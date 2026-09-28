@@ -1,0 +1,6 @@
+{
+  "name": "Workers Collaborative Dashboard",
+  "description": "Full-stack real-time collaborative daily task and kosher audit platform supporting multi-agency isolation, custom venue platforms, role-based access (Admin, Owner, Worker), automated attribution, and daily shift compliance.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
