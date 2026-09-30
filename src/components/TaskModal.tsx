@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Clock, Calendar, CheckSquare, Users, Plus, Trash2, CalendarDays, CheckCircle2, ListFilter } from 'lucide-react';
 import { Task, TaskInputType } from '../types';
 import { DAYS_MAP } from '../lib/utils';
@@ -78,8 +78,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [selectedDays, setSelectedDays] = useState<number[]>([0, 1, 2, 3, 4, 5, 6]);
   const [selectedDates, setSelectedDates] = useState<string[]>([]);
 
+  // Synchronous guard against double-submit (double-click / Enter+click firing
+  // handleSubmit twice before the modal unmounts). A ref (not state) is used
+  // so the second synchronous invocation is blocked too.
+  const submitGuard = useRef(false);
+
   useEffect(() => {
     const todayStr = new Date().toISOString().split('T')[0];
+    // Fresh guard every time the modal opens.
+    submitGuard.current = false;
 
     if (taskToEdit) {
       setTitle(taskToEdit.title);
@@ -223,6 +230,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
+    // Block duplicate submissions: one submit per modal open.
+    if (submitGuard.current) return;
+    submitGuard.current = true;
 
     const assignedTo = assignType === 'all' || selectedWorkers.length === 0 ? ['all'] : selectedWorkers;
 

@@ -1626,7 +1626,9 @@ app.post('/api/tasks', (req, res) => {
   }
 
   const newTask: TaskItem = {
-    id: `task-${Date.now()}`,
+    // crypto.randomUUID: two rapid creates must never share an id (Date.now()
+    // can collide within the same millisecond, producing un-deletable twins).
+    id: `task-${crypto.randomUUID()}`,
     agencyId: callerAgencyId,
     venueId: targetVenueId,
     title,
@@ -1769,14 +1771,15 @@ app.put('/api/tasks/:id', (req, res) => {
 
 app.delete('/api/tasks/:id', (req, res) => {
   const { id } = req.params;
-  const index = tasks.findIndex((t) => t.id === id);
+  const deletedTask = tasks.find((t) => t.id === id);
 
-  if (index === -1) {
+  if (!deletedTask) {
     return res.status(404).json({ error: 'Task not found' });
   }
 
-  const deletedTask = tasks[index];
-  tasks.splice(index, 1);
+  // Remove EVERY record with this id, not just the first: duplicate creates
+  // (same-millisecond id collision) could leave twins behind otherwise.
+  tasks = tasks.filter((t) => t.id !== id);
   saveState();
 
   broadcast('TASK_DELETED', { id, venueId: deletedTask.venueId, agencyId: deletedTask.agencyId });

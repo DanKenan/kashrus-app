@@ -268,7 +268,9 @@ export default function App() {
         }
       } else if (msg.type === 'TASK_CREATED' && msg.payload) {
         const created = msg.payload as Task;
-        setTasks((prev) => [...prev, created]);
+        // The creator already appended the task from the POST response; the
+        // server broadcasts to ALL clients including the sender, so dedupe by id.
+        setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
         if (msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
           showToast(`New assignment added: "${created.title}"`);
         }
