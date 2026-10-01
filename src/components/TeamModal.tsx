@@ -410,7 +410,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                             {user.name}
                           </p>
                           {isCurrent && (
-                            <span className="text-[10px] px-2 py-0.2 rounded-md bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 font-bold">
+                            <span className="text-[10px] px-2 py-0.2 rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-bold border border-emerald-500/30">
                               You
                             </span>
                           )}
@@ -424,10 +424,10 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                                 user.role === 'admin'
                                   ? 'bg-gold-wash text-gold-ink border-gold/40'
                                   : user.role === 'coordinator'
-                                  ? 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300 border-sky-300'
+                                  ? 'bg-sunken text-ink-soft border-line'
                                   : user.role === 'owner'
-                                  ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 border-purple-300'
-                                  : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border-emerald-300'
+                                  ? 'bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-500/30'
+                                  : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
                               }`}
                             >
                               <option value="mashgiach">Mashgiach</option>
@@ -441,10 +441,10 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                                 user.role === 'admin'
                                   ? 'bg-gold-wash text-gold-ink'
                                   : user.role === 'coordinator'
-                                  ? 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300'
+                                  ? 'bg-sunken text-ink-soft border border-line'
                                   : user.role === 'owner'
-                                  ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300'
-                                  : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                  ? 'bg-purple-500/10 text-purple-700 dark:text-purple-300 border border-purple-500/30'
+                                  : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
                               }`}
                             >
                               {getRoleLabel(user.role)}
@@ -466,7 +466,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         disabled={!onUpdateUser || isPrimaryAdmin}
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition cursor-pointer ${
                           canFillVal
-                            ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                            ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-700 dark:text-emerald-300'
                             : 'bg-sunken border-line text-ink-faint line-through'
                         } ${(!onUpdateUser || isPrimaryAdmin) ? 'cursor-default opacity-80' : 'hover:scale-[1.02]'}`}
                         title="Permission to complete checklist items and save notes"
@@ -482,12 +482,12 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         disabled={!onUpdateUser || isPrimaryAdmin}
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition cursor-pointer ${
                           canAssignVal
-                            ? 'bg-indigo-50 dark:bg-indigo-950/60 border-indigo-300 dark:border-indigo-800 text-indigo-800 dark:text-indigo-200'
+                            ? 'bg-gold-wash border-gold/40 text-gold-ink'
                             : 'bg-sunken border-line text-ink-faint line-through'
                         } ${(!onUpdateUser || isPrimaryAdmin) ? 'cursor-default opacity-80' : 'hover:scale-[1.02]'}`}
                         title="Permission to create new assignments and edit task definitions"
                       >
-                        <PlusCircle className={`w-3.5 h-3.5 ${canAssignVal ? 'text-indigo-600 dark:text-indigo-400' : 'text-ink-faint'}`} />
+                        <PlusCircle className={`w-3.5 h-3.5 ${canAssignVal ? 'text-gold-deep' : 'text-ink-faint'}`} />
                         <span>Assign Tasks: {canAssignVal ? 'Allowed' : 'Disabled'}</span>
                       </button>
 
