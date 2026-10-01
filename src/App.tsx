@@ -99,7 +99,17 @@ export default function App() {
   // Filters & View modes
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
-  const [activeTabFilter, setActiveTabFilter] = useState<'all' | 'mine' | 'pending' | 'completed'>('all');
+  const [activeTabFilter, setActiveTabFilter] = useState<'all' | 'mine' | 'pending' | 'completed'>(() => {
+    // Mashgichim open straight onto the tasks designated for them
+    try {
+      const saved = typeof window !== 'undefined' ? localStorage.getItem('current_user') : null;
+      if (saved) {
+        const u = JSON.parse(saved);
+        if (u && (u.role === 'mashgiach' || u.role === 'worker')) return 'mine';
+      }
+    } catch {}
+    return 'all';
+  });
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
   const [showOnlyTodaySchedule, setShowOnlyTodaySchedule] = useState(false);
 
@@ -816,6 +826,14 @@ export default function App() {
     return Array.from(set);
   }, [tasks]);
 
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    tasks.forEach((t) => {
+      if (t.category) counts[t.category] = (counts[t.category] || 0) + 1;
+    });
+    return counts;
+  }, [tasks]);
+
   // Filter tasks
   const filteredTasks = useMemo(() => {
     const todayIndex = new Date().getDay();
@@ -896,9 +914,9 @@ export default function App() {
   // Require authentication to view tasks and shift operations
   if (!currentUser) {
     return (
-      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col transition-colors">
+      <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
         {toastMessage && (
-          <div className="fixed bottom-5 right-5 z-50 bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold px-4 py-3 rounded-2xl shadow-xl border border-slate-700/50 flex items-center gap-2 animate-slide-up">
+          <div className="fixed bottom-5 right-5 z-50 bg-ink text-paper text-xs font-semibold px-4 py-3 rounded-2xl tactile-4 border border-line-strong flex items-center gap-2 animate-slide-up">
             <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
             <span>{toastMessage}</span>
           </div>
@@ -907,6 +925,12 @@ export default function App() {
           onLoginSuccess={(user) => {
             setCurrentUser(user);
             setCurrentVenueId(null);
+            // Mashgichim land straight on their own assignments
+            if (user && (user.role === 'mashgiach' || user.role === 'worker')) {
+              setActiveTabFilter('mine');
+            } else {
+              setActiveTabFilter('all');
+            }
             if (typeof window !== 'undefined') {
               localStorage.setItem('current_user', JSON.stringify(user));
               localStorage.removeItem('selected_venue_id');
@@ -921,11 +945,11 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col transition-colors">
+    <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
       
       {/* Toast Alert */}
       {toastMessage && (
-        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold px-4 py-3 rounded-2xl shadow-xl border border-slate-700/50 flex items-center gap-2 animate-slide-up">
+        <div className="fixed bottom-5 right-5 z-50 bg-ink text-paper text-xs font-semibold px-4 py-3 rounded-2xl tactile-4 border border-line-strong flex items-center gap-2 animate-slide-up">
           <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
           <span>{toastMessage}</span>
         </div>
@@ -965,25 +989,25 @@ export default function App() {
         
         {/* Welcome Empty State for newly registered Kosher Agencies or when starting from scratch */}
         {venues.length === 0 ? (
-          <div className="my-10 p-8 sm:p-10 rounded-3xl bg-white dark:bg-slate-900 border border-amber-200/70 dark:border-amber-900/40 shadow-sm text-center max-w-2xl mx-auto animate-fade-in">
-            <div className="w-16 h-16 rounded-2xl bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 mx-auto flex items-center justify-center mb-4 ring-8 ring-amber-100/50 dark:ring-amber-950/30">
+          <div className="my-10 p-8 sm:p-10 rounded-3xl bg-surface border border-gold/40 tactile-3 text-center max-w-2xl mx-auto animate-fade-in">
+            <div className="w-16 h-16 rounded-2xl bg-gold-wash text-gold-deep mx-auto flex items-center justify-center mb-4 ring-8 ring-gold/15 border border-gold/30">
               <Building2 className="w-8 h-8" />
             </div>
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100/80 dark:bg-amber-950/80 text-amber-900 dark:text-amber-300 text-[11px] font-bold uppercase tracking-wider mb-2">
-              <ShieldCheck className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400" />
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gold-wash text-gold-ink text-[11px] font-bold uppercase tracking-wider mb-2 border border-gold/30">
+              <ShieldCheck className="w-3.5 h-3.5 text-gold-deep" />
               <span>{currentUser?.agencyShortCode || 'HKC'} Kashrut Portal</span>
             </div>
-            <h3 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">
+            <h3 className="text-xl sm:text-2xl font-black text-ink">
               {currentUser?.agencyName || 'Hartford Kashrut Commission (HKC)'}
             </h3>
-            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-2 max-w-md mx-auto leading-relaxed">
+            <p className="text-xs sm:text-sm text-ink-soft mt-2 max-w-md mx-auto leading-relaxed">
               Your platform is a clean slate ready for production. Add your first certified restaurant, bakery, meat market, or catering facility to start managing real checklists, temperature logs, and mashgichim shifts.
             </p>
             <div className="mt-7 flex flex-col sm:flex-row items-center justify-center gap-3">
               <button
                 type="button"
                 onClick={() => setIsCreateVenueOpen(true)}
-                className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 active:scale-95 text-white font-bold text-xs sm:text-sm shadow-md shadow-amber-700/20 transition flex items-center justify-center gap-2 cursor-pointer"
+                className="pressable w-full sm:w-auto px-6 py-2.5 rounded-xl bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white font-bold text-xs sm:text-sm tactile-2 transition flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Plus className="w-4 h-4 stroke-[2.5]" />
                 <span>Establish First Kosher Venue</span>
@@ -992,10 +1016,10 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleRestoreDemo}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-stone-100 hover:bg-stone-200 dark:bg-slate-800 dark:hover:bg-slate-700 active:scale-95 text-stone-700 dark:text-stone-300 font-semibold text-xs sm:text-sm border border-stone-200 dark:border-stone-700 transition flex items-center justify-center gap-2 cursor-pointer"
+                className="pressable w-full sm:w-auto px-5 py-2.5 rounded-xl bg-sunken hover:border-line-strong text-ink-soft font-semibold text-xs sm:text-sm border border-line tactile-1 transition flex items-center justify-center gap-2 cursor-pointer"
                 title="Restore example venues, mashgichim, and tasks to explore features"
               >
-                <Sparkles className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                <Sparkles className="w-4 h-4 text-gold-deep" />
                 <span>Load Example Templates</span>
               </button>
             </div>
@@ -1033,12 +1057,12 @@ export default function App() {
 
         {/* Compact Kosher Events Alert (Only shown when active events exist) */}
         {events.length > 0 && (
-          <div className="mb-4 px-4 py-2.5 rounded-2xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <div className="mb-4 px-4 py-2.5 rounded-2xl bg-gold-wash border border-gold/40 tactile-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-fade-in">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className="p-1.5 rounded-lg bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-400 shrink-0">
+              <div className="p-1.5 rounded-lg bg-gold/15 text-gold-deep shrink-0 border border-gold/30">
                 <Calendar className="w-4 h-4" />
               </div>
-              <span className="text-xs text-amber-950 dark:text-amber-200 font-semibold truncate">
+              <span className="text-xs text-gold-ink font-semibold truncate">
                 <strong>{events.length} active kosher event {events.length === 1 ? 'schedule' : 'schedules'}</strong> registered for this facility.
               </span>
             </div>
@@ -1046,7 +1070,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setIsEventsModalOpen(true)}
-                className="px-3 py-1 rounded-xl bg-white dark:bg-slate-800 hover:bg-amber-100/50 dark:hover:bg-slate-700 text-amber-900 dark:text-amber-200 border border-amber-300/80 dark:border-amber-800/80 text-xs font-bold transition cursor-pointer shadow-2xs"
+                className="pressable px-3 py-1 rounded-xl bg-surface hover:border-gold text-gold-ink border border-gold/40 text-xs font-bold transition cursor-pointer tactile-1"
               >
                 View Events ({events.length})
               </button>
@@ -1061,6 +1085,7 @@ export default function App() {
           selectedCategory={selectedCategory}
           onCategoryChange={setSelectedCategory}
           categories={categories}
+          categoryCounts={categoryCounts}
           viewMode={viewMode}
           onViewModeChange={setViewMode}
           showOnlyTodaySchedule={showOnlyTodaySchedule}
@@ -1110,13 +1135,13 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="mt-auto border-t border-slate-200 dark:border-slate-800 py-4 px-6 text-center text-xs text-slate-400 dark:text-slate-500">
+      <footer className="mt-auto border-t border-line py-4 px-6 text-center text-xs text-ink-faint">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
           <span>KeepingKosher Operations & Audit Engine</span>
           <div className="flex items-center gap-3">
             {currentUser?.role === 'admin' && (
               <>
-                <button onClick={() => setIsVenuesDirectoryOpen(true)} className="hover:underline text-blue-600 dark:text-blue-400">
+                <button onClick={() => setIsVenuesDirectoryOpen(true)} className="hover:underline text-gold-deep">
                   Venues Hub ({venues.length})
                 </button>
                 <span>•</span>
@@ -1130,7 +1155,7 @@ export default function App() {
                 <span>•</span>
               </>
             )}
-            <button onClick={() => setIsHistoryModalOpen(true)} className="hover:underline text-slate-600 dark:text-slate-300">
+            <button onClick={() => setIsHistoryModalOpen(true)} className="hover:underline text-ink-soft">
               Shift History Archives
             </button>
           </div>

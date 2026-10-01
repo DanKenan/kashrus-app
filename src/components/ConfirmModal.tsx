@@ -33,12 +33,12 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
       case 'trash':
         return <Trash2 className="w-6 h-6 text-rose-600 dark:text-rose-400" />;
       case 'rotate':
-        return <RotateCcw className="w-6 h-6 text-amber-600 dark:text-amber-400" />;
+        return <RotateCcw className="w-6 h-6 text-gold-deep dark:text-gold" />;
       case 'shield':
-        return <ShieldAlert className="w-6 h-6 text-indigo-600 dark:text-indigo-400" />;
+        return <ShieldAlert className="w-6 h-6 text-gold-deep dark:text-gold" />;
       case 'alert':
       default:
-        return <AlertTriangle className="w-6 h-6 text-amber-600 dark:text-amber-400" />;
+        return <AlertTriangle className="w-6 h-6 text-gold-deep dark:text-gold" />;
     }
   };
 
@@ -46,19 +46,19 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
     switch (variant) {
       case 'warning':
         return {
-          iconBg: 'bg-amber-100 dark:bg-amber-950/60 ring-8 ring-amber-50 dark:ring-amber-950/30',
-          btnBg: 'bg-amber-600 hover:bg-amber-700 text-white shadow-amber-600/20',
+          iconBg: 'bg-gold-wash ring-8 ring-gold-wash/50',
+          btnBg: 'pressable bg-gradient-to-b from-gold to-gold-deep text-white',
         };
       case 'primary':
         return {
-          iconBg: 'bg-blue-100 dark:bg-blue-950/60 ring-8 ring-blue-50 dark:ring-blue-950/30',
-          btnBg: 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-600/20',
+          iconBg: 'bg-gold-wash ring-8 ring-gold-wash/50',
+          btnBg: 'pressable bg-gradient-to-b from-gold to-gold-deep text-white',
         };
       case 'danger':
       default:
         return {
           iconBg: 'bg-rose-100 dark:bg-rose-950/60 ring-8 ring-rose-50 dark:ring-rose-950/30',
-          btnBg: 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-600/20',
+          btnBg: 'pressable bg-rose-600 hover:bg-rose-700 text-white',
         };
     }
   };
@@ -66,9 +66,9 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
   const styles = getVariantStyles();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1a120a]/60 backdrop-blur-xs animate-fade-in">
       <div 
-        className="w-full max-w-md rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden p-6 animate-scale-up"
+        className="w-full max-w-md rounded-2xl bg-surface border border-line tactile-5 overflow-hidden p-6 animate-slide-up"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4">
@@ -77,10 +77,10 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
               {renderIcon()}
             </div>
             <div>
-              <h3 className="text-base font-bold text-slate-900 dark:text-white leading-tight">
+              <h3 className="text-base font-bold text-ink leading-tight">
                 {title}
               </h3>
-              <div className="mt-2 text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed whitespace-pre-line">
+              <div className="mt-2 text-xs sm:text-sm text-ink-soft leading-relaxed whitespace-pre-line">
                 {message}
               </div>
             </div>
@@ -88,18 +88,18 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+            className="p-1 rounded-lg text-ink-faint hover:text-ink-soft hover:bg-sunken transition cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="mt-6 flex items-center justify-end gap-2.5 pt-4 border-t border-slate-100 dark:border-slate-800/80">
+        <div className="mt-6 flex items-center justify-end gap-2.5 pt-4 border-t border-line">
           <button
             type="button"
             onClick={onClose}
             disabled={isLoading}
-            className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 transition cursor-pointer disabled:opacity-50"
+            className="px-4 py-2 rounded-xl text-xs font-semibold text-ink-soft bg-sunken hover:brightness-95 pressable cursor-pointer disabled:opacity-50"
           >
             {cancelText}
           </button>
@@ -109,7 +109,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
               onConfirm();
             }}
             disabled={isLoading}
-            className={`px-4 py-2 rounded-xl text-xs font-bold shadow-md transition active:scale-95 cursor-pointer disabled:opacity-50 flex items-center gap-1.5 ${styles.btnBg}`}
+            className={`px-4 py-2 rounded-xl text-xs font-bold tactile-2 cursor-pointer disabled:opacity-50 flex items-center gap-1.5 ${styles.btnBg}`}
           >
             {isLoading ? (
               <span>Processing...</span>

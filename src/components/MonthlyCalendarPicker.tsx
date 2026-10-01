@@ -78,19 +78,19 @@ export const MonthlyCalendarPicker: React.FC<MonthlyCalendarPickerProps> = ({
   const sortedSelected = [...selectedDates].sort();
 
   return (
-    <div className="bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-200 dark:border-slate-700 p-3.5 space-y-3">
+    <div className="bg-sunken rounded-2xl border border-line p-3.5 space-y-3">
       {/* Calendar Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <CalendarIcon className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-          <span className="font-bold text-slate-800 dark:text-white text-xs sm:text-sm">
+          <CalendarIcon className="w-4 h-4 text-gold-deep" />
+          <span className="font-bold text-ink text-xs sm:text-sm">
             {monthNames[viewMonth]} {viewYear}
           </span>
           {(viewMonth !== today.getMonth() || viewYear !== today.getFullYear()) && (
             <button
               type="button"
               onClick={handleJumpToToday}
-              className="text-[10px] text-emerald-600 dark:text-emerald-400 hover:underline font-semibold"
+              className="text-[10px] text-gold-deep hover:underline font-semibold"
             >
               (Current)
             </button>
@@ -101,7 +101,7 @@ export const MonthlyCalendarPicker: React.FC<MonthlyCalendarPickerProps> = ({
           <button
             type="button"
             onClick={handlePrevMonth}
-            className="p-1.5 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+            className="p-1.5 rounded-lg text-ink-soft hover:bg-surface transition pressable"
             title="Previous Month"
           >
             <ChevronLeft className="w-4 h-4" />
@@ -109,7 +109,7 @@ export const MonthlyCalendarPicker: React.FC<MonthlyCalendarPickerProps> = ({
           <button
             type="button"
             onClick={handleNextMonth}
-            className="p-1.5 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+            className="p-1.5 rounded-lg text-ink-soft hover:bg-surface transition pressable"
             title="Next Month"
           >
             <ChevronRight className="w-4 h-4" />
@@ -118,7 +118,7 @@ export const MonthlyCalendarPicker: React.FC<MonthlyCalendarPickerProps> = ({
       </div>
 
       {/* Weekday Labels */}
-      <div className="grid grid-cols-7 gap-1 text-center text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+      <div className="grid grid-cols-7 gap-1 text-center text-[10px] font-bold text-ink-faint uppercase tracking-wider">
         <span>Sun</span>
         <span>Mon</span>
         <span>Tue</span>
@@ -144,37 +144,39 @@ export const MonthlyCalendarPicker: React.FC<MonthlyCalendarPickerProps> = ({
               key={dateString}
               type="button"
               onClick={() => onToggleDate(dateString)}
-              className={`h-8 sm:h-9 rounded-xl text-xs font-semibold flex flex-col items-center justify-center relative transition active:scale-95 ${
+              className={`h-8 sm:h-9 rounded-xl text-xs font-semibold tnum flex flex-col items-center justify-center relative transition pressable ${
                 isSelected
-                  ? 'bg-emerald-600 text-white shadow-xs font-bold ring-2 ring-emerald-500/40'
+                  ? 'bg-gold text-white tactile-1 font-bold ring-1 ring-gold/30'
                   : isToday
-                  ? 'bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 border border-emerald-500 dark:border-emerald-500 font-bold'
-                  : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200/60 dark:border-slate-800'
+                  ? 'bg-surface text-gold-deep border border-gold/40 font-bold'
+                  : 'bg-surface text-ink-soft hover:bg-sunken border border-line/60'
               }`}
             >
               <span>{dayNum}</span>
-              {isSelected && (
+              {isSelected ? (
                 <span className="w-1 h-1 rounded-full bg-white mt-0.5" />
-              )}
+              ) : isToday ? (
+                <span className="w-1 h-1 rounded-full bg-gold mt-0.5" />
+              ) : null}
             </button>
           );
         })}
       </div>
 
       {/* Quick Selection Helpers */}
-      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-200/60 dark:border-slate-700/60 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-line/60 text-xs">
         <div className="flex items-center gap-1.5 flex-wrap">
           <button
             type="button"
             onClick={onSelectToday}
-            className="px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 transition"
+            className="px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-surface hover:bg-sunken text-ink-soft transition border border-line pressable"
           >
             + Today
           </button>
           <button
             type="button"
             onClick={onSelectTomorrow}
-            className="px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 transition"
+            className="px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-surface hover:bg-sunken text-ink-soft transition border border-line pressable"
           >
             + Tomorrow
           </button>
@@ -194,14 +196,14 @@ export const MonthlyCalendarPicker: React.FC<MonthlyCalendarPickerProps> = ({
       {/* Selected Dates Display Chips */}
       {sortedSelected.length > 0 ? (
         <div className="pt-1.5 space-y-1">
-          <div className="text-[11px] font-bold text-slate-600 dark:text-slate-400">
+          <div className="text-[11px] font-bold text-ink-soft">
             Assigned on ({sortedSelected.length} {sortedSelected.length === 1 ? 'day' : 'days'}):
           </div>
           <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
             {sortedSelected.map((ds) => (
               <span
                 key={ds}
-                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800"
+                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-semibold bg-gold-wash text-gold-ink border border-gold/40"
               >
                 <Check className="w-3 h-3" />
                 <span>{formatChipDate(ds)}</span>
@@ -218,7 +220,7 @@ export const MonthlyCalendarPicker: React.FC<MonthlyCalendarPickerProps> = ({
           </div>
         </div>
       ) : (
-        <div className="text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 p-2 rounded-xl border border-amber-200 dark:border-amber-900/50">
+        <div className="text-[11px] text-gold-deep bg-gold-wash p-2 rounded-xl border border-gold/40">
           ⚠️ Please click one or more days on the calendar above to assign this task.
         </div>
       )}

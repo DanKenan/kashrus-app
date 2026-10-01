@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Database, Copy, Check, Shield, Zap, Terminal, Download, ExternalLink } from 'lucide-react';
+import { X, Database, Copy, Check, Shield, Zap, Terminal, Download } from 'lucide-react';
 import { SUPABASE_SQL_SCHEMA } from '../lib/sqlSchema';
 import { getSupabaseConfig, saveSupabaseConfig, clearSupabaseConfig } from '../lib/supabaseClient';
 
@@ -49,40 +49,40 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto">
-      <div className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-4xl shadow-2xl border border-slate-200 dark:border-slate-800 my-8 overflow-hidden flex flex-col max-h-[88vh] transition-colors">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1a120a]/60 backdrop-blur-xs overflow-y-auto animate-fade-in">
+      <div className="bg-surface rounded-2xl w-full max-w-4xl tactile-5 border border-line my-8 overflow-hidden flex flex-col max-h-[88vh] animate-slide-up">
         
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-line shrink-0">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-xl bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400">
               <Database className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-900 dark:text-white">
+              <h2 className="text-base font-bold text-ink">
                 Supabase Backend Integration & SQL Schema
               </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
+              <p className="text-xs text-ink-soft">
                 Production-ready PostgreSQL tables, RLS security policies, real-time replication, and midnight triggers.
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+            className="p-1 rounded-lg text-ink-faint hover:text-ink hover:bg-sunken transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex items-center gap-2 px-6 border-b border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 text-xs font-semibold shrink-0">
+        <div className="flex items-center gap-2 px-6 border-b border-line bg-sunken/60 text-xs font-semibold shrink-0">
           <button
             onClick={() => setActiveTab('sql')}
             className={`py-3 px-3 border-b-2 transition flex items-center gap-1.5 ${
               activeTab === 'sql'
                 ? 'border-emerald-600 text-emerald-600 dark:text-emerald-400'
-                : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                : 'border-transparent text-ink-faint hover:text-ink'
             }`}
           >
             <Terminal className="w-3.5 h-3.5" /> Complete SQL Migration
@@ -92,7 +92,7 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
             className={`py-3 px-3 border-b-2 transition flex items-center gap-1.5 ${
               activeTab === 'rls'
                 ? 'border-emerald-600 text-emerald-600 dark:text-emerald-400'
-                : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                : 'border-transparent text-ink-faint hover:text-ink'
             }`}
           >
             <Shield className="w-3.5 h-3.5" /> RLS Policies & Roles
@@ -102,7 +102,7 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
             className={`py-3 px-3 border-b-2 transition flex items-center gap-1.5 ${
               activeTab === 'connect'
                 ? 'border-emerald-600 text-emerald-600 dark:text-emerald-400'
-                : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                : 'border-transparent text-ink-faint hover:text-ink'
             }`}
           >
             <Zap className="w-3.5 h-3.5" /> Live Connection & Keys
@@ -110,17 +110,17 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
         </div>
 
         {/* Tab Content */}
-        <div className="flex-1 overflow-y-auto p-6 text-xs text-slate-700 dark:text-slate-300">
+        <div className="flex-1 overflow-y-auto p-6 text-xs text-ink-soft">
           
           {/* TAB 1: Complete SQL Schema */}
           {activeTab === 'sql' && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="font-semibold text-slate-900 dark:text-white">
+                  <p className="font-semibold text-ink">
                     One-Click PostgreSQL Migration Script
                   </p>
-                  <p className="text-slate-500 dark:text-slate-400 text-[11px]">
+                  <p className="text-ink-soft text-[11px]">
                     Paste this into the Supabase SQL Editor (Dashboard → SQL Editor) to provision all 4 tables, triggers, and replication.
                   </p>
                 </div>
@@ -128,14 +128,14 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
                 <div className="flex items-center gap-2">
                   <button
                     onClick={handleDownloadSQL}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 text-slate-700 dark:text-slate-200 transition font-medium"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-line bg-surface hover:bg-sunken text-ink-soft pressable font-medium cursor-pointer"
                   >
                     <Download className="w-3.5 h-3.5" /> Download .sql
                   </button>
 
                   <button
                     onClick={handleCopy}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-xs transition"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg pressable bg-emerald-600 hover:bg-emerald-700 text-white font-medium tactile-1 cursor-pointer"
                   >
                     {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                     <span>{copied ? 'Copied to Clipboard!' : 'Copy SQL'}</span>
@@ -143,7 +143,7 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
                 </div>
               </div>
 
-              <div className="rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-950 text-slate-200 font-mono text-[11px] p-4 max-h-96 overflow-y-auto leading-relaxed">
+              <div className="rounded-xl overflow-hidden border border-line bg-slate-950 text-slate-200 font-mono text-[11px] p-4 max-h-96 overflow-y-auto leading-relaxed">
                 <pre>{SUPABASE_SQL_SCHEMA}</pre>
               </div>
             </div>
@@ -162,9 +162,9 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
-                  <h5 className="font-bold text-slate-900 dark:text-white mb-2">Admin Permissions:</h5>
-                  <ul className="space-y-1.5 list-disc pl-4 text-slate-600 dark:text-slate-300">
+                <div className="p-4 rounded-xl border border-line bg-sunken">
+                  <h5 className="font-bold text-ink mb-2">Admin Permissions:</h5>
+                  <ul className="space-y-1.5 list-disc pl-4 text-ink-soft">
                     <li>Create, update, and delete task definitions in <code>tasks</code></li>
                     <li>Assign tasks to all team members or specific worker emails</li>
                     <li>Execute manual and scheduled daily board resets</li>
@@ -173,9 +173,9 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
                   </ul>
                 </div>
 
-                <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
-                  <h5 className="font-bold text-slate-900 dark:text-white mb-2">Worker Permissions:</h5>
-                  <ul className="space-y-1.5 list-disc pl-4 text-slate-600 dark:text-slate-300">
+                <div className="p-4 rounded-xl border border-line bg-sunken">
+                  <h5 className="font-bold text-ink mb-2">Worker Permissions:</h5>
+                  <ul className="space-y-1.5 list-disc pl-4 text-ink-soft">
                     <li>View active tasks assigned to the team or to their specific email</li>
                     <li>Mark completion status (Yes/No, Toggle, Status dropdown, Checkbox)</li>
                     <li>Write and update details in the multi-line <code>notes</code> field</li>
@@ -185,12 +185,12 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
                 </div>
               </div>
 
-              <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
-                <h5 className="font-bold text-slate-900 dark:text-white mb-1">Scheduled Midnight Reset Trigger:</h5>
-                <p className="text-slate-600 dark:text-slate-400 mb-2">
+              <div className="p-4 rounded-xl border border-line bg-surface">
+                <h5 className="font-bold text-ink mb-1">Scheduled Midnight Reset Trigger:</h5>
+                <p className="text-ink-soft mb-2">
                   The stored procedure <code>archive_and_reset_daily_tasks()</code> automatically:
                 </p>
-                <ol className="list-decimal pl-5 space-y-1 text-slate-600 dark:text-slate-400">
+                <ol className="list-decimal pl-5 space-y-1 text-ink-soft">
                   <li>Copies previous day's completions & notes into <code>history_logs</code>.</li>
                   <li>Wipes previous day transient entries in <code>daily_task_completions</code>.</li>
                   <li>Initializes fresh pending records for today with zero status.</li>
@@ -202,13 +202,13 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
           {/* TAB 3: Live Connection & Credentials */}
           {activeTab === 'connect' && (
             <div className="space-y-4 max-w-xl">
-              <p className="text-slate-600 dark:text-slate-400">
+              <p className="text-ink-soft">
                 Connect your external Supabase project to authenticate users and persist tasks directly to Supabase cloud. If left unconfigured, the app operates using the built-in real-time WebSocket server.
               </p>
 
               <form onSubmit={handleSaveConfig} className="space-y-3">
                 <div>
-                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-semibold text-ink-soft mb-1">
                     Supabase Project URL
                   </label>
                   <input
@@ -216,12 +216,12 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
                     value={urlInput}
                     onChange={(e) => setUrlInput(e.target.value)}
                     placeholder="https://xyzcompany.supabase.co"
-                    className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
+                    className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink font-mono focus:outline-none focus:border-gold transition-colors"
                   />
                 </div>
 
                 <div>
-                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-semibold text-ink-soft mb-1">
                     Supabase Anon Public API Key
                   </label>
                   <input
@@ -229,14 +229,14 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
                     value={keyInput}
                     onChange={(e) => setKeyInput(e.target.value)}
                     placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                    className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono"
+                    className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink font-mono focus:outline-none focus:border-gold transition-colors"
                   />
                 </div>
 
                 <div className="flex items-center gap-2 pt-2">
                   <button
                     type="submit"
-                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold transition"
+                    className="px-4 py-2 rounded-xl pressable bg-emerald-600 hover:bg-emerald-700 text-white font-semibold cursor-pointer"
                   >
                     Save & Connect Supabase
                   </button>
@@ -244,7 +244,7 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
                     <button
                       type="button"
                       onClick={handleClear}
-                      className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-300 font-semibold transition"
+                      className="px-4 py-2 rounded-xl bg-sunken hover:brightness-95 text-ink-soft font-semibold pressable cursor-pointer"
                     >
                       Disconnect / Use Server State
                     </button>
@@ -263,10 +263,10 @@ export const SupabaseModal: React.FC<SupabaseModalProps> = ({ isOpen, onClose })
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 text-right shrink-0">
+        <div className="px-6 py-3 border-t border-line bg-sunken text-right shrink-0">
           <button
             onClick={onClose}
-            className="px-4 py-1.5 text-xs font-semibold rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 text-slate-800 dark:text-slate-200"
+            className="px-4 py-1.5 text-xs font-semibold rounded-xl bg-surface border border-line text-ink-soft hover:brightness-95 pressable cursor-pointer"
           >
             Close
           </button>

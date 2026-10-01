@@ -103,7 +103,7 @@ export const Header: React.FC<HeaderProps> = ({
   });
 
   return (
-    <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-stone-200/90 dark:border-stone-800 shadow-2xs transition-colors">
+    <header className="sticky top-0 z-30 bg-surface/95 backdrop-blur-md border-b border-line tactile-1 transition-colors">
       {/* Click-outside transparent overlay for open dropdowns */}
       {(toolsMenuOpen || userMenuOpen) && (
         <div 
@@ -129,17 +129,17 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="admin-venue-switcher-btn"
                 onClick={openVenuesModal}
-                className="group flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-stone-100 hover:bg-stone-200/80 dark:bg-slate-800 dark:hover:bg-slate-700/80 border border-stone-200/90 dark:border-stone-700 transition cursor-pointer shadow-2xs shrink-0"
+                className="group flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-sunken hover:bg-line/40 border border-line transition cursor-pointer tactile-1 shrink-0"
                 title="Switch to another kosher venue"
               >
-                <Building2 className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
-                <span className="text-xs font-bold text-stone-800 dark:text-stone-100 truncate max-w-[130px] sm:max-w-[170px]">
+                <Building2 className="w-3.5 h-3.5 text-gold-deep shrink-0" />
+                <span className="text-xs font-bold text-ink truncate max-w-[130px] sm:max-w-[170px]">
                   {currentVenue?.name || 'Select Venue'}
                 </span>
-                <ChevronDown className="w-3 h-3 text-stone-400 group-hover:text-stone-600 dark:group-hover:text-stone-300 transition" />
+                <ChevronDown className="w-3 h-3 text-ink-faint group-hover:text-ink-soft transition" />
               </button>
             ) : currentVenue ? (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/40 text-emerald-900 dark:text-emerald-200 shadow-2xs shrink-0">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/40 text-emerald-900 dark:text-emerald-200 tactile-1 shrink-0">
                 <Building2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
                 <span className="text-xs font-bold truncate max-w-[130px] sm:max-w-[170px]">
                   {currentVenue.name}
@@ -148,12 +148,12 @@ export const Header: React.FC<HeaderProps> = ({
             ) : null}
 
             {/* Compact Live indicator */}
-            <div className="hidden sm:flex items-center gap-1.5 text-xs text-stone-500 dark:text-stone-400 pl-1">
+            <div className="hidden sm:flex items-center gap-1.5 text-xs text-ink-faint pl-1">
               <span className="relative flex h-2 w-2">
                 {isRealtimeConnected && (
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 bg-emerald-400" />
                 )}
-                <span className={`relative inline-flex rounded-full h-2 w-2 ${isRealtimeConnected ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${isRealtimeConnected ? 'bg-emerald-500' : 'bg-gold'}`} />
               </span>
               <span className="font-semibold text-[11px]">
                 {isRealtimeConnected ? 'Live' : 'Offline'}
@@ -169,10 +169,10 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="header-events-btn"
                 onClick={onOpenEventsModal}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-amber-900 dark:text-amber-200 bg-amber-50/90 dark:bg-amber-950/50 hover:bg-amber-100 dark:hover:bg-amber-900/50 border border-amber-200/90 dark:border-amber-800/60 transition cursor-pointer shadow-2xs shrink-0"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-gold-ink bg-gold-wash hover:bg-gold-wash border border-gold/40 transition cursor-pointer tactile-1 shrink-0"
                 title="Kosher Events & Banquets Hub"
               >
-                <Calendar className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                <Calendar className="w-3.5 h-3.5 text-gold-deep" />
                 <span>Events ({eventsCount})</span>
               </button>
             )}
@@ -182,30 +182,30 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="header-operations-menu-btn"
                 onClick={() => { setToolsMenuOpen(!toolsMenuOpen); setUserMenuOpen(false); }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-stone-700 dark:text-stone-200 bg-stone-100 hover:bg-stone-200/80 dark:bg-slate-800 dark:hover:bg-slate-700 border border-stone-200/90 dark:border-stone-700 transition cursor-pointer shadow-2xs shrink-0"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-ink-soft bg-sunken hover:bg-line/40 border border-line transition cursor-pointer tactile-1 shrink-0"
                 title="Access Agency Operations, Rosters, and Audits"
               >
-                <SlidersHorizontal className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400" />
+                <SlidersHorizontal className="w-3.5 h-3.5 text-ink-faint" />
                 <span>Operations</span>
-                <ChevronDown className={`w-3 h-3 text-stone-400 transition-transform ${toolsMenuOpen ? 'rotate-180' : ''}`} />
+                <ChevronDown className={`w-3 h-3 text-ink-faint transition-transform ${toolsMenuOpen ? 'rotate-180' : ''}`} />
               </button>
 
               {toolsMenuOpen && (
-                <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-white dark:bg-slate-900 border border-stone-200 dark:border-stone-800 shadow-xl py-2 z-50 text-stone-800 dark:text-stone-200">
-                  <div className="px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-stone-400 dark:text-stone-500 border-b border-stone-100 dark:border-stone-800/80">
+                <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-surface border border-line tactile-4 py-2 z-50 text-ink-soft">
+                  <div className="px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-ink-faint border-b border-line/70">
                     Kashrus Operations Hub
                   </div>
 
                   {currentUser?.role === 'admin' && (
                     <button
                       onClick={() => { setToolsMenuOpen(false); openVenuesModal(); }}
-                      className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-stone-50 dark:hover:bg-slate-800 transition text-left cursor-pointer"
+                      className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer"
                     >
                       <span className="flex items-center gap-2">
-                        <Store className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                        <Store className="w-4 h-4 text-gold-deep" />
                         <span>Venues Directory</span>
                       </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-stone-100 dark:bg-slate-800 text-stone-500 font-bold">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-sunken text-ink-faint font-bold">
                         {allVenues.length}
                       </span>
                     </button>
@@ -214,9 +214,9 @@ export const Header: React.FC<HeaderProps> = ({
                   {currentUser?.role === 'admin' && (
                     <button
                       onClick={() => { setToolsMenuOpen(false); onOpenCreateVenue(); }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-stone-50 dark:hover:bg-slate-800 transition text-left cursor-pointer"
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer"
                     >
-                      <Plus className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                      <Plus className="w-4 h-4 text-gold-deep" />
                       <span>Establish New Venue</span>
                     </button>
                   )}
@@ -224,13 +224,13 @@ export const Header: React.FC<HeaderProps> = ({
                   {currentUser?.role === 'admin' && (
                     <button
                       onClick={() => { setToolsMenuOpen(false); onOpenTeamModal(); }}
-                      className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-stone-50 dark:hover:bg-slate-800 transition text-left cursor-pointer"
+                      className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer"
                     >
                       <span className="flex items-center gap-2">
                         <Users className="w-4 h-4 text-indigo-500" />
                         <span>Mashgichim & Team</span>
                       </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-stone-100 dark:bg-slate-800 text-stone-500 font-bold">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-sunken text-ink-faint font-bold">
                         {totalWorkersCount}
                       </span>
                     </button>
@@ -238,14 +238,14 @@ export const Header: React.FC<HeaderProps> = ({
 
                   <button
                     onClick={() => { setToolsMenuOpen(false); onOpenEventsModal(); }}
-                    className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-stone-50 dark:hover:bg-slate-800 transition text-left cursor-pointer"
+                    className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer"
                   >
                     <span className="flex items-center gap-2">
-                      <Calendar className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                      <Calendar className="w-4 h-4 text-gold-deep" />
                       <span>Events & Banquets</span>
                     </span>
                     {eventsCount > 0 && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300 font-black">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gold-wash text-gold-ink font-black">
                         {eventsCount}
                       </span>
                     )}
@@ -253,17 +253,17 @@ export const Header: React.FC<HeaderProps> = ({
 
                   <button
                     onClick={() => { setToolsMenuOpen(false); onOpenHistoryModal(); }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-stone-50 dark:hover:bg-slate-800 transition text-left cursor-pointer"
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer"
                   >
-                    <History className="w-4 h-4 text-blue-500" />
+                    <History className="w-4 h-4 text-gold-deep" />
                     <span>Inspection Audit History</span>
                   </button>
 
                   {currentUser?.role === 'admin' && (
-                    <div className="pt-1 mt-1 border-t border-stone-100 dark:border-stone-800/80">
+                    <div className="pt-1 mt-1 border-t border-line/70">
                       <button
                         onClick={() => { setToolsMenuOpen(false); onOpenSupabaseModal(); }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-stone-50 dark:hover:bg-slate-800 transition text-left cursor-pointer text-stone-600 dark:text-stone-300"
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer text-ink-soft"
                       >
                         <Database className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                         <span>Database & Security (RLS)</span>
@@ -271,9 +271,9 @@ export const Header: React.FC<HeaderProps> = ({
 
                       <button
                         onClick={() => { setToolsMenuOpen(false); onResetDailyBoard(); }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-950/40 text-amber-700 dark:text-amber-300 transition text-left cursor-pointer"
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-gold-wash text-gold-deep transition text-left cursor-pointer"
                       >
-                        <RotateCcw className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                        <RotateCcw className="w-4 h-4 text-gold-deep" />
                         <span>Reset Daily Venue Board</span>
                       </button>
 
@@ -309,7 +309,7 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="header-add-task-btn"
                 onClick={onOpenTaskModal}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-black rounded-xl bg-gradient-to-r from-amber-600 via-amber-700 to-amber-800 hover:from-amber-700 hover:to-amber-900 active:scale-95 text-white shadow-sm shadow-amber-700/20 transition cursor-pointer shrink-0"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-black rounded-xl bg-gradient-to-r from-gold via-gold to-gold-deep hover:from-gold-deep hover:to-gold-ink active:scale-95 text-white tactile-1 transition cursor-pointer shrink-0"
                 title="Create a new daily assignment"
               >
                 <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
@@ -322,32 +322,32 @@ export const Header: React.FC<HeaderProps> = ({
 
             {/* User Profile & Settings Menu */}
             {currentUser ? (
-              <div className="relative pl-1 border-l border-stone-200 dark:border-stone-800">
+              <div className="relative pl-1 border-l border-line">
                 <button
                   id="header-user-menu-btn"
                   onClick={() => { setUserMenuOpen(!userMenuOpen); setToolsMenuOpen(false); }}
-                  className="flex items-center gap-1.5 p-1 rounded-full hover:bg-stone-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                  className="flex items-center gap-1.5 p-1 rounded-full hover:bg-sunken transition cursor-pointer"
                   title={`${currentUser.name} (${getRoleLabel(currentUser.role)})`}
                 >
                   <div
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-black text-white shadow-2xs ring-2 ring-amber-500/30"
+                    className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-black text-white tactile-1 ring-2 ring-gold/30"
                     style={{ backgroundColor: currentUser.avatarColor || '#d97706' }}
                   >
                     {currentUser.name.charAt(0).toUpperCase()}
                   </div>
-                  <ChevronDown className={`w-3 h-3 text-stone-400 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} />
+                  <ChevronDown className={`w-3 h-3 text-ink-faint transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} />
                 </button>
 
                 {userMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-white dark:bg-slate-900 border border-stone-200 dark:border-stone-800 shadow-xl p-3 z-50 text-stone-800 dark:text-stone-200">
-                    <div className="pb-2.5 mb-2 border-b border-stone-100 dark:border-stone-800">
+                  <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-surface border border-line tactile-4 p-3 z-50 text-ink-soft">
+                    <div className="pb-2.5 mb-2 border-b border-line/70">
                       <div className="flex items-center justify-between">
-                        <div className="font-bold text-xs text-stone-900 dark:text-white truncate max-w-[150px]">
+                        <div className="font-bold text-xs text-ink truncate max-w-[150px]">
                           {currentUser.name}
                         </div>
                         <span className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase ${
                           currentUser.role === 'admin'
-                            ? 'bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300'
+                            ? 'bg-gold-wash text-gold-ink'
                             : currentUser.role === 'coordinator'
                             ? 'bg-sky-100 dark:bg-sky-950/80 text-sky-800 dark:text-sky-300'
                             : 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300'
@@ -355,11 +355,11 @@ export const Header: React.FC<HeaderProps> = ({
                           {getRoleLabel(currentUser.role)}
                         </span>
                       </div>
-                      <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate mt-0.5">
+                      <div className="text-[11px] text-ink-faint truncate mt-0.5">
                         {currentUser.email}
                       </div>
                       {currentUser.agencyName && (
-                        <div className="text-[10px] text-amber-700 dark:text-amber-400 font-semibold mt-1">
+                        <div className="text-[10px] text-gold-deep font-semibold mt-1">
                           {currentUser.agencyName}
                         </div>
                       )}
@@ -369,13 +369,13 @@ export const Header: React.FC<HeaderProps> = ({
                       {/* Theme Toggle in Menu */}
                       <button
                         onClick={onToggleDarkMode}
-                        className="w-full flex items-center justify-between px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-stone-50 dark:hover:bg-slate-800 transition cursor-pointer"
+                        className="w-full flex items-center justify-between px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer"
                       >
-                        <span className="flex items-center gap-2 text-stone-700 dark:text-stone-300">
-                          {darkMode ? <Sun className="w-4 h-4 text-amber-500" /> : <Moon className="w-4 h-4 text-stone-500" />}
+                        <span className="flex items-center gap-2 text-ink-soft">
+                          {darkMode ? <Sun className="w-4 h-4 text-gold" /> : <Moon className="w-4 h-4 text-ink-faint" />}
                           <span>Appearance</span>
                         </span>
-                        <span className="text-[11px] text-stone-400 font-normal">
+                        <span className="text-[11px] text-ink-faint font-normal">
                           {darkMode ? 'Dark' : 'Light'}
                         </span>
                       </button>
@@ -389,9 +389,9 @@ export const Header: React.FC<HeaderProps> = ({
                       {onOpenChangePassword && (
                         <button
                           onClick={() => { setUserMenuOpen(false); onOpenChangePassword(); }}
-                          className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-stone-50 dark:hover:bg-slate-800 transition cursor-pointer text-stone-700 dark:text-stone-300"
+                          className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
                         >
-                          <KeyRound className="w-4 h-4 text-stone-400" />
+                          <KeyRound className="w-4 h-4 text-ink-faint" />
                           <span>Change Password</span>
                         </button>
                       )}
@@ -412,7 +412,7 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="header-login-btn"
                 onClick={onOpenAuth}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 active:scale-95 text-white text-xs font-bold shadow-xs transition cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gold hover:bg-gold-deep active:scale-95 text-white text-xs font-bold shadow-xs transition cursor-pointer"
               >
                 <LogIn className="w-3.5 h-3.5" />
                 <span>Sign In</span>
@@ -427,7 +427,7 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="mobile-header-new-task-btn"
                 onClick={onOpenTaskModal}
-                className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-600 to-amber-700 active:scale-95 text-white text-xs font-bold shadow-xs cursor-pointer shrink-0"
+                className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-gold to-gold-deep active:scale-95 text-white text-xs font-bold shadow-xs cursor-pointer shrink-0"
                 title="Add New Assignment"
               >
                 <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
@@ -438,7 +438,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               id="mobile-header-menu-toggle"
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="p-1.5 rounded-xl text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-slate-800 cursor-pointer shrink-0"
+              className="p-1.5 rounded-xl text-ink-soft hover:bg-sunken cursor-pointer shrink-0"
               aria-label="Toggle mobile menu"
             >
               {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -449,12 +449,12 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Mobile Menu Dropdown */}
       {mobileMenuOpen && (
-        <div className="lg:hidden border-t border-stone-200 dark:border-stone-800 bg-white dark:bg-slate-900 px-4 py-3 space-y-2 max-h-[85vh] overflow-y-auto">
+        <div className="lg:hidden border-t border-line bg-surface px-4 py-3 space-y-2 max-h-[85vh] overflow-y-auto">
           {/* Mobile Install App Banner */}
           <PWAInstallButton variant="banner" />
 
           {currentUser ? (
-            <div className="py-2 border-b border-stone-100 dark:border-stone-800 space-y-1.5">
+            <div className="py-2 border-b border-line/70 space-y-1.5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
                   <div
@@ -464,20 +464,20 @@ export const Header: React.FC<HeaderProps> = ({
                     {currentUser.name.charAt(0).toUpperCase()}
                   </div>
                   <div>
-                    <p className="text-xs font-bold text-stone-900 dark:text-white">{currentUser.name}</p>
-                    <p className="text-[11px] text-stone-500 dark:text-stone-400">{currentUser.email}</p>
+                    <p className="text-xs font-bold text-ink">{currentUser.name}</p>
+                    <p className="text-[11px] text-ink-faint">{currentUser.email}</p>
                   </div>
                 </div>
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
                   currentUser.role === 'admin'
-                    ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300'
+                    ? 'bg-gold-wash text-gold-ink'
                     : 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300'
                 }`}>
                   {getRoleLabel(currentUser.role)}
                 </span>
               </div>
               {currentUser.agencyName && (
-                <div className="flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-400 pt-0.5 font-medium">
+                <div className="flex items-center gap-1.5 text-[11px] text-gold-deep pt-0.5 font-medium">
                   <ShieldCheck className="w-3.5 h-3.5" />
                   <span>Agency: <strong>{currentUser.agencyName}</strong></span>
                 </div>
@@ -486,7 +486,7 @@ export const Header: React.FC<HeaderProps> = ({
           ) : (
             <button
               onClick={() => { setMobileMenuOpen(false); onOpenAuth?.(); }}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-bold rounded-lg text-white bg-amber-600 hover:bg-amber-700 shadow-xs cursor-pointer"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-bold rounded-lg text-white bg-gold hover:bg-gold-deep shadow-xs cursor-pointer"
             >
               <UserIcon className="w-4 h-4" />
               <span>Sign In to Your Account</span>
@@ -495,26 +495,26 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Mobile Admin Venue Switcher */}
           {currentUser?.role === 'admin' && (
-            <div className="p-2.5 rounded-2xl bg-stone-50 dark:bg-slate-800/60 border border-stone-200 dark:border-stone-700 space-y-2">
+            <div className="p-2.5 rounded-2xl bg-sunken border border-line space-y-2">
               <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-stone-700 dark:text-stone-300 flex items-center gap-1.5">
-                  <Building2 className="w-3.5 h-3.5 text-amber-600" />
+                <span className="font-bold text-ink-soft flex items-center gap-1.5">
+                  <Building2 className="w-3.5 h-3.5 text-gold-deep" />
                   Active Venue:
                 </span>
-                <span className="font-bold text-amber-700 dark:text-amber-400">
+                <span className="font-bold text-gold-deep">
                   {currentVenue?.name}
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => { setMobileMenuOpen(false); openVenuesModal(); }}
-                  className="px-2.5 py-1.5 text-xs font-bold rounded-xl bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 border border-amber-200/80 dark:border-amber-800/60 text-center cursor-pointer"
+                  className="px-2.5 py-1.5 text-xs font-bold rounded-xl bg-gold-wash text-gold-ink border border-gold/40 text-center cursor-pointer"
                 >
                   Venues Hub ({allVenues.length})
                 </button>
                 <button
                   onClick={() => { setMobileMenuOpen(false); onOpenCreateVenue(); }}
-                  className="px-2.5 py-1.5 text-xs font-bold rounded-xl bg-amber-600 text-white text-center cursor-pointer flex items-center justify-center gap-1"
+                  className="px-2.5 py-1.5 text-xs font-bold rounded-xl bg-gold text-white text-center cursor-pointer flex items-center justify-center gap-1"
                 >
                   <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
                   <span>New Venue</span>
@@ -526,7 +526,7 @@ export const Header: React.FC<HeaderProps> = ({
           {canUserAssignTasks(currentUser) && (
             <button
               onClick={() => { setMobileMenuOpen(false); onOpenTaskModal(); }}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-bold rounded-xl text-white bg-gradient-to-r from-amber-600 to-amber-700 shadow-xs cursor-pointer"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-bold rounded-xl text-white bg-gradient-to-r from-gold to-gold-deep shadow-xs cursor-pointer"
             >
               <Plus className="w-4 h-4 stroke-[2.5]" />
               <span>Create New Assignment</span>
@@ -536,14 +536,14 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Events Hub on Mobile */}
           <button
             onClick={() => { setMobileMenuOpen(false); onOpenEventsModal(); }}
-            className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold rounded-xl text-amber-900 dark:text-amber-200 bg-amber-50/90 dark:bg-amber-950/50 border border-amber-200/90 dark:border-amber-800/60 cursor-pointer shadow-2xs"
+            className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold rounded-xl text-gold-ink bg-gold-wash border border-gold/40 cursor-pointer tactile-1"
           >
             <span className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+              <Calendar className="w-4 h-4 text-gold-deep" />
               <span>Kosher Events & Banquets</span>
             </span>
             {eventsCount > 0 && (
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-600 text-white">
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-gold text-white">
                 {eventsCount} active
               </span>
             )}
@@ -553,7 +553,7 @@ export const Header: React.FC<HeaderProps> = ({
             {currentUser?.role === 'admin' && (
               <button
                 onClick={() => { setMobileMenuOpen(false); onOpenTeamModal(); }}
-                className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-stone-700 dark:text-stone-200 bg-stone-100 dark:bg-slate-800 cursor-pointer"
+                className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-ink-soft bg-sunken cursor-pointer"
               >
                 <Users className="w-4 h-4 text-indigo-500" />
                 <span>Mashgichim ({totalWorkersCount})</span>
@@ -561,17 +561,17 @@ export const Header: React.FC<HeaderProps> = ({
             )}
             <button
               onClick={() => { setMobileMenuOpen(false); onOpenHistoryModal(); }}
-              className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-stone-700 dark:text-stone-200 bg-stone-100 dark:bg-slate-800 cursor-pointer ${
+              className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-ink-soft bg-sunken cursor-pointer ${
                 currentUser?.role === 'admin' ? '' : 'col-span-2'
               }`}
             >
-              <History className="w-4 h-4 text-blue-500" />
+              <History className="w-4 h-4 text-gold-deep" />
               <span>History Log</span>
             </button>
             {currentUser?.role === 'admin' && (
               <button
                 onClick={() => { setMobileMenuOpen(false); onOpenSupabaseModal(); }}
-                className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-stone-700 dark:text-stone-200 bg-stone-100 dark:bg-slate-800 col-span-2 cursor-pointer"
+                className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-ink-soft bg-sunken col-span-2 cursor-pointer"
               >
                 <Database className="w-4 h-4 text-emerald-500" />
                 <span>Supabase / RLS</span>
@@ -583,7 +583,7 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="space-y-1.5">
               <button
                 onClick={() => { setMobileMenuOpen(false); onResetDailyBoard(); }}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 cursor-pointer"
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-gold-deep bg-gold-wash border border-gold/40 cursor-pointer"
               >
                 <RotateCcw className="w-4 h-4" />
                 <span>Reset Daily Board Now</span>
@@ -614,24 +614,24 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Theme Switcher on Mobile */}
           <button
             onClick={onToggleDarkMode}
-            className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold rounded-xl bg-stone-100 dark:bg-slate-800 text-stone-700 dark:text-stone-200 cursor-pointer"
+            className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold rounded-xl bg-sunken text-ink-soft cursor-pointer"
           >
             <span className="flex items-center gap-2">
-              {darkMode ? <Sun className="w-4 h-4 text-amber-500" /> : <Moon className="w-4 h-4 text-stone-500" />}
+              {darkMode ? <Sun className="w-4 h-4 text-gold" /> : <Moon className="w-4 h-4 text-ink-faint" />}
               <span>Toggle Appearance</span>
             </span>
-            <span className="text-xs text-stone-400">{darkMode ? 'Dark' : 'Light'}</span>
+            <span className="text-xs text-ink-faint">{darkMode ? 'Dark' : 'Light'}</span>
           </button>
 
-          <div className="pt-2 border-t border-stone-100 dark:border-stone-800 flex justify-between items-center">
+          <div className="pt-2 border-t border-line/70 flex justify-between items-center">
             {currentUser ? (
               <>
                 {onOpenChangePassword && (
                   <button
                     onClick={() => { setMobileMenuOpen(false); onOpenChangePassword(); }}
-                    className="text-xs font-semibold text-stone-700 dark:text-stone-200 flex items-center gap-1 cursor-pointer"
+                    className="text-xs font-semibold text-ink-soft flex items-center gap-1 cursor-pointer"
                   >
-                    <KeyRound className="w-3.5 h-3.5 text-stone-500" />
+                    <KeyRound className="w-3.5 h-3.5 text-ink-faint" />
                     <span>Change Password</span>
                   </button>
                 )}
@@ -645,7 +645,7 @@ export const Header: React.FC<HeaderProps> = ({
             ) : (
               <button
                 onClick={() => { setMobileMenuOpen(false); onOpenAuth?.(); }}
-                className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-xs transition cursor-pointer"
+                className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-gold hover:bg-gold-deep text-white text-xs font-bold shadow-xs transition cursor-pointer"
               >
                 <LogIn className="w-3.5 h-3.5" /> Sign In to Account
               </button>

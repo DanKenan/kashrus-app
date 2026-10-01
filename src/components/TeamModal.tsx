@@ -4,17 +4,13 @@ import {
   Users, 
   UserPlus, 
   Trash2, 
-  Shield, 
   User, 
   Mail, 
   AlertTriangle, 
   Lock, 
   Building2, 
-  Check, 
   CheckSquare, 
-  PlusCircle, 
-  ShieldAlert,
-  Edit2
+  PlusCircle,
 } from 'lucide-react';
 import { User as UserType, UserRole, Task, Venue, UserPermissions } from '../types';
 import { getRoleLabel, canUserAssignTasks, canUserFillTasks, DEFAULT_ROLE_PERMISSIONS } from '../lib/permissions';
@@ -191,36 +187,36 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto">
-      <div className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-4xl shadow-2xl border border-slate-200 dark:border-slate-800 my-8 overflow-hidden flex flex-col max-h-[90vh] transition-colors">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1a120a]/60 backdrop-blur-xs overflow-y-auto">
+      <div className="bg-surface rounded-2xl w-full max-w-4xl tactile-4 border border-line my-8 overflow-hidden flex flex-col max-h-[90vh] animate-slide-up">
         
         {/* Modal Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-line shrink-0">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400">
+            <div className="p-2 rounded-xl bg-gold-wash text-gold-deep">
               <Users className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <h2 className="text-base font-bold text-ink flex items-center gap-2">
                 <span>Mashgiach Team & Access Permissions</span>
                 {currentVenue && (
-                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-300 font-semibold flex items-center gap-1">
+                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 font-semibold flex items-center gap-1">
                     <Building2 className="w-3 h-3" />
                     {currentVenue.name}
                   </span>
                 )}
-                <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold">
+                <span className="text-xs px-2 py-0.5 rounded-full bg-sunken text-ink-soft font-semibold">
                   {users.length} members
                 </span>
               </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
+              <p className="text-xs text-ink-soft">
                 Manage Mashgichim, Coordinators, and Venue Owners. Toggle permissions to fill tasks and/or assign new tasks.
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+            className="p-1 rounded-lg text-ink-faint hover:text-ink cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -230,8 +226,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           
           {/* Section 1: Add New Member Form */}
-          <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3 flex items-center gap-1.5">
+          <div className="p-4 rounded-2xl bg-sunken border border-line tactile-1">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-faint mb-3 flex items-center gap-1.5">
               <UserPlus className="w-3.5 h-3.5 text-emerald-500" />
               Add New Team Member
             </h3>
@@ -246,11 +242,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
             <form onSubmit={handleAddSubmit} className="space-y-3 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
                 <div className="sm:col-span-3">
-                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-semibold text-ink-soft mb-1">
                     Full Name
                   </label>
                   <div className="relative">
-                    <User className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <User className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       id="new-member-name-input"
                       type="text"
@@ -258,17 +254,17 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       placeholder="e.g. Rabbi David Cohen"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:ring-1 focus:ring-emerald-500 outline-none"
+                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-line bg-sunken text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
                     />
                   </div>
                 </div>
 
                 <div className="sm:col-span-3">
-                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-semibold text-ink-soft mb-1">
                     Email
                   </label>
                   <div className="relative">
-                    <Mail className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Mail className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       id="new-member-email-input"
                       type="email"
@@ -276,17 +272,17 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       placeholder="e.g. dcohen@hartfordkashrut.org"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 focus:ring-1 focus:ring-emerald-500 outline-none"
+                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-line bg-sunken text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
                     />
                   </div>
                 </div>
 
                 <div className="sm:col-span-3">
-                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-semibold text-ink-soft mb-1">
                     Password
                   </label>
                   <div className="relative">
-                    <Lock className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Lock className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       id="new-member-password-input"
                       type="password"
@@ -294,20 +290,20 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       placeholder="Min 6 characters"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white placeholder-slate-400 font-mono text-xs focus:ring-1 focus:ring-emerald-500 outline-none"
+                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-line bg-sunken text-ink placeholder-ink-faint font-mono text-xs focus:border-gold focus:outline-none"
                     />
                   </div>
                 </div>
 
                 <div className="sm:col-span-3">
-                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  <label className="block font-semibold text-ink-soft mb-1">
                     Role
                   </label>
                   <select
                     id="new-member-role-select"
                     value={role}
                     onChange={(e) => handleRoleChange(e.target.value as UserRole)}
-                    className="w-full py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-medium focus:ring-1 focus:ring-emerald-500 outline-none"
+                    className="w-full py-2 px-3 rounded-xl border border-line bg-sunken text-ink font-medium focus:border-gold focus:outline-none"
                   >
                     <option value="mashgiach">Mashgiach (Field Inspector)</option>
                     <option value="coordinator">Coordinator (Can Add Tasks)</option>
@@ -318,9 +314,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
               </div>
 
               {/* Permission checkboxes for the new user */}
-              <div className="pt-2 border-t border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div className="pt-2 border-t border-line flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-5">
-                  <span className="font-semibold text-slate-700 dark:text-slate-300">
+                  <span className="font-semibold text-ink-soft">
                     Permissions:
                   </span>
                   <label className="inline-flex items-center gap-2 cursor-pointer select-none">
@@ -328,9 +324,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       type="checkbox"
                       checked={canFill}
                       onChange={(e) => setCanFill(e.target.checked)}
-                      className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
+                      className="w-4 h-4 accent-gold rounded border-line cursor-pointer"
                     />
-                    <span className="text-slate-700 dark:text-slate-300">
+                    <span className="text-ink-soft">
                       Can Fill Up Tasks & Notes
                     </span>
                   </label>
@@ -339,9 +335,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       type="checkbox"
                       checked={canAssign}
                       onChange={(e) => setCanAssign(e.target.checked)}
-                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                      className="w-4 h-4 accent-gold rounded border-line cursor-pointer"
                     />
-                    <span className="text-slate-700 dark:text-slate-300">
+                    <span className="text-ink-soft">
                       Can Assign / Add New Tasks
                     </span>
                   </label>
@@ -351,7 +347,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   id="add-member-submit-btn"
                   type="submit"
                   disabled={isSubmitting}
-                  className="py-2 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 text-white font-bold transition flex items-center justify-center gap-1.5 shadow-xs cursor-pointer shrink-0"
+                  className="pressable py-2 px-4 rounded-xl bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 disabled:opacity-50 text-white font-bold flex items-center justify-center gap-1.5 tactile-1 cursor-pointer shrink-0"
                 >
                   <UserPlus className="w-4 h-4" />
                   <span>{isSubmitting ? 'Adding...' : 'Add Team Member'}</span>
@@ -364,10 +360,10 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           <div>
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
               <div>
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-ink-faint">
                   Active Team Roster & Permissions ({filteredUsers.length})
                 </h3>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                <p className="text-[11px] text-ink-soft">
                   Admins can toggle task filling and task assignment permissions directly for any Mashgiach or Owner.
                 </p>
               </div>
@@ -376,11 +372,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                 placeholder="Search by name, email, or role..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="text-xs px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white max-w-xs focus:ring-1 focus:ring-emerald-500 outline-none"
+                className="text-xs px-3 py-1.5 rounded-xl border border-line bg-sunken text-ink max-w-xs focus:border-gold focus:outline-none"
               />
             </div>
 
-            <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-slate-900">
+            <div className="divide-y divide-line border border-line rounded-2xl overflow-hidden bg-surface">
               {filteredUsers.map((user) => {
                 const isCurrent = currentUser?.id === user.id;
                 const isPrimaryAdmin = user.email.toLowerCase() === 'kenan@hartfordkashrut.org';
@@ -396,21 +392,21 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                 return (
                   <div
                     key={user.id}
-                    className={`p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition ${
+                    className={`p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-surface tactile-1 lift hover:bg-sunken/50 transition ${
                       isBusy ? 'opacity-50 pointer-events-none' : ''
                     }`}
                   >
                     {/* User Info & Role Dropdown */}
                     <div className="flex items-center gap-3 min-w-0 flex-1">
                       <div
-                        className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold text-white shadow-xs shrink-0"
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold text-white tactile-1 ring-2 ring-gold/30 shrink-0"
                         style={{ backgroundColor: user.avatarColor || '#3b82f6' }}
                       >
                         {user.name.charAt(0).toUpperCase()}
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                          <p className="text-xs font-bold text-ink truncate">
                             {user.name}
                           </p>
                           {isCurrent && (
@@ -426,7 +422,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                               onChange={(e) => handleChangeUserRole(user, e.target.value as UserRole)}
                               className={`text-[10px] font-bold px-2 py-0.5 rounded-lg uppercase tracking-wider cursor-pointer border ${
                                 user.role === 'admin'
-                                  ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border-amber-300'
+                                  ? 'bg-gold-wash text-gold-ink border-gold/40'
                                   : user.role === 'coordinator'
                                   ? 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300 border-sky-300'
                                   : user.role === 'owner'
@@ -443,7 +439,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                             <span
                               className={`text-[10px] px-2 py-0.5 rounded-md font-bold uppercase tracking-wider ${
                                 user.role === 'admin'
-                                  ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                  ? 'bg-gold-wash text-gold-ink'
                                   : user.role === 'coordinator'
                                   ? 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300'
                                   : user.role === 'owner'
@@ -455,7 +451,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                             </span>
                           )}
                         </div>
-                        <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                        <p className="text-xs text-ink-soft truncate">
                           {user.email}
                         </p>
                       </div>
@@ -471,11 +467,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition cursor-pointer ${
                           canFillVal
                             ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
-                            : 'bg-slate-100 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-400 line-through'
+                            : 'bg-sunken border-line text-ink-faint line-through'
                         } ${(!onUpdateUser || isPrimaryAdmin) ? 'cursor-default opacity-80' : 'hover:scale-[1.02]'}`}
                         title="Permission to complete checklist items and save notes"
                       >
-                        <CheckSquare className={`w-3.5 h-3.5 ${canFillVal ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`} />
+                        <CheckSquare className={`w-3.5 h-3.5 ${canFillVal ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-faint'}`} />
                         <span>Fill Tasks: {canFillVal ? 'Allowed' : 'Disabled'}</span>
                       </button>
 
@@ -487,15 +483,15 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition cursor-pointer ${
                           canAssignVal
                             ? 'bg-indigo-50 dark:bg-indigo-950/60 border-indigo-300 dark:border-indigo-800 text-indigo-800 dark:text-indigo-200'
-                            : 'bg-slate-100 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-400 line-through'
+                            : 'bg-sunken border-line text-ink-faint line-through'
                         } ${(!onUpdateUser || isPrimaryAdmin) ? 'cursor-default opacity-80' : 'hover:scale-[1.02]'}`}
                         title="Permission to create new assignments and edit task definitions"
                       >
-                        <PlusCircle className={`w-3.5 h-3.5 ${canAssignVal ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`} />
+                        <PlusCircle className={`w-3.5 h-3.5 ${canAssignVal ? 'text-indigo-600 dark:text-indigo-400' : 'text-ink-faint'}`} />
                         <span>Assign Tasks: {canAssignVal ? 'Allowed' : 'Disabled'}</span>
                       </button>
 
-                      <span className="text-xs text-slate-400 hidden xl:inline" title="Tasks assigned to this user">
+                      <span className="text-xs text-ink-faint tnum hidden xl:inline" title="Tasks assigned to this user">
                         {assignedCount} tasks
                       </span>
 
@@ -503,7 +499,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       {!isPrimaryAdmin && (
                         <button
                           onClick={() => handleDelete(user)}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition cursor-pointer"
+                          className="p-1.5 rounded-lg text-ink-faint hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition cursor-pointer"
                           title={`Delete ${user.name}`}
                         >
                           <Trash2 className="w-4 h-4" />
@@ -519,13 +515,13 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="px-6 py-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 flex items-center justify-between shrink-0">
-          <p className="text-xs text-slate-500 dark:text-slate-400">
+        <div className="px-6 py-3 border-t border-line bg-sunken flex items-center justify-between shrink-0">
+          <p className="text-xs text-ink-soft">
             Changes to roles and permissions apply immediately across all live connected sessions.
           </p>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 text-xs font-semibold rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 text-slate-800 dark:text-slate-200 cursor-pointer"
+            className="pressable px-4 py-1.5 text-xs font-semibold rounded-xl border border-line bg-sunken hover:bg-gold-wash/60 text-ink cursor-pointer"
           >
             Close
           </button>
