@@ -159,6 +159,104 @@ export interface KosherEvent {
   updatedAt?: string;
 }
 
+export interface AirtableConfig {
+  id?: string;
+  agencyId?: string;
+  venueId?: string; // Optional: configure per-venue or agency-wide
+  apiKey?: string; // Personal Access Token (pat...)
+  baseId: string; // app...
+  tableName: string; // e.g. "Approved Ingredients" or "Ingredients"
+  viewName?: string; // e.g. "Grid view"
+  // Column field mappings (flexible to match user's custom Airtable schema)
+  fieldNameMapping?: {
+    ingredientName?: string;
+    brandOrSupplier?: string;
+    kashrutAgency?: string;
+    kosherStatus?: string; // Dairy, Parve, Meat, Pas Yisroel, etc.
+    lotNumber?: string;
+    approvalDate?: string;
+    approvedBy?: string;
+    factoryFacility?: string;
+    notes?: string;
+    status?: string;
+  };
+  lastSyncedAt?: string;
+  autoSyncEnabled?: boolean;
+}
+
+export interface ApprovedIngredient {
+  id: string; // airtable record id or internal id
+  airtableRecordId?: string;
+  venueId: string;
+  agencyId: string;
+  name: string;
+  brandOrSupplier?: string;
+  kashrutAgency?: string; // e.g. "OU", "OK", "Star-K", "cRc", "HKC"
+  kosherStatus: 'Parve' | 'Dairy' | 'Meat' | 'Cholov Yisroel' | 'Pas Yisroel' | 'Glatt' | 'Other';
+  lotOrBatch?: string;
+  approvalStatus: 'approved' | 'pending_approval' | 'discontinued' | 'flagged';
+  approvalDate?: string;
+  approvedBy?: string;
+  notes?: string;
+  // Live Mashgiach Audit State (for today's inspection)
+  verificationStatus?: 'verified_present' | 'verified_not_found' | 'unverified' | 'flagged_discrepancy';
+  verifiedAt?: string | null;
+  verifiedByName?: string | null;
+  verifiedByEmail?: string | null;
+  verificationNotes?: string;
+}
+
+export interface UnapprovedDiscrepancy {
+  id: string;
+  name: string;
+  brandOrSupplier?: string;
+  kashrutSymbolFound?: string;
+  lotOrBatch?: string;
+  locationInFactory?: string;
+  severity: 'critical' | 'warning' | 'inquiry';
+  notes: string;
+  actionTaken?: string;
+  photoUrl?: string;
+  reportedAt: string;
+  reportedByName: string;
+  reportedByEmail: string;
+}
+
+export interface FactoryAuditReport {
+  id: string;
+  agencyId: string;
+  venueId: string;
+  venueName?: string;
+  auditDate: string; // YYYY-MM-DD
+  startTime?: string;
+  endTime?: string;
+  mashgiachName: string;
+  mashgiachEmail: string;
+  factoryRepresentative?: string;
+  
+  // Stats
+  totalApprovedChecked: number;
+  totalPresent: number;
+  totalDiscrepancies: number;
+  
+  // Audited items and unauthorized discoveries
+  auditedIngredients: Array<{
+    ingredientId: string;
+    name: string;
+    brandOrSupplier?: string;
+    status: 'verified_present' | 'verified_not_found' | 'flagged_discrepancy';
+    notes?: string;
+  }>;
+  discrepancies: UnapprovedDiscrepancy[];
+  
+  // General findings & Rabbinic conclusions
+  summaryNotes: string;
+  status: 'passed' | 'passed_with_notes' | 'critical_violation_found' | 'in_progress';
+  mashgiachSigned: boolean;
+  signatureTimestamp?: string;
+  createdAt: string;
+}
+
 export interface ServerBroadcastMessage {
   type: 
     | 'TASK_UPDATED' 
@@ -176,6 +274,9 @@ export interface ServerBroadcastMessage {
     | 'EVENT_CREATED'
     | 'EVENT_UPDATED'
     | 'EVENT_DELETED'
+    | 'INGREDIENT_VERIFIED'
+    | 'INGREDIENTS_SYNCED'
+    | 'AUDIT_REPORT_SUBMITTED'
     | 'CLEAN_SLATE_RESET'
     | 'DEMO_RESTORED';
   payload: any;
@@ -184,3 +285,4 @@ export interface ServerBroadcastMessage {
   agencyId?: string;
   venueId?: string;
 }
+

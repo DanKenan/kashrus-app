@@ -79,14 +79,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [selectedDates, setSelectedDates] = useState<string[]>([]);
 
   // Synchronous guard against double-submit (double-click / Enter+click firing
-  // handleSubmit twice before the modal unmounts). A ref (not state) is used
-  // so the second synchronous invocation is blocked too.
+  // handleSubmit twice before the modal unmounts).
   const submitGuard = useRef(false);
 
   useEffect(() => {
-    const todayStr = new Date().toISOString().split('T')[0];
-    // Fresh guard every time the modal opens.
     submitGuard.current = false;
+    const todayStr = new Date().toISOString().split('T')[0];
 
     if (taskToEdit) {
       setTitle(taskToEdit.title);
@@ -230,7 +228,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
-    // Block duplicate submissions: one submit per modal open.
     if (submitGuard.current) return;
     submitGuard.current = true;
 

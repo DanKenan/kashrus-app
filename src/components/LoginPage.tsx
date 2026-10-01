@@ -12,7 +12,8 @@ import {
   CheckCircle2, 
   Building2,
   Sparkles,
-  UserPlus
+  UserPlus,
+  Factory
 } from 'lucide-react';
 import { KeepingKosherLogo } from './KeepingKosherLogo';
 import { User as UserType } from '../types';
@@ -287,121 +288,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   </p>
                 </div>
 
-                {/* Quick Demo Accounts for Multi-Venue Testing */}
-                <div className="mt-5 pt-4 border-t border-dashed border-slate-200 dark:border-slate-800">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
-                      Quick Access Demo Accounts (HKC)
-                    </span>
-                    <span className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">Click to fill</span>
-                  </div>
-                  
-                  {/* Admin & Coordinator quick logins */}
-                  <div className="grid grid-cols-2 gap-2 mb-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEmail('kenan@hartfordkashrut.org');
-                        setPassword('admin123');
-                        setErrorMessage(null);
-                      }}
-                      className="p-2 rounded-xl bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900 text-left transition text-xs flex items-center justify-between cursor-pointer"
-                    >
-                      <div>
-                        <div className="font-bold text-blue-900 dark:text-blue-200 flex items-center gap-1 text-[11px]">
-                          <ShieldCheck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-                          <span>Admin</span>
-                        </div>
-                        <div className="text-[10px] text-blue-700 dark:text-blue-300">Kenan (Full Control)</div>
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEmail('coordinator@hartfordkashrut.org');
-                        setPassword('coord123');
-                        setErrorMessage(null);
-                      }}
-                      className="p-2 rounded-xl bg-sky-50 dark:bg-sky-950/40 hover:bg-sky-100 dark:hover:bg-sky-900/50 border border-sky-200 dark:border-sky-900 text-left transition text-xs flex items-center justify-between cursor-pointer"
-                    >
-                      <div>
-                        <div className="font-bold text-sky-900 dark:text-sky-200 flex items-center gap-1 text-[11px]">
-                          <ShieldCheck className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400 shrink-0" />
-                          <span>Coordinator</span>
-                        </div>
-                        <div className="text-[10px] text-sky-700 dark:text-sky-300">Rabbi Levy (Add Tasks)</div>
-                      </div>
-                    </button>
-                  </div>
-
-                  {/* Venue-Specific Quick Accounts Grid */}
-                  <div className="space-y-1.5 text-xs">
-                    {/* Crown Market */}
-                    <div className="p-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1 flex items-center gap-1">
-                        <Building2 className="w-3 h-3 text-blue-500" />
-                        The Crown Market (Facility 1)
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEmail('owner@crownmarket.com');
-                            setPassword('owner123');
-                            setErrorMessage(null);
-                          }}
-                          className="flex-1 py-1 px-2 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-[11px] font-medium text-purple-700 dark:text-purple-300 transition text-center cursor-pointer"
-                        >
-                          Owner (Audit Only)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEmail('alex@company.com');
-                            setPassword('worker123');
-                            setErrorMessage(null);
-                          }}
-                          className="flex-1 py-1 px-2 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-[11px] font-medium text-emerald-700 dark:text-emerald-300 transition text-center cursor-pointer"
-                        >
-                          Alex (Mashgiach)
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Hartford Kosher Bakery */}
-                    <div className="p-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1 flex items-center gap-1">
-                        <Building2 className="w-3 h-3 text-amber-500" />
-                        Hartford Kosher Bakery (Facility 2)
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEmail('owner@hartfordbakery.com');
-                            setPassword('owner123');
-                            setErrorMessage(null);
-                          }}
-                          className="flex-1 py-1 px-2 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-[11px] font-medium text-purple-700 dark:text-purple-300 transition text-center cursor-pointer"
-                        >
-                          Owner (Audit Only)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEmail('sarah@hartfordbakery.com');
-                            setPassword('worker123');
-                            setErrorMessage(null);
-                          }}
-                          className="flex-1 py-1 px-2 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-[11px] font-medium text-emerald-700 dark:text-emerald-300 transition text-center cursor-pointer"
-                        >
-                          Sarah (Mashgiach)
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
               </>
             )}
 

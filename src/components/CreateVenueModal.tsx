@@ -13,7 +13,8 @@ import {
   Coffee, 
   Truck, 
   FileText,
-  PenLine
+  PenLine,
+  Factory
 } from 'lucide-react';
 import { Venue } from '../types';
 
@@ -35,7 +36,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   agencySeal,
 }) => {
   const [name, setName] = useState('');
-  const [category, setCategory] = useState('Food Service');
+  const [category, setCategory] = useState('Industrial');
   const [customCategory, setCustomCategory] = useState('');
   const [address, setAddress] = useState('');
   const [certification, setCertification] = useState(
@@ -43,7 +44,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
       ? `${agencyName}${agencySeal ? ` - ${agencySeal}` : ' - Supervised Kosher'}`
       : 'Hartford Kashrut Commission (HKC) - Glatt Meat & Parve'
   );
-  const [templateType, setTemplateType] = useState<'restaurant' | 'bakery' | 'catering' | 'blank'>('restaurant');
+  const [templateType, setTemplateType] = useState<'restaurant' | 'bakery' | 'catering' | 'industrial' | 'blank'>('industrial');
 
   // Venue Owner credentials
   const [ownerName, setOwnerName] = useState('');
@@ -185,13 +186,14 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                     setCategory(val);
                     if (val === 'Bakery') setTemplateType('bakery');
                     else if (val === 'Catering') setTemplateType('catering');
+                    else if (val === 'Industrial' || val.toLowerCase().includes('factory')) setTemplateType('industrial');
                     else if (val === 'Restaurant' || val === 'Food Service') setTemplateType('restaurant');
                   }}
                   className="w-full px-3.5 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
+                  <option value="Industrial">Industrial / Factory Plant (Airtable & Audits)</option>
                   <option value="Food Service">Food Service</option>
                   <option value="Restaurant">Restaurant</option>
-                  <option value="Industrial">Industrial</option>
                   <option value="Catering">Catering</option>
                   <option value="Bakery">Bakery</option>
                   <option value="Other">Other (Create your own category...)</option>
@@ -264,6 +266,24 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
             </h3>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                onClick={() => setTemplateType('industrial')}
+                className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition cursor-pointer ${
+                  templateType === 'industrial'
+                    ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100 ring-1 ring-emerald-500'
+                    : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
+                }`}
+              >
+                <Factory className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-xs font-bold">Industrial & Factory Plant</div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                    4 starter tasks: Airtable approved ingredient verification, floor audit for unapproved items, CIP 212°F check, audit report.
+                  </div>
+                </div>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setTemplateType('restaurant')}
