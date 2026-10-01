@@ -20,6 +20,7 @@ import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage
 import { realtimeSocket } from './lib/socketClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, getRoleLabel } from './lib/permissions';
+import { refreshCustomCategories } from './lib/categoryStyle';
 
 const DEFAULT_USERS: User[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', permissions: { canFillTasks: true, canAssignTasks: true } },
@@ -36,9 +37,9 @@ export default function App() {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('theme_mode');
       if (saved) return saved === 'dark';
-      return window.matchMedia('(prefers-color-scheme: dark)').matches;
+      return true; // default to the dark theme
     }
-    return false;
+    return true;
   });
 
   useEffect(() => {
@@ -64,6 +65,12 @@ export default function App() {
     // Default to Kenan (Admin) for initial experience
     return DEFAULT_USERS[0];
   });
+
+  // Keep the render-path category colors in sync with this user's saved
+  // custom categories ("Other" entries) — on login, logout, and switch.
+  useEffect(() => {
+    refreshCustomCategories(currentUser?.email);
+  }, [currentUser?.email]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -525,7 +532,9 @@ export default function App() {
           }),
         });
         const created = await res.json();
-        setTasks((prev) => [...prev, created]);
+        // Dedupe by id: the TASK_CREATED broadcast can arrive before the
+        // POST resolves, in which case the task is already in state.
+        setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
         showToast(`Created assignment: "${created.title}"`);
       } catch (err) {
         console.error('Failed to create task:', err);
@@ -1172,6 +1181,7 @@ export default function App() {
         onSave={handleSaveTask}
         taskToEdit={taskToEdit}
         knownWorkers={knownUsers}
+        currentUserEmail={currentUser?.email}
       />
 
       <HistoryLogModal
