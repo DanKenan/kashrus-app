@@ -16,9 +16,11 @@ import { VenuesDirectoryModal } from './components/VenuesDirectoryModal';
 import { EventsModal } from './components/EventsModal';
 import { CreateEventModal } from './components/CreateEventModal';
 import { ConfirmModal } from './components/ConfirmModal';
+import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
 import { realtimeSocket } from './lib/socketClient';
-import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles } from 'lucide-react';
+import { testFirestoreConnection } from './lib/firebaseClient';
+import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
 
@@ -29,6 +31,8 @@ const DEFAULT_USERS: User[] = [
   { id: 'usr_mashgiach1', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'alex@company.com', name: 'Alex Rivera (Mashgiach)', role: 'mashgiach', avatarColor: '#10b981', venueId: 'venue_crown_market', permissions: { canFillTasks: true, canAssignTasks: false } },
   { id: 'usr_mashgiach2', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'maria@company.com', name: 'Maria Santos (Mashgiach)', role: 'mashgiach', avatarColor: '#f59e0b', venueId: 'venue_crown_market', permissions: { canFillTasks: true, canAssignTasks: false } },
   { id: 'usr_mashgiach3', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'david@company.com', name: 'David Chen (Mashgiach)', role: 'mashgiach', avatarColor: '#6366f1', venueId: 'venue_crown_market', permissions: { canFillTasks: true, canAssignTasks: false } },
+  { id: 'usr_worker_factory', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'factory.mashgiach@hartfordkashrut.org', name: 'Rabbi Shimon Klein (Factory Mashgiach)', role: 'mashgiach', avatarColor: '#6366f1', venueId: 'venue-hartford-manufacturing', permissions: { canFillTasks: true, canAssignTasks: false } },
+  { id: 'usr_owner_factory', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'qa@ne-kosherfoods.com', name: 'Factory QA Director', role: 'owner', avatarColor: '#059669', venueId: 'venue-hartford-manufacturing', permissions: { canFillTasks: false, canAssignTasks: false } },
 ];
 
 export default function App() {
@@ -62,8 +66,8 @@ export default function App() {
         } catch {}
       }
     }
-    // Default to Kenan (Admin) for initial experience
-    return DEFAULT_USERS[0];
+    // Start on Login / Welcome Home screen if no saved session
+    return null;
   });
 
   // Keep the render-path category colors in sync with this user's saved
@@ -130,6 +134,7 @@ export default function App() {
   const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
   const [isCreateEventModalOpen, setIsCreateEventModalOpen] = useState(false);
   const [events, setEvents] = useState<KosherEvent[]>([]);
+  const [isFactoryAuditOpen, setIsFactoryAuditOpen] = useState(false);
 
   // In-App Confirm Dialog State (replaces window.confirm)
   const [confirmModalConfig, setConfirmModalConfig] = useState<{
@@ -285,8 +290,6 @@ export default function App() {
         }
       } else if (msg.type === 'TASK_CREATED' && msg.payload) {
         const created = msg.payload as Task;
-        // The creator already appended the task from the POST response; the
-        // server broadcasts to ALL clients including the sender, so dedupe by id.
         setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
         if (msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
           showToast(`New assignment added: "${created.title}"`);
@@ -973,6 +976,7 @@ export default function App() {
         onOpenHistoryModal={() => setIsHistoryModalOpen(true)}
         onOpenEventsModal={() => setIsEventsModalOpen(true)}
         onOpenCreateEvent={() => setIsCreateEventModalOpen(true)}
+        onOpenFactoryAudit={() => setIsFactoryAuditOpen(true)}
         eventsCount={events.length}
         onOpenSupabaseModal={() => setIsSupabaseModalOpen(true)}
         onOpenTeamModal={() => setIsTeamModalOpen(true)}
@@ -1064,6 +1068,39 @@ export default function App() {
               />
             )}
 
+        {/* Factory & Airtable Ingredients Audit Quick Banner (Shown for Industrial Plant facilities) */}
+        {(currentVenue?.category?.toLowerCase().includes('industrial') || currentVenue?.category?.toLowerCase().includes('plant') || currentVenue?.category?.toLowerCase().includes('factory')) && (
+          <div className="mb-4 px-4 py-3 rounded-[20px] bg-gold-wash border border-gold/30 tactile-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-fade-in">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2 shrink-0">
+                <Factory className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-gold-ink">
+                    Industrial Facility: Approved Ingredients & Floor Audit Active
+                  </span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase bg-gold/15 text-gold-deep border border-gold/30">
+                    Airtable
+                  </span>
+                </div>
+                <p className="text-[11px] text-ink-soft mt-0.5">
+                  Mashgichim must cross-check factory floor bulk bags and drums against agency-approved raw materials and file inspection logs.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsFactoryAuditOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 active:scale-[.98] text-white text-xs font-bold tactile-2 transition cursor-pointer"
+              >
+                <span>Launch Ingredients Audit</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Compact Kosher Events Alert (Only shown when active events exist) */}
         {events.length > 0 && (
           <div className="mb-4 px-4 py-2.5 rounded-2xl bg-gold-wash border border-gold/40 tactile-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-fade-in">
@@ -1154,7 +1191,7 @@ export default function App() {
                   Venues Hub ({venues.length})
                 </button>
                 <span>•</span>
-                <button onClick={() => setIsTeamModalOpen(true)} className="hover:underline text-indigo-600 dark:text-indigo-400">
+                <button onClick={() => setIsTeamModalOpen(true)} className="hover:underline text-gold-deep">
                   Team Roster ({knownUsers.length})
                 </button>
                 <span>•</span>
@@ -1264,6 +1301,15 @@ export default function App() {
         currentVenue={currentVenue}
         allVenues={venues}
         availableMashgichim={knownUsers}
+      />
+
+      {/* Factory & Airtable Ingredients Audit Hub Modal */}
+      <FactoryAuditHubModal
+        isOpen={isFactoryAuditOpen}
+        onClose={() => setIsFactoryAuditOpen(false)}
+        currentVenue={currentVenue}
+        currentUser={currentUser}
+        isAdmin={currentUser?.role === 'admin' || currentUser?.role === 'coordinator'}
       />
 
       {/* Reusable In-App Confirmation Modal */}

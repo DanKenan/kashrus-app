@@ -1,0 +1,9 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow read/write for all application state in the kosher app
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
