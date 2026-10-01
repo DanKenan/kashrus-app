@@ -537,10 +537,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
           {/* CUSTOM STATUS VALUES BUILDER (When inputType === 'status_select') */}
           {inputType === 'status_select' && (
-            <div className="p-3.5 bg-sunken rounded-2xl border border-indigo-200 dark:border-indigo-900/50 space-y-3 animate-fade-in">
+            <div className="p-3.5 bg-sunken rounded-2xl border border-gold/30 space-y-3 animate-fade-in">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
-                  <ListFilter className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                  <ListFilter className="w-4 h-4 text-gold-deep" />
                   <span className="font-bold text-ink text-xs">
                     Custom Status Values
                   </span>
@@ -640,7 +640,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 <button
                   type="button"
                   onClick={handleAddStatusOption}
-                  className="px-3 py-1.5 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition flex items-center gap-1"
+                  className="px-3 py-1.5 text-xs font-semibold rounded-xl bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white transition tactile-1 flex items-center gap-1"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>Add Value</span>

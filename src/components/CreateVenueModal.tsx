@@ -270,13 +270,13 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                 className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition cursor-pointer ${
                   templateType === 'industrial'
                     ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100 ring-1 ring-emerald-500'
-                    : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
+                    : 'border-line hover:border-line-strong'
                 }`}
               >
                 <Factory className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
                 <div>
                   <div className="text-xs font-bold">Industrial & Factory Plant</div>
-                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  <div className="text-[11px] text-ink-faint">
                     4 starter tasks: Airtable approved ingredient verification, floor audit for unapproved items, CIP 212°F check, audit report.
                   </div>
                 </div>
