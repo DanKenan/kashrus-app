@@ -85,14 +85,14 @@ export default function App() {
     refreshCustomCategories(currentUser?.email);
   }, [currentUser?.email]);
 
+  // Persist the session only while authenticated. The public landing page
+  // intentionally starts with currentUser === null, so this must NOT clear
+  // the saved session — logout and "Use a different account" remove it
+  // explicitly in their own handlers.
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      if (currentUser) {
-        localStorage.setItem('current_user', JSON.stringify(currentUser));
-        realtimeSocket.sendPresence(currentUser.email, currentUser.name);
-      } else {
-        localStorage.removeItem('current_user');
-      }
+    if (typeof window !== 'undefined' && currentUser) {
+      localStorage.setItem('current_user', JSON.stringify(currentUser));
+      realtimeSocket.sendPresence(currentUser.email, currentUser.name);
     }
   }, [currentUser]);
 
