@@ -25,7 +25,8 @@ import {
   Calendar,
   SlidersHorizontal,
   Sparkles,
-  Trash2
+  Trash2,
+  Factory
 } from 'lucide-react';
 import { User, Venue } from '../types';
 import { KeepingKosherLogo } from './KeepingKosherLogo';
@@ -47,6 +48,7 @@ interface HeaderProps {
   onOpenHistoryModal: () => void;
   onOpenEventsModal: () => void;
   onOpenCreateEvent: () => void;
+  onOpenFactoryAudit?: () => void;
   eventsCount?: number;
   onOpenSupabaseModal: () => void;
   onOpenTeamModal: () => void;
@@ -77,6 +79,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenHistoryModal,
   onOpenEventsModal,
   onOpenCreateEvent,
+  onOpenFactoryAudit,
   eventsCount = 0,
   onOpenSupabaseModal,
   onOpenTeamModal,
@@ -164,6 +167,19 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Desktop Actions Bar (Clean, Un-crowded) */}
           <div className="hidden lg:flex items-center gap-2">
             
+            {/* Factory & Airtable Ingredients Audit Shortcut */}
+            {onOpenFactoryAudit && (
+              <button
+                id="header-factory-audit-btn"
+                onClick={onOpenFactoryAudit}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-indigo-900 dark:text-indigo-200 bg-indigo-50/90 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 border border-indigo-200/90 dark:border-indigo-800/60 transition cursor-pointer shadow-2xs shrink-0"
+                title="Factory Floor & Airtable Ingredients Audit"
+              >
+                <Factory className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                <span>Factory Ingredients Audit</span>
+              </button>
+            )}
+
             {/* Events Badge Shortcut (if events active) */}
             {eventsCount > 0 && (
               <button
@@ -232,6 +248,21 @@ export const Header: React.FC<HeaderProps> = ({
                       </span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-stone-100 dark:bg-slate-800 text-stone-500 font-bold">
                         {totalWorkersCount}
+                      </span>
+                    </button>
+                  )}
+
+                  {onOpenFactoryAudit && (
+                    <button
+                      onClick={() => { setToolsMenuOpen(false); onOpenFactoryAudit(); }}
+                      className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-stone-50 dark:hover:bg-slate-800 transition text-left cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Factory className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                        <span>Factory Ingredients Audit</span>
+                      </span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 font-bold uppercase">
+                        Airtable
                       </span>
                     </button>
                   )}
@@ -530,6 +561,22 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <Plus className="w-4 h-4 stroke-[2.5]" />
               <span>Create New Assignment</span>
+            </button>
+          )}
+
+          {/* Factory Ingredients Audit on Mobile */}
+          {onOpenFactoryAudit && (
+            <button
+              onClick={() => { setMobileMenuOpen(false); onOpenFactoryAudit(); }}
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold rounded-xl text-indigo-900 dark:text-indigo-200 bg-indigo-50/90 dark:bg-indigo-950/50 border border-indigo-200/90 dark:border-indigo-800/60 cursor-pointer shadow-2xs"
+            >
+              <span className="flex items-center gap-2">
+                <Factory className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                <span>Factory Ingredients Audit (Airtable)</span>
+              </span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-600 text-white">
+                Live
+              </span>
             </button>
           )}
 

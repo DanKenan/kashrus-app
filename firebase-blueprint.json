@@ -1,0 +1,90 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role and kosher agency affiliation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "agencyId": { "type": "string" },
+        "agencyName": { "type": "string" },
+        "agencyShortCode": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "coordinator", "mashgiach", "owner"] },
+        "avatarColor": { "type": "string" },
+        "venueId": { "type": "string" }
+      },
+      "required": ["id", "agencyId", "email", "name", "role"]
+    },
+    "Venue": {
+      "title": "Venue",
+      "description": "Supervised kosher kitchen, restaurant, catering or manufacturing facility",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "agencyId": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "address": { "type": "string" },
+        "certification": { "type": "string" },
+        "ownerEmail": { "type": "string", "format": "email" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "agencyId", "name", "category"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "Daily kosher inspection, bishul yisroel, or ingredient verification task",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "agencyId": { "type": "string" },
+        "venueId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "inputType": { "type": "string" },
+        "currentStatus": { "type": "string" },
+        "isCompleted": { "type": "boolean" },
+        "notes": { "type": "string" }
+      },
+      "required": ["id", "agencyId", "venueId", "title"]
+    },
+    "Ingredient": {
+      "title": "Ingredient",
+      "description": "Factory or restaurant approved raw material or ingredient",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "agencyId": { "type": "string" },
+        "venueId": { "type": "string" },
+        "name": { "type": "string" },
+        "brandOrSupplier": { "type": "string" },
+        "kashrutAgency": { "type": "string" },
+        "kosherStatus": { "type": "string" },
+        "approvalStatus": { "type": "string" },
+        "verificationStatus": { "type": "string" }
+      },
+      "required": ["id", "venueId", "name"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/venues/{venueId}": {
+      "schema": "Venue",
+      "description": "Supervised venues and factories"
+    },
+    "/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Kosher inspection tasks"
+    },
+    "/ingredients/{ingredientId}": {
+      "schema": "Ingredient",
+      "description": "Approved ingredients and factory verification"
+    }
+  }
+}
