@@ -16,6 +16,7 @@ import {
   Factory
 } from 'lucide-react';
 import { KeepingKosherLogo } from './KeepingKosherLogo';
+import { LandingBackButton } from './LandingPage';
 import { User as UserType } from '../types';
 import { AgencySignupForm } from './AgencySignupForm';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -24,14 +25,20 @@ interface LoginPageProps {
   onLoginSuccess: (user: UserType) => void;
   darkMode: boolean;
   onToggleDarkMode: () => void;
+  /** Which tab to show first when arriving from the landing page. */
+  initialMode?: 'login' | 'signup';
+  /** Return to the public home page. */
+  onBack?: () => void;
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({
   onLoginSuccess,
   darkMode,
   onToggleDarkMode,
+  initialMode,
+  onBack,
 }) => {
-  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>(initialMode || 'login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -85,7 +92,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
       {/* Top Bar with Brand & Theme Toggle */}
       <header className="relative z-10 w-full px-4 sm:px-6 py-4 sm:py-5 flex items-center justify-between max-w-7xl mx-auto">
-        <KeepingKosherLogo size="sm" showSubtitle={true} />
+        <div className="flex items-center gap-3">
+          {onBack && <LandingBackButton onBack={onBack} />}
+          <KeepingKosherLogo size="sm" showSubtitle={true} />
+        </div>
         
         <div className="flex items-center gap-2 sm:gap-3">
           <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface/80 border border-line text-[11px] font-medium text-ink-soft backdrop-blur-sm">

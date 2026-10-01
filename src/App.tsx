@@ -9,6 +9,7 @@ import { TaskModal } from './components/TaskModal';
 import { HistoryLogModal } from './components/HistoryLogModal';
 import { SupabaseModal } from './components/SupabaseModal';
 import { LoginPage } from './components/LoginPage';
+import { LandingPage } from './components/LandingPage';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { TeamModal } from './components/TeamModal';
 import { CreateVenueModal } from './components/CreateVenueModal';
@@ -56,8 +57,13 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Current User state (supports sign out to null)
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+  // Current User state (supports sign out to null). The app always opens on
+  // the public landing page first — a saved session is offered as
+  // "Continue as ..." rather than auto-entering the account.
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+
+  // Saved session from a previous visit (offered on the landing page).
+  const [savedSession, setSavedSession] = useState<User | null>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('current_user');
       if (saved) {
@@ -66,9 +72,12 @@ export default function App() {
         } catch {}
       }
     }
-    // Start on Login / Welcome Home screen if no saved session
     return null;
   });
+
+  // Which public screen is showing: the landing home page or the auth form.
+  const [authView, setAuthView] = useState<'landing' | 'auth'>('landing');
+  const [authInitialMode, setAuthInitialMode] = useState<'login' | 'signup'>('login');
 
   // Keep the render-path category colors in sync with this user's saved
   // custom categories ("Other" entries) — on login, logout, and switch.
@@ -920,11 +929,65 @@ export default function App() {
       localStorage.removeItem('current_user');
       localStorage.removeItem('selected_venue_id');
     }
+    setSavedSession(null);
+    setAuthView('landing');
     showToast('Signed out successfully.');
   };
 
+  const handleLoginSuccess = (user: User) => {
+    setCurrentUser(user);
+    setSavedSession(user);
+    setCurrentVenueId(null);
+    // Mashgichim land straight on their own assignments
+    if (user && (user.role === 'mashgiach' || user.role === 'worker')) {
+      setActiveTabFilter('mine');
+    } else {
+      setActiveTabFilter('all');
+    }
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('current_user', JSON.stringify(user));
+      localStorage.removeItem('selected_venue_id');
+    }
+    showToast(`Welcome to ${user.agencyName || 'KeepingKosher'}, ${user.name}!`);
+  };
+
+  // Public screens: the landing home page opens first; auth form on demand.
   // Require authentication to view tasks and shift operations
   if (!currentUser) {
+    if (authView === 'landing') {
+      return (
+        <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
+          {toastMessage && (
+            <div className="fixed bottom-5 right-5 z-50 bg-ink text-paper text-xs font-semibold px-4 py-3 rounded-2xl tactile-4 border border-line-strong flex items-center gap-2 animate-slide-up">
+              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span>{toastMessage}</span>
+            </div>
+          )}
+          <LandingPage
+            savedUser={savedSession}
+            onContinueAs={() => {
+              if (savedSession) handleLoginSuccess(savedSession);
+            }}
+            onUseDifferentAccount={() => {
+              setSavedSession(null);
+              if (typeof window !== 'undefined') localStorage.removeItem('current_user');
+              setAuthInitialMode('login');
+              setAuthView('auth');
+            }}
+            onSignIn={() => {
+              setAuthInitialMode('login');
+              setAuthView('auth');
+            }}
+            onRegister={() => {
+              setAuthInitialMode('signup');
+              setAuthView('auth');
+            }}
+            darkMode={darkMode}
+            onToggleDarkMode={() => setDarkMode(!darkMode)}
+          />
+        </div>
+      );
+    }
     return (
       <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
         {toastMessage && (
@@ -934,21 +997,9 @@ export default function App() {
           </div>
         )}
         <LoginPage
-          onLoginSuccess={(user) => {
-            setCurrentUser(user);
-            setCurrentVenueId(null);
-            // Mashgichim land straight on their own assignments
-            if (user && (user.role === 'mashgiach' || user.role === 'worker')) {
-              setActiveTabFilter('mine');
-            } else {
-              setActiveTabFilter('all');
-            }
-            if (typeof window !== 'undefined') {
-              localStorage.setItem('current_user', JSON.stringify(user));
-              localStorage.removeItem('selected_venue_id');
-            }
-            showToast(`Welcome to ${user.agencyName || 'KeepingKosher'}, ${user.name}!`);
-          }}
+          onLoginSuccess={handleLoginSuccess}
+          initialMode={authInitialMode}
+          onBack={() => setAuthView('landing')}
           darkMode={darkMode}
           onToggleDarkMode={() => setDarkMode(!darkMode)}
         />
