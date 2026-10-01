@@ -172,10 +172,10 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="header-factory-audit-btn"
                 onClick={onOpenFactoryAudit}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-indigo-900 dark:text-indigo-200 bg-indigo-50/90 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 border border-indigo-200/90 dark:border-indigo-800/60 transition cursor-pointer shadow-2xs shrink-0"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-gold-ink bg-gold-wash hover:bg-gold/15 border border-gold/40 transition cursor-pointer tactile-1 shrink-0"
                 title="Factory Floor & Airtable Ingredients Audit"
               >
-                <Factory className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                <Factory className="w-3.5 h-3.5 text-gold-deep" />
                 <span>Factory Ingredients Audit</span>
               </button>
             )}
@@ -243,7 +243,7 @@ export const Header: React.FC<HeaderProps> = ({
                       className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer"
                     >
                       <span className="flex items-center gap-2">
-                        <Users className="w-4 h-4 text-indigo-500" />
+                        <Users className="w-4 h-4 text-gold-deep" />
                         <span>Mashgichim & Team</span>
                       </span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-sunken text-ink-faint font-bold">
@@ -255,13 +255,13 @@ export const Header: React.FC<HeaderProps> = ({
                   {onOpenFactoryAudit && (
                     <button
                       onClick={() => { setToolsMenuOpen(false); onOpenFactoryAudit(); }}
-                      className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-stone-50 dark:hover:bg-slate-800 transition text-left cursor-pointer"
+                      className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer"
                     >
                       <span className="flex items-center gap-2">
-                        <Factory className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                        <Factory className="w-4 h-4 text-gold-deep" />
                         <span>Factory Ingredients Audit</span>
                       </span>
-                      <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 font-bold uppercase">
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-gold/15 text-gold-deep border border-gold/30 font-bold uppercase">
                         Airtable
                       </span>
                     </button>
@@ -380,8 +380,8 @@ export const Header: React.FC<HeaderProps> = ({
                           currentUser.role === 'admin'
                             ? 'bg-gold-wash text-gold-ink'
                             : currentUser.role === 'coordinator'
-                            ? 'bg-sky-100 dark:bg-sky-950/80 text-sky-800 dark:text-sky-300'
-                            : 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300'
+                            ? 'bg-sunken text-ink-soft border border-line'
+                            : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
                         }`}>
                           {getRoleLabel(currentUser.role)}
                         </span>
@@ -568,13 +568,13 @@ export const Header: React.FC<HeaderProps> = ({
           {onOpenFactoryAudit && (
             <button
               onClick={() => { setMobileMenuOpen(false); onOpenFactoryAudit(); }}
-              className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold rounded-xl text-indigo-900 dark:text-indigo-200 bg-indigo-50/90 dark:bg-indigo-950/50 border border-indigo-200/90 dark:border-indigo-800/60 cursor-pointer shadow-2xs"
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold rounded-xl text-gold-ink bg-gold-wash border border-gold/40 cursor-pointer tactile-1"
             >
               <span className="flex items-center gap-2">
-                <Factory className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                <Factory className="w-4 h-4 text-gold-deep" />
                 <span>Factory Ingredients Audit (Airtable)</span>
               </span>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-600 text-white">
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-gradient-to-b from-gold to-gold-deep text-white">
                 Live
               </span>
             </button>
@@ -602,7 +602,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => { setMobileMenuOpen(false); onOpenTeamModal(); }}
                 className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-ink-soft bg-sunken cursor-pointer"
               >
-                <Users className="w-4 h-4 text-indigo-500" />
+                <Users className="w-4 h-4 text-gold-deep" />
                 <span>Mashgichim ({totalWorkersCount})</span>
               </button>
             )}

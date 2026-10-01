@@ -4,7 +4,7 @@ import type { Task, User } from '../types';
 /**
  * Deterministic category color system.
  *
- * The picker offers Opening Procedures / Closing Procedures plus the
+ * The picker offers Opening Procedures / Locking Procedures plus the
  * user's own custom categories (name + hand-picked color, saved per
  * user). Anything else a category is ever called still hashes to a
  * stable OKLCH hue, so legacy or future categories automatically get a
@@ -59,13 +59,13 @@ export function categoryVarsForHue(hue: number): CSSProperties {
 
 /* ------------------------------------------------------------------
    Custom categories — the "Other" box.
-   The admin picks Opening Procedures / Closing Procedures, or taps
+   The admin picks Opening Procedures / Locking Procedures, or taps
    Other, types a name, and picks a color from a curated palette. The
    choice is saved per user and offered again next time; custom entries
    can be deleted from the picker.
 ------------------------------------------------------------------ */
 
-export const PRESET_CATEGORIES = ['Opening Procedures', 'Closing Procedures'] as const;
+export const PRESET_CATEGORIES = ['Opening Procedures', 'Locking Procedures'] as const;
 
 /** Curated palette for hand-picked category colors — systematic, warm-safe. */
 export const CATEGORY_PALETTE = [

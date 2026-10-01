@@ -203,27 +203,27 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/65 backdrop-blur-xs overflow-y-auto animate-fade-in">
-      <div className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-5xl shadow-2xl border border-slate-200 dark:border-slate-800 my-4 sm:my-8 overflow-hidden flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#1a120a]/60 backdrop-blur-sm overflow-y-auto animate-fade-in">
+      <div className="bg-surface border border-line tactile-4 rounded-[28px] w-full max-w-5xl my-4 sm:my-8 overflow-hidden flex flex-col max-h-[92vh]">
         
         {/* Top Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between px-6 py-4.5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-800/40 gap-3 shrink-0">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between px-6 py-4.5 border-b border-line/70 bg-sunken/50 gap-3 shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-600/20 shrink-0">
+            <div className="w-11 h-11 rounded-2xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2 shrink-0">
               <Factory className="w-6 h-6" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                <h2 className="text-base font-bold text-ink">
                   Factory Kashrut & Airtable Ingredients Audit
                 </h2>
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-indigo-100 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300">
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-gold-wash text-gold-ink border border-gold/30">
                   Industrial Plant
                 </span>
               </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5 mt-0.5">
-                <Building2 className="w-3.5 h-3.5 text-slate-400" />
-                <span className="font-semibold text-slate-700 dark:text-slate-200">{currentVenue.name}</span>
+              <p className="text-xs text-ink-faint flex items-center gap-1.5 mt-0.5">
+                <Building2 className="w-3.5 h-3.5 text-ink-faint" />
+                <span className="font-semibold text-ink-soft">{currentVenue.name}</span>
                 <span>•</span>
                 <span>Assigned Mashgiach: {currentUser?.name}</span>
               </p>
@@ -234,17 +234,17 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
             {/* Airtable Sync Button */}
             <button
               onClick={() => setIsAirtableModalOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-orange-700 dark:text-orange-300 bg-orange-50 hover:bg-orange-100 dark:bg-orange-950/50 dark:hover:bg-orange-900/50 border border-orange-200 dark:border-orange-800 transition cursor-pointer shadow-2xs"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-amber-700 dark:text-amber-300 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/50 dark:hover:bg-amber-900/50 border border-amber-200 dark:border-amber-800 transition cursor-pointer tactile-1"
               title="Configure or sync Airtable database"
             >
-              <Database className="w-3.5 h-3.5 text-orange-600" />
+              <Database className="w-3.5 h-3.5 text-amber-600" />
               <span>Airtable Database</span>
             </button>
 
             {/* Close Button */}
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+              className="p-1.5 rounded-lg text-ink-faint hover:text-ink hover:bg-sunken transition cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -257,7 +257,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
             bannerToast.type === 'error'
               ? 'bg-rose-500 text-white'
               : bannerToast.type === 'info'
-              ? 'bg-blue-600 text-white'
+              ? 'bg-gold-deep text-white'
               : 'bg-emerald-600 text-white'
           }`}>
             <span className="flex items-center gap-2">
@@ -271,14 +271,14 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
         )}
 
         {/* Plant Inspection Dashboard Summary Bar */}
-        <div className="px-6 py-3.5 bg-slate-100/60 dark:bg-slate-800/25 border-b border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0">
+        <div className="px-6 py-3.5 bg-sunken/50 border-b border-line/70 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0">
           <div className="flex items-center gap-4">
             <div>
-              <span className="text-slate-500 dark:text-slate-400 font-medium">Approved Materials: </span>
-              <span className="font-bold text-slate-800 dark:text-slate-100">{ingredients.length} items</span>
+              <span className="text-ink-faint font-medium">Approved Materials: </span>
+              <span className="font-bold text-ink">{ingredients.length} items</span>
             </div>
             <div>
-              <span className="text-slate-500 dark:text-slate-400 font-medium">Floor Verified: </span>
+              <span className="text-ink-faint font-medium">Floor Verified: </span>
               <span className="font-bold text-emerald-600 dark:text-emerald-400">
                 {verifiedPresentCount} ({verifiedPercentage}%)
               </span>
@@ -294,7 +294,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={() => setIsAddDiscrepancyOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/50 border border-rose-200 dark:border-rose-800/80 transition cursor-pointer shadow-2xs"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/50 border border-rose-200 dark:border-rose-800/80 transition cursor-pointer tactile-2"
             >
               <ShieldAlert className="w-3.5 h-3.5 text-rose-600" />
               <span>Flag Unapproved Raw Material</span>
@@ -302,7 +302,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
 
             <button
               onClick={() => setIsSubmitReportOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-md shadow-indigo-600/20 transition cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold text-white bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 active:scale-[.98] tactile-2 transition cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5" />
               <span>Submit Inspection Report</span>
@@ -311,53 +311,63 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex items-center px-6 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shrink-0">
-          <button
-            onClick={() => setActiveTab('ingredients')}
-            className={`py-3 px-4 text-xs font-bold border-b-2 flex items-center gap-2 transition cursor-pointer ${
-              activeTab === 'ingredients'
-                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
-                : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
-            }`}
-          >
-            <ShieldCheck className="w-4 h-4" />
-            <span>Approved Ingredients Matrix</span>
-            <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
-              {ingredients.length}
-            </span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('discrepancies')}
-            className={`py-3 px-4 text-xs font-bold border-b-2 flex items-center gap-2 transition cursor-pointer ${
-              activeTab === 'discrepancies'
-                ? 'border-rose-600 text-rose-600 dark:text-rose-400'
-                : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
-            }`}
-          >
-            <AlertTriangle className="w-4 h-4" />
-            <span>Unapproved Materials Log</span>
-            {discrepancies.length > 0 && (
-              <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 font-black">
-                {discrepancies.length}
+        <div className="px-6 py-2.5 border-b border-line/70 bg-surface shrink-0">
+          <div className="inline-flex items-center gap-1 bg-sunken rounded-full p-1 max-w-full overflow-x-auto">
+            <button
+              onClick={() => setActiveTab('ingredients')}
+              className={`py-1.5 px-3.5 text-xs font-bold rounded-full flex items-center gap-2 transition cursor-pointer whitespace-nowrap ${
+                activeTab === 'ingredients'
+                  ? 'bg-gradient-to-b from-gold to-gold-deep text-white tactile-2'
+                  : 'text-ink-faint hover:text-ink'
+              }`}
+            >
+              <ShieldCheck className="w-4 h-4" />
+              <span>Approved Ingredients Matrix</span>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
+                activeTab === 'ingredients'
+                  ? 'bg-white/25 text-white'
+                  : 'bg-surface text-ink-faint border border-line/70'
+              }`}>
+                {ingredients.length}
               </span>
-            )}
-          </button>
+            </button>
 
-          <button
-            onClick={() => setActiveTab('reports')}
-            className={`py-3 px-4 text-xs font-bold border-b-2 flex items-center gap-2 transition cursor-pointer ${
-              activeTab === 'reports'
-                ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-                : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
-            }`}
-          >
-            <FileText className="w-4 h-4" />
-            <span>Official Factory Reports</span>
-            <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
-              {reports.length}
-            </span>
-          </button>
+            <button
+              onClick={() => setActiveTab('discrepancies')}
+              className={`py-1.5 px-3.5 text-xs font-bold rounded-full flex items-center gap-2 transition cursor-pointer whitespace-nowrap ${
+                activeTab === 'discrepancies'
+                  ? 'bg-gradient-to-b from-gold to-gold-deep text-white tactile-2'
+                  : 'text-ink-faint hover:text-ink'
+              }`}
+            >
+              <AlertTriangle className="w-4 h-4" />
+              <span>Unapproved Materials Log</span>
+              {discrepancies.length > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 font-black">
+                  {discrepancies.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setActiveTab('reports')}
+              className={`py-1.5 px-3.5 text-xs font-bold rounded-full flex items-center gap-2 transition cursor-pointer whitespace-nowrap ${
+                activeTab === 'reports'
+                  ? 'bg-gradient-to-b from-gold to-gold-deep text-white tactile-2'
+                  : 'text-ink-faint hover:text-ink'
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              <span>Official Factory Reports</span>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
+                activeTab === 'reports'
+                  ? 'bg-white/25 text-white'
+                  : 'bg-surface text-ink-faint border border-line/70'
+              }`}>
+                {reports.length}
+              </span>
+            </button>
+          </div>
         </div>
 
         {/* Tab 1: Approved Ingredients Matrix */}
@@ -366,13 +376,13 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
             {/* Search and Filters Bar */}
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4 shrink-0">
               <div className="relative flex-1 min-w-[220px]">
-                <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400" />
+                <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
                 <input
                   type="text"
                   placeholder="Search raw material name, supplier, lot #, or kosher agency..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder:text-ink-faint focus:border-gold focus:ring-2 focus:ring-gold/20 outline-none"
                 />
               </div>
 
@@ -380,7 +390,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                 <select
                   value={kosherStatusFilter}
                   onChange={(e) => setKosherStatusFilter(e.target.value)}
-                  className="px-3 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold cursor-pointer"
+                  className="px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink-soft font-semibold cursor-pointer focus:border-gold outline-none"
                 >
                   <option value="all">All Kosher Types</option>
                   <option value="parve">Parve</option>
@@ -393,7 +403,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                 <select
                   value={verificationFilter}
                   onChange={(e) => setVerificationFilter(e.target.value as any)}
-                  className="px-3 py-2 text-xs rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold cursor-pointer"
+                  className="px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink-soft font-semibold cursor-pointer focus:border-gold outline-none"
                 >
                   <option value="all">All Verification States</option>
                   <option value="verified_present">✓ Verified Present</option>
@@ -404,20 +414,20 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
             </div>
 
             {/* Ingredients Table */}
-            <div className="flex-1 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl">
+            <div className="flex-1 overflow-y-auto border border-line rounded-[20px] bg-surface tactile-1">
               {filteredIngredients.length === 0 ? (
-                <div className="p-12 text-center text-slate-400">
-                  <Database className="w-10 h-10 mx-auto mb-2 text-slate-300 dark:text-slate-600" />
-                  <p className="text-sm font-bold text-slate-600 dark:text-slate-300">
+                <div className="p-12 text-center text-ink-faint">
+                  <Database className="w-10 h-10 mx-auto mb-2 text-ink-faint" />
+                  <p className="text-sm font-bold text-ink-soft">
                     No matching approved raw materials found.
                   </p>
-                  <p className="text-xs text-slate-400 mt-1">
+                  <p className="text-xs text-ink-faint mt-1">
                     Try adjusting search terms or click "Airtable Database" to pull the latest ingredients.
                   </p>
                 </div>
               ) : (
                 <table className="w-full text-left text-xs border-collapse">
-                  <thead className="bg-slate-50 dark:bg-slate-800/70 text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-10 font-bold uppercase tracking-wider text-[10px]">
+                  <thead className="bg-sunken text-ink-soft border-b border-line sticky top-0 z-10 font-bold uppercase tracking-wider text-[10px]">
                     <tr>
                       <th className="py-2.5 px-3">Raw Material / Ingredient</th>
                       <th className="py-2.5 px-3">Manufacturer / Supplier</th>
@@ -428,7 +438,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                       <th className="py-2.5 px-3 text-right">Mashgiach Action</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  <tbody className="divide-y divide-line/70">
                     {filteredIngredients.map((item) => {
                       const isVerified = item.verificationStatus === 'verified_present';
                       const isFlagged = item.verificationStatus === 'flagged_discrepancy';
@@ -436,27 +446,27 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                       return (
                         <tr 
                           key={item.id} 
-                          className={`hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition ${
+                          className={`hover:bg-sunken/60 transition ${
                             isVerified ? 'bg-emerald-50/20 dark:bg-emerald-950/10' : ''
                           }`}
                         >
                           <td className="py-3 px-3">
-                            <div className="font-bold text-slate-900 dark:text-white">
+                            <div className="font-bold text-ink">
                               {item.name}
                             </div>
                             {item.notes && (
-                              <div className="text-[11px] text-slate-400 mt-0.5 line-clamp-1 italic">
+                              <div className="text-[11px] text-ink-faint mt-0.5 line-clamp-1 italic">
                                 {item.notes}
                               </div>
                             )}
                           </td>
 
-                          <td className="py-3 px-3 text-slate-700 dark:text-slate-300">
+                          <td className="py-3 px-3 text-ink-soft">
                             {item.brandOrSupplier || '—'}
                           </td>
 
                           <td className="py-3 px-3">
-                            <span className="font-semibold text-slate-800 dark:text-slate-200">
+                            <span className="font-semibold text-ink-soft">
                               {item.kashrutAgency || 'HKC Approved'}
                             </span>
                           </td>
@@ -475,7 +485,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                             </span>
                           </td>
 
-                          <td className="py-3 px-3 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                          <td className="py-3 px-3 font-mono text-[11px] text-ink-faint">
                             {item.lotOrBatch || '—'}
                           </td>
 
@@ -491,13 +501,13 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                                 <span>Discrepancy</span>
                               </div>
                             ) : (
-                              <div className="flex items-center gap-1.5 text-slate-400 font-medium">
+                              <div className="flex items-center gap-1.5 text-ink-faint font-medium">
                                 <Clock className="w-3.5 h-3.5 shrink-0" />
                                 <span>Pending Check</span>
                               </div>
                             )}
                             {item.verifiedByName && (
-                              <div className="text-[10px] text-slate-400">
+                              <div className="text-[10px] text-ink-faint">
                                 by {item.verifiedByName}
                               </div>
                             )}
@@ -508,7 +518,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                               {isVerified ? (
                                 <button
                                   onClick={() => handleVerifyIngredient(item.id, 'unverified')}
-                                  className="px-2 py-1 text-[11px] rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 transition cursor-pointer"
+                                  className="px-2 py-1 text-[11px] rounded-lg bg-sunken border border-line text-ink-soft hover:border-line-strong transition cursor-pointer"
                                   title="Reset check state"
                                 >
                                   Undo
@@ -517,7 +527,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                                 <>
                                   <button
                                     onClick={() => handleVerifyIngredient(item.id, 'verified_present')}
-                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition cursor-pointer shadow-2xs"
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition cursor-pointer tactile-2"
                                     title="Mark present & verified in factory"
                                   >
                                     <Check className="w-3 h-3" />
@@ -526,7 +536,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
 
                                   <button
                                     onClick={() => handleVerifyIngredient(item.id, 'flagged_discrepancy')}
-                                    className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition cursor-pointer"
+                                    className="p-1 rounded-lg text-ink-faint hover:text-rose-600 hover:bg-rose-500/10 transition cursor-pointer"
                                     title="Flag discrepancy"
                                   >
                                     <AlertTriangle className="w-3.5 h-3.5" />
@@ -550,17 +560,17 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
           <div className="flex-1 p-6 overflow-y-auto space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                <h3 className="text-sm font-bold text-ink">
                   Physical Plant Unauthorized Materials Log
                 </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
+                <p className="text-xs text-ink-faint">
                   Ingredients, processing aids, or flavorings found in the factory that are NOT on the agency-approved list.
                 </p>
               </div>
 
               <button
                 onClick={() => setIsAddDiscrepancyOpen(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 transition cursor-pointer shadow-2xs"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 hover:brightness-105 active:scale-[.98] transition cursor-pointer tactile-2"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Log Unapproved Material</span>
@@ -568,12 +578,12 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
             </div>
 
             {discrepancies.length === 0 ? (
-              <div className="p-12 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-2xl bg-slate-50/50 dark:bg-slate-800/20">
+              <div className="p-12 text-center border border-dashed border-line rounded-[20px] bg-sunken/50">
                 <ShieldCheck className="w-12 h-12 mx-auto mb-2 text-emerald-500" />
-                <h4 className="text-sm font-bold text-slate-700 dark:text-slate-200">
+                <h4 className="text-sm font-bold text-ink-soft">
                   Clean Slate: No Unauthorized Materials Reported
                 </h4>
-                <p className="text-xs text-slate-400 max-w-md mx-auto mt-1">
+                <p className="text-xs text-ink-faint max-w-md mx-auto mt-1">
                   Mashgiach inspections have not found unapproved chemicals, raw materials, or non-kosher products on this facility's floor.
                 </p>
               </div>
@@ -582,39 +592,39 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                 {discrepancies.map((disc) => (
                   <div 
                     key={disc.id} 
-                    className="p-4 rounded-xl border border-rose-200 dark:border-rose-900/50 bg-rose-50/40 dark:bg-rose-950/20 space-y-2"
+                    className="p-4 rounded-[20px] border border-rose-200 dark:border-rose-900/50 bg-rose-50/40 dark:bg-rose-950/20 space-y-2 tactile-1"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-bold px-2 py-0.5 rounded-full uppercase bg-rose-100 text-rose-800 dark:bg-rose-900/80 dark:text-rose-200">
                           {disc.severity} Violation
                         </span>
-                        <h4 className="text-sm font-bold text-slate-900 dark:text-white">
+                        <h4 className="text-sm font-bold text-ink">
                           {disc.name}
                         </h4>
                       </div>
-                      <span className="text-[11px] text-slate-400 font-mono">
+                      <span className="text-[11px] text-ink-faint font-mono">
                         {new Date(disc.reportedAt).toLocaleDateString()}
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-slate-600 dark:text-slate-300">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-ink-soft">
                       <div>
-                        <span className="text-slate-400">Supplier:</span> {disc.brandOrSupplier || 'Unknown'}
+                        <span className="text-ink-faint">Supplier:</span> {disc.brandOrSupplier || 'Unknown'}
                       </div>
                       <div>
-                        <span className="text-slate-400">Location:</span> {disc.locationInFactory}
+                        <span className="text-ink-faint">Location:</span> {disc.locationInFactory}
                       </div>
                       <div>
-                        <span className="text-slate-400">Action:</span> {disc.actionTaken}
+                        <span className="text-ink-faint">Action:</span> {disc.actionTaken}
                       </div>
                     </div>
 
-                    <p className="text-xs text-slate-700 dark:text-slate-200 bg-white/70 dark:bg-slate-900/60 p-2.5 rounded-lg border border-rose-100 dark:border-rose-900/30">
+                    <p className="text-xs text-ink-soft bg-surface/80 p-2.5 rounded-lg border border-rose-100 dark:border-rose-900/30">
                       {disc.notes}
                     </p>
 
-                    <div className="text-[10px] text-slate-400 flex items-center justify-between pt-1">
+                    <div className="text-[10px] text-ink-faint flex items-center justify-between pt-1">
                       <span>Reported by Mashgiach: {disc.reportedByName}</span>
                     </div>
                   </div>
@@ -629,17 +639,17 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
           <div className="flex-1 p-6 overflow-y-auto space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                <h3 className="text-sm font-bold text-ink">
                   Factory Audit Reports Archive
                 </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
+                <p className="text-xs text-ink-faint">
                   Transmitted inspection summaries, signed Mashgiach logs, and Rabbinic conclusions.
                 </p>
               </div>
 
               <button
                 onClick={() => setIsSubmitReportOpen(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition cursor-pointer shadow-2xs"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 active:scale-[.98] tactile-2 transition cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>File New Inspection Report</span>
@@ -647,12 +657,12 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
             </div>
 
             {reports.length === 0 ? (
-              <div className="p-12 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-2xl bg-slate-50/50 dark:bg-slate-800/20">
-                <FileText className="w-12 h-12 mx-auto mb-2 text-slate-300 dark:text-slate-600" />
-                <h4 className="text-sm font-bold text-slate-700 dark:text-slate-200">
+              <div className="p-12 text-center border border-dashed border-line rounded-[20px] bg-sunken/50">
+                <FileText className="w-12 h-12 mx-auto mb-2 text-ink-faint" />
+                <h4 className="text-sm font-bold text-ink-soft">
                   No Audit Reports Filed Yet
                 </h4>
-                <p className="text-xs text-slate-400 max-w-md mx-auto mt-1">
+                <p className="text-xs text-ink-faint max-w-md mx-auto mt-1">
                   Once the Mashgiach verifies floor ingredients, click "Submit Inspection Report" to archive official findings.
                 </p>
               </div>
@@ -661,7 +671,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                 {reports.map((rpt) => (
                   <div
                     key={rpt.id}
-                    className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-300 dark:hover:border-slate-700 transition space-y-2.5 shadow-2xs"
+                    className="p-4 rounded-[20px] border border-line bg-surface hover:border-line-strong transition space-y-2.5 tactile-2"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
@@ -674,43 +684,43 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                         }`}>
                           {rpt.status.replace(/_/g, ' ')}
                         </span>
-                        <h4 className="text-sm font-bold text-slate-900 dark:text-white">
+                        <h4 className="text-sm font-bold text-ink">
                           Audit on {rpt.auditDate} ({rpt.startTime} – {rpt.endTime})
                         </h4>
                       </div>
 
-                      <div className="text-xs text-slate-400 font-mono">
+                      <div className="text-xs text-ink-faint font-mono">
                         Report #{rpt.id.slice(-6)}
                       </div>
                     </div>
 
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-                      <div className="p-2 rounded-lg bg-slate-50 dark:bg-slate-800">
-                        <span className="text-slate-400 block text-[10px]">Approved Checked:</span>
-                        <span className="font-bold text-slate-800 dark:text-slate-200">{rpt.totalApprovedChecked} items</span>
+                      <div className="p-2 rounded-xl bg-sunken">
+                        <span className="text-ink-faint block text-[10px]">Approved Checked:</span>
+                        <span className="font-bold text-ink">{rpt.totalApprovedChecked} items</span>
                       </div>
 
-                      <div className="p-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/40">
+                      <div className="p-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/40">
                         <span className="text-emerald-600 block text-[10px]">Verified Present:</span>
                         <span className="font-bold text-emerald-800 dark:text-emerald-200">{rpt.totalPresent} items</span>
                       </div>
 
-                      <div className="p-2 rounded-lg bg-rose-50 dark:bg-rose-950/40">
+                      <div className="p-2 rounded-xl bg-rose-50 dark:bg-rose-950/40">
                         <span className="text-rose-600 block text-[10px]">Unapproved Found:</span>
                         <span className="font-bold text-rose-800 dark:text-rose-200">{rpt.totalDiscrepancies}</span>
                       </div>
 
-                      <div className="p-2 rounded-lg bg-slate-50 dark:bg-slate-800">
-                        <span className="text-slate-400 block text-[10px]">Plant QA Escort:</span>
-                        <span className="font-bold text-slate-800 dark:text-slate-200 truncate block">{rpt.factoryRepresentative || 'QA Manager'}</span>
+                      <div className="p-2 rounded-xl bg-sunken">
+                        <span className="text-ink-faint block text-[10px]">Plant QA Escort:</span>
+                        <span className="font-bold text-ink truncate block">{rpt.factoryRepresentative || 'QA Manager'}</span>
                       </div>
                     </div>
 
-                    <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed italic border-l-2 border-indigo-500 pl-3 py-0.5">
+                    <p className="text-xs text-ink-soft leading-relaxed italic border-l-2 border-gold pl-3 py-0.5">
                       "{rpt.summaryNotes}"
                     </p>
 
-                    <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-100 dark:border-slate-800">
+                    <div className="flex items-center justify-between text-[11px] text-ink-faint pt-1 border-t border-line/70">
                       <span>Mashgiach Signoff: {rpt.mashgiachName}</span>
                       {rpt.signatureTimestamp && (
                         <span>Signed {new Date(rpt.signatureTimestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
@@ -724,11 +734,11 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
         )}
 
         {/* Modal Footer */}
-        <div className="px-6 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 flex items-center justify-between text-xs text-slate-500 shrink-0">
+        <div className="px-6 py-3 border-t border-line/70 bg-sunken/50 flex items-center justify-between text-xs text-ink-faint shrink-0">
           <span>Hartford Kashrut Commission (HKC) • Industrial Manufacturing Compliance Engine</span>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-xl font-bold bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 transition cursor-pointer"
+            className="px-4 py-1.5 rounded-xl font-bold bg-sunken border border-line text-ink-soft hover:border-line-strong transition cursor-pointer"
           >
             Done
           </button>
