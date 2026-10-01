@@ -6,12 +6,9 @@ import {
   ShieldCheck, 
   MapPin, 
   Users, 
-  CheckCircle2, 
   ArrowRight, 
   Search, 
   Trash2, 
-  Clock, 
-  ExternalLink 
 } from 'lucide-react';
 import { Venue } from '../types';
 import { ConfirmModal } from './ConfirmModal';
@@ -65,24 +62,24 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
   return (
     <div
       id="venues-directory-modal-overlay"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1a120a]/60 backdrop-blur-xs animate-fade-in"
     >
-      <div className="bg-white dark:bg-slate-900 w-full max-w-4xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[85vh]">
+      <div className="bg-surface w-full max-w-4xl rounded-2xl tactile-4 animate-slide-up border border-line overflow-hidden flex flex-col max-h-[85vh]">
         
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40">
+        <div className="flex items-center justify-between px-6 py-4.5 border-b border-line bg-sunken">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-500/20">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2">
               <Building2 className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <h2 className="text-base font-bold text-ink flex items-center gap-2">
                 <span>Kosher Venues & Restaurants Platform Hub</span>
-                <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300">
+                <span className="tnum text-xs font-semibold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40">
                   {venues.length} Facilities
                 </span>
               </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
+              <p className="text-xs text-ink-soft">
                 Switch between venues or establish a new certified kosher restaurant, bakery, or caterer platform.
               </p>
             </div>
@@ -96,7 +93,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                   onClose();
                   onOpenCreateVenue();
                 }}
-                className="px-3 py-1.5 text-xs font-bold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-xs flex items-center gap-1.5 transition cursor-pointer"
+                className="pressable px-3 py-1.5 text-xs font-bold rounded-lg bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white tactile-1 flex items-center gap-1.5 cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>New Venue</span>
@@ -105,7 +102,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
             <button
               id="close-venues-directory-btn"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+              className="p-1.5 rounded-lg text-ink-faint hover:text-ink hover:bg-sunken transition cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -113,15 +110,15 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
         </div>
 
         {/* Filter & Search Bar */}
-        <div className="p-4 border-b border-slate-100 dark:border-slate-800/80 bg-slate-50/40 dark:bg-slate-900/40 flex flex-col sm:flex-row gap-3 items-center justify-between">
+        <div className="p-4 border-b border-line bg-sunken/60 flex flex-col sm:flex-row gap-3 items-center justify-between">
           <div className="relative w-full sm:w-72">
-            <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400" />
+            <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search by venue, address, or hashgacha..."
-              className="w-full pl-8.5 pr-3 py-1.5 text-xs rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full pl-8.5 pr-3 py-1.5 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
             />
           </div>
 
@@ -132,8 +129,8 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                 onClick={() => setCategoryFilter(cat)}
                 className={`px-2.5 py-1 text-xs font-medium rounded-lg capitalize whitespace-nowrap transition cursor-pointer ${
                   categoryFilter === cat
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                    ? 'bg-gold text-white tactile-1'
+                    : 'bg-sunken text-ink-soft hover:text-ink border border-line'
                 }`}
               >
                 {cat === 'all' ? 'All Establishments' : cat}
@@ -145,7 +142,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
         {/* Venues Grid */}
         <div className="p-6 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
           {filteredVenues.length === 0 ? (
-            <div className="col-span-2 text-center py-12 text-slate-400">
+            <div className="col-span-2 text-center py-12 text-ink-faint">
               <Building2 className="w-8 h-8 mx-auto mb-2 opacity-40" />
               <p className="text-xs font-medium">No venues match your search criteria.</p>
             </div>
@@ -165,8 +162,8 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                   }}
                   className={`p-4.5 rounded-2xl border transition text-left relative flex flex-col justify-between cursor-pointer group ${
                     isCurrent
-                      ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/30 ring-1 ring-blue-500 shadow-md'
-                      : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 hover:border-slate-300 dark:hover:border-slate-700 hover:shadow-md'
+                      ? 'border-gold/60 bg-gold-wash/60 ring-1 ring-gold/40 tactile-2'
+                      : 'border-line bg-surface tactile-1 lift hover:border-line-strong'
                   }`}
                 >
                   {/* Top line: Name, Category, Active badge */}
@@ -174,16 +171,16 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                     <div className="flex items-start justify-between gap-2 mb-1.5">
                       <div>
                         <div className="flex items-center gap-2">
-                          <h3 className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 transition">
+                          <h3 className="text-sm font-bold text-ink group-hover:text-gold-deep transition">
                             {venue.name}
                           </h3>
                           {isCurrent && (
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white shrink-0">
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-gradient-to-b from-gold to-gold-deep text-white shrink-0">
                               Active Platform
                             </span>
                           )}
                         </div>
-                        <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 mt-0.5">
+                        <div className="text-[11px] font-medium text-ink-soft mt-0.5">
                           {venue.category}
                         </div>
                       </div>
@@ -192,7 +189,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                         <button
                           title="Delete Venue Platform"
                           onClick={(e) => handleDelete(e, venue)}
-                          className="text-slate-300 hover:text-rose-500 p-1 rounded-md hover:bg-rose-50 dark:hover:bg-rose-950/40 transition opacity-0 group-hover:opacity-100 cursor-pointer"
+                          className="text-ink-faint hover:text-rose-500 p-1 rounded-md hover:bg-rose-50 dark:hover:bg-rose-950/40 transition opacity-0 group-hover:opacity-100 cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -200,10 +197,10 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                     </div>
 
                     {/* Address & Certification */}
-                    <div className="space-y-1 text-[11px] text-slate-600 dark:text-slate-300 mb-3.5">
+                    <div className="space-y-1 text-[11px] text-ink-soft mb-3.5">
                       {venue.address && (
-                        <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
-                          <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                        <div className="flex items-center gap-1.5 text-ink-soft">
+                          <MapPin className="w-3 h-3 text-ink-faint shrink-0" />
                           <span className="truncate">{venue.address}</span>
                         </div>
                       )}
@@ -217,31 +214,31 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                   </div>
 
                   {/* Metrics & Action */}
-                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800">
+                  <div className="pt-3 border-t border-line">
                     <div className="flex items-center justify-between text-xs mb-1.5">
-                      <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                      <span className="text-[11px] text-ink-soft tnum">
                         Shift Completion: <strong>{completedTasks}/{totalTasks}</strong>
                       </span>
-                      <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                      <span className="text-xs font-bold text-ink tnum">
                         {rate}%
                       </span>
                     </div>
 
-                    <div className="w-full h-1.5 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mb-3">
+                    <div className="w-full h-1.5 bg-sunken rounded-full overflow-hidden mb-3">
                       <div
                         className={`h-full transition-all duration-500 ${
                           rate === 100
                             ? 'bg-emerald-500'
                             : rate > 50
-                            ? 'bg-blue-500'
-                            : 'bg-amber-500'
+                            ? 'bg-gold'
+                            : 'bg-gold-deep'
                         }`}
                         style={{ width: `${rate}%` }}
                       />
                     </div>
 
                     <div className="flex items-center justify-between pt-1">
-                      <span className="text-[11px] text-slate-400 flex items-center gap-1">
+                      <span className="text-[11px] text-ink-faint flex items-center gap-1">
                         <Users className="w-3 h-3" />
                         {venue.workerCount ?? 0} staff members
                       </span>
@@ -249,8 +246,8 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                       <button
                         className={`text-xs font-semibold flex items-center gap-1 px-2.5 py-1 rounded-lg transition ${
                           isCurrent
-                            ? 'text-blue-600 dark:text-blue-400 bg-blue-100/70 dark:bg-blue-900/40'
-                            : 'text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 bg-slate-100 dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-blue-950/50'
+                            ? 'text-gold-deep bg-gold-wash border border-gold/40'
+                            : 'text-ink-soft hover:text-gold-deep bg-sunken hover:bg-gold-wash/60'
                         }`}
                       >
                         <span>{isCurrent ? 'Viewing Now' : 'Switch to Platform'}</span>
@@ -265,13 +262,13 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+        <div className="px-6 py-3 border-t border-line bg-sunken flex items-center justify-between text-xs text-ink-soft">
           <span>
             {isAdmin ? 'All establishments are isolated with dedicated tasks, mashgichim, and history.' : 'You have access to this certified venue platform.'}
           </span>
           <button
             onClick={onClose}
-            className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition cursor-pointer"
+            className="pressable px-3.5 py-1.5 text-xs font-semibold rounded-lg border border-line bg-sunken hover:bg-gold-wash/60 text-ink transition cursor-pointer"
           >
             Close Hub
           </button>

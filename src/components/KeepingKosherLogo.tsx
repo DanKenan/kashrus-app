@@ -41,7 +41,7 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
     <div className={`flex items-center gap-2 sm:gap-2.5 min-w-0 ${className}`}>
       {/* Brand Emblem Shield */}
       <div
-        className={`${iconSizes[size]} shrink-0 bg-gradient-to-br from-blue-700 via-indigo-700 to-slate-900 flex items-center justify-center shadow-md shadow-blue-900/20 ring-2 ring-blue-500/20 text-white relative overflow-hidden`}
+        className={`${iconSizes[size]} shrink-0 bg-gradient-to-br from-gold via-gold-deep to-gold-ink flex items-center justify-center tactile-2 ring-2 ring-gold/30 text-white relative overflow-hidden`}
       >
         <svg
           viewBox="0 0 40 40"
@@ -53,7 +53,7 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
           <path
             d="M20 4L7 9V18C7 26.5 12.5 34.5 20 37C27.5 34.5 33 26.5 33 18V9L20 4Z"
             fill="url(#shieldGrad)"
-            stroke="#93c5fd"
+            stroke="var(--gold)"
             strokeWidth="1.5"
             strokeLinejoin="round"
           />
@@ -69,8 +69,8 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
           />
           <defs>
             <linearGradient id="shieldGrad" x1="7" y1="4" x2="33" y2="37" gradientUnits="userSpaceOnUse">
-              <stop stopColor="#1e3a8a" />
-              <stop offset="1" stopColor="#0f172a" />
+              <stop stopColor="var(--gold-deep)" />
+              <stop offset="1" stopColor="var(--gold-ink)" />
             </linearGradient>
           </defs>
         </svg>
@@ -79,21 +79,21 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
       {/* Brand Typographic Identity */}
       <div className="flex flex-col justify-center min-w-0 overflow-hidden">
         <div className="flex items-center gap-1 sm:gap-1.5 flex-nowrap">
-          <span className={`${titleSizes[size]} text-slate-900 dark:text-white leading-tight font-sans whitespace-nowrap`}>
-            Keeping<span className="text-blue-600 dark:text-blue-400">Kosher</span>
+          <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap`}>
+            Keeping<span className="text-gold-deep">Kosher</span>
           </span>
           {agencyShortCode ? (
-            <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border border-blue-300/60 dark:border-blue-700/50 shrink-0">
+            <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-gold-wash text-gold-ink border border-gold/40 shrink-0">
               {agencyShortCode}
             </span>
           ) : (
-            <span className="hidden xs:inline-block text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-300/60 dark:border-amber-700/50 shrink-0">
+            <span className="hidden xs:inline-block text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.2 rounded bg-gold-wash text-gold-ink border border-gold/40 shrink-0">
               PRO
             </span>
           )}
         </div>
         {showSubtitle && (
-          <p className={`${subSizes[size]} font-medium text-slate-500 dark:text-slate-400 truncate leading-tight mt-0.5 ${size === 'sm' ? 'hidden sm:block' : ''}`}>
+          <p className={`${subSizes[size]} font-medium text-ink-soft truncate leading-tight mt-0.5 ${size === 'sm' ? 'hidden sm:block' : ''}`}>
             {agencyName ? agencyName : 'Compliance & Shift Operations'}
           </p>
         )}

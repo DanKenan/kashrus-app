@@ -76,10 +76,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 via-slate-100 to-blue-50/40 dark:from-slate-950 dark:via-slate-900 dark:to-blue-950/30 text-slate-900 dark:text-slate-100 flex flex-col justify-between transition-colors relative overflow-hidden">
+    <div className="min-h-screen bg-paper text-ink flex flex-col justify-between transition-colors relative overflow-hidden">
       
       {/* Subtle Background Ambience */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[350px] bg-blue-500/10 dark:bg-blue-600/10 blur-3xl pointer-events-none rounded-full" />
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[350px] bg-gold/10 blur-3xl pointer-events-none rounded-full" />
       <div className="absolute bottom-0 right-0 w-[400px] h-[300px] bg-indigo-500/10 dark:bg-indigo-600/10 blur-2xl pointer-events-none rounded-full" />
 
       {/* Top Bar with Brand & Theme Toggle */}
@@ -87,8 +87,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         <KeepingKosherLogo size="sm" showSubtitle={true} />
         
         <div className="flex items-center gap-2 sm:gap-3">
-          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/80 dark:bg-slate-900/80 border border-slate-200/80 dark:border-slate-800 text-[11px] font-medium text-slate-600 dark:text-slate-400 backdrop-blur-xs">
-            <ShieldCheck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface/80 border border-line text-[11px] font-medium text-ink-soft backdrop-blur-sm">
+            <ShieldCheck className="w-3.5 h-3.5 text-gold-deep" />
             <span>Multi-Agency Kashrut Network</span>
           </div>
 
@@ -97,10 +97,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           <button
             type="button"
             onClick={onToggleDarkMode}
-            className="p-2 sm:p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white shadow-xs transition cursor-pointer"
+            className="p-2 sm:p-2.5 rounded-xl bg-surface border border-line text-ink-soft hover:text-ink tactile-1 transition cursor-pointer"
             aria-label="Toggle dark mode"
           >
-            {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-600" />}
+            {darkMode ? <Sun className="w-4 h-4 text-gold" /> : <Moon className="w-4 h-4 text-ink-soft" />}
           </button>
         </div>
       </header>
@@ -110,17 +110,17 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         <div className={`w-full transition-all duration-300 ${authMode === 'signup' ? 'max-w-xl' : 'max-w-md'}`}>
           
           {/* Card Frame */}
-          <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-3xl p-6 sm:p-8 shadow-2xl border border-slate-200/80 dark:border-slate-800/90 ring-1 ring-slate-900/5 dark:ring-white/5">
+          <div className="bg-surface/95 backdrop-blur-md rounded-3xl p-6 sm:p-8 tactile-5 border border-line">
             
             {/* Header / Brand Emblem */}
             <div className="text-center mb-5">
               <div className="flex justify-center mb-3">
                 <KeepingKosherLogo size="lg" showSubtitle={false} />
               </div>
-              <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-white">
+              <h1 className="text-xl sm:text-2xl font-black tracking-tight text-ink">
                 {authMode === 'signup' ? 'Kosher Agency Registration' : 'Kosher Shift & Daily Board'}
               </h1>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-sm mx-auto">
+              <p className="text-xs text-ink-faint mt-1 max-w-sm mx-auto">
                 {authMode === 'signup'
                   ? 'Set up a private, isolated portal for your Kosher Agency or Vaad to supervise venues, mashgichim staff, and checklists.'
                   : 'Sign in to access daily shift assignments, temperature logs, and kosher compliance checklists.'}
@@ -128,7 +128,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             </div>
 
             {/* Segmented Mode Switcher (Sign In vs Register Agency) */}
-            <div className="flex p-1 mb-6 rounded-2xl bg-slate-100 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/80">
+            <div className="flex p-1 mb-6 rounded-2xl bg-sunken border border-line">
               <button
                 type="button"
                 id="auth-tab-login"
@@ -138,8 +138,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 }}
                 className={`flex-1 py-2 text-xs font-bold rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 ${
                   authMode === 'login'
-                    ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs'
-                    : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                    ? 'bg-surface text-gold-deep tactile-1'
+                    : 'text-ink-faint hover:text-ink'
                 }`}
               >
                 <LogIn className="w-3.5 h-3.5" />
@@ -154,8 +154,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 }}
                 className={`flex-1 py-2 text-xs font-bold rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 ${
                   authMode === 'signup'
-                    ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs'
-                    : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                    ? 'bg-surface text-gold-deep tactile-1'
+                    : 'text-ink-faint hover:text-ink'
                 }`}
               >
                 <ShieldCheck className="w-3.5 h-3.5" />
@@ -188,11 +188,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 {/* Login Form */}
                 <form onSubmit={handleSubmit} className="space-y-4">
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                    <label className="block text-xs font-bold text-ink-soft mb-1.5">
                       Email
                     </label>
                     <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-ink-faint">
                         <Mail className="w-4 h-4" />
                       </div>
                       <input
@@ -202,17 +202,17 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                         onChange={(e) => setEmail(e.target.value)}
                         placeholder="Email"
                         autoComplete="email"
-                        className="w-full pl-10 pr-3 py-2.5 text-xs sm:text-sm rounded-xl bg-slate-50/80 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+                        className="w-full pl-10 pr-3 py-2.5 text-xs sm:text-sm rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:outline-none focus:border-gold transition"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                    <label className="block text-xs font-bold text-ink-soft mb-1.5">
                       Password
                     </label>
                     <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-ink-faint">
                         <Lock className="w-4 h-4" />
                       </div>
                       <input
@@ -222,12 +222,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                         onChange={(e) => setPassword(e.target.value)}
                         placeholder="Password"
                         autoComplete="current-password"
-                        className="w-full pl-10 pr-10 py-2.5 text-xs sm:text-sm rounded-xl bg-slate-50/80 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+                        className="w-full pl-10 pr-10 py-2.5 text-xs sm:text-sm rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:outline-none focus:border-gold transition"
                       />
                       <button
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
-                        className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                        className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-ink-faint hover:text-ink-soft  cursor-pointer"
                         aria-label="Toggle password visibility"
                       >
                         {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -238,7 +238,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   <button
                     type="submit"
                     disabled={isLoading}
-                    className="w-full mt-2 py-3 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-xs sm:text-sm font-bold shadow-lg shadow-blue-600/25 flex items-center justify-center gap-2 transition disabled:opacity-50 cursor-pointer"
+                    className="w-full mt-2 py-3 px-4 rounded-xl pressable bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white text-xs sm:text-sm font-bold tactile-2 flex items-center justify-center gap-2 transition disabled:opacity-50 cursor-pointer"
                   >
                     {isLoading ? (
                       <>
@@ -255,12 +255,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 </form>
 
                 {/* Callout to register new agency */}
-                <div className="mt-5 p-3 rounded-2xl bg-blue-50/60 dark:bg-blue-950/40 border border-blue-200/60 dark:border-blue-900/40 flex items-center justify-between text-xs">
+                <div className="mt-5 p-3 rounded-2xl bg-gold-wash border border-gold/40 flex items-center justify-between text-xs">
                   <div className="text-left">
-                    <p className="font-bold text-blue-900 dark:text-blue-200 text-[11px]">
+                    <p className="font-bold text-gold-ink text-[11px]">
                       Kosher Agency / Vaad Administrator?
                     </p>
-                    <p className="text-[10px] text-blue-700 dark:text-blue-300">
+                    <p className="text-[10px] text-gold-deep">
                       Launch a dedicated platform for your organization.
                     </p>
                   </div>
@@ -270,30 +270,30 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                       setAuthMode('signup');
                       setErrorMessage(null);
                     }}
-                    className="shrink-0 px-2.5 py-1 rounded-lg bg-blue-600 text-white font-bold text-[11px] hover:bg-blue-700 transition cursor-pointer"
+                    className="shrink-0 px-2.5 py-1 rounded-lg bg-gradient-to-b from-gold to-gold-deep text-white font-bold text-[11px] hover:brightness-105 transition cursor-pointer"
                   >
                     Register Agency
                   </button>
                 </div>
 
                 {/* Security Guarantee */}
-                <div className="mt-5 pt-4 border-t border-slate-100 dark:border-slate-800/80 text-center">
-                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 text-[11px] text-slate-500 dark:text-slate-400">
+                <div className="mt-5 pt-4 border-t border-line/70 text-center">
+                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-sunken border border-line text-[11px] text-ink-faint">
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
                     <span>Multi-Agency Tenant Data Isolation</span>
                   </div>
-                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-2">
+                  <p className="text-[11px] text-ink-faint mt-2">
                     Each kosher agency and supervised venue operates in an isolated environment. Mashgichim and owners only access their authorized facilities.
                   </p>
                 </div>
 
                 {/* Quick Demo Accounts for Multi-Venue Testing */}
-                <div className="mt-5 pt-4 border-t border-dashed border-slate-200 dark:border-slate-800">
+                <div className="mt-5 pt-4 border-t border-dashed border-line">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-ink-faint">
                       Quick Access Demo Accounts (HKC)
                     </span>
-                    <span className="text-[10px] text-blue-600 dark:text-blue-400 font-medium">Click to fill</span>
+                    <span className="text-[10px] text-gold-deep font-medium">Click to fill</span>
                   </div>
                   
                   {/* Admin & Coordinator quick logins */}
@@ -305,14 +305,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                         setPassword('admin123');
                         setErrorMessage(null);
                       }}
-                      className="p-2 rounded-xl bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-900 text-left transition text-xs flex items-center justify-between cursor-pointer"
+                      className="p-2 rounded-xl bg-gold-wash hover:bg-gold-wash border border-gold/40 hover:border-gold text-left transition text-xs flex items-center justify-between cursor-pointer"
                     >
                       <div>
-                        <div className="font-bold text-blue-900 dark:text-blue-200 flex items-center gap-1 text-[11px]">
-                          <ShieldCheck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                        <div className="font-bold text-gold-ink flex items-center gap-1 text-[11px]">
+                          <ShieldCheck className="w-3.5 h-3.5 text-gold-deep shrink-0" />
                           <span>Admin</span>
                         </div>
-                        <div className="text-[10px] text-blue-700 dark:text-blue-300">Kenan (Full Control)</div>
+                        <div className="text-[10px] text-gold-deep">Kenan (Full Control)</div>
                       </div>
                     </button>
 
@@ -323,14 +323,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                         setPassword('coord123');
                         setErrorMessage(null);
                       }}
-                      className="p-2 rounded-xl bg-sky-50 dark:bg-sky-950/40 hover:bg-sky-100 dark:hover:bg-sky-900/50 border border-sky-200 dark:border-sky-900 text-left transition text-xs flex items-center justify-between cursor-pointer"
+                      className="p-2 rounded-xl bg-sunken hover:bg-line/40 border border-line hover:border-line-strong text-left transition text-xs flex items-center justify-between cursor-pointer"
                     >
                       <div>
-                        <div className="font-bold text-sky-900 dark:text-sky-200 flex items-center gap-1 text-[11px]">
-                          <ShieldCheck className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400 shrink-0" />
+                        <div className="font-bold text-ink flex items-center gap-1 text-[11px]">
+                          <ShieldCheck className="w-3.5 h-3.5 text-gold-deep shrink-0" />
                           <span>Coordinator</span>
                         </div>
-                        <div className="text-[10px] text-sky-700 dark:text-sky-300">Rabbi Levy (Add Tasks)</div>
+                        <div className="text-[10px] text-ink-soft">Rabbi Levy (Add Tasks)</div>
                       </div>
                     </button>
                   </div>
@@ -338,9 +338,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   {/* Venue-Specific Quick Accounts Grid */}
                   <div className="space-y-1.5 text-xs">
                     {/* Crown Market */}
-                    <div className="p-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1 flex items-center gap-1">
-                        <Building2 className="w-3 h-3 text-blue-500" />
+                    <div className="p-2 rounded-xl bg-sunken border border-line">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-ink-faint mb-1 flex items-center gap-1">
+                        <Building2 className="w-3 h-3 text-gold-deep" />
                         The Crown Market (Facility 1)
                       </div>
                       <div className="flex gap-2">
@@ -351,7 +351,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                             setPassword('owner123');
                             setErrorMessage(null);
                           }}
-                          className="flex-1 py-1 px-2 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-[11px] font-medium text-purple-700 dark:text-purple-300 transition text-center cursor-pointer"
+                          className="flex-1 py-1 px-2 rounded-lg bg-surface hover:bg-sunken border border-line text-[11px] font-medium text-purple-700 dark:text-purple-300 transition text-center cursor-pointer"
                         >
                           Owner (Audit Only)
                         </button>
@@ -362,7 +362,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                             setPassword('worker123');
                             setErrorMessage(null);
                           }}
-                          className="flex-1 py-1 px-2 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-[11px] font-medium text-emerald-700 dark:text-emerald-300 transition text-center cursor-pointer"
+                          className="flex-1 py-1 px-2 rounded-lg bg-surface hover:bg-sunken border border-line text-[11px] font-medium text-emerald-700 dark:text-emerald-300 transition text-center cursor-pointer"
                         >
                           Alex (Mashgiach)
                         </button>
@@ -370,9 +370,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     </div>
 
                     {/* Hartford Kosher Bakery */}
-                    <div className="p-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1 flex items-center gap-1">
-                        <Building2 className="w-3 h-3 text-amber-500" />
+                    <div className="p-2 rounded-xl bg-sunken border border-line">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-ink-faint mb-1 flex items-center gap-1">
+                        <Building2 className="w-3 h-3 text-gold-deep" />
                         Hartford Kosher Bakery (Facility 2)
                       </div>
                       <div className="flex gap-2">
@@ -383,7 +383,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                             setPassword('owner123');
                             setErrorMessage(null);
                           }}
-                          className="flex-1 py-1 px-2 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-[11px] font-medium text-purple-700 dark:text-purple-300 transition text-center cursor-pointer"
+                          className="flex-1 py-1 px-2 rounded-lg bg-surface hover:bg-sunken border border-line text-[11px] font-medium text-purple-700 dark:text-purple-300 transition text-center cursor-pointer"
                         >
                           Owner (Audit Only)
                         </button>
@@ -394,7 +394,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                             setPassword('worker123');
                             setErrorMessage(null);
                           }}
-                          className="flex-1 py-1 px-2 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-[11px] font-medium text-emerald-700 dark:text-emerald-300 transition text-center cursor-pointer"
+                          className="flex-1 py-1 px-2 rounded-lg bg-surface hover:bg-sunken border border-line text-[11px] font-medium text-emerald-700 dark:text-emerald-300 transition text-center cursor-pointer"
                         >
                           Sarah (Mashgiach)
                         </button>
@@ -410,13 +410,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           {/* Facility Highlights / System Status */}
           <div className="mt-5 space-y-3 px-2">
             <PWAInstallButton variant="banner" />
-            <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 dark:text-slate-400">
+            <div className="grid grid-cols-2 gap-3 text-[11px] text-ink-faint">
               <div className="flex items-center gap-2">
-                <CheckCircle2 className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                <CheckCircle2 className="w-3.5 h-3.5 text-gold-deep shrink-0" />
                 <span>Real-time multi-tenant sync</span>
               </div>
               <div className="flex items-center gap-2">
-                <ShieldCheck className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                <ShieldCheck className="w-3.5 h-3.5 text-gold-deep shrink-0" />
                 <span>Personalized Agency Portals</span>
               </div>
             </div>
@@ -426,7 +426,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       </main>
 
       {/* Footer */}
-      <footer className="relative z-10 w-full px-6 py-4 text-center text-xs text-slate-400 dark:text-slate-600 border-t border-slate-200/60 dark:border-slate-800/60">
+      <footer className="relative z-10 w-full px-6 py-4 text-center text-xs text-ink-faint dark:text-ink-soft border-t border-line/60">
         KeepingKosher Multi-Agency Kashrut Operations &copy; {new Date().getFullYear()} &bull; All Rights Reserved
       </footer>
     </div>

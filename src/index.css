@@ -1,14 +1,251 @@
+@import "@fontsource-variable/dm-sans";
+@import "@fontsource-variable/dm-sans/wght-italic.css";
+@import "@fontsource-variable/jetbrains-mono";
 @import "tailwindcss";
 
 @variant dark (&:where(.dark, .dark *));
 
+/* ------------------------------------------------------------------
+   Warm tactile design tokens.
+   Semantic colors are CSS vars that flip with `.dark`, exposed to
+   Tailwind via `@theme inline` so utilities like `bg-paper text-ink
+   border-line` automatically adapt — no `dark:` variants needed.
+------------------------------------------------------------------ */
+:root {
+  --paper: oklch(0.968 0.010 80);        /* app background — warm paper */
+  --surface: oklch(0.998 0.003 90);      /* cards, sheets */
+  --sunken: oklch(0.946 0.014 78);       /* wells, inputs, troughs */
+  --line: oklch(0.884 0.020 78);         /* hairline borders */
+  --line-strong: oklch(0.792 0.030 74);  /* emphasized borders */
+  --ink: oklch(0.272 0.024 62);          /* primary text */
+  --ink-soft: oklch(0.462 0.022 68);     /* secondary text */
+  --ink-faint: oklch(0.618 0.020 72);    /* tertiary text */
+  --gold: oklch(0.622 0.145 74);         /* brand accent */
+  --gold-deep: oklch(0.512 0.132 70);    /* accent pressed / text on light */
+  --gold-ink: oklch(0.398 0.118 68);     /* accent text */
+  --gold-wash: oklch(0.952 0.045 78);    /* accent tint bg */
+  color-scheme: light;
+}
+
+.dark {
+  --paper: oklch(0.232 0.018 62);
+  --surface: oklch(0.278 0.020 62);
+  --sunken: oklch(0.208 0.016 60);
+  --line: oklch(0.368 0.026 64);
+  --line-strong: oklch(0.462 0.032 64);
+  --ink: oklch(0.942 0.010 80);
+  --ink-soft: oklch(0.762 0.018 74);
+  --ink-faint: oklch(0.604 0.020 70);
+  --gold: oklch(0.768 0.138 78);
+  --gold-deep: oklch(0.702 0.138 76);
+  --gold-ink: oklch(0.884 0.108 80);
+  --gold-wash: oklch(0.300 0.055 70);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-faint: var(--ink-faint);
+  --color-gold: var(--gold);
+  --color-gold-deep: var(--gold-deep);
+  --color-gold-ink: var(--gold-ink);
+  --color-gold-wash: var(--gold-wash);
+
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 @layer base {
-  body {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-    @apply bg-slate-50 text-slate-900 antialiased selection:bg-amber-500/20 selection:text-amber-800 transition-colors duration-200;
+  html {
+    -webkit-tap-highlight-color: transparent;
   }
 
-  .dark body {
-    @apply bg-slate-950 text-slate-100 selection:bg-amber-500/30 selection:text-amber-300;
+  body {
+    font-family: var(--font-sans);
+    @apply bg-paper text-ink antialiased;
+    font-optical-sizing: auto;
+  }
+
+  ::selection {
+    background: oklch(0.622 0.145 74 / 0.28);
+  }
+  .dark ::selection {
+    background: oklch(0.768 0.138 78 / 0.35);
+  }
+
+  /* Warm, visible keyboard focus everywhere */
+  :focus-visible {
+    outline: 2px solid oklch(0.622 0.145 74);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  /* Subtle paper grain over the app background (never over text blocks) */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    pointer-events: none;
+    opacity: 0.05;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E");
+  }
+  .dark body::before {
+    opacity: 0.07;
+  }
+}
+
+/* ------------------------------------------------------------------
+   Elevation scale — layered shadows with an inset top-edge highlight
+   so surfaces read as physical thickness, not outlines.
+------------------------------------------------------------------ */
+@utility tactile-1 {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.7),
+    0 1px 2px rgb(74 52 20 / 0.07);
+}
+@utility tactile-2 {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.7),
+    0 1px 2px rgb(74 52 20 / 0.06),
+    0 8px 20px -8px rgb(74 52 20 / 0.16);
+}
+@utility tactile-3 {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.7),
+    0 2px 4px rgb(74 52 20 / 0.06),
+    0 16px 36px -12px rgb(74 52 20 / 0.22);
+}
+@utility tactile-4 {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.7),
+    0 4px 8px rgb(74 52 20 / 0.08),
+    0 28px 56px -16px rgb(74 52 20 / 0.30);
+}
+@utility tactile-5 {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.75),
+    0 8px 16px rgb(74 52 20 / 0.10),
+    0 48px 88px -24px rgb(74 52 20 / 0.38);
+}
+
+.dark .tactile-1 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 1px 2px rgb(0 0 0 / 0.45); }
+.dark .tactile-2 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 20px -8px rgb(0 0 0 / 0.55); }
+.dark .tactile-3 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 2px 4px rgb(0 0 0 / 0.4), 0 16px 36px -12px rgb(0 0 0 / 0.6); }
+.dark .tactile-4 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 4px 8px rgb(0 0 0 / 0.45), 0 28px 56px -16px rgb(0 0 0 / 0.65); }
+.dark .tactile-5 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 8px 16px rgb(0 0 0 / 0.5), 0 48px 88px -24px rgb(0 0 0 / 0.7); }
+
+/* Physical press feedback for buttons */
+@utility pressable {
+  transition: transform 120ms ease, box-shadow 160ms ease, background-color 160ms ease;
+}
+.pressable:active {
+  transform: scale(0.965);
+}
+
+/* Hover lift — transform + precomposed shadow layer, never animating box-shadow per-frame */
+@utility lift {
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 180ms ease, border-color 180ms ease;
+}
+.lift:hover {
+  transform: translateY(-2px);
+}
+
+/* Tabular numerals for times, counts, IDs */
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------
+   Category color system.
+   Set `--cat-h` (an OKLCH hue) inline via `categoryVars(name)`; every
+   category a user ever types automatically gets a distinct, stable look.
+------------------------------------------------------------------ */
+.cat-dot {
+  background: oklch(0.62 0.165 var(--cat-h, 72));
+  box-shadow: inset 0 1px 1px rgb(255 255 255 / 0.45), 0 1px 2px rgb(0 0 0 / 0.18);
+}
+.cat-chip {
+  background: oklch(0.95 0.045 var(--cat-h, 72));
+  color: oklch(0.43 0.125 var(--cat-h, 72));
+  border-color: oklch(0.83 0.085 var(--cat-h, 72));
+}
+.dark .cat-chip {
+  background: oklch(0.315 0.065 var(--cat-h, 72));
+  color: oklch(0.86 0.095 var(--cat-h, 72));
+  border-color: oklch(0.46 0.085 var(--cat-h, 72));
+}
+.cat-spine {
+  background: linear-gradient(180deg, oklch(0.72 0.15 var(--cat-h, 72)), oklch(0.56 0.155 var(--cat-h, 72)));
+  box-shadow: inset 0 1px 1px rgb(255 255 255 / 0.5);
+}
+.cat-wash {
+  background: oklch(0.972 0.028 var(--cat-h, 72));
+}
+.dark .cat-wash {
+  background: oklch(0.272 0.048 var(--cat-h, 72));
+}
+.cat-text {
+  color: oklch(0.50 0.135 var(--cat-h, 72));
+}
+.dark .cat-text {
+  color: oklch(0.82 0.105 var(--cat-h, 72));
+}
+.cat-ring {
+  --tw-ring-color: oklch(0.62 0.165 var(--cat-h, 72) / 0.45);
+}
+
+/* ------------------------------------------------------------------
+   "Assigned to me" — tasks the admin designated for this mashgiach.
+------------------------------------------------------------------ */
+.mine-glow {
+  border-color: oklch(0.70 0.12 78);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.7),
+    0 1px 2px rgb(74 52 20 / 0.06),
+    0 10px 26px -10px oklch(0.62 0.145 74 / 0.45);
+}
+.dark .mine-glow {
+  border-color: oklch(0.60 0.11 76);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.07),
+    0 1px 2px rgb(0 0 0 / 0.4),
+    0 10px 26px -10px oklch(0.70 0.14 76 / 0.35);
+}
+
+/* Motion */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.96) translateY(4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@utility animate-fade-in {
+  animation: fade-in 220ms ease both;
+}
+@utility animate-slide-up {
+  animation: slide-up 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@utility animate-pop-in {
+  animation: pop-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

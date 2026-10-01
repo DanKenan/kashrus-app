@@ -192,27 +192,27 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
   return (
     <div
       id="create-event-modal-overlay"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/60 backdrop-blur-xs animate-fade-in overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#1a120a]/60 backdrop-blur-xs animate-fade-in overflow-y-auto"
     >
-      <div className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-2xl shadow-2xl border border-stone-200 dark:border-stone-800 overflow-hidden my-6">
+      <div className="bg-surface w-full max-w-2xl rounded-2xl tactile-5 border border-line overflow-hidden my-6 animate-slide-up">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4.5 border-b border-stone-200/90 dark:border-stone-800 bg-stone-50/80 dark:bg-slate-850">
+        <div className="flex items-center justify-between px-6 py-4.5 border-b border-line bg-sunken">
           <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-600 to-amber-700 text-white flex items-center justify-center shadow-md shadow-amber-600/20">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-gold to-gold-deep text-white flex items-center justify-center tactile-2">
               <Calendar className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-stone-900 dark:text-white tracking-tight">
+              <h2 className="text-base font-bold text-ink tracking-tight">
                 Notify & Register Kosher Event
               </h2>
-              <p className="text-xs text-stone-500 dark:text-stone-400">
+              <p className="text-xs text-ink-soft">
                 Notify the Kashrut Admin & assign a Mashgiach with inspection tasks & menu.
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-stone-400 hover:text-stone-600 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-slate-800 transition cursor-pointer"
+            className="p-1.5 rounded-lg text-ink-faint hover:text-ink-soft hover:bg-sunken transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -232,11 +232,11 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
           <div className="space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block font-semibold text-stone-700 dark:text-stone-300 mb-1">
+                <label className="block font-semibold text-ink-soft mb-1">
                   Originating Establishment / Caterer *
                 </label>
                 <div className="relative">
-                  <Building2 className="w-3.5 h-3.5 absolute left-3 top-2.5 text-stone-400" />
+                  <Building2 className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
                   <select
                     value={venueId}
                     onChange={(e) => {
@@ -245,7 +245,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                       if (selected?.address) setLocation(selected.address);
                     }}
                     disabled={currentUser?.role === 'owner'}
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-stone-50/70 dark:bg-slate-800 border border-stone-200 dark:border-stone-700 text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500/25 focus:border-amber-500 disabled:opacity-70"
+                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold disabled:opacity-70"
                   >
                     {allVenues.map((v) => (
                       <option key={v.id} value={v.id}>
@@ -257,7 +257,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
               </div>
 
               <div>
-                <label className="block font-semibold text-stone-700 dark:text-stone-300 mb-1">
+                <label className="block font-semibold text-ink-soft mb-1">
                   Event Title / Occasion *
                 </label>
                 <input
@@ -266,24 +266,24 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   placeholder="e.g. Miller Wedding, Community Shabbat Dinner"
-                  className="w-full px-3 py-2 text-xs rounded-xl bg-stone-50/70 dark:bg-slate-800 border border-stone-200 dark:border-stone-700 text-stone-900 dark:text-white placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500/25 focus:border-amber-500"
+                  className="w-full px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder:text-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block font-semibold text-stone-700 dark:text-stone-300 mb-1">
+              <label className="block font-semibold text-ink-soft mb-1">
                 Event Location / Ballroom Address *
               </label>
               <div className="relative">
-                <MapPin className="w-3.5 h-3.5 absolute left-3 top-2.5 text-stone-400" />
+                <MapPin className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
                 <input
                   type="text"
                   required
                   value={location}
                   onChange={(e) => setLocation(e.target.value)}
                   placeholder="e.g. Beth El Synagogue Ballroom, 2626 Albany Ave"
-                  className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-stone-50/70 dark:bg-slate-800 border border-stone-200 dark:border-stone-700 text-stone-900 dark:text-white placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500/25 focus:border-amber-500"
+                  className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder:text-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
                 />
               </div>
             </div>
@@ -291,49 +291,49 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
             {/* Date & Times */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
-                <label className="block font-semibold text-stone-700 dark:text-stone-300 mb-1">
+                <label className="block font-semibold text-ink-soft mb-1">
                   Event Date *
                 </label>
                 <div className="relative">
-                  <Calendar className="w-3.5 h-3.5 absolute left-3 top-2.5 text-stone-400" />
+                  <Calendar className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
                   <input
                     type="date"
                     required
                     value={date}
                     onChange={(e) => setDate(e.target.value)}
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-stone-50/70 dark:bg-slate-800 border border-stone-200 dark:border-stone-700 text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500/25 focus:border-amber-500"
+                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block font-semibold text-stone-700 dark:text-stone-300 mb-1">
+                <label className="block font-semibold text-ink-soft mb-1">
                   Start Time
                 </label>
                 <div className="relative">
-                  <Clock className="w-3.5 h-3.5 absolute left-3 top-2.5 text-stone-400" />
+                  <Clock className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
                   <input
                     type="text"
                     value={startTime}
                     onChange={(e) => setStartTime(e.target.value)}
                     placeholder="e.g. 11:30 AM"
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-stone-50/70 dark:bg-slate-800 border border-stone-200 dark:border-stone-700 text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500/25 focus:border-amber-500"
+                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block font-semibold text-stone-700 dark:text-stone-300 mb-1">
+                <label className="block font-semibold text-ink-soft mb-1">
                   End Time
                 </label>
                 <div className="relative">
-                  <Clock className="w-3.5 h-3.5 absolute left-3 top-2.5 text-stone-400" />
+                  <Clock className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
                   <input
                     type="text"
                     value={endTime}
                     onChange={(e) => setEndTime(e.target.value)}
                     placeholder="e.g. 16:30 PM"
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-stone-50/70 dark:bg-slate-800 border border-stone-200 dark:border-stone-700 text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500/25 focus:border-amber-500"
+                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
                   />
                 </div>
               </div>
@@ -341,13 +341,13 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
           </div>
 
           {/* Section 2: Mashgiach Assignment */}
-          <div className="pt-3 border-t border-stone-200 dark:border-stone-800 space-y-3">
+          <div className="pt-3 border-t border-line space-y-3">
             <div className="flex items-center justify-between">
-              <label className="font-bold text-stone-800 dark:text-stone-200 flex items-center gap-1.5">
-                <ShieldCheck className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+              <label className="font-bold text-ink flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-gold-deep" />
                 <span>Mashgiach Assigned to Event</span>
               </label>
-              <span className="text-[11px] text-stone-400">
+              <span className="text-[11px] text-ink-faint">
                 Supervisors receive real-time notification
               </span>
             </div>
@@ -359,8 +359,8 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 onClick={() => setMashgiachMode('assigned_user')}
                 className={`py-2 px-2.5 rounded-xl border text-center transition cursor-pointer ${
                   mashgiachMode === 'assigned_user'
-                    ? 'border-amber-500 bg-amber-50/90 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 font-bold ring-1 ring-amber-500'
-                    : 'border-stone-200 dark:border-stone-800 text-stone-600 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-slate-800 font-medium'
+                    ? 'border-gold bg-gold-wash text-gold-ink font-bold ring-1 ring-gold/30 pressable'
+                    : 'border-line text-ink-soft hover:bg-sunken font-medium pressable'
                 }`}
               >
                 Known Mashgiach
@@ -371,8 +371,8 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 onClick={() => setMashgiachMode('external')}
                 className={`py-2 px-2.5 rounded-xl border text-center transition cursor-pointer ${
                   mashgiachMode === 'external'
-                    ? 'border-amber-600 bg-amber-100/70 dark:bg-amber-950/50 text-amber-900 dark:text-amber-200 font-bold ring-1 ring-amber-600'
-                    : 'border-stone-200 dark:border-stone-800 text-stone-600 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-slate-800 font-medium'
+                    ? 'border-gold bg-gold-wash text-gold-ink font-bold ring-1 ring-gold/30 pressable'
+                    : 'border-line text-ink-soft hover:bg-sunken font-medium pressable'
                 }`}
               >
                 Other / External
@@ -383,8 +383,8 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 onClick={() => setMashgiachMode('unassigned')}
                 className={`py-2 px-2.5 rounded-xl border text-center transition cursor-pointer ${
                   mashgiachMode === 'unassigned'
-                    ? 'border-stone-400 bg-stone-100 dark:bg-slate-800 text-stone-900 dark:text-white font-bold ring-1 ring-stone-400'
-                    : 'border-stone-200 dark:border-stone-800 text-stone-600 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-slate-800 font-medium'
+                    ? 'border-line-strong bg-sunken text-ink font-bold ring-1 ring-line-strong pressable'
+                    : 'border-line text-ink-soft hover:bg-sunken font-medium pressable'
                 }`}
               >
                 Assign Later
@@ -393,16 +393,16 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
             {/* If Known Mashgiach selected */}
             {mashgiachMode === 'assigned_user' && (
-              <div className="p-3 bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/80 dark:border-amber-900/50 rounded-xl space-y-2">
-                <label className="block text-xs font-semibold text-stone-700 dark:text-stone-300">
+              <div className="p-3 bg-gold-wash border border-gold/40 rounded-xl space-y-2">
+                <label className="block text-xs font-semibold text-ink-soft">
                   Select Supervised Mashgiach:
                 </label>
                 <div className="relative">
-                  <User className="w-3.5 h-3.5 absolute left-3 top-2.5 text-amber-600" />
+                  <User className="w-3.5 h-3.5 absolute left-3 top-2.5 text-gold-deep" />
                   <select
                     value={selectedMashgiachEmail}
                     onChange={(e) => setSelectedMashgiachEmail(e.target.value)}
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-lg bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-800/80 text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500/30"
+                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-lg bg-surface border border-gold/40 text-ink focus:outline-none focus:ring-2 focus:ring-gold/30"
                   >
                     {relevantMashgichim.length === 0 ? (
                       <option value="">No venue mashgichim found - select Other</option>
@@ -415,7 +415,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     )}
                   </select>
                 </div>
-                <p className="text-[11px] text-amber-800 dark:text-amber-300 font-medium">
+                <p className="text-[11px] text-gold-ink font-medium">
                   ✓ This mashgiach will receive an instant assignment badge and can access event checklists directly.
                 </p>
               </div>
@@ -423,14 +423,14 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
             {/* If Other / External mashgiach */}
             {mashgiachMode === 'external' && (
-              <div className="p-3 bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50 rounded-xl space-y-2.5 animate-fade-in">
-                <div className="text-xs font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
-                  <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+              <div className="p-3 bg-gold-wash border border-gold/40 rounded-xl space-y-2.5 animate-fade-in">
+                <div className="text-xs font-bold text-gold-ink flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 text-gold-deep" />
                   <span>External Mashgiach Contact Information</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                   <div>
-                    <label className="block text-[11px] font-semibold text-stone-700 dark:text-stone-300 mb-1">
+                    <label className="block text-[11px] font-semibold text-ink-soft mb-1">
                       Full Name *
                     </label>
                     <input
@@ -439,38 +439,38 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                       value={extName}
                       onChange={(e) => setExtName(e.target.value)}
                       placeholder="Rabbi / Mashgiach Name"
-                      className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-surface border border-gold/40 text-ink focus:outline-none focus:ring-2 focus:ring-gold"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-semibold text-stone-700 dark:text-stone-300 mb-1">
+                    <label className="block text-[11px] font-semibold text-ink-soft mb-1">
                       Phone Number
                     </label>
                     <div className="relative">
-                      <Phone className="w-3 h-3 absolute left-2.5 top-2.5 text-stone-400" />
+                      <Phone className="w-3 h-3 absolute left-2.5 top-2.5 text-ink-faint" />
                       <input
                         type="tel"
                         value={extPhone}
                         onChange={(e) => setExtPhone(e.target.value)}
                         placeholder="(860) 555-0192"
-                        className="w-full pl-7.5 pr-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        className="w-full pl-7.5 pr-2.5 py-1.5 text-xs rounded-lg bg-surface border border-gold/40 text-ink focus:outline-none focus:ring-2 focus:ring-gold"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-semibold text-stone-700 dark:text-stone-300 mb-1">
+                    <label className="block text-[11px] font-semibold text-ink-soft mb-1">
                       Email Address
                     </label>
                     <div className="relative">
-                      <Mail className="w-3 h-3 absolute left-2.5 top-2.5 text-stone-400" />
+                      <Mail className="w-3 h-3 absolute left-2.5 top-2.5 text-ink-faint" />
                       <input
                         type="email"
                         value={extEmail}
                         onChange={(e) => setExtEmail(e.target.value)}
                         placeholder="mashgiach@email.com"
-                        className="w-full pl-7.5 pr-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        className="w-full pl-7.5 pr-2.5 py-1.5 text-xs rounded-lg bg-surface border border-gold/40 text-ink focus:outline-none focus:ring-2 focus:ring-gold"
                       />
                     </div>
                   </div>
@@ -480,9 +480,9 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
           </div>
 
           {/* Section 3: Menu Attachment & Kashrut Notes */}
-          <div className="pt-3 border-t border-stone-200 dark:border-stone-800 space-y-3">
+          <div className="pt-3 border-t border-line space-y-3">
             <div>
-              <label className="block font-semibold text-stone-700 dark:text-stone-300 mb-1">
+              <label className="block font-semibold text-ink-soft mb-1">
                 Event Menu Attachment (PDF or Image)
               </label>
               <div className="flex items-center gap-3">
@@ -496,9 +496,9 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="px-3 py-2 rounded-xl border border-amber-200/90 dark:border-amber-800/80 bg-amber-50/60 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200 hover:bg-amber-100/70 dark:hover:bg-amber-900/40 flex items-center gap-1.5 transition cursor-pointer font-medium shadow-2xs"
+                  className="px-3 py-2 rounded-xl border border-gold/40 bg-gold-wash text-gold-ink hover:bg-gold/20 flex items-center gap-1.5 transition cursor-pointer font-medium tactile-1 pressable"
                 >
-                  <Paperclip className="w-3.5 h-3.5 text-amber-600" />
+                  <Paperclip className="w-3.5 h-3.5 text-gold-deep" />
                   <span>{menuFileName ? 'Replace Menu File' : 'Upload Event Menu'}</span>
                 </button>
                 {menuFileName && (
@@ -511,7 +511,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
             </div>
 
             <div>
-              <label className="block font-semibold text-stone-700 dark:text-stone-300 mb-1">
+              <label className="block font-semibold text-ink-soft mb-1">
                 Kashrut Supervision Notes
               </label>
               <textarea
@@ -519,18 +519,18 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="e.g. Glatt Meat buffet; all pastries Parve; require unbroken Cambro delivery seals upon arrival."
-                className="w-full px-3 py-2 text-xs rounded-xl bg-stone-50/70 dark:bg-slate-800 border border-stone-200 dark:border-stone-700 text-stone-900 dark:text-white placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-amber-500/25 focus:border-amber-500"
+                className="w-full px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder:text-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
               />
             </div>
           </div>
 
           {/* Section 4: Specific Event Tasks Checklist */}
-          <div className="pt-3 border-t border-stone-200 dark:border-stone-800 space-y-2">
+          <div className="pt-3 border-t border-line space-y-2">
             <div className="flex items-center justify-between">
-              <label className="font-bold text-stone-800 dark:text-stone-200">
+              <label className="font-bold text-ink">
                 Assigned Event Tasks ({customTasks.length})
               </label>
-              <span className="text-[11px] text-stone-400">
+              <span className="text-[11px] text-ink-faint">
                 Mashgiach checks these off on-site
               </span>
             </div>
@@ -539,16 +539,16 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
               {customTasks.map((t, idx) => (
                 <div
                   key={idx}
-                  className="flex items-center justify-between p-2 rounded-lg bg-stone-50 dark:bg-slate-800 border border-stone-200/80 dark:border-stone-700/70"
+                  className="flex items-center justify-between p-2 rounded-lg bg-sunken border border-line/70"
                 >
-                  <span className="text-xs text-stone-800 dark:text-stone-200 flex items-center gap-2">
-                    <FileText className="w-3 h-3 text-amber-600 shrink-0" />
+                  <span className="text-xs text-ink flex items-center gap-2">
+                    <FileText className="w-3 h-3 text-gold-deep shrink-0" />
                     {t}
                   </span>
                   <button
                     type="button"
                     onClick={() => handleRemoveTask(idx)}
-                    className="p-1 text-stone-400 hover:text-rose-500 transition"
+                    className="p-1 text-ink-faint hover:text-rose-500 transition"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -568,12 +568,12 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   }
                 }}
                 placeholder="Add custom task (e.g. Verify wine bottle seals)"
-                className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-stone-50 dark:bg-slate-800 border border-stone-200 dark:border-stone-700 text-stone-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500/25 focus:border-amber-500"
+                className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
               />
               <button
                 type="button"
                 onClick={handleAddTask}
-                className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center gap-1 transition shadow-2xs"
+                className="px-3.5 py-1.5 rounded-lg bg-gold hover:bg-gold-deep text-white font-semibold flex items-center gap-1 transition tactile-1 pressable"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Add</span>
@@ -582,18 +582,18 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
           </div>
 
           {/* Footer Actions */}
-          <div className="pt-4 border-t border-stone-200 dark:border-stone-800 flex items-center justify-end gap-3">
+          <div className="pt-4 border-t border-line flex items-center justify-end gap-3">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 font-semibold text-stone-600 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer"
+              className="px-4 py-2 font-semibold text-ink-soft hover:bg-sunken rounded-xl transition cursor-pointer"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={isLoading}
-              className="px-5 py-2 font-bold rounded-xl bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 text-white shadow-md shadow-amber-600/20 flex items-center gap-1.5 transition disabled:opacity-50 cursor-pointer"
+              className="px-5 py-2 font-bold rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 flex items-center gap-1.5 transition disabled:opacity-50 cursor-pointer pressable"
             >
               {isLoading ? (
                 <>
