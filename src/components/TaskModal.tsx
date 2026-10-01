@@ -2,7 +2,17 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Clock, Calendar, CheckSquare, Users, Plus, Trash2, CalendarDays, CheckCircle2, ListFilter } from 'lucide-react';
 import { Task, TaskInputType } from '../types';
 import { DAYS_MAP } from '../lib/utils';
-import { categoryVars } from '../lib/categoryStyle';
+import {
+  categoryVars,
+  categoryVarsForHue,
+  PRESET_CATEGORIES,
+  CATEGORY_PALETTE,
+  loadCustomCategories,
+  saveCustomCategory,
+  deleteCustomCategory,
+  refreshCustomCategories,
+  type CustomCategory,
+} from '../lib/categoryStyle';
 import { MonthlyCalendarPicker } from './MonthlyCalendarPicker';
 
 interface TaskModalProps {
@@ -11,20 +21,8 @@ interface TaskModalProps {
   onSave: (taskData: Partial<Task>) => void;
   taskToEdit?: Task | null;
   knownWorkers: Array<{ email: string; name: string }>;
+  currentUserEmail?: string | null;
 }
-
-const CATEGORY_SUGGESTIONS = [
-  'Opening Procedures',
-  'Closing Procedures',
-  'Logistics',
-  'Food Safety',
-  'Sanitation',
-  'Inventory',
-  'Operations',
-  'Security',
-  'Maintenance',
-  'Customer Service',
-];
 
 const PRESET_STATUS_GROUPS = [
   {
@@ -55,16 +53,72 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   onSave,
   taskToEdit,
   knownWorkers,
+  currentUserEmail,
 }) => {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [category, setCategory] = useState('Logistics');
+  const [category, setCategory] = useState<string>(PRESET_CATEGORIES[0]);
   const [inputType, setInputType] = useState<TaskInputType>('yes_no');
   const [targetTime, setTargetTime] = useState('09:00 AM');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
   const [assignType, setAssignType] = useState<'all' | 'specific'>('all');
   const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
   const [customWorkerEmail, setCustomWorkerEmail] = useState('');
+
+  // Category picker state — presets + the user's own saved customs.
+  const [customCats, setCustomCats] = useState<CustomCategory[]>([]);
+  const [showOtherForm, setShowOtherForm] = useState(false);
+  const [otherName, setOtherName] = useState('');
+  const [otherHue, setOtherHue] = useState<number>(CATEGORY_PALETTE[0]);
+  const [confirmDeleteCat, setConfirmDeleteCat] = useState<string | null>(null);
+
+  // All pickable categories: presets, the user's saved customs, and — when
+  // editing an older task — its current value so nothing silently changes.
+  const categoryOptions: string[] = [...PRESET_CATEGORIES];
+  for (const c of customCats) {
+    if (!categoryOptions.some((o) => o.toLowerCase() === c.name.toLowerCase())) {
+      categoryOptions.push(c.name);
+    }
+  }
+  const trimmedCategory = category.trim();
+  const isLegacyCategory =
+    trimmedCategory.length > 0 &&
+    !categoryOptions.some((o) => o.toLowerCase() === trimmedCategory.toLowerCase());
+  if (isLegacyCategory) categoryOptions.push(trimmedCategory);
+
+  const isCustomCat = (name: string) =>
+    customCats.some((c) => c.name.toLowerCase() === name.toLowerCase());
+
+  const pickCategory = (name: string) => {
+    setCategory(name);
+    setShowOtherForm(false);
+    setConfirmDeleteCat(null);
+  };
+
+  const addCustomCategory = () => {
+    const name = otherName.trim();
+    if (!name || !currentUserEmail) return;
+    const updated = saveCustomCategory(currentUserEmail, { name, hue: otherHue });
+    setCustomCats(updated);
+    setCategory(name);
+    setShowOtherForm(false);
+    setOtherName('');
+    setOtherHue(CATEGORY_PALETTE[0]);
+  };
+
+  const removeCustomCategory = (name: string) => {
+    if (confirmDeleteCat !== name) {
+      setConfirmDeleteCat(name); // first tap arms, second tap deletes
+      return;
+    }
+    if (currentUserEmail) {
+      setCustomCats(deleteCustomCategory(currentUserEmail, name));
+    }
+    setConfirmDeleteCat(null);
+    if (trimmedCategory.toLowerCase() === name.toLowerCase()) {
+      setCategory(PRESET_CATEGORIES[0]);
+    }
+  };
 
   // Custom Status Select State
   const [customStatusOptions, setCustomStatusOptions] = useState<string[]>([
@@ -90,6 +144,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     const todayStr = new Date().toISOString().split('T')[0];
     // Fresh guard every time the modal opens.
     submitGuard.current = false;
+
+    // Load this user's saved custom categories ("Other" entries).
+    setCustomCats(loadCustomCategories(currentUserEmail));
+    refreshCustomCategories(currentUserEmail);
+    setShowOtherForm(false);
+    setOtherName('');
+    setOtherHue(CATEGORY_PALETTE[0]);
+    setConfirmDeleteCat(null);
 
     if (taskToEdit) {
       setTitle(taskToEdit.title);
@@ -130,7 +192,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     } else {
       setTitle('');
       setDescription('');
-      setCategory('Logistics');
+      setCategory(PRESET_CATEGORIES[0]);
       setInputType('yes_no');
       setTargetTime('09:00 AM');
       setPriority('medium');
@@ -327,45 +389,134 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               <label className="block font-semibold text-ink-soft mb-1">
                 Category
               </label>
-              <div className="flex items-center gap-2">
-                <span
-                  className="cat-dot w-4 h-4 rounded-full shrink-0 tactile-1"
-                  style={categoryVars(category.trim() || 'General')}
-                  title="This category's automatic color"
-                />
-                <input
-                  id="task-category-input"
-                  type="text"
-                  list="category-options"
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value)}
-                  placeholder="e.g. Opening Procedures"
-                  className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink"
-                />
+              <div className="flex flex-wrap gap-1.5">
+                {categoryOptions.map((c) => {
+                  const selected = trimmedCategory.toLowerCase() === c.toLowerCase();
+                  const custom = isCustomCat(c);
+                  return (
+                    <span
+                      key={c}
+                      style={categoryVars(c)}
+                      className={`cat-chip inline-flex items-center gap-1 pl-2 ${
+                        custom ? 'pr-1' : 'pr-2.5'
+                      } py-1 rounded-full text-[11px] font-bold border transition tactile-1 ${
+                        selected ? 'cat-ring ring-2' : 'hover:border-line-strong'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => pickCategory(c)}
+                        className={`inline-flex items-center gap-1.5 cursor-pointer ${
+                          selected ? 'cat-text' : ''
+                        }`}
+                        title={custom ? 'Your saved category — tap to use' : 'Tap to use'}
+                      >
+                        <span className="cat-dot w-2 h-2 rounded-full shrink-0" />
+                        {c}
+                      </button>
+                      {custom && (
+                        <button
+                          type="button"
+                          onClick={() => removeCustomCategory(c)}
+                          title={confirmDeleteCat === c ? 'Tap again to delete' : 'Delete this category'}
+                          className={`shrink-0 w-4.5 h-4.5 p-0.5 rounded-full inline-flex items-center justify-center transition cursor-pointer ${
+                            confirmDeleteCat === c
+                              ? 'bg-red-500 text-white'
+                              : 'text-ink-faint hover:text-red-600 hover:bg-red-500/10'
+                          }`}
+                        >
+                          {confirmDeleteCat === c ? (
+                            <CheckCircle2 className="w-3 h-3" />
+                          ) : (
+                            <X className="w-3 h-3" />
+                          )}
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowOtherForm((v) => !v);
+                    setConfirmDeleteCat(null);
+                  }}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold border border-dashed transition cursor-pointer tactile-1 ${
+                    showOtherForm
+                      ? 'border-gold bg-gold-wash text-gold-ink'
+                      : 'border-line-strong text-ink-soft hover:border-gold hover:text-gold-ink'
+                  }`}
+                >
+                  <Plus className="w-3 h-3" />
+                  Other…
+                </button>
               </div>
-              <datalist id="category-options">
-                {CATEGORY_SUGGESTIONS.map((c) => (
-                  <option key={c} value={c} />
-                ))}
-              </datalist>
-              <div className="flex flex-wrap gap-1.5 mt-2">
-                {CATEGORY_SUGGESTIONS.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setCategory(c)}
-                    style={categoryVars(c)}
-                    className={`cat-chip inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border transition cursor-pointer hover:scale-105 ${
-                      category.trim().toLowerCase() === c.toLowerCase() ? 'ring-2 cat-ring' : ''
-                    }`}
-                  >
-                    <span className="cat-dot w-1.5 h-1.5 rounded-full" />
-                    {c}
-                  </button>
-                ))}
-              </div>
+
+              {showOtherForm && (
+                <div className="mt-2 p-3 rounded-2xl bg-sunken border border-line tactile-1 animate-fade-in">
+                  <label className="block text-[11px] font-bold text-ink-soft mb-1">
+                    Name your category
+                  </label>
+                  <input
+                    type="text"
+                    value={otherName}
+                    onChange={(e) => setOtherName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addCustomCategory();
+                      }
+                    }}
+                    placeholder="e.g. Pesach Prep"
+                    className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-surface text-ink placeholder:text-ink-faint focus:outline-none focus:border-gold"
+                  />
+                  <label className="block text-[11px] font-bold text-ink-soft mt-2.5 mb-1.5">
+                    Pick its color
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {CATEGORY_PALETTE.map((h) => (
+                      <button
+                        key={h}
+                        type="button"
+                        onClick={() => setOtherHue(h)}
+                        style={categoryVarsForHue(h)}
+                        title={`Color ${h}°`}
+                        className={`cat-dot w-7 h-7 rounded-full transition cursor-pointer pressable ${
+                          otherHue === h ? 'ring-2 ring-offset-2 ring-gold cat-ring' : 'hover:scale-110'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between mt-3">
+                    <span
+                      className="cat-chip inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border"
+                      style={categoryVarsForHue(otherHue)}
+                    >
+                      <span className="cat-dot w-2 h-2 rounded-full" />
+                      <span className="cat-text">{otherName.trim() || 'Preview'}</span>
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowOtherForm(false)}
+                        className="px-3 py-1.5 rounded-xl text-[11px] font-bold text-ink-soft hover:text-ink transition cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={addCustomCategory}
+                        disabled={!otherName.trim()}
+                        className="px-3.5 py-1.5 rounded-xl text-[11px] font-black bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 pressable transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Save category
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
               <p className="text-[10px] text-ink-faint mt-1.5 leading-snug">
-                Every category gets its own color automatically — on cards, in the table, and in the filter bar.
+                Your <em>Other</em> categories are saved for next time — tap the × on one to remove it.
               </p>
             </div>
 

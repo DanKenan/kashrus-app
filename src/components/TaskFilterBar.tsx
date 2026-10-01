@@ -152,7 +152,7 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
                 onClick={() => onCategoryChange(active ? 'all' : c)}
                 style={categoryVars(c)}
                 className={`shrink-0 inline-flex items-center gap-1.5 pl-2 pr-3 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer ${
-                  active ? 'cat-chip cat-ring ring-2 tactile-2' : 'bg-surface text-ink-soft border-line hover:border-line-strong tactile-1'
+                  active ? 'cat-chip cat-ring cat-text ring-2 tactile-2' : 'bg-surface text-ink-soft border-line hover:border-line-strong tactile-1'
                 }`}
                 title={active ? `Show all categories` : `Show only ${c}`}
               >
