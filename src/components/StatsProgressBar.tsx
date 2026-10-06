@@ -6,7 +6,8 @@ import {
   UserCheck,
   ShieldCheck,
   Building2,
-  Activity
+  Activity,
+  Trash2
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -24,6 +25,8 @@ interface StatsProgressBarProps {
   venueCertification?: string;
   isRealtimeConnected?: boolean;
   activeWorkersCount?: number;
+  onDeleteVenue?: () => void;
+  isAdmin?: boolean;
 }
 
 export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
@@ -40,6 +43,8 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
   venueCertification,
   isRealtimeConnected,
   activeWorkersCount,
+  onDeleteVenue,
+  isAdmin = false,
 }) => {
   const isAllDone = totalTasks > 0 && completedTasks === totalTasks;
   const remainingTasks = Math.max(0, totalTasks - completedTasks);
@@ -107,8 +112,19 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
           </div>
         </div>
 
-        {/* Live Status Badge */}
-        <div className="flex items-center gap-2 self-start sm:self-center">
+        {/* Live Status Badge & Admin Delete Action */}
+        <div className="flex items-center gap-2 self-start sm:self-center flex-wrap">
+          {isAdmin && onDeleteVenue && (
+            <button
+              type="button"
+              onClick={onDeleteVenue}
+              className="pressable cursor-pointer inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold text-rose-600 dark:text-rose-400 bg-rose-50/80 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition tactile-1"
+              title="Delete this venue establishment"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Delete Venue</span>
+            </button>
+          )}
           <span className={`px-3 py-1 rounded-xl text-xs font-bold tracking-tight inline-flex items-center gap-1.5 tactile-1 ${status.color}`}>
             <Activity className="w-3.5 h-3.5 animate-pulse" />
             <span>{status.label}</span>

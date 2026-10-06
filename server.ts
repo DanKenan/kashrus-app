@@ -295,15 +295,6 @@ const DEFAULT_VENUES: Venue[] = [
 
 const DEFAULT_USERS: UserProfile[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', password: 'Kosher2026!' },
-  { id: 'usr_coordinator', agencyId: 'agency-hkc', email: 'coordinator@hartfordkashrut.org', name: 'Kashrut Coordinator', role: 'coordinator', venueId: 'venue-crown-market', avatarColor: '#0284c7', password: 'coord123', permissions: { canFillTasks: true, canAssignTasks: true } },
-  { id: 'usr_owner_crown', agencyId: 'agency-hkc', email: 'owner@kosherkitchen.com', name: 'Crown Market Owner', role: 'owner', venueId: 'venue-crown-market', avatarColor: '#d97706', password: 'owner123', permissions: { canFillTasks: false, canAssignTasks: false } },
-  { id: 'usr_owner_bakery', agencyId: 'agency-hkc', email: 'owner.bakery@kosherkitchen.com', name: 'Shalom Bakery Owner', role: 'owner', venueId: 'venue-hartford-bakery', avatarColor: '#b45309', password: 'owner123', permissions: { canFillTasks: false, canAssignTasks: false } },
-  { id: 'usr_owner_factory', agencyId: 'agency-hkc', email: 'qa@ne-kosherfoods.com', name: 'Factory QA Director', role: 'owner', venueId: 'venue-hartford-manufacturing', avatarColor: '#059669', password: 'owner123', permissions: { canFillTasks: false, canAssignTasks: false } },
-  { id: 'usr_worker1', agencyId: 'agency-hkc', email: 'alex@company.com', name: 'Alex Rivera (Mashgiach)', role: 'mashgiach', venueId: 'venue-crown-market', avatarColor: '#10b981', password: 'worker123', permissions: { canFillTasks: true, canAssignTasks: false } },
-  { id: 'usr_worker2', agencyId: 'agency-hkc', email: 'maria@company.com', name: 'Maria Santos (Mashgiach)', role: 'mashgiach', venueId: 'venue-crown-market', avatarColor: '#f59e0b', password: 'worker123', permissions: { canFillTasks: true, canAssignTasks: false } },
-  { id: 'usr_worker3', agencyId: 'agency-hkc', email: 'david@company.com', name: 'David Chen (Mashgiach)', role: 'mashgiach', venueId: 'venue-crown-market', avatarColor: '#8b5cf6', password: 'worker123', permissions: { canFillTasks: true, canAssignTasks: false } },
-  { id: 'usr_worker_bakery', agencyId: 'agency-hkc', email: 'sarah.baker@kosherkitchen.com', name: 'Sarah Levi (Mashgicha)', role: 'mashgiach', venueId: 'venue-hartford-bakery', avatarColor: '#06b6d4', password: 'worker123', permissions: { canFillTasks: true, canAssignTasks: false } },
-  { id: 'usr_worker_factory', agencyId: 'agency-hkc', email: 'factory.mashgiach@hartfordkashrut.org', name: 'Rabbi Shimon Klein (Factory Mashgiach)', role: 'mashgiach', venueId: 'venue-hartford-manufacturing', avatarColor: '#6366f1', password: 'worker123', permissions: { canFillTasks: true, canAssignTasks: false } },
 ];
 
 function generateTemplateTasks(venueId: string, templateType: string = 'restaurant', agencyId: string = 'agency-hkc'): TaskItem[] {
@@ -1146,7 +1137,7 @@ function loadState() {
           users = [DEFAULT_USERS[0]];
         }
       } else {
-        if (Array.isArray(parsed.venues) && parsed.venues.length > 0) {
+        if (Array.isArray(parsed.venues)) {
           venues = parsed.venues.map((v: any) => ({
             ...v,
             agencyId: v.agencyId || 'agency-hkc',
@@ -1169,22 +1160,6 @@ function loadState() {
                 : {}),
             };
           });
-
-          // Ensure starter tasks for default venues exist if missing
-          for (const defaultVenue of DEFAULT_VENUES) {
-            if (!tasks.some((t) => t.venueId === defaultVenue.id)) {
-              const starter = generateTemplateTasks(
-                defaultVenue.id,
-                defaultVenue.category.toLowerCase().includes('bakery')
-                  ? 'bakery'
-                  : defaultVenue.category.toLowerCase().includes('catering')
-                  ? 'catering'
-                  : 'restaurant',
-                defaultVenue.agencyId || 'agency-hkc'
-              );
-              tasks.push(...starter);
-            }
-          }
         }
 
         if (Array.isArray(parsed.historyLogs)) {
@@ -1228,11 +1203,10 @@ function loadState() {
             };
           });
 
-          // Ensure admin and default owners/workers exist
-          for (const defUser of DEFAULT_USERS) {
-            if (!users.some((u) => u.email.toLowerCase() === defUser.email.toLowerCase())) {
-              users.push({ ...defUser });
-            }
+          // Ensure primary agency admin exists
+          const adminUser = DEFAULT_USERS[0];
+          if (!users.some((u) => u.email.toLowerCase() === adminUser.email.toLowerCase())) {
+            users.unshift({ ...adminUser });
           }
         }
 
@@ -1867,11 +1841,6 @@ app.delete('/api/venues/:id', (req, res) => {
     if (caller) {
       callerAgencyId = caller.agencyId || 'agency-hkc';
     }
-  }
-
-  const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === callerAgencyId);
-  if (agencyVenues.length <= 1) {
-    return res.status(400).json({ error: 'Cannot delete the only remaining venue for your agency.' });
   }
 
   const index = venues.findIndex((v) => v.id === id);
