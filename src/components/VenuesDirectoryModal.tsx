@@ -189,9 +189,10 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                         <button
                           title="Delete Venue Platform"
                           onClick={(e) => handleDelete(e, venue)}
-                          className="text-ink-faint hover:text-rose-500 p-1 rounded-md hover:bg-rose-50 dark:hover:bg-rose-950/40 transition opacity-0 group-hover:opacity-100 cursor-pointer"
+                          className="pressable flex items-center gap-1 text-xs text-rose-600 dark:text-rose-400 p-1.5 rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition cursor-pointer shrink-0"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
+                          <span className="text-[11px] font-semibold hidden sm:inline">Delete</span>
                         </button>
                       )}
                     </div>

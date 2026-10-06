@@ -27,13 +27,6 @@ import { refreshCustomCategories } from './lib/categoryStyle';
 
 const DEFAULT_USERS: User[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', permissions: { canFillTasks: true, canAssignTasks: true } },
-  { id: 'usr_coord', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'coordinator@hartfordkashrut.org', name: 'Rabbi Levy (Coordinator)', role: 'coordinator', avatarColor: '#0284c7', permissions: { canFillTasks: true, canAssignTasks: true } },
-  { id: 'usr_owner', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'owner@crownmarket.com', name: 'Crown Market Owner', role: 'owner', avatarColor: '#8b5cf6', venueId: 'venue_crown_market', permissions: { canFillTasks: false, canAssignTasks: false } },
-  { id: 'usr_mashgiach1', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'alex@company.com', name: 'Alex Rivera (Mashgiach)', role: 'mashgiach', avatarColor: '#10b981', venueId: 'venue_crown_market', permissions: { canFillTasks: true, canAssignTasks: false } },
-  { id: 'usr_mashgiach2', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'maria@company.com', name: 'Maria Santos (Mashgiach)', role: 'mashgiach', avatarColor: '#f59e0b', venueId: 'venue_crown_market', permissions: { canFillTasks: true, canAssignTasks: false } },
-  { id: 'usr_mashgiach3', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'david@company.com', name: 'David Chen (Mashgiach)', role: 'mashgiach', avatarColor: '#6366f1', venueId: 'venue_crown_market', permissions: { canFillTasks: true, canAssignTasks: false } },
-  { id: 'usr_worker_factory', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'factory.mashgiach@hartfordkashrut.org', name: 'Rabbi Shimon Klein (Factory Mashgiach)', role: 'mashgiach', avatarColor: '#6366f1', venueId: 'venue-hartford-manufacturing', permissions: { canFillTasks: true, canAssignTasks: false } },
-  { id: 'usr_owner_factory', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', email: 'qa@ne-kosherfoods.com', name: 'Factory QA Director', role: 'owner', avatarColor: '#059669', venueId: 'venue-hartford-manufacturing', permissions: { canFillTasks: false, canAssignTasks: false } },
 ];
 
 export default function App() {
@@ -1116,6 +1109,27 @@ export default function App() {
                 venueCertification={currentVenue?.certification}
                 isRealtimeConnected={isRealtimeConnected}
                 activeWorkersCount={activeWorkersCount}
+                isAdmin={currentUser?.role === 'admin'}
+                onDeleteVenue={
+                  currentUser?.role === 'admin' && currentVenue
+                    ? () => {
+                        const targetVenue = currentVenue;
+                        setConfirmModalConfig({
+                          isOpen: true,
+                          title: `Delete "${targetVenue.name}"?`,
+                          message: `Are you sure you want to delete "${targetVenue.name}" and all its shift assignments and logs? This action cannot be undone.`,
+                          confirmText: 'Delete Venue',
+                          cancelText: 'Cancel',
+                          variant: 'danger',
+                          icon: 'trash',
+                          onConfirm: async () => {
+                            setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+                            await handleDeleteVenue(targetVenue.id);
+                          },
+                        });
+                      }
+                    : undefined
+                }
               />
             )}
 
