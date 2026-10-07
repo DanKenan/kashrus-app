@@ -4,6 +4,8 @@ import path from 'path';
 import fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
+import { initializeApp, getApps, getApp } from 'firebase-admin';
+import { getFirestore } from 'firebase-admin/firestore';
 
 const PORT = 3000;
 const app = express();
@@ -1095,15 +1097,9 @@ let approvedIngredients: ApprovedIngredientItem[] = [...INITIAL_APPROVED_INGREDI
 let factoryReports: FactoryAuditReportItem[] = [];
 
 // Load persisted state if exists
-function loadState() {
+// Hydrate all in-memory state from a parsed snapshot (local file or Firestore).
+function hydrateState(parsed: any) {
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (fs.existsSync(DATA_FILE)) {
-      const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-      const parsed = JSON.parse(raw);
-
       if (parsed.isDemoCleared !== undefined) {
         isDemoCleared = Boolean(parsed.isDemoCleared);
       }
@@ -1236,10 +1232,40 @@ function loadState() {
       }
 
       if (parsed.currentWorkDate) currentWorkDate = parsed.currentWorkDate;
+  } catch (err) {
+    console.warn('Could not hydrate state:', err);
+  }
+}
+
+function loadState() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, 'utf-8');
+      hydrateState(JSON.parse(raw));
     }
   } catch (err) {
     console.warn('Could not read store.json, using defaults:', err);
   }
+}
+
+// Single snapshot of everything the server persists.
+function stateSnapshot() {
+  return {
+    agencies,
+    venues,
+    tasks,
+    historyLogs,
+    users,
+    events,
+    airtableConfigs,
+    approvedIngredients,
+    factoryReports,
+    currentWorkDate,
+    isDemoCleared,
+  };
 }
 
 function saveState() {
@@ -1247,30 +1273,94 @@ function saveState() {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(
-      DATA_FILE,
-      JSON.stringify(
-        {
-          agencies,
-          venues,
-          tasks,
-          historyLogs,
-          users,
-          events,
-          airtableConfigs,
-          approvedIngredients,
-          factoryReports,
-          currentWorkDate,
-          isDemoCleared,
-        },
-        null,
-        2
-      ),
-      'utf-8'
-    );
+    fs.writeFileSync(DATA_FILE, JSON.stringify(stateSnapshot(), null, 2), 'utf-8');
   } catch (err) {
     console.warn('Could not save store.json:', err);
   }
+  // Best-effort durable save to Firestore (never blocks, never throws).
+  persistToFirestore();
+}
+
+// ---------------------------------------------------------------------------
+// Firestore durable persistence.
+//
+// The local store.json lives on the container's ephemeral filesystem: every
+// deploy or server restart wipes it. Firestore is the durable copy.
+// Writes are best-effort and never block request handling; if Firestore is
+// unreachable (e.g. local dev without GCP credentials) the app keeps working
+// exactly as before on the local file.
+// ---------------------------------------------------------------------------
+const FIRESTORE_STATE_DOC = 'app-state/main';
+let firestoreDb: any = null;
+
+function getFirestoreConfig(): { projectId?: string; databaseId?: string } {
+  let fileConfig: any = {};
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), 'firebase-applet-config.json'), 'utf-8');
+    fileConfig = JSON.parse(raw);
+  } catch {
+    // config file not present — env vars still work
+  }
+  return {
+    projectId: process.env.FIREBASE_PROJECT_ID || fileConfig.projectId,
+    databaseId: process.env.FIRESTORE_DATABASE_ID || fileConfig.firestoreDatabaseId,
+  };
+}
+
+function initFirestore() {
+  try {
+    // Only attempt Firestore where GCP credentials can exist: Cloud Run
+    // (K_SERVICE is always set there), an explicit service-account key, or an
+    // explicit opt-in. Anywhere else the ADC lookup would hang and fail, so
+    // stay on the local file.
+    const mayHaveCredentials =
+      process.env.K_SERVICE ||
+      process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+      process.env.FIRESTORE_ENABLED === 'true';
+    if (!mayHaveCredentials) {
+      console.log('[Firestore] Not on Cloud Run — durable persistence disabled (file only).');
+      return;
+    }
+    const { projectId, databaseId } = getFirestoreConfig();
+    if (!projectId) {
+      console.log('[Firestore] No project configured — durable persistence disabled (file only).');
+      return;
+    }
+    const app = getApps().length > 0 ? getApp() : initializeApp({ projectId });
+    firestoreDb = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+    console.log(`[Firestore] Durable persistence enabled (db: ${databaseId || '(default)'}).`);
+  } catch (err: any) {
+    firestoreDb = null;
+    console.warn('[Firestore] Init failed — durable persistence disabled (file only):', err?.message);
+  }
+}
+
+// Load durable state at boot. Returns true when Firestore had state to apply.
+async function loadStateFromFirestore(): Promise<boolean> {
+  if (!firestoreDb) return false;
+  try {
+    const snap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
+    if (!snap.exists) {
+      console.log('[Firestore] No saved state yet — starting from local file.');
+      return false;
+    }
+    hydrateState(snap.data());
+    console.log('[Firestore] Loaded durable state.');
+    return true;
+  } catch (err: any) {
+    console.warn('[Firestore] Could not load state:', err?.message);
+    return false;
+  }
+}
+
+// Fire-and-forget durable write. Safe to call from sync code paths.
+function persistToFirestore() {
+  if (!firestoreDb) return;
+  const payload = { ...stateSnapshot(), savedAt: Date.now() };
+  firestoreDb
+    .doc(FIRESTORE_STATE_DOC)
+    .set(payload)
+    .catch((err: any) => console.warn('[Firestore] Background save failed:', err?.message));
 }
 
 loadState();
@@ -3251,6 +3341,20 @@ app.post('/api/factory-reports', (req, res) => {
 
 // Vite middleware for development & static serving for production
 async function startServer() {
+  // Durable state first: Firestore wins over the ephemeral local file.
+  initFirestore();
+  if (firestoreDb) {
+    const loadPromise = loadStateFromFirestore();
+    // Swallow late rejections: if the timeout below wins the race, the
+    // Firestore attempt must not crash the process when it settles.
+    loadPromise.catch(() => {});
+    const loaded = await Promise.race([
+      loadPromise,
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 8000)),
+    ]);
+    if (!loaded) console.log('[Firestore] Continuing with local file state.');
+  }
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
