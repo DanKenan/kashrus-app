@@ -3,7 +3,6 @@ import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer as createViteServer } from 'vite';
 import { initializeApp, getApps, getApp } from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
 
@@ -3356,6 +3355,8 @@ async function startServer() {
   }
 
   if (process.env.NODE_ENV !== 'production') {
+    // Dynamic import so production containers don't need vite installed.
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

@@ -35,8 +35,17 @@ jobs:
           # make sure the Artifact Registry repo exists (idempotent)
           gcloud artifacts repositories describe "$REPO" --location="$REGION" --project="$PROJECT" >/dev/null 2>&1 || \
             gcloud artifacts repositories create "$REPO" --repository-format=docker --location="$REGION" --project="$PROJECT" --description="Built containers for Cloud Run deploys"
+          # Carry over the live frontend config so the new bundle behaves identically
+          # (VITE_ vars are baked in at build time). Values never leave the runner.
+          VITE_ENVS=$(gcloud run services describe workers-collaborative-dashboard --region="$REGION" --project="$PROJECT" --format=json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          envs={e['name']:e.get('value','') for e in d['spec']['template']['spec']['containers'][0].get('env',[]) if e['name'].startswith('VITE_')}
+          print(','.join(f'env={k}={v}' for k,v in envs.items()))")
+          PACK_ARGS="image=${IMAGE}"
+          [ -n "$VITE_ENVS" ] && PACK_ARGS="${PACK_ARGS},${VITE_ENVS}"
           # build with buildpacks, push to Artifact Registry (async: we poll status ourselves)
-          BUILD_ID=$(gcloud builds submit --async --pack "image=${IMAGE}" --project="$PROJECT" --format='value(id)' .)
+          BUILD_ID=$(gcloud builds submit --async --pack "$PACK_ARGS" --project="$PROJECT" --format='value(id)' .)
           echo "build id: $BUILD_ID"
           while true; do
             STATUS=$(gcloud builds describe "$BUILD_ID" --project="$PROJECT" --format='value(status)')
@@ -47,23 +56,13 @@ jobs:
             esac
             sleep 15
           done
-          # deploy the built image (avoids the --source annotation path)
-          # First remove the stale AI Studio "sources" annotation — the API rejects
-          # any update while it exists (its sources aren't referenced by containers).
-          SVC="projects/gen-lang-client-0875538181/locations/us-east1/services/workers-collaborative-dashboard"
-          TOKEN="$(gcloud auth print-access-token)"
-          ANN=$(curl -s -H "Authorization: Bearer ${TOKEN}" "https://run.googleapis.com/v2/${SVC}" | python3 -c "
-          import json,sys
-          d=json.load(sys.stdin)
-          a=d.get('template',{}).get('metadata',{}).get('annotations',{})
-          a.pop('run.googleapis.com/sources',None)
-          print(json.dumps({'template':{'metadata':{'annotations':a}}}))")
-          curl -s -X PATCH "https://run.googleapis.com/v2/${SVC}?updateMask=template.metadata.annotations" \
-            -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
-            -d "$ANN" -o /dev/null -w "clear-annotation HTTP:%{http_code}\n"
+          # NOTE: the stale AI Studio "run.googleapis.com/sources" annotation must be
+          # removed from the service once via the Cloud Console YAML editor
+          # (the v2 API rejects PATCHes touching run.googleapis.com/* annotations).
+          # After that one-time cleanup, plain --image deploys work.
           gcloud run deploy workers-collaborative-dashboard \
             --image="$IMAGE" \
             --region="$REGION" \
             --project="$PROJECT" \
             --allow-unauthenticated \
-            --set-env-vars=NODE_ENV=production
+            --update-env-vars=NODE_ENV=production
