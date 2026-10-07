@@ -56,13 +56,27 @@ jobs:
             esac
             sleep 15
           done
-          # NOTE: the stale AI Studio "run.googleapis.com/sources" annotation must be
-          # removed from the service once via the Cloud Console YAML editor
-          # (the v2 API rejects PATCHes touching run.googleapis.com/* annotations).
-          # After that one-time cleanup, plain --image deploys work.
-          gcloud run deploy workers-collaborative-dashboard \
-            --image="$IMAGE" \
-            --region="$REGION" \
-            --project="$PROJECT" \
-            --allow-unauthenticated \
-            --update-env-vars=NODE_ENV=production
+          # Deploy by replacing the service spec: this drops the stale AI Studio
+          # "run.googleapis.com/sources" annotation that blocks all updates,
+          # points at the new image, and ensures production mode — while
+          # preserving every other existing setting.
+          SVC_JSON=/tmp/svc.json
+          gcloud run services describe workers-collaborative-dashboard \
+            --region="$REGION" --project="$PROJECT" --format=json > "$SVC_JSON"
+          IMAGE="$IMAGE" python3 - "$SVC_JSON" <<'EOF'
+          import json, os, sys
+          p = sys.argv[1]
+          d = json.load(open(p))
+          d.pop('status', None)  # replace takes the spec, not observed status
+          tpl = d['spec']['template']
+          anns = tpl['metadata'].get('annotations', {})
+          anns.pop('run.googleapis.com/sources', None)
+          c = tpl['spec']['containers'][0]
+          c['image'] = os.environ['IMAGE']
+          env = c.get('env', [])
+          if not any(e['name'] == 'NODE_ENV' for e in env):
+              env.append({'name': 'NODE_ENV', 'value': 'production'})
+          c['env'] = env
+          json.dump(d, open(p, 'w'))
+          EOF
+          gcloud run services replace "$SVC_JSON" --region="$REGION" --project="$PROJECT"
