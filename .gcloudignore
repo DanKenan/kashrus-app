@@ -1,0 +1,7 @@
+# Files to exclude from the Cloud Run source upload (built fresh by buildpacks)
+node_modules/
+dist/
+.git/
+.gitignore
+dev-dist/
+*.log

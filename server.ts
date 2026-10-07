@@ -7,7 +7,7 @@ import { createServer as createViteServer } from 'vite';
 import { initializeApp, getApps, getApp } from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
 
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
 const server = http.createServer(app);
 
