@@ -1,5 +1,5 @@
-# Auto-deploy: every push to main builds and publishes the app to Cloud Run.
-# No clicks needed — push is the deploy.
+# Auto-deploy: every push to main builds a container with buildpacks
+# and deploys it to Cloud Run. No clicks needed — push is the deploy.
 name: Deploy to Cloud Run
 
 on:
@@ -25,11 +25,22 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Deploy to Cloud Run
+      - name: Build and deploy
         run: |
+          set -e
+          PROJECT=gen-lang-client-0875538181
+          REGION=us-east1
+          REPO=cloud-run-source-deploy
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT/$REPO/kashrus-app:${GITHUB_SHA}"
+          # make sure the Artifact Registry repo exists (idempotent)
+          gcloud artifacts repositories describe "$REPO" --location="$REGION" --project="$PROJECT" >/dev/null 2>&1 || \
+            gcloud artifacts repositories create "$REPO" --repository-format=docker --location="$REGION" --project="$PROJECT" --description="Built containers for Cloud Run deploys"
+          # build with buildpacks, push to Artifact Registry
+          gcloud builds submit --pack "image=${IMAGE}" --project="$PROJECT" .
+          # deploy the built image (avoids the --source annotation path)
           gcloud run deploy workers-collaborative-dashboard \
-            --source . \
-            --region us-east1 \
-            --project gen-lang-client-0875538181 \
+            --image="$IMAGE" \
+            --region="$REGION" \
+            --project="$PROJECT" \
             --allow-unauthenticated \
-            --set-env-vars NODE_ENV=production
+            --set-env-vars=NODE_ENV=production
