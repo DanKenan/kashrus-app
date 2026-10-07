@@ -463,7 +463,9 @@ export default function App() {
   };
 
   const handleVenueCreated = (newVenue: Venue) => {
-    setVenues((prev) => [...prev, newVenue]);
+    // Dedupe by id: guards against a VENUE_CREATED broadcast (or double
+    // submit) landing before/after this local append.
+    setVenues((prev) => (prev.some((v) => v.id === newVenue.id) ? prev : [...prev, newVenue]));
     setCurrentVenueId(newVenue.id);
     if (typeof window !== 'undefined') {
       localStorage.setItem('selected_venue_id', newVenue.id);
@@ -703,7 +705,9 @@ export default function App() {
       throw new Error(errData.error || 'Failed to add team member');
     }
     const data = await res.json();
-    setKnownUsers((prev) => [...prev, data.user]);
+    // Dedupe by id: the USERS_UPDATED broadcast can arrive before the
+    // POST resolves, in which case the member is already in state.
+    setKnownUsers((prev) => (prev.some((u) => u.id === data.user.id) ? prev : [...prev, data.user]));
     showToast(`Added new team member: ${data.user.name} (${data.user.email})`);
   };
 
