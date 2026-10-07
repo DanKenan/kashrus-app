@@ -48,6 +48,19 @@ jobs:
             sleep 15
           done
           # deploy the built image (avoids the --source annotation path)
+          # First remove the stale AI Studio "sources" annotation — the API rejects
+          # any update while it exists (its sources aren't referenced by containers).
+          SVC="projects/gen-lang-client-0875538181/locations/us-east1/services/workers-collaborative-dashboard"
+          TOKEN="$(gcloud auth print-access-token)"
+          ANN=$(curl -s -H "Authorization: Bearer ${TOKEN}" "https://run.googleapis.com/v2/${SVC}" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          a=d.get('template',{}).get('metadata',{}).get('annotations',{})
+          a.pop('run.googleapis.com/sources',None)
+          print(json.dumps({'template':{'metadata':{'annotations':a}}}))")
+          curl -s -X PATCH "https://run.googleapis.com/v2/${SVC}?updateMask=template.metadata.annotations" \
+            -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+            -d "$ANN" -o /dev/null -w "clear-annotation HTTP:%{http_code}\n"
           gcloud run deploy workers-collaborative-dashboard \
             --image="$IMAGE" \
             --region="$REGION" \
