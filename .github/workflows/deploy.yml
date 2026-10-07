@@ -35,8 +35,18 @@ jobs:
           # make sure the Artifact Registry repo exists (idempotent)
           gcloud artifacts repositories describe "$REPO" --location="$REGION" --project="$PROJECT" >/dev/null 2>&1 || \
             gcloud artifacts repositories create "$REPO" --repository-format=docker --location="$REGION" --project="$PROJECT" --description="Built containers for Cloud Run deploys"
-          # build with buildpacks, push to Artifact Registry
-          gcloud builds submit --pack "image=${IMAGE}" --project="$PROJECT" .
+          # build with buildpacks, push to Artifact Registry (async: we poll status ourselves)
+          BUILD_ID=$(gcloud builds submit --async --pack "image=${IMAGE}" --project="$PROJECT" --format='value(id)' .)
+          echo "build id: $BUILD_ID"
+          while true; do
+            STATUS=$(gcloud builds describe "$BUILD_ID" --project="$PROJECT" --format='value(status)')
+            echo "build status: $STATUS"
+            case "$STATUS" in
+              SUCCESS) break ;;
+              FAILURE|TIMEOUT|CANCELLED|EXPIRED) echo "build failed: $STATUS"; exit 1 ;;
+            esac
+            sleep 15
+          done
           # deploy the built image (avoids the --source annotation path)
           gcloud run deploy workers-collaborative-dashboard \
             --image="$IMAGE" \
