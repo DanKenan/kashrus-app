@@ -2,14 +2,12 @@ import React from 'react';
 import {
   Clock,
   ListChecks,
-  Sparkles,
   UserCheck,
   ShieldCheck,
   Building2,
   Activity,
   Trash2
 } from 'lucide-react';
-import confetti from 'canvas-confetti';
 
 interface StatsProgressBarProps {
   totalTasks: number;
@@ -48,15 +46,6 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
 }) => {
   const isAllDone = totalTasks > 0 && completedTasks === totalTasks;
   const remainingTasks = Math.max(0, totalTasks - completedTasks);
-
-  const triggerCelebration = () => {
-    confetti({
-      particleCount: 90,
-      spread: 75,
-      origin: { y: 0.6 },
-      colors: ['#d97706', '#059669', '#2563eb', '#f59e0b'],
-    });
-  };
 
   const getReadinessStatus = () => {
     if (totalTasks === 0) return { label: 'Awaiting Daily Roster', color: 'text-ink-soft bg-sunken border border-line' };
@@ -129,15 +118,6 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
             <Activity className="w-3.5 h-3.5 animate-pulse" />
             <span>{status.label}</span>
           </span>
-          {isAllDone && (
-            <button
-              onClick={triggerCelebration}
-              className="pressable cursor-pointer inline-flex items-center gap-1 px-3 py-1 rounded-xl text-xs font-bold bg-gradient-to-b from-emerald-600 to-emerald-700 text-white tactile-2 transition"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Celebrate</span>
-            </button>
-          )}
         </div>
       </div>
 

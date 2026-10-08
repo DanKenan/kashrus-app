@@ -52,8 +52,19 @@ export default function App() {
 
   // Current User state (supports sign out to null). The app always opens on
   // the public landing page first — a saved session is offered as
-  // "Continue as ..." rather than auto-entering the account.
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  // Session: restore the logged-in user on refresh so the dashboard opens
+  // directly instead of dropping back to the landing page.
+  const [currentUser, setCurrentUser] = useState<User | null>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('current_user');
+      if (saved) {
+        try {
+          return JSON.parse(saved);
+        } catch {}
+      }
+    }
+    return null;
+  });
 
   // Saved session from a previous visit (offered on the landing page).
   const [savedSession, setSavedSession] = useState<User | null>(() => {
