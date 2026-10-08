@@ -1355,11 +1355,20 @@ async function loadStateFromFirestore(): Promise<boolean> {
 // Fire-and-forget durable write. Safe to call from sync code paths.
 function persistToFirestore() {
   if (!firestoreDb) return;
-  const payload = { ...stateSnapshot(), savedAt: Date.now() };
-  firestoreDb
-    .doc(FIRESTORE_STATE_DOC)
-    .set(payload)
-    .catch((err: any) => console.warn('[Firestore] Background save failed:', err?.message));
+  try {
+    // Firestore rejects `undefined` field values with a *synchronous* throw
+    // inside .set() (a promise .catch() cannot catch it), and that throw used
+    // to escape into the request as a 500 HTML page. Strip undefineds with a
+    // JSON round-trip and keep the whole write guarded so a Firestore failure
+    // can never break the API response.
+    const payload = JSON.parse(JSON.stringify({ ...stateSnapshot(), savedAt: Date.now() }));
+    firestoreDb
+      .doc(FIRESTORE_STATE_DOC)
+      .set(payload)
+      .catch((err: any) => console.warn('[Firestore] Background save failed:', err?.message));
+  } catch (err: any) {
+    console.warn('[Firestore] Background save failed:', err?.message);
+  }
 }
 
 loadState();
