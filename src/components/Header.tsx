@@ -308,27 +308,6 @@ export const Header: React.FC<HeaderProps> = ({
                         <span>Reset Daily Venue Board</span>
                       </button>
 
-                      {onCleanSlate && (
-                        <button
-                          onClick={() => { setToolsMenuOpen(false); onCleanSlate(); }}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-rose-50 dark:hover:bg-rose-950/40 text-rose-700 dark:text-rose-400 transition text-left cursor-pointer"
-                          title="Wipe demo examples to start completely from scratch"
-                        >
-                          <Trash2 className="w-4 h-4 text-rose-600 dark:text-rose-400" />
-                          <span>Start From Scratch (Clear Demo Data)</span>
-                        </button>
-                      )}
-
-                      {onRestoreDemo && isDemoCleared && (
-                        <button
-                          onClick={() => { setToolsMenuOpen(false); onRestoreDemo(); }}
-                          className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 transition text-left cursor-pointer"
-                          title="Restore sample facilities, mashgichim and tasks"
-                        >
-                          <Sparkles className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                          <span>Restore Demo Examples</span>
-                        </button>
-                      )}
                     </div>
                   )}
                 </div>
@@ -636,25 +615,6 @@ export const Header: React.FC<HeaderProps> = ({
                 <span>Reset Daily Board Now</span>
               </button>
 
-              {onCleanSlate && (
-                <button
-                  onClick={() => { setMobileMenuOpen(false); onCleanSlate(); }}
-                  className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 cursor-pointer"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  <span>Start From Scratch (Clear Demo Data)</span>
-                </button>
-              )}
-
-              {onRestoreDemo && isDemoCleared && (
-                <button
-                  onClick={() => { setMobileMenuOpen(false); onRestoreDemo(); }}
-                  className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 cursor-pointer"
-                >
-                  <Sparkles className="w-4 h-4" />
-                  <span>Restore Demo Examples</span>
-                </button>
-              )}
             </div>
           )}
 
