@@ -1005,8 +1005,11 @@ function persistToFirestore() {
 }
 
 /** Backfill sortOrder for tasks that predate the manual-order feature,
- *  per venue, ordered by target time then creation. Idempotent. */
-function normalizeTaskOrder() {
+ *  per venue, ordered by target time then creation. Idempotent.
+ *  MUST run after the Firestore load (see startServer) — the async hydrate
+ *  overwrites in-memory tasks, so a module-level call gets wiped. */
+function normalizeTaskOrder(): boolean {
+  let changed = false;
   const venueIds = [...new Set(tasks.map((t) => t.venueId))];
   for (const vid of venueIds) {
     const group = tasks
@@ -1020,12 +1023,13 @@ function normalizeTaskOrder() {
       group.forEach((t, i) => {
         t.sortOrder = i;
       });
+      changed = true;
     }
   }
+  return changed;
 }
 
 loadState();
-normalizeTaskOrder();
 
 /** Ensure VAPID keys exist: env vars win, else persisted, else generate once. */
 function ensureVapidKeys() {
@@ -3237,6 +3241,11 @@ async function startServer() {
     ]);
     if (!loaded) console.log('[Firestore] Continuing with local file state.');
   }
+
+  // Backfill task ordering AFTER the durable load (the hydrate above replaces
+  // in-memory tasks, so this must not run at module level). Persists when it
+  // changes anything so the order sticks.
+  if (normalizeTaskOrder()) saveState();
 
   // Web Push: VAPID keys must be ready after durable state loads (env vars
   // take precedence over persisted keys inside ensureVapidKeys).
