@@ -17,6 +17,11 @@ import {
   Building2,
 } from 'lucide-react';
 import { KosherEvent, User as UserType, Venue } from '../types';
+import { getRoleLabel } from '../lib/permissions';
+
+// Staff roles that can be assigned to supervise an event — everyone on the
+// team except venue owners. ('worker' is the app's Mashgiach role.)
+const ASSIGNABLE_ROLES = ['admin', 'coordinator', 'mashgiach', 'worker'];
 
 interface CreateEventModalProps {
   isOpen: boolean;
@@ -51,7 +56,9 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
   const [mashgiachMode, setMashgiachMode] = useState<'assigned_user' | 'external' | 'unassigned'>('assigned_user');
   const [selectedMashgiachEmail, setSelectedMashgiachEmail] = useState<string>(() => {
     // Default to first mashgiach in list if available
-    const mashgiachList = availableMashgichim.filter(m => m.role === 'mashgiach');
+    const mashgiachList = availableMashgichim.filter((m) =>
+      ASSIGNABLE_ROLES.includes(m.role)
+    );
     return mashgiachList[0]?.email || '';
   });
   
@@ -84,7 +91,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
   // Filter mashgichim belonging to chosen venue or agency
   const relevantMashgichim = availableMashgichim.filter(
-    (u) => u.role === 'mashgiach' && (!u.venueId || u.venueId === venueId)
+    (u) => ASSIGNABLE_ROLES.includes(u.role) && (!u.venueId || u.venueId === venueId)
   );
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -409,7 +416,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     ) : (
                       relevantMashgichim.map((m) => (
                         <option key={m.id} value={m.email}>
-                          {m.name} ({m.email})
+                          {m.name} — {getRoleLabel(m.role)} ({m.email})
                         </option>
                       ))
                     )}

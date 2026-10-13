@@ -86,6 +86,10 @@ export interface Task {
   createdAt: string;
   // Repeatable check-ins (inputType === 'check_in'): one record per tap
   checkIns?: TaskCheckIn[];
+  // Manual board order (up/down arrows); initialized from target time
+  sortOrder?: number;
+  // When true, only assignees + admins/coordinators can see the task
+  isPrivate?: boolean;
 }
 
 export interface HistoryEntry {
