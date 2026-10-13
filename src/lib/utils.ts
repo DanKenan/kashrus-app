@@ -45,6 +45,42 @@ export function taskCategories(task: { category?: string; categories?: string[] 
   return task.category ? [task.category] : [];
 }
 
+export interface BoardSortableTask {
+  id: string;
+  isCompleted?: boolean;
+  priority?: string;
+  assignedTo?: string[];
+  sortOrder?: number;
+  createdAt: string;
+}
+
+/** Board tier for smart ordering: 0 = urgent, 1 = personally assigned, 2 = everything else. */
+export function boardTier(task: BoardSortableTask, userEmail: string | undefined | null): number {
+  const email = (userEmail || '').toLowerCase();
+  if (!task.isCompleted && task.priority === 'high') return 0;
+  if (
+    !task.isCompleted &&
+    email &&
+    (task.assignedTo || []).some((a) => a.toLowerCase() === email)
+  )
+    return 1;
+  return 2;
+}
+
+/** Smart board order: urgent first, then the viewer's own assignments,
+ *  then the manual order (up/down arrows; initialized from target time). */
+export function sortTasksForBoard<T extends BoardSortableTask>(
+  list: T[],
+  userEmail: string | undefined | null
+): T[] {
+  return [...list].sort(
+    (a, b) =>
+      boardTier(a, userEmail) - boardTier(b, userEmail) ||
+      (a.sortOrder ?? 0) - (b.sortOrder ?? 0) ||
+      a.createdAt.localeCompare(b.createdAt)
+  );
+}
+
 export function formatDaysOfWeek(days: number[]): string {
   if (!days || days.length === 0 || days.length === 7) return 'Every day';
   if (days.length === 5 && days.every((d) => [1, 2, 3, 4, 5].includes(d))) return 'Mon - Fri';

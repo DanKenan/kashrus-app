@@ -17,13 +17,13 @@ import { VenuesDirectoryModal } from './components/VenuesDirectoryModal';
 import { EventsModal } from './components/EventsModal';
 import { CreateEventModal } from './components/CreateEventModal';
 import { ConfirmModal } from './components/ConfirmModal';
-import { taskCategories } from './lib/utils';
+import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
 import { realtimeSocket } from './lib/socketClient';
 import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
-import { canUserFillTasks, canUserAssignTasks, getRoleLabel } from './lib/permissions';
+import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
 
 const DEFAULT_USERS: User[] = [
@@ -240,7 +240,7 @@ export default function App() {
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data.tasks)) {
-          setTasks(data.tasks);
+          setTasks(data.tasks.filter((t: Task) => canSeeTask(t, currentUser)));
         }
       })
       .catch((err) => console.warn('Could not fetch /api/tasks:', err));
@@ -289,7 +289,8 @@ export default function App() {
       }
 
       if (msg.type === 'INITIAL_STATE' && msg.payload) {
-        if (Array.isArray(msg.payload.tasks)) setTasks(msg.payload.tasks);
+        if (Array.isArray(msg.payload.tasks))
+          setTasks(msg.payload.tasks.filter((t: Task) => canSeeTask(t, currentUser)));
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(msg.payload.historyLogs);
         if (Array.isArray(msg.payload.events)) setEvents(msg.payload.events);
         if (Array.isArray(msg.payload.users)) setKnownUsers(msg.payload.users);
@@ -298,12 +299,17 @@ export default function App() {
         }
       } else if (msg.type === 'TASK_UPDATED' && msg.payload) {
         const updated = msg.payload as Task;
-        setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+        setTasks((prev) =>
+          canSeeTask(updated, currentUser)
+            ? prev.map((t) => (t.id === updated.id ? updated : t))
+            : prev.filter((t) => t.id !== updated.id)
+        );
         if (msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
           showToast(`${updated.updatedByName || msg.senderEmail} updated "${updated.title}"`);
         }
       } else if (msg.type === 'TASK_CREATED' && msg.payload) {
         const created = msg.payload as Task;
+        if (!canSeeTask(created, currentUser)) return;
         setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
         if (msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
           showToast(`New assignment added: "${created.title}"`);
@@ -311,7 +317,8 @@ export default function App() {
       } else if (msg.type === 'TASK_DELETED' && msg.payload) {
         setTasks((prev) => prev.filter((t) => t.id !== msg.payload.id));
       } else if (msg.type === 'DAILY_RESET' && msg.payload) {
-        if (Array.isArray(msg.payload.tasks)) setTasks(msg.payload.tasks);
+        if (Array.isArray(msg.payload.tasks))
+          setTasks(msg.payload.tasks.filter((t: Task) => canSeeTask(t, currentUser)));
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(msg.payload.historyLogs);
         showToast('Daily board has refreshed for the day! Previous records archived.');
       } else if (msg.type === 'USER_PRESENCE' && msg.payload) {
@@ -963,6 +970,59 @@ export default function App() {
     });
   }, [tasks, searchQuery, selectedCategory, showOnlyTodaySchedule, activeTabFilter, currentUser?.email]);
 
+  // Smart board order: urgent first, then the viewer's own assignments,
+  // then the manual order (up/down arrows; initialized from target time).
+  const sortedTasks = useMemo(
+    () => sortTasksForBoard(filteredTasks, currentUser?.email),
+    [filteredTasks, currentUser?.email]
+  );
+
+  // Manual reorder (up/down arrows, assigners only): swap the two tasks'
+  // positions within their board section. Pinned sections (urgent / mine)
+  // keep their order rules — the arrows fine-tune inside each group.
+  const handleMoveTask = async (taskId: string, direction: 'up' | 'down') => {
+    if (!currentUser || !canUserAssignTasks(currentUser)) {
+      showToast('Only admins and coordinators can reorder tasks.');
+      return;
+    }
+    const list = sortTasksForBoard(filteredTasks, currentUser.email);
+    const idx = list.findIndex((t) => t.id === taskId);
+    if (idx === -1) return;
+    const nIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (nIdx < 0 || nIdx >= list.length) return;
+    if (boardTier(list[idx], currentUser.email) !== boardTier(list[nIdx], currentUser.email)) {
+      showToast('Pinned tasks stay in their section — reorder inside the group.');
+      return;
+    }
+    const a = list[idx];
+    const b = list[nIdx];
+    const aOrder = a.sortOrder ?? 0;
+    const bOrder = b.sortOrder ?? 0;
+    // Optimistic swap
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === a.id ? { ...t, sortOrder: bOrder } : t.id === b.id ? { ...t, sortOrder: aOrder } : t
+      )
+    );
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      const payload = (sortOrder: number) =>
+        JSON.stringify({ userEmail: currentUser.email, sortOrder });
+      await fetch(`/api/tasks/${a.id}`, {
+        method: 'PUT',
+        headers,
+        body: payload(bOrder),
+      });
+      await fetch(`/api/tasks/${b.id}`, {
+        method: 'PUT',
+        headers,
+        body: payload(aOrder),
+      });
+    } catch (err) {
+      console.warn('Could not persist task order:', err);
+    }
+  };
+
   // Open Task Modal
   const handleOpenCreateTask = () => {
     if (!currentUser) {
@@ -1274,7 +1334,7 @@ export default function App() {
         {/* Dynamic View Mode: Excel-like Table View vs Responsive Card View */}
         {viewMode === 'table' ? (
           <TaskTableView
-            tasks={filteredTasks}
+            tasks={sortedTasks}
             currentUser={currentUser}
             onUpdateStatus={handleUpdateStatus}
             onUpdateNotes={handleUpdateNotes}
@@ -1289,14 +1349,18 @@ export default function App() {
             onDeleteTask={handleDeleteTask}
             onOpenTaskModal={handleOpenCreateTask}
             onCheckIn={handleCheckIn}
+            onMoveTask={handleMoveTask}
+            canReorder={canUserAssignTasks(currentUser)}
           />
         ) : (
           <TaskCardView
-            tasks={filteredTasks}
+            tasks={sortedTasks}
             currentUser={currentUser}
             onUpdateStatus={handleUpdateStatus}
             onUpdateNotes={handleUpdateNotes}
             onCheckIn={handleCheckIn}
+            onMoveTask={handleMoveTask}
+            canReorder={canUserAssignTasks(currentUser)}
             onEditTask={(task) => {
               if (!canUserAssignTasks(currentUser)) {
                 showToast('You do not have permission to edit task definitions.');
