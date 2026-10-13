@@ -60,6 +60,8 @@ interface TaskItem {
   updatedAt: string | null;
   createdAt: string;
   checkIns?: TaskCheckInItem[];
+  sortOrder?: number;
+  isPrivate?: boolean;
 }
 
 interface TaskCheckInItem {
@@ -67,6 +69,21 @@ interface TaskCheckInItem {
   byName: string | null;
   byEmail: string | null;
   at: string; // ISO timestamp
+}
+
+/** Minutes after midnight for a target time like "09:00 AM" / "14:30"; Infinity when none. */
+function targetTimeMinutes(t: string | undefined | null): number {
+  if (!t) return Infinity;
+  const s = t.trim();
+  const m12 = s.match(/^(\d{1,2}):(\d{2})\s*([AaPp])\.?\s*[Mm]\.?$/);
+  if (m12) {
+    let h = parseInt(m12[1], 10) % 12;
+    if (/^[Pp]/.test(m12[3])) h += 12;
+    return h * 60 + parseInt(m12[2], 10);
+  }
+  const m24 = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
+  return Infinity;
 }
 
 interface HistoryLog {
@@ -953,7 +970,28 @@ function persistToFirestore() {
   }
 }
 
+/** Backfill sortOrder for tasks that predate the manual-order feature,
+ *  per venue, ordered by target time then creation. Idempotent. */
+function normalizeTaskOrder() {
+  const venueIds = [...new Set(tasks.map((t) => t.venueId))];
+  for (const vid of venueIds) {
+    const group = tasks
+      .filter((t) => t.venueId === vid)
+      .sort(
+        (a, b) =>
+          targetTimeMinutes(a.targetTime) - targetTimeMinutes(b.targetTime) ||
+          a.createdAt.localeCompare(b.createdAt)
+      );
+    if (group.some((t) => t.sortOrder === undefined)) {
+      group.forEach((t, i) => {
+        t.sortOrder = i;
+      });
+    }
+  }
+}
+
 loadState();
+normalizeTaskOrder();
 
 // WebSocket Setup
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -1601,15 +1639,30 @@ app.get('/api/tasks', (req, res) => {
   const filteredTasks = tasks.filter(
     (t) => t.venueId === targetVenueId && (t.agencyId || 'agency-hkc') === callerAgencyId
   );
+  // Private assignments: only the assignees, coordinators and admins may see them
+  const callerEmailNorm = userEmail ? String(userEmail).trim().toLowerCase() : '';
+  const callerUser = callerEmailNorm
+    ? users.find((u) => u.email.toLowerCase() === callerEmailNorm)
+    : undefined;
+  const canSeePrivate =
+    isCallerAdmin || (callerUser && callerUser.role === 'coordinator');
+  const visibleTasks = canSeePrivate
+    ? filteredTasks
+    : filteredTasks.filter(
+        (t) =>
+          !t.isPrivate ||
+          (callerEmailNorm !== '' &&
+            (t.assignedTo || []).some((a) => a.toLowerCase() === callerEmailNorm))
+      );
   const activeVenue = agencyVenues.find((v) => v.id === targetVenueId) || agencyVenues[0] || venues[0];
 
   res.json({
-    tasks: filteredTasks,
+    tasks: visibleTasks,
     venue: activeVenue,
     venueId: targetVenueId,
     currentWorkDate,
-    totalTasks: filteredTasks.length,
-    completedCount: filteredTasks.filter((t) => t.isCompleted).length,
+    totalTasks: visibleTasks.length,
+    completedCount: visibleTasks.filter((t) => t.isCompleted).length,
   });
 });
 
@@ -1620,6 +1673,7 @@ app.post('/api/tasks', (req, res) => {
     description,
     category,
     categories,
+    isPrivate,
     inputType,
     customStatusOptions,
     completedStatusValues,
@@ -1662,6 +1716,24 @@ app.post('/api/tasks', (req, res) => {
     defaultStatus = customStatusOptions[0];
   }
 
+  // Slot the new task into the manual board order by its target time
+  // (earliest first); up/down arrows can fine-tune it afterwards.
+  const newTimeKey = targetTimeMinutes(targetTime);
+  const nowIso = new Date().toISOString();
+  const siblings = tasks
+    .filter((t) => t.venueId === targetVenueId)
+    .sort(
+      (a, b) =>
+        (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.createdAt.localeCompare(b.createdAt)
+    );
+  let insertAt = siblings.findIndex(
+    (t) => targetTimeMinutes(t.targetTime) > newTimeKey || (targetTimeMinutes(t.targetTime) === newTimeKey && t.createdAt > nowIso)
+  );
+  if (insertAt === -1) insertAt = siblings.length;
+  siblings.forEach((t, i) => {
+    if (i >= insertAt) t.sortOrder = (t.sortOrder ?? i) + 1;
+  });
+
   const newTask: TaskItem = {
     id: `task-${crypto.randomUUID()}`,
     agencyId: callerAgencyId,
@@ -1670,6 +1742,8 @@ app.post('/api/tasks', (req, res) => {
     description: description || '',
     category: category || 'General',
     categories: Array.isArray(categories) && categories.length > 0 ? categories : [category || 'General'],
+    isPrivate: isPrivate === true,
+    sortOrder: insertAt,
     inputType: inputType || 'yes_no',
     customStatusOptions: Array.isArray(customStatusOptions) && customStatusOptions.length > 0 ? customStatusOptions : undefined,
     completedStatusValues: Array.isArray(completedStatusValues) && completedStatusValues.length > 0 ? completedStatusValues : undefined,
@@ -1716,6 +1790,8 @@ app.put('/api/tasks/:id', (req, res) => {
     description,
     category,
     categories,
+    isPrivate,
+    sortOrder,
     inputType,
     customStatusOptions,
     completedStatusValues,
@@ -1733,6 +1809,8 @@ app.put('/api/tasks/:id', (req, res) => {
     description !== undefined ||
     category !== undefined ||
     categories !== undefined ||
+    isPrivate !== undefined ||
+    sortOrder !== undefined ||
     inputType !== undefined ||
     customStatusOptions !== undefined ||
     completedStatusValues !== undefined ||
@@ -1785,6 +1863,8 @@ app.put('/api/tasks/:id', (req, res) => {
     description: description !== undefined ? description : existing.description,
     category: category !== undefined ? category : existing.category,
     categories: categories !== undefined ? categories : existing.categories,
+    isPrivate: isPrivate !== undefined ? isPrivate === true : existing.isPrivate,
+    sortOrder: sortOrder !== undefined ? Number(sortOrder) : existing.sortOrder,
     inputType: inputType !== undefined ? inputType : existing.inputType,
     customStatusOptions: customStatusOptions !== undefined ? customStatusOptions : existing.customStatusOptions,
     completedStatusValues: completedStatusValues !== undefined ? completedStatusValues : existing.completedStatusValues,
