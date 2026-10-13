@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock,
   Users,
   Check,
@@ -16,7 +17,7 @@ import {
   Star,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
-import { formatTimeAgo, formatExactTime, formatTaskSchedule, taskCategories } from '../lib/utils';
+import { formatTimeAgo, formatExactTime, formatTaskSchedule, taskCategories, boardTier } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
@@ -29,6 +30,8 @@ interface TaskTableViewProps {
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
+  onMoveTask?: (taskId: string, direction: 'up' | 'down') => void;
+  canReorder?: boolean;
 }
 
 const getInitials = (nameOrEmail: string) => {
@@ -50,6 +53,8 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
+  onMoveTask,
+  canReorder,
 }) => {
   const [expandedDescriptions, setExpandedDescriptions] = useState<Record<string, boolean>>({});
   const [editingNotes, setEditingNotes] = useState<Record<string, string>>({});
@@ -113,19 +118,26 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-line/60 text-xs text-ink-soft">
-            {tasks.map((task) => {
+            {tasks.map((task, i) => {
               const isExpanded = expandedDescriptions[task.id];
               const noteValue = editingNotes[task.id] !== undefined ? editingNotes[task.id] : task.notes;
               const isSaved = saveIndicator[task.id];
               const canFill = canUserFillTasks(currentUser);
               const canAssign = canUserAssignTasks(currentUser);
               const mine = isDirectlyAssigned(task, currentUser);
+              const tier = boardTier(task, currentUser?.email);
+              const upBlocked =
+                i === 0 || boardTier(tasks[i - 1], currentUser?.email) !== tier;
+              const downBlocked =
+                i === tasks.length - 1 || boardTier(tasks[i + 1], currentUser?.email) !== tier;
 
               return (
                 <tr
                   key={task.id}
                   style={categoryVars(task.category)}
                   className={`transition-colors group hover:bg-sunken/50 ${
+                    task.isCompleted ? 'opacity-55' : ''
+                  } ${
                     mine ? 'bg-gold-wash/50 hover:bg-gold-wash/70' : task.isCompleted ? 'bg-emerald-50/30 dark:bg-emerald-950/10' : ''
                   }`}
                 >
@@ -488,6 +500,26 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                   {canAssign && (
                     <td className="py-3.5 px-3 align-top text-right pr-4">
                       <div className="flex items-center justify-end gap-1">
+                        {canReorder && onMoveTask && (
+                          <>
+                            <button
+                              onClick={() => onMoveTask(task.id, 'up')}
+                              disabled={upBlocked}
+                              className="pressable p-1.5 rounded-lg text-ink-faint hover:text-gold-deep hover:bg-sunken transition cursor-pointer disabled:opacity-25 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+                              title={upBlocked ? 'Top of its section' : 'Move up'}
+                            >
+                              <ChevronUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => onMoveTask(task.id, 'down')}
+                              disabled={downBlocked}
+                              className="pressable p-1.5 rounded-lg text-ink-faint hover:text-gold-deep hover:bg-sunken transition cursor-pointer disabled:opacity-25 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+                              title={downBlocked ? 'Bottom of its section' : 'Move down'}
+                            >
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            </button>
+                          </>
+                        )}
                         <button
                           onClick={() => onEditTask(task)}
                           className="pressable p-1.5 rounded-lg text-ink-faint hover:text-gold-deep hover:bg-sunken transition cursor-pointer"

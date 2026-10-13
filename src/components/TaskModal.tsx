@@ -64,6 +64,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [assignType, setAssignType] = useState<'all' | 'specific'>('all');
   const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
   const [customWorkerEmail, setCustomWorkerEmail] = useState('');
+  const [visibleToTeam, setVisibleToTeam] = useState(true);
 
   // Category picker state — presets + the user's own saved customs.
   const [customCats, setCustomCats] = useState<CustomCategory[]>([]);
@@ -179,6 +180,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
         setAssignType('specific');
         setSelectedWorkers(taskToEdit.assignedTo);
       }
+      setVisibleToTeam(!taskToEdit.isPrivate);
 
       // Schedule
       setScheduleType(taskToEdit.scheduleType || 'recurring');
@@ -210,6 +212,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setPriority('medium');
       setAssignType('all');
       setSelectedWorkers([]);
+      setVisibleToTeam(true);
       setScheduleType('recurring');
       setSelectedDays([0, 1, 2, 3, 4, 5, 6]);
       setSelectedDates([todayStr]);
@@ -325,6 +328,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       description: description.trim(),
       category: (selectedCategories[0] || 'General').trim(),
       categories: selectedCategories.length > 0 ? selectedCategories.map((c) => c.trim()) : ['General'],
+      isPrivate: assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
       inputType,
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
@@ -860,6 +864,21 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                     Add
                   </button>
                 </div>
+
+                {/* Visibility: who else can see this assignment */}
+                <label className="flex items-start gap-2 pt-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={visibleToTeam}
+                    onChange={(e) => setVisibleToTeam(e.target.checked)}
+                    className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span className="text-[11px] text-ink-soft leading-snug">
+                    <span className="font-bold">Visible to the rest of the team.</span>{' '}
+                    Uncheck to keep it private — only the selected mashgichim (plus admins
+                    and coordinators) will see this assignment.
+                  </span>
+                </label>
               </div>
             )}
           </div>

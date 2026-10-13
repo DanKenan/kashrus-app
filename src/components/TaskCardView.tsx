@@ -18,7 +18,7 @@ import {
   Star,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
-import { formatTimeAgo, formatExactTime, formatTaskSchedule, taskCategories } from '../lib/utils';
+import { formatTimeAgo, formatExactTime, formatTaskSchedule, taskCategories, boardTier } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
@@ -31,6 +31,8 @@ interface TaskCardViewProps {
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
+  onMoveTask?: (taskId: string, direction: 'up' | 'down') => void;
+  canReorder?: boolean;
 }
 
 const getInitials = (nameOrEmail: string) => {
@@ -52,6 +54,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
+  onMoveTask,
+  canReorder,
 }) => {
   const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
@@ -87,6 +91,13 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
         const canFill = canUserFillTasks(currentUser);
         const canAssign = canUserAssignTasks(currentUser);
         const mine = isDirectlyAssigned(task, currentUser);
+        const done = task.isCompleted;
+        // Reorder arrows move within the task's board section (urgent / mine / rest)
+        const tier = boardTier(task, currentUser?.email);
+        const upBlocked =
+          i === 0 || boardTier(tasks[i - 1], currentUser?.email) !== tier;
+        const downBlocked =
+          i === tasks.length - 1 || boardTier(tasks[i + 1], currentUser?.email) !== tier;
 
         return (
           <motion.div
@@ -97,13 +108,13 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
             transition={{ duration: 0.25, delay: Math.min(i * 0.03, 0.3), ease: [0.22, 1, 0.36, 1] }}
             style={categoryVars(task.category)}
             className={`relative rounded-2xl bg-surface border border-line tactile-2 lift overflow-hidden ${
-              task.isCompleted ? 'opacity-[0.92]' : ''
+              done ? 'opacity-55' : ''
             } ${mine ? 'mine-glow' : ''}`}
           >
             {/* Category spine — every category carries its own color */}
             <div className="cat-spine absolute left-0 top-0 bottom-0 w-[5px]" aria-hidden />
 
-            <div className="p-4 sm:p-5 pl-5 sm:pl-6">
+            <div className={done ? 'p-2.5 sm:p-3 pl-4 sm:pl-4' : 'p-4 sm:p-5 pl-5 sm:pl-6'}>
               {/* Top Bar: Category, Assignment, Priority, Target Time, Admin Actions */}
               <div className="flex items-center justify-between gap-2 mb-2">
                 <div className="flex items-center gap-1.5 flex-wrap">
@@ -136,6 +147,26 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
 
                 {canAssign && (
                   <div className="flex items-center gap-1">
+                    {canReorder && onMoveTask && (
+                      <>
+                        <button
+                          onClick={() => onMoveTask(task.id, 'up')}
+                          disabled={upBlocked}
+                          className="pressable p-1.5 text-ink-faint hover:text-gold-deep hover:bg-sunken rounded-lg transition cursor-pointer disabled:opacity-25 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+                          title={upBlocked ? 'Top of its section' : 'Move up'}
+                        >
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => onMoveTask(task.id, 'down')}
+                          disabled={downBlocked}
+                          className="pressable p-1.5 text-ink-faint hover:text-gold-deep hover:bg-sunken rounded-lg transition cursor-pointer disabled:opacity-25 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+                          title={downBlocked ? 'Bottom of its section' : 'Move down'}
+                        >
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
+                      </>
+                    )}
                     <button
                       onClick={() => onEditTask(task)}
                       className="pressable p-1.5 text-ink-faint hover:text-gold-deep hover:bg-sunken rounded-lg transition cursor-pointer"
@@ -156,7 +187,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
 
               {/* Task Title with Verification Seal Badge */}
               <div className="flex items-start justify-between gap-2">
-                <h3 className="text-sm sm:text-base font-bold text-ink leading-snug">
+                <h3 className={`font-bold text-ink leading-snug ${done ? 'text-xs sm:text-sm' : 'text-sm sm:text-base'}`}>
                   {task.title}
                 </h3>
                 {task.isCompleted && (

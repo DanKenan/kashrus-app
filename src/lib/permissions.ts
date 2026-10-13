@@ -73,6 +73,21 @@ export function canUserAssignTasks(user: User | null | undefined): boolean {
   return false;
 }
 
+/**
+ * Whether a user may see a task. Private tasks are visible only to their
+ * assignees plus admins and coordinators.
+ */
+export function canSeeTask(
+  task: { isPrivate?: boolean; assignedTo?: string[] },
+  user: User | null | undefined
+): boolean {
+  if (!task.isPrivate) return true;
+  if (!user) return false;
+  if (user.role === 'admin' || user.role === 'coordinator') return true;
+  const email = user.email.toLowerCase();
+  return (task.assignedTo || []).some((a) => a.toLowerCase() === email);
+}
+
 export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, { canFillTasks: boolean; canAssignTasks: boolean }> = {
   admin: { canFillTasks: true, canAssignTasks: true },
   coordinator: { canFillTasks: true, canAssignTasks: true },
