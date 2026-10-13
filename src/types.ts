@@ -5,9 +5,16 @@ export interface UserPermissions {
   canAssignTasks?: boolean; // Can add / create new assignments and edit tasks
 }
 
-export type TaskInputType = 'toggle' | 'yes_no' | 'status_select' | 'checkbox';
+export type TaskInputType = 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'yes' | 'no' | string;
+
+export interface TaskCheckIn {
+  id: string;
+  byName: string | null;
+  byEmail: string | null;
+  at: string; // ISO timestamp of the check-in
+}
 
 export interface KosherAgency {
   id: string;
@@ -76,6 +83,8 @@ export interface Task {
   updatedByName: string | null;
   updatedAt: string | null; // ISO string
   createdAt: string;
+  // Repeatable check-ins (inputType === 'check_in'): one record per tap
+  checkIns?: TaskCheckIn[];
 }
 
 export interface HistoryEntry {

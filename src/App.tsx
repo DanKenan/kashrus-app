@@ -462,6 +462,56 @@ export default function App() {
     }
   };
 
+  // Log one repeatable check-in on a task (inputType 'check_in')
+  const handleCheckIn = async (taskId: string) => {
+    if (!currentUser) {
+      showToast('Please sign in to log checks.');
+      return;
+    }
+    if (!canUserFillTasks(currentUser)) {
+      showToast('You do not have permission to log checks.');
+      return;
+    }
+    const now = new Date().toISOString();
+    const optimistic = {
+      id: `checkin-local-${Date.now()}`,
+      byName: currentUser.name,
+      byEmail: currentUser.email,
+      at: now,
+    };
+
+    // Optimistic local update
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === taskId
+          ? {
+              ...t,
+              checkIns: [...(t.checkIns || []), optimistic],
+              updatedByEmail: currentUser.email,
+              updatedByName: currentUser.name,
+              updatedAt: now,
+            }
+          : t
+      )
+    );
+
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/check-in`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userEmail: currentUser.email,
+          userName: currentUser.name,
+        }),
+      });
+      const data = await res.json();
+      // Ensure sync (server is the source of truth for the check-in list)
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? data : t)));
+    } catch (err) {
+      console.error('Failed to log check-in:', err);
+    }
+  };
+
   // Venue Management Handlers
   const handleSelectVenue = (venueId: string) => {
     const target = venues.find((v) => v.id === venueId);
@@ -1237,6 +1287,7 @@ export default function App() {
             }}
             onDeleteTask={handleDeleteTask}
             onOpenTaskModal={handleOpenCreateTask}
+            onCheckIn={handleCheckIn}
           />
         ) : (
           <TaskCardView
@@ -1244,6 +1295,7 @@ export default function App() {
             currentUser={currentUser}
             onUpdateStatus={handleUpdateStatus}
             onUpdateNotes={handleUpdateNotes}
+            onCheckIn={handleCheckIn}
             onEditTask={(task) => {
               if (!canUserAssignTasks(currentUser)) {
                 showToast('You do not have permission to edit task definitions.');

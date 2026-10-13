@@ -17,8 +17,8 @@ import {
   ShieldCheck,
   Star,
 } from 'lucide-react';
-import { Task, TaskStatus, User as UserType } from '../types';
-import { formatTimeAgo, formatTaskSchedule } from '../lib/utils';
+import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
+import { formatTimeAgo, formatExactTime, formatTaskSchedule } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
@@ -27,6 +27,7 @@ interface TaskCardViewProps {
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
   onUpdateNotes: (taskId: string, notes: string) => void;
+  onCheckIn: (taskId: string) => void;
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
@@ -47,6 +48,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   currentUser,
   onUpdateStatus,
   onUpdateNotes,
+  onCheckIn,
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
@@ -376,6 +378,46 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                         <span>{task.isCompleted ? '✓ Signed & Verified (Click to cancel)' : 'Sign & Complete Inspection'}</span>
                       </button>
                     )}
+
+                    {/* 5. Repeatable check-in — every tap logs who + when under the task */}
+                    {task.inputType === 'check_in' && (
+                      <div className="w-full">
+                        <button
+                          id={`mobile-task-checkin-${task.id}`}
+                          onClick={() => onCheckIn(task.id)}
+                          className="pressable w-full min-h-[44px] flex items-center justify-center gap-2 rounded-xl text-xs font-bold border transition cursor-pointer tactile-1 bg-gradient-to-b from-gold to-gold-deep border-gold-deep text-white"
+                          title="Log that you did this check right now"
+                        >
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>Log check</span>
+                          {(task.checkIns?.length || 0) > 0 && (
+                            <span className="ml-1 px-2 py-0.5 rounded-full bg-white/25 text-[11px] font-black">
+                              {task.checkIns!.length}
+                            </span>
+                          )}
+                        </button>
+                        {(task.checkIns?.length || 0) > 0 && (
+                          <ul className="mt-2 space-y-1">
+                            {task.checkIns!.map((c: TaskCheckIn) => (
+                              <li
+                                key={c.id}
+                                className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-sunken border border-line text-[11px] animate-fade-in"
+                              >
+                                <span className="w-5 h-5 rounded-full bg-gold-wash border border-gold/40 text-gold-ink flex items-center justify-center text-[9px] font-black shrink-0">
+                                  {getInitials(c.byName || c.byEmail || 'MK')}
+                                </span>
+                                <span className="font-bold text-ink truncate">
+                                  {c.byName || c.byEmail || 'Someone'}
+                                </span>
+                                <span className="text-ink-faint ml-auto shrink-0 font-semibold">
+                                  {formatExactTime(c.at)}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -383,7 +425,15 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
               {/* Attribution & Signature Banner */}
               <div className="flex items-center justify-between mt-2.5 pt-2 text-[11px] text-ink-faint">
                 <div>
-                  {task.isCompleted && (task.updatedByName || task.updatedByEmail) ? (
+                  {task.inputType === 'check_in' && (task.checkIns?.length || 0) > 0 ? (
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-gold shrink-0 inline-block" />
+                      <span>
+                        <strong className="text-ink">{task.checkIns!.length} check{task.checkIns!.length === 1 ? '' : 's'} logged</strong>
+                        {' '}· last by {task.checkIns![task.checkIns!.length - 1].byName || task.checkIns![task.checkIns!.length - 1].byEmail || 'someone'} ({formatTimeAgo(task.checkIns![task.checkIns!.length - 1].at)})
+                      </span>
+                    </span>
+                  ) : task.isCompleted && (task.updatedByName || task.updatedByEmail) ? (
                     <span className="flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 inline-block" />
                       <span>

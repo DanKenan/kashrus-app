@@ -531,6 +531,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 <option value="toggle">On / Off Toggle Switch</option>
                 <option value="status_select">Status Select (Customizable Values)</option>
                 <option value="checkbox">Standard Checkbox</option>
+                <option value="check_in">Repeatable Check-in — log who + when on every tap</option>
               </select>
             </div>
           </div>
