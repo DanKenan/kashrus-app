@@ -31,6 +31,8 @@ import {
 import { User, Venue } from '../types';
 import { KeepingKosherLogo } from './KeepingKosherLogo';
 import { PWAInstallButton } from './PWAInstallButton';
+import { PushNotificationToggle } from './PushNotificationToggle';
+import { UpdateAppButton } from './UpdateAppButton';
 import { getRoleLabel, canUserAssignTasks } from '../lib/permissions';
 
 interface HeaderProps {
@@ -393,6 +395,16 @@ export const Header: React.FC<HeaderProps> = ({
                       {/* Install PWA Option */}
                       <div className="px-1 py-1">
                         <PWAInstallButton variant="banner" />
+                      </div>
+
+                      {/* Phone push notifications */}
+                      <div className="px-1 py-0.5 border-t border-line/60 mt-1 pt-1">
+                        <PushNotificationToggle userEmail={currentUser.email} />
+                      </div>
+
+                      {/* Force-update: clear caches and load the newest version */}
+                      <div className="px-1 py-0.5">
+                        <UpdateAppButton />
                       </div>
 
                       {/* Change Password */}
