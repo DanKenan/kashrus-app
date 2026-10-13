@@ -16,7 +16,7 @@ import {
   Star,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
-import { formatTimeAgo, formatExactTime, formatTaskSchedule } from '../lib/utils';
+import { formatTimeAgo, formatExactTime, formatTaskSchedule, taskCategories } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
@@ -139,10 +139,28 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                             High
                           </span>
                         )}
-                        <span className="cat-chip shrink-0 mt-0.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold border">
-                          <span className="cat-dot w-1.5 h-1.5 rounded-full" />
-                          {task.category}
-                        </span>
+                        {(() => {
+                          const cats = taskCategories(task);
+                          return (
+                            <>
+                              <span
+                                style={categoryVars(cats[0] || 'General')}
+                                className="cat-chip shrink-0 mt-0.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold border"
+                              >
+                                <span className="cat-dot w-1.5 h-1.5 rounded-full" />
+                                {cats[0] || 'General'}
+                              </span>
+                              {cats.length > 1 && (
+                                <span
+                                  className="shrink-0 mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-black bg-sunken border border-line text-ink-soft"
+                                  title={cats.slice(1).join(', ')}
+                                >
+                                  +{cats.length - 1}
+                                </span>
+                              )}
+                            </>
+                          );
+                        })()}
                         {mine && (
                           <span className="shrink-0 mt-0.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-gold-wash text-gold-ink border border-gold/40">
                             <Star className="w-2 h-2 fill-current" />

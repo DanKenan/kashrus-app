@@ -17,6 +17,7 @@ import { VenuesDirectoryModal } from './components/VenuesDirectoryModal';
 import { EventsModal } from './components/EventsModal';
 import { CreateEventModal } from './components/CreateEventModal';
 import { ConfirmModal } from './components/ConfirmModal';
+import { taskCategories } from './lib/utils';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
 import { realtimeSocket } from './lib/socketClient';
@@ -900,7 +901,7 @@ export default function App() {
   const categories = useMemo(() => {
     const set = new Set<string>();
     tasks.forEach((t) => {
-      if (t.category) set.add(t.category);
+      for (const c of taskCategories(t)) set.add(c);
     });
     return Array.from(set);
   }, [tasks]);
@@ -908,7 +909,7 @@ export default function App() {
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     tasks.forEach((t) => {
-      if (t.category) counts[t.category] = (counts[t.category] || 0) + 1;
+      for (const c of taskCategories(t)) counts[c] = (counts[c] || 0) + 1;
     });
     return counts;
   }, [tasks]);
@@ -924,15 +925,15 @@ export default function App() {
         const matchesTitle = task.title.toLowerCase().includes(q);
         const matchesDesc = (task.description || '').toLowerCase().includes(q);
         const matchesNotes = (task.notes || '').toLowerCase().includes(q);
-        const matchesCategory = task.category.toLowerCase().includes(q);
+        const matchesCategory = taskCategories(task).some((c) => c.toLowerCase().includes(q));
         const matchesWorker = (task.updatedByName || task.updatedByEmail || '').toLowerCase().includes(q);
         if (!matchesTitle && !matchesDesc && !matchesNotes && !matchesCategory && !matchesWorker) {
           return false;
         }
       }
 
-      // Category filter
-      if (selectedCategory !== 'all' && task.category !== selectedCategory) {
+      // Category filter — a task shows under any of its categories
+      if (selectedCategory !== 'all' && !taskCategories(task).includes(selectedCategory)) {
         return false;
       }
 

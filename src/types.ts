@@ -65,6 +65,7 @@ export interface Task {
   title: string;
   description: string;
   category: string;
+  categories?: string[]; // All assigned categories; category[0] is the primary
   inputType: TaskInputType;
   customStatusOptions?: string[]; // Admin-defined options for status_select
   completedStatusValues?: string[]; // Which options count as completed
