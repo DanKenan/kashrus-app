@@ -42,6 +42,7 @@ interface TaskItem {
   title: string;
   description: string;
   category: string;
+  categories?: string[]; // All assigned categories; categories[0] is the primary
   inputType: 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in';
   customStatusOptions?: string[];
   completedStatusValues?: string[];
@@ -1618,6 +1619,7 @@ app.post('/api/tasks', (req, res) => {
     title,
     description,
     category,
+    categories,
     inputType,
     customStatusOptions,
     completedStatusValues,
@@ -1667,6 +1669,7 @@ app.post('/api/tasks', (req, res) => {
     title,
     description: description || '',
     category: category || 'General',
+    categories: Array.isArray(categories) && categories.length > 0 ? categories : [category || 'General'],
     inputType: inputType || 'yes_no',
     customStatusOptions: Array.isArray(customStatusOptions) && customStatusOptions.length > 0 ? customStatusOptions : undefined,
     completedStatusValues: Array.isArray(completedStatusValues) && completedStatusValues.length > 0 ? completedStatusValues : undefined,
@@ -1712,6 +1715,7 @@ app.put('/api/tasks/:id', (req, res) => {
     title,
     description,
     category,
+    categories,
     inputType,
     customStatusOptions,
     completedStatusValues,
@@ -1728,6 +1732,7 @@ app.put('/api/tasks/:id', (req, res) => {
     title !== undefined ||
     description !== undefined ||
     category !== undefined ||
+    categories !== undefined ||
     inputType !== undefined ||
     customStatusOptions !== undefined ||
     completedStatusValues !== undefined ||
@@ -1779,6 +1784,7 @@ app.put('/api/tasks/:id', (req, res) => {
     title: title !== undefined ? title : existing.title,
     description: description !== undefined ? description : existing.description,
     category: category !== undefined ? category : existing.category,
+    categories: categories !== undefined ? categories : existing.categories,
     inputType: inputType !== undefined ? inputType : existing.inputType,
     customStatusOptions: customStatusOptions !== undefined ? customStatusOptions : existing.customStatusOptions,
     completedStatusValues: completedStatusValues !== undefined ? completedStatusValues : existing.completedStatusValues,

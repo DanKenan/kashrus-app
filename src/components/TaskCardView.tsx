@@ -18,7 +18,7 @@ import {
   Star,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
-import { formatTimeAgo, formatExactTime, formatTaskSchedule } from '../lib/utils';
+import { formatTimeAgo, formatExactTime, formatTaskSchedule, taskCategories } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
@@ -112,10 +112,16 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                       High Priority
                     </span>
                   )}
-                  <span className="cat-chip inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold border">
-                    <span className="cat-dot w-2 h-2 rounded-full shrink-0" />
-                    {task.category}
-                  </span>
+                  {taskCategories(task).map((cat) => (
+                    <span
+                      key={cat}
+                      style={categoryVars(cat)}
+                      className="cat-chip inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold border"
+                    >
+                      <span className="cat-dot w-2 h-2 rounded-full shrink-0" />
+                      {cat}
+                    </span>
+                  ))}
                   {mine && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-gold-wash text-gold-ink border border-gold/40">
                       <Star className="w-2.5 h-2.5 fill-current" />

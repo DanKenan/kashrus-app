@@ -57,7 +57,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 }) => {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [category, setCategory] = useState<string>(PRESET_CATEGORIES[0]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([PRESET_CATEGORIES[0]]);
   const [inputType, setInputType] = useState<TaskInputType>('yes_no');
   const [targetTime, setTargetTime] = useState('09:00 AM');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
@@ -73,24 +73,34 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [confirmDeleteCat, setConfirmDeleteCat] = useState<string | null>(null);
 
   // All pickable categories: presets, the user's saved customs, and — when
-  // editing an older task — its current value so nothing silently changes.
+  // editing an older task — its current values so nothing silently changes.
   const categoryOptions: string[] = [...PRESET_CATEGORIES];
   for (const c of customCats) {
     if (!categoryOptions.some((o) => o.toLowerCase() === c.name.toLowerCase())) {
       categoryOptions.push(c.name);
     }
   }
-  const trimmedCategory = category.trim();
-  const isLegacyCategory =
-    trimmedCategory.length > 0 &&
-    !categoryOptions.some((o) => o.toLowerCase() === trimmedCategory.toLowerCase());
-  if (isLegacyCategory) categoryOptions.push(trimmedCategory);
+  const legacyCategories: string[] = [];
+  for (const lc of selectedCategories) {
+    const t = lc.trim();
+    if (t.length > 0 && !categoryOptions.some((o) => o.toLowerCase() === t.toLowerCase())) {
+      legacyCategories.push(t);
+    }
+  }
+  for (const lc of legacyCategories) categoryOptions.push(lc);
 
   const isCustomCat = (name: string) =>
     customCats.some((c) => c.name.toLowerCase() === name.toLowerCase());
 
-  const pickCategory = (name: string) => {
-    setCategory(name);
+  const isSelectedCat = (name: string) =>
+    selectedCategories.some((s) => s.toLowerCase() === name.toLowerCase());
+
+  const toggleCategory = (name: string) => {
+    setSelectedCategories((prev) =>
+      prev.some((s) => s.toLowerCase() === name.toLowerCase())
+        ? prev.filter((s) => s.toLowerCase() !== name.toLowerCase())
+        : [...prev, name]
+    );
     setShowOtherForm(false);
     setConfirmDeleteCat(null);
   };
@@ -100,7 +110,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     if (!name || !currentUserEmail) return;
     const updated = saveCustomCategory(currentUserEmail, { name, hue: otherHue });
     setCustomCats(updated);
-    setCategory(name);
+    setSelectedCategories((prev) =>
+      prev.some((s) => s.toLowerCase() === name.toLowerCase()) ? prev : [...prev, name]
+    );
     setShowOtherForm(false);
     setOtherName('');
     setOtherHue(CATEGORY_PALETTE[0]);
@@ -115,9 +127,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setCustomCats(deleteCustomCategory(currentUserEmail, name));
     }
     setConfirmDeleteCat(null);
-    if (trimmedCategory.toLowerCase() === name.toLowerCase()) {
-      setCategory(PRESET_CATEGORIES[0]);
-    }
+    setSelectedCategories((prev) => prev.filter((s) => s.toLowerCase() !== name.toLowerCase()));
   };
 
   // Custom Status Select State
@@ -154,7 +164,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     if (taskToEdit) {
       setTitle(taskToEdit.title);
       setDescription(taskToEdit.description || '');
-      setCategory(taskToEdit.category || 'General');
+      setSelectedCategories(
+        taskToEdit.categories && taskToEdit.categories.length > 0
+          ? [...taskToEdit.categories]
+          : [taskToEdit.category || 'General']
+      );
       setInputType(taskToEdit.inputType || 'yes_no');
       setTargetTime(taskToEdit.targetTime || '09:00 AM');
       setPriority(taskToEdit.priority || 'medium');
@@ -190,7 +204,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     } else {
       setTitle('');
       setDescription('');
-      setCategory(PRESET_CATEGORIES[0]);
+      setSelectedCategories([PRESET_CATEGORIES[0]]);
       setInputType('yes_no');
       setTargetTime('09:00 AM');
       setPriority('medium');
@@ -309,7 +323,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       ...(taskToEdit ? { id: taskToEdit.id } : {}),
       title: title.trim(),
       description: description.trim(),
-      category: category.trim(),
+      category: (selectedCategories[0] || 'General').trim(),
+      categories: selectedCategories.length > 0 ? selectedCategories.map((c) => c.trim()) : ['General'],
       inputType,
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
@@ -384,31 +399,36 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block font-semibold text-ink-soft mb-1">
-                Category
+                Categories <span className="text-[10px] font-normal text-ink-faint">(tap to add / remove — pick as many as fit)</span>
               </label>
               <div className="flex flex-wrap gap-1.5">
                 {categoryOptions.map((c) => {
-                  const selected = trimmedCategory.toLowerCase() === c.toLowerCase();
+                  const selected = isSelectedCat(c);
                   const custom = isCustomCat(c);
                   return (
                     <span
                       key={c}
                       style={categoryVars(c)}
-                      className={`cat-chip inline-flex items-center gap-1 pl-2 ${
+                      className={`inline-flex items-center gap-1 pl-2 ${
                         custom ? 'pr-1' : 'pr-2.5'
-                      } py-1 rounded-full text-[11px] font-bold border transition tactile-1 ${
-                        selected ? 'cat-ring ring-2' : 'hover:border-line-strong'
+                      } py-1 rounded-full text-[11px] font-bold border transition tactile-1 pressable ${
+                        selected
+                          ? 'cat-chip-selected ring-2 ring-offset-1 cat-ring scale-[1.03]'
+                          : 'cat-chip hover:border-line-strong'
                       }`}
                     >
                       <button
                         type="button"
-                        onClick={() => pickCategory(c)}
-                        className={`inline-flex items-center gap-1.5 cursor-pointer ${
-                          selected ? 'cat-text' : ''
-                        }`}
-                        title={custom ? 'Your saved category — tap to use' : 'Tap to use'}
+                        onClick={() => toggleCategory(c)}
+                        className="inline-flex items-center gap-1.5 cursor-pointer"
+                        title={selected ? 'Tap to remove' : 'Tap to add'}
+                        aria-pressed={selected}
                       >
-                        <span className="cat-dot w-2 h-2 rounded-full shrink-0" />
+                        {selected ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                        ) : (
+                          <span className="cat-dot w-2 h-2 rounded-full shrink-0" />
+                        )}
                         {c}
                       </button>
                       {custom && (

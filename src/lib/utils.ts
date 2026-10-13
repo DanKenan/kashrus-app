@@ -39,6 +39,12 @@ export function getInitials(name: string): string {
 
 export const DAYS_MAP = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+/** All categories assigned to a task — falls back to the legacy single `category`. */
+export function taskCategories(task: { category?: string; categories?: string[] }): string[] {
+  if (Array.isArray(task.categories) && task.categories.length > 0) return task.categories;
+  return task.category ? [task.category] : [];
+}
+
 export function formatDaysOfWeek(days: number[]): string {
   if (!days || days.length === 0 || days.length === 7) return 'Every day';
   if (days.length === 5 && days.every((d) => [1, 2, 3, 4, 5].includes(d))) return 'Mon - Fri';
