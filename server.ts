@@ -5,6 +5,7 @@ import fs from 'fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import { initializeApp, getApps, getApp } from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
+import webpush from 'web-push';
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
@@ -694,12 +695,43 @@ let airtableConfigs: AirtableConfigItem[] = [...INITIAL_AIRTABLE_CONFIGS];
 let approvedIngredients: ApprovedIngredientItem[] = [...INITIAL_APPROVED_INGREDIENTS];
 let factoryReports: FactoryAuditReportItem[] = [];
 
+// Web Push (phone notifications): per-user browser subscriptions + VAPID keys.
+// VAPID keys come from env when set; otherwise generated once and persisted
+// with the rest of the state so subscriptions survive restarts and deploys.
+interface PushSubscriptionRecord {
+  userEmail: string;
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  createdAt: string;
+}
+let pushSubscriptions: PushSubscriptionRecord[] = [];
+let vapidKeys: { publicKey: string; privateKey: string } | null = null;
+
 // Load persisted state if exists
 // Hydrate all in-memory state from a parsed snapshot (local file or Firestore).
 function hydrateState(parsed: any) {
   try {
       if (parsed.isDemoCleared !== undefined) {
         isDemoCleared = Boolean(parsed.isDemoCleared);
+      }
+
+      // Web Push state survives regardless of demo mode
+      if (Array.isArray(parsed.pushSubscriptions)) {
+        pushSubscriptions = parsed.pushSubscriptions.filter(
+          (s: any) => s && s.endpoint && s.userEmail && s.keys
+        );
+      }
+      // Persisted VAPID keys only win when env vars are not set (env takes precedence)
+      if (
+        !process.env.VAPID_PUBLIC_KEY &&
+        parsed.vapidKeys &&
+        parsed.vapidKeys.publicKey &&
+        parsed.vapidKeys.privateKey
+      ) {
+        vapidKeys = {
+          publicKey: parsed.vapidKeys.publicKey,
+          privateKey: parsed.vapidKeys.privateKey,
+        };
       }
 
       if (Array.isArray(parsed.agencies) && parsed.agencies.length > 0) {
@@ -863,6 +895,8 @@ function stateSnapshot() {
     factoryReports,
     currentWorkDate,
     isDemoCleared,
+    pushSubscriptions,
+    vapidKeys,
   };
 }
 
@@ -992,6 +1026,82 @@ function normalizeTaskOrder() {
 
 loadState();
 normalizeTaskOrder();
+
+/** Ensure VAPID keys exist: env vars win, else persisted, else generate once. */
+function ensureVapidKeys() {
+  if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+    vapidKeys = {
+      publicKey: process.env.VAPID_PUBLIC_KEY,
+      privateKey: process.env.VAPID_PRIVATE_KEY,
+    };
+  } else if (!vapidKeys) {
+    const generated = webpush.generateVAPIDKeys();
+    vapidKeys = { publicKey: generated.publicKey, privateKey: generated.privateKey };
+    console.log('[Push] Generated VAPID keys (persisted with app state).');
+    saveState();
+  }
+  webpush.setVapidDetails(
+    'mailto:kenan@hartfordkashrut.org',
+    vapidKeys.publicKey,
+    vapidKeys.privateKey
+  );
+}
+
+/** Send a push notification to every device a user subscribed. Fire-and-forget. */
+function sendPushToUser(userEmail: string, title: string, body: string, data?: any) {
+  if (!vapidKeys) return;
+  const email = userEmail.trim().toLowerCase();
+  const subs = pushSubscriptions.filter((s) => s.userEmail.toLowerCase() === email);
+  for (const sub of subs) {
+    const payload = JSON.stringify({ title, body, data: data || {} });
+    webpush
+      .sendNotification(
+        { endpoint: sub.endpoint, keys: sub.keys } as any,
+        payload
+      )
+      .catch((err: any) => {
+        // 410/404 = subscription is gone; drop it instead of retrying forever
+        if (err?.statusCode === 410 || err?.statusCode === 404) {
+          pushSubscriptions = pushSubscriptions.filter((s) => s.endpoint !== sub.endpoint);
+          saveState();
+        } else {
+          console.warn('[Push] Send failed:', err?.message || err);
+        }
+      });
+  }
+}
+
+// ---- Web Push endpoints ----
+app.get('/api/push/public-key', (_req, res) => {
+  if (!vapidKeys) return res.status(503).json({ error: 'Push not initialized' });
+  res.json({ publicKey: vapidKeys.publicKey });
+});
+
+app.post('/api/push/subscribe', (req, res) => {
+  const { userEmail, subscription } = req.body as any;
+  if (!userEmail || !subscription?.endpoint || !subscription?.keys) {
+    return res.status(400).json({ error: 'userEmail and subscription required' });
+  }
+  const email = String(userEmail).trim().toLowerCase();
+  pushSubscriptions = pushSubscriptions.filter((s) => s.endpoint !== subscription.endpoint);
+  pushSubscriptions.push({
+    userEmail: email,
+    endpoint: subscription.endpoint,
+    keys: subscription.keys,
+    createdAt: new Date().toISOString(),
+  });
+  saveState();
+  res.json({ success: true });
+});
+
+app.post('/api/push/unsubscribe', (req, res) => {
+  const { endpoint } = req.body as any;
+  if (endpoint) {
+    pushSubscriptions = pushSubscriptions.filter((s) => s.endpoint !== endpoint);
+    saveState();
+  }
+  res.json({ success: true });
+});
 
 // WebSocket Setup
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -1767,6 +1877,21 @@ app.post('/api/tasks', (req, res) => {
   saveState();
 
   broadcast('TASK_CREATED', newTask, createdByEmail);
+
+  // Phone push to specifically-assigned mashgichim (not for global 'all' tasks)
+  const assignees = (newTask.assignedTo || []).filter(
+    (a) => a && a.toLowerCase() !== 'all'
+  );
+  for (const email of assignees) {
+    if (createdByEmail && email.toLowerCase() === createdByEmail.toLowerCase()) continue;
+    sendPushToUser(
+      email,
+      '📋 New task assigned to you',
+      `${newTask.title}${newTask.targetTime ? ` — ${newTask.targetTime}` : ''}`,
+      { url: '/', taskId: newTask.id }
+    );
+  }
+
   res.status(201).json(newTask);
 });
 
@@ -2265,6 +2390,17 @@ app.post('/api/events', (req, res) => {
     venueId: targetVenueId,
     assignedMashgiachEmail: resolvedMashgiachEmail,
   });
+
+  // Phone push to the assigned mashgiach (works even with the app closed)
+  if (resolvedMashgiachEmail) {
+    const when = newEvent.date ? ` — ${newEvent.date}` : '';
+    sendPushToUser(
+      resolvedMashgiachEmail,
+      '⭐ New event assignment',
+      `${newEvent.title}${when} at ${newEvent.location}`,
+      { url: '/', eventId: newEvent.id }
+    );
+  }
 
   res.status(201).json({ event: newEvent });
 });
@@ -3101,6 +3237,10 @@ async function startServer() {
     ]);
     if (!loaded) console.log('[Firestore] Continuing with local file state.');
   }
+
+  // Web Push: VAPID keys must be ready after durable state loads (env vars
+  // take precedence over persisted keys inside ensureVapidKeys).
+  ensureVapidKeys();
 
   if (process.env.NODE_ENV !== 'production') {
     // Dynamic import so production containers don't need vite installed.
