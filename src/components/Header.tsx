@@ -642,6 +642,14 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="text-xs text-ink-faint">{darkMode ? 'Dark' : 'Light'}</span>
           </button>
 
+          {/* App updates & phone notifications on Mobile */}
+          {currentUser && (
+            <div className="rounded-xl bg-sunken px-1 py-1">
+              <PushNotificationToggle userEmail={currentUser.email} />
+              <UpdateAppButton />
+            </div>
+          )}
+
           <div className="pt-2 border-t border-line/70 flex justify-between items-center">
             {currentUser ? (
               <>
