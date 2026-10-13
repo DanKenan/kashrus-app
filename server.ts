@@ -42,7 +42,7 @@ interface TaskItem {
   title: string;
   description: string;
   category: string;
-  inputType: 'toggle' | 'yes_no' | 'status_select' | 'checkbox';
+  inputType: 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in';
   customStatusOptions?: string[];
   completedStatusValues?: string[];
   assignedTo: string[]; // ['all'] or array of worker emails
@@ -58,6 +58,14 @@ interface TaskItem {
   updatedByName: string | null;
   updatedAt: string | null;
   createdAt: string;
+  checkIns?: TaskCheckInItem[];
+}
+
+interface TaskCheckInItem {
+  id: string;
+  byName: string | null;
+  byEmail: string | null;
+  at: string; // ISO timestamp
 }
 
 interface HistoryLog {
@@ -1036,18 +1044,39 @@ function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
       completionRate: rate,
       resetAt: new Date().toISOString(),
       resetBy,
-      entries: venueTasks.map((t) => ({
-        id: `entry-${t.id}-${Date.now()}`,
-        taskId: t.id,
-        taskTitle: t.title,
-        category: t.category,
-        status: t.currentStatus,
-        isCompleted: t.isCompleted,
-        notes: t.notes,
-        completedByEmail: t.updatedByEmail,
-        completedByName: t.updatedByName,
-        completedAt: t.updatedAt,
-      })),
+      entries: venueTasks.map((t) => {
+        const checkIns = t.checkIns || [];
+        const checkInSummary =
+          checkIns.length > 0
+            ? checkIns
+                .map((c) => {
+                  const when = (() => {
+                    try {
+                      return new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    } catch {
+                      return '';
+                    }
+                  })();
+                  return `${c.byName || c.byEmail || 'Someone'}${when ? ` at ${when}` : ''}`;
+                })
+                .join('; ')
+            : '';
+        const archivedNotes = checkInSummary
+          ? `${t.notes ? t.notes + '\n' : ''}Checks (${checkIns.length}): ${checkInSummary}`
+          : t.notes;
+        return {
+          id: `entry-${t.id}-${Date.now()}`,
+          taskId: t.id,
+          taskTitle: t.title,
+          category: t.category,
+          status: t.currentStatus,
+          isCompleted: t.isCompleted,
+          notes: archivedNotes,
+          completedByEmail: t.updatedByEmail,
+          completedByName: t.updatedByName,
+          completedAt: t.updatedAt,
+        };
+      }),
     };
 
     snapshots.push(snapshot);
@@ -1080,6 +1109,7 @@ function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
       updatedByEmail: null,
       updatedByName: null,
       updatedAt: null,
+      checkIns: [],
     };
   });
 
@@ -1652,6 +1682,7 @@ app.post('/api/tasks', (req, res) => {
     updatedByEmail: null,
     updatedByName: null,
     updatedAt: null,
+    checkIns: [],
     createdAt: new Date().toISOString(),
   };
 
@@ -1763,6 +1794,55 @@ app.put('/api/tasks/:id', (req, res) => {
     updatedByEmail,
     updatedByName,
     updatedAt,
+  };
+
+  tasks[index] = updated;
+  saveState();
+
+  broadcast('TASK_UPDATED', updated, userEmail);
+  res.json(updated);
+});
+
+// Log one repeatable check-in on a task (inputType 'check_in'): every tap
+// appends a {byName, byEmail, at} record under the task.
+app.post('/api/tasks/:id/check-in', (req, res) => {
+  const { id } = req.params;
+  const index = tasks.findIndex((t) => t.id === id);
+
+  if (index === -1) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+
+  const { userEmail, userName } = req.body;
+  if (userEmail) {
+    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
+    if (caller) {
+      const canFill =
+        caller.role === 'admin' ||
+        (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
+        ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
+        (caller.role === 'owner' && caller.permissions?.canFillTasks === true);
+      if (!canFill) {
+        return res.status(403).json({ error: 'You do not have permission to log checks.' });
+      }
+    }
+  }
+
+  const existing = tasks[index];
+  const now = new Date().toISOString();
+  const checkIn: TaskCheckInItem = {
+    id: `checkin-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    byName: userName || null,
+    byEmail: userEmail || null,
+    at: now,
+  };
+
+  const updated: TaskItem = {
+    ...existing,
+    checkIns: [...(existing.checkIns || []), checkIn],
+    updatedByEmail: userEmail || existing.updatedByEmail || null,
+    updatedByName: userName || existing.updatedByName || null,
+    updatedAt: now,
   };
 
   tasks[index] = updated;

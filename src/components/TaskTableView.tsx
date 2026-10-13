@@ -15,7 +15,7 @@ import {
   ShieldCheck,
   Star,
 } from 'lucide-react';
-import { Task, TaskStatus, User as UserType } from '../types';
+import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
 import { formatTimeAgo, formatExactTime, formatTaskSchedule } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
@@ -25,6 +25,7 @@ interface TaskTableViewProps {
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
   onUpdateNotes: (taskId: string, notes: string) => void;
+  onCheckIn: (taskId: string) => void;
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
@@ -45,6 +46,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   currentUser,
   onUpdateStatus,
   onUpdateNotes,
+  onCheckIn,
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
@@ -357,8 +359,41 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                           </button>
                         )}
 
+                        {/* 5. Repeatable check-in — every tap logs who + when */}
+                        {task.inputType === 'check_in' && (
+                          <div className="flex flex-col items-start gap-1">
+                            <button
+                              id={`task-checkin-${task.id}`}
+                              onClick={() => onCheckIn(task.id)}
+                              className="pressable inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-lg transition cursor-pointer bg-gradient-to-b from-gold to-gold-deep text-white tactile-1"
+                              title="Log that you did this check right now"
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              <span>Log check</span>
+                              {(task.checkIns?.length || 0) > 0 && (
+                                <span className="px-1.5 py-px rounded-full bg-white/25 text-[10px] font-black">
+                                  {task.checkIns!.length}
+                                </span>
+                              )}
+                            </button>
+                            {(task.checkIns?.length || 0) > 0 && (
+                              <div className="text-[10px] text-ink-faint font-medium leading-snug max-w-[220px]">
+                                {task.checkIns!.map((c: TaskCheckIn) => (
+                                  <div key={c.id} className="truncate">
+                                    {c.byName || c.byEmail || 'Someone'} · {formatExactTime(c.at)}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         <div className="text-[10px] font-bold text-ink-faint">
-                          {task.isCompleted ? (
+                          {task.inputType === 'check_in' && (task.checkIns?.length || 0) > 0 ? (
+                            <span className="text-gold-ink font-bold">
+                              {task.checkIns!.length} check{task.checkIns!.length === 1 ? '' : 's'} logged
+                            </span>
+                          ) : task.isCompleted ? (
                             <span className="text-emerald-700 dark:text-emerald-400 font-bold flex items-center gap-1">
                               <CheckCircle2 className="w-3 h-3" /> Signed
                             </span>
