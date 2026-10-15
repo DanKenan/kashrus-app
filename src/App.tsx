@@ -289,7 +289,7 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
     const url = `/api/venues?userEmail=${encodeURIComponent(currentUser.email)}`;
-    fetch(url)
+    apiFetch(url)
       .then((res) => res.json())
       .then((data) => {
         if (data.isDemoCleared !== undefined) {
