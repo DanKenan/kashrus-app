@@ -79,8 +79,8 @@ export default defineConfig(() => {
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
         manifest: {
           id: '/',
-          name: 'Kosher Supervisor',
-          short_name: 'KosherSuper',
+          name: 'Shutfey',
+          short_name: 'Shutfey',
           description: 'Kosher supervision, audit tasks, and collaborative shift inspection platform.',
           theme_color: '#b45309',
           background_color: '#1c1917',
