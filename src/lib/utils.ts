@@ -81,6 +81,12 @@ export function sortTasksForBoard<T extends BoardSortableTask>(
   );
 }
 
+/** Display both scheduled times, e.g. "9:00 AM · 3:00 PM". */
+export function formatTaskTimes(task: { targetTime?: string; targetTime2?: string }): string {
+  const t1 = task.targetTime || 'End of Shift';
+  return task.targetTime2 ? `${t1} · ${task.targetTime2}` : t1;
+}
+
 export function formatDaysOfWeek(days: number[]): string {
   if (!days || days.length === 0 || days.length === 7) return 'Every day';
   if (days.length === 5 && days.every((d) => [1, 2, 3, 4, 5].includes(d))) return 'Mon - Fri';

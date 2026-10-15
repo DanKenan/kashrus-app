@@ -15,6 +15,108 @@ import {
 } from '../lib/categoryStyle';
 import { MonthlyCalendarPicker } from './MonthlyCalendarPicker';
 
+/** Structured time value: 12-hour clock the app can reliably process. */
+export interface PickerTime {
+  hour: number; // 1-12
+  minute: number; // 0-59
+  ampm: 'AM' | 'PM';
+}
+
+export function parseTimeText(text: string | undefined | null): PickerTime | null {
+  if (!text) return null;
+  const s = text.trim();
+  const m12 = s.match(/^(\d{1,2}):(\d{2})\s*([AaPp])\.?\s*[Mm]\.?$/);
+  if (m12) {
+    const h = parseInt(m12[1], 10);
+    const m = parseInt(m12[2], 10);
+    if (h >= 1 && h <= 12 && m <= 59) return { hour: h, minute: m, ampm: /^[Pp]/.test(m12[3]) ? 'PM' : 'AM' };
+    return null;
+  }
+  const m24 = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (m24) {
+    const h = parseInt(m24[1], 10);
+    const m = parseInt(m24[2], 10);
+    if (h <= 23 && m <= 59) {
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      return { hour: h % 12 === 0 ? 12 : h % 12, minute: m, ampm };
+    }
+  }
+  return null;
+}
+
+export function formatPickerTime(t: PickerTime): string {
+  return `${t.hour}:${String(t.minute).padStart(2, '0')} ${t.ampm}`;
+}
+
+export function pickerTimeToMinutes(t: PickerTime): number {
+  let h = t.hour % 12;
+  if (t.ampm === 'PM') h += 12;
+  return h * 60 + t.minute;
+}
+
+const MINUTE_OPTIONS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
+
+/** One row: hour : minute + AM/PM toggle. Big enough for fingers. */
+function TimePickerRow({
+  value,
+  onChange,
+  onRemove,
+}: {
+  value: PickerTime;
+  onChange: (t: PickerTime) => void;
+  onRemove?: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <select
+        value={value.hour}
+        onChange={(e) => onChange({ ...value, hour: Number(e.target.value) })}
+        className="text-sm font-bold px-2 py-2 rounded-xl border border-line bg-sunken text-ink focus:border-gold focus:outline-none"
+        aria-label="Hour"
+      >
+        {Array.from({ length: 12 }, (_, i) => i + 1).map((h) => (
+          <option key={h} value={h}>{h}</option>
+        ))}
+      </select>
+      <span className="font-black text-ink-soft">:</span>
+      <select
+        value={value.minute}
+        onChange={(e) => onChange({ ...value, minute: Number(e.target.value) })}
+        className="text-sm font-bold px-2 py-2 rounded-xl border border-line bg-sunken text-ink focus:border-gold focus:outline-none"
+        aria-label="Minute"
+      >
+        {MINUTE_OPTIONS.map((m) => (
+          <option key={m} value={m}>{String(m).padStart(2, '0')}</option>
+        ))}
+      </select>
+      <div className="flex rounded-xl border border-line overflow-hidden">
+        {(['AM', 'PM'] as const).map((ap) => (
+          <button
+            key={ap}
+            type="button"
+            onClick={() => onChange({ ...value, ampm: ap })}
+            className={`px-3 py-2 text-sm font-black transition-colors ${
+              value.ampm === ap ? 'bg-gold-deep text-white' : 'bg-sunken text-ink-soft'
+            }`}
+          >
+            {ap}
+          </button>
+        ))}
+      </div>
+      {onRemove && (
+        <button
+          type="button"
+          onClick={onRemove}
+          className="p-2 rounded-xl text-ink-faint hover:text-red-600"
+          aria-label="Remove second time"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 interface TaskModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -59,7 +161,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [description, setDescription] = useState('');
   const [selectedCategories, setSelectedCategories] = useState<string[]>([PRESET_CATEGORIES[0]]);
   const [inputType, setInputType] = useState<TaskInputType>('yes_no');
-  const [targetTime, setTargetTime] = useState('09:00 AM');
+  // Structured times — the app can reliably sort and process these.
+  const [time1, setTime1] = useState<PickerTime>({ hour: 9, minute: 0, ampm: 'AM' });
+  const [time2, setTime2] = useState<PickerTime | null>(null);
+  // Free-text fallback for non-clock times like "End of Shift".
+  const [customTimeText, setCustomTimeText] = useState<string | null>(null);
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
   const [assignType, setAssignType] = useState<'all' | 'specific'>('all');
   const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
@@ -171,7 +277,17 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           : [taskToEdit.category || 'General']
       );
       setInputType(taskToEdit.inputType || 'yes_no');
-      setTargetTime(taskToEdit.targetTime || '09:00 AM');
+      // Load times: structured when parseable, free-text otherwise.
+      const t1 = parseTimeText(taskToEdit.targetTime);
+      if (t1) {
+        setTime1(t1);
+        setCustomTimeText(null);
+      } else {
+        setTime1({ hour: 9, minute: 0, ampm: 'AM' });
+        setCustomTimeText(taskToEdit.targetTime || null);
+      }
+      const t2 = parseTimeText(taskToEdit.targetTime2);
+      setTime2(t2);
       setPriority(taskToEdit.priority || 'medium');
       if (taskToEdit.assignedTo.includes('all')) {
         setAssignType('all');
@@ -208,7 +324,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setDescription('');
       setSelectedCategories([PRESET_CATEGORIES[0]]);
       setInputType('yes_no');
-      setTargetTime('09:00 AM');
+      setTime1({ hour: 9, minute: 0, ampm: 'AM' });
+      setTime2(null);
+      setCustomTimeText(null);
       setPriority('medium');
       setAssignType('all');
       setSelectedWorkers([]);
@@ -332,7 +450,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       inputType,
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
-      targetTime: targetTime.trim(),
+      // Structured times when set via picker; custom text clears the minutes.
+      targetTime: customTimeText !== null ? customTimeText.trim() : formatPickerTime(time1),
+      targetTimeMinutes: customTimeText !== null ? null : pickerTimeToMinutes(time1),
+      targetTime2: time2 ? formatPickerTime(time2) : '',
+      targetTime2Minutes: time2 ? pickerTimeToMinutes(time2) : null,
       priority,
       assignedTo,
       scheduleType,
@@ -678,16 +800,64 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block font-semibold text-ink-soft mb-1 flex items-center gap-1">
-                <Clock className="w-3.5 h-3.5 text-ink-faint" /> Target Completion Time
+                <Clock className="w-3.5 h-3.5 text-ink-faint" /> Target Time
               </label>
-              <input
-                id="task-target-time-input"
-                type="text"
-                value={targetTime}
-                onChange={(e) => setTargetTime(e.target.value)}
-                placeholder="e.g. 09:00 AM or End of Shift"
-                className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink"
-              />
+              {customTimeText !== null ? (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={customTimeText}
+                    onChange={(e) => setCustomTimeText(e.target.value)}
+                    placeholder="e.g. End of Shift"
+                    className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setCustomTimeText(null)}
+                    className="text-xs font-bold text-gold-deep whitespace-nowrap"
+                  >
+                    Use clock
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <TimePickerRow value={time1} onChange={setTime1} />
+                  {time2 ? (
+                    <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />
+                  ) : (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => setTime1({ hour: 9, minute: 0, ampm: 'AM' })}
+                        className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold"
+                      >
+                        ☀️ Morning
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTime1({ hour: 3, minute: 0, ampm: 'PM' })}
+                        className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold"
+                      >
+                        🌤️ Afternoon
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTime2({ hour: 3, minute: 0, ampm: 'PM' })}
+                        className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-dashed border-gold/60 text-gold-deep"
+                      >
+                        + Second time
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCustomTimeText('')}
+                        className="text-xs text-ink-faint underline"
+                      >
+                        Custom text
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div>

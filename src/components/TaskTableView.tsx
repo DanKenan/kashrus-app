@@ -17,7 +17,7 @@ import {
   Star,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
-import { formatTimeAgo, formatExactTime, formatTaskSchedule, taskCategories, boardTier } from '../lib/utils';
+import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories, boardTier } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
@@ -27,6 +27,7 @@ interface TaskTableViewProps {
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
   onUpdateNotes: (taskId: string, notes: string) => void;
   onCheckIn: (taskId: string) => void;
+  onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
@@ -50,6 +51,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   onUpdateStatus,
   onUpdateNotes,
   onCheckIn,
+  onRemoveCheckIn,
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
@@ -214,7 +216,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                     <div className="space-y-1">
                       <div className="tnum inline-flex items-center gap-1 font-bold text-ink">
                         <Clock className="w-3.5 h-3.5 text-ink-faint shrink-0" />
-                        <span>{task.targetTime || 'End of Shift'}</span>
+                        <span>{formatTaskTimes(task)}</span>
                       </div>
                       <div className="text-[11px] text-ink-faint flex items-center gap-1 font-medium">
                         {task.scheduleType === 'specific_dates' && (
@@ -409,8 +411,20 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                             {(task.checkIns?.length || 0) > 0 && (
                               <div className="text-[10px] text-ink-faint font-medium leading-snug max-w-[220px]">
                                 {task.checkIns!.map((c: TaskCheckIn) => (
-                                  <div key={c.id} className="truncate">
-                                    {c.byName || c.byEmail || 'Someone'} · {formatExactTime(c.at)}
+                                  <div key={c.id} className="truncate flex items-center gap-1 group">
+                                    <span className="truncate">
+                                      {c.byName || c.byEmail || 'Someone'} · {formatExactTime(c.at)}
+                                    </span>
+                                    {onRemoveCheckIn && (
+                                      <button
+                                        onClick={() => onRemoveCheckIn(task.id, c.id)}
+                                        className="shrink-0 p-0.5 rounded text-ink-faint hover:text-red-600"
+                                        title="Remove this check"
+                                        aria-label="Remove check"
+                                      >
+                                        <X className="w-3 h-3" />
+                                      </button>
+                                    )}
                                   </div>
                                 ))}
                               </div>
