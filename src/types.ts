@@ -55,6 +55,7 @@ export interface User {
   role: UserRole;
   avatarColor?: string;
   venueId?: string; // Workers & Owners belong to a specific venue; Admins have access to all in their agency
+  kioskPin?: string; // 4-6 digit PIN for shared kiosk tablets (never sent to clients)
   permissions?: UserPermissions;
 }
 

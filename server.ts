@@ -258,6 +258,7 @@ interface UserProfile {
   role: 'admin' | 'coordinator' | 'mashgiach' | 'owner' | 'worker';
   avatarColor: string;
   password?: string;
+  kioskPin?: string; // 4-6 digit PIN for shared kiosk tablets (never sent to clients)
   venueId?: string; // Mashgichim, Coordinators and Owners belong to a specific venue; Admins have access to all in their agency
   permissions?: UserPermissions;
 }
@@ -657,7 +658,7 @@ function generateTemplateTasks(venueId: string, templateType: string = 'restaura
 }
 
 function getSafeUser(user: UserProfile) {
-  const { password, ...safe } = user;
+  const { password, kioskPin, ...safe } = user;
   const userAgency = agencies.find((a) => a.id === user.agencyId) || agencies[0];
   return {
     ...safe,
@@ -2645,11 +2646,18 @@ app.put('/api/users/:id', (req, res) => {
     return res.status(404).json({ error: 'Team member not found' });
   }
 
-  const { role, permissions, venueId, name } = req.body;
+  const { role, permissions, venueId, name, kioskPin } = req.body;
   const existingUser = users[userIndex];
 
   if (name !== undefined) {
     existingUser.name = name.trim();
+  }
+  if (kioskPin !== undefined) {
+    // 4-6 digit kiosk PIN, or empty string to clear
+    const pin = String(kioskPin).trim();
+    if (pin === '' || /^[0-9]{4,6}$/.test(pin)) {
+      existingUser.kioskPin = pin === '' ? undefined : pin;
+    }
   }
   if (venueId !== undefined) {
     existingUser.venueId = venueId;
@@ -2698,6 +2706,29 @@ app.delete('/api/users/:id', (req, res) => {
   saveState();
   broadcast('USERS_UPDATED', { users: getSafeUsers(), deletedId: id, agencyId: userToDelete.agencyId });
   res.json({ success: true, deletedId: id });
+});
+
+// ---- Kiosk mode: shared tablet login via per-user PIN ----
+// Public list of PIN-enabled staff for one venue (no PINs, no emails exposed).
+app.get('/api/kiosk/users', (req, res) => {
+  const venueId = String(req.query.venueId || '').trim();
+  if (!venueId) return res.status(400).json({ error: 'venueId required' });
+  const staff = users
+    .filter((u) => u.venueId === venueId && u.kioskPin && ['mashgiach', 'worker', 'coordinator'].includes(u.role))
+    .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
+  const venue = venues.find((v) => v.id === venueId);
+  res.json({ venueName: venue?.name || 'Kiosk', users: staff });
+});
+
+// Verify a kiosk PIN and return the user session.
+app.post('/api/kiosk/login', (req, res) => {
+  const { userId, pin } = req.body;
+  if (!userId || !pin) return res.status(400).json({ error: 'Missing credentials' });
+  const user = users.find((u) => u.id === userId);
+  if (!user || !user.kioskPin || user.kioskPin !== String(pin).trim()) {
+    return res.status(401).json({ error: 'Wrong code. Try again.' });
+  }
+  res.json({ user: getSafeUser(user) });
 });
 
 // Formal Login Endpoint

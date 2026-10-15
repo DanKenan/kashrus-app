@@ -9,6 +9,7 @@ import { TaskModal } from './components/TaskModal';
 import { HistoryLogModal } from './components/HistoryLogModal';
 import { SupabaseModal } from './components/SupabaseModal';
 import { LoginPage } from './components/LoginPage';
+import { KioskLogin } from './components/KioskLogin';
 import { LandingPage } from './components/LandingPage';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { TeamModal } from './components/TeamModal';
@@ -82,6 +83,34 @@ export default function App() {
 
   // Which public screen is showing: the landing home page or the auth form.
   const [authView, setAuthView] = useState<'landing' | 'auth'>('landing');
+
+  // ---- Kiosk mode: shared wall tablet ----
+  // Activated via ?kiosk=1&venue=VENUE_ID (persisted in localStorage so it survives reloads).
+  const [kioskVenueId, setKioskVenueId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('kiosk') === '0') {
+        localStorage.removeItem('kiosk_venue_id');
+        return null;
+      }
+      const urlVenue = params.get('venue');
+      if (params.get('kiosk') === '1' && urlVenue) {
+        localStorage.setItem('kiosk_venue_id', urlVenue);
+        return urlVenue;
+      }
+      return localStorage.getItem('kiosk_venue_id');
+    } catch {
+      return null;
+    }
+  });
+  const isKiosk = kioskVenueId !== null;
+
+  const exitKioskMode = () => {
+    setKioskVenueId(null);
+    if (typeof window !== 'undefined') localStorage.removeItem('kiosk_venue_id');
+    setAuthView('landing');
+  };
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'signup'>('login');
 
   // Keep the render-path category colors in sync with this user's saved
@@ -94,6 +123,28 @@ export default function App() {
   // intentionally starts with currentUser === null, so this must NOT clear
   // the saved session — logout and "Use a different account" remove it
   // explicitly in their own handlers.
+
+  // Kiosk auto-logout: 5 minutes of no touches returns the tablet to the PIN screen.
+  useEffect(() => {
+    if (!isKiosk || !currentUser) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        handleLogout();
+        showToast('Signed out for inactivity.');
+      }, 5 * 60 * 1000);
+    };
+    arm();
+    const events = ['pointerdown', 'keydown', 'touchstart', 'wheel'];
+    events.forEach((e) => window.addEventListener(e, arm, { passive: true }));
+    return () => {
+      clearTimeout(timer);
+      events.forEach((e) => window.removeEventListener(e, arm));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isKiosk, currentUser?.id]);
+
   useEffect(() => {
     if (typeof window !== 'undefined' && currentUser) {
       localStorage.setItem('current_user', JSON.stringify(currentUser));
@@ -781,7 +832,7 @@ export default function App() {
   };
 
   // Update existing user (role, permissions)
-  const handleUpdateUser = async (userId: string, updates: { role?: UserRole; permissions?: { canFillTasks?: boolean; canAssignTasks?: boolean } }) => {
+  const handleUpdateUser = async (userId: string, updates: { role?: UserRole; permissions?: { canFillTasks?: boolean; canAssignTasks?: boolean }; kioskPin?: string }) => {
     const res = await fetch(`/api/users/${userId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -1049,7 +1100,8 @@ export default function App() {
       localStorage.removeItem('selected_venue_id');
     }
     setSavedSession(null);
-    setAuthView('landing');
+    // In kiosk mode the tablet returns to the PIN screen, not the landing page.
+    if (!kioskVenueId) setAuthView('landing');
     showToast('Signed out successfully.');
   };
 
@@ -1073,6 +1125,25 @@ export default function App() {
   // Public screens: the landing home page opens first; auth form on demand.
   // Require authentication to view tasks and shift operations
   if (!currentUser) {
+    // Kiosk tablets go straight to the PIN screen.
+    if (isKiosk && kioskVenueId) {
+      return (
+        <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
+          {toastMessage && (
+            <div className="fixed bottom-5 right-5 z-50 bg-ink text-paper text-xs font-semibold px-4 py-3 rounded-2xl tactile-4 border border-line-strong flex items-center gap-2 animate-slide-up">
+              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span>{toastMessage}</span>
+            </div>
+          )}
+          <KioskLogin
+            venueId={kioskVenueId}
+            onLoginSuccess={handleLoginSuccess}
+            onExitKiosk={exitKioskMode}
+            darkMode={darkMode}
+          />
+        </div>
+      );
+    }
     if (authView === 'landing') {
       return (
         <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
@@ -1135,6 +1206,16 @@ export default function App() {
           <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
           <span>{toastMessage}</span>
         </div>
+      )}
+
+      {/* Kiosk: always-visible End shift button for the wall tablet */}
+      {isKiosk && (
+        <button
+          onClick={handleLogout}
+          className="fixed bottom-5 left-5 z-50 tactile-4 bg-red-700 text-white text-base font-extrabold font-sans px-6 py-4 rounded-2xl shadow-lg active:scale-95 transition-transform"
+        >
+          End shift — {currentUser.name.split(' ')[0]}
+        </button>
       )}
 
       {/* Navigation Header */}
