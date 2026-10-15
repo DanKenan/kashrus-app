@@ -124,6 +124,9 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   // Kiosk: the PIN itself is the credential; /kiosk/users only returns names.
   { method: 'GET', path: '/kiosk/users' },
   { method: 'POST', path: '/kiosk/login' },
+  // Kiosk setup: venue names only (no sensitive data) so a fresh tablet can
+  // pick its establishment before anyone logs in.
+  { method: 'GET', path: '/kiosk/venues' },
 ];
 
 function isPublicApiRoute(method: string, path: string): boolean {
@@ -3062,6 +3065,14 @@ app.delete('/api/users/:id', (req, res) => {
 
 // ---- Kiosk mode: shared tablet login via per-user PIN ----
 // Public list of PIN-enabled staff for one venue (no PINs, no emails exposed).
+// Public venue list for kiosk setup: id + name only, no sensitive data.
+// A fresh tablet needs this before anyone logs in.
+app.get('/api/kiosk/venues', (req, res) => {
+  res.json({
+    venues: venues.map((v) => ({ id: v.id, name: v.name })),
+  });
+});
+
 app.get('/api/kiosk/users', (req, res) => {
   const venueId = String(req.query.venueId || '').trim();
   if (!venueId) return res.status(400).json({ error: 'venueId required' });

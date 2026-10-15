@@ -37,7 +37,7 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
   useEffect(() => {
     if (!venueId) {
       // No venue yet — let the installer pick which establishment this tablet belongs to.
-      apiFetch('/api/venues')
+      apiFetch('/api/kiosk/venues')
         .then((r) => r.json())
         .then((d) => {
           setVenues(Array.isArray(d.venues) ? d.venues : Array.isArray(d) ? d : []);
