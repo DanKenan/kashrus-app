@@ -59,14 +59,18 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
           />
           {/* Inner Circle */}
           <circle cx="20" cy="19" r="9" stroke="#fbbf24" strokeWidth="1.2" strokeDasharray="2 1.5" />
-          {/* Letter K */}
-          <path
-            d="M16.5 13.5V24.5M16.5 19H18.5L23 13.5M18 19L23.5 24.5"
-            stroke="#ffffff"
-            strokeWidth="2.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
+          {/* Letter Shin */}
+          <text
+            x="20"
+            y="25.5"
+            textAnchor="middle"
+            fontSize="15"
+            fontWeight="900"
+            fill="#ffffff"
+            fontFamily="serif"
+          >
+            ש
+          </text>
           <defs>
             <linearGradient id="shieldGrad" x1="7" y1="4" x2="33" y2="37" gradientUnits="userSpaceOnUse">
               <stop stopColor="var(--gold-deep)" />
@@ -80,7 +84,7 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
       <div className="flex flex-col justify-center min-w-0 overflow-hidden">
         <div className="flex items-center gap-1 sm:gap-1.5 flex-nowrap">
           <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap`}>
-            Keeping<span className="text-gold-deep">Kosher</span>
+            Shut<span className="text-gold-deep">fey</span>
           </span>
           {agencyShortCode ? (
             <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-gold-wash text-gold-ink border border-gold/40 shrink-0">
