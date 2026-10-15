@@ -114,14 +114,16 @@ app.use(express.json());
 // ---------------------------------------------------------------------------
 
 const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
-  { method: 'GET', path: '/api/health' },
-  { method: 'POST', path: '/api/auth/login' },
-  { method: 'POST', path: '/api/agencies/register' },
-  { method: 'GET', path: '/api/push/public-key' },
-  { method: 'GET', path: '/api/agencies/by-domain' },
+  // Note: req.path inside app.use('/api') is stripped of the /api prefix.
+  { method: 'GET', path: '/health' },
+  { method: 'POST', path: '/auth/login' },
+  { method: 'POST', path: '/auth/setup' },
+  { method: 'POST', path: '/agencies/register' },
+  { method: 'GET', path: '/push/public-key' },
+  { method: 'GET', path: '/agencies/by-domain' },
   // Kiosk: the PIN itself is the credential; /kiosk/users only returns names.
-  { method: 'GET', path: '/api/kiosk/users' },
-  { method: 'POST', path: '/api/kiosk/login' },
+  { method: 'GET', path: '/kiosk/users' },
+  { method: 'POST', path: '/kiosk/login' },
 ];
 
 function isPublicApiRoute(method: string, path: string): boolean {
