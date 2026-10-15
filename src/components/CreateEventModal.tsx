@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { KosherEvent, User as UserType, Venue } from '../types';
 import { getRoleLabel } from '../lib/permissions';
+import { apiFetch } from '../lib/api';
 
 // Staff roles that can be assigned to supervise an event — everyone on the
 // team except venue owners. ('worker' is the app's Mashgiach role.)
@@ -92,7 +93,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
     setShowTemplateManager(false);
     setNewTemplateInput('');
     const agencyParam = currentUser?.agencyId ? `?agencyId=${encodeURIComponent(currentUser.agencyId)}` : '';
-    fetch(`/api/event-task-templates${agencyParam}`)
+    apiFetch(`/api/event-task-templates${agencyParam}`)
       .then((r) => r.json())
       .then((d) => {
         const list = Array.isArray(d.templates) ? d.templates : [];
@@ -142,7 +143,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
     const title = newTemplateInput.trim();
     if (!title) return;
     try {
-      const res = await fetch('/api/event-task-templates', {
+      const res = await apiFetch('/api/event-task-templates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -162,7 +163,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
   const handleDeleteTemplate = async (id: string) => {
     try {
-      const res = await fetch(`/api/event-task-templates/${id}`, {
+      const res = await apiFetch(`/api/event-task-templates/${id}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userEmail: currentUser?.email }),
@@ -232,7 +233,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
         userName: currentUser?.name,
       };
 
-      const res = await fetch('/api/events', {
+      const res = await apiFetch('/api/events', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

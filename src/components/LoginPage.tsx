@@ -20,6 +20,7 @@ import { LandingBackButton } from './LandingPage';
 import { User as UserType } from '../types';
 import { AgencySignupForm } from './AgencySignupForm';
 import { PWAInstallButton } from './PWAInstallButton';
+import { apiFetch, setSessionToken } from '../lib/api';
 
 interface LoginPageProps {
   onLoginSuccess: (user: UserType) => void;
@@ -44,6 +45,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // First-run admin setup: no password exists yet → show the create-password form.
+  const [needsSetup, setNeedsSetup] = useState(false);
+  const [setupPassword, setSetupPassword] = useState('');
+  const [setupConfirm, setSetupConfirm] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,7 +64,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
     try {
       setIsLoading(true);
-      const res = await fetch('/api/auth/login', {
+      const res = await apiFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: trimmedEmail, password: trimmedPassword }),
@@ -71,6 +76,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         throw new Error(data.error || 'Authentication failed. Please check your email and password.');
       }
 
+      // First-run setup: admin has no password yet → create it now.
+      if (data.needsSetup) {
+        setNeedsSetup(true);
+        setIsLoading(false);
+        return;
+      }
+
+      if (data.token) {
+        setSessionToken(data.token);
+      }
       if (data.user) {
         onLoginSuccess(data.user);
       } else {
@@ -78,6 +93,36 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Unable to sign in. Please verify your network and credentials.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSetupSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage(null);
+    if (setupPassword.trim().length < 8) {
+      setErrorMessage('Please choose a password of at least 8 characters.');
+      return;
+    }
+    if (setupPassword !== setupConfirm) {
+      setErrorMessage('The two passwords do not match.');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const res = await apiFetch('/api/auth/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), newPassword: setupPassword.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Setup failed. Please try again.');
+      if (data.token) setSessionToken(data.token);
+      if (data.user) onLoginSuccess(data.user);
+      else throw new Error('Setup complete but sign-in failed. Please sign in.');
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Setup failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -185,6 +230,50 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   setErrorMessage(null);
                 }}
               />
+            ) : needsSetup ? (
+              /* First-run admin setup: create the admin password */
+              <>
+                {errorMessage && (
+                  <div className="mb-5 p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2.5 animate-shake">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-500" />
+                    <span>{errorMessage}</span>
+                  </div>
+                )}
+                <form onSubmit={handleSetupSubmit} className="space-y-4">
+                  <div className="p-3.5 rounded-2xl bg-gold-wash border border-gold/40 text-xs text-ink-soft">
+                    <span className="font-bold text-ink">Welcome — let's secure your account.</span>
+                    <br />
+                    Create a strong password for {email.trim() || 'the admin account'}. You'll use it to sign in from now on.
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-ink-soft mb-1">New password (min 8 characters)</label>
+                    <input
+                      type="password"
+                      value={setupPassword}
+                      onChange={(e) => setSetupPassword(e.target.value)}
+                      placeholder="Choose a strong password"
+                      className="w-full px-3 py-2.5 text-sm rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none transition"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-ink-soft mb-1">Confirm password</label>
+                    <input
+                      type="password"
+                      value={setupConfirm}
+                      onChange={(e) => setSetupConfirm(e.target.value)}
+                      placeholder="Repeat the password"
+                      className="w-full px-3 py-2.5 text-sm rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none transition"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isLoading}
+                    className="w-full py-3 px-4 rounded-xl pressable bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 text-sm font-bold flex items-center justify-center gap-2 transition disabled:opacity-50 cursor-pointer"
+                  >
+                    {isLoading ? 'Setting up…' : 'Create password & sign in'}
+                  </button>
+                </form>
+              </>
             ) : (
               /* Standard Staff Sign In Flow */
               <>

@@ -14,6 +14,7 @@ import {
   Calendar
 } from 'lucide-react';
 import { ApprovedIngredient, UnapprovedDiscrepancy, FactoryAuditReport, Venue, User as UserType } from '../types';
+import { apiFetch } from '../lib/api';
 
 interface SubmitAuditReportModalProps {
   isOpen: boolean;
@@ -73,7 +74,7 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
     }));
 
     try {
-      const res = await fetch('/api/factory-reports', {
+      const res = await apiFetch('/api/factory-reports', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

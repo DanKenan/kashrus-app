@@ -15,6 +15,7 @@ import {
   Factory
 } from 'lucide-react';
 import { Venue } from '../types';
+import { apiFetch } from '../lib/api';
 
 interface CreateVenueModalProps {
   isOpen: boolean;
@@ -79,7 +80,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
 
     try {
       setIsLoading(true);
-      const res = await fetch('/api/venues', {
+      const res = await apiFetch('/api/venues', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

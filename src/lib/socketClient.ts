@@ -1,4 +1,5 @@
 import { ServerBroadcastMessage } from '../types';
+import { getSessionToken } from './api';
 
 type MessageListener = (message: ServerBroadcastMessage) => void;
 type StatusListener = (connected: boolean) => void;
@@ -30,8 +31,11 @@ class RealtimeSocket {
 
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
-      
+      // Session token authenticates the socket; the server scopes all
+      // real-time data to the token owner's agency.
+      const token = getSessionToken();
+      const wsUrl = `${protocol}//${window.location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+
       this.socket = new WebSocket(wsUrl);
 
       this.socket.onopen = () => {
@@ -55,9 +59,11 @@ class RealtimeSocket {
         }
       };
 
-      this.socket.onclose = () => {
+      this.socket.onclose = (event) => {
         this.isConnected = false;
         this.notifyStatus(false);
+        // 4401 = auth rejected: do NOT retry (no valid session). Anything else retries.
+        if (event && (event as CloseEvent).code === 4401) return;
         this.scheduleReconnect();
       };
 
@@ -121,6 +127,12 @@ class RealtimeSocket {
     }
     this.isConnected = false;
     this.notifyStatus(false);
+  }
+
+  /** Reconnect with the current session token (call after login). */
+  public reconnect() {
+    this.disconnect();
+    this.connect(this.currentUserEmail, this.currentUserName);
   }
 
   public getStatus() {

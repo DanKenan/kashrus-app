@@ -1,9 +1,13 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow read/write for all application state in the kosher app
+    // Server-only access. The Express server uses the Firebase Admin SDK,
+    // which bypasses these rules entirely. No client — browser, phone, or
+    // otherwise — may read or write Firestore directly. All data flows
+    // through the API, which authenticates every request with a signed
+    // session token and enforces per-agency isolation.
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }
