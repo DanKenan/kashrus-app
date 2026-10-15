@@ -26,7 +26,8 @@ import {
   SlidersHorizontal,
   Sparkles,
   Trash2,
-  Factory
+  Factory,
+  Tablet
 } from 'lucide-react';
 import { User, Venue } from '../types';
 import { KeepingKosherLogo } from './KeepingKosherLogo';
@@ -106,6 +107,18 @@ export const Header: React.FC<HeaderProps> = ({
     month: 'short',
     day: 'numeric',
   });
+
+  // Enter kiosk mode: this device becomes a shared wall tablet.
+  // The kiosk PIN screen (with venue picker on first launch) takes over on reload.
+  const enterKioskMode = () => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('kiosk_mode', '1');
+    }
+    setUserMenuOpen(false);
+    setMobileMenuOpen(false);
+    window.location.reload();
+  };
+  const canEnterKiosk = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
 
   return (
     <header className="sticky top-0 z-30 bg-surface/95 backdrop-blur-md border-b border-line tactile-1 transition-colors">
@@ -407,6 +420,20 @@ export const Header: React.FC<HeaderProps> = ({
                         <UpdateAppButton />
                       </div>
 
+                      {/* Kiosk mode: turn this device into a shared wall tablet */}
+                      {canEnterKiosk && (
+                        <div className="px-1 py-0.5 border-t border-line/60 mt-1 pt-1">
+                          <button
+                            onClick={enterKioskMode}
+                            className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
+                            title="Lock this device to the mashgiach sign-in screen"
+                          >
+                            <Tablet className="w-4 h-4 text-gold-deep" />
+                            <span>Enter kiosk mode</span>
+                          </button>
+                        </div>
+                      )}
+
                       {/* Change Password */}
                       {onOpenChangePassword && (
                         <button
@@ -647,6 +674,16 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="rounded-xl bg-sunken px-1 py-1">
               <PushNotificationToggle userEmail={currentUser.email} />
               <UpdateAppButton />
+              {canEnterKiosk && (
+                <button
+                  onClick={enterKioskMode}
+                  className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-surface transition cursor-pointer text-ink-soft"
+                  title="Lock this device to the mashgiach sign-in screen"
+                >
+                  <Tablet className="w-4 h-4 text-gold-deep" />
+                  <span>Enter kiosk mode</span>
+                </button>
+              )}
             </div>
           )}
 
