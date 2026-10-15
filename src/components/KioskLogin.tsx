@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Delete, LogIn } from 'lucide-react';
 import { KeepingKosherLogo } from './KeepingKosherLogo';
 import type { User } from '../types';
@@ -95,9 +95,27 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
     setError('');
   };
 
+  // Hidden exit: tap the logo 5 times to leave kiosk mode.
+  // No visible button — this tablet is meant to stay locked.
+  const logoTaps = useRef<{ count: number; firstAt: number }>({ count: 0, firstAt: 0 });
+  const handleLogoTap = () => {
+    const now = Date.now();
+    if (now - logoTaps.current.firstAt > 3000) {
+      logoTaps.current = { count: 1, firstAt: now };
+    } else {
+      logoTaps.current.count += 1;
+    }
+    if (logoTaps.current.count >= 5) {
+      logoTaps.current = { count: 0, firstAt: 0 };
+      if (window.confirm('Exit kiosk mode?')) onExitKiosk();
+    }
+  };
+
   return (
     <div className="min-h-screen bg-paper text-ink flex flex-col items-center px-6 py-8 transition-colors">
-      <KeepingKosherLogo size="md" darkMode={darkMode} />
+      <button onClick={handleLogoTap} aria-label="Shutfey logo" className="cursor-default">
+        <KeepingKosherLogo size="md" darkMode={darkMode} />
+      </button>
 
       <div className="mt-6 text-center">
         <p className="text-xs font-bold uppercase tracking-[0.2em] text-gold-deep">Mashgiach sign-in</p>
@@ -205,12 +223,6 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
         </div>
       )}
 
-      <button
-        onClick={onExitKiosk}
-        className="mt-auto pt-10 text-xs text-ink-soft underline"
-      >
-        Exit kiosk mode
-      </button>
     </div>
   );
 }
