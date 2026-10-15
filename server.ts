@@ -1345,7 +1345,7 @@ app.post('/api/agencies/register', (req, res) => {
     adminPassword,
     initialVenueName,
     initialVenueCategory,
-    includeStarterTemplates = true,
+    includeStarterTemplates = false,
   } = req.body;
 
   if (!agencyName || !agencyName.trim()) {

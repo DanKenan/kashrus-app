@@ -40,7 +40,7 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
   const [initialVenueCategory, setInitialVenueCategory] = useState('Food Service');
   const [customVenueCategory, setCustomVenueCategory] = useState('');
   const [initialVenueAddress, setInitialVenueAddress] = useState('');
-  const [seedTemplateTasks, setSeedTemplateTasks] = useState(true);
+  // (seedTemplateTasks removed — the generated tasks were generic/random)
 
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -109,7 +109,6 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
           initialVenueName: cleanVenueName,
           initialVenueCategory: finalCategory,
           initialVenueAddress: initialVenueAddress.trim() || undefined,
-          seedTemplateTasks,
         }),
       });
 
@@ -358,23 +357,7 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
           />
         </div>
 
-        {/* Seed Template Checkbox */}
-        <label className="flex items-start gap-2.5 pt-1 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={seedTemplateTasks}
-            onChange={(e) => setSeedTemplateTasks(e.target.checked)}
-            className="mt-0.5 rounded accent-gold"
-          />
-          <div className="text-[11px] text-ink-soft leading-tight">
-            <span className="font-bold text-ink">
-              Initialize with industry-standard kashrut inspection tasks
-            </span>
-            <p className="text-ink-faint mt-0.5">
-              Includes pre-configured daily tasks (Bishul Yisroel, egg checking, flour sifting, vegetable inspection, insect checking, and daily log review).
-            </p>
-          </div>
-        </label>
+        {/* Seed Template Checkbox — removed: the generated tasks were generic/random */}
       </div>
 
       {/* Isolation Guarantee */}
