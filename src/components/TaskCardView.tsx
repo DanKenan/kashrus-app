@@ -18,7 +18,7 @@ import {
   Star,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
-import { formatTimeAgo, formatExactTime, formatTaskSchedule, taskCategories, boardTier } from '../lib/utils';
+import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories, boardTier } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
@@ -28,6 +28,7 @@ interface TaskCardViewProps {
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
   onUpdateNotes: (taskId: string, notes: string) => void;
   onCheckIn: (taskId: string) => void;
+  onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
@@ -51,6 +52,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   onUpdateStatus,
   onUpdateNotes,
   onCheckIn,
+  onRemoveCheckIn,
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
@@ -141,7 +143,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                   )}
                   <span className="tnum inline-flex items-center gap-1 text-[11px] font-semibold text-ink-faint">
                     <Clock className="w-3 h-3" />
-                    {task.targetTime || 'End of Shift'}
+                    {formatTaskTimes(task)}
                   </span>
                 </div>
 
@@ -449,6 +451,16 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                                 <span className="text-ink-faint ml-auto shrink-0 font-semibold">
                                   {formatExactTime(c.at)}
                                 </span>
+                                {onRemoveCheckIn && (
+                                  <button
+                                    onClick={() => onRemoveCheckIn(task.id, c.id)}
+                                    className="shrink-0 p-1 rounded-md text-ink-faint hover:text-red-600 hover:bg-red-500/10"
+                                    title="Remove this check"
+                                    aria-label="Remove check"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
                               </li>
                             ))}
                           </ul>

@@ -52,6 +52,9 @@ interface TaskItem {
   daysOfWeek: number[]; // 0-6
   specificDates?: string[]; // 'YYYY-MM-DD'
   targetTime?: string;
+  targetTimeMinutes?: number; // minutes since midnight, set by the structured time picker
+  targetTime2?: string; // optional second daily time (e.g. morning + afternoon)
+  targetTime2Minutes?: number;
   priority?: 'low' | 'medium' | 'high';
   currentStatus: string;
   isCompleted: boolean;
@@ -1009,6 +1012,12 @@ function persistToFirestore() {
  *  per venue, ordered by target time then creation. Idempotent.
  *  MUST run after the Firestore load (see startServer) — the async hydrate
  *  overwrites in-memory tasks, so a module-level call gets wiped. */
+function taskSortMinutes(t: { targetTime?: string; targetTimeMinutes?: number }): number {
+  // Explicit picker value wins; fall back to parsing the free-text time.
+  if (typeof t.targetTimeMinutes === 'number') return t.targetTimeMinutes;
+  return targetTimeMinutes(t.targetTime);
+}
+
 function normalizeTaskOrder(): boolean {
   let changed = false;
   const venueIds = [...new Set(tasks.map((t) => t.venueId))];
@@ -1017,7 +1026,7 @@ function normalizeTaskOrder(): boolean {
       .filter((t) => t.venueId === vid)
       .sort(
         (a, b) =>
-          targetTimeMinutes(a.targetTime) - targetTimeMinutes(b.targetTime) ||
+          taskSortMinutes(a) - taskSortMinutes(b) ||
           a.createdAt.localeCompare(b.createdAt)
       );
     if (group.some((t) => t.sortOrder === undefined)) {
@@ -1797,6 +1806,9 @@ app.post('/api/tasks', (req, res) => {
     daysOfWeek,
     specificDates,
     targetTime,
+    targetTimeMinutes,
+    targetTime2,
+    targetTime2Minutes,
     priority,
     createdByEmail,
   } = req.body;
@@ -1867,6 +1879,9 @@ app.post('/api/tasks', (req, res) => {
     daysOfWeek: Array.isArray(daysOfWeek) ? daysOfWeek : [0, 1, 2, 3, 4, 5, 6],
     specificDates: Array.isArray(specificDates) ? specificDates : undefined,
     targetTime: targetTime || 'End of Day',
+    targetTimeMinutes: targetTimeMinutes !== undefined && targetTimeMinutes !== null ? Number(targetTimeMinutes) : undefined,
+    targetTime2: targetTime2 || undefined,
+    targetTime2Minutes: targetTime2Minutes !== undefined && targetTime2Minutes !== null ? Number(targetTime2Minutes) : undefined,
     priority: priority || 'medium',
     currentStatus: defaultStatus,
     isCompleted: false,
@@ -1930,6 +1945,9 @@ app.put('/api/tasks/:id', (req, res) => {
     daysOfWeek,
     specificDates,
     targetTime,
+    targetTimeMinutes,
+    targetTime2,
+    targetTime2Minutes,
     priority,
   } = req.body;
 
@@ -1949,6 +1967,8 @@ app.put('/api/tasks/:id', (req, res) => {
     daysOfWeek !== undefined ||
     specificDates !== undefined ||
     targetTime !== undefined ||
+    targetTimeMinutes !== undefined ||
+    targetTime2 !== undefined ||
     priority !== undefined;
 
   if (userEmail) {
@@ -2003,6 +2023,9 @@ app.put('/api/tasks/:id', (req, res) => {
     daysOfWeek: daysOfWeek !== undefined ? daysOfWeek : existing.daysOfWeek,
     specificDates: specificDates !== undefined ? specificDates : existing.specificDates,
     targetTime: targetTime !== undefined ? targetTime : existing.targetTime,
+    targetTimeMinutes: targetTimeMinutes !== undefined ? (targetTimeMinutes === null ? undefined : Number(targetTimeMinutes)) : existing.targetTimeMinutes,
+    targetTime2: targetTime2 !== undefined ? (targetTime2 || undefined) : existing.targetTime2,
+    targetTime2Minutes: targetTime2Minutes !== undefined ? (targetTime2Minutes === null ? undefined : Number(targetTime2Minutes)) : existing.targetTime2Minutes,
     priority: priority !== undefined ? priority : existing.priority,
     currentStatus: currentStatus !== undefined ? currentStatus : (finalIsCompleted ? existing.currentStatus : 'pending'),
     isCompleted: finalIsCompleted,
@@ -2010,6 +2033,51 @@ app.put('/api/tasks/:id', (req, res) => {
     updatedByEmail,
     updatedByName,
     updatedAt,
+  };
+
+  tasks[index] = updated;
+  saveState();
+
+  broadcast('TASK_UPDATED', updated, userEmail);
+  res.json(updated);
+});
+
+// Remove one check-in entry (tapped by mistake, logged in error).
+app.delete('/api/tasks/:id/check-in/:checkInId', (req, res) => {
+  const { id, checkInId } = req.params;
+  const index = tasks.findIndex((t) => t.id === id);
+
+  if (index === -1) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+
+  const { userEmail } = req.body || {};
+  const existing = tasks[index];
+  const entry = (existing.checkIns || []).find((c: any) => c.id === checkInId);
+  if (!entry) {
+    return res.status(404).json({ error: 'Check-in not found' });
+  }
+
+  // The person who logged it, or anyone with fill permission, can remove it.
+  if (userEmail) {
+    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
+    const isLogger = entry.byEmail && entry.byEmail.toLowerCase() === String(userEmail).trim().toLowerCase();
+    const canFill =
+      caller &&
+      (caller.role === 'admin' ||
+        (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
+        ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
+        (caller.role === 'owner' && caller.permissions?.canFillTasks === true));
+    if (!isLogger && !canFill) {
+      return res.status(403).json({ error: 'You do not have permission to remove checks.' });
+    }
+  }
+
+  const now = new Date().toISOString();
+  const updated: TaskItem = {
+    ...existing,
+    checkIns: (existing.checkIns || []).filter((c: any) => c.id !== checkInId),
+    updatedAt: now,
   };
 
   tasks[index] = updated;

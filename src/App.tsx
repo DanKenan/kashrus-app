@@ -588,6 +588,32 @@ export default function App() {
     }
   };
 
+  // Remove one check-in entry (tapped by mistake).
+  const handleRemoveCheckIn = async (taskId: string, checkInId: string) => {
+    if (!currentUser) return;
+    // Optimistic local update
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === taskId
+          ? { ...t, checkIns: (t.checkIns || []).filter((c) => c.id !== checkInId) }
+          : t
+      )
+    );
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/check-in/${checkInId}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userEmail: currentUser.email }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed');
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? data : t)));
+    } catch (err) {
+      console.error('Failed to remove check-in:', err);
+      showToast('Could not remove that check.');
+    }
+  };
+
   // Venue Management Handlers
   const handleSelectVenue = (venueId: string) => {
     const target = venues.find((v) => v.id === venueId);
@@ -1451,6 +1477,7 @@ export default function App() {
             onDeleteTask={handleDeleteTask}
             onOpenTaskModal={handleOpenCreateTask}
             onCheckIn={handleCheckIn}
+            onRemoveCheckIn={handleRemoveCheckIn}
             onMoveTask={handleMoveTask}
             canReorder={canUserAssignTasks(currentUser)}
           />
@@ -1461,6 +1488,7 @@ export default function App() {
             onUpdateStatus={handleUpdateStatus}
             onUpdateNotes={handleUpdateNotes}
             onCheckIn={handleCheckIn}
+            onRemoveCheckIn={handleRemoveCheckIn}
             onMoveTask={handleMoveTask}
             canReorder={canUserAssignTasks(currentUser)}
             onEditTask={(task) => {

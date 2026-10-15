@@ -75,6 +75,9 @@ export interface Task {
   daysOfWeek: number[]; // 0 = Sunday, 1 = Monday, ..., 6 = Saturday. Empty = every day.
   specificDates?: string[]; // Array of 'YYYY-MM-DD' dates for one-time or specific date tasks
   targetTime?: string; // e.g. "09:00 AM", "14:00"
+  targetTimeMinutes?: number; // minutes since midnight, set by the structured time picker
+  targetTime2?: string; // optional second daily time (e.g. morning + afternoon)
+  targetTime2Minutes?: number;
   priority?: 'low' | 'medium' | 'high';
   
   // Current Day's State
