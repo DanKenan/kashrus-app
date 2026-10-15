@@ -23,7 +23,8 @@ import {
   Building2,
   Sliders,
   Sparkles,
-  Info
+  Info,
+  Camera
 } from 'lucide-react';
 import { 
   Venue, 
@@ -36,6 +37,7 @@ import {
 import { AirtableConfigModal } from './AirtableConfigModal';
 import { AddDiscrepancyModal } from './AddDiscrepancyModal';
 import { SubmitAuditReportModal } from './SubmitAuditReportModal';
+import { HechsherCheckModal } from './HechsherCheckModal';
 
 interface FactoryAuditHubModalProps {
   isOpen: boolean;
@@ -67,6 +69,8 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
   const [isAddDiscrepancyOpen, setIsAddDiscrepancyOpen] = useState(false);
   const [isSubmitReportOpen, setIsSubmitReportOpen] = useState(false);
   const [selectedReportToView, setSelectedReportToView] = useState<FactoryAuditReport | null>(null);
+  // Hechsher camera check
+  const [hechsherCheckItem, setHechsherCheckItem] = useState<ApprovedIngredient | null>(null);
 
   // Status feedback toast
   const [bannerToast, setBannerToast] = useState<{ type: 'success' | 'info' | 'error'; text: string } | null>(null);
@@ -526,6 +530,15 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                               ) : (
                                 <>
                                   <button
+                                    onClick={() => setHechsherCheckItem(item)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg bg-gold-wash text-gold-ink border border-gold/40 hover:bg-gold-wash/70 transition cursor-pointer tactile-1"
+                                    title="Photograph label & check hechsher"
+                                  >
+                                    <Camera className="w-3 h-3" />
+                                    <span>Check</span>
+                                  </button>
+
+                                  <button
                                     onClick={() => handleVerifyIngredient(item.id, 'verified_present')}
                                     className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition cursor-pointer tactile-2"
                                     title="Mark present & verified in factory"
@@ -781,6 +794,21 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
           showToast('Official Factory Inspection Report submitted successfully!');
         }}
       />
+
+      {hechsherCheckItem && (
+        <HechsherCheckModal
+          ingredient={hechsherCheckItem}
+          onClose={() => setHechsherCheckItem(null)}
+          onConfirm={(id) => {
+            handleVerifyIngredient(id, 'verified_present');
+            setHechsherCheckItem(null);
+          }}
+          onFlag={(id) => {
+            handleVerifyIngredient(id, 'flagged_discrepancy');
+            setHechsherCheckItem(null);
+          }}
+        />
+      )}
     </div>
   );
 };
