@@ -85,30 +85,47 @@ export default function App() {
   const [authView, setAuthView] = useState<'landing' | 'auth'>('landing');
 
   // ---- Kiosk mode: shared wall tablet ----
-  // Activated via ?kiosk=1&venue=VENUE_ID (persisted in localStorage so it survives reloads).
+  // Activated via ?kiosk=1 (persisted in localStorage so it survives reloads).
+  // Optional &venue=VENUE_ID preselects the establishment; otherwise the
+  // tablet asks on first launch and remembers the pick.
+  const [kioskMode, setKioskMode] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('kiosk') === '0') {
+        localStorage.removeItem('kiosk_mode');
+        localStorage.removeItem('kiosk_venue_id');
+        return false;
+      }
+      if (params.get('kiosk') === '1') {
+        localStorage.setItem('kiosk_mode', '1');
+        const urlVenue = params.get('venue');
+        if (urlVenue) localStorage.setItem('kiosk_venue_id', urlVenue);
+        return true;
+      }
+      return localStorage.getItem('kiosk_mode') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [kioskVenueId, setKioskVenueId] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null;
     try {
       const params = new URLSearchParams(window.location.search);
-      if (params.get('kiosk') === '0') {
-        localStorage.removeItem('kiosk_venue_id');
-        return null;
-      }
-      const urlVenue = params.get('venue');
-      if (params.get('kiosk') === '1' && urlVenue) {
-        localStorage.setItem('kiosk_venue_id', urlVenue);
-        return urlVenue;
-      }
-      return localStorage.getItem('kiosk_venue_id');
+      return params.get('venue') || localStorage.getItem('kiosk_venue_id');
     } catch {
       return null;
     }
   });
-  const isKiosk = kioskVenueId !== null;
+  const isKiosk = kioskMode;
 
   const exitKioskMode = () => {
+    setKioskMode(false);
     setKioskVenueId(null);
-    if (typeof window !== 'undefined') localStorage.removeItem('kiosk_venue_id');
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('kiosk_mode');
+      localStorage.removeItem('kiosk_venue_id');
+    }
     setAuthView('landing');
   };
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'signup'>('login');
@@ -1101,7 +1118,7 @@ export default function App() {
     }
     setSavedSession(null);
     // In kiosk mode the tablet returns to the PIN screen, not the landing page.
-    if (!kioskVenueId) setAuthView('landing');
+    if (!kioskMode) setAuthView('landing');
     showToast('Signed out successfully.');
   };
 
@@ -1125,8 +1142,8 @@ export default function App() {
   // Public screens: the landing home page opens first; auth form on demand.
   // Require authentication to view tasks and shift operations
   if (!currentUser) {
-    // Kiosk tablets go straight to the PIN screen.
-    if (isKiosk && kioskVenueId) {
+    // Kiosk tablets go straight to the PIN screen (or venue picker on first launch).
+    if (isKiosk) {
       return (
         <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
           {toastMessage && (
@@ -1137,6 +1154,10 @@ export default function App() {
           )}
           <KioskLogin
             venueId={kioskVenueId}
+            onPickVenue={(id) => {
+              setKioskVenueId(id);
+              if (typeof window !== 'undefined') localStorage.setItem('kiosk_venue_id', id);
+            }}
             onLoginSuccess={handleLoginSuccess}
             onExitKiosk={exitKioskMode}
             darkMode={darkMode}
