@@ -26,6 +26,7 @@ import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
+import { apiFetch, clearSession, getSessionToken } from './lib/api';
 
 const DEFAULT_USERS: User[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', permissions: { canFillTasks: true, canAssignTasks: true } },
@@ -140,6 +141,18 @@ export default function App() {
   // intentionally starts with currentUser === null, so this must NOT clear
   // the saved session — logout and "Use a different account" remove it
   // explicitly in their own handlers.
+
+  // Expired/revoked token: any API 401 drops back to the login screen.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      if (currentUser) {
+        handleLogout();
+        showToast('Your session expired. Please sign in again.');
+      }
+    };
+    window.addEventListener('shutfey:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('shutfey:unauthorized', onUnauthorized);
+  }, [currentUser]);
 
   // Kiosk auto-logout: 5 minutes of no touches returns the tablet to the PIN screen.
   useEffect(() => {
@@ -304,7 +317,7 @@ export default function App() {
       ? `?venueId=${encodeURIComponent(activeVenueId)}&userEmail=${encodeURIComponent(currentUser.email)}`
       : `?userEmail=${encodeURIComponent(currentUser.email)}`;
 
-    fetch(`/api/tasks${qs}`)
+    apiFetch(`/api/tasks${qs}`)
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data.tasks)) {
@@ -313,7 +326,7 @@ export default function App() {
       })
       .catch((err) => console.warn('Could not fetch /api/tasks:', err));
 
-    fetch(`/api/history${qs}`)
+    apiFetch(`/api/history${qs}`)
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data.historyLogs)) {
@@ -322,7 +335,7 @@ export default function App() {
       })
       .catch((err) => console.warn('Could not fetch /api/history:', err));
 
-    fetch(`/api/users${qs}`)
+    apiFetch(`/api/users${qs}`)
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data.users)) {
@@ -331,7 +344,7 @@ export default function App() {
       })
       .catch(() => {});
 
-    fetch(`/api/events${qs}`)
+    apiFetch(`/api/events${qs}`)
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data.events)) {
@@ -479,7 +492,7 @@ export default function App() {
     );
 
     try {
-      const res = await fetch(`/api/tasks/${taskId}`, {
+      const res = await apiFetch(`/api/tasks/${taskId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -524,7 +537,7 @@ export default function App() {
     );
 
     try {
-      await fetch(`/api/tasks/${taskId}`, {
+      await apiFetch(`/api/tasks/${taskId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -572,7 +585,7 @@ export default function App() {
     );
 
     try {
-      const res = await fetch(`/api/tasks/${taskId}/check-in`, {
+      const res = await apiFetch(`/api/tasks/${taskId}/check-in`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -600,7 +613,7 @@ export default function App() {
       )
     );
     try {
-      const res = await fetch(`/api/tasks/${taskId}/check-in/${checkInId}`, {
+      const res = await apiFetch(`/api/tasks/${taskId}/check-in/${checkInId}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userEmail: currentUser.email }),
@@ -642,7 +655,7 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch(`/api/venues/${venueId}?userEmail=${encodeURIComponent(currentUser.email)}`, {
+      const res = await apiFetch(`/api/venues/${venueId}?userEmail=${encodeURIComponent(currentUser.email)}`, {
         method: 'DELETE',
       });
       if (!res.ok) {
@@ -673,7 +686,7 @@ export default function App() {
     if (taskData.id) {
       // Edit
       try {
-        const res = await fetch(`/api/tasks/${taskData.id}`, {
+        const res = await apiFetch(`/api/tasks/${taskData.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -691,7 +704,7 @@ export default function App() {
     } else {
       // Create
       try {
-        const res = await fetch('/api/tasks', {
+        const res = await apiFetch('/api/tasks', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -729,7 +742,7 @@ export default function App() {
       onConfirm: async () => {
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
         try {
-          await fetch(`/api/tasks/${taskId}?userEmail=${encodeURIComponent(currentUser.email)}`, { method: 'DELETE' });
+          await apiFetch(`/api/tasks/${taskId}?userEmail=${encodeURIComponent(currentUser.email)}`, { method: 'DELETE' });
           setTasks((prev) => prev.filter((t) => t.id !== taskId));
           showToast('Assignment removed');
         } catch (err) {
@@ -757,7 +770,7 @@ export default function App() {
       onConfirm: async () => {
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
         try {
-          const res = await fetch('/api/reset-daily', {
+          const res = await apiFetch('/api/reset-daily', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
@@ -797,7 +810,7 @@ export default function App() {
       onConfirm: async () => {
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
         try {
-          const res = await fetch('/api/admin/clean-slate', {
+          const res = await apiFetch('/api/admin/clean-slate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ userEmail: currentUser.email }),
@@ -827,7 +840,7 @@ export default function App() {
   const handleRestoreDemo = async () => {
     if (!currentUser || currentUser.role !== 'admin') return;
     try {
-      const res = await fetch('/api/admin/restore-demo', {
+      const res = await apiFetch('/api/admin/restore-demo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userEmail: currentUser.email }),
@@ -854,7 +867,7 @@ export default function App() {
 
   // Add new user to team roster
   const handleAddUser = async (userData: { name: string; email: string; role: UserRole; password?: string; venueId?: string; permissions?: { canFillTasks?: boolean; canAssignTasks?: boolean } }) => {
-    const res = await fetch('/api/users', {
+    const res = await apiFetch('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -876,7 +889,7 @@ export default function App() {
 
   // Update existing user (role, permissions)
   const handleUpdateUser = async (userId: string, updates: { role?: UserRole; permissions?: { canFillTasks?: boolean; canAssignTasks?: boolean }; kioskPin?: string }) => {
-    const res = await fetch(`/api/users/${userId}`, {
+    const res = await apiFetch(`/api/users/${userId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -898,7 +911,7 @@ export default function App() {
 
   // Delete/Remove user from team roster
   const handleDeleteUser = async (userId: string) => {
-    const res = await fetch(`/api/users/${userId}?adminEmail=${encodeURIComponent(currentUser.email)}`, { method: 'DELETE' });
+    const res = await apiFetch(`/api/users/${userId}?adminEmail=${encodeURIComponent(currentUser.email)}`, { method: 'DELETE' });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.error || 'Failed to delete user');
@@ -921,7 +934,7 @@ export default function App() {
     notes?: string
   ) => {
     try {
-      const res = await fetch(`/api/events/${eventId}/tasks/${taskId}/toggle`, {
+      const res = await apiFetch(`/api/events/${eventId}/tasks/${taskId}/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -947,7 +960,7 @@ export default function App() {
 
   const handleUpdateEvent = async (updatedEvent: KosherEvent) => {
     try {
-      const res = await fetch(`/api/events/${updatedEvent.id}`, {
+      const res = await apiFetch(`/api/events/${updatedEvent.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -977,7 +990,7 @@ export default function App() {
       onConfirm: async () => {
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
         try {
-          const res = await fetch(`/api/events/${eventId}`, { method: 'DELETE' });
+          const res = await apiFetch(`/api/events/${eventId}`, { method: 'DELETE' });
           if (!res.ok) throw new Error('Failed to delete event');
           setEvents((prev) => prev.filter((e) => e.id !== eventId));
           showToast('Event notification deleted');
@@ -1102,12 +1115,12 @@ export default function App() {
       const headers = { 'Content-Type': 'application/json' };
       const payload = (sortOrder: number) =>
         JSON.stringify({ userEmail: currentUser.email, sortOrder });
-      await fetch(`/api/tasks/${a.id}`, {
+      await apiFetch(`/api/tasks/${a.id}`, {
         method: 'PUT',
         headers,
         body: payload(bOrder),
       });
-      await fetch(`/api/tasks/${b.id}`, {
+      await apiFetch(`/api/tasks/${b.id}`, {
         method: 'PUT',
         headers,
         body: payload(aOrder),
@@ -1142,6 +1155,8 @@ export default function App() {
       localStorage.removeItem('current_user');
       localStorage.removeItem('selected_venue_id');
     }
+    clearSession();
+    realtimeSocket.disconnect();
     setSavedSession(null);
     // In kiosk mode the tablet returns to the PIN screen, not the landing page.
     if (!kioskMode) setAuthView('landing');
@@ -1152,6 +1167,8 @@ export default function App() {
     setCurrentUser(user);
     setSavedSession(user);
     setCurrentVenueId(null);
+    // Reconnect real-time socket with the new session token.
+    realtimeSocket.reconnect();
     // Mashgichim land straight on their own assignments
     if (user && (user.role === 'mashgiach' || user.role === 'worker')) {
       setActiveTabFilter('mine');

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Delete, LogIn } from 'lucide-react';
 import { KeepingKosherLogo } from './KeepingKosherLogo';
 import type { User } from '../types';
+import { apiFetch, setSessionToken } from '../lib/api';
 
 interface KioskStaff {
   id: string;
@@ -36,7 +37,7 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
   useEffect(() => {
     if (!venueId) {
       // No venue yet — let the installer pick which establishment this tablet belongs to.
-      fetch('/api/venues')
+      apiFetch('/api/venues')
         .then((r) => r.json())
         .then((d) => {
           setVenues(Array.isArray(d.venues) ? d.venues : Array.isArray(d) ? d : []);
@@ -45,7 +46,7 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
         .catch(() => setLoaded(true));
       return;
     }
-    fetch(`/api/kiosk/users?venueId=${encodeURIComponent(venueId)}`)
+    apiFetch(`/api/kiosk/users?venueId=${encodeURIComponent(venueId)}`)
       .then((r) => r.json())
       .then((d) => {
         setVenueName(d.venueName || 'Kiosk');
@@ -73,13 +74,14 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
     setBusy(true);
     setError('');
     try {
-      const r = await fetch('/api/kiosk/login', {
+      const r = await apiFetch('/api/kiosk/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: selected.id, pin }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Wrong code. Try again.');
+      if (d.token) setSessionToken(d.token);
       onLoginSuccess(d.user);
     } catch (e: any) {
       setError(e.message || 'Wrong code. Try again.');

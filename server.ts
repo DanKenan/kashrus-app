@@ -6,12 +6,167 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { initializeApp, getApps, getApp } from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
 import webpush from 'web-push';
+import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
+
+// ---------------------------------------------------------------------------
+// Auth: bcrypt passwords + signed session tokens (HMAC-SHA256 JWT)
+// ---------------------------------------------------------------------------
+
+// JWT signing secret: env first, else generated once and persisted with state
+// (same pattern as VAPID keys) so tokens survive restarts and deploys.
+let jwtSecret: string | null = null;
+
+function getJwtSecret(): string {
+  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    jwtSecret = crypto.randomBytes(48).toString('hex');
+    try {
+      saveState();
+    } catch {
+      // saveState defined below; first call happens after boot anyway
+    }
+  }
+  return jwtSecret;
+}
+
+function isBcryptHash(s: unknown): boolean {
+  return (
+    typeof s === 'string' &&
+    (s.startsWith('$2a$') || s.startsWith('$2b$') || s.startsWith('$2y$'))
+  );
+}
+
+async function hashPassword(plain: string): Promise<string> {
+  return bcrypt.hash(plain, 10);
+}
+
+/** Returns 'valid' | 'valid-needs-upgrade' (legacy plaintext matched) | 'invalid'. */
+async function checkPassword(
+  plain: string,
+  stored?: string
+): Promise<'valid' | 'valid-needs-upgrade' | 'invalid'> {
+  if (!stored || typeof stored !== 'string') return 'invalid';
+  if (isBcryptHash(stored)) {
+    return (await bcrypt.compare(plain, stored)) ? 'valid' : 'invalid';
+  }
+  // Legacy plaintext password: verify, then the caller upgrades it to bcrypt.
+  return stored === plain ? 'valid-needs-upgrade' : 'invalid';
+}
+
+function base64url(input: Buffer | string): string {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+const TOKEN_TTL_SECONDS = 30 * 24 * 3600; // 30 days
+
+function signToken(userId: string): string {
+  const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const now = Math.floor(Date.now() / 1000);
+  const payload = base64url(JSON.stringify({ sub: userId, iat: now, exp: now + TOKEN_TTL_SECONDS }));
+  const sig = base64url(
+    crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest()
+  );
+  return `${header}.${payload}.${sig}`;
+}
+
+function verifyToken(token: string): { userId: string } | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const [header, payload, sig] = parts;
+    const expected = base64url(
+      crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest()
+    );
+    if (
+      sig.length !== expected.length ||
+      !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))
+    ) {
+      return null;
+    }
+    const data = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
+    if (typeof data.exp !== 'number' || data.exp < Math.floor(Date.now() / 1000)) return null;
+    if (typeof data.sub !== 'string' || !data.sub) return null;
+    return { userId: data.sub };
+  } catch {
+    return null;
+  }
+}
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
 const server = http.createServer(app);
 
 app.use(express.json());
+
+// ---------------------------------------------------------------------------
+// Request authentication + custom-domain agency resolution.
+// Every /api route except the public ones below requires a signed session
+// token (issued at login / kiosk PIN login). The middleware verifies the
+// token and FORCES the verified user's email into the request, so the
+// existing per-endpoint agency-scoping logic (which keys off userEmail)
+// becomes trustworthy — clients can no longer impersonate anyone by
+// sending an arbitrary email address.
+// ---------------------------------------------------------------------------
+
+const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
+  { method: 'GET', path: '/api/health' },
+  { method: 'POST', path: '/api/auth/login' },
+  { method: 'POST', path: '/api/agencies/register' },
+  { method: 'GET', path: '/api/push/public-key' },
+  { method: 'GET', path: '/api/agencies/by-domain' },
+  // Kiosk: the PIN itself is the credential; /kiosk/users only returns names.
+  { method: 'GET', path: '/api/kiosk/users' },
+  { method: 'POST', path: '/api/kiosk/login' },
+];
+
+function isPublicApiRoute(method: string, path: string): boolean {
+  return PUBLIC_API_ROUTES.some((r) => r.method === method && r.path === path);
+}
+
+// Custom domains: agencyId -> hostname (e.g. app.hartfordkashrut.org).
+// Agencies map in state; entries added via agency settings.
+function agencyIdForHostname(hostname: string): string | null {
+  const host = hostname.split(':')[0].toLowerCase();
+  for (const a of agencies as Array<{ id: string; customDomain?: string }>) {
+    if (a.customDomain && a.customDomain.toLowerCase() === host) return a.id;
+  }
+  return null;
+}
+
+app.use('/api', (req, res, next) => {
+  // Resolve agency from custom domain when present (used by login/agency pages).
+  const domainAgencyId = agencyIdForHostname(req.hostname || '');
+  if (domainAgencyId) {
+    (req as any).domainAgencyId = domainAgencyId;
+  }
+
+  if (isPublicApiRoute(req.method, req.path)) return next();
+
+  const authHeader = String(req.headers.authorization || '');
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const payload = token ? verifyToken(token) : null;
+  const user = payload ? users.find((u) => u.id === payload.userId) : undefined;
+
+  if (!user) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+
+  // Force the verified identity: endpoints keying off userEmail now see the
+  // authenticated user, never a client-supplied impersonation.
+  (req as any).authUser = user;
+  if (req.query && typeof req.query === 'object') {
+    (req.query as any).userEmail = user.email;
+  }
+  if (req.body && typeof req.body === 'object') {
+    (req.body as any).userEmail = user.email;
+  }
+  next();
+});
 
 // In-memory + file-backed storage
 interface Agency {
@@ -23,6 +178,8 @@ interface Agency {
   region: string;
   contactPhone?: string;
   createdAt: string;
+  /** Custom hostname for this agency's portal (e.g. app.hartfordkashrut.org). */
+  customDomain?: string;
 }
 
 interface Venue {
@@ -285,7 +442,7 @@ const DEFAULT_AGENCIES: Agency[] = [
 const DEFAULT_VENUES: Venue[] = [];
 
 const DEFAULT_USERS: UserProfile[] = [
-  { id: 'usr_admin', agencyId: 'agency-hkc', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', password: 'Kosher2026!' },
+  { id: 'usr_admin', agencyId: 'agency-hkc', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', password: '' },
 ];
 
 function generateTemplateTasks(venueId: string, templateType: string = 'restaurant', agencyId: string = 'agency-hkc'): TaskItem[] {
@@ -745,6 +902,10 @@ function hydrateState(parsed: any) {
           privateKey: parsed.vapidKeys.privateKey,
         };
       }
+      // Persisted JWT secret only wins when JWT_SECRET env is not set.
+      if (!process.env.JWT_SECRET && typeof parsed.jwtSecret === 'string' && parsed.jwtSecret.length >= 32) {
+        jwtSecret = parsed.jwtSecret;
+      }
 
       if (Array.isArray(parsed.agencies) && parsed.agencies.length > 0) {
         agencies = parsed.agencies;
@@ -829,15 +990,8 @@ function hydrateState(parsed: any) {
               permissions,
               agencyId: u.agencyId || 'agency-hkc',
               venueId: assignedVenue,
-              password:
-                u.password ||
-                (role === 'admin' || u.email?.toLowerCase() === 'kenan@hartfordkashrut.org'
-                  ? 'Kosher2026!'
-                  : role === 'coordinator'
-                  ? 'coord123'
-                  : role === 'owner'
-                  ? 'owner123'
-                  : 'worker123'),
+              // Role change resets to a random temp password (hashed) — admin sets a real one.
+              password: bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10),
             };
           });
 
@@ -918,6 +1072,7 @@ function stateSnapshot() {
     isDemoCleared,
     pushSubscriptions,
     vapidKeys,
+    jwtSecret,
   };
 }
 
@@ -1136,9 +1291,24 @@ app.post('/api/push/unsubscribe', (req, res) => {
 
 // WebSocket Setup
 const wss = new WebSocketServer({ server, path: '/ws' });
-const activeSockets = new Map<WebSocket, { email: string; name: string }>();
+const activeSockets = new Map<WebSocket, { email: string; name: string; agencyId: string }>();
 
-function broadcast(type: string, payload: any, senderEmail?: string) {
+function agencyStateFor(agencyId: string) {
+  const norm = (v?: string) => v || 'agency-hkc';
+  return {
+    venues: venues.filter((v) => norm(v.agencyId) === agencyId),
+    tasks: tasks.filter((t) => norm(t.agencyId) === agencyId),
+    historyLogs: historyLogs.filter((h) => norm(h.agencyId) === agencyId),
+    events: events.filter((e) => norm(e.agencyId) === agencyId),
+    airtableConfigs: airtableConfigs.filter((c) => norm(c.agencyId) === agencyId),
+    approvedIngredients: approvedIngredients.filter((i) => norm(i.agencyId) === agencyId),
+    factoryReports: factoryReports.filter((r) => norm(r.agencyId) === agencyId),
+    users: getSafeUsers().filter((u: any) => norm(u.agencyId) === agencyId),
+    currentWorkDate,
+  };
+}
+
+function broadcast(type: string, payload: any, senderEmail?: string, agencyId?: string) {
   const message = JSON.stringify({
     type,
     payload,
@@ -1147,46 +1317,60 @@ function broadcast(type: string, payload: any, senderEmail?: string) {
   });
 
   for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
+    if (client.readyState !== WebSocket.OPEN) continue;
+    // Agency-scoped broadcasts only reach that agency's sockets.
+    if (agencyId) {
+      const meta = activeSockets.get(client);
+      if (!meta || meta.agencyId !== agencyId) continue;
     }
+    client.send(message);
   }
 }
 
-wss.on('connection', (ws) => {
-  activeSockets.set(ws, { email: 'guest@company.com', name: 'Guest' });
+wss.on('connection', (ws, req) => {
+  // Token via ?token=… query param (set by the client from its session).
+  let authedUser: any = null;
+  try {
+    const url = new URL(req.url || '/ws', 'http://localhost');
+    const token = url.searchParams.get('token') || '';
+    const payload = token ? verifyToken(token) : null;
+    authedUser = payload ? users.find((u) => u.id === payload.userId) : null;
+  } catch {
+    authedUser = null;
+  }
 
-  // Send initial state to newly connected client
+  if (!authedUser) {
+    ws.close(4401, 'Unauthorized');
+    return;
+  }
+
+  const agencyId = authedUser.agencyId || 'agency-hkc';
+  activeSockets.set(ws, { email: authedUser.email, name: authedUser.name, agencyId });
+
+  // Initial state: ONLY this user's agency. Never the whole platform.
   ws.send(
     JSON.stringify({
       type: 'INITIAL_STATE',
       payload: {
-        venues,
-        tasks,
-        historyLogs,
-        events,
-        airtableConfigs,
-        approvedIngredients,
-        factoryReports,
-        users: getSafeUsers(),
-        currentWorkDate,
+        ...agencyStateFor(agencyId),
         activeWorkersCount: activeSockets.size,
       },
       timestamp: new Date().toISOString(),
     })
   );
 
-  broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size });
+  broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
 
   ws.on('message', (data) => {
     try {
       const parsed = JSON.parse(data.toString());
       if (parsed.type === 'USER_PRESENCE' && parsed.payload) {
         activeSockets.set(ws, {
-          email: parsed.payload.email || 'guest@company.com',
-          name: parsed.payload.name || 'Guest',
+          email: authedUser.email,
+          name: authedUser.name,
+          agencyId,
         });
-        broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size });
+        broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
       }
     } catch (e) {
       // ignore
@@ -1195,7 +1379,7 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     activeSockets.delete(ws);
-    broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size });
+    broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
   });
 });
 
@@ -1295,14 +1479,17 @@ function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
 
   saveState();
 
-  // Broadcast to all clients
-  broadcast('DAILY_RESET', {
-    venueId: targetVenueId || 'all',
-    tasks,
-    historyLogs,
-    currentWorkDate,
-    snapshot: snapshots[0] || null,
-  });
+  // Broadcast per-agency: each agency's sockets get only their own data.
+  for (const a of agencies) {
+    const aid = a.id;
+    broadcast('DAILY_RESET', {
+      venueId: targetVenueId || 'all',
+      tasks: tasks.filter((t) => (t.agencyId || 'agency-hkc') === aid),
+      historyLogs: historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === aid),
+      currentWorkDate,
+      snapshot: snapshots[0] || null,
+    }, undefined, aid);
+  }
 
   return snapshots[0] || null;
 }
@@ -1402,7 +1589,7 @@ app.post('/api/agencies/register', (req, res) => {
     name: (adminName && adminName.trim()) || `${cleanAgencyName} Administrator`,
     role: 'admin',
     avatarColor: '#3b82f6',
-    password: adminPassword.trim(),
+    password: bcrypt.hashSync(adminPassword.trim(), 10),
   };
   users.push(adminUser);
 
@@ -1439,13 +1626,14 @@ app.post('/api/agencies/register', (req, res) => {
   broadcast('AGENCY_REGISTERED', {
     agency: newAgency,
     adminEmail: cleanAdminEmail,
-  });
+  }, undefined, newAgency.id);
 
   res.status(201).json({
     success: true,
     message: `Welcome to KeepingKosher! Agency ${cleanAgencyName} has been established.`,
     agency: newAgency,
     user: getSafeUser(adminUser),
+    token: signToken(adminUser.id),
     venue: starterVenue,
     tasks: starterTasks,
   });
@@ -1487,7 +1675,7 @@ app.get('/api/agencies/current', (req, res) => {
 
 // Agency administrator updates agency profile details
 app.put('/api/agencies/current', (req, res) => {
-  const { userEmail, name, shortCode, certificationSeal, region, contactPhone } = req.body;
+  const { userEmail, name, shortCode, certificationSeal, region, contactPhone, customDomain } = req.body;
   const user = userEmail
     ? users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase())
     : null;
@@ -1502,6 +1690,17 @@ app.put('/api/agencies/current', (req, res) => {
     return res.status(404).json({ error: 'Agency record not found.' });
   }
 
+  // Custom domain must be unique across agencies (case-insensitive).
+  if (customDomain !== undefined && customDomain.trim() !== '') {
+    const normalized = customDomain.trim().toLowerCase();
+    const clash = agencies.find(
+      (a) => a.id !== agencyId && a.customDomain && a.customDomain.toLowerCase() === normalized
+    );
+    if (clash) {
+      return res.status(409).json({ error: 'That domain is already assigned to another agency.' });
+    }
+  }
+
   agencies[index] = {
     ...agencies[index],
     name: name !== undefined ? name.trim() : agencies[index].name,
@@ -1509,11 +1708,28 @@ app.put('/api/agencies/current', (req, res) => {
     certificationSeal: certificationSeal !== undefined ? certificationSeal.trim() : agencies[index].certificationSeal,
     region: region !== undefined ? region.trim() : agencies[index].region,
     contactPhone: contactPhone !== undefined ? contactPhone.trim() : agencies[index].contactPhone,
+    customDomain: customDomain !== undefined ? customDomain.trim().toLowerCase() || undefined : agencies[index].customDomain,
   };
 
   saveState();
-  broadcast('AGENCY_UPDATED', { agency: agencies[index] }, userEmail);
+  broadcast('AGENCY_UPDATED', { agency: agencies[index] }, userEmail, agencyId);
   res.json({ success: true, agency: agencies[index] });
+});
+
+// Resolve the agency for the current hostname (custom-domain portals).
+// Public: the login page uses this to show the agency's name on their domain.
+app.get('/api/agencies/by-domain', (req, res) => {
+  const host = String(req.hostname || '').split(':')[0].toLowerCase();
+  const agency = agencies.find((a) => a.customDomain && a.customDomain.toLowerCase() === host);
+  if (!agency) return res.json({ agency: null });
+  res.json({
+    agency: {
+      id: agency.id,
+      name: agency.name,
+      shortCode: agency.shortCode,
+      certificationSeal: agency.certificationSeal,
+    },
+  });
 });
 
 // -------------------------------------------------------------
@@ -1636,7 +1852,7 @@ app.post('/api/venues', (req, res) => {
         role: 'owner',
         venueId: newVenueId,
         avatarColor: '#d97706',
-        password: ownerPassword?.trim() || 'owner123',
+        password: ownerPassword?.trim() ? bcrypt.hashSync(ownerPassword.trim(), 10) : bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10),
       };
       users.push(ownerUser);
       createdOwner = ownerUser;
@@ -1654,7 +1870,7 @@ app.post('/api/venues', (req, res) => {
     agencyId: callerAgencyId,
     tasksCount: starterTasks.length,
     owner: createdOwner ? getSafeUser(createdOwner) : null,
-  });
+  }, undefined, callerAgencyId);
 
   res.status(201).json({
     success: true,
@@ -1703,7 +1919,7 @@ app.put('/api/venues/:id', (req, res) => {
   venues[index] = updated;
   saveState();
 
-  broadcast('VENUE_UPDATED', { venue: updated, agencyId: callerAgencyId });
+  broadcast('VENUE_UPDATED', { venue: updated, agencyId: callerAgencyId }, undefined, callerAgencyId);
   res.json({ success: true, venue: updated });
 });
 
@@ -1740,7 +1956,7 @@ app.delete('/api/venues/:id', (req, res) => {
 
   saveState();
 
-  broadcast('VENUE_DELETED', { deletedVenueId: id, agencyId: callerAgencyId });
+  broadcast('VENUE_DELETED', { deletedVenueId: id, agencyId: callerAgencyId }, undefined, callerAgencyId);
   res.json({ success: true, deletedVenueId: id });
 });
 
@@ -1913,7 +2129,7 @@ app.post('/api/tasks', (req, res) => {
   tasks.push(newTask);
   saveState();
 
-  broadcast('TASK_CREATED', newTask, createdByEmail);
+  broadcast('TASK_CREATED', newTask, createdByEmail, newTask.agencyId || 'agency-hkc');
 
   // Phone push to specifically-assigned mashgichim (not for global 'all' tasks)
   const assignees = (newTask.assignedTo || []).filter(
@@ -2055,7 +2271,7 @@ app.put('/api/tasks/:id', (req, res) => {
   tasks[index] = updated;
   saveState();
 
-  broadcast('TASK_UPDATED', updated, userEmail);
+  broadcast('TASK_UPDATED', updated, userEmail, updated.agencyId || 'agency-hkc');
   res.json(updated);
 });
 
@@ -2100,7 +2316,7 @@ app.delete('/api/tasks/:id/check-in/:checkInId', (req, res) => {
   tasks[index] = updated;
   saveState();
 
-  broadcast('TASK_UPDATED', updated, userEmail);
+  broadcast('TASK_UPDATED', updated, userEmail, updated.agencyId || 'agency-hkc');
   res.json(updated);
 });
 
@@ -2149,7 +2365,7 @@ app.post('/api/tasks/:id/check-in', (req, res) => {
   tasks[index] = updated;
   saveState();
 
-  broadcast('TASK_UPDATED', updated, userEmail);
+  broadcast('TASK_UPDATED', updated, userEmail, updated.agencyId || 'agency-hkc');
   res.json(updated);
 });
 
@@ -2164,7 +2380,7 @@ app.delete('/api/tasks/:id', (req, res) => {
   tasks = tasks.filter((t) => t.id !== id);
   saveState();
 
-  broadcast('TASK_DELETED', { id, venueId: deletedTask.venueId, agencyId: deletedTask.agencyId });
+  broadcast('TASK_DELETED', { id, venueId: deletedTask.venueId, agencyId: deletedTask.agencyId }, undefined, deletedTask.agencyId || 'agency-hkc');
   res.json({ success: true, deletedId: id });
 });
 
@@ -2223,7 +2439,7 @@ app.post('/api/admin/clean-slate', (req, res) => {
     events: [],
     users: getSafeUsers(),
     isDemoCleared: true,
-  });
+  }, undefined, callerAgencyId);
 
   res.json({
     success: true,
@@ -2270,7 +2486,7 @@ app.post('/api/admin/restore-demo', (req, res) => {
     events,
     users: getSafeUsers(),
     isDemoCleared: false,
-  });
+  }, undefined, callerAgencyId);
 
   res.json({
     success: true,
@@ -2346,7 +2562,7 @@ app.post('/api/event-task-templates', (req, res) => {
   };
   eventTaskTemplates.push(template);
   saveState();
-  broadcast('EVENT_TEMPLATES_UPDATED', { templates: eventTaskTemplates });
+  broadcast('EVENT_TEMPLATES_UPDATED', { templates: eventTaskTemplates }, undefined, (req as any).authUser?.agencyId || 'agency-hkc');
   res.json({ template });
 });
 
@@ -2359,7 +2575,7 @@ app.delete('/api/event-task-templates/:id', (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Template not found.' });
   eventTaskTemplates.splice(idx, 1);
   saveState();
-  broadcast('EVENT_TEMPLATES_UPDATED', { templates: eventTaskTemplates });
+  broadcast('EVENT_TEMPLATES_UPDATED', { templates: eventTaskTemplates }, undefined, (req as any).authUser?.agencyId || 'agency-hkc');
   res.json({ success: true });
 });
 
@@ -2529,7 +2745,7 @@ app.post('/api/events', (req, res) => {
     agencyId: callerAgencyId,
     venueId: targetVenueId,
     assignedMashgiachEmail: resolvedMashgiachEmail,
-  });
+  }, undefined, callerAgencyId);
 
   // Phone push to the assigned mashgiach (works even with the app closed)
   if (resolvedMashgiachEmail) {
@@ -2612,7 +2828,7 @@ app.put('/api/events/:id', (req, res) => {
     agencyId: updated.agencyId,
     venueId: updated.venueId,
     assignedMashgiachEmail: updated.assignedMashgiachEmail,
-  });
+  }, undefined, updated.agencyId || 'agency-hkc');
 
   res.json({ event: updated });
 });
@@ -2633,7 +2849,7 @@ app.delete('/api/events/:id', (req, res) => {
     id,
     agencyId: deletedEvent.agencyId,
     venueId: deletedEvent.venueId,
-  });
+  }, undefined, deletedEvent.agencyId || 'agency-hkc');
 
   res.json({ success: true, deletedId: id });
 });
@@ -2676,7 +2892,7 @@ app.post('/api/events/:id/tasks/:taskId/toggle', (req, res) => {
     agencyId: event.agencyId,
     venueId: event.venueId,
     assignedMashgiachEmail: event.assignedMashgiachEmail,
-  });
+  }, undefined, event.agencyId || 'agency-hkc');
 
   res.json({ success: true, event, task });
 });
@@ -2723,8 +2939,7 @@ app.post('/api/users', (req, res) => {
   }
 
   const initialPassword =
-    (password && String(password).trim()) ||
-    (role === 'coordinator' ? 'coord123' : role === 'owner' ? 'owner123' : 'worker123');
+    (password && String(password).trim()) || crypto.randomBytes(9).toString('hex');
 
   const existing = users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
   if (existing) {
@@ -2764,12 +2979,12 @@ app.post('/api/users', (req, res) => {
     venueId: targetVenueId,
     permissions: defaultPermissions,
     avatarColor: colors[Math.floor(Math.random() * colors.length)],
-    password: initialPassword,
+    password: bcrypt.hashSync(initialPassword, 10),
   };
 
   users.push(newUser);
   saveState();
-  broadcast('USERS_UPDATED', { users: getSafeUsers(), agencyId: callerAgencyId });
+  broadcast('USERS_UPDATED', { users: getSafeUsers(), agencyId: callerAgencyId }, undefined, callerAgencyId);
   res.status(201).json({ user: getSafeUser(newUser) });
 });
 
@@ -2816,7 +3031,7 @@ app.put('/api/users/:id', (req, res) => {
   }
 
   saveState();
-  broadcast('USERS_UPDATED', { users: getSafeUsers(), agencyId: existingUser.agencyId });
+  broadcast('USERS_UPDATED', { users: getSafeUsers(), agencyId: existingUser.agencyId }, undefined, existingUser.agencyId);
   res.json({ user: getSafeUser(existingUser) });
 });
 
@@ -2839,7 +3054,7 @@ app.delete('/api/users/:id', (req, res) => {
 
   users.splice(userIndex, 1);
   saveState();
-  broadcast('USERS_UPDATED', { users: getSafeUsers(), deletedId: id, agencyId: userToDelete.agencyId });
+  broadcast('USERS_UPDATED', { users: getSafeUsers(), deletedId: id, agencyId: userToDelete.agencyId }, undefined, userToDelete.agencyId);
   res.json({ success: true, deletedId: id });
 });
 
@@ -2855,7 +3070,8 @@ app.get('/api/kiosk/users', (req, res) => {
   res.json({ venueName: venue?.name || 'Kiosk', users: staff });
 });
 
-// Verify a kiosk PIN and return the user session.
+// Verify a kiosk PIN and return the user session (with a signed token, so the
+// kiosk session is authenticated like any other login).
 app.post('/api/kiosk/login', (req, res) => {
   const { userId, pin } = req.body;
   if (!userId || !pin) return res.status(400).json({ error: 'Missing credentials' });
@@ -2863,76 +3079,95 @@ app.post('/api/kiosk/login', (req, res) => {
   if (!user || !user.kioskPin || user.kioskPin !== String(pin).trim()) {
     return res.status(401).json({ error: 'Wrong code. Try again.' });
   }
-  res.json({ user: getSafeUser(user) });
+  res.json({ user: getSafeUser(user), token: signToken(user.id) });
 });
 
-// Formal Login Endpoint
-app.post('/api/auth/login', (req, res) => {
+// Formal Login Endpoint — bcrypt passwords, signed session token on success.
+// Legacy plaintext passwords are transparently upgraded to bcrypt on login.
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'Please enter both your email and password.' });
   }
 
-  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedEmail = String(email).trim().toLowerCase();
   const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
 
   if (!user) {
     return res.status(401).json({ error: 'Account not found. Please verify your email or ask your admin to register you.' });
   }
 
-  const isKenanAdmin = user.role === 'admin' || user.email.toLowerCase() === 'kenan@hartfordkashrut.org';
-  const isValidAdminPass = isKenanAdmin && (password.trim() === 'Kosher2026!' || password.trim() === 'admin123');
-
-  const storedPassword =
-    user.password ||
-    (isKenanAdmin
-      ? 'Kosher2026!'
-      : user.role === 'owner'
-      ? 'owner123'
-      : 'worker123');
-
-  if (storedPassword !== password.trim() && !isValidAdminPass) {
-    return res.status(401).json({ error: 'Incorrect password. Please try again or request a reset.' });
+  // First-run setup: admin account with no password yet → client shows the
+  // "create your password" screen instead of an error.
+  if (!user.password && user.role === 'admin') {
+    return res.json({ success: false, needsSetup: true, email: user.email });
   }
 
+  // No hardcoded fallback passwords: only the stored (bcrypt) password works.
+  const result = await checkPassword(String(password), user.password);
+  if (result === 'invalid') {
+    return res.status(401).json({ error: 'Incorrect password. Please try again or request a reset.' });
+  }
+  if (result === 'valid-needs-upgrade') {
+    user.password = await hashPassword(String(password));
+    saveState();
+  }
+
+  const token = signToken(user.id);
   res.json({
     success: true,
     user: getSafeUser(user),
+    token,
   });
 });
 
-// Change Password Endpoint
-app.post('/api/auth/change-password', (req, res) => {
-  const { email, currentPassword, newPassword } = req.body;
-  if (!email || !currentPassword || !newPassword) {
+// First-run admin setup: sets the admin password. Public, but ONLY works when
+// the admin account has no password yet — it becomes a no-op forever after.
+app.post('/api/auth/setup', async (req, res) => {
+  const { email, newPassword } = req.body;
+  if (!email || !newPassword || String(newPassword).trim().length < 8) {
+    return res.status(400).json({ error: 'A password of at least 8 characters is required.' });
+  }
+  const normalizedEmail = String(email).trim().toLowerCase();
+  const userIndex = users.findIndex((u) => u.email.toLowerCase() === normalizedEmail);
+  if (userIndex === -1) {
+    return res.status(404).json({ error: 'Account not found.' });
+  }
+  const user = users[userIndex];
+  if (user.role !== 'admin' || user.password) {
+    return res.status(403).json({ error: 'Setup is already complete.' });
+  }
+  users[userIndex].password = await hashPassword(String(newPassword).trim());
+  saveState();
+  const token = signToken(user.id);
+  res.json({ success: true, user: getSafeUser(users[userIndex]), token });
+});
+
+// Change Password Endpoint — requires a valid session; the caller can only
+// change their OWN password (identity comes from the verified token).
+app.post('/api/auth/change-password', async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: 'Current password and new password are both required.' });
   }
 
-  if (newPassword.trim().length < 6) {
+  if (String(newPassword).trim().length < 6) {
     return res.status(400).json({ error: 'New password must be at least 6 characters long.' });
   }
 
-  const normalizedEmail = email.trim().toLowerCase();
-  const userIndex = users.findIndex((u) => u.email.toLowerCase() === normalizedEmail);
-
+  const authUser = (req as any).authUser;
+  const userIndex = users.findIndex((u) => u.id === authUser.id);
   if (userIndex === -1) {
     return res.status(404).json({ error: 'User account not found.' });
   }
 
   const user = users[userIndex];
-  const storedPassword =
-    user.password ||
-    (user.role === 'admin' || user.email.toLowerCase() === 'kenan@hartfordkashrut.org'
-      ? 'Kosher2026!'
-      : user.role === 'owner'
-      ? 'owner123'
-      : 'worker123');
-
-  if (storedPassword !== currentPassword.trim()) {
+  const result = await checkPassword(String(currentPassword), user.password);
+  if (result === 'invalid') {
     return res.status(401).json({ error: 'Current password does not match.' });
   }
 
-  users[userIndex].password = newPassword.trim();
+  users[userIndex].password = await hashPassword(String(newPassword).trim());
   saveState();
 
   res.json({ success: true, message: 'Password updated successfully.' });
@@ -3116,7 +3351,7 @@ app.post('/api/airtable/sync', async (req, res) => {
         ingredients: approvedIngredients.filter((i) => i.venueId === venueId),
         count: syncedIngredients.length,
         syncedAt: config.lastSyncedAt,
-      });
+      }, undefined, callerAgencyId);
 
       return res.json({
         success: true,
@@ -3141,7 +3376,7 @@ app.post('/api/airtable/sync', async (req, res) => {
     ingredients: venueIngredients,
     count: venueIngredients.length,
     syncedAt: config.lastSyncedAt,
-  });
+  }, undefined, callerAgencyId);
 
   res.json({
     success: true,
@@ -3208,7 +3443,7 @@ app.put('/api/ingredients/:id/verify', (req, res) => {
     ingredient: updated,
     venueId: updated.venueId,
     agencyId: updated.agencyId,
-  });
+  }, undefined, updated.agencyId || 'agency-hkc');
 
   res.json({ success: true, ingredient: updated });
 });
@@ -3253,7 +3488,7 @@ app.post('/api/ingredients', (req, res) => {
     ingredient: newIngredient,
     venueId: newIngredient.venueId,
     agencyId: newIngredient.agencyId,
-  });
+  }, undefined, newIngredient.agencyId || 'agency-hkc');
 
   res.status(201).json({ success: true, ingredient: newIngredient });
 });
@@ -3275,7 +3510,7 @@ app.delete('/api/ingredients/:id', (req, res) => {
     agencyId: deleted.agencyId,
     deletedId: id,
     ingredients: approvedIngredients.filter((i) => i.venueId === deleted.venueId),
-  });
+  }, undefined, deleted.agencyId || 'agency-hkc');
 
   res.json({ success: true, deletedId: id });
 });
@@ -3393,6 +3628,22 @@ app.post('/api/factory-reports', (req, res) => {
 
 
 // Vite middleware for development & static serving for production
+// One-time (per boot) migration: bcrypt-hash any plaintext passwords found in
+// state. Already-hashed and empty passwords are left alone.
+async function migratePasswordsToBcrypt(): Promise<void> {
+  let changed = 0;
+  for (const u of users) {
+    if (u.password && !isBcryptHash(u.password)) {
+      u.password = await hashPassword(u.password);
+      changed++;
+    }
+  }
+  if (changed > 0) {
+    saveState();
+    console.log(`[Auth] Migrated ${changed} plaintext password(s) to bcrypt.`);
+  }
+}
+
 async function startServer() {
   // Durable state first: Firestore wins over the ephemeral local file.
   initFirestore();
@@ -3416,6 +3667,10 @@ async function startServer() {
   // Web Push: VAPID keys must be ready after durable state loads (env vars
   // take precedence over persisted keys inside ensureVapidKeys).
   ensureVapidKeys();
+
+  // Security migration: hash any legacy plaintext passwords still in state.
+  // Runs once per boot; already-hashed passwords are untouched.
+  await migratePasswordsToBcrypt();
 
   if (process.env.NODE_ENV !== 'production') {
     // Dynamic import so production containers don't need vite installed.

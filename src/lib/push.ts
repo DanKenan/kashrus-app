@@ -1,3 +1,4 @@
+import { apiFetch } from './api';
 /**
  * Web Push (phone notifications) — subscribe / unsubscribe this device.
  *
@@ -47,7 +48,7 @@ export async function subscribeForPush(
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') return 'denied';
   try {
-    const keyRes = await fetch('/api/push/public-key');
+    const keyRes = await apiFetch('/api/push/public-key');
     if (!keyRes.ok) return 'failed';
     const { publicKey } = await keyRes.json();
     const reg = await navigator.serviceWorker.ready;
@@ -55,7 +56,7 @@ export async function subscribeForPush(
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(publicKey),
     });
-    const saveRes = await fetch('/api/push/subscribe', {
+    const saveRes = await apiFetch('/api/push/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userEmail, subscription: sub.toJSON() }),
@@ -76,7 +77,7 @@ export async function unsubscribeFromPush(): Promise<void> {
     const reg = await navigator.serviceWorker.ready;
     const sub = await reg.pushManager.getSubscription();
     if (sub) {
-      await fetch('/api/push/unsubscribe', {
+      await apiFetch('/api/push/unsubscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ endpoint: sub.endpoint }),

@@ -13,6 +13,7 @@ import {
   PenLine
 } from 'lucide-react';
 import { User as UserType } from '../types';
+import { apiFetch, setSessionToken } from '../lib/api';
 
 interface AgencySignupFormProps {
   onSuccess: (user: UserType) => void;
@@ -95,7 +96,7 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
 
     try {
       setIsLoading(true);
-      const res = await fetch('/api/agencies/register', {
+      const res = await apiFetch('/api/agencies/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -117,6 +118,7 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
         throw new Error(data.error || 'Registration failed. Please verify your details.');
       }
 
+      if (data.token) setSessionToken(data.token);
       if (data.user) {
         onSuccess(data.user);
       } else {

@@ -38,6 +38,7 @@ import { AirtableConfigModal } from './AirtableConfigModal';
 import { AddDiscrepancyModal } from './AddDiscrepancyModal';
 import { SubmitAuditReportModal } from './SubmitAuditReportModal';
 import { HechsherCheckModal } from './HechsherCheckModal';
+import { apiFetch } from '../lib/api';
 
 interface FactoryAuditHubModalProps {
   isOpen: boolean;
@@ -85,21 +86,21 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
     setIsLoading(true);
     try {
       // 1. Load Ingredients
-      const ingRes = await fetch(`/api/ingredients?venueId=${currentVenue.id}&userEmail=${encodeURIComponent(currentUser?.email || '')}`);
+      const ingRes = await apiFetch(`/api/ingredients?venueId=${currentVenue.id}&userEmail=${encodeURIComponent(currentUser?.email || '')}`);
       if (ingRes.ok) {
         const ingData = await ingRes.json();
         setIngredients(ingData.ingredients || []);
       }
 
       // 2. Load Airtable Config
-      const atRes = await fetch(`/api/airtable/config?venueId=${currentVenue.id}&userEmail=${encodeURIComponent(currentUser?.email || '')}`);
+      const atRes = await apiFetch(`/api/airtable/config?venueId=${currentVenue.id}&userEmail=${encodeURIComponent(currentUser?.email || '')}`);
       if (atRes.ok) {
         const atData = await atRes.json();
         setAirtableConfig(atData.config || null);
       }
 
       // 3. Load Reports
-      const rptRes = await fetch(`/api/factory-reports?venueId=${currentVenue.id}&userEmail=${encodeURIComponent(currentUser?.email || '')}`);
+      const rptRes = await apiFetch(`/api/factory-reports?venueId=${currentVenue.id}&userEmail=${encodeURIComponent(currentUser?.email || '')}`);
       if (rptRes.ok) {
         const rptData = await rptRes.json();
         setReports(rptData.reports || []);
@@ -145,7 +146,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
   // Verification actions by Mashgiach
   const handleVerifyIngredient = async (ingredientId: string, status: 'verified_present' | 'verified_not_found' | 'unverified' | 'flagged_discrepancy') => {
     try {
-      const res = await fetch(`/api/ingredients/${ingredientId}/verify`, {
+      const res = await apiFetch(`/api/ingredients/${ingredientId}/verify`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -171,7 +172,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
   };
 
   const handleSaveAirtableConfig = async (updated: Partial<AirtableConfig>) => {
-    const res = await fetch('/api/airtable/config', {
+    const res = await apiFetch('/api/airtable/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -189,7 +190,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
   };
 
   const handleSyncAirtable = async () => {
-    const res = await fetch('/api/airtable/sync', {
+    const res = await apiFetch('/api/airtable/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
