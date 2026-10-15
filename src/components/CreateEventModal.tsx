@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   X,
   Calendar,
@@ -75,14 +75,35 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
   // Notes
   const [notes, setNotes] = useState('');
 
-  // Starter tasks builder
-  const [customTasks, setCustomTasks] = useState<string[]>([
-    'Inspect Tamper-Evident Delivery Seals on Warmers & Cambros',
-    'Ballroom Ovens & Warmers Pilot Ignition (Bishul Yisroel Check)',
-    'Separate Meat & Dairy Station Buffets and Utensil Carts',
-    'Post-Event Kashrut Wrap-up and Tagged Box Inspection',
-  ]);
+  // Event tasks: pre-filled from the admin's default template set.
+  // The creator deletes any that don't apply and adds event-specific ones.
+  const [customTasks, setCustomTasks] = useState<string[]>([]);
   const [newTaskInput, setNewTaskInput] = useState('');
+
+  // Default task templates (admin-managed, shared across events).
+  const [templates, setTemplates] = useState<{ id: string; title: string }[]>([]);
+  const [showTemplateManager, setShowTemplateManager] = useState(false);
+  const [newTemplateInput, setNewTemplateInput] = useState('');
+  const canManageTemplates = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
+
+  // Load the default task set each time the modal opens.
+  useEffect(() => {
+    if (!isOpen) return;
+    setShowTemplateManager(false);
+    setNewTemplateInput('');
+    const agencyParam = currentUser?.agencyId ? `?agencyId=${encodeURIComponent(currentUser.agencyId)}` : '';
+    fetch(`/api/event-task-templates${agencyParam}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const list = Array.isArray(d.templates) ? d.templates : [];
+        setTemplates(list);
+        setCustomTasks(list.map((t: any) => t.title));
+      })
+      .catch(() => {
+        setTemplates([]);
+        setCustomTasks([]);
+      });
+  }, [isOpen]);
 
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -115,6 +136,42 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
   const handleRemoveTask = (index: number) => {
     setCustomTasks(customTasks.filter((_, i) => i !== index));
+  };
+
+  const handleAddTemplate = async () => {
+    const title = newTemplateInput.trim();
+    if (!title) return;
+    try {
+      const res = await fetch('/api/event-task-templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title,
+          agencyId: currentUser?.agencyId,
+          userEmail: currentUser?.email,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed');
+      setTemplates([...templates, data.template]);
+      setNewTemplateInput('');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Could not save default task.');
+    }
+  };
+
+  const handleDeleteTemplate = async (id: string) => {
+    try {
+      const res = await fetch(`/api/event-task-templates/${id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userEmail: currentUser?.email }),
+      });
+      if (!res.ok) throw new Error('Failed');
+      setTemplates(templates.filter((t) => t.id !== id));
+    } catch {
+      setErrorMsg('Could not delete default task.');
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -535,10 +592,10 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
           <div className="pt-3 border-t border-line space-y-2">
             <div className="flex items-center justify-between">
               <label className="font-bold text-ink">
-                Assigned Event Tasks ({customTasks.length})
+                Event Tasks ({customTasks.length})
               </label>
               <span className="text-[11px] text-ink-faint">
-                Mashgiach checks these off on-site
+                Defaults loaded — delete any that don't apply
               </span>
             </div>
 
@@ -574,7 +631,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     handleAddTask();
                   }
                 }}
-                placeholder="Add custom task (e.g. Verify wine bottle seals)"
+                placeholder="Add task for this event only (e.g. Verify wine bottle seals)"
                 className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
               />
               <button
@@ -586,6 +643,63 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 <span>Add</span>
               </button>
             </div>
+
+            {/* Default task templates — admin-managed, pre-fill every new event */}
+            {canManageTemplates && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowTemplateManager(!showTemplateManager)}
+                  className="text-xs font-bold text-gold-deep hover:underline"
+                >
+                  {showTemplateManager ? '▾ Hide default tasks' : '▸ Edit default tasks for all events'}
+                </button>
+                {showTemplateManager && (
+                  <div className="mt-2 p-3 rounded-xl bg-gold-wash/40 border border-gold/30 space-y-1.5">
+                    <p className="text-[11px] text-ink-soft">
+                      These load automatically into every new event. Delete any that don't apply per event.
+                    </p>
+                    {templates.map((t) => (
+                      <div
+                        key={t.id}
+                        className="flex items-center justify-between p-1.5 rounded-lg bg-sunken border border-line/70"
+                      >
+                        <span className="text-xs text-ink">{t.title}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteTemplate(t.id)}
+                          className="p-1 text-ink-faint hover:text-rose-500 transition"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    <div className="flex gap-2 pt-1">
+                      <input
+                        type="text"
+                        value={newTemplateInput}
+                        onChange={(e) => setNewTemplateInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddTemplate();
+                          }
+                        }}
+                        placeholder="New default task (e.g. Check oven pilots)"
+                        className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleAddTemplate}
+                        className="px-3 py-1.5 rounded-lg border border-gold/50 text-gold-deep text-xs font-bold hover:bg-gold-wash transition"
+                      >
+                        Save as default
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Footer Actions */}

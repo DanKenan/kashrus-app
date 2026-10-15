@@ -660,6 +660,13 @@ function generateTemplateTasks(venueId: string, templateType: string = 'restaura
   }
 }
 
+interface EventTaskTemplate {
+  id: string;
+  title: string;
+  agencyId?: string;
+  sortOrder: number;
+}
+
 function getSafeUser(user: UserProfile) {
   const { password, kioskPin, ...safe } = user;
   const userAgency = agencies.find((a) => a.id === user.agencyId) || agencies[0];
@@ -684,6 +691,7 @@ let venues: Venue[] = [...DEFAULT_VENUES];
 let tasks: TaskItem[] = [...INITIAL_TASKS];
 let historyLogs: HistoryLog[] = [...INITIAL_HISTORY];
 let users: UserProfile[] = [...DEFAULT_USERS];
+let eventTaskTemplates: EventTaskTemplate[] = [];
 let currentWorkDate = new Date().toISOString().split('T')[0];
 let isDemoCleared = false;
 
@@ -863,6 +871,14 @@ function hydrateState(parsed: any) {
         } else {
           factoryReports = [];
         }
+
+        if (Array.isArray(parsed.eventTaskTemplates)) {
+          eventTaskTemplates = parsed.eventTaskTemplates.filter(
+            (t: any) => t && t.id && t.title
+          );
+        } else {
+          eventTaskTemplates = [];
+        }
       }
 
       if (parsed.currentWorkDate) currentWorkDate = parsed.currentWorkDate;
@@ -894,6 +910,7 @@ function stateSnapshot() {
     historyLogs,
     users,
     events,
+    eventTaskTemplates,
     airtableConfigs,
     approvedIngredients,
     factoryReports,
@@ -2295,6 +2312,56 @@ app.get('/api/history', (req, res) => {
 // -------------------------------------------------------------
 // KOSHER EVENTS ENDPOINTS
 // -------------------------------------------------------------
+
+// ---- Default event task templates ----
+// Admin-defined tasks that pre-fill every new event notification.
+// The event creator can delete any that don't apply and add event-specific ones.
+app.get('/api/event-task-templates', (req, res) => {
+  const { agencyId } = req.query;
+  const list = eventTaskTemplates
+    .filter((t) => !agencyId || !t.agencyId || t.agencyId === agencyId)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+  res.json({ templates: list });
+});
+
+function canManageTemplates(userEmail: string | undefined): boolean {
+  if (!userEmail) return false;
+  const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
+  return !!caller && (caller.role === 'admin' || caller.role === 'coordinator');
+}
+
+app.post('/api/event-task-templates', (req, res) => {
+  const { title, agencyId, userEmail } = req.body;
+  if (!canManageTemplates(userEmail)) {
+    return res.status(403).json({ error: 'Only admins can manage default event tasks.' });
+  }
+  if (!title || !String(title).trim()) {
+    return res.status(400).json({ error: 'Title is required.' });
+  }
+  const template: EventTaskTemplate = {
+    id: `etpl-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    title: String(title).trim(),
+    agencyId: agencyId || undefined,
+    sortOrder: eventTaskTemplates.length,
+  };
+  eventTaskTemplates.push(template);
+  saveState();
+  broadcast('EVENT_TEMPLATES_UPDATED', { templates: eventTaskTemplates });
+  res.json({ template });
+});
+
+app.delete('/api/event-task-templates/:id', (req, res) => {
+  const { userEmail } = req.body || {};
+  if (!canManageTemplates(userEmail)) {
+    return res.status(403).json({ error: 'Only admins can manage default event tasks.' });
+  }
+  const idx = eventTaskTemplates.findIndex((t) => t.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Template not found.' });
+  eventTaskTemplates.splice(idx, 1);
+  saveState();
+  broadcast('EVENT_TEMPLATES_UPDATED', { templates: eventTaskTemplates });
+  res.json({ success: true });
+});
 
 app.get('/api/events', (req, res) => {
   const { venueId, userEmail } = req.query;
