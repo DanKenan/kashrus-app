@@ -9,6 +9,7 @@ import {
   Moon,
   LogIn,
   Building2,
+  Tablet,
 } from 'lucide-react';
 import { KeepingKosherLogo } from './KeepingKosherLogo';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -158,6 +159,23 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               </button>
             </div>
           )}
+          {/* Venue kiosk entry — for shared tablets hung in establishments */}
+          <button
+            type="button"
+            onClick={() => {
+              try {
+                localStorage.setItem('kiosk_mode', '1');
+              } catch {
+                // ignore
+              }
+              window.location.href = `${window.location.pathname}?kiosk=1`;
+            }}
+            className="mt-4 w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl border border-dashed border-line text-xs font-bold text-ink-soft hover:text-ink hover:border-gold/50 transition cursor-pointer"
+          >
+            <Tablet className="w-4 h-4" />
+            Set up this device as a venue kiosk
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
         </div>
 
         {/* Feature strip */}
