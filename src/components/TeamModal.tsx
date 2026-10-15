@@ -34,9 +34,57 @@ interface TeamModalProps {
   onUpdateUser?: (userId: string, updates: { 
     role?: UserRole; 
     permissions?: UserPermissions;
+    kioskPin?: string;
   }) => Promise<void>;
   onDeleteUser: (userId: string) => Promise<void>;
 }
+
+/** Small inline editor for a user's kiosk PIN (4-6 digits, empty = none). */
+const KioskPinEditor: React.FC<{
+  userId: string;
+  onSave: (pin: string) => void;
+  isBusy: boolean;
+}> = ({ userId, onSave, isBusy }) => {
+  const [pin, setPin] = useState('');
+  const [touched, setTouched] = useState(false);
+  // Reset when switching to a different user row
+  React.useEffect(() => {
+    setPin('');
+    setTouched(false);
+  }, [userId]);
+  const valid = pin === '' || /^[0-9]{4,6}$/.test(pin);
+  return (
+    <span className="inline-flex items-center gap-1.5" title="Kiosk sign-in code for shared tablets (4-6 digits, empty to clear)">
+      <Lock className="w-3.5 h-3.5 text-ink-faint" />
+      <input
+        value={pin}
+        onChange={(e) => {
+          setPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 6));
+          setTouched(true);
+        }}
+        onBlur={() => {
+          if (touched && valid) {
+            onSave(pin);
+            setTouched(false);
+          }
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && valid) {
+            onSave(pin);
+            setTouched(false);
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        disabled={isBusy}
+        placeholder="Code"
+        inputMode="numeric"
+        className={`w-20 text-xs px-2 py-1 rounded-xl border bg-sunken text-ink text-center tracking-[0.2em] focus:outline-none ${
+          touched && !valid ? 'border-red-500' : 'border-line focus:border-gold'
+        }`}
+      />
+    </span>
+  );
+};
 
 export const TeamModal: React.FC<TeamModalProps> = ({
   isOpen,
@@ -177,6 +225,23 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       return;
     }
     setUserToDelete(user);
+  };
+
+  const handleSaveKioskPin = async (user: UserType, pin: string) => {
+    if (!onUpdateUser) return;
+    if (pin !== '' && !/^[0-9]{4,6}$/.test(pin)) {
+      setActionAlert('Kiosk code must be 4–6 digits.');
+      return;
+    }
+    try {
+      setUpdatingUserId(user.id);
+      await onUpdateUser(user.id, { kioskPin: pin });
+      setActionAlert(pin === '' ? `Kiosk code cleared for ${user.name}.` : `Kiosk code set for ${user.name}.`);
+    } catch (err: any) {
+      setActionAlert(err?.message || 'Failed to save kiosk code');
+    } finally {
+      setUpdatingUserId(null);
+    }
   };
 
   const filteredUsers = users.filter((u) => {
@@ -494,6 +559,15 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       <span className="text-xs text-ink-faint tnum hidden xl:inline" title="Tasks assigned to this user">
                         {assignedCount} tasks
                       </span>
+
+                      {/* Kiosk PIN — 4-6 digit code for shared wall tablets */}
+                      {onUpdateUser && !isPrimaryAdmin && ['mashgiach', 'worker', 'coordinator'].includes(user.role) && (
+                        <KioskPinEditor
+                          userId={user.id}
+                          onSave={(pin) => handleSaveKioskPin(user, pin)}
+                          isBusy={isBusy}
+                        />
+                      )}
 
                       {/* Delete Member Button */}
                       {!isPrimaryAdmin && (
