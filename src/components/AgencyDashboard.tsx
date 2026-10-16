@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Building2, CheckCircle2, AlertTriangle, MessageSquare, X } from 'lucide-react';
+import { Building2, CheckCircle2, AlertTriangle, MessageSquare, X, Phone, User } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 
 interface VenueStat {
@@ -8,11 +8,20 @@ interface VenueStat {
   completedTasks: number;
   completionRate: number;
   overdueTasks: number;
+  overdueTaskList: Array<{ id: string; title: string; targetTime?: string }>;
   recentNotes: Array<{
     id: string;
     authorName: string;
     content: string;
     shift: string;
+    createdAt: string;
+  }>;
+  mashgichim: Array<{ email: string; name: string; phone: string; role: string }>;
+  openIncidents: Array<{
+    id: string;
+    title: string;
+    severity: string;
+    reporterName: string;
     createdAt: string;
   }>;
 }
@@ -165,6 +174,43 @@ export function AgencyDashboard({ onClose, onSelectVenue }: AgencyDashboardProps
                       <span className="font-semibold">{vs.recentNotes[0].authorName}:</span>{' '}
                       {vs.recentNotes[0].content}
                     </div>
+                  </div>
+                )}
+
+                {/* Open incidents */}
+                {vs.openIncidents.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-line/60 space-y-1">
+                    {vs.openIncidents.slice(0, 2).map((inc) => (
+                      <div key={inc.id} className="flex items-center gap-1.5 text-[11px]">
+                        <AlertTriangle className={`w-3.5 h-3.5 shrink-0 ${inc.severity === 'critical' ? 'text-rose-600' : inc.severity === 'high' ? 'text-orange-500' : 'text-gold-deep'}`} />
+                        <span className="font-semibold truncate">{inc.title}</span>
+                        <span className="text-ink-faint shrink-0">({inc.severity})</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Mashgichim — tap to call */}
+                {vs.mashgichim.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-line/60 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()}>
+                    {vs.mashgichim.map((m) => (
+                      m.phone ? (
+                        <a
+                          key={m.email}
+                          href={`tel:${m.phone}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-gold/10 hover:bg-gold/20 text-[11px] font-semibold text-gold-deep transition"
+                        >
+                          <Phone className="w-3 h-3" />
+                          {m.name}
+                        </a>
+                      ) : (
+                        <span key={m.email} className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sunken text-[11px] text-ink-faint">
+                          <User className="w-3 h-3" />
+                          {m.name}
+                        </span>
+                      )
+                    ))}
                   </div>
                 )}
               </button>

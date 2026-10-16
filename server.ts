@@ -1870,7 +1870,7 @@ app.get('/api/admin/dashboard', (req, res) => {
     const venueTasks = tasks.filter((t) => t.venueId === venue.id);
     const completed = venueTasks.filter((t) => t.isCompleted).length;
     const total = venueTasks.length;
-    const overdue = venueTasks.filter((t) => {
+    const overdueList = venueTasks.filter((t) => {
       if (t.isCompleted) return false;
       // Overdue if target time has passed today
       if (!t.targetTime || t.targetTime === 'End of Day') return false;
@@ -1878,7 +1878,7 @@ app.get('/api/admin/dashboard', (req, res) => {
       const minutes = taskSortMinutes(t);
       const nowMinutes = now.getHours() * 60 + now.getMinutes();
       return minutes < nowMinutes;
-    }).length;
+    });
 
     // Recent handoff notes (last 3)
     const recentNotes = handoffNotes
@@ -1886,13 +1886,45 @@ app.get('/api/admin/dashboard', (req, res) => {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, 3);
 
+    // Mashgichim assigned to this venue (with phone numbers for tap-to-call)
+    const venueUsers = users
+      .filter((u) => (u.agencyId || 'agency-hkc') === agencyId)
+      .filter((u) => {
+        // User is assigned if they have venueId match or are assigned to venue tasks
+        if ((u as any).venueId === venue.id) return true;
+        return venueTasks.some((t) =>
+          Array.isArray(t.assignedTo) &&
+          (t.assignedTo.includes('all') || t.assignedTo.includes(u.email))
+        );
+      })
+      .map((u) => ({
+        email: u.email,
+        name: u.name,
+        phone: (u as any).phone || '',
+        role: u.role,
+      }));
+
+    // Open incidents
+    const openIncidents = incidents
+      .filter((i) => i.venueId === venue.id && i.status !== 'resolved')
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
     return {
       venue,
       totalTasks: total,
       completedTasks: completed,
       completionRate: total > 0 ? Math.round((completed / total) * 100) : 0,
-      overdueTasks: overdue,
+      overdueTasks: overdueList.length,
+      overdueTaskList: overdueList.map((t) => ({ id: t.id, title: t.title, targetTime: t.targetTime })),
       recentNotes,
+      mashgichim: venueUsers,
+      openIncidents: openIncidents.map((i) => ({
+        id: i.id,
+        title: i.title,
+        severity: i.severity,
+        reporterName: i.reporterName,
+        createdAt: i.createdAt,
+      })),
     };
   });
 
