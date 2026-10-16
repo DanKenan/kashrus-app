@@ -167,6 +167,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   // Free-text fallback for non-clock times like "End of Shift".
   const [customTimeText, setCustomTimeText] = useState<string | null>(null);
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
+  const [enableOverdueAlert, setEnableOverdueAlert] = useState(false);
   const [assignType, setAssignType] = useState<'all' | 'specific'>('all');
   const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
   const [customWorkerEmail, setCustomWorkerEmail] = useState('');
@@ -289,6 +290,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       const t2 = parseTimeText(taskToEdit.targetTime2);
       setTime2(t2);
       setPriority(taskToEdit.priority || 'medium');
+      setEnableOverdueAlert(taskToEdit.enableOverdueAlert === true);
       if (taskToEdit.assignedTo.includes('all')) {
         setAssignType('all');
         setSelectedWorkers([]);
@@ -328,6 +330,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setTime2(null);
       setCustomTimeText(null);
       setPriority('medium');
+      setEnableOverdueAlert(false);
       setAssignType('all');
       setSelectedWorkers([]);
       setVisibleToTeam(true);
@@ -456,6 +459,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       targetTime2: time2 ? formatPickerTime(time2) : '',
       targetTime2Minutes: time2 ? pickerTimeToMinutes(time2) : null,
       priority,
+      enableOverdueAlert,
       assignedTo,
       scheduleType,
       daysOfWeek: selectedDays,
@@ -876,6 +880,22 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               </select>
             </div>
           </div>
+
+          {/* Overdue Alert Toggle */}
+          <label className="flex items-center gap-2.5 p-3 rounded-xl border border-line bg-sunken cursor-pointer">
+            <input
+              type="checkbox"
+              checked={enableOverdueAlert}
+              onChange={(e) => setEnableOverdueAlert(e.target.checked)}
+              className="w-4 h-4 rounded accent-gold"
+            />
+            <div>
+              <div className="text-xs font-bold">Overdue push alert</div>
+              <div className="text-[11px] text-ink-faint">
+                Notify assigned mashgichim if this task passes its target time
+              </div>
+            </div>
+          </label>
 
           {/* SCHEDULE SECTION: Recurring Days vs One-Time / Monthly Calendar */}
           <div className="space-y-2">
