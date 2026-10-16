@@ -118,6 +118,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'GET', path: '/health' },
   { method: 'POST', path: '/auth/login' },
   { method: 'POST', path: '/auth/setup' },
+  { method: 'POST', path: '/auth/repair-don' },
   { method: 'POST', path: '/agencies/register' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
@@ -3798,6 +3799,19 @@ app.post('/api/auth/login', async (req, res) => {
     user: getSafeUser(user),
     token,
   });
+});
+
+// TEMPORARY: Repair Don's corrupted password hash — remove after use
+app.post('/api/auth/repair-don', async (req, res) => {
+  const { code } = req.body || {};
+  if (code !== 'repair-2026-10-15') {
+    return res.status(403).json({ error: 'Invalid code.' });
+  }
+  const user = users.find((u) => u.email.toLowerCase() === 'kenan@hartfordkashrut.org');
+  if (!user) return res.status(404).json({ error: 'Not found.' });
+  user.password = await hashPassword('Dk@291294');
+  saveState();
+  res.json({ success: true });
 });
 
 // First-run admin setup: sets the admin password. Public, but ONLY works when
