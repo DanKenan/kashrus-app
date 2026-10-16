@@ -290,6 +290,23 @@ interface HandoffNote {
   createdAt: string;
 }
 
+interface TaskTemplate {
+  id: string;
+  agencyId: string;
+  name: string;
+  description?: string;
+  tasks: Array<{
+    title: string;
+    description?: string;
+    category?: string;
+    targetTime?: string;
+    priority?: 'low' | 'medium' | 'high';
+    enableOverdueAlert?: boolean;
+  }>;
+  createdByEmail: string;
+  createdAt: string;
+}
+
 export interface UserPermissions {
   canFillTasks?: boolean;
   canAssignTasks?: boolean;
@@ -868,6 +885,7 @@ let tasks: TaskItem[] = [...INITIAL_TASKS];
 let historyLogs: HistoryLog[] = [...INITIAL_HISTORY];
 let users: UserProfile[] = [...DEFAULT_USERS];
 let handoffNotes: HandoffNote[] = [];
+let taskTemplates: TaskTemplate[] = [];
 let eventTaskTemplates: EventTaskTemplate[] = [];
 let currentWorkDate = new Date().toISOString().split('T')[0];
 let isDemoCleared = false;
@@ -946,6 +964,7 @@ function hydrateState(parsed: any) {
         tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
         historyLogs = Array.isArray(parsed.historyLogs) ? parsed.historyLogs : [];
         handoffNotes = Array.isArray(parsed.handoffNotes) ? parsed.handoffNotes : [];
+        taskTemplates = Array.isArray(parsed.taskTemplates) ? parsed.taskTemplates : [];
         events = Array.isArray(parsed.events) ? parsed.events : [];
         airtableConfigs = Array.isArray(parsed.airtableConfigs) ? parsed.airtableConfigs : [];
         approvedIngredients = Array.isArray(parsed.approvedIngredients) ? parsed.approvedIngredients : [];
@@ -1084,6 +1103,7 @@ function stateSnapshot() {
     tasks,
     historyLogs,
     handoffNotes,
+    taskTemplates,
     users,
     events,
     eventTaskTemplates,
@@ -1615,6 +1635,99 @@ app.get('/api/admin/export', (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Type', 'application/json');
   res.json({ ...safe, exportedAt: new Date().toISOString() });
+});
+
+// Custom task templates — Don's own library (replaces generic ones)
+app.get('/api/task-templates', (req, res) => {
+  const agencyId = (req as any).agencyId || 'agency-hkc';
+  res.json({ templates: taskTemplates.filter((t) => t.agencyId === agencyId) });
+});
+
+app.post('/api/task-templates', (req, res) => {
+  const { name, description, tasks: templateTasks, fromVenueId, createdByEmail } = req.body || {};
+  if (!name?.trim()) {
+    return res.status(400).json({ error: 'Template name is required.' });
+  }
+
+  let taskDefs: TaskTemplate['tasks'] = [];
+  if (fromVenueId) {
+    // Save current venue's tasks as a template
+    taskDefs = tasks
+      .filter((t) => t.venueId === fromVenueId)
+      .map((t) => ({
+        title: t.title,
+        description: t.description,
+        category: t.category,
+        targetTime: t.targetTime,
+        priority: t.priority,
+        enableOverdueAlert: t.enableOverdueAlert,
+      }));
+  } else if (Array.isArray(templateTasks)) {
+    taskDefs = templateTasks;
+  }
+
+  const template: TaskTemplate = {
+    id: `tmpl-${crypto.randomUUID()}`,
+    agencyId: (req as any).agencyId || 'agency-hkc',
+    name: String(name).trim(),
+    description: description?.trim(),
+    tasks: taskDefs,
+    createdByEmail: createdByEmail || '',
+    createdAt: new Date().toISOString(),
+  };
+  taskTemplates.push(template);
+  saveState();
+  res.json({ template });
+});
+
+app.post('/api/task-templates/:id/apply', (req, res) => {
+  const template = taskTemplates.find((t) => t.id === req.params.id);
+  if (!template) return res.status(404).json({ error: 'Template not found.' });
+
+  const { venueId, createdByEmail } = req.body || {};
+  if (!venueId) return res.status(400).json({ error: 'Venue ID is required.' });
+
+  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const now = new Date().toISOString();
+  const created: TaskItem[] = template.tasks.map((td, i) => ({
+    id: `task-${crypto.randomUUID()}`,
+    agencyId,
+    venueId,
+    title: td.title,
+    description: td.description || '',
+    category: td.category || 'General',
+    categories: [td.category || 'General'],
+    isPrivate: false,
+    sortOrder: i,
+    inputType: 'yes_no',
+    assignedTo: ['all'],
+    scheduleType: 'recurring',
+    daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+    targetTime: td.targetTime || 'End of Day',
+    priority: td.priority || 'medium',
+    enableOverdueAlert: td.enableOverdueAlert === true,
+    currentStatus: 'pending',
+    isCompleted: false,
+    notes: '',
+    updatedByEmail: null,
+    updatedByName: null,
+    updatedAt: null,
+    checkIns: [],
+    createdAt: now,
+  }));
+
+  tasks.push(...created);
+  saveState();
+  broadcast('TASKS_UPDATED', { venueId }, undefined, agencyId);
+  res.json({ created: created.length, tasks: created });
+});
+
+app.delete('/api/task-templates/:id', (req, res) => {
+  const idx = taskTemplates.findIndex((t) => t.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Template not found.' });
+  taskTemplates.splice(idx, 1);
+  saveState();
+  res.json({ success: true });
 });
 
 // Agency dashboard — overview of all venues with task stats (admin/coordinator)
