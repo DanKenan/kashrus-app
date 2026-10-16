@@ -287,6 +287,7 @@ interface HandoffNote {
   authorName: string;
   content: string;
   shift: string; // e.g. "Morning", "Afternoon", "Evening"
+  voiceNoteData?: string; // base64 audio
   createdAt: string;
 }
 
@@ -1922,9 +1923,9 @@ app.get('/api/handoff-notes', (req, res) => {
 });
 
 app.post('/api/handoff-notes', (req, res) => {
-  const { venueId, content, shift, authorEmail, authorName } = req.body || {};
-  if (!venueId || !content?.trim()) {
-    return res.status(400).json({ error: 'Venue and note content are required.' });
+  const { venueId, content, shift, authorEmail, authorName, voiceNoteData } = req.body || {};
+  if (!venueId || (!content?.trim() && !voiceNoteData)) {
+    return res.status(400).json({ error: 'Venue and note content (or voice note) are required.' });
   }
   const note: HandoffNote = {
     id: `handoff-${crypto.randomUUID()}`,
@@ -1932,8 +1933,9 @@ app.post('/api/handoff-notes', (req, res) => {
     venueId,
     authorEmail: authorEmail || (req as any).userEmail || '',
     authorName: authorName || 'Mashgiach',
-    content: String(content).trim(),
+    content: String(content || '').trim(),
     shift: shift || 'General',
+    voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/') ? voiceNoteData.slice(0, 1000000) : undefined,
     createdAt: new Date().toISOString(),
   };
   handoffNotes.unshift(note);
