@@ -1105,6 +1105,10 @@ function saveState() {
 // ---------------------------------------------------------------------------
 const FIRESTORE_STATE_DOC = 'app-state/main';
 let firestoreDb: any = null;
+// Set true once we've successfully applied Firestore state (or confirmed no
+// doc exists yet). persistToFirestore() refuses to write until this is true,
+// so a slow/failed boot can never overwrite good data with seed defaults.
+let durableStateLoaded = false;
 
 function getFirestoreConfig(): { projectId?: string; databaseId?: string } {
   let fileConfig: any = {};
@@ -1149,15 +1153,18 @@ function initFirestore() {
 }
 
 // Load durable state at boot. Returns true when Firestore had state to apply.
+// Sets durableStateLoaded so persistToFirestore() knows it's safe to write.
 async function loadStateFromFirestore(): Promise<boolean> {
   if (!firestoreDb) return false;
   try {
     const snap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
     if (!snap.exists) {
       console.log('[Firestore] No saved state yet — starting from local file.');
+      durableStateLoaded = true; // Nothing to overwrite; in-memory is the baseline.
       return false;
     }
     hydrateState(snap.data());
+    durableStateLoaded = true;
     console.log('[Firestore] Loaded durable state.');
     return true;
   } catch (err: any) {
@@ -1169,6 +1176,12 @@ async function loadStateFromFirestore(): Promise<boolean> {
 // Fire-and-forget durable write. Safe to call from sync code paths.
 function persistToFirestore() {
   if (!firestoreDb) return;
+  // NEVER overwrite Firestore with state that wasn't loaded from it. If a boot
+  // is slow or failing, writing now would destroy the user's real data.
+  if (!durableStateLoaded) {
+    console.warn('[Firestore] Skipping persist — durable state not yet loaded.');
+    return;
+  }
   try {
     // Firestore rejects `undefined` field values with a *synchronous* throw
     // inside .set() (a promise .catch() cannot catch it), and that throw used
@@ -3676,17 +3689,17 @@ async function migratePasswordsToBcrypt(): Promise<void> {
 
 async function startServer() {
   // Durable state first: Firestore wins over the ephemeral local file.
+  // We WAIT for the load — no timeout race. Starting with seed state while
+  // Firestore is slow would let the first request overwrite real user data.
+  // If Firestore is unreachable, the boot fails loudly instead of corrupting.
   initFirestore();
   if (firestoreDb) {
-    const loadPromise = loadStateFromFirestore();
-    // Swallow late rejections: if the timeout below wins the race, the
-    // Firestore attempt must not crash the process when it settles.
-    loadPromise.catch(() => {});
-    const loaded = await Promise.race([
-      loadPromise,
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 8000)),
-    ]);
-    if (!loaded) console.log('[Firestore] Continuing with local file state.');
+    const loaded = await loadStateFromFirestore();
+    if (!loaded && !durableStateLoaded) {
+      throw new Error('[Firestore] Could not load durable state at boot — refusing to start with empty state.');
+    }
+  } else {
+    durableStateLoaded = true; // No Firestore configured; local file is the source of truth.
   }
 
   // Backfill task ordering AFTER the durable load (the hydrate above replaces
