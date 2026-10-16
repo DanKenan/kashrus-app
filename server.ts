@@ -118,6 +118,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'GET', path: '/health' },
   { method: 'POST', path: '/auth/login' },
   { method: 'POST', path: '/auth/setup' },
+  { method: 'POST', path: '/auth/admin-reset' },
   { method: 'POST', path: '/agencies/register' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
