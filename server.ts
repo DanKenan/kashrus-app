@@ -3134,6 +3134,23 @@ app.post('/api/auth/login', async (req, res) => {
   });
 });
 
+// TEMPORARY one-time admin password reset — remove after Don uses it.
+// Requires a one-time code (given to Don directly) so it's not openly exploitable.
+const ADMIN_RESET_CODE = 'shutfey-reset-7d3f9a';
+app.post('/api/auth/admin-reset', async (req, res) => {
+  const { email, resetCode } = req.body || {};
+  if (resetCode !== ADMIN_RESET_CODE) {
+    return res.status(403).json({ error: 'Invalid reset code.' });
+  }
+  const user = users.find(
+    (u) => u.email.toLowerCase() === String(email || '').trim().toLowerCase() && u.role === 'admin'
+  );
+  if (!user) return res.status(404).json({ error: 'Admin account not found.' });
+  user.password = ''; // Clear → login returns needsSetup, Don sets a fresh password
+  saveState();
+  res.json({ success: true });
+});
+
 // First-run admin setup: sets the admin password. Public, but ONLY works when
 // the admin account has no password yet — it becomes a no-op forever after.
 app.post('/api/auth/setup', async (req, res) => {

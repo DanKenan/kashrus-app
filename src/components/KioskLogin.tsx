@@ -138,6 +138,12 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
               {v.name}
             </button>
           ))}
+          <button
+            onClick={onExitKiosk}
+            className="mt-4 text-center text-xs text-ink-faint underline underline-offset-2"
+          >
+            ← Back to regular sign-in
+          </button>
         </div>
       ) : !selected ? (
         <div className="mt-10 w-full max-w-md flex flex-col gap-4">
@@ -165,6 +171,12 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
               </span>
             </button>
           ))}
+          <button
+            onClick={onExitKiosk}
+            className="mt-6 text-center text-xs text-ink-faint underline underline-offset-2"
+          >
+            ← Back to regular sign-in
+          </button>
         </div>
       ) : (
         <div className="mt-8 w-full max-w-xs flex flex-col items-center">
