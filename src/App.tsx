@@ -552,7 +552,7 @@ export default function App() {
   };
 
   // Log one repeatable check-in on a task (inputType 'check_in')
-  const handleCheckIn = async (taskId: string) => {
+  const handleCheckIn = async (taskId: string, photoData?: string, photoCaption?: string) => {
     if (!currentUser) {
       showToast('Please sign in to log checks.');
       return;
@@ -567,6 +567,8 @@ export default function App() {
       byName: currentUser.name,
       byEmail: currentUser.email,
       at: now,
+      photoData,
+      photoCaption,
     };
 
     // Optimistic local update
@@ -591,6 +593,8 @@ export default function App() {
         body: JSON.stringify({
           userEmail: currentUser.email,
           userName: currentUser.name,
+          photoData,
+          photoCaption,
         }),
       });
       const data = await res.json();

@@ -16,6 +16,7 @@ import {
   CalendarDays,
   ShieldCheck,
   Star,
+  Camera,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
 import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories, boardTier } from '../lib/utils';
@@ -27,7 +28,7 @@ interface TaskCardViewProps {
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
   onUpdateNotes: (taskId: string, notes: string) => void;
-  onCheckIn: (taskId: string) => void;
+  onCheckIn: (taskId: string, photoData?: string, photoCaption?: string) => void;
   onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
@@ -421,45 +422,95 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                     {/* 5. Repeatable check-in — every tap logs who + when under the task */}
                     {task.inputType === 'check_in' && (
                       <div className="w-full">
-                        <button
-                          id={`mobile-task-checkin-${task.id}`}
-                          onClick={() => onCheckIn(task.id)}
-                          className="pressable w-full min-h-[44px] flex items-center justify-center gap-2 rounded-xl text-xs font-bold border transition cursor-pointer tactile-1 bg-gradient-to-b from-gold to-gold-deep border-gold-deep text-white"
-                          title="Log that you did this check right now"
-                        >
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span>Log check</span>
+                        <div className="flex gap-2">
+                          <button
+                            id={`mobile-task-checkin-${task.id}`}
+                            onClick={() => onCheckIn(task.id)}
+                            className="pressable flex-1 min-h-[44px] flex items-center justify-center gap-2 rounded-xl text-xs font-bold border transition cursor-pointer tactile-1 bg-gradient-to-b from-gold to-gold-deep border-gold-deep text-white"
+                            title="Log that you did this check right now"
+                          >
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span>Log check</span>
                           {(task.checkIns?.length || 0) > 0 && (
                             <span className="ml-1 px-2 py-0.5 rounded-full bg-white/25 text-[11px] font-black">
                               {task.checkIns!.length}
                             </span>
                           )}
                         </button>
+                          <label
+                            className="pressable min-h-[44px] px-3 flex items-center justify-center rounded-xl text-xs font-bold border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30"
+                            title="Log check with photo evidence"
+                          >
+                            <Camera className="w-4 h-4" />
+                            <input
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                const reader = new FileReader();
+                                reader.onload = () => {
+                                  const img = new Image();
+                                  img.onload = () => {
+                                    // Resize to max 800px to keep base64 reasonable
+                                    const canvas = document.createElement('canvas');
+                                    const scale = Math.min(1, 800 / Math.max(img.width, img.height));
+                                    canvas.width = img.width * scale;
+                                    canvas.height = img.height * scale;
+                                    canvas.getContext('2d')?.drawImage(img, 0, 0, canvas.width, canvas.height);
+                                    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+                                    onCheckIn(task.id, dataUrl);
+                                  };
+                                  img.src = reader.result as string;
+                                };
+                                reader.readAsDataURL(file);
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                        </div>
                         {(task.checkIns?.length || 0) > 0 && (
                           <ul className="mt-2 space-y-1">
                             {task.checkIns!.map((c: TaskCheckIn) => (
                               <li
                                 key={c.id}
-                                className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-sunken border border-line text-[11px] animate-fade-in"
+                                className="px-2.5 py-1.5 rounded-lg bg-sunken border border-line text-[11px] animate-fade-in"
                               >
-                                <span className="w-5 h-5 rounded-full bg-gold-wash border border-gold/40 text-gold-ink flex items-center justify-center text-[9px] font-black shrink-0">
-                                  {getInitials(c.byName || c.byEmail || 'MK')}
-                                </span>
-                                <span className="font-bold text-ink truncate">
-                                  {c.byName || c.byEmail || 'Someone'}
-                                </span>
-                                <span className="text-ink-faint ml-auto shrink-0 font-semibold">
-                                  {formatExactTime(c.at)}
-                                </span>
-                                {onRemoveCheckIn && (
-                                  <button
-                                    onClick={() => onRemoveCheckIn(task.id, c.id)}
-                                    className="shrink-0 p-1 rounded-md text-ink-faint hover:text-red-600 hover:bg-red-500/10"
-                                    title="Remove this check"
-                                    aria-label="Remove check"
-                                  >
-                                    <X className="w-3.5 h-3.5" />
-                                  </button>
+                                <div className="flex items-center gap-2">
+                                  <span className="w-5 h-5 rounded-full bg-gold-wash border border-gold/40 text-gold-ink flex items-center justify-center text-[9px] font-black shrink-0">
+                                    {getInitials(c.byName || c.byEmail || 'MK')}
+                                  </span>
+                                  <span className="font-bold text-ink truncate">
+                                    {c.byName || c.byEmail || 'Someone'}
+                                  </span>
+                                  <span className="text-ink-faint ml-auto shrink-0 font-semibold">
+                                    {formatExactTime(c.at)}
+                                  </span>
+                                  {onRemoveCheckIn && (
+                                    <button
+                                      onClick={() => onRemoveCheckIn(task.id, c.id)}
+                                      className="shrink-0 p-1 rounded-md text-ink-faint hover:text-red-600 hover:bg-red-500/10"
+                                      title="Remove this check"
+                                      aria-label="Remove check"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                                {c.photoData && (
+                                  <img
+                                    src={c.photoData}
+                                    alt={c.photoCaption || 'Check-in photo'}
+                                    className="mt-1.5 w-full rounded-lg border border-line object-cover max-h-40 cursor-pointer"
+                                    onClick={(e) => {
+                                      const w = window.open();
+                                      if (w) {
+                                        w.document.write(`<img src="${c.photoData}" style="max-width:100%"/>`);
+                                      }
+                                    }}
+                                  />
                                 )}
                               </li>
                             ))}

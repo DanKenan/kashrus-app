@@ -14,6 +14,8 @@ export interface TaskCheckIn {
   byName: string | null;
   byEmail: string | null;
   at: string; // ISO timestamp of the check-in
+  photoData?: string;
+  photoCaption?: string;
 }
 
 export interface KosherAgency {
