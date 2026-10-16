@@ -236,6 +236,8 @@ interface TaskCheckInItem {
   byName: string | null;
   byEmail: string | null;
   at: string; // ISO timestamp
+  photoData?: string; // base64 data URL (optional photo evidence)
+  photoCaption?: string;
 }
 
 /** Minutes after midnight for a target time like "09:00 AM" / "14:30"; Infinity when none. */
@@ -2526,7 +2528,7 @@ app.post('/api/tasks/:id/check-in', (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
 
-  const { userEmail, userName } = req.body;
+  const { userEmail, userName, photoData, photoCaption } = req.body;
   if (userEmail) {
     const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
     if (caller) {
@@ -2548,6 +2550,8 @@ app.post('/api/tasks/:id/check-in', (req, res) => {
     byName: userName || null,
     byEmail: userEmail || null,
     at: now,
+    photoData: typeof photoData === 'string' && photoData.startsWith('data:image/') ? photoData.slice(0, 500000) : undefined, // cap at ~500KB
+    photoCaption: typeof photoCaption === 'string' ? photoCaption.slice(0, 200) : undefined,
   };
 
   const updated: TaskItem = {
