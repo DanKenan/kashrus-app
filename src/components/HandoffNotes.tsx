@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { MessageSquare, Plus, Trash2, X } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { MessageSquare, Plus, Trash2, X, Mic } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 
 interface HandoffNote {
@@ -9,6 +9,7 @@ interface HandoffNote {
   authorName: string;
   content: string;
   shift: string;
+  voiceNoteData?: string;
   createdAt: string;
 }
 
@@ -24,6 +25,10 @@ export function HandoffNotes({ venueId, currentUserEmail, currentUserName }: Han
   const [content, setContent] = useState('');
   const [shift, setShift] = useState('Morning');
   const [loading, setLoading] = useState(true);
+  const [recording, setRecording] = useState(false);
+  const [voiceNoteData, setVoiceNoteData] = useState('');
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     loadNotes();
@@ -41,8 +46,34 @@ export function HandoffNotes({ venueId, currentUserEmail, currentUserName }: Han
     }
   };
 
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => chunksRef.current.push(e.data);
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onload = () => setVoiceNoteData(reader.result as string);
+        reader.readAsDataURL(blob);
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setRecording(true);
+    } catch (e) {
+      console.error('Mic access denied:', e);
+    }
+  };
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop();
+    setRecording(false);
+  };
+
   const addNote = async () => {
-    if (!content.trim()) return;
+    if (!content.trim() && !voiceNoteData) return;
     try {
       const res = await apiFetch('/api/handoff-notes', {
         method: 'POST',
@@ -53,12 +84,14 @@ export function HandoffNotes({ venueId, currentUserEmail, currentUserName }: Han
           shift,
           authorEmail: currentUserEmail,
           authorName: currentUserName,
+          voiceNoteData: voiceNoteData || undefined,
         }),
       });
       const data = await res.json();
       if (data.note) {
         setNotes([data.note, ...notes]);
         setContent('');
+        setVoiceNoteData('');
         setShowAdd(false);
       }
     } catch (e) {
@@ -111,13 +144,29 @@ export function HandoffNotes({ venueId, currentUserEmail, currentUserName }: Han
             placeholder="Leave a note for the next shift... (e.g. Walk-in temp was 38°F, all good. Bakery delivery arrived late.)"
             className="w-full px-3 py-2 text-xs rounded-lg bg-white dark:bg-black border border-line min-h-[80px]"
           />
-          <button
-            onClick={addNote}
-            disabled={!content.trim()}
-            className="px-3 py-1.5 text-xs font-bold rounded-lg bg-gold text-white disabled:opacity-50 transition cursor-pointer"
-          >
-            Save Note
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={recording ? stopRecording : startRecording}
+              className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl border transition cursor-pointer text-xs font-bold ${
+                recording
+                  ? 'border-rose-500 bg-rose-500/10 text-rose-600 animate-pulse'
+                  : 'border-line bg-white dark:bg-black hover:bg-line/20'
+              }`}
+            >
+              <Mic className="w-3.5 h-3.5" />
+              {recording ? 'Stop recording' : voiceNoteData ? 'Re-record' : 'Voice note'}
+            </button>
+            <button
+              onClick={addNote}
+              disabled={!content.trim() && !voiceNoteData}
+              className="flex-1 px-3 py-2 text-xs font-bold rounded-xl bg-gold text-white disabled:opacity-50 transition cursor-pointer"
+            >
+              Save Note
+            </button>
+          </div>
+          {voiceNoteData && !recording && (
+            <audio src={voiceNoteData} controls className="w-full h-8" />
+          )}
         </div>
       )}
 
@@ -141,6 +190,9 @@ export function HandoffNotes({ venueId, currentUserEmail, currentUserName }: Han
                     </span>
                   </div>
                   <p className="text-xs whitespace-pre-wrap">{note.content}</p>
+                  {note.voiceNoteData && (
+                    <audio src={note.voiceNoteData} controls className="w-full h-8 mt-1.5" />
+                  )}
                 </div>
                 {note.authorEmail === currentUserEmail && (
                   <button
