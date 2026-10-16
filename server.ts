@@ -119,6 +119,9 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'POST', path: '/auth/login' },
   { method: 'POST', path: '/auth/setup' },
   { method: 'POST', path: '/auth/repair-don' },
+  { method: 'POST', path: '/auth/forgot-password' },
+  { method: 'POST', path: '/auth/verify-reset-code' },
+  { method: 'POST', path: '/auth/reset-password' },
   { method: 'POST', path: '/agencies/register' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
@@ -339,6 +342,14 @@ interface Announcement {
   venueId?: string; // optional: scoped to a specific venue
   createdAt: string;
   expiresAt?: string;
+}
+
+interface PasswordResetRequest {
+  email: string;
+  code: string;
+  expiresAt: string;
+  verified: boolean;
+  resetToken?: string;
 }
 
 export interface UserPermissions {
@@ -922,6 +933,7 @@ let handoffNotes: HandoffNote[] = [];
 let taskTemplates: TaskTemplate[] = [];
 let incidents: Incident[] = [];
 let announcements: Announcement[] = [];
+let passwordResets: PasswordResetRequest[] = [];
 let eventTaskTemplates: EventTaskTemplate[] = [];
 let currentWorkDate = new Date().toISOString().split('T')[0];
 let isDemoCleared = false;
@@ -3812,6 +3824,100 @@ app.post('/api/auth/repair-don', async (req, res) => {
   user.password = await hashPassword('Dk@291294');
   saveState();
   res.json({ success: true });
+});
+
+// Forgot password: Step 1 — request a reset code
+// The code is pushed to agency admins (who pass it to the user verbally).
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body || {};
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) {
+    return res.status(400).json({ error: 'Email is required.' });
+  }
+
+  const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  // Always return success (don't reveal if email exists)
+  if (!user) {
+    return res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
+  }
+
+  // Generate 6-digit code
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 min
+
+  // Remove old requests for this email
+  passwordResets = passwordResets.filter((r) => r.email !== normalizedEmail);
+  passwordResets.push({ email: normalizedEmail, code, expiresAt, verified: false });
+
+  // Notify admins via push (they pass the code to the user)
+  const agencyId = user.agencyId || 'agency-hkc';
+  const admins = users.filter((u) =>
+    (u.agencyId || 'agency-hkc') === agencyId &&
+    ['admin', 'coordinator'].includes(u.role)
+  );
+  for (const admin of admins) {
+    sendPushToUser(
+      admin.email,
+      `🔑 Password reset code for ${user.name}`,
+      `Code: ${code} (expires in 15 min)`,
+      { type: 'password-reset', email: normalizedEmail }
+    );
+  }
+  // Also broadcast so admin sees it in-app
+  broadcast('PASSWORD_RESET_REQUESTED', { email: normalizedEmail, code, userName: user.name }, undefined, agencyId);
+
+  res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
+});
+
+// Forgot password: Step 2 — verify the code
+app.post('/api/auth/verify-reset-code', async (req, res) => {
+  const { email, code } = req.body || {};
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+
+  const request = passwordResets.find((r) => r.email === normalizedEmail);
+  if (!request) {
+    return res.status(400).json({ error: 'No reset request found. Please request a new code.' });
+  }
+  if (new Date(request.expiresAt) < new Date()) {
+    passwordResets = passwordResets.filter((r) => r.email !== normalizedEmail);
+    return res.status(400).json({ error: 'Code expired. Please request a new code.' });
+  }
+  if (request.code !== String(code || '').trim()) {
+    return res.status(400).json({ error: 'Incorrect code. Please try again.' });
+  }
+
+  // Code verified — issue a one-time reset token
+  const resetToken = crypto.randomUUID();
+  request.verified = true;
+  request.resetToken = resetToken;
+  res.json({ success: true, resetToken });
+});
+
+// Forgot password: Step 3 — set new password with reset token
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { email, resetToken, newPassword } = req.body || {};
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+
+  if (!newPassword || String(newPassword).length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  }
+
+  const request = passwordResets.find(
+    (r) => r.email === normalizedEmail && r.verified && r.resetToken === resetToken
+  );
+  if (!request) {
+    return res.status(400).json({ error: 'Invalid or expired reset token.' });
+  }
+
+  const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  if (!user) return res.status(404).json({ error: 'Account not found.' });
+
+  user.password = await hashPassword(String(newPassword));
+  passwordResets = passwordResets.filter((r) => r.email !== normalizedEmail);
+  saveState();
+
+  const token = signToken(user.id);
+  res.json({ success: true, user: getSafeUser(user), token });
 });
 
 // First-run admin setup: sets the admin password. Public, but ONLY works when

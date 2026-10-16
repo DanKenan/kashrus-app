@@ -20,6 +20,7 @@ import { LandingBackButton } from './LandingPage';
 import { User as UserType } from '../types';
 import { AgencySignupForm } from './AgencySignupForm';
 import { PWAInstallButton } from './PWAInstallButton';
+import { ForgotPasswordModal } from './ForgotPasswordModal';
 import { apiFetch, setSessionToken } from '../lib/api';
 
 interface LoginPageProps {
@@ -49,6 +50,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [needsSetup, setNeedsSetup] = useState(false);
   const [setupPassword, setSetupPassword] = useState('');
   const [setupConfirm, setSetupConfirm] = useState('');
+  const [showForgot, setShowForgot] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -354,6 +356,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   </button>
                 </form>
 
+                {/* Forgot password link */}
+                <button
+                  onClick={() => setShowForgot(true)}
+                  className="mt-3 w-full text-center text-xs text-gold-deep hover:text-gold-ink font-semibold transition cursor-pointer"
+                >
+                  Forgot your password?
+                </button>
+
                 {/* Callout to register new agency */}
                 <div className="mt-5 p-3 rounded-2xl bg-gold-wash border border-gold/40 flex items-center justify-between text-xs">
                   <div className="text-left">
@@ -414,6 +424,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       <footer className="relative z-10 w-full px-6 py-4 text-center text-xs text-ink-faint dark:text-ink-soft border-t border-line/60">
         KeepingKosher Multi-Agency Kashrut Operations &copy; {new Date().getFullYear()} &bull; All Rights Reserved
       </footer>
+
+      {showForgot && (
+        <ForgotPasswordModal
+          onClose={() => setShowForgot(false)}
+          onSuccess={(user, token) => {
+            if (token) setSessionToken(token);
+            onLoginSuccess(user);
+          }}
+        />
+      )}
     </div>
   );
 };
