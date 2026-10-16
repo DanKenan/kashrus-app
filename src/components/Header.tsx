@@ -17,6 +17,7 @@ import {
   Menu,
   X,
   KeyRound,
+  Download,
   LogIn,
   User as UserIcon,
   Building2,
@@ -444,6 +445,34 @@ export const Header: React.FC<HeaderProps> = ({
                           <span>Change Password</span>
                         </button>
                       )}
+
+                      {/* Download Backup */}
+                      <button
+                        onClick={async () => {
+                          setUserMenuOpen(false);
+                          try {
+                            const res = await fetch('/api/admin/export', {
+                              headers: { 'Authorization': `Bearer ${localStorage.getItem('shutfey_session_token')}` }
+                            });
+                            if (!res.ok) throw new Error('Export failed');
+                            const blob = await res.blob();
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = `shutfey-backup-${new Date().toISOString().slice(0, 10)}.json`;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                          } catch (e) {
+                            console.error('Backup failed:', e);
+                          }
+                        }}
+                        className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
+                      >
+                        <Download className="w-4 h-4 text-ink-faint" />
+                        <span>Download Backup</span>
+                      </button>
 
                       {/* Sign Out */}
                       <button
