@@ -4,12 +4,14 @@ import { registerSW } from 'virtual:pwa-register';
 import App from './App.tsx';
 import './index.css';
 
-// Register PWA service worker: when a new version is deployed, activate it
-// immediately and reload once so the app never gets stuck on stale code.
+// Register PWA service worker: check for updates on open, but NEVER force a
+// reload mid-session — that was white-screening the app on busy deploy days.
+// A new version activates quietly in the background and takes over on next open.
 const updateSW = registerSW({
   immediate: true,
   onNeedRefresh() {
-    updateSW(true);
+    // Activate the waiting service worker without reloading this page.
+    updateSW(false);
   },
 });
 
