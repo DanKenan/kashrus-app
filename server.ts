@@ -326,6 +326,20 @@ interface Incident {
   resolvedBy?: string;
 }
 
+interface Announcement {
+  id: string;
+  agencyId: string;
+  authorEmail: string;
+  authorName: string;
+  title: string;
+  body: string;
+  category: 'assignment' | 'update' | 'notice' | 'urgent';
+  targetRoles: string[]; // ['admin','coordinator','owner','mashgiach','worker'] or ['all']
+  venueId?: string; // optional: scoped to a specific venue
+  createdAt: string;
+  expiresAt?: string;
+}
+
 export interface UserPermissions {
   canFillTasks?: boolean;
   canAssignTasks?: boolean;
@@ -906,6 +920,7 @@ let users: UserProfile[] = [...DEFAULT_USERS];
 let handoffNotes: HandoffNote[] = [];
 let taskTemplates: TaskTemplate[] = [];
 let incidents: Incident[] = [];
+let announcements: Announcement[] = [];
 let eventTaskTemplates: EventTaskTemplate[] = [];
 let currentWorkDate = new Date().toISOString().split('T')[0];
 let isDemoCleared = false;
@@ -986,6 +1001,7 @@ function hydrateState(parsed: any) {
         handoffNotes = Array.isArray(parsed.handoffNotes) ? parsed.handoffNotes : [];
         taskTemplates = Array.isArray(parsed.taskTemplates) ? parsed.taskTemplates : [];
         incidents = Array.isArray(parsed.incidents) ? parsed.incidents : [];
+        announcements = Array.isArray(parsed.announcements) ? parsed.announcements : [];
         events = Array.isArray(parsed.events) ? parsed.events : [];
         airtableConfigs = Array.isArray(parsed.airtableConfigs) ? parsed.airtableConfigs : [];
         approvedIngredients = Array.isArray(parsed.approvedIngredients) ? parsed.approvedIngredients : [];
@@ -1126,6 +1142,7 @@ function stateSnapshot() {
     handoffNotes,
     taskTemplates,
     incidents,
+    announcements,
     users,
     events,
     eventTaskTemplates,
@@ -1333,6 +1350,57 @@ function sendPushToUser(userEmail: string, title: string, body: string, data?: a
       });
   }
 }
+
+// Media retention: photos and voice notes auto-expire after 30 days
+// (keeps the text record, drops the base64 to save Firestore space/cost)
+const MEDIA_RETENTION_DAYS = 30;
+function cleanupExpiredMedia() {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - MEDIA_RETENTION_DAYS);
+  const cutoffIso = cutoff.toISOString();
+  let cleaned = 0;
+
+  // Check-in photos
+  for (const task of tasks) {
+    if (!task.checkIns) continue;
+    for (const checkIn of task.checkIns) {
+      if (checkIn.photoData && checkIn.at < cutoffIso) {
+        checkIn.photoData = undefined;
+        cleaned++;
+      }
+    }
+  }
+
+  // Handoff note voice notes
+  for (const note of handoffNotes) {
+    if ((note as any).voiceNoteData && note.createdAt < cutoffIso) {
+      (note as any).voiceNoteData = undefined;
+      cleaned++;
+    }
+  }
+
+  // Incident media
+  for (const incident of incidents) {
+    if (incident.photoData && incident.createdAt < cutoffIso) {
+      incident.photoData = undefined;
+      cleaned++;
+    }
+    if (incident.voiceNoteData && incident.createdAt < cutoffIso) {
+      incident.voiceNoteData = undefined;
+      cleaned++;
+    }
+  }
+
+  if (cleaned > 0) {
+    console.log(`[MediaCleanup] Removed ${cleaned} expired media items`);
+    saveState();
+  }
+}
+
+// Run media cleanup daily
+setInterval(cleanupExpiredMedia, 24 * 60 * 60 * 1000);
+// Run once at startup (delayed to avoid slowing boot)
+setTimeout(cleanupExpiredMedia, 60000);
 
 // Check for overdue tasks and notify assigned users (runs every 15 min)
 // Tracks already-notified tasks to avoid spam
@@ -1640,6 +1708,50 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Storage stats — how much space media is using (admin only)
+app.get('/api/admin/storage', (req, res) => {
+  let photoBytes = 0;
+  let audioBytes = 0;
+  let photoCount = 0;
+  let audioCount = 0;
+
+  for (const task of tasks) {
+    for (const ci of task.checkIns || []) {
+      if ((ci as any).photoData) {
+        photoBytes += (ci as any).photoData.length;
+        photoCount++;
+      }
+    }
+  }
+  for (const note of handoffNotes) {
+    if ((note as any).voiceNoteData) {
+      audioBytes += (note as any).voiceNoteData.length;
+      audioCount++;
+    }
+  }
+  for (const incident of incidents) {
+    if (incident.photoData) {
+      photoBytes += incident.photoData.length;
+      photoCount++;
+    }
+    if (incident.voiceNoteData) {
+      audioBytes += incident.voiceNoteData.length;
+      audioCount++;
+    }
+  }
+
+  // Base64 is ~33% larger than binary
+  const totalBytes = Math.round((photoBytes + audioBytes) * 0.75);
+
+  res.json({
+    photos: { count: photoCount, bytes: Math.round(photoBytes * 0.75) },
+    audio: { count: audioCount, bytes: Math.round(audioBytes * 0.75) },
+    totalBytes,
+    totalMB: (totalBytes / 1024 / 1024).toFixed(2),
+    retentionDays: MEDIA_RETENTION_DAYS,
+  });
+});
+
 // Admin data export — download full state as JSON backup (admin only)
 app.get('/api/admin/export', (req, res) => {
   const snapshot = stateSnapshot();
@@ -1859,6 +1971,88 @@ app.post('/api/incidents/:id/acknowledge', (req, res) => {
   saveState();
   broadcast('INCIDENT_UPDATED', { incident }, undefined, incident.agencyId);
   res.json({ incident });
+});
+
+// Broadcast announcements — one-way team updates (NOT a chat)
+// Categories: assignment, update, notice, urgent. Targeted by role.
+app.get('/api/announcements', (req, res) => {
+  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const userEmail = String(req.query.userEmail || '').toLowerCase();
+  const user = users.find((u) => u.email.toLowerCase() === userEmail);
+
+  const now = new Date().toISOString();
+  let list = announcements.filter((a) => a.agencyId === agencyId);
+  // Filter expired
+  list = list.filter((a) => !a.expiresAt || a.expiresAt > now);
+  // Filter by role targeting
+  if (user) {
+    list = list.filter((a) =>
+      a.targetRoles.includes('all') || a.targetRoles.includes(user.role)
+    );
+  }
+  res.json({
+    announcements: list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+  });
+});
+
+app.post('/api/announcements', (req, res) => {
+  const { title, body, category, targetRoles, venueId, expiresAt, authorEmail, authorName } = req.body || {};
+  if (!title?.trim()) {
+    return res.status(400).json({ error: 'Title is required.' });
+  }
+
+  // Only admin/coordinator can post announcements
+  const author = users.find((u) => u.email.toLowerCase() === String(authorEmail || '').toLowerCase());
+  if (!author || !['admin', 'coordinator'].includes(author.role)) {
+    return res.status(403).json({ error: 'Only admins and coordinators can post announcements.' });
+  }
+
+  const agencyId = (req as any).agencyId || author.agencyId || 'agency-hkc';
+  const announcement: Announcement = {
+    id: `announce-${crypto.randomUUID()}`,
+    agencyId,
+    authorEmail: author.email,
+    authorName: authorName || author.name,
+    title: String(title).trim(),
+    body: String(body || '').trim(),
+    category: ['assignment', 'update', 'notice', 'urgent'].includes(category) ? category : 'update',
+    targetRoles: Array.isArray(targetRoles) && targetRoles.length > 0 ? targetRoles : ['all'],
+    venueId: venueId || undefined,
+    createdAt: new Date().toISOString(),
+    expiresAt: expiresAt || undefined,
+  };
+  announcements.unshift(announcement);
+  // Keep only last 100 announcements
+  if (announcements.length > 100) announcements = announcements.slice(0, 100);
+  saveState();
+
+  // Push to targeted users
+  const targets = users.filter((u) =>
+    (u.agencyId || 'agency-hkc') === agencyId &&
+    (announcement.targetRoles.includes('all') || announcement.targetRoles.includes(u.role))
+  );
+  const icon = announcement.category === 'urgent' ? '🚨' : announcement.category === 'assignment' ? '📋' : '📢';
+  for (const target of targets) {
+    if (target.email.toLowerCase() === author.email.toLowerCase()) continue; // Don't notify author
+    sendPushToUser(
+      target.email,
+      `${icon} ${announcement.title}`,
+      announcement.body.slice(0, 100),
+      { announcementId: announcement.id, type: 'announcement' }
+    );
+  }
+  broadcast('ANNOUNCEMENT', { announcement }, undefined, agencyId);
+
+  res.json({ announcement });
+});
+
+app.delete('/api/announcements/:id', (req, res) => {
+  const idx = announcements.findIndex((a) => a.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Announcement not found.' });
+  const [deleted] = announcements.splice(idx, 1);
+  saveState();
+  broadcast('ANNOUNCEMENT_DELETED', { id: deleted.id }, undefined, deleted.agencyId);
+  res.json({ success: true });
 });
 
 // Agency dashboard — overview of all venues with task stats (admin/coordinator)
