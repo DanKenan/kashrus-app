@@ -118,7 +118,6 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'GET', path: '/health' },
   { method: 'POST', path: '/auth/login' },
   { method: 'POST', path: '/auth/setup' },
-  { method: 'POST', path: '/auth/admin-reset' },
   { method: 'POST', path: '/agencies/register' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
@@ -275,6 +274,17 @@ interface HistoryLog {
   }>;
   resetAt: string;
   resetBy: string;
+}
+
+interface HandoffNote {
+  id: string;
+  agencyId?: string;
+  venueId: string;
+  authorEmail: string;
+  authorName: string;
+  content: string;
+  shift: string; // e.g. "Morning", "Afternoon", "Evening"
+  createdAt: string;
 }
 
 export interface UserPermissions {
@@ -854,6 +864,7 @@ let venues: Venue[] = [...DEFAULT_VENUES];
 let tasks: TaskItem[] = [...INITIAL_TASKS];
 let historyLogs: HistoryLog[] = [...INITIAL_HISTORY];
 let users: UserProfile[] = [...DEFAULT_USERS];
+let handoffNotes: HandoffNote[] = [];
 let eventTaskTemplates: EventTaskTemplate[] = [];
 let currentWorkDate = new Date().toISOString().split('T')[0];
 let isDemoCleared = false;
@@ -931,6 +942,7 @@ function hydrateState(parsed: any) {
         venues = Array.isArray(parsed.venues) ? parsed.venues : [];
         tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
         historyLogs = Array.isArray(parsed.historyLogs) ? parsed.historyLogs : [];
+        handoffNotes = Array.isArray(parsed.handoffNotes) ? parsed.handoffNotes : [];
         events = Array.isArray(parsed.events) ? parsed.events : [];
         airtableConfigs = Array.isArray(parsed.airtableConfigs) ? parsed.airtableConfigs : [];
         approvedIngredients = Array.isArray(parsed.approvedIngredients) ? parsed.approvedIngredients : [];
@@ -1068,6 +1080,7 @@ function stateSnapshot() {
     venues,
     tasks,
     historyLogs,
+    handoffNotes,
     users,
     events,
     eventTaskTemplates,
@@ -1532,6 +1545,65 @@ app.get('/api/health', (req, res) => {
     venuesCount: venues.length,
     tasksCount: tasks.length,
   });
+});
+
+// Admin data export — download full state as JSON backup (admin only)
+app.get('/api/admin/export', (req, res) => {
+  const snapshot = stateSnapshot();
+  // Strip sensitive fields from export
+  const safe = {
+    ...snapshot,
+    users: (snapshot.users || []).map((u: any) => ({
+      ...u,
+      password: undefined,
+    })),
+    jwtSecret: undefined,
+    vapidKeys: undefined,
+  };
+  const filename = `shutfey-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Content-Type', 'application/json');
+  res.json({ ...safe, exportedAt: new Date().toISOString() });
+});
+
+// Shift handoff notes — mashgiach-to-mashgiach communication
+app.get('/api/handoff-notes', (req, res) => {
+  const venueId = String(req.query.venueId || '');
+  const notes = venueId
+    ? handoffNotes.filter((n) => n.venueId === venueId)
+    : handoffNotes;
+  res.json({ notes: notes.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
+});
+
+app.post('/api/handoff-notes', (req, res) => {
+  const { venueId, content, shift, authorEmail, authorName } = req.body || {};
+  if (!venueId || !content?.trim()) {
+    return res.status(400).json({ error: 'Venue and note content are required.' });
+  }
+  const note: HandoffNote = {
+    id: `handoff-${crypto.randomUUID()}`,
+    agencyId: (req as any).agencyId || 'agency-hkc',
+    venueId,
+    authorEmail: authorEmail || (req as any).userEmail || '',
+    authorName: authorName || 'Mashgiach',
+    content: String(content).trim(),
+    shift: shift || 'General',
+    createdAt: new Date().toISOString(),
+  };
+  handoffNotes.unshift(note);
+  saveState();
+  // Broadcast to agency
+  broadcast('HANDOFF_NOTE', { note }, undefined, note.agencyId);
+  res.json({ note });
+});
+
+app.delete('/api/handoff-notes/:id', (req, res) => {
+  const idx = handoffNotes.findIndex((n) => n.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Note not found.' });
+  const [deleted] = handoffNotes.splice(idx, 1);
+  saveState();
+  broadcast('HANDOFF_NOTE_DELETED', { id: deleted.id, venueId: deleted.venueId }, undefined, deleted.agencyId);
+  res.json({ success: true });
 });
 
 // -------------------------------------------------------------
@@ -3146,23 +3218,6 @@ app.post('/api/auth/login', async (req, res) => {
     user: getSafeUser(user),
     token,
   });
-});
-
-// TEMPORARY one-time admin password reset — remove after Don uses it.
-// Requires a one-time code (given to Don directly) so it's not openly exploitable.
-const ADMIN_RESET_CODE = 'shutfey-reset-7d3f9a';
-app.post('/api/auth/admin-reset', async (req, res) => {
-  const { email, resetCode } = req.body || {};
-  if (resetCode !== ADMIN_RESET_CODE) {
-    return res.status(403).json({ error: 'Invalid reset code.' });
-  }
-  const user = users.find(
-    (u) => u.email.toLowerCase() === String(email || '').trim().toLowerCase() && u.role === 'admin'
-  );
-  if (!user) return res.status(404).json({ error: 'Admin account not found.' });
-  user.password = ''; // Clear → login returns needsSetup, Don sets a fresh password
-  saveState();
-  res.json({ success: true });
 });
 
 // First-run admin setup: sets the admin password. Public, but ONLY works when
