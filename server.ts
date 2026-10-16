@@ -307,6 +307,24 @@ interface TaskTemplate {
   createdAt: string;
 }
 
+interface Incident {
+  id: string;
+  agencyId: string;
+  venueId: string;
+  reporterEmail: string;
+  reporterName: string;
+  title: string;
+  description: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  photoData?: string;
+  voiceNoteData?: string; // base64 audio
+  status: 'open' | 'acknowledged' | 'resolved';
+  linkedTaskId?: string;
+  createdAt: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+}
+
 export interface UserPermissions {
   canFillTasks?: boolean;
   canAssignTasks?: boolean;
@@ -886,6 +904,7 @@ let historyLogs: HistoryLog[] = [...INITIAL_HISTORY];
 let users: UserProfile[] = [...DEFAULT_USERS];
 let handoffNotes: HandoffNote[] = [];
 let taskTemplates: TaskTemplate[] = [];
+let incidents: Incident[] = [];
 let eventTaskTemplates: EventTaskTemplate[] = [];
 let currentWorkDate = new Date().toISOString().split('T')[0];
 let isDemoCleared = false;
@@ -965,6 +984,7 @@ function hydrateState(parsed: any) {
         historyLogs = Array.isArray(parsed.historyLogs) ? parsed.historyLogs : [];
         handoffNotes = Array.isArray(parsed.handoffNotes) ? parsed.handoffNotes : [];
         taskTemplates = Array.isArray(parsed.taskTemplates) ? parsed.taskTemplates : [];
+        incidents = Array.isArray(parsed.incidents) ? parsed.incidents : [];
         events = Array.isArray(parsed.events) ? parsed.events : [];
         airtableConfigs = Array.isArray(parsed.airtableConfigs) ? parsed.airtableConfigs : [];
         approvedIngredients = Array.isArray(parsed.approvedIngredients) ? parsed.approvedIngredients : [];
@@ -1104,6 +1124,7 @@ function stateSnapshot() {
     historyLogs,
     handoffNotes,
     taskTemplates,
+    incidents,
     users,
     events,
     eventTaskTemplates,
@@ -1728,6 +1749,115 @@ app.delete('/api/task-templates/:id', (req, res) => {
   taskTemplates.splice(idx, 1);
   saveState();
   res.json({ success: true });
+});
+
+// Incidents — "oh no" flow: photo + voice + instant alert + auto-task
+app.get('/api/incidents', (req, res) => {
+  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const venueId = String(req.query.venueId || '');
+  const status = String(req.query.status || '');
+  let list = incidents.filter((i) => i.agencyId === agencyId);
+  if (venueId) list = list.filter((i) => i.venueId === venueId);
+  if (status) list = list.filter((i) => i.status === status);
+  res.json({ incidents: list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
+});
+
+app.post('/api/incidents', (req, res) => {
+  const { venueId, title, description, severity, photoData, voiceNoteData, reporterEmail, reporterName } = req.body || {};
+  if (!venueId || !title?.trim()) {
+    return res.status(400).json({ error: 'Venue and title are required.' });
+  }
+
+  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const now = new Date().toISOString();
+  const venue = venues.find((v) => v.id === venueId);
+
+  const incident: Incident = {
+    id: `incident-${crypto.randomUUID()}`,
+    agencyId,
+    venueId,
+    reporterEmail: reporterEmail || '',
+    reporterName: reporterName || 'Mashgiach',
+    title: String(title).trim(),
+    description: String(description || '').trim(),
+    severity: ['low', 'medium', 'high', 'critical'].includes(severity) ? severity : 'medium',
+    photoData: typeof photoData === 'string' && photoData.startsWith('data:image/') ? photoData.slice(0, 500000) : undefined,
+    voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/') ? voiceNoteData.slice(0, 1000000) : undefined,
+    status: 'open',
+    createdAt: now,
+  };
+  incidents.unshift(incident);
+
+  // Auto-create a follow-up task
+  const followUp: TaskItem = {
+    id: `task-${crypto.randomUUID()}`,
+    agencyId,
+    venueId,
+    title: `🚨 Follow up: ${incident.title}`,
+    description: `Incident reported by ${incident.reporterName} at ${new Date(now).toLocaleString()}.\n\n${incident.description}`,
+    category: 'Incident',
+    categories: ['Incident'],
+    isPrivate: false,
+    sortOrder: 0,
+    inputType: 'yes_no',
+    assignedTo: ['all'],
+    scheduleType: 'recurring',
+    daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+    targetTime: 'End of Day',
+    priority: incident.severity === 'critical' ? 'high' : incident.severity === 'high' ? 'high' : 'medium',
+    enableOverdueAlert: incident.severity === 'critical' || incident.severity === 'high',
+    currentStatus: 'pending',
+    isCompleted: false,
+    notes: '',
+    updatedByEmail: null,
+    updatedByName: null,
+    updatedAt: null,
+    checkIns: [],
+    createdAt: now,
+  };
+  tasks.push(followUp);
+  incident.linkedTaskId = followUp.id;
+
+  saveState();
+
+  // Instant alert to all admins/coordinators
+  const admins = users.filter((u) =>
+    (u.agencyId || 'agency-hkc') === agencyId &&
+    (u.role === 'admin' || u.role === 'coordinator')
+  );
+  for (const admin of admins) {
+    sendPushToUser(
+      admin.email,
+      `🚨 ${incident.severity.toUpperCase()}: ${incident.title}`,
+      `${venue?.name || 'Venue'} — reported by ${incident.reporterName}`,
+      { incidentId: incident.id, venueId, type: 'incident' }
+    );
+  }
+  broadcast('INCIDENT_CREATED', { incident }, undefined, agencyId);
+  broadcast('TASKS_UPDATED', { venueId }, undefined, agencyId);
+
+  res.json({ incident });
+});
+
+app.post('/api/incidents/:id/resolve', (req, res) => {
+  const incident = incidents.find((i) => i.id === req.params.id);
+  if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+  const { resolvedBy } = req.body || {};
+  incident.status = 'resolved';
+  incident.resolvedAt = new Date().toISOString();
+  incident.resolvedBy = resolvedBy || '';
+  saveState();
+  broadcast('INCIDENT_UPDATED', { incident }, undefined, incident.agencyId);
+  res.json({ incident });
+});
+
+app.post('/api/incidents/:id/acknowledge', (req, res) => {
+  const incident = incidents.find((i) => i.id === req.params.id);
+  if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+  incident.status = 'acknowledged';
+  saveState();
+  broadcast('INCIDENT_UPDATED', { incident }, undefined, incident.agencyId);
+  res.json({ incident });
 });
 
 // Agency dashboard — overview of all venues with task stats (admin/coordinator)
