@@ -1,18 +1,13 @@
 import React, { useState } from 'react';
-import { 
-  X, 
-  Building2, 
-  ShieldCheck, 
-  MapPin, 
-  User, 
-  Sparkles, 
-  CheckCircle2, 
-  Utensils, 
-  Coffee, 
-  Truck, 
-  FileText,
+import {
+  X,
+  Building2,
+  ShieldCheck,
+  MapPin,
+  User,
+  CheckCircle2,
+  Truck,
   PenLine,
-  Factory
 } from 'lucide-react';
 import { Venue } from '../types';
 import { apiFetch } from '../lib/api';
@@ -43,7 +38,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
       ? `${agencyName}${agencySeal ? ` - ${agencySeal}` : ' - Supervised Kosher'}`
       : 'Hartford Kashrut Commission (HKC) - Glatt Meat & Parve'
   );
-  const [templateType, setTemplateType] = useState<'restaurant' | 'bakery' | 'catering' | 'industrial' | 'blank'>('industrial');
+  const templateType = 'blank' as const;
 
   // Venue Owner credentials
   const [ownerName, setOwnerName] = useState('');
@@ -181,12 +176,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   id="venue-category-select"
                   value={category}
                   onChange={(e) => {
-                    const val = e.target.value;
-                    setCategory(val);
-                    if (val === 'Bakery') setTemplateType('bakery');
-                    else if (val === 'Catering') setTemplateType('catering');
-                    else if (val === 'Industrial' || val.toLowerCase().includes('factory')) setTemplateType('industrial');
-                    else if (val === 'Restaurant' || val === 'Food Service') setTemplateType('restaurant');
+                    setCategory(e.target.value);
                   }}
                   className="w-full px-3.5 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:border-gold focus:outline-none"
                 >
@@ -256,107 +246,6 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
               </div>
             </div>
           </div>
-
-          {/* Section 2: Starter Task Template */}
-          <div className="space-y-3 pt-2 border-t border-line">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-faint flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-gold-deep" />
-              <span>2. Seed Starter Shift Assignments</span>
-            </h3>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <button
-                type="button"
-                onClick={() => setTemplateType('industrial')}
-                className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition cursor-pointer ${
-                  templateType === 'industrial'
-                    ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100 ring-1 ring-emerald-500'
-                    : 'border-line hover:border-line-strong'
-                }`}
-              >
-                <Factory className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                <div>
-                  <div className="text-xs font-bold">Industrial & Factory Plant</div>
-                  <div className="text-[11px] text-ink-faint">
-                    4 starter tasks: Airtable approved ingredient verification, floor audit for unapproved items, CIP 212°F check, audit report.
-                  </div>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setTemplateType('restaurant')}
-                className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition cursor-pointer lift ${
-                  templateType === 'restaurant'
-                    ? 'border-gold/60 bg-gold-wash/60 text-ink ring-1 ring-gold/40 tactile-1'
-                    : 'border-line hover:border-line-strong'
-                }`}
-              >
-                <Utensils className="w-4 h-4 text-gold-deep shrink-0 mt-0.5" />
-                <div>
-                  <div className="text-xs font-bold">Restaurant & Deli Standard</div>
-                  <div className="text-[11px] text-ink-soft">
-                    5 starter tasks: Deliveries, walk-in cooler temps, meat/dairy sanitization, FIFO expiration, lockout.
-                  </div>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setTemplateType('bakery')}
-                className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition cursor-pointer lift ${
-                  templateType === 'bakery'
-                    ? 'border-gold/60 bg-gold-wash/60 text-ink ring-1 ring-gold/40 tactile-1'
-                    : 'border-line hover:border-line-strong'
-                }`}
-              >
-                <Coffee className="w-4 h-4 text-gold-deep shrink-0 mt-0.5" />
-                <div>
-                  <div className="text-xs font-bold">Bakery & Cafe Standard</div>
-                  <div className="text-[11px] text-ink-soft">
-                    5 starter tasks: Pas Yisroel ignition check, flour sifting log, dairy/parve sheet segregation, stickers.
-                  </div>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setTemplateType('catering')}
-                className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition cursor-pointer lift ${
-                  templateType === 'catering'
-                    ? 'border-purple-500 bg-purple-50/70 dark:bg-purple-950/40 text-purple-900 dark:text-purple-100 ring-1 ring-purple-500 tactile-1'
-                    : 'border-line hover:border-line-strong'
-                }`}
-              >
-                <Truck className="w-4 h-4 text-purple-500 shrink-0 mt-0.5" />
-                <div>
-                  <div className="text-xs font-bold">Catering & Events Standard</div>
-                  <div className="text-[11px] text-ink-soft">
-                    4 starter tasks: Mashgiach tamper seal inspection, Cambro hot holding temp log, return manifest.
-                  </div>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setTemplateType('blank')}
-                className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition cursor-pointer lift ${
-                  templateType === 'blank'
-                    ? 'border-line-strong bg-sunken text-ink ring-1 ring-line-strong tactile-1'
-                    : 'border-line hover:border-line-strong'
-                }`}
-              >
-                <FileText className="w-4 h-4 text-ink-faint shrink-0 mt-0.5" />
-                <div>
-                  <div className="text-xs font-bold">Blank Slate Platform</div>
-                  <div className="text-[11px] text-ink-soft">
-                    Start with an empty board and craft assignments from scratch via the "+ New Assignment" button.
-                  </div>
-                </div>
-              </button>
-            </div>
-          </div>
-
           {/* Section 3: Venue Owner Account Provisioning */}
           <div className="space-y-3 pt-2 border-t border-line">
             <h3 className="text-xs font-bold uppercase tracking-wider text-ink-faint flex items-center gap-1.5">
