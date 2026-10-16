@@ -1289,6 +1289,53 @@ function sendPushToUser(userEmail: string, title: string, body: string, data?: a
   }
 }
 
+// Check for overdue tasks and notify assigned users (runs every 15 min)
+// Tracks already-notified tasks to avoid spam
+const overdueNotified = new Set<string>();
+function checkOverdueTasks() {
+  const now = new Date();
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const today = now.toISOString().split('T')[0];
+
+  for (const task of tasks) {
+    if (task.isCompleted) continue;
+    if (!task.targetTime || task.targetTime === 'End of Day') continue;
+
+    const taskMinutes = taskSortMinutes(task);
+    if (taskMinutes >= nowMinutes) continue; // Not overdue yet
+
+    const notifyKey = `${task.id}:${today}`;
+    if (overdueNotified.has(notifyKey)) continue; // Already notified today
+    overdueNotified.add(notifyKey);
+
+    const venue = venues.find((v) => v.id === task.venueId);
+    const venueName = venue?.name || 'your venue';
+
+    // Notify assigned users, or all venue users if assigned to 'all'
+    const assigned = Array.isArray(task.assignedTo) ? task.assignedTo : ['all'];
+    const notifyEmails = assigned.includes('all')
+      ? users.filter((u) => u.venueId === task.venueId || !u.venueId).map((u) => u.email)
+      : assigned;
+
+    for (const email of notifyEmails) {
+      sendPushToUser(
+        email,
+        `Overdue: ${task.title}`,
+        `${venueName} — was due at ${task.targetTime}`,
+        { taskId: task.id, venueId: task.venueId, type: 'overdue' }
+      );
+    }
+  }
+
+  // Clean up old notification keys (keep only today's)
+  for (const key of overdueNotified) {
+    if (!key.endsWith(`:${today}`)) overdueNotified.delete(key);
+  }
+}
+
+// Run overdue check every 15 minutes
+setInterval(checkOverdueTasks, 15 * 60 * 1000);
+
 // ---- Web Push endpoints ----
 app.get('/api/push/public-key', (_req, res) => {
   if (!vapidKeys) return res.status(503).json({ error: 'Push not initialized' });
@@ -1564,6 +1611,58 @@ app.get('/api/admin/export', (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Type', 'application/json');
   res.json({ ...safe, exportedAt: new Date().toISOString() });
+});
+
+// Agency dashboard — overview of all venues with task stats (admin/coordinator)
+app.get('/api/admin/dashboard', (req, res) => {
+  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === agencyId);
+
+  const venueStats = agencyVenues.map((venue) => {
+    const venueTasks = tasks.filter((t) => t.venueId === venue.id);
+    const completed = venueTasks.filter((t) => t.isCompleted).length;
+    const total = venueTasks.length;
+    const overdue = venueTasks.filter((t) => {
+      if (t.isCompleted) return false;
+      // Overdue if target time has passed today
+      if (!t.targetTime || t.targetTime === 'End of Day') return false;
+      const now = new Date();
+      const minutes = taskSortMinutes(t);
+      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+      return minutes < nowMinutes;
+    }).length;
+
+    // Recent handoff notes (last 3)
+    const recentNotes = handoffNotes
+      .filter((n) => n.venueId === venue.id)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 3);
+
+    return {
+      venue,
+      totalTasks: total,
+      completedTasks: completed,
+      completionRate: total > 0 ? Math.round((completed / total) * 100) : 0,
+      overdueTasks: overdue,
+      recentNotes,
+    };
+  });
+
+  // Agency-wide totals
+  const allTasks = tasks.filter((t) => {
+    const v = venues.find((vv) => vv.id === t.venueId);
+    return v && (v.agencyId || 'agency-hkc') === agencyId;
+  });
+
+  res.json({
+    venues: venueStats,
+    totals: {
+      venueCount: agencyVenues.length,
+      totalTasks: allTasks.length,
+      completedTasks: allTasks.filter((t) => t.isCompleted).length,
+      totalHandoffNotes: handoffNotes.length,
+    },
+  });
 });
 
 // Shift handoff notes — mashgiach-to-mashgiach communication
