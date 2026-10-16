@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { KeepingKosherLogo } from './KeepingKosherLogo';
 import { PWAInstallButton } from './PWAInstallButton';
+import { UpdateAppButton } from './UpdateAppButton';
 import { User as UserType } from '../types';
 
 interface LandingPageProps {
@@ -176,6 +177,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             Set up this device as a venue kiosk
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
+          <div className="mt-3 flex justify-center">
+            <UpdateAppButton />
+          </div>
         </div>
 
         {/* Feature strip */}
