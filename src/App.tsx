@@ -102,6 +102,12 @@ export default function App() {
         localStorage.setItem('kiosk_mode', '1');
         const urlVenue = params.get('venue');
         if (urlVenue) localStorage.setItem('kiosk_venue_id', urlVenue);
+        // Kiosk is a clean slate — clear any existing user session so the
+        // tablet doesn't leak the previous user's agency context.
+        try {
+          localStorage.removeItem('shutfey_session_token');
+          localStorage.removeItem('shutfey_user');
+        } catch {}
         return true;
       }
       return localStorage.getItem('kiosk_mode') === '1';
