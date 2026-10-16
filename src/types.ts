@@ -79,6 +79,7 @@ export interface Task {
   targetTime2?: string; // optional second daily time (e.g. morning + afternoon)
   targetTime2Minutes?: number;
   priority?: 'low' | 'medium' | 'high';
+  enableOverdueAlert?: boolean;
   
   // Current Day's State
   currentStatus: TaskStatus;

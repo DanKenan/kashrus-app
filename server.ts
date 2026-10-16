@@ -218,6 +218,7 @@ interface TaskItem {
   targetTime2?: string; // optional second daily time (e.g. morning + afternoon)
   targetTime2Minutes?: number;
   priority?: 'low' | 'medium' | 'high';
+  enableOverdueAlert?: boolean; // if true, send push notification when overdue
   currentStatus: string;
   isCompleted: boolean;
   notes: string;
@@ -1299,6 +1300,7 @@ function checkOverdueTasks() {
 
   for (const task of tasks) {
     if (task.isCompleted) continue;
+    if (!task.enableOverdueAlert) continue; // Only alert for tasks with alerts enabled
     if (!task.targetTime || task.targetTime === 'End of Day') continue;
 
     const taskMinutes = taskSortMinutes(task);
@@ -2233,6 +2235,7 @@ app.post('/api/tasks', (req, res) => {
     targetTime2,
     targetTime2Minutes,
     priority,
+    enableOverdueAlert,
     createdByEmail,
   } = req.body;
 
@@ -2306,6 +2309,7 @@ app.post('/api/tasks', (req, res) => {
     targetTime2: targetTime2 || undefined,
     targetTime2Minutes: targetTime2Minutes !== undefined && targetTime2Minutes !== null ? Number(targetTime2Minutes) : undefined,
     priority: priority || 'medium',
+    enableOverdueAlert: enableOverdueAlert === true,
     currentStatus: defaultStatus,
     isCompleted: false,
     notes: '',
@@ -2372,6 +2376,7 @@ app.put('/api/tasks/:id', (req, res) => {
     targetTime2,
     targetTime2Minutes,
     priority,
+    enableOverdueAlert,
   } = req.body;
 
   const hasStatusChange = currentStatus !== undefined || isCompleted !== undefined || notes !== undefined;
@@ -2450,6 +2455,7 @@ app.put('/api/tasks/:id', (req, res) => {
     targetTime2: targetTime2 !== undefined ? (targetTime2 || undefined) : existing.targetTime2,
     targetTime2Minutes: targetTime2Minutes !== undefined ? (targetTime2Minutes === null ? undefined : Number(targetTime2Minutes)) : existing.targetTime2Minutes,
     priority: priority !== undefined ? priority : existing.priority,
+    enableOverdueAlert: enableOverdueAlert !== undefined ? enableOverdueAlert === true : existing.enableOverdueAlert,
     currentStatus: currentStatus !== undefined ? currentStatus : (finalIsCompleted ? existing.currentStatus : 'pending'),
     isCompleted: finalIsCompleted,
     notes: notes !== undefined ? notes : existing.notes,
