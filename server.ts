@@ -6965,6 +6965,7 @@ async function startServer() {
   }
 
   if (!staged) {
+  try {
   // Initialize the password-reset pepper BEFORE accepting requests.
   // Must be stable before any verification happens (no async race).
   await initResetPepper();
@@ -6989,6 +6990,12 @@ async function startServer() {
   // Security migration: hash any legacy plaintext passwords still in state.
   // Runs once per boot; already-hashed passwords are untouched.
   await migratePasswordsToBcrypt();
+  } catch (err: any) {
+    // Boot must never die on a startup-write failure. The server starts and
+    // serves; the failed backfill is logged for investigation. Data safety
+    // is preserved because reads loaded successfully above.
+    console.error('[Boot] Startup writes failed (non-fatal, server continuing):', err?.message);
+  }
   }
 
   if (process.env.NODE_ENV !== 'production') {
