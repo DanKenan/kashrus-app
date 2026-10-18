@@ -35,11 +35,14 @@ jobs:
       - name: Check for code changes
         id: check
         run: |
-          # Diff PR head against the merge base with main.
+          # On a pull_request event, HEAD is GitHub's synthetic merge commit
+          # (base merged with the PR head). HEAD^1 is the base branch tip, so
+          # this diff is exactly the PR's changes — deterministic, no need to
+          # compute a merge base. --no-renames ensures a source file renamed
+          # into docs/ still shows as a deletion (code change, not docs-only).
           # Docs-only = files under docs/ or ending in .md.
           # Anything else (code, tests, workflows, config) triggers the full suite.
-          BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD ${{ github.event.pull_request.base.sha }})
-          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          CHANGED=$(git diff --name-only --no-renames HEAD^1 HEAD)
           echo "Changed files:"
           echo "$CHANGED"
           if echo "$CHANGED" | grep -qvE '^docs/|\.md$'; then
