@@ -3,55 +3,36 @@
  *
  * Per-entity Firestore collection: `venues/{venueId}`
  * Not wired into API routes yet (PR B). PR C will wire the write path.
+ *
+ * Preserves the EXACT shape of the existing Venue from the monolith.
  */
 
 export interface VenueDoc {
   id: string;
   agencyId: string;
   name: string;
-  address?: string;
-  city?: string;
-  state?: string;
-  zip?: string;
-  phone?: string;
-  contactName?: string;
-  contactEmail?: string;
-  contactPhone?: string;
+  category: string;
+  address: string;
+  certification: string;
+  ownerEmail?: string;
   createdAt: string;
-  updatedAt: string;
+  updatedAt?: string;
   _v: number;
 }
 
 export async function createVenue(
   db: any,
-  params: {
-    agencyId: string;
-    name: string;
-    address?: string;
-    city?: string;
-    state?: string;
-    zip?: string;
-    phone?: string;
-    contactName?: string;
-    contactEmail?: string;
-    contactPhone?: string;
+  params: Omit<VenueDoc, '_v' | 'createdAt' | 'updatedAt'> & {
+    id?: string;
+    createdAt?: string;
   }
 ): Promise<VenueDoc> {
-  const id = `venue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = params.id || `venue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
   const doc: VenueDoc = {
+    ...params,
     id,
-    agencyId: params.agencyId,
-    name: params.name,
-    address: params.address,
-    city: params.city,
-    state: params.state,
-    zip: params.zip,
-    phone: params.phone,
-    contactName: params.contactName,
-    contactEmail: params.contactEmail,
-    contactPhone: params.contactPhone,
-    createdAt: now,
+    createdAt: params.createdAt || now,
     updatedAt: now,
     _v: 1,
   };

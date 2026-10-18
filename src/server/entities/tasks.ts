@@ -4,61 +4,78 @@
  * Per-entity Firestore collection: `tasks/{taskId}`
  * Not wired into API routes yet (PR B). PR C will wire the write path.
  *
+ * IMPORTANT: TaskDoc preserves the EXACT shape of the existing TaskItem
+ * from the monolith. Do not simplify or rename fields — the migration
+ * must not lose information.
+ *
  * All functions take `db` (the named Firestore instance) as first parameter.
  * Agency scoping is enforced by callers via the verified session user.
  */
 
+export interface TaskCheckInItem {
+  id: string;
+  byName: string | null;
+  byEmail: string | null;
+  at: string; // ISO timestamp
+  photoData?: string; // base64 data URL (optional photo evidence)
+  photoCaption?: string;
+}
+
 export interface TaskDoc {
   id: string;
-  agencyId: string;
+  agencyId?: string;
   venueId: string;
   title: string;
-  description?: string;
-  status: 'open' | 'in_progress' | 'completed' | 'cancelled';
-  priority?: number;
-  assignedTo?: string;      // User ID
-  createdBy: string;        // User ID
-  createdAt: string;        // ISO
-  updatedAt: string;        // ISO
-  completedAt?: string;     // ISO
-  dueDate?: string;         // ISO date
-  _v: number;               // Per-entity version, incremented transactionally
+  description: string;
+  category: string;
+  categories?: string[];
+  inputType: 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in';
+  customStatusOptions?: string[];
+  completedStatusValues?: string[];
+  assignedTo: string[]; // ['all'] or array of worker emails
+  scheduleType?: 'recurring' | 'specific_dates';
+  daysOfWeek: number[];
+  specificDates?: string[];
+  targetTime?: string;
+  targetTimeMinutes?: number;
+  targetTime2?: string;
+  targetTime2Minutes?: number;
+  priority?: 'low' | 'medium' | 'high';
+  enableOverdueAlert?: boolean;
+  currentStatus: string;
+  isCompleted: boolean;
+  notes: string;
+  updatedByEmail: string | null;
+  updatedByName: string | null;
+  updatedAt: string | null;
+  createdAt: string;
+  checkIns?: TaskCheckInItem[];
+  sortOrder?: number;
+  isPrivate?: boolean;
+  _v: number; // Per-entity version, incremented transactionally
 }
 
 /**
- * Create a task document. Returns the created doc.
- * The ID is server-generated (opaque).
+ * Create a task document. Preserves the client-supplied ID if provided
+ * (for idempotency — the client's retry contract depends on stable IDs).
+ * If no ID is provided, generates one.
  */
 export async function createTask(
   db: any,
-  params: {
-    agencyId: string;
-    venueId: string;
-    title: string;
-    description?: string;
-    priority?: number;
-    assignedTo?: string;
-    createdBy: string;
-    dueDate?: string;
+  params: Omit<TaskDoc, '_v' | 'createdAt' | 'updatedAt'> & {
+    id?: string; // Optional: use client-supplied ID for idempotency
   }
 ): Promise<TaskDoc> {
-  const id = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = params.id || `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
   const doc: TaskDoc = {
+    ...params,
     id,
-    agencyId: params.agencyId,
-    venueId: params.venueId,
-    title: params.title,
-    description: params.description,
-    status: 'open',
-    priority: params.priority,
-    assignedTo: params.assignedTo,
-    createdBy: params.createdBy,
-    createdAt: now,
+    createdAt: params.createdAt || now,
     updatedAt: now,
-    dueDate: params.dueDate,
     _v: 1,
   };
+  // Use set with the specific ID (not add) to preserve client-supplied IDs
   await db.collection('tasks').doc(id).set(doc);
   return doc;
 }
@@ -75,6 +92,7 @@ export async function getTask(db: any, taskId: string): Promise<TaskDoc | null> 
 /**
  * Update a task transactionally. Increments _v.
  * Only updates if the current _v matches expectedVersion (optimistic locking).
+ * Preserves immutable fields (id, agencyId, createdAt).
  */
 export async function updateTask(
   db: any,
@@ -95,9 +113,9 @@ export async function updateTask(
     const updated: TaskDoc = {
       ...current,
       ...updates,
-      id: current.id, // Never change ID
-      agencyId: current.agencyId, // Never change agency
-      createdAt: current.createdAt, // Never change creation time
+      id: current.id,
+      agencyId: current.agencyId,
+      createdAt: current.createdAt,
       updatedAt: new Date().toISOString(),
       _v: current._v + 1,
     };
@@ -108,7 +126,7 @@ export async function updateTask(
 }
 
 /**
- * Delete a task. (Soft delete via status change is preferred; this is hard delete.)
+ * Delete a task document.
  */
 export async function deleteTask(db: any, taskId: string): Promise<void> {
   await db.collection('tasks').doc(taskId).delete();
@@ -124,22 +142,6 @@ export async function listTasksByVenue(
 ): Promise<TaskDoc[]> {
   const snap = await db.collection('tasks')
     .where('venueId', '==', venueId)
-    .orderBy('createdAt', 'desc')
-    .limit(limit)
-    .get();
-  return snap.docs.map((d: any) => d.data() as TaskDoc);
-}
-
-/**
- * List tasks assigned to a user.
- */
-export async function listTasksByAssignee(
-  db: any,
-  userId: string,
-  limit: number = 50
-): Promise<TaskDoc[]> {
-  const snap = await db.collection('tasks')
-    .where('assignedTo', '==', userId)
     .orderBy('createdAt', 'desc')
     .limit(limit)
     .get();

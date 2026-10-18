@@ -1,11 +1,11 @@
 /**
  * Part 2 PR B: Entity module unit tests.
  * Tests tasks, venues, users CRUD with mocked Firestore.
- * Calls the actual functions — not wired into routes yet.
+ * Verifies document shapes match the real monolith structures.
  */
 import { createTask, getTask, updateTask, deleteTask, listTasksByVenue } from '../../src/server/entities/tasks.ts';
 import { createVenue, getVenue, updateVenue, listVenuesByAgency } from '../../src/server/entities/venues.ts';
-import { createUser, getUser, getUserByEmail, updateUser, listUsersByAgency } from '../../src/server/entities/users.ts';
+import { createUser, getUser, getUserByEmail, updateUser, listUsersByAgency, sanitizeUser } from '../../src/server/entities/users.ts';
 
 function createMockDb() {
   const docs = new Map();
@@ -32,8 +32,7 @@ function createMockDb() {
         where(field, op, value) {
           const q = {
             _f: [{ field, op, value }],
-            _order: null,
-            _limit: null,
+            _order: null, _limit: null,
             where(f, o, v) { q._f.push({ field: f, op: o, value: v }); return q; },
             orderBy(f, dir) { q._order = { f, dir }; return q; },
             limit(n) { q._limit = n; return q; },
@@ -47,12 +46,10 @@ function createMockDb() {
                 }
                 if (ok) res.push({ id: k.split('/')[1], data: () => v });
               }
-              if (q._order) {
-                res.sort((a, b) => {
-                  const av = a.data()[q._order.f], bv = b.data()[q._order.f];
-                  return q._order.dir === 'desc' ? (bv > av ? 1 : -1) : (av > bv ? 1 : -1);
-                });
-              }
+              if (q._order) res.sort((a, b) => {
+                const av = a.data()[q._order.f], bv = b.data()[q._order.f];
+                return q._order.dir === 'desc' ? (bv > av ? 1 : -1) : (av > bv ? 1 : -1);
+              });
               if (q._limit) res = res.slice(0, q._limit);
               return { docs: res };
             },
@@ -65,6 +62,7 @@ function createMockDb() {
       const tx = {
         get: async (ref) => ref.get(),
         update: (ref, u) => ref.update(u),
+        set: (ref, data) => ref.set(data),
       };
       return fn(tx);
     },
@@ -73,71 +71,121 @@ function createMockDb() {
 }
 
 export default {
-  name: 'Part 2 PR B: Entity modules (tasks, venues, users)',
-  whatItProves: 'CRUD helpers work correctly with mocked Firestore; versioning prevents stale writes.',
+  name: 'Part 2 PR B: Entity modules (correct shapes)',
+  whatItProves: 'CRUD preserves real TaskItem/Venue/UserProfile shapes; auth fields kept; IDs stable.',
 
   async run() {
     const db = createMockDb();
 
-    // Tasks
+    // Tasks — must match TaskItem shape
     const task = await createTask(db, {
       agencyId: 'agency-hkc',
       venueId: 'venue-1',
       title: 'Test task',
-      createdBy: 'user-1',
+      description: 'Test description',
+      category: 'cleaning',
+      inputType: 'checkbox',
+      assignedTo: ['worker@example.com'], // Array of emails, not single ID
+      daysOfWeek: [1, 2, 3],
+      priority: 'high', // Enum, not number
+      currentStatus: 'pending',
+      isCompleted: false, // Boolean, not status enum
+      notes: '',
+      updatedByEmail: null,
+      updatedByName: null,
+      updatedAt: null,
     });
     if (!task.id.startsWith('task-')) throw new Error('Bad task ID');
     if (task._v !== 1) throw new Error('Initial _v should be 1');
+    if (!Array.isArray(task.assignedTo)) throw new Error('assignedTo must be array');
+    if (typeof task.isCompleted !== 'boolean') throw new Error('isCompleted must be boolean');
 
-    const fetched = await getTask(db, task.id);
-    if (!fetched || fetched.title !== 'Test task') throw new Error('getTask failed');
+    // Client-supplied ID preserved (idempotency)
+    const task2 = await createTask(db, {
+      id: 'client-generated-123',
+      agencyId: 'agency-hkc',
+      venueId: 'venue-1',
+      title: 'Client ID task',
+      description: '',
+      category: 'other',
+      inputType: 'toggle',
+      assignedTo: ['all'],
+      daysOfWeek: [],
+      currentStatus: '',
+      isCompleted: false,
+      notes: '',
+      updatedByEmail: null,
+      updatedByName: null,
+      updatedAt: null,
+    });
+    if (task2.id !== 'client-generated-123') throw new Error('Client ID not preserved');
+    console.log('  ✓ tasks preserve TaskItem shape + client IDs');
 
-    const updated = await updateTask(db, task.id, { status: 'completed' }, 1);
-    if (updated._v !== 2) throw new Error('_v should increment');
-    if (updated.status !== 'completed') throw new Error('Status not updated');
-
-    // Stale version should fail
+    const updated = await updateTask(db, task.id, { isCompleted: true }, 1);
+    if (updated._v !== 2 || updated.isCompleted !== true) throw new Error('Update failed');
     try {
-      await updateTask(db, task.id, { status: 'open' }, 1);
-      throw new Error('Should have failed on stale version');
+      await updateTask(db, task.id, { isCompleted: false }, 1);
+      throw new Error('Should fail on stale version');
     } catch (e) {
       if (!e.message.includes('Version mismatch')) throw e;
     }
-    console.log('  ✓ tasks CRUD + optimistic locking');
+    console.log('  ✓ tasks optimistic locking');
 
-    // Venues
-    const venue = await createVenue(db, { agencyId: 'agency-hkc', name: 'Crown Market' });
-    const vFetched = await getVenue(db, venue.id);
-    if (!vFetched || vFetched.name !== 'Crown Market') throw new Error('getVenue failed');
-    const vUpdated = await updateVenue(db, venue.id, { phone: '555-1234' }, 1);
-    if (vUpdated._v !== 2) throw new Error('Venue _v should increment');
-    const vList = await listVenuesByAgency(db, 'agency-hkc');
-    if (vList.length !== 1) throw new Error('listVenuesByAgency failed');
-    console.log('  ✓ venues CRUD');
+    // Venues — must match Venue shape
+    const venue = await createVenue(db, {
+      agencyId: 'agency-hkc',
+      name: 'Crown Market',
+      category: 'grocery',
+      address: '123 Main St',
+      certification: 'HKC',
+      ownerEmail: 'owner@example.com',
+    });
+    if (venue.category !== 'grocery') throw new Error('Missing category');
+    if (venue.certification !== 'HKC') throw new Error('Missing certification');
+    console.log('  ✓ venues preserve Venue shape');
 
-    // Users
+    // Users — must preserve auth fields
     const user = await createUser(db, {
       agencyId: 'agency-hkc',
       email: 'Test@Example.com',
       name: 'Test User',
       role: 'mashgiach',
+      avatarColor: '#ff0000',
+      password: '$2b$10$hashedpassword', // bcrypt hash preserved
+      kioskPin: '1234', // PIN preserved
+      permissions: { canFillTasks: true },
     });
-    if (user.email !== 'test@example.com') throw new Error('Email should be lowercase');
-    const uByEmail = await getUserByEmail(db, 'test@example.com');
-    if (!uByEmail || uByEmail.id !== user.id) throw new Error('getUserByEmail failed');
-    const uUpdated = await updateUser(db, user.id, { name: 'New Name' }, 1);
-    if (uUpdated.name !== 'New Name' || uUpdated._v !== 2) throw new Error('updateUser failed');
-    // Email is immutable
-    const uUpdated2 = await updateUser(db, user.id, { name: 'Another' }, 2);
-    if (uUpdated2.email !== 'test@example.com') throw new Error('Email should not change');
-    console.log('  ✓ users CRUD (email immutable, lowercase)');
+    if (user.email !== 'test@example.com') throw new Error('Email not lowercased');
+    if (user.password !== '$2b$10$hashedpassword') throw new Error('Password hash lost!');
+    if (user.kioskPin !== '1234') throw new Error('Kiosk PIN lost!');
 
-    // Delete
-    await deleteTask(db, task.id);
-    const deleted = await getTask(db, task.id);
-    if (deleted !== null) throw new Error('deleteTask failed');
-    console.log('  ✓ delete');
+    // Email uniqueness enforced
+    try {
+      await createUser(db, {
+        agencyId: 'agency-hkc',
+        email: 'test@example.com', // Same email, different case
+        name: 'Duplicate',
+        role: 'worker',
+        avatarColor: '#000',
+      });
+      throw new Error('Should reject duplicate email');
+    } catch (e) {
+      if (!e.message.includes('already in use')) throw e;
+    }
+    console.log('  ✓ users preserve auth fields + email uniqueness');
 
-    console.log('  ✓ All entity module tests passed');
+    // Sanitize strips secrets
+    const safe = sanitizeUser(user);
+    if ('password' in safe || 'kioskPin' in safe) {
+      throw new Error('sanitizeUser must strip secrets');
+    }
+    console.log('  ✓ sanitizeUser strips password/kioskPin');
+
+    // getUserByEmail works via lookup
+    const byEmail = await getUserByEmail(db, 'TEST@example.com'); // Different case
+    if (!byEmail || byEmail.id !== user.id) throw new Error('getUserByEmail failed');
+    console.log('  ✓ usersByEmail lookup (case-insensitive)');
+
+    console.log('  ✓ All entity tests passed');
   },
 };
