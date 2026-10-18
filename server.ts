@@ -43,12 +43,48 @@ function isBcryptHash(s: unknown): boolean {
 // Password-reset code hashing + rate limiting (Stage 2 hardening).
 // ---------------------------------------------------------------------------
 
-/** SHA-256 hex of `reset-code:<pepper>:<code>`. Pepper = server JWT secret
- *  (persisted in Firestore, never hardcoded, never logged). */
+/** SHA-256 hex of `reset-code:<pepper>:<code>`.
+ *
+ * Pepper is a DEDICATED secret, separate from the JWT signing secret.
+ * Priority: RESET_CODE_PEPPER env var → Firestore-stored `resetPepper`
+ * (generated on first use, persisted transactionally) → never hardcoded.
+ *
+ * Why not reuse the JWT secret? The JWT secret is stored IN the Firestore
+ * document alongside the code hashes. If an attacker reads the document
+ * (e.g., via open Firestore rules), they'd get both the hashes AND the
+ * pepper, defeating the hashing. A dedicated pepper from an env var lives
+ * outside Firestore. The Firestore fallback exists for zero-config deploys
+ * but should be replaced with the env var in production.
+ *
+ * Rotation: set a new RESET_CODE_PEPPER env var and redeploy. All outstanding
+ * reset codes become invalid (they were hashed with the old pepper) — users
+ * simply request new codes. No data migration needed.
+ */
+function getResetPepper(): string {
+  if (process.env.RESET_CODE_PEPPER) return process.env.RESET_CODE_PEPPER;
+  // Firestore-stored fallback (generated once, persisted via commitState).
+  if (!(globalThis as any).__resetPepper) {
+    (globalThis as any).__resetPepper = crypto.randomBytes(32).toString('hex');
+    // Persist it transactionally so it survives restarts (best-effort; the
+    // in-memory value is used until the persist completes).
+    commitState(
+      (freshDoc) => {
+        if (freshDoc.resetPepper) {
+          (globalThis as any).__resetPepper = freshDoc.resetPepper;
+          return { doc: freshDoc, result: null };
+        }
+        return { doc: { ...freshDoc, resetPepper: (globalThis as any).__resetPepper }, result: null };
+      },
+      { label: 'persist-reset-pepper' }
+    ).catch(() => {});
+  }
+  return (globalThis as any).__resetPepper;
+}
+
 function hashResetCode(code: string): string {
   return crypto
     .createHash('sha256')
-    .update(`reset-code:${getJwtSecret()}:${code}`)
+    .update(`reset-code:${getResetPepper()}:${code}`)
     .digest('hex');
 }
 
@@ -73,13 +109,39 @@ function verifyResetCode(code: string, stored: PasswordResetRequest): boolean {
   return false;
 }
 
-/** Client IP for rate limiting: X-Forwarded-For (first hop) or socket. */
+/**
+ * Test-mode gate for /api/__test__ endpoints.
+ * BOTH conditions required:
+ *   1. STAGE2_TEST_MODE=true (explicit opt-in)
+ *   2. NOT on Cloud Run (K_SERVICE is always set there)
+ *
+ * Defense-in-depth: even if STAGE2_TEST_MODE is accidentally set in
+ * production, the endpoints remain unreachable on Cloud Run. These endpoints
+ * can reveal full database state and reset codes — they must never exist
+ * in production.
+ */
+function isTestMode(): boolean {
+  return process.env.STAGE2_TEST_MODE === 'true' && !process.env.K_SERVICE;
+}
+
+/**
+ * Client IP for rate limiting.
+ *
+ * Cloud Run sits behind Google's load balancer, which appends the real client
+ * IP to X-Forwarded-For. We configure `trust proxy` (see server startup) so
+ * Express's req.ip returns the leftmost UNTRUSTED address — i.e., the real
+ * client IP, not a spoofed value. A client that sends a fake X-Forwarded-For
+ * cannot bypass rate limits because Express strips trusted proxy hops.
+ *
+ * Fallback order: req.ip (trust-aware) → socket address → 'unknown'.
+ */
 function getClientIp(req: any): string {
-  const fwd = req.headers?.['x-forwarded-for'];
-  if (typeof fwd === 'string' && fwd.trim()) {
-    return fwd.split(',')[0].trim();
+  // req.ip is trust-proxy aware (see app.set('trust proxy') at startup).
+  const ip = req.ip;
+  if (typeof ip === 'string' && ip.trim() && ip !== 'unknown') {
+    return ip.trim();
   }
-  return req.socket?.remoteAddress || req.ip || 'unknown';
+  return req.socket?.remoteAddress || 'unknown';
 }
 
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour sliding window
@@ -192,6 +254,14 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
 const server = http.createServer(app);
 
+// Trust Cloud Run's proxy chain for correct client IP detection.
+// Cloud Run terminates TLS at Google's load balancer and forwards with
+// X-Forwarded-For. `trust proxy` (1 hop) makes req.ip return the real client
+// IP. Without this, req.ip would return the load balancer's internal address
+// and per-IP rate limiting would be useless (all clients share one IP).
+// In local dev (no proxy), this is harmless — req.ip falls back to socket.
+app.set('trust proxy', 1);
+
 app.use(express.json());
 
 // ---------------------------------------------------------------------------
@@ -224,7 +294,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   // Test-only endpoints (registered only when STAGE2_TEST_MODE=true; the
   // routes themselves don't exist in production, but list them here so the
   // auth middleware doesn't 401 them in test mode).
-  ...(process.env.STAGE2_TEST_MODE === 'true'
+  ...(isTestMode()
     ? [
         { method: 'GET', path: '/__test__/firestore-doc' },
         { method: 'GET', path: '/__test__/last-reset-code' },
@@ -248,6 +318,17 @@ function agencyIdForHostname(hostname: string): string | null {
 }
 
 app.use('/api', (req, res, next) => {
+  // BLOCKER 2 fix: FORCE_LOCAL_MODE is a READ-ONLY maintenance mode.
+  // All mutating requests (POST/PUT/DELETE/PATCH) are rejected with 503 —
+  // never claim success for writes that only hit ephemeral local disk.
+  // GET requests continue to work (read-only maintenance).
+  if (process.env.FORCE_LOCAL_MODE === 'true' && req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+    return res.status(503).json({
+      error: 'Maintenance mode — writes are temporarily disabled. Your data is safe; please try again shortly.',
+      code: 'MAINTENANCE',
+    });
+  }
+
   // Resolve agency from custom domain when present (used by login/agency pages).
   const domainAgencyId = agencyIdForHostname(req.hostname || '');
   if (domainAgencyId) {
@@ -1378,6 +1459,7 @@ function stateSnapshot() {
     pushSubscriptions,
     vapidKeys,
     jwtSecret,
+    resetPepper: (globalThis as any).__resetPepper || undefined,
     passwordResets,
     passwordResetRateLimits,
   };
@@ -1618,6 +1700,22 @@ class RateLimitError extends Error {
   }
 }
 
+/** Thrown when the document would exceed the Firestore size limit. */
+class DocumentTooLargeError extends Error {
+  code = 'SIZE_LIMIT';
+  sizeBytes: number;
+  limitBytes: number;
+  constructor(sizeBytes: number, limitBytes: number) {
+    super(
+      `Document too large (${Math.round(sizeBytes / 1024)} KiB exceeds ${Math.round(limitBytes / 1024)} KiB limit). ` +
+      `Remove large attachments or contact support.`
+    );
+    this.name = 'DocumentTooLargeError';
+    this.sizeBytes = sizeBytes;
+    this.limitBytes = limitBytes;
+  }
+}
+
 // Idempotency: durable records stored in the Firestore document itself
 // (doc.idempotencyRecords), so retries survive restarts and work across
 // instances. Single-instance deployment (maxScale=1) is no longer load-bearing
@@ -1658,7 +1756,18 @@ function sanitizeForIdempotency<T>(value: T): T {
       if (IDEMPOTENCY_SENSITIVE_FIELDS.has(kl) || kl.includes('secret') || kl.includes('token')) {
         continue;
       }
+      // Don't store large blobs (e.g., base64 photos) in idempotency records.
+      // Store a placeholder instead — the record is for deduplication, not data.
+      if (typeof v === 'string' && v.length > 1024) {
+        out[k] = `[truncated ${v.length} chars]`;
+        continue;
+      }
       out[k] = sanitizeForIdempotency(v);
+    }
+    // Safety cap: if the sanitized result is still > 10KB, store metadata only.
+    const serialized = JSON.stringify(out);
+    if (serialized.length > 10 * 1024) {
+      return { _truncated: true, _size: serialized.length } as unknown as T;
     }
     return out as T;
   }
@@ -1717,32 +1826,41 @@ interface CommitResult {
 
 // Keys ignored when deciding whether a commit actually changed anything.
 // _v is the version counter (managed by commitState, not the mutator);
-// updatedAt is a timestamp stamp the mutator may touch on every write;
 // savedAt is written by the previous commit but never present in the
 // mutator's output doc (it's added after this comparison).
-const NOOP_IGNORED_KEYS = new Set(['_v', 'updatedAt', 'savedAt']);
+// NOTE: `updatedAt` is ONLY ignored at the TOP LEVEL (document metadata).
+// Nested entity `updatedAt` fields (e.g., task.updatedAt = "last checked")
+// are REAL DATA and must be compared — see the isTopLevel flag below.
+const NOOP_IGNORED_KEYS = new Set(['_v', 'savedAt']);
 
 /**
- * Recursive structural equality, ignoring NOOP_IGNORED_KEYS wherever they
- * appear as keys. Used by commitState() to detect no-op mutations so a
- * write that changes nothing doesn't bump _v or cost a Firestore write.
- * No new dependencies — plain recursion over JSON-shaped data.
+ * Recursive structural equality for no-op detection.
+ * - Top level: ignores `_v`, `updatedAt`, `savedAt` (document metadata).
+ * - Nested levels: compares EVERYTHING including `updatedAt` (entity
+ *   timestamps are real data).
+ * Used by commitState() so a write that changes nothing doesn't bump _v
+ * or cost a Firestore write. No new dependencies — plain recursion over
+ * JSON-shaped data.
  */
-function docsEqualIgnoring(a: any, b: any): boolean {
+function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
   if (a === b) return true;
   if (typeof a !== typeof b) return false;
   if (a === null || b === null) return a === b;
   if (Array.isArray(a) || Array.isArray(b)) {
     if (!Array.isArray(a) || !Array.isArray(b)) return false;
     if (a.length !== b.length) return false;
-    return a.every((item, i) => docsEqualIgnoring(item, b[i]));
+    return a.every((item, i) => docsEqualIgnoring(item, b[i], false));
   }
   if (typeof a === 'object') {
-    const aKeys = Object.keys(a).filter((k) => !NOOP_IGNORED_KEYS.has(k));
-    const bKeys = Object.keys(b).filter((k) => !NOOP_IGNORED_KEYS.has(k));
+    // Top level: also ignore `updatedAt` (document metadata).
+    // Nested: compare everything (entity timestamps are real data).
+    const ignored = (k: string) =>
+      NOOP_IGNORED_KEYS.has(k) || (isTopLevel && k === 'updatedAt');
+    const aKeys = Object.keys(a).filter((k) => !ignored(k));
+    const bKeys = Object.keys(b).filter((k) => !ignored(k));
     if (aKeys.length !== bKeys.length) return false;
     return aKeys.every(
-      (k) => Object.prototype.hasOwnProperty.call(b, k) && docsEqualIgnoring(a[k], b[k])
+      (k) => Object.prototype.hasOwnProperty.call(b, k) && docsEqualIgnoring(a[k], b[k], false)
     );
   }
   return false;
@@ -1913,13 +2031,34 @@ async function commitState(
         }
         // Firestore rejects `undefined` with a synchronous throw — strip via JSON round-trip.
         const payload = JSON.parse(JSON.stringify(newDoc));
+        // Document-size guard: Firestore hard limit is 1 MiB. We refuse at
+        // 900 KiB to leave headroom for the _v/savedAt fields and to fail
+        // with a clear error instead of a cryptic Firestore rejection.
+        // Until Stage 3 (per-collection docs), photo/voice base64 is the main
+        // size risk — see TEST_RESULTS.md for the analysis.
+        const SIZE_LIMIT_BYTES = 900 * 1024;
+        const payloadSize = JSON.stringify(payload).length;
+        if (payloadSize > SIZE_LIMIT_BYTES) {
+          throw new DocumentTooLargeError(payloadSize, SIZE_LIMIT_BYTES);
+        }
         tx.set(docRef, payload);
         return { result: outcome.result, version: currentVersion + 1, doc: payload };
       });
 
       // ---- Commit succeeded: NOW update in-memory cache ----
-      hydrateState(committed.doc);
-      stateVersion = committed.version;
+      // BLOCKER 3 fix: guard against out-of-order transaction completion.
+      // If a newer transaction already hydrated the cache (higher _v),
+      // this older result must NOT overwrite it.
+      const committedVersion = committed.version;
+      if (committedVersion > stateVersion) {
+        hydrateState(committed.doc);
+        stateVersion = committedVersion;
+      } else {
+        console.warn(
+          `[commitState:${label}] Skipping stale hydration: committed v${committedVersion} <= current v${stateVersion}. ` +
+          `Newer state already in cache — not overwriting.`
+        );
+      }
 
       return { result: committed.result, version: committed.version };
     } catch (err: any) {
@@ -2026,6 +2165,11 @@ async function commitOrRespond(
     if (err instanceof RateLimitError) {
       res.setHeader('Retry-After', String(err.retryAfterSec));
       res.status(429).json({ error: err.message, code: 'RATE_LIMITED' });
+      return null;
+    }
+    if (err instanceof DocumentTooLargeError) {
+      console.error(`[commitOrRespond:${options.label || 'unnamed'}] ${err.message}`);
+      res.status(503).json({ error: err.message, code: 'SIZE_LIMIT' });
       return null;
     }
     if (err instanceof FirestoreUnavailableError) {
@@ -2583,14 +2727,18 @@ wss.on('connection', (ws, req) => {
 async function executeDailyReset(
   targetVenueId?: string,
   resetBy: string = 'system',
-  opts: { force?: boolean; operationId?: string } = {}
+  opts: { force?: boolean; operationId?: string; agencyId?: string } = {}
 ): Promise<{ result: any; version: number } | null> {
-  const todayStr = new Date().toISOString().split('T')[0];
+  // Agency scoping: manual resets pass agencyId (caller's agency only).
+  // Scheduled resets pass no agencyId (system operation across all agencies).
+  const scopeAgencyId = opts.agencyId || null;
+  // Use America/New_York for work dates (Don's timezone; all agencies are CT-based).
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const resetAt = new Date().toISOString();
   // Random ID base per reset invocation: stable across transaction retries
   // (the mutator closure captures it), unique across invocations so snapshot
   // IDs from different resets can never collide.
-  const stamp = crypto.randomUUID().slice(0, 8);
+  const stamp = crypto.randomUUID();
 
   // Build a single history snapshot from a venue + its tasks (pure function).
   const buildSnapshot = (v: any, venueTasks: any[]): HistoryLog => {
@@ -2643,7 +2791,10 @@ async function executeDailyReset(
     };
   };
 
-  const resetTask = (t: any): any => {
+  const resetTask = (t: any, scopedVenueIds: Set<string> | null): any => {
+    // Agency scoping: only reset tasks whose venue is in the scoped set.
+    // When scopedVenueIds is null (scheduled system reset), all venues reset.
+    if (scopedVenueIds && !scopedVenueIds.has(t.venueId)) return t;
     if (targetVenueId && t.venueId !== targetVenueId) return t;
     let initialStatus = 'pending';
     if (t.inputType === 'yes_no') {
@@ -2685,17 +2836,24 @@ async function executeDailyReset(
         if (!opts.force && freshDoc.currentWorkDate === todayStr) {
           return { doc: freshDoc, result: null };
         }
-        const targetVenues = targetVenueId
-          ? freshVenues.filter((v) => v.id === targetVenueId)
+        // Agency scoping: filter venues to the caller's agency when scoped.
+        // Without scoping (scheduled system reset), all venues are reset.
+        const scopedVenues = scopeAgencyId
+          ? freshVenues.filter((v) => (v.agencyId || 'agency-hkc') === scopeAgencyId)
           : freshVenues;
+        const targetVenues = targetVenueId
+          ? scopedVenues.filter((v) => v.id === targetVenueId)
+          : scopedVenues;
         const snapshots = targetVenues.map((v) =>
           buildSnapshot(v, freshTasks.filter((t) => t.venueId === v.id))
         );
+        // Scoped venue IDs for task filtering (null = all venues, system reset).
+        const scopedVenueIds = scopeAgencyId ? new Set(targetVenues.map((v) => v.id)) : null;
         return {
           doc: {
             ...freshDoc,
             historyLogs: [...snapshots, ...freshHistory],
-            tasks: freshTasks.map(resetTask),
+            tasks: freshTasks.map((t) => resetTask(t, scopedVenueIds)),
             currentWorkDate: todayStr,
           },
           result: snapshots[0] || null,
@@ -3387,7 +3545,7 @@ app.post('/api/agencies/register', async (req, res) => {
   }
 
   const cleanAgencyName = agencyName.trim();
-  const agencyId = `agency-${crypto.randomUUID().slice(0, 8)}`;
+  const agencyId = `agency-${crypto.randomUUID()}`;
   const derivedShortCode =
     (shortCode && shortCode.trim()) ||
     cleanAgencyName
@@ -3404,7 +3562,7 @@ app.post('/api/agencies/register', async (req, res) => {
 
   // Pre-generate stable IDs + hash password BEFORE the transaction.
   // Random base (stable within this call) so IDs are unique across calls.
-  const stamp = crypto.randomUUID().slice(0, 8);
+  const stamp = crypto.randomUUID();
   const adminUserId = `usr_admin_${stamp}`;
   const venueId = `venue-${stamp}`;
   const createdAt = new Date().toISOString();
@@ -3623,7 +3781,7 @@ app.get('/api/agencies/by-domain', (req, res) => {
 // TEST ONLY: exposes mock Firestore state for the Stage 2 test suite.
 // Registered when FIRESTORE_MOCK=true (local mock) or STAGE2_TEST_MODE=true
 // (real-emulator CI). Never enabled in production.
-if (process.env.FIRESTORE_MOCK === 'true' || process.env.STAGE2_TEST_MODE === 'true') {
+if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
   app.get('/api/__test__/firestore-doc', async (req, res) => {
     if (process.env.FIRESTORE_MOCK === 'true') {
       if (!firestoreDb || !firestoreDb._read) {
@@ -3748,9 +3906,9 @@ app.post('/api/venues', async (req, res) => {
   }
 
   // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
-  const newVenueId = `venue-${crypto.randomUUID().slice(0, 8)}`;
+  const newVenueId = `venue-${crypto.randomUUID()}`;
   const cleanOwnerEmail = ownerEmail?.trim().toLowerCase() || undefined;
-  const ownerUserId = `usr_owner_${crypto.randomUUID().slice(0, 8)}`;
+  const ownerUserId = `usr_owner_${crypto.randomUUID()}`;
   const createdAt = new Date().toISOString();
   // Hash the owner password once, outside the transaction (bcrypt is CPU-heavy;
   // the hash is deterministic input to the mutator).
@@ -4428,7 +4586,7 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
 
   // Stable check-in ID generated BEFORE the transaction so retries don't duplicate.
   const now = new Date().toISOString();
-  const checkInId = `checkin-${crypto.randomUUID().slice(0, 8)}`;
+  const checkInId = `checkin-${crypto.randomUUID()}`;
   const checkIn: TaskCheckInItem = {
     id: checkInId,
     byName: userName || null,
@@ -4506,28 +4664,40 @@ app.delete('/api/tasks/:id', async (req, res) => {
 // — unlike the scheduled midnight reset, which skips. The operationId makes
 // explicit client retries idempotent; the transaction itself is atomic.
 app.post('/api/reset-daily', async (req, res) => {
-  const { venueId, resetBy, userEmail, operationId } = req.body;
-  let callerAgencyId = 'agency-hkc';
-  if (userEmail) {
-    const user = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (user) {
-      callerAgencyId = user.agencyId || 'agency-hkc';
-    }
-  }
+  // BLOCKER 1 fix: require admin + scope strictly to caller's agency.
+  // Previously this endpoint trusted client-supplied userEmail and had no
+  // admin check — a non-admin could reset any agency's venues.
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const agencyId = admin.agencyId || 'agency-hkc';
+
+  const { venueId, resetBy, operationId } = req.body;
   // A targeted reset must reference the caller's own agency venue.
   if (venueId && !requireOwnVenue(req, res, venueId, venues)) return;
   try {
     // Await the CONFIRMED transaction before responding or broadcasting.
+    // Agency-scoped: only the caller's agency venues are reset.
     const outcome = await executeDailyReset(venueId, resetBy || 'Admin Manual', {
       force: true,
       operationId: operationId || crypto.randomUUID(),
+      agencyId,
     });
     // In-memory state was hydrated by commitState — read tasks AFTER the await.
+    // Scoped to caller's agency only.
     const venueTasks = tasks.filter(
-      (t) => (!venueId || t.venueId === venueId) && (t.agencyId || 'agency-hkc') === callerAgencyId
+      (t) => (!venueId || t.venueId === venueId) && (t.agencyId || 'agency-hkc') === agencyId
     );
     res.json({ success: true, snapshot: outcome ? outcome.result : null, tasks: venueTasks });
   } catch (err: any) {
+    // Duplicate operation (idempotent retry): return the cached result with
+    // 200, not 503. The reset already happened — the client just needs the
+    // original response.
+    if (err instanceof DuplicateOperationError) {
+      const venueTasks = tasks.filter(
+        (t) => (!venueId || t.venueId === venueId) && (t.agencyId || 'agency-hkc') === agencyId
+      );
+      return res.json({ success: true, snapshot: err.cachedResult?.result ?? null, tasks: venueTasks, duplicate: true });
+    }
     res.status(503).json({ error: 'Daily reset failed: ' + (err?.message || 'unknown error') });
   }
 });
@@ -4718,7 +4888,7 @@ app.post('/api/event-task-templates', async (req, res) => {
   // sortOrder is computed INSIDE the transaction from fresh data (not the cache),
   // so concurrent creates get correct ordering.
   const template: EventTaskTemplate = {
-    id: `etpl-${crypto.randomUUID().slice(0, 8)}`,
+    id: `etpl-${crypto.randomUUID()}`,
     title: String(title).trim(),
     agencyId: agencyId || undefined,
     sortOrder: 0, // overwritten inside the transaction
@@ -4856,7 +5026,7 @@ app.post('/api/events', async (req, res) => {
 
   // Pre-generate ALL stable IDs BEFORE the transaction so retries never duplicate.
   // Random base (stable within this call) so IDs are unique across calls.
-  const stamp = crypto.randomUUID().slice(0, 8);
+  const stamp = crypto.randomUUID();
   const eventId = `evt-${stamp}`;
   const nowIso = new Date().toISOString();
 
@@ -5566,7 +5736,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
   // TEST ONLY: stash the plaintext code so test-8 can retrieve it.
   // Gated by STAGE2_TEST_MODE — never populated in production.
-  if (process.env.STAGE2_TEST_MODE === 'true') {
+  if (isTestMode()) {
     (global as any).__testLastResetCodes = (global as any).__testLastResetCodes || {};
     (global as any).__testLastResetCodes[normalizedEmail] = { code };
   }
@@ -6193,7 +6363,7 @@ app.post('/api/ingredients', async (req, res) => {
   // The ingredient's venue must belong to the caller's agency.
   if (!requireOwnVenue(req, res, venueId, venues)) return;
 
-  const ingredientId = `ing_${crypto.randomUUID().slice(0, 8)}`;
+  const ingredientId = `ing_${crypto.randomUUID()}`;
   const newIngredient: ApprovedIngredientItem = {
     id: ingredientId,
     venueId,
@@ -6304,12 +6474,12 @@ app.post('/api/factory-reports', async (req, res) => {
   }
 
   // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
-  const reportId = `rpt_${crypto.randomUUID().slice(0, 8)}`;
+  const reportId = `rpt_${crypto.randomUUID()}`;
   const nowIso = new Date().toISOString();
 
   const cleanDiscrepancies: UnapprovedDiscrepancyItem[] = Array.isArray(discrepancies)
     ? discrepancies.map((d: any, idx: number) => ({
-        id: d.id || `disc_${crypto.randomUUID().slice(0, 8)}_${idx}`,
+        id: d.id || `disc_${crypto.randomUUID()}_${idx}`,
         name: String(d.name || 'Unlabeled Raw Material'),
         brandOrSupplier: d.brandOrSupplier ? String(d.brandOrSupplier) : undefined,
         kashrutSymbolFound: d.kashrutSymbolFound ? String(d.kashrutSymbolFound) : 'None / Non-Kosher',

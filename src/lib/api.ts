@@ -91,11 +91,47 @@ export function describeWriteError(status: number, serverMessage?: string): stri
  * returns a structured result. Never throws for HTTP error statuses; only
  * throws on truly unexpected failures. Callers must check `result.ok` before
  * treating the write as successful or showing a success toast.
+ *
+ * Versioning & idempotency (Stage 2 contract):
+ * - `expectedVersion`: the entity's last-known `_v`. The server rejects with
+ *   409 if it doesn't match — the caller's screen is stale.
+ * - `operationId`: stable UUID per user action. Generate ONCE per action and
+ *   reuse it on retry — do NOT generate a new one per attempt, or retries
+ *   become duplicate operations. If omitted, apiWrite generates one.
  */
-export async function apiWrite<T = any>(input: string, init: RequestInit): Promise<ApiWriteResult<T>> {
+export async function apiWrite<T = any>(
+  input: string,
+  init: RequestInit & { expectedVersion?: number; operationId?: string } = {}
+): Promise<ApiWriteResult<T>> {
+  const { expectedVersion, operationId, ...fetchInit } = init;
+  // Stable operationId: reuse the caller's (for retries) or generate once.
+  const opId = operationId || crypto.randomUUID();
+
   let res: Response;
   try {
-    res = await apiFetch(input, init);
+    // Inject versioning fields into the JSON body.
+    let body = fetchInit.body;
+    const headers = new Headers(fetchInit.headers || {});
+    if (body && typeof body === 'string') {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          if (expectedVersion !== undefined && parsed.expectedVersion === undefined) {
+            parsed.expectedVersion = expectedVersion;
+          }
+          if (!parsed.operationId) {
+            parsed.operationId = opId;
+          }
+          body = JSON.stringify(parsed);
+        }
+      } catch {
+        // Not JSON — send as-is; server will handle missing fields.
+      }
+    }
+    if (!headers.has('Content-Type') && typeof body === 'string') {
+      headers.set('Content-Type', 'application/json');
+    }
+    res = await apiFetch(input, { ...fetchInit, body, headers });
   } catch {
     return {
       ok: false,

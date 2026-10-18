@@ -15,6 +15,20 @@
 
 ## 1. How to pause writes safely
 
+### Maintenance mode vs normal operation
+
+**Normal operation:** All endpoints work. Writes go through Firestore transactions.
+
+**Read-only maintenance mode** (`FORCE_LOCAL_MODE=true` env var):
+- ALL mutating endpoints (POST/PUT/DELETE/PATCH) return **503** with `{code: 'MAINTENANCE'}`
+- GET endpoints continue to work (users can view data, just not change it)
+- The server does NOT claim writes succeeded — it explicitly rejects them
+- Use this when Firestore is unavailable or you need to stop all writes immediately
+- Set via Cloud Run: `gcloud run services update workers-collaborative-dashboard --set-env-vars FORCE_LOCAL_MODE=true --region us-east1`
+- To exit maintenance: remove the env var or set it to `false`, then redeploy
+
+**Important:** `FORCE_LOCAL_MODE` does NOT make the server write to local disk and claim success. It makes the server REJECT writes. This is the safe behavior — a maintenance mode that silently loses data is worse than one that says "try later."
+
 ### Option A: Route traffic to the previous healthy revision (recommended)
 
 Cloud Run keeps prior revisions. Shifting 100% of traffic to the last-known-good
@@ -164,7 +178,7 @@ Enforcement options, in order of preference:
 | Bad build deployed, no bad writes committed yet | Yes | Traffic shift to healthy revision (Option A) |
 | Bad writes committed with valid `_v` chain | Yes | Forward data migration (new build repairs records at boot or via admin endpoint) |
 | Pre-Stage-2 code wrote without `_v` checks | Partially | Identify overwritten fields from Firestore version history (console → document → history); manually reconcile. No automatic undo. |
-| Firestore database destroyed | Last resort | Restore `BACKUP-2026-10-17-stage1.json`; all post-backup writes are lost; every client must hard-refresh |
+| Firestore database destroyed | Last resort | Restore from a fresh `/api/admin/export` backup (stored privately, NOT in git); all post-backup writes are lost; every client must hard-refresh |
 | In-memory idempotency cache lost (restart) | Yes | Mutators are idempotent on stable IDs; client retries are safe |
 
 **What we cannot recover:** writes that were never committed (client got an
@@ -263,7 +277,7 @@ post-backup writes after a total-restore.
 | `GET /api/health` (no auth; status/firestore/version/uptime) | ⚠️ Documented only | Endpoint extended; already public (no auth). Manually verifiable with curl. |
 | Daily reset awaited + force/operationId | ⚠️ Documented only | `executeDailyReset` is now async; scheduled vs manual semantics changed. Not covered by current tests. |
 | Firestore deny-all rules (Option C) | ⚠️ Documented only | ⚠️ CORRECTED 2026-10-18: Security Rules do **NOT** restrict the Firebase Admin SDK — this never blocked server writes. Only stops direct client SDK access. Rules syntax is standard; never deployed. |
-| Backup restore from BACKUP-2026-10-17-stage1.json | ⚠️ Documented only | File exists and is valid JSON. Restore procedure (import via admin endpoint or manual Firestore write) has NOT been executed. Passwords are stripped by design — users would need password resets after restore. |
+| Backup restore from private export | ⚠️ Documented only | Take a fresh backup via `/api/admin/export` and store it privately (never in git). Restore procedure (import via admin endpoint or manual Firestore write) has NOT been executed. Passwords are stripped by design — users would need password resets after restore. |
 | Forward-fix deploy (ROLLBACK.md policy) | ⚠️ Documented only | Standard deploy pipeline; the policy (never redeploy pre-Stage-2) is a process rule, not a technical gate. |
 
 **Before production deployment, the ⚠️ items should be dry-run where safe** (traffic shift is non-destructive and can be tested; backup restore should be tested against the Firestore emulator, not production).
@@ -275,5 +289,5 @@ post-backup writes after a total-restore.
 - **Service URL:** `https://workers-collaborative-dashboard-1080260390009.us-east1.run.app/`
 - **Repo:** `https://github.com/DanKenan/kashrus-app` (branch `review/stage2-data-integrity` for Stage 2 review)
 - **Firestore console:** Firebase project `gen-lang-client-0875538181` → Firestore → database `ai-studio-workerscollabora-faedc6a8-580b-463e-86b2-c3e3048ed73d` → `app-state/main`
-- **Backup:** `BACKUP-2026-10-17-stage1.json` (repo root; passwords stripped by design)
+- **Backup:** Take a fresh backup via `GET /api/admin/export` before any risky operation. Store it privately (NOT in git — the Oct 17 backup was removed from the repo after it was found to contain user emails and kiosk PINs in a public repo). Passwords are stripped by design.
 - **Related docs:** `ROLLBACK.md` (forward-fix policy), `TEST_RESULTS.md` (verification), `ARCHITECTURE_ANALYSIS.md` (full failure-mode analysis)

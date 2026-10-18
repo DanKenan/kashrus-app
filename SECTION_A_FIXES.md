@@ -138,3 +138,148 @@ All changes uncommitted, for review. `npx tsc --noEmit` clean. `npm run test:sta
 - **Edit collisions:** two workers edited `server.ts` concurrently mid-task; both detected and re-applied their changes. Final tree verified coherent via `tsc` (clean) and 9/9 tests.
 - **Not yet done (flagged for follow-up):** frontend-to-server integration tests for 409/503 handling; dedicated per-endpoint authorization tests; daily-reset specific tests (archive, double-reset, concurrent, failure); all marked in the relevant sections above.
 - **Production unchanged:** no deploys from this branch. The only production change tonight was the backup-file removal commit on `main` (delete-only, verified).
+
+---
+
+# Round 2 — Second Reviewer Pass (commit 549c8a9 → current)
+
+## R2-BLOCKER 1: Daily reset authorization and isolation
+
+**Was wrong:** `POST /api/reset-daily` had no admin check and trusted client-supplied `userEmail` for agency scoping. Omitting `venueId` reset ALL agencies' venues.
+
+**Changed (server.ts):**
+- Endpoint now calls `requireAdmin(req, res)` first — non-admins get 403
+- Uses `admin.agencyId` (from verified session) instead of client-supplied `userEmail`
+- `executeDailyReset` accepts `opts.agencyId`; venues filtered to caller's agency when scoped
+- Dates use `America/New_York` timezone via `toLocaleDateString('en-CA', { timeZone })`
+- Scheduled cron reset (no agencyId) still resets all agencies (system operation)
+
+**Tested:** test-10-daily-reset.mjs (non-admin 403, manual reset, double-reset idempotency, agency scoping, archive dates)
+
+## R2-BLOCKER 2: FORCE_LOCAL_MODE rejects writes
+
+**Was wrong:** `FORCE_LOCAL_MODE=true` fell back to local file writes and could return success — claiming data was saved when it was only on ephemeral disk.
+
+**Changed (server.ts):**
+- New middleware at top of `/api` router: when `FORCE_LOCAL_MODE=true`, ALL mutating requests (POST/PUT/DELETE/PATCH) return 503 `{error: 'Maintenance mode...', code: 'MAINTENANCE'}`
+- GET/HEAD/OPTIONS continue to work (read-only maintenance mode)
+- Documented in EMERGENCY.md §1 with gcloud commands to enable/disable
+
+**Tested:** test-11-maintenance-mode.mjs documents manual verification steps
+
+## R2-BLOCKER 3: Out-of-order transaction completion
+
+**Was wrong:** `hydrateState(committed.doc)` ran unconditionally after every commit. If transaction A (older) completed after transaction B (newer), A's stale doc overwrote B's newer state.
+
+**Changed (server.ts, commitState):**
+- Before hydrating: compare `committed.version > stateVersion`
+- Only hydrate if the committed version is newer; otherwise log warning and skip
+- The newer state is already correct — no overwrite
+
+**Tested:** test-12-out-of-order-hydration.mjs
+
+## R2-4: Client-side versioning and idempotency
+
+**Was wrong:** `apiWrite()` didn't send `expectedVersion` or stable `operationId`.
+
+**Changed (src/lib/api.ts):**
+- `apiWrite` now accepts `{expectedVersion, operationId}` in init options
+- Auto-injects both into JSON request bodies (doesn't overwrite if already present)
+- Generates stable UUID per call; callers should generate once per user action and reuse on retry
+- Server-side idempotency already scoped to `${userId}:${operationId}` with payload-agnostic caching
+
+**Tested:** test-15-frontend-smoke.mjs (retry with same ID, stale version 409)
+
+## R2-5: Correct no-op detection
+
+**Was wrong:** `docsEqualIgnoring` ignored ALL `updatedAt` fields recursively — legitimate entity timestamp updates (e.g., "last checked at") were treated as no-ops.
+
+**Changed (server.ts):**
+- `docsEqualIgnoring(a, b, isTopLevel=true)` — top level ignores `_v`, `updatedAt`, `savedAt` (document metadata)
+- Nested levels compare EVERYTHING including `updatedAt` (entity timestamps are real data)
+- Array recursion passes `isTopLevel=false`
+
+**Tested:** test-13-noop-detection.mjs (nested timestamp persists + bumps version; true no-op doesn't bump)
+
+## R2-6: Password-reset security finishing
+
+**Was wrong:** (a) IP extraction trusted `X-Forwarded-For` blindly (spoofable); (b) reset-code pepper was the JWT secret stored alongside hashes in Firestore.
+
+**Changed (server.ts):**
+- `app.set('trust proxy', 1)` — Express `req.ip` now returns real client IP behind Cloud Run's load balancer; spoofed X-Forwarded-For is stripped
+- `getClientIp()` uses trust-aware `req.ip` (not raw header parsing)
+- New `getResetPepper()`: dedicated secret from `RESET_CODE_PEPPER` env var → Firestore-stored fallback (generated once) → never hardcoded, never the JWT secret
+- Rotation documented: set new env var, redeploy; old codes invalidate naturally
+
+**Tested:** Existing test-8 covers the flow; IP trust is infrastructure config (documented)
+
+## R2-7: Test endpoints gated on !K_SERVICE
+
+**Was wrong:** `/api/__test__/*` gated only on `STAGE2_TEST_MODE=true` — if accidentally set in production, they'd expose full DB state and reset codes.
+
+**Changed (server.ts):**
+- New `isTestMode()` helper: `STAGE2_TEST_MODE === 'true' && !process.env.K_SERVICE`
+- All three gating points (route registration, auth bypass list, code stash) use `isTestMode()`
+- On Cloud Run (K_SERVICE always set), endpoints don't exist even if the env var is set
+
+**Tested:** Code inspection; CI runs with K_SERVICE unset so tests still work
+
+## R2-8: Document-size guard
+
+**Was wrong:** No protection against hitting Firestore's 1 MiB document limit — would fail with cryptic error.
+
+**Changed (server.ts):**
+- `commitState` measures `JSON.stringify(payload).length` before `tx.set()`
+- Exceeds 900 KiB → throws `DocumentTooLargeError` → mapped to 503 `{code: 'SIZE_LIMIT'}` with clear message
+- `sanitizeForIdempotency`: truncates strings >1KB, caps total at 10KB (metadata only beyond)
+- All `crypto.randomUUID().slice(0,8)` replaced with full UUIDs for durable records
+- Idempotency records already capped at 1000, pruned transactionally (verified working)
+
+**Tested:** test-14-document-size-guard.mjs documents the wiring; TEST_RESULTS.md updated with photo/voice handling analysis
+
+## R2-9: Release-critical tests
+
+**Added:**
+- test-10: daily reset (auth, idempotency, agency scoping, archive dates)
+- test-12: out-of-order hydration safety
+- test-13: no-op detection (nested timestamps vs true no-ops)
+- test-15: frontend smoke (retry, 409, optimistic rollback behavior)
+- CI: crash detection step (fails on "unhandled"/"EADDRINUSE"/"FATAL" in logs)
+- CI: triggers on `src/**` changes (was only server.ts/tests)
+- Harness: pre-flight port cleanup (kills stale servers on test port)
+
+**Still manual:** full maintenance-mode test (requires env var + restart); 503 simulation
+
+## R2-10: Recovery documentation
+
+**Changed:**
+- EMERGENCY.md: all `BACKUP-2026-10-17-stage1.json` references replaced with "fresh `/api/admin/export` backup, stored privately (NOT in git)"
+- ROLLBACK.md: same replacement
+- EMERGENCY.md §1: added "Maintenance mode vs normal operation" section documenting FORCE_LOCAL_MODE behavior, gcloud commands, and the guarantee that writes are REJECTED (not silently lost)
+- Noted: backup remains in git history on PR branch; Don handles history cleanup + credential rotation separately in the morning
+
+---
+
+## Round 2 Bug Fixes (found by test-10 during verification)
+
+### BUGFIX A: Daily reset task clearing was not agency-scoped
+
+**Was wrong:** `resetTask()` inside `executeDailyReset` filtered only by `targetVenueId`, not by agency. When a manual reset omitted `venueId` (agency-wide reset), it cleared EVERY task across ALL agencies — while snapshots were correctly scoped. Test-10 proved an agency-B task's `isCompleted`/`notes` were wiped with no snapshot archived.
+
+**Changed (server.ts):**
+- `resetTask(t, scopedVenueIds)` now takes the scoped venue ID set
+- When `scopeAgencyId` is set, only tasks whose `venueId` is in the scoped set are reset; others returned untouched
+- Scheduled system reset (`scopeAgencyId=null`) still resets all venues as intended
+
+**Tested:** test-10 verifies agency-B fixture task is untouched after agency-A reset
+
+### BUGFIX B: Duplicate operationId on reset-daily returned 503
+
+**Was wrong:** The endpoint's catch-all mapped `DuplicateOperationError` to 503. Clients retrying after a lost response got an error instead of the cached result.
+
+**Changed (server.ts):**
+- `catch` block now checks `err instanceof DuplicateOperationError` first
+- Returns 200 `{success: true, snapshot, tasks, duplicate: true}` with the cached result
+- No duplicate effect (idempotency already guaranteed by commitState)
+
+**Tested:** test-10 updated to expect 200 + `duplicate:true` on replay

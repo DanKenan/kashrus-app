@@ -124,8 +124,24 @@ the same pattern. The two apparent exceptions are safe:
 
 ### Task 4: Document size and write contention — what Stage 2 does NOT solve
 
-**Current size:** `BACKUP-2026-10-17-stage1.json` is 2,860 bytes (0.3% of the
+**Current size:** The production database is 2,860 bytes (0.3% of the
 1 MiB Firestore document limit). The database is nearly empty (0 tasks).
+
+**NEW in Round 2: Document-size guard.** `commitState` now measures
+`JSON.stringify(doc).length` before every write. If it exceeds 900 KiB
+(leaving 124 KiB headroom below Firestore's 1 MiB hard limit), the write is
+rejected with 503 `{code: 'SIZE_LIMIT'}` and a clear message. This prevents
+cryptic Firestore rejections and gives operators a clear signal to clean up
+or accelerate Stage 3.
+
+**How photo/voice uploads are handled until Stage 3:**
+- Photos are compressed client-side (max 800px, JPEG 0.7, ~500 KB cap each)
+- 30-day retention: `MEDIA_RETENTION_DAYS = 30` strips old base64 automatically
+- **BUT:** 2 photos still fill the document. The size guard will start rejecting
+  writes when this happens — this is intentional. It's a circuit breaker, not
+  a solution. Stage 3 (Cloud Storage for media) is the real fix.
+- Idempotency records are capped at 1000 entries, pruned transactionally, and
+  large results are truncated (not stored) to prevent unbounded growth.
 
 **Projection — the limit is closer than it looks:**
 - Photo check-ins: ~500 KB base64 each (after client-side compression)

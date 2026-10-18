@@ -32,7 +32,7 @@ If Stage 2 has a bug in production:
    (a new deploy whose boot or admin path corrects the records), not by
    restoring a backup over live data — a restore would resurrect stale versions
    and collide with the `_v` chain.
-3. **Disaster recovery only:** `BACKUP-2026-10-17-stage1.json` (repo root,
+3. **Disaster recovery only:** a fresh backup from `/api/admin/export` (stored privately, NOT in git — the Oct 17 backup file was removed from the repo),
    passwords stripped by design) exists for total-loss scenarios (e.g. the
    Firestore database itself is destroyed). Restoring it means:
    - The `_v` chain restarts from the backup's version.

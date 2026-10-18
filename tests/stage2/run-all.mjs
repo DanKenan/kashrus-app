@@ -1,11 +1,16 @@
 /**
- * Runs all 8 Stage 2 tests sequentially.
+ * Runs all 15 Stage 2 tests sequentially.
  * Each test module exports: { name, whatItProves, run(baseUrl, ctx) }
  * ctx provides shared helpers (api helpers, mock Firestore direct access).
  *
  * The server runs with FIRESTORE_MOCK=true, so Firestore state is inspected
  * via the test-only /api/__test__/firestore-doc endpoint (the mock lives in
  * the server's process and cannot be reached directly from here).
+ *
+ * Tests 11 and 14 are documentation-heavy by design: the harness cannot boot
+ * the server with FORCE_LOCAL_MODE=true (test 11), and pushing a real 900KB
+ * document through the API is impractical (test 14). Both verify what can be
+ * verified automatically and document the manual steps in their headers.
  */
 export async function runAll(baseUrl, extraCtx = {}) {
   // Authenticate as the default admin user for all test requests.
@@ -68,6 +73,12 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-7-retry-storm.mjs')).default,
     (await import('./test-8-password-reset-security.mjs')).default,
     (await import('./test-9-airtable-key-preservation.mjs')).default,
+    (await import('./test-10-daily-reset.mjs')).default,
+    (await import('./test-11-maintenance-mode.mjs')).default,
+    (await import('./test-12-out-of-order-hydration.mjs')).default,
+    (await import('./test-13-noop-detection.mjs')).default,
+    (await import('./test-14-document-size-guard.mjs')).default,
+    (await import('./test-15-frontend-smoke.mjs')).default,
   ];
 
   const results = [];

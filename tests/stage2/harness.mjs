@@ -75,6 +75,16 @@ async function main() {
   if (!useRealEmulator) console.log(`Mock persistence file: ${mockFile} (cleared)`);
   console.log(`Server data dir: ${dataDir} (fresh)`);
 
+  // Pre-flight: kill anything already on the test port (stale servers from
+  // previous runs cause EADDRINUSE / WebSocket port-conflict errors).
+  try {
+    const { execSync } = await import('node:child_process');
+    execSync(`lsof -ti:${SERVER_PORT} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
+    await sleep(1000);
+  } catch {
+    // lsof not available or nothing to kill — continue
+  }
+
   // Server with Firestore → mock or real emulator.
   console.log(`\n[1/2] Starting server on :${SERVER_PORT} (Firestore → ${useRealEmulator ? 'real emulator' : 'in-memory mock'})...`);
   const serverEnv = {
