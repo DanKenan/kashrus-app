@@ -13,6 +13,10 @@
  *
  * The entity data is copied verbatim from the monolith — no field
  * transformations, no dropped fields. Only `_v` is added/updated.
+ *
+ * IMPORTANT: Firestore transactions require ALL reads to complete before
+ * ANY writes. This function does all tx.get() calls first, then all
+ * tx.set()/tx.delete() calls. Never interleave them.
  */
 
 /**
@@ -27,82 +31,109 @@ export async function dualWriteChangedEntities(
 ): Promise<void> {
   if (!firestoreDb) return;
 
-  // Helper: diff an entity array and dual-write changes
-  async function dualWriteArray(
-    collectionName: string,
-    beforeArr: any[],
-    afterArr: any[]
-  ): Promise<void> {
+  // Phase 1: Identify all changed entities (no Firestore I/O, just diffing)
+  interface PendingWrite {
+    collection: string;
+    id: string;
+    data: any | null; // null = delete
+    emailLookup?: { oldEmail?: string; newEmail?: string };
+  }
+  const pendingWrites: PendingWrite[] = [];
+
+  function diffArray(collectionName: string, beforeArr: any[], afterArr: any[]): void {
     const beforeMap = new Map<string, any>((beforeArr || []).map((e: any) => [e.id, e]));
     const afterMap = new Map<string, any>((afterArr || []).map((e: any) => [e.id, e]));
 
-    // Added or updated
     for (const [id, entity] of afterMap) {
       const prev = beforeMap.get(id);
-      // JSON comparison: only write if actually changed
       if (!prev || JSON.stringify(prev) !== JSON.stringify(entity)) {
-        const entityRef = firestoreDb.collection(collectionName).doc(id);
-        const existing = await tx.get(entityRef);
-        const currentV = existing.exists ? (existing.data()?._v || 0) : 0;
-        // Strip undefined via JSON round-trip (Firestore rejects undefined)
-        const clean = JSON.parse(JSON.stringify({ ...entity, _v: currentV + 1 }));
-        tx.set(entityRef, clean);
+        pendingWrites.push({ collection: collectionName, id, data: entity });
       }
     }
-
-    // Deleted
     for (const [id] of beforeMap) {
       if (!afterMap.has(id)) {
-        tx.delete(firestoreDb.collection(collectionName).doc(id));
+        pendingWrites.push({ collection: collectionName, id, data: null });
       }
     }
   }
 
-  await dualWriteArray('tasks', before.tasks, after.tasks);
-  await dualWriteArray('venues', before.venues, after.venues);
+  diffArray('tasks', before.tasks, after.tasks);
+  diffArray('venues', before.venues, after.venues);
 
-  // Users: dual-write + maintain usersByEmail lookup
+  // Users: also track email changes for the usersByEmail lookup
   const beforeUsers = new Map<string, any>((before.users || []).map((u: any) => [u.id, u]));
   const afterUsers = new Map<string, any>((after.users || []).map((u: any) => [u.id, u]));
-
-  // Dynamic import for crypto (works in both CJS and ESM contexts)
-  const crypto = await import('crypto');
-  const emailKey = (email: string) =>
-    crypto.createHash('sha256').update(email.toLowerCase()).digest('hex');
-
   for (const [id, user] of afterUsers) {
     const prev = beforeUsers.get(id);
     if (!prev || JSON.stringify(prev) !== JSON.stringify(user)) {
-      const userRef = firestoreDb.collection('users').doc(id);
-      const existing = await tx.get(userRef);
-      const currentV = existing.exists ? (existing.data()?._v || 0) : 0;
-      const clean = JSON.parse(JSON.stringify({ ...user, _v: currentV + 1 }));
-      tx.set(userRef, clean);
+      const emailChanged = !prev || prev.email?.trim().toLowerCase() !== user.email?.trim().toLowerCase();
+      pendingWrites.push({
+        collection: 'users',
+        id,
+        data: user,
+        emailLookup: emailChanged
+          ? { oldEmail: prev?.email, newEmail: user.email }
+          : undefined,
+      });
+    }
+  }
+  for (const [id, user] of beforeUsers) {
+    if (!afterUsers.has(id)) {
+      pendingWrites.push({
+        collection: 'users',
+        id,
+        data: null,
+        emailLookup: user.email ? { oldEmail: user.email } : undefined,
+      });
+    }
+  }
 
-      // Maintain usersByEmail lookup (for transactional uniqueness in PR D)
-      const emailChanged = !prev || prev.email?.toLowerCase() !== user.email?.toLowerCase();
-      if (emailChanged && user.email) {
-        const key = emailKey(user.email);
-        tx.set(firestoreDb.collection('usersByEmail').doc(key), {
-          userId: id,
-          email: user.email.toLowerCase(),
-        });
-        // If email changed, delete the old lookup
-        if (prev?.email && prev.email.toLowerCase() !== user.email.toLowerCase()) {
-          const oldKey = emailKey(prev.email);
-          tx.delete(firestoreDb.collection('usersByEmail').doc(oldKey));
-        }
+  if (pendingWrites.length === 0) return;
+
+  // Phase 2: ALL READS — fetch current per-entity docs to get their _v values.
+  // Must complete before any writes.
+  const crypto = await import('crypto');
+  const emailKey = (email: string) =>
+    crypto.createHash('sha256').update(email.trim().toLowerCase()).digest('hex');
+
+  const readResults = new Map<string, number>(); // "collection/id" -> current _v (0 if not exists)
+  for (const pw of pendingWrites) {
+    if (pw.data !== null) {
+      // Only need _v for writes (not deletes)
+      const key = `${pw.collection}/${pw.id}`;
+      if (!readResults.has(key)) {
+        const ref = firestoreDb.collection(pw.collection).doc(pw.id);
+        const snap = await tx.get(ref);
+        readResults.set(key, snap.exists ? (snap.data()?._v || 0) : 0);
       }
     }
   }
 
-  for (const [id, user] of beforeUsers) {
-    if (!afterUsers.has(id)) {
-      tx.delete(firestoreDb.collection('users').doc(id));
-      // Clean up the email lookup
-      if (user.email) {
-        const key = emailKey(user.email);
-        tx.delete(firestoreDb.collection('usersByEmail').doc(key));
+  // Phase 3: ALL WRITES — now safe to write, no more reads.
+  for (const pw of pendingWrites) {
+    const ref = firestoreDb.collection(pw.collection).doc(pw.id);
+    if (pw.data === null) {
+      tx.delete(ref);
+    } else {
+      const key = `${pw.collection}/${pw.id}`;
+      const currentV = readResults.get(key) || 0;
+      const clean = JSON.parse(JSON.stringify({ ...pw.data, _v: currentV + 1 }));
+      tx.set(ref, clean);
+    }
+
+    // Maintain usersByEmail lookup
+    if (pw.emailLookup) {
+      const { oldEmail, newEmail } = pw.emailLookup;
+      if (newEmail) {
+        const key = emailKey(newEmail);
+        tx.set(firestoreDb.collection('usersByEmail').doc(key), {
+          userId: pw.id,
+          email: newEmail.trim().toLowerCase(),
+        });
+      }
+      if (oldEmail && oldEmail.trim().toLowerCase() !== newEmail?.trim().toLowerCase()) {
+        const oldKey = emailKey(oldEmail);
+        tx.delete(firestoreDb.collection('usersByEmail').doc(oldKey));
       }
     }
   }
