@@ -3890,6 +3890,72 @@ app.get('/api/media/status', (req, res) => {
   });
 });
 
+/**
+ * GET /api/media/check-indexes — Check if Firestore composite indexes are ready.
+ * Admin only. Runs the sweeper's queries with limit(1) to detect missing-index errors.
+ * Returns per-index readiness. If an index is still building, Firestore throws.
+ */
+app.get('/api/media/check-indexes', async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const db = requireMediaDb(req, res);
+  if (!db) return;
+
+  const indexes = [];
+  let allReady = true;
+
+  // Index 1: media(state, createdAt) — for stale intent queries
+  try {
+    await db.collection('media')
+      .where('state', 'in', ['INTENT', 'UPLOADED', 'VALIDATED'])
+      .where('createdAt', '<', new Date().toISOString())
+      .limit(1)
+      .get();
+    indexes.push({ name: 'media(state, createdAt)', ready: true, detail: 'Query succeeded' });
+  } catch (e: any) {
+    const isIndexError = e?.message?.includes('index') || e?.code === 9;
+    indexes.push({
+      name: 'media(state, createdAt)',
+      ready: false,
+      detail: isIndexError ? 'Index missing or building' : e?.message,
+    });
+    allReady = false;
+  }
+
+  // Index 2: media(state, deleteError) — for failed-delete retry queries
+  try {
+    await db.collection('media')
+      .where('state', '==', 'ABANDONED')
+      .where('deleteError', '!=', null)
+      .limit(1)
+      .get();
+    indexes.push({ name: 'media(state, deleteError)', ready: true, detail: 'Query succeeded' });
+  } catch (e: any) {
+    const isIndexError = e?.message?.includes('index') || e?.code === 9;
+    indexes.push({
+      name: 'media(state, deleteError)',
+      ready: false,
+      detail: isIndexError ? 'Index missing or building' : e?.message,
+    });
+    allReady = false;
+  }
+
+  res.json({ indexes, allReady });
+});
+
+/**
+ * GET /admin/media-check — Serve the admin media-check HTML page.
+ * Admin only. Don logs in via the main app, then visits this URL.
+ */
+app.get('/admin/media-check', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user || user.role !== 'admin') {
+    res.status(403).send('Admin access required. Please log in as an administrator first.');
+    return;
+  }
+  res.sendFile(path.join(process.cwd(), 'public', 'admin-media-check.html'));
+});
+
 // Broadcast announcements — one-way team updates (NOT a chat)
 // Categories: assignment, update, notice, urgent. Targeted by role.
 app.get('/api/announcements', (req, res) => {
