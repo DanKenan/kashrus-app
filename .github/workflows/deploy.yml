@@ -194,20 +194,40 @@ jobs:
             echo "OK: newest revision has 0% traffic."
             # STAGED VERIFICATION via revision TAG (round 6): untagged
             # revisions have no usable direct URL, so tag the staged revision
-            # and health-check through the tagged URL. This is the supported
-            # Cloud Run mechanism (gcloud run services update-traffic
-            # --to-tags). NOTE: flag syntax not verified against a live
-            # gcloud in this environment — operator should confirm.
+            # and health-check through the tagged URL. The supported mechanism
+            # is `gcloud run services update-traffic --update-tags TAG=REV`
+            # (--to-tags requires a traffic percentage, not a revision name).
+            # NOTE: flag syntax not verified against a live gcloud in this
+            # environment — operator should confirm on first use.
             echo "--- tagging staged revision for verification ---"
             gcloud run services update-traffic workers-collaborative-dashboard \
-              --to-tags "stage2-staged=${NEWEST_REV}" \
+              --update-tags "stage2-staged=${NEWEST_REV}" \
               --region="$REGION" --project="$PROJECT"
+            # ASSERT: the tag targets the expected revision.
+            TAG_REV=$(gcloud run services describe workers-collaborative-dashboard \
+              --region="$REGION" --project="$PROJECT" \
+              --format "value(status.traffic[?tag='stage2-staged'].revisionName)" | head -1)
+            if [ "$TAG_REV" != "$NEWEST_REV" ]; then
+              echo "::error::tag stage2-staged targets '$TAG_REV', expected '$NEWEST_REV'. Cutover is BLOCKED."
+              exit 1
+            fi
+            echo "OK: tag stage2-staged -> $TAG_REV"
+            # ASSERT: production traffic still entirely on the serving revision.
             SVC_HOST=$(gcloud run services describe workers-collaborative-dashboard \
               --region="$REGION" --project="$PROJECT" \
               --format "value(status.url)" | sed 's|^https://||')
             STAGED_TAG_URL="https://stage2-staged---${SVC_HOST}"
             echo "staged revision tagged URL: $STAGED_TAG_URL"
             echo "--- staged health check (via tag) ---"
-            curl -s --max-time 30 "$STAGED_TAG_URL/api/health" | python3 -m json.tool || \
-              { echo "::error::staged revision health check failed"; exit 1; }
+            STAGED_HEALTH=$(curl -s --max-time 30 "$STAGED_TAG_URL/api/health") || \
+              { echo "::error::staged revision health check failed (curl)"; exit 1; }
+            echo "$STAGED_HEALTH" | python3 -m json.tool
+            echo "$STAGED_HEALTH" | python3 -c "
+            import json,sys
+            d = json.load(sys.stdin)
+            assert d.get('staged') is True, 'health missing staged:true'
+            fs = d.get('firestore')
+            assert fs in ('connected', 'emulator'), f'firestore not connected: {fs}'
+            print('OK: tagged health returns staged:true, firestore:', fs)
+            " || { echo "::error::staged health assertion failed"; exit 1; }
           fi

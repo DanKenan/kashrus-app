@@ -1796,6 +1796,14 @@ class PayloadMismatchError extends Error {
   }
 }
 
+class StagedRevisionError extends Error {
+  code = 'NOT_YET_LIVE';
+  constructor() {
+    super('This app revision is staged for verification and is not live yet. Please wait for the cutover to complete.');
+    this.name = 'StagedRevisionError';
+  }
+}
+
 /**
  * The client sent an update without the version it rendered (expectedVersion).
  * This means the client is too old to participate in the version contract
@@ -2036,6 +2044,12 @@ async function commitState(
   options: CommitOptions = {}
 ): Promise<CommitResult> {
   const label = options.label || 'unnamed';
+  // ROUND 6 — centralized staged-revision write rejection. No indirect caller
+  // (getJwtSecret(), boot backfills, background jobs) can write while staged,
+  // even via a read path. This is the single transactional write boundary.
+  if (isStagedRevision()) {
+    throw new StagedRevisionError();
+  }
   // Scoped idempotency key: `${userId}:${operationId}` so one user's retries
   // can never collide with another user's operationId.
   const idemKey = options.idempotencyKey || options.operationId || undefined;
@@ -2370,6 +2384,10 @@ async function commitOrRespond(
     }
     if (err instanceof PayloadMismatchError) {
       res.status(409).json({ error: err.message, code: 'PAYLOAD_MISMATCH' });
+      return null;
+    }
+    if (err instanceof StagedRevisionError) {
+      res.status(503).json({ error: err.message, code: 'NOT_YET_LIVE' });
       return null;
     }
     if (err instanceof StaleClientError) {

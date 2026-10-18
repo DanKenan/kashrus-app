@@ -70,6 +70,25 @@ export default {
     const vStill = await ctx.getVersion();
     if (vStill !== vBefore) throw new Error('write attempt moved version in staged mode');
 
+    // --- 4b. Indirect write via read path: an authenticated request triggers
+    // getJwtSecret() -> commitState() (fire-and-forget persist). The
+    // centralized commitState guard must block it — doc stays byte-identical.
+    // This subtest is meaningful only when the doc has no persisted jwtSecret
+    // (getJwtSecret only persists when the secret is missing); otherwise the
+    // hash check above already covers it.
+    const docNoSecret = await ctx.getDoc();
+    if (docNoSecret.jwtSecret === undefined) {
+      const authed = await ctx.api('GET', '/api/tasks?venueId=venue-crown-market');
+      if (authed.status !== 200) throw new Error(`authed read failed in staged mode: ${authed.status}`);
+      const docAfterJwt = await ctx.getDoc();
+      if (docHash(docAfterJwt) !== hashBefore) {
+        throw new Error('getJwtSecret() persisted via read path in staged mode — central guard failed');
+      }
+      if ((await ctx.getVersion()) !== vBefore) {
+        throw new Error('indirect write moved version in staged mode');
+      }
+    }
+
     // --- 5. Restart back to normal (clean state for subsequent tests) ---
     await ctx.restartServer({});
     const health2 = await ctx.api('GET', '/api/health');
