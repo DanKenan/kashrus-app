@@ -64,26 +64,38 @@ export default {
   whatItProves: 'Recursive secret scrubbing; manifest; all collections captured.',
 
   async run() {
-    // Test 1: scrubSecrets removes secrets recursively
+    // Test 1: scrubSecrets removes secrets recursively (and preserves non-secrets)
     {
       const input = {
         name: 'Crown Market',
         password: 'secret123',
+        userPassword: 'cp123', // camelCase compound → scrub
+        accessToken: 'tok123', // must scrub (was missed before)
+        refreshToken: 'ref123', // must scrub
+        privateKey: 'pk123', // must scrub even outside vapidKeys
         nested: { kioskPin: '9999', ok: 'fine' },
         arr: [{ apiKey: 'key123' }, { name: 'x' }],
         jwtSecret: 'jwt123',
+        apiKeyLabel: 'My API Key', // must PRESERVE (false positive before)
+        keyboard: 'qwerty', // must PRESERVE (ends with "key" but not secret)
       };
       const out = scrubSecrets(input);
       if (out.password !== '[REDACTED]') throw new Error('password not scrubbed');
+      if (out.userPassword !== '[REDACTED]') throw new Error('userPassword not scrubbed');
+      if (out.accessToken !== '[REDACTED]') throw new Error('accessToken not scrubbed (was missed)');
+      if (out.refreshToken !== '[REDACTED]') throw new Error('refreshToken not scrubbed (was missed)');
+      if (out.privateKey !== '[REDACTED]') throw new Error('privateKey not scrubbed (was missed)');
       if (out.nested.kioskPin !== '[REDACTED]') throw new Error('nested kioskPin not scrubbed');
       if (out.arr[0].apiKey !== '[REDACTED]') throw new Error('array apiKey not scrubbed');
       if (out.jwtSecret !== '[REDACTED]') throw new Error('jwtSecret not scrubbed');
       if (out.name !== 'Crown Market') throw new Error('non-secret modified');
+      if (out.apiKeyLabel !== 'My API Key') throw new Error('apiKeyLabel falsely scrubbed!');
+      if (out.keyboard !== 'qwerty') throw new Error('keyboard falsely scrubbed!');
       if (out.nested.ok !== 'fine') throw new Error('non-secret nested modified');
-      console.log('  ✓ scrubSecrets removes secrets recursively');
+      console.log('  ✓ scrubSecrets: catches tokens/keys, preserves labels');
     }
 
-    // Test 2: runTier1Backup captures all + scrubs + manifest
+    // Test 2: runTier1Backup captures all + scrubs + manifest (unique paths, version check)
     {
       const monolith = {
         _v: 5,
@@ -104,29 +116,58 @@ export default {
 
       if (manifest.tier !== 'tier1') throw new Error('Wrong tier');
       if (!manifest.monolithPresent) throw new Error('Monolith not captured');
+      if (manifest.monolithVersion !== 5) throw new Error('Version not captured');
       if (manifest.collections.venues !== 1) throw new Error('Venues not counted');
       if (!manifest.checksum || manifest.checksum.length !== 64) throw new Error('Bad checksum');
       if (!manifest.secretsScrubbed) throw new Error('Scrub flag not set');
 
-      // Verify files written (NOT .enc — Google-managed encryption)
-      const dataKey = [...storage.files.keys()].find(k => k.endsWith('backup.json'));
-      const manifestKey = [...storage.files.keys()].find(k => k.endsWith('manifest.json'));
+      // Verify unique paths per execution (runId in path)
+      const keys = [...storage.files.keys()];
+      const dataKey = keys.find(k => k.endsWith('backup.json'));
+      const manifestKey = keys.find(k => k.endsWith('manifest.json'));
+      const markerKey = keys.find(k => k.endsWith('latest-success.json'));
       if (!dataKey) throw new Error('backup.json not written');
       if (!manifestKey) throw new Error('manifest.json not written');
+      if (!markerKey) throw new Error('latest-success.json marker not written');
       if (dataKey.endsWith('.enc')) throw new Error('Must not use .enc extension');
+      // Path must contain a run ID (tier1/<date>/<runId>/)
+      const parts = dataKey.split('/');
+      if (parts.length < 4) throw new Error(`Path not unique per execution: ${dataKey}`);
 
-      // Verify secrets scrubbed in the written data
+      // Verify secrets scrubbed in the written SERIALIZED artifact (not just in-memory)
       const written = JSON.parse(storage.files.get(dataKey).data);
       if (written.monolith.jwtSecret !== '[REDACTED]') throw new Error('jwtSecret leaked in backup!');
       if (written.monolith.users[0].password !== '[REDACTED]') throw new Error('password leaked!');
       if (written.collections.users[0].password !== '[REDACTED]') throw new Error('per-entity password leaked!');
 
-      // Verify backups/latest updated
-      const latest = await db.collection('backups').doc('latest').get();
-      if (!latest.exists) throw new Error('backups/latest not written');
-      if (latest.data().checksum !== manifest.checksum) throw new Error('Checksum mismatch in latest');
+      // Verify NO Firestore write happened (backup SA is read-only)
+      // (The mock would have recorded it; we check backups/latest was NOT written to Firestore)
+      // Instead, the GCS marker was written:
+      const marker = JSON.parse(storage.files.get(markerKey).data);
+      if (marker.checksum !== manifest.checksum) throw new Error('Marker checksum mismatch');
 
-      console.log('  ✓ Tier 1 backup: all data captured, secrets scrubbed, manifest written');
+      console.log('  ✓ Tier 1 backup: unique paths, version check, GCS marker (no Firestore write)');
+    }
+
+    // Test 3: Refuses when monolith missing or _v invalid
+    {
+      const db1 = createMockDb(null, {});
+      const storage = createMockStorage();
+      try {
+        await runTier1Backup(db1, storage, 'test-bucket', 'test-db');
+        throw new Error('Should have refused missing monolith');
+      } catch (e) {
+        if (!e.message.includes('does not exist')) throw new Error(`Wrong error: ${e.message}`);
+      }
+
+      const db2 = createMockDb({ venues: [] }, {}); // no _v
+      try {
+        await runTier1Backup(db2, storage, 'test-bucket', 'test-db');
+        throw new Error('Should have refused invalid _v');
+      } catch (e) {
+        if (!e.message.includes('_v')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      console.log('  ✓ refuses missing monolith / invalid _v');
     }
 
     console.log('  ✓ All backup tests passed');

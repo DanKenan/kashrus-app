@@ -3,22 +3,21 @@
  *
  * Reads ALL recoverable data from the named Firestore database directly
  * (not via HTTP), scrubs secrets recursively, writes a manifest + data
- * to the private backup bucket, and updates backups/latest for staleness
- * monitoring.
+ * to the private backup bucket.
  *
  * Runs as a dedicated Cloud Run Job with its own service account:
- * - Firestore: datastore.entities.list + datastore.entities.get on the
- *   named database ONLY (no writes to user data).
- * - Storage: storage.objects.create on the backup bucket ONLY.
+ * - Firestore: datastore.viewer (read-only, database-conditioned) on the
+ *   named database ONLY. NO writes to Firestore — the job is read-only.
+ * - Storage: storage.objectCreator on the backup bucket ONLY (no overwrite).
+ *
+ * Backup-success is tracked via a GCS marker file (not Firestore), so the
+ * backup identity stays genuinely read-only. Monitoring reads the marker
+ * through its own identity.
  *
  * Tier 1 captures: monolith app-state/main (all fields), every per-entity
  * collection (tasks, venues, users, usersByEmail, media), and media metadata.
  * Media BYTES are NOT copied (they live in GCS; the 30-day retention is
  * enforced by the sweeper, not by backup retention).
- *
- * Secrets scrubbed recursively: password, kioskPin, jwtSecret, vapidKeys,
- * resetPepper, airtable credentials (apiKey, token), and any field whose
- * key matches /password|secret|token|key|pin/i (case-insensitive).
  */
 
 import crypto from 'crypto';
@@ -35,22 +34,42 @@ const PER_ENTITY_COLLECTIONS = [
   'media',
 ];
 
-// Field names (case-insensitive patterns) that are always scrubbed.
-const SECRET_PATTERNS = [
-  /password/i,
-  /kioskpin/i,
-  /jwtsecret/i,
-  /vapid/i,
-  /pepper/i,
-  /apikey/i,
-  /api_key/i,
-  /\btoken\b/i,
-  /secret/i,
-  /\bpin\b/i,
+// Field names that are always scrubbed (case-insensitive exact match).
+// Explicit list to avoid false positives (apiKeyLabel) and false negatives
+// (accessToken, privateKey). Compound names like "userPassword" are caught
+// by checking camelCase boundaries.
+const SECRET_WORDS = [
+  'password',
+  'kioskpin',
+  'jwtsecret',
+  'vapid',
+  'pepper',
+  'apikey',
+  'accesstoken',
+  'refreshtoken',
+  'privatekey',
+  'secret',
+  'token',
 ];
 
 function isSecretKey(key: string): boolean {
-  return SECRET_PATTERNS.some(p => p.test(key));
+  const lower = key.toLowerCase();
+  // Exact match (ignoring _ and -)
+  const normalized = lower.replace(/[_-]/g, '');
+  if (SECRET_WORDS.includes(normalized)) return true;
+  // CamelCase compound: e.g. "userPassword" → "Password" starts with uppercase P
+  // Check if key ends with a secret word whose first letter is uppercase
+  for (const word of SECRET_WORDS) {
+    if (lower.endsWith(word) && lower.length > word.length) {
+      const idx = key.length - word.length;
+      const firstChar = key[idx];
+      // Uppercase first letter = camelCase boundary (userPassword, accessToken)
+      if (firstChar && firstChar === firstChar.toUpperCase() && firstChar !== firstChar.toLowerCase()) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -80,6 +99,7 @@ export interface BackupManifest {
   tier: 'tier1';
   collections: Record<string, number>; // collection name -> doc count
   monolithPresent: boolean;
+  monolithVersion: number;
   checksum: string; // SHA-256 of the canonical JSON payload
   secretsScrubbed: boolean;
 }
@@ -87,11 +107,18 @@ export interface BackupManifest {
 /**
  * Run a Tier 1 backup.
  *
- * @param firestoreDb - Admin SDK Firestore instance (named database).
- * @param storage - Admin SDK Storage instance.
+ * @param firestoreDb - Firestore instance for the NAMED database (read-only).
+ * @param storage - Storage instance.
  * @param backupBucket - GCS bucket name (private, uniform access).
- * @param databaseId - Named database ID (for manifest + explicit selection).
+ * @param databaseId - Named database ID (for manifest).
  * @returns Manifest of the completed backup.
+ *
+ * Each execution writes to a unique path: tier1/<date>/<runId>/
+ * (storage.objectCreator cannot overwrite, so unique paths enable retries).
+ *
+ * Requires the monolith to exist with a valid numeric _v. Captures the
+ * version before and after reading collections; if it changed, retries
+ * (a backup across concurrent commits is not a consistent snapshot).
  */
 export async function runTier1Backup(
   firestoreDb: any,
@@ -99,70 +126,95 @@ export async function runTier1Backup(
   backupBucket: string,
   databaseId: string
 ): Promise<BackupManifest> {
+  const runId = crypto.randomBytes(8).toString('hex');
   const createdAt = new Date().toISOString();
   const dateStr = createdAt.slice(0, 10); // YYYY-MM-DD
+  const basePath = `tier1/${dateStr}/${runId}`;
 
-  // 1. Read monolith
-  const monolithSnap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
-  const monolithData = monolithSnap.exists ? monolithSnap.data() : null;
+  const MAX_ATTEMPTS = 3;
+  let lastError: string | undefined;
 
-  // 2. Read all per-entity collections
-  const collections: Record<string, any[]> = {};
-  const counts: Record<string, number> = {};
-  for (const collName of PER_ENTITY_COLLECTIONS) {
-    const snap = await firestoreDb.collection(collName).get();
-    collections[collName] = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
-    counts[collName] = snap.size;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // 1. Read monolith + capture version BEFORE
+    const monolithSnapBefore = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
+    if (!monolithSnapBefore.exists) {
+      throw new Error('[backup] Monolith app-state/main does not exist — refusing to back up empty state.');
+    }
+    const monolithData = monolithSnapBefore.data();
+    const versionBefore = monolithData?._v;
+    if (typeof versionBefore !== 'number') {
+      throw new Error(`[backup] Monolith _v is not a valid number (got ${typeof versionBefore}) — refusing.`);
+    }
+
+    // 2. Read all per-entity collections
+    const collections: Record<string, any[]> = {};
+    const counts: Record<string, number> = {};
+    for (const collName of PER_ENTITY_COLLECTIONS) {
+      const snap = await firestoreDb.collection(collName).get();
+      collections[collName] = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      counts[collName] = snap.size;
+    }
+
+    // 3. Verify version AFTER (consistent snapshot check)
+    const monolithSnapAfter = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
+    const versionAfter = monolithSnapAfter.data()?._v;
+    if (versionBefore !== versionAfter) {
+      lastError = `Monolith version changed during backup (v${versionBefore} → v${versionAfter}), retrying`;
+      console.warn(`[backup] ${lastError} (attempt ${attempt})`);
+      continue;
+    }
+
+    // 4. Scrub secrets recursively
+    const scrubbedMonolith = scrubSecrets(monolithData);
+    const scrubbedCollections: Record<string, any[]> = {};
+    for (const [name, docs] of Object.entries(collections)) {
+      scrubbedCollections[name] = docs.map(scrubSecrets);
+    }
+
+    // 5. Assemble payload + manifest
+    const payload = {
+      monolith: scrubbedMonolith,
+      collections: scrubbedCollections,
+    };
+    const payloadJson = JSON.stringify(payload);
+    const checksum = crypto.createHash('sha256').update(payloadJson, 'utf8').digest('hex');
+
+    const manifest: BackupManifest = {
+      version: 1,
+      createdAt,
+      databaseId,
+      tier: 'tier1',
+      collections: counts,
+      monolithPresent: true,
+      monolithVersion: versionAfter,
+      checksum,
+      secretsScrubbed: true,
+    };
+
+    // 6. Write to GCS with unique paths (Google-managed encryption; NOT .enc)
+    const bucket = storage.bucket(backupBucket);
+    const dataPath = `${basePath}/backup.json`;
+    const manifestPath = `${basePath}/manifest.json`;
+    await bucket.file(dataPath).save(payloadJson, { contentType: 'application/json' });
+    await bucket.file(manifestPath).save(JSON.stringify(manifest, null, 2), {
+      contentType: 'application/json',
+    });
+
+    // 7. Write success marker to GCS (NOT Firestore — backup SA is read-only).
+    //    Monitoring reads this marker via its own identity.
+    const markerPath = `tier1/latest-success.json`;
+    await bucket.file(markerPath).save(JSON.stringify({
+      createdAt,
+      runId,
+      manifestPath: `gs://${backupBucket}/${manifestPath}`,
+      dataPath: `gs://${backupBucket}/${dataPath}`,
+      checksum,
+      monolithVersion: versionAfter,
+    }), { contentType: 'application/json' });
+
+    console.log(`[backup] Tier 1 complete: ${basePath}, v${versionAfter}, checksum ${checksum.slice(0, 12)}..., ${Object.values(counts).reduce((a, b) => a + b, 0)} docs`);
+    return manifest;
   }
 
-  // 3. Scrub secrets recursively
-  const scrubbedMonolith = scrubSecrets(monolithData);
-  const scrubbedCollections: Record<string, any[]> = {};
-  for (const [name, docs] of Object.entries(collections)) {
-    scrubbedCollections[name] = docs.map(scrubSecrets);
-  }
-
-  // 4. Assemble payload + manifest
-  const payload = {
-    monolith: scrubbedMonolith,
-    collections: scrubbedCollections,
-  };
-  const payloadJson = JSON.stringify(payload);
-  const checksum = crypto.createHash('sha256').update(payloadJson, 'utf8').digest('hex');
-
-  const manifest: BackupManifest = {
-    version: 1,
-    createdAt,
-    databaseId,
-    tier: 'tier1',
-    collections: counts,
-    monolithPresent: monolithSnap.exists,
-    checksum,
-    secretsScrubbed: true,
-  };
-
-  // 5. Write to GCS (Google-managed encryption; NOT .enc — no app-level encryption)
-  const bucket = storage.bucket(backupBucket);
-  const dataPath = `tier1/${dateStr}/backup.json`;
-  const manifestPath = `tier1/${dateStr}/manifest.json`;
-  await bucket.file(dataPath).save(payloadJson, { contentType: 'application/json' });
-  await bucket.file(manifestPath).save(JSON.stringify(manifest, null, 2), {
-    contentType: 'application/json',
-  });
-
-  // 6. Update backups/latest for staleness monitoring (in the PROD database,
-  //    so /api/health and the consistency job can check it).
-  //    This is metadata about the backup, not user data.
-  await firestoreDb.collection('backups').doc('latest').set({
-    tier: 'tier1',
-    createdAt,
-    manifestPath: `gs://${backupBucket}/${manifestPath}`,
-    dataPath: `gs://${backupBucket}/${dataPath}`,
-    checksum,
-    collections: counts,
-    monolithPresent: monolithSnap.exists,
-  });
-
-  console.log(`[backup] Tier 1 complete: ${dateStr}, checksum ${checksum.slice(0, 12)}..., ${Object.values(counts).reduce((a, b) => a + b, 0)} docs`);
-  return manifest;
+  throw new Error(`[backup] Failed after ${MAX_ATTEMPTS} attempts: ${lastError}`);
 }

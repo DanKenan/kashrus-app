@@ -63,19 +63,46 @@ export interface ConsistencyResult {
 }
 
 /**
- * Check backup staleness via the backups/latest doc.
- * Returns { stale, lastAt }. Stale = no successful backup in 26 hours.
+ * Check backup staleness via the GCS success marker.
+ * The backup job writes tier1/latest-success.json on each successful run.
+ * Monitoring reads it through its own identity (app SA needs
+ * storage.objects.get on the backup bucket).
+ *
+ * Returns { stale, lastAt }. Stale = no successful backup in 26 hours,
+ * OR missing/malformed/future timestamp (fail closed on bad data).
  */
 async function checkBackupStaleness(firestoreDb: any): Promise<{ stale: boolean; lastAt: string | null }> {
+  const bucketName = process.env.BACKUP_BUCKET;
+  if (!bucketName) {
+    // Not configured — cannot determine staleness; report unknown (not stale,
+    // to avoid false alerts before Don sets up backups).
+    return { stale: false, lastAt: null };
+  }
   try {
-    const snap = await firestoreDb.collection('backups').doc('latest').get();
-    if (!snap.exists) return { stale: true, lastAt: null };
-    const lastAt = snap.data()?.createdAt || null;
-    if (!lastAt) return { stale: true, lastAt: null };
-    const ageMs = Date.now() - new Date(lastAt).getTime();
+    // Use the app's Storage client (needs storage.objects.get on the bucket)
+    const { getStorage } = await import('./media.js').catch(() => ({ getStorage: null }));
+    // Fallback: try admin SDK directly
+    const admin = await import('firebase-admin').catch(() => null);
+    if (!admin) return { stale: true, lastAt: null };
+    const storage = (admin as any).storage();
+    const [contents] = await storage.bucket(bucketName).file('tier1/latest-success.json').download();
+    const marker = JSON.parse(contents.toString('utf8'));
+    const lastAt = marker?.createdAt;
+    if (!lastAt || typeof lastAt !== 'string') {
+      return { stale: true, lastAt: null };
+    }
+    const ts = new Date(lastAt).getTime();
+    if (isNaN(ts)) {
+      return { stale: true, lastAt: null }; // Malformed date = stale
+    }
+    if (ts > Date.now() + 5 * 60 * 1000) {
+      return { stale: true, lastAt }; // Implausibly future = stale
+    }
+    const ageMs = Date.now() - ts;
     const stale = ageMs > 26 * 60 * 60 * 1000; // 26 hours
     return { stale, lastAt };
-  } catch {
+  } catch (e: any) {
+    // Marker missing or unreadable = stale (fail closed)
     return { stale: true, lastAt: null };
   }
 }
