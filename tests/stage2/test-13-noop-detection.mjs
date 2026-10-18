@@ -51,6 +51,7 @@ export default {
       isCompleted: true,
       notes: 'noop probe notes',
       userEmail: ADMIN_EMAIL,
+      expectedVersion: v0,
     });
     if (done.status !== 200) throw new Error(`complete failed: ${done.status}`);
     const v1 = await ctx.getVersion();
@@ -69,6 +70,7 @@ export default {
       isCompleted: true,
       notes: 'noop probe notes',
       userEmail: ADMIN_EMAIL,
+      expectedVersion: v1,
     });
     if (same.status !== 200) throw new Error(`identical re-complete failed: ${same.status}`);
     const v2 = await ctx.getVersion();
@@ -80,6 +82,7 @@ export default {
     const edit = await ctx.api('PUT', `/api/tasks/${taskId}`, {
       notes: 'noop probe notes v2',
       userEmail: ADMIN_EMAIL,
+      expectedVersion: v2,
     });
     if (edit.status !== 200) throw new Error(`notes edit failed: ${edit.status}`);
     const v3 = await ctx.getVersion();
@@ -95,7 +98,8 @@ export default {
       throw new Error('state doc carries a top-level updatedAt — the metadata-ignore branch could mask real changes');
     }
 
-    await ctx.api('DELETE', `/api/tasks/${taskId}`, {});
+    const vDel = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${taskId}`, { expectedVersion: vDel });
 
     return (
       `nested updatedAt stamped+ persisted (v${v0}→v${v1}); ` +

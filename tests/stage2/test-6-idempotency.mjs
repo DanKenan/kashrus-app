@@ -58,7 +58,8 @@ export default {
       throw new Error(`version incremented on idempotent replay: ${v1} -> ${v2}`);
     }
 
-    await ctx.api('DELETE', `/api/tasks/${task1.id}`, {});
+    const vDel = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${task1.id}`, { expectedVersion: vDel });
 
     return `retry returned same task ${task1.id}, no duplicate, version stayed at ${v2}`;
   },

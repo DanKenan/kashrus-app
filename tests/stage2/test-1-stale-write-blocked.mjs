@@ -60,7 +60,8 @@ export default {
     }
 
     // Cleanup.
-    await ctx.api('DELETE', `/api/tasks/${taskId}`, {});
+    const vDel = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${taskId}`, { expectedVersion: vDel });
 
     return `stale write got 409, committed data intact, version stayed at ${vAfterStale}`;
   },

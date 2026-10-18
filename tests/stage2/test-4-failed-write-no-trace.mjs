@@ -39,11 +39,13 @@ export default {
     // Force a failure: first change the title via a good write (bumps version),
     // then attempt a write with a stale baseline → semantic conflict → 409.
     // The mutator runs, detects the conflict, and aborts BEFORE any write.
+    // (The good write carries the current version per the version contract.)
     const good = await ctx.api('PUT', `/api/tasks/${taskId}`, {
       title: 'Stage2 Test4 Task — good write',
       createdByEmail: 'kenan@hartfordkashrut.org',
+      expectedVersion: vBefore,
     });
-    if (good.status !== 200) throw new Error('good write failed');
+    if (good.status !== 200) throw new Error(`good write failed: ${good.status} ${JSON.stringify(good.json)}`);
 
     const bad = await ctx.api('PUT', `/api/tasks/${taskId}`, {
       title: 'Stage2 Test4 Task — FAILED WRITE',
@@ -71,7 +73,8 @@ export default {
       throw new Error(`in-memory cache diverged: ${apiTaskAfter.title}`);
     }
 
-    await ctx.api('DELETE', `/api/tasks/${taskId}`, {});
+    const vDel = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${taskId}`, { expectedVersion: vDel });
 
     return '409 returned; Firestore and in-memory cache show only the good write';
   },

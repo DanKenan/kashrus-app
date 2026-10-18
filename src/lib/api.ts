@@ -37,6 +37,9 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     headers.set('Authorization', `Bearer ${token}`);
   }
   const res = await fetch(input, { ...init, headers });
+  // Track the server's document version from every API response so writes
+  // can send back the version this client last saw (version contract).
+  trackVersionHeader(res);
   if (res.status === 401 && token) {
     // Token expired or revoked — clear it and tell the app to show login.
     clearSession();
@@ -47,6 +50,99 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     }
   }
   return res;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2 version contract (client side).
+//
+// The server stamps every /api response with X-State-Version (the _v of the
+// single app-state/main Firestore document) and every WebSocket message with
+// `version`. This module remembers the highest version seen. apiWrite()
+// automatically attaches it as expectedVersion on updates (PUT/PATCH/DELETE),
+// so a stale screen can never silently overwrite newer data: the server
+// rejects with 409 VERSION_CONFLICT (version sent but outdated) or 428
+// STALE_CLIENT (no version sent at all — e.g. an old cached PWA client).
+// ---------------------------------------------------------------------------
+
+let lastKnownVersion: number | undefined = undefined;
+
+/** Highest document version observed from API responses / WS messages. */
+export function getLastKnownVersion(): number | undefined {
+  return lastKnownVersion;
+}
+
+/** Record a version seen from the server (keeps the max). */
+export function observeVersion(v: unknown): void {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  if (Number.isFinite(n) && n >= 0 && (lastKnownVersion === undefined || n > lastKnownVersion)) {
+    lastKnownVersion = n;
+  }
+}
+
+function trackVersionHeader(res: Response): void {
+  try {
+    const h = res.headers.get('X-State-Version');
+    if (h) observeVersion(h);
+  } catch {
+    // ignore — version tracking is best-effort
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stale-client drafts: when the server answers 428 STALE_CLIENT, the user's
+// screen is older than the version contract and must refresh — but the
+// user's unsaved input must NOT be silently discarded. Callers pass
+// `draft: { key, label, data }`; apiWrite persists it to localStorage and the
+// app offers to re-apply it after refresh (see App.tsx stale-draft banner).
+// ---------------------------------------------------------------------------
+
+export interface StaleDraft {
+  /** Stable key, e.g. 'checkin:task-123'. One draft per key (latest wins). */
+  key: string;
+  /** Human-readable label shown in the restore banner. */
+  label: string;
+  /** Endpoint + method + JSON body needed to re-apply the write. */
+  endpoint: string;
+  method: string;
+  body: unknown;
+  savedAt: string;
+}
+
+const DRAFTS_KEY = 'shutfey_stale_drafts';
+
+export function loadStaleDrafts(): StaleDraft[] {
+  try {
+    const raw = localStorage.getItem(DRAFTS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStaleDraft(draft: StaleDraft): void {
+  try {
+    const rest = loadStaleDrafts().filter((d) => d.key !== draft.key);
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify([...rest, draft]));
+    try {
+      window.dispatchEvent(new CustomEvent('shutfey:stale-draft'));
+    } catch {
+      // ignore
+    }
+  } catch {
+    // storage unavailable — the in-memory form state is still intact
+  }
+}
+
+export function discardStaleDraft(key: string): void {
+  try {
+    localStorage.setItem(
+      DRAFTS_KEY,
+      JSON.stringify(loadStaleDrafts().filter((d) => d.key !== key))
+    );
+  } catch {
+    // ignore
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +173,8 @@ export interface ApiWriteResult<T = any> {
  */
 export function describeWriteError(status: number, serverMessage?: string): string {
   if (serverMessage && serverMessage.trim()) return serverMessage.trim();
+  if (status === 428)
+    return 'Your app is out of date — please refresh the app, then try again. Your input was saved.';
   if (status === 409) return 'Someone else changed this — please review and retry.';
   if (status === 503) return "Couldn't save — please check your connection and retry.";
   if (status === 0) return "Couldn't save — please check your connection and retry.";
@@ -98,7 +196,8 @@ export function describeWriteError(status: number, serverMessage?: string): stri
  *     method: 'PUT',
  *     body: JSON.stringify({ ... }),
  *     operationId: actionId,  // same ID on retry
- *     expectedVersion: task._v,  // entity's last-known version
+ *     // expectedVersion is injected automatically from the last
+ *     // X-State-Version seen; pass explicitly only to override it.
  *   });
  */
 export function newActionId(): string {
@@ -112,25 +211,51 @@ export function newActionId(): string {
  * treating the write as successful or showing a success toast.
  *
  * Versioning & idempotency contract (Stage 2):
- * - `expectedVersion`: the entity's last-known `_v` (from when the UI loaded
- *   it). The server rejects with 409 VERSION_CONFLICT if it doesn't match —
- *   the caller's screen is stale and must refresh. CALLERS MUST PROVIDE THIS
- *   for updates to existing entities; apiWrite cannot know which entity you're
- *   editing. For creates (no existing entity), omit it.
+ * - `expectedVersion`: the DOCUMENT version this client last saw (tracked
+ *   automatically from X-State-Version headers and WS messages). For updates
+ *   (PUT/PATCH/DELETE) apiWrite injects the tracked version when the caller
+ *   doesn't pass one explicitly. The server rejects with 409 VERSION_CONFLICT
+ *   if it doesn't match the current version — the screen is stale and must
+ *   refresh. For creates (POST to a collection), omit it.
+ * - If the server answers 428 STALE_CLIENT, no version was sent at all (old
+ *   cached client). The write is rejected safely — never silently applied.
  * - `operationId`: stable UUID per user action (see newActionId()). Generate
  *   ONCE per action in the UI component, reuse on retry. If omitted, apiWrite
  *   generates one — but then retries from the caller MUST pass the same ID
  *   back, or the retry becomes a separate operation.
+ * - `draft`: on 428 STALE_CLIENT, persist the user's input so a refresh does
+ *   not silently discard it. The app restores it from localStorage.
  */
 export async function apiWrite<T = any>(
   input: string,
-  init: RequestInit & { expectedVersion?: number; operationId?: string } = {}
+  init: RequestInit & {
+    expectedVersion?: number;
+    operationId?: string;
+    draft?: { key: string; label: string; data: () => unknown };
+  } = {}
 ): Promise<ApiWriteResult<T>> {
-  const { expectedVersion, operationId, ...fetchInit } = init;
+  const { expectedVersion, operationId, draft, ...fetchInit } = init;
   // Stable operationId: reuse the caller's (for retries) or generate once.
   const opId = operationId || crypto.randomUUID();
+  const method = (fetchInit.method || 'POST').toUpperCase();
+  // Version contract: updates automatically carry the last version this
+  // client saw. An explicit expectedVersion from the caller wins.
+  const versionToSend =
+    expectedVersion !== undefined
+      ? expectedVersion
+      : method === 'PUT' || method === 'PATCH' || method === 'DELETE'
+        ? getLastKnownVersion()
+        : undefined;
 
   let res: Response;
+  let sentBody: unknown = undefined;
+  // For body-less updates (e.g. DELETE with no body), the version and
+  // operation ID travel as query params — the server reads both places.
+  let url = input;
+  if (!fetchInit.body && versionToSend !== undefined) {
+    const sep = url.includes('?') ? '&' : '?';
+    url = `${url}${sep}expectedVersion=${encodeURIComponent(String(versionToSend))}&operationId=${encodeURIComponent(opId)}`;
+  }
   try {
     // Inject versioning fields into the JSON body.
     let body = fetchInit.body;
@@ -139,13 +264,14 @@ export async function apiWrite<T = any>(
       try {
         const parsed = JSON.parse(body);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          if (expectedVersion !== undefined && parsed.expectedVersion === undefined) {
-            parsed.expectedVersion = expectedVersion;
+          if (versionToSend !== undefined && parsed.expectedVersion === undefined) {
+            parsed.expectedVersion = versionToSend;
           }
           if (!parsed.operationId) {
             parsed.operationId = opId;
           }
           body = JSON.stringify(parsed);
+          sentBody = parsed;
         }
       } catch {
         // Not JSON — send as-is; server will handle missing fields.
@@ -154,7 +280,7 @@ export async function apiWrite<T = any>(
     if (!headers.has('Content-Type') && typeof body === 'string') {
       headers.set('Content-Type', 'application/json');
     }
-    res = await apiFetch(input, { ...fetchInit, body, headers });
+    res = await apiFetch(url, { ...fetchInit, body, headers });
   } catch {
     return {
       ok: false,
@@ -171,6 +297,22 @@ export async function apiWrite<T = any>(
   const body = (data || {}) as Record<string, any>;
   const code = typeof body.code === 'string' ? body.code : undefined;
   const serverMessage = typeof body.error === 'string' ? body.error : undefined;
+  // Stale client: the write was rejected safely. Preserve the user's input
+  // so the required refresh does not silently discard it.
+  if (res.status === 428 && draft) {
+    try {
+      saveStaleDraft({
+        key: draft.key,
+        label: draft.label,
+        endpoint: input,
+        method,
+        body: sentBody !== undefined ? sentBody : draft.data(),
+        savedAt: new Date().toISOString(),
+      });
+    } catch {
+      // ignore — the form state in memory is still intact
+    }
+  }
   return {
     ok: false,
     status: res.status,

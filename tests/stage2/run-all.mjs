@@ -41,6 +41,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
   const ctx = {
     baseUrl,
     ...extraCtx,
+    authHeaders,
     async getVersion() {
       const r = await fetch(`${baseUrl}/api/__test__/firestore-doc`, { headers: authHeaders });
       const j = await r.json();
@@ -79,6 +80,9 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-13-noop-detection.mjs')).default,
     (await import('./test-14-document-size-guard.mjs')).default,
     (await import('./test-15-frontend-smoke.mjs')).default,
+    (await import('./test-16-scheduled-reset-broadcast.mjs')).default,
+    (await import('./test-17-idempotency-op-scoping.mjs')).default,
+    (await import('./test-18-isolated-restore.mjs')).default,
   ];
 
   const results = [];

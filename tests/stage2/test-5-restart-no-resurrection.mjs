@@ -56,7 +56,8 @@ export default {
     const apiTask = (api.json.tasks || []).find((t) => t.id === committedId);
     if (!apiTask) throw new Error('committed task missing from API after restart');
 
-    await ctx.api('DELETE', `/api/tasks/${committedId}`, {});
+    const vDel = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${committedId}`, { expectedVersion: vDel });
 
     return `committed task survived, ghost write absent, version stable at ${vAfter}`;
   },

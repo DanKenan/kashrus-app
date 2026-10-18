@@ -1,11 +1,17 @@
 /**
- * Test 2: Two simultaneous updates to DIFFERENT tasks → both succeed, no data loss.
- * Mergeable writes must both commit (via transaction retry on version conflict).
+ * Test 2: Two simultaneous updates to DIFFERENT tasks with the same version.
+ *
+ * Under the strict version contract, the client's version must match the
+ * server's current version exactly. Two concurrent writes race: the first
+ * commits, the second finds the version moved and gets 409 VERSION_CONFLICT
+ * (not a silent overwrite, not a silent drop — a clear, retryable error).
+ * The loser refreshes, retries with the fresh version, and its change lands.
+ * Nothing is lost; nothing is silently overwritten.
  */
 export default {
-  name: 'Test 2: Concurrent writes to different tasks both succeed',
+  name: 'Test 2: Concurrent writes to different tasks — one wins, loser retries cleanly',
   whatItProves:
-    'Mergeable concurrent writes (different tasks) both succeed. Transaction retry re-applies on fresh data; nothing is lost.',
+    'The strict version gate turns a concurrent race into a clear 409 (never a silent overwrite). The loser refreshes and retries with the fresh version; both changes land, no data loss.',
 
   async run(baseUrl, ctx) {
     const venueId = 'venue-crown-market';
@@ -24,20 +30,43 @@ export default {
     const idB = await mk('Stage2 Test2 Task B');
     const v0 = await ctx.getVersion();
 
-    // Fire two updates simultaneously (no expectedVersion → server uses fresh read).
+    // Fire two updates simultaneously, both with the version they saw (v0).
+    // Exactly one must win; the other must get 409 (strict gate).
     const [rA, rB] = await Promise.all([
       ctx.api('PUT', `/api/tasks/${idA}`, {
         title: 'Stage2 Test2 Task A — updated',
         createdByEmail: 'kenan@hartfordkashrut.org',
+        expectedVersion: v0,
       }),
       ctx.api('PUT', `/api/tasks/${idB}`, {
         title: 'Stage2 Test2 Task B — updated',
         createdByEmail: 'kenan@hartfordkashrut.org',
+        expectedVersion: v0,
       }),
     ]);
 
-    if (rA.status !== 200) throw new Error(`update A failed: ${rA.status} ${JSON.stringify(rA.json)}`);
-    if (rB.status !== 200) throw new Error(`update B failed: ${rB.status} ${JSON.stringify(rB.json)}`);
+    const statuses = [rA.status, rB.status].sort();
+    if (!(statuses[0] === 200 && statuses[1] === 409)) {
+      throw new Error(
+        `expected one 200 and one 409, got ${rA.status} and ${rB.status}: ` +
+        JSON.stringify([rA.json, rB.json])
+      );
+    }
+    const loser = rA.status === 409 ? { id: idA, title: 'Stage2 Test2 Task A — updated' } : { id: idB, title: 'Stage2 Test2 Task B — updated' };
+    const loserRes = rA.status === 409 ? rA : rB;
+    if (loserRes.json.code !== 'VERSION_CONFLICT') {
+      throw new Error(`loser should get VERSION_CONFLICT, got ${JSON.stringify(loserRes.json)}`);
+    }
+
+    // The loser refreshes (reads the new version) and retries — its change lands.
+    const v1 = await ctx.getVersion();
+    if (v1 !== v0 + 1) throw new Error(`expected version ${v0 + 1} after one commit, got ${v1}`);
+    const retry = await ctx.api('PUT', `/api/tasks/${loser.id}`, {
+      title: loser.title,
+      createdByEmail: 'kenan@hartfordkashrut.org',
+      expectedVersion: v1,
+    });
+    if (retry.status !== 200) throw new Error(`retry failed: ${retry.status} ${JSON.stringify(retry.json)}`);
 
     // Both changes must be present in Firestore.
     const doc = await ctx.getDoc();
@@ -46,13 +75,15 @@ export default {
     if (tA.title !== 'Stage2 Test2 Task A — updated') throw new Error('task A update lost');
     if (tB.title !== 'Stage2 Test2 Task B — updated') throw new Error('task B update lost');
 
-    // Version must have incremented by at least 2 (no lost writes).
-    const v1 = await ctx.getVersion();
-    if (v1 < v0 + 2) throw new Error(`expected version >= ${v0 + 2}, got ${v1}`);
+    // Version advanced by exactly 2 (two commits, no lost writes).
+    const v2 = await ctx.getVersion();
+    if (v2 !== v0 + 2) throw new Error(`expected version ${v0 + 2}, got ${v2}`);
 
-    await ctx.api('DELETE', `/api/tasks/${idA}`, {});
-    await ctx.api('DELETE', `/api/tasks/${idB}`, {});
+    const vDel1 = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${idA}`, { expectedVersion: vDel1 });
+    const vDel2 = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${idB}`, { expectedVersion: vDel2 });
 
-    return `both updates committed, version ${v0} → ${v1}, no data loss`;
+    return `race → one 200 + one 409 VERSION_CONFLICT; loser retried at v${v1} → 200; both changes present, version ${v0} → ${v2}`;
   },
 };

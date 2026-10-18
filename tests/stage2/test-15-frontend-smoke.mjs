@@ -93,11 +93,13 @@ export default {
     if (v2 !== v1) throw new Error(`version moved on idempotent retry: ${v1} -> ${v2}`);
 
     // --- 4. Stale edit: A reads version, B updates, A writes with old version → 409 ---
+    // (Version contract: B's update must carry the version it saw.)
     const vA = await ctx.getVersion();
     const bUpdate = await ctx.api('PUT', `/api/tasks/${task1.id}`, {
       title: `${title} — client B edit`,
       createdByEmail: ADMIN_EMAIL,
       userEmail: ADMIN_EMAIL,
+      expectedVersion: vA,
     });
     if (bUpdate.status !== 200) throw new Error(`client B update failed: ${bUpdate.status}`);
     const stale = await authed('PUT', `/api/tasks/${task1.id}`, {
@@ -121,11 +123,44 @@ export default {
       throw new Error('stale write corrupted the task');
     }
 
-    await authed('DELETE', `/api/tasks/${task1.id}`, {});
+    // --- 5. Stale client: PUT with NO version at all → 428 STALE_CLIENT ---
+    // (Simulates an old cached PWA client from before the version contract.)
+    // The write must be rejected safely — never silently applied.
+    const noVersion = await authed('PUT', `/api/tasks/${task1.id}`, {
+      title: `${title} — version-less edit`,
+      createdByEmail: ADMIN_EMAIL,
+      userEmail: ADMIN_EMAIL,
+    });
+    if (noVersion.status !== 428) {
+      throw new Error(`version-less edit should be 428, got ${noVersion.status}: ${JSON.stringify(noVersion.json)}`);
+    }
+    if (noVersion.json.code !== 'STALE_CLIENT') {
+      throw new Error(`expected code STALE_CLIENT, got ${JSON.stringify(noVersion.json)}`);
+    }
+    const durable2 = (await ctx.getDoc()).tasks.find((t) => t.id === task1.id);
+    if (durable2.title !== `${title} — client B edit`) {
+      throw new Error('version-less write corrupted the task');
+    }
+
+    // --- 6. Version header: every API response carries X-State-Version ---
+    const hRes = await fetch(`${baseUrl}/api/tasks?venueId=${venueId}`, {
+      headers: { Authorization: `Bearer ${loginJson.token}` },
+    });
+    const hv = hRes.headers.get('X-State-Version');
+    if (hv === null || !/^\d+$/.test(hv)) {
+      throw new Error(`X-State-Version header missing/malformed: ${hv}`);
+    }
+    if (Number(hv) !== (await ctx.getVersion())) {
+      throw new Error(`X-State-Version ${hv} != document version ${await ctx.getVersion()}`);
+    }
+
+    const vDel = await ctx.getVersion();
+    await authed('DELETE', `/api/tasks/${task1.id}`, { expectedVersion: vDel });
 
     return (
       `PWA flows verified: login ok; operationId retry → cached task ${task1.id} (no dupe, version ${v1}); ` +
-      `stale edit → 409 VERSION_CONFLICT (currentVersion ${stale.json.currentVersion}). ` +
+      `stale edit → 409 VERSION_CONFLICT (currentVersion ${stale.json.currentVersion}); ` +
+      `version-less edit → 428 STALE_CLIENT (safely rejected); X-State-Version header verified. ` +
       `503-simulation and optimistic-rollback UI behavior documented as manual tests (see file header).`
     );
   },

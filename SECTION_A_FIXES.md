@@ -324,3 +324,112 @@ All changes uncommitted, for review. `npx tsc --noEmit` clean. `npm run test:sta
 Applied `requireAdmin` check to `/api/admin/export` on the PR branch (matches hotfix/admin-export-auth PR #2).
 
 **Tests:** 15/15 pass. `npx tsc --noEmit` clean.
+
+---
+
+## Round 4 (fourth review) — release/cutover blockers
+
+### R4-1. Zero-traffic deploy workflow (actual code change, not just docs)
+**Was wrong:** CUTOVER.md told the operator to merge, let the ordinary deploy
+take 100% traffic, then pin traffic back — a window where old unversioned and
+new transactional writers serve simultaneously.
+**Changed:** `.github/workflows/deploy.yml` now does staged deploys by
+default: the Python spec-rewrite pins 100% of traffic to the currently-serving
+revision, so `gcloud run services replace` creates the new revision with **0%
+traffic**. Handles both traffic shapes (`revisionName` entries and
+`latestRevision: true` via `status.latestReadyRevisionName`). Set the repo
+Actions variable `STAGED_DEPLOY=false` to restore ordinary push-to-deploy
+after the migration. `CUTOVER.md` rewritten to match: deploy → verify new
+revision on its direct URL → drain → atomic `update-traffic` cutover → verify
+0% on old → never revert to pre-Stage-2 once it has committed (forward-fix
+only). Traffic-pinning logic unit-tested locally against simulated
+describe-JSON (4 shapes, all pass); gcloud itself unavailable in this sandbox.
+
+### R4-2. Scheduled reset broadcast per-agency scoping
+**Was wrong:** `executeDailyReset()` returned only `snapshots[0]` and the
+broadcast sent it to every agency — the scheduled (unscoped) reset leaked
+agency A's snapshot to agency B.
+**Changed:** the transaction now returns the full `snapshots` array (each
+tagged `agencyId`); the broadcast filters per agency (`snapshots`, `tasks`,
+`historyLogs` all agency-scoped). Manual endpoint takes `snapshots[0]` for
+its single-snapshot response (unchanged frontend contract). New test-only
+endpoint `/api/__test__/scheduled-reset` runs the exact scheduled code path.
+**Test 16** (new): real WebSocket clients for agency-hkc and agency-b;
+scheduled reset fires; asserts each client receives ONLY its agency's
+snapshots/tasks/history and no cross-agency notes leakage. PASSES.
+
+### R4-3. Stale-client version contract (end to end)
+**Was wrong:** `apiWrite()` accepted `expectedVersion` but no caller sent it;
+old cached clients sent nothing and would have been silently accepted.
+**Changed:**
+- Server: `X-State-Version` header on every `/api` response; `version` in
+  every WebSocket envelope (incl. INITIAL_STATE).
+- Server: `requireVersion: true` on all update/delete handlers (12 bespoke
+  labels + `crudUpdate`/`crudDelete`). Missing version → **428 STALE_CLIENT**
+  ("please refresh — your input is preserved"), never a silent apply.
+  Exemptions (documented in code): `task-checkin` (append to fresh array —
+  provably safe under concurrency) and `toggle-event-task` (has its own
+  entity-level baseline guard).
+- New `StaleClientError` → 428. (Also fixed: `PayloadMismatchError` now
+  propagates untouched from transactions instead of degrading to 503.)
+- Frontend (`src/lib/api.ts`): tracks `lastKnownVersion` from headers + WS
+  messages (`observeVersion`); `apiWrite()` auto-injects it for
+  PUT/PATCH/DELETE; `describeWriteError` handles 428; stale-draft
+  save/restore via localStorage (`shutfey_stale_drafts`).
+- Frontend (`src/App.tsx`): WS handler observes versions; stale-draft banner
+  with Re-apply (resends with fresh version) / Discard; drafts wired into
+  task-notes and task-edit writes (check-in/handoff forms already keep input
+  on failure; deletes need no drafts).
+- **Design decision (strict gate):** the version check is strict equality.
+  Concurrent fresh writes race: one commits, the other gets 409
+  VERSION_CONFLICT (clear, retryable — never silent). Tests 2 and 12 updated
+  to assert this contract (winner + 409 loser + clean retry, both changes land).
+- **Test 15** extended: version-less PUT → 428 STALE_CLIENT (rejected, data
+  intact); `X-State-Version` header verified present and correct.
+
+### R4-4. Disaster recovery correctness
+**Was wrong:** restore script used `admin.initializeApp({ databaseId })`
+(which firebase-admin v14 does not support) and implied `admin.firestore()`
+default-DB usage.
+**Changed:** script now uses the explicit, supported
+`getFirestore(app, DATABASE_ID)` with the named database
+(`ai-studio-workerscollabora-faedc6a8-580b-463e-86b2-c3e3048ed73d`).
+`BACKUP_RESTORE.md`: exact in/out inventory verified against code
+(passwords/hashes/PINs/jwtSecret/vapidKeys stripped; resetPepper included;
+pushSubscriptions ARE included — corrected the old "cannot be restored"
+claim); new "complete backup" section (JSON export + separate secret
+inventory + optional GCS `gcloud firestore export`); test-18 result recorded;
+production verification checklist for Don (counts, pepper env var, rules).
+**Test 18** (new): export → wipe → restore cycle. Mock mode: structural
+validation (required fields, no credential leakage). Emulator (CI): full
+cycle via Admin SDK with explicit database ID — counts, version, and canary
+identical after restore; post-restore write succeeds. PASSES.
+
+### R4-5. Idempotency operation scoping
+**Was wrong:** only user + operationId + payload hash were checked.
+**Changed:** records now store `opType` (label), `opMethod`, `opTarget`
+(entity type + id, derived from the request path). Mismatches → 409
+PAYLOAD_MISMATCH (not the wrong cached result). Applied to both the
+transactional path and the dev-fallback map.
+**Test 17** (new): same operationId for create→update → 409; same
+operationId + identical payload for task A → task B → 409 (no cross-apply);
+genuine retry (same op/target/payload) → 200 cached. PASSES.
+
+### R4-6. Release preparation
+- `PWA_UPDATE.md` rewritten to the ACTUAL verified behavior (428 flow, draft
+  banner, what's verified in code/tests vs. what needs Don's device check).
+- `CUTOVER.md` rewritten for the staged workflow (see R4-1).
+- `BACKUP_RESTORE.md` corrected (see R4-4).
+- New `MANUAL_VERIFICATION.md`: exact commands for maintenance mode
+  (enable/verify/disable), PWA device checks, restart checks, and Don's
+  pre-cutover production checklist (Firestore rules, pepper env var, PIN
+  rotation, JWT rotation decision, git history, fresh backup).
+- **PR #2 merge conflict note:** PR #2 (`hotfix/admin-export-auth`) and this
+  PR both touch `/api/admin/export`. PR #2 adds an `(req as any).authUser`
+  role check; this PR uses `requireAdmin(req, res)` (strictly stronger —
+  same 403 semantics via the shared helper). When PR #2 merges first, the
+  merge of main into this branch will conflict on those lines: **keep this
+  PR's `requireAdmin` line** (it subsumes PR #2's fix).
+
+**Tests:** 18/18 pass (mock mode locally; real-emulator run in CI).
+`npx tsc --noEmit` clean.

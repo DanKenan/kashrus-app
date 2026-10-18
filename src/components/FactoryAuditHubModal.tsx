@@ -38,7 +38,7 @@ import { AirtableConfigModal } from './AirtableConfigModal';
 import { AddDiscrepancyModal } from './AddDiscrepancyModal';
 import { SubmitAuditReportModal } from './SubmitAuditReportModal';
 import { HechsherCheckModal } from './HechsherCheckModal';
-import { apiFetch, apiWrite } from '../lib/api';
+import { apiFetch, apiWrite, getLastKnownVersion } from '../lib/api';
 
 interface FactoryAuditHubModalProps {
   isOpen: boolean;
@@ -179,6 +179,9 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
         venueId: currentVenue.id,
         userEmail: currentUser?.email,
       }),
+      // POST update endpoint: the version contract requires the last-seen
+      // version (apiWrite only auto-injects for PUT/PATCH/DELETE).
+      expectedVersion: getLastKnownVersion(),
     });
     if (!result.ok) {
       throw new Error(result.error || 'Failed to update Airtable settings');

@@ -12,8 +12,9 @@
  * resolving and the cache being updated. This test therefore proves the
  * INVARIANT the guard protects, under the exact conditions that would
  * expose a broken guard (two concurrent commits racing):
- *   1. Two concurrent writes to different tasks (Test 2 pattern) — the
- *      second may commit first at the Firestore layer.
+ *   1. Two concurrent writes to different tasks (Test 2 pattern) — under the
+ *      strict version contract one wins immediately and the other gets 409,
+ *      then retries with the fresh version. Both commits land.
  *   2. Final version advanced by exactly the number of commits.
  *   3. No write lost: both updates present in durable Firestore state.
  *   4. KEY ASSERTION: the in-memory cache (observed via GET /api/tasks,
@@ -52,22 +53,38 @@ export default {
     const idB = await mk(`Stage2 Test12 Task B ${ts}`);
     const v0 = await ctx.getVersion();
 
-    // Fire two updates simultaneously — at the Firestore layer either may
-    // commit first; both must survive and the cache must end up consistent.
+    // Fire two updates simultaneously — under the strict version contract,
+    // exactly one wins immediately; the loser gets 409 VERSION_CONFLICT,
+    // refreshes, and retries. Both commits must land (no lost writes) and
+    // the cache must end up consistent.
     const titleA = `Stage2 Test12 Task A ${ts} — updated`;
     const titleB = `Stage2 Test12 Task B ${ts} — updated`;
     const [rA, rB] = await Promise.all([
       ctx.api('PUT', `/api/tasks/${idA}`, {
         title: titleA,
         createdByEmail: 'kenan@hartfordkashrut.org',
+        expectedVersion: v0,
       }),
       ctx.api('PUT', `/api/tasks/${idB}`, {
         title: titleB,
         createdByEmail: 'kenan@hartfordkashrut.org',
+        expectedVersion: v0,
       }),
     ]);
-    if (rA.status !== 200) throw new Error(`update A failed: ${rA.status} ${JSON.stringify(rA.json)}`);
-    if (rB.status !== 200) throw new Error(`update B failed: ${rB.status} ${JSON.stringify(rB.json)}`);
+    const statuses = [rA.status, rB.status].sort();
+    if (!(statuses[0] === 200 && statuses[1] === 409)) {
+      throw new Error(`expected one 200 and one 409, got ${rA.status} and ${rB.status}`);
+    }
+    // Loser retries with the fresh version.
+    const loserId = rA.status === 409 ? idA : idB;
+    const loserTitle = rA.status === 409 ? titleA : titleB;
+    const vRetry = await ctx.getVersion();
+    const rRetry = await ctx.api('PUT', `/api/tasks/${loserId}`, {
+      title: loserTitle,
+      createdByEmail: 'kenan@hartfordkashrut.org',
+      expectedVersion: vRetry,
+    });
+    if (rRetry.status !== 200) throw new Error(`retry failed: ${rRetry.status} ${JSON.stringify(rRetry.json)}`);
 
     // Version advanced by at least 2 (no lost writes).
     const v1 = await ctx.getVersion();
@@ -102,9 +119,10 @@ export default {
       }
     }
 
-    await ctx.api('DELETE', `/api/tasks/${idA}`, {});
-    await ctx.api('DELETE', `/api/tasks/${idB}`, {});
-    await ctx.api('DELETE', `/api/venues/${venueId}`, {});
+    for (const [method, path] of [['DELETE', `/api/tasks/${idA}`], ['DELETE', `/api/tasks/${idB}`], ['DELETE', `/api/venues/${venueId}`]]) {
+      const v = await ctx.getVersion();
+      await ctx.api(method, path, { expectedVersion: v });
+    }
 
     return `concurrent commits consistent: version ${v0}→${v1}, cache == durable on all raced fields`;
   },

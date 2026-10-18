@@ -136,10 +136,13 @@ export default {
     const taskId = (tr.json.task || tr.json).id;
 
     // Complete the task so the reset has something to clear.
+    // (Version contract: updates must carry the last-seen version.)
+    const vTask = await ctx.getVersion();
     const done = await ctx.api('PUT', `/api/tasks/${taskId}`, {
       isCompleted: true,
       notes: 'reset-me notes',
       userEmail: ADMIN_EMAIL,
+      expectedVersion: vTask,
     });
     if (done.status !== 200) throw new Error(`completing task failed: ${done.status}`);
 
@@ -297,9 +300,28 @@ export default {
     await ctx.restartServer();
 
     // The admin token survives the restart (JWT secret is persisted in the doc).
-    const docR = await ctx.getDoc();
-    if (!docR.venues.some((v) => v.id === bVenueId)) {
-      throw new Error('agency-B venue not hydrated after restart');
+    // Robustness: the restart is racy (an orphaned server can keep the port,
+    // so the "new" server is actually the old one without the fixture). Poll
+    // for the fixture; if it never appears, kill + restart once more before
+    // failing. (Round 4: this race caused ~50% flakes in full-suite runs.)
+    let docR = null;
+    let hydrated = false;
+    for (let attempt = 1; attempt <= 2 && !hydrated; attempt++) {
+      for (let i = 0; i < 20 && !hydrated; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        try {
+          docR = await ctx.getDoc();
+          hydrated = !!(docR && docR.venues.some((v) => v.id === bVenueId));
+        } catch {}
+      }
+      if (!hydrated && attempt === 1) {
+        console.log('  [test10] fixture not hydrated after restart — retrying kill+restart once');
+        killPortHolders(port);
+        await ctx.restartServer();
+      }
+    }
+    if (!hydrated) {
+      throw new Error('agency-B venue not hydrated after restart (2 attempts)');
     }
     const bTaskBefore = docR.tasks.find((x) => x.id === bTaskId);
     if (!bTaskBefore || bTaskBefore.isCompleted !== true) {
@@ -332,8 +354,10 @@ export default {
     // Cleanup: remove our task + venue (agency-hkc). The agency-B fixtures
     // cannot be deleted by this admin (cross-agency) — they are namespaced
     // and harmless to later tests.
-    await ctx.api('DELETE', `/api/tasks/${taskId}`, {});
-    await ctx.api('DELETE', `/api/venues/${venueId}`, {});
+    const vDel1 = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${taskId}`, { expectedVersion: vDel1 });
+    const vDel2 = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/venues/${venueId}`, { expectedVersion: vDel2 });
 
     return details.join('; ');
   },

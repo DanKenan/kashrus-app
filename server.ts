@@ -309,6 +309,27 @@ app.set('trust proxy', 1);
 
 app.use(express.json({ limit: '2mb' }));
 
+// Stage 2 version contract: every /api response carries the current document
+// version in the X-State-Version header. Clients track it (see
+// src/lib/api.ts) and send it back as expectedVersion on updates, so a stale
+// screen can never silently overwrite newer data. (stateVersion is declared
+// further below at module level; this closure only reads it per-request,
+// long after module load.)
+app.use('/api', (_req, res, next) => {
+  const origJson = res.json.bind(res);
+  (res as any).json = (body: any) => {
+    try {
+      if (typeof stateVersion === 'number') {
+        res.setHeader('X-State-Version', String(stateVersion));
+      }
+    } catch {
+      /* header best-effort; never break the response */
+    }
+    return origJson(body);
+  };
+  next();
+});
+
 // ---------------------------------------------------------------------------
 // Request authentication + custom-domain agency resolution.
 // Every /api route except the public ones below requires a signed session
@@ -1740,6 +1761,21 @@ class PayloadMismatchError extends Error {
   }
 }
 
+/**
+ * The client sent an update without the version it rendered (expectedVersion).
+ * This means the client is too old to participate in the version contract
+ * (cached PWA from before Stage 2) or never loaded state — accepting the
+ * write could silently clobber newer data. Fail safe: 428 tells the client
+ * to refresh the app (preserving the user's draft) and retry.
+ */
+class StaleClientError extends Error {
+  code = 'STALE_CLIENT';
+  constructor() {
+    super('Your app is out of date. Please refresh the app to get the latest data — your unsaved input is preserved — then try again.');
+    this.name = 'StaleClientError';
+  }
+}
+
 class FirestoreUnavailableError extends Error {
   code = 'FIRESTORE_UNAVAILABLE';
   constructor(message: string) {
@@ -1881,6 +1917,22 @@ interface CommitOptions {
   maxRetries?: number;
   /** Human-readable label for logs. */
   label?: string;
+  /**
+   * When true, the write is an update to existing data and the client MUST
+   * send expectedVersion. If it doesn't (old cached PWA client, or a client
+   * that never loaded state), the server rejects with 428 STALE_CLIENT
+   * instead of accepting a potentially stale write. Creates leave this false.
+   */
+  requireVersion?: boolean;
+  /**
+   * Operation type (e.g. 'update-task'), HTTP method, and target
+   * (e.g. 'tasks:abc123') for idempotency scoping. Stored on the idempotency
+   * record; a retry with the same operationId but a different type/method/
+   * target is rejected with 409 (not treated as idempotent).
+   */
+  opType?: string;
+  opMethod?: string;
+  opTarget?: string;
 }
 
 interface CommitResult {
@@ -1963,6 +2015,18 @@ async function commitState(
       const hit = devIdempotencyFallback.get(idemKey);
       if (hit) {
         if (hit.expiresAt > Date.now()) {
+          if (options.payloadHash && (hit as any).payloadHash && options.payloadHash !== (hit as any).payloadHash) {
+            throw new PayloadMismatchError();
+          }
+          if (options.opType && (hit as any).opType && options.opType !== (hit as any).opType) {
+            throw new PayloadMismatchError();
+          }
+          if (options.opMethod && (hit as any).opMethod && options.opMethod !== (hit as any).opMethod) {
+            throw new PayloadMismatchError();
+          }
+          if (options.opTarget && (hit as any).opTarget && options.opTarget !== (hit as any).opTarget) {
+            throw new PayloadMismatchError();
+          }
           throw new DuplicateOperationError({ result: hit.result, version: hit.version });
         }
         devIdempotencyFallback.delete(idemKey);
@@ -1992,7 +2056,11 @@ async function commitState(
         result: sanitizeForIdempotency(result.result),
         version: result.version,
         expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
-      });
+        payloadHash: options.payloadHash || null,
+        opType: options.opType || null,
+        opMethod: options.opMethod || null,
+        opTarget: options.opTarget || null,
+      } as any);
     }
     return result;
   }
@@ -2032,6 +2100,19 @@ async function commitState(
             // or payload. This is NOT a retry — reject it. Returning the
             // cached result would apply the wrong operation's outcome.
             if (options.payloadHash && hit.payloadHash && options.payloadHash !== hit.payloadHash) {
+              throw new PayloadMismatchError();
+            }
+            // Operation-scope mismatch: same operationId AND same payload,
+            // but a different action (type), HTTP method, or target entity.
+            // E.g. the ID was reused for update-task vs delete-task, or for
+            // task A vs task B. Not a retry — reject it.
+            if (options.opType && hit.opType && options.opType !== hit.opType) {
+              throw new PayloadMismatchError();
+            }
+            if (options.opMethod && hit.opMethod && options.opMethod !== hit.opMethod) {
+              throw new PayloadMismatchError();
+            }
+            if (options.opTarget && hit.opTarget && options.opTarget !== hit.opTarget) {
               throw new PayloadMismatchError();
             }
             throw new DuplicateOperationError({ result: hit.result, version: hit.version });
@@ -2091,6 +2172,9 @@ async function commitState(
               userId: options.idempotencyUserId || null,
               operation: label,
               payloadHash: options.payloadHash || null,
+              opType: options.opType || null,
+              opMethod: options.opMethod || null,
+              opTarget: options.opTarget || null,
               result: sanitizeForIdempotency(outcome.result),
               createdAt: now,
               expiresAt: now + IDEMPOTENCY_TTL_MS,
@@ -2137,6 +2221,10 @@ async function commitState(
       // the transaction — it must propagate untouched (the record is already
       // stored; a retry will keep returning the cached result).
       if (err instanceof DuplicateOperationError) throw err;
+      // PayloadMismatchError: the operationId was reused for a different
+      // action. Never retry — retrying would just re-detect the mismatch.
+      // Propagate untouched so commitOrRespond maps it to 409.
+      if (err instanceof PayloadMismatchError) throw err;
       // RateLimitError: never retry — the limit is real, retrying would just
       // burn the client's quota. Surface 429.
       if (err instanceof RateLimitError) {
@@ -2218,9 +2306,23 @@ async function commitOrRespond(
   const payloadHash = operationId
     ? crypto.createHash('sha256').update(JSON.stringify(payloadForHash)).digest('hex').slice(0, 16)
     : undefined;
+  // Idempotency scoping: the operation type (label), HTTP method, and target
+  // (derived from the request path) are stored on the idempotency record so
+  // the same operationId can never return another action's cached result.
+  const opTarget = req.params && (req.params as any).id
+    ? `${req.path.split('/')[2] || 'unknown'}:${(req.params as any).id}`
+    : undefined;
 
+  // Version contract: updates to existing data MUST carry the version the
+  // client rendered. A client that sends no version is too old (cached PWA)
+  // or never loaded state — reject safely instead of risking a stale
+  // overwrite. 428 tells the client to refresh (keeping the user's draft).
+  // Thrown INSIDE the try so it maps to a 428 response, not a 500.
   try {
-    return await commitState(mutator, { ...options, expectedVersion, operationId, idempotencyKey, idempotencyUserId: authUserId, payloadHash });
+    if (options.requireVersion && expectedVersion === undefined) {
+      throw new StaleClientError();
+    }
+    return await commitState(mutator, { ...options, expectedVersion, operationId, idempotencyKey, idempotencyUserId: authUserId, payloadHash, opType: options.label, opMethod: req.method, opTarget });
   } catch (err: any) {
     // All error paths send the HTTP response and return null, so the caller's
     // `if (!committed) return;` guard works. (Returning the Express Response
@@ -2233,6 +2335,12 @@ async function commitOrRespond(
     }
     if (err instanceof PayloadMismatchError) {
       res.status(409).json({ error: err.message, code: 'PAYLOAD_MISMATCH' });
+      return null;
+    }
+    if (err instanceof StaleClientError) {
+      // 428 Precondition Required: the client must refresh and resend with
+      // the version it rendered. Never accept a version-less update.
+      res.status(428).json({ error: err.message, code: 'STALE_CLIENT' });
       return null;
     }
     if (err instanceof VersionConflictError) {
@@ -2286,6 +2394,12 @@ interface CrudHelperOptions {
   broadcastType?: string;
   getAgencyId?: (item: any) => string;
   getBroadcastPayload?: (item: any, result: any) => any;
+  /**
+   * Updates/deletes of existing entities require the client to send the
+   * version it rendered (expectedVersion). Always true for these helpers —
+   * they only ever mutate existing entities.
+   */
+  requireVersion?: boolean;
 }
 
 /**
@@ -2357,7 +2471,7 @@ async function crudUpdate(
       const newArr = arr.map((x) => (x && x.id === id ? outcome : x));
       return { doc: { ...freshDoc, [arrayKey]: newArr }, result: outcome };
     },
-    { label: opts.label }
+    { label: opts.label, requireVersion: true }
   );
   if (!committed) return false;
   const updated = committed.result;
@@ -2390,7 +2504,7 @@ async function crudDelete(
       const newArr = freshArr.filter((x) => !(x && x.id === id));
       return { doc: { ...freshDoc, [arrayKey]: newArr }, result: { success: true, deletedId: id, deleted: found } };
     },
-    { label: opts.label }
+    { label: opts.label, requireVersion: true }
   );
   if (!committed) return false;
   const result: any = committed.result;
@@ -2735,11 +2849,16 @@ function agencyStateFor(agencyId: string) {
 }
 
 function broadcast(type: string, payload: any, senderEmail?: string, agencyId?: string) {
+  // The envelope carries the current document version so clients can keep
+  // their last-known version fresh without polling (see src/lib/api.ts).
+  // Broadcasts are sent only after the commit hydrated the cache, so
+  // stateVersion is the version that produced this payload.
   const message = JSON.stringify({
     type,
     payload,
     timestamp: new Date().toISOString(),
     senderEmail,
+    version: typeof stateVersion === 'number' ? stateVersion : undefined,
   });
 
   for (const client of wss.clients) {
@@ -2782,6 +2901,7 @@ wss.on('connection', (ws, req) => {
         activeWorkersCount: activeSockets.size,
       },
       timestamp: new Date().toISOString(),
+      version: typeof stateVersion === 'number' ? stateVersion : undefined,
     })
   );
 
@@ -2943,6 +3063,11 @@ async function executeDailyReset(
         );
         // Scoped venue IDs for task filtering (null = all venues, system reset).
         const scopedVenueIds = scopeAgencyId ? new Set(targetVenues.map((v) => v.id)) : null;
+        // CORE FIX (round 4): the transaction result carries ALL snapshots
+        // (each tagged with its agencyId). The broadcast below selects the
+        // snapshots for each agency — never send agency A's snapshot to
+        // agency B. Previously this returned only snapshots[0], which leaked
+        // the first agency's snapshot to every agency on scheduled resets.
         return {
           doc: {
             ...freshDoc,
@@ -2950,7 +3075,7 @@ async function executeDailyReset(
             tasks: freshTasks.map((t) => resetTask(t, scopedVenueIds)),
             currentWorkDate: todayStr,
           },
-          result: snapshots[0] || null,
+          result: snapshots,
         };
       },
       { label: 'daily-reset', operationId: opts.operationId }
@@ -2961,20 +3086,22 @@ async function executeDailyReset(
   }
 
   // Broadcast per-agency ONLY after commit (in-memory cache is now fresh).
-  // AGENCY SCOPING: if this reset was scoped to one agency, only that agency
-  // gets the broadcast. Other agencies must not receive another agency's
-  // reset snapshot or task history.
+  // AGENCY SCOPING: each agency receives ONLY its own snapshots.
+  // committed.result is the full snapshots array (each tagged with agencyId);
+  // filter per agency so agency B never receives agency A's history/notes.
+  const allSnapshots: any[] = Array.isArray(committed.result) ? committed.result : [];
   const broadcastAgencies = scopeAgencyId
     ? agencies.filter((a: any) => a.id === scopeAgencyId)
     : agencies;
   for (const a of broadcastAgencies) {
     const aid = a.id;
+    const agencySnapshots = allSnapshots.filter((s: any) => (s.agencyId || 'agency-hkc') === aid);
     broadcast('DAILY_RESET', {
       venueId: targetVenueId || 'all',
       tasks: tasks.filter((t) => (t.agencyId || 'agency-hkc') === aid),
       historyLogs: historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === aid),
       currentWorkDate,
-      snapshot: committed.result,
+      snapshots: agencySnapshots,
     }, undefined, aid);
   }
 
@@ -3856,7 +3983,7 @@ app.put('/api/agencies/current', async (req, res) => {
       const newAgencies = freshAgencies.map((a) => (a.id === agencyId ? updated : a));
       return { doc: { ...freshDoc, agencies: newAgencies }, result: updated };
     },
-    { label: 'update-agency' }
+    { label: 'update-agency', requireVersion: true }
   );
   if (!committed) return;
   const updated = committed.result as Agency;
@@ -3938,24 +4065,52 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     }
   });
 
-  // TEST ONLY: injects venues/tasks directly into Firestore (for cross-agency
-  // test fixtures that can't be created via the scoped HTTP API).
-  // Used by test-10 to set up agency-B data before a restart.
+  // TEST ONLY: runs the exact scheduled-midnight code path
+  // (executeDailyReset with no agencyId — system operation across all
+  // agencies). First rolls currentWorkDate back one day so the rollover
+  // check genuinely fires (other tests may have already reset today).
+  // Used by test-16 to verify per-agency broadcast scoping of scheduled resets.
+  app.post('/api/__test__/scheduled-reset', async (req, res) => {
+    try {
+      const yesterday = new Date(Date.now() - 86400000)
+        .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      await commitState(
+        (freshDoc) => ({
+          doc: { ...freshDoc, currentWorkDate: yesterday },
+          result: { success: true },
+        }),
+        { label: 'test-rewind-work-date' }
+      );
+      const committed = await executeDailyReset(undefined, 'test-scheduled-reset');
+      res.json({ success: true, version: committed ? committed.version : null });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // TEST ONLY: injects venues/tasks/agencies/users directly into Firestore
+  // (for cross-agency test fixtures that can't be created via the scoped
+  // HTTP API). Used by test-10 and test-16.
   app.post('/api/__test__/inject-fixture', async (req, res) => {
-    const { venues = [], tasks = [] } = req.body || {};
+    const { venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [] } = req.body || {};
     try {
       await commitState(
         (freshDoc) => {
           const newVenues = [...(freshDoc.venues || []), ...venues];
           const newTasks = [...(freshDoc.tasks || []), ...tasks];
+          const mergedAgencies = [...(freshDoc.agencies || [])];
+          for (const a of newAgencies) {
+            if (!mergedAgencies.some((x: any) => x && x.id === a.id)) mergedAgencies.push(a);
+          }
+          const mergedUsers = [...(freshDoc.users || []), ...newUsers];
           return {
-            doc: { ...freshDoc, venues: newVenues, tasks: newTasks },
-            result: { injected: venues.length + tasks.length },
+            doc: { ...freshDoc, venues: newVenues, tasks: newTasks, agencies: mergedAgencies, users: mergedUsers },
+            result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length },
           };
         },
         { label: 'test-inject-fixture' }
       );
-      res.json({ success: true, injected: venues.length + tasks.length });
+      res.json({ success: true, injected: venues.length + tasks.length + newAgencies.length + newUsers.length });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
@@ -4179,7 +4334,7 @@ app.put('/api/venues/:id', async (req, res) => {
       const newVenues = freshVenues.map((v) => (v.id === id ? updated : v));
       return { doc: { ...freshDoc, venues: newVenues }, result: updated };
     },
-    { label: 'update-venue' }
+    { label: 'update-venue', requireVersion: true }
   );
   if (!committed) return;
   const updated = committed.result as Venue;
@@ -4225,7 +4380,7 @@ app.delete('/api/venues/:id', async (req, res) => {
         result: { success: true, deletedVenueId: id },
       };
     },
-    { label: 'delete-venue' }
+    { label: 'delete-venue', requireVersion: true }
   );
   if (!committed) return;
 
@@ -4619,7 +4774,7 @@ app.put('/api/tasks/:id', async (req, res) => {
       const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
       return { doc: { ...freshDoc, tasks: newTasks }, result: updated };
     },
-    { label: 'update-task' }
+    { label: 'update-task', requireVersion: true }
   );
   if (!committed) return;
 
@@ -4680,7 +4835,7 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
       const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
       return { doc: { ...freshDoc, tasks: newTasks }, result: updated };
     },
-    { label: 'delete-check-in' }
+    { label: 'delete-check-in', requireVersion: true }
   );
   if (!committed) return;
   const updated = committed.result as TaskItem;
@@ -4751,6 +4906,9 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
       const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
       return { doc: { ...freshDoc, tasks: newTasks }, result: updated };
     },
+    // NOTE: no requireVersion — check-ins APPEND to the fresh checkIns array
+    // (never overwrite user content), so concurrent check-ins are safe and a
+    // version gate would only cause spurious 409s on the primary workflow.
     { label: 'task-checkin' }
   );
   if (!committed) return;
@@ -4782,7 +4940,7 @@ app.delete('/api/tasks/:id', async (req, res) => {
       const newTasks = freshTasks.filter((t) => t.id !== id);
       return { doc: { ...freshDoc, tasks: newTasks }, result: { success: true, deletedId: id } };
     },
-    { label: 'delete-task' }
+    { label: 'delete-task', requireVersion: true }
   );
   if (!committed) return;
 
@@ -4814,11 +4972,14 @@ app.post('/api/reset-daily', async (req, res) => {
       agencyId,
     });
     // In-memory state was hydrated by commitState — read tasks AFTER the await.
-    // Scoped to caller's agency only.
+    // Scoped to caller's agency only. executeDailyReset returns the snapshots
+    // array; the frontend expects a single snapshot, so send the first
+    // (manual resets are agency-scoped, all snapshots are the caller's own).
     const venueTasks = tasks.filter(
       (t) => (!venueId || t.venueId === venueId) && (t.agencyId || 'agency-hkc') === agencyId
     );
-    res.json({ success: true, snapshot: outcome ? outcome.result : null, tasks: venueTasks });
+    const snaps = outcome && Array.isArray(outcome.result) ? outcome.result : [];
+    res.json({ success: true, snapshot: snaps[0] ?? null, tasks: venueTasks });
   } catch (err: any) {
     // Duplicate operation (idempotent retry): return the cached result with
     // 200, not 503. The reset already happened — the client just needs the
@@ -4827,7 +4988,9 @@ app.post('/api/reset-daily', async (req, res) => {
       const venueTasks = tasks.filter(
         (t) => (!venueId || t.venueId === venueId) && (t.agencyId || 'agency-hkc') === agencyId
       );
-      return res.json({ success: true, snapshot: err.cachedResult?.result ?? null, tasks: venueTasks, duplicate: true });
+      // cachedResult.result is the snapshots array (see executeDailyReset).
+      const cachedSnaps = Array.isArray(err.cachedResult?.result) ? err.cachedResult.result : [];
+      return res.json({ success: true, snapshot: cachedSnaps[0] ?? null, tasks: venueTasks, duplicate: true });
     }
     res.status(503).json({ error: 'Daily reset failed: ' + (err?.message || 'unknown error') });
   }
@@ -5339,7 +5502,7 @@ app.put('/api/events/:id', async (req, res) => {
       const newEvents = freshEvents.map((e) => (e.id === id ? updated : e));
       return { doc: { ...freshDoc, events: newEvents }, result: updated };
     },
-    { label: 'update-event' }
+    { label: 'update-event', requireVersion: true }
   );
   if (!committed) return;
   const updated = committed.result as KosherEventItem;
@@ -5424,6 +5587,9 @@ app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
       const newEvents = freshEvents.map((e) => (e.id === id ? updatedEvent : e));
       return { doc: { ...freshDoc, events: newEvents }, result: { event: updatedEvent, task: updatedTask } };
     },
+    // NOTE: no requireVersion — the mutator has its own entity-level stale
+    // guard (baselineCompleted vs fresh), which is the precise check for a
+    // toggle. A document-version gate would be redundant.
     { label: 'toggle-event-task' }
   );
   if (!committed) return;
@@ -5643,7 +5809,7 @@ app.put('/api/users/:id', async (req, res) => {
       const newUsers = freshUsers.map((u) => (u.id === id ? updated : u));
       return { doc: { ...freshDoc, users: newUsers }, result: updated };
     },
-    { label: 'update-user' }
+    { label: 'update-user', requireVersion: true }
   );
   if (!committed) return;
   const updated = committed.result as UserProfile;
@@ -5707,7 +5873,7 @@ app.delete('/api/users/:id', async (req, res) => {
         result: { success: true, deletedId: id },
       };
     },
-    { label: 'delete-user' }
+    { label: 'delete-user', requireVersion: true }
   );
   if (!committed) return;
   broadcast(
@@ -6225,7 +6391,7 @@ app.post('/api/airtable/config', async (req, res) => {
         : [...arr, updatedConfig];
       return { doc: { ...freshDoc, airtableConfigs: newArr }, result: updatedConfig };
     },
-    { label: 'save-airtable-config' }
+    { label: 'save-airtable-config', requireVersion: true }
   );
   if (!committed) return;
   const updatedConfig = committed.result as AirtableConfigItem;

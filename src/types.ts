@@ -305,5 +305,7 @@ export interface ServerBroadcastMessage {
   senderEmail?: string;
   agencyId?: string;
   venueId?: string;
+  /** Document version that produced this message (Stage 2 version contract). */
+  version?: number;
 }
 

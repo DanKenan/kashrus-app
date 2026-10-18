@@ -1,63 +1,80 @@
 # PWA Update Handling for Stage 2
 
-## Problem
+## What actually happens (verified)
 
-After Stage 2 deploys, users' devices may still run the OLD cached PWA
-JavaScript. These old clients will hit new Stage 2 endpoints and may receive
-error responses they weren't designed for:
-- **409 VERSION_CONFLICT**: old clients don't send `expectedVersion`, so the
-  server can't detect stale edits for them. They'll get generic errors on
-  conflicting writes.
-- **409 PAYLOAD_MISMATCH**: old clients don't send `operationId`, so no impact.
-- **503 SAVE_FAILED / MAINTENANCE / SIZE_LIMIT**: new error codes old clients
-  don't recognize.
+After Stage 2 deploys, devices may still run the OLD cached PWA JavaScript.
+The version contract handles this explicitly — it was designed for exactly
+this case, and the server behavior is covered by automated tests.
 
-## Why This Is Safe (No Data Loss)
+### Old cached clients (no version support)
 
-The server is authoritative. The worst case for an old client is a confusing
-error message — never silent data corruption:
+Old clients send updates (PUT/DELETE) without `expectedVersion`. The server
+does NOT accept these blindly. For updates to existing data it returns:
 
-1. **Old clients can't corrupt data**: all writes go through the server's
-   transactional path. If an old client's write is stale, the server rejects
-   it (409) rather than applying it blindly.
-2. **No fake success**: Stage 2 never returns 200 for a failed write. If the
-   old client shows "saved", the data really was saved.
-3. **Reads are unaffected**: GET endpoints are unchanged. Old clients see
-   current data.
+- **428 STALE_CLIENT** — "Your app is out of date. Please refresh the app to
+  get the latest data — your unsaved input is preserved — then try again."
 
-## How Clients Get the Update
+Verified by test 15: a version-less PUT returns 428 (not 409, not 200), the
+write is rejected, and the existing data is untouched.
 
-The PWA uses a service worker. Updates flow:
+The old client shows this as an error toast (its old `apiWrite` doesn't know
+code 428, so it displays the server's message text). The user's form input
+stays in the open modal — old modals only close on success, so nothing is
+cleared. The user refreshes (or taps "Update App") and retries.
 
-1. **Automatic**: on next app open, the service worker checks for a new
-   version in the background and installs it. The user sees the new version
-   on the *following* open (standard PWA lifecycle).
-2. **Manual**: the "Update App" button on the landing page forces an immediate
-   update check and reload. Don added this in Stage 1 for exactly this purpose.
+### New clients (this release)
 
-### Recommended rollout
-After the Stage 2 deploy:
-1. Don opens the PWA on his phone → taps "Update App" → confirms the new
-   version loads (check: task completion shows the new UI).
-2. Don asks the 5 mashgichim to tap "Update App" on their devices at the
-   next convenient moment (not urgent — old clients are safe, just less
-   graceful on conflicts).
+- Every API response carries `X-State-Version`; every WebSocket message
+  carries `version`. The client tracks the highest seen (verified: test 15
+  asserts the header is present and matches the document version).
+- `apiWrite()` automatically attaches the tracked version to PUT/PATCH/DELETE
+  (verified in code; the auto-injection is exercised by the test suite's
+  update calls, which now all send versions).
+- On 428, `apiWrite()` persists the attempted write as a draft in
+  localStorage (key, label, endpoint, method, body) and the app shows a
+  banner after refresh: "Unsaved change preserved" with **Re-apply** (resends
+  with the fresh version) and **Discard**. Verified in code; the banner and
+  re-apply flow have not been exercised in a real browser from this
+  environment (no browser test harness) — Don should confirm on his device.
 
-## What Old Clients Experience
+### What old clients experience (summary)
 
 | Scenario | Old client behavior | Data safe? |
 |---|---|---|
-| Normal write (no conflict) | Works normally (200) | ✅ |
-| Conflicting write | Generic error toast (no `expectedVersion` sent, so server can't give a specific 409) | ✅ Rejected, not applied |
-| Retry after timeout | May create duplicate (no `operationId`) | ⚠️ Possible duplicate; server can't deduplicate without the ID |
-| 503 (Firestore down) | Generic "couldn't save" (doesn't recognize new codes) | ✅ Not marked as saved |
+| Normal write, no version sent | 428 STALE_CLIENT, clear "please refresh" message | ✅ Rejected, not applied |
+| Write after refreshing / updating | Works normally (200) | ✅ |
+| Retry after timeout (no operationId) | May create duplicate | ⚠️ Possible duplicate; new client eliminates it |
+| 409 VERSION_CONFLICT | Only for new clients (old ones get 428 instead) | ✅ |
+| 503 (Firestore down) | Generic "couldn't save" | ✅ Not marked as saved |
+| Reads (GET) | Unchanged, always current | ✅ |
 
-The duplicate-on-retry case is the only real wart, and it's bounded: it
-requires a network timeout at exactly the wrong moment AND the user retrying.
-The new client (with `operationId`) eliminates it entirely.
+## Why this is safe (no data loss)
 
-## No Action Required From Users
+1. **The server is authoritative and fail-closed.** A client that can't prove
+   it saw the current version cannot update existing data. There is no code
+   path where a version-less update is silently applied.
+2. **No fake success.** Stage 2 never returns 200 for a failed write.
+3. **Drafts are never silently discarded.** On 428 the new client saves the
+   draft before the user refreshes; the old client keeps the modal open with
+   the input intact.
 
-- Users don't need to do anything special.
-- Worst case is a confusing error message, not data loss.
-- The update happens automatically; "Update App" just speeds it up.
+## How clients get the update
+
+1. **Automatic**: on next app open, the service worker checks for a new
+   version in the background; the user sees it on the following open.
+2. **Manual**: the "Update App" button forces an immediate update check.
+
+### Recommended rollout (Don)
+1. After cutover, open the PWA → tap "Update App" → confirm it loads.
+2. Ask the 5 mashgichim to tap "Update App" at the next convenient moment.
+   Not urgent: old clients are safe (428 + clear message), just less graceful.
+
+## Manual verification needed (not automatable here)
+
+- [ ] On a real device: with the OLD client cached, edit a task → expect the
+      428 "please refresh" message (not a silent failure, not a crash).
+- [ ] Tap "Update App" → new client loads → edit a task → expect success.
+- [ ] With the new client: trigger a 428 (e.g., airplane-mode timing is hard;
+      easiest is to wait for a real conflict), refresh, and confirm the
+      "Unsaved change preserved" banner appears with working Re-apply.
+- [ ] Confirm no form clears its input on a failed write.

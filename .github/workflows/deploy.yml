@@ -26,6 +26,12 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Build and deploy
+        env:
+          # Staged (zero-traffic) deploys are the default: the new revision is
+          # created with 0% traffic and the operator cuts over explicitly
+          # (see CUTOVER.md). Set the repo Actions variable STAGED_DEPLOY to
+          # 'false' to restore ordinary push-to-deploy behavior.
+          STAGED_DEPLOY: ${{ vars.STAGED_DEPLOY }}
         run: |
           set -e
           PROJECT=gen-lang-client-0875538181
@@ -67,7 +73,11 @@ jobs:
           import json, os, sys
           p = sys.argv[1]
           d = json.load(open(p))
-          d.pop('status', None)  # replace takes the spec, not observed status
+          # Capture the currently-serving revision BEFORE dropping status
+          # (replace takes the spec, not observed status).
+          status = d.get('status') or {}
+          latest_ready = status.get('latestReadyRevisionName')
+          d.pop('status', None)
           tpl = d['spec']['template']
           anns = tpl['metadata'].get('annotations', {})
           anns.pop('run.googleapis.com/sources', None)
@@ -82,6 +92,38 @@ jobs:
           if not any(e['name'] == 'NODE_ENV' for e in env):
               env.append({'name': 'NODE_ENV', 'value': 'production'})
           c['env'] = env
+          # STAGE 2 MIGRATION — staged (zero-traffic) deploy. Unless STAGED_DEPLOY
+          # is explicitly 'false', pin 100% of traffic to the revision that is
+          # currently serving it, so the revision created by `services replace`
+          # below starts with ZERO traffic. The operator then verifies the new
+          # revision on its direct URL and cuts traffic over explicitly
+          # (see CUTOVER.md). This guarantees old unversioned writers and new
+          # transactional writers never serve simultaneously — an ordinary
+          # rolling deploy cannot promise that.
+          if os.environ.get('STAGED_DEPLOY', '') != 'false':
+              serving_rev = None
+              for t in d['spec'].get('traffic', []) or []:
+                  if (t.get('percent') or 0) > 0 and t.get('revisionName'):
+                      serving_rev = t['revisionName']
+                      break
+              if not serving_rev:
+                  # Default Cloud Run shape is {latestRevision: true} with no
+                  # named revision — the serving revision is the latest ready one.
+                  serving_rev = latest_ready
+              if serving_rev:
+                  d['spec']['traffic'] = [
+                      {'revisionName': serving_rev, 'percent': 100,
+                       'latestRevision': False}
+                  ]
+                  print('STAGED DEPLOY: new revision gets 0% traffic; '
+                        f'pinned to {serving_rev}')
+              else:
+                  # First deploy (no serving revision yet): traffic follows latest.
+                  print('STAGED DEPLOY: no serving revision found — '
+                        'traffic follows latest revision')
+          else:
+              print('STAGED_DEPLOY=false: ordinary deploy, new revision '
+                    'takes 100% traffic')
           json.dump(d, open(p, 'w'))
           EOF
           gcloud run services replace "$SVC_JSON" --region="$REGION" --project="$PROJECT"

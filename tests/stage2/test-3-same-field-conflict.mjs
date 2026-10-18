@@ -50,7 +50,8 @@ export default {
       throw new Error(`winner's value not intact: expected "${winnerName}", got "${t.title}"`);
     }
 
-    await ctx.api('DELETE', `/api/tasks/${taskId}`, {});
+    const vDel = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${taskId}`, { expectedVersion: vDel });
 
     return `one 200 + one 409, winner="${winnerName}", no silent overwrite`;
   },

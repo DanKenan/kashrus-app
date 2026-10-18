@@ -59,7 +59,8 @@ export default {
       throw new Error(`normal write failed after size-guard test: ${ok.status}`);
     }
     const taskId = (ok.json.task || ok.json).id;
-    await ctx.api('DELETE', `/api/tasks/${taskId}`, {});
+    const vDel = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${taskId}`, { expectedVersion: vDel });
 
     return 'size guard verified live: 950KB write → 503 SIZE_LIMIT, no version bump, no leak, normal writes OK';
   },

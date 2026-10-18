@@ -20,7 +20,13 @@ export default {
       const arr = Array.isArray(doc.airtableConfigs) ? doc.airtableConfigs : [];
       return arr.find((c) => c && c.venueId === venueId);
     };
-    const api = (body) => ctx.api('POST', '/api/airtable/config', { venueId, ...body });
+    const api = async (body) => {
+      // save-airtable-config is an update endpoint: the version contract
+      // requires the version the client saw. Fetch it fresh per call since
+      // each call bumps the version.
+      const v = await ctx.getVersion();
+      return ctx.api('POST', '/api/airtable/config', { venueId, expectedVersion: v, ...body });
+    };
 
     // 1. Create the config with a key + base ID.
     const r1 = await api({ apiKey: key1, baseId: base1, tableName: 'T9-Table' });

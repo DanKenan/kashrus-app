@@ -54,7 +54,8 @@ export default {
     }
 
     // Cleanup.
-    await Promise.all(ids.map((id) => ctx.api('DELETE', `/api/tasks/${id}`, {})));
+    const vDel = await ctx.getVersion();
+    await Promise.all(ids.map((id) => ctx.api('DELETE', `/api/tasks/${id}`, { expectedVersion: vDel })));
 
     return `all ${N} writes committed, version ${v0} → ${v1}, no lost writes`;
   },

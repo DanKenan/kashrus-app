@@ -54,7 +54,8 @@ export default {
       throw new Error(`write blocked in normal mode: ${c.status}`);
     }
     const taskId = (c.json.task || c.json).id;
-    await ctx.api('DELETE', `/api/tasks/${taskId}`, {});
+    const vDel = await ctx.getVersion();
+    await ctx.api('DELETE', `/api/tasks/${taskId}`, { expectedVersion: vDel });
 
     // 2. Source verification: middleware blocks mutations.
     mustContain(

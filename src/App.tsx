@@ -26,7 +26,7 @@ import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
-import { apiFetch, apiWrite, clearSession, getSessionToken } from './lib/api';
+import { apiFetch, apiWrite, clearSession, getSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft } from './lib/api';
 
 const DEFAULT_USERS: User[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', permissions: { canFillTasks: true, canAssignTasks: true } },
@@ -195,6 +195,38 @@ export default function App() {
   const [isRealtimeConnected, setIsRealtimeConnected] = useState<boolean>(false);
   const [activeWorkersCount, setActiveWorkersCount] = useState<number>(1);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Stale-client drafts: writes rejected with 428 STALE_CLIENT are preserved
+  // here (see src/lib/api.ts). After the required refresh, the banner below
+  // offers to re-apply each draft with a fresh version — never silently lost.
+  const [staleDrafts, setStaleDrafts] = useState<StaleDraft[]>(() => loadStaleDrafts());
+  useEffect(() => {
+    const refresh = () => setStaleDrafts(loadStaleDrafts());
+    window.addEventListener('shutfey:stale-draft', refresh);
+    return () => window.removeEventListener('shutfey:stale-draft', refresh);
+  }, []);
+
+  const handleReapplyDraft = async (draft: StaleDraft) => {
+    const result = await apiWrite(draft.endpoint, {
+      method: draft.method as any,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft.body),
+    });
+    if (result.ok) {
+      discardStaleDraft(draft.key);
+      setStaleDrafts(loadStaleDrafts());
+      showToast('Change re-applied successfully.');
+      // Reload so the freshly saved change renders from server state.
+      window.location.reload();
+    } else {
+      showToast(result.error || 'Could not re-apply the change.');
+    }
+  };
+
+  const handleDiscardDraft = (draft: StaleDraft) => {
+    discardStaleDraft(draft.key);
+    setStaleDrafts(loadStaleDrafts());
+  };
 
   // Venues state
   const [venues, setVenues] = useState<Venue[]>([]);
@@ -369,6 +401,10 @@ export default function App() {
     });
 
     const unsubMsg = realtimeSocket.onMessage((msg: ServerBroadcastMessage) => {
+      // Stage 2 version contract: every broadcast carries the document
+      // version that produced it — keep the client's last-known version fresh
+      // so the next update sends a current expectedVersion.
+      if (msg.version !== undefined) observeVersion(msg.version);
       // Filter out messages for other venues if venueId is present
       const msgVenueId = (msg.payload as any)?.venueId;
       if (msgVenueId && currentVenue?.id && msgVenueId !== currentVenue.id) {
@@ -558,6 +594,13 @@ export default function App() {
         userEmail: currentUser.email,
         userName: currentUser.name,
       }),
+      // Preserve the notes if the client is stale (428) — the required
+      // refresh must not silently discard them.
+      draft: {
+        key: `task-notes:${taskId}`,
+        label: `Task notes for "${previousTask?.title || taskId}"`,
+        data: () => ({ notes, userEmail: currentUser.email, userName: currentUser.name }),
+      },
     });
     if (!result.ok) {
       if (previousTask) {
@@ -729,6 +772,13 @@ export default function App() {
           venueId: currentVenue?.id,
           userEmail: currentUser.email,
         }),
+        // Preserve the edit if the client is stale (428) — the modal stays
+        // open on failure, and the draft survives the required refresh.
+        draft: {
+          key: `task-edit:${taskData.id}`,
+          label: `Task edit for "${taskData.title || taskData.id}"`,
+          data: () => ({ ...taskData, venueId: currentVenue?.id, userEmail: currentUser.email }),
+        },
       });
       if (!result.ok) {
         console.error('Failed to edit task:', result.error);
@@ -1309,7 +1359,32 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
-      
+      {/* Stale-draft banner: changes preserved across the refresh that a
+          428 STALE_CLIENT required. Re-apply sends them with a fresh version. */}
+      {staleDrafts.length > 0 && (
+        <div className="sticky top-0 z-40 bg-amber-100 dark:bg-amber-900 border-b border-amber-300 px-4 py-3">
+          {staleDrafts.map((d) => (
+            <div key={d.key} className="flex items-center gap-3 text-sm mb-2 last:mb-0">
+              <span className="flex-1">
+                <strong>Unsaved change preserved:</strong> {d.label}{' '}
+                <span className="opacity-70">(saved {new Date(d.savedAt).toLocaleTimeString()})</span>
+              </span>
+              <button
+                onClick={() => handleReapplyDraft(d)}
+                className="px-3 py-1 rounded-lg bg-amber-600 text-white text-xs font-semibold"
+              >
+                Re-apply
+              </button>
+              <button
+                onClick={() => handleDiscardDraft(d)}
+                className="px-3 py-1 rounded-lg border border-amber-400 text-xs"
+              >
+                Discard
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {/* Toast Alert */}
       {toastMessage && (
         <div className="fixed bottom-5 right-5 z-50 bg-ink text-paper text-xs font-semibold px-4 py-3 rounded-2xl tactile-4 border border-line-strong flex items-center gap-2 animate-slide-up">
