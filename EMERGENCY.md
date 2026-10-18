@@ -423,7 +423,6 @@ Carried forward from `STAGE4_PLAN.md`:
 - [ ] Fix flaky Test 2 in `tests/stage2/harness.mjs` (concurrent writes: both
   requests got 409 instead of one 200 + one 409 — pre-existing timing race,
   observed 2026-10-18; re-run passed).
-- [ ] Full Tier 2 recovery (weekly managed export + its restore path).
 - [ ] Step E (stop dual-write): **deferred by Don's decision** — do not revive
   without him.
 - [ ] Ingredients / factory-inspections migration: **do not touch** until Don
