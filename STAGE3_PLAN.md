@@ -313,9 +313,11 @@ The backfill script MUST be:
 - **Identified:** each run gets a `migrationId` (uuid + timestamp + operator). All migrated docs carry `_migratedBy: migrationId` and `_migratedAt`. The manifest below is keyed by it.
 
 ### Step 0 — Fresh verified backup (Tier 2) + source manifest
-Per BACKUP_RESTORE.md: full-fidelity export of `app-state/main` from the named database, encrypted, stored off-GitHub. Additionally, produce the **authoritative source manifest**:
+Per BACKUP_RESTORE.md: full-fidelity export of `app-state/main` from the named database, encrypted, stored off-GitHub. Additionally, produce the **authoritative source manifest** — built from the **actual committed Firestore document read raw from the database**, not from `stateSnapshot()`:
+
 - The monolith's `_v`, canonical SHA-256 hash of the full JSON, per-collection entity counts.
 - Per-entity content hashes (so the backfill can verify field-by-field, not just counts).
+- **Transaction-maintained fields:** the raw document contains fields the application code never puts in `stateSnapshot()` — verified in the Stage 2 code, `idempotencyRecords` is an array maintained entirely inside the Firestore transaction (appended on each mutating write, pruned of expired entries). The manifest step **diffs the raw document's top-level keys against the §3 field inventory**; every key present in the document but absent from §3 must be classified (migrated / transformed / intentionally retired with reasoning) before the backfill runs. Nothing in the committed document is dropped by omission. (For `idempotencyRecords` specifically: records carry a 24h TTL and the cutover runs inside a maintenance window with drained writers — the default classification is *intentionally retired*, with the reasoning recorded in the manifest; if any unexpired record exists at cutover, it is migrated to the per-operation `idempotency/{userId}:{operationId}` docs instead.)
 - Media source inventory: every base64 payload's location (collection, entity ID, field), byte size, and SHA-256 checksum.
 - This manifest is the ground truth every later validation compares against. It is stored alongside the backup, never in git.
 
@@ -346,9 +348,10 @@ Per BACKUP_RESTORE.md: full-fidelity export of `app-state/main` from the named d
 
 ### Step 4 — Server cutover (feature flag, tested for exclusivity)
 - The Stage 3 server reads/writes the new layout when `FIRESTORE_LAYOUT=v2` (env var, default `v1` = monolith). Deploy with `v1` first (no behavior change), verify health, then flip to `v2` via `gcloud run services update --update-env-vars FIRESTORE_LAYOUT=v2` (new revision — no in-place flag flips, per the Stage 2 lesson).
-- **Exclusivity test (required before traffic):** the `v2` revision is deployed at 0% traffic with a revision tag (Stage 2 cutover pattern). The operator verifies via the tagged URL that (a) reads work against the new layout, (b) a test write commits to the new layout only, and (c) the monolith's `_v`/hash are unchanged. Only then does traffic shift.
+- **Exclusivity test (required before traffic):** the `v2` revision is deployed at 0% traffic with a revision tag (Stage 2 cutover pattern) as a **read-only staged revision** — the `STAGED_REVISION` pattern: it refuses all writes (503), no exceptions, no "write after confirmation" state. The operator verifies via the tagged URL that (a) reads work against the new layout, (b) a write attempt is **refused** (proving the staged revision cannot write), and (c) the monolith's `_v`/hash are unchanged. Only then does traffic shift.
+- **All test writes happen in the isolated test environment** (Steps 1–2 staging backfill and verification gates on the throwaway database) — never against a production staged revision. A production staged revision that accepts even one "test" write is a second writer, which is exactly what the staged pattern exists to prevent.
 - The `v2` code paths are the only writers to the new collections. The monolith writer is **deleted** from the `v2` path (not dual-written — one writer, one truth).
-- Extend the `STAGED_REVISION` pattern: the staged `v2` revision cannot write until the operator confirms the old layout's writers are stopped.
+- Extend the `STAGED_REVISION` pattern: the staged `v2` revision **cannot write, full stop** — there is no state in which a staged production revision accepts writes. Write-path verification for `v2` is completed beforehand in the isolated test environment (Steps 1–2).
 - Smoke test: Don creates/completes/deletes a task on his phone; checks the team screen; verifies a photo check-in uploads to Storage via the §6 lifecycle.
 
 ### Step 5 — Soak + monolith retirement (gated, not timed)
@@ -389,7 +392,7 @@ Once `v2` has committed production writes, the new collections contain data the 
 
 ### 8.2 Tested cutover exclusivity
 
-The §7 Step 4 exclusivity check is not optional and not a doc exercise: the staged `v2` revision is verified at 0% traffic via its revision tag to (a) read the new layout, (b) write only to the new layout, and (c) leave the monolith byte-identical — before any production traffic shifts. This is the same bar Stage 2's test 21 sets, applied to the layout cutover.
+The §7 Step 4 exclusivity check is not optional and not a doc exercise: the staged `v2` revision is verified at 0% traffic via its revision tag to (a) read the new layout, (b) **refuse writes** (staged = read-only, no exceptions — the "write to the new layout" half of exclusivity is proven in the isolated test environment during Steps 1–2, never against production), and (c) leave the monolith byte-identical — before any production traffic shifts. This is the same bar Stage 2's test 21 sets, applied to the layout cutover.
 
 ---
 
@@ -398,7 +401,7 @@ The §7 Step 4 exclusivity check is not optional and not a doc exercise: the sta
 Stage 3 does **not** go live unless all of these hold. (Stage 4 remains the comprehensive ops phase; these are the non-negotiable minimums for the data migration.)
 
 1. **Full-fidelity backup/restore for the NEW layout** — tested end-to-end: back up the per-entity collections, restore to a throwaway database, verify counts + hashes + relationships (§3.4). The monolith backup alone is insufficient once `v2` writes.
-2. **Media in backups** — the backup covers Cloud Storage objects as well as Firestore documents (object inventory with checksums; restore verifies object presence). A Firestore-only backup is not a complete backup.
+2. **Media in backups** — the backup contains **actual recoverable copies** of the Cloud Storage media objects (byte copies in the backup bucket, e.g. via Storage Transfer Service or `gsutil rsync`), not merely an inventory with checksums. An inventory proves what *should* exist; only byte copies prove recovery. The restore drill restores every object and verifies its SHA-256 against the manifest. A Firestore-only backup is not a complete backup. **Retention interaction:** the media backup bucket carries a 30-day lifecycle rule and the §6.3 deletion job's scope includes backup copies, so deleted media does not remain accessible beyond 30 days through backups.
 3. **Secret/config recovery** — Secret Manager values included in the recovery plan (separate from the Firestore backup — see §2.2); `app-meta/config` contents documented; recovery procedure tested (read-back of each secret in a drill).
 4. **Index definitions in recovery** — Firestore composite indexes are **not** captured by managed exports. The required index list (§2.1) is stored as code/config (e.g., `firestore.indexes.json`) and part of the recovery procedure.
 5. **Basic alerts live** — failed writes (any `commitState`/transaction error), unhealthy deployments (5xx spike / failed revision), failed backups (no successful backup in 26h). Don has the notification channel on his phone.
@@ -464,11 +467,11 @@ The estimate grew from the first draft because the review correctly added: the f
 
 The reviewer's implementation acceptance criteria, mapped to this plan:
 
-1. **Corrected schema + field map:** §2.1 (per-entry history, per-ingredient docs, per-operation idempotency, opaque reset IDs, per-agency operational state) and §3 (field-by-field inventory with classifications). Nothing disappears silently.
+1. **Corrected schema + field map:** §2.1 (per-entry history, per-ingredient docs, per-operation idempotency, opaque reset IDs, per-agency operational state) and §3 (field-by-field inventory with classifications). Nothing disappears silently. The Step 0 manifest is built from the **actual committed document** (raw read), diffed against §3 — transaction-maintained fields like `idempotencyRecords` are classified, never dropped by omission.
 2. **Migration and reverse-recovery specs:** §7 (resumable/idempotent script, manifest, gates) and §8.1 (rollback-before vs recovery-after, reverse-migration preconditions).
-3. **Media-upload state machine + retention:** §6 (five-state lifecycle, orphan sweeper, signed-URL discipline) and the retention decision flagged for Don.
+3. **Media-upload state machine + retention:** §6 (five-state lifecycle, orphan sweeper, signed-URL discipline) and the retention policy **decided** (§6.3): 30 days from upload, backup copies expire too, written records permanent.
 4. **Per-entity version/API contract:** §5 (per-record baselines, preserved response formats, WebSocket agency isolation, maxScale=1).
-5. **Minimum backup/auth/monitoring in Stage 3 gates:** §9 (nine gates, including the service-account backup requirement).
+5. **Minimum backup/auth/monitoring in Stage 3 gates:** §9 (nine gates, including the service-account backup requirement; media backups are byte copies; verification is per-entity `_v` + hashes, never a global `_v`).
 
 Plus the original functional criteria:
 6. `app-state/main` is not written by any code path; Firestore console shows the §2.1 collections.

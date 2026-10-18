@@ -95,7 +95,7 @@ BACKUP_RESTORE.md defines the two-tier model. Stage 4 makes it run itself.
 
 ### 3.1 Automated schedule
 
-- **Tier 1 (sanitized export):** daily, via Cloud Scheduler → Cloud Run job or Cloud Function: `GET /api/admin/export` (service-account auth — see below) → encrypt → write to `gs://<backup-bucket>/tier1/<date>.json.enc`. Retention: 30 days.
+- **Tier 1 (sanitized export):** daily, via Cloud Scheduler → Cloud Run job or Cloud Function that reads Firestore **directly** through the backup service account's IAM permissions (`datastore.entities.list`/`datastore.entities.get`), assembles the sanitized export (same strip rules as the operator endpoint), encrypts → writes to `gs://<backup-bucket>/tier1/<date>.json.enc`. Retention: 30 days. It **never** calls `GET /api/admin/export` — the user-facing endpoint is a human-operator tool, not the automated disaster-recovery path.
 - **Tier 2 (full-fidelity):** weekly, via `gcloud firestore export` to `gs://<backup-bucket>/tier2/<date>/` (native Firestore export format — the only format that restores hashes, preserving logins). Retention: 90 days. Plus: one Tier 2 export before every production deploy (manual trigger, same pipeline).
 - **Bucket:** separate from the media bucket, private, uniform access, **no public readers**, lifecycle rules enforcing the retention above.
 
@@ -108,7 +108,7 @@ A Firestore managed export does **not** capture everything needed for recovery. 
 | Component | Captured by | Restored by | Verified in drill |
 |---|---|---|---|
 | Firestore documents (all collections) | Tier 2 managed export | Managed import to throwaway/prod DB | Counts + hashes |
-| Cloud Storage media objects | Object inventory (nightly listing w/ checksums to the backup bucket) + Storage replication/versioning | Copy-back from inventory; checksum match | Spot-downloads |
+| Cloud Storage media objects | **Byte copies** in the backup bucket (Storage Transfer Service / `gsutil rsync`, nightly) — actual recoverable objects, not an inventory | Copy-back from the backup bucket; per-object SHA-256 vs manifest | Every object byte-verified |
 | Secret Manager values | **Not in Firestore exports** — separate: encrypted snapshot of secret *metadata* (names, versions, rotation dates); values re-created from Don's password manager / re-issued | Manual per §2.2 procedures | Read-back access check |
 | Firestore index definitions | `firestore.indexes.json` in git (deployed via `firebase deploy --only firestore:indexes`) | Index redeploy; build completion check | Index list diff |
 | Cloud Run service config (env vars, traffic) | Exported service YAML in git-ignored ops dir (no secrets) | `gcloud run services replace` (minus secrets, re-attached) | Health check |
@@ -118,14 +118,14 @@ If any row has no verified restore, the backup is incomplete — say so in the d
 ### 3.2 Verification (automated, not trusted)
 
 After every backup job:
-- Tier 1: decrypt → parse → assert required top-level keys present, counts > 0, `_v` is a number, no `password`/`kioskPin` fields present (the strip check from test 18, run against the real artifact).
+- Tier 1: decrypt → parse → per the new per-entity layout (there is no global `_v` anymore): assert every expected collection is present, per-collection counts are > 0 and match the manifest, **every document carries a numeric per-entity `_v`**, per-entity content hashes match the manifest, no `password`/`passwordHash`/`kioskPin` fields present (the strip check from test 18, run against the real artifact).
 - Tier 2: assert the export completed (operation status `SUCCESSFUL`) and metadata lists the expected collections.
 - On any failure: alert Don (same channel as §2.2) and keep the previous good backup — never delete the last good backup on a failed run.
 
 ### 3.3 Restore drill cadence
 
-- **Quarterly:** restore drill against a **throwaway database**. Alternate the tiers: one quarter the Tier 1 sanitized export, the next quarter the **full-fidelity Tier 2 backup including media** (Firestore restore + Storage object inventory verification + spot-download of 3 objects). The full-fidelity drill must happen **at least twice a year** — a sanitized-export drill alone does not prove the media or secret-recovery paths work.
-- **What the full-fidelity drill verifies:** collection counts match, per-entity hashes match (§3.4 of STAGE3_PLAN.md), every Storage object in the inventory exists and downloads, Secret Manager values are readable by the service account, required indexes exist.
+- **Quarterly:** restore drill against a **throwaway database**. Alternate the tiers: one quarter the Tier 1 sanitized export, the next quarter the **full-fidelity Tier 2 backup including media** (Firestore restore + restore of the actual media byte-copies from the backup bucket + per-object SHA-256 verification against the manifest — every object, not a sample). The full-fidelity drill must happen **at least twice a year** — a sanitized-export drill alone does not prove the media or secret-recovery paths work.
+- **What the full-fidelity drill verifies:** per-collection counts match the manifest, **per-entity `_v` present and numeric on every document**, per-entity content hashes match (§3.4 of STAGE3_PLAN.md), every restored media object byte-verified against its manifest checksum, Secret Manager values are readable by the service account, required indexes exist.
 - **After any backup-pipeline change:** immediate drill (same tier that changed).
 - Document each drill (date, tier, result, counts, media objects verified) in BACKUP_RESTORE.md's drill log. A backup you've never restored is a hope, not a plan.
 
