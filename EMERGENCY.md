@@ -19,15 +19,24 @@
 
 **Normal operation:** All endpoints work. Writes go through Firestore transactions.
 
-**Read-only maintenance mode** (`FORCE_LOCAL_MODE=true` env var):
-- ALL mutating endpoints (POST/PUT/DELETE/PATCH) return **503** with `{code: 'MAINTENANCE'}`
-- GET endpoints continue to work (users can view data, just not change it)
-- The server does NOT claim writes succeeded — it explicitly rejects them
-- Use this when Firestore is unavailable or you need to stop all writes immediately
-- Set via Cloud Run: `gcloud run services update workers-collaborative-dashboard --set-env-vars FORCE_LOCAL_MODE=true --region us-east1`
-- To exit maintenance: remove the env var or set it to `false`, then redeploy
+**Read-only maintenance mode** — two implementations, same behavior:
 
-**Important:** `FORCE_LOCAL_MODE` does NOT make the server write to local disk and claim success. It makes the server REJECT writes. This is the safe behavior — a maintenance mode that silently loses data is worse than one that says "try later."
+- **On current production (pre-Stage-2):** `MAINTENANCE_MODE=true` env var
+  (added by the `hotfix/maintenance-mode` PR). ALL non-read `/api` requests
+  return **503** with `{code: 'MAINTENANCE'}`; background writers (media
+  cleanup, overdue check, scheduled reset) skip. This is the switch to stop
+  old-version writes fast — e.g. before the Stage 2 cutover (see CUTOVER.md).
+  Set via: `gcloud run services update workers-collaborative-dashboard --update-env-vars MAINTENANCE_MODE=true --region us-east1 --project gen-lang-client-0875538181`
+  To exit: `--remove-env-vars MAINTENANCE_MODE`.
+- **On Stage 2 builds:** `FORCE_LOCAL_MODE=true` env var. ALL mutating
+  endpoints (POST/PUT/DELETE/PATCH) return **503** with `{code: 'MAINTENANCE'}`.
+  GET endpoints continue to work. Set via: `gcloud run services update workers-collaborative-dashboard --set-env-vars FORCE_LOCAL_MODE=true --region us-east1`
+  To exit: remove the env var or set it to `false`, then redeploy.
+
+**Important:** neither mode makes the server write to local disk and claim
+success. Both REJECT writes explicitly. This is the safe behavior — a
+maintenance mode that silently loses data is worse than one that says
+"try later."
 
 ### Option A: Route traffic to the previous healthy revision (recommended)
 
@@ -263,17 +272,19 @@ post-backup writes after a total-restore.
 
 | Procedure | Status | Notes |
 |---|---|---|
-| Transactional write path (commitState/commitOrRespond) | ✅ Tested | 7/7 tests pass against Firestore mock (TEST_RESULTS.md). Real-emulator run pending. |
-| Version conflict → 409 (no silent overwrite) | ✅ Tested | Test 1 & 3 verify stale writes blocked, conflicts return 409. |
-| Idempotent retries (no duplicates) | ✅ Tested | Test 6 verifies same operationId returns cached result. |
+| Transactional write path (commitState/commitOrRespond) | ✅ Tested | All Stage 2 tests pass against the real Firestore emulator in CI (see CI runs on PR #1). |
+| Version conflict → 409 (no silent overwrite) | ✅ Tested | Tests 1, 3, 19 verify stale writes blocked, conflicts return 409; test 19 covers the stale-form baseline. |
+| Idempotent retries (no duplicates) | ✅ Tested | Tests 6, 17 verify same operationId returns cached result; type/method/target scoping. |
 | Failed write leaves no trace | ✅ Tested | Test 4 verifies Firestore + memory unchanged on failure. |
 | Restart doesn't resurrect uncommitted data | ✅ Tested | Test 5 verifies only committed data survives restart. |
 | Concurrent writes (10-way storm) | ✅ Tested | Test 7 verifies all succeed, version increments correctly. |
+| Staged revision refuses writes (incl. boot) | ✅ Tested | Tests 20 (runtime toggle) and 21 (real staged boot — version/hash unchanged). |
+| Backup → wipe → restore cycle | ✅ Tested | Test 18: export, wipe, restore via Admin SDK with explicit database ID; counts/version identical. Emulator only — production named-DB restore still needs operator verification. |
 | Traffic shift to healthy revision (Option A) | ⚠️ Documented only | gcloud commands verified syntactically, never executed against production. Safe to test — it's non-destructive (just reroutes traffic). |
 | Scale-to-zero maintenance mode (Option B) | ⚠️ Documented only | Command verified against Google Cloud docs ("Manual scaling": `--scaling=0` disables a service). Never executed against production. Brief downtime expected. |
-| FORCE_LOCAL_MODE kill-switch (Option D) | ⚠️ Documented only | Code path added in `initFirestore()`; never exercised against production. Verify in a staging revision before relying on it in an incident. |
+| Maintenance kill-switch (Option D) | ⚠️ Documented only | `MAINTENANCE_MODE` (old server hotfix) and `FORCE_LOCAL_MODE` (Stage 2) code paths added; never exercised against production. Verify in a staging revision before relying on it in an incident. |
 | Fail-closed boot (K_SERVICE + Firestore failure → `process.exit(1)`) | ⚠️ Documented only | Code path added; cannot be triggered by the test suite (would require K_SERVICE set + broken credentials). |
-| No-op commits (skip write, no `_v` bump) | ⚠️ Documented only | `docsEqualIgnoring` added in `commitState()`; not covered by current tests. Behavior change: a mutator that only touches `updatedAt` now commits nothing. |
+| No-op commits (skip write, no `_v` bump) | ✅ Tested | Test 13 verifies nested timestamps are treated as data; top-level `_v`/`updatedAt`/`savedAt` ignored for no-op detection. |
 | `GET /api/health` (no auth; status/firestore/version/uptime) | ⚠️ Documented only | Endpoint extended; already public (no auth). Manually verifiable with curl. |
 | Daily reset awaited + force/operationId | ⚠️ Documented only | `executeDailyReset` is now async; scheduled vs manual semantics changed. Not covered by current tests. |
 | Firestore deny-all rules (Option C) | ⚠️ Documented only | ⚠️ CORRECTED 2026-10-18: Security Rules do **NOT** restrict the Firebase Admin SDK — this never blocked server writes. Only stops direct client SDK access. Rules syntax is standard; never deployed. |

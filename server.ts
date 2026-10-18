@@ -6927,6 +6927,17 @@ async function startServer() {
     durableStateLoaded = true; // No Firestore configured; local file is the source of truth.
   }
 
+  // STAGED REVISION: verification reads only. Skip ALL startup writes —
+  // pepper init, task-order backfill, VAPID persistence, password migration.
+  // A staged revision must not make ANY Firestore mutation, including during
+  // boot. The live revision (flag removed) does the normal startup writes
+  // at cutover time. Reads (initFirestore/loadStateFromFirestore above) stay.
+  const staged = isStagedRevision();
+  if (staged) {
+    console.log('[Boot] STAGED_REVISION=true — skipping all startup writes (pepper init, task-order backfill, VAPID, password migration). Reads only.');
+  }
+
+  if (!staged) {
   // Initialize the password-reset pepper BEFORE accepting requests.
   // Must be stable before any verification happens (no async race).
   await initResetPepper();
@@ -6951,6 +6962,7 @@ async function startServer() {
   // Security migration: hash any legacy plaintext passwords still in state.
   // Runs once per boot; already-hashed passwords are untouched.
   await migratePasswordsToBcrypt();
+  }
 
   if (process.env.NODE_ENV !== 'production') {
     // Dynamic import so production containers don't need vite installed.

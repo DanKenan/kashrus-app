@@ -85,6 +85,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-18-isolated-restore.mjs')).default,
     (await import('./test-19-stale-form-baseline.mjs')).default,
     (await import('./test-20-staged-revision.mjs')).default,
+    (await import('./test-21-staged-boot-no-writes.mjs')).default,
   ];
 
   const results = [];

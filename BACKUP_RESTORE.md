@@ -30,34 +30,45 @@ It returns the full Firestore document as JSON.
 
 ### The complete backup: two tiers, different trust levels
 
-**Tier 1 — Ordinary admin export** (`GET /api/admin/export` → JSON).
-Strips ALL credential material: passwords, password hashes, kiosk PINs,
-`jwtSecret`, `vapidKeys`. Safe to handle, store, and move around — but a
-restore from Tier 1 alone means: all users reset passwords via the
-forgot-password flow, all kiosk PINs re-issued, push re-keyed. Acceptable
-for a data-only recovery; annoying for a full disaster.
+> **Sensitive-config warning:** the Tier 1 export below is NOT harmless data.
+> It contains Airtable API keys, agency configs, password-reset state
+> (`resetPepper`, outstanding codes, rate limits), push subscriptions, and
+> all user emails. It must be **encrypted at rest and access-restricted**:
+> encrypted disk, a password manager, or a private GCS bucket with limited
+> IAM. Never in git, never in chat, never on an unencrypted drive.
 
-**Tier 2 — Full-fidelity disaster-recovery backup** (round 5). For a restore
-where users keep working with no re-issue storm, keep a SEPARATE encrypted
+**Tier 1 — Ordinary admin export** (`GET /api/admin/export` → JSON).
+Strips credential material: passwords, password hashes, kiosk PINs,
+`jwtSecret`, `vapidKeys`. A restore from Tier 1 alone means: all users
+reset passwords via the forgot-password flow, all kiosk PINs re-issued,
+push re-keyed, all sessions invalidated. Acceptable for a data-only
+recovery.
+
+**Tier 2 — Full-fidelity disaster-recovery backup.** A SEPARATE encrypted
 bundle containing everything Tier 1 strips, stored with restricted access
 (encrypted file in a password manager, or a private GCS bucket with
 limited IAM — never in git, never next to the Tier 1 JSON):
 
-- `kioskPin` per kiosk user (user id → PIN). PINs cannot be extracted from
-  exports (they're stripped) — maintain this inventory separately, recorded
-  when PINs are issued via TeamModal. Re-apply after restore via TeamModal.
+- `password` (bcrypt hash) per user — **bcrypt hashes cannot be reversed,
+  but the hash itself restores fine**: copy the hash back and logins keep
+  working with the same passwords. No cracking, no resets needed.
+- `kioskPin` per kiosk user (user id → PIN), recorded when PINs are issued
+  via TeamModal. Re-apply after restore via TeamModal.
 - VAPID public/private keys (keeps push working after restore). Record from
   the server environment / secret store — never from an export.
-- `RESET_CODE_PEPPER` value (or confirm it remains the Cloud Run env var)
-- Passwords: NOT recoverable by design (bcrypt hashes are one-way). Even
-  Tier 2 cannot restore passwords — users MUST use the forgot-password flow
-  after any restore. Document this; do not promise otherwise.
+- `RESET_CODE_PEPPER` value (or confirm it remains the Cloud Run env var).
 - The JWT secret is intentionally EXCLUDED from both tiers — restoring it
   would keep potentially-stolen sessions valid. Let it rotate on restore;
   users re-login once.
 
-Tier 2 exists so a restore doesn't lock out the field team (PINs) or break
-push (VAPID). It does NOT avoid the password-reset flow — nothing can.
+**Password resets are necessary after a Tier 1 (sanitized) restore — not
+inherently after every recovery.** A Tier 2 full-fidelity restore preserves
+the bcrypt hashes, so users log in with their existing passwords.
+
+| After restore from… | Passwords | Kiosk PINs | Push | Sessions |
+|---|---|---|---|---|
+| Tier 1 (sanitized export) | Users reset via forgot-password flow | Re-issue via TeamModal | Re-key VAPID | All re-login |
+| Tier 2 (full-fidelity) | Keep working (hashes restored) | Re-applied from inventory | Keeps working | All re-login (JWT secret rotates by design) |
 
 ### Verifying the restore against the NAMED production database (operator)
 
@@ -91,7 +102,11 @@ Record the result here when done:
 - [ ] Throwaway database deleted afterwards
 
 ### Storage
-- Store backups **privately** — encrypted drive, password manager, etc.
+- **Encrypt at rest and restrict access.** Tier 1 exports contain Airtable
+  API keys, reset-pepper material, push subscriptions, and user emails —
+  "private" is not enough. Use an encrypted drive, a password manager, or a
+  private GCS bucket with limited IAM. Tier 2 bundles (credential material)
+  get the strictest handling: encrypted, minimal access list.
 - **NEVER commit to git** (the Oct 17 backup was accidentally committed to the
   public repo; it was removed from `main` on Oct 18 and history cleanup is planned).
 - `.gitignore` now blocks `BACKUP-*.json` and `*.backup` files.

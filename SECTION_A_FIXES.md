@@ -532,3 +532,54 @@ export code only removed `password` — PINs leaked into every export.
 
 **Tests:** 20/20 pass (mock mode locally; real-emulator run in CI).
 `npx tsc --noEmit` clean.
+
+---
+
+## Round 6 — Final cutover defects (reviewer: stale-form + PIN fixes accepted, cutover NO-GO)
+
+Three cutover defects, all fixed with code + runtime tests:
+
+### 1. Old server could not enter maintenance mode (real defect)
+CUTOVER.md Step 1 set `FORCE_LOCAL_MODE=true` on the old production server —
+but `main` has zero support for it. The old server would have kept writing.
+**Fix:** separate minimal hotfix branch `hotfix/maintenance-mode` (from
+`main`, like PR #2): `MAINTENANCE_MODE=true` makes all non-read `/api`
+requests return 503 `MAINTENANCE`, gates the old server's background writers
+(media cleanup, overdue check, scheduled reset), and `/api/health` reports
+`maintenance: true`. Don merges it first (auto-deploys), then sets the env
+var to open the window. CUTOVER.md Step 0/1 rewritten around it.
+
+### 2. Staged revision wrote during boot (real defect)
+`STAGED_REVISION=true` blocked HTTP writes and intervals, but `startServer()`
+still ran four startup writes: `initResetPepper()`, task-order backfill,
+`ensureVapidKeys()`, `migratePasswordsToBcrypt()`. Test 20 toggled staged
+mode at runtime, so it never covered boot.
+**Fix:** `startServer()` skips all four when `isStagedRevision()` is true
+(reads stay); logs loudly. The live revision (flag removed) does normal
+startup writes at cutover. **New test 21:** real process restart with
+`STAGED_REVISION=true` — Firestore doc version AND hash unchanged,
+health staged:true, mutation 503; then restarts back clean. PASSES.
+
+### 3. Staged verification via revision tags (not status.url)
+Untagged revisions have no usable direct URL. **Fix:** deploy workflow tags
+the staged revision (`gcloud run services update-traffic --to-tags
+stage2-staged=<REV>`), constructs the tagged URL
+(`https://stage2-staged---<svc-host>`), prints it, and curls `/api/health`
+through it. CUTOVER.md Step 4 uses the tagged URL. (gcloud unavailable in
+sandbox — flag syntax marked unverified; first staged deploy's workflow log
+is the live proof.)
+
+### Doc corrections
+- `BACKUP_RESTORE.md`: Tier 1 exports contain Airtable keys, reset material,
+  push subs, user emails — must be **encrypted at rest, access-restricted**
+  (not just "private"). Bcrypt clarification: hashes can't be reversed but
+  CAN be restored from a full-fidelity backup — logins keep working. Password
+  resets are required after Tier 1 (sanitized) restores, not inherently after
+  every recovery. New Tier 1 vs Tier 2 restore-implications table.
+- `EMERGENCY.md`: maintenance section covers both `MAINTENANCE_MODE` (old
+  server hotfix) and `FORCE_LOCAL_MODE` (Stage 2); tested-vs-documented
+  table updated (was: "7/7 mock, emulator pending").
+- `CUTOVER.md`: full rewrite — maintenance-hotfix Step 0/1, tagged URLs,
+  no hardcoded test counts, no contradictions.
+
+**Tests:** 21/21 (test 21 new). `npx tsc --noEmit` clean.
