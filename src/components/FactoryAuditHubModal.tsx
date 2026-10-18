@@ -38,7 +38,7 @@ import { AirtableConfigModal } from './AirtableConfigModal';
 import { AddDiscrepancyModal } from './AddDiscrepancyModal';
 import { SubmitAuditReportModal } from './SubmitAuditReportModal';
 import { HechsherCheckModal } from './HechsherCheckModal';
-import { apiFetch } from '../lib/api';
+import { apiFetch, apiWrite, getLastKnownVersion } from '../lib/api';
 
 interface FactoryAuditHubModalProps {
   isOpen: boolean;
@@ -145,34 +145,33 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
 
   // Verification actions by Mashgiach
   const handleVerifyIngredient = async (ingredientId: string, status: 'verified_present' | 'verified_not_found' | 'unverified' | 'flagged_discrepancy') => {
-    try {
-      const res = await apiFetch(`/api/ingredients/${ingredientId}/verify`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          verificationStatus: status,
-          userEmail: currentUser?.email,
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setIngredients((prev) =>
-          prev.map((i) => (i.id === ingredientId ? data.ingredient : i))
-        );
-        if (status === 'verified_present') {
-          showToast(`Verified compliant: ${data.ingredient.name}`);
-        } else if (status === 'flagged_discrepancy') {
-          showToast(`Flagged discrepancy on raw material!`, 'error');
-        }
-      }
-    } catch (err) {
-      console.error('Failed to verify ingredient:', err);
+    const result = await apiWrite(`/api/ingredients/${ingredientId}/verify`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        verificationStatus: status,
+        userEmail: currentUser?.email,
+      }),
+    });
+    if (!result.ok) {
+      console.error('Failed to verify ingredient:', result.error);
+      showToast(result.error || 'Could not save the verification.', 'error');
+      return;
+    }
+    // The endpoint returns the updated ingredient object directly.
+    const updated = result.data?.ingredient ?? result.data;
+    setIngredients((prev) =>
+      prev.map((i) => (i.id === ingredientId ? updated : i))
+    );
+    if (status === 'verified_present') {
+      showToast(`Verified compliant: ${updated.name}`);
+    } else if (status === 'flagged_discrepancy') {
+      showToast(`Flagged discrepancy on raw material!`, 'error');
     }
   };
 
   const handleSaveAirtableConfig = async (updated: Partial<AirtableConfig>) => {
-    const res = await apiFetch('/api/airtable/config', {
+    const result = await apiWrite('/api/airtable/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -180,17 +179,18 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
         venueId: currentVenue.id,
         userEmail: currentUser?.email,
       }),
+      // POST update endpoint: the version contract requires the last-seen
+      // version (apiWrite only auto-injects for PUT/PATCH/DELETE).
+      expectedVersion: getLastKnownVersion(),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to update Airtable settings');
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to update Airtable settings');
     }
-    const data = await res.json();
-    setAirtableConfig(data.config);
+    setAirtableConfig(result.data.config);
   };
 
   const handleSyncAirtable = async () => {
-    const res = await apiFetch('/api/airtable/sync', {
+    const result = await apiWrite('/api/airtable/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -198,11 +198,10 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
         userEmail: currentUser?.email,
       }),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to sync Airtable ingredients');
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to sync Airtable ingredients');
     }
-    const data = await res.json();
+    const data = result.data;
     setIngredients(data.ingredients || []);
     showToast(`Pulled ${data.count} approved ingredients from Airtable!`);
   };

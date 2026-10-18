@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { MessageSquare, Plus, Trash2, X, Mic } from 'lucide-react';
-import { apiFetch } from '../lib/api';
+import { apiFetch, apiWrite } from '../lib/api';
 
 interface HandoffNote {
   id: string;
@@ -27,6 +27,7 @@ export function HandoffNotes({ venueId, currentUserEmail, currentUserName }: Han
   const [loading, setLoading] = useState(true);
   const [recording, setRecording] = useState(false);
   const [voiceNoteData, setVoiceNoteData] = useState('');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
@@ -74,38 +75,41 @@ export function HandoffNotes({ venueId, currentUserEmail, currentUserName }: Han
 
   const addNote = async () => {
     if (!content.trim() && !voiceNoteData) return;
-    try {
-      const res = await apiFetch('/api/handoff-notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          venueId,
-          content: content.trim(),
-          shift,
-          authorEmail: currentUserEmail,
-          authorName: currentUserName,
-          voiceNoteData: voiceNoteData || undefined,
-        }),
-      });
-      const data = await res.json();
-      if (data.note) {
-        setNotes([data.note, ...notes]);
-        setContent('');
-        setVoiceNoteData('');
-        setShowAdd(false);
-      }
-    } catch (e) {
-      console.error('Failed to add note:', e);
+    setErrorMsg(null);
+    const result = await apiWrite('/api/handoff-notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        venueId,
+        content: content.trim(),
+        shift,
+        authorEmail: currentUserEmail,
+        authorName: currentUserName,
+        voiceNoteData: voiceNoteData || undefined,
+      }),
+    });
+    if (!result.ok) {
+      // Keep the form open with the user's text intact so they can retry.
+      setErrorMsg(result.error || 'Could not save the note.');
+      return;
+    }
+    const note = result.data?.note;
+    if (note) {
+      setNotes([note, ...notes]);
+      setContent('');
+      setVoiceNoteData('');
+      setShowAdd(false);
     }
   };
 
   const deleteNote = async (id: string) => {
-    try {
-      await apiFetch(`/api/handoff-notes/${id}`, { method: 'DELETE' });
-      setNotes(notes.filter((n) => n.id !== id));
-    } catch (e) {
-      console.error('Failed to delete note:', e);
+    setErrorMsg(null);
+    const result = await apiWrite(`/api/handoff-notes/${id}`, { method: 'DELETE' });
+    if (!result.ok) {
+      setErrorMsg(result.error || 'Could not delete the note.');
+      return;
     }
+    setNotes(notes.filter((n) => n.id !== id));
   };
 
   if (loading) return <div className="text-xs text-ink-faint">Loading notes...</div>;
@@ -126,8 +130,19 @@ export function HandoffNotes({ venueId, currentUserEmail, currentUserName }: Han
         </button>
       </div>
 
+      {!showAdd && errorMsg && (
+        <div className="p-2 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-[11px] text-rose-700 dark:text-rose-300">
+          {errorMsg}
+        </div>
+      )}
+
       {showAdd && (
         <div className="p-3 rounded-xl border border-line bg-sunken space-y-2">
+          {errorMsg && (
+            <div className="p-2 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-[11px] text-rose-700 dark:text-rose-300">
+              {errorMsg}
+            </div>
+          )}
           <select
             value={shift}
             onChange={(e) => setShift(e.target.value)}

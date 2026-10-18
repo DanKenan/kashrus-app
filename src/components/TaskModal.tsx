@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Clock, Calendar, CheckSquare, Users, Plus, Trash2, CalendarDays, CheckCircle2, ListFilter } from 'lucide-react';
 import { Task, TaskInputType } from '../types';
+import { captureEditBaseline } from '../lib/api';
 import { DAYS_MAP } from '../lib/utils';
 import {
   categoryVars,
@@ -120,7 +121,7 @@ function TimePickerRow({
 interface TaskModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (taskData: Partial<Task>) => void;
+  onSave: (taskData: Partial<Task>, opts?: { baselineVersion?: number }) => Promise<boolean> | void;
   taskToEdit?: Task | null;
   knownWorkers: Array<{ email: string; name: string }>;
   currentUserEmail?: string | null;
@@ -256,6 +257,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   // Synchronous guard against double-submit (double-click / Enter+click firing
   // handleSubmit twice before the modal unmounts).
   const submitGuard = useRef(false);
+  // ROUND 5 — write baseline for this edit form. Captured when the modal
+  // loads taskToEdit (what the user sees), NOT at save time (by then a
+  // WebSocket update may have bumped the tracked version past the form).
+  const baselineRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     submitGuard.current = false;
@@ -270,6 +275,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     setConfirmDeleteCat(null);
 
     if (taskToEdit) {
+      // Capture the write baseline NOW — the form renders taskToEdit's data,
+      // so the baseline is the version the user is looking at.
+      baselineRef.current = captureEditBaseline();
       setTitle(taskToEdit.title);
       setDescription(taskToEdit.description || '');
       setSelectedCategories(
@@ -322,6 +330,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
         setCompletedStatusValues(['Completed']);
       }
     } else {
+      baselineRef.current = undefined; // create — no baseline needed
       setTitle('');
       setDescription('');
       setSelectedCategories([PRESET_CATEGORIES[0]]);
@@ -428,7 +437,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
     if (submitGuard.current) return;
@@ -443,7 +452,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       finalDates = [todayStr];
     }
 
-    onSave({
+    const saved = await onSave({
       ...(taskToEdit ? { id: taskToEdit.id } : {}),
       title: title.trim(),
       description: description.trim(),
@@ -464,8 +473,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       scheduleType,
       daysOfWeek: selectedDays,
       specificDates: scheduleType === 'specific_dates' ? finalDates : undefined,
-    });
+    }, { baselineVersion: baselineRef.current });
 
+    // Only close on a confirmed save — on failure the modal stays open with
+    // the user's input intact so they can review and retry.
+    if (saved === false) {
+      submitGuard.current = false;
+      return;
+    }
     onClose();
   };
 
