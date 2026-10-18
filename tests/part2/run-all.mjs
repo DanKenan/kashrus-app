@@ -1,10 +1,11 @@
 /**
- * Runs Part 2 PR B + PR C tests.
+ * Runs Part 2 PR B + PR C + PR D tests.
  */
 import testEntities from './test-entities.mjs';
 import testDualwrite from './test-dualwrite.mjs';
+import testMigration from './test-migration.mjs';
 
-const tests = [testEntities, testDualwrite];
+const tests = [testEntities, testDualwrite, testMigration];
 
 export async function runAll() {
   console.log(`\n=== Part 2 Tests (${tests.length} tests) ===\n`);
