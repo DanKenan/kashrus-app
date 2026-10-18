@@ -94,6 +94,15 @@ jobs:
           if not any(e['name'] == 'NODE_ENV' for e in env):
               env.append({'name': 'NODE_ENV', 'value': 'production'})
           c['env'] = env
+          # Explicit startup probe: give the app a realistic 3-minute budget
+          # to open its port (Firestore init can be slow). Without this,
+          # Cloud Run's default 10s probe can kill a healthy-but-slow boot.
+          c['startupProbe'] = {
+              'tcpSocket': {'port': 3000},
+              'periodSeconds': 5,
+              'timeoutSeconds': 5,
+              'failureThreshold': 36,
+          }
           # STAGE 2 MIGRATION — staged (zero-traffic) deploy. Unless STAGED_DEPLOY
           # is explicitly 'false', pin 100% of traffic to the revision that is
           # currently serving it, so the revision created by `services replace`
@@ -161,6 +170,19 @@ jobs:
               d['spec']['traffic'] = [{'latestRevision': True, 'percent': 100}]
           json.dump(d, open(p, 'w'))
           EOF
+          # DIAGNOSTIC: print the container spec we're about to apply
+          echo "--- container spec to be applied ---"
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/svc.json'))
+          c = d['spec']['template']['spec']['containers'][0]
+          print('image:', c.get('image'))
+          print('env names:', [e['name'] for e in c.get('env', [])])
+          print('ports:', c.get('ports'))
+          print('startupProbe:', c.get('startupProbe'))
+          print('command:', c.get('command'))
+          print('args:', c.get('args'))
+          "
           gcloud run services replace "$SVC_JSON" --region="$REGION" --project="$PROJECT"
 
           # POST-DEPLOY ASSERTION (round 5): read back the traffic allocation
@@ -235,4 +257,26 @@ jobs:
             assert fs in ('connected', 'emulator'), f'firestore not connected: {fs}'
             print('OK: tagged health returns staged:true, firestore:', fs)
             " || { echo "::error::staged health assertion failed"; exit 1; }
+          fi
+
+      - name: Diagnose failed deploy
+        if: failure()
+        run: |
+          PROJECT=gen-lang-client-0875538181
+          REGION=us-east1
+          SVC=workers-collaborative-dashboard
+          echo "=== revision list ==="
+          gcloud run revisions list --service "$SVC" --region="$REGION" --project="$PROJECT" \
+            --limit 5 --format "table(name,status.conditions[0].type,status.conditions[0].message)" || true
+          NEWEST_REV=$(gcloud run revisions list --service "$SVC" --region="$REGION" --project="$PROJECT" \
+            --sort-by "~metadata.creationTimestamp" --limit 1 --format "value(metadata.name)" || true)
+          echo "newest revision: $NEWEST_REV"
+          if [ -n "$NEWEST_REV" ]; then
+            echo "=== revision describe ==="
+            gcloud run revisions describe "$NEWEST_REV" --region="$REGION" --project="$PROJECT" \
+              --format "yaml(status.conditions,spec.containers[0].image,spec.containers[0].env,spec.containers[0].startupProbe,spec.containers[0].ports,spec.containers[0].command,spec.containers[0].args)" || true
+            echo "=== container logs (last 30m) ==="
+            gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$SVC\" AND resource.labels.revision_name=\"$NEWEST_REV\"" \
+              --project="$PROJECT" --limit 100 --freshness 30m \
+              --format "value(timestamp,severity,textPayload)" || echo "LOGGING READ FAILED (check IAM: roles/logging.viewer for github-deploy@)"
           fi

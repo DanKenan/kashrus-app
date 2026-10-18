@@ -7014,49 +7014,9 @@ async function startServer() {
     });
   }
 
-  // Start listening FIRST so the Cloud Run startup probe (tcp 3000, 10s
-  // timeout) succeeds immediately. Startup writes below happen after the
-  // port is open — they must not block the probe.
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[WorkPulse Server] Listening on http://0.0.0.0:${PORT} with WebSockets enabled at /ws`);
   });
-
-  // Startup writes run AFTER the port is open (see above). They are
-  // non-fatal: a failure is logged and the server keeps serving.
-  if (!staged) {
-  try {
-  // Initialize the password-reset pepper BEFORE accepting requests.
-  // Must be stable before any verification happens (no async race).
-  await initResetPepper();
-
-  // Backfill task ordering AFTER the durable load (the hydrate above replaces
-  // in-memory tasks, so this must not run at module level). Persists via the
-  // transactional write path when it changes anything so the order sticks.
-  await commitState(
-    (freshDoc) => {
-      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
-      const { tasks: normalized, changed } = normalizeTaskOrderPure(freshTasks);
-      if (!changed) return { doc: freshDoc, result: { changed: false } };
-      return { doc: { ...freshDoc, tasks: normalized }, result: { changed: true } };
-    },
-    { label: 'normalize-task-order-boot' }
-  ).catch((err) => console.warn('[Boot] Task-order backfill failed:', (err as any)?.message));
-
-  // Web Push: VAPID keys must be ready after durable state loads (env vars
-  // take precedence over persisted keys inside ensureVapidKeys).
-  ensureVapidKeys();
-
-  // Security migration: hash any legacy plaintext passwords still in state.
-  // Runs once per boot; already-hashed passwords are untouched.
-  await migratePasswordsToBcrypt();
-  } catch (err: any) {
-    // Boot must never die on a startup-write failure. The server starts and
-    // serves; the failed backfill is logged for investigation. Data safety
-    // is preserved because reads loaded successfully above.
-    console.error('[Boot] Startup writes failed (non-fatal, server continuing):', err?.message);
-  }
-  }
-
 }
 
 startServer();
