@@ -22,9 +22,6 @@ function getJwtSecret(): string {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
   if (!jwtSecret) {
     jwtSecret = crypto.randomBytes(48).toString('hex');
-    // Persist via the transactional write path (fire-and-forget is fine here:
-    // the secret is already in memory; this just ensures it survives restarts).
-    // First call happens after boot anyway.
     commitState(
       (freshDoc) => ({ doc: { ...freshDoc, jwtSecret }, result: null }),
       { label: 'persist-jwt-secret' }
@@ -7528,6 +7525,22 @@ async function migratePasswordsToBcrypt(): Promise<void> {
 }
 
 async function startServer() {
+  // Stage 3C: Load secrets from Secret Manager BEFORE anything else.
+  // Fails closed — if USE_SECRET_MANAGER=true and secrets are unavailable,
+  // the server refuses to start (no silent fallback, no generated values).
+  if (process.env.USE_SECRET_MANAGER === 'true') {
+    console.log('[secrets] Loading secrets from Secret Manager...');
+    const { getSecret, SECRET_NAMES } = await import('./src/server/secrets.js');
+    // JWT secret → set as env var so existing getJwtSecret() picks it up
+    process.env.JWT_SECRET = await getSecret(SECRET_NAMES.JWT_SECRET);
+    // VAPID keys → set as env vars
+    process.env.VAPID_PUBLIC_KEY = await getSecret(SECRET_NAMES.VAPID_PUBLIC_KEY);
+    process.env.VAPID_PRIVATE_KEY = await getSecret(SECRET_NAMES.VAPID_PRIVATE_KEY);
+    // Reset pepper → set as env var
+    process.env.RESET_CODE_PEPPER = await getSecret(SECRET_NAMES.RESET_CODE_PEPPER);
+    console.log('[secrets] All secrets loaded from Secret Manager.');
+  }
+
   // Durable state first: Firestore wins over the ephemeral local file.
   // We WAIT for the load — no timeout race. Starting with seed state while
   // Firestore is slow would let the first request overwrite real user data.
