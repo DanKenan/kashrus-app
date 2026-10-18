@@ -151,18 +151,18 @@ Enforcement options, in order of preference:
    `initFirestore()` checks `K_SERVICE` independently, so on Cloud Run the
    database is still initialized regardless of that variable. (Setting
    `FIRESTORE_ENABLED=false` only removes one of three opt-in signals; the
-   `K_SERVICE` signal alone is enough.) On current Stage 2 builds, use the
-   real kill-switch instead: `FORCE_LOCAL_MODE=true` — it skips Firestore
-   init entirely, even on Cloud Run (see §1 Option D).
+   `K_SERVICE` signal alone is enough.) On current builds, `FORCE_LOCAL_MODE=true`
+   makes the middleware **reject API mutations** — it is not a local-file mode
+   (see §1 Option D). **Prefer maintenance mode (§6)** — it's the supported
+   path for pausing writes.
    ```bash
    gcloud run services update workers-collaborative-dashboard \
      --region us-east1 \
      --project gen-lang-client-0875538181 \
-     --set-env-vars FORCE_LOCAL_MODE=true
+     --update-env-vars MAINTENANCE_MODE=true
    ```
-   **No writes will persist** in this mode (local file only, ephemeral) —
-   treat it as read-only. Re-enable by removing the override
-   (`--remove-env-vars FORCE_LOCAL_MODE`) when the fixed build is deployed.
+   Re-enable by removing the override (`--remove-env-vars MAINTENANCE_MODE`)
+   when the fixed build is deployed.
    Note: pre-Stage-2 revisions do not know `FORCE_LOCAL_MODE` — for those,
    use §1 Option B (scale to zero), which works regardless of code version.
 3. **Firestore deny-all rules** (§1 Option C) are already the permanent
@@ -224,7 +224,8 @@ post-backup writes after a total-restore.
 
 ### Fix forward
 
-1. Write the fix locally; run `npm run test:stage2` (all 7 must pass) and
+1. Write the fix locally; run `npm run test:stage2` and
+   `node tests/stage4/run-all.mjs` (all suites green) and
    `npx tsc --noEmit` (clean).
 2. Commit to a branch, open a PR, get review — **even in an incident, no
    unreviewed production pushes** (Don's standing rule).
