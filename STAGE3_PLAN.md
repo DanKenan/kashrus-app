@@ -301,83 +301,50 @@ Per the §3 inventory: every `photoData`/`voiceNoteData`/`menuAttachmentData` ba
 
 ---
 
-## 7. Migration steps from the single document
+## 7. Migration: switch to per-record layout (slimmed per Don, 2026-10-18)
 
-**Principle: backfill, don't dual-write.** Stage 2's cutover taught us that two writers to the same data are the danger. The monolith is read-mostly during migration; the backfill is a one-way copy, verified, then the server switches.
+**Context:** There are no real users. The production dataset is 6 users, 1 venue (Crown Market), 0 tasks. The heavyweight machinery below (reverse backfill, checkpoints, multi-gate harness, forward-repair) is designed for a large live dataset — it is overkill here. Don's decision: **days, not weeks.**
 
-### 7.0 Migration script properties (required)
+**What we do instead:**
 
-The backfill script MUST be:
-- **Resumable:** processes entities in batches, records a **checkpoint** (last completed collection + entity ID) in a `migrationRuns/{migrationId}` doc after each batch. A crashed run resumes from the checkpoint — never from scratch.
-- **Idempotent:** every write uses deterministic document IDs (§2.1); re-running a batch overwrites identical content (verified by hash before write — skip if the target doc already matches).
-- **Identified:** each run gets a `migrationId` (uuid + timestamp + operator). All migrated docs carry `_migratedBy: migrationId` and `_migratedAt`. The manifest below is keyed by it.
+### Step 1 — Build the per-record layout (no migration yet)
+- Implement the §2.1 collections (`tasks/{taskId}`, `venues/{venueId}`, `users/{userId}`, etc.) in code.
+- The transactional write path writes to BOTH the monolith AND the new collections (dual-write during transition).
+- Reads still come from the monolith. The new collections are inert — no code reads them yet.
+- Deploy and verify: health ok, existing functionality unchanged.
 
-### Step 0 — Fresh verified backup (Tier 2) + source manifest
-Per BACKUP_RESTORE.md: full-fidelity export of `app-state/main` from the named database, encrypted, stored off-GitHub. Additionally, produce the **authoritative source manifest** — built from the **actual committed Firestore document read raw from the database**, not from `stateSnapshot()`:
+### Step 2 — One-time copy of existing data
+- Write a simple script that reads `app-state/main` and copies the 6 users + 1 venue into the new collections.
+- Run it once against production.
+- **Verify by eye:** Don (or Tab) checks the Firestore console — 6 user docs, 1 venue doc, correct fields. That's it. No hash manifests, no automated gates.
+- If anything looks wrong: delete the new collections, fix the script, re-run. The monolith is untouched.
 
-- The monolith's `_v`, canonical SHA-256 hash of the full JSON, per-collection entity counts.
-- Per-entity content hashes (so the backfill can verify field-by-field, not just counts).
-- **Transaction-maintained fields:** the raw document contains fields the application code never puts in `stateSnapshot()` — verified in the Stage 2 code, `idempotencyRecords` is an array maintained entirely inside the Firestore transaction (appended on each mutating write, pruned of expired entries). The manifest step **diffs the raw document's top-level keys against the §3 field inventory**; every key present in the document but absent from §3 must be classified (migrated / transformed / intentionally retired with reasoning) before the backfill runs. Nothing in the committed document is dropped by omission. (For `idempotencyRecords` specifically: records carry a 24h TTL and the cutover runs inside a maintenance window with drained writers — the default classification is *intentionally retired*, with the reasoning recorded in the manifest; if any unexpired record exists at cutover, it is migrated to the per-operation `idempotency/{userId}:{operationId}` docs instead.)
-- Media source inventory: every base64 payload's location (collection, entity ID, field), byte size, and SHA-256 checksum.
-- This manifest is the ground truth every later validation compares against. It is stored alongside the backup, never in git.
+### Step 3 — Switch reads to the new layout
+- Flip the read path: server reads from per-entity collections instead of the monolith.
+- Deploy. Verify: Don checks his phone — team list shows 6 users, venue shows Crown Market, create/edit a task works.
+- The monolith writer is removed from the code path (writes go only to new collections now).
+- **The monolith document `app-state/main` is NOT deleted.** It remains in Firestore as a cold fallback. Deleting data requires Don's explicit OK (standing rule).
 
-### Step 1 — Staging backfill (no production touch)
-1. Create a **throwaway named database** (or use the emulator with the production-shaped data).
-2. Run the backfill script against the Step 0 manifest.
-3. Verification gates (must ALL pass — per the §3.4 test requirements):
-   - **Counts:** per-collection entity counts match the manifest exactly.
-   - **Content:** canonical hash of every migrated entity matches the source (field-by-field after documented transformations).
-   - **IDs:** every target doc ID is well-formed and unique; no collisions; deterministic IDs reproducible from source.
-   - **Agency ownership:** every migrated doc's `agencyId` matches the source entity's agency; zero cross-agency misplacements.
-   - **Relationships:** every `taskId`/`venueId`/`userId`/`linkedTaskId`/`airtableRecordId` reference resolves; dangling references reported, not dropped.
-   - **Media:** every source payload → exactly one Storage object with matching checksum; every object ← exactly one source (missing-object detection both directions).
-   - **Indexes:** confirm every index in the §2.1 table exists in the throwaway database (create missing ones; Firestore index builds take minutes — never discover this at cutover).
+### Step 4 — Soak
+- Operate normally. If anything breaks: the monolith still has the pre-cutover data; we can flip reads back in one deploy.
+- No 30-day timer, no formal gates. Don says "looks great" → we're done.
 
-### Step 2 — Backfill script review + dry run against production-shaped data
-- Independent review of the backfill script AND the reverse-recovery script (see §8) by the Stage 2 reviewer if available.
-- Dry run against a **restored copy** of the production backup in the throwaway database — never the live database.
-- The reverse script (new-layout → monolith) must round-trip in staging with identical counts/hashes **before** it is accepted as a cutover precondition.
+**What we explicitly do NOT do:**
+- No reverse backfill (monolith → new is one-way; if we need to roll back reads, the monolith is still there).
+- No checkpoints, manifests, or migration-run tracking (6 users don't need resumability).
+- No multi-gate verification harness (eyeball check in the console is sufficient).
+- No forward-repair plan (if the copy is wrong, delete and re-copy).
+- No monolith deletion (Don's rule: never delete data without his explicit OK).
 
-### Step 3 — Production backfill (maintenance window)
-1. Don enables `MAINTENANCE_MODE=true` on the live server — writes stop, 503s.
-2. Explicit drain verification per the revised CUTOVER.md (traffic, revision instances, request log, Firestore stability — **not** "60 seconds = drained").
-3. Take a **final pre-migration backup** and regenerate the source manifest (writes have stopped — this is the exact cutover point).
-4. Run the backfill script against the **production named database**. Target: new collections only; `app-state/main` untouched.
-5. Run the Step 1 verification gates against production (counts, content, IDs, agency ownership, relationships, media, indexes).
-6. If any gate fails: **stop. Do not proceed.** The monolith is untouched and the app is still in maintenance mode — this is a rollback-before-live-writes (see §8): abort, keep Stage 2, exit maintenance mode.
-
-### Step 4 — Server cutover (feature flag, tested for exclusivity)
-- The Stage 3 server reads/writes the new layout when `FIRESTORE_LAYOUT=v2` (env var, default `v1` = monolith). Deploy with `v1` first (no behavior change), verify health, then flip to `v2` via `gcloud run services update --update-env-vars FIRESTORE_LAYOUT=v2` (new revision — no in-place flag flips, per the Stage 2 lesson).
-- **Exclusivity test (required before traffic):** the `v2` revision is deployed at 0% traffic with a revision tag (Stage 2 cutover pattern) as a **read-only staged revision** — the `STAGED_REVISION` pattern: it refuses all writes (503), no exceptions, no "write after confirmation" state. The operator verifies via the tagged URL that (a) reads work against the new layout, (b) a write attempt is **refused** (proving the staged revision cannot write), and (c) the monolith's `_v`/hash are unchanged. Only then does traffic shift.
-- **All test writes happen in the isolated test environment** (Steps 1–2 staging backfill and verification gates on the throwaway database) — never against a production staged revision. A production staged revision that accepts even one "test" write is a second writer, which is exactly what the staged pattern exists to prevent.
-- The `v2` code paths are the only writers to the new collections. The monolith writer is **deleted** from the `v2` path (not dual-written — one writer, one truth).
-- Extend the `STAGED_REVISION` pattern: the staged `v2` revision **cannot write, full stop** — there is no state in which a staged production revision accepts writes. Write-path verification for `v2` is completed beforehand in the isolated test environment (Steps 1–2).
-- Smoke test: Don creates/completes/deletes a task on his phone; checks the team screen; verifies a photo check-in uploads to Storage via the §6 lifecycle.
-
-### Step 5 — Soak + monolith retirement (gated, not timed)
-- 7 days minimum of production operation on `v2`. Monitor: Firestore error rates, contention errors, Storage upload failures, failed-write log (must stay zero).
-- **Monolith deletion gate** (replaces the arbitrary "30 days"): `app-state/main` is deleted only when ALL of these hold —
-  1. New-layout **backups have been taken and a restore has been verified** (throwaway database, counts match — the §9 gate).
-  2. Data-retention requirements are satisfied (Don confirms no compliance/audit need for the old format; the Tier 2 backup from Step 0 remains regardless).
-  3. 30 days of clean `v2` operation have elapsed (minimum, not sufficient alone).
-- Until the gate passes, the monolith remains as a read-only cold backup (with restricted access — it contains historical secrets, see §2.2).
-
-### Rollback (per step)
-| Step fails | Rollback |
-|---|---|
-| Step 1/2 (staging) | Throw away the throwaway database. Nothing production touched. |
-| Step 3 (backfill) | Don't cut over. New collections are inert (no code reads them). Optionally delete them. App exits maintenance mode on the monolith. |
-| Step 4 (cutover) | Flip `FIRESTORE_LAYOUT` back to `v1` (new revision). The monolith was never written by `v2` code paths... **with one caveat:** any writes committed to the new collections while on `v2` are NOT in the monolith. True rollback after live writes requires the reverse backfill (collections → monolith), which must be written and tested as part of Step 2. **Do not cut over without a tested reverse backfill.** |
-| Step 5 (soak) | Same as Step 4, within the 30-day monolith retention. |
+**Rollback:** Flip the read path back to the monolith (one env var or deploy). The monolith was never modified after Step 2, so it's a clean fallback.
 
 ---
 
-## 8. Rollout, rollback, and recovery
+## 8. Rollout notes (slimmed)
 
-- **Phased:** staging backfill → reviewed script → production maintenance window → flagged cutover → soak → gated monolith retirement. No phase starts until the previous phase's verification gates pass.
-- **Monitoring during migration:** Cloud Run logs for transaction errors; Firestore console for the new collections (doc counts vs manifest); the failed-write counter (must remain zero); Storage upload success rate; orphan-sweeper reclaim counts.
-- **Rollback triggers (explicit):** any verification gate fails; 409/503 spike after cutover; Don's screenshot shows wrong data; failed-write counter > 0. The default action on any trigger is **stop and hold in maintenance mode**, not "try the next step."
-- **Stage 2 cutover lessons applied:** staged revisions that cannot write (extend the `STAGED_REVISION` pattern to the migration); no simultaneous writers (maintenance window + explicit drain verification); revision tags for verification URLs.
+- **Phased:** build layout → one-time copy → switch reads → soak. Each phase is a separate PR, CI-green, ChatGPT-reviewed.
+- **Monitoring:** Cloud Run logs for errors; Don's phone as the smoke test.
+- **Rollback trigger:** Don's screenshot shows wrong data → flip reads back to monolith, investigate.
 
 ### 8.1 The critical distinction: rollback vs recovery
 
