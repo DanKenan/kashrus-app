@@ -8,6 +8,7 @@ import { getFirestore } from 'firebase-admin/firestore';
 import webpush from 'web-push';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import * as media from './src/server/media.js';
 
 // ---------------------------------------------------------------------------
 // Auth: bcrypt passwords + signed session tokens (HMAC-SHA256 JWT)
@@ -3562,6 +3563,202 @@ app.post('/api/incidents/:id/acknowledge', async (req, res) => {
     }
   );
   return;
+});
+
+// ---------------------------------------------------------------------------
+// Stage 3A — Media lifecycle API
+// All routes require authentication. Agency/venue scope comes from the
+// verified session user, never from client-supplied parameters.
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/media/intent — Create an upload intent.
+ * Body: { mimeType, sizeBytes, sha256, venueId? }
+ * Returns: { mediaId, uploadUrl, expiresAt }
+ */
+app.post('/api/media/intent', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const agencyId = callerAgencyId(req);
+    // venueId is optional; if supplied, verify user has access to it.
+    // Admins can access all venues in their agency; others must match their venueId.
+    const { mimeType, sizeBytes, sha256, venueId } = req.body || {};
+    if (venueId && user.role !== 'admin' && user.venueId !== venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
+    const result = await media.createIntent(getFirestore(), {
+      agencyId,
+      venueId,
+      uploadedBy: user.id,
+      mimeType,
+      sizeBytes,
+      sha256,
+    });
+    res.json(result);
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] intent error:', e);
+      res.status(500).json({ error: 'Failed to create upload intent.' });
+    }
+  }
+});
+
+/**
+ * POST /api/media/:id/uploaded — Mark intent as uploaded (after PUT to signed URL).
+ */
+app.post('/api/media/:id/uploaded', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const doc = await getFirestore().collection('media').doc(req.params.id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    if (!requireSameAgency(req, res, doc.data(), 'media')) return;
+    await media.markUploaded(getFirestore(), req.params.id);
+    res.json({ ok: true });
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] uploaded error:', e);
+      res.status(500).json({ error: 'Failed to mark as uploaded.' });
+    }
+  }
+});
+
+/**
+ * POST /api/media/:id/validate — Validate the uploaded file.
+ * Checks size, checksum, and file signature. INTENT/UPLOADED → VALIDATED.
+ */
+app.post('/api/media/:id/validate', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const doc = await getFirestore().collection('media').doc(req.params.id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    if (!requireSameAgency(req, res, doc.data(), 'media')) return;
+    const validated = await media.validateUpload(getFirestore(), req.params.id);
+    res.json({ ok: true, state: validated.state });
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] validate error:', e);
+      res.status(500).json({ error: 'Validation failed.' });
+    }
+  }
+});
+
+/**
+ * POST /api/media/:id/commit — Commit validated media to an entity.
+ * Body: { entityType, entityId }
+ * VALIDATED → COMMITTED. Only after validation.
+ */
+app.post('/api/media/:id/commit', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const doc = await getFirestore().collection('media').doc(req.params.id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    if (!requireSameAgency(req, res, doc.data(), 'media')) return;
+    const { entityType, entityId } = req.body || {};
+    if (!entityType || !entityId) {
+      res.status(400).json({ error: 'entityType and entityId are required.' });
+      return;
+    }
+    const committed = await media.commitMedia(getFirestore(), req.params.id, entityType, entityId);
+    res.json({ ok: true, state: committed.state, attachedTo: committed.attachedTo });
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] commit error:', e);
+      res.status(500).json({ error: 'Failed to commit media.' });
+    }
+  }
+});
+
+/**
+ * GET /api/media/:id/download — Get a short-lived signed download URL.
+ * Only for COMMITTED media in the caller's agency.
+ */
+app.get('/api/media/:id/download', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const doc = await getFirestore().collection('media').doc(req.params.id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    if (!requireSameAgency(req, res, doc.data(), 'media')) return;
+    const url = await media.getDownloadUrl(getFirestore(), req.params.id);
+    res.json({ downloadUrl: url });
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] download error:', e);
+      res.status(500).json({ error: 'Failed to get download URL.' });
+    }
+  }
+});
+
+/**
+ * POST /api/media/sweep — Run the orphan sweeper (admin only).
+ * Idempotent. Marks abandoned intents, deletes expired files.
+ */
+app.post('/api/media/sweep', async (req, res) => {
+  try {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
+    const result = await media.sweepOrphans(getFirestore());
+    res.json(result);
+  } catch (e: any) {
+    console.error('[media] sweep error:', e);
+    res.status(500).json({ error: 'Sweeper failed.' });
+  }
+});
+
+/**
+ * GET /api/media/status — Check if media storage is configured.
+ * Used by the client to gracefully disable media features.
+ */
+app.get('/api/media/status', (req, res) => {
+  res.json({
+    configured: media.isMediaConfigured(),
+    retentionDays: media.RETENTION_DAYS,
+    maxImageBytes: media.MAX_IMAGE_BYTES,
+    maxAudioBytes: media.MAX_AUDIO_BYTES,
+    allowedMimeTypes: Array.from(media.ALLOWED_MIME_TYPES),
+  });
 });
 
 // Broadcast announcements — one-way team updates (NOT a chat)
