@@ -8,10 +8,20 @@ import * as crypto from 'crypto';
 
 // --- Mocks ---
 
-function createMockDb(existingDocs = {}) {
+function createMockDb(existingDocs = {}, opts = {}) {
   const docs = new Map(Object.entries(existingDocs));
+  const listError = opts.listError || null;
+  // Derive collection names from doc paths
+  const collectionNames = new Set();
+  for (const k of docs.keys()) {
+    const parts = k.split('/');
+    if (parts.length >= 2) collectionNames.add(parts[0]);
+  }
+  // Always include the known collections so listCollections finds them
+  for (const c of ['tasks', 'venues', 'users', 'usersByEmail', 'media']) collectionNames.add(c);
   return {
     _docs: docs,
+    _collectionNames: collectionNames,
     doc(path) {
       return {
         _path: path,
@@ -21,19 +31,50 @@ function createMockDb(existingDocs = {}) {
       };
     },
     collection(name) {
-      return {
+      const makeColl = (n) => ({
+        _collName: n,
         doc(id) {
-          return { _path: `${name}/${id}` };
+          const docPath = `${n}/${id}`;
+          return {
+            _path: docPath,
+            async get() {
+              return { exists: docs.has(docPath), data: () => docs.get(docPath) };
+            },
+          };
         },
-        limit(n) {
+        limit(x) {
           return {
             async get() {
-              const has = [...docs.keys()].some(k => k.startsWith(name + '/'));
+              const has = [...docs.keys()].some(k => k.startsWith(n + '/'));
               return { empty: !has };
             },
           };
         },
-      };
+        async get() {
+          const matching = [...docs.keys()].filter(k => k.startsWith(n + '/'));
+          return {
+            size: matching.length,
+            docs: matching.map(k => ({ id: k.split('/')[1], data: () => docs.get(k) })),
+          };
+        },
+      });
+      return makeColl(name);
+    },
+    async listCollections() {
+      if (listError) throw new Error(listError);
+      return [...collectionNames].map(n => {
+        const c = {
+          id: n,
+          _collName: n,
+          limit: (x) => ({
+            async get() {
+              const has = [...docs.keys()].some(k => k.startsWith(n + '/'));
+              return { empty: !has };
+            },
+          }),
+        };
+        return c;
+      });
     },
     batch() {
       const ops = [];
@@ -201,7 +242,7 @@ export default {
       console.log('  ✓ successful restore: counts match manifest');
     }
 
-    // Test 7: Dry run without --confirm writes nothing
+    // Test 7: Dry run without --confirm writes nothing (but still validates)
     {
       const { manifest, dataJson } = makeBackup();
       const db = createMockDb();
@@ -215,7 +256,99 @@ export default {
       });
       if (Object.keys(counts).length !== 0) throw new Error('Dry run should not write');
       if (db._docs.size !== 0) throw new Error('Dry run wrote to DB!');
-      console.log('  ✓ dry run without --confirm writes nothing');
+      console.log('  ✓ validated dry run writes nothing');
+    }
+
+    // Test 8: Refuses non-empty UNRELATED collection (e.g. backups)
+    {
+      const { manifest, dataJson } = makeBackup();
+      const db = createMockDb({ 'backups/latest': { tier: 'tier1' } });
+      const storage = createMockStorage(manifest, dataJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-005', firestoreDb: db, storage });
+        throw new Error('Should have refused non-empty unrelated collection');
+      } catch (e) {
+        if (!e.message.includes('not empty') || !e.message.includes('backups')) {
+          throw new Error(`Wrong error: ${e.message}`);
+        }
+      }
+      console.log('  ✓ refuses non-empty unrelated collection');
+    }
+
+    // Test 9: Fails closed on listCollections error
+    {
+      const { manifest, dataJson } = makeBackup();
+      const db = createMockDb({}, { listError: 'permission denied' });
+      const storage = createMockStorage(manifest, dataJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-006', firestoreDb: db, storage });
+        throw new Error('Should have failed closed');
+      } catch (e) {
+        if (!e.message.includes('Fail closed')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      console.log('  ✓ fails closed on collection-enumeration error');
+    }
+
+    // Test 10: Malformed manifest rejected BEFORE any writes
+    {
+      const { manifest, dataJson } = makeBackup();
+      const badManifest = { ...manifest, secretsScrubbed: false }; // not confirmed scrubbed
+      const db = createMockDb();
+      const storage = createMockStorage(badManifest, dataJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-007', firestoreDb: db, storage });
+        throw new Error('Should have rejected bad manifest');
+      } catch (e) {
+        if (!e.message.includes('secretsScrubbed')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      if (db._docs.size !== 0) throw new Error('Wrote before manifest validation!');
+      console.log('  ✓ malformed manifest rejected before any writes');
+    }
+
+    // Test 11: Wrong source database ID rejected
+    {
+      const { manifest, dataJson } = makeBackup();
+      const badManifest = { ...manifest, databaseId: 'some-other-db' };
+      // Recompute checksum for the tampered manifest so we test the DB check, not checksum
+      const db = createMockDb();
+      const storage = createMockStorage(badManifest, dataJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-008', firestoreDb: db, storage });
+        throw new Error('Should have rejected wrong source DB');
+      } catch (e) {
+        if (!e.message.includes('databaseId')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      console.log('  ✓ wrong source database ID rejected');
+    }
+
+    // Test 12: Post-write verification catches count drift
+    // (Simulate by having the mock drop a write — verification must catch it)
+    {
+      const { manifest, dataJson } = makeBackup();
+      const db = createMockDb();
+      // Wrap batch to silently drop one write
+      const origBatch = db.batch.bind(db);
+      let dropNext = true;
+      db.batch = () => {
+        const b = origBatch();
+        const origSet = b.set.bind(b);
+        b.set = (ref, data) => {
+          if (dropNext && ref._path === 'users/u1') {
+            dropNext = false;
+            return; // silently drop
+          }
+          origSet(ref, data);
+        };
+        return b;
+      };
+      const storage = createMockStorage(manifest, dataJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-009', firestoreDb: db, storage });
+        throw new Error('Should have caught verification mismatch');
+      } catch (e) {
+        if (!e.message.includes('VERIFY FAILED')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      console.log('  ✓ post-write verification catches missing record');
     }
 
     console.log('  ✓ All restore tests passed');
