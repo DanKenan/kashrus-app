@@ -3890,6 +3890,117 @@ app.get('/api/media/status', (req, res) => {
   });
 });
 
+/**
+ * GET /api/media/check-indexes — Check if Firestore composite indexes are ready.
+ * Admin only. Runs the sweeper's queries with limit(1) to detect missing-index errors.
+ * Returns per-index readiness. If an index is still building, Firestore throws.
+ */
+app.get('/api/media/check-indexes', async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const db = requireMediaDb(req, res);
+  if (!db) return;
+
+  const indexes = [];
+  let allReady = true;
+
+  // Index 1: media(state, createdAt) — for stale intent queries
+  try {
+    await db.collection('media')
+      .where('state', 'in', ['INTENT', 'UPLOADED', 'VALIDATED'])
+      .where('createdAt', '<', new Date().toISOString())
+      .limit(1)
+      .get();
+    indexes.push({ name: 'media(state, createdAt)', ready: true, detail: 'Query succeeded' });
+  } catch (e: any) {
+    const isIndexError = e?.message?.includes('index') || e?.code === 9;
+    indexes.push({
+      name: 'media(state, createdAt)',
+      ready: false,
+      detail: isIndexError ? 'Index missing or building' : e?.message,
+    });
+    allReady = false;
+  }
+
+  // Index 2: media(state, deleteError) — for failed-delete retry queries
+  try {
+    await db.collection('media')
+      .where('state', '==', 'ABANDONED')
+      .where('deleteError', '!=', null)
+      .limit(1)
+      .get();
+    indexes.push({ name: 'media(state, deleteError)', ready: true, detail: 'Query succeeded' });
+  } catch (e: any) {
+    const isIndexError = e?.message?.includes('index') || e?.code === 9;
+    indexes.push({
+      name: 'media(state, deleteError)',
+      ready: false,
+      detail: isIndexError ? 'Index missing or building' : e?.message,
+    });
+    allReady = false;
+  }
+
+  res.json({ indexes, allReady });
+});
+
+/**
+ * DELETE /api/media/:id/test-cleanup — Delete test-created media.
+ * Admin only. NARROWLY SCOPED: only deletes media where attachedTo.entityId
+ * starts with 'test-' (e2e test artifacts). Refuses all other deletions.
+ * This is for cleaning up after the /admin/media-check e2e test.
+ */
+app.delete('/api/media/:id/test-cleanup', async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const db = requireMediaDb(req, res);
+  if (!db) return;
+  try {
+    const docRef = db.collection('media').doc(req.params.id);
+    const snap = await docRef.get();
+    if (!snap.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    const doc = snap.data();
+    // Narrow scope: only test artifacts (entityId starts with 'test-')
+    const entityId = doc.attachedTo?.entityId || '';
+    if (!entityId.startsWith('test-')) {
+      res.status(403).json({
+        error: 'This endpoint only deletes test-created media (entityId must start with test-).',
+      });
+      return;
+    }
+    if (!requireSameAgency(req, res, doc, 'media')) return;
+
+    // Delete from Storage, then delete the Firestore doc
+    const store = media.getStorage();
+    if (store) {
+      try {
+        await store.storage.bucket(store.bucketName).file(doc.storagePath).delete({ ignoreNotFound: true });
+      } catch (e: any) {
+        console.warn(`[media] test-cleanup storage delete failed: ${e?.message}`);
+      }
+    }
+    await docRef.delete();
+    res.json({ ok: true, deleted: req.params.id });
+  } catch (e: any) {
+    console.error('[media] test-cleanup error:', e);
+    res.status(500).json({ error: 'Cleanup failed.' });
+  }
+});
+
+/**
+ * GET /admin/media-check — Serve the admin media-check HTML page.
+ *
+ * The HTML itself is NOT sensitive (no secrets in it). The page reads the
+ * session token from localStorage and requires a successful admin-only API
+ * call before enabling the test buttons. All privileged operations remain
+ * protected server-side via requireAdmin().
+ */
+app.get('/admin/media-check', (req, res) => {
+  res.sendFile(path.join(process.cwd(), 'public', 'admin-media-check.html'));
+});
+
 // Broadcast announcements — one-way team updates (NOT a chat)
 // Categories: assignment, update, notice, urgent. Targeted by role.
 app.get('/api/announcements', (req, res) => {
