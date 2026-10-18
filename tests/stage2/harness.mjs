@@ -130,8 +130,14 @@ async function main() {
   const restartServer = async (envOverrides = {}) => {
     console.log('[harness] Restarting server...');
     serverChild.kill('SIGKILL');
-    // Wait for the port to actually release before rebinding — SIGKILL is
-    // async and rebinding too early causes EADDRINUSE (CI failure 2026-10-18).
+    // npx spawns a child node process; SIGKILL to the parent can orphan it.
+    // Kill by port to catch orphans (CI failure 2026-10-18: orphaned node
+    // kept :3100, "port did not release within 15s").
+    try {
+      execSync(`lsof -ti:${SERVER_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
+    } catch { /* nothing on the port — fine */ }
+    // Wait for the port to actually release before rebinding — kill is async
+    // and rebinding too early causes EADDRINUSE.
     const portFreeDeadline = Date.now() + 15000;
     for (;;) {
       try {
