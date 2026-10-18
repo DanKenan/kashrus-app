@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { KosherEvent, User as UserType, Venue } from '../types';
 import { getRoleLabel } from '../lib/permissions';
-import { apiFetch } from '../lib/api';
+import { apiFetch, apiWrite } from '../lib/api';
 
 // Staff roles that can be assigned to supervise an event — everyone on the
 // team except venue owners. ('worker' is the app's Mashgiach role.)
@@ -143,7 +143,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
     const title = newTemplateInput.trim();
     if (!title) return;
     try {
-      const res = await apiFetch('/api/event-task-templates', {
+      const result = await apiWrite('/api/event-task-templates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -152,9 +152,11 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
           userEmail: currentUser?.email,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed');
-      setTemplates([...templates, data.template]);
+      if (!result.ok) throw new Error(result.error || 'Failed');
+      // The endpoint returns the created template object directly (201).
+      const template = result.data?.template ?? result.data;
+      if (!template || !template.id) throw new Error('Could not save default task.');
+      setTemplates([...templates, template]);
       setNewTemplateInput('');
     } catch (err: any) {
       setErrorMsg(err.message || 'Could not save default task.');
@@ -163,15 +165,15 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
   const handleDeleteTemplate = async (id: string) => {
     try {
-      const res = await apiFetch(`/api/event-task-templates/${id}`, {
+      const result = await apiWrite(`/api/event-task-templates/${id}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userEmail: currentUser?.email }),
       });
-      if (!res.ok) throw new Error('Failed');
+      if (!result.ok) throw new Error(result.error || 'Failed');
       setTemplates(templates.filter((t) => t.id !== id));
-    } catch {
-      setErrorMsg('Could not delete default task.');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Could not delete default task.');
     }
   };
 

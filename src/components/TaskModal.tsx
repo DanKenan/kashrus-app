@@ -120,7 +120,7 @@ function TimePickerRow({
 interface TaskModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (taskData: Partial<Task>) => void;
+  onSave: (taskData: Partial<Task>) => Promise<boolean> | void;
   taskToEdit?: Task | null;
   knownWorkers: Array<{ email: string; name: string }>;
   currentUserEmail?: string | null;
@@ -428,7 +428,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
     if (submitGuard.current) return;
@@ -443,7 +443,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       finalDates = [todayStr];
     }
 
-    onSave({
+    const saved = await onSave({
       ...(taskToEdit ? { id: taskToEdit.id } : {}),
       title: title.trim(),
       description: description.trim(),
@@ -466,6 +466,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       specificDates: scheduleType === 'specific_dates' ? finalDates : undefined,
     });
 
+    // Only close on a confirmed save — on failure the modal stays open with
+    // the user's input intact so they can review and retry.
+    if (saved === false) {
+      submitGuard.current = false;
+      return;
+    }
     onClose();
   };
 

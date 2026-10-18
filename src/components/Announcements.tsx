@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Megaphone, Plus, X, Trash2, ClipboardList, Bell, AlertTriangle, Info } from 'lucide-react';
-import { apiFetch } from '../lib/api';
+import { apiFetch, apiWrite } from '../lib/api';
 
 interface Announcement {
   id: string;
@@ -44,6 +44,7 @@ export function Announcements({ currentUserEmail, currentUserName, currentUserRo
   const [body, setBody] = useState('');
   const [category, setCategory] = useState<Announcement['category']>('update');
   const [targetRoles, setTargetRoles] = useState<string[]>(['all']);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const canPost = ['admin', 'coordinator'].includes(currentUserRole);
 
@@ -63,37 +64,39 @@ export function Announcements({ currentUserEmail, currentUserName, currentUserRo
 
   const post = async () => {
     if (!title.trim()) return;
-    try {
-      const res = await apiFetch('/api/announcements', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: title.trim(),
-          body: body.trim(),
-          category,
-          targetRoles,
-          authorEmail: currentUserEmail,
-          authorName: currentUserName,
-        }),
-      });
-      const d = await res.json();
-      if (d.announcement) {
-        setAnnouncements([d.announcement, ...announcements]);
-        setTitle(''); setBody(''); setCategory('update'); setTargetRoles(['all']);
-        setShowCompose(false);
-      }
-    } catch (e) {
-      console.error('Failed to post:', e);
+    setErrorMsg(null);
+    const result = await apiWrite('/api/announcements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: title.trim(),
+        body: body.trim(),
+        category,
+        targetRoles,
+        authorEmail: currentUserEmail,
+        authorName: currentUserName,
+      }),
+    });
+    if (!result.ok) {
+      // Keep the compose form open with the text intact so the user can retry.
+      setErrorMsg(result.error || 'Could not post the broadcast.');
+      return;
+    }
+    const announcement = result.data?.announcement;
+    if (announcement) {
+      setAnnouncements([announcement, ...announcements]);
+      setTitle(''); setBody(''); setCategory('update'); setTargetRoles(['all']);
+      setShowCompose(false);
     }
   };
 
   const remove = async (id: string) => {
-    try {
-      await apiFetch(`/api/announcements/${id}`, { method: 'DELETE' });
-      setAnnouncements(announcements.filter((a) => a.id !== id));
-    } catch (e) {
-      console.error('Failed to delete:', e);
+    const result = await apiWrite(`/api/announcements/${id}`, { method: 'DELETE' });
+    if (!result.ok) {
+      setErrorMsg(result.error || 'Could not delete the broadcast.');
+      return;
     }
+    setAnnouncements(announcements.filter((a) => a.id !== id));
   };
 
   const toggleRole = (role: string) => {
@@ -159,6 +162,11 @@ export function Announcements({ currentUserEmail, currentUserName, currentUserRo
 
           {showCompose && canPost && (
             <div className="p-3 rounded-xl border border-line bg-sunken space-y-2.5">
+              {errorMsg && (
+                <div className="p-2 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-[11px] text-rose-700 dark:text-rose-300">
+                  {errorMsg}
+                </div>
+              )}
               <input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
@@ -215,10 +223,15 @@ export function Announcements({ currentUserEmail, currentUserName, currentUserRo
             </div>
           )}
 
+          {!showCompose && errorMsg && (
+            <div className="p-2 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-[11px] text-rose-700 dark:text-rose-300">
+              {errorMsg}
+            </div>
+          )}
+
           {loading ? (
             <div className="text-xs text-ink-faint text-center py-6">Loading...</div>
-          ) : filtered.length === 0 ? (
-            <div className="text-xs text-ink-faint text-center py-6">
+          ) : filtered.length === 0 ? (            <div className="text-xs text-ink-faint text-center py-6">
               No broadcasts yet.
             </div>
           ) : (

@@ -277,6 +277,64 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+// ---------------------------------------------------------------------------
+// Stage 2 Section A: server-side authorization helpers.
+// The auth middleware above resolves the signed session token into
+// req.authUser (the VERIFIED user record). These helpers standardize on that
+// — handlers must NEVER trust role/agencyId from the request body.
+// ---------------------------------------------------------------------------
+
+/** The authenticated user from the session token (set by the auth middleware). */
+function getAuthUser(req: any): UserProfile | undefined {
+  return (req as any).authUser as UserProfile | undefined;
+}
+
+/** The caller's agency, from the verified session user. */
+function callerAgencyId(req: any): string {
+  return getAuthUser(req)?.agencyId || 'agency-hkc';
+}
+
+/**
+ * Require the caller to be an agency admin. Sends 403 and returns null when
+ * the check fails; otherwise returns the verified admin user.
+ */
+function requireAdmin(req: any, res: any): UserProfile | null {
+  const user = getAuthUser(req);
+  if (!user || user.role !== 'admin') {
+    res.status(403).json({ error: 'Only administrators can perform this action.' });
+    return null;
+  }
+  return user;
+}
+
+/**
+ * Require the target entity to belong to the caller's agency. Sends 403 and
+ * returns false on a cross-agency attempt; returns true otherwise. Entities
+ * without an agencyId are treated as belonging to the default agency.
+ */
+function requireSameAgency(req: any, res: any, entity: any, entityLabel = 'item'): boolean {
+  const agency = callerAgencyId(req);
+  const entityAgency = (entity && entity.agencyId) || 'agency-hkc';
+  if (entityAgency !== agency) {
+    res.status(403).json({ error: `You can only modify ${entityLabel} in your own agency.` });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Require a venue to belong to the caller's agency — but only when the venue
+ * exists. Dangling venue references are tolerated (legacy data and tests use
+ * venue IDs that may not resolve); a venue that DOES exist must belong to the
+ * caller's agency. Returns false (after sending 403) on a cross-agency venue.
+ */
+function requireOwnVenue(req: any, res: any, venueId: string | undefined, venueList: any[]): boolean {
+  if (!venueId) return true;
+  const venue = venueList.find((v) => v && v.id === venueId);
+  if (!venue) return true; // dangling reference — nothing cross-agency to protect
+  return requireSameAgency(req, res, venue, 'venues');
+}
+
 // In-memory + file-backed storage
 interface Agency {
   id: string;
@@ -1343,9 +1401,13 @@ function saveState() {
 //
 // The local store.json lives on the container's ephemeral filesystem: every
 // deploy or server restart wipes it. Firestore is the durable copy.
-// Writes are best-effort and never block request handling; if Firestore is
-// unreachable (e.g. local dev without GCP credentials) the app keeps working
-// exactly as before on the local file.
+//
+// Fail-closed on Cloud Run (K_SERVICE set): if Firestore init fails there,
+// the server REFUSES TO START (process.exit(1)) instead of serving in
+// silent degraded mode. In local dev (no K_SERVICE) a failed init falls
+// back to the local file, with a loud DEGRADED warning on every write.
+// Emergency kill-switch: FORCE_LOCAL_MODE=true skips Firestore init
+// entirely (even on Cloud Run) — see EMERGENCY.md.
 // ---------------------------------------------------------------------------
 const FIRESTORE_STATE_DOC = 'app-state/main';
 let firestoreDb: any = null;
@@ -1353,6 +1415,12 @@ let firestoreDb: any = null;
 // doc exists yet). persistToFirestore() refuses to write until this is true,
 // so a slow/failed boot can never overwrite good data with seed defaults.
 let durableStateLoaded = false;
+// Tracks WHY Firestore is absent, for /api/health and logs. Set by
+// initFirestore(): 'connected' = init succeeded; 'disabled' = intentionally
+// off (FORCE_LOCAL_MODE kill-switch, or no credentials available in local
+// dev); 'degraded-local' = init was attempted but failed (local dev only —
+// on Cloud Run a failed init refuses to start instead, see below).
+let firestoreInitStatus: 'connected' | 'degraded-local' | 'disabled' = 'disabled';
 
 function getFirestoreConfig(): { projectId?: string; databaseId?: string } {
   let fileConfig: any = {};
@@ -1374,12 +1442,24 @@ function getFirestoreConfig(): { projectId?: string; databaseId?: string } {
 }
 
 async function initFirestore() {
+  // Emergency kill-switch (see EMERGENCY.md §1 Option B / §2). When set,
+  // Firestore init is skipped ENTIRELY — even on Cloud Run. The server runs
+  // in local-file mode (ephemeral on Cloud Run: data will NOT persist across
+  // restarts) and logs a loud warning on every write attempt. Fail-closed
+  // is deliberately NOT triggered by this path: the degraded mode is the
+  // operator's explicit choice.
+  if (process.env.FORCE_LOCAL_MODE === 'true') {
+    console.warn('[Firestore] FORCE_LOCAL_MODE=true — skipping Firestore init entirely (local file only, NO durability).');
+    firestoreInitStatus = 'disabled';
+    return;
+  }
   try {
     // Test hook: in-memory Firestore mock with faithful transaction semantics.
     // Used by the Stage 2 test suite (FIRESTORE_MOCK=true). Not for production.
     if (process.env.FIRESTORE_MOCK === 'true') {
       const mockMod = await import('./tests/stage2/firestore-mock.mjs');
       firestoreDb = mockMod.getMockFirestore();
+      firestoreInitStatus = 'connected';
       console.log('[Firestore] Using in-memory mock (FIRESTORE_MOCK=true).');
       return;
     }
@@ -1393,18 +1473,36 @@ async function initFirestore() {
       process.env.FIRESTORE_ENABLED === 'true';
     if (!mayHaveCredentials) {
       console.log('[Firestore] Not on Cloud Run — durable persistence disabled (file only).');
+      firestoreInitStatus = 'disabled';
       return;
     }
     const { projectId, databaseId } = getFirestoreConfig();
+    const onCloudRun = !!process.env.K_SERVICE;
     if (!projectId) {
+      // On Cloud Run a missing project config is a FATAL misconfiguration,
+      // not a soft fallback: fail closed (handled in the catch below).
+      if (onCloudRun) {
+        throw new Error('No Firebase project configured (FIREBASE_PROJECT_ID or firebase-applet-config.json missing).');
+      }
       console.log('[Firestore] No project configured — durable persistence disabled (file only).');
+      firestoreInitStatus = 'disabled';
       return;
     }
     const app = getApps().length > 0 ? getApp() : initializeApp({ projectId });
     firestoreDb = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+    firestoreInitStatus = 'connected';
     console.log(`[Firestore] Durable persistence enabled (db: ${databaseId || '(default)'}).`);
   } catch (err: any) {
     firestoreDb = null;
+    if (process.env.K_SERVICE) {
+      // FAIL-CLOSED in production: a Cloud Run instance that cannot reach
+      // Firestore must NEVER serve in silent degraded mode (writes would
+      // land in the ephemeral container and be lost on the next deploy).
+      // Crash the boot so Cloud Run surfaces the failure loudly instead.
+      console.error('[Firestore] FATAL: Firestore init failed on Cloud Run — refusing to start:', err?.message);
+      process.exit(1);
+    }
+    firestoreInitStatus = 'degraded-local';
     console.warn('[Firestore] Init failed — durable persistence disabled (file only):', err?.message);
   }
 }
@@ -1520,19 +1618,73 @@ class RateLimitError extends Error {
   }
 }
 
-// Idempotency: recent operation IDs with TTL. Single-instance deployment
-// (maxScale=1) makes in-memory tracking correct. Entries expire after
-// IDEMPOTENCY_TTL_MS to bound memory.
-const IDEMPOTENCY_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const idempotencyCache = new Map<string, { result: any; version: number; expiresAt: number; inFlight?: boolean }>();
+// Idempotency: durable records stored in the Firestore document itself
+// (doc.idempotencyRecords), so retries survive restarts and work across
+// instances. Single-instance deployment (maxScale=1) is no longer load-bearing
+// for correctness.
+//
+// Lifecycle: commitOrRespond scopes the client-supplied operationId with the
+// authenticated user's ID (`${userId}:${operationId}`) into
+// options.idempotencyKey. Inside the transaction, commitState reads the fresh
+// document: a live (unexpired) record for the key short-circuits with the
+// cached result (DuplicateOperationError); otherwise the mutator runs and the
+// sanitized result is stored atomically with the main write.
+//
+// Concurrency: two in-flight requests with the same key both enter
+// transactions; the first commits, the second's commit fails optimistic
+// concurrency and is retried — the retry then sees the stored record and
+// returns the cached result instead of re-executing the mutator. Mutators
+// must stay pure (they already are: version-conflict retries re-run them).
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const IDEMPOTENCY_MAX_RECORDS = 1000;
 
-function pruneIdempotencyCache() {
-  const now = Date.now();
-  for (const [key, entry] of idempotencyCache) {
-    if (entry.expiresAt < now) idempotencyCache.delete(key);
+/** Exact-match sensitive field names (case-insensitive) stripped from cached results. */
+const IDEMPOTENCY_SENSITIVE_FIELDS = new Set(['password', 'passwordhash', 'kioskpin', 'resettoken', 'apikey']);
+
+/**
+ * Deep-strip sensitive fields from a result before caching it as an
+ * idempotency record. Removes password/passwordHash/kioskPin/resetToken/
+ * apiKey and any field whose name contains 'secret' or 'token'
+ * (case-insensitive). Never mutates the input.
+ */
+function sanitizeForIdempotency<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForIdempotency(item)) as unknown as T;
   }
+  if (value && typeof value === 'object') {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value as Record<string, any>)) {
+      const kl = k.toLowerCase();
+      if (IDEMPOTENCY_SENSITIVE_FIELDS.has(kl) || kl.includes('secret') || kl.includes('token')) {
+        continue;
+      }
+      out[k] = sanitizeForIdempotency(v);
+    }
+    return out as T;
+  }
+  return value;
 }
-setInterval(pruneIdempotencyCache, 5 * 60 * 1000).unref?.();
+
+/**
+ * Drop expired idempotency records; if still over the cap, keep the newest
+ * IDEMPOTENCY_MAX_RECORDS by createdAt. Runs inside the transaction, so the
+ * prune is atomic with the write that triggered it.
+ */
+function pruneIdempotencyRecords(records: any[]): any[] {
+  const now = Date.now();
+  const live = records.filter(
+    (r) => r && typeof r.key === 'string' && typeof r.expiresAt === 'number' && r.expiresAt > now
+  );
+  if (live.length <= IDEMPOTENCY_MAX_RECORDS) return live;
+  return live
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .slice(0, IDEMPOTENCY_MAX_RECORDS);
+}
+
+// Dev-only fallback (no Firestore configured): there is no durable store, so
+// idempotency records live in memory. Production always has Firestore, so
+// this Map is never consulted there.
+const devIdempotencyFallback = new Map<string, { result: any; version: number; expiresAt: number }>();
 
 // The shape a mutator returns. Either a successful mutation or a conflict.
 type MutatorOutcome =
@@ -1544,6 +1696,14 @@ interface CommitOptions {
   expectedVersion?: number;
   /** Client-generated UUID for idempotency. Retries with the same ID return the cached result. */
   operationId?: string;
+  /**
+   * Scoped idempotency key (`${userId}:${operationId}`), computed by
+   * commitOrRespond from the authenticated session user. Takes precedence
+   * over operationId when both are set.
+   */
+  idempotencyKey?: string;
+  /** Authenticated user ID that owns the idempotency key (stored on the record). */
+  idempotencyUserId?: string;
   /** How many times to retry the transaction on version conflict (default 2). */
   maxRetries?: number;
   /** Human-readable label for logs. */
@@ -1555,64 +1715,102 @@ interface CommitResult {
   version: number;
 }
 
+// Keys ignored when deciding whether a commit actually changed anything.
+// _v is the version counter (managed by commitState, not the mutator);
+// updatedAt is a timestamp stamp the mutator may touch on every write;
+// savedAt is written by the previous commit but never present in the
+// mutator's output doc (it's added after this comparison).
+const NOOP_IGNORED_KEYS = new Set(['_v', 'updatedAt', 'savedAt']);
+
+/**
+ * Recursive structural equality, ignoring NOOP_IGNORED_KEYS wherever they
+ * appear as keys. Used by commitState() to detect no-op mutations so a
+ * write that changes nothing doesn't bump _v or cost a Firestore write.
+ * No new dependencies — plain recursion over JSON-shaped data.
+ */
+function docsEqualIgnoring(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (a === null || b === null) return a === b;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    return a.every((item, i) => docsEqualIgnoring(item, b[i]));
+  }
+  if (typeof a === 'object') {
+    const aKeys = Object.keys(a).filter((k) => !NOOP_IGNORED_KEYS.has(k));
+    const bKeys = Object.keys(b).filter((k) => !NOOP_IGNORED_KEYS.has(k));
+    if (aKeys.length !== bKeys.length) return false;
+    return aKeys.every(
+      (k) => Object.prototype.hasOwnProperty.call(b, k) && docsEqualIgnoring(a[k], b[k])
+    );
+  }
+  return false;
+}
+
 /**
  * The ONLY way to persist a mutation. Runs the mutator inside a Firestore
  * transaction against fresh document data.
  *
+ * No-op detection: if the mutator's output doc is structurally identical to
+ * the current doc (ignoring _v, updatedAt, savedAt), the write is SKIPPED —
+ * _v is NOT incremented and no Firestore write happens. Success is returned
+ * with the existing version.
+ *
  * When Firestore is unavailable (local dev without credentials), falls back
  * to the legacy in-memory + file path WITHOUT version checking, and logs a
- * warning. This keeps local development working; production always has
- * Firestore (Cloud Run).
+ * loud DEGRADED warning on every write attempt. On Cloud Run (K_SERVICE)
+ * this fallback never happens: a failed Firestore init refuses to start.
  */
 async function commitState(
   mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
   options: CommitOptions = {}
 ): Promise<CommitResult> {
   const label = options.label || 'unnamed';
+  // Scoped idempotency key: `${userId}:${operationId}` so one user's retries
+  // can never collide with another user's operationId.
+  const idemKey = options.idempotencyKey || options.operationId || undefined;
 
-  // ---- Idempotency: return cached result for retried operations ----
-  // The check-and-claim below is synchronous (no awaits), so in Node's
-  // single-threaded event loop it is atomic: two concurrent requests with the
-  // same operationId cannot both pass. The first claims the ID immediately;
-  // the second sees the in-flight claim and gets a 429-style retry response
-  // (mapped to 409 by commitOrRespond) instead of executing twice.
-  if (options.operationId) {
-    const cached = idempotencyCache.get(options.operationId);
-    if (cached && cached.expiresAt > Date.now()) {
-      if ((cached as any).inFlight) {
-        throw new OperationConflictError('Operation already in progress — please retry in a moment.');
-      }
-      throw new DuplicateOperationError({ result: cached.result, version: cached.version });
-    }
-    // Claim synchronously: blocks concurrent duplicates before any await.
-    idempotencyCache.set(options.operationId, {
-      inFlight: true,
-      result: null,
-      version: -1,
-      expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
-    });
-    // Opportunistic prune on each new operation
-    if (idempotencyCache.size > 10000) pruneIdempotencyCache();
-  }
-
-  // ---- Fallback: no Firestore (local dev) ----
+  // ---- Fallback: no Firestore (local dev only — fail-closed on Cloud Run) ----
   if (!firestoreDb) {
-    console.warn(`[commitState:${label}] No Firestore — using file-only fallback (no version checking).`);
-    const outcome = mutator(stateSnapshot(), stateVersion);
+    console.warn(`[Firestore] DEGRADED: writing to local file only — data will NOT persist across restarts`);
+    const beforeDoc = stateSnapshot();
+    // Dev-fallback idempotency: no durable store here, so check the
+    // in-memory fallback map (synchronous section — atomic in the event loop).
+    if (idemKey) {
+      const hit = devIdempotencyFallback.get(idemKey);
+      if (hit) {
+        if (hit.expiresAt > Date.now()) {
+          throw new DuplicateOperationError({ result: hit.result, version: hit.version });
+        }
+        devIdempotencyFallback.delete(idemKey);
+      }
+    }
+    // Pristine deep copy BEFORE the mutator runs: the no-op comparison below
+    // must stay correct even if a mutator mutates its input in place.
+    const pristineBefore = JSON.parse(JSON.stringify(beforeDoc));
+    const outcome = mutator(beforeDoc, stateVersion);
     if ('conflict' in outcome) {
-      releaseIdempotencyClaim(options.operationId);
       throw new OperationConflictError(outcome.conflict);
     }
     hydrateState(outcome.doc);
-    try {
-      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-      fs.writeFileSync(DATA_FILE, JSON.stringify(stateSnapshot(), null, 2), 'utf-8');
-    } catch (err) {
-      console.warn('[commitState] File fallback save failed:', (err as any)?.message);
+    // No-op detection (fallback path): skip the file write when nothing
+    // changed. (The transactional path additionally skips the _v bump.)
+    if (!docsEqualIgnoring(JSON.parse(JSON.stringify(outcome.doc)), pristineBefore)) {
+      try {
+        if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(DATA_FILE, JSON.stringify(stateSnapshot(), null, 2), 'utf-8');
+      } catch (err) {
+        console.warn('[commitState] File fallback save failed:', (err as any)?.message);
+      }
     }
     const result = { result: outcome.result, version: stateVersion };
-    if (options.operationId) {
-      idempotencyCache.set(options.operationId, { result: result.result, version: result.version, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS });
+    if (idemKey) {
+      devIdempotencyFallback.set(idemKey, {
+        result: sanitizeForIdempotency(result.result),
+        version: result.version,
+        expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
+      });
     }
     return result;
   }
@@ -1633,6 +1831,25 @@ async function commitState(
         const currentDoc = snap.exists ? snap.data() : null;
         const currentVersion = typeof currentDoc?._v === 'number' ? currentDoc._v : 0;
 
+        // ---- Idempotency check-and-set (durable, inside the transaction) ----
+        // Read the fresh document's idempotency records: a live record for
+        // this key short-circuits with the cached result — the mutator never
+        // re-runs, so a client retry after a timeout cannot double-apply.
+        // Checked BEFORE the expectedVersion check so a retry carrying its
+        // original (now stale) version still gets its cached result.
+        if (idemKey) {
+          const records: any[] = Array.isArray(currentDoc?.idempotencyRecords)
+            ? currentDoc.idempotencyRecords
+            : [];
+          const now = Date.now();
+          const hit = records.find(
+            (r) => r && r.key === idemKey && typeof r.expiresAt === 'number' && r.expiresAt > now
+          );
+          if (hit) {
+            throw new DuplicateOperationError({ result: hit.result, version: hit.version });
+          }
+        }
+
         // Strict equality check: the client's view must match reality.
         if (options.expectedVersion !== undefined && options.expectedVersion !== currentVersion) {
           throw new VersionConflictError(currentVersion, options.expectedVersion);
@@ -1644,16 +1861,56 @@ async function commitState(
         // an empty world. This is safe because no other writer can exist yet
         // (the document is being created).
         const baseDoc = currentDoc || stateSnapshot();
+        // Pristine deep copy BEFORE the mutator runs, so the no-op comparison
+        // below stays correct even if a mutator mutates its input in place.
+        // (Skipped on first boot when the doc doesn't exist yet — that write
+        // must always happen.)
+        const pristineBefore = currentDoc ? JSON.parse(JSON.stringify(currentDoc)) : null;
         const outcome = mutator(baseDoc, currentVersion);
         if ('conflict' in outcome) {
           throw new OperationConflictError(outcome.conflict);
         }
 
-        const newDoc = {
+        // No-op detection: the mutator changed nothing meaningful — skip the
+        // Firestore write entirely, do NOT increment _v, return success with
+        // the existing version. Compares the JSON-normalized output (exactly
+        // what would be written) so `undefined` stripping can't produce a
+        // false "changed" verdict.
+        if (pristineBefore && docsEqualIgnoring(JSON.parse(JSON.stringify(outcome.doc)), pristineBefore)) {
+          return { result: outcome.result, version: currentVersion, doc: currentDoc };
+        }
+
+        const newDoc: any = {
           ...outcome.doc,
           _v: currentVersion + 1,
           savedAt: Date.now(),
         };
+        // Store the idempotency record atomically with the main write, so a
+        // retry that arrives after this commit sees the cached result. The
+        // cached result is sanitized (no passwords, PINs, tokens, or secrets).
+        // On the no-op path above nothing is written, so no record is stored
+        // either — a retry simply re-runs the effect-free mutator.
+        // Expired records are pruned when the array exceeds the cap.
+        const existingRecords: any[] = Array.isArray(currentDoc?.idempotencyRecords)
+          ? currentDoc.idempotencyRecords
+          : [];
+        if (idemKey) {
+          const now = Date.now();
+          newDoc.idempotencyRecords = [
+            ...pruneIdempotencyRecords(existingRecords),
+            {
+              key: idemKey,
+              userId: options.idempotencyUserId || null,
+              operation: label,
+              result: sanitizeForIdempotency(outcome.result),
+              createdAt: now,
+              expiresAt: now + IDEMPOTENCY_TTL_MS,
+              version: currentVersion + 1,
+            },
+          ];
+        } else if (existingRecords.length > IDEMPOTENCY_MAX_RECORDS) {
+          newDoc.idempotencyRecords = pruneIdempotencyRecords(existingRecords);
+        }
         // Firestore rejects `undefined` with a synchronous throw — strip via JSON round-trip.
         const payload = JSON.parse(JSON.stringify(newDoc));
         tx.set(docRef, payload);
@@ -1664,22 +1921,15 @@ async function commitState(
       hydrateState(committed.doc);
       stateVersion = committed.version;
 
-      if (options.operationId) {
-        idempotencyCache.set(options.operationId, {
-          result: committed.result,
-          version: committed.version,
-          expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
-        });
-      }
       return { result: committed.result, version: committed.version };
     } catch (err: any) {
-      // DuplicateOperationError is thrown above, not from here — but guard anyway.
-      // (The original request still owns the claim; do not release it.)
+      // DuplicateOperationError is thrown from the idempotency check inside
+      // the transaction — it must propagate untouched (the record is already
+      // stored; a retry will keep returning the cached result).
       if (err instanceof DuplicateOperationError) throw err;
       // RateLimitError: never retry — the limit is real, retrying would just
-      // burn the client's quota. Release the claim and surface 429.
+      // burn the client's quota. Surface 429.
       if (err instanceof RateLimitError) {
-        releaseIdempotencyClaim(options.operationId);
         throw err;
       }
       if (err instanceof VersionConflictError || err instanceof OperationConflictError) {
@@ -1693,37 +1943,21 @@ async function commitState(
           console.log(`[commitState:${label}] Version conflict (attempt ${attempt}/${maxAttempts}) — retrying with fresh data.`);
           continue;
         }
-        // Terminal failure: release the idempotency claim so a legitimate
-        // client retry with the same operationId can re-execute. (Data-level
-        // idempotency in the mutators — pre-generated IDs + existence checks —
-        // guards against the lost-commit edge case.)
-        releaseIdempotencyClaim(options.operationId);
+        // Terminal failure: no idempotency record was stored (the transaction
+        // aborted before the atomic write), so a legitimate client retry with
+        // the same operationId will simply not find a record and re-execute.
+        // Data-level idempotency in the mutators — pre-generated IDs +
+        // existence checks — guards against the lost-commit edge case.
         throw err;
       }
       // Firestore errors (unavailable, deadline exceeded, etc.)
       console.warn(`[commitState:${label}] Transaction failed (attempt ${attempt}/${maxAttempts}):`, err?.message);
       lastError = err;
       if (attempt < maxAttempts) continue;
-      releaseIdempotencyClaim(options.operationId);
       throw new FirestoreUnavailableError(`Save failed after ${maxAttempts} attempts: ${err?.message || 'unknown error'}. Your data was NOT saved — please retry.`);
     }
   }
-  releaseIdempotencyClaim(options.operationId);
   throw lastError;
-}
-
-/**
- * Releases an in-flight idempotency claim after a terminal failure, so a
- * legitimate client retry with the same operationId can re-execute. Only
- * removes the claim if it is still marked in-flight (never removes a
- * committed result).
- */
-function releaseIdempotencyClaim(operationId?: string): void {
-  if (!operationId) return;
-  const cached = idempotencyCache.get(operationId);
-  if (cached && (cached as any).inFlight) {
-    idempotencyCache.delete(operationId);
-  }
 }
 
 // In-memory mirror of the Firestore document version. Updated only from
@@ -1755,9 +1989,18 @@ async function commitOrRespond(
     body.expectedVersion !== undefined ? Number(body.expectedVersion) :
     query.expectedVersion !== undefined ? Number(query.expectedVersion) : undefined;
   const operationId = body.operationId || query.operationId || undefined;
+  // Scope the idempotency key to the authenticated caller:
+  // `${userId}:${operationId}` — never the bare client-supplied operationId,
+  // so one user's retries can never collide with another user's.
+  const authUserId = (req as any).authUser?.id as string | undefined;
+  const idempotencyKey = operationId
+    ? authUserId
+      ? `${authUserId}:${operationId}`
+      : operationId
+    : undefined;
 
   try {
-    return await commitState(mutator, { ...options, expectedVersion, operationId });
+    return await commitState(mutator, { ...options, expectedVersion, operationId, idempotencyKey, idempotencyUserId: authUserId });
   } catch (err: any) {
     // All error paths send the HTTP response and return null, so the caller's
     // `if (!committed) return;` guard works. (Returning the Express Response
@@ -2209,13 +2452,21 @@ app.post('/api/push/subscribe', async (req, res) => {
 
 app.post('/api/push/unsubscribe', async (req, res) => {
   const { endpoint } = req.body as any;
+  // Only the caller's own subscription for that endpoint can be removed
+  // (userEmail is forced to the authenticated user by the auth middleware).
+  const callerEmail = String((req.body as any)?.userEmail || '').trim().toLowerCase();
   if (endpoint) {
     const committed = await commitOrRespond(
       req, res,
       (freshDoc) => {
         const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
         return {
-          doc: { ...freshDoc, pushSubscriptions: arr.filter((s) => s.endpoint !== endpoint) },
+          doc: {
+            ...freshDoc,
+            pushSubscriptions: arr.filter(
+              (s) => s.endpoint !== endpoint || (callerEmail && s.userEmail !== callerEmail)
+            ),
+          },
           result: { success: true },
         };
       },
@@ -2321,11 +2572,25 @@ wss.on('connection', (ws, req) => {
 });
 
 // Daily Reset Logic (supports resetting a specific venue or all)
-function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
+//
+// Returns a Promise that resolves ONLY after the transaction has committed
+// (or rejects on failure) — callers must await it before responding or
+// broadcasting. Scheduled resets skip when currentWorkDate is already today
+// (idempotency via the work-date guard inside the mutator); manual resets
+// pass { force: true } to ALWAYS run when explicitly requested, staying
+// transactional and idempotent via operationId. Archive/history creation
+// happens INSIDE the transaction (buildSnapshot runs in the mutator).
+async function executeDailyReset(
+  targetVenueId?: string,
+  resetBy: string = 'system',
+  opts: { force?: boolean; operationId?: string } = {}
+): Promise<{ result: any; version: number } | null> {
   const todayStr = new Date().toISOString().split('T')[0];
   const resetAt = new Date().toISOString();
-  // Stable timestamp base so transaction retries generate identical snapshot IDs.
-  const stamp = Date.now();
+  // Random ID base per reset invocation: stable across transaction retries
+  // (the mutator closure captures it), unique across invocations so snapshot
+  // IDs from different resets can never collide.
+  const stamp = crypto.randomUUID().slice(0, 8);
 
   // Build a single history snapshot from a venue + its tasks (pure function).
   const buildSnapshot = (v: any, venueTasks: any[]): HistoryLog => {
@@ -2404,49 +2669,58 @@ function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
 
   // The whole reset (snapshots + task reset + work-date bump) commits atomically.
   // currentWorkDate is bumped inside the mutator so a retry can't double-reset.
-  commitState(
-    (freshDoc) => {
-      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
-      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
-      const freshHistory: any[] = Array.isArray(freshDoc.historyLogs) ? freshDoc.historyLogs : [];
-      // Idempotency: if the work date was already advanced, this reset already ran.
-      if (freshDoc.currentWorkDate === todayStr) {
-        return { doc: freshDoc, result: null };
-      }
-      const targetVenues = targetVenueId
-        ? freshVenues.filter((v) => v.id === targetVenueId)
-        : freshVenues;
-      const snapshots = targetVenues.map((v) =>
-        buildSnapshot(v, freshTasks.filter((t) => t.venueId === v.id))
-      );
-      return {
-        doc: {
-          ...freshDoc,
-          historyLogs: [...snapshots, ...freshHistory],
-          tasks: freshTasks.map(resetTask),
-          currentWorkDate: todayStr,
-        },
-        result: snapshots[0] || null,
-      };
-    },
-    { label: 'daily-reset' }
-  ).then((outcome) => {
-    // Broadcast per-agency ONLY after commit (in-memory cache is now fresh).
-    for (const a of agencies) {
-      const aid = a.id;
-      broadcast('DAILY_RESET', {
-        venueId: targetVenueId || 'all',
-        tasks: tasks.filter((t) => (t.agencyId || 'agency-hkc') === aid),
-        historyLogs: historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === aid),
-        currentWorkDate,
-        snapshot: outcome.result,
-      }, undefined, aid);
-    }
-  }).catch((err) => {
+  // Await the CONFIRMED transaction before responding or broadcasting —
+  // nothing may act on a reset that hasn't committed.
+  let committed: { result: any; version: number };
+  try {
+    committed = await commitState(
+      (freshDoc) => {
+        const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+        const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+        const freshHistory: any[] = Array.isArray(freshDoc.historyLogs) ? freshDoc.historyLogs : [];
+        // Idempotency for scheduled resets: if the work date was already
+        // advanced, this reset already ran — the no-op detection in
+        // commitState() turns this into a version-neutral success. Manual
+        // (force) resets always run; their idempotency comes from operationId.
+        if (!opts.force && freshDoc.currentWorkDate === todayStr) {
+          return { doc: freshDoc, result: null };
+        }
+        const targetVenues = targetVenueId
+          ? freshVenues.filter((v) => v.id === targetVenueId)
+          : freshVenues;
+        const snapshots = targetVenues.map((v) =>
+          buildSnapshot(v, freshTasks.filter((t) => t.venueId === v.id))
+        );
+        return {
+          doc: {
+            ...freshDoc,
+            historyLogs: [...snapshots, ...freshHistory],
+            tasks: freshTasks.map(resetTask),
+            currentWorkDate: todayStr,
+          },
+          result: snapshots[0] || null,
+        };
+      },
+      { label: 'daily-reset', operationId: opts.operationId }
+    );
+  } catch (err) {
     console.warn('[DailyReset] Transaction failed:', (err as any)?.message);
-  });
+    throw err;
+  }
 
-  return null;
+  // Broadcast per-agency ONLY after commit (in-memory cache is now fresh).
+  for (const a of agencies) {
+    const aid = a.id;
+    broadcast('DAILY_RESET', {
+      venueId: targetVenueId || 'all',
+      tasks: tasks.filter((t) => (t.agencyId || 'agency-hkc') === aid),
+      historyLogs: historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === aid),
+      currentWorkDate,
+      snapshot: committed.result,
+    }, undefined, aid);
+  }
+
+  return committed;
 }
 
 // Scheduled interval: check every 60s for midnight rollover
@@ -2454,14 +2728,24 @@ setInterval(() => {
   const today = new Date().toISOString().split('T')[0];
   if (today !== currentWorkDate) {
     console.log(`[Scheduled Reset] Rollover detected from ${currentWorkDate} to ${today}`);
-    executeDailyReset(undefined, 'scheduled_midnight_cron');
+    // Async: resolves only after the transaction commits. Log-and-continue on
+    // failure — the next 60s tick retries the rollover.
+    executeDailyReset(undefined, 'scheduled_midnight_cron').catch((err) =>
+      console.warn('[Scheduled Reset] Failed:', (err as any)?.message)
+    );
   }
 }, 60000);
 
 // REST API Endpoints
+// Health — deliberately PUBLIC (listed in PUBLIC_API_ROUTES): monitoring and
+// uptime checks must reach it without auth.
 app.get('/api/health', (req, res) => {
+  const firestore = firestoreDb ? 'connected' : firestoreInitStatus;
   res.json({
-    status: 'ok',
+    status: firestore === 'connected' ? 'ok' : 'degraded',
+    firestore,
+    version: stateVersion,
+    uptime: Math.floor(process.uptime()),
     time: new Date().toISOString(),
     activeSockets: activeSockets.size,
     currentWorkDate,
@@ -2563,7 +2847,10 @@ app.post('/api/task-templates', async (req, res) => {
   }
 
   const templateId = `tmpl-${crypto.randomUUID()}`;
-  const agencyId = (req as any).agencyId || 'agency-hkc';
+  // New templates belong to the caller's agency (never trust a client value).
+  const agencyId = callerAgencyId(req);
+  // Copying another agency's venue tasks into a template would leak their data.
+  if (fromVenueId && !requireOwnVenue(req, res, fromVenueId, venues)) return;
 
   const committed = await commitOrRespond(
     req, res,
@@ -2596,7 +2883,10 @@ app.post('/api/task-templates/:id/apply', async (req, res) => {
   const { venueId, createdByEmail } = req.body || {};
   if (!venueId) return res.status(400).json({ error: 'Venue ID is required.' });
 
-  const agencyId = (req as any).agencyId || 'agency-hkc';
+  // The template and the target venue must both belong to the caller's agency.
+  if (!requireSameAgency(req, res, template, 'templates')) return;
+  if (!requireOwnVenue(req, res, venueId, venues)) return;
+  const agencyId = callerAgencyId(req);
   const now = new Date().toISOString();
   // Pre-generate stable IDs so transaction retries don't duplicate tasks.
   const created: TaskItem[] = template.tasks.map((td, i) => ({
@@ -2651,6 +2941,7 @@ app.post('/api/task-templates/:id/apply', async (req, res) => {
 app.delete('/api/task-templates/:id', async (req, res) => {
   const existing = taskTemplates.find((t) => t.id === req.params.id);
   if (!existing) return res.status(404).json({ error: 'Template not found.' });
+  if (!requireSameAgency(req, res, existing, 'templates')) return;
   const ok = await crudDelete(req, res, 'taskTemplates', req.params.id, { label: 'delete-task-template' });
   return;
 });
@@ -2672,8 +2963,10 @@ app.post('/api/incidents', async (req, res) => {
     return res.status(400).json({ error: 'Venue and title are required.' });
   }
 
-  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const agencyId = callerAgencyId(req);
   const now = new Date().toISOString();
+  // The incident's venue must belong to the caller's agency.
+  if (!requireOwnVenue(req, res, venueId, venues)) return;
   const venue = venues.find((v) => v.id === venueId);
   const venueName = venue?.name || 'Venue';
 
@@ -2767,6 +3060,7 @@ app.post('/api/incidents', async (req, res) => {
 app.post('/api/incidents/:id/resolve', async (req, res) => {
   const incident = incidents.find((i) => i.id === req.params.id);
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+  if (!requireSameAgency(req, res, incident, 'incidents')) return;
   const { resolvedBy } = req.body || {};
   const resolvedAt = new Date().toISOString();
   const ok = await crudUpdate(req, res, 'incidents', req.params.id,
@@ -2787,6 +3081,7 @@ app.post('/api/incidents/:id/resolve', async (req, res) => {
 app.post('/api/incidents/:id/acknowledge', async (req, res) => {
   const incident = incidents.find((i) => i.id === req.params.id);
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+  if (!requireSameAgency(req, res, incident, 'incidents')) return;
   const ok = await crudUpdate(req, res, 'incidents', req.params.id,
     (fresh) => {
       if (fresh.status === 'acknowledged' || fresh.status === 'resolved') return fresh; // idempotent
@@ -2825,18 +3120,21 @@ app.get('/api/announcements', (req, res) => {
 });
 
 app.post('/api/announcements', async (req, res) => {
-  const { title, body, category, targetRoles, venueId, expiresAt, authorEmail, authorName } = req.body || {};
+  const { title, body, category, targetRoles, venueId, expiresAt, authorName } = req.body || {};
   if (!title?.trim()) {
     return res.status(400).json({ error: 'Title is required.' });
   }
 
-  // Only admin/coordinator can post announcements
-  const author = users.find((u) => u.email.toLowerCase() === String(authorEmail || '').toLowerCase());
+  // Only admin/coordinator can post announcements — the author is ALWAYS the
+  // authenticated session user, never a client-supplied email.
+  const author = getAuthUser(req);
   if (!author || !['admin', 'coordinator'].includes(author.role)) {
     return res.status(403).json({ error: 'Only admins and coordinators can post announcements.' });
   }
 
-  const agencyId = (req as any).agencyId || author.agencyId || 'agency-hkc';
+  const agencyId = callerAgencyId(req);
+  // An announcement targeted at a venue must reference the caller's own agency venue.
+  if (venueId && !requireOwnVenue(req, res, venueId, venues)) return;
   const announcementId = `announce-${crypto.randomUUID()}`;
   const createdAt = new Date().toISOString();
 
@@ -2889,8 +3187,14 @@ app.post('/api/announcements', async (req, res) => {
 });
 
 app.delete('/api/announcements/:id', async (req, res) => {
+  // Same bar as posting: only admins/coordinators, from the session user.
+  const caller = getAuthUser(req);
+  if (!caller || !['admin', 'coordinator'].includes(caller.role)) {
+    return res.status(403).json({ error: 'Only admins and coordinators can delete announcements.' });
+  }
   const existing = announcements.find((a) => a.id === req.params.id);
   if (!existing) return res.status(404).json({ error: 'Announcement not found.' });
+  if (!requireSameAgency(req, res, existing, 'announcements')) return;
   const agencyId = existing.agencyId;
   const ok = await crudDelete(req, res, 'announcements', req.params.id, {
     label: 'delete-announcement',
@@ -3000,7 +3304,9 @@ app.post('/api/handoff-notes', async (req, res) => {
     return res.status(400).json({ error: 'Venue and note content (or voice note) are required.' });
   }
   const noteId = `handoff-${crypto.randomUUID()}`;
-  const agencyId = (req as any).agencyId || 'agency-hkc';
+  // Notes belong to the caller's agency; the venue must be theirs too.
+  const agencyId = callerAgencyId(req);
+  if (!requireOwnVenue(req, res, venueId, venues)) return;
   const createdAt = new Date().toISOString();
 
   const committed = await commitOrRespond(
@@ -3033,6 +3339,7 @@ app.post('/api/handoff-notes', async (req, res) => {
 app.delete('/api/handoff-notes/:id', async (req, res) => {
   const existing = handoffNotes.find((n) => n.id === req.params.id);
   if (!existing) return res.status(404).json({ error: 'Handoff note not found.' });
+  if (!requireSameAgency(req, res, existing, 'handoff notes')) return;
   const ok = await crudDelete(req, res, 'handoffNotes', req.params.id, {
     label: 'delete-handoff-note',
     broadcastType: 'HANDOFF_NOTE_DELETED',
@@ -3080,7 +3387,7 @@ app.post('/api/agencies/register', async (req, res) => {
   }
 
   const cleanAgencyName = agencyName.trim();
-  const agencyId = `agency-${Date.now()}`;
+  const agencyId = `agency-${crypto.randomUUID().slice(0, 8)}`;
   const derivedShortCode =
     (shortCode && shortCode.trim()) ||
     cleanAgencyName
@@ -3096,7 +3403,8 @@ app.post('/api/agencies/register', async (req, res) => {
   const cleanRegion = (region && region.trim()) || 'Regional Kashrut Authority';
 
   // Pre-generate stable IDs + hash password BEFORE the transaction.
-  const stamp = Date.now();
+  // Random base (stable within this call) so IDs are unique across calls.
+  const stamp = crypto.randomUUID().slice(0, 8);
   const adminUserId = `usr_admin_${stamp}`;
   const venueId = `venue-${stamp}`;
   const createdAt = new Date().toISOString();
@@ -3233,14 +3541,12 @@ app.get('/api/agencies/current', (req, res) => {
 
 // Agency administrator updates agency profile details
 app.put('/api/agencies/current', async (req, res) => {
-  const { userEmail, name, shortCode, certificationSeal, region, contactPhone, customDomain } = req.body;
-  const user = userEmail
-    ? users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase())
-    : null;
-
-  if (!user || user.role !== 'admin') {
+  // Agency settings: admin only, verified from the session token.
+  const user = requireAdmin(req, res);
+  if (!user) {
     return res.status(403).json({ error: 'Only kosher agency administrators can edit agency profile settings.' });
   }
+  const { name, shortCode, certificationSeal, region, contactPhone, customDomain } = req.body;
 
   const agencyId = user.agencyId || 'agency-hkc';
   const existing = agencies.find((a) => a.id === agencyId);
@@ -3289,7 +3595,7 @@ app.put('/api/agencies/current', async (req, res) => {
   if (!committed) return;
   const updated = committed.result as Agency;
 
-  broadcast('AGENCY_UPDATED', { agency: updated }, userEmail, agencyId);
+  broadcast('AGENCY_UPDATED', { agency: updated }, user.email, agencyId);
   res.json({ success: true, agency: updated });
 });
 
@@ -3426,21 +3732,14 @@ app.post('/api/venues', async (req, res) => {
     ownerEmail,
     ownerPassword,
     templateType,
-    userEmail,
   } = req.body;
 
-  let callerAgencyId = 'agency-hkc';
-  let callerAgency: Agency | undefined = undefined;
-
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller && caller.role !== 'admin') {
-      return res.status(403).json({ error: 'Only agency administrators can create new venue platforms.' });
-    }
-    if (caller) {
-      callerAgencyId = caller.agencyId || 'agency-hkc';
-    }
+  const caller = requireAdmin(req, res);
+  if (!caller) {
+    return res.status(403).json({ error: 'Only agency administrators can create new venue platforms.' });
   }
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  let callerAgency: Agency | undefined = undefined;
 
   callerAgency = agencies.find((a) => a.id === callerAgencyId) || agencies[0];
 
@@ -3449,9 +3748,9 @@ app.post('/api/venues', async (req, res) => {
   }
 
   // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
-  const newVenueId = `venue-${Date.now()}`;
+  const newVenueId = `venue-${crypto.randomUUID().slice(0, 8)}`;
   const cleanOwnerEmail = ownerEmail?.trim().toLowerCase() || undefined;
-  const ownerUserId = `usr_owner_${Date.now()}`;
+  const ownerUserId = `usr_owner_${crypto.randomUUID().slice(0, 8)}`;
   const createdAt = new Date().toISOString();
   // Hash the owner password once, outside the transaction (bcrypt is CPU-heavy;
   // the hash is deterministic input to the mutator).
@@ -3549,28 +3848,20 @@ app.post('/api/venues', async (req, res) => {
 // Admin edits venue details
 app.put('/api/venues/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, category, address, certification, ownerEmail, userEmail } = req.body;
+  const { name, category, address, certification, ownerEmail } = req.body;
 
-  let callerAgencyId = 'agency-hkc';
-
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller && caller.role !== 'admin') {
-      return res.status(403).json({ error: 'Only administrators can modify venue settings.' });
-    }
-    if (caller) {
-      callerAgencyId = caller.agencyId || 'agency-hkc';
-    }
+  const caller = requireAdmin(req, res);
+  if (!caller) {
+    return res.status(403).json({ error: 'Only administrators can modify venue settings.' });
   }
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   const existing = venues.find((v) => v.id === id);
   if (!existing) {
     return res.status(404).json({ error: 'Venue not found.' });
   }
 
-  if (existing.agencyId && existing.agencyId !== callerAgencyId) {
-    return res.status(403).json({ error: 'You do not have permission to modify venues outside your agency.' });
-  }
+  if (!requireSameAgency(req, res, existing, 'venues')) return;
 
   // Baseline for semantic conflict detection on name/category/address.
   const baseline = { name: existing.name, category: existing.category, address: existing.address };
@@ -3610,28 +3901,19 @@ app.put('/api/venues/:id', async (req, res) => {
 // Admin deletes a venue
 app.delete('/api/venues/:id', async (req, res) => {
   const { id } = req.params;
-  const { userEmail } = req.query;
 
-  let callerAgencyId = 'agency-hkc';
-
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller && caller.role !== 'admin') {
-      return res.status(403).json({ error: 'Only administrators can remove venue platforms.' });
-    }
-    if (caller) {
-      callerAgencyId = caller.agencyId || 'agency-hkc';
-    }
+  const caller = requireAdmin(req, res);
+  if (!caller) {
+    return res.status(403).json({ error: 'Only administrators can remove venue platforms.' });
   }
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   const existing = venues.find((v) => v.id === id);
   if (!existing) {
     return res.status(404).json({ error: 'Venue not found.' });
   }
 
-  if (existing.agencyId && existing.agencyId !== callerAgencyId) {
-    return res.status(403).json({ error: 'You do not have permission to delete venues outside your agency.' });
-  }
+  if (!requireSameAgency(req, res, existing, 'venues')) return;
 
   const committed = await commitOrRespond(
     req, res,
@@ -3771,6 +4053,8 @@ app.post('/api/tasks', async (req, res) => {
 
   const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === callerAgencyId);
   const targetVenueId = venueId || agencyVenues[0]?.id || 'venue-crown-market';
+  // The task's venue must belong to the caller's agency.
+  if (!requireOwnVenue(req, res, targetVenueId, venues)) return;
 
   let defaultStatus = 'pending';
   if (inputType === 'yes_no') {
@@ -3891,6 +4175,7 @@ app.put('/api/tasks/:id', async (req, res) => {
   if (!existing) {
     return res.status(404).json({ error: 'Task not found' });
   }
+  if (!requireSameAgency(req, res, existing, 'tasks')) return;
 
   const {
     currentStatus,
@@ -4062,6 +4347,7 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
   if (!existing) {
     return res.status(404).json({ error: 'Task not found' });
   }
+  if (!requireSameAgency(req, res, existing, 'tasks')) return;
 
   const { userEmail } = req.body || {};
   const entry = (existing.checkIns || []).find((c: any) => c.id === checkInId);
@@ -4123,6 +4409,7 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
   if (!existing) {
     return res.status(404).json({ error: 'Task not found' });
   }
+  if (!requireSameAgency(req, res, existing, 'tasks')) return;
 
   const { userEmail, userName, photoData, photoCaption } = req.body;
   if (userEmail) {
@@ -4141,7 +4428,7 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
 
   // Stable check-in ID generated BEFORE the transaction so retries don't duplicate.
   const now = new Date().toISOString();
-  const checkInId = `checkin-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const checkInId = `checkin-${crypto.randomUUID().slice(0, 8)}`;
   const checkIn: TaskCheckInItem = {
     id: checkInId,
     byName: userName || null,
@@ -4191,6 +4478,7 @@ app.delete('/api/tasks/:id', async (req, res) => {
   if (!deletedTask) {
     return res.status(404).json({ error: 'Task not found' });
   }
+  if (!requireSameAgency(req, res, deletedTask, 'tasks')) return;
   const { venueId: delVenueId, agencyId: delAgencyId } = deletedTask;
 
   const committed = await commitOrRespond(
@@ -4214,8 +4502,11 @@ app.delete('/api/tasks/:id', async (req, res) => {
 });
 
 // Admin manual reset daily board for a venue
-app.post('/api/reset-daily', (req, res) => {
-  const { venueId, resetBy, userEmail } = req.body;
+// Manual resets ALWAYS run (force), even if the board was already reset today
+// — unlike the scheduled midnight reset, which skips. The operationId makes
+// explicit client retries idempotent; the transaction itself is atomic.
+app.post('/api/reset-daily', async (req, res) => {
+  const { venueId, resetBy, userEmail, operationId } = req.body;
   let callerAgencyId = 'agency-hkc';
   if (userEmail) {
     const user = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
@@ -4223,22 +4514,28 @@ app.post('/api/reset-daily', (req, res) => {
       callerAgencyId = user.agencyId || 'agency-hkc';
     }
   }
-  const snapshot = executeDailyReset(venueId, resetBy || 'Admin Manual');
-  const venueTasks = tasks.filter(
-    (t) => (!venueId || t.venueId === venueId) && (t.agencyId || 'agency-hkc') === callerAgencyId
-  );
-  res.json({ success: true, snapshot, tasks: venueTasks });
+  // A targeted reset must reference the caller's own agency venue.
+  if (venueId && !requireOwnVenue(req, res, venueId, venues)) return;
+  try {
+    // Await the CONFIRMED transaction before responding or broadcasting.
+    const outcome = await executeDailyReset(venueId, resetBy || 'Admin Manual', {
+      force: true,
+      operationId: operationId || crypto.randomUUID(),
+    });
+    // In-memory state was hydrated by commitState — read tasks AFTER the await.
+    const venueTasks = tasks.filter(
+      (t) => (!venueId || t.venueId === venueId) && (t.agencyId || 'agency-hkc') === callerAgencyId
+    );
+    res.json({ success: true, snapshot: outcome ? outcome.result : null, tasks: venueTasks });
+  } catch (err: any) {
+    res.status(503).json({ error: 'Daily reset failed: ' + (err?.message || 'unknown error') });
+  }
 });
 
 // Admin Wipes All Demo Data to Start Completely From Scratch
 app.post('/api/admin/clean-slate', async (req, res) => {
-  const { userEmail } = req.body;
-  if (!userEmail) {
-    return res.status(400).json({ error: 'User email is required' });
-  }
-
-  const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-  if (!caller || caller.role !== 'admin') {
+  const caller = requireAdmin(req, res);
+  if (!caller) {
     return res.status(403).json({ error: 'Only administrators can reset the platform to a clean slate.' });
   }
 
@@ -4296,9 +4593,8 @@ app.post('/api/admin/clean-slate', async (req, res) => {
 
 // Admin Restores Demonstration Facilities and Data
 app.post('/api/admin/restore-demo', async (req, res) => {
-  const { userEmail } = req.body;
-  const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-  if (!caller || caller.role !== 'admin') {
+  const caller = requireAdmin(req, res);
+  if (!caller) {
     return res.status(403).json({ error: 'Only administrators can restore demonstration data.' });
   }
 
@@ -4399,25 +4695,30 @@ app.get('/api/event-task-templates', (req, res) => {
   res.json({ templates: list });
 });
 
-function canManageTemplates(userEmail: string | undefined): boolean {
-  if (!userEmail) return false;
-  const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
+function canManageTemplates(req: any): boolean {
+  const caller = getAuthUser(req);
   return !!caller && (caller.role === 'admin' || caller.role === 'coordinator');
 }
 
 app.post('/api/event-task-templates', async (req, res) => {
-  const { title, agencyId, userEmail } = req.body;
-  if (!canManageTemplates(userEmail)) {
+  const { title, agencyId } = req.body;
+  if (!canManageTemplates(req)) {
     return res.status(403).json({ error: 'Only admins can manage default event tasks.' });
   }
   if (!title || !String(title).trim()) {
     return res.status(400).json({ error: 'Title is required.' });
   }
+  const callerAgency = callerAgencyId(req);
+  // A client-supplied agencyId must match the caller's agency (or be omitted
+  // for a global template) — never another agency.
+  if (agencyId && agencyId !== callerAgency) {
+    return res.status(403).json({ error: 'You can only create templates for your own agency.' });
+  }
   const broadcastAgencyId = (req as any).authUser?.agencyId || 'agency-hkc';
   // sortOrder is computed INSIDE the transaction from fresh data (not the cache),
   // so concurrent creates get correct ordering.
   const template: EventTaskTemplate = {
-    id: `etpl-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    id: `etpl-${crypto.randomUUID().slice(0, 8)}`,
     title: String(title).trim(),
     agencyId: agencyId || undefined,
     sortOrder: 0, // overwritten inside the transaction
@@ -4442,13 +4743,14 @@ app.post('/api/event-task-templates', async (req, res) => {
 });
 
 app.delete('/api/event-task-templates/:id', async (req, res) => {
-  const { userEmail } = req.body || {};
-  if (!canManageTemplates(userEmail)) {
+  if (!canManageTemplates(req)) {
     return res.status(403).json({ error: 'Only admins can manage default event tasks.' });
   }
   const broadcastAgencyId = (req as any).authUser?.agencyId || 'agency-hkc';
   const existing = eventTaskTemplates.find((t) => t.id === req.params.id);
   if (!existing) return res.status(404).json({ error: 'Template not found.' });
+  // Global templates (no agencyId) are shared; agency-scoped ones are protected.
+  if (existing.agencyId && !requireSameAgency(req, res, existing, 'templates')) return;
   const ok = await crudDelete(req, res, 'eventTaskTemplates', req.params.id, {
     label: 'delete-event-task-template',
     broadcastType: 'EVENT_TEMPLATES_UPDATED',
@@ -4537,6 +4839,8 @@ app.post('/api/events', async (req, res) => {
   }
 
   const targetVenueId = venueId || 'venue-crown-market';
+  // The event's venue must belong to the caller's agency.
+  if (!requireOwnVenue(req, res, targetVenueId, venues)) return;
   const targetVenue = venues.find((v) => v.id === targetVenueId);
 
   // Resolve assigned mashgiach details
@@ -4551,7 +4855,8 @@ app.post('/api/events', async (req, res) => {
   }
 
   // Pre-generate ALL stable IDs BEFORE the transaction so retries never duplicate.
-  const stamp = Date.now();
+  // Random base (stable within this call) so IDs are unique across calls.
+  const stamp = crypto.randomUUID().slice(0, 8);
   const eventId = `evt-${stamp}`;
   const nowIso = new Date().toISOString();
 
@@ -4662,6 +4967,7 @@ app.put('/api/events/:id', async (req, res) => {
   if (!existing) {
     return res.status(404).json({ error: 'Event not found.' });
   }
+  if (!requireSameAgency(req, res, existing, 'events')) return;
 
   const {
     title,
@@ -4754,6 +5060,7 @@ app.delete('/api/events/:id', async (req, res) => {
   if (!deletedEvent) {
     return res.status(404).json({ error: 'Event not found.' });
   }
+  if (!requireSameAgency(req, res, deletedEvent, 'events')) return;
   const agencyId = deletedEvent.agencyId;
   const venueId = deletedEvent.venueId;
 
@@ -4775,6 +5082,7 @@ app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
   if (!event) {
     return res.status(404).json({ error: 'Event not found.' });
   }
+  if (!requireSameAgency(req, res, event, 'events')) return;
 
   const cachedTask = event.tasks.find((t) => t.id === taskId);
   if (!cachedTask) {
@@ -4858,17 +5166,15 @@ app.get('/api/users', (req, res) => {
 });
 
 app.post('/api/users', async (req, res) => {
-  const { email, name, role, password, venueId, userEmail, permissions } = req.body;
+  // Only admins can create users — verified from the session token, never the body.
+  const caller = requireAdmin(req, res);
+  if (!caller) return;
+  // New users are always created in the caller's own agency.
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+
+  const { email, name, role, password, venueId, permissions } = req.body;
   if (!email || !name) {
     return res.status(400).json({ error: 'Email and name are required' });
-  }
-
-  let callerAgencyId = 'agency-hkc';
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) {
-      callerAgencyId = caller.agencyId || 'agency-hkc';
-    }
   }
 
   // Pre-generate stable ID + hash the password BEFORE the transaction so retries
@@ -4889,7 +5195,15 @@ app.post('/api/users', async (req, res) => {
       : 'mashgiach';
 
   const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === callerAgencyId);
-  const targetVenueId = validRole === 'admin' ? undefined : (venueId || agencyVenues[0]?.id || 'venue-crown-market');
+  // A client-supplied venueId must belong to the caller's agency.
+  let targetVenueId: string | undefined = validRole === 'admin' ? undefined : (agencyVenues[0]?.id || 'venue-crown-market');
+  if (validRole !== 'admin' && venueId) {
+    const chosen = agencyVenues.find((v) => v.id === venueId);
+    if (!chosen) {
+      return res.status(403).json({ error: 'You can only assign team members to venues in your own agency.' });
+    }
+    targetVenueId = chosen.id;
+  }
 
   const defaultPermissions: UserPermissions = {
     canFillTasks:
@@ -4938,10 +5252,19 @@ app.post('/api/users', async (req, res) => {
 
 // Update user permissions or role
 app.put('/api/users/:id', async (req, res) => {
+  // Only admins can update users — verified from the session token.
+  const caller = requireAdmin(req, res);
+  if (!caller) return;
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+
   const { id } = req.params;
   const existingUser = users.find((u) => u.id === id);
   if (!existingUser) {
     return res.status(404).json({ error: 'Team member not found' });
+  }
+  // Cross-agency: the target must belong to the caller's agency.
+  if ((existingUser.agencyId || 'agency-hkc') !== callerAgencyId) {
+    return res.status(403).json({ error: 'You can only manage team members in your own agency.' });
   }
 
   const { role, permissions, venueId, name, kioskPin } = req.body;
@@ -4964,6 +5287,10 @@ app.put('/api/users/:id', async (req, res) => {
       const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
       const freshUser = freshUsers.find((u) => u.id === id);
       if (!freshUser) return { conflict: 'Team member not found (they may have been deleted).' };
+      // Re-verify agency against FRESH data (the cached check above is a fast path).
+      if ((freshUser.agencyId || 'agency-hkc') !== callerAgencyId) {
+        return { conflict: 'You can only manage team members in your own agency.' };
+      }
       // Conflict if someone else changed a field this request is editing.
       if (name !== undefined && freshUser.name !== baseline.name) {
         return { conflict: 'Conflict: this team member\'s name was changed by someone else. Please refresh and try again.' };
@@ -4971,19 +5298,39 @@ app.put('/api/users/:id', async (req, res) => {
       if (role !== undefined && freshUser.role !== baseline.role) {
         return { conflict: 'Conflict: this team member\'s role was changed by someone else. Please refresh and try again.' };
       }
+      const newRole =
+        role === undefined
+          ? freshUser.role
+          : role === 'admin'
+          ? 'admin'
+          : role === 'coordinator'
+          ? 'coordinator'
+          : role === 'owner'
+          ? 'owner'
+          : 'mashgiach';
+      // Never demote the last admin of the agency (counted on fresh data).
+      if (newRole !== 'admin' && freshUser.role === 'admin') {
+        const adminCount = freshUsers.filter(
+          (u) => (u.agencyId || 'agency-hkc') === callerAgencyId && u.role === 'admin'
+        ).length;
+        if (adminCount <= 1) {
+          return { conflict: 'Cannot change this role: they are the last administrator of the agency.' };
+        }
+      }
+      // A reassigned venue must belong to the caller's agency.
+      if (venueId !== undefined && venueId !== freshUser.venueId) {
+        const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+        const targetVenue = freshVenues.find((v) => v && v.id === venueId);
+        if (!targetVenue || (targetVenue.agencyId || 'agency-hkc') !== callerAgencyId) {
+          return { conflict: 'You can only assign team members to venues in your own agency.' };
+        }
+      }
       const updated: UserProfile = { ...freshUser };
       if (name !== undefined) updated.name = name.trim();
       if (pinUpdate !== null) updated.kioskPin = pinUpdate === undefined ? undefined : pinUpdate;
       if (venueId !== undefined) updated.venueId = venueId;
       if (role !== undefined) {
-        updated.role =
-          role === 'admin'
-            ? 'admin'
-            : role === 'coordinator'
-            ? 'coordinator'
-            : role === 'owner'
-            ? 'owner'
-            : 'mashgiach';
+        updated.role = newRole;
       }
       if (permissions !== undefined) {
         updated.permissions = {
@@ -5004,29 +5351,71 @@ app.put('/api/users/:id', async (req, res) => {
 });
 
 app.delete('/api/users/:id', async (req, res) => {
+  // Only admins can delete users — verified from the session token.
+  const caller = requireAdmin(req, res);
+  if (!caller) return;
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+
   const { id } = req.params;
+  // Admins cannot delete themselves.
+  if (id === caller.id) {
+    return res.status(400).json({ error: 'You cannot delete your own account.' });
+  }
   const userToDelete = users.find((u) => u.id === id);
-  if (!userToDelete) {
-    return res.status(404).json({ error: 'Worker not found' });
-  }
+  // Not in cache → the transactional delete below returns idempotent success
+  // (already deleted). The agency/primary-admin checks only apply to existing users.
+  if (userToDelete) {
+    // Cross-agency: the target must belong to the caller's agency.
+    if ((userToDelete.agencyId || 'agency-hkc') !== callerAgencyId) {
+      return res.status(403).json({ error: 'You can only manage team members in your own agency.' });
+    }
 
-  // Check if primary admin for this agency (permission check — safe on cached data).
-  const userAgency = agencies.find((a) => a.id === userToDelete.agencyId);
-  if (
-    userToDelete.email.toLowerCase() === 'kenan@hartfordkashrut.org' ||
-    (userAgency && userToDelete.email.toLowerCase() === userAgency.adminEmail.toLowerCase())
-  ) {
-    return res.status(400).json({ error: 'Cannot delete the primary administrator account for this agency.' });
+    // Check if primary admin for this agency (permission check — safe on cached data).
+    const userAgency = agencies.find((a) => a.id === userToDelete.agencyId);
+    if (
+      userToDelete.email.toLowerCase() === 'kenan@hartfordkashrut.org' ||
+      (userAgency && userToDelete.email.toLowerCase() === userAgency.adminEmail.toLowerCase())
+    ) {
+      return res.status(400).json({ error: 'Cannot delete the primary administrator account for this agency.' });
+    }
   }
-  const deletedAgencyId = userToDelete.agencyId;
+  const deletedAgencyId = userToDelete?.agencyId || 'agency-hkc';
 
-  const ok = await crudDelete(req, res, 'users', id, {
-    label: 'delete-user',
-    broadcastType: 'USERS_UPDATED',
-    getDeletePayload: () => ({ users: getSafeUsers(), deletedId: id, agencyId: deletedAgencyId }),
-    getAgencyId: () => deletedAgencyId,
-  });
-  return;
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshTarget = freshUsers.find((u) => u.id === id);
+      // Already deleted → idempotent success.
+      if (!freshTarget) return { doc: freshDoc, result: { success: true, deletedId: id, alreadyDeleted: true } };
+      // Re-verify agency against FRESH data.
+      if ((freshTarget.agencyId || 'agency-hkc') !== callerAgencyId) {
+        return { conflict: 'You can only manage team members in your own agency.' };
+      }
+      // Never delete the last admin of the agency (counted on fresh data).
+      if (freshTarget.role === 'admin') {
+        const adminCount = freshUsers.filter(
+          (u) => (u.agencyId || 'agency-hkc') === callerAgencyId && u.role === 'admin'
+        ).length;
+        if (adminCount <= 1) {
+          return { conflict: 'Cannot delete the last administrator of the agency.' };
+        }
+      }
+      return {
+        doc: { ...freshDoc, users: freshUsers.filter((u) => u.id !== id) },
+        result: { success: true, deletedId: id },
+      };
+    },
+    { label: 'delete-user' }
+  );
+  if (!committed) return;
+  broadcast(
+    'USERS_UPDATED',
+    { users: getSafeUsers(), deletedId: id, agencyId: deletedAgencyId },
+    undefined,
+    deletedAgencyId
+  );
+  res.json({ success: true, deletedId: id });
 });
 
 // ---- Kiosk mode: shared tablet login via per-user PIN ----
@@ -5489,13 +5878,16 @@ app.get('/api/airtable/config', (req, res) => {
 
 // Save or Update Airtable Config
 app.post('/api/airtable/config', async (req, res) => {
-  const { venueId, agencyId, apiKey, baseId, tableName, viewName, fieldNameMapping, userEmail } = req.body;
-
-  let callerAgencyId = agencyId || 'agency-hkc';
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) callerAgencyId = caller.agencyId || callerAgencyId;
+  // Airtable config is agency settings: admin only, from the session token.
+  const caller = requireAdmin(req, res);
+  if (!caller) return;
+  // Configs always live in the caller's agency — never trust a client-supplied agencyId.
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  if (req.body?.agencyId && req.body.agencyId !== callerAgencyId) {
+    return res.status(403).json({ error: 'You can only configure Airtable for your own agency.' });
   }
+
+  const { venueId, apiKey, baseId, tableName, viewName, fieldNameMapping } = req.body;
 
   const configId = `atcfg_${Date.now()}`;
   const nowIso = new Date().toISOString();
@@ -5509,12 +5901,18 @@ app.post('/api/airtable/config', async (req, res) => {
         (c) => c.agencyId === callerAgencyId && (venueId ? c.venueId === venueId : true)
       );
       const existing = existingIdx >= 0 ? arr[existingIdx] : null;
+      // Sensitive fields are NEVER blanked by an update that omits them: a new
+      // value overwrites only when explicitly provided (non-empty). This keeps
+      // the frontend from wiping the stored API key / base ID when it saves
+      // the config form without re-sending secrets.
+      const incomingApiKey = apiKey === undefined || apiKey === null ? '' : String(apiKey).trim();
+      const incomingBaseId = baseId === undefined || baseId === null ? '' : String(baseId).trim();
       const updatedConfig: AirtableConfigItem = {
         id: existing ? existing.id : configId,
         agencyId: callerAgencyId,
         venueId: venueId || undefined,
-        apiKey: (apiKey || '').trim(),
-        baseId: (baseId || '').trim(),
+        apiKey: incomingApiKey !== '' ? incomingApiKey : (existing?.apiKey || ''),
+        baseId: incomingBaseId !== '' ? incomingBaseId : (existing?.baseId || ''),
         tableName: (tableName || 'Approved Ingredients').trim(),
         viewName: (viewName || 'Grid view').trim(),
         fieldNameMapping: fieldNameMapping || (existing ? existing.fieldNameMapping : undefined),
@@ -5739,6 +6137,7 @@ app.put('/api/ingredients/:id/verify', async (req, res) => {
   if (!existing) {
     return res.status(404).json({ error: 'Ingredient not found' });
   }
+  if (!requireSameAgency(req, res, existing, 'ingredients')) return;
 
   let verifiedByName = 'Factory Mashgiach';
   let verifiedByEmail = userEmail || null;
@@ -5791,8 +6190,10 @@ app.post('/api/ingredients', async (req, res) => {
       approverName = caller.name;
     }
   }
+  // The ingredient's venue must belong to the caller's agency.
+  if (!requireOwnVenue(req, res, venueId, venues)) return;
 
-  const ingredientId = `ing_${Date.now()}`;
+  const ingredientId = `ing_${crypto.randomUUID().slice(0, 8)}`;
   const newIngredient: ApprovedIngredientItem = {
     id: ingredientId,
     venueId,
@@ -5829,6 +6230,7 @@ app.delete('/api/ingredients/:id', async (req, res) => {
   if (!existing) {
     return res.status(404).json({ error: 'Ingredient not found' });
   }
+  if (!requireSameAgency(req, res, existing, 'ingredients')) return;
   const venueId = existing.venueId;
   const agencyId = existing.agencyId;
   const ok = await crudDelete(req, res, 'approvedIngredients', id, {
@@ -5886,6 +6288,8 @@ app.post('/api/factory-reports', async (req, res) => {
   }
 
   const venue = venues.find((v) => v.id === venueId);
+  // The report's venue must belong to the caller's agency (and determines the agency).
+  if (!requireOwnVenue(req, res, venueId, venues)) return;
   let callerAgencyId = venue?.agencyId || 'agency-hkc';
   let mashgiachName = 'Rabbi Shimon Klein (Factory Mashgiach)';
   let mashgiachEmail = userEmail || 'factory.mashgiach@hartfordkashrut.org';
@@ -5900,12 +6304,12 @@ app.post('/api/factory-reports', async (req, res) => {
   }
 
   // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
-  const reportId = `rpt_${Date.now()}`;
+  const reportId = `rpt_${crypto.randomUUID().slice(0, 8)}`;
   const nowIso = new Date().toISOString();
 
   const cleanDiscrepancies: UnapprovedDiscrepancyItem[] = Array.isArray(discrepancies)
     ? discrepancies.map((d: any, idx: number) => ({
-        id: d.id || `disc_${Date.now()}_${idx}`,
+        id: d.id || `disc_${crypto.randomUUID().slice(0, 8)}_${idx}`,
         name: String(d.name || 'Unlabeled Raw Material'),
         brandOrSupplier: d.brandOrSupplier ? String(d.brandOrSupplier) : undefined,
         kashrutSymbolFound: d.kashrutSymbolFound ? String(d.kashrutSymbolFound) : 'None / Non-Kosher',

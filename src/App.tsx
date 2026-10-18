@@ -26,7 +26,7 @@ import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
-import { apiFetch, clearSession, getSessionToken } from './lib/api';
+import { apiFetch, apiWrite, clearSession, getSessionToken } from './lib/api';
 
 const DEFAULT_USERS: User[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', permissions: { canFillTasks: true, canAssignTasks: true } },
@@ -480,6 +480,9 @@ export default function App() {
       return;
     }
     const now = new Date().toISOString();
+    // Snapshot for rollback: if the write fails we restore this instead of
+    // leaving the optimistic state (or, worse, replacing the task with an error body).
+    const previousTask = tasks.find((t) => t.id === taskId);
 
     // Optimistic local update: if completed, log user attribution; if cancelled/incomplete, delete the log
     setTasks((prev) =>
@@ -497,22 +500,25 @@ export default function App() {
       )
     );
 
-    try {
-      const res = await apiFetch(`/api/tasks/${taskId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          currentStatus: status,
-          isCompleted,
-          userEmail: currentUser.email,
-          userName: currentUser.name,
-        }),
-      });
-      const data = await res.json();
+    const result = await apiWrite(`/api/tasks/${taskId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        currentStatus: status,
+        isCompleted,
+        userEmail: currentUser.email,
+        userName: currentUser.name,
+      }),
+    });
+    if (result.ok) {
       // Ensure sync
-      setTasks((prev) => prev.map((t) => (t.id === taskId ? data : t)));
-    } catch (err) {
-      console.error('Failed to update task status:', err);
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)));
+    } else {
+      if (previousTask) {
+        setTasks((prev) => prev.map((t) => (t.id === taskId ? previousTask : t)));
+      }
+      console.error('Failed to update task status:', result.error);
+      showToast(result.error || 'Could not update the task status.');
     }
   };
 
@@ -527,6 +533,8 @@ export default function App() {
       return;
     }
     const now = new Date().toISOString();
+    // Snapshot for rollback if the write fails.
+    const previousTask = tasks.find((t) => t.id === taskId);
 
     setTasks((prev) =>
       prev.map((t) =>
@@ -542,18 +550,21 @@ export default function App() {
       )
     );
 
-    try {
-      await apiFetch(`/api/tasks/${taskId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          notes,
-          userEmail: currentUser.email,
-          userName: currentUser.name,
-        }),
-      });
-    } catch (err) {
-      console.error('Failed to update notes:', err);
+    const result = await apiWrite(`/api/tasks/${taskId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        notes,
+        userEmail: currentUser.email,
+        userName: currentUser.name,
+      }),
+    });
+    if (!result.ok) {
+      if (previousTask) {
+        setTasks((prev) => prev.map((t) => (t.id === taskId ? previousTask : t)));
+      }
+      console.error('Failed to update notes:', result.error);
+      showToast(result.error || 'Could not save the notes.');
     }
   };
 
@@ -592,28 +603,40 @@ export default function App() {
       )
     );
 
-    try {
-      const res = await apiFetch(`/api/tasks/${taskId}/check-in`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userEmail: currentUser.email,
-          userName: currentUser.name,
-          photoData,
-          photoCaption,
-        }),
-      });
-      const data = await res.json();
+    const result = await apiWrite(`/api/tasks/${taskId}/check-in`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userEmail: currentUser.email,
+        userName: currentUser.name,
+        photoData,
+        photoCaption,
+      }),
+    });
+    if (result.ok) {
       // Ensure sync (server is the source of truth for the check-in list)
-      setTasks((prev) => prev.map((t) => (t.id === taskId ? data : t)));
-    } catch (err) {
-      console.error('Failed to log check-in:', err);
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)));
+    } else {
+      // Roll back the optimistic check-in so it doesn't linger as if logged.
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId
+            ? { ...t, checkIns: (t.checkIns || []).filter((c) => c.id !== optimistic.id) }
+            : t
+        )
+      );
+      console.error('Failed to log check-in:', result.error);
+      showToast(result.error || 'Could not log the check.');
     }
   };
 
   // Remove one check-in entry (tapped by mistake).
   const handleRemoveCheckIn = async (taskId: string, checkInId: string) => {
     if (!currentUser) return;
+    // Snapshot the removed entry so we can restore it if the delete fails.
+    const removedCheckIn = tasks
+      .find((t) => t.id === taskId)
+      ?.checkIns?.find((c) => c.id === checkInId);
     // Optimistic local update
     setTasks((prev) =>
       prev.map((t) =>
@@ -622,18 +645,23 @@ export default function App() {
           : t
       )
     );
-    try {
-      const res = await apiFetch(`/api/tasks/${taskId}/check-in/${checkInId}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userEmail: currentUser.email }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed');
-      setTasks((prev) => prev.map((t) => (t.id === taskId ? data : t)));
-    } catch (err) {
-      console.error('Failed to remove check-in:', err);
-      showToast('Could not remove that check.');
+    const result = await apiWrite(`/api/tasks/${taskId}/check-in/${checkInId}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userEmail: currentUser.email }),
+    });
+    if (result.ok) {
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)));
+    } else {
+      if (removedCheckIn) {
+        setTasks((prev) =>
+          prev.map((t) =>
+            t.id === taskId ? { ...t, checkIns: [...(t.checkIns || []), removedCheckIn] } : t
+          )
+        );
+      }
+      console.error('Failed to remove check-in:', result.error);
+      showToast(result.error || 'Could not remove that check.');
     }
   };
 
@@ -665,13 +693,10 @@ export default function App() {
       return;
     }
     try {
-      const res = await apiFetch(`/api/venues/${venueId}?userEmail=${encodeURIComponent(currentUser.email)}`, {
+      const result = await apiWrite(`/api/venues/${venueId}?userEmail=${encodeURIComponent(currentUser.email)}`, {
         method: 'DELETE',
       });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Failed to delete venue platform');
-      }
+      if (!result.ok) throw new Error(result.error || 'Failed to delete venue platform');
       setVenues((prev) => prev.filter((v) => v.id !== venueId));
       if (currentVenueId === venueId) {
         const remaining = venues.filter((v) => v.id !== venueId);
@@ -686,53 +711,57 @@ export default function App() {
     }
   };
 
-  // Save Task (Create or Edit)
-  const handleSaveTask = async (taskData: Partial<Task>) => {
+  // Save Task (Create or Edit). Returns true only when the server confirmed the
+  // write — the TaskModal stays open on failure so the user's input is preserved.
+  const handleSaveTask = async (taskData: Partial<Task>): Promise<boolean> => {
     if (!currentUser || !canUserAssignTasks(currentUser)) {
       showToast('You do not have permission to create or edit assignments.');
-      return;
+      return false;
     }
 
     if (taskData.id) {
       // Edit
-      try {
-        const res = await apiFetch(`/api/tasks/${taskData.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...taskData,
-            venueId: currentVenue?.id,
-            userEmail: currentUser.email,
-          }),
-        });
-        const updated = await res.json();
-        setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
-        showToast(`Updated assignment: "${updated.title}"`);
-      } catch (err) {
-        console.error('Failed to edit task:', err);
+      const result = await apiWrite(`/api/tasks/${taskData.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...taskData,
+          venueId: currentVenue?.id,
+          userEmail: currentUser.email,
+        }),
+      });
+      if (!result.ok) {
+        console.error('Failed to edit task:', result.error);
+        showToast(result.error || 'Could not update the assignment.');
+        return false;
       }
-    } else {
-      // Create
-      try {
-        const res = await apiFetch('/api/tasks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...taskData,
-            venueId: currentVenue?.id,
-            createdByEmail: currentUser.email,
-            userEmail: currentUser.email,
-          }),
-        });
-        const created = await res.json();
-        // Dedupe by id: the TASK_CREATED broadcast can arrive before the
-        // POST resolves, in which case the task is already in state.
-        setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
-        showToast(`Created assignment: "${created.title}"`);
-      } catch (err) {
-        console.error('Failed to create task:', err);
-      }
+      const updated = result.data;
+      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      showToast(`Updated assignment: "${updated.title}"`);
+      return true;
     }
+    // Create
+    const result = await apiWrite('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...taskData,
+        venueId: currentVenue?.id,
+        createdByEmail: currentUser.email,
+        userEmail: currentUser.email,
+      }),
+    });
+    if (!result.ok) {
+      console.error('Failed to create task:', result.error);
+      showToast(result.error || 'Could not create the assignment.');
+      return false;
+    }
+    const created = result.data;
+    // Dedupe by id: the TASK_CREATED broadcast can arrive before the
+    // POST resolves, in which case the task is already in state.
+    setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
+    showToast(`Created assignment: "${created.title}"`);
+    return true;
   };
 
   // Delete Task
@@ -751,13 +780,14 @@ export default function App() {
       icon: 'trash',
       onConfirm: async () => {
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
-        try {
-          await apiFetch(`/api/tasks/${taskId}?userEmail=${encodeURIComponent(currentUser.email)}`, { method: 'DELETE' });
-          setTasks((prev) => prev.filter((t) => t.id !== taskId));
-          showToast('Assignment removed');
-        } catch (err) {
-          console.error('Failed to delete task:', err);
+        const result = await apiWrite(`/api/tasks/${taskId}?userEmail=${encodeURIComponent(currentUser.email)}`, { method: 'DELETE' });
+        if (!result.ok) {
+          console.error('Failed to delete task:', result.error);
+          showToast(result.error || 'Could not delete the assignment.');
+          return;
         }
+        setTasks((prev) => prev.filter((t) => t.id !== taskId));
+        showToast('Assignment removed');
       },
     });
   };
@@ -779,23 +809,24 @@ export default function App() {
       icon: 'rotate',
       onConfirm: async () => {
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
-        try {
-          const res = await apiFetch('/api/reset-daily', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              resetBy: currentUser.name,
-              userEmail: currentUser.email,
-              venueId: currentVenue?.id 
-            }),
-          });
-          const data = await res.json();
-          if (data.tasks) setTasks(data.tasks);
-          if (data.snapshot) setHistoryLogs((prev) => [data.snapshot, ...prev]);
-          showToast(`Daily board for "${venueName}" has been reset and archived!`);
-        } catch (err) {
-          console.error('Failed to reset daily board:', err);
+        const result = await apiWrite('/api/reset-daily', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            resetBy: currentUser.name,
+            userEmail: currentUser.email,
+            venueId: currentVenue?.id 
+          }),
+        });
+        if (!result.ok) {
+          console.error('Failed to reset daily board:', result.error);
+          showToast(result.error || 'Could not reset the daily board.');
+          return;
         }
+        const data = result.data;
+        if (data.tasks) setTasks(data.tasks);
+        if (data.snapshot) setHistoryLogs((prev) => [data.snapshot, ...prev]);
+        showToast(`Daily board for "${venueName}" has been reset and archived!`);
       },
     });
   };
@@ -819,28 +850,28 @@ export default function App() {
       icon: 'trash',
       onConfirm: async () => {
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
-        try {
-          const res = await apiFetch('/api/admin/clean-slate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userEmail: currentUser.email }),
-          });
-          const data = await res.json();
-          if (data.success) {
-            setVenues([]);
-            setCurrentVenueId(null);
-            setTasks([]);
-            setEvents([]);
-            setHistoryLogs([]);
-            setIsDemoCleared(true);
-            if (Array.isArray(data.users)) setKnownUsers(data.users);
-            showToast('All demo examples cleared! Platform is ready to start from scratch.');
-          } else {
-            showToast(data.error || 'Failed to clear demo data.');
-          }
-        } catch (err) {
-          console.error('Failed to clean slate:', err);
-          showToast('Failed to connect to server.');
+        const result = await apiWrite('/api/admin/clean-slate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userEmail: currentUser.email }),
+        });
+        if (!result.ok) {
+          console.error('Failed to clean slate:', result.error);
+          showToast(result.error || 'Failed to clear demo data.');
+          return;
+        }
+        const data = result.data;
+        if (data.success) {
+          setVenues([]);
+          setCurrentVenueId(null);
+          setTasks([]);
+          setEvents([]);
+          setHistoryLogs([]);
+          setIsDemoCleared(true);
+          if (Array.isArray(data.users)) setKnownUsers(data.users);
+          showToast('All demo examples cleared! Platform is ready to start from scratch.');
+        } else {
+          showToast(data.error || 'Failed to clear demo data.');
         }
       },
     });
@@ -849,35 +880,35 @@ export default function App() {
   // Restore Demonstration Facilities and Checklists (Admin Only)
   const handleRestoreDemo = async () => {
     if (!currentUser || currentUser.role !== 'admin') return;
-    try {
-      const res = await apiFetch('/api/admin/restore-demo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userEmail: currentUser.email }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        if (Array.isArray(data.venues)) {
-          setVenues(data.venues);
-          if (data.venues.length > 0) setCurrentVenueId(data.venues[0].id);
-        }
-        if (Array.isArray(data.tasks)) setTasks(data.tasks);
-        if (Array.isArray(data.events)) setEvents(data.events);
-        if (Array.isArray(data.users)) setKnownUsers(data.users);
-        setIsDemoCleared(false);
-        showToast('Demonstration data restored!');
-      } else {
-        showToast(data.error || 'Failed to restore demo data.');
+    const result = await apiWrite('/api/admin/restore-demo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userEmail: currentUser.email }),
+    });
+    if (!result.ok) {
+      console.error('Failed to restore demo data:', result.error);
+      showToast(result.error || 'Failed to restore demo data.');
+      return;
+    }
+    const data = result.data;
+    if (data.success) {
+      if (Array.isArray(data.venues)) {
+        setVenues(data.venues);
+        if (data.venues.length > 0) setCurrentVenueId(data.venues[0].id);
       }
-    } catch (err) {
-      console.error('Failed to restore demo data:', err);
-      showToast('Failed to connect to server.');
+      if (Array.isArray(data.tasks)) setTasks(data.tasks);
+      if (Array.isArray(data.events)) setEvents(data.events);
+      if (Array.isArray(data.users)) setKnownUsers(data.users);
+      setIsDemoCleared(false);
+      showToast('Demonstration data restored!');
+    } else {
+      showToast(data.error || 'Failed to restore demo data.');
     }
   };
 
   // Add new user to team roster
   const handleAddUser = async (userData: { name: string; email: string; role: UserRole; password?: string; venueId?: string; permissions?: { canFillTasks?: boolean; canAssignTasks?: boolean } }) => {
-    const res = await apiFetch('/api/users', {
+    const result = await apiWrite('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -886,11 +917,10 @@ export default function App() {
         venueId: userData.venueId || currentVenue?.id,
       }),
     });
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || 'Failed to add team member');
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to add team member');
     }
-    const data = await res.json();
+    const data = result.data;
     // Dedupe by id: the USERS_UPDATED broadcast can arrive before the
     // POST resolves, in which case the member is already in state.
     setKnownUsers((prev) => (prev.some((u) => u.id === data.user.id) ? prev : [...prev, data.user]));
@@ -899,7 +929,7 @@ export default function App() {
 
   // Update existing user (role, permissions)
   const handleUpdateUser = async (userId: string, updates: { role?: UserRole; permissions?: { canFillTasks?: boolean; canAssignTasks?: boolean }; kioskPin?: string }) => {
-    const res = await apiFetch(`/api/users/${userId}`, {
+    const result = await apiWrite(`/api/users/${userId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -907,11 +937,10 @@ export default function App() {
         adminEmail: currentUser.email,
       }),
     });
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || 'Failed to update user');
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to update user');
     }
-    const data = await res.json();
+    const data = result.data;
     setKnownUsers((prev) => prev.map((u) => (u.id === userId ? data.user : u)));
     if (currentUser && currentUser.id === userId) {
       setCurrentUser(data.user);
@@ -921,10 +950,9 @@ export default function App() {
 
   // Delete/Remove user from team roster
   const handleDeleteUser = async (userId: string) => {
-    const res = await apiFetch(`/api/users/${userId}?adminEmail=${encodeURIComponent(currentUser.email)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || 'Failed to delete user');
+    const result = await apiWrite(`/api/users/${userId}?adminEmail=${encodeURIComponent(currentUser.email)}`, { method: 'DELETE' });
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to delete user');
     }
     setKnownUsers((prev) => prev.filter((u) => u.id !== userId));
     showToast('Member removed from team roster');
@@ -944,7 +972,7 @@ export default function App() {
     notes?: string
   ) => {
     try {
-      const res = await apiFetch(`/api/events/${eventId}/tasks/${taskId}/toggle`, {
+      const result = await apiWrite(`/api/events/${eventId}/tasks/${taskId}/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -955,11 +983,11 @@ export default function App() {
         }),
       });
 
-      if (!res.ok) {
-        throw new Error('Failed to update event task status');
+      if (!result.ok) {
+        throw new Error(result.error || 'Failed to update event task status');
       }
 
-      const data = await res.json();
+      const data = result.data;
       if (data.event) {
         setEvents((prev) => prev.map((e) => (e.id === data.event.id ? data.event : e)));
       }
@@ -970,7 +998,7 @@ export default function App() {
 
   const handleUpdateEvent = async (updatedEvent: KosherEvent) => {
     try {
-      const res = await apiFetch(`/api/events/${updatedEvent.id}`, {
+      const result = await apiWrite(`/api/events/${updatedEvent.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -979,8 +1007,8 @@ export default function App() {
           userName: currentUser?.name,
         }),
       });
-      if (!res.ok) throw new Error('Failed to update event');
-      const data = await res.json();
+      if (!result.ok) throw new Error(result.error || 'Failed to update event');
+      const data = result.data;
       setEvents((prev) => prev.map((e) => (e.id === data.event.id ? data.event : e)));
       showToast('Event updated successfully');
     } catch (err: any) {
@@ -1000,8 +1028,8 @@ export default function App() {
       onConfirm: async () => {
         setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
         try {
-          const res = await apiFetch(`/api/events/${eventId}`, { method: 'DELETE' });
-          if (!res.ok) throw new Error('Failed to delete event');
+          const result = await apiWrite(`/api/events/${eventId}`, { method: 'DELETE' });
+          if (!result.ok) throw new Error(result.error || 'Failed to delete event');
           setEvents((prev) => prev.filter((e) => e.id !== eventId));
           showToast('Event notification deleted');
         } catch (err: any) {
@@ -1121,22 +1149,30 @@ export default function App() {
         t.id === a.id ? { ...t, sortOrder: bOrder } : t.id === b.id ? { ...t, sortOrder: aOrder } : t
       )
     );
-    try {
-      const headers = { 'Content-Type': 'application/json' };
-      const payload = (sortOrder: number) =>
-        JSON.stringify({ userEmail: currentUser.email, sortOrder });
-      await apiFetch(`/api/tasks/${a.id}`, {
-        method: 'PUT',
-        headers,
-        body: payload(bOrder),
-      });
-      await apiFetch(`/api/tasks/${b.id}`, {
-        method: 'PUT',
-        headers,
-        body: payload(aOrder),
-      });
-    } catch (err) {
-      console.warn('Could not persist task order:', err);
+    const headers = { 'Content-Type': 'application/json' };
+    const payload = (sortOrder: number) =>
+      JSON.stringify({ userEmail: currentUser.email, sortOrder });
+    const ra = await apiWrite(`/api/tasks/${a.id}`, { method: 'PUT', headers, body: payload(bOrder) });
+    if (!ra.ok) {
+      // Nothing persisted — roll the whole swap back.
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === a.id ? { ...t, sortOrder: aOrder } : t.id === b.id ? { ...t, sortOrder: bOrder } : t
+        )
+      );
+      console.warn('Could not persist task order:', ra.error);
+      showToast(ra.error || 'Could not save the new order — please try again.');
+      return;
+    }
+    const rb = await apiWrite(`/api/tasks/${b.id}`, { method: 'PUT', headers, body: payload(aOrder) });
+    if (!rb.ok) {
+      // The first write committed but the second did not: keep `a` at its new
+      // order (matches the server) and roll back only `b`.
+      setTasks((prev) =>
+        prev.map((t) => (t.id === b.id ? { ...t, sortOrder: bOrder } : t))
+      );
+      console.warn('Could not persist task order:', rb.error);
+      showToast(rb.error || 'Could not save the new order — please try again.');
     }
   };
 

@@ -67,6 +67,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-6-idempotency.mjs')).default,
     (await import('./test-7-retry-storm.mjs')).default,
     (await import('./test-8-password-reset-security.mjs')).default,
+    (await import('./test-9-airtable-key-preservation.mjs')).default,
   ];
 
   const results = [];

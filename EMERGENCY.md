@@ -47,37 +47,75 @@ If every available revision is suspect, take the service offline gracefully
 rather than serving corrupt writes:
 
 ```bash
-# Scale to zero — stops all instances, rejects new requests
+# Scale to zero — stops all instances, rejects new requests.
+# Per Google Cloud docs ("Manual scaling"): --scaling=0 disables the service.
+# (The previous revision of this runbook used --max-instances 0, which is
+# INVALID — max-instances minimum is 1 — and would have failed.)
 gcloud run services update workers-collaborative-dashboard \
   --region us-east1 \
   --project gen-lang-client-0875538181 \
-  --max-instances 0
+  --scaling=0
 ```
 
-Clients will see connection errors (better than silent data corruption).
-Restore with `--max-instances 1` (Stage 1 constraint) once fixed.
+Clients will see "Service unavailable" / "Service disabled" errors (better
+than silent data corruption). Restore with `--scaling=auto --max-instances=1`
+(the Stage 1 single-instance constraint) once fixed.
 
-### Option C: Firestore read-only (nuclear option)
+### Option C: Firestore deny-all (limited — read the warning)
 
-If the bug is writing bad data (not just failing), stop all writes at the
-database level via the Firebase console:
-**Firestore → Rules → deploy temporary deny-all writes:**
+> ⚠️ **Firestore Security Rules do NOT restrict the Firebase Admin SDK.**
+> The server bypasses rules entirely. Setting rules to read-only (or deny-all)
+> only stops DIRECT CLIENT SDK access — it does **NOT** stop the server from
+> writing. If the bug is in the server's writes, rules alone will **NOT** stop
+> the bleeding: use Option B (scale to zero) or Option D (FORCE_LOCAL_MODE)
+> to actually stop server writes.
+
+If direct client access (e.g. a compromised client SDK path) is the threat,
+stop all access at the database level via the Firebase console:
+**Firestore → Rules → deploy temporary deny-all (reads AND writes):**
 
 ```
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /{document=**} {
-      allow read: if true;
-      allow write: if false;
+      allow read, write: if false;
     }
   }
 }
 ```
 
-The server will return 503 `SAVE_FAILED` on every write (by design — Stage 2
-never reports success without a commit). Reads keep working. Revert the rules
-when the fix is deployed.
+This does **not** make the server read-only: the Admin SDK used by our server
+bypasses Security Rules entirely, so server writes continue unchanged. Do not
+rely on this to stop bad server writes — see the warning above. Revert the
+rules when the fix is deployed.
+
+### Option D: FORCE_LOCAL_MODE kill-switch (stop server Firestore writes)
+
+On Stage 2 builds (current code), set the env var `FORCE_LOCAL_MODE=true`:
+the server skips Firestore init **entirely** — even on Cloud Run — and runs
+in local-file mode, logging a loud `[Firestore] DEGRADED` warning on every
+write attempt.
+
+```bash
+gcloud run services update workers-collaborative-dashboard \
+  --region us-east1 \
+  --project gen-lang-client-0875538181 \
+  --set-env-vars FORCE_LOCAL_MODE=true
+```
+
+Caveats:
+
+- **Writes do NOT persist across restarts** (ephemeral container filesystem).
+  Treat as read-mostly; expect data loss on redeploy/crash. This is a PAUSE,
+  not a mode of operation.
+- Works ONLY on Stage 2 builds containing the FORCE_LOCAL_MODE check
+  (`initFirestore()` in server.ts). Pre-Stage-2 revisions ignore this variable
+  — for those, use Option B (scale to zero).
+- Reads keep serving from the in-memory cache (seeded from the local file at
+  boot); they are not frozen.
+- Re-enable by removing the override
+  (`--remove-env-vars FORCE_LOCAL_MODE`) and redeploying the fixed build.
 
 ---
 
@@ -96,21 +134,28 @@ Enforcement options, in order of preference:
 
 1. **Don't roll back at all** — fix forward (Option A with a Stage 2 revision,
    or deploy a patched Stage 2 build).
-2. **If you must run old code temporarily** (e.g. to keep reads alive), deploy
-   it with Firestore writes disabled: set `FIRESTORE_ENABLED=false`
-   (the server falls back to file-only mode and logs a warning per write).
-   Reads still work from the in-memory cache loaded at boot.
+2. **If you must run old code temporarily** (e.g. to keep reads alive):
+   ⚠️ `FIRESTORE_ENABLED=false` does **NOT** disable Firestore on Cloud Run —
+   `initFirestore()` checks `K_SERVICE` independently, so on Cloud Run the
+   database is still initialized regardless of that variable. (Setting
+   `FIRESTORE_ENABLED=false` only removes one of three opt-in signals; the
+   `K_SERVICE` signal alone is enough.) On current Stage 2 builds, use the
+   real kill-switch instead: `FORCE_LOCAL_MODE=true` — it skips Firestore
+   init entirely, even on Cloud Run (see §1 Option D).
    ```bash
    gcloud run services update workers-collaborative-dashboard \
      --region us-east1 \
      --project gen-lang-client-0875538181 \
-     --set-env-vars FIRESTORE_ENABLED=false
+     --set-env-vars FORCE_LOCAL_MODE=true
    ```
-   **No writes will persist** in this mode — treat it as read-only.
-   Re-enable with `--set-env-vars FIRESTORE_ENABLED=true` (or remove the override)
-   when the fixed build is deployed.
-3. **Firestore read-only rules** (Option C above) as a backstop regardless of
-   which revision is serving.
+   **No writes will persist** in this mode (local file only, ephemeral) —
+   treat it as read-only. Re-enable by removing the override
+   (`--remove-env-vars FORCE_LOCAL_MODE`) when the fixed build is deployed.
+   Note: pre-Stage-2 revisions do not know `FORCE_LOCAL_MODE` — for those,
+   use §1 Option B (scale to zero), which works regardless of code version.
+3. **Firestore deny-all rules** (§1 Option C) as a backstop regardless of
+   which revision is serving — with the caveat that they only stop DIRECT
+   client SDK access, never the server's Admin SDK writes.
 
 ### What we can and cannot recover
 
@@ -148,9 +193,12 @@ post-backup writes after a total-restore.
 
 1. Shift traffic to last healthy Stage 2 revision (Option A above).
 2. If no healthy revision: scale to zero (Option B).
-3. If bad writes are suspected: deploy Firestore deny-all-writes rules (Option C).
-4. Confirm: `curl -s https://<service-url>/api/health` (or equivalent) reflects
-   the intended state.
+3. If bad writes are suspected: scale to zero (Option B) or set
+   `FORCE_LOCAL_MODE=true` (Option D) — do NOT rely on Firestore rules
+   (Option C), which cannot stop the server's Admin SDK writes.
+4. Confirm: `curl -s https://<service-url>/api/health` (no auth needed) — check
+   the `firestore` field reflects the intended state (`connected`,
+   `degraded-local`, or `disabled`).
 
 ### Assess (~15 min)
 
@@ -169,8 +217,11 @@ post-backup writes after a total-restore.
 2. Commit to a branch, open a PR, get review — **even in an incident, no
    unreviewed production pushes** (Don's standing rule).
 3. Deploy via the normal pipeline (push to `main` → GitHub Actions → Cloud Run).
-4. If Firestore was set read-only (Option C), restore the normal rules **after**
-   the fixed build is serving.
+4. If Firestore deny-all rules were deployed (Option C), restore the normal
+   rules **after** the fixed build is serving.
+5. If `FORCE_LOCAL_MODE=true` was set (Option D), remove it
+   (`--remove-env-vars FORCE_LOCAL_MODE`) **after** the fixed build is
+   serving, so durability is restored.
 
 ### Verify
 
@@ -188,7 +239,8 @@ post-backup writes after a total-restore.
      --project gen-lang-client-0875538181 \
      --to-latest
    ```
-2. Restore `--max-instances 1` if you scaled to zero.
+2. Restore `--scaling=auto --max-instances=1` if you scaled to zero (restores
+   autoscaling with the Stage 1 single-instance constraint).
 3. Document the incident: what happened, what was done, what to prevent recurrence.
 
 ---
@@ -204,8 +256,13 @@ post-backup writes after a total-restore.
 | Restart doesn't resurrect uncommitted data | ✅ Tested | Test 5 verifies only committed data survives restart. |
 | Concurrent writes (10-way storm) | ✅ Tested | Test 7 verifies all succeed, version increments correctly. |
 | Traffic shift to healthy revision (Option A) | ⚠️ Documented only | gcloud commands verified syntactically, never executed against production. Safe to test — it's non-destructive (just reroutes traffic). |
-| Scale-to-zero maintenance mode (Option B) | ⚠️ Documented only | Command is standard Cloud Run; never executed. Brief downtime expected. |
-| Firestore read-only rules (Option C) | ⚠️ Documented only | Rules syntax is standard; never deployed. Would block ALL writes including legitimate ones until reverted. |
+| Scale-to-zero maintenance mode (Option B) | ⚠️ Documented only | Command verified against Google Cloud docs ("Manual scaling": `--scaling=0` disables a service). Never executed against production. Brief downtime expected. |
+| FORCE_LOCAL_MODE kill-switch (Option D) | ⚠️ Documented only | Code path added in `initFirestore()`; never exercised against production. Verify in a staging revision before relying on it in an incident. |
+| Fail-closed boot (K_SERVICE + Firestore failure → `process.exit(1)`) | ⚠️ Documented only | Code path added; cannot be triggered by the test suite (would require K_SERVICE set + broken credentials). |
+| No-op commits (skip write, no `_v` bump) | ⚠️ Documented only | `docsEqualIgnoring` added in `commitState()`; not covered by current tests. Behavior change: a mutator that only touches `updatedAt` now commits nothing. |
+| `GET /api/health` (no auth; status/firestore/version/uptime) | ⚠️ Documented only | Endpoint extended; already public (no auth). Manually verifiable with curl. |
+| Daily reset awaited + force/operationId | ⚠️ Documented only | `executeDailyReset` is now async; scheduled vs manual semantics changed. Not covered by current tests. |
+| Firestore deny-all rules (Option C) | ⚠️ Documented only | ⚠️ CORRECTED 2026-10-18: Security Rules do **NOT** restrict the Firebase Admin SDK — this never blocked server writes. Only stops direct client SDK access. Rules syntax is standard; never deployed. |
 | Backup restore from BACKUP-2026-10-17-stage1.json | ⚠️ Documented only | File exists and is valid JSON. Restore procedure (import via admin endpoint or manual Firestore write) has NOT been executed. Passwords are stripped by design — users would need password resets after restore. |
 | Forward-fix deploy (ROLLBACK.md policy) | ⚠️ Documented only | Standard deploy pipeline; the policy (never redeploy pre-Stage-2) is a process rule, not a technical gate. |
 
