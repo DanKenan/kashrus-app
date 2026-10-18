@@ -1274,6 +1274,12 @@ async function loadStateFromFirestore(): Promise<boolean> {
 
 // Fire-and-forget durable write. Safe to call from sync code paths.
 function persistToFirestore() {
+  // MAINTENANCE HOTFIX: never write to Firestore in maintenance mode.
+  // The /api middleware blocks HTTP mutations, but boot-time code (VAPID
+  // setup, JWT-secret creation) calls saveState() directly and would bypass
+  // it. This is the single Firestore write boundary — guarding here stops
+  // every old-server persistence path during the cutover window.
+  if (process.env.MAINTENANCE_MODE === 'true') return;
   if (!firestoreDb) return;
   // NEVER overwrite Firestore with state that wasn't loaded from it. If a boot
   // is slow or failing, writing now would destroy the user's real data.
