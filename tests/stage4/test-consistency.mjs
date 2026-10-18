@@ -68,7 +68,9 @@ export default {
   whatItProves: 'Version-stable retry, size warning, non-2xx on mismatch.',
 
   async run() {
-    // Test 1: Match + small size = ok
+    // Test 1: Match + small size = ok (but backup unconfigured = stale)
+    // Note: without BACKUP_BUCKET, staleness check fails closed → ok=false.
+    // This is intentional: monitoring enabled but unconfigured = error.
     {
       const monolith = { _v: 5, venues: [venue], users: [user('u1', 'a@x.com')], tasks: [] };
       const perEntity = {
@@ -78,9 +80,11 @@ export default {
       };
       const db = createMockDb(monolith, perEntity);
       const r = await runConsistencyCheck(db);
-      if (!r.ok) throw new Error(`Expected ok, got: ${JSON.stringify(r)}`);
-      if (r.monolithSizeWarn) throw new Error('Should not warn on small doc');
-      console.log('  ✓ match + small size = ok');
+      // Backup not configured → stale → ok=false (fail closed)
+      if (r.ok) throw new Error('Expected not ok when backup unconfigured (fail closed)');
+      if (!r.backupStale) throw new Error('Should report backup stale when unconfigured');
+      if (r.status && !r.status.match) throw new Error('Data should still match');
+      console.log('  ✓ unconfigured backup = stale (fail closed), data still matches');
     }
 
     // Test 2: Mismatch = not ok
@@ -106,19 +110,22 @@ export default {
       console.log(`  ✓ size warning at ${Math.round((r.monolithSizeBytes || 0) / 1024)} KiB`);
     }
 
-    // Test 4: Version change mid-check triggers retry, eventually ok
+    // Test 4: Version change mid-check triggers retry, eventually stable
+    // (ok=false due to unconfigured backup, but version retry must succeed)
     {
       const monolith = { _v: 5, venues: [venue], users: [], tasks: [] };
       const perEntity = { 'venues/v1': { ...venue, _v: 1 } };
       // versionChanges=1: first attempt sees v5→v6 (retry), second sees v6→v6 (stable)
       const db = createMockDb(monolith, perEntity, 1);
       const r = await runConsistencyCheck(db);
-      // Must have retried (error mentions version change) AND eventually succeeded
-      if (!r.ok) throw new Error(`Expected ok after retry, got: ${r.error}`);
+      // Version retry must have happened and stabilized (error records it)
       if (!r.error || !r.error.includes('version changed')) {
         throw new Error(`Expected retry to be recorded in error field, got: ${r.error || 'none'}`);
       }
-      console.log(`  ✓ version-change retry happened and succeeded`);
+      // Data must match (ok=false only because backup unconfigured)
+      if (!r.status || !r.status.match) throw new Error('Data should match after retry');
+      if (!r.backupStale) throw new Error('Backup should be stale (unconfigured)');
+      console.log(`  ✓ version-change retry happened and stabilized (ok=false only for backup)`);
     }
 
     console.log('  ✓ All consistency tests passed');

@@ -51,8 +51,26 @@ function createMockStorage() {
         file(path) {
           const key = `${name}/${path}`;
           return {
-            async save(data, opts) { files.set(key, { data, contentType: opts?.contentType }); },
+            async save(data, opts) {
+              // Simulate objectCreator: fail on overwrite
+              if (files.has(key)) {
+                throw new Error(`storage.objectCreator: ${key} already exists (no overwrite)`);
+              }
+              files.set(key, { data, contentType: opts?.contentType });
+            },
+            async download() {
+              const f = files.get(key);
+              if (!f) throw new Error('Not found');
+              return [Buffer.from(f.data)];
+            },
           };
+        },
+        async getFiles(opts) {
+          const prefix = `${name}/${opts?.prefix || ''}`;
+          const matched = [...files.keys()]
+            .filter(k => k.startsWith(prefix))
+            .map(k => ({ name: k.slice(name.length + 1) }));
+          return [matched];
         },
       };
     },
@@ -78,6 +96,12 @@ export default {
         jwtSecret: 'jwt123',
         apiKeyLabel: 'My API Key', // must PRESERVE (false positive before)
         keyboard: 'qwerty', // must PRESERVE (ends with "key" but not secret)
+        pushSubscriptions: [
+          { endpoint: 'https://push.example', keys: { p256dh: 'pub123', auth: 'authsecret123' } },
+        ],
+        passwordResets: [
+          { email: 'a@x.com', code: 'plaintext123', codeHash: 'hash123', expiresAt: '2026-01-01' },
+        ],
       };
       const out = scrubSecrets(input);
       if (out.password !== '[REDACTED]') throw new Error('password not scrubbed');
@@ -88,11 +112,17 @@ export default {
       if (out.nested.kioskPin !== '[REDACTED]') throw new Error('nested kioskPin not scrubbed');
       if (out.arr[0].apiKey !== '[REDACTED]') throw new Error('array apiKey not scrubbed');
       if (out.jwtSecret !== '[REDACTED]') throw new Error('jwtSecret not scrubbed');
+      if (out.pushSubscriptions[0].keys.auth !== '[REDACTED]') throw new Error('push keys.auth not scrubbed!');
+      if (out.pushSubscriptions[0].keys.p256dh !== 'pub123') throw new Error('p256dh should be preserved');
+      if (out.pushSubscriptions[0].endpoint !== 'https://push.example') throw new Error('endpoint should be preserved');
+      if (out.passwordResets[0].code !== '[REDACTED]') throw new Error('legacy reset code not scrubbed!');
+      if (out.passwordResets[0].codeHash !== '[REDACTED]') throw new Error('reset codeHash not scrubbed!');
+      if (out.passwordResets[0].email !== 'a@x.com') throw new Error('reset email should be preserved');
       if (out.name !== 'Crown Market') throw new Error('non-secret modified');
       if (out.apiKeyLabel !== 'My API Key') throw new Error('apiKeyLabel falsely scrubbed!');
       if (out.keyboard !== 'qwerty') throw new Error('keyboard falsely scrubbed!');
       if (out.nested.ok !== 'fine') throw new Error('non-secret nested modified');
-      console.log('  ✓ scrubSecrets: catches tokens/keys, preserves labels');
+      console.log('  ✓ scrubSecrets: catches tokens/keys/auth/codes, preserves labels');
     }
 
     // Test 2: runTier1Backup captures all + scrubs + manifest (unique paths, version check)
@@ -125,10 +155,10 @@ export default {
       const keys = [...storage.files.keys()];
       const dataKey = keys.find(k => k.endsWith('backup.json'));
       const manifestKey = keys.find(k => k.endsWith('manifest.json'));
-      const markerKey = keys.find(k => k.endsWith('latest-success.json'));
+      const markerKey = keys.find(k => k.endsWith('/SUCCESS.json'));
       if (!dataKey) throw new Error('backup.json not written');
       if (!manifestKey) throw new Error('manifest.json not written');
-      if (!markerKey) throw new Error('latest-success.json marker not written');
+      if (!markerKey) throw new Error('SUCCESS.json marker not written');
       if (dataKey.endsWith('.enc')) throw new Error('Must not use .enc extension');
       // Path must contain a run ID (tier1/<date>/<runId>/)
       const parts = dataKey.split('/');
@@ -168,6 +198,27 @@ export default {
         if (!e.message.includes('_v')) throw new Error(`Wrong error: ${e.message}`);
       }
       console.log('  ✓ refuses missing monolith / invalid _v');
+    }
+
+    // Test 4: Two consecutive executions succeed (no overwrite conflict)
+    {
+      const monolith = { _v: 5, venues: [], users: [], tasks: [] };
+      const db = createMockDb(monolith, {});
+      const storage = createMockStorage();
+
+      const m1 = await runTier1Backup(db, storage, 'test-bucket', 'test-db');
+      const m2 = await runTier1Backup(db, storage, 'test-bucket', 'test-db');
+
+      // Different run IDs → different paths → no overwrite
+      const keys = [...storage.files.keys()];
+      const successMarkers = keys.filter(k => k.endsWith('/SUCCESS.json'));
+      if (successMarkers.length !== 2) {
+        throw new Error(`Expected 2 unique SUCCESS markers, got ${successMarkers.length}`);
+      }
+      if (successMarkers[0] === successMarkers[1]) {
+        throw new Error('Success markers must have unique paths!');
+      }
+      console.log('  ✓ two consecutive runs succeed with unique immutable markers');
     }
 
     console.log('  ✓ All backup tests passed');

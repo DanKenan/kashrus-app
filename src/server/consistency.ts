@@ -63,31 +63,52 @@ export interface ConsistencyResult {
 }
 
 /**
- * Check backup staleness via the GCS success marker.
- * The backup job writes tier1/latest-success.json on each successful run.
- * Monitoring reads it through its own identity (app SA needs
- * storage.objects.get on the backup bucket).
+ * Check backup staleness by finding the newest SUCCESS.json marker in GCS.
+ * Each backup run writes tier1/<date>/<runId>/SUCCESS.json (immutable).
+ * Monitoring lists the bucket prefix and takes the newest by path
+ * (paths are chronological: tier1/YYYY-MM-DD/<runId>/).
  *
  * Returns { stale, lastAt }. Stale = no successful backup in 26 hours,
- * OR missing/malformed/future timestamp (fail closed on bad data).
+ * OR missing/malformed/future timestamp, OR missing BACKUP_BUCKET config
+ * (once monitoring is enabled, unconfigured = error, not healthy).
  */
 async function checkBackupStaleness(firestoreDb: any): Promise<{ stale: boolean; lastAt: string | null }> {
   const bucketName = process.env.BACKUP_BUCKET;
   if (!bucketName) {
-    // Not configured — cannot determine staleness; report unknown (not stale,
-    // to avoid false alerts before Don sets up backups).
-    return { stale: false, lastAt: null };
+    // Monitoring is enabled (this code is running) but bucket not configured.
+    // That's an error, not a healthy "unknown" — fail closed.
+    console.error('[consistency] ERROR: BACKUP_BUCKET not configured — backup monitoring enabled but no bucket. Stale.');
+    return { stale: true, lastAt: null };
   }
   try {
-    // Use the app's Storage client (needs storage.objects.get on the bucket)
-    const { getStorage } = await import('./media.js').catch(() => ({ getStorage: null }));
-    // Fallback: try admin SDK directly
     const admin = await import('firebase-admin').catch(() => null);
     if (!admin) return { stale: true, lastAt: null };
     const storage = (admin as any).storage();
-    const [contents] = await storage.bucket(bucketName).file('tier1/latest-success.json').download();
-    const marker = JSON.parse(contents.toString('utf8'));
-    const lastAt = marker?.createdAt;
+    // List all SUCCESS.json markers. Run IDs are random (not chronological),
+    // so download each marker and select by its createdAt timestamp.
+    const [files] = await storage.bucket(bucketName).getFiles({ prefix: 'tier1/' });
+    const markerNames = files
+      .filter((f: any) => f.name.endsWith('/SUCCESS.json'))
+      .map((f: any) => f.name);
+    if (markerNames.length === 0) {
+      return { stale: true, lastAt: null };
+    }
+    let newestTs = -1;
+    let newestAt: string | null = null;
+    for (const name of markerNames) {
+      try {
+        const [contents] = await storage.bucket(bucketName).file(name).download();
+        const marker = JSON.parse(contents.toString('utf8'));
+        const ts = new Date(marker?.createdAt).getTime();
+        if (!isNaN(ts) && ts > newestTs) {
+          newestTs = ts;
+          newestAt = marker.createdAt;
+        }
+      } catch {
+        // Skip unreadable markers
+      }
+    }
+    const lastAt = newestAt;
     if (!lastAt || typeof lastAt !== 'string') {
       return { stale: true, lastAt: null };
     }

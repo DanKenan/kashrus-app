@@ -76,17 +76,52 @@ function isSecretKey(key: string): boolean {
  * Recursively scrub secrets from an object. Returns a deep copy with
  * secret values replaced by "[REDACTED]". Arrays and nested objects
  * are handled. Non-object values pass through.
+ *
+ * In addition to field-name matching, explicitly handles known sensitive
+ * paths:
+ * - pushSubscriptions[].keys.auth (Web Push auth secret)
+ * - passwordResets[].code (legacy plaintext reset codes)
+ * - passwordResets[].codeHash (hash — still sensitive, scrub for safety)
  */
-export function scrubSecrets(obj: any): any {
+export function scrubSecrets(obj: any, path: string = ''): any {
   if (obj === null || obj === undefined) return obj;
-  if (Array.isArray(obj)) return obj.map(scrubSecrets);
+  if (Array.isArray(obj)) return obj.map((v, i) => scrubSecrets(v, `${path}[${i}]`));
   if (typeof obj !== 'object') return obj;
+
+  // Explicit path-based scrubbing for known sensitive nested fields
+  if (path.endsWith('pushSubscriptions') || /pushSubscriptions\[\d+\]$/.test(path)) {
+    // Inside a push subscription: scrub keys.auth
+    const out: any = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k === 'keys' && v && typeof v === 'object') {
+        out[k] = { ...(v as object), auth: '[REDACTED]' };
+      } else if (isSecretKey(k)) {
+        out[k] = '[REDACTED]';
+      } else {
+        out[k] = scrubSecrets(v, path ? `${path}.${k}` : k);
+      }
+    }
+    return out;
+  }
+  if (/passwordResets\[\d+\]$/.test(path)) {
+    // Inside a password reset record: scrub code and codeHash
+    const out: any = { ...(obj as object) };
+    if ('code' in out) out.code = '[REDACTED]';
+    if ('codeHash' in out) out.codeHash = '[REDACTED]';
+    for (const [k, v] of Object.entries(out)) {
+      if (k !== 'code' && k !== 'codeHash') {
+        out[k] = isSecretKey(k) ? '[REDACTED]' : scrubSecrets(v, path ? `${path}.${k}` : k);
+      }
+    }
+    return out;
+  }
+
   const out: any = {};
   for (const [k, v] of Object.entries(obj)) {
     if (isSecretKey(k)) {
       out[k] = '[REDACTED]';
     } else {
-      out[k] = scrubSecrets(v);
+      out[k] = scrubSecrets(v, path ? `${path}.${k}` : k);
     }
   }
   return out;
@@ -168,7 +203,7 @@ export async function runTier1Backup(
     const scrubbedMonolith = scrubSecrets(monolithData);
     const scrubbedCollections: Record<string, any[]> = {};
     for (const [name, docs] of Object.entries(collections)) {
-      scrubbedCollections[name] = docs.map(scrubSecrets);
+      scrubbedCollections[name] = docs.map(d => scrubSecrets(d));
     }
 
     // 5. Assemble payload + manifest
@@ -192,17 +227,18 @@ export async function runTier1Backup(
     };
 
     // 6. Write to GCS with unique paths (Google-managed encryption; NOT .enc)
+    //    Every file is immutable — storage.objectCreator cannot overwrite,
+    //    so unique paths per execution enable retries.
     const bucket = storage.bucket(backupBucket);
     const dataPath = `${basePath}/backup.json`;
     const manifestPath = `${basePath}/manifest.json`;
+    // Success marker is ALSO unique per run (not a fixed latest-success.json,
+    // which would fail on overwrite). Monitoring lists tier1/ to find newest.
+    const markerPath = `${basePath}/SUCCESS.json`;
     await bucket.file(dataPath).save(payloadJson, { contentType: 'application/json' });
     await bucket.file(manifestPath).save(JSON.stringify(manifest, null, 2), {
       contentType: 'application/json',
     });
-
-    // 7. Write success marker to GCS (NOT Firestore — backup SA is read-only).
-    //    Monitoring reads this marker via its own identity.
-    const markerPath = `tier1/latest-success.json`;
     await bucket.file(markerPath).save(JSON.stringify({
       createdAt,
       runId,
