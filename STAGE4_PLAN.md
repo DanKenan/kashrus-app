@@ -95,9 +95,25 @@ BACKUP_RESTORE.md defines the two-tier model. Stage 4 makes it run itself.
 
 ### 3.1 Automated schedule
 
-- **Tier 1 (sanitized export):** daily, via Cloud Scheduler → Cloud Run job or Cloud Function: `GET /api/admin/export` (service-account auth) → encrypt → write to `gs://<backup-bucket>/tier1/<date>.json.enc`. Retention: 30 days.
+- **Tier 1 (sanitized export):** daily, via Cloud Scheduler → Cloud Run job or Cloud Function: `GET /api/admin/export` (service-account auth — see below) → encrypt → write to `gs://<backup-bucket>/tier1/<date>.json.enc`. Retention: 30 days.
 - **Tier 2 (full-fidelity):** weekly, via `gcloud firestore export` to `gs://<backup-bucket>/tier2/<date>/` (native Firestore export format — the only format that restores hashes, preserving logins). Retention: 90 days. Plus: one Tier 2 export before every production deploy (manual trigger, same pipeline).
-- **Bucket:** separate from the media bucket, private, uniform access, **no public readers**, lifecycle rules enforcing the retention above. Consider Object Versioning off (exports are immutable by date path) and a second-region copy if Don wants it (costs double storage — ~$0.02/GiB/mo — say so explicitly).
+- **Bucket:** separate from the media bucket, private, uniform access, **no public readers**, lifecycle rules enforcing the retention above.
+
+**Service-account backup access (not an admin token):** the scheduled job authenticates as a dedicated GCP service account with a custom IAM role: `datastore.entities.list`/`datastore.entities.get` on the app's collections, `storage.objects.list`/`storage.objects.get` on the media and backup buckets, `secretmanager.versions.access` on the three app secrets (for the recovery drill — not for the daily backup). It has **no** write access to user data. `/api/admin/export` remains a human-operator tool; it is not the automated DR path.
+
+### 3.1b Recovery components (each documented separately)
+
+A Firestore managed export does **not** capture everything needed for recovery. The complete recovery set is:
+
+| Component | Captured by | Restored by | Verified in drill |
+|---|---|---|---|
+| Firestore documents (all collections) | Tier 2 managed export | Managed import to throwaway/prod DB | Counts + hashes |
+| Cloud Storage media objects | Object inventory (nightly listing w/ checksums to the backup bucket) + Storage replication/versioning | Copy-back from inventory; checksum match | Spot-downloads |
+| Secret Manager values | **Not in Firestore exports** — separate: encrypted snapshot of secret *metadata* (names, versions, rotation dates); values re-created from Don's password manager / re-issued | Manual per §2.2 procedures | Read-back access check |
+| Firestore index definitions | `firestore.indexes.json` in git (deployed via `firebase deploy --only firestore:indexes`) | Index redeploy; build completion check | Index list diff |
+| Cloud Run service config (env vars, traffic) | Exported service YAML in git-ignored ops dir (no secrets) | `gcloud run services replace` (minus secrets, re-attached) | Health check |
+
+If any row has no verified restore, the backup is incomplete — say so in the drill log rather than assuming coverage.
 
 ### 3.2 Verification (automated, not trusted)
 
@@ -108,9 +124,10 @@ After every backup job:
 
 ### 3.3 Restore drill cadence
 
-- **Quarterly:** restore the latest Tier 1 backup to a **throwaway database**, verify counts, delete the throwaway. 30 minutes, assistant-guided, Don observes once then it's routine.
-- **After any backup-pipeline change:** immediate drill.
-- Document each drill (date, result, counts) in BACKUP_RESTORE.md's drill log. A backup you've never restored is a hope, not a plan.
+- **Quarterly:** restore drill against a **throwaway database**. Alternate the tiers: one quarter the Tier 1 sanitized export, the next quarter the **full-fidelity Tier 2 backup including media** (Firestore restore + Storage object inventory verification + spot-download of 3 objects). The full-fidelity drill must happen **at least twice a year** — a sanitized-export drill alone does not prove the media or secret-recovery paths work.
+- **What the full-fidelity drill verifies:** collection counts match, per-entity hashes match (§3.4 of STAGE3_PLAN.md), every Storage object in the inventory exists and downloads, Secret Manager values are readable by the service account, required indexes exist.
+- **After any backup-pipeline change:** immediate drill (same tier that changed).
+- Document each drill (date, tier, result, counts, media objects verified) in BACKUP_RESTORE.md's drill log. A backup you've never restored is a hope, not a plan.
 
 ### 3.4 What changes from today
 
@@ -156,36 +173,49 @@ Per STAGE3_PLAN.md §2.2: pepper, VAPID private key, JWT secret move to Secret M
 
 ---
 
-## 5. Costs (honest estimate, us-east1, Blaze pay-as-you-go)
+## 5. Costs (labeled estimate + verification plan, us-east1, Blaze pay-as-you-go)
+
+**This is an ESTIMATE, not a prediction.** Cloud pricing changes, and "free tier" has sharp edges. The plan below includes how to check the actual bill — the estimate is a starting hypothesis, the billing console is the truth.
 
 Don's scale: ~6 users, bursty human-paced usage, ~500 writes/day, ~12K reads/day, <1 GiB storage, <0.5 GiB media.
 
-| Service | Usage | Free tier | Expected cost |
+| Service | Usage | Free tier | Estimated cost |
 |---|---|---|---|
-| Cloud Run | ~50K requests/mo, low vCPU | 2M req, 180K vCPU-s, 360K GiB-s /mo | **$0** |
-| Firestore (Native) | ~360K reads, ~15K writes /mo | 50K reads + 20K writes **per day** | **$0** |
-| Cloud Storage (media) | ~0.5 GiB, few thousand ops | 5 GiB-mo, 5K Class A + 50K Class B /mo | **$0** |
-| Cloud Storage (backups) | ~1 GiB versions | Same free tier (shared) | **$0** |
-| Cloud Scheduler | 2 jobs (daily + weekly) | 3 jobs free | **$0** |
-| Secret Manager | 3 secrets | — ($0.06/secret-version/mo) | **~$0.18/mo** |
-| Cloud Monitoring/Logging | Default metrics | Generous free tier | **$0** |
-| **Total** | | | **~$0.18/mo** |
+| Cloud Run | ~50K requests/mo, low vCPU | 2M req, 180K vCPU-s, 360K GiB-s /mo | **~$0** |
+| Firestore (Native) | ~360K reads, ~15K writes /mo | 50K reads + 20K writes **per day** | **~$0** |
+| Cloud Storage (media) | ~0.5 GiB, few thousand ops | 5 GiB-mo, 5K Class A + 50K Class B /mo | **~$0** |
+| Cloud Storage (backups) | ~1 GiB versions | Same free tier (shared) | **~$0** |
+| Cloud Scheduler | 2 jobs (daily + weekly) | 3 jobs free | **~$0** |
+| Secret Manager | 3 secrets | $0.06 per active secret version /mo (no free tier) | **~$0.18/mo** |
+| Cloud Monitoring/Logging | Default metrics | Generous free tier | **~$0** |
+| **Total** | | | **~$0.18/mo (estimate)** |
 
-**When would Don pay?** Roughly: 10× user growth (60 users, multi-agency) → Firestore ~$2–5/mo; 100× → ~$20–40/mo. Media is the wild card — 10,000 photos/mo ≈ 5 GiB ≈ $0.10/mo storage; still trivial. The honest message: **this app costs essentially nothing to run at Don's scale, and stays under $10/mo until he's 50× bigger.** The $10/mo Postgres from the architecture analysis remains unnecessary.
+**Sharp edges the estimate does NOT assume away:**
+- **Firestore free tier covers only ONE database per project.** The Stage 3 migration uses throwaway named databases for staging/dry-runs — those live in the same project and share/exceed the free quota if used heavily. Keep staging databases short-lived and delete them after verification.
+- **Managed backups, restores, and TTL deletions have billing implications** beyond the table above: Firestore managed export/restore operations are billed (not free-tier-covered at all usage levels); TTL-policy deletions count as writes. The quarterly restore drill has a real (small) cost — budget it, don't discover it.
+- **A billing alert is NOT a spending cap.** It sends an email; it does not stop spending. Say this explicitly to Don: if something runs away, the alert tells him at $5 — he still has to act.
 
-**Billing guardrail:** set a Cloud Billing budget alert at $5/mo (email to Don). If anything ever misbehaves (runaway function, hot loop), he hears about it at $5, not $500.
+**Verification plan (first operational release must INCLUDE these, not just plan for them):**
+1. **Real billing alert active:** Cloud Billing budget at $5/mo, notification to Don's email + phone, verified by triggering a test notification during setup.
+2. **First verified backup exists:** one Tier 1 automated backup completed + verified (decrypt, counts, strip-check) and one Tier 2 export completed — before Stage 4 is declared done.
+3. **Monthly 2-minute billing check** (added to Don's routine): open Cloud Billing → confirm current-month spend < $1 → done. If it ever isn't, investigate before the next deploy.
+
+**When would Don actually pay?** Roughly: 10× user growth (60 users, multi-agency) → Firestore ~$2–5/mo; 100× → ~$20–40/mo. Media is the wild card — 10,000 photos/mo ≈ 5 GiB ≈ $0.10/mo storage; still trivial. Honest message: **this app should cost essentially nothing at Don's scale, and the billing check above is how we confirm that monthly instead of assuming it.**
 
 ---
 
 ## 6. Stage 4 acceptance criteria
 
-1. Don hasn't run a manual backup in 90 days; the drill log shows 1+ successful quarterly restores.
+1. Don hasn't run a manual backup in 90 days; the drill log shows 1+ successful quarterly restores, including at least one **full-fidelity drill** (Tier 2 + media + secret read-back) in the last 12 months.
 2. The monitoring dashboard exists; Don got zero false-positive pages in 90 days (alerts are tuned or they're noise).
 3. Firestore rules verified deny-all; no secrets in any Firestore document; `git log` shows no backup files.
 4. Admin export is agency-scoped (reviewer's note closed) with a passing test.
 5. Audit log records admin actions; `npm audit` clean within the quarter.
-6. Billing alert at $5/mo active; actual spend < $1/mo.
+6. **Billing alert at $5/mo active with a verified test notification;** monthly billing check shows actual spend < $1/mo (or the overage is understood and accepted).
 7. EMERGENCY.md's "tested vs documented" table has no stale rows.
+8. The recovery-components table (§3.1b) has a verified restore for **every** row — Firestore, media, secrets, indexes, service config. No row is "assumed."
+
+**Relationship to Stage 3:** the §9 release gates in STAGE3_PLAN.md (full-fidelity backup/restore, media coverage, secret recovery, alerts, maintenance procedure, access controls, export scoping, service-account backups) are the **prerequisites** for the Stage 3 cutover. Stage 4 operationalizes what Stage 3 proves once: automated schedules, quarterly drills, and the ongoing hygiene above.
 
 ---
 
