@@ -40,10 +40,18 @@ function getClient(): SecretManagerServiceClient {
  * Throws if the secret is not accessible (fail closed).
  */
 export async function getSecret(secretName: string): Promise<string> {
-  const projectId = process.env.GCP_PROJECT_ID || process.env.GCLOUD_PROJECT;
+  // Project ID resolution: explicit GCP_PROJECT_ID → GCLOUD_PROJECT →
+  // FIREBASE_PROJECT_ID (app's established config) → fail.
+  // Cloud Run does not always set GCP_PROJECT_ID/GCLOUD_PROJECT, so we
+  // fall back to the Firebase config the app already uses.
+  const projectId =
+    process.env.GCP_PROJECT_ID ||
+    process.env.GCLOUD_PROJECT ||
+    process.env.FIREBASE_PROJECT_ID;
   if (!projectId) {
     throw new Error(
-      `[secrets] USE_SECRET_MANAGER=true but GCP_PROJECT_ID is not set. ` +
+      `[secrets] USE_SECRET_MANAGER=true but no project ID found ` +
+      `(checked GCP_PROJECT_ID, GCLOUD_PROJECT, FIREBASE_PROJECT_ID). ` +
       `Cannot resolve secret ${secretName}.`
     );
   }
