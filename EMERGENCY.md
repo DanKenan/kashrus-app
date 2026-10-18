@@ -38,7 +38,11 @@ success. Both REJECT writes explicitly. This is the safe behavior — a
 maintenance mode that silently loses data is worse than one that says
 "try later."
 
-### Option A: Route traffic to the previous healthy revision (recommended)
+### Option A: Route traffic to the previous healthy revision (conditional)
+
+**Only use this if the bad revision is actually serving production traffic
+and causing real impact.** A failed build that never took traffic needs no
+shift — just fix forward.
 
 Cloud Run keeps prior revisions. Shifting 100% of traffic to the last-known-good
 revision stops the bad code from serving within ~30 seconds, without deleting anything.
@@ -51,18 +55,22 @@ gcloud run revisions list \
   --project gen-lang-client-0875538181 \
   --format "table(metadata.name, metadata.creationTimestamp)"
 
-# Route 100% of traffic to the last healthy revision
+# Route 100% of traffic to the verified healthy revision
+HEALTHY_REVISION="verified-revision-name"
 gcloud run services update-traffic workers-collaborative-dashboard \
+  --to-revisions="${HEALTHY_REVISION}=100" \
   --region us-east1 \
-  --project gen-lang-client-0875538181 \
-  --to-revisions <HEALTHY_REVISION_NAME>=100
+  --project gen-lang-client-0875538181
 ```
 
-**Critical constraint:** the "healthy" revision must itself be a Stage 2 build
-(any build with the `_v` version chain). Rolling back to a *pre-Stage-2*
-revision reintroduces unversioned writes — see Section 2.
+**Critical constraint:** the target revision must be verified compatible with
+*today's* data layer — per-entity reads, transactional writes (`_v` chain),
+and the current security posture. **Never blindly pick an old Stage 2
+revision**: schema, middleware, or env expectations may have drifted since it
+was built. Verify by checking its deploy date against recent migrations and,
+if in doubt, smoke-test it on its tagged revision URL before shifting traffic.
 
-If no Stage 2 revision is healthy, use Option B.
+If no verified-compatible revision is healthy, use Option B.
 
 ### Option B: Maintenance mode (kill-switch)
 
@@ -84,41 +92,28 @@ Clients will see "Service unavailable" / "Service disabled" errors (better
 than silent data corruption). Restore with `--scaling=auto --max-instances=1`
 (the Stage 1 single-instance constraint) once fixed.
 
-### Option C: Firestore deny-all (limited — read the warning)
+### Option C: Firestore deny-all rules (permanent — do not change without Don's OK)
 
-> ⚠️ **Firestore Security Rules do NOT restrict the Firebase Admin SDK.**
-> The server bypasses rules entirely. Setting rules to read-only (or deny-all)
-> only stops DIRECT CLIENT SDK access — it does **NOT** stop the server from
-> writing. If the bug is in the server's writes, rules alone will **NOT** stop
-> the bleeding: use Option B (scale to zero) or Option D (FORCE_LOCAL_MODE)
-> to actually stop server writes.
+> **Status 2026-10-18:** deny-all rules are DEPLOYED and are the permanent
+> protection. They block all direct client SDK access. The server's Admin SDK
+> bypasses rules entirely, so this does **not** stop server writes.
+>
+> **Any change to these rules needs Don's explicit OK** (Shutfey guardrail).
+> There is no "temporary deploy and revert" — the rules stay as they are.
 
-If direct client access (e.g. a compromised client SDK path) is the threat,
-stop all access at the database level via the Firebase console:
-**Firestore → Rules → deploy temporary deny-all (reads AND writes):**
+If the incident involves compromised direct client access, the rules are
+already blocking it. If the bug is in the server's writes, rules alone will
+**NOT** stop the bleeding: use Option B (scale to zero) or maintenance mode
+(§6) to actually stop server writes.
 
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if false;
-    }
-  }
-}
-```
+### Option D: FORCE_LOCAL_MODE kill-switch (legacy — prefer maintenance mode)
 
-This does **not** make the server read-only: the Admin SDK used by our server
-bypasses Security Rules entirely, so server writes continue unchanged. Do not
-rely on this to stop bad server writes — see the warning above. Revert the
-rules when the fix is deployed.
-
-### Option D: FORCE_LOCAL_MODE kill-switch (stop server Firestore writes)
-
-On Stage 2 builds (current code), set the env var `FORCE_LOCAL_MODE=true`:
-the server skips Firestore init **entirely** — even on Cloud Run — and runs
-in local-file mode, logging a loud `[Firestore] DEGRADED` warning on every
-write attempt.
+> **Corrected 2026-10-18:** On current builds, the middleware rejects API
+> mutations when `FORCE_LOCAL_MODE=true` — it is NOT a "local-file mode"
+> where writes might be lost. It is a hard stop on mutations, closer to
+> maintenance mode than to a degraded local mode. **Prefer maintenance mode
+> (§6)** for pausing writes — it's the supported path. `FORCE_LOCAL_MODE`
+> remains as a legacy kill-switch.
 
 ```bash
 gcloud run services update workers-collaborative-dashboard \
@@ -127,18 +122,12 @@ gcloud run services update workers-collaborative-dashboard \
   --set-env-vars FORCE_LOCAL_MODE=true
 ```
 
-Caveats:
+Re-enable with `--remove-env-vars FORCE_LOCAL_MODE`.
 
-- **Writes do NOT persist across restarts** (ephemeral container filesystem).
-  Treat as read-mostly; expect data loss on redeploy/crash. This is a PAUSE,
-  not a mode of operation.
-- Works ONLY on Stage 2 builds containing the FORCE_LOCAL_MODE check
-  (`initFirestore()` in server.ts). Pre-Stage-2 revisions ignore this variable
-  — for those, use Option B (scale to zero).
-- Reads keep serving from the in-memory cache (seeded from the local file at
-  boot); they are not frozen.
-- Re-enable by removing the override
-  (`--remove-env-vars FORCE_LOCAL_MODE`) and redeploying the fixed build.
+**Limits of `--scaling=0` (Option B):** scaling to zero stops new instances,
+but tagged revision URLs may stay reachable and in-flight requests finish
+gracefully — it does not instantly remove every writer. For a hard stop,
+combine with maintenance mode.
 
 ---
 
@@ -176,9 +165,9 @@ Enforcement options, in order of preference:
    (`--remove-env-vars FORCE_LOCAL_MODE`) when the fixed build is deployed.
    Note: pre-Stage-2 revisions do not know `FORCE_LOCAL_MODE` — for those,
    use §1 Option B (scale to zero), which works regardless of code version.
-3. **Firestore deny-all rules** (§1 Option C) as a backstop regardless of
-   which revision is serving — with the caveat that they only stop DIRECT
-   client SDK access, never the server's Admin SDK writes.
+3. **Firestore deny-all rules** (§1 Option C) are already the permanent
+   backstop — they stop direct client SDK access. They never stop the
+   server's Admin SDK writes. **Do not change them without Don's OK.**
 
 ### What we can and cannot recover
 
@@ -187,7 +176,7 @@ Enforcement options, in order of preference:
 | Bad build deployed, no bad writes committed yet | Yes | Traffic shift to healthy revision (Option A) |
 | Bad writes committed with valid `_v` chain | Yes | Forward data migration (new build repairs records at boot or via admin endpoint) |
 | Pre-Stage-2 code wrote without `_v` checks | Partially | Identify overwritten fields from Firestore version history (console → document → history); manually reconcile. No automatic undo. |
-| Firestore database destroyed | Last resort | Restore from a fresh `/api/admin/export` backup (stored privately, NOT in git); all post-backup writes are lost; every client must hard-refresh |
+| Firestore database destroyed | Last resort | Tier 1 backup restore (once operational) or Tier 2 managed export; all post-backup writes are lost; every client must hard-refresh |
 | In-memory idempotency cache lost (restart) | Yes | Mutators are idempotent on stable IDs; client retries are safe |
 
 **What we cannot recover:** writes that were never committed (client got an
@@ -240,9 +229,7 @@ post-backup writes after a total-restore.
 2. Commit to a branch, open a PR, get review — **even in an incident, no
    unreviewed production pushes** (Don's standing rule).
 3. Deploy via the normal pipeline (push to `main` → GitHub Actions → Cloud Run).
-4. If Firestore deny-all rules were deployed (Option C), restore the normal
-   rules **after** the fixed build is serving.
-5. If `FORCE_LOCAL_MODE=true` was set (Option D), remove it
+4. If `FORCE_LOCAL_MODE=true` was set (legacy Option D), remove it
    (`--remove-env-vars FORCE_LOCAL_MODE`) **after** the fixed build is
    serving, so durability is restored.
 
@@ -304,9 +291,9 @@ code + docs, not a verified capability.
 Every production deploy — no exceptions, no matter how small the change.
 
 **Before the PR:**
-- [ ] Pre-review checklist points 1–9 (in `AGENTS.md` / memory — data source,
+- [ ] Pre-review checklist points 1–9 (standing rules — data source,
   API verification, arithmetic, auth, concurrency, tests, deployment compat,
-  final diff + CI, infrastructure).
+  final diff + CI + pushed-diff verification, infrastructure).
 - [ ] `npm run lint` (tsc) + all relevant test suites green **locally**.
 - [ ] 5-sentence note drafted: what changed / tested / unverified / data impact.
 
@@ -321,10 +308,16 @@ Every production deploy — no exceptions, no matter how small the change.
 - [ ] Watch the Actions run → confirm the Cloud Run revision deployed.
 - [ ] `curl https://workers-collaborative-dashboard-1080260390009.us-east1.run.app/api/health`
   → expect `status: "ok"`, `firestore: "connected"`, `maintenance: false`,
-  `staged: false`, and the new `version` number.
+  `staged: false`. (Note: `version` is the Firestore state `_v`, not a build
+  version — a code-only release need not change it. Verify the deployed Cloud
+  Run revision separately via `gcloud run revisions list`.)
 - [ ] Don's 30-second verify: team screen loads, create → complete → delete
   one task.
-- [ ] Watch logs 10 min: `[commitOrRespond]` ERROR lines, 5xx/503 spikes.
+- [ ] Installed-PWA check (per `PWA_UPDATE.md`): on Don's phone, confirm the
+  installed PWA picks up the new version (no white screen, no stale cache).
+  Do NOT clear site data — that wipes the local session.
+- [ ] Watch logs 10 min: `[commitOrRespond:<label>]` ERROR lines (terminal
+  failed writes), 5xx/503 spikes.
 
 **If the deploy fails:**
 1. **Don't panic-deploy.** Read the Actions log — most failures are build
@@ -380,10 +373,9 @@ state — don't rely on log silence alone.
 
 ---
 
-## 7. Don's open items (one place)
+## 7. Open items (one place)
 
-Everything below needs Don (console access he has, I don't). Nothing here
-runs automatically.
+### Don's actions (console access he has, I don't)
 
 **Backup & recovery:**
 - [ ] GCP backup setup bundle (PR #19 body): create bucket, backup SA with
@@ -393,9 +385,6 @@ runs automatically.
   markers with matching checksums.
 - [ ] Restore drill: create empty `restore-drill-<date>` DB, run
   `node dist/restore-backup.cjs --confirm`, verify printed counts match.
-- [ ] Tier 2 (weekly managed Firestore export): separate future work.
-- [ ] Lifecycle deletion rules (tier1/ 30d, tier2/ 90d): **needs Don's OK**
-  before activating — he reserved explicit authorization for auto-deletion.
 
 **Monitoring:**
 - [ ] Create scheduler job `shutfey-consistency-check` every **4–6 hours**
@@ -404,18 +393,36 @@ runs automatically.
   `docs/stage4-alerts.md`; fire the test alert; confirm delivery.
 - [ ] Sweeper scheduler: set `--max-retry-attempts 3` on `shutfey-media-sweeper`.
 
-**Security & hygiene:**
-- [ ] Secrets cutover (`USE_SECRET_MANAGER=true`): 5 steps in PR #16 —
-  **needs Don's separate explicit OK**.
-- [ ] JWT/VAPID secret rotation: **propose only** — would log everyone out.
+**Hygiene:**
 - [ ] Change the reused admin password everywhere (hash was public ~12h Oct 18).
 - [ ] Branch protection on `main` (PRs + required CI + no bypasses).
 
-**Product (parked — Don's call):**
-- [ ] Step E (stop dual-write): deferred by Don's decision.
-- [ ] Ingredients / factory-inspections: **do not touch** until Don decides
-  with his people — then it's top priority and the migration is designed
-  together with it.
+### Explicit-approval-only decisions (propose, never do unprompted)
+
+- [ ] Secrets cutover (`USE_SECRET_MANAGER=true`): 5 steps in PR #16.
+- [ ] JWT/VAPID secret rotation — would log everyone out.
+- [ ] **Any Firestore rules change** (rules are permanent deny-all since Oct 18).
+- [ ] **Any data deletion** (including lifecycle auto-deletion rules:
+  tier1/ 30d, tier2/ 90d — Don reserved explicit authorization).
+- [ ] Agency-scoped admin export design (needs Don's call on super-admin model).
+- [ ] Kiosk PIN rotation / reset-code provisioning — **dropped by Don's explicit
+  decision** ("no one using it"). Do not raise again.
+- [ ] Git-history rewriting / token hygiene verification (destructive).
+
+### Engineering work (code, not Don's console)
+
+Carried forward from `STAGE4_PLAN.md`:
+- [ ] Admin audit logging (who changed what, when).
+- [ ] Quarterly `npm audit` + dependency updates.
+- [ ] Token/history hygiene verification (after Don OKs the approach).
+- [ ] Cloud Monitoring dashboard (uptime, 5xx rate, backup age, monolith size).
+- [ ] Deferred monitoring coverage from `docs/stage4-alerts.md` §6 PENDING items
+  (login-spike alert, Firestore quota, bucket growth, backup digest, cert expiry).
+- [ ] Full Tier 2 recovery (weekly managed export + its restore path).
+- [ ] Step E (stop dual-write): **deferred by Don's decision** — do not revive
+  without him.
+- [ ] Ingredients / factory-inspections migration: **do not touch** until Don
+  decides with his people — then it's top priority.
 
 ---
 
@@ -424,5 +431,5 @@ runs automatically.
 - **Service URL:** `https://workers-collaborative-dashboard-1080260390009.us-east1.run.app/`
 - **Repo:** `https://github.com/DanKenan/kashrus-app` (branch `review/stage2-data-integrity` for Stage 2 review)
 - **Firestore console:** Firebase project `gen-lang-client-0875538181` → Firestore → database `ai-studio-workerscollabora-faedc6a8-580b-463e-86b2-c3e3048ed73d` → `app-state/main`
-- **Backup:** Take a fresh backup via `GET /api/admin/export` before any risky operation. Store it privately (NOT in git — the Oct 17 backup was removed from the repo after it was found to contain user emails and kiosk PINs in a public repo). Passwords are stripped by design.
+- **Backup:** Once the Tier 1 job is operational, backups run automatically nightly. Before any risky operation, trigger a manual job run and note its `SUCCESS.json` path. (The old `/api/admin/export` endpoint is a manual sanitized snapshot — not a DR mechanism; Tier 1/Tier 2 are.) Store exports privately, never in git.
 - **Related docs:** `ROLLBACK.md` (forward-fix policy), `TEST_RESULTS.md` (verification), `ARCHITECTURE_ANALYSIS.md` (full failure-mode analysis)
