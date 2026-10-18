@@ -414,7 +414,7 @@ async function fireTestAlert() {
       step(el, 'Test alert', false, r.json.error || 'Failed');
       return;
     }
-    step(el, 'Test alert fired', true, 'Check your email/phone for the Cloud Monitoring notification. Sent at: ' + r.json.sentAt);
+    step(el, 'Test alert fired', true, 'Check your email/phone for the Cloud Monitoring notification. Logged at: ' + r.json.sentAt);
   } catch (e) {
     el.innerHTML = '';
     step(el, 'Test alert', false, e.message);
