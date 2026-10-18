@@ -225,8 +225,8 @@ Don's scale: ~6 users, bursty human-paced usage, ~500 writes/day, ~12K reads/day
 |---|---|---|---|
 | 3C | Secrets → Secret Manager (PR #16) | Open, awaiting review | **YES — cutover step** (setting `USE_SECRET_MANAGER=true`); rotation is separate |
 | A | Consistency + monolith-size monitor (PR #15) | Open, CI green | No — read-only; scheduler job setup is Don's console work |
-| B | Automated backups (Tier 1 + Tier 2, Cloud Run Job) | Planned, not yet coded | No for Tier 1; **YES** for any restore test touching prod |
-| C | Uptime / error / backup-staleness / billing ($5/mo) alerts | Planned | No — but Don confirms alert channel (email + SMS?) |
+| B | Automated backups (Tier 1 + Tier 2, Cloud Run Job) | Planned, not yet coded | No for Tier 1; **YES** for any restore test touching prod. **Restore drills: throwaway database ONLY — never test against production.** Media retention: **30 days from original upload applies to every backup copy**, regardless of Tier 2 90-day retention. |
+| C | Uptime / error / backup-staleness / billing ($5/mo) alerts | Planned | No — Don confirmed: **email for all alerts, SMS for urgent** |
 | D | Runbook + security-hardening verification | Planned | — |
 | — | Agency-scoped admin export | Planned (from §4.4) | **YES** — needs Don's call on super-admin model |
 | — | Admin audit log | Planned (from §4.6) | No |
