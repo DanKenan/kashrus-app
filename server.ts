@@ -3604,6 +3604,22 @@ function requireMediaDb(req: any, res: any): any | null {
 // ---------------------------------------------------------------------------
 
 /**
+ * Media route error handler. For admin callers, includes the underlying
+ * error message to aid debugging (e.g. via /admin/media-check).
+ * Non-admin callers get the generic message only.
+ */
+function mediaErrorResponse(req: any, res: any, e: any, genericMessage: string, logPrefix: string): void {
+  if (e instanceof media.MediaError) {
+    res.status(e.status).json({ error: e.message, code: e.code });
+  } else {
+    console.error(`[media] ${logPrefix} error:`, e);
+    const user = getAuthUser(req);
+    const detail = user?.role === 'admin' && e?.message ? `: ${e.message}` : '';
+    res.status(500).json({ error: genericMessage + detail });
+  }
+}
+
+/**
  * POST /api/media/intent — Create an upload intent.
  * Body: { mimeType, sizeBytes, sha256, venueId? }
  * Returns: { mediaId, uploadUrl, expiresAt }
@@ -3635,12 +3651,7 @@ app.post('/api/media/intent', async (req, res) => {
     });
     res.json(result);
   } catch (e: any) {
-    if (e instanceof media.MediaError) {
-      res.status(e.status).json({ error: e.message, code: e.code });
-    } else {
-      console.error('[media] intent error:', e);
-      res.status(500).json({ error: 'Failed to create upload intent.' });
-    }
+    mediaErrorResponse(req, res, e, 'Failed to create upload intent.', 'intent');
   }
 });
 
@@ -3671,12 +3682,7 @@ app.post('/api/media/:id/uploaded', async (req, res) => {
     await media.markUploaded(db, req.params.id);
     res.json({ ok: true });
   } catch (e: any) {
-    if (e instanceof media.MediaError) {
-      res.status(e.status).json({ error: e.message, code: e.code });
-    } else {
-      console.error('[media] uploaded error:', e);
-      res.status(500).json({ error: 'Failed to mark as uploaded.' });
-    }
+    mediaErrorResponse(req, res, e, 'Failed to mark as uploaded.', 'uploaded');
   }
 });
 
@@ -3707,12 +3713,7 @@ app.post('/api/media/:id/validate', async (req, res) => {
     const validated = await media.validateUpload(db, req.params.id);
     res.json({ ok: true, state: validated.state });
   } catch (e: any) {
-    if (e instanceof media.MediaError) {
-      res.status(e.status).json({ error: e.message, code: e.code });
-    } else {
-      console.error('[media] validate error:', e);
-      res.status(500).json({ error: 'Validation failed.' });
-    }
+    mediaErrorResponse(req, res, e, 'Validation failed.', 'validate');
   }
 });
 
@@ -3758,12 +3759,7 @@ app.post('/api/media/:id/commit', async (req, res) => {
     const committed = await media.commitMedia(db, req.params.id, entityType, entityId);
     res.json({ ok: true, state: committed.state, attachedTo: committed.attachedTo });
   } catch (e: any) {
-    if (e instanceof media.MediaError) {
-      res.status(e.status).json({ error: e.message, code: e.code });
-    } else {
-      console.error('[media] commit error:', e);
-      res.status(500).json({ error: 'Failed to commit media.' });
-    }
+    mediaErrorResponse(req, res, e, 'Failed to commit media.', 'commit');
   }
 });
 
@@ -3794,12 +3790,7 @@ app.get('/api/media/:id/download', async (req, res) => {
     const url = await media.getDownloadUrl(db, req.params.id);
     res.json({ downloadUrl: url });
   } catch (e: any) {
-    if (e instanceof media.MediaError) {
-      res.status(e.status).json({ error: e.message, code: e.code });
-    } else {
-      console.error('[media] download error:', e);
-      res.status(500).json({ error: 'Failed to get download URL.' });
-    }
+    mediaErrorResponse(req, res, e, 'Failed to get download URL.', 'download');
   }
 });
 
