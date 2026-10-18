@@ -22,7 +22,7 @@ export interface VenueDoc {
 
 export async function createVenue(
   db: any,
-  params: Omit<VenueDoc, '_v' | 'updatedAt'> & {
+  params: Omit<VenueDoc, '_v' | 'updatedAt' | 'id' | 'createdAt'> & {
     id?: string;
     createdAt?: string; // Optional: preserve original creation date during migration
   }
@@ -36,7 +36,13 @@ export async function createVenue(
     updatedAt: now,
     _v: 1,
   };
-  await db.collection('venues').doc(id).set(doc);
+  // Create-if-absent: refuse to overwrite an existing document.
+  const docRef = db.collection('venues').doc(id);
+  const existing = await docRef.get();
+  if (existing.exists) {
+    throw new Error(`Venue already exists: ${id}. Use updateVenue to modify it.`);
+  }
+  await docRef.set(doc);
   return doc;
 }
 

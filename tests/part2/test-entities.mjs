@@ -121,6 +121,31 @@ export default {
     if (task2.id !== 'client-generated-123') throw new Error('Client ID not preserved');
     console.log('  ✓ tasks preserve TaskItem shape + client IDs');
 
+    // Create-if-absent: reusing an ID must fail, not overwrite
+    try {
+      await createTask(db, {
+        id: 'client-generated-123', // Same ID as above
+        agencyId: 'agency-hkc',
+        venueId: 'venue-1',
+        title: 'Overwrite attempt',
+        description: '',
+        category: 'other',
+        inputType: 'toggle',
+        assignedTo: ['all'],
+        daysOfWeek: [],
+        currentStatus: '',
+        isCompleted: false,
+        notes: '',
+        updatedByEmail: null,
+        updatedByName: null,
+        updatedAt: null,
+      });
+      throw new Error('Should reject duplicate ID');
+    } catch (e) {
+      if (!e.message.includes('already exists')) throw e;
+    }
+    console.log('  ✓ tasks reject duplicate IDs (create-if-absent)');
+
     const updated = await updateTask(db, task.id, { isCompleted: true }, 1);
     if (updated._v !== 2 || updated.isCompleted !== true) throw new Error('Update failed');
     try {
@@ -159,11 +184,11 @@ export default {
     if (user.password !== '$2b$10$hashedpassword') throw new Error('Password hash lost!');
     if (user.kioskPin !== '1234') throw new Error('Kiosk PIN lost!');
 
-    // Email uniqueness enforced
+    // Email uniqueness enforced (with trim + case-insensitive)
     try {
       await createUser(db, {
         agencyId: 'agency-hkc',
-        email: 'test@example.com', // Same email, different case
+        email: '  TEST@example.com  ', // Same email, different case + whitespace
         name: 'Duplicate',
         role: 'worker',
         avatarColor: '#000',
@@ -172,7 +197,23 @@ export default {
     } catch (e) {
       if (!e.message.includes('already in use')) throw e;
     }
-    console.log('  ✓ users preserve auth fields + email uniqueness');
+    console.log('  ✓ users preserve auth fields + email uniqueness (trim/case-insensitive)');
+
+    // User ID collision rejected
+    try {
+      await createUser(db, {
+        id: user.id, // Same ID as the first user
+        agencyId: 'agency-hkc',
+        email: 'different@example.com',
+        name: 'ID Collision',
+        role: 'worker',
+        avatarColor: '#000',
+      });
+      throw new Error('Should reject duplicate user ID');
+    } catch (e) {
+      if (!e.message.includes('already exists')) throw e;
+    }
+    console.log('  ✓ users reject duplicate IDs (create-if-absent)');
 
     // Sanitize strips secrets
     const safe = sanitizeUser(user);

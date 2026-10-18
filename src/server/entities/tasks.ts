@@ -62,7 +62,7 @@ export interface TaskDoc {
  */
 export async function createTask(
   db: any,
-  params: Omit<TaskDoc, '_v' | 'updatedAt'> & {
+  params: Omit<TaskDoc, '_v' | 'updatedAt' | 'id' | 'createdAt'> & {
     id?: string; // Optional: use client-supplied ID for idempotency
     createdAt?: string; // Optional: preserve original creation date during migration
   }
@@ -76,8 +76,14 @@ export async function createTask(
     updatedAt: now,
     _v: 1,
   };
-  // Use set with the specific ID (not add) to preserve client-supplied IDs
-  await db.collection('tasks').doc(id).set(doc);
+  // Create-if-absent: refuse to overwrite an existing document.
+  // Reusing an ID must not silently reset _v to 1 or lose data.
+  const docRef = db.collection('tasks').doc(id);
+  const existing = await docRef.get();
+  if (existing.exists) {
+    throw new Error(`Task already exists: ${id}. Use updateTask to modify it.`);
+  }
+  await docRef.set(doc);
   return doc;
 }
 

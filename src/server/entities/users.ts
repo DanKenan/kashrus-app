@@ -40,22 +40,30 @@ export interface UserDoc {
 
 function emailKey(email: string): string {
   // SHA-256 of lowercase email, for the usersByEmail lookup
-  return crypto.createHash('sha256').update(email.toLowerCase()).digest('hex');
+  return crypto.createHash('sha256').update(email.trim().toLowerCase()).digest('hex');
 }
 
 export async function createUser(
   db: any,
-  params: Omit<UserDoc, '_v' | 'createdAt' | 'updatedAt' | 'email'> & {
+  params: Omit<UserDoc, '_v' | 'createdAt' | 'updatedAt' | 'email' | 'id'> & {
     id?: string;
     email: string;
   }
 ): Promise<UserDoc> {
   const id = params.id || `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const email = params.email.toLowerCase();
+  const email = params.email.trim().toLowerCase();
   const now = new Date().toISOString();
 
-  // Transactionally enforce email uniqueness via usersByEmail
+  // Transactionally enforce email uniqueness via usersByEmail AND
+  // ensure the user ID doesn't already exist (create-if-absent).
   const result = await db.runTransaction(async (tx: any) => {
+    // Check ID doesn't exist
+    const userRef = db.collection('users').doc(id);
+    const existingUser = await tx.get(userRef);
+    if (existingUser.exists) {
+      throw new Error(`User already exists: ${id}. Use updateUser to modify it.`);
+    }
+    // Check email uniqueness
     const key = emailKey(email);
     const existingRef = db.collection('usersByEmail').doc(key);
     const existing = await tx.get(existingRef);
@@ -70,7 +78,7 @@ export async function createUser(
       updatedAt: now,
       _v: 1,
     };
-    tx.set(db.collection('users').doc(id), doc);
+    tx.set(userRef, doc);
     tx.set(existingRef, { userId: id, email });
     return doc;
   });
