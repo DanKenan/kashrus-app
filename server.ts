@@ -1721,6 +1721,38 @@ async function initFirestore() {
   }
 }
 
+/**
+ * PR D: Load tasks, venues, users from per-entity collections into memory.
+ * Called at startup and after each commitState when READ_FROM_PER_ENTITY=true.
+ * Strips per-entity _v (in-memory uses monolith versioning).
+ */
+async function loadPerEntityIntoMemory(): Promise<void> {
+  if (!firestoreDb) return;
+  try {
+    const [tasksSnap, venuesSnap, usersSnap] = await Promise.all([
+      firestoreDb.collection('tasks').get(),
+      firestoreDb.collection('venues').get(),
+      firestoreDb.collection('users').get(),
+    ]);
+    // Strip _v from per-entity docs (in-memory doesn't use per-entity versioning)
+    tasks = tasksSnap.docs.map((d: any) => {
+      const { _v, ...rest } = d.data();
+      return rest;
+    });
+    venues = venuesSnap.docs.map((d: any) => {
+      const { _v, ...rest } = d.data();
+      return rest;
+    });
+    users = usersSnap.docs.map((d: any) => {
+      const { _v, ...rest } = d.data();
+      return rest;
+    });
+    console.log(`[PerEntity] Loaded ${tasks.length} tasks, ${venues.length} venues, ${users.length} users from per-entity collections.`);
+  } catch (err: any) {
+    console.warn('[PerEntity] Failed to load per-entity collections:', err?.message);
+  }
+}
+
 // Load durable state at boot. Returns true when Firestore had state to apply.
 // Sets durableStateLoaded so persistToFirestore() knows it's safe to write.
 async function loadStateFromFirestore(): Promise<boolean> {
@@ -1735,6 +1767,10 @@ async function loadStateFromFirestore(): Promise<boolean> {
     hydrateState(snap.data());
     durableStateLoaded = true;
     console.log('[Firestore] Loaded durable state.');
+    // PR D: If reading from per-entity, override tasks/venues/users from collections
+    if (process.env.READ_FROM_PER_ENTITY === 'true') {
+      await loadPerEntityIntoMemory();
+    }
     return true;
   } catch (err: any) {
     console.warn('[Firestore] Could not load state:', err?.message);
@@ -2292,6 +2328,11 @@ async function commitState(
       if (committedVersion > stateVersion) {
         hydrateState(committed.doc);
         stateVersion = committedVersion;
+        // PR D: If reading from per-entity, refresh tasks/venues/users from collections
+        // (dual-write updated them in the transaction; this keeps in-memory in sync)
+        if (process.env.READ_FROM_PER_ENTITY === 'true') {
+          await loadPerEntityIntoMemory();
+        }
       } else {
         console.warn(
           `[commitState:${label}] Skipping stale hydration: committed v${committedVersion} <= current v${stateVersion}. ` +
@@ -5637,6 +5678,51 @@ app.post('/api/admin/restore-demo', async (req, res) => {
     users: getSafeUsers(),
     message: 'Demo facilities, mashgichim, and inspection tasks have been restored.',
   });
+});
+
+/**
+ * POST /api/admin/migrate-copy — One-time copy from monolith to per-entity.
+ * Admin only. Idempotent: skips docs that already exist, never overwrites.
+ * Runs in a single Firestore transaction (all reads before all writes).
+ * The monolith is never modified or deleted.
+ */
+app.post('/api/admin/migrate-copy', async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  if (!firestoreDb) {
+    res.status(503).json({ error: 'Firestore not available.' });
+    return;
+  }
+  try {
+    const { migrateCopy } = await import('./src/server/migration.js');
+    const result = await migrateCopy(firestoreDb);
+    res.json({ ok: true, ...result });
+  } catch (e: any) {
+    console.error('[migration] copy error:', e);
+    res.status(500).json({ error: 'Migration copy failed.', detail: e?.message });
+  }
+});
+
+/**
+ * GET /api/admin/per-entity-status — Compare monolith vs per-entity.
+ * Admin only. Returns counts, match status, and mismatch details.
+ * Never returns password hashes, PINs, or secrets.
+ */
+app.get('/api/admin/per-entity-status', async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  if (!firestoreDb) {
+    res.status(503).json({ error: 'Firestore not available.' });
+    return;
+  }
+  try {
+    const { perEntityStatus } = await import('./src/server/migration.js');
+    const result = await perEntityStatus(firestoreDb);
+    res.json(result);
+  } catch (e: any) {
+    console.error('[migration] status error:', e);
+    res.status(500).json({ error: 'Status check failed.', detail: e?.message });
+  }
 });
 
 app.get('/api/history', (req, res) => {
