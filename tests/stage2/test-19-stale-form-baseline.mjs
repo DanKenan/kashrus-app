@@ -104,6 +104,14 @@ export default {
     if (formBaseline !== docV) throw new Error(`header v${formBaseline} != doc v${docV}`);
 
     // --- 3. A's WS client connects (browser is listening) ---
+    // NOTE: test 18 (restore cycle) runs before this test and strips
+    // passwords — re-establish via setup, mirroring the real post-restore
+    // flow and the harness startup.
+    await fetch(`${baseUrl}/api/auth/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: ADMIN_EMAIL, newPassword: 'stage2-test-password' }),
+    });
     const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
