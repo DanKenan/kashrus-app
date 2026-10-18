@@ -3939,6 +3939,50 @@ app.post('/api/media/sweep', async (req, res) => {
 });
 
 /**
+ * POST /api/internal/consistency-check — Stage 4 PR A.
+ * Scheduler-OIDC or admin only. Runs the dual-write consistency check
+ * (per-entity vs monolith) + monolith size warning.
+ * Returns non-2xx on failure so Cloud Scheduler retries / alerts.
+ */
+app.post('/api/internal/consistency-check', async (req, res) => {
+  try {
+    const isScheduler = (req as any).schedulerAuth === true;
+    if (!isScheduler) {
+      const admin = requireAdmin(req, res);
+      if (!admin) return;
+    }
+    if (!firestoreDb) {
+      res.status(503).json({ error: 'Firestore not available.' });
+      return;
+    }
+    const { runConsistencyCheck } = await import('./src/server/consistency.js');
+    const result = await runConsistencyCheck(firestoreDb);
+    if (!result.ok) {
+      // Non-2xx: mismatch, size warning, or unstable read
+      res.status(500).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (e: any) {
+    console.error('[consistency] check error:', e);
+    res.status(500).json({ error: 'Consistency check failed.', detail: e?.message });
+  }
+});
+
+/**
+ * POST /api/internal/test-alert — Stage 4 PR A.
+ * Admin only. Fires a real ERROR-severity log line so Don can verify
+ * the Cloud Monitoring alert pipeline delivers to his email/phone.
+ */
+app.post('/api/internal/test-alert', async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const stamp = new Date().toISOString();
+  console.error(`[alert-test] TEST ALERT from Shutfey admin at ${stamp}. If you received this, the monitoring pipeline works.`);
+  res.json({ ok: true, sentAt: stamp, message: 'Test alert logged. Check your email/phone for the Cloud Monitoring notification.' });
+});
+
+/**
  * GET /api/media/status — Check if media storage is configured.
  * Used by the client to gracefully disable media features.
  */
