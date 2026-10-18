@@ -441,6 +441,10 @@ export async function markUploaded(db: any, mediaId: string): Promise<void> {
  * Commit validated media to an entity. Transitions VALIDATED → COMMITTED.
  * The media reference is only stored after validation passes.
  *
+ * Uses a transaction to guard against concurrent abandonment/deletion:
+ * if the record is no longer VALIDATED (e.g., sweeper abandoned it),
+ * the commit fails.
+ *
  * Verifies the Storage generation hasn't changed since validation
  * (prevents post-validation overwrite attacks).
  *
@@ -455,25 +459,38 @@ export async function commitMedia(
 ): Promise<MediaDoc> {
   const store = getStorage();
   const docRef = db.collection('media').doc(mediaId);
-  const snap = await docRef.get();
-  if (!snap.exists) {
-    throw new MediaError('Media not found.', 'NOT_FOUND', 404);
-  }
-  const doc = snap.data() as MediaDoc;
-  if (doc.state !== 'VALIDATED') {
-    throw new MediaError(
-      `Cannot commit media in state ${doc.state}. Must be VALIDATED.`,
-      'INVALID_STATE',
-      400
-    );
-  }
 
-  // Verify generation hasn't changed (overwrite detection)
+  // Transactional state check: only commit if still VALIDATED
+  const doc = await db.runTransaction(async (tx: any) => {
+    const snap = await tx.get(docRef);
+    if (!snap.exists) {
+      throw new MediaError('Media not found.', 'NOT_FOUND', 404);
+    }
+    const data = snap.data() as MediaDoc;
+    if (data.state !== 'VALIDATED') {
+      throw new MediaError(
+        `Cannot commit media in state ${data.state}. Must be VALIDATED.`,
+        'INVALID_STATE',
+        400
+      );
+    }
+    const committedAt = new Date().toISOString();
+    tx.update(docRef, {
+      state: 'COMMITTED',
+      committedAt,
+      attachedTo: { entityType, entityId },
+    });
+    return { ...data, state: 'COMMITTED' as MediaState, committedAt, attachedTo: { entityType, entityId } };
+  });
+
+  // Verify generation hasn't changed (overwrite detection) — outside the
+  // transaction since it requires a Storage call
   if (store && doc.generation) {
     const bucket = store.storage.bucket(store.bucketName);
     const file = bucket.file(doc.storagePath);
     const [metadata] = await file.getMetadata();
     if (metadata.generation !== doc.generation) {
+      // Roll back the commit: mark as ABANDONED
       await docRef.update({
         state: 'ABANDONED',
         validationError: 'File was modified after validation.',
@@ -486,18 +503,7 @@ export async function commitMedia(
     }
   }
 
-  const committed: MediaDoc = {
-    ...doc,
-    state: 'COMMITTED',
-    committedAt: new Date().toISOString(),
-    attachedTo: { entityType, entityId },
-  };
-  await docRef.update({
-    state: 'COMMITTED',
-    committedAt: committed.committedAt,
-    attachedTo: committed.attachedTo,
-  });
-  return committed;
+  return doc;
 }
 
 /**
@@ -587,15 +593,21 @@ export async function sweepOrphans(db: any): Promise<SweeperResult> {
   for (const doc of staleIntents.docs) {
     try {
       const data = doc.data() as MediaDoc;
-      // Use transaction to protect against concurrent updates
-      await db.runTransaction(async (tx: any) => {
+      // Use transaction to protect against concurrent updates.
+      // Only delete the Storage object if WE actually transitioned the record.
+      const transitioned = await db.runTransaction(async (tx: any) => {
         const fresh = await tx.get(doc.ref);
-        if (!fresh.exists) return;
+        if (!fresh.exists) return false;
         const freshData = fresh.data() as MediaDoc;
         // Only abandon if still in a pre-commit state (not already handled)
-        if (!['INTENT', 'UPLOADED', 'VALIDATED'].includes(freshData.state)) return;
+        if (!['INTENT', 'UPLOADED', 'VALIDATED'].includes(freshData.state)) return false;
         tx.update(doc.ref, { state: 'ABANDONED', validationError: 'Intent expired.' });
+        return true;
       });
+      if (!transitioned) {
+        // Another worker already handled this record; skip deletion
+        continue;
+      }
       result.abandoned++;
       // Try to delete the object — even for INTENT, the user may have uploaded
       // without calling /uploaded. Always attempt deletion.
@@ -604,7 +616,8 @@ export async function sweepOrphans(db: any): Promise<SweeperResult> {
         result.deleted++;
         await doc.ref.update({ mediaDeletedAt: nowIso });
       } else if (store) {
-        // Record for retry, even if the file might not exist
+        // Record for retry, even if the file might not exist.
+        // Storage-unavailable records remain eligible for retry via deleteError.
         await doc.ref.update({ deleteError: 'Delete failed or file not found, will retry.' });
       }
     } catch (e: any) {
@@ -637,11 +650,13 @@ export async function sweepOrphans(db: any): Promise<SweeperResult> {
   }
 
   // 3. Expire committed media past retention — ONLY after confirmed deletion
-  // Uses 29-day threshold (safety margin before the 30-day maximum).
+  // Uses createdAt <= now - 29d (safety margin before the 30-day maximum).
+  // Note: expiresAt is createdAt + 30d, so querying expiresAt < now - 29d
+  // would incorrectly wait until ~59 days. We use createdAt directly.
   const retentionCutoff = new Date(now.getTime() - SWEEPER_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const expired = await db.collection('media')
     .where('state', '==', 'COMMITTED')
-    .where('expiresAt', '<', retentionCutoff)
+    .where('createdAt', '<=', retentionCutoff)
     .get();
   for (const doc of expired.docs) {
     try {

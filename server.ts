@@ -400,7 +400,7 @@ function agencyIdForHostname(hostname: string): string | null {
   return null;
 }
 
-app.use('/api', (req, res, next) => {
+app.use('/api', async (req, res, next) => {
   // MAINTENANCE HOTFIX (2026-10-18, from main): operator cutover switch.
   // Refuses all mutations with 503 so old-version writes stop before cutover.
   if (process.env.MAINTENANCE_MODE === 'true' && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
@@ -448,6 +448,22 @@ app.use('/api', (req, res, next) => {
   }
 
   if (isPublicApiRoute(req.method, req.path)) return next();
+
+  // Scheduler exception: POST /api/media/sweep accepts a verified Google
+  // OIDC token from Cloud Scheduler INSTEAD OF a session token. This is
+  // narrowly scoped — only this exact route, only POST, only with a valid
+  // OIDC token. All other routes require session auth as before.
+  if (req.method === 'POST' && req.path === '/media/sweep') {
+    const oidcValid = await verifySchedulerOidc(req);
+    if (oidcValid) {
+      // Mark as scheduler-authenticated; the route handler checks this
+      // flag instead of requiring an admin session.
+      (req as any).schedulerAuth = true;
+      return next();
+    }
+    // If OIDC invalid, fall through to normal session auth (admin can still
+    // trigger manually). Do NOT return 401 here — let the session check run.
+  }
 
   const authHeader = String(req.headers.authorization || '');
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -3839,8 +3855,9 @@ async function verifySchedulerOidc(req: any): Promise<boolean> {
 
 app.post('/api/media/sweep', async (req, res) => {
   try {
-    // Accept either: admin session OR verified Cloud Scheduler OIDC token
-    const isScheduler = await verifySchedulerOidc(req);
+    // Accept either: verified scheduler OIDC (set by middleware) OR admin session.
+    // The middleware already verified the OIDC token; we just check the flag.
+    const isScheduler = (req as any).schedulerAuth === true;
     if (!isScheduler) {
       const admin = requireAdmin(req, res);
       if (!admin) return;

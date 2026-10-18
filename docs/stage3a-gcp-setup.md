@@ -91,6 +91,24 @@ Deploy and runtime identities are separate by design.
 ## 7. Set Up the Scheduled Sweeper (Cloud Scheduler)
 
 The sweeper must run on a schedule — the admin endpoint alone is insufficient.
+Cloud Scheduler uses OIDC tokens; the app verifies them via `google-auth-library`.
+
+### 7a. Create a Service Account for the Scheduler
+
+1. Go to https://console.cloud.google.com/iam-admin/serviceaccounts?project=gen-lang-client-0875538181
+2. Click **CREATE SERVICE ACCOUNT**
+3. Name: `shutfey-scheduler`
+4. Click **CREATE AND CONTINUE** → **DONE** (no project roles needed)
+
+### 7b. Set Env Vars on Cloud Run
+
+1. Go to Cloud Run → workers-collaborative-dashboard → **EDIT & DEPLOY NEW REVISION**
+2. **VARIABLES & SECRETS** → **ADD VARIABLE** (twice):
+   - `SCHEDULER_SERVICE_ACCOUNT` = `shutfey-scheduler@gen-lang-client-0875538181.iam.gserviceaccount.com`
+   - `SCHEDULER_AUDIENCE` = `https://workers-collaborative-dashboard-1080260390009.us-east1.run.app`
+3. Click **DEPLOY**
+
+### 7c. Create the Scheduler Job
 
 1. Go to https://console.cloud.google.com/cloudscheduler?project=gen-lang-client-0875538181
 2. Click **CREATE JOB**
@@ -100,11 +118,14 @@ The sweeper must run on a schedule — the admin endpoint alone is insufficient.
 6. Target type: **HTTP**
 7. URL: `https://workers-collaborative-dashboard-1080260390009.us-east1.run.app/api/media/sweep`
 8. HTTP method: **POST**
-9. Auth header: Add an `Authorization` header with a service account token
-   - (Requires setting up OIDC token for the scheduler SA — see Cloud Scheduler docs)
+9. Auth header: **Add OIDC token**
+   - Service account: `shutfey-scheduler@gen-lang-client-0875538181.iam.gserviceaccount.com`
+   - Audience: `https://workers-collaborative-dashboard-1080260390009.us-east1.run.app`
 10. Click **CREATE**
 
-**Alternative (simpler for now):** Don can manually trigger the sweeper via the admin UI, or we can add it to the existing nightly cron. The Cloud Scheduler is the robust long-term solution.
+The app's `/api` middleware has a narrowly-scoped exception: `POST /api/media/sweep`
+with a valid OIDC token bypasses session auth. All other routes are unaffected.
+Admins can still trigger the sweeper manually via session auth.
 
 ## Verification
 
