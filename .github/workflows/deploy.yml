@@ -94,6 +94,13 @@ jobs:
           if not any(e['name'] == 'NODE_ENV' for e in env):
               env.append({'name': 'NODE_ENV', 'value': 'production'})
           c['env'] = env
+          # Remove the stale AI-Studio command/args override. The buildpack
+          # image has no npm on the plain-sh PATH, so the old override
+          # (/bin/sh -c "... npm start") fails with "npm: not found".
+          # Dropping the override lets the image's own entrypoint run the
+          # buildpack web process (npm start -> node dist/server.cjs).
+          c.pop('command', None)
+          c.pop('args', None)
           # Explicit startup probe: give the app a realistic 3-minute budget
           # to open its port (Firestore init can be slow). Without this,
           # Cloud Run's default 10s probe can kill a healthy-but-slow boot.
