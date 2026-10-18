@@ -3565,6 +3565,22 @@ app.post('/api/incidents/:id/acknowledge', async (req, res) => {
   return;
 });
 
+/**
+ * Get the Firestore database for media operations. Uses the named database
+ * (firestoreDb), not the default. Fails closed (503) if unavailable.
+ * Returns null after sending the error response; callers must check.
+ */
+function requireMediaDb(req: any, res: any): any | null {
+  if (!firestoreDb) {
+    res.status(503).json({
+      error: 'Media storage is temporarily unavailable (Firestore not connected).',
+      code: 'DB_UNAVAILABLE',
+    });
+    return null;
+  }
+  return firestoreDb;
+}
+
 // ---------------------------------------------------------------------------
 // Stage 3A — Media lifecycle API
 // All routes require authentication. Agency/venue scope comes from the
@@ -3583,6 +3599,8 @@ app.post('/api/media/intent', async (req, res) => {
       res.status(401).json({ error: 'Authentication required.' });
       return;
     }
+    const db = requireMediaDb(req, res);
+    if (!db) return;
     const agencyId = callerAgencyId(req);
     // venueId is optional; if supplied, verify user has access to it.
     // Admins can access all venues in their agency; others must match their venueId.
@@ -3591,7 +3609,7 @@ app.post('/api/media/intent', async (req, res) => {
       res.status(403).json({ error: 'No access to this venue.' });
       return;
     }
-    const result = await media.createIntent(getFirestore(), {
+    const result = await media.createIntent(db, {
       agencyId,
       venueId,
       uploadedBy: user.id,
@@ -3620,13 +3638,21 @@ app.post('/api/media/:id/uploaded', async (req, res) => {
       res.status(401).json({ error: 'Authentication required.' });
       return;
     }
-    const doc = await getFirestore().collection('media').doc(req.params.id).get();
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const doc = await db.collection('media').doc(req.params.id).get();
     if (!doc.exists) {
       res.status(404).json({ error: 'Media not found.' });
       return;
     }
-    if (!requireSameAgency(req, res, doc.data(), 'media')) return;
-    await media.markUploaded(getFirestore(), req.params.id);
+    const mediaDoc = doc.data();
+    if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
+    // Venue access: if media is venue-scoped, verify user can access that venue.
+    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
+    await media.markUploaded(db, req.params.id);
     res.json({ ok: true });
   } catch (e: any) {
     if (e instanceof media.MediaError) {
@@ -3649,13 +3675,20 @@ app.post('/api/media/:id/validate', async (req, res) => {
       res.status(401).json({ error: 'Authentication required.' });
       return;
     }
-    const doc = await getFirestore().collection('media').doc(req.params.id).get();
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const doc = await db.collection('media').doc(req.params.id).get();
     if (!doc.exists) {
       res.status(404).json({ error: 'Media not found.' });
       return;
     }
-    if (!requireSameAgency(req, res, doc.data(), 'media')) return;
-    const validated = await media.validateUpload(getFirestore(), req.params.id);
+    const mediaDoc = doc.data();
+    if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
+    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
+    const validated = await media.validateUpload(db, req.params.id);
     res.json({ ok: true, state: validated.state });
   } catch (e: any) {
     if (e instanceof media.MediaError) {
@@ -3679,18 +3712,34 @@ app.post('/api/media/:id/commit', async (req, res) => {
       res.status(401).json({ error: 'Authentication required.' });
       return;
     }
-    const doc = await getFirestore().collection('media').doc(req.params.id).get();
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const doc = await db.collection('media').doc(req.params.id).get();
     if (!doc.exists) {
       res.status(404).json({ error: 'Media not found.' });
       return;
     }
-    if (!requireSameAgency(req, res, doc.data(), 'media')) return;
+    const mediaDoc = doc.data();
+    if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
+    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
     const { entityType, entityId } = req.body || {};
     if (!entityType || !entityId) {
       res.status(400).json({ error: 'entityType and entityId are required.' });
       return;
     }
-    const committed = await media.commitMedia(getFirestore(), req.params.id, entityType, entityId);
+    // Whitelist of attachable entity types (Phase 3A: metadata-only, see below).
+    const ALLOWED_ENTITY_TYPES = new Set(['task', 'incident', 'handoff-note', 'announcement']);
+    if (!ALLOWED_ENTITY_TYPES.has(entityType)) {
+      res.status(400).json({ error: `Entity type not allowed: ${entityType}` });
+      return;
+    }
+    // Phase 3A note: attachedTo is metadata recording the intended attachment.
+    // The target entity lives in the monolith (app-state/main); Phase 3B's
+    // per-entity collections will enforce referential integrity.
+    const committed = await media.commitMedia(db, req.params.id, entityType, entityId);
     res.json({ ok: true, state: committed.state, attachedTo: committed.attachedTo });
   } catch (e: any) {
     if (e instanceof media.MediaError) {
@@ -3713,13 +3762,20 @@ app.get('/api/media/:id/download', async (req, res) => {
       res.status(401).json({ error: 'Authentication required.' });
       return;
     }
-    const doc = await getFirestore().collection('media').doc(req.params.id).get();
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const doc = await db.collection('media').doc(req.params.id).get();
     if (!doc.exists) {
       res.status(404).json({ error: 'Media not found.' });
       return;
     }
-    if (!requireSameAgency(req, res, doc.data(), 'media')) return;
-    const url = await media.getDownloadUrl(getFirestore(), req.params.id);
+    const mediaDoc = doc.data();
+    if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
+    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
+    const url = await media.getDownloadUrl(db, req.params.id);
     res.json({ downloadUrl: url });
   } catch (e: any) {
     if (e instanceof media.MediaError) {
@@ -3739,7 +3795,9 @@ app.post('/api/media/sweep', async (req, res) => {
   try {
     const admin = requireAdmin(req, res);
     if (!admin) return;
-    const result = await media.sweepOrphans(getFirestore());
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const result = await media.sweepOrphans(db);
     res.json(result);
   } catch (e: any) {
     console.error('[media] sweep error:', e);

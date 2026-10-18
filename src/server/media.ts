@@ -71,48 +71,53 @@ export interface MediaDoc {
   sizeBytes: number;
   sha256: string;             // Client-provided, verified on validate
   storagePath: string;        // Server-generated, never client-controlled
+  generation?: string;        // Storage generation, for overwrite detection
   createdAt: string;          // ISO timestamp
   uploadedAt?: string;
   validatedAt?: string;
   committedAt?: string;
   expiresAt: string;          // createdAt + 30 days
-  attachedTo?: {              // Set on commit
+  mediaDeletedAt?: string;    // When the Storage object was deleted
+  attachedTo?: {              // Set on commit (metadata only in Phase 3A)
     entityType: string;
     entityId: string;
   };
   validationError?: string;
+  deleteError?: string;       // Last delete failure, for sweeper retry
 }
 
 // ---------------------------------------------------------------------------
 // File signature validation (magic bytes)
 // ---------------------------------------------------------------------------
 
-const SIGNATURES: Array<{ mime: string; offset: number; bytes: number[] }> = [
+const SIGNATURES: Array<{ mime: string; offset: number; bytes: number[]; extra?: { offset: number; bytes: number[] } }> = [
   // JPEG
   { mime: 'image/jpeg', offset: 0, bytes: [0xFF, 0xD8, 0xFF] },
   // PNG
   { mime: 'image/png', offset: 0, bytes: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] },
-  // WebP (RIFF....WEBP)
-  { mime: 'image/webp', offset: 0, bytes: [0x52, 0x49, 0x46, 0x46] },
-  // HEIC/HEIF (ftyp box)
+  // WebP: RIFF....WEBP (verify both RIFF header and WEBP marker)
+  { mime: 'image/webp', offset: 0, bytes: [0x52, 0x49, 0x46, 0x46], extra: { offset: 8, bytes: [0x57, 0x45, 0x42, 0x50] } },
+  // HEIC/HEIF: ftyp box (verify ftyp at offset 4)
   { mime: 'image/heic', offset: 4, bytes: [0x66, 0x74, 0x79, 0x70] },
-  // MP3 (ID3 or frame sync)
+  // MP3: ID3 header or frame sync
   { mime: 'audio/mpeg', offset: 0, bytes: [0x49, 0x44, 0x33] },
   { mime: 'audio/mpeg', offset: 0, bytes: [0xFF, 0xFB] },
   { mime: 'audio/mpeg', offset: 0, bytes: [0xFF, 0xF3] },
-  // WAV (RIFF....WAVE)
-  { mime: 'audio/wav', offset: 0, bytes: [0x52, 0x49, 0x46, 0x46] },
+  { mime: 'audio/mpeg', offset: 0, bytes: [0xFF, 0xF2] },
+  // WAV: RIFF....WAVE (verify both)
+  { mime: 'audio/wav', offset: 0, bytes: [0x52, 0x49, 0x46, 0x46], extra: { offset: 8, bytes: [0x57, 0x41, 0x56, 0x45] } },
   // OGG
   { mime: 'audio/ogg', offset: 0, bytes: [0x4F, 0x67, 0x67, 0x53] },
-  // WebM (EBML)
+  // WebM: EBML header
   { mime: 'audio/webm', offset: 0, bytes: [0x1A, 0x45, 0xDF, 0xA3] },
-  // M4A/MP4 (ftyp)
+  // M4A/MP4: ftyp box
   { mime: 'audio/mp4', offset: 4, bytes: [0x66, 0x74, 0x79, 0x70] },
 ];
 
 /**
  * Validate that buffer's magic bytes match the claimed MIME type.
- * Returns true if the signature matches, false otherwise.
+ * For RIFF-based formats (WebP, WAV), verifies both the RIFF header
+ * and the format-specific marker. Returns true if signature matches.
  */
 export function validateFileSignature(buffer: Buffer, mimeType: string): boolean {
   if (!ALLOWED_MIME_TYPES.has(mimeType)) return false;
@@ -124,6 +129,17 @@ export function validateFileSignature(buffer: Buffer, mimeType: string): boolean
       if (buffer[sig.offset + i] !== sig.bytes[i]) {
         match = false;
         break;
+      }
+    }
+    if (!match) continue;
+    // Verify extra marker (e.g., WEBP after RIFF, WAVE after RIFF)
+    if (sig.extra) {
+      if (buffer.length < sig.extra.offset + sig.extra.bytes.length) continue;
+      for (let i = 0; i < sig.extra.bytes.length; i++) {
+        if (buffer[sig.extra.offset + i] !== sig.extra.bytes[i]) {
+          match = false;
+          break;
+        }
       }
     }
     if (match) return true;
@@ -223,6 +239,10 @@ export interface IntentResult {
 /**
  * Create an upload intent. Returns a signed URL for direct-to-bucket upload.
  * The media doc starts in INTENT state.
+ *
+ * Security: The signed URL includes an ifGenerationMatch=0 precondition,
+ * preventing overwrite of an existing object. The generation is verified
+ * on validate to ensure the file hasn't been replaced post-validation.
  */
 export async function createIntent(
   db: any,
@@ -269,7 +289,8 @@ export async function createIntent(
     expiresAt,
   };
 
-  // Generate signed upload URL (PUT, 15-min TTL, content-type locked)
+  // Generate signed upload URL (PUT, 15-min TTL, content-type locked).
+  // ifGenerationMatch=0: fail if object already exists (prevent overwrite).
   const bucket = store.storage.bucket(store.bucketName);
   const file = bucket.file(storagePath);
   const [uploadUrl] = await file.getSignedUrl({
@@ -277,6 +298,8 @@ export async function createIntent(
     action: 'write',
     expires: Date.now() + UPLOAD_URL_TTL_MINUTES * 60 * 1000,
     contentType: mimeType,
+    // Precondition: only succeed if no object exists yet
+    ifGenerationMatch: 0,
   });
 
   await db.collection('media').doc(mediaId).set(doc);
@@ -284,8 +307,12 @@ export async function createIntent(
 }
 
 /**
- * Validate an uploaded file. Downloads the first bytes + full file for
- * checksum, verifies MIME signature and size. Transitions UPLOADED → VALIDATED.
+ * Validate an uploaded file. Streams the content for checksum verification
+ * (avoids loading 50MB into memory), verifies MIME signature from the first
+ * bytes, and checks size. Transitions UPLOADED → VALIDATED.
+ *
+ * The object's generation is recorded. If the generation changes after
+ * validation (overwrite attempt), commit will fail.
  */
 export async function validateUpload(db: any, mediaId: string): Promise<MediaDoc> {
   const store = getStorage();
@@ -321,9 +348,26 @@ export async function validateUpload(db: any, mediaId: string): Promise<MediaDoc
     throw new MediaError('File size does not match intent.', 'SIZE_MISMATCH', 400);
   }
 
-  // Download and verify checksum + signature
-  const [buffer] = await file.download();
-  const actualHash = crypto.createHash('sha256').update(buffer).digest('hex');
+  // Record the generation for overwrite detection
+  const generation = metadata.generation;
+
+  // Stream the file for checksum + signature validation (memory-efficient)
+  const hash = crypto.createHash('sha256');
+  const stream = file.createReadStream();
+  let firstBytes: Buffer | null = null;
+
+  await new Promise<void>((resolve, reject) => {
+    stream.on('data', (chunk: Buffer) => {
+      hash.update(chunk);
+      if (!firstBytes) {
+        firstBytes = chunk.slice(0, 32); // Enough for magic bytes
+      }
+    });
+    stream.on('end', () => resolve());
+    stream.on('error', reject);
+  });
+
+  const actualHash = hash.digest('hex');
   if (actualHash.toLowerCase() !== doc.sha256.toLowerCase()) {
     await docRef.update({
       state: 'ABANDONED',
@@ -332,7 +376,7 @@ export async function validateUpload(db: any, mediaId: string): Promise<MediaDoc
     throw new MediaError('File checksum does not match.', 'CHECKSUM_MISMATCH', 400);
   }
 
-  if (!validateFileSignature(buffer, doc.mimeType)) {
+  if (!firstBytes || !validateFileSignature(firstBytes, doc.mimeType)) {
     await docRef.update({
       state: 'ABANDONED',
       validationError: `File signature does not match MIME type ${doc.mimeType}.`,
@@ -344,8 +388,14 @@ export async function validateUpload(db: any, mediaId: string): Promise<MediaDoc
     ...doc,
     state: 'VALIDATED',
     validatedAt: new Date().toISOString(),
-  };
-  await docRef.update({ state: 'VALIDATED', validatedAt: validated.validatedAt });
+    // Store generation to detect post-validation overwrites
+    generation,
+  } as MediaDoc;
+  await docRef.update({
+    state: 'VALIDATED',
+    validatedAt: validated.validatedAt,
+    generation,
+  });
   return validated;
 }
 
@@ -369,6 +419,12 @@ export async function markUploaded(db: any, mediaId: string): Promise<void> {
 /**
  * Commit validated media to an entity. Transitions VALIDATED → COMMITTED.
  * The media reference is only stored after validation passes.
+ *
+ * Verifies the Storage generation hasn't changed since validation
+ * (prevents post-validation overwrite attacks).
+ *
+ * Phase 3A note: attachedTo is metadata recording the intended attachment.
+ * Referential integrity is enforced in Phase 3B with per-entity collections.
  */
 export async function commitMedia(
   db: any,
@@ -376,6 +432,7 @@ export async function commitMedia(
   entityType: string,
   entityId: string
 ): Promise<MediaDoc> {
+  const store = getStorage();
   const docRef = db.collection('media').doc(mediaId);
   const snap = await docRef.get();
   if (!snap.exists) {
@@ -389,6 +446,25 @@ export async function commitMedia(
       400
     );
   }
+
+  // Verify generation hasn't changed (overwrite detection)
+  if (store && doc.generation) {
+    const bucket = store.storage.bucket(store.bucketName);
+    const file = bucket.file(doc.storagePath);
+    const [metadata] = await file.getMetadata();
+    if (metadata.generation !== doc.generation) {
+      await docRef.update({
+        state: 'ABANDONED',
+        validationError: 'File was modified after validation.',
+      });
+      throw new MediaError(
+        'File was replaced after validation. Upload again.',
+        'OVERWRITE_DETECTED',
+        400
+      );
+    }
+  }
+
   const committed: MediaDoc = {
     ...doc,
     state: 'COMMITTED',
@@ -405,6 +481,7 @@ export async function commitMedia(
 
 /**
  * Get a short-lived signed download URL for committed media.
+ * Rejects expired media. Caps URL expiry at the retention deadline.
  */
 export async function getDownloadUrl(db: any, mediaId: string): Promise<string> {
   const store = getStorage();
@@ -419,12 +496,20 @@ export async function getDownloadUrl(db: any, mediaId: string): Promise<string> 
   if (doc.state !== 'COMMITTED') {
     throw new MediaError('Media is not available for download.', 'NOT_COMMITTED', 400);
   }
+  // Reject expired media
+  if (new Date(doc.expiresAt) < new Date()) {
+    throw new MediaError('Media has expired.', 'EXPIRED', 410);
+  }
   const bucket = store.storage.bucket(store.bucketName);
   const file = bucket.file(doc.storagePath);
+  // Cap URL expiry at the retention deadline (don't issue URLs past expiration)
+  const maxExpiry = new Date(doc.expiresAt).getTime();
+  const requestedExpiry = Date.now() + DOWNLOAD_URL_TTL_MINUTES * 60 * 1000;
+  const expires = Math.min(requestedExpiry, maxExpiry);
   const [url] = await file.getSignedUrl({
     version: 'v4',
     action: 'read',
-    expires: Date.now() + DOWNLOAD_URL_TTL_MINUTES * 60 * 1000,
+    expires,
   });
   return url;
 }
@@ -436,39 +521,61 @@ export async function getDownloadUrl(db: any, mediaId: string): Promise<string> 
 export interface SweeperResult {
   abandoned: number;   // Intents marked ABANDONED
   deleted: number;     // Expired files deleted from Storage
+  retried: number;     // Failed deletes retried
   errors: string[];
 }
 
 /**
  * Sweep for orphans. Idempotent — safe to run multiple times.
- * 1. Mark INTENTs older than INTENT_TTL_MS as ABANDONED.
- * 2. Delete Storage objects for ABANDONED intents (if uploaded).
- * 3. Delete Storage objects past expiresAt (30-day retention), mark EXPIRED.
+ *
+ * 1. Mark INTENT/UPLOADED/VALIDATED older than INTENT_TTL_MS as ABANDONED.
+ *    (VALIDATED stranded without commit are also abandoned.)
+ * 2. Retry deletion for ABANDONED records with a previous deleteError.
+ * 3. Delete Storage objects for ABANDONED intents. Only mark DELETED after
+ *    confirmed deletion. On failure, record deleteError for retry.
+ * 4. For COMMITTED past expiresAt: delete from Storage first. Only mark
+ *    EXPIRED after confirmed deletion. If Storage is unavailable or delete
+ *    fails, leave as COMMITTED with deleteError for retry — never mark
+ *    EXPIRED while the object still exists.
+ *
  * Written Firestore metadata is preserved (the record that media existed).
  */
 export async function sweepOrphans(db: any): Promise<SweeperResult> {
-  const result: SweeperResult = { abandoned: 0, deleted: 0, errors: [] };
+  const result: SweeperResult = { abandoned: 0, deleted: 0, retried: 0, errors: [] };
   const store = getStorage();
   const now = new Date();
   const intentCutoff = new Date(now.getTime() - INTENT_TTL_MS).toISOString();
   const nowIso = now.toISOString();
 
-  // 1. Abandon expired intents
+  // Helper: delete object, return true on success, false on failure
+  async function tryDelete(storagePath: string): Promise<boolean> {
+    if (!store) return false;
+    try {
+      await store.storage.bucket(store.bucketName).file(storagePath).delete({ ignoreNotFound: true });
+      return true;
+    } catch (e: any) {
+      return false;
+    }
+  }
+
+  // 1. Abandon expired intents (INTENT, UPLOADED, or stranded VALIDATED)
   const staleIntents = await db.collection('media')
-    .where('state', 'in', ['INTENT', 'UPLOADED'])
+    .where('state', 'in', ['INTENT', 'UPLOADED', 'VALIDATED'])
     .where('createdAt', '<', intentCutoff)
     .get();
   for (const doc of staleIntents.docs) {
     try {
+      const data = doc.data() as MediaDoc;
       await doc.ref.update({ state: 'ABANDONED', validationError: 'Intent expired.' });
       result.abandoned++;
-      // Delete the object if it was partially uploaded
-      if (store) {
-        const data = doc.data() as MediaDoc;
-        try {
-          await store.storage.bucket(store.bucketName).file(data.storagePath).delete({ ignoreNotFound: true });
-        } catch (e: any) {
-          result.errors.push(`delete ${data.storagePath}: ${e?.message}`);
+      // Try to delete the object if it was uploaded
+      if (data.state !== 'INTENT') {
+        const deleted = await tryDelete(data.storagePath);
+        if (deleted) {
+          result.deleted++;
+          await doc.ref.update({ mediaDeletedAt: nowIso });
+        } else if (store) {
+          await doc.ref.update({ deleteError: 'Delete failed, will retry.' });
         }
       }
     } catch (e: any) {
@@ -476,7 +583,31 @@ export async function sweepOrphans(db: any): Promise<SweeperResult> {
     }
   }
 
-  // 2. Expire committed media past retention
+  // 2. Retry failed deletions for ABANDONED records
+  const failedDeletes = await db.collection('media')
+    .where('state', '==', 'ABANDONED')
+    .where('deleteError', '!=', null)
+    .get();
+  for (const doc of failedDeletes.docs) {
+    try {
+      const data = doc.data() as MediaDoc;
+      // Skip if already deleted
+      if (data.mediaDeletedAt) {
+        await doc.ref.update({ deleteError: null });
+        continue;
+      }
+      const deleted = await tryDelete(data.storagePath);
+      result.retried++;
+      if (deleted) {
+        result.deleted++;
+        await doc.ref.update({ mediaDeletedAt: nowIso, deleteError: null });
+      }
+    } catch (e: any) {
+      result.errors.push(`retry ${doc.id}: ${e?.message}`);
+    }
+  }
+
+  // 3. Expire committed media past retention — ONLY after confirmed deletion
   const expired = await db.collection('media')
     .where('state', '==', 'COMMITTED')
     .where('expiresAt', '<', nowIso)
@@ -484,16 +615,22 @@ export async function sweepOrphans(db: any): Promise<SweeperResult> {
   for (const doc of expired.docs) {
     try {
       const data = doc.data() as MediaDoc;
-      if (store) {
-        try {
-          await store.storage.bucket(store.bucketName).file(data.storagePath).delete({ ignoreNotFound: true });
-          result.deleted++;
-        } catch (e: any) {
-          result.errors.push(`delete ${data.storagePath}: ${e?.message}`);
-        }
+      // If Storage is unavailable, do NOT mark EXPIRED — leave for retry
+      if (!store) {
+        await doc.ref.update({ deleteError: 'Storage unavailable, will retry.' });
+        result.errors.push(`${doc.id}: Storage unavailable, not marking EXPIRED`);
+        continue;
       }
-      // Keep the metadata doc with EXPIRED state (written history preserved)
-      await doc.ref.update({ state: 'EXPIRED', mediaDeletedAt: nowIso });
+      const deleted = await tryDelete(data.storagePath);
+      if (deleted) {
+        result.deleted++;
+        // Only mark EXPIRED after confirmed deletion
+        await doc.ref.update({ state: 'EXPIRED', mediaDeletedAt: nowIso, deleteError: null });
+      } else {
+        // Delete failed — record for retry, do NOT mark EXPIRED
+        await doc.ref.update({ deleteError: 'Delete failed, will retry.' });
+        result.errors.push(`${doc.id}: Delete failed, will retry`);
+      }
     } catch (e: any) {
       result.errors.push(`expire ${doc.id}: ${e?.message}`);
     }
