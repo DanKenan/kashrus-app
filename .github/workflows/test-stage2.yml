@@ -115,6 +115,15 @@ jobs:
           echo "Confirmed: tests ran against the REAL Firestore emulator."
           exit $TEST_EXIT
 
+      - name: Run Part 2 unit tests (no emulator needed)
+        run: node tests/part2/run-all.mjs
+
+      - name: Run Stage 3A media unit tests (no emulator needed)
+        run: node tests/stage3a/run-all.mjs
+
+      - name: Run Stage 4 unit tests (no emulator needed)
+        run: node tests/stage4/run-all.mjs
+
       - name: Check for server crashes in test output
         if: always()
         run: |
