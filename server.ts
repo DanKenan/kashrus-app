@@ -8,6 +8,7 @@ import { getFirestore } from 'firebase-admin/firestore';
 import webpush from 'web-push';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import * as media from './src/server/media.js';
 
 // ---------------------------------------------------------------------------
 // Auth: bcrypt passwords + signed session tokens (HMAC-SHA256 JWT)
@@ -399,7 +400,7 @@ function agencyIdForHostname(hostname: string): string | null {
   return null;
 }
 
-app.use('/api', (req, res, next) => {
+app.use('/api', async (req, res, next) => {
   // MAINTENANCE HOTFIX (2026-10-18, from main): operator cutover switch.
   // Refuses all mutations with 503 so old-version writes stop before cutover.
   if (process.env.MAINTENANCE_MODE === 'true' && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
@@ -447,6 +448,22 @@ app.use('/api', (req, res, next) => {
   }
 
   if (isPublicApiRoute(req.method, req.path)) return next();
+
+  // Scheduler exception: POST /api/media/sweep accepts a verified Google
+  // OIDC token from Cloud Scheduler INSTEAD OF a session token. This is
+  // narrowly scoped — only this exact route, only POST, only with a valid
+  // OIDC token. All other routes require session auth as before.
+  if (req.method === 'POST' && req.path === '/media/sweep') {
+    const oidcValid = await verifySchedulerOidc(req);
+    if (oidcValid) {
+      // Mark as scheduler-authenticated; the route handler checks this
+      // flag instead of requiring an admin session.
+      (req as any).schedulerAuth = true;
+      return next();
+    }
+    // If OIDC invalid, fall through to normal session auth (admin can still
+    // trigger manually). Do NOT return 401 here — let the session check run.
+  }
 
   const authHeader = String(req.headers.authorization || '');
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -3562,6 +3579,315 @@ app.post('/api/incidents/:id/acknowledge', async (req, res) => {
     }
   );
   return;
+});
+
+/**
+ * Get the Firestore database for media operations. Uses the named database
+ * (firestoreDb), not the default. Fails closed (503) if unavailable.
+ * Returns null after sending the error response; callers must check.
+ */
+function requireMediaDb(req: any, res: any): any | null {
+  if (!firestoreDb) {
+    res.status(503).json({
+      error: 'Media storage is temporarily unavailable (Firestore not connected).',
+      code: 'DB_UNAVAILABLE',
+    });
+    return null;
+  }
+  return firestoreDb;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3A — Media lifecycle API
+// All routes require authentication. Agency/venue scope comes from the
+// verified session user, never from client-supplied parameters.
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/media/intent — Create an upload intent.
+ * Body: { mimeType, sizeBytes, sha256, venueId? }
+ * Returns: { mediaId, uploadUrl, expiresAt }
+ */
+app.post('/api/media/intent', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const agencyId = callerAgencyId(req);
+    // venueId is optional; if supplied, verify user has access to it.
+    // Admins can access all venues in their agency; others must match their venueId.
+    const { mimeType, sizeBytes, sha256, venueId } = req.body || {};
+    if (venueId && user.role !== 'admin' && user.venueId !== venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
+    const result = await media.createIntent(db, {
+      agencyId,
+      venueId,
+      uploadedBy: user.id,
+      mimeType,
+      sizeBytes,
+      sha256,
+    });
+    res.json(result);
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] intent error:', e);
+      res.status(500).json({ error: 'Failed to create upload intent.' });
+    }
+  }
+});
+
+/**
+ * POST /api/media/:id/uploaded — Mark intent as uploaded (after PUT to signed URL).
+ */
+app.post('/api/media/:id/uploaded', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const doc = await db.collection('media').doc(req.params.id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    const mediaDoc = doc.data();
+    if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
+    // Venue access: if media is venue-scoped, verify user can access that venue.
+    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
+    await media.markUploaded(db, req.params.id);
+    res.json({ ok: true });
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] uploaded error:', e);
+      res.status(500).json({ error: 'Failed to mark as uploaded.' });
+    }
+  }
+});
+
+/**
+ * POST /api/media/:id/validate — Validate the uploaded file.
+ * Checks size, checksum, and file signature. INTENT/UPLOADED → VALIDATED.
+ */
+app.post('/api/media/:id/validate', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const doc = await db.collection('media').doc(req.params.id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    const mediaDoc = doc.data();
+    if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
+    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
+    const validated = await media.validateUpload(db, req.params.id);
+    res.json({ ok: true, state: validated.state });
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] validate error:', e);
+      res.status(500).json({ error: 'Validation failed.' });
+    }
+  }
+});
+
+/**
+ * POST /api/media/:id/commit — Commit validated media to an entity.
+ * Body: { entityType, entityId }
+ * VALIDATED → COMMITTED. Only after validation.
+ */
+app.post('/api/media/:id/commit', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const doc = await db.collection('media').doc(req.params.id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    const mediaDoc = doc.data();
+    if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
+    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
+    const { entityType, entityId } = req.body || {};
+    if (!entityType || !entityId) {
+      res.status(400).json({ error: 'entityType and entityId are required.' });
+      return;
+    }
+    // Whitelist of attachable entity types (Phase 3A: metadata-only, see below).
+    const ALLOWED_ENTITY_TYPES = new Set(['task', 'incident', 'handoff-note', 'announcement']);
+    if (!ALLOWED_ENTITY_TYPES.has(entityType)) {
+      res.status(400).json({ error: `Entity type not allowed: ${entityType}` });
+      return;
+    }
+    // Phase 3A note: attachedTo is metadata recording the intended attachment.
+    // The target entity lives in the monolith (app-state/main); Phase 3B's
+    // per-entity collections will enforce referential integrity.
+    const committed = await media.commitMedia(db, req.params.id, entityType, entityId);
+    res.json({ ok: true, state: committed.state, attachedTo: committed.attachedTo });
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] commit error:', e);
+      res.status(500).json({ error: 'Failed to commit media.' });
+    }
+  }
+});
+
+/**
+ * GET /api/media/:id/download — Get a short-lived signed download URL.
+ * Only for COMMITTED media in the caller's agency.
+ */
+app.get('/api/media/:id/download', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const doc = await db.collection('media').doc(req.params.id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    const mediaDoc = doc.data();
+    if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
+    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
+      res.status(403).json({ error: 'No access to this venue.' });
+      return;
+    }
+    const url = await media.getDownloadUrl(db, req.params.id);
+    res.json({ downloadUrl: url });
+  } catch (e: any) {
+    if (e instanceof media.MediaError) {
+      res.status(e.status).json({ error: e.message, code: e.code });
+    } else {
+      console.error('[media] download error:', e);
+      res.status(500).json({ error: 'Failed to get download URL.' });
+    }
+  }
+});
+
+/**
+ * POST /api/media/sweep — Run the orphan sweeper (admin only).
+ * Idempotent. Marks abandoned intents, deletes expired files.
+ */
+/**
+ * Verify a Google OIDC token from Cloud Scheduler.
+ * Uses google-auth-library to verify the token's signature, audience,
+ * and service account email. Returns true if valid, false otherwise.
+ */
+async function verifySchedulerOidc(req: any): Promise<boolean> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
+  const token = authHeader.slice(7);
+
+  // Expected: Cloud Scheduler's service account
+  const expectedSa = process.env.SCHEDULER_SERVICE_ACCOUNT;
+  const expectedAudience = process.env.SCHEDULER_AUDIENCE ||
+    'https://workers-collaborative-dashboard-1080260390009.us-east1.run.app';
+
+  if (!expectedSa) {
+    console.warn('[media] SCHEDULER_SERVICE_ACCOUNT not configured; OIDC verification disabled.');
+    return false;
+  }
+
+  try {
+    const { OAuth2Client } = await import('google-auth-library');
+    const client = new OAuth2Client();
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: expectedAudience,
+    });
+    const payload = ticket.getPayload();
+    if (!payload) return false;
+    // Verify the token was issued for the expected service account
+    if (payload.email !== expectedSa) {
+      console.warn(`[media] OIDC email mismatch: ${payload.email} !== ${expectedSa}`);
+      return false;
+    }
+    // Verify issuer is Google
+    if (payload.iss !== 'https://accounts.google.com' && payload.iss !== 'accounts.google.com') {
+      console.warn(`[media] OIDC issuer mismatch: ${payload.iss}`);
+      return false;
+    }
+    return true;
+  } catch (e: any) {
+    console.warn('[media] OIDC verification failed:', e?.message);
+    return false;
+  }
+}
+
+app.post('/api/media/sweep', async (req, res) => {
+  try {
+    // Accept either: verified scheduler OIDC (set by middleware) OR admin session.
+    // The middleware already verified the OIDC token; we just check the flag.
+    const isScheduler = (req as any).schedulerAuth === true;
+    if (!isScheduler) {
+      const admin = requireAdmin(req, res);
+      if (!admin) return;
+    }
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const result = await media.sweepOrphans(db);
+    // Alert on failures: log loudly for monitoring
+    if (result.errors.length > 0) {
+      console.error(`[media] Sweeper completed with ${result.errors.length} errors:`, result.errors);
+    }
+    res.json(result);
+  } catch (e: any) {
+    console.error('[media] sweep error:', e);
+    res.status(500).json({ error: 'Sweeper failed.' });
+  }
+});
+
+/**
+ * GET /api/media/status — Check if media storage is configured.
+ * Used by the client to gracefully disable media features.
+ */
+app.get('/api/media/status', (req, res) => {
+  res.json({
+    configured: media.isMediaConfigured(),
+    retentionDays: media.RETENTION_DAYS,
+    maxImageBytes: media.MAX_IMAGE_BYTES,
+    maxAudioBytes: media.MAX_AUDIO_BYTES,
+    allowedMimeTypes: Array.from(media.ALLOWED_MIME_TYPES),
+  });
 });
 
 // Broadcast announcements — one-way team updates (NOT a chat)
