@@ -449,11 +449,11 @@ app.use('/api', async (req, res, next) => {
 
   if (isPublicApiRoute(req.method, req.path)) return next();
 
-  // Scheduler exception: POST /api/media/sweep accepts a verified Google
-  // OIDC token from Cloud Scheduler INSTEAD OF a session token. This is
-  // narrowly scoped — only this exact route, only POST, only with a valid
-  // OIDC token. All other routes require session auth as before.
-  if (req.method === 'POST' && req.path === '/media/sweep') {
+  // Scheduler exception: POST /api/media/sweep and POST /api/internal/consistency-check
+  // accept a verified Google OIDC token from Cloud Scheduler INSTEAD OF a session
+  // token. This is narrowly scoped — only these exact routes, only POST, only with
+  // a valid OIDC token. All other routes require session auth as before.
+  if (req.method === 'POST' && (req.path === '/media/sweep' || req.path === '/internal/consistency-check')) {
     const oidcValid = await verifySchedulerOidc(req);
     if (oidcValid) {
       // Mark as scheduler-authenticated; the route handler checks this

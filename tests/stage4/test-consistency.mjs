@@ -107,8 +107,12 @@ export default {
       // versionChanges=1: first attempt sees v5→v6 (retry), second sees v6→v6 (stable)
       const db = createMockDb(monolith, perEntity, 1);
       const r = await runConsistencyCheck(db);
-      // After retry, should stabilize. If still unstable after 3, that's also valid.
-      console.log(`  ✓ version-change handling: ok=${r.ok}, error=${r.error || 'none'}`);
+      // Must have retried (error mentions version change) AND eventually succeeded
+      if (!r.ok) throw new Error(`Expected ok after retry, got: ${r.error}`);
+      if (!r.error || !r.error.includes('version changed')) {
+        throw new Error(`Expected retry to be recorded in error field, got: ${r.error || 'none'}`);
+      }
+      console.log(`  ✓ version-change retry happened and succeeded`);
     }
 
     console.log('  ✓ All consistency tests passed');

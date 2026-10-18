@@ -82,34 +82,55 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
   for (let attempt = 1; attempt <= MAX_CONSISTENCY_RETRIES; attempt++) {
     const versionBefore = await getMonolithVersion(firestoreDb);
     const sizeBytes = await getMonolithSize(firestoreDb);
+
+    // Fail closed: if we can't read the version or size, that's a failure,
+    // not a stable null. Never let null === null appear "stable".
+    if (versionBefore === null) {
+      lastError = `Cannot read monolith version (attempt ${attempt})`;
+      console.error(`[consistency] ERROR: ${lastError}`);
+      continue;
+    }
+    if (sizeBytes === null) {
+      lastError = `Cannot read monolith size (attempt ${attempt})`;
+      console.error(`[consistency] ERROR: ${lastError}`);
+      continue;
+    }
+
     let status = null;
     try {
       status = await perEntityStatus(firestoreDb);
     } catch (e: any) {
       lastError = e?.message || 'perEntityStatus failed';
+      console.error(`[consistency] ERROR: perEntityStatus failed (attempt ${attempt}): ${lastError}`);
       continue;
     }
     const versionAfter = await getMonolithVersion(firestoreDb);
+    if (versionAfter === null) {
+      lastError = `Cannot read monolith version after check (attempt ${attempt})`;
+      console.error(`[consistency] ERROR: ${lastError}`);
+      continue;
+    }
 
     // Version changed mid-check — retry (not a mismatch, just unstable read)
     if (versionBefore !== versionAfter) {
       lastError = `Monolith version changed during check (v${versionBefore} → v${versionAfter}), retrying`;
+      console.error(`[consistency] WARNING: ${lastError}`);
       continue;
     }
 
-    const sizeWarn = sizeBytes !== null && sizeBytes >= MONOLITH_SIZE_WARN_BYTES;
+    const sizeWarn = sizeBytes >= MONOLITH_SIZE_WARN_BYTES;
     const ok = status.match && !sizeWarn;
 
     if (!status.match) {
       // Log IDs + reasons only — perEntityStatus never includes secrets
       console.error(
-        `[consistency] MISMATCH detected (attempt ${attempt}):`,
+        `[consistency] ERROR: MISMATCH detected (attempt ${attempt}):`,
         JSON.stringify(status.mismatches.map(m => `${m.collection}/${m.id}: ${m.reason}`))
       );
     }
     if (sizeWarn) {
       console.error(
-        `[consistency] MONOLITH SIZE WARNING: ${Math.round((sizeBytes || 0) / 1024)} KiB ` +
+        `[consistency] ERROR: MONOLITH SIZE WARNING: ${Math.round(sizeBytes / 1024)} KiB ` +
         `(warn at 800 KiB, hard cap 900 KiB)`
       );
     }
@@ -124,13 +145,15 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
     };
   }
 
-  // All retries saw version changes — report unstable, not mismatched
+  // All retries failed — emit ERROR and report failure
+  const finalError = `Unstable or unreadable after ${MAX_CONSISTENCY_RETRIES} attempts. ${lastError || ''}`;
+  console.error(`[consistency] ERROR: ${finalError}`);
   return {
     ok: false,
     monolithVersion: null,
     monolithSizeBytes: null,
     monolithSizeWarn: false,
     status: null,
-    error: `Unstable: monolith version changed on all ${MAX_CONSISTENCY_RETRIES} attempts. ${lastError || ''}`,
+    error: finalError,
   };
 }
