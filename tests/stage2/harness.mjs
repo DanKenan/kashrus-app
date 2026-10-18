@@ -3,7 +3,7 @@
  *
  * Spawns the Shutfey server (server.ts via tsx) with FIRESTORE_MOCK=true
  * (in-memory Firestore mock with faithful transaction semantics), then runs
- * the 7 Stage 2 tests via HTTP against the server's API.
+ * the 8 Stage 2 tests via HTTP against the server's API.
  *
  * Why a mock instead of the emulator: the Firestore emulator's backend does
  * not function in this sandbox (503 "Network closed for unknown reason" on
@@ -82,6 +82,9 @@ async function main() {
     PORT: String(SERVER_PORT),
     DATA_DIR_OVERRIDE: dataDir,
     NODE_ENV: 'test',
+    // Enables test-only endpoints (/api/__test__/last-reset-code, etc.).
+    // Never set in production.
+    STAGE2_TEST_MODE: 'true',
   };
   if (useRealEmulator) {
     serverEnv.FIRESTORE_ENABLED = 'true';

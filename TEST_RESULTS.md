@@ -1,9 +1,9 @@
 # Stage 2 Test Results — Single Transactional Write Path
 
 **Date:** 2026-10-17/18
-**Method:** 7 HTTP-level tests against the server with `FIRESTORE_MOCK=true`
+**Method:** 8 HTTP-level tests against the server with `FIRESTORE_MOCK=true`
 (an in-memory Firestore mock with faithful transaction semantics).
-**Result: 7/7 PASS** (three consecutive clean runs, including after verification fixes).
+**Result: 8/8 PASS** (multiple consecutive clean runs).
 
 ## Why a mock instead of the emulator — precise diagnosis
 
@@ -221,6 +221,53 @@ writes, no duplicates.
 Firestore; `_v` goes from 23 → 33 (exactly +10).
 
 **Result:** `all 10 writes committed, version 23 → 33, no lost writes`
+
+### Test 8: Password-reset security — PASS
+**What it proves:** reset codes are cryptographically generated, stored hashed,
+rate-limited, attempt-capped, single-use, and expire correctly.
+
+**How:** 7 scenarios against the live endpoints with dedicated test users
+(isolated IPs via `X-Forwarded-For`):
+1. **Code format** — `forgot-password` → test-only `/api/__test__/last-reset-code`
+   returns a 6-digit numeric code.
+2. **Hashed storage** — Firestore doc shows `codeHash` (64-char SHA-256 hex);
+   no plaintext `code` field persisted.
+3. **Per-email rate limit** — 5 requests succeed; 6th within the hour → **429**
+   with `Retry-After` header.
+4. **Attempt cap** — 5 wrong codes → request invalidated; even the correct
+   code then returns 400 ("invalidated").
+5. **Forgiving within cap** — 4 wrong codes (each returns attempts-left),
+   then the correct code → 200 with `resetToken`.
+6. **Single-use token** — `reset-password` with token → 200; reuse → 400.
+7. **Expiry** — force-expire via `/api/__test__/expire-reset` → verify →
+   400 ("expired").
+
+**Result:** `all 7 password-reset security scenarios verified`
+
+## Password-reset security design
+
+| Requirement | Implementation |
+|---|---|
+| Secure RNG | `crypto.randomInt(100000, 1000000)` — never `Math.random()` |
+| Hashed storage | `codeHash` = SHA-256(`reset-code:<pepper>:<code>`); pepper = server JWT secret (persisted in Firestore, never hardcoded, never logged) |
+| Constant-time verify | `crypto.timingSafeEqual()` on hash buffers; legacy plaintext `code` entries also compared in constant time during migration |
+| Per-email request limit | 5/hour → 429 + `Retry-After` |
+| Per-IP request limit | 10/hour → 429 |
+| Per-email verify attempts | 5 wrong → request deleted (invalidated) |
+| Per-IP verify attempts | 20/hour → 429 |
+| Rate-limit durability | Timestamps persisted in `passwordResetRateLimits` in the Firestore doc — survive restarts, work across instances |
+| Atomicity | All checks + mutations inside the Firestore transaction; `RateLimitError` is never retried by `commitState` |
+| Single-use | Reset token consumed atomically with the password change (same transaction) |
+| Expiry | 15-min TTL, re-checked inside the final redemption transaction |
+| Anti-enumeration | Generic success response even for unregistered emails |
+| No secrets in logs | Plaintext code exists only in handler memory for the admin push/broadcast; zero `console.*` hits for codes (audited) |
+| Migration | `hydrateState` accepts both `codeHash` (new) and legacy `code`; all new writes use `codeHash`; legacy entries expire naturally |
+
+**Known gaps (reviewer decision):**
+- No CAPTCHA on `forgot-password` (rate limits mitigate; 5/hr/email makes abuse expensive).
+- 6-digit numeric code (~20 bits entropy). At 5 attempts per 15-min window,
+  brute force is infeasible (1M ÷ 5 per 15 min ≈ 5.7 years expected), but a
+  longer alphanumeric code would be stronger. Left as reviewer call.
 
 ## Remaining risks / limitations (updated 2026-10-18 after verification audit)
 

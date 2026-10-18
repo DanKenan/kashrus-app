@@ -1,5 +1,5 @@
 /**
- * Runs all 7 Stage 2 tests sequentially.
+ * Runs all 8 Stage 2 tests sequentially.
  * Each test module exports: { name, whatItProves, run(baseUrl, ctx) }
  * ctx provides shared helpers (api helpers, mock Firestore direct access).
  *
@@ -66,6 +66,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-5-restart-no-resurrection.mjs')).default,
     (await import('./test-6-idempotency.mjs')).default,
     (await import('./test-7-retry-storm.mjs')).default,
+    (await import('./test-8-password-reset-security.mjs')).default,
   ];
 
   const results = [];

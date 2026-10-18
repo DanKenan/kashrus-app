@@ -1,6 +1,6 @@
 # Stage 2 data-integrity tests — PR only, never deploys.
 #
-# Triggers on pull requests targeting main. Runs the 7 Stage 2 tests
+# Triggers on pull requests targeting main. Runs the 8 Stage 2 tests
 # against the REAL Firestore emulator (not the in-memory mock).
 #
 # Safety properties:
@@ -33,14 +33,14 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
-      - name: Set up Java (Firestore emulator requirement)
+      - name: Set up Java (Firestore emulator requires Java 21+)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Install dependencies
         run: npm ci
@@ -60,17 +60,35 @@ jobs:
             }
           }
           EOF
-          firebase emulators:start --only firestore --project demo-test &
+          firebase emulators:start --only firestore --project demo-test > /tmp/emulator.log 2>&1 &
           echo $! > /tmp/emulator.pid
-          # Wait for emulator to accept connections (max 60s)
+          # Wait for emulator to accept connections (max 60s).
+          # FAIL THE WORKFLOW if the emulator doesn't start — never silently skip.
+          READY=0
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8080/ > /dev/null 2>&1; then
               echo "Emulator ready after ${i}s"
+              READY=1
               break
             fi
             sleep 1
           done
-          curl -sf http://127.0.0.1:8080/ > /dev/null || (echo "Emulator failed to start" && exit 1)
+          if [ "$READY" != "1" ]; then
+            echo "::error::Firestore emulator failed to start within 60s. Emulator log:"
+            cat /tmp/emulator.log
+            exit 1
+          fi
+
+      - name: Verify emulator is serving Firestore (not a stale process)
+        run: |
+          # The emulator REST API should respond to a document read.
+          # If this fails, something else is on port 8080 — fail, don't test against it.
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8080/v1/projects/demo-test/databases/(default)/documents/app-state/main" || echo "000")
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ]; then
+            echo "::error::Port 8080 did not return a valid Firestore response (got HTTP $HTTP_CODE). Refusing to test against an unknown service."
+            exit 1
+          fi
+          echo "Emulator Firestore API responding (HTTP $HTTP_CODE)."
 
       - name: Run Stage 2 tests against real emulator
         env:
@@ -80,7 +98,21 @@ jobs:
           FIRESTORE_DATABASE_ID: ''
           # FIRESTORE_MOCK is NOT set — harness uses the real emulator
           # when FIRESTORE_EMULATOR_HOST is present.
-        run: npm run test:stage2
+        run: |
+          npm run test:stage2 2>&1 | tee /tmp/test-output.log
+          TEST_EXIT=${PIPESTATUS[0]}
+          # FAIL if tests fell back to the mock — the whole point is testing
+          # against the real emulator. The harness prints the mode on startup.
+          if grep -q "in-memory mock" /tmp/test-output.log; then
+            echo "::error::Tests ran against the in-memory mock, not the real emulator. This defeats the purpose of CI verification."
+            exit 1
+          fi
+          if ! grep -q "REAL Firestore emulator" /tmp/test-output.log; then
+            echo "::error::Could not confirm tests ran against the real emulator."
+            exit 1
+          fi
+          echo "Confirmed: tests ran against the REAL Firestore emulator."
+          exit $TEST_EXIT
 
       - name: Stop emulator
         if: always()

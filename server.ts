@@ -39,6 +39,95 @@ function isBcryptHash(s: unknown): boolean {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Password-reset code hashing + rate limiting (Stage 2 hardening).
+// ---------------------------------------------------------------------------
+
+/** SHA-256 hex of `reset-code:<pepper>:<code>`. Pepper = server JWT secret
+ *  (persisted in Firestore, never hardcoded, never logged). */
+function hashResetCode(code: string): string {
+  return crypto
+    .createHash('sha256')
+    .update(`reset-code:${getJwtSecret()}:${code}`)
+    .digest('hex');
+}
+
+/** Constant-time comparison of a submitted code against a stored request.
+ *  Handles both new `codeHash` entries and legacy plaintext `code` entries. */
+function verifyResetCode(code: string, stored: PasswordResetRequest): boolean {
+  const submitted = String(code || '').trim();
+  if (!submitted) return false;
+  if (stored.codeHash) {
+    const expected = Buffer.from(stored.codeHash, 'hex');
+    const actual = Buffer.from(hashResetCode(submitted), 'hex');
+    if (expected.length !== actual.length) return false;
+    return crypto.timingSafeEqual(expected, actual);
+  }
+  // Legacy plaintext entry (pre-hardening). Expires naturally via 15-min TTL.
+  if (stored.code) {
+    const expected = Buffer.from(stored.code);
+    const actual = Buffer.from(submitted);
+    if (expected.length !== actual.length) return false;
+    return crypto.timingSafeEqual(expected, actual);
+  }
+  return false;
+}
+
+/** Client IP for rate limiting: X-Forwarded-For (first hop) or socket. */
+function getClientIp(req: any): string {
+  const fwd = req.headers?.['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd.trim()) {
+    return fwd.split(',')[0].trim();
+  }
+  return req.socket?.remoteAddress || req.ip || 'unknown';
+}
+
+const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour sliding window
+
+function emptyRateLimits(): PasswordResetRateLimits {
+  return { emailRequests: {}, ipRequests: {}, ipVerifies: {} };
+}
+
+/** Prune timestamps older than the window; returns pruned array. */
+function pruneWindow(timestamps: string[], nowMs: number): string[] {
+  return (Array.isArray(timestamps) ? timestamps : []).filter(
+    (t) => nowMs - new Date(t).getTime() < RATE_LIMIT_WINDOW_MS
+  );
+}
+
+/**
+ * Check a sliding-window rate limit inside a transaction mutator.
+ * Throws RateLimitError (never retried) when over the limit; otherwise
+ * returns the updated rate-limit state with this hit recorded.
+ */
+function checkRateLimit(
+  limits: PasswordResetRateLimits,
+  bucket: keyof PasswordResetRateLimits,
+  key: string,
+  maxPerHour: number,
+  nowMs: number
+): PasswordResetRateLimits {
+  const pruned = pruneWindow(limits[bucket][key], nowMs);
+  if (pruned.length >= maxPerHour) {
+    const oldest = new Date(pruned[0]).getTime();
+    const retryAfterSec = Math.max(
+      1,
+      Math.ceil((oldest + RATE_LIMIT_WINDOW_MS - nowMs) / 1000)
+    );
+    throw new RateLimitError(
+      `Too many requests. Please try again in ${Math.ceil(retryAfterSec / 60)} minute(s).`,
+      retryAfterSec
+    );
+  }
+  return {
+    ...limits,
+    [bucket]: {
+      ...limits[bucket],
+      [key]: [...pruned, new Date(nowMs).toISOString()],
+    },
+  };
+}
+
 async function hashPassword(plain: string): Promise<string> {
   return bcrypt.hash(plain, 10);
 }
@@ -132,6 +221,16 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   // Kiosk setup: venue names only (no sensitive data) so a fresh tablet can
   // pick its establishment before anyone logs in.
   { method: 'GET', path: '/kiosk/venues' },
+  // Test-only endpoints (registered only when STAGE2_TEST_MODE=true; the
+  // routes themselves don't exist in production, but list them here so the
+  // auth middleware doesn't 401 them in test mode).
+  ...(process.env.STAGE2_TEST_MODE === 'true'
+    ? [
+        { method: 'GET', path: '/__test__/firestore-doc' },
+        { method: 'GET', path: '/__test__/last-reset-code' },
+        { method: 'POST', path: '/__test__/expire-reset' },
+      ]
+    : []),
 ];
 
 function isPublicApiRoute(method: string, path: string): boolean {
@@ -347,10 +446,27 @@ interface Announcement {
 
 interface PasswordResetRequest {
   email: string;
-  code: string;
+  /** Legacy plaintext code (pre-hardening). New writes use codeHash only. */
+  code?: string;
+  /** SHA-256 hex of `reset-code:<pepper>:<code>`. */
+  codeHash?: string;
   expiresAt: string;
   verified: boolean;
   resetToken?: string;
+  /** Failed verification attempts (5 → request invalidated). */
+  attempts?: number;
+  lastAttemptAt?: string;
+}
+
+/** Sliding-window rate-limit timestamps, persisted in Firestore so limits
+ *  survive restarts and work across instances. */
+interface PasswordResetRateLimits {
+  /** email -> ISO timestamps of forgot-password requests (last hour window) */
+  emailRequests: Record<string, string[]>;
+  /** ip -> ISO timestamps of forgot-password requests */
+  ipRequests: Record<string, string[]>;
+  /** ip -> ISO timestamps of verify attempts */
+  ipVerifies: Record<string, string[]>;
 }
 
 export interface UserPermissions {
@@ -939,6 +1055,7 @@ let taskTemplates: TaskTemplate[] = [];
 let incidents: Incident[] = [];
 let announcements: Announcement[] = [];
 let passwordResets: PasswordResetRequest[] = [];
+let passwordResetRateLimits: PasswordResetRateLimits = emptyRateLimits();
 let eventTaskTemplates: EventTaskTemplate[] = [];
 let currentWorkDate = new Date().toISOString().split('T')[0];
 let isDemoCleared = false;
@@ -1000,11 +1117,26 @@ function hydrateState(parsed: any) {
 
       // Password reset requests are persisted so they survive restarts.
       // Expired entries are pruned on read (15-min TTL enforced at use).
+      // Accepts both new `codeHash` entries and legacy plaintext `code` entries
+      // (legacy entries expire naturally; new writes always use codeHash).
       if (Array.isArray(parsed.passwordResets)) {
         const now = Date.now();
         passwordResets = parsed.passwordResets.filter(
-          (r: any) => r && r.email && r.code && new Date(r.expiresAt).getTime() > now - 3600000
+          (r: any) => r && r.email && (r.codeHash || r.code) && new Date(r.expiresAt).getTime() > now - 3600000
         );
+      }
+
+      // Rate-limit state is persisted so limits survive restarts and work
+      // across instances. Malformed entries are dropped defensively.
+      if (parsed.passwordResetRateLimits && typeof parsed.passwordResetRateLimits === 'object') {
+        const rl = parsed.passwordResetRateLimits;
+        passwordResetRateLimits = {
+          emailRequests: typeof rl.emailRequests === 'object' && rl.emailRequests ? rl.emailRequests : {},
+          ipRequests: typeof rl.ipRequests === 'object' && rl.ipRequests ? rl.ipRequests : {},
+          ipVerifies: typeof rl.ipVerifies === 'object' && rl.ipVerifies ? rl.ipVerifies : {},
+        };
+      } else {
+        passwordResetRateLimits = emptyRateLimits();
       }
 
       if (Array.isArray(parsed.agencies) && parsed.agencies.length > 0) {
@@ -1189,6 +1321,7 @@ function stateSnapshot() {
     vapidKeys,
     jwtSecret,
     passwordResets,
+    passwordResetRateLimits,
   };
 }
 
@@ -1377,6 +1510,16 @@ class FirestoreUnavailableError extends Error {
   }
 }
 
+class RateLimitError extends Error {
+  code = 'RATE_LIMITED';
+  retryAfterSec: number;
+  constructor(message: string, retryAfterSec: number) {
+    super(message);
+    this.name = 'RateLimitError';
+    this.retryAfterSec = retryAfterSec;
+  }
+}
+
 // Idempotency: recent operation IDs with TTL. Single-instance deployment
 // (maxScale=1) makes in-memory tracking correct. Entries expire after
 // IDEMPOTENCY_TTL_MS to bound memory.
@@ -1533,6 +1676,12 @@ async function commitState(
       // DuplicateOperationError is thrown above, not from here — but guard anyway.
       // (The original request still owns the claim; do not release it.)
       if (err instanceof DuplicateOperationError) throw err;
+      // RateLimitError: never retry — the limit is real, retrying would just
+      // burn the client's quota. Release the claim and surface 429.
+      if (err instanceof RateLimitError) {
+        releaseIdempotencyClaim(options.operationId);
+        throw err;
+      }
       if (err instanceof VersionConflictError || err instanceof OperationConflictError) {
         // Version conflicts: retry re-runs the mutator on fresh data (mergeable
         // operations succeed on retry; truly conflicting ones will hit the
@@ -1629,6 +1778,11 @@ async function commitOrRespond(
     }
     if (err instanceof OperationConflictError) {
       res.status(409).json({ error: err.message, code: 'OPERATION_CONFLICT' });
+      return null;
+    }
+    if (err instanceof RateLimitError) {
+      res.setHeader('Retry-After', String(err.retryAfterSec));
+      res.status(429).json({ error: err.message, code: 'RATE_LIMITED' });
       return null;
     }
     if (err instanceof FirestoreUnavailableError) {
@@ -3161,14 +3315,55 @@ app.get('/api/agencies/by-domain', (req, res) => {
 
 // Get venues list. Strictly scoped to the caller's kosher agency!
 // TEST ONLY: exposes mock Firestore state for the Stage 2 test suite.
-// Only registered when FIRESTORE_MOCK=true. Never enabled in production.
-if (process.env.FIRESTORE_MOCK === 'true') {
+// Registered when FIRESTORE_MOCK=true (local mock) or STAGE2_TEST_MODE=true
+// (real-emulator CI). Never enabled in production.
+if (process.env.FIRESTORE_MOCK === 'true' || process.env.STAGE2_TEST_MODE === 'true') {
   app.get('/api/__test__/firestore-doc', async (req, res) => {
-    if (!firestoreDb || !firestoreDb._read) {
-      return res.status(500).json({ error: 'mock not active' });
+    if (process.env.FIRESTORE_MOCK === 'true') {
+      if (!firestoreDb || !firestoreDb._read) {
+        return res.status(500).json({ error: 'mock not active' });
+      }
+      const doc = firestoreDb._read('app-state/main');
+      return res.json({ doc, version: doc ? doc._v : null });
     }
-    const doc = firestoreDb._read('app-state/main');
-    res.json({ doc, version: doc ? doc._v : null });
+    // Real emulator: read via the Admin SDK.
+    try {
+      const snap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
+      const doc = snap.exists ? snap.data() : null;
+      return res.json({ doc, version: doc && typeof doc._v === 'number' ? doc._v : null });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'read failed' });
+    }
+  });
+
+  // TEST ONLY: returns the plaintext reset code for the most recent request
+  // for a given email (the code is only in server memory otherwise).
+  // Used by test-8 to verify the correct code without admin push access.
+  app.get('/api/__test__/last-reset-code', async (req, res) => {
+    const email = String(req.query.email || '').trim().toLowerCase();
+    const hit = (global as any).__testLastResetCodes?.[email];
+    if (!hit) return res.status(404).json({ error: 'no code recorded for email' });
+    res.json({ code: hit.code });
+  });
+
+  // TEST ONLY: force-expires the reset request for an email (for expiry tests).
+  app.post('/api/__test__/expire-reset', async (req, res) => {
+    const email = String((req.body || {}).email || '').trim().toLowerCase();
+    try {
+      await commitState(
+        (freshDoc) => {
+          const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+          const newResets = freshResets.map((r: any) =>
+            r.email === email ? { ...r, expiresAt: new Date(Date.now() - 1000).toISOString() } : r
+          );
+          return { doc: { ...freshDoc, passwordResets: newResets }, result: { success: true } };
+        },
+        { label: 'test-expire-reset' }
+      );
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
   });
 }
 
@@ -4941,24 +5136,51 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     return res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
   }
 
-  // Generate 6-digit code
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  // Cryptographically secure 6-digit code (crypto.randomInt, not Math.random).
+  const code = crypto.randomInt(100000, 1000000).toString();
+  // Store only the hash — the plaintext code lives in this handler's memory
+  // (for the admin push/broadcast below) and is never persisted or logged.
+  const codeHash = hashResetCode(code);
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 min
+  const clientIp = getClientIp(req);
+  const nowMs = Date.now();
 
   // Persist the reset request transactionally (survives restarts).
+  // Rate limits are checked INSIDE the transaction against fresh data.
   const committed = await commitOrRespond(
     req, res,
     (freshDoc) => {
       const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      const rawLimits = freshDoc.passwordResetRateLimits;
+      const limits: PasswordResetRateLimits = rawLimits && typeof rawLimits === 'object'
+        ? {
+            emailRequests: rawLimits.emailRequests || {},
+            ipRequests: rawLimits.ipRequests || {},
+            ipVerifies: rawLimits.ipVerifies || {},
+          }
+        : emptyRateLimits();
+      // 5 requests/hour per email, 10/hour per IP. Throws RateLimitError → 429.
+      const afterEmail = checkRateLimit(limits, 'emailRequests', normalizedEmail, 5, nowMs);
+      const afterIp = checkRateLimit(afterEmail, 'ipRequests', clientIp, 10, nowMs);
       const newResets = [
         ...freshResets.filter((r: any) => r.email !== normalizedEmail),
-        { email: normalizedEmail, code, expiresAt, verified: false },
+        { email: normalizedEmail, codeHash, expiresAt, verified: false, attempts: 0 },
       ];
-      return { doc: { ...freshDoc, passwordResets: newResets }, result: { success: true } };
+      return {
+        doc: { ...freshDoc, passwordResets: newResets, passwordResetRateLimits: afterIp },
+        result: { success: true },
+      };
     },
     { label: 'forgot-password' }
   );
   if (!committed) return;
+
+  // TEST ONLY: stash the plaintext code so test-8 can retrieve it.
+  // Gated by STAGE2_TEST_MODE — never populated in production.
+  if (process.env.STAGE2_TEST_MODE === 'true') {
+    (global as any).__testLastResetCodes = (global as any).__testLastResetCodes || {};
+    (global as any).__testLastResetCodes[normalizedEmail] = { code };
+  }
 
   // Notify admins via push (they pass the code to the user) — only after commit.
   const agencyId = user.agencyId || 'agency-hkc';
@@ -4984,66 +5206,106 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.post('/api/auth/verify-reset-code', async (req, res) => {
   const { email, code } = req.body || {};
   const normalizedEmail = String(email || '').trim().toLowerCase();
+  const submittedCode = String(code || '').trim();
+  const clientIp = getClientIp(req);
+  const nowMs = Date.now();
 
-  // Validate against fresh data (not the in-memory cache) to handle concurrent requests.
-  // Note: we read the current state here for validation; the mutation below re-reads
-  // fresh data inside the transaction, so a concurrent verify can't double-issue.
-  const request = passwordResets.find((r) => r.email === normalizedEmail);
-  if (!request) {
-    return res.status(400).json({ error: 'No reset request found. Please request a new code.' });
-  }
-  if (new Date(request.expiresAt) < new Date()) {
-    // Expired — remove it transactionally.
-    await commitState(
-      (freshDoc) => {
-        const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
-        return {
-          doc: { ...freshDoc, passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail) },
-          result: null,
-        };
-      },
-      { label: 'verify-reset-code-expired-cleanup' }
-    ).catch(() => {});
-    return res.status(400).json({ error: 'Code expired. Please request a new code.' });
-  }
-  if (request.code !== String(code || '').trim()) {
-    return res.status(400).json({ error: 'Incorrect code. Please try again.' });
-  }
-
-  // Code verified — issue a one-time reset token, persisted transactionally.
+  // All checks happen INSIDE the transaction against fresh data:
+  // expiry, hash comparison (constant-time), attempt counting, and
+  // per-IP verify rate limiting. 5 wrong attempts invalidates the request.
   const resetToken = crypto.randomUUID();
   const committed = await commitOrRespond(
     req, res,
     (freshDoc) => {
       const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      const rawLimits = freshDoc.passwordResetRateLimits;
+      const limits: PasswordResetRateLimits = rawLimits && typeof rawLimits === 'object'
+        ? {
+            emailRequests: rawLimits.emailRequests || {},
+            ipRequests: rawLimits.ipRequests || {},
+            ipVerifies: rawLimits.ipVerifies || {},
+          }
+        : emptyRateLimits();
+      // 20 verify attempts/hour per IP. Throws RateLimitError → 429.
+      const afterIpVerify = checkRateLimit(limits, 'ipVerifies', clientIp, 20, nowMs);
+
       const freshRequest = freshResets.find((r: any) => r.email === normalizedEmail);
-      if (!freshRequest) return { conflict: 'No reset request found. Please request a new code.' };
-      if (new Date(freshRequest.expiresAt) < new Date()) {
+      if (!freshRequest) {
         return {
-          doc: { ...freshDoc, passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail) },
-          result: null,
-          // Signal expiry via conflict so the client gets a clear message.
+          doc: { ...freshDoc, passwordResetRateLimits: afterIpVerify },
+          result: { notFound: true },
         };
       }
-      if (freshRequest.code !== String(code || '').trim()) {
-        return { conflict: 'Incorrect code. Please try again.' };
+      if (new Date(freshRequest.expiresAt).getTime() < nowMs) {
+        return {
+          doc: {
+            ...freshDoc,
+            passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail),
+            passwordResetRateLimits: afterIpVerify,
+          },
+          result: { expired: true },
+        };
+      }
+      if (!verifyResetCode(submittedCode, freshRequest)) {
+        const attempts = (freshRequest.attempts || 0) + 1;
+        if (attempts >= 5) {
+          // Too many wrong guesses — invalidate the request entirely.
+          return {
+            doc: {
+              ...freshDoc,
+              passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail),
+              passwordResetRateLimits: afterIpVerify,
+            },
+            result: { invalidated: true },
+          };
+        }
+        const newResets = freshResets.map((r: any) =>
+          r.email === normalizedEmail
+            ? { ...r, attempts, lastAttemptAt: new Date(nowMs).toISOString() }
+            : r
+        );
+        return {
+          doc: { ...freshDoc, passwordResets: newResets, passwordResetRateLimits: afterIpVerify },
+          result: { wrongCode: true, attemptsLeft: 5 - attempts },
+        };
       }
       // Prevent double-verification: if already verified, return the existing token
       // (idempotent — the client may have retried after a lost response).
       if (freshRequest.verified && freshRequest.resetToken) {
-        return { doc: freshDoc, result: { resetToken: freshRequest.resetToken } };
+        return {
+          doc: { ...freshDoc, passwordResetRateLimits: afterIpVerify },
+          result: { resetToken: freshRequest.resetToken },
+        };
       }
       const newResets = freshResets.map((r: any) =>
         r.email === normalizedEmail ? { ...r, verified: true, resetToken } : r
       );
-      return { doc: { ...freshDoc, passwordResets: newResets }, result: { resetToken } };
+      return {
+        doc: { ...freshDoc, passwordResets: newResets, passwordResetRateLimits: afterIpVerify },
+        result: { resetToken },
+      };
     },
     { label: 'verify-reset-code' }
   );
   if (!committed) return;
-  // If the token was already consumed (expired cleanup path), committed.result is null.
-  if (!committed.result || !committed.result.resetToken) {
+  if (committed.result && committed.result.wrongCode) {
+    return res.status(400).json({
+      error: `Incorrect code. ${committed.result.attemptsLeft} attempt(s) left before this code is invalidated.`,
+    });
+  }
+  // notFound = no request (invalidated or never requested).
+  // expired = request existed but past its TTL.
+  if (!committed.result || committed.result.notFound) {
+    return res.status(400).json({ error: 'No reset request found. Please request a new code.' });
+  }
+  if (committed.result.expired) {
     return res.status(400).json({ error: 'Code expired. Please request a new code.' });
+  }
+  if (committed.result.invalidated) {
+    return res.status(400).json({ error: 'Too many incorrect attempts. This code has been invalidated. Please request a new code.' });
+  }
+  if (!committed.result.resetToken) {
+    return res.status(400).json({ error: 'Code invalidated. Please request a new code.' });
   }
   res.json({ success: true, resetToken: committed.result.resetToken });
 });
