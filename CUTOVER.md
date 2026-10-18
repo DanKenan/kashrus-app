@@ -105,21 +105,53 @@ curl -s -X POST "https://workers-collaborative-dashboard-1080260390009.us-east1.
 # Expect: MAINTENANCE
 ```
 
-### Step 2. Confirm zero in-flight writes
+### Step 2. Confirm old writers are fully stopped (explicit verification)
 
-Check the Cloud Run request log — no mutating requests after the
-maintenance revision took over:
+Do NOT assume a quiet minute means drained. An env-var update creates a new
+Cloud Run revision; older revision instances may still exist temporarily, and
+revision-level minimum instances can keep them active. Verify each of these
+explicitly — **if any check cannot be confirmed, STOP the cutover** rather
+than guessing:
 
+**2a. Traffic: 100% on the maintenance revision, 0% elsewhere.**
+```bash
+gcloud run services describe $SERVICE --region $REGION --project $PROJECT \
+  --format "value(status.traffic[].percent,status.traffic[].revisionName)"
+# Expect: exactly one line with 100 and the maintenance revision name.
+```
+
+**2b. No pre-maintenance revision has running instances.**
+```bash
+gcloud run revisions list --service $SERVICE --region $REGION --project $PROJECT \
+  --format "table(name,active:status.conditions[0].status)"
+# Every revision EXCEPT the maintenance revision must show no active instances.
+# If an old revision still has instances, wait and re-check; do not proceed
+# while any unguarded revision can serve.
+```
+
+**2c. No mutating requests in the log since the maintenance revision took over.**
 ```bash
 gcloud logging read \
   'resource.type="cloud_run_revision" AND resource.labels.service_name="workers-collaborative-dashboard" AND httpRequest.requestMethod!="GET"' \
   --project $PROJECT --limit 5 --format "value(timestamp,httpRequest.requestMethod,httpRequest.requestUrl)" \
   --freshness 10m
-# Expect: no output (or only requests from before the maintenance revision).
+# Expect: no output, or only requests timestamped before the maintenance revision.
 ```
 
-Wait ~60 seconds after the last observed request. The app is single-instance
-(`maxScale=1`), so one quiet minute means fully drained.
+**2d. Firestore document is stable.**
+Read `app-state/main` in the Firebase console (named database
+`ai-studio-workerscollabora-faedc6a8-580b-463e-86b2-c3e3048ed73d`); note `_v`
+and `updatedAt`. Wait 2 minutes, re-read. Both must be unchanged — no writer
+is touching the document.
+
+**2e. STAGED_DEPLOY is not disabled.**
+```bash
+gh variable list --repo DanKenan/kashrus-app | grep STAGED_DEPLOY
+# Expect: no output, or STAGED_DEPLOY=true. If STAGED_DEPLOY=false, the next
+# push deploys with traffic — STOP and remove the variable first.
+```
+
+Only when 2a–2e all pass: old writers are conclusively stopped.
 
 ### Step 3. Deploy Stage 2 (0% traffic, staged, cannot write)
 
