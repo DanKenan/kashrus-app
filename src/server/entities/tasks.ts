@@ -62,8 +62,9 @@ export interface TaskDoc {
  */
 export async function createTask(
   db: any,
-  params: Omit<TaskDoc, '_v' | 'createdAt' | 'updatedAt'> & {
+  params: Omit<TaskDoc, '_v' | 'updatedAt'> & {
     id?: string; // Optional: use client-supplied ID for idempotency
+    createdAt?: string; // Optional: preserve original creation date during migration
   }
 ): Promise<TaskDoc> {
   const id = params.id || `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

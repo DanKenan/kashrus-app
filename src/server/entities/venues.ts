@@ -22,9 +22,9 @@ export interface VenueDoc {
 
 export async function createVenue(
   db: any,
-  params: Omit<VenueDoc, '_v' | 'createdAt' | 'updatedAt'> & {
+  params: Omit<VenueDoc, '_v' | 'updatedAt'> & {
     id?: string;
-    createdAt?: string;
+    createdAt?: string; // Optional: preserve original creation date during migration
   }
 ): Promise<VenueDoc> {
   const id = params.id || `venue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
