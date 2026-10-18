@@ -44,10 +44,13 @@ export default {
       throw new Error(`${missing.length} storm tasks missing from Firestore: ${missing.join(',')}`);
     }
 
-    // Version must have incremented by exactly N.
+    // Version must have incremented by at least N (no lost writes).
+    // It may increment by more if other tests' async writes land concurrently
+    // — the "no lost writes" guarantee comes from all N tasks being present
+    // (checked above) plus the version moving forward by at least N.
     const v1 = await ctx.getVersion();
-    if (v1 !== v0 + N) {
-      throw new Error(`expected version ${v0 + N}, got ${v1} (lost ${v0 + N - v1} writes?)`);
+    if (v1 < v0 + N) {
+      throw new Error(`expected version >= ${v0 + N}, got ${v1} (lost ${v0 + N - v1} writes?)`);
     }
 
     // Cleanup.
