@@ -135,12 +135,52 @@ After the 3A PR deploys and bucket is configured:
    - If `configured: false`, check: bucket name env var, SA permissions, Storage API enabled.
 2. Test upload flow:
    - `POST /api/media/intent` (as admin) → should return `uploadUrl`
-   - PUT a test image to the `uploadUrl` → should succeed (CORS configured)
+   - PUT a test image to the `uploadUrl` with `x-goog-if-generation-match: 0` header → should succeed (CORS configured)
    - `POST /api/media/:id/uploaded` → `{"ok": true}`
    - `POST /api/media/:id/validate` → `{"ok": true, "state": "VALIDATED"}`
    - `POST /api/media/:id/commit` → `{"ok": true, "state": "COMMITTED"}`
    - `GET /api/media/:id/download` → should return `downloadUrl`
 3. Test sweeper: `POST /api/media/sweep` (as admin) → should return counts.
+4. Test scheduler: trigger the Cloud Scheduler job manually → check logs for successful OIDC verification.
+
+## Firestore Composite Indexes
+
+The sweeper uses compound queries on the `media` collection. These require
+composite indexes on the NAMED database (not the default).
+
+**Required indexes:**
+- `media` collection: `state` ASC, `createdAt` ASC
+- `media` collection: `state` ASC, `deleteError` ASC
+
+**Provision via gcloud** (replace `<DB_ID>` with the named database ID):
+```bash
+# media(state, createdAt) — for stale intent queries
+gcloud firestore indexes composite create \
+  --project=gen-lang-client-0875538181 \
+  --database=<DB_ID> \
+  --collection-group=media \
+  --field-config=field-path=state,order=ascending \
+  --field-config=field-path=createdAt,order=ascending
+
+# media(state, deleteError) — for failed-delete retry queries
+gcloud firestore indexes composite create \
+  --project=gen-lang-client-0875538181 \
+  --database=<DB_ID> \
+  --collection-group=media \
+  --field-config=field-path=state,order=ascending \
+  --field-config=field-path=deleteError,order=ascending
+```
+
+**Or via Firebase Console:**
+1. Go to https://console.cloud.google.com/firestore/indexes?project=gen-lang-client-0875538181
+2. Select the named database from the dropdown (not "Default")
+3. Click **CREATE INDEX** → Collection: `media`
+4. Add fields: `state` Ascending, `createdAt` Ascending → **CREATE**
+5. Repeat for `state` Ascending, `deleteError` Ascending
+
+Without these indexes, the sweeper's `where('state', 'in', [...]).where('createdAt', '<', ...)`
+and `where('state', '==', 'ABANDONED').where('deleteError', '!=', null)` queries
+will fail in production with a "missing index" error.
 
 ## What the App Does NOT Do
 

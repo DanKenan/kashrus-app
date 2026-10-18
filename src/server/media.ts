@@ -460,7 +460,48 @@ export async function commitMedia(
   const store = getStorage();
   const docRef = db.collection('media').doc(mediaId);
 
-  // Transactional state check: only commit if still VALIDATED
+  // FIRST: verify Storage is available and generation matches, BEFORE the
+  // transaction. Fail closed if Storage is unavailable — never commit a
+  // record we cannot verify.
+  const preSnap = await docRef.get();
+  if (!preSnap.exists) {
+    throw new MediaError('Media not found.', 'NOT_FOUND', 404);
+  }
+  const preDoc = preSnap.data() as MediaDoc;
+  if (preDoc.state !== 'VALIDATED') {
+    throw new MediaError(
+      `Cannot commit media in state ${preDoc.state}. Must be VALIDATED.`,
+      'INVALID_STATE',
+      400
+    );
+  }
+  if (!store) {
+    throw new MediaError(
+      'Media storage is not configured. Cannot verify file integrity.',
+      'NOT_CONFIGURED',
+      503
+    );
+  }
+  if (preDoc.generation) {
+    const bucket = store.storage.bucket(store.bucketName);
+    const file = bucket.file(preDoc.storagePath);
+    const [metadata] = await file.getMetadata();
+    if (metadata.generation !== preDoc.generation) {
+      await docRef.update({
+        state: 'ABANDONED',
+        validationError: 'File was modified after validation.',
+        deleteError: 'Validation failed, file needs deletion.',
+      });
+      throw new MediaError(
+        'File was replaced after validation. Upload again.',
+        'OVERWRITE_DETECTED',
+        400
+      );
+    }
+  }
+
+  // THEN: transactional state check and commit. The state is re-checked
+  // inside the transaction to guard against concurrent abandonment.
   const doc = await db.runTransaction(async (tx: any) => {
     const snap = await tx.get(docRef);
     if (!snap.exists) {
@@ -482,26 +523,6 @@ export async function commitMedia(
     });
     return { ...data, state: 'COMMITTED' as MediaState, committedAt, attachedTo: { entityType, entityId } };
   });
-
-  // Verify generation hasn't changed (overwrite detection) — outside the
-  // transaction since it requires a Storage call
-  if (store && doc.generation) {
-    const bucket = store.storage.bucket(store.bucketName);
-    const file = bucket.file(doc.storagePath);
-    const [metadata] = await file.getMetadata();
-    if (metadata.generation !== doc.generation) {
-      // Roll back the commit: mark as ABANDONED
-      await docRef.update({
-        state: 'ABANDONED',
-        validationError: 'File was modified after validation.',
-      });
-      throw new MediaError(
-        'File was replaced after validation. Upload again.',
-        'OVERWRITE_DETECTED',
-        400
-      );
-    }
-  }
 
   return doc;
 }
@@ -614,11 +635,15 @@ export async function sweepOrphans(db: any): Promise<SweeperResult> {
       const deleted = await tryDelete(data.storagePath);
       if (deleted) {
         result.deleted++;
-        await doc.ref.update({ mediaDeletedAt: nowIso });
-      } else if (store) {
-        // Record for retry, even if the file might not exist.
-        // Storage-unavailable records remain eligible for retry via deleteError.
-        await doc.ref.update({ deleteError: 'Delete failed or file not found, will retry.' });
+        await doc.ref.update({ mediaDeletedAt: nowIso, deleteError: null });
+      } else {
+        // Record for retry EVEN IF Storage is unavailable — the next sweep
+        // will retry. Without deleteError, the record escapes the retry query.
+        await doc.ref.update({
+          deleteError: store
+            ? 'Delete failed, will retry.'
+            : 'Storage unavailable, will retry.',
+        });
       }
     } catch (e: any) {
       result.errors.push(`abandon ${doc.id}: ${e?.message}`);
