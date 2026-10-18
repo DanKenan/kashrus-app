@@ -8,16 +8,24 @@
   body { font-family: system-ui, sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
   h1 { font-size: 1.5rem; }
   button { padding: 0.75rem 1.5rem; margin: 0.5rem 0.25rem; font-size: 1rem; cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
   .step { padding: 0.5rem; margin: 0.25rem 0; border-radius: 4px; }
   .pass { background: #d4edda; color: #155724; }
   .fail { background: #f8d7da; color: #721c24; }
   .pending { background: #fff3cd; color: #856404; }
   pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; font-size: 0.85rem; }
   .section { margin: 2rem 0; padding: 1rem; border: 1px solid #ddd; border-radius: 8px; }
+  #auth-gate { background: #fff3cd; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
 </style>
 </head>
 <body>
 <h1>🔧 Shutfey Media Infrastructure Check</h1>
+
+<div id="auth-gate">
+  <p><strong>Checking admin access...</strong> This page requires you to be logged in as an administrator.</p>
+</div>
+
+<div id="main-content" style="display: none;">
 <p>Run these checks after completing the GCP setup. Each step shows green (pass) or red (fail).</p>
 
 <div class="section">
@@ -28,7 +36,7 @@
 
 <div class="section">
   <h2>2. End-to-End Upload Test</h2>
-  <p>Generates a 1KB test PNG in your browser, uploads it through the full lifecycle.</p>
+  <p>Generates a 1KB test PNG in your browser, uploads it through the full lifecycle, downloads it back, and verifies the bytes match.</p>
   <button onclick="runE2E()">Run End-to-End Test</button>
   <div id="e2e-result"></div>
 </div>
@@ -47,13 +55,31 @@
   <div id="sweep-result"></div>
 </div>
 
+<div class="section">
+  <h2>5. Clean Up Test Media</h2>
+  <p>Deletes the test file created by the end-to-end test above.</p>
+  <button onclick="cleanupTest()">Clean Up Test File</button>
+  <div id="cleanup-result"></div>
+</div>
+</div>
+
 <script>
-const api = (method, path, body) => fetch(path, {
-  method,
-  headers: { 'Content-Type': 'application/json' },
-  credentials: 'include',
-  body: body ? JSON.stringify(body) : undefined,
-}).then(r => r.json().then(j => ({ status: r.status, json: j })));
+// Read session token from localStorage (Shutfey uses Bearer auth, not cookies)
+function getToken() {
+  return localStorage.getItem('shutfey_session_token');
+}
+
+const api = (method, path, body) => {
+  const token = getToken();
+  return fetch(path, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': token ? 'Bearer ' + token : '',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(r => r.json().then(j => ({ status: r.status, json: j })));
+};
 
 function step(el, name, ok, detail) {
   const div = document.createElement('div');
@@ -61,6 +87,33 @@ function step(el, name, ok, detail) {
   div.textContent = (ok === null ? '⏳ ' : ok ? '✅ ' : '❌ ') + name + (detail ? ': ' + detail : '');
   el.appendChild(div);
 }
+
+// On load: verify admin access before enabling anything
+(async function init() {
+  const gate = document.getElementById('auth-gate');
+  const main = document.getElementById('main-content');
+  const token = getToken();
+  if (!token) {
+    gate.innerHTML = '<p><strong>❌ Not logged in.</strong> Please log into Shutfey first, then return to this page.</p>';
+    return;
+  }
+  try {
+    // Use check-indexes as the admin gate (it's admin-only)
+    const r = await api('GET', '/api/media/check-indexes');
+    if (r.status === 403 || r.status === 401) {
+      gate.innerHTML = '<p><strong>❌ Admin access required.</strong> You are logged in but not as an administrator.</p>';
+      return;
+    }
+    if (r.status !== 200) {
+      gate.innerHTML = '<p><strong>❌ Could not verify access:</strong> ' + (r.json.error || r.status) + '</p>';
+      return;
+    }
+    gate.style.display = 'none';
+    main.style.display = 'block';
+  } catch (e) {
+    gate.innerHTML = '<p><strong>❌ Error:</strong> ' + e.message + '</p>';
+  }
+})();
 
 async function checkStatus() {
   const el = document.getElementById('status-result');
@@ -73,7 +126,9 @@ async function checkStatus() {
       step(el, 'Status check', false, r.json.error || r.status);
       return;
     }
-    step(el, 'Media configured', r.json.configured, r.json.configured ? 'Bucket ready' : 'MEDIA_BUCKET_NAME not set');
+    // Note: configured:true means the env var exists, NOT that the bucket is verified
+    step(el, 'Configuration present', r.json.configured,
+      r.json.configured ? 'MEDIA_BUCKET_NAME is set (bucket not verified)' : 'MEDIA_BUCKET_NAME not set');
     step(el, 'Retention', true, r.json.retentionDays + ' days');
     const pre = document.createElement('pre');
     pre.textContent = JSON.stringify(r.json, null, 2);
@@ -84,44 +139,35 @@ async function checkStatus() {
   }
 }
 
+let lastTestMediaId = null;
+
 async function runE2E() {
   const el = document.getElementById('e2e-result');
   el.innerHTML = '';
   try {
-    // Generate 1KB PNG (minimal valid PNG)
     step(el, 'Generating test PNG...', null);
-    // 1x1 red PNG, base64
     const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
     const pngBytes = Uint8Array.from(atob(pngBase64), c => c.charCodeAt(0));
-    // Pad to ~1KB
     const padded = new Uint8Array(1024);
     padded.set(pngBytes);
     el.innerHTML = '';
     step(el, 'Test PNG generated', true, '1024 bytes');
 
-    // Compute SHA-256
     const hashBuffer = await crypto.subtle.digest('SHA-256', padded);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const sha256 = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    const sha256 = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 
     // 1. Intent
-    step(el, 'Creating upload intent...', null);
-    let r = await api('POST', '/api/media/intent', {
-      mimeType: 'image/png',
-      sizeBytes: 1024,
-      sha256: sha256,
-    });
-    el.innerHTML = '';
-    step(el, 'Test PNG generated', true, '1024 bytes');
+    let r = await api('POST', '/api/media/intent', { mimeType: 'image/png', sizeBytes: 1024, sha256 });
     if (r.status !== 200) {
       step(el, 'Create intent', false, r.json.error || r.status);
       return;
     }
     const { mediaId, uploadUrl } = r.json;
+    lastTestMediaId = mediaId;
     step(el, 'Create intent', true, 'ID: ' + mediaId.slice(0, 20) + '...');
 
-    // 2. PUT to signed URL (with generation-match header)
-    step(el, 'Uploading to signed URL...', null);
+    // 2. PUT to signed URL
+    const token = getToken();
     const putRes = await fetch(uploadUrl, {
       method: 'PUT',
       headers: {
@@ -130,10 +176,6 @@ async function runE2E() {
       },
       body: padded,
     });
-    // Re-render
-    el.innerHTML = '';
-    step(el, 'Test PNG generated', true, '1024 bytes');
-    step(el, 'Create intent', true, 'ID: ' + mediaId.slice(0, 20) + '...');
     if (!putRes.ok) {
       step(el, 'Upload to signed URL', false, 'HTTP ' + putRes.status);
       return;
@@ -142,39 +184,70 @@ async function runE2E() {
 
     // 3. Mark uploaded
     r = await api('POST', `/api/media/${mediaId}/uploaded`);
-    if (r.status !== 200) {
-      step(el, 'Mark uploaded', false, r.json.error);
-      return;
-    }
+    if (r.status !== 200) { step(el, 'Mark uploaded', false, r.json.error); return; }
     step(el, 'Mark uploaded', true);
 
     // 4. Validate
     r = await api('POST', `/api/media/${mediaId}/validate`);
-    if (r.status !== 200) {
-      step(el, 'Validate', false, r.json.error);
-      return;
-    }
+    if (r.status !== 200) { step(el, 'Validate', false, r.json.error); return; }
     step(el, 'Validate', true, 'State: ' + r.json.state);
 
     // 5. Commit
-    r = await api('POST', `/api/media/${mediaId}/commit`, {
-      entityType: 'task',
-      entityId: 'test-e2e',
-    });
-    if (r.status !== 200) {
-      step(el, 'Commit', false, r.json.error);
-      return;
-    }
+    r = await api('POST', `/api/media/${mediaId}/commit`, { entityType: 'task', entityId: 'test-e2e' });
+    if (r.status !== 200) { step(el, 'Commit', false, r.json.error); return; }
     step(el, 'Commit', true, 'State: ' + r.json.state);
 
-    // 6. Download URL
+    // 6. Get download URL
     r = await api('GET', `/api/media/${mediaId}/download`);
-    if (r.status !== 200) {
-      step(el, 'Get download URL', false, r.json.error);
+    if (r.status !== 200) { step(el, 'Get download URL', false, r.json.error); return; }
+    step(el, 'Get download URL', true);
+    const downloadUrl = r.json.downloadUrl;
+
+    // 7. ACTUALLY DOWNLOAD and verify bytes
+    step(el, 'Downloading file...', null);
+    const dlRes = await fetch(downloadUrl);
+    if (!dlRes.ok) {
+      // Re-render without the pending step
+      el.innerHTML = '';
+      step(el, 'Test PNG generated', true, '1024 bytes');
+      step(el, 'Create intent', true, 'ID: ' + mediaId.slice(0, 20) + '...');
+      step(el, 'Upload to signed URL', true, 'HTTP ' + putRes.status);
+      step(el, 'Mark uploaded', true);
+      step(el, 'Validate', true);
+      step(el, 'Commit', true);
+      step(el, 'Get download URL', true);
+      step(el, 'Download file', false, 'HTTP ' + dlRes.status);
       return;
     }
+    const downloadedBytes = new Uint8Array(await dlRes.arrayBuffer());
+
+    // Re-render
+    el.innerHTML = '';
+    step(el, 'Test PNG generated', true, '1024 bytes');
+    step(el, 'Create intent', true, 'ID: ' + mediaId.slice(0, 20) + '...');
+    step(el, 'Upload to signed URL', true, 'HTTP ' + putRes.status);
+    step(el, 'Mark uploaded', true);
+    step(el, 'Validate', true);
+    step(el, 'Commit', true);
     step(el, 'Get download URL', true);
-    step(el, '🎉 END-TO-END TEST PASSED', true, 'All 6 steps green');
+
+    if (downloadedBytes.length !== 1024) {
+      step(el, 'Download file', false, `Size mismatch: ${downloadedBytes.length} !== 1024`);
+      return;
+    }
+    step(el, 'Download file', true, `${downloadedBytes.length} bytes`);
+
+    // Verify checksum
+    const dlHashBuffer = await crypto.subtle.digest('SHA-256', downloadedBytes);
+    const dlSha256 = Array.from(new Uint8Array(dlHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    if (dlSha256 !== sha256) {
+      step(el, 'Verify checksum', false, 'Downloaded bytes do not match original');
+      return;
+    }
+    step(el, 'Verify checksum', true, 'SHA-256 matches');
+
+    step(el, '🎉 END-TO-END TEST PASSED', true, 'All 8 steps green, bytes verified');
+    step(el, 'Note', true, 'Use "Clean Up Test Media" below to remove the test file');
 
   } catch (e) {
     step(el, 'Test', false, e.message);
@@ -224,6 +297,29 @@ async function runSweeper() {
   } catch (e) {
     el.innerHTML = '';
     step(el, 'Sweeper', false, e.message);
+  }
+}
+
+async function cleanupTest() {
+  const el = document.getElementById('cleanup-result');
+  el.innerHTML = '';
+  if (!lastTestMediaId) {
+    step(el, 'Cleanup', false, 'No test media ID recorded. Run the end-to-end test first.');
+    return;
+  }
+  step(el, 'Deleting test media...', null);
+  try {
+    const r = await api('DELETE', `/api/media/${lastTestMediaId}/test-cleanup`);
+    el.innerHTML = '';
+    if (r.status !== 200) {
+      step(el, 'Cleanup', false, r.json.error);
+      return;
+    }
+    step(el, 'Test media deleted', true, r.json.deleted);
+    lastTestMediaId = null;
+  } catch (e) {
+    el.innerHTML = '';
+    step(el, 'Cleanup', false, e.message);
   }
 }
 </script>

@@ -3944,15 +3944,60 @@ app.get('/api/media/check-indexes', async (req, res) => {
 });
 
 /**
+ * DELETE /api/media/:id/test-cleanup — Delete test-created media.
+ * Admin only. NARROWLY SCOPED: only deletes media where attachedTo.entityId
+ * starts with 'test-' (e2e test artifacts). Refuses all other deletions.
+ * This is for cleaning up after the /admin/media-check e2e test.
+ */
+app.delete('/api/media/:id/test-cleanup', async (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  const db = requireMediaDb(req, res);
+  if (!db) return;
+  try {
+    const docRef = db.collection('media').doc(req.params.id);
+    const snap = await docRef.get();
+    if (!snap.exists) {
+      res.status(404).json({ error: 'Media not found.' });
+      return;
+    }
+    const doc = snap.data();
+    // Narrow scope: only test artifacts (entityId starts with 'test-')
+    const entityId = doc.attachedTo?.entityId || '';
+    if (!entityId.startsWith('test-')) {
+      res.status(403).json({
+        error: 'This endpoint only deletes test-created media (entityId must start with test-).',
+      });
+      return;
+    }
+    if (!requireSameAgency(req, res, doc, 'media')) return;
+
+    // Delete from Storage, then delete the Firestore doc
+    const store = media.getStorage();
+    if (store) {
+      try {
+        await store.storage.bucket(store.bucketName).file(doc.storagePath).delete({ ignoreNotFound: true });
+      } catch (e: any) {
+        console.warn(`[media] test-cleanup storage delete failed: ${e?.message}`);
+      }
+    }
+    await docRef.delete();
+    res.json({ ok: true, deleted: req.params.id });
+  } catch (e: any) {
+    console.error('[media] test-cleanup error:', e);
+    res.status(500).json({ error: 'Cleanup failed.' });
+  }
+});
+
+/**
  * GET /admin/media-check — Serve the admin media-check HTML page.
- * Admin only. Don logs in via the main app, then visits this URL.
+ *
+ * The HTML itself is NOT sensitive (no secrets in it). The page reads the
+ * session token from localStorage and requires a successful admin-only API
+ * call before enabling the test buttons. All privileged operations remain
+ * protected server-side via requireAdmin().
  */
 app.get('/admin/media-check', (req, res) => {
-  const user = getAuthUser(req);
-  if (!user || user.role !== 'admin') {
-    res.status(403).send('Admin access required. Please log in as an administrator first.');
-    return;
-  }
   res.sendFile(path.join(process.cwd(), 'public', 'admin-media-check.html'));
 });
 
