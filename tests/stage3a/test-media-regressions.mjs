@@ -217,11 +217,11 @@ export default {
       setTestStorage(null);
     }
 
-    console.log('  ✓ All regression tests passed');
-
     // TEST 4: Intent without venueId (Don's bug 2026-10-18)
     console.log('  Test 4: intent without venueId...');
     await this.testIntentWithoutVenueId();
+
+    console.log('  ✓ All regression tests passed');
   },
 
   /**
