@@ -121,6 +121,9 @@ jobs:
       - name: Run Stage 3A media unit tests (no emulator needed)
         run: node tests/stage3a/run-all.mjs
 
+      - name: Run Stage 3C unit tests (no emulator needed)
+        run: node tests/stage3c/run-all.mjs
+
       - name: Run Stage 4 unit tests (no emulator needed)
         run: node tests/stage4/run-all.mjs
 
