@@ -130,7 +130,20 @@ async function main() {
   const restartServer = async (envOverrides = {}) => {
     console.log('[harness] Restarting server...');
     serverChild.kill('SIGKILL');
-    await sleep(2000);
+    // Wait for the port to actually release before rebinding — SIGKILL is
+    // async and rebinding too early causes EADDRINUSE (CI failure 2026-10-18).
+    const portFreeDeadline = Date.now() + 15000;
+    for (;;) {
+      try {
+        execSync(`lsof -ti:${SERVER_PORT}`, { stdio: 'ignore' });
+      } catch {
+        break; // lsof found nothing — port is free
+      }
+      if (Date.now() > portFreeDeadline) {
+        throw new Error(`port ${SERVER_PORT} did not release within 15s after SIGKILL`);
+      }
+      await sleep(250);
+    }
     const restartEnv = { ...serverEnv, ...envOverrides };
     serverChild = spawnLogged('npx', ['tsx', 'server.ts'], { cwd: REPO, env: restartEnv }, 'server');
     await waitFor(`http://127.0.0.1:${SERVER_PORT}/api/venues`, { label: 'server (restarted)', timeoutMs: 120000 });
