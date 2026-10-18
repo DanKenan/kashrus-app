@@ -147,6 +147,16 @@ function agencyIdForHostname(hostname: string): string | null {
 }
 
 app.use('/api', (req, res, next) => {
+  // MAINTENANCE HOTFIX (2026-10-18): when MAINTENANCE_MODE=true, refuse all
+  // mutations with 503 so the operator can stop old-version writes before a
+  // cutover. Reads (GET/HEAD/OPTIONS) still work. Set via:
+  //   gcloud run services update <svc> --update-env-vars MAINTENANCE_MODE=true
+  if (process.env.MAINTENANCE_MODE === 'true' && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    return res.status(503).json({
+      error: 'Shutfey is briefly down for maintenance. Please try again in a few minutes.',
+      code: 'MAINTENANCE',
+    });
+  }
   // Resolve agency from custom domain when present (used by login/agency pages).
   const domainAgencyId = agencyIdForHostname(req.hostname || '');
   if (domainAgencyId) {
@@ -1264,6 +1274,12 @@ async function loadStateFromFirestore(): Promise<boolean> {
 
 // Fire-and-forget durable write. Safe to call from sync code paths.
 function persistToFirestore() {
+  // MAINTENANCE HOTFIX: never write to Firestore in maintenance mode.
+  // The /api middleware blocks HTTP mutations, but boot-time code (VAPID
+  // setup, JWT-secret creation) calls saveState() directly and would bypass
+  // it. This is the single Firestore write boundary — guarding here stops
+  // every old-server persistence path during the cutover window.
+  if (process.env.MAINTENANCE_MODE === 'true') return;
   if (!firestoreDb) return;
   // NEVER overwrite Firestore with state that wasn't loaded from it. If a boot
   // is slow or failing, writing now would destroy the user's real data.
@@ -1410,10 +1426,16 @@ function cleanupExpiredMedia() {
   }
 }
 
-// Run media cleanup daily
-setInterval(cleanupExpiredMedia, 24 * 60 * 60 * 1000);
+// Run media cleanup daily (skipped in maintenance mode)
+setInterval(() => {
+  if (process.env.MAINTENANCE_MODE === 'true') return;
+  cleanupExpiredMedia();
+}, 24 * 60 * 60 * 1000);
 // Run once at startup (delayed to avoid slowing boot)
-setTimeout(cleanupExpiredMedia, 60000);
+setTimeout(() => {
+  if (process.env.MAINTENANCE_MODE === 'true') return;
+  cleanupExpiredMedia();
+}, 60000);
 
 // Check for overdue tasks and notify assigned users (runs every 15 min)
 // Tracks already-notified tasks to avoid spam
@@ -1460,8 +1482,11 @@ function checkOverdueTasks() {
   }
 }
 
-// Run overdue check every 15 minutes
-setInterval(checkOverdueTasks, 15 * 60 * 1000);
+// Run overdue check every 15 minutes (skipped in maintenance mode)
+setInterval(() => {
+  if (process.env.MAINTENANCE_MODE === 'true') return;
+  checkOverdueTasks();
+}, 15 * 60 * 1000);
 
 // ---- Web Push endpoints ----
 app.get('/api/push/public-key', (_req, res) => {
@@ -1701,7 +1726,9 @@ function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
 }
 
 // Scheduled interval: check every 60s for midnight rollover
+// (skipped in maintenance mode — no writes during cutover window)
 setInterval(() => {
+  if (process.env.MAINTENANCE_MODE === 'true') return;
   const today = new Date().toISOString().split('T')[0];
   if (today !== currentWorkDate) {
     console.log(`[Scheduled Reset] Rollover detected from ${currentWorkDate} to ${today}`);
@@ -1718,6 +1745,7 @@ app.get('/api/health', (req, res) => {
     currentWorkDate,
     venuesCount: venues.length,
     tasksCount: tasks.length,
+    maintenance: process.env.MAINTENANCE_MODE === 'true',
   });
 });
 
