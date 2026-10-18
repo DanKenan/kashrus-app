@@ -270,32 +270,156 @@ post-backup writes after a total-restore.
 
 ## 4. Tested vs documented-only
 
+> Updated 2026-10-18 (Stage 4). Brutally honest: ✅ = executed for real;
+> ⚠️ = written but never run against production.
+
 | Procedure | Status | Notes |
 |---|---|---|
-| Transactional write path (commitState/commitOrRespond) | ✅ Tested | All Stage 2 tests pass against the real Firestore emulator in CI (see CI runs on PR #1). |
-| Version conflict → 409 (no silent overwrite) | ✅ Tested | Tests 1, 3, 19 verify stale writes blocked, conflicts return 409; test 19 covers the stale-form baseline. |
-| Idempotent retries (no duplicates) | ✅ Tested | Tests 6, 17 verify same operationId returns cached result; type/method/target scoping. |
-| Failed write leaves no trace | ✅ Tested | Test 4 verifies Firestore + memory unchanged on failure. |
-| Restart doesn't resurrect uncommitted data | ✅ Tested | Test 5 verifies only committed data survives restart. |
-| Concurrent writes (10-way storm) | ✅ Tested | Test 7 verifies all succeed, version increments correctly. |
-| Staged revision refuses writes (incl. boot) | ✅ Tested | Tests 20 (runtime toggle) and 21 (real staged boot — version/hash unchanged). |
-| Backup → wipe → restore cycle | ✅ Tested | Test 18: export, wipe, restore via Admin SDK with explicit database ID; counts/version identical. Emulator only — production named-DB restore still needs operator verification. |
-| Traffic shift to healthy revision (Option A) | ⚠️ Documented only | gcloud commands verified syntactically, never executed against production. Safe to test — it's non-destructive (just reroutes traffic). |
-| Scale-to-zero maintenance mode (Option B) | ⚠️ Documented only | Command verified against Google Cloud docs ("Manual scaling": `--scaling=0` disables a service). Never executed against production. Brief downtime expected. |
-| Maintenance kill-switch (Option D) | ⚠️ Documented only | `MAINTENANCE_MODE` (old server hotfix) and `FORCE_LOCAL_MODE` (Stage 2) code paths added; never exercised against production. Verify in a staging revision before relying on it in an incident. |
-| Fail-closed boot (K_SERVICE + Firestore failure → `process.exit(1)`) | ⚠️ Documented only | Code path added; cannot be triggered by the test suite (would require K_SERVICE set + broken credentials). |
-| No-op commits (skip write, no `_v` bump) | ✅ Tested | Test 13 verifies nested timestamps are treated as data; top-level `_v`/`updatedAt`/`savedAt` ignored for no-op detection. |
-| `GET /api/health` (no auth; status/firestore/version/uptime) | ⚠️ Documented only | Endpoint extended; already public (no auth). Manually verifiable with curl. |
-| Daily reset awaited + force/operationId | ⚠️ Documented only | `executeDailyReset` is now async; scheduled vs manual semantics changed. Not covered by current tests. |
-| Firestore deny-all rules (Option C) | ⚠️ Documented only | ⚠️ CORRECTED 2026-10-18: Security Rules do **NOT** restrict the Firebase Admin SDK — this never blocked server writes. Only stops direct client SDK access. Rules syntax is standard; never deployed. |
-| Backup restore from private export | ✅ Tested (emulator) | Test 18: full export → wipe → restore cycle against the Firestore emulator with explicit database ID — counts/version identical, post-restore write OK. Named production database still needs the operator throwaway-DB verification (BACKUP_RESTORE.md). Passwords AND kiosk PINs are stripped by design — users need password resets + PIN re-issue after a Tier 1 restore. |
-| Forward-fix deploy (ROLLBACK.md policy) | ⚠️ Documented only | Standard deploy pipeline; the policy (never redeploy pre-Stage-2) is a process rule, not a technical gate. |
+| Transactional write path (commitState/commitOrRespond) | ✅ Tested | All Stage 2 tests pass against the real Firestore emulator in CI. |
+| Version conflict → 409 (no silent overwrite) | ✅ Tested | Stale writes blocked, conflicts return 409. |
+| Stage 2 release to production | ✅ Tested | Deployed 2026-10-17/18; the Cloud Run startup-command fix (removed stale AI-Studio override, 3-min probe) was diagnosed and fixed live. Don phone-tested: "Looks great." |
+| Media upload lifecycle (intent → commit) | ✅ Tested | Don ran the full media-check E2E on his phone 2026-10-18 — ALL GREEN. |
+| Per-entity migration copy + status | ✅ Tested | Don ran Copy (6 users, 1 venue, 6 email lookups) + Check Migration Status (MATCH) in production 2026-10-18. |
+| Per-entity read switch (`READ_FROM_PER_ENTITY`) | ✅ Tested | Don flipped the env var; phone-tested login, users, venue, task CRUD — "All good." |
+| Consistency monitor code | ✅ Tested (code) / ⚠️ Not created (job) | `runConsistencyCheck()` deployed; unit tests green. The Cloud Scheduler job (`shutfey-consistency-check`, every 4–6h) is **NOT yet created** — Don's open item. |
+| Tier 1 backup code | ✅ Tested (code) / ⚠️ Not run (job) | `runTier1Backup()` deployed; unit tests green (scrub, checksums, unique paths). The Cloud Run Job + bucket + scheduler are **NOT yet created** — Don's open item. No backup has ever run. |
+| Restore tool | ✅ Tested (code) / ⚠️ Not drilled | `restore-backup.ts` merged; 16 unit tests green (refusals, checksum, verification). **No real drill into a throwaway DB has been run.** Tier 1 is NOT disaster-recovery ready until this happens. |
+| Secrets → Secret Manager code | ✅ Tested (code) / ⚠️ Not cut over | `USE_SECRET_MANAGER` flag deployed (default off — changes nothing). The 5-step cutover (copy values → create secrets → grant access → flip flag → verify) **needs Don's separate explicit OK** — not done. |
+| Monitoring alerts | ⚠️ Documented only | `docs/stage4-alerts.md` written with Don's console steps. **No alert has been created**; no notification test has fired (except none). Don's open item. |
+| Traffic shift to healthy revision (Option A) | ⚠️ Documented only | Never executed against production. Non-destructive — safe to test. |
+| Scale-to-zero maintenance mode (Option B) | ⚠️ Documented only | Never executed against production. Brief downtime expected. |
+| `MAINTENANCE_MODE` kill-switch | ⚠️ Documented only | Code path added (PR #3); never exercised against production. See §6. |
+| Firestore deny-all rules | ✅ Tested | Don published deny-all rules 2026-10-18; Tab re-verified unauthenticated reads return 403. App unaffected (Admin SDK bypasses rules). |
+| Secrets rotation (JWT/VAPID/PIN) | ⚠️ Documented only | **Needs Don's separate explicit OK — propose only, never do unprompted.** Would log everyone out. |
+| Branch protection on main | ⚠️ Documented only | Proposed to Don (he enables it in GitHub settings). Not done. |
 
-**Before production deployment, the ⚠️ items should be dry-run where safe** (traffic shift is non-destructive and can be tested; backup restore should be tested against the Firestore emulator, not production).
+**The single most important untested item:** no backup has ever run and no
+restore has ever been drilled. Until both happen, Stage 4's recovery story is
+code + docs, not a verified capability.
 
 ---
 
-## 5. Contacts and references
+## 5. Deploy checklist (one page)
+
+Every production deploy — no exceptions, no matter how small the change.
+
+**Before the PR:**
+- [ ] Pre-review checklist points 1–9 (in `AGENTS.md` / memory — data source,
+  API verification, arithmetic, auth, concurrency, tests, deployment compat,
+  final diff + CI, infrastructure).
+- [ ] `npm run lint` (tsc) + all relevant test suites green **locally**.
+- [ ] 5-sentence note drafted: what changed / tested / unverified / data impact.
+
+**The PR:**
+- [ ] Open PR against `main`. **No direct pushes to main — ever** (not even docs).
+- [ ] CI must go **green on the pushed SHA** (queued/running/failing ≠ green).
+- [ ] Independent review (ChatGPT via Tab): address every point, push fixes,
+  re-verify the pushed head via GitHub's compare API.
+- [ ] Merge only on: review GO + CI green + your own agreement.
+
+**After merge (GitHub Actions deploys automatically):**
+- [ ] Watch the Actions run → confirm the Cloud Run revision deployed.
+- [ ] `curl https://workers-collaborative-dashboard-1080260390009.us-east1.run.app/api/health`
+  → expect `status: "ok"`, `firestore: "connected"`, `maintenance: false`,
+  `staged: false`, and the new `version` number.
+- [ ] Don's 30-second verify: team screen loads, create → complete → delete
+  one task.
+- [ ] Watch logs 10 min: `[commitOrRespond]` ERROR lines, 5xx/503 spikes.
+
+**If the deploy fails:**
+1. **Don't panic-deploy.** Read the Actions log — most failures are build
+   errors (tsc) or the stale startup-command issue (see below).
+2. **Diagnostics:** `gcloud run revisions list --service workers-collaborative-dashboard --region us-east1`
+   → find the last healthy revision →
+   `gcloud run services update-traffic workers-collaborative-dashboard --to-revisions <healthy>=100 --region us-east1`
+   (Option A — non-destructive traffic shift, no redeploy).
+3. **Known gotcha (Oct 18):** a stale AI-Studio container command override
+   (`/bin/sh -c "if [ -f server.js ]; then..."`) can survive `services replace`
+   and break startup. Fix: remove the override so the buildpack default
+   (`node dist/server.cjs`) runs; ensure the startup probe allows ~3 min.
+4. If writes are at risk and you can't diagnose in 5 min: **maintenance mode**
+   (§6) to pause, then diagnose.
+
+---
+
+## 6. Maintenance-mode procedure
+
+From `STAGE4_PLAN.md` §1.2. Use when you need to pause all writes safely
+(deploy gone wrong, data repair, incident triage).
+
+**What users see:** the app shows a friendly maintenance banner (the client
+already handles HTTP 503 `MAINTENANCE`).
+
+**Engage:**
+```bash
+gcloud run services update workers-collaborative-dashboard \
+  --update-env-vars MAINTENANCE_MODE=true \
+  --region us-east1 --project gen-lang-client-0875538181
+```
+
+**Verify — do not assume:**
+1. `curl /api/health` → `maintenance: true`.
+2. One test mutation (e.g. create a task) → expect HTTP 503.
+3. Cloud Run request logs: no mutating requests for 60 seconds.
+4. Firestore `app-state/main` `_v` stable (no version bumps).
+
+**Do the work.**
+
+**Lift:**
+```bash
+gcloud run services update workers-collaborative-dashboard \
+  --remove-env-vars MAINTENANCE_MODE \
+  --region us-east1 --project gen-lang-client-0875538181
+```
+Then: `curl /api/health` → `maintenance: false`; Don smoke-tests one write
+(create → complete → delete a task).
+
+**Key lesson (Oct 18):** "60 seconds quiet" is evidence, not proof. For
+anything beyond a quick pause, also check the serving revision and instance
+state — don't rely on log silence alone.
+
+---
+
+## 7. Don's open items (one place)
+
+Everything below needs Don (console access he has, I don't). Nothing here
+runs automatically.
+
+**Backup & recovery:**
+- [ ] GCP backup setup bundle (PR #19 body): create bucket, backup SA with
+  database-conditioned viewer role, deploy Cloud Run Job, scheduler (OAuth,
+  `America/New_York`), grant `run.invoker`.
+- [ ] Run the backup job **twice** successfully; verify two `SUCCESS.json`
+  markers with matching checksums.
+- [ ] Restore drill: create empty `restore-drill-<date>` DB, run
+  `node dist/restore-backup.cjs --confirm`, verify printed counts match.
+- [ ] Tier 2 (weekly managed Firestore export): separate future work.
+- [ ] Lifecycle deletion rules (tier1/ 30d, tier2/ 90d): **needs Don's OK**
+  before activating — he reserved explicit authorization for auto-deletion.
+
+**Monitoring:**
+- [ ] Create scheduler job `shutfey-consistency-check` every **4–6 hours**
+  (not daily) — OIDC, verify 200 not 401, set `--max-retry-attempts 3`.
+- [ ] Create notification channels (email + SMS) and all alerts in
+  `docs/stage4-alerts.md`; fire the test alert; confirm delivery.
+- [ ] Sweeper scheduler: set `--max-retry-attempts 3` on `shutfey-media-sweeper`.
+
+**Security & hygiene:**
+- [ ] Secrets cutover (`USE_SECRET_MANAGER=true`): 5 steps in PR #16 —
+  **needs Don's separate explicit OK**.
+- [ ] JWT/VAPID secret rotation: **propose only** — would log everyone out.
+- [ ] Change the reused admin password everywhere (hash was public ~12h Oct 18).
+- [ ] Branch protection on `main` (PRs + required CI + no bypasses).
+
+**Product (parked — Don's call):**
+- [ ] Step E (stop dual-write): deferred by Don's decision.
+- [ ] Ingredients / factory-inspections: **do not touch** until Don decides
+  with his people — then it's top priority and the migration is designed
+  together with it.
+
+---
+
+## 8. Contacts and references
 
 - **Service URL:** `https://workers-collaborative-dashboard-1080260390009.us-east1.run.app/`
 - **Repo:** `https://github.com/DanKenan/kashrus-app` (branch `review/stage2-data-integrity` for Stage 2 review)
