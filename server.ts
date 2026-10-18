@@ -3921,9 +3921,15 @@ app.post('/api/media/sweep', async (req, res) => {
     const db = requireMediaDb(req, res);
     if (!db) return;
     const result = await media.sweepOrphans(db);
-    // Alert on failures: log loudly for monitoring
+    // If any deletions failed, return 500 so Cloud Scheduler retries.
+    // The sweeper marks failed records with deleteError for the next run.
     if (result.errors.length > 0) {
       console.error(`[media] Sweeper completed with ${result.errors.length} errors:`, result.errors);
+      res.status(500).json({
+        error: 'Sweeper completed with deletion errors; will retry.',
+        ...result,
+      });
+      return;
     }
     res.json(result);
   } catch (e: any) {
