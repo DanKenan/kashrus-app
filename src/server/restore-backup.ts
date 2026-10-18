@@ -89,8 +89,11 @@ function parseGsUrl(url: string): { bucket: string; prefix: string } {
 }
 
 /**
- * Check the target is truly empty by enumerating ALL root collections.
- * Fails closed: any read error => not empty (refuse).
+ * Check the target is truly empty: reject if listCollections() returns ANY
+ * collection. A newly created throwaway DB has zero collections; any
+ * collection present (even an "empty" one, which may hide orphaned
+ * subcollections beneath missing parent docs) means refuse.
+ * Fails closed: any read error => refuse.
  */
 async function assertTargetEmpty(db: any): Promise<void> {
   let collections: any[];
@@ -99,30 +102,35 @@ async function assertTargetEmpty(db: any): Promise<void> {
   } catch (e: any) {
     throw new Error(`[restore] REFUSING: cannot enumerate target collections (${e?.message}). Fail closed.`);
   }
-  const nonEmpty: string[] = [];
-  // Check app-state/main explicitly (it's a single doc, not a collection)
+  if (collections.length > 0) {
+    const names = collections.map((c: any) => c.id || String(c));
+    throw new Error(`[restore] REFUSING: target has collections (${names.join(', ')}). Use a newly created, empty throwaway DB.`);
+  }
+  // Also check app-state/main explicitly (single doc, not a collection)
   try {
     const mainSnap = await db.doc(FIRESTORE_STATE_DOC).get();
-    if (mainSnap.exists) nonEmpty.push(FIRESTORE_STATE_DOC);
+    if (mainSnap.exists) {
+      throw new Error(`[restore] REFUSING: target has ${FIRESTORE_STATE_DOC}. Use a newly created, empty throwaway DB.`);
+    }
   } catch (e: any) {
+    if (e.message.includes('REFUSING')) throw e;
     throw new Error(`[restore] REFUSING: cannot read ${FIRESTORE_STATE_DOC} (${e?.message}). Fail closed.`);
   }
-  for (const coll of collections) {
-    const name = coll.id || coll._queryOptions?.collectionId || String(coll);
-    try {
-      const snap = await coll.limit(1).get();
-      if (!snap.empty) nonEmpty.push(name);
-    } catch (e: any) {
-      throw new Error(`[restore] REFUSING: cannot check collection ${name} (${e?.message}). Fail closed.`);
-    }
-  }
-  if (nonEmpty.length > 0) {
-    throw new Error(`[restore] REFUSING: target is not empty. Non-empty: ${nonEmpty.join(', ')}`);
-  }
+}
+
+// The complete Tier 1 schema: exactly these collections, no more, no fewer.
+const TIER1_COLLECTIONS = ['tasks', 'venues', 'users', 'usersByEmail', 'media'];
+
+// Firestore document IDs: 1-1500 chars, no forward slashes.
+function isValidDocId(id: any): boolean {
+  return typeof id === 'string' && id.length >= 1 && id.length <= 1500 && !id.includes('/');
 }
 
 /**
  * Validate manifest schema and payload structure BEFORE any write.
+ * Requires the COMPLETE Tier 1 schema: tier='tier1', monolithPresent=true,
+ * exactly the five expected collections with non-negative integer counts,
+ * valid Firestore document IDs, no unexpected collections.
  * Throws on any problem. Returns the parsed payload.
  */
 function validateManifestAndPayload(manifest: any, dataJson: string): any {
@@ -130,14 +138,40 @@ function validateManifestAndPayload(manifest: any, dataJson: string): any {
   if (manifest.version !== EXPECTED_MANIFEST_VERSION) {
     throw new Error(`[restore] Bad manifest version: ${manifest.version} (expected ${EXPECTED_MANIFEST_VERSION})`);
   }
+  if (manifest.tier !== 'tier1') {
+    throw new Error(`[restore] Bad manifest tier: ${manifest.tier} (expected 'tier1')`);
+  }
   if (manifest.databaseId !== PROD_DATABASE_ID) {
     throw new Error(`[restore] Manifest databaseId ${manifest.databaseId} != production ${PROD_DATABASE_ID}. Wrong source.`);
   }
   if (manifest.secretsScrubbed !== true) {
     throw new Error('[restore] Manifest does not confirm secretsScrubbed. Refusing.');
   }
+  if (manifest.monolithPresent !== true) {
+    throw new Error('[restore] Manifest monolithPresent is not true. Refusing incomplete backup.');
+  }
   if (!manifest.checksum || typeof manifest.checksum !== 'string') {
     throw new Error('[restore] Manifest missing checksum.');
+  }
+  if (!manifest.collections || typeof manifest.collections !== 'object') {
+    throw new Error('[restore] Manifest missing collections map.');
+  }
+
+  // Complete schema: exactly the five expected collections
+  const manifestColls = Object.keys(manifest.collections).sort();
+  const expectedColls = [...TIER1_COLLECTIONS].sort();
+  const missing = expectedColls.filter(c => !manifestColls.includes(c));
+  const unexpected = manifestColls.filter(c => !expectedColls.includes(c));
+  if (missing.length > 0) {
+    throw new Error(`[restore] Manifest missing collections: ${missing.join(', ')}. Incomplete Tier 1 schema.`);
+  }
+  if (unexpected.length > 0) {
+    throw new Error(`[restore] Manifest has unexpected collections: ${unexpected.join(', ')}. Refusing.`);
+  }
+  for (const [name, count] of Object.entries(manifest.collections)) {
+    if (!Number.isInteger(count) || (count as number) < 0) {
+      throw new Error(`[restore] Manifest collection ${name} has invalid count: ${count} (must be non-negative integer).`);
+    }
   }
 
   // Checksum
@@ -153,23 +187,34 @@ function validateManifestAndPayload(manifest: any, dataJson: string): any {
   } catch {
     throw new Error('[restore] backup.json is not valid JSON.');
   }
-  if (manifest.monolithPresent && !payload.monolith) {
-    throw new Error('[restore] Manifest says monolith present but payload has none.');
+  if (!payload.monolith) {
+    throw new Error('[restore] Payload missing monolith.');
+  }
+  if (!payload.collections || typeof payload.collections !== 'object') {
+    throw new Error('[restore] Payload missing collections.');
   }
 
-  // Collection counts + unique valid doc IDs
+  // Payload collections must match manifest exactly (no missing/unexpected)
+  const payloadColls = Object.keys(payload.collections).sort();
+  const pMissing = expectedColls.filter(c => !payloadColls.includes(c));
+  const pUnexpected = payloadColls.filter(c => !expectedColls.includes(c));
+  if (pMissing.length > 0) throw new Error(`[restore] Payload missing collections: ${pMissing.join(', ')}.`);
+  if (pUnexpected.length > 0) throw new Error(`[restore] Payload has unexpected collections: ${pUnexpected.join(', ')}.`);
+
+  // Collection counts + unique VALID doc IDs
   const seenIds = new Set<string>();
-  for (const [collName, expectedCount] of Object.entries(manifest.collections || {})) {
-    const docs = payload.collections?.[collName];
+  for (const collName of TIER1_COLLECTIONS) {
+    const expectedCount = manifest.collections[collName];
+    const docs = payload.collections[collName];
     if (!Array.isArray(docs)) {
-      throw new Error(`[restore] Payload missing array for collection ${collName}.`);
+      throw new Error(`[restore] Payload ${collName} is not an array.`);
     }
     if (docs.length !== expectedCount) {
       throw new Error(`[restore] Payload ${collName} has ${docs.length} docs, manifest says ${expectedCount}.`);
     }
     for (const doc of docs) {
-      if (!doc.id || typeof doc.id !== 'string') {
-        throw new Error(`[restore] Document in ${collName} has invalid id.`);
+      if (!isValidDocId(doc.id)) {
+        throw new Error(`[restore] Document in ${collName} has invalid Firestore ID: ${JSON.stringify(doc.id)}.`);
       }
       const key = `${collName}/${doc.id}`;
       if (seenIds.has(key)) {
@@ -184,41 +229,52 @@ function validateManifestAndPayload(manifest: any, dataJson: string): any {
 
 /**
  * Independently verify the restore by re-querying Firestore.
+ * Compares actual counts AND representative field values (not just existence).
  * Returns per-collection actual counts. Throws on mismatch.
  */
 async function verifyRestore(db: any, manifest: any, payload: any): Promise<Record<string, number>> {
   const actual: Record<string, number> = {};
 
-  // Monolith
+  // Monolith: existence + _v + spot-check a field value
   const mainSnap = await db.doc(FIRESTORE_STATE_DOC).get();
   actual['app-state/main'] = mainSnap.exists ? 1 : 0;
-  const expectedMain = manifest.monolithPresent ? 1 : 0;
-  if (actual['app-state/main'] !== expectedMain) {
-    throw new Error(`[restore] VERIFY FAILED: app-state/main exists=${mainSnap.exists}, expected present=${manifest.monolithPresent}`);
+  if (!mainSnap.exists) {
+    throw new Error('[restore] VERIFY FAILED: app-state/main missing after restore');
   }
-  // Spot-check: monolith _v matches
-  if (mainSnap.exists && payload.monolith?._v !== undefined) {
-    const restoredV = mainSnap.data()?._v;
-    if (restoredV !== payload.monolith._v) {
-      throw new Error(`[restore] VERIFY FAILED: monolith _v ${restoredV} != payload ${payload.monolith._v}`);
-    }
+  const restoredMain = mainSnap.data();
+  if (restoredMain?._v !== payload.monolith._v) {
+    throw new Error(`[restore] VERIFY FAILED: monolith _v ${restoredMain?._v} != payload ${payload.monolith._v}`);
+  }
+  // Spot-check a nested field value (not just the version)
+  const payloadVenueName = payload.monolith.venues?.[0]?.name;
+  const restoredVenueName = restoredMain?.venues?.[0]?.name;
+  if (payloadVenueName !== undefined && restoredVenueName !== payloadVenueName) {
+    throw new Error(`[restore] VERIFY FAILED: monolith venues[0].name "${restoredVenueName}" != payload "${payloadVenueName}"`);
   }
 
-  // Per-entity collections: count + spot-check first doc
-  for (const collName of Object.keys(manifest.collections || {})) {
+  // Per-entity collections: count + spot-check field values of first doc
+  for (const collName of TIER1_COLLECTIONS) {
     const snap = await db.collection(collName).get();
     actual[collName] = snap.size;
     const expected = manifest.collections[collName];
     if (actual[collName] !== expected) {
       throw new Error(`[restore] VERIFY FAILED: ${collName} has ${actual[collName]} docs, expected ${expected}`);
     }
-    // Spot-check: first payload doc exists with matching id
     const payloadDocs = payload.collections?.[collName] || [];
     if (payloadDocs.length > 0) {
-      const firstId = payloadDocs[0].id;
-      const docSnap = await db.collection(collName).doc(firstId).get();
+      const first = payloadDocs[0];
+      const docSnap = await db.collection(collName).doc(first.id).get();
       if (!docSnap.exists) {
-        throw new Error(`[restore] VERIFY FAILED: ${collName}/${firstId} missing after restore`);
+        throw new Error(`[restore] VERIFY FAILED: ${collName}/${first.id} missing after restore`);
+      }
+      // Compare actual field values, not just existence
+      const restored = docSnap.data();
+      for (const [k, v] of Object.entries(first)) {
+        if (k === 'id') continue;
+        const rv = restored?.[k];
+        if (JSON.stringify(rv) !== JSON.stringify(v)) {
+          throw new Error(`[restore] VERIFY FAILED: ${collName}/${first.id}.${k} = ${JSON.stringify(rv)} != payload ${JSON.stringify(v)}`);
+        }
       }
     }
   }
@@ -290,7 +346,7 @@ export async function runRestore(opts: {
       batch.set(firestoreDb.doc(FIRESTORE_STATE_DOC), payload.monolith);
       batchCount++;
     }
-    for (const collName of Object.keys(manifest.collections || {})) {
+    for (const collName of TIER1_COLLECTIONS) {
       const docs = payload.collections?.[collName] || [];
       for (const doc of docs) {
         const { id, ...data } = doc;

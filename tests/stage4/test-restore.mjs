@@ -11,14 +11,12 @@ import * as crypto from 'crypto';
 function createMockDb(existingDocs = {}, opts = {}) {
   const docs = new Map(Object.entries(existingDocs));
   const listError = opts.listError || null;
-  // Derive collection names from doc paths
+  // Derive collection names ONLY from actual docs — a fresh DB has zero.
   const collectionNames = new Set();
   for (const k of docs.keys()) {
     const parts = k.split('/');
     if (parts.length >= 2) collectionNames.add(parts[0]);
   }
-  // Always include the known collections so listCollections finds them
-  for (const c of ['tasks', 'venues', 'users', 'usersByEmail', 'media']) collectionNames.add(c);
   return {
     _docs: docs,
     _collectionNames: collectionNames,
@@ -193,7 +191,7 @@ export default {
       console.log('  ✓ refuses non-throwaway naming');
     }
 
-    // Test 4: Refuses non-empty target (mock enforces the empty-target rule)
+    // Test 4: Refuses non-empty target (any collection present → refuse)
     {
       const { manifest, dataJson } = makeBackup();
       const db = createMockDb({ 'venues/v1': { id: 'v1', name: 'Existing' } });
@@ -202,9 +200,11 @@ export default {
         await runRestore({ ...base, targetDb: 'restore-drill-001', firestoreDb: db, storage });
         throw new Error('Should have refused non-empty target');
       } catch (e) {
-        if (!e.message.includes('not empty')) throw new Error(`Wrong error: ${e.message}`);
+        if (!e.message.includes('REFUSING') || !e.message.includes('venues')) {
+          throw new Error(`Wrong error: ${e.message}`);
+        }
       }
-      console.log('  ✓ refuses non-empty target');
+      console.log('  ✓ refuses target with any collection present');
     }
 
     // Test 5: Refuses checksum mismatch
@@ -268,7 +268,7 @@ export default {
         await runRestore({ ...base, targetDb: 'restore-drill-005', firestoreDb: db, storage });
         throw new Error('Should have refused non-empty unrelated collection');
       } catch (e) {
-        if (!e.message.includes('not empty') || !e.message.includes('backups')) {
+        if (!e.message.includes('REFUSING') || !e.message.includes('backups')) {
           throw new Error(`Wrong error: ${e.message}`);
         }
       }
@@ -349,6 +349,84 @@ export default {
         if (!e.message.includes('VERIFY FAILED')) throw new Error(`Wrong error: ${e.message}`);
       }
       console.log('  ✓ post-write verification catches missing record');
+    }
+
+    // Test 13: Manifest missing a collection → rejected (incomplete Tier 1 schema)
+    {
+      const { manifest, dataJson } = makeBackup();
+      const badManifest = { ...manifest };
+      delete badManifest.collections.media;
+      const db = createMockDb();
+      const storage = createMockStorage(badManifest, dataJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-010', firestoreDb: db, storage });
+        throw new Error('Should have rejected incomplete schema');
+      } catch (e) {
+        if (!e.message.includes('missing collections')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      console.log('  ✓ manifest missing a collection rejected');
+    }
+
+    // Test 14: Manifest with unexpected collection → rejected
+    {
+      const { manifest, dataJson } = makeBackup();
+      const badManifest = { ...manifest, collections: { ...manifest.collections, evil: 1 } };
+      const db = createMockDb();
+      const storage = createMockStorage(badManifest, dataJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-011', firestoreDb: db, storage });
+        throw new Error('Should have rejected unexpected collection');
+      } catch (e) {
+        if (!e.message.includes('unexpected collections')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      console.log('  ✓ manifest with unexpected collection rejected');
+    }
+
+    // Test 15: Invalid Firestore doc ID → rejected
+    {
+      const { manifest, dataJson } = makeBackup();
+      const payload = JSON.parse(dataJson);
+      payload.collections.venues[0].id = 'bad/id/with/slashes';
+      const badJson = JSON.stringify(payload);
+      const badManifest = { ...manifest, checksum: crypto.createHash('sha256').update(badJson, 'utf8').digest('hex') };
+      const db = createMockDb();
+      const storage = createMockStorage(badManifest, badJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-012', firestoreDb: db, storage });
+        throw new Error('Should have rejected invalid doc ID');
+      } catch (e) {
+        if (!e.message.includes('invalid Firestore ID')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      console.log('  ✓ invalid Firestore doc ID rejected');
+    }
+
+    // Test 16: Field-value spot-check catches tampered value
+    {
+      const { manifest, dataJson } = makeBackup();
+      const db = createMockDb();
+      // Wrap batch to tamper a field value on write
+      const origBatch = db.batch.bind(db);
+      db.batch = () => {
+        const b = origBatch();
+        const origSet = b.set.bind(b);
+        b.set = (ref, data) => {
+          if (ref._path === 'venues/v1') {
+            data = { ...data, name: 'Tampered' };
+          }
+          origSet(ref, data);
+        };
+        return b;
+      };
+      const storage = createMockStorage(manifest, dataJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-013', firestoreDb: db, storage });
+        throw new Error('Should have caught field-value mismatch');
+      } catch (e) {
+        if (!e.message.includes('VERIFY FAILED') || !e.message.includes('name')) {
+          throw new Error(`Wrong error: ${e.message}`);
+        }
+      }
+      console.log('  ✓ field-value spot-check catches tampered value');
     }
 
     console.log('  ✓ All restore tests passed');
