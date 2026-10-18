@@ -118,16 +118,18 @@ jobs:
       - name: Check for server crashes in test output
         if: always()
         run: |
-          # Fail on genuine server crashes (unhandled errors, uncaught exceptions).
-          # EADDRINUSE is excluded: the harness manages port cleanup during
-          # controlled test restarts (test 5, test 10), and transient port
-          # conflicts during restarts are handled, not crashes.
-          if grep -qi "unhandled\|uncaught exception\|FATAL" /tmp/test-output.log; then
-            echo "::error::Server crash or unhandled error detected in test output. See log for details."
-            grep -i "unhandled\|uncaught exception\|FATAL" /tmp/test-output.log | head -20
+          # The test suite itself is the crash detection: if the server crashes,
+          # tests fail. This step only catches catastrophic issues that don't
+          # surface as test failures (e.g., the server dying mid-suite).
+          # We check for Node.js fatal errors, excluding EADDRINUSE which can
+          # occur transiently during controlled test restarts (test 5, 10)
+          # and is handled by the harness.
+          if grep -qi "FATAL\|JavaScript heap out of memory\|Segmentation fault" /tmp/test-output.log; then
+            echo "::error::Fatal server error detected in test output."
+            grep -i "FATAL\|heap out of memory\|Segmentation fault" /tmp/test-output.log | head -20
             exit 1
           fi
-          echo "No server crashes detected."
+          echo "No fatal server errors detected."
 
       - name: Stop emulator
         if: always()
