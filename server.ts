@@ -1079,8 +1079,9 @@ function hydrateState(parsed: any) {
               permissions,
               agencyId: u.agencyId || 'agency-hkc',
               venueId: assignedVenue,
-              // Role change resets to a random temp password (hashed) — admin sets a real one.
-              password: bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10),
+              // NEVER reset passwords on state load. Passwords are only set
+              // via explicit flows (setup, change-password, forgot-password).
+              password: u.password || '', 
             };
           });
 
