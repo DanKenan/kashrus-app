@@ -91,7 +91,7 @@ Today the pepper, VAPID private key, and JWT secret live *inside* the Firestore 
 
 **Sequencing (three independently testable changes — per reviewer):**
 1. **Media extraction** — Storage upload flow + metadata refs; Firestore layout unchanged.
-2. **Per-entity migration** — the §4 backfill; secrets untouched (still read from env/Firestore as today).
+2. **Per-entity migration** — the §7 one-time copy; secrets untouched (still read from env/Firestore as today).
 3. **Secrets migration** — move values to Secret Manager; verify; remove Firestore fallback only after 30 days of clean operation.
 
 **Cold-backup warning:** retaining `app-state/main` as a cold backup retains any historical secrets it contains (`jwtSecret`, `vapidKeys.privateKey`, `resetPepper`). Restrict access to the backup accordingly (encrypted, same access controls as Secret Manager — see §7).
@@ -122,7 +122,7 @@ Source: `stateSnapshot()` on the Stage 2 branch (commit `6cd6915`). Every field 
 
 | `stateSnapshot()` field | Classification | Target | Notes |
 |---|---|---|---|
-| `_v` (global version) | **Transformed** | Per-entity `_v` on each new doc | The monolith's single version counter splits. Each entity doc gets `_v` starting at the monolith's `_v` at backfill time (preserves ordering), then increments per-entity. No global version survives — cross-entity consistency comes from Firestore transactions, not a shared counter. |
+| `_v` (global version) | **Transformed** | Per-entity `_v` on each new doc | The monolith's single version counter splits. Each entity doc gets `_v` starting at the monolith's `_v` at copy time (preserves ordering), then increments per-entity. No global version survives — cross-entity consistency comes from Firestore transactions, not a shared counter. |
 | `currentWorkDate` | **Transformed** | `agencyState/{agencyId}.currentWorkDate` | Was accidentally global; the daily reset is agency-scoped. Each agency gets its own rollover date, initialized from the monolith's value. Behavior preserved: same date each agency already had. |
 | `isDemoCleared` | **Transformed** | `agencyState/{agencyId}.isDemoCleared` | Was accidentally global; demo-clear is agency-scoped (keeps the caller's agency). Per-agency flag, initialized from the monolith's value. |
 
@@ -203,7 +203,7 @@ Stays, but its role shrinks to backstop: with media out of Firestore and per-ent
 ### 4.1 Versioning carries over, per-entity
 
 Stage 2's `_v` becomes **per-document** instead of per-monolith:
-- Each entity doc has its own `_v`, incremented transactionally on every mutation of that doc. Initial `_v` = the monolith's `_v` at backfill time (preserves ordering across the cutover).
+- Each entity doc has its own `_v`, incremented transactionally on every mutation of that doc. Initial `_v` = the monolith's `_v` at copy time (preserves ordering across the cutover).
 - The stale-write contract is unchanged in shape: client sends `expectedVersion` = the version the form rendered; server rejects with 409 on mismatch. But contention scope shrinks dramatically — two mashgichim editing *different* tasks never conflict (today they share one `_v`).
 - Immutable collections (`historyLogs` entries, `auditLog`) carry no `_v` — they are write-once by construction; an update attempt is a 409 by policy, not by version comparison.
 
@@ -297,7 +297,7 @@ The current `MEDIA_RETENTION_DAYS = 30` strips base64 from the monolith. In Stag
 
 ### 6.4 Migration of existing media
 
-Per the §3 inventory: every `photoData`/`voiceNoteData`/`menuAttachmentData` base64 payload in the monolith is uploaded to its §2.3 path during the backfill, with a **checksum recorded in the migration manifest** (§7). The backfill verifies: every source payload → exactly one object with matching checksum; every object ← exactly one source payload (missing-object detection both directions). The monolith's base64 fields are **not** deleted during backfill (they remain in the cold backup); the new docs store paths only.
+Per the §3 inventory: if any `photoData`/`voiceNoteData` base64 payloads exist in the monolith, they are uploaded to their §2.3 paths during the one-time copy (§7). The monolith's base64 fields are **not** deleted (they remain in the cold backup); the new docs store paths only. With 0 tasks, this is likely a no-op.
 
 ---
 
@@ -309,12 +309,13 @@ Per the §3 inventory: every `photoData`/`voiceNoteData`/`menuAttachmentData` ba
 
 ### Step 1 — Build the per-record layout (no migration yet)
 - Implement the §2.1 collections (`tasks/{taskId}`, `venues/{venueId}`, `users/{userId}`, etc.) in code.
-- The transactional write path writes to BOTH the monolith AND the new collections (dual-write during transition).
+- The transactional write path writes to BOTH the monolith AND the new collections **in the same Firestore transaction** (dual-write during transition — atomic, no partial writes).
 - Reads still come from the monolith. The new collections are inert — no code reads them yet.
 - Deploy and verify: health ok, existing functionality unchanged.
 
 ### Step 2 — One-time copy of existing data
 - Write a simple script that reads `app-state/main` and copies the 6 users + 1 venue into the new collections.
+- **The copy must not overwrite newer records:** check if the target doc already exists and has a newer `updatedAt` (or any write after the copy started); skip if so. With 6 users this is a visual check, not code — but the principle stands.
 - Run it once against production.
 - **Verify by eye:** Don (or Tab) checks the Firestore console — 6 user docs, 1 venue doc, correct fields. That's it. No hash manifests, no automated gates.
 - If anything looks wrong: delete the new collections, fix the script, re-run. The monolith is untouched.
@@ -336,7 +337,10 @@ Per the §3 inventory: every `photoData`/`voiceNoteData`/`menuAttachmentData` ba
 - No forward-repair plan (if the copy is wrong, delete and re-copy).
 - No monolith deletion (Don's rule: never delete data without his explicit OK).
 
-**Rollback:** Flip the read path back to the monolith (one env var or deploy). The monolith was never modified after Step 2, so it's a clean fallback.
+**Rollback:** 
+- **Before Step 3 (reads still on monolith):** Flip nothing — the monolith is the source of truth. Delete the new collections if desired. Clean.
+- **After Step 3 (reads on new layout, writes to new layout):** The monolith is now STALE — it does not receive writes anymore. Switching reads back to the monolith would LOSE any changes made since Step 3. True rollback requires copying new-layout data back to the monolith (reverse of Step 2), or accepting data loss. **Do not flip back without Don's explicit OK and a plan for the delta.**
+- The monolith document `app-state/main` is NOT deleted (Don's standing rule). It remains as a pre-cutover snapshot.
 
 ---
 
@@ -354,7 +358,7 @@ If the migration is aborted before the `v2` code paths accept production traffic
 **Recovery AFTER live writes — forward repair preferred.**
 Once `v2` has committed production writes, the new collections contain data the monolith does not. Reverting to the old layout at this point **can lose data**:
 - **Preferred: forward repair.** Fix the new layout in place (same discipline as Stage 2's forward-fix policy). The monolith is stale the moment `v2` writes — do not route traffic back to it.
-- **Reverse migration (last resort):** the tested reverse backfill (collections → monolith, a Step 2 precondition) may be used ONLY after: (1) writes are frozen (maintenance mode, drain verified per the §7 procedure), (2) a full reconciliation has been run and passes (every new-layout entity accounted for in the reverse output, counts + hashes match), and (3) Don explicitly approves. The reverse run gets its own migration ID and manifest.
+- **Reverse migration:** Not implemented (per Don's slim plan). If rollback after Step 3 is needed, Don approves a manual copy-back or accepts the delta. See §7 Rollback.
 - **Never** delete the monolith while the new layout is the only copy of live data (see the §7 retirement gate).
 
 ### 8.2 Tested cutover exclusivity
@@ -386,10 +390,10 @@ Per the reviewer: do not ship media extraction, per-entity migration, and secret
 **Phase 3A — Media extraction** (smallest blast radius).
 - Implements the §6 upload lifecycle; migrates existing base64 payloads to Storage; Firestore docs store paths.
 - The monolith layout is unchanged; only media fields change shape (base64 → path + metadata).
-- Testable: upload → validate → commit → download round-trip; orphan sweeper; backfill checksum verification.
+- Testable: upload → validate → commit → download round-trip; orphan sweeper.
 - Reversible: paths can be resolved back to base64 from Storage; the monolith is untouched.
 
-**Phase 3B — Per-entity migration** (the §7 backfill).
+**Phase 3B — Per-entity migration** (the §7 one-time copy).
 - Implements the §2.1 layout; the §7 migration with all gates; the §5 client contract.
 - Depends on 3A (media already in Storage) but not on 3C (secrets still read as today).
 - Reversible per §8.1 (before live writes: abort; after: forward repair).
@@ -407,7 +411,7 @@ Each phase gets its own branch, review, staging verification, and production cut
 
 | Work | Estimate |
 |---|---|
-| Backfill script + reverse backfill + verification harness (+ manifest, checkpoints) | 4–5 days |
+| One-time copy script + per-entity modules | 2–3 days |
 | Server read/write path migration (collection by collection) | 5–7 days |
 | Media upload lifecycle (§6) + client integration + orphan sweeper | 4–5 days |
 | Secret Manager migration (decoupled) | 2 days |
@@ -434,8 +438,8 @@ The estimate grew from the first draft because the review correctly added: the f
 
 The reviewer's implementation acceptance criteria, mapped to this plan:
 
-1. **Corrected schema + field map:** §2.1 (per-entry history, per-ingredient docs, per-operation idempotency, opaque reset IDs, per-agency operational state) and §3 (field-by-field inventory with classifications). Nothing disappears silently. The Step 0 manifest is built from the **actual committed document** (raw read), diffed against §3 — transaction-maintained fields like `idempotencyRecords` are classified, never dropped by omission.
-2. **Migration and reverse-recovery specs:** §7 (resumable/idempotent script, manifest, gates) and §8.1 (rollback-before vs recovery-after, reverse-migration preconditions).
+1. **Corrected schema + field map:** §2.1 (per-entry history, per-ingredient docs, per-operation idempotency, opaque reset IDs, per-agency operational state) and §3 (field-by-field inventory with classifications). Nothing disappears silently.
+2. **Migration spec:** §7 (one-time copy, eyeball verification, monolith retained as fallback).
 3. **Media-upload state machine + retention:** §6 (five-state lifecycle, orphan sweeper, signed-URL discipline) and the retention policy **decided** (§6.3): 30 days from upload, backup copies expire too, written records permanent.
 4. **Per-entity version/API contract:** §5 (per-record baselines, preserved response formats, WebSocket agency isolation, maxScale=1).
 5. **Minimum backup/auth/monitoring in Stage 3 gates:** §9 (nine gates, including the service-account backup requirement; media backups are byte copies; verification is per-entity `_v` + hashes, never a global `_v`).
@@ -445,7 +449,7 @@ Plus the original functional criteria:
 7. Two 500 KB photo check-ins in one day: both persist via the §6 lifecycle, task docs stay small, Storage holds the bytes.
 8. 32 rapid task completions across two devices: all persist, no contention errors, per-task `_v` chains clean.
 9. Staged-revision discipline holds: a staged Stage 3 revision writes nothing (extend test 21).
-10. Reverse backfill tested: collections → monolith round-trips with identical counts/hashes (Step 2 precondition).
+10. One-time copy verified by eye in Firestore console (Step 2).
 11. Monolith deleted only when the §7 retirement gate passes; Tier 2 backup retained.
 
 ---
