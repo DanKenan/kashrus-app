@@ -4487,3 +4487,4 @@ async function startServer() {
 }
 
 startServer();
+// Force redeploy to clear stale instance - 2026-10-18T00:09:21Z
