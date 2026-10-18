@@ -1767,6 +1767,12 @@ app.get('/api/admin/storage', (req, res) => {
 
 // Admin data export — download full state as JSON backup (admin only)
 app.get('/api/admin/export', (req, res) => {
+  // SECURITY: admin-only. Previously any authenticated user could download
+  // the full database. Hotfix 2026-10-18.
+  const authUser = (req as any).authUser;
+  if (!authUser || authUser.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
   const snapshot = stateSnapshot();
   // Strip sensitive fields from export
   const safe = {
