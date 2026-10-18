@@ -400,6 +400,15 @@ function agencyIdForHostname(hostname: string): string | null {
 }
 
 app.use('/api', (req, res, next) => {
+  // MAINTENANCE HOTFIX (2026-10-18, from main): operator cutover switch.
+  // Refuses all mutations with 503 so old-version writes stop before cutover.
+  if (process.env.MAINTENANCE_MODE === 'true' && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    return res.status(503).json({
+      error: 'Shutfey is briefly down for maintenance. Please try again in a few minutes.',
+      code: 'MAINTENANCE',
+    });
+  }
+
   // BLOCKER 2 fix: FORCE_LOCAL_MODE is a READ-ONLY maintenance mode.
   // All mutating requests (POST/PUT/DELETE/PATCH) are rejected with 503 —
   // never claim success for writes that only hit ephemeral local disk.
@@ -2763,15 +2772,15 @@ function cleanupExpiredMedia() {
   }
 }
 
-// Run media cleanup daily (not in maintenance mode — it's a write;
-// not on a staged revision either — staged revisions must not write at all)
+// Run media cleanup daily (skipped in maintenance mode / FORCE_LOCAL_MODE — it's a write;
+// never on a staged revision either — staged revisions must not write at all)
 setInterval(() => {
-  if (process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
+  if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
   cleanupExpiredMedia();
 }, 24 * 60 * 60 * 1000);
 // Run once at startup (delayed to avoid slowing boot)
 setTimeout(() => {
-  if (process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
+  if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
   cleanupExpiredMedia();
 }, 60000);
 
@@ -2820,10 +2829,10 @@ function checkOverdueTasks() {
   }
 }
 
-// Run overdue check every 15 minutes (not in maintenance mode;
-// not on a staged revision — staged revisions must not write at all)
+// Run overdue check every 15 minutes (skipped in maintenance mode /
+// FORCE_LOCAL_MODE; never on a staged revision — staged revisions must not write at all)
 setInterval(() => {
-  if (process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
+  if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
   checkOverdueTasks();
 }, 15 * 60 * 1000);
 
@@ -3166,9 +3175,9 @@ async function executeDailyReset(
 // Scheduled interval: check every 60s for midnight rollover.
 // Uses America/New_York consistently with executeDailyReset's todayStr.
 setInterval(() => {
-  // Maintenance mode: no background writes. The daily reset is a write.
-  // Staged revision: no background writes either (must not write pre-cutover).
-  if (process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
+  // No background writes: maintenance mode (cutover window), FORCE_LOCAL_MODE,
+  // or staged revision (must not write pre-cutover). The daily reset is a write.
+  if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   if (today !== currentWorkDate) {
     console.log(`[Scheduled Reset] Rollover detected from ${currentWorkDate} to ${today}`);
@@ -3184,7 +3193,7 @@ setInterval(() => {
 // Health — deliberately PUBLIC (listed in PUBLIC_API_ROUTES): monitoring and
 // uptime checks must reach it without auth.
 app.get('/api/health', (req, res) => {
-  const maintenance = process.env.FORCE_LOCAL_MODE === 'true';
+  const maintenance = process.env.FORCE_LOCAL_MODE === 'true' || process.env.MAINTENANCE_MODE === 'true';
   const staged = isStagedRevision();
   const firestore = maintenance ? 'maintenance' : (firestoreDb ? 'connected' : firestoreInitStatus);
   res.json({

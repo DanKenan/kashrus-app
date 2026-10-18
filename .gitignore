@@ -8,3 +8,5 @@ coverage/
 .env*
 !.env.example
 data/
+BACKUP-*.json
+*.backup
