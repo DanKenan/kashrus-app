@@ -87,17 +87,40 @@ export function describeWriteError(status: number, serverMessage?: string): stri
 }
 
 /**
+ * Generate a stable operation ID for ONE user action. Call this ONCE when the
+ * user initiates the action (e.g., on button click), then pass the same ID to
+ * apiWrite on every attempt including retries. Do NOT generate a new ID per
+ * retry — the server uses it to detect duplicate submissions.
+ *
+ * Example:
+ *   const actionId = newActionId();
+ *   const attempt = async () => apiWrite('/api/tasks/123', {
+ *     method: 'PUT',
+ *     body: JSON.stringify({ ... }),
+ *     operationId: actionId,  // same ID on retry
+ *     expectedVersion: task._v,  // entity's last-known version
+ *   });
+ */
+export function newActionId(): string {
+  return crypto.randomUUID();
+}
+
+/**
  * POST/PUT/DELETE/PATCH wrapper: performs the request, parses the body, and
  * returns a structured result. Never throws for HTTP error statuses; only
  * throws on truly unexpected failures. Callers must check `result.ok` before
  * treating the write as successful or showing a success toast.
  *
- * Versioning & idempotency (Stage 2 contract):
- * - `expectedVersion`: the entity's last-known `_v`. The server rejects with
- *   409 if it doesn't match — the caller's screen is stale.
- * - `operationId`: stable UUID per user action. Generate ONCE per action and
- *   reuse it on retry — do NOT generate a new one per attempt, or retries
- *   become duplicate operations. If omitted, apiWrite generates one.
+ * Versioning & idempotency contract (Stage 2):
+ * - `expectedVersion`: the entity's last-known `_v` (from when the UI loaded
+ *   it). The server rejects with 409 VERSION_CONFLICT if it doesn't match —
+ *   the caller's screen is stale and must refresh. CALLERS MUST PROVIDE THIS
+ *   for updates to existing entities; apiWrite cannot know which entity you're
+ *   editing. For creates (no existing entity), omit it.
+ * - `operationId`: stable UUID per user action (see newActionId()). Generate
+ *   ONCE per action in the UI component, reuse on retry. If omitted, apiWrite
+ *   generates one — but then retries from the caller MUST pass the same ID
+ *   back, or the retry becomes a separate operation.
  */
 export async function apiWrite<T = any>(
   input: string,

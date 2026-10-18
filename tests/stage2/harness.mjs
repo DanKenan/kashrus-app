@@ -124,12 +124,15 @@ async function main() {
   const { runAll } = await import('./run-all.mjs');
 
   // Test 5 needs to kill and restart the server. Provide a restart hook.
+  // Accepts optional env overrides (e.g., { FORCE_LOCAL_MODE: 'true' } for
+  // test 11's maintenance-mode verification).
   let serverChild = server;
-  const restartServer = async () => {
+  const restartServer = async (envOverrides = {}) => {
     console.log('[harness] Restarting server...');
     serverChild.kill('SIGKILL');
     await sleep(2000);
-    serverChild = spawnLogged('npx', ['tsx', 'server.ts'], { cwd: REPO, env: serverEnv }, 'server');
+    const restartEnv = { ...serverEnv, ...envOverrides };
+    serverChild = spawnLogged('npx', ['tsx', 'server.ts'], { cwd: REPO, env: restartEnv }, 'server');
     await waitFor(`http://127.0.0.1:${SERVER_PORT}/api/venues`, { label: 'server (restarted)', timeoutMs: 120000 });
     console.log('[harness] Server restarted.');
   };

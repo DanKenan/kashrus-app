@@ -47,38 +47,83 @@ function isBcryptHash(s: unknown): boolean {
  *
  * Pepper is a DEDICATED secret, separate from the JWT signing secret.
  * Priority: RESET_CODE_PEPPER env var → Firestore-stored `resetPepper`
- * (generated on first use, persisted transactionally) → never hardcoded.
+ * (initialized once at startup, before any request handling).
  *
  * Why not reuse the JWT secret? The JWT secret is stored IN the Firestore
  * document alongside the code hashes. If an attacker reads the document
  * (e.g., via open Firestore rules), they'd get both the hashes AND the
  * pepper, defeating the hashing. A dedicated pepper from an env var lives
- * outside Firestore. The Firestore fallback exists for zero-config deploys
- * but should be replaced with the env var in production.
+ * outside Firestore.
+ *
+ * STARTUP INITIALIZATION (no async race): initResetPepper() runs during
+ * startServer(), AFTER Firestore loads and BEFORE the server accepts requests.
+ * The pepper is therefore STABLE before any verification happens. There is
+ * no async generation during request handling.
  *
  * Rotation: set a new RESET_CODE_PEPPER env var and redeploy. All outstanding
  * reset codes become invalid (they were hashed with the old pepper) — users
  * simply request new codes. No data migration needed.
+ *
+ * TECH DEBT: On Cloud Run without RESET_CODE_PEPPER set, we fall back to the
+ * Firestore-persisted pepper (better than crashing, but the pepper lives
+ * alongside the hashes). Don should set the env var in production.
  */
-function getResetPepper(): string {
-  if (process.env.RESET_CODE_PEPPER) return process.env.RESET_CODE_PEPPER;
-  // Firestore-stored fallback (generated once, persisted via commitState).
-  if (!(globalThis as any).__resetPepper) {
-    (globalThis as any).__resetPepper = crypto.randomBytes(32).toString('hex');
-    // Persist it transactionally so it survives restarts (best-effort; the
-    // in-memory value is used until the persist completes).
-    commitState(
-      (freshDoc) => {
-        if (freshDoc.resetPepper) {
-          (globalThis as any).__resetPepper = freshDoc.resetPepper;
-          return { doc: freshDoc, result: null };
-        }
-        return { doc: { ...freshDoc, resetPepper: (globalThis as any).__resetPepper }, result: null };
-      },
-      { label: 'persist-reset-pepper' }
-    ).catch(() => {});
+let _resetPepper: string | null = null;
+
+async function initResetPepper(): Promise<void> {
+  // 1. Env var wins (production configuration).
+  if (process.env.RESET_CODE_PEPPER) {
+    _resetPepper = process.env.RESET_CODE_PEPPER;
+    console.log('[Security] Using RESET_CODE_PEPPER from environment.');
+    return;
   }
-  return (globalThis as any).__resetPepper;
+  // 2. Firestore-persisted pepper (stable across restarts).
+  // Read it synchronously during startup — no race.
+  if (firestoreDb) {
+    try {
+      const snap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
+      const stored = snap.exists ? (snap.data() as any)?.resetPepper : null;
+      if (stored && typeof stored === 'string') {
+        _resetPepper = stored;
+        console.log('[Security] Using Firestore-persisted reset pepper.');
+        return;
+      }
+    } catch (err: any) {
+      console.warn('[Security] Could not read reset pepper from Firestore:', err?.message);
+    }
+  }
+  // 3. Generate and persist (first boot only).
+  _resetPepper = crypto.randomBytes(32).toString('hex');
+  if (!process.env.K_SERVICE) {
+    console.warn('[Security] Generated ephemeral reset pepper for local dev. Set RESET_CODE_PEPPER env var for production.');
+  } else {
+    console.error('[Security] WARNING: No RESET_CODE_PEPPER env var on Cloud Run. Using generated pepper persisted to Firestore. Set the env var to fix this (see docs).');
+  }
+  // Persist transactionally so it survives restarts.
+  if (firestoreDb) {
+    try {
+      await commitState(
+        (freshDoc) => {
+          // Another instance may have written it concurrently — prefer existing.
+          if (freshDoc.resetPepper && typeof freshDoc.resetPepper === 'string') {
+            _resetPepper = freshDoc.resetPepper;
+            return { doc: freshDoc, result: null };
+          }
+          return { doc: { ...freshDoc, resetPepper: _resetPepper }, result: null };
+        },
+        { label: 'init-reset-pepper' }
+      );
+    } catch (err: any) {
+      console.warn('[Security] Could not persist reset pepper:', err?.message);
+    }
+  }
+}
+
+function getResetPepper(): string {
+  if (!_resetPepper) {
+    throw new Error('[Security] Reset pepper not initialized. initResetPepper() must run during startup before any request handling.');
+  }
+  return _resetPepper;
 }
 
 function hashResetCode(code: string): string {
@@ -262,7 +307,7 @@ const server = http.createServer(app);
 // In local dev (no proxy), this is harmless — req.ip falls back to socket.
 app.set('trust proxy', 1);
 
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 // ---------------------------------------------------------------------------
 // Request authentication + custom-domain agency resolution.
@@ -1538,8 +1583,12 @@ async function initFirestore() {
   }
   try {
     // Test hook: in-memory Firestore mock with faithful transaction semantics.
-    // Used by the Stage 2 test suite (FIRESTORE_MOCK=true). Not for production.
+    // Used by the Stage 2 test suite (FIRESTORE_MOCK=true). NEVER on Cloud Run.
     if (process.env.FIRESTORE_MOCK === 'true') {
+      if (process.env.K_SERVICE) {
+        console.error('[FATAL] FIRESTORE_MOCK=true on Cloud Run (K_SERVICE set). Refusing to start with mock data in production.');
+        process.exit(1);
+      }
       const mockMod = await import('./tests/stage2/firestore-mock.mjs');
       firestoreDb = mockMod.getMockFirestore();
       firestoreInitStatus = 'connected';
@@ -1683,6 +1732,14 @@ class DuplicateOperationError extends Error {
   }
 }
 
+class PayloadMismatchError extends Error {
+  code = 'PAYLOAD_MISMATCH';
+  constructor() {
+    super('Operation ID was already used for a different request. Please retry with a new operation ID.');
+    this.name = 'PayloadMismatchError';
+  }
+}
+
 class FirestoreUnavailableError extends Error {
   code = 'FIRESTORE_UNAVAILABLE';
   constructor(message: string) {
@@ -1814,6 +1871,12 @@ interface CommitOptions {
   idempotencyKey?: string;
   /** Authenticated user ID that owns the idempotency key (stored on the record). */
   idempotencyUserId?: string;
+  /**
+   * SHA-256 fingerprint of the request payload (minus versioning fields).
+   * Stored on the idempotency record; a retry with the same operationId but
+   * a different payload is rejected with 409 (not treated as idempotent).
+   */
+  payloadHash?: string;
   /** How many times to retry the transaction on version conflict (default 2). */
   maxRetries?: number;
   /** Human-readable label for logs. */
@@ -1965,6 +2028,12 @@ async function commitState(
             (r) => r && r.key === idemKey && typeof r.expiresAt === 'number' && r.expiresAt > now
           );
           if (hit) {
+            // Payload mismatch: same operationId but different operation type
+            // or payload. This is NOT a retry — reject it. Returning the
+            // cached result would apply the wrong operation's outcome.
+            if (options.payloadHash && hit.payloadHash && options.payloadHash !== hit.payloadHash) {
+              throw new PayloadMismatchError();
+            }
             throw new DuplicateOperationError({ result: hit.result, version: hit.version });
           }
         }
@@ -2021,6 +2090,7 @@ async function commitState(
               key: idemKey,
               userId: options.idempotencyUserId || null,
               operation: label,
+              payloadHash: options.payloadHash || null,
               result: sanitizeForIdempotency(outcome.result),
               createdAt: now,
               expiresAt: now + IDEMPOTENCY_TTL_MS,
@@ -2138,9 +2208,19 @@ async function commitOrRespond(
       ? `${authUserId}:${operationId}`
       : operationId
     : undefined;
+  // Payload fingerprint: hash of the request body (minus versioning fields).
+  // If the same operationId arrives with a DIFFERENT payload, it's not a
+  // retry — it's a collision or bug. The server rejects it with 409 rather
+  // than returning the wrong cached result.
+  const payloadForHash = { ...body };
+  delete payloadForHash.expectedVersion;
+  delete payloadForHash.operationId;
+  const payloadHash = operationId
+    ? crypto.createHash('sha256').update(JSON.stringify(payloadForHash)).digest('hex').slice(0, 16)
+    : undefined;
 
   try {
-    return await commitState(mutator, { ...options, expectedVersion, operationId, idempotencyKey, idempotencyUserId: authUserId });
+    return await commitState(mutator, { ...options, expectedVersion, operationId, idempotencyKey, idempotencyUserId: authUserId, payloadHash });
   } catch (err: any) {
     // All error paths send the HTTP response and return null, so the caller's
     // `if (!committed) return;` guard works. (Returning the Express Response
@@ -2149,6 +2229,10 @@ async function commitOrRespond(
       // Idempotent retry: the original result was already broadcast when it
       // first committed. Return it directly without re-broadcasting.
       res.json(err.cachedResult.result);
+      return null;
+    }
+    if (err instanceof PayloadMismatchError) {
+      res.status(409).json({ error: err.message, code: 'PAYLOAD_MISMATCH' });
       return null;
     }
     if (err instanceof VersionConflictError) {
@@ -2512,10 +2596,16 @@ function cleanupExpiredMedia() {
   }
 }
 
-// Run media cleanup daily
-setInterval(cleanupExpiredMedia, 24 * 60 * 60 * 1000);
+// Run media cleanup daily (not in maintenance mode — it's a write)
+setInterval(() => {
+  if (process.env.FORCE_LOCAL_MODE === 'true') return;
+  cleanupExpiredMedia();
+}, 24 * 60 * 60 * 1000);
 // Run once at startup (delayed to avoid slowing boot)
-setTimeout(cleanupExpiredMedia, 60000);
+setTimeout(() => {
+  if (process.env.FORCE_LOCAL_MODE === 'true') return;
+  cleanupExpiredMedia();
+}, 60000);
 
 // Check for overdue tasks and notify assigned users (runs every 15 min)
 // Tracks already-notified tasks to avoid spam
@@ -2562,8 +2652,11 @@ function checkOverdueTasks() {
   }
 }
 
-// Run overdue check every 15 minutes
-setInterval(checkOverdueTasks, 15 * 60 * 1000);
+// Run overdue check every 15 minutes (not in maintenance mode)
+setInterval(() => {
+  if (process.env.FORCE_LOCAL_MODE === 'true') return;
+  checkOverdueTasks();
+}, 15 * 60 * 1000);
 
 // ---- Web Push endpoints ----
 app.get('/api/push/public-key', (_req, res) => {
@@ -2868,7 +2961,13 @@ async function executeDailyReset(
   }
 
   // Broadcast per-agency ONLY after commit (in-memory cache is now fresh).
-  for (const a of agencies) {
+  // AGENCY SCOPING: if this reset was scoped to one agency, only that agency
+  // gets the broadcast. Other agencies must not receive another agency's
+  // reset snapshot or task history.
+  const broadcastAgencies = scopeAgencyId
+    ? agencies.filter((a: any) => a.id === scopeAgencyId)
+    : agencies;
+  for (const a of broadcastAgencies) {
     const aid = a.id;
     broadcast('DAILY_RESET', {
       venueId: targetVenueId || 'all',
@@ -2882,9 +2981,12 @@ async function executeDailyReset(
   return committed;
 }
 
-// Scheduled interval: check every 60s for midnight rollover
+// Scheduled interval: check every 60s for midnight rollover.
+// Uses America/New_York consistently with executeDailyReset's todayStr.
 setInterval(() => {
-  const today = new Date().toISOString().split('T')[0];
+  // Maintenance mode: no background writes. The daily reset is a write.
+  if (process.env.FORCE_LOCAL_MODE === 'true') return;
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   if (today !== currentWorkDate) {
     console.log(`[Scheduled Reset] Rollover detected from ${currentWorkDate} to ${today}`);
     // Async: resolves only after the transaction commits. Log-and-continue on
@@ -2899,10 +3001,12 @@ setInterval(() => {
 // Health — deliberately PUBLIC (listed in PUBLIC_API_ROUTES): monitoring and
 // uptime checks must reach it without auth.
 app.get('/api/health', (req, res) => {
-  const firestore = firestoreDb ? 'connected' : firestoreInitStatus;
+  const maintenance = process.env.FORCE_LOCAL_MODE === 'true';
+  const firestore = maintenance ? 'maintenance' : (firestoreDb ? 'connected' : firestoreInitStatus);
   res.json({
-    status: firestore === 'connected' ? 'ok' : 'degraded',
+    status: maintenance ? 'maintenance' : (firestore === 'connected' ? 'ok' : 'degraded'),
     firestore,
+    maintenance,
     version: stateVersion,
     uptime: Math.floor(process.uptime()),
     time: new Date().toISOString(),
@@ -2959,6 +3063,9 @@ app.get('/api/admin/storage', (req, res) => {
 
 // Admin data export — download full state as JSON backup (admin only)
 app.get('/api/admin/export', (req, res) => {
+  // SECURITY: admin-only. Previously any authenticated user could download
+  // the full database. Fixed 2026-10-18 (matches hotfix/admin-export-auth).
+  if (!requireAdmin(req, res)) return;
   const snapshot = stateSnapshot();
   // Strip sensitive fields from export
   const safe = {
@@ -6596,6 +6703,10 @@ async function startServer() {
   } else {
     durableStateLoaded = true; // No Firestore configured; local file is the source of truth.
   }
+
+  // Initialize the password-reset pepper BEFORE accepting requests.
+  // Must be stable before any verification happens (no async race).
+  await initResetPepper();
 
   // Backfill task ordering AFTER the durable load (the hydrate above replaces
   // in-memory tasks, so this must not run at module level). Persists via the

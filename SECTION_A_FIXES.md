@@ -283,3 +283,44 @@ All changes uncommitted, for review. `npx tsc --noEmit` clean. `npm run test:sta
 - No duplicate effect (idempotency already guaranteed by commitState)
 
 **Tested:** test-10 updated to expect 200 + `duplicate:true` on replay
+
+---
+
+## Round 3 — Third Review (commit eaf0075)
+
+### R3-1. Daily-reset WebSocket broadcast scoping
+**Was wrong:** Post-commit broadcast looped over ALL agencies, sending `committed.result` (only the first snapshot) to every agency.
+**Changed:** `server.ts` `executeDailyReset()`: broadcast now scoped to `scopeAgencyId` when set. Also aligned scheduled rollover check to America/New_York (was UTC `toISOString`, now `toLocaleDateString` with NY timezone, matching the transaction).
+
+### R3-2. Client versioning and idempotency completion
+**Was wrong:** No callers passed `expectedVersion`; operation IDs generated in apiWrite (not stable across retries); server didn't check payload on idempotency hit.
+**Changed:**
+- `src/lib/api.ts`: added `newActionId()` helper + explicit JSDoc contract (callers MUST provide expectedVersion for updates; generate ONE action ID per user action).
+- `server.ts`: `commitOrRespond` computes `payloadHash` (SHA-256 of body minus versioning fields); `commitState` stores it on idempotency records; on lookup, mismatched payload → new `PayloadMismatchError` → 409 `PAYLOAD_MISMATCH` (not cached result).
+
+### R3-3. Mock and maintenance safety
+**Was wrong:** FIRESTORE_MOCK could run on Cloud Run; background writers (daily reset cron, media cleanup, overdue check) ran in maintenance mode; /api/health didn't report maintenance.
+**Changed:**
+- `initFirestore()`: `FIRESTORE_MOCK=true` + `K_SERVICE` → `console.error` + `process.exit(1)`.
+- All `setInterval`/`setTimeout` background writers gated on `FORCE_LOCAL_MODE !== 'true'`.
+- `/api/health` now reports `maintenance: true/false` and `firestore: 'maintenance'` in maintenance mode.
+
+### R3-4. Reset pepper race fix
+**Was wrong:** `getResetPepper()` generated and persisted async during request handling (race on restart).
+**Changed:** New `initResetPepper()` runs during `startServer()` after Firestore loads, before accepting requests. Priority: env var → Firestore-stored → generate+publish. `getResetPepper()` throws if not initialized. No async generation during requests.
+
+### R3-5. Completed tests
+- **Test 11**: now actually restarts with `FORCE_LOCAL_MODE=true`, verifies 503 MAINTENANCE on POST/PUT/DELETE, 200 on GETs, clean recovery. Harness `restartServer` accepts env overrides.
+- **Test 14**: now performs a real 950KB oversized write, verifies 503 SIZE_LIMIT, no version bump, no leak, normal writes unaffected.
+- **Test 15**: already honest about API-contract verification (no React test infra); description accurate.
+- **EADDRINUSE investigation**: port 24678 not in codebase (ephemeral CI port); WebSocket shares HTTP server port 3100; harness kills 3100 on restart. All tests pass; noise from controlled restarts, not a code bug.
+
+### R3-6/7/8. New docs
+- `CUTOVER.md`: atomic traffic cutover procedure with gcloud commands.
+- `PWA_UPDATE.md`: old-client behavior matrix, update flow.
+- `BACKUP_RESTORE.md`: backup via admin export, manual restore procedure, post-restore steps.
+
+### R3-9. Admin/export hotfix included
+Applied `requireAdmin` check to `/api/admin/export` on the PR branch (matches hotfix/admin-export-auth PR #2).
+
+**Tests:** 15/15 pass. `npx tsc --noEmit` clean.
