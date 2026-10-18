@@ -75,6 +75,13 @@
   <button onclick="checkMigration()">Check Migration Status</button>
   <div id="migration-status-result"></div>
 </div>
+
+<div class="section">
+  <h2>8. Test Monitoring Alert</h2>
+  <p>Fires a real ERROR log line to verify the Cloud Monitoring alert pipeline reaches your email/phone.</p>
+  <button onclick="fireTestAlert()">Fire Test Alert</button>
+  <div id="test-alert-result"></div>
+</div>
 </div>
 
 <script>
@@ -393,6 +400,24 @@ async function checkMigration() {
   } catch (e) {
     el.innerHTML = '';
     step(el, 'Status check', false, e.message);
+  }
+}
+
+async function fireTestAlert() {
+  const el = document.getElementById('test-alert-result');
+  el.innerHTML = '';
+  step(el, 'Firing test alert...', null);
+  try {
+    const r = await api('POST', '/api/internal/test-alert');
+    el.innerHTML = '';
+    if (r.status !== 200) {
+      step(el, 'Test alert', false, r.json.error || 'Failed');
+      return;
+    }
+    step(el, 'Test alert fired', true, 'Check your email/phone for the Cloud Monitoring notification. Sent at: ' + r.json.sentAt);
+  } catch (e) {
+    el.innerHTML = '';
+    step(el, 'Test alert', false, e.message);
   }
 }
 </script>
