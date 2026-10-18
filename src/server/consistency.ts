@@ -18,6 +18,8 @@ const FIRESTORE_STATE_DOC = 'app-state/main';
 const MONOLITH_SIZE_WARN_BYTES = 800 * 1024; // 800 KiB warning
 const MAX_CONSISTENCY_RETRIES = 3;
 
+import { getStorage } from 'firebase-admin/storage';
+
 /**
  * Get the monolith's _v (global version) for stability checking.
  */
@@ -51,6 +53,8 @@ export interface ConsistencyResult {
   monolithVersion: number | null;
   monolithSizeBytes: number | null;
   monolithSizeWarn: boolean;
+  backupStale: boolean;
+  backupLastAt: string | null;
   status: {
     monolith: { venues: number; users: number; tasks: number };
     perEntity: { venues: number; users: number; tasks: number; usersByEmail: number };
@@ -58,6 +62,70 @@ export interface ConsistencyResult {
     mismatches: Array<{ collection: string; id: string; reason: string }>;
   } | null;
   error?: string;
+}
+
+/**
+ * Check backup staleness by finding the newest SUCCESS.json marker in GCS.
+ * Each backup run writes tier1/<date>/<runId>/SUCCESS.json (immutable).
+ * Monitoring lists the bucket prefix and takes the newest by path
+ * (paths are chronological: tier1/YYYY-MM-DD/<runId>/).
+ *
+ * Returns { stale, lastAt }. Stale = no successful backup in 26 hours,
+ * OR missing/malformed/future timestamp, OR missing BACKUP_BUCKET config
+ * (once monitoring is enabled, unconfigured = error, not healthy).
+ */
+async function checkBackupStaleness(firestoreDb: any): Promise<{ stale: boolean; lastAt: string | null }> {
+  const bucketName = process.env.BACKUP_BUCKET;
+  if (!bucketName) {
+    // Monitoring is enabled (this code is running) but bucket not configured.
+    // That's an error, not a healthy "unknown" — fail closed.
+    console.error('[consistency] ERROR: BACKUP_BUCKET not configured — backup monitoring enabled but no bucket. Stale.');
+    return { stale: true, lastAt: null };
+  }
+  try {
+    const storage = getStorage();
+    // List all SUCCESS.json markers. Run IDs are random (not chronological),
+    // so download each marker and select by its createdAt timestamp.
+    const [files] = await storage.bucket(bucketName).getFiles({ prefix: 'tier1/' });
+    const markerNames = files
+      .filter((f: any) => f.name.endsWith('/SUCCESS.json'))
+      .map((f: any) => f.name);
+    if (markerNames.length === 0) {
+      return { stale: true, lastAt: null };
+    }
+    let newestTs = -1;
+    let newestAt: string | null = null;
+    for (const name of markerNames) {
+      try {
+        const [contents] = await storage.bucket(bucketName).file(name).download();
+        const marker = JSON.parse(contents.toString('utf8'));
+        const ts = new Date(marker?.createdAt).getTime();
+        if (!isNaN(ts) && ts > newestTs) {
+          newestTs = ts;
+          newestAt = marker.createdAt;
+        }
+      } catch {
+        // Skip unreadable markers
+      }
+    }
+    const lastAt = newestAt;
+    if (!lastAt || typeof lastAt !== 'string') {
+      return { stale: true, lastAt: null };
+    }
+    const ts = new Date(lastAt).getTime();
+    if (isNaN(ts)) {
+      return { stale: true, lastAt: null }; // Malformed date = stale
+    }
+    if (ts > Date.now() + 5 * 60 * 1000) {
+      return { stale: true, lastAt }; // Implausibly future = stale
+    }
+    const ageMs = Date.now() - ts;
+    const stale = ageMs > 26 * 60 * 60 * 1000; // 26 hours
+    return { stale, lastAt };
+  } catch (e: any) {
+    // Marker missing or unreadable = stale (fail closed)
+    return { stale: true, lastAt: null };
+  }
 }
 
 /**
@@ -119,7 +187,14 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
     }
 
     const sizeWarn = sizeBytes >= MONOLITH_SIZE_WARN_BYTES;
-    const ok = status.match && !sizeWarn;
+    const backup = await checkBackupStaleness(firestoreDb);
+    if (backup.stale) {
+      console.error(
+        `[consistency] ERROR: BACKUP STALE — last successful backup: ${backup.lastAt || 'never'} ` +
+        `(threshold: 26h)`
+      );
+    }
+    const ok = status.match && !sizeWarn && !backup.stale;
 
     if (!status.match) {
       // Log IDs + reasons only — perEntityStatus never includes secrets
@@ -140,6 +215,8 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
       monolithVersion: versionAfter,
       monolithSizeBytes: sizeBytes,
       monolithSizeWarn: sizeWarn,
+      backupStale: backup.stale,
+      backupLastAt: backup.lastAt,
       status,
       ...(lastError ? { error: lastError } : {}),
     };
@@ -153,6 +230,8 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
     monolithVersion: null,
     monolithSizeBytes: null,
     monolithSizeWarn: false,
+    backupStale: true,
+    backupLastAt: null,
     status: null,
     error: finalError,
   };
