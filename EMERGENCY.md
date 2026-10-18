@@ -420,6 +420,9 @@ Carried forward from `STAGE4_PLAN.md`:
 - [ ] Deferred monitoring coverage from `docs/stage4-alerts.md` §6 PENDING items
   (login-spike alert, Firestore quota, bucket growth, backup digest, cert expiry).
 - [ ] Full Tier 2 recovery (weekly managed export + its restore path).
+- [ ] Fix flaky Test 2 in `tests/stage2/harness.mjs` (concurrent writes: both
+  requests got 409 instead of one 200 + one 409 — pre-existing timing race,
+  observed 2026-10-18; re-run passed).
 - [ ] Step E (stop dual-write): **deferred by Don's decision** — do not revive
   without him.
 - [ ] Ingredients / factory-inspections migration: **do not touch** until Don
