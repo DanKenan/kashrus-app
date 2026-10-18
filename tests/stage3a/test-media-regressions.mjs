@@ -218,5 +218,77 @@ export default {
     }
 
     console.log('  ✓ All regression tests passed');
+
+    // TEST 4: Intent without venueId (Don's bug 2026-10-18)
+    console.log('  Test 4: intent without venueId...');
+    await this.testIntentWithoutVenueId();
+  },
+
+  /**
+   * Regression test for the bug Don hit 2026-10-18: creating a media intent
+   * without venueId caused "Cannot use undefined as a Firestore value".
+   * Uses a strict mock that enforces Firestore's no-undefined rule.
+   */
+  async testIntentWithoutVenueId() {
+    function createStrictMockDb() {
+      const docs = new Map();
+      function assertNoUndefined(obj, path = '') {
+        if (obj === undefined) {
+          throw new Error(`Cannot use "undefined" as a Firestore value (found in field "${path}")`);
+        }
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+          for (const [k, v] of Object.entries(obj)) {
+            assertNoUndefined(v, path ? `${path}.${k}` : k);
+          }
+        }
+      }
+      return {
+        collection(name) {
+          return {
+            doc(id) {
+              const key = `${name}/${id}`;
+              return {
+                async get() {
+                  const d = docs.get(key);
+                  return { exists: !!d, data: () => d, id };
+                },
+                async set(data) {
+                  assertNoUndefined(data); // Enforce Firestore rule
+                  docs.set(key, data);
+                },
+              };
+            },
+          };
+        },
+      };
+    }
+
+    const db = createStrictMockDb();
+    setTestStorage(mockStorage);
+
+    try {
+      // Intent WITHOUT venueId — this is what Don did on the admin page
+      const intent = await createIntent(db, {
+        agencyId: 'agency-hkc',
+        uploadedBy: 'user-1',
+        mimeType: 'image/png',
+        sizeBytes: 1024,
+        sha256: 'b'.repeat(64),
+        // venueId intentionally omitted
+      });
+
+      if (!intent.mediaId) throw new Error('No mediaId returned');
+      if (!intent.uploadUrl) throw new Error('No uploadUrl returned');
+
+      // Verify the doc was written without venueId field (not undefined)
+      const snap = await db.collection('media').doc(intent.mediaId).get();
+      const data = snap.data();
+      if ('venueId' in data && data.venueId === undefined) {
+        throw new Error('venueId should be stripped, not undefined');
+      }
+      console.log(`  ✓ Intent without venueId succeeds (regression test for Don's bug)`);
+    } finally {
+      setTestStorage(null);
+    }
   },
 };
