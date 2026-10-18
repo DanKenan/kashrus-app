@@ -108,7 +108,7 @@ gs://<bucket>/
   temp-uploads/{uuid}                   # client direct-upload staging (lifecycle-deleted)
 ```
 
-Photos may show venue interiors, staff, and proprietary processes — signed URLs, not public URLs. The full upload lifecycle state machine (intent → private upload → server validation → transactional metadata → orphan cleanup) is defined in §6. The 30-day media-retention auto-deletion policy is **flagged for Don's explicit decision** before implementation (see §6) — inspection evidence must not be auto-deleted on an assumed policy.
+Photos may show venue interiors, staff, and proprietary processes — signed URLs, not public URLs. The full upload lifecycle state machine (intent → private upload → server validation → transactional metadata → orphan cleanup) is defined in §6. The 30-day media-retention policy is **decided** (Don, 2026-10-18): photos and voice recordings auto-deleted 30 days after upload; backups/object versions must not keep deleted media accessible; written inspection records are retained permanently — the record that an inspection occurred survives its media (see §6.3).
 
 **Size enforcement:** the 900 KB Firestore guard stays (defense in depth); the meaningful limit moves to the upload endpoint: photos ≤ 5 MB post-compression, voice ≤ 10 MB. Client-side compression (~500 KB cap) stays as the first line.
 
@@ -281,13 +281,19 @@ ABANDONED (orphan sweeper reclaims)
 - When serving metadata to a client, the server issues a **short-lived signed read URL** (15 min) after checking the caller's agency/venue permissions for that object.
 - **Never store long-lived signed URLs as permanent metadata** — they leak via exports, logs, and caches, and they bypass permission checks after issuance.
 
-### 6.3 Retention policy — decision required
+### 6.3 Retention policy — DECIDED (Don, 2026-10-18; advisor-confirmed)
 
-The current `MEDIA_RETENTION_DAYS = 30` strips base64 from the monolith. In Stage 3 the equivalent is deleting the Storage object. **This policy is flagged for Don's explicit decision before implementation** — inspection evidence (kashering photos, incident documentation) may have evidentiary or compliance value beyond 30 days, and auto-deletion is irreversible. Options to put to Don:
-- (a) Keep 30-day auto-deletion (current behavior, new mechanism).
-- (b) Retain 1 year, then delete (covers annual audit cycles).
-- (c) Retain indefinitely; Don deletes manually per venue.
-- Until Don decides, the migration preserves all existing media with **no auto-deletion** in the new layout (safe default).
+Maximum 30-day retention for media. The policy:
+
+- **Inspection photographs:** automatically deleted **30 days after upload**.
+- **Voice recordings:** automatically deleted **30 days after upload**.
+- **Backups and object versions:** deleted media must not remain accessible beyond the 30-day limit through backups or object versions. The backup design must actively expire media (e.g., GCS lifecycle rules on the media bucket + backup retention ≤ 30 days for media payloads, or media excluded from long-retention backups), and **object versioning must not resurrect deleted media**.
+- **Inspection history is NOT deleted:** written records, timestamps, task completions, and notes are retained permanently. Only the photo and audio bytes are subject to deletion.
+- **The 30-day clock starts at upload time**, recorded in the metadata doc.
+
+**The key invariant:** the record that an inspection *occurred* survives forever; the media *evidence* expires after 30 days. After deletion, the metadata doc remains with its timestamps, notes, and a `mediaDeletedAt` marker — never a dangling reference that implies the photo still exists.
+
+The current `MEDIA_RETENTION_DAYS = 30` strips base64 from the monolith. In Stage 3 the equivalent is deleting the Storage object on the same schedule, with the backup/object-version constraints above. Until the new-layout deletion job is implemented and tested, the migration preserves all existing media with **no auto-deletion** in the new layout (safe default).
 
 ### 6.4 Migration of existing media
 
