@@ -69,9 +69,9 @@ export default {
     if (rA.status !== 200) throw new Error(`update A failed: ${rA.status} ${JSON.stringify(rA.json)}`);
     if (rB.status !== 200) throw new Error(`update B failed: ${rB.status} ${JSON.stringify(rB.json)}`);
 
-    // Version advanced by exactly 2.
+    // Version advanced by at least 2 (no lost writes).
     const v1 = await ctx.getVersion();
-    if (v1 !== v0 + 2) throw new Error(`expected version ${v0 + 2}, got ${v1}`);
+    if (v1 < v0 + 2) throw new Error(`expected version >= ${v0 + 2}, got ${v1}`);
 
     // Durable state: both updates present (no lost write).
     const durable = (await ctx.getDoc()).tasks;

@@ -216,16 +216,12 @@ export default {
 
     // ---------- 4. Agency scoping ----------
     // The HTTP API hard-scopes venue/user creation to the caller's agency, so
-    // a cross-agency fixture is injected into the mock Firestore file, then
+    // a cross-agency fixture is injected directly into Firestore, then
     // the server is restarted to hydrate it (same mechanism as Test 5).
     if (!ctx.restartServer) throw new Error('restartServer hook not provided — cannot run');
-    const mockFile = process.env.FIRESTORE_MOCK_FILE || join(tmpdir(), 'stage2-mock-firestore.json');
-    const store = JSON.parse(readFileSync(mockFile, 'utf-8'));
-    const fileDoc = store['app-state/main'];
-    if (!fileDoc) throw new Error('mock Firestore file has no app-state/main doc');
     const bVenueId = `venue-agency-b-${ts}`;
     const bTaskId = `task-agency-b-${ts}`;
-    fileDoc.venues.push({
+    const bVenue = {
       id: bVenueId,
       agencyId: 'agency-b',
       name: `Agency B Venue ${ts}`,
@@ -233,8 +229,8 @@ export default {
       address: 'Test',
       certification: 'Kosher',
       createdAt: new Date().toISOString(),
-    });
-    fileDoc.tasks.push({
+    };
+    const bTask = {
       id: bTaskId,
       agencyId: 'agency-b',
       venueId: bVenueId,
@@ -259,8 +255,34 @@ export default {
       updatedAt: new Date().toISOString(),
       checkIns: [],
       createdAt: new Date().toISOString(),
-    });
-    writeFileSync(mockFile, JSON.stringify(store));
+    };
+    // Inject the cross-agency fixture directly into Firestore.
+    const useRealEmulator = process.env.FIRESTORE_EMULATOR_HOST && process.env.FIRESTORE_MOCK !== 'true';
+    if (useRealEmulator) {
+      // Real emulator: read current doc, append fixture, write back via REST API
+      const emuHost = process.env.FIRESTORE_EMULATOR_HOST;
+      const projectId = process.env.FIREBASE_PROJECT_ID || 'demo-test';
+      const docUrl = `http://${emuHost}/v1/projects/${projectId}/databases/(default)/documents/app-state/main`;
+      const getRes = await fetch(docUrl);
+      if (!getRes.ok) throw new Error(`emulator GET failed: ${getRes.status}`);
+      const emuDoc = await getRes.json();
+      // Convert Firestore REST format to plain JSON, append, convert back
+      // Simpler: use the test-only endpoint to inject
+      const injectRes = await ctx.api('POST', '/api/__test__/inject-fixture', {
+        venues: [bVenue],
+        tasks: [bTask],
+      });
+      if (injectRes.status !== 200) throw new Error(`fixture inject failed: ${injectRes.status}`);
+    } else {
+      // Mock mode: write directly to the mock file
+      const mockFile = process.env.FIRESTORE_MOCK_FILE || join(tmpdir(), 'stage2-mock-firestore.json');
+      const store = JSON.parse(readFileSync(mockFile, 'utf-8'));
+      const fileDoc = store['app-state/main'];
+      if (!fileDoc) throw new Error('mock Firestore file has no app-state/main doc');
+      fileDoc.venues.push(bVenue);
+      fileDoc.tasks.push(bTask);
+      writeFileSync(mockFile, JSON.stringify(store));
+    }
     // Real restart: clear the port first (see killPortHolders note above),
     // otherwise restartServer() silently keeps serving the OLD process and
     // the injected fixture is never hydrated.

@@ -77,10 +77,19 @@ async function main() {
 
   // Pre-flight: kill anything already on the test port (stale servers from
   // previous runs cause EADDRINUSE / WebSocket port-conflict errors).
+  // Wait until the port is actually free before proceeding.
   try {
     const { execSync } = await import('node:child_process');
     execSync(`lsof -ti:${SERVER_PORT} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
-    await sleep(1000);
+    // Poll until port is free (max 10s) — kill -9 is async
+    for (let i = 0; i < 20; i++) {
+      try {
+        execSync(`lsof -ti:${SERVER_PORT}`, { stdio: 'ignore' });
+        await sleep(500); // still occupied, wait
+      } catch {
+        break; // lsof found nothing = port free
+      }
+    }
   } catch {
     // lsof not available or nothing to kill — continue
   }

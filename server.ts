@@ -299,6 +299,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'GET', path: '/__test__/firestore-doc' },
         { method: 'GET', path: '/__test__/last-reset-code' },
         { method: 'POST', path: '/__test__/expire-reset' },
+        { method: 'POST', path: '/__test__/inject-fixture' },
       ]
     : []),
 ];
@@ -3825,6 +3826,29 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
         { label: 'test-expire-reset' }
       );
       res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // TEST ONLY: injects venues/tasks directly into Firestore (for cross-agency
+  // test fixtures that can't be created via the scoped HTTP API).
+  // Used by test-10 to set up agency-B data before a restart.
+  app.post('/api/__test__/inject-fixture', async (req, res) => {
+    const { venues = [], tasks = [] } = req.body || {};
+    try {
+      await commitState(
+        (freshDoc) => {
+          const newVenues = [...(freshDoc.venues || []), ...venues];
+          const newTasks = [...(freshDoc.tasks || []), ...tasks];
+          return {
+            doc: { ...freshDoc, venues: newVenues, tasks: newTasks },
+            result: { injected: venues.length + tasks.length },
+          };
+        },
+        { label: 'test-inject-fixture' }
+      );
+      res.json({ success: true, injected: venues.length + tasks.length });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
