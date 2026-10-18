@@ -33,6 +33,8 @@ The app will NOT create or reconfigure the bucket on deploy.
 ## 4. Configure CORS for Browser Uploads
 
 Browser-based PUT uploads to signed URLs require CORS on the bucket.
+The signed URL includes `x-goog-if-generation-match: 0` as a signed header —
+the client MUST send this header on the PUT, and CORS must allow it.
 
 1. Create a file `cors.json`:
 ```json
@@ -40,13 +42,26 @@ Browser-based PUT uploads to signed URLs require CORS on the bucket.
   {
     "origin": ["https://workers-collaborative-dashboard-1080260390009.us-east1.run.app"],
     "method": ["PUT", "GET", "HEAD"],
-    "responseHeader": ["Content-Type", "Content-Length"],
+    "responseHeader": ["Content-Type", "Content-Length", "x-goog-if-generation-match"],
     "maxAgeSeconds": 3600
   }
 ]
 ```
 2. Run: `gsutil cors set cors.json gs://shutfey-media-gen-lang-client-0875538181`
    (Or use Cloud Shell in the console)
+
+**Client upload code must include the header:**
+```javascript
+await fetch(uploadUrl, {
+  method: 'PUT',
+  headers: {
+    'Content-Type': mimeType,
+    'x-goog-if-generation-match': '0',
+  },
+  body: file,
+});
+```
+A second PUT to the same URL will receive HTTP 412 (Precondition Failed).
 
 ## 5. Grant the Runtime Service Account Access
 

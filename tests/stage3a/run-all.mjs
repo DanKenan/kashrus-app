@@ -5,8 +5,9 @@
  */
 import testValidation from './test-media-validation.mjs';
 import testLifecycle from './test-media-lifecycle.mjs';
+import testRealFunctions from './test-media-real-functions.mjs';
 
-const tests = [testValidation, testLifecycle];
+const tests = [testValidation, testLifecycle, testRealFunctions];
 
 export async function runAll() {
   console.log(`\n=== Stage 3A Media Tests (${tests.length} tests) ===\n`);

@@ -3791,13 +3791,67 @@ app.get('/api/media/:id/download', async (req, res) => {
  * POST /api/media/sweep — Run the orphan sweeper (admin only).
  * Idempotent. Marks abandoned intents, deletes expired files.
  */
+/**
+ * Verify a Google OIDC token from Cloud Scheduler.
+ * Uses google-auth-library to verify the token's signature, audience,
+ * and service account email. Returns true if valid, false otherwise.
+ */
+async function verifySchedulerOidc(req: any): Promise<boolean> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
+  const token = authHeader.slice(7);
+
+  // Expected: Cloud Scheduler's service account
+  const expectedSa = process.env.SCHEDULER_SERVICE_ACCOUNT;
+  const expectedAudience = process.env.SCHEDULER_AUDIENCE ||
+    'https://workers-collaborative-dashboard-1080260390009.us-east1.run.app';
+
+  if (!expectedSa) {
+    console.warn('[media] SCHEDULER_SERVICE_ACCOUNT not configured; OIDC verification disabled.');
+    return false;
+  }
+
+  try {
+    const { OAuth2Client } = await import('google-auth-library');
+    const client = new OAuth2Client();
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: expectedAudience,
+    });
+    const payload = ticket.getPayload();
+    if (!payload) return false;
+    // Verify the token was issued for the expected service account
+    if (payload.email !== expectedSa) {
+      console.warn(`[media] OIDC email mismatch: ${payload.email} !== ${expectedSa}`);
+      return false;
+    }
+    // Verify issuer is Google
+    if (payload.iss !== 'https://accounts.google.com' && payload.iss !== 'accounts.google.com') {
+      console.warn(`[media] OIDC issuer mismatch: ${payload.iss}`);
+      return false;
+    }
+    return true;
+  } catch (e: any) {
+    console.warn('[media] OIDC verification failed:', e?.message);
+    return false;
+  }
+}
+
 app.post('/api/media/sweep', async (req, res) => {
   try {
-    const admin = requireAdmin(req, res);
-    if (!admin) return;
+    // Accept either: admin session OR verified Cloud Scheduler OIDC token
+    const isScheduler = await verifySchedulerOidc(req);
+    if (!isScheduler) {
+      const admin = requireAdmin(req, res);
+      if (!admin) return;
+    }
     const db = requireMediaDb(req, res);
     if (!db) return;
     const result = await media.sweepOrphans(db);
+    // Alert on failures: log loudly for monitoring
+    if (result.errors.length > 0) {
+      console.error(`[media] Sweeper completed with ${result.errors.length} errors:`, result.errors);
+    }
     res.json(result);
   } catch (e: any) {
     console.error('[media] sweep error:', e);

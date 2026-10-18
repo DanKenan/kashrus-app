@@ -44,8 +44,9 @@ export const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 export const UPLOAD_URL_TTL_MINUTES = 15;
 export const DOWNLOAD_URL_TTL_MINUTES = 15;
 
-/** Retention: 30 days per Don's decision. */
+/** Retention: 30 days per Don's decision. Sweeper runs at 29 days for safety margin. */
 export const RETENTION_DAYS = 30;
+export const SWEEPER_RETENTION_DAYS = 29;
 
 /** Intent expires if not uploaded within 1 hour. */
 export const INTENT_TTL_MS = 60 * 60 * 1000;
@@ -178,11 +179,20 @@ export function generateMediaId(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Storage client (lazy, graceful degradation)
+// Storage client (lazy, graceful degradation, injectable for tests)
 // ---------------------------------------------------------------------------
 
 let storageClient: any = null;
 let storageInitError: string | null = null;
+// Test seam: injected Storage client overrides the real one
+let injectedStorage: any = null;
+
+/**
+ * Inject a mock Storage client for testing. Pass null to clear.
+ */
+export function setTestStorage(mock: any | null): void {
+  injectedStorage = mock;
+}
 
 function getBucketName(): string | null {
   return process.env.MEDIA_BUCKET_NAME || null;
@@ -193,6 +203,9 @@ function getBucketName(): string | null {
  * Missing configuration must not break the app — media ops return 503.
  */
 export function getStorage(): { storage: any; bucketName: string } | null {
+  if (injectedStorage) {
+    return { storage: injectedStorage, bucketName: 'test-bucket' };
+  }
   const bucketName = getBucketName();
   if (!bucketName) return null;
   if (storageInitError) return null;
@@ -240,9 +253,11 @@ export interface IntentResult {
  * Create an upload intent. Returns a signed URL for direct-to-bucket upload.
  * The media doc starts in INTENT state.
  *
- * Security: The signed URL includes an ifGenerationMatch=0 precondition,
- * preventing overwrite of an existing object. The generation is verified
- * on validate to ensure the file hasn't been replaced post-validation.
+ * Security: The signed URL includes x-goog-if-generation-match: 0 as a
+ * signed extension header, preventing overwrite of an existing object.
+ * The client MUST send this header on the PUT, and CORS must allow it.
+ * A second PUT to the same URL receives HTTP 412 (Precondition Failed).
+ * The generation is verified on validate/commit as defense-in-depth.
  */
 export async function createIntent(
   db: any,
@@ -290,7 +305,9 @@ export async function createIntent(
   };
 
   // Generate signed upload URL (PUT, 15-min TTL, content-type locked).
-  // ifGenerationMatch=0: fail if object already exists (prevent overwrite).
+  // x-goog-if-generation-match: 0 as a SIGNED extension header — the client
+  // must send this header on the PUT, or the signature won't match.
+  // A second PUT to the same path gets HTTP 412 (Precondition Failed).
   const bucket = store.storage.bucket(store.bucketName);
   const file = bucket.file(storagePath);
   const [uploadUrl] = await file.getSignedUrl({
@@ -298,8 +315,9 @@ export async function createIntent(
     action: 'write',
     expires: Date.now() + UPLOAD_URL_TTL_MINUTES * 60 * 1000,
     contentType: mimeType,
-    // Precondition: only succeed if no object exists yet
-    ifGenerationMatch: 0,
+    extensionHeaders: {
+      'x-goog-if-generation-match': '0',
+    },
   });
 
   await db.collection('media').doc(mediaId).set(doc);
@@ -334,7 +352,7 @@ export async function validateUpload(db: any, mediaId: string): Promise<MediaDoc
   const file = bucket.file(doc.storagePath);
   const [exists] = await file.exists();
   if (!exists) {
-    await docRef.update({ state: 'ABANDONED', validationError: 'File not uploaded.' });
+    await docRef.update({ state: 'ABANDONED', validationError: 'File not uploaded.', deleteError: 'No file to delete.' });
     throw new MediaError('File was not uploaded.', 'NOT_UPLOADED', 400);
   }
 
@@ -344,6 +362,7 @@ export async function validateUpload(db: any, mediaId: string): Promise<MediaDoc
     await docRef.update({
       state: 'ABANDONED',
       validationError: `Size mismatch: expected ${doc.sizeBytes}, got ${actualSize}.`,
+      deleteError: 'Validation failed, file needs deletion.',
     });
     throw new MediaError('File size does not match intent.', 'SIZE_MISMATCH', 400);
   }
@@ -372,6 +391,7 @@ export async function validateUpload(db: any, mediaId: string): Promise<MediaDoc
     await docRef.update({
       state: 'ABANDONED',
       validationError: 'Checksum mismatch.',
+      deleteError: 'Validation failed, file needs deletion.',
     });
     throw new MediaError('File checksum does not match.', 'CHECKSUM_MISMATCH', 400);
   }
@@ -380,6 +400,7 @@ export async function validateUpload(db: any, mediaId: string): Promise<MediaDoc
     await docRef.update({
       state: 'ABANDONED',
       validationError: `File signature does not match MIME type ${doc.mimeType}.`,
+      deleteError: 'Validation failed, file needs deletion.',
     });
     throw new MediaError('File content does not match declared type.', 'SIGNATURE_MISMATCH', 400);
   }
@@ -566,17 +587,25 @@ export async function sweepOrphans(db: any): Promise<SweeperResult> {
   for (const doc of staleIntents.docs) {
     try {
       const data = doc.data() as MediaDoc;
-      await doc.ref.update({ state: 'ABANDONED', validationError: 'Intent expired.' });
+      // Use transaction to protect against concurrent updates
+      await db.runTransaction(async (tx: any) => {
+        const fresh = await tx.get(doc.ref);
+        if (!fresh.exists) return;
+        const freshData = fresh.data() as MediaDoc;
+        // Only abandon if still in a pre-commit state (not already handled)
+        if (!['INTENT', 'UPLOADED', 'VALIDATED'].includes(freshData.state)) return;
+        tx.update(doc.ref, { state: 'ABANDONED', validationError: 'Intent expired.' });
+      });
       result.abandoned++;
-      // Try to delete the object if it was uploaded
-      if (data.state !== 'INTENT') {
-        const deleted = await tryDelete(data.storagePath);
-        if (deleted) {
-          result.deleted++;
-          await doc.ref.update({ mediaDeletedAt: nowIso });
-        } else if (store) {
-          await doc.ref.update({ deleteError: 'Delete failed, will retry.' });
-        }
+      // Try to delete the object — even for INTENT, the user may have uploaded
+      // without calling /uploaded. Always attempt deletion.
+      const deleted = await tryDelete(data.storagePath);
+      if (deleted) {
+        result.deleted++;
+        await doc.ref.update({ mediaDeletedAt: nowIso });
+      } else if (store) {
+        // Record for retry, even if the file might not exist
+        await doc.ref.update({ deleteError: 'Delete failed or file not found, will retry.' });
       }
     } catch (e: any) {
       result.errors.push(`abandon ${doc.id}: ${e?.message}`);
@@ -608,9 +637,11 @@ export async function sweepOrphans(db: any): Promise<SweeperResult> {
   }
 
   // 3. Expire committed media past retention — ONLY after confirmed deletion
+  // Uses 29-day threshold (safety margin before the 30-day maximum).
+  const retentionCutoff = new Date(now.getTime() - SWEEPER_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const expired = await db.collection('media')
     .where('state', '==', 'COMMITTED')
-    .where('expiresAt', '<', nowIso)
+    .where('expiresAt', '<', retentionCutoff)
     .get();
   for (const doc of expired.docs) {
     try {
