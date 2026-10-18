@@ -20,7 +20,7 @@
  *   SERVER_PORT=3100
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { unlinkSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
