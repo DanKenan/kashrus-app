@@ -219,4 +219,23 @@ Don's scale: ~6 users, bursty human-paced usage, ~500 writes/day, ~12K reads/day
 
 ---
 
+## 7. Stage 4 PR checklist (added 2026-10-18 — ChatGPT review)
+
+| PR | Item | Status | Needs Don's OK? |
+|---|---|---|---|
+| 3C | Secrets → Secret Manager (PR #16) | Open, awaiting review | **YES — cutover step** (setting `USE_SECRET_MANAGER=true`); rotation is separate |
+| A | Consistency + monolith-size monitor (PR #15) | Open, CI green | No — read-only; scheduler job setup is Don's console work |
+| B | Automated backups (Tier 1 + Tier 2, Cloud Run Job) | Planned, not yet coded | No for Tier 1; **YES** for any restore test touching prod. **Restore drills: throwaway database ONLY — never test against production.** Media retention: **30 days from original upload applies to every backup copy**, regardless of Tier 2 90-day retention. |
+| C | Uptime / error / backup-staleness / billing ($5/mo) alerts | Planned | No — Don confirmed: **email for all alerts, SMS for urgent** |
+| D | Runbook + security-hardening verification | Planned | — |
+| — | Agency-scoped admin export | Planned (from §4.4) | **YES** — needs Don's call on super-admin model |
+| — | Admin audit log | Planned (from §4.6) | No |
+| — | Dependency checks (`npm audit` quarterly) | Planned (from §4.5) | No |
+| — | Git-history / token hygiene verification | Planned (from §4.7) | **YES** — history rewrite is destructive |
+| — | JWT/VAPID secret rotation | Propose only | **YES — explicit** |
+| — | Kiosk PIN rotation | Propose only (dropped by Don 2026-10-18) | **YES — explicit** (do not raise unprompted) |
+| — | Firestore rules changes | Propose only | **YES — explicit** |
+| — | Deleting any data | Propose only | **YES — explicit** |
+| — | Ingredients / factory-inspections redesign | **DEFERRED** — Don deciding with his team; top priority when it happens | **YES** — design together, don't touch now |
+
 *End of Stage 4 plan. This is the "boring operations" stage — its success metric is that Don never thinks about infrastructure.*
