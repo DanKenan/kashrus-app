@@ -89,6 +89,8 @@ jobs:
           c = tpl['spec']['containers'][0]
           c['image'] = os.environ['IMAGE']
           env = c.get('env', [])
+          # Strip cutover lock vars: they must never persist on a live revision.
+          env = [e for e in env if e['name'] not in ('STAGED_REVISION', 'MAINTENANCE_MODE')]
           if not any(e['name'] == 'NODE_ENV' for e in env):
               env.append({'name': 'NODE_ENV', 'value': 'production'})
           c['env'] = env
