@@ -82,15 +82,12 @@ function createMockDb(monolithData, existingPerEntity = {}) {
       const tx = {
         async get(ref) { return ref.get(); },
         set(ref, data) {
-          // ref is from collection().doc() — need to track key
-          // Simplified: store by capturing in writes
           writes.push({ op: 'set', ref, data });
         },
         delete(ref) {
           writes.push({ op: 'delete', ref });
         },
       };
-      // For our mock, ref needs _key; patch collection().doc() to include it
       const origCollection = db.collection;
       db.collection = (name) => {
         const c = origCollection(name);
@@ -102,12 +99,12 @@ function createMockDb(monolithData, existingPerEntity = {}) {
         };
         return c;
       };
-      await fn(tx);
-      // Apply writes to docs map for subsequent reads
+      const result = await fn(tx);
       for (const w of writes) {
         if (w.op === 'set') docs.set(w.ref._key, w.data);
         else docs.delete(w.ref._key);
       }
+      return result;
     },
   };
   // Patch initial collection().doc() too
@@ -246,6 +243,53 @@ export default {
       const m = status.mismatches.find(x => x.id === 'venue-1792117476241');
       if (!m || !m.reason.includes('Missing')) throw new Error('Should report missing doc');
       console.log('  ✓ status: missing per-entity doc reported');
+    }
+
+    // Test 6: Copy verifies lookups for existing (dual-written) users too
+    {
+      const monolith = {
+        venues: [],
+        users: [realUser('user-1', 'a@example.com')],
+        tasks: [],
+      };
+      const existing = {
+        // User doc exists (from dual-write) but lookup is missing
+        'users/user-1': { ...realUser('user-1', 'a@example.com'), _v: 3 },
+      };
+      const db = createMockDb(monolith, existing);
+      const result = await migrateCopy(db);
+
+      if (result.users.copied !== 0) throw new Error('Should not copy existing user doc');
+      if (result.users.skipped !== 1) throw new Error('Should count skipped user');
+      if (result.usersByEmail.created !== 1) {
+        throw new Error(`Should create missing lookup for existing user, got ${result.usersByEmail.created}`);
+      }
+      console.log('  ✓ copy creates missing lookups for existing users');
+    }
+
+    // Test 7: Copy refuses conflicting lookup ownership
+    {
+      const monolith = {
+        venues: [],
+        users: [realUser('user-1', 'a@example.com')],
+        tasks: [],
+      };
+      const existing = {
+        // Lookup exists but points to a DIFFERENT user
+        [`usersByEmail/${crypto.createHash('sha256').update('a@example.com').digest('hex')}`]: {
+          userId: 'user-999', email: 'a@example.com',
+        },
+      };
+      const db = createMockDb(monolith, existing);
+      const result = await migrateCopy(db);
+
+      if (result.usersByEmail.conflicts.length !== 1) {
+        throw new Error('Should record conflict for mismatched lookup');
+      }
+      if (result.usersByEmail.created !== 0) {
+        throw new Error('Should not overwrite conflicting lookup');
+      }
+      console.log('  ✓ copy refuses conflicting lookup ownership');
     }
 
     console.log('  ✓ All migration tests passed');

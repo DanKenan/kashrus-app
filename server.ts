@@ -1723,34 +1723,37 @@ async function initFirestore() {
 
 /**
  * PR D: Load tasks, venues, users from per-entity collections into memory.
- * Called at startup and after each commitState when READ_FROM_PER_ENTITY=true.
+ * Called at startup when READ_FROM_PER_ENTITY=true.
+ *
+ * FAILS LOUDLY: if the flag is set but collections can't be read, the server
+ * must not silently fall back to monolith reads (that would mask a broken
+ * migration). Throws on failure.
+ *
  * Strips per-entity _v (in-memory uses monolith versioning).
  */
 async function loadPerEntityIntoMemory(): Promise<void> {
-  if (!firestoreDb) return;
-  try {
-    const [tasksSnap, venuesSnap, usersSnap] = await Promise.all([
-      firestoreDb.collection('tasks').get(),
-      firestoreDb.collection('venues').get(),
-      firestoreDb.collection('users').get(),
-    ]);
-    // Strip _v from per-entity docs (in-memory doesn't use per-entity versioning)
-    tasks = tasksSnap.docs.map((d: any) => {
-      const { _v, ...rest } = d.data();
-      return rest;
-    });
-    venues = venuesSnap.docs.map((d: any) => {
-      const { _v, ...rest } = d.data();
-      return rest;
-    });
-    users = usersSnap.docs.map((d: any) => {
-      const { _v, ...rest } = d.data();
-      return rest;
-    });
-    console.log(`[PerEntity] Loaded ${tasks.length} tasks, ${venues.length} venues, ${users.length} users from per-entity collections.`);
-  } catch (err: any) {
-    console.warn('[PerEntity] Failed to load per-entity collections:', err?.message);
+  if (!firestoreDb) {
+    throw new Error('[PerEntity] READ_FROM_PER_ENTITY=true but Firestore is not available.');
   }
+  const [tasksSnap, venuesSnap, usersSnap] = await Promise.all([
+    firestoreDb.collection('tasks').get(),
+    firestoreDb.collection('venues').get(),
+    firestoreDb.collection('users').get(),
+  ]);
+  // Strip _v from per-entity docs (in-memory doesn't use per-entity versioning)
+  tasks = tasksSnap.docs.map((d: any) => {
+    const { _v, ...rest } = d.data();
+    return rest;
+  });
+  venues = venuesSnap.docs.map((d: any) => {
+    const { _v, ...rest } = d.data();
+    return rest;
+  });
+  users = usersSnap.docs.map((d: any) => {
+    const { _v, ...rest } = d.data();
+    return rest;
+  });
+  console.log(`[PerEntity] Loaded ${tasks.length} tasks, ${venues.length} venues, ${users.length} users from per-entity collections.`);
 }
 
 // Load durable state at boot. Returns true when Firestore had state to apply.
@@ -1767,9 +1770,23 @@ async function loadStateFromFirestore(): Promise<boolean> {
     hydrateState(snap.data());
     durableStateLoaded = true;
     console.log('[Firestore] Loaded durable state.');
-    // PR D: If reading from per-entity, override tasks/venues/users from collections
+    // PR D: If reading from per-entity, override tasks/venues/users from collections.
+    // Fail loudly if per-entity is empty but monolith had data (copy not run).
     if (process.env.READ_FROM_PER_ENTITY === 'true') {
+      const monolithCounts = {
+        tasks: tasks.length,
+        venues: venues.length,
+        users: users.length,
+      };
       await loadPerEntityIntoMemory();
+      const perEntityTotal = tasks.length + venues.length + users.length;
+      const monolithTotal = monolithCounts.tasks + monolithCounts.venues + monolithCounts.users;
+      if (perEntityTotal === 0 && monolithTotal > 0) {
+        throw new Error(
+          `[PerEntity] READ_FROM_PER_ENTITY=true but per-entity collections are empty ` +
+          `(monolith has ${monolithTotal} entities). Run POST /api/admin/migrate-copy first.`
+        );
+      }
     }
     return true;
   } catch (err: any) {
@@ -2328,11 +2345,9 @@ async function commitState(
       if (committedVersion > stateVersion) {
         hydrateState(committed.doc);
         stateVersion = committedVersion;
-        // PR D: If reading from per-entity, refresh tasks/venues/users from collections
-        // (dual-write updated them in the transaction; this keeps in-memory in sync)
-        if (process.env.READ_FROM_PER_ENTITY === 'true') {
-          await loadPerEntityIntoMemory();
-        }
+        // PR D note: No per-entity reload needed here. The transaction already
+        // dual-wrote to per-entity collections, and hydrateState loads the same
+        // entity data from the monolith doc. Both layouts are in sync.
       } else {
         console.warn(
           `[commitState:${label}] Skipping stale hydration: committed v${committedVersion} <= current v${stateVersion}. ` +

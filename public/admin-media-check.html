@@ -61,6 +61,20 @@
   <button onclick="cleanupTest()">Clean Up Test File</button>
   <div id="cleanup-result"></div>
 </div>
+
+<div class="section">
+  <h2>6. Migrate to Per-Entity (Stage 3 Part 2)</h2>
+  <p>Copies existing venues, users, and tasks from the monolith to per-entity collections. Safe to run multiple times — skips existing.</p>
+  <button onclick="migrateCopy()">Copy Existing Data</button>
+  <div id="migrate-result"></div>
+</div>
+
+<div class="section">
+  <h2>7. Check Migration Status</h2>
+  <p>Compares monolith vs per-entity collections field-by-field.</p>
+  <button onclick="checkMigration()">Check Migration Status</button>
+  <div id="migration-status-result"></div>
+</div>
 </div>
 
 <script>
@@ -320,6 +334,65 @@ async function cleanupTest() {
   } catch (e) {
     el.innerHTML = '';
     step(el, 'Cleanup', false, e.message);
+  }
+}
+
+async function migrateCopy() {
+  const el = document.getElementById('migrate-result');
+  el.innerHTML = '';
+  step(el, 'Copying data from monolith...', null);
+  try {
+    const r = await api('POST', '/api/admin/migrate-copy');
+    el.innerHTML = '';
+    if (r.status !== 200) {
+      step(el, 'Copy', false, r.json.error + (r.json.detail ? ': ' + r.json.detail : ''));
+      return;
+    }
+    const d = r.json;
+    step(el, 'Copy complete', true);
+    const pre = document.createElement('pre');
+    pre.textContent =
+      `Venues: ${d.venues.copied} copied, ${d.venues.skipped} skipped\n` +
+      `Users: ${d.users.copied} copied, ${d.users.skipped} skipped\n` +
+      `Tasks: ${d.tasks.copied} copied, ${d.tasks.skipped} skipped\n` +
+      `Email lookups: ${d.usersByEmail.created} created, ${d.usersByEmail.verified} verified` +
+      (d.usersByEmail.conflicts.length ? `\nConflicts:\n${d.usersByEmail.conflicts.join('\n')}` : '');
+    el.appendChild(pre);
+  } catch (e) {
+    el.innerHTML = '';
+    step(el, 'Copy', false, e.message);
+  }
+}
+
+async function checkMigration() {
+  const el = document.getElementById('migration-status-result');
+  el.innerHTML = '';
+  step(el, 'Checking migration status...', null);
+  try {
+    const r = await api('GET', '/api/admin/per-entity-status');
+    el.innerHTML = '';
+    if (r.status !== 200) {
+      step(el, 'Status check', false, r.json.error);
+      return;
+    }
+    const d = r.json;
+    step(el, 'Monolith', true,
+      `${d.monolith.venues} venues, ${d.monolith.users} users, ${d.monolith.tasks} tasks`);
+    step(el, 'Per-entity', true,
+      `${d.perEntity.venues} venues, ${d.perEntity.users} users, ${d.perEntity.tasks} tasks, ${d.perEntity.usersByEmail} email lookups`);
+    if (d.match) {
+      step(el, '🎉 MATCH: All fields identical', true);
+    } else {
+      step(el, `${d.mismatches.length} mismatch(es) found`, false);
+      const pre = document.createElement('pre');
+      pre.textContent = d.mismatches
+        .map(m => `${m.collection}/${m.id}: ${m.reason}`)
+        .join('\n');
+      el.appendChild(pre);
+    }
+  } catch (e) {
+    el.innerHTML = '';
+    step(el, 'Status check', false, e.message);
   }
 }
 </script>
