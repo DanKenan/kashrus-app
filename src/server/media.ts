@@ -320,7 +320,7 @@ export async function createIntent(
     },
   });
 
-  await db.collection('media').doc(mediaId).set(doc);
+  await db.collection('media').doc(mediaId).set(JSON.parse(JSON.stringify(doc)));
   return { mediaId, uploadUrl, storagePath, expiresAt };
 }
 
