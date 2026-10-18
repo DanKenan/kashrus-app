@@ -1,10 +1,11 @@
 /**
- * Runs Stage 4 PR A + PR B tests.
+ * Runs Stage 4 PR A + PR B + PR R tests.
  */
 import testConsistency from './test-consistency.mjs';
 import testBackup from './test-backup.mjs';
+import testRestore from './test-restore.mjs';
 
-const tests = [testConsistency, testBackup];
+const tests = [testConsistency, testBackup, testRestore];
 
 export async function runAll() {
   console.log(`\n=== Stage 4 PR A Tests (${tests.length} tests) ===\n`);
