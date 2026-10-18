@@ -36,7 +36,6 @@ export async function dualWriteChangedEntities(
     collection: string;
     id: string;
     data: any | null; // null = delete
-    emailLookup?: { oldEmail?: string; newEmail?: string };
   }
   const pendingWrites: PendingWrite[] = [];
 
@@ -60,43 +59,59 @@ export async function dualWriteChangedEntities(
   diffArray('tasks', before.tasks, after.tasks);
   diffArray('venues', before.venues, after.venues);
 
-  // Users: also track email changes for the usersByEmail lookup
-  const beforeUsers = new Map<string, any>((before.users || []).map((u: any) => [u.id, u]));
-  const afterUsers = new Map<string, any>((after.users || []).map((u: any) => [u.id, u]));
-  for (const [id, user] of afterUsers) {
-    const prev = beforeUsers.get(id);
-    if (!prev || JSON.stringify(prev) !== JSON.stringify(user)) {
-      const emailChanged = !prev || prev.email?.trim().toLowerCase() !== user.email?.trim().toLowerCase();
-      pendingWrites.push({
-        collection: 'users',
-        id,
-        data: user,
-        emailLookup: emailChanged
-          ? { oldEmail: prev?.email, newEmail: user.email }
-          : undefined,
-      });
-    }
-  }
-  for (const [id, user] of beforeUsers) {
-    if (!afterUsers.has(id)) {
-      pendingWrites.push({
-        collection: 'users',
-        id,
-        data: null,
-        emailLookup: user.email ? { oldEmail: user.email } : undefined,
-      });
-    }
-  }
+  // Users: dual-write the user docs via diffArray, then handle the
+  // usersByEmail lookup separately from complete before/after email maps.
+  //
+  // Why separate: if user A is deleted and user B is created with A's former
+  // email in the SAME transaction, per-user tracking would set B's lookup
+  // then delete A's old key — wiping B's entry. Computing from the full maps
+  // yields exactly one write per email key.
+  diffArray('users', before.users, after.users);
 
-  if (pendingWrites.length === 0) return;
-
-  // Phase 2: ALL READS — fetch current per-entity docs to get their _v values.
-  // Must complete before any writes.
   const crypto = await import('crypto');
+  const normalizeEmail = (email: string) => email.trim().toLowerCase();
   const emailKey = (email: string) =>
-    crypto.createHash('sha256').update(email.trim().toLowerCase()).digest('hex');
+    crypto.createHash('sha256').update(normalizeEmail(email)).digest('hex');
+
+  // Build complete email→userId maps
+  const beforeEmailMap = new Map<string, string>(); // normalized email -> userId
+  for (const u of (before.users || [])) {
+    if (u?.email) beforeEmailMap.set(normalizeEmail(u.email), u.id);
+  }
+  const afterEmailMap = new Map<string, string>();
+  for (const u of (after.users || [])) {
+    if (!u?.email) continue;
+    const norm = normalizeEmail(u.email);
+    const existing = afterEmailMap.get(norm);
+    if (existing && existing !== u.id) {
+      throw new Error(
+        `Duplicate email in transaction: ${u.email} used by both ${existing} and ${u.id}`
+      );
+    }
+    afterEmailMap.set(norm, u.id);
+  }
+
+  // Compute net lookup changes: at most one write per email key
+  interface LookupChange { key: string; userId: string | null; email: string | null }
+  const lookupChanges: LookupChange[] = [];
+  const allEmails = new Set([...beforeEmailMap.keys(), ...afterEmailMap.keys()]);
+  for (const email of allEmails) {
+    const beforeUser = beforeEmailMap.get(email) || null;
+    const afterUser = afterEmailMap.get(email) || null;
+    if (beforeUser === afterUser) continue; // No change
+    const key = emailKey(email);
+    if (afterUser) {
+      // Create or reassign (single set covers both)
+      lookupChanges.push({ key, userId: afterUser, email });
+    } else {
+      // Email no longer used — delete the lookup
+      lookupChanges.push({ key, userId: null, email: null });
+    }
+  }
 
   const readResults = new Map<string, number>(); // "collection/id" -> current _v (0 if not exists)
+  // Phase 2: ALL READS — fetch current per-entity docs to get their _v values.
+  // Must complete before any writes.
   for (const pw of pendingWrites) {
     if (pw.data !== null) {
       // Only need _v for writes (not deletes)
@@ -120,21 +135,15 @@ export async function dualWriteChangedEntities(
       const clean = JSON.parse(JSON.stringify({ ...pw.data, _v: currentV + 1 }));
       tx.set(ref, clean);
     }
+  }
 
-    // Maintain usersByEmail lookup
-    if (pw.emailLookup) {
-      const { oldEmail, newEmail } = pw.emailLookup;
-      if (newEmail) {
-        const key = emailKey(newEmail);
-        tx.set(firestoreDb.collection('usersByEmail').doc(key), {
-          userId: pw.id,
-          email: newEmail.trim().toLowerCase(),
-        });
-      }
-      if (oldEmail && oldEmail.trim().toLowerCase() !== newEmail?.trim().toLowerCase()) {
-        const oldKey = emailKey(oldEmail);
-        tx.delete(firestoreDb.collection('usersByEmail').doc(oldKey));
-      }
+  // Apply usersByEmail lookup changes (at most one write per email key)
+  for (const lc of lookupChanges) {
+    const ref = firestoreDb.collection('usersByEmail').doc(lc.key);
+    if (lc.userId) {
+      tx.set(ref, { userId: lc.userId, email: lc.email });
+    } else {
+      tx.delete(ref);
     }
   }
 }

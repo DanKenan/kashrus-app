@@ -190,6 +190,86 @@ export default {
       console.log('  ✓ no-op produces zero writes');
     }
 
+    // Test 7: Delete user A and create user B with A's email in ONE transaction.
+    // The lookup must end up pointing to B (single write, not set-then-delete).
+    {
+      const tx = createMockTx();
+      const userA = { ...realUser, id: 'user-a', email: 'shared@example.com' };
+      const userB = { ...realUser, id: 'user-b', email: 'shared@example.com', name: 'User B' };
+      const before = { tasks: [], venues: [], users: [userA] };
+      const after = { tasks: [], venues: [], users: [userB] };
+      await dualWriteChangedEntities(tx, db, before, after);
+
+      const expectedKey = crypto.createHash('sha256').update('shared@example.com').digest('hex');
+      const lookupWrites = tx.writes.filter(w => w.collection === 'usersByEmail' && w.id === expectedKey);
+      if (lookupWrites.length !== 1) {
+        throw new Error(`Expected exactly 1 lookup write for reassigned email, got ${lookupWrites.length}`);
+      }
+      if (lookupWrites[0].op !== 'set') throw new Error('Reassigned email lookup should be a set, not delete');
+      if (lookupWrites[0].data.userId !== 'user-b') {
+        throw new Error(`Lookup should point to user-b, got ${lookupWrites[0].data.userId}`);
+      }
+      // User A doc deleted, user B doc created
+      const delA = tx.writes.find(w => w.op === 'delete' && w.collection === 'users' && w.id === 'user-a');
+      const setB = tx.writes.find(w => w.op === 'set' && w.collection === 'users' && w.id === 'user-b');
+      if (!delA) throw new Error('User A doc not deleted');
+      if (!setB) throw new Error('User B doc not created');
+      console.log('  ✓ delete-A + create-B-with-same-email: single lookup write → B');
+    }
+
+    // Test 8: User renames email (old lookup deleted, new lookup created)
+    {
+      const tx = createMockTx();
+      const beforeUser = { ...realUser, id: 'user-1', email: 'old@example.com' };
+      const afterUser = { ...realUser, id: 'user-1', email: 'new@example.com' };
+      const before = { tasks: [], venues: [], users: [beforeUser] };
+      const after = { tasks: [], venues: [], users: [afterUser] };
+      await dualWriteChangedEntities(tx, db, before, after);
+
+      const oldKey = crypto.createHash('sha256').update('old@example.com').digest('hex');
+      const newKey = crypto.createHash('sha256').update('new@example.com').digest('hex');
+      const delOld = tx.writes.find(w => w.op === 'delete' && w.collection === 'usersByEmail' && w.id === oldKey);
+      const setNew = tx.writes.find(w => w.op === 'set' && w.collection === 'usersByEmail' && w.id === newKey);
+      if (!delOld) throw new Error('Old email lookup not deleted on rename');
+      if (!setNew) throw new Error('New email lookup not created on rename');
+      if (setNew.data.userId !== 'user-1') throw new Error('New lookup points to wrong user');
+      console.log('  ✓ email rename: old lookup deleted, new lookup created');
+    }
+
+    // Test 9: Ordinary user update (no email change) → no lookup writes
+    {
+      const tx = createMockTx();
+      const beforeUser = { ...realUser, id: 'user-1', email: 'same@example.com' };
+      const afterUser = { ...realUser, id: 'user-1', email: 'same@example.com', name: 'New Name' };
+      const before = { tasks: [], venues: [], users: [beforeUser] };
+      const after = { tasks: [], venues: [], users: [afterUser] };
+      await dualWriteChangedEntities(tx, db, before, after);
+
+      const lookupWrites = tx.writes.filter(w => w.collection === 'usersByEmail');
+      if (lookupWrites.length !== 0) {
+        throw new Error(`Expected 0 lookup writes for non-email update, got ${lookupWrites.length}`);
+      }
+      const userWrite = tx.writes.find(w => w.collection === 'users' && w.id === 'user-1');
+      if (!userWrite) throw new Error('User doc not updated');
+      console.log('  ✓ non-email user update: zero lookup writes');
+    }
+
+    // Test 10: Duplicate emails in same transaction → rejected
+    {
+      const tx = createMockTx();
+      const user1 = { ...realUser, id: 'user-1', email: 'dupe@example.com' };
+      const user2 = { ...realUser, id: 'user-2', email: ' DUPE@example.com ' }; // Same after trim+lowercase
+      const before = { tasks: [], venues: [], users: [] };
+      const after = { tasks: [], venues: [], users: [user1, user2] };
+      try {
+        await dualWriteChangedEntities(tx, db, before, after);
+        throw new Error('Should reject duplicate emails');
+      } catch (e) {
+        if (!e.message.includes('Duplicate email')) throw e;
+      }
+      console.log('  ✓ duplicate normalized emails rejected');
+    }
+
     console.log('  ✓ All dual-write tests passed');
   },
 };
