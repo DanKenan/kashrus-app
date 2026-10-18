@@ -18,6 +18,8 @@ const FIRESTORE_STATE_DOC = 'app-state/main';
 const MONOLITH_SIZE_WARN_BYTES = 800 * 1024; // 800 KiB warning
 const MAX_CONSISTENCY_RETRIES = 3;
 
+import { getStorage } from 'firebase-admin/storage';
+
 /**
  * Get the monolith's _v (global version) for stability checking.
  */
@@ -81,9 +83,7 @@ async function checkBackupStaleness(firestoreDb: any): Promise<{ stale: boolean;
     return { stale: true, lastAt: null };
   }
   try {
-    const admin = await import('firebase-admin').catch(() => null);
-    if (!admin) return { stale: true, lastAt: null };
-    const storage = (admin as any).storage();
+    const storage = getStorage();
     // List all SUCCESS.json markers. Run IDs are random (not chronological),
     // so download each marker and select by its createdAt timestamp.
     const [files] = await storage.bucket(bucketName).getFiles({ prefix: 'tier1/' });

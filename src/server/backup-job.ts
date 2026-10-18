@@ -21,6 +21,7 @@
 
 import admin from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
+import { getStorage } from 'firebase-admin/storage';
 
 // Exact production identifiers — the job REFUSES to run against anything else.
 const PROD_PROJECT_ID = 'gen-lang-client-0875538181';
@@ -53,7 +54,7 @@ async function main() {
   // Use the explicit named-database API (not (app as any).firestore(id)).
   const namedDb = getFirestore(app, databaseId);
 
-  const storage = (admin as any).storage();
+  const storage = getStorage(app);
 
   const { runTier1Backup } = await import('./backup.js');
   try {
