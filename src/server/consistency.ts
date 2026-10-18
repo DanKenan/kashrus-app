@@ -51,6 +51,8 @@ export interface ConsistencyResult {
   monolithVersion: number | null;
   monolithSizeBytes: number | null;
   monolithSizeWarn: boolean;
+  backupStale: boolean;
+  backupLastAt: string | null;
   status: {
     monolith: { venues: number; users: number; tasks: number };
     perEntity: { venues: number; users: number; tasks: number; usersByEmail: number };
@@ -58,6 +60,24 @@ export interface ConsistencyResult {
     mismatches: Array<{ collection: string; id: string; reason: string }>;
   } | null;
   error?: string;
+}
+
+/**
+ * Check backup staleness via the backups/latest doc.
+ * Returns { stale, lastAt }. Stale = no successful backup in 26 hours.
+ */
+async function checkBackupStaleness(firestoreDb: any): Promise<{ stale: boolean; lastAt: string | null }> {
+  try {
+    const snap = await firestoreDb.collection('backups').doc('latest').get();
+    if (!snap.exists) return { stale: true, lastAt: null };
+    const lastAt = snap.data()?.createdAt || null;
+    if (!lastAt) return { stale: true, lastAt: null };
+    const ageMs = Date.now() - new Date(lastAt).getTime();
+    const stale = ageMs > 26 * 60 * 60 * 1000; // 26 hours
+    return { stale, lastAt };
+  } catch {
+    return { stale: true, lastAt: null };
+  }
 }
 
 /**
@@ -119,7 +139,14 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
     }
 
     const sizeWarn = sizeBytes >= MONOLITH_SIZE_WARN_BYTES;
-    const ok = status.match && !sizeWarn;
+    const backup = await checkBackupStaleness(firestoreDb);
+    if (backup.stale) {
+      console.error(
+        `[consistency] ERROR: BACKUP STALE — last successful backup: ${backup.lastAt || 'never'} ` +
+        `(threshold: 26h)`
+      );
+    }
+    const ok = status.match && !sizeWarn && !backup.stale;
 
     if (!status.match) {
       // Log IDs + reasons only — perEntityStatus never includes secrets
@@ -140,6 +167,8 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
       monolithVersion: versionAfter,
       monolithSizeBytes: sizeBytes,
       monolithSizeWarn: sizeWarn,
+      backupStale: backup.stale,
+      backupLastAt: backup.lastAt,
       status,
       ...(lastError ? { error: lastError } : {}),
     };
@@ -153,6 +182,8 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
     monolithVersion: null,
     monolithSizeBytes: null,
     monolithSizeWarn: false,
+    backupStale: true,
+    backupLastAt: null,
     status: null,
     error: finalError,
   };

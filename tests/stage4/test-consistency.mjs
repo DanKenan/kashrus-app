@@ -11,6 +11,12 @@ function emailKey(email) {
 function createMockDb(monolithData, perEntityDocs = {}, versionChanges = 0) {
   const docs = new Map();
   for (const [k, v] of Object.entries(perEntityDocs)) docs.set(k, v);
+  // Add a recent backup so staleness check passes (unless testing staleness)
+  docs.set('backups/latest', {
+    tier: 'tier1',
+    createdAt: new Date().toISOString(),
+    checksum: 'abc123',
+  });
   let versionCalls = 0;
 
   const db = {
