@@ -80,14 +80,14 @@ async function main() {
   // Wait until the port is actually free before proceeding.
   try {
     const { execSync } = await import('node:child_process');
-    execSync(`lsof -ti:${SERVER_PORT} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
+    execSync(`lsof -ti:${SERVER_PORT} -sTCP:LISTEN | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
     // Poll until port is free (max 10s) — kill -9 is async
     for (let i = 0; i < 20; i++) {
       try {
-        execSync(`lsof -ti:${SERVER_PORT}`, { stdio: 'ignore' });
+        execSync(`lsof -ti:${SERVER_PORT} -sTCP:LISTEN`, { stdio: 'ignore' });
         await sleep(500); // still occupied, wait
       } catch {
-        break; // lsof found nothing = port free
+        break; // nothing listening = port free
       }
     }
   } catch {
@@ -133,17 +133,20 @@ async function main() {
     // npx spawns a child node process; SIGKILL to the parent can orphan it.
     // Kill by port to catch orphans (CI failure 2026-10-18: orphaned node
     // kept :3100, "port did not release within 15s").
+    // CRITICAL: -sTCP:LISTEN only — a bare -ti:3100 also matches the
+    // harness's own keep-alive client connections, and xargs kill -9 would
+    // kill the test runner itself (silent CI death, 2026-10-18).
     try {
-      execSync(`lsof -ti:${SERVER_PORT} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
-    } catch { /* nothing on the port — fine */ }
+      execSync(`lsof -ti:${SERVER_PORT} -sTCP:LISTEN | xargs kill -9 2>/dev/null`, { stdio: 'ignore' });
+    } catch { /* nothing listening — fine */ }
     // Wait for the port to actually release before rebinding — kill is async
     // and rebinding too early causes EADDRINUSE.
     const portFreeDeadline = Date.now() + 15000;
     for (;;) {
       try {
-        execSync(`lsof -ti:${SERVER_PORT}`, { stdio: 'ignore' });
+        execSync(`lsof -ti:${SERVER_PORT} -sTCP:LISTEN`, { stdio: 'ignore' });
       } catch {
-        break; // lsof found nothing — port is free
+        break; // nothing listening — port is free
       }
       if (Date.now() > portFreeDeadline) {
         throw new Error(`port ${SERVER_PORT} did not release within 15s after SIGKILL`);
