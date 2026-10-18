@@ -89,24 +89,11 @@ export default {
     if (cr.status !== 201 && cr.status !== 200) throw new Error(`canary create failed: ${cr.status}`);
     const taskId = (cr.json.task || cr.json).id;
 
-    // --- 2. User A "opens the form": GET the task list and capture the
-    // X-State-Version header — the ACTUAL form-baseline mechanism, not a
-    // hard-coded version. This is what captureEditBaseline() snapshots. ---
-    const formLoad = await fetch(`${baseUrl}/api/tasks`, { headers: ctx.authHeaders });
-    if (formLoad.status !== 200) throw new Error(`form-load GET failed: ${formLoad.status}`);
-    const formBaselineHeader = formLoad.headers.get('X-State-Version');
-    const formBaseline = formBaselineHeader === null ? undefined : Number(formBaselineHeader);
-    if (!Number.isFinite(formBaseline)) {
-      throw new Error(`form load did not carry X-State-Version: ${formBaselineHeader}`);
-    }
-    // Sanity: the header must match the document version.
-    const docV = await ctx.getVersion();
-    if (formBaseline !== docV) throw new Error(`header v${formBaseline} != doc v${docV}`);
-
-    // --- 3. A's WS client connects (browser is listening) ---
+    // --- 2. A's browser session: setup (post-test-18 restore) + login + WS.
     // NOTE: test 18 (restore cycle) runs before this test and strips
     // passwords — re-establish via setup, mirroring the real post-restore
-    // flow and the harness startup.
+    // flow and the harness startup. This MUST happen before capturing the
+    // form baseline: setup is a version-bumping write.
     await fetch(`${baseUrl}/api/auth/setup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -121,6 +108,20 @@ export default {
     if (!loginJson.token) throw new Error('admin login failed');
     const connA = await connectWs(baseUrl, loginJson.token);
     connA.messages.length = 0;
+
+    // --- 3. User A "opens the form": GET the task list and capture the
+    // X-State-Version header — the ACTUAL form-baseline mechanism, not a
+    // hard-coded version. This is what captureEditBaseline() snapshots. ---
+    const formLoad = await fetch(`${baseUrl}/api/tasks`, { headers: ctx.authHeaders });
+    if (formLoad.status !== 200) throw new Error(`form-load GET failed: ${formLoad.status}`);
+    const formBaselineHeader = formLoad.headers.get('X-State-Version');
+    const formBaseline = formBaselineHeader === null ? undefined : Number(formBaselineHeader);
+    if (!Number.isFinite(formBaseline)) {
+      throw new Error(`form load did not carry X-State-Version: ${formBaselineHeader}`);
+    }
+    // Sanity: the header must match the document version.
+    const docV = await ctx.getVersion();
+    if (formBaseline !== docV) throw new Error(`header v${formBaseline} != doc v${docV}`);
 
     // --- 4. User B changes the notes (fresh baseline → 200). Doc moves on. ---
     const bText = `B's update ${ts}`;
