@@ -71,6 +71,11 @@ jobs:
           tpl = d['spec']['template']
           anns = tpl['metadata'].get('annotations', {})
           anns.pop('run.googleapis.com/sources', None)
+          # CORE FIX: Lock to a single instance. The app uses in-memory state
+          # with Firestore persistence — multiple instances diverge and corrupt
+          # data. Single instance eliminates the entire class of bugs.
+          anns['autoscaling.knative.dev/maxScale'] = '1'
+          tpl['metadata']['annotations'] = anns
           c = tpl['spec']['containers'][0]
           c['image'] = os.environ['IMAGE']
           env = c.get('env', [])
