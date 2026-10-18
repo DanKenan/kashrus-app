@@ -1,7 +1,11 @@
 # Stage 2 data-integrity tests — PR only, never deploys.
 #
-# Triggers on pull requests targeting main. Runs the 8 Stage 2 tests
-# against the REAL Firestore emulator (not the in-memory mock).
+# Triggers on ALL pull requests targeting main (no paths filter). This is
+# deliberate: GitHub branch protection "required status checks" will block
+# a PR forever if the workflow never runs (e.g. a docs-only PR with a paths
+# filter). Instead, the workflow always runs; a change-detection job skips
+# the heavy emulator tests for docs-only PRs. A skipped required check
+# satisfies branch protection (per GitHub docs on required status checks).
 #
 # Safety properties:
 # - No GCP credentials, no service account, no workload identity.
@@ -13,18 +17,42 @@ name: Stage 2 Data-Integrity Tests
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'server.ts'
-      - 'src/**'
-      - 'tests/**'
-      - 'package.json'
-      - '.github/workflows/test-stage2.yml'
 
 permissions:
   contents: read   # read-only; no write, no id-token, no GCP auth
 
 jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.check.outputs.code_changed }}
+    steps:
+      - name: Checkout PR branch (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for code changes
+        id: check
+        run: |
+          # Diff PR head against the merge base with main.
+          # Docs-only = files under docs/ or ending in .md.
+          # Anything else (code, tests, workflows, config) triggers the full suite.
+          BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD ${{ github.event.pull_request.base.sha }})
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -qvE '^docs/|\.md$'; then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Code changes detected — running full test suite."
+          else
+            echo "code_changed=false" >> "$GITHUB_OUTPUT"
+            echo "Docs-only changes — skipping emulator tests (check will report skipped)."
+          fi
+
   emulator-tests:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
