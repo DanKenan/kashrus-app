@@ -118,7 +118,6 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'GET', path: '/health' },
   { method: 'POST', path: '/auth/login' },
   { method: 'POST', path: '/auth/setup' },
-  { method: 'POST', path: '/auth/repair-don' },
   { method: 'POST', path: '/auth/forgot-password' },
   { method: 'POST', path: '/auth/verify-reset-code' },
   { method: 'POST', path: '/auth/reset-password' },
@@ -3813,19 +3812,6 @@ app.post('/api/auth/login', async (req, res) => {
   });
 });
 
-// TEMPORARY: Repair Don's password — remove after use
-app.post('/api/auth/repair-don', async (req, res) => {
-  const { code } = req.body || {};
-  if (code !== 'repair-2026-10-16') {
-    return res.status(403).json({ error: 'Invalid code.' });
-  }
-  const user = users.find((u) => u.email.toLowerCase() === 'kenan@hartfordkashrut.org');
-  if (!user) return res.status(404).json({ error: 'Not found.' });
-  user.password = await hashPassword('Dk@291294');
-  saveState();
-  res.json({ success: true });
-});
-
 // Forgot password: Step 1 — request a reset code
 // The code is pushed to agency admins (who pass it to the user verbally).
 app.post('/api/auth/forgot-password', async (req, res) => {
@@ -4487,4 +4473,3 @@ async function startServer() {
 }
 
 startServer();
-// Force redeploy to clear stale instance - 2026-10-18T00:09:21Z
