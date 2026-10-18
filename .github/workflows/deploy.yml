@@ -156,6 +156,9 @@ jobs:
           else:
               print('STAGED_DEPLOY=false: ordinary deploy, new revision '
                     'takes 100% traffic')
+              # Clear any pinned traffic so the new revision serves 100%.
+              # (Manual console edits may have pinned traffic to an old revision.)
+              d['spec']['traffic'] = [{'latestRevision': True, 'percent': 100}]
           json.dump(d, open(p, 'w'))
           EOF
           gcloud run services replace "$SVC_JSON" --region="$REGION" --project="$PROJECT"
