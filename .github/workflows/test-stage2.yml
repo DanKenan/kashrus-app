@@ -1,0 +1,87 @@
+# Stage 2 data-integrity tests — PR only, never deploys.
+#
+# Triggers on pull requests targeting main. Runs the 7 Stage 2 tests
+# against the REAL Firestore emulator (not the in-memory mock).
+#
+# Safety properties:
+# - No GCP credentials, no service account, no workload identity.
+# - No access to production Firestore (emulator only, localhost).
+# - No build, no push, no deploy steps exist in this workflow.
+# - Cannot deploy even if misconfigured: there is no deploy job.
+name: Stage 2 Data-Integrity Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'server.ts'
+      - 'tests/stage2/**'
+      - 'package.json'
+      - '.github/workflows/test-stage2.yml'
+
+permissions:
+  contents: read   # read-only; no write, no id-token, no GCP auth
+
+jobs:
+  emulator-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Set up Java (Firestore emulator requirement)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Start Firestore emulator
+        run: |
+          npm install -g firebase-tools
+          # Single-project emulator config; no production project ID used
+          cat > firebase.json <<'EOF'
+          {
+            "emulators": {
+              "firestore": { "port": 8080 },
+              "ui": { "enabled": false }
+            }
+          }
+          EOF
+          firebase emulators:start --only firestore --project demo-test &
+          echo $! > /tmp/emulator.pid
+          # Wait for emulator to accept connections (max 60s)
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/ > /dev/null 2>&1; then
+              echo "Emulator ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/ > /dev/null || (echo "Emulator failed to start" && exit 1)
+
+      - name: Run Stage 2 tests against real emulator
+        env:
+          FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080'
+          FIRESTORE_ENABLED: 'true'
+          FIREBASE_PROJECT_ID: 'demo-test'
+          FIRESTORE_DATABASE_ID: ''
+          # FIRESTORE_MOCK is NOT set — harness uses the real emulator
+          # when FIRESTORE_EMULATOR_HOST is present.
+        run: npm run test:stage2
+
+      - name: Stop emulator
+        if: always()
+        run: kill $(cat /tmp/emulator.pid) 2>/dev/null || true

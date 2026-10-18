@@ -21,11 +21,13 @@ function getJwtSecret(): string {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
   if (!jwtSecret) {
     jwtSecret = crypto.randomBytes(48).toString('hex');
-    try {
-      saveState();
-    } catch {
-      // saveState defined below; first call happens after boot anyway
-    }
+    // Persist via the transactional write path (fire-and-forget is fine here:
+    // the secret is already in memory; this just ensures it survives restarts).
+    // First call happens after boot anyway.
+    commitState(
+      (freshDoc) => ({ doc: { ...freshDoc, jwtSecret }, result: null }),
+      { label: 'persist-jwt-secret' }
+    ).catch((err) => console.warn('[getJwtSecret] Persist failed:', (err as any)?.message));
   }
   return jwtSecret;
 }
@@ -503,7 +505,11 @@ interface UserProfile {
   permissions?: UserPermissions;
 }
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+// Test hook: DATA_DIR_OVERRIDE lets the Stage 2 test suite run the server
+// against an isolated data directory (never touches the real ./data).
+const DATA_DIR = process.env.DATA_DIR_OVERRIDE
+  ? path.resolve(process.env.DATA_DIR_OVERRIDE)
+  : path.join(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'store.json');
 
 const DEFAULT_AGENCIES: Agency[] = [
@@ -992,6 +998,15 @@ function hydrateState(parsed: any) {
         jwtSecret = parsed.jwtSecret;
       }
 
+      // Password reset requests are persisted so they survive restarts.
+      // Expired entries are pruned on read (15-min TTL enforced at use).
+      if (Array.isArray(parsed.passwordResets)) {
+        const now = Date.now();
+        passwordResets = parsed.passwordResets.filter(
+          (r: any) => r && r.email && r.code && new Date(r.expiresAt).getTime() > now - 3600000
+        );
+      }
+
       if (Array.isArray(parsed.agencies) && parsed.agencies.length > 0) {
         agencies = parsed.agencies;
       } else {
@@ -1126,6 +1141,9 @@ function hydrateState(parsed: any) {
       }
 
       if (parsed.currentWorkDate) currentWorkDate = parsed.currentWorkDate;
+      if (typeof parsed._v === 'number' && parsed._v >= 0) {
+        stateVersion = parsed._v;
+      }
   } catch (err) {
     console.warn('Could not hydrate state:', err);
   }
@@ -1146,8 +1164,11 @@ function loadState() {
 }
 
 // Single snapshot of everything the server persists.
+// _v is the monotonic document version for optimistic concurrency (Stage 2).
+// It is managed exclusively by commitState() — never set it manually.
 function stateSnapshot() {
   return {
+    _v: stateVersion,
     agencies,
     venues,
     tasks,
@@ -1167,6 +1188,7 @@ function stateSnapshot() {
     pushSubscriptions,
     vapidKeys,
     jwtSecret,
+    passwordResets,
   };
 }
 
@@ -1209,12 +1231,25 @@ function getFirestoreConfig(): { projectId?: string; databaseId?: string } {
   }
   return {
     projectId: process.env.FIREBASE_PROJECT_ID || fileConfig.projectId,
-    databaseId: process.env.FIRESTORE_DATABASE_ID || fileConfig.firestoreDatabaseId,
+    // An explicitly-set (even empty) FIRESTORE_DATABASE_ID wins over the file.
+    // Empty string means "use the Firestore default database" (used by tests
+    // against the emulator, where the production database ID does not exist).
+    databaseId: process.env.FIRESTORE_DATABASE_ID !== undefined
+      ? process.env.FIRESTORE_DATABASE_ID || undefined
+      : fileConfig.firestoreDatabaseId,
   };
 }
 
-function initFirestore() {
+async function initFirestore() {
   try {
+    // Test hook: in-memory Firestore mock with faithful transaction semantics.
+    // Used by the Stage 2 test suite (FIRESTORE_MOCK=true). Not for production.
+    if (process.env.FIRESTORE_MOCK === 'true') {
+      const mockMod = await import('./tests/stage2/firestore-mock.mjs');
+      firestoreDb = mockMod.getMockFirestore();
+      console.log('[Firestore] Using in-memory mock (FIRESTORE_MOCK=true).');
+      return;
+    }
     // Only attempt Firestore where GCP credentials can exist: Cloud Run
     // (K_SERVICE is always set there), an explicit service-account key, or an
     // explicit opt-in. Anywhere else the ADC lookup would hang and fail, so
@@ -1262,30 +1297,491 @@ async function loadStateFromFirestore(): Promise<boolean> {
   }
 }
 
-// Fire-and-forget durable write. Safe to call from sync code paths.
+// Fire-and-forget durable write. RETIRED in Stage 2 — DO NOT CALL.
+//
+// Stage 2 replaced this with commitState(), the single transactional write
+// path. This function performed an UNVERSIONED, NON-TRANSACTIONAL .set() of
+// the entire document, which could overwrite a committed transaction with a
+// stale in-memory snapshot. It is kept as a no-op (not deleted) so any
+// forgotten caller fails safe instead of silently corrupting data. If you see
+// this warning in logs, that caller must be migrated to commitState().
 function persistToFirestore() {
-  if (!firestoreDb) return;
-  // NEVER overwrite Firestore with state that wasn't loaded from it. If a boot
-  // is slow or failing, writing now would destroy the user's real data.
-  if (!durableStateLoaded) {
-    console.warn('[Firestore] Skipping persist — durable state not yet loaded.');
-    return;
-  }
-  try {
-    // Firestore rejects `undefined` field values with a *synchronous* throw
-    // inside .set() (a promise .catch() cannot catch it), and that throw used
-    // to escape into the request as a 500 HTML page. Strip undefineds with a
-    // JSON round-trip and keep the whole write guarded so a Firestore failure
-    // can never break the API response.
-    const payload = JSON.parse(JSON.stringify({ ...stateSnapshot(), savedAt: Date.now() }));
-    firestoreDb
-      .doc(FIRESTORE_STATE_DOC)
-      .set(payload)
-      .catch((err: any) => console.warn('[Firestore] Background save failed:', err?.message));
-  } catch (err: any) {
-    console.warn('[Firestore] Background save failed:', err?.message);
+  console.warn('[Firestore] persistToFirestore() is retired — use commitState(). Call ignored.');
+}
+
+// ============================================================================
+// STAGE 2: Single transactional write path — Firestore is authoritative.
+// ----------------------------------------------------------------------------
+// Every mutation MUST go through commitState(). The old pattern (mutate
+// in-memory arrays → saveState() → fire-and-forget Firestore write) is
+// retired. The new flow:
+//
+//   1. Handler validates input (reads from in-memory cache — safe).
+//   2. Handler calls await commitState(mutator, { expectedVersion, operationId }).
+//   3. commitState opens a Firestore transaction:
+//      a. Reads the live document + its _v version.
+//      b. If expectedVersion was provided and !== current _v → 409 Conflict.
+//      c. Runs mutator(freshDoc) — the mutator applies the change to FRESH
+//         Firestore data, never to the in-memory snapshot.
+//      d. Mutator returns { doc, result } or { conflict: message }.
+//      e. Writes doc with _v+1 and server timestamp, atomically.
+//   4. On commit success: hydrate in-memory from committed doc, record
+//      operationId for idempotency, return result.
+//   5. Caller (handler) then broadcasts WebSocket, sends pushes, responds.
+//   6. On ANY failure: in-memory untouched, nothing broadcast, error returned.
+//
+// Invariants:
+// - In-memory state is a READ CACHE. It is only updated from committed
+//   Firestore data, never the other way around.
+// - No WebSocket broadcast, push notification, or HTTP success happens
+//   until the Firestore transaction commits.
+// - A failed write leaves zero trace: no memory change, no broadcast,
+//   no partial persistence.
+// ============================================================================
+
+class VersionConflictError extends Error {
+  code = 'VERSION_CONFLICT';
+  currentVersion: number;
+  expectedVersion: number;
+  constructor(currentVersion: number, expectedVersion: number) {
+    super(`Version conflict: expected ${expectedVersion}, found ${currentVersion}. Please refresh and retry.`);
+    this.name = 'VersionConflictError';
+    this.currentVersion = currentVersion;
+    this.expectedVersion = expectedVersion;
   }
 }
+
+class OperationConflictError extends Error {
+  code = 'OPERATION_CONFLICT';
+  constructor(message: string) {
+    super(message);
+    this.name = 'OperationConflictError';
+  }
+}
+
+class DuplicateOperationError extends Error {
+  code = 'DUPLICATE_OPERATION';
+  cachedResult: any;
+  constructor(cachedResult: any) {
+    super('Duplicate operation — returning cached result.');
+    this.name = 'DuplicateOperationError';
+    this.cachedResult = cachedResult;
+  }
+}
+
+class FirestoreUnavailableError extends Error {
+  code = 'FIRESTORE_UNAVAILABLE';
+  constructor(message: string) {
+    super(message);
+    this.name = 'FirestoreUnavailableError';
+  }
+}
+
+// Idempotency: recent operation IDs with TTL. Single-instance deployment
+// (maxScale=1) makes in-memory tracking correct. Entries expire after
+// IDEMPOTENCY_TTL_MS to bound memory.
+const IDEMPOTENCY_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const idempotencyCache = new Map<string, { result: any; version: number; expiresAt: number; inFlight?: boolean }>();
+
+function pruneIdempotencyCache() {
+  const now = Date.now();
+  for (const [key, entry] of idempotencyCache) {
+    if (entry.expiresAt < now) idempotencyCache.delete(key);
+  }
+}
+setInterval(pruneIdempotencyCache, 5 * 60 * 1000).unref?.();
+
+// The shape a mutator returns. Either a successful mutation or a conflict.
+type MutatorOutcome =
+  | { doc: any; result: any }
+  | { conflict: string };
+
+interface CommitOptions {
+  /** Client-provided version for optimistic concurrency. If set and !== current _v → 409. */
+  expectedVersion?: number;
+  /** Client-generated UUID for idempotency. Retries with the same ID return the cached result. */
+  operationId?: string;
+  /** How many times to retry the transaction on version conflict (default 2). */
+  maxRetries?: number;
+  /** Human-readable label for logs. */
+  label?: string;
+}
+
+interface CommitResult {
+  result: any;
+  version: number;
+}
+
+/**
+ * The ONLY way to persist a mutation. Runs the mutator inside a Firestore
+ * transaction against fresh document data.
+ *
+ * When Firestore is unavailable (local dev without credentials), falls back
+ * to the legacy in-memory + file path WITHOUT version checking, and logs a
+ * warning. This keeps local development working; production always has
+ * Firestore (Cloud Run).
+ */
+async function commitState(
+  mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
+  options: CommitOptions = {}
+): Promise<CommitResult> {
+  const label = options.label || 'unnamed';
+
+  // ---- Idempotency: return cached result for retried operations ----
+  // The check-and-claim below is synchronous (no awaits), so in Node's
+  // single-threaded event loop it is atomic: two concurrent requests with the
+  // same operationId cannot both pass. The first claims the ID immediately;
+  // the second sees the in-flight claim and gets a 429-style retry response
+  // (mapped to 409 by commitOrRespond) instead of executing twice.
+  if (options.operationId) {
+    const cached = idempotencyCache.get(options.operationId);
+    if (cached && cached.expiresAt > Date.now()) {
+      if ((cached as any).inFlight) {
+        throw new OperationConflictError('Operation already in progress — please retry in a moment.');
+      }
+      throw new DuplicateOperationError({ result: cached.result, version: cached.version });
+    }
+    // Claim synchronously: blocks concurrent duplicates before any await.
+    idempotencyCache.set(options.operationId, {
+      inFlight: true,
+      result: null,
+      version: -1,
+      expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
+    });
+    // Opportunistic prune on each new operation
+    if (idempotencyCache.size > 10000) pruneIdempotencyCache();
+  }
+
+  // ---- Fallback: no Firestore (local dev) ----
+  if (!firestoreDb) {
+    console.warn(`[commitState:${label}] No Firestore — using file-only fallback (no version checking).`);
+    const outcome = mutator(stateSnapshot(), stateVersion);
+    if ('conflict' in outcome) {
+      releaseIdempotencyClaim(options.operationId);
+      throw new OperationConflictError(outcome.conflict);
+    }
+    hydrateState(outcome.doc);
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(DATA_FILE, JSON.stringify(stateSnapshot(), null, 2), 'utf-8');
+    } catch (err) {
+      console.warn('[commitState] File fallback save failed:', (err as any)?.message);
+    }
+    const result = { result: outcome.result, version: stateVersion };
+    if (options.operationId) {
+      idempotencyCache.set(options.operationId, { result: result.result, version: result.version, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS });
+    }
+    return result;
+  }
+
+  // ---- Transactional path (production) ----
+  if (!durableStateLoaded) {
+    throw new FirestoreUnavailableError('Durable state not yet loaded — refusing to write (would risk overwriting good data).');
+  }
+
+  const maxAttempts = (options.maxRetries ?? 2) + 1;
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const committed = await firestoreDb.runTransaction(async (tx: any) => {
+        const docRef = firestoreDb.doc(FIRESTORE_STATE_DOC);
+        const snap = await tx.get(docRef);
+        const currentDoc = snap.exists ? snap.data() : null;
+        const currentVersion = typeof currentDoc?._v === 'number' ? currentDoc._v : 0;
+
+        // Strict equality check: the client's view must match reality.
+        if (options.expectedVersion !== undefined && options.expectedVersion !== currentVersion) {
+          throw new VersionConflictError(currentVersion, options.expectedVersion);
+        }
+
+        // Run the mutator against FRESH Firestore data — never in-memory.
+        // Exception: if the document doesn't exist yet (first boot), seed the
+        // mutator with the in-memory baseline so the first write doesn't see
+        // an empty world. This is safe because no other writer can exist yet
+        // (the document is being created).
+        const baseDoc = currentDoc || stateSnapshot();
+        const outcome = mutator(baseDoc, currentVersion);
+        if ('conflict' in outcome) {
+          throw new OperationConflictError(outcome.conflict);
+        }
+
+        const newDoc = {
+          ...outcome.doc,
+          _v: currentVersion + 1,
+          savedAt: Date.now(),
+        };
+        // Firestore rejects `undefined` with a synchronous throw — strip via JSON round-trip.
+        const payload = JSON.parse(JSON.stringify(newDoc));
+        tx.set(docRef, payload);
+        return { result: outcome.result, version: currentVersion + 1, doc: payload };
+      });
+
+      // ---- Commit succeeded: NOW update in-memory cache ----
+      hydrateState(committed.doc);
+      stateVersion = committed.version;
+
+      if (options.operationId) {
+        idempotencyCache.set(options.operationId, {
+          result: committed.result,
+          version: committed.version,
+          expiresAt: Date.now() + IDEMPOTENCY_TTL_MS,
+        });
+      }
+      return { result: committed.result, version: committed.version };
+    } catch (err: any) {
+      // DuplicateOperationError is thrown above, not from here — but guard anyway.
+      // (The original request still owns the claim; do not release it.)
+      if (err instanceof DuplicateOperationError) throw err;
+      if (err instanceof VersionConflictError || err instanceof OperationConflictError) {
+        // Version conflicts: retry re-runs the mutator on fresh data (mergeable
+        // operations succeed on retry; truly conflicting ones will hit the
+        // mutator's own conflict check and raise OperationConflictError).
+        // Operation conflicts: do NOT retry — the mutator already determined
+        // this operation cannot apply.
+        if (err instanceof VersionConflictError && attempt < maxAttempts) {
+          lastError = err;
+          console.log(`[commitState:${label}] Version conflict (attempt ${attempt}/${maxAttempts}) — retrying with fresh data.`);
+          continue;
+        }
+        // Terminal failure: release the idempotency claim so a legitimate
+        // client retry with the same operationId can re-execute. (Data-level
+        // idempotency in the mutators — pre-generated IDs + existence checks —
+        // guards against the lost-commit edge case.)
+        releaseIdempotencyClaim(options.operationId);
+        throw err;
+      }
+      // Firestore errors (unavailable, deadline exceeded, etc.)
+      console.warn(`[commitState:${label}] Transaction failed (attempt ${attempt}/${maxAttempts}):`, err?.message);
+      lastError = err;
+      if (attempt < maxAttempts) continue;
+      releaseIdempotencyClaim(options.operationId);
+      throw new FirestoreUnavailableError(`Save failed after ${maxAttempts} attempts: ${err?.message || 'unknown error'}. Your data was NOT saved — please retry.`);
+    }
+  }
+  releaseIdempotencyClaim(options.operationId);
+  throw lastError;
+}
+
+/**
+ * Releases an in-flight idempotency claim after a terminal failure, so a
+ * legitimate client retry with the same operationId can re-execute. Only
+ * removes the claim if it is still marked in-flight (never removes a
+ * committed result).
+ */
+function releaseIdempotencyClaim(operationId?: string): void {
+  if (!operationId) return;
+  const cached = idempotencyCache.get(operationId);
+  if (cached && (cached as any).inFlight) {
+    idempotencyCache.delete(operationId);
+  }
+}
+
+// In-memory mirror of the Firestore document version. Updated only from
+// committed transaction results. Used by the file-fallback path and for
+// observability; the transaction always reads the authoritative _v from
+// Firestore, never this.
+let stateVersion = 0;
+
+/**
+ * Helper for Express handlers: runs commitState and maps errors to HTTP
+ * responses. Returns the commit result on success, or sends the error
+ * response and returns null.
+ *
+ * Usage:
+ *   const committed = await commitOrRespond(req, res, mutator, { label: 'create-task' });
+ *   if (!committed) return; // response already sent
+ *   broadcast(...); // only after commit
+ *   res.status(201).json(committed.result);
+ */
+async function commitOrRespond(
+  req: any,
+  res: any,
+  mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
+  options: Omit<CommitOptions, 'expectedVersion' | 'operationId'> = {}
+): Promise<CommitResult | null> {
+  const body = req.body || {};
+  const query = req.query || {};
+  const expectedVersion =
+    body.expectedVersion !== undefined ? Number(body.expectedVersion) :
+    query.expectedVersion !== undefined ? Number(query.expectedVersion) : undefined;
+  const operationId = body.operationId || query.operationId || undefined;
+
+  try {
+    return await commitState(mutator, { ...options, expectedVersion, operationId });
+  } catch (err: any) {
+    // All error paths send the HTTP response and return null, so the caller's
+    // `if (!committed) return;` guard works. (Returning the Express Response
+    // object here would be truthy and break that guard.)
+    if (err instanceof DuplicateOperationError) {
+      // Idempotent retry: the original result was already broadcast when it
+      // first committed. Return it directly without re-broadcasting.
+      res.json(err.cachedResult.result);
+      return null;
+    }
+    if (err instanceof VersionConflictError) {
+      res.status(409).json({
+        error: 'Conflict: the data changed since you loaded it. Please refresh and try again.',
+        code: 'VERSION_CONFLICT',
+        currentVersion: err.currentVersion,
+      });
+      return null;
+    }
+    if (err instanceof OperationConflictError) {
+      res.status(409).json({ error: err.message, code: 'OPERATION_CONFLICT' });
+      return null;
+    }
+    if (err instanceof FirestoreUnavailableError) {
+      console.error(`[commitOrRespond:${options.label || 'unnamed'}] ${err.message}`);
+      res.status(503).json({
+        error: 'Could not save — the database is unreachable. Your changes were NOT saved. Please try again.',
+        code: 'SAVE_FAILED',
+      });
+      return null;
+    }
+    console.error(`[commitOrRespond:${options.label || 'unnamed'}] Unexpected error:`, err);
+    res.status(500).json({ error: 'Save failed. Your changes were NOT saved. Please try again.', code: 'SAVE_FAILED' });
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// End of Stage 2 transactional infrastructure.
+// ---------------------------------------------------------------------------
+
+// ============================================================================
+// Stage 2 generic CRUD helpers for simple top-level array entities.
+// These wrap commitOrRespond for the common create/update/delete patterns so
+// each handler stays small while keeping transactional guarantees.
+// ============================================================================
+
+interface CrudHelperOptions {
+  label: string;
+  broadcastType?: string;
+  getAgencyId?: (item: any) => string;
+  getBroadcastPayload?: (item: any, result: any) => any;
+}
+
+/**
+ * Generic "create item in array" handler helper.
+ * - buildItem(freshDoc): returns the new item (ID must be pre-generated by caller).
+ * - checkDuplicate(freshDoc): returns conflict message if the item already exists, else null.
+ */
+async function crudCreate(
+  req: any,
+  res: any,
+  arrayKey: string,
+  buildItem: () => any,
+  opts: CrudHelperOptions & {
+    checkDuplicate?: (freshDoc: any, item: any) => string | null;
+    statusCode?: number;
+  }
+): Promise<boolean> {
+  const item = buildItem();
+  const committed = await commitOrRespond(
+    req,
+    res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc[arrayKey]) ? freshDoc[arrayKey] : [];
+      if (opts.checkDuplicate) {
+        const dupMsg = opts.checkDuplicate(freshDoc, item);
+        if (dupMsg) return { conflict: dupMsg };
+      }
+      // Idempotency: same ID already present → return existing.
+      const existing = arr.find((x) => x && x.id === item.id);
+      if (existing) return { doc: freshDoc, result: existing };
+      return { doc: { ...freshDoc, [arrayKey]: [...arr, item] }, result: item };
+    },
+    { label: opts.label }
+  );
+  if (!committed) return false;
+  const created = committed.result;
+  if (opts.broadcastType) {
+    const payload = opts.getBroadcastPayload ? opts.getBroadcastPayload(created, committed.result) : created;
+    const agencyId = opts.getAgencyId ? opts.getAgencyId(created) : undefined;
+    broadcast(opts.broadcastType, payload, undefined, agencyId);
+  }
+  res.status(opts.statusCode || 201).json(created);
+  return true;
+}
+
+/**
+ * Generic "update item in array by ID" helper.
+ * - applyUpdate(freshItem, freshDoc): returns updated item, or { conflict: msg }.
+ */
+async function crudUpdate(
+  req: any,
+  res: any,
+  arrayKey: string,
+  id: string,
+  applyUpdate: (freshItem: any, freshDoc: any) => any | { conflict: string },
+  opts: CrudHelperOptions
+): Promise<boolean> {
+  const committed = await commitOrRespond(
+    req,
+    res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc[arrayKey]) ? freshDoc[arrayKey] : [];
+      const freshItem = arr.find((x) => x && x.id === id);
+      if (!freshItem) return { conflict: `${arrayKey} item not found (it may have been deleted).` };
+      const outcome = applyUpdate(freshItem, freshDoc);
+      if (outcome && typeof outcome === 'object' && 'conflict' in outcome) {
+        return { conflict: (outcome as any).conflict };
+      }
+      const newArr = arr.map((x) => (x && x.id === id ? outcome : x));
+      return { doc: { ...freshDoc, [arrayKey]: newArr }, result: outcome };
+    },
+    { label: opts.label }
+  );
+  if (!committed) return false;
+  const updated = committed.result;
+  if (opts.broadcastType) {
+    const payload = opts.getBroadcastPayload ? opts.getBroadcastPayload(updated, committed.result) : updated;
+    const agencyId = opts.getAgencyId ? opts.getAgencyId(updated) : undefined;
+    broadcast(opts.broadcastType, payload, undefined, agencyId);
+  }
+  res.json(updated);
+  return true;
+}
+
+/**
+ * Generic "delete item from array by ID" helper (idempotent).
+ */
+async function crudDelete(
+  req: any,
+  res: any,
+  arrayKey: string,
+  id: string,
+  opts: CrudHelperOptions & { getDeletePayload?: (deleted: any) => any }
+): Promise<boolean> {
+  const committed = await commitOrRespond(
+    req,
+    res,
+    (freshDoc) => {
+      const freshArr: any[] = Array.isArray(freshDoc[arrayKey]) ? freshDoc[arrayKey] : [];
+      const found = freshArr.find((x) => x && x.id === id);
+      if (!found) return { doc: freshDoc, result: { success: true, deletedId: id, alreadyDeleted: true } };
+      const newArr = freshArr.filter((x) => !(x && x.id === id));
+      return { doc: { ...freshDoc, [arrayKey]: newArr }, result: { success: true, deletedId: id, deleted: found } };
+    },
+    { label: opts.label }
+  );
+  if (!committed) return false;
+  const result: any = committed.result;
+  if (opts.broadcastType) {
+    const payload = opts.getDeletePayload && result.deleted
+      ? opts.getDeletePayload(result.deleted)
+      : { id, deletedId: id };
+    const agencyId = opts.getAgencyId && result.deleted ? opts.getAgencyId(result.deleted) : undefined;
+    broadcast(opts.broadcastType, payload, undefined, agencyId);
+  }
+  res.json({ success: true, deletedId: id });
+  return true;
+}
+
+// ============================================================================
+// End of Stage 2 CRUD helpers.
+// ============================================================================
 
 /** Backfill sortOrder for tasks that predate the manual-order feature,
  *  per venue, ordered by target time then creation. Idempotent.
@@ -1297,24 +1793,39 @@ function taskSortMinutes(t: { targetTime?: string; targetTimeMinutes?: number })
   return targetTimeMinutes(t.targetTime);
 }
 
-function normalizeTaskOrder(): boolean {
+/**
+ * Backfill sortOrder for tasks that predate the manual-order feature.
+ * Pure: takes a task array, returns { tasks, changed }. The boot call site
+ * runs it inside the transactional write path on fresh Firestore data.
+ */
+function normalizeTaskOrderPure(input: any[]): { tasks: any[]; changed: boolean } {
   let changed = false;
-  const venueIds = [...new Set(tasks.map((t) => t.venueId))];
+  // Work on copies so the input is never mutated.
+  const working = input.map((t) => ({ ...t }));
+  const byId = new Map(working.map((t) => [t.id, t]));
+  const venueIds = [...new Set(working.map((t) => t.venueId))];
   for (const vid of venueIds) {
-    const group = tasks
+    const group = working
       .filter((t) => t.venueId === vid)
       .sort(
         (a, b) =>
           taskSortMinutes(a) - taskSortMinutes(b) ||
-          a.createdAt.localeCompare(b.createdAt)
+          String(a.createdAt || '').localeCompare(String(b.createdAt || ''))
       );
     if (group.some((t) => t.sortOrder === undefined)) {
       group.forEach((t, i) => {
-        t.sortOrder = i;
+        byId.get(t.id)!.sortOrder = i;
       });
       changed = true;
     }
   }
+  return { tasks: working, changed };
+}
+
+/** Legacy wrapper: normalize the in-memory cache (boot-time only). */
+function normalizeTaskOrder(): boolean {
+  const { tasks: normalized, changed } = normalizeTaskOrderPure(tasks);
+  if (changed) tasks = normalized;
   return changed;
 }
 
@@ -1331,7 +1842,10 @@ function ensureVapidKeys() {
     const generated = webpush.generateVAPIDKeys();
     vapidKeys = { publicKey: generated.publicKey, privateKey: generated.privateKey };
     console.log('[Push] Generated VAPID keys (persisted with app state).');
-    saveState();
+    commitState(
+      (freshDoc) => ({ doc: { ...freshDoc, vapidKeys }, result: null }),
+      { label: 'persist-vapid-keys' }
+    ).catch((err) => console.warn('[Push] VAPID key persist failed:', (err as any)?.message));
   }
   webpush.setVapidDetails(
     'mailto:kenan@hartfordkashrut.org',
@@ -1355,8 +1869,17 @@ function sendPushToUser(userEmail: string, title: string, body: string, data?: a
       .catch((err: any) => {
         // 410/404 = subscription is gone; drop it instead of retrying forever
         if (err?.statusCode === 410 || err?.statusCode === 404) {
-          pushSubscriptions = pushSubscriptions.filter((s) => s.endpoint !== sub.endpoint);
-          saveState();
+          const deadEndpoint = sub.endpoint;
+          commitState(
+            (freshDoc) => {
+              const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
+              return {
+                doc: { ...freshDoc, pushSubscriptions: arr.filter((s) => s.endpoint !== deadEndpoint) },
+                result: null,
+              };
+            },
+            { label: 'prune-dead-push-subscription' }
+          ).catch((e) => console.warn('[Push] Dead-subscription prune failed:', (e as any)?.message));
         } else {
           console.warn('[Push] Send failed:', err?.message || err);
         }
@@ -1406,7 +1929,44 @@ function cleanupExpiredMedia() {
 
   if (cleaned > 0) {
     console.log(`[MediaCleanup] Removed ${cleaned} expired media items`);
-    saveState();
+    // Persist via the transactional write path. The mutator re-applies the
+    // expiry scan to FRESH data (idempotent — already-cleaned items are skipped).
+    commitState(
+      (freshDoc) => {
+        const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+        const freshNotes: any[] = Array.isArray(freshDoc.handoffNotes) ? freshDoc.handoffNotes : [];
+        const freshIncidents: any[] = Array.isArray(freshDoc.incidents) ? freshDoc.incidents : [];
+        const stripMedia = (arr: any[], getDate: (x: any) => string, fields: string[]) =>
+          arr.map((x) => {
+            let changed = false;
+            const copy = { ...x };
+            for (const f of fields) {
+              if ((copy as any)[f] && getDate(x) < cutoffIso) {
+                (copy as any)[f] = undefined;
+                changed = true;
+              }
+            }
+            return changed ? copy : x;
+          });
+        const newTasks = freshTasks.map((t) => {
+          const checkIns = Array.isArray(t.checkIns) ? t.checkIns : [];
+          const newCheckIns = checkIns.map((c: any) =>
+            c.photoData && c.at < cutoffIso ? { ...c, photoData: undefined } : c
+          );
+          return newCheckIns.some((c: any, i: number) => c !== checkIns[i]) ? { ...t, checkIns: newCheckIns } : t;
+        });
+        return {
+          doc: {
+            ...freshDoc,
+            tasks: newTasks,
+            handoffNotes: stripMedia(freshNotes, (n) => n.createdAt, ['voiceNoteData']),
+            incidents: stripMedia(freshIncidents, (i) => i.createdAt, ['photoData', 'voiceNoteData']),
+          },
+          result: null,
+        };
+      },
+      { label: 'media-cleanup' }
+    ).catch((err) => console.warn('[MediaCleanup] Persist failed:', (err as any)?.message));
   }
 }
 
@@ -1469,28 +2029,45 @@ app.get('/api/push/public-key', (_req, res) => {
   res.json({ publicKey: vapidKeys.publicKey });
 });
 
-app.post('/api/push/subscribe', (req, res) => {
+app.post('/api/push/subscribe', async (req, res) => {
   const { userEmail, subscription } = req.body as any;
   if (!userEmail || !subscription?.endpoint || !subscription?.keys) {
     return res.status(400).json({ error: 'userEmail and subscription required' });
   }
   const email = String(userEmail).trim().toLowerCase();
-  pushSubscriptions = pushSubscriptions.filter((s) => s.endpoint !== subscription.endpoint);
-  pushSubscriptions.push({
-    userEmail: email,
-    endpoint: subscription.endpoint,
-    keys: subscription.keys,
-    createdAt: new Date().toISOString(),
-  });
-  saveState();
+  const createdAt = new Date().toISOString();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
+      // Upsert by endpoint against FRESH data.
+      const newArr = [
+        ...arr.filter((s) => s.endpoint !== subscription.endpoint),
+        { userEmail: email, endpoint: subscription.endpoint, keys: subscription.keys, createdAt },
+      ];
+      return { doc: { ...freshDoc, pushSubscriptions: newArr }, result: { success: true } };
+    },
+    { label: 'push-subscribe' }
+  );
+  if (!committed) return;
   res.json({ success: true });
 });
 
-app.post('/api/push/unsubscribe', (req, res) => {
+app.post('/api/push/unsubscribe', async (req, res) => {
   const { endpoint } = req.body as any;
   if (endpoint) {
-    pushSubscriptions = pushSubscriptions.filter((s) => s.endpoint !== endpoint);
-    saveState();
+    const committed = await commitOrRespond(
+      req, res,
+      (freshDoc) => {
+        const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
+        return {
+          doc: { ...freshDoc, pushSubscriptions: arr.filter((s) => s.endpoint !== endpoint) },
+          result: { success: true },
+        };
+      },
+      { label: 'push-unsubscribe' }
+    );
+    if (!committed) return;
   }
   res.json({ success: true });
 });
@@ -1592,34 +2169,31 @@ wss.on('connection', (ws, req) => {
 // Daily Reset Logic (supports resetting a specific venue or all)
 function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
   const todayStr = new Date().toISOString().split('T')[0];
-  const targetVenuesToReset = targetVenueId
-    ? venues.filter((v) => v.id === targetVenueId)
-    : venues;
+  const resetAt = new Date().toISOString();
+  // Stable timestamp base so transaction retries generate identical snapshot IDs.
+  const stamp = Date.now();
 
-  const snapshots: HistoryLog[] = [];
-
-  for (const v of targetVenuesToReset) {
-    const venueTasks = tasks.filter((t) => t.venueId === v.id);
+  // Build a single history snapshot from a venue + its tasks (pure function).
+  const buildSnapshot = (v: any, venueTasks: any[]): HistoryLog => {
     const completedCount = venueTasks.filter((t) => t.isCompleted).length;
     const totalCount = venueTasks.length;
     const rate = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
-
-    const snapshot: HistoryLog = {
-      id: `hist-${v.id}-${Date.now()}`,
+    return {
+      id: `hist-${v.id}-${stamp}`,
       agencyId: v.agencyId || 'agency-hkc',
       venueId: v.id,
       date: currentWorkDate,
       totalTasks: totalCount,
       completedTasks: completedCount,
       completionRate: rate,
-      resetAt: new Date().toISOString(),
+      resetAt,
       resetBy,
       entries: venueTasks.map((t) => {
         const checkIns = t.checkIns || [];
         const checkInSummary =
           checkIns.length > 0
             ? checkIns
-                .map((c) => {
+                .map((c: any) => {
                   const when = (() => {
                     try {
                       return new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -1635,7 +2209,7 @@ function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
           ? `${t.notes ? t.notes + '\n' : ''}Checks (${checkIns.length}): ${checkInSummary}`
           : t.notes;
         return {
-          id: `entry-${t.id}-${Date.now()}`,
+          id: `entry-${t.id}-${stamp}`,
           taskId: t.id,
           taskTitle: t.title,
           category: t.category,
@@ -1648,18 +2222,10 @@ function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
         };
       }),
     };
+  };
 
-    snapshots.push(snapshot);
-    historyLogs = [snapshot, ...historyLogs];
-  }
-
-  // Reset tasks for the target venue(s)
-  currentWorkDate = todayStr;
-  tasks = tasks.map((t) => {
-    if (targetVenueId && t.venueId !== targetVenueId) {
-      return t;
-    }
-
+  const resetTask = (t: any): any => {
+    if (targetVenueId && t.venueId !== targetVenueId) return t;
     let initialStatus = 'pending';
     if (t.inputType === 'yes_no') {
       initialStatus = 'no';
@@ -1670,7 +2236,6 @@ function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
     ) {
       initialStatus = t.customStatusOptions[0];
     }
-
     return {
       ...t,
       currentStatus: initialStatus,
@@ -1681,23 +2246,53 @@ function executeDailyReset(targetVenueId?: string, resetBy: string = 'system') {
       updatedAt: null,
       checkIns: [],
     };
+  };
+
+  // The whole reset (snapshots + task reset + work-date bump) commits atomically.
+  // currentWorkDate is bumped inside the mutator so a retry can't double-reset.
+  commitState(
+    (freshDoc) => {
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      const freshHistory: any[] = Array.isArray(freshDoc.historyLogs) ? freshDoc.historyLogs : [];
+      // Idempotency: if the work date was already advanced, this reset already ran.
+      if (freshDoc.currentWorkDate === todayStr) {
+        return { doc: freshDoc, result: null };
+      }
+      const targetVenues = targetVenueId
+        ? freshVenues.filter((v) => v.id === targetVenueId)
+        : freshVenues;
+      const snapshots = targetVenues.map((v) =>
+        buildSnapshot(v, freshTasks.filter((t) => t.venueId === v.id))
+      );
+      return {
+        doc: {
+          ...freshDoc,
+          historyLogs: [...snapshots, ...freshHistory],
+          tasks: freshTasks.map(resetTask),
+          currentWorkDate: todayStr,
+        },
+        result: snapshots[0] || null,
+      };
+    },
+    { label: 'daily-reset' }
+  ).then((outcome) => {
+    // Broadcast per-agency ONLY after commit (in-memory cache is now fresh).
+    for (const a of agencies) {
+      const aid = a.id;
+      broadcast('DAILY_RESET', {
+        venueId: targetVenueId || 'all',
+        tasks: tasks.filter((t) => (t.agencyId || 'agency-hkc') === aid),
+        historyLogs: historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === aid),
+        currentWorkDate,
+        snapshot: outcome.result,
+      }, undefined, aid);
+    }
+  }).catch((err) => {
+    console.warn('[DailyReset] Transaction failed:', (err as any)?.message);
   });
 
-  saveState();
-
-  // Broadcast per-agency: each agency's sockets get only their own data.
-  for (const a of agencies) {
-    const aid = a.id;
-    broadcast('DAILY_RESET', {
-      venueId: targetVenueId || 'all',
-      tasks: tasks.filter((t) => (t.agencyId || 'agency-hkc') === aid),
-      historyLogs: historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === aid),
-      currentWorkDate,
-      snapshot: snapshots[0] || null,
-    }, undefined, aid);
-  }
-
-  return snapshots[0] || null;
+  return null;
 }
 
 // Scheduled interval: check every 60s for midnight rollover
@@ -1790,15 +2385,15 @@ app.get('/api/task-templates', (req, res) => {
   res.json({ templates: taskTemplates.filter((t) => t.agencyId === agencyId) });
 });
 
-app.post('/api/task-templates', (req, res) => {
+app.post('/api/task-templates', async (req, res) => {
   const { name, description, tasks: templateTasks, fromVenueId, createdByEmail } = req.body || {};
   if (!name?.trim()) {
     return res.status(400).json({ error: 'Template name is required.' });
   }
 
+  // Build task definitions from the request (reads from memory cache — safe for reads).
   let taskDefs: TaskTemplate['tasks'] = [];
   if (fromVenueId) {
-    // Save current venue's tasks as a template
     taskDefs = tasks
       .filter((t) => t.venueId === fromVenueId)
       .map((t) => ({
@@ -1813,21 +2408,34 @@ app.post('/api/task-templates', (req, res) => {
     taskDefs = templateTasks;
   }
 
-  const template: TaskTemplate = {
-    id: `tmpl-${crypto.randomUUID()}`,
-    agencyId: (req as any).agencyId || 'agency-hkc',
-    name: String(name).trim(),
-    description: description?.trim(),
-    tasks: taskDefs,
-    createdByEmail: createdByEmail || '',
-    createdAt: new Date().toISOString(),
-  };
-  taskTemplates.push(template);
-  saveState();
-  res.json({ template });
+  const templateId = `tmpl-${crypto.randomUUID()}`;
+  const agencyId = (req as any).agencyId || 'agency-hkc';
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.taskTemplates) ? freshDoc.taskTemplates : [];
+      if (arr.some((t) => t.id === templateId)) {
+        return { doc: freshDoc, result: arr.find((t) => t.id === templateId) };
+      }
+      const template: TaskTemplate = {
+        id: templateId,
+        agencyId,
+        name: String(name).trim(),
+        description: description?.trim(),
+        tasks: taskDefs,
+        createdByEmail: createdByEmail || '',
+        createdAt: new Date().toISOString(),
+      };
+      return { doc: { ...freshDoc, taskTemplates: [...arr, template] }, result: template };
+    },
+    { label: 'create-task-template' }
+  );
+  if (!committed) return;
+  res.json({ template: committed.result });
 });
 
-app.post('/api/task-templates/:id/apply', (req, res) => {
+app.post('/api/task-templates/:id/apply', async (req, res) => {
   const template = taskTemplates.find((t) => t.id === req.params.id);
   if (!template) return res.status(404).json({ error: 'Template not found.' });
 
@@ -1836,6 +2444,7 @@ app.post('/api/task-templates/:id/apply', (req, res) => {
 
   const agencyId = (req as any).agencyId || 'agency-hkc';
   const now = new Date().toISOString();
+  // Pre-generate stable IDs so transaction retries don't duplicate tasks.
   const created: TaskItem[] = template.tasks.map((td, i) => ({
     id: `task-${crypto.randomUUID()}`,
     agencyId,
@@ -1862,19 +2471,34 @@ app.post('/api/task-templates/:id/apply', (req, res) => {
     checkIns: [],
     createdAt: now,
   }));
+  const createdIds = new Set(created.map((t) => t.id));
 
-  tasks.push(...created);
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      // Idempotency: skip tasks whose IDs already exist (partial previous commit).
+      const toAdd = created.filter((t) => !freshTasks.some((ft) => ft.id === t.id));
+      if (toAdd.length === 0) {
+        return { doc: freshDoc, result: { created: 0, tasks: [] } };
+      }
+      return {
+        doc: { ...freshDoc, tasks: [...freshTasks, ...toAdd] },
+        result: { created: toAdd.length, tasks: toAdd },
+      };
+    },
+    { label: 'apply-task-template' }
+  );
+  if (!committed) return;
   broadcast('TASKS_UPDATED', { venueId }, undefined, agencyId);
-  res.json({ created: created.length, tasks: created });
+  res.json(committed.result);
 });
 
-app.delete('/api/task-templates/:id', (req, res) => {
-  const idx = taskTemplates.findIndex((t) => t.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Template not found.' });
-  taskTemplates.splice(idx, 1);
-  saveState();
-  res.json({ success: true });
+app.delete('/api/task-templates/:id', async (req, res) => {
+  const existing = taskTemplates.find((t) => t.id === req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Template not found.' });
+  const ok = await crudDelete(req, res, 'taskTemplates', req.params.id, { label: 'delete-task-template' });
+  return;
 });
 
 // Incidents — "oh no" flow: photo + voice + instant alert + auto-task
@@ -1888,7 +2512,7 @@ app.get('/api/incidents', (req, res) => {
   res.json({ incidents: list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
 });
 
-app.post('/api/incidents', (req, res) => {
+app.post('/api/incidents', async (req, res) => {
   const { venueId, title, description, severity, photoData, voiceNoteData, reporterEmail, reporterName } = req.body || {};
   if (!venueId || !title?.trim()) {
     return res.status(400).json({ error: 'Venue and title are required.' });
@@ -1897,56 +2521,77 @@ app.post('/api/incidents', (req, res) => {
   const agencyId = (req as any).agencyId || 'agency-hkc';
   const now = new Date().toISOString();
   const venue = venues.find((v) => v.id === venueId);
+  const venueName = venue?.name || 'Venue';
 
-  const incident: Incident = {
-    id: `incident-${crypto.randomUUID()}`,
-    agencyId,
-    venueId,
-    reporterEmail: reporterEmail || '',
-    reporterName: reporterName || 'Mashgiach',
-    title: String(title).trim(),
-    description: String(description || '').trim(),
-    severity: ['low', 'medium', 'high', 'critical'].includes(severity) ? severity : 'medium',
-    photoData: typeof photoData === 'string' && photoData.startsWith('data:image/') ? photoData.slice(0, 500000) : undefined,
-    voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/') ? voiceNoteData.slice(0, 1000000) : undefined,
-    status: 'open',
-    createdAt: now,
-  };
-  incidents.unshift(incident);
+  // Pre-generate stable IDs so transaction retries don't duplicate.
+  const incidentId = `incident-${crypto.randomUUID()}`;
+  const followUpId = `task-${crypto.randomUUID()}`;
+  const sev = (['low', 'medium', 'high', 'critical'].includes(severity) ? severity : 'medium') as Incident['severity'];
 
-  // Auto-create a follow-up task
-  const followUp: TaskItem = {
-    id: `task-${crypto.randomUUID()}`,
-    agencyId,
-    venueId,
-    title: `🚨 Follow up: ${incident.title}`,
-    description: `Incident reported by ${incident.reporterName} at ${new Date(now).toLocaleString()}.\n\n${incident.description}`,
-    category: 'Incident',
-    categories: ['Incident'],
-    isPrivate: false,
-    sortOrder: 0,
-    inputType: 'yes_no',
-    assignedTo: ['all'],
-    scheduleType: 'recurring',
-    daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
-    targetTime: 'End of Day',
-    priority: incident.severity === 'critical' ? 'high' : incident.severity === 'high' ? 'high' : 'medium',
-    enableOverdueAlert: incident.severity === 'critical' || incident.severity === 'high',
-    currentStatus: 'pending',
-    isCompleted: false,
-    notes: '',
-    updatedByEmail: null,
-    updatedByName: null,
-    updatedAt: null,
-    checkIns: [],
-    createdAt: now,
-  };
-  tasks.push(followUp);
-  incident.linkedTaskId = followUp.id;
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshIncidents: any[] = Array.isArray(freshDoc.incidents) ? freshDoc.incidents : [];
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      // Idempotency: if this incident ID already exists, return it.
+      const existingIncident = freshIncidents.find((i) => i.id === incidentId);
+      if (existingIncident) {
+        return { doc: freshDoc, result: existingIncident };
+      }
+      const incident: Incident = {
+        id: incidentId,
+        agencyId,
+        venueId,
+        reporterEmail: reporterEmail || '',
+        reporterName: reporterName || 'Mashgiach',
+        title: String(title).trim(),
+        description: String(description || '').trim(),
+        severity: sev,
+        photoData: typeof photoData === 'string' && photoData.startsWith('data:image/') ? photoData.slice(0, 500000) : undefined,
+        voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/') ? voiceNoteData.slice(0, 1000000) : undefined,
+        status: 'open',
+        createdAt: now,
+        linkedTaskId: followUpId,
+      };
+      // Auto-create a follow-up task (same transaction — atomic with the incident).
+      const followUp: TaskItem = {
+        id: followUpId,
+        agencyId,
+        venueId,
+        title: `🚨 Follow up: ${incident.title}`,
+        description: `Incident reported by ${incident.reporterName} at ${new Date(now).toLocaleString()}.\n\n${incident.description}`,
+        category: 'Incident',
+        categories: ['Incident'],
+        isPrivate: false,
+        sortOrder: 0,
+        inputType: 'yes_no',
+        assignedTo: ['all'],
+        scheduleType: 'recurring',
+        daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+        targetTime: 'End of Day',
+        priority: sev === 'critical' || sev === 'high' ? 'high' : 'medium',
+        enableOverdueAlert: sev === 'critical' || sev === 'high',
+        currentStatus: 'pending',
+        isCompleted: false,
+        notes: '',
+        updatedByEmail: null,
+        updatedByName: null,
+        updatedAt: null,
+        checkIns: [],
+        createdAt: now,
+      };
+      const tasksToAdd = freshTasks.some((t) => t.id === followUpId) ? [] : [followUp];
+      return {
+        doc: { ...freshDoc, incidents: [incident, ...freshIncidents], tasks: [...freshTasks, ...tasksToAdd] },
+        result: incident,
+      };
+    },
+    { label: 'create-incident' }
+  );
+  if (!committed) return;
+  const incident = committed.result as Incident;
 
-  saveState();
-
-  // Instant alert to all admins/coordinators
+  // Side effects ONLY after commit.
   const admins = users.filter((u) =>
     (u.agencyId || 'agency-hkc') === agencyId &&
     (u.role === 'admin' || u.role === 'coordinator')
@@ -1955,7 +2600,7 @@ app.post('/api/incidents', (req, res) => {
     sendPushToUser(
       admin.email,
       `🚨 ${incident.severity.toUpperCase()}: ${incident.title}`,
-      `${venue?.name || 'Venue'} — reported by ${incident.reporterName}`,
+      `${venueName} — reported by ${incident.reporterName}`,
       { incidentId: incident.id, venueId, type: 'incident' }
     );
   }
@@ -1965,25 +2610,42 @@ app.post('/api/incidents', (req, res) => {
   res.json({ incident });
 });
 
-app.post('/api/incidents/:id/resolve', (req, res) => {
+app.post('/api/incidents/:id/resolve', async (req, res) => {
   const incident = incidents.find((i) => i.id === req.params.id);
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
   const { resolvedBy } = req.body || {};
-  incident.status = 'resolved';
-  incident.resolvedAt = new Date().toISOString();
-  incident.resolvedBy = resolvedBy || '';
-  saveState();
-  broadcast('INCIDENT_UPDATED', { incident }, undefined, incident.agencyId);
-  res.json({ incident });
+  const resolvedAt = new Date().toISOString();
+  const ok = await crudUpdate(req, res, 'incidents', req.params.id,
+    (fresh) => {
+      if (fresh.status === 'resolved') return fresh; // idempotent
+      return { ...fresh, status: 'resolved', resolvedAt, resolvedBy: resolvedBy || '' };
+    },
+    {
+      label: 'resolve-incident',
+      broadcastType: 'INCIDENT_UPDATED',
+      getBroadcastPayload: (updated) => ({ incident: updated }),
+      getAgencyId: (updated) => updated.agencyId,
+    }
+  );
+  return;
 });
 
-app.post('/api/incidents/:id/acknowledge', (req, res) => {
+app.post('/api/incidents/:id/acknowledge', async (req, res) => {
   const incident = incidents.find((i) => i.id === req.params.id);
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
-  incident.status = 'acknowledged';
-  saveState();
-  broadcast('INCIDENT_UPDATED', { incident }, undefined, incident.agencyId);
-  res.json({ incident });
+  const ok = await crudUpdate(req, res, 'incidents', req.params.id,
+    (fresh) => {
+      if (fresh.status === 'acknowledged' || fresh.status === 'resolved') return fresh; // idempotent
+      return { ...fresh, status: 'acknowledged' };
+    },
+    {
+      label: 'acknowledge-incident',
+      broadcastType: 'INCIDENT_UPDATED',
+      getBroadcastPayload: (updated) => ({ incident: updated }),
+      getAgencyId: (updated) => updated.agencyId,
+    }
+  );
+  return;
 });
 
 // Broadcast announcements — one-way team updates (NOT a chat)
@@ -2008,7 +2670,7 @@ app.get('/api/announcements', (req, res) => {
   });
 });
 
-app.post('/api/announcements', (req, res) => {
+app.post('/api/announcements', async (req, res) => {
   const { title, body, category, targetRoles, venueId, expiresAt, authorEmail, authorName } = req.body || {};
   if (!title?.trim()) {
     return res.status(400).json({ error: 'Title is required.' });
@@ -2021,25 +2683,38 @@ app.post('/api/announcements', (req, res) => {
   }
 
   const agencyId = (req as any).agencyId || author.agencyId || 'agency-hkc';
-  const announcement: Announcement = {
-    id: `announce-${crypto.randomUUID()}`,
-    agencyId,
-    authorEmail: author.email,
-    authorName: authorName || author.name,
-    title: String(title).trim(),
-    body: String(body || '').trim(),
-    category: ['assignment', 'update', 'notice', 'urgent'].includes(category) ? category : 'update',
-    targetRoles: Array.isArray(targetRoles) && targetRoles.length > 0 ? targetRoles : ['all'],
-    venueId: venueId || undefined,
-    createdAt: new Date().toISOString(),
-    expiresAt: expiresAt || undefined,
-  };
-  announcements.unshift(announcement);
-  // Keep only last 100 announcements
-  if (announcements.length > 100) announcements = announcements.slice(0, 100);
-  saveState();
+  const announcementId = `announce-${crypto.randomUUID()}`;
+  const createdAt = new Date().toISOString();
 
-  // Push to targeted users
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.announcements) ? freshDoc.announcements : [];
+      const existing = arr.find((a) => a.id === announcementId);
+      if (existing) return { doc: freshDoc, result: existing };
+      const announcement: Announcement = {
+        id: announcementId,
+        agencyId,
+        authorEmail: author.email,
+        authorName: authorName || author.name,
+        title: String(title).trim(),
+        body: String(body || '').trim(),
+        category: (['assignment', 'update', 'notice', 'urgent'] as const).includes(category) ? category : 'update',
+        targetRoles: Array.isArray(targetRoles) && targetRoles.length > 0 ? targetRoles : ['all'],
+        venueId: venueId || undefined,
+        createdAt,
+        expiresAt: expiresAt || undefined,
+      };
+      // Keep only last 100 announcements
+      const updated = [announcement, ...arr].slice(0, 100);
+      return { doc: { ...freshDoc, announcements: updated }, result: announcement };
+    },
+    { label: 'create-announcement' }
+  );
+  if (!committed) return;
+  const announcement = committed.result as Announcement;
+
+  // Side effects ONLY after commit.
   const targets = users.filter((u) =>
     (u.agencyId || 'agency-hkc') === agencyId &&
     (announcement.targetRoles.includes('all') || announcement.targetRoles.includes(u.role))
@@ -2059,13 +2734,17 @@ app.post('/api/announcements', (req, res) => {
   res.json({ announcement });
 });
 
-app.delete('/api/announcements/:id', (req, res) => {
-  const idx = announcements.findIndex((a) => a.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Announcement not found.' });
-  const [deleted] = announcements.splice(idx, 1);
-  saveState();
-  broadcast('ANNOUNCEMENT_DELETED', { id: deleted.id }, undefined, deleted.agencyId);
-  res.json({ success: true });
+app.delete('/api/announcements/:id', async (req, res) => {
+  const existing = announcements.find((a) => a.id === req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Announcement not found.' });
+  const agencyId = existing.agencyId;
+  const ok = await crudDelete(req, res, 'announcements', req.params.id, {
+    label: 'delete-announcement',
+    broadcastType: 'ANNOUNCEMENT_DELETED',
+    getDeletePayload: () => ({ id: req.params.id }),
+    getAgencyId: () => agencyId,
+  });
+  return;
 });
 
 // Agency dashboard — overview of all venues with task stats (admin/coordinator)
@@ -2161,36 +2840,52 @@ app.get('/api/handoff-notes', (req, res) => {
   res.json({ notes: notes.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
 });
 
-app.post('/api/handoff-notes', (req, res) => {
+app.post('/api/handoff-notes', async (req, res) => {
   const { venueId, content, shift, authorEmail, authorName, voiceNoteData } = req.body || {};
   if (!venueId || (!content?.trim() && !voiceNoteData)) {
     return res.status(400).json({ error: 'Venue and note content (or voice note) are required.' });
   }
-  const note: HandoffNote = {
-    id: `handoff-${crypto.randomUUID()}`,
-    agencyId: (req as any).agencyId || 'agency-hkc',
-    venueId,
-    authorEmail: authorEmail || (req as any).userEmail || '',
-    authorName: authorName || 'Mashgiach',
-    content: String(content || '').trim(),
-    shift: shift || 'General',
-    voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/') ? voiceNoteData.slice(0, 1000000) : undefined,
-    createdAt: new Date().toISOString(),
-  };
-  handoffNotes.unshift(note);
-  saveState();
-  // Broadcast to agency
+  const noteId = `handoff-${crypto.randomUUID()}`;
+  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const createdAt = new Date().toISOString();
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.handoffNotes) ? freshDoc.handoffNotes : [];
+      const existing = arr.find((n) => n.id === noteId);
+      if (existing) return { doc: freshDoc, result: existing };
+      const note: HandoffNote = {
+        id: noteId,
+        agencyId,
+        venueId,
+        authorEmail: authorEmail || (req as any).userEmail || '',
+        authorName: authorName || 'Mashgiach',
+        content: String(content || '').trim(),
+        shift: shift || 'General',
+        voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/') ? voiceNoteData.slice(0, 1000000) : undefined,
+        createdAt,
+      };
+      return { doc: { ...freshDoc, handoffNotes: [note, ...arr] }, result: note };
+    },
+    { label: 'create-handoff-note' }
+  );
+  if (!committed) return;
+  const note = committed.result as HandoffNote;
   broadcast('HANDOFF_NOTE', { note }, undefined, note.agencyId);
   res.json({ note });
 });
 
-app.delete('/api/handoff-notes/:id', (req, res) => {
-  const idx = handoffNotes.findIndex((n) => n.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Note not found.' });
-  const [deleted] = handoffNotes.splice(idx, 1);
-  saveState();
-  broadcast('HANDOFF_NOTE_DELETED', { id: deleted.id, venueId: deleted.venueId }, undefined, deleted.agencyId);
-  res.json({ success: true });
+app.delete('/api/handoff-notes/:id', async (req, res) => {
+  const existing = handoffNotes.find((n) => n.id === req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Handoff note not found.' });
+  const ok = await crudDelete(req, res, 'handoffNotes', req.params.id, {
+    label: 'delete-handoff-note',
+    broadcastType: 'HANDOFF_NOTE_DELETED',
+    getDeletePayload: () => ({ id: req.params.id }),
+    getAgencyId: () => existing.agencyId,
+  });
+  return;
 });
 
 // -------------------------------------------------------------
@@ -2198,7 +2893,7 @@ app.delete('/api/handoff-notes/:id', (req, res) => {
 // -------------------------------------------------------------
 
 // Register a brand new Kosher Agency & provision initial workspace
-app.post('/api/agencies/register', (req, res) => {
+app.post('/api/agencies/register', async (req, res) => {
   const {
     agencyName,
     shortCode,
@@ -2246,6 +2941,13 @@ app.post('/api/agencies/register', (req, res) => {
   const cleanSeal = (certificationSeal && certificationSeal.trim()) || `${cleanAgencyName} - Kosher Supervision`;
   const cleanRegion = (region && region.trim()) || 'Regional Kashrut Authority';
 
+  // Pre-generate stable IDs + hash password BEFORE the transaction.
+  const stamp = Date.now();
+  const adminUserId = `usr_admin_${stamp}`;
+  const venueId = `venue-${stamp}`;
+  const createdAt = new Date().toISOString();
+  const adminPasswordHash = bcrypt.hashSync(adminPassword.trim(), 10);
+
   const newAgency: Agency = {
     id: agencyId,
     name: cleanAgencyName,
@@ -2254,25 +2956,19 @@ app.post('/api/agencies/register', (req, res) => {
     certificationSeal: cleanSeal,
     region: cleanRegion,
     contactPhone: contactPhone ? contactPhone.trim() : undefined,
-    createdAt: new Date().toISOString(),
+    createdAt,
   };
 
-  agencies.push(newAgency);
-
-  // Create primary Administrator profile for this agency
   const adminUser: UserProfile = {
-    id: `usr_admin_${Date.now()}`,
+    id: adminUserId,
     agencyId,
     email: cleanAdminEmail,
     name: (adminName && adminName.trim()) || `${cleanAgencyName} Administrator`,
     role: 'admin',
     avatarColor: '#3b82f6',
-    password: bcrypt.hashSync(adminPassword.trim(), 10),
+    password: adminPasswordHash,
   };
-  users.push(adminUser);
 
-  // Create starter certified facility for this agency
-  const venueId = `venue-${Date.now()}`;
   const venueName = (initialVenueName && initialVenueName.trim()) || `${cleanAgencyName} Certified Kitchen`;
   const venueCategory = (initialVenueCategory && initialVenueCategory.trim()) || 'Food Service';
 
@@ -2283,11 +2979,9 @@ app.post('/api/agencies/register', (req, res) => {
     category: venueCategory,
     address: cleanRegion,
     certification: cleanSeal,
-    createdAt: new Date().toISOString(),
+    createdAt,
   };
-  venues.push(starterVenue);
 
-  // Create starter templates if requested
   let starterTasks: TaskItem[] = [];
   if (includeStarterTemplates) {
     const templateCat = venueCategory.toLowerCase().includes('bakery')
@@ -2296,24 +2990,56 @@ app.post('/api/agencies/register', (req, res) => {
       ? 'catering'
       : 'restaurant';
     starterTasks = generateTemplateTasks(venueId, templateCat, agencyId);
-    tasks.push(...starterTasks);
   }
 
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+
+      // Idempotency: agency already registered by a previous attempt.
+      if (freshAgencies.some((a) => a.id === agencyId)) {
+        const ag = freshAgencies.find((a) => a.id === agencyId);
+        return { doc: freshDoc, result: { agency: ag, user: freshUsers.find((u) => u.id === adminUserId), venue: starterVenue, tasks: [] } };
+      }
+      // Email uniqueness against FRESH data (concurrent registrations).
+      if (freshUsers.some((u) => u.email.toLowerCase() === cleanAdminEmail)) {
+        return { conflict: 'An administrator or staff account with this email already exists on the platform.' };
+      }
+
+      const tasksToAdd = starterTasks.filter((t) => !freshTasks.some((ft) => ft.id === t.id));
+      return {
+        doc: {
+          ...freshDoc,
+          agencies: [...freshAgencies, newAgency],
+          users: [...freshUsers, adminUser],
+          venues: [...freshVenues, starterVenue],
+          tasks: [...freshTasks, ...tasksToAdd],
+        },
+        result: { agency: newAgency, user: adminUser, venue: starterVenue, tasks: tasksToAdd },
+      };
+    },
+    { label: 'register-agency' }
+  );
+  if (!committed) return;
+  const { agency, user, venue, tasks: createdTasks } = committed.result as any;
 
   broadcast('AGENCY_REGISTERED', {
-    agency: newAgency,
+    agency,
     adminEmail: cleanAdminEmail,
-  }, undefined, newAgency.id);
+  }, undefined, agency.id);
 
   res.status(201).json({
     success: true,
     message: `Welcome to KeepingKosher! Agency ${cleanAgencyName} has been established.`,
-    agency: newAgency,
-    user: getSafeUser(adminUser),
-    token: signToken(adminUser.id),
-    venue: starterVenue,
-    tasks: starterTasks,
+    agency,
+    user: getSafeUser(user),
+    token: signToken(user.id),
+    venue,
+    tasks: createdTasks,
   });
 });
 
@@ -2352,7 +3078,7 @@ app.get('/api/agencies/current', (req, res) => {
 });
 
 // Agency administrator updates agency profile details
-app.put('/api/agencies/current', (req, res) => {
+app.put('/api/agencies/current', async (req, res) => {
   const { userEmail, name, shortCode, certificationSeal, region, contactPhone, customDomain } = req.body;
   const user = userEmail
     ? users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase())
@@ -2363,35 +3089,54 @@ app.put('/api/agencies/current', (req, res) => {
   }
 
   const agencyId = user.agencyId || 'agency-hkc';
-  const index = agencies.findIndex((a) => a.id === agencyId);
-  if (index === -1) {
+  const existing = agencies.find((a) => a.id === agencyId);
+  if (!existing) {
     return res.status(404).json({ error: 'Agency record not found.' });
   }
 
-  // Custom domain must be unique across agencies (case-insensitive).
-  if (customDomain !== undefined && customDomain.trim() !== '') {
-    const normalized = customDomain.trim().toLowerCase();
-    const clash = agencies.find(
-      (a) => a.id !== agencyId && a.customDomain && a.customDomain.toLowerCase() === normalized
-    );
-    if (clash) {
-      return res.status(409).json({ error: 'That domain is already assigned to another agency.' });
-    }
-  }
+  // Baseline for semantic conflict detection.
+  const baseline = { name: existing.name, shortCode: existing.shortCode };
 
-  agencies[index] = {
-    ...agencies[index],
-    name: name !== undefined ? name.trim() : agencies[index].name,
-    shortCode: shortCode !== undefined ? shortCode.trim() : agencies[index].shortCode,
-    certificationSeal: certificationSeal !== undefined ? certificationSeal.trim() : agencies[index].certificationSeal,
-    region: region !== undefined ? region.trim() : agencies[index].region,
-    contactPhone: contactPhone !== undefined ? contactPhone.trim() : agencies[index].contactPhone,
-    customDomain: customDomain !== undefined ? customDomain.trim().toLowerCase() || undefined : agencies[index].customDomain,
-  };
+  const newCustomDomain = customDomain !== undefined
+    ? customDomain.trim().toLowerCase() || undefined
+    : undefined; // undefined = not being changed
 
-  saveState();
-  broadcast('AGENCY_UPDATED', { agency: agencies[index] }, userEmail, agencyId);
-  res.json({ success: true, agency: agencies[index] });
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const freshAgency = freshAgencies.find((a) => a.id === agencyId);
+      if (!freshAgency) return { conflict: 'Agency record not found.' };
+      // Custom domain uniqueness must be checked against FRESH data.
+      if (newCustomDomain) {
+        const clash = freshAgencies.find(
+          (a) => a.id !== agencyId && a.customDomain && a.customDomain.toLowerCase() === newCustomDomain
+        );
+        if (clash) return { conflict: 'That domain is already assigned to another agency.' };
+      }
+      // Conflict if someone else changed a field this request is editing.
+      if (name !== undefined && freshAgency.name !== baseline.name) {
+        return { conflict: 'Conflict: the agency name was changed by someone else. Please refresh and try again.' };
+      }
+      const updated: Agency = {
+        ...freshAgency,
+        name: name !== undefined ? name.trim() : freshAgency.name,
+        shortCode: shortCode !== undefined ? shortCode.trim() : freshAgency.shortCode,
+        certificationSeal: certificationSeal !== undefined ? certificationSeal.trim() : freshAgency.certificationSeal,
+        region: region !== undefined ? region.trim() : freshAgency.region,
+        contactPhone: contactPhone !== undefined ? contactPhone.trim() : freshAgency.contactPhone,
+        customDomain: customDomain !== undefined ? newCustomDomain : freshAgency.customDomain,
+      };
+      const newAgencies = freshAgencies.map((a) => (a.id === agencyId ? updated : a));
+      return { doc: { ...freshDoc, agencies: newAgencies }, result: updated };
+    },
+    { label: 'update-agency' }
+  );
+  if (!committed) return;
+  const updated = committed.result as Agency;
+
+  broadcast('AGENCY_UPDATED', { agency: updated }, userEmail, agencyId);
+  res.json({ success: true, agency: updated });
 });
 
 // Resolve the agency for the current hostname (custom-domain portals).
@@ -2415,6 +3160,18 @@ app.get('/api/agencies/by-domain', (req, res) => {
 // -------------------------------------------------------------
 
 // Get venues list. Strictly scoped to the caller's kosher agency!
+// TEST ONLY: exposes mock Firestore state for the Stage 2 test suite.
+// Only registered when FIRESTORE_MOCK=true. Never enabled in production.
+if (process.env.FIRESTORE_MOCK === 'true') {
+  app.get('/api/__test__/firestore-doc', async (req, res) => {
+    if (!firestoreDb || !firestoreDb._read) {
+      return res.status(500).json({ error: 'mock not active' });
+    }
+    const doc = firestoreDb._read('app-state/main');
+    res.json({ doc, version: doc ? doc._v : null });
+  });
+}
+
 app.get('/api/venues', (req, res) => {
   const { userEmail } = req.query;
 
@@ -2464,7 +3221,7 @@ app.get('/api/venues', (req, res) => {
 });
 
 // Admin creates a brand new venue within their agency
-app.post('/api/venues', (req, res) => {
+app.post('/api/venues', async (req, res) => {
   const {
     name,
     category,
@@ -2496,8 +3253,16 @@ app.post('/api/venues', (req, res) => {
     return res.status(400).json({ error: 'Venue Name is required.' });
   }
 
+  // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
   const newVenueId = `venue-${Date.now()}`;
   const cleanOwnerEmail = ownerEmail?.trim().toLowerCase() || undefined;
+  const ownerUserId = `usr_owner_${Date.now()}`;
+  const createdAt = new Date().toISOString();
+  // Hash the owner password once, outside the transaction (bcrypt is CPU-heavy;
+  // the hash is deterministic input to the mutator).
+  const ownerPasswordHash = ownerPassword?.trim()
+    ? bcrypt.hashSync(ownerPassword.trim(), 10)
+    : bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10);
 
   const newVenue: Venue = {
     id: newVenueId,
@@ -2507,59 +3272,87 @@ app.post('/api/venues', (req, res) => {
     address: address?.trim() || callerAgency?.region || 'West Hartford, CT',
     certification: certification?.trim() || callerAgency?.certificationSeal || 'Certified Kosher',
     ownerEmail: cleanOwnerEmail,
-    createdAt: new Date().toISOString(),
+    createdAt,
   };
 
-  venues.push(newVenue);
-
-  // If an owner was provided, register them as the venue owner under this agency
-  let createdOwner: UserProfile | null = null;
-  if (cleanOwnerEmail) {
-    const existingOwnerIndex = users.findIndex((u) => u.email.toLowerCase() === cleanOwnerEmail);
-    if (existingOwnerIndex !== -1) {
-      users[existingOwnerIndex].venueId = newVenueId;
-      users[existingOwnerIndex].role = 'owner';
-      users[existingOwnerIndex].agencyId = callerAgencyId;
-      createdOwner = users[existingOwnerIndex];
-    } else {
-      const ownerUser: UserProfile = {
-        id: `usr_owner_${Date.now()}`,
-        agencyId: callerAgencyId,
-        email: cleanOwnerEmail,
-        name: ownerName?.trim() || `${name.trim()} Owner`,
-        role: 'owner',
-        venueId: newVenueId,
-        avatarColor: '#d97706',
-        password: ownerPassword?.trim() ? bcrypt.hashSync(ownerPassword.trim(), 10) : bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10),
-      };
-      users.push(ownerUser);
-      createdOwner = ownerUser;
-    }
-  }
-
-  // Generate starter tasks based on template choice and tag with agencyId
+  // Generate starter tasks (pure function of inputs — safe to pre-compute).
   const starterTasks = generateTemplateTasks(newVenueId, templateType || 'restaurant', callerAgencyId);
-  tasks.push(...starterTasks);
 
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+
+      // Idempotency: venue already created by a previous attempt.
+      const existingVenue = freshVenues.find((v) => v.id === newVenueId);
+      if (existingVenue) {
+        return { doc: freshDoc, result: { venue: existingVenue, tasks: [], owner: null } };
+      }
+
+      let newUsers = [...freshUsers];
+      let createdOwner: any = null;
+      if (cleanOwnerEmail) {
+        const existingOwnerIdx = newUsers.findIndex((u) => u.email.toLowerCase() === cleanOwnerEmail);
+        if (existingOwnerIdx !== -1) {
+          newUsers[existingOwnerIdx] = {
+            ...newUsers[existingOwnerIdx],
+            venueId: newVenueId,
+            role: 'owner',
+            agencyId: callerAgencyId,
+          };
+          createdOwner = newUsers[existingOwnerIdx];
+        } else {
+          const ownerUser: UserProfile = {
+            id: ownerUserId,
+            agencyId: callerAgencyId,
+            email: cleanOwnerEmail,
+            name: ownerName?.trim() || `${name.trim()} Owner`,
+            role: 'owner',
+            venueId: newVenueId,
+            avatarColor: '#d97706',
+            password: ownerPasswordHash,
+          };
+          newUsers.push(ownerUser);
+          createdOwner = ownerUser;
+        }
+      }
+
+      // Atomic: venue + owner + starter tasks all commit together.
+      const tasksToAdd = starterTasks.filter((t) => !freshTasks.some((ft) => ft.id === t.id));
+      return {
+        doc: {
+          ...freshDoc,
+          venues: [...freshVenues, newVenue],
+          users: newUsers,
+          tasks: [...freshTasks, ...tasksToAdd],
+        },
+        result: { venue: newVenue, tasks: tasksToAdd, owner: createdOwner },
+      };
+    },
+    { label: 'create-venue' }
+  );
+  if (!committed) return;
+  const { venue, tasks: createdTasks, owner } = committed.result as any;
 
   broadcast('VENUE_CREATED', {
-    venue: newVenue,
+    venue,
     agencyId: callerAgencyId,
-    tasksCount: starterTasks.length,
-    owner: createdOwner ? getSafeUser(createdOwner) : null,
+    tasksCount: createdTasks.length,
+    owner: owner ? getSafeUser(owner) : null,
   }, undefined, callerAgencyId);
 
   res.status(201).json({
     success: true,
-    venue: newVenue,
-    tasks: starterTasks,
-    owner: createdOwner ? getSafeUser(createdOwner) : null,
+    venue,
+    tasks: createdTasks,
+    owner: owner ? getSafeUser(owner) : null,
   });
 });
 
 // Admin edits venue details
-app.put('/api/venues/:id', (req, res) => {
+app.put('/api/venues/:id', async (req, res) => {
   const { id } = req.params;
   const { name, category, address, certification, ownerEmail, userEmail } = req.body;
 
@@ -2575,34 +3368,52 @@ app.put('/api/venues/:id', (req, res) => {
     }
   }
 
-  const index = venues.findIndex((v) => v.id === id);
-  if (index === -1) {
+  const existing = venues.find((v) => v.id === id);
+  if (!existing) {
     return res.status(404).json({ error: 'Venue not found.' });
   }
 
-  const existing = venues[index];
   if (existing.agencyId && existing.agencyId !== callerAgencyId) {
     return res.status(403).json({ error: 'You do not have permission to modify venues outside your agency.' });
   }
 
-  const updated: Venue = {
-    ...existing,
-    name: name !== undefined ? name.trim() : existing.name,
-    category: category !== undefined ? category.trim() : existing.category,
-    address: address !== undefined ? address.trim() : existing.address,
-    certification: certification !== undefined ? certification.trim() : existing.certification,
-    ownerEmail: ownerEmail !== undefined ? ownerEmail?.trim().toLowerCase() : existing.ownerEmail,
-  };
+  // Baseline for semantic conflict detection on name/category/address.
+  const baseline = { name: existing.name, category: existing.category, address: existing.address };
 
-  venues[index] = updated;
-  saveState();
-
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const freshVenue = freshVenues.find((v) => v.id === id);
+      if (!freshVenue) return { conflict: 'Venue not found (it may have been deleted).' };
+      // Conflict if someone else changed a field this request is editing.
+      for (const field of ['name', 'category', 'address'] as const) {
+        const newVal = { name, category, address }[field];
+        if (newVal !== undefined && (freshVenue as any)[field] !== (baseline as any)[field]) {
+          return { conflict: `Conflict: venue ${field} was changed by someone else. Please refresh and try again.` };
+        }
+      }
+      const updated: Venue = {
+        ...freshVenue,
+        name: name !== undefined ? name.trim() : freshVenue.name,
+        category: category !== undefined ? category.trim() : freshVenue.category,
+        address: address !== undefined ? address.trim() : freshVenue.address,
+        certification: certification !== undefined ? certification.trim() : freshVenue.certification,
+        ownerEmail: ownerEmail !== undefined ? ownerEmail?.trim().toLowerCase() : freshVenue.ownerEmail,
+      };
+      const newVenues = freshVenues.map((v) => (v.id === id ? updated : v));
+      return { doc: { ...freshDoc, venues: newVenues }, result: updated };
+    },
+    { label: 'update-venue' }
+  );
+  if (!committed) return;
+  const updated = committed.result as Venue;
   broadcast('VENUE_UPDATED', { venue: updated, agencyId: callerAgencyId }, undefined, callerAgencyId);
   res.json({ success: true, venue: updated });
 });
 
 // Admin deletes a venue
-app.delete('/api/venues/:id', (req, res) => {
+app.delete('/api/venues/:id', async (req, res) => {
   const { id } = req.params;
   const { userEmail } = req.query;
 
@@ -2618,21 +3429,39 @@ app.delete('/api/venues/:id', (req, res) => {
     }
   }
 
-  const index = venues.findIndex((v) => v.id === id);
-  if (index === -1) {
+  const existing = venues.find((v) => v.id === id);
+  if (!existing) {
     return res.status(404).json({ error: 'Venue not found.' });
   }
 
-  if (venues[index].agencyId && venues[index].agencyId !== callerAgencyId) {
+  if (existing.agencyId && existing.agencyId !== callerAgencyId) {
     return res.status(403).json({ error: 'You do not have permission to delete venues outside your agency.' });
   }
 
-  venues.splice(index, 1);
-  // Cascade delete associated tasks and history
-  tasks = tasks.filter((t) => t.venueId !== id);
-  historyLogs = historyLogs.filter((h) => h.venueId !== id);
-
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      // Idempotent: already deleted → success.
+      if (!freshVenues.some((v) => v.id === id)) {
+        return { doc: freshDoc, result: { success: true, deletedVenueId: id } };
+      }
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      const freshHistory: any[] = Array.isArray(freshDoc.historyLogs) ? freshDoc.historyLogs : [];
+      // Atomic cascade: venue + its tasks + its history all removed together.
+      return {
+        doc: {
+          ...freshDoc,
+          venues: freshVenues.filter((v) => v.id !== id),
+          tasks: freshTasks.filter((t) => t.venueId !== id),
+          historyLogs: freshHistory.filter((h) => h.venueId !== id),
+        },
+        result: { success: true, deletedVenueId: id },
+      };
+    },
+    { label: 'delete-venue' }
+  );
+  if (!committed) return;
 
   broadcast('VENUE_DELETED', { deletedVenueId: id, agencyId: callerAgencyId }, undefined, callerAgencyId);
   res.json({ success: true, deletedVenueId: id });
@@ -2701,7 +3530,7 @@ app.get('/api/tasks', (req, res) => {
   });
 });
 
-app.post('/api/tasks', (req, res) => {
+app.post('/api/tasks', async (req, res) => {
   const {
     venueId,
     title,
@@ -2755,26 +3584,14 @@ app.post('/api/tasks', (req, res) => {
     defaultStatus = customStatusOptions[0];
   }
 
-  // Slot the new task into the manual board order by its target time
-  // (earliest first); up/down arrows can fine-tune it afterwards.
-  const newTimeKey = targetTimeMinutes(targetTime);
+  // Generate stable IDs/timestamps BEFORE the transaction so retries reuse them
+  // (idempotent: a retried transaction creates the same task, not a duplicate).
+  const newTaskId = `task-${crypto.randomUUID()}`;
   const nowIso = new Date().toISOString();
-  const siblings = tasks
-    .filter((t) => t.venueId === targetVenueId)
-    .sort(
-      (a, b) =>
-        (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.createdAt.localeCompare(b.createdAt)
-    );
-  let insertAt = siblings.findIndex(
-    (t) => targetTimeMinutes(t.targetTime) > newTimeKey || (targetTimeMinutes(t.targetTime) === newTimeKey && t.createdAt > nowIso)
-  );
-  if (insertAt === -1) insertAt = siblings.length;
-  siblings.forEach((t, i) => {
-    if (i >= insertAt) t.sortOrder = (t.sortOrder ?? i) + 1;
-  });
+  const newTimeKey = targetTimeMinutes(targetTime);
 
   const newTask: TaskItem = {
-    id: `task-${crypto.randomUUID()}`,
+    id: newTaskId,
     agencyId: callerAgencyId,
     venueId: targetVenueId,
     title,
@@ -2782,7 +3599,7 @@ app.post('/api/tasks', (req, res) => {
     category: category || 'General',
     categories: Array.isArray(categories) && categories.length > 0 ? categories : [category || 'General'],
     isPrivate: isPrivate === true,
-    sortOrder: insertAt,
+    sortOrder: 0, // computed inside the transaction against fresh data
     inputType: inputType || 'yes_no',
     customStatusOptions: Array.isArray(customStatusOptions) && customStatusOptions.length > 0 ? customStatusOptions : undefined,
     completedStatusValues: Array.isArray(completedStatusValues) && completedStatusValues.length > 0 ? completedStatusValues : undefined,
@@ -2803,16 +3620,59 @@ app.post('/api/tasks', (req, res) => {
     updatedByName: null,
     updatedAt: null,
     checkIns: [],
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
   };
 
-  tasks.push(newTask);
-  saveState();
+  // STAGE 2: transactional commit. The mutator runs against FRESH Firestore
+  // data (not in-memory). Sort-order slotting is recomputed inside so
+  // concurrent inserts merge correctly instead of clobbering.
+  const committed = await commitOrRespond(
+    req,
+    res,
+    (freshDoc) => {
+      const freshTasks: TaskItem[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
 
-  broadcast('TASK_CREATED', newTask, createdByEmail, newTask.agencyId || 'agency-hkc');
+      // Idempotency within retries: if this task ID already exists (a previous
+      // attempt committed but the response was lost), return it instead of duplicating.
+      const existing = freshTasks.find((t) => t.id === newTaskId);
+      if (existing) {
+        return { doc: freshDoc, result: existing };
+      }
+
+      // Slot into manual board order by target time (earliest first).
+      const siblings = freshTasks
+        .filter((t) => t.venueId === targetVenueId)
+        .sort(
+          (a, b) =>
+            (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.createdAt.localeCompare(b.createdAt)
+        );
+      let insertAt = siblings.findIndex(
+        (t) => targetTimeMinutes(t.targetTime) > newTimeKey || (targetTimeMinutes(t.targetTime) === newTimeKey && t.createdAt > nowIso)
+      );
+      if (insertAt === -1) insertAt = siblings.length;
+
+      const updatedTasks = freshTasks.map((t) => {
+        if (t.venueId !== targetVenueId) return t;
+        const idx = siblings.findIndex((s) => s.id === t.id);
+        if (idx >= insertAt) return { ...t, sortOrder: (t.sortOrder ?? idx) + 1 };
+        return t;
+      });
+
+      const taskToInsert = { ...newTask, sortOrder: insertAt };
+      updatedTasks.push(taskToInsert);
+      return { doc: { ...freshDoc, tasks: updatedTasks }, result: taskToInsert };
+    },
+    { label: 'create-task' }
+  );
+  if (!committed) return; // error response already sent
+
+  const created = committed.result as TaskItem;
+
+  // Side effects ONLY after successful commit.
+  broadcast('TASK_CREATED', created, createdByEmail, created.agencyId || 'agency-hkc');
 
   // Phone push to specifically-assigned mashgichim (not for global 'all' tasks)
-  const assignees = (newTask.assignedTo || []).filter(
+  const assignees = (created.assignedTo || []).filter(
     (a) => a && a.toLowerCase() !== 'all'
   );
   for (const email of assignees) {
@@ -2820,24 +3680,23 @@ app.post('/api/tasks', (req, res) => {
     sendPushToUser(
       email,
       '📋 New task assigned to you',
-      `${newTask.title}${newTask.targetTime ? ` — ${newTask.targetTime}` : ''}`,
-      { url: '/', taskId: newTask.id }
+      `${created.title}${created.targetTime ? ` — ${created.targetTime}` : ''}`,
+      { url: '/', taskId: created.id }
     );
   }
 
-  res.status(201).json(newTask);
+  res.status(201).json(created);
 });
 
 // Update task status, notes, or configuration
-app.put('/api/tasks/:id', (req, res) => {
+app.put('/api/tasks/:id', async (req, res) => {
   const { id } = req.params;
-  const index = tasks.findIndex((t) => t.id === id);
+  const existing = tasks.find((t) => t.id === id);
 
-  if (index === -1) {
+  if (!existing) {
     return res.status(404).json({ error: 'Task not found' });
   }
 
-  const existing = tasks[index];
   const {
     currentStatus,
     isCompleted,
@@ -2914,60 +3773,102 @@ app.put('/api/tasks/:id', (req, res) => {
     }
   }
 
-  const finalIsCompleted = isCompleted !== undefined ? Boolean(isCompleted) : existing.isCompleted;
+  // Capture the in-memory snapshot for semantic conflict detection. If the
+  // fresh Firestore task differs in a field this request is trying to change,
+  // someone else edited it concurrently → 409 (not silent overwrite).
+  const baseline = { ...existing };
+  const definitionFields: Array<[string, any]> = [
+    ['title', title], ['description', description], ['category', category],
+    ['inputType', inputType], ['assignedTo', assignedTo], ['priority', priority],
+    ['targetTime', targetTime], ['scheduleType', scheduleType],
+  ];
 
-  // When someone cancels their choice or marks as incomplete, delete the completion log
-  const updatedByEmail = finalIsCompleted ? (userEmail || existing.updatedByEmail || null) : null;
-  const updatedByName = finalIsCompleted ? (userName || existing.updatedByName || null) : null;
-  const updatedAt = finalIsCompleted ? (hasStatusChange ? new Date().toISOString() : existing.updatedAt) : null;
+  const committed = await commitOrRespond(
+    req,
+    res,
+    (freshDoc) => {
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      const freshTask = freshTasks.find((t) => t.id === id);
+      if (!freshTask) {
+        return { conflict: 'Task not found (it may have been deleted).' };
+      }
 
-  const updated: TaskItem = {
-    ...existing,
-    title: title !== undefined ? title : existing.title,
-    description: description !== undefined ? description : existing.description,
-    category: category !== undefined ? category : existing.category,
-    categories: categories !== undefined ? categories : existing.categories,
-    isPrivate: isPrivate !== undefined ? isPrivate === true : existing.isPrivate,
-    sortOrder: sortOrder !== undefined ? Number(sortOrder) : existing.sortOrder,
-    inputType: inputType !== undefined ? inputType : existing.inputType,
-    customStatusOptions: customStatusOptions !== undefined ? customStatusOptions : existing.customStatusOptions,
-    completedStatusValues: completedStatusValues !== undefined ? completedStatusValues : existing.completedStatusValues,
-    assignedTo: assignedTo !== undefined ? assignedTo : existing.assignedTo,
-    scheduleType: scheduleType !== undefined ? scheduleType : existing.scheduleType,
-    daysOfWeek: daysOfWeek !== undefined ? daysOfWeek : existing.daysOfWeek,
-    specificDates: specificDates !== undefined ? specificDates : existing.specificDates,
-    targetTime: targetTime !== undefined ? targetTime : existing.targetTime,
-    targetTimeMinutes: targetTimeMinutes !== undefined ? (targetTimeMinutes === null ? undefined : Number(targetTimeMinutes)) : existing.targetTimeMinutes,
-    targetTime2: targetTime2 !== undefined ? (targetTime2 || undefined) : existing.targetTime2,
-    targetTime2Minutes: targetTime2Minutes !== undefined ? (targetTime2Minutes === null ? undefined : Number(targetTime2Minutes)) : existing.targetTime2Minutes,
-    priority: priority !== undefined ? priority : existing.priority,
-    enableOverdueAlert: enableOverdueAlert !== undefined ? enableOverdueAlert === true : existing.enableOverdueAlert,
-    currentStatus: currentStatus !== undefined ? currentStatus : (finalIsCompleted ? existing.currentStatus : 'pending'),
-    isCompleted: finalIsCompleted,
-    notes: notes !== undefined ? notes : existing.notes,
-    updatedByEmail,
-    updatedByName,
-    updatedAt,
-  };
+      // Semantic conflict check for definition edits: if the caller is
+      // changing a field that someone else already changed, refuse rather
+      // than silently overwriting their edit.
+      if (isDefinitionEdit) {
+        for (const [field, newValue] of definitionFields) {
+          if (newValue !== undefined && JSON.stringify((freshTask as any)[field]) !== JSON.stringify((baseline as any)[field])) {
+            return { conflict: `Conflict: "${field}" was changed by someone else. Please refresh and try again.` };
+          }
+        }
+      }
 
-  tasks[index] = updated;
-  saveState();
+      // Idempotency for status: if the requested end-state already holds, return it.
+      const finalIsCompleted = isCompleted !== undefined ? Boolean(isCompleted) : freshTask.isCompleted;
+      const statusAlreadyMatches =
+        (currentStatus === undefined || freshTask.currentStatus === currentStatus) &&
+        (isCompleted === undefined || freshTask.isCompleted === finalIsCompleted) &&
+        (notes === undefined || freshTask.notes === notes);
+      if (hasStatusChange && !isDefinitionEdit && statusAlreadyMatches) {
+        return { doc: freshDoc, result: freshTask };
+      }
 
+      const updatedByEmail = finalIsCompleted ? (userEmail || freshTask.updatedByEmail || null) : null;
+      const updatedByName = finalIsCompleted ? (userName || freshTask.updatedByName || null) : null;
+      const updatedAt = finalIsCompleted ? (hasStatusChange ? new Date().toISOString() : freshTask.updatedAt) : null;
+
+      const updated: TaskItem = {
+        ...freshTask,
+        title: title !== undefined ? title : freshTask.title,
+        description: description !== undefined ? description : freshTask.description,
+        category: category !== undefined ? category : freshTask.category,
+        categories: categories !== undefined ? categories : freshTask.categories,
+        isPrivate: isPrivate !== undefined ? isPrivate === true : freshTask.isPrivate,
+        sortOrder: sortOrder !== undefined ? Number(sortOrder) : freshTask.sortOrder,
+        inputType: inputType !== undefined ? inputType : freshTask.inputType,
+        customStatusOptions: customStatusOptions !== undefined ? customStatusOptions : freshTask.customStatusOptions,
+        completedStatusValues: completedStatusValues !== undefined ? completedStatusValues : freshTask.completedStatusValues,
+        assignedTo: assignedTo !== undefined ? assignedTo : freshTask.assignedTo,
+        scheduleType: scheduleType !== undefined ? scheduleType : freshTask.scheduleType,
+        daysOfWeek: daysOfWeek !== undefined ? daysOfWeek : freshTask.daysOfWeek,
+        specificDates: specificDates !== undefined ? specificDates : freshTask.specificDates,
+        targetTime: targetTime !== undefined ? targetTime : freshTask.targetTime,
+        targetTimeMinutes: targetTimeMinutes !== undefined ? (targetTimeMinutes === null ? undefined : Number(targetTimeMinutes)) : freshTask.targetTimeMinutes,
+        targetTime2: targetTime2 !== undefined ? (targetTime2 || undefined) : freshTask.targetTime2,
+        targetTime2Minutes: targetTime2Minutes !== undefined ? (targetTime2Minutes === null ? undefined : Number(targetTime2Minutes)) : freshTask.targetTime2Minutes,
+        priority: priority !== undefined ? priority : freshTask.priority,
+        enableOverdueAlert: enableOverdueAlert !== undefined ? enableOverdueAlert === true : freshTask.enableOverdueAlert,
+        currentStatus: currentStatus !== undefined ? currentStatus : (finalIsCompleted ? freshTask.currentStatus : 'pending'),
+        isCompleted: finalIsCompleted,
+        notes: notes !== undefined ? notes : freshTask.notes,
+        updatedByEmail,
+        updatedByName,
+        updatedAt,
+      };
+
+      const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
+      return { doc: { ...freshDoc, tasks: newTasks }, result: updated };
+    },
+    { label: 'update-task' }
+  );
+  if (!committed) return;
+
+  const updated = committed.result as TaskItem;
   broadcast('TASK_UPDATED', updated, userEmail, updated.agencyId || 'agency-hkc');
   res.json(updated);
 });
 
 // Remove one check-in entry (tapped by mistake, logged in error).
-app.delete('/api/tasks/:id/check-in/:checkInId', (req, res) => {
+app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
   const { id, checkInId } = req.params;
-  const index = tasks.findIndex((t) => t.id === id);
+  const existing = tasks.find((t) => t.id === id);
 
-  if (index === -1) {
+  if (!existing) {
     return res.status(404).json({ error: 'Task not found' });
   }
 
   const { userEmail } = req.body || {};
-  const existing = tasks[index];
   const entry = (existing.checkIns || []).find((c: any) => c.id === checkInId);
   if (!entry) {
     return res.status(404).json({ error: 'Check-in not found' });
@@ -2989,14 +3890,30 @@ app.delete('/api/tasks/:id/check-in/:checkInId', (req, res) => {
   }
 
   const now = new Date().toISOString();
-  const updated: TaskItem = {
-    ...existing,
-    checkIns: (existing.checkIns || []).filter((c: any) => c.id !== checkInId),
-    updatedAt: now,
-  };
 
-  tasks[index] = updated;
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      const freshTask = freshTasks.find((t) => t.id === id);
+      if (!freshTask) return { conflict: 'Task not found.' };
+      const freshCheckIns: any[] = Array.isArray(freshTask.checkIns) ? freshTask.checkIns : [];
+      // Idempotent: check-in already removed → success.
+      if (!freshCheckIns.some((c: any) => c.id === checkInId)) {
+        return { doc: freshDoc, result: freshTask };
+      }
+      const updated: TaskItem = {
+        ...freshTask,
+        checkIns: freshCheckIns.filter((c: any) => c.id !== checkInId),
+        updatedAt: now,
+      };
+      const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
+      return { doc: { ...freshDoc, tasks: newTasks }, result: updated };
+    },
+    { label: 'delete-check-in' }
+  );
+  if (!committed) return;
+  const updated = committed.result as TaskItem;
 
   broadcast('TASK_UPDATED', updated, userEmail, updated.agencyId || 'agency-hkc');
   res.json(updated);
@@ -3004,11 +3921,11 @@ app.delete('/api/tasks/:id/check-in/:checkInId', (req, res) => {
 
 // Log one repeatable check-in on a task (inputType 'check_in'): every tap
 // appends a {byName, byEmail, at} record under the task.
-app.post('/api/tasks/:id/check-in', (req, res) => {
+app.post('/api/tasks/:id/check-in', async (req, res) => {
   const { id } = req.params;
-  const index = tasks.findIndex((t) => t.id === id);
+  const existing = tasks.find((t) => t.id === id);
 
-  if (index === -1) {
+  if (!existing) {
     return res.status(404).json({ error: 'Task not found' });
   }
 
@@ -3027,10 +3944,11 @@ app.post('/api/tasks/:id/check-in', (req, res) => {
     }
   }
 
-  const existing = tasks[index];
+  // Stable check-in ID generated BEFORE the transaction so retries don't duplicate.
   const now = new Date().toISOString();
+  const checkInId = `checkin-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const checkIn: TaskCheckInItem = {
-    id: `checkin-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    id: checkInId,
     byName: userName || null,
     byEmail: userEmail || null,
     at: now,
@@ -3038,33 +3956,65 @@ app.post('/api/tasks/:id/check-in', (req, res) => {
     photoCaption: typeof photoCaption === 'string' ? photoCaption.slice(0, 200) : undefined,
   };
 
-  const updated: TaskItem = {
-    ...existing,
-    checkIns: [...(existing.checkIns || []), checkIn],
-    updatedByEmail: userEmail || existing.updatedByEmail || null,
-    updatedByName: userName || existing.updatedByName || null,
-    updatedAt: now,
-  };
+  const committed = await commitOrRespond(
+    req,
+    res,
+    (freshDoc) => {
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      const freshTask = freshTasks.find((t) => t.id === id);
+      if (!freshTask) {
+        return { conflict: 'Task not found (it may have been deleted).' };
+      }
+      // Idempotency: if this check-in ID already exists, return the task as-is.
+      const alreadyLogged = (freshTask.checkIns || []).some((c: any) => c.id === checkInId);
+      if (alreadyLogged) {
+        return { doc: freshDoc, result: freshTask };
+      }
+      const updated: TaskItem = {
+        ...freshTask,
+        checkIns: [...(freshTask.checkIns || []), checkIn],
+        updatedByEmail: userEmail || freshTask.updatedByEmail || null,
+        updatedByName: userName || freshTask.updatedByName || null,
+        updatedAt: now,
+      };
+      const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
+      return { doc: { ...freshDoc, tasks: newTasks }, result: updated };
+    },
+    { label: 'task-checkin' }
+  );
+  if (!committed) return;
 
-  tasks[index] = updated;
-  saveState();
-
+  const updated = committed.result as TaskItem;
   broadcast('TASK_UPDATED', updated, userEmail, updated.agencyId || 'agency-hkc');
   res.json(updated);
 });
 
-app.delete('/api/tasks/:id', (req, res) => {
+app.delete('/api/tasks/:id', async (req, res) => {
   const { id } = req.params;
   const deletedTask = tasks.find((t) => t.id === id);
 
   if (!deletedTask) {
     return res.status(404).json({ error: 'Task not found' });
   }
+  const { venueId: delVenueId, agencyId: delAgencyId } = deletedTask;
 
-  tasks = tasks.filter((t) => t.id !== id);
-  saveState();
+  const committed = await commitOrRespond(
+    req,
+    res,
+    (freshDoc) => {
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      // Idempotent: already deleted → success.
+      if (!freshTasks.some((t) => t.id === id)) {
+        return { doc: freshDoc, result: { success: true, deletedId: id } };
+      }
+      const newTasks = freshTasks.filter((t) => t.id !== id);
+      return { doc: { ...freshDoc, tasks: newTasks }, result: { success: true, deletedId: id } };
+    },
+    { label: 'delete-task' }
+  );
+  if (!committed) return;
 
-  broadcast('TASK_DELETED', { id, venueId: deletedTask.venueId, agencyId: deletedTask.agencyId }, undefined, deletedTask.agencyId || 'agency-hkc');
+  broadcast('TASK_DELETED', { id, venueId: delVenueId, agencyId: delAgencyId }, undefined, delAgencyId || 'agency-hkc');
   res.json({ success: true, deletedId: id });
 });
 
@@ -3086,7 +4036,7 @@ app.post('/api/reset-daily', (req, res) => {
 });
 
 // Admin Wipes All Demo Data to Start Completely From Scratch
-app.post('/api/admin/clean-slate', (req, res) => {
+app.post('/api/admin/clean-slate', async (req, res) => {
   const { userEmail } = req.body;
   if (!userEmail) {
     return res.status(400).json({ error: 'User email is required' });
@@ -3098,23 +4048,36 @@ app.post('/api/admin/clean-slate', (req, res) => {
   }
 
   const callerAgencyId = caller.agencyId || 'agency-hkc';
+  const callerEmailLower = caller.email.toLowerCase();
 
-  // Wipe tasks, history, events, and venues for this agency
-  tasks = tasks.filter((t) => (t.agencyId || 'agency-hkc') !== callerAgencyId);
-  historyLogs = historyLogs.filter((h) => (h.agencyId || 'agency-hkc') !== callerAgencyId);
-  events = events.filter((e) => (e.agencyId || 'agency-hkc') !== callerAgencyId);
-  venues = venues.filter((v) => (v.agencyId || 'agency-hkc') !== callerAgencyId);
-  airtableConfigs = airtableConfigs.filter((c) => (c.agencyId || 'agency-hkc') !== callerAgencyId);
-  approvedIngredients = approvedIngredients.filter((i) => (i.agencyId || 'agency-hkc') !== callerAgencyId);
-  factoryReports = factoryReports.filter((r) => (r.agencyId || 'agency-hkc') !== callerAgencyId);
-
-  // Keep admin user(s)
-  users = users.filter(
-    (u) => (u.agencyId || 'agency-hkc') !== callerAgencyId || u.role === 'admin' || u.email.toLowerCase() === caller.email.toLowerCase()
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const keep = (arr: any[]) =>
+        (Array.isArray(arr) ? arr : []).filter((x) => (x.agencyId || 'agency-hkc') !== callerAgencyId);
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      // Wipe agency data atomically; keep admin users.
+      return {
+        doc: {
+          ...freshDoc,
+          tasks: keep(freshDoc.tasks),
+          historyLogs: keep(freshDoc.historyLogs),
+          events: keep(freshDoc.events),
+          venues: keep(freshDoc.venues),
+          airtableConfigs: keep(freshDoc.airtableConfigs),
+          approvedIngredients: keep(freshDoc.approvedIngredients),
+          factoryReports: keep(freshDoc.factoryReports),
+          users: freshUsers.filter(
+            (u) => (u.agencyId || 'agency-hkc') !== callerAgencyId || u.role === 'admin' || u.email.toLowerCase() === callerEmailLower
+          ),
+          isDemoCleared: true,
+        },
+        result: { success: true, isDemoCleared: true },
+      };
+    },
+    { label: 'clean-slate' }
   );
-
-  isDemoCleared = true;
-  saveState();
+  if (!committed) return;
 
   broadcast('CLEAN_SLATE_RESET', {
     agencyId: callerAgencyId,
@@ -3137,7 +4100,7 @@ app.post('/api/admin/clean-slate', (req, res) => {
 });
 
 // Admin Restores Demonstration Facilities and Data
-app.post('/api/admin/restore-demo', (req, res) => {
+app.post('/api/admin/restore-demo', async (req, res) => {
   const { userEmail } = req.body;
   const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
   if (!caller || caller.role !== 'admin') {
@@ -3146,22 +4109,39 @@ app.post('/api/admin/restore-demo', (req, res) => {
 
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
-  // Re-seed default venues, tasks, events, and users
-  venues = [...venues.filter((v) => (v.agencyId || 'agency-hkc') !== callerAgencyId), ...DEFAULT_VENUES];
-  tasks = [...tasks.filter((t) => (t.agencyId || 'agency-hkc') !== callerAgencyId), ...INITIAL_TASKS];
-  historyLogs = [...historyLogs.filter((h) => (h.agencyId || 'agency-hkc') !== callerAgencyId), ...INITIAL_HISTORY];
-  events = [...events.filter((e) => (e.agencyId || 'agency-hkc') !== callerAgencyId), ...INITIAL_EVENTS];
-  airtableConfigs = [...airtableConfigs.filter((c) => (c.agencyId || 'agency-hkc') !== callerAgencyId), ...INITIAL_AIRTABLE_CONFIGS];
-  approvedIngredients = [...approvedIngredients.filter((i) => (i.agencyId || 'agency-hkc') !== callerAgencyId), ...INITIAL_APPROVED_INGREDIENTS];
-
-  for (const defUser of DEFAULT_USERS) {
-    if (!users.some((u) => u.email.toLowerCase() === defUser.email.toLowerCase())) {
-      users.push({ ...defUser });
-    }
-  }
-
-  isDemoCleared = false;
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const replaceAgency = (arr: any[], seeds: any[]) => [
+        ...(Array.isArray(arr) ? arr : []).filter((x) => (x.agencyId || 'agency-hkc') !== callerAgencyId),
+        ...seeds,
+      ];
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const newUsers = [...freshUsers];
+      for (const defUser of DEFAULT_USERS) {
+        if (!newUsers.some((u) => u.email.toLowerCase() === defUser.email.toLowerCase())) {
+          newUsers.push({ ...defUser });
+        }
+      }
+      // Re-seed default venues, tasks, events, and users atomically.
+      return {
+        doc: {
+          ...freshDoc,
+          venues: replaceAgency(freshDoc.venues, DEFAULT_VENUES),
+          tasks: replaceAgency(freshDoc.tasks, INITIAL_TASKS),
+          historyLogs: replaceAgency(freshDoc.historyLogs, INITIAL_HISTORY),
+          events: replaceAgency(freshDoc.events, INITIAL_EVENTS),
+          airtableConfigs: replaceAgency(freshDoc.airtableConfigs, INITIAL_AIRTABLE_CONFIGS),
+          approvedIngredients: replaceAgency(freshDoc.approvedIngredients, INITIAL_APPROVED_INGREDIENTS),
+          users: newUsers,
+          isDemoCleared: false,
+        },
+        result: { success: true, isDemoCleared: false },
+      };
+    },
+    { label: 'restore-demo' }
+  );
+  if (!committed) return;
 
   broadcast('DEMO_RESTORED', {
     agencyId: callerAgencyId,
@@ -3230,7 +4210,7 @@ function canManageTemplates(userEmail: string | undefined): boolean {
   return !!caller && (caller.role === 'admin' || caller.role === 'coordinator');
 }
 
-app.post('/api/event-task-templates', (req, res) => {
+app.post('/api/event-task-templates', async (req, res) => {
   const { title, agencyId, userEmail } = req.body;
   if (!canManageTemplates(userEmail)) {
     return res.status(403).json({ error: 'Only admins can manage default event tasks.' });
@@ -3238,29 +4218,49 @@ app.post('/api/event-task-templates', (req, res) => {
   if (!title || !String(title).trim()) {
     return res.status(400).json({ error: 'Title is required.' });
   }
+  const broadcastAgencyId = (req as any).authUser?.agencyId || 'agency-hkc';
+  // sortOrder is computed INSIDE the transaction from fresh data (not the cache),
+  // so concurrent creates get correct ordering.
   const template: EventTaskTemplate = {
     id: `etpl-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
     title: String(title).trim(),
     agencyId: agencyId || undefined,
-    sortOrder: eventTaskTemplates.length,
+    sortOrder: 0, // overwritten inside the transaction
   };
-  eventTaskTemplates.push(template);
-  saveState();
-  broadcast('EVENT_TEMPLATES_UPDATED', { templates: eventTaskTemplates }, undefined, (req as any).authUser?.agencyId || 'agency-hkc');
-  res.json({ template });
+  const ok = await crudCreate(req, res, 'eventTaskTemplates',
+    () => template,
+    {
+      label: 'create-event-task-template',
+      // Fix sortOrder against fresh data before insert.
+      checkDuplicate: (freshDoc, item) => {
+        const arr: any[] = Array.isArray(freshDoc.eventTaskTemplates) ? freshDoc.eventTaskTemplates : [];
+        if (arr.some((t) => t.id === item.id)) return null; // idempotent path handles it
+        item.sortOrder = arr.length;
+        return null;
+      },
+      broadcastType: 'EVENT_TEMPLATES_UPDATED',
+      getBroadcastPayload: () => ({ templates: eventTaskTemplates }),
+      getAgencyId: () => broadcastAgencyId,
+    }
+  );
+  return;
 });
 
-app.delete('/api/event-task-templates/:id', (req, res) => {
+app.delete('/api/event-task-templates/:id', async (req, res) => {
   const { userEmail } = req.body || {};
   if (!canManageTemplates(userEmail)) {
     return res.status(403).json({ error: 'Only admins can manage default event tasks.' });
   }
-  const idx = eventTaskTemplates.findIndex((t) => t.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Template not found.' });
-  eventTaskTemplates.splice(idx, 1);
-  saveState();
-  broadcast('EVENT_TEMPLATES_UPDATED', { templates: eventTaskTemplates }, undefined, (req as any).authUser?.agencyId || 'agency-hkc');
-  res.json({ success: true });
+  const broadcastAgencyId = (req as any).authUser?.agencyId || 'agency-hkc';
+  const existing = eventTaskTemplates.find((t) => t.id === req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Template not found.' });
+  const ok = await crudDelete(req, res, 'eventTaskTemplates', req.params.id, {
+    label: 'delete-event-task-template',
+    broadcastType: 'EVENT_TEMPLATES_UPDATED',
+    getDeletePayload: () => ({ templates: eventTaskTemplates }),
+    getAgencyId: () => broadcastAgencyId,
+  });
+  return;
 });
 
 app.get('/api/events', (req, res) => {
@@ -3304,7 +4304,7 @@ app.get('/api/events', (req, res) => {
   res.json({ events: agencyEvents });
 });
 
-app.post('/api/events', (req, res) => {
+app.post('/api/events', async (req, res) => {
   const {
     venueId,
     title,
@@ -3355,10 +4355,14 @@ app.post('/api/events', (req, res) => {
     }
   }
 
-  // Default tasks for a new event if none provided
+  // Pre-generate ALL stable IDs BEFORE the transaction so retries never duplicate.
+  const stamp = Date.now();
+  const eventId = `evt-${stamp}`;
+  const nowIso = new Date().toISOString();
+
   const starterTasks: EventTaskItem[] = Array.isArray(initialTasks) && initialTasks.length > 0
     ? initialTasks.map((t: any, idx: number) => ({
-        id: `etask-${Date.now()}-${idx}`,
+        id: t.id || `etask-${stamp}-${idx}`,
         title: t.title || 'Event Kosher Inspection Task',
         description: t.description || '',
         category: t.category || 'Inspection',
@@ -3367,7 +4371,7 @@ app.post('/api/events', (req, res) => {
       }))
     : [
         {
-          id: `etask-${Date.now()}-1`,
+          id: `etask-${stamp}-1`,
           title: 'Tamper-Evident Delivery Seals & Manifest Verification',
           description: 'Inspect seals on all delivery Cambros and containers before venue entry.',
           category: 'Delivery',
@@ -3375,7 +4379,7 @@ app.post('/api/events', (req, res) => {
           notes: '',
         },
         {
-          id: `etask-${Date.now()}-2`,
+          id: `etask-${stamp}-2`,
           title: 'Ballroom / Banquet Kitchen Warmers & Bishul Yisroel Check',
           description: 'Verify heating element switches and pilot lights ignited according to standard.',
           category: 'Bishul Yisroel',
@@ -3383,7 +4387,7 @@ app.post('/api/events', (req, res) => {
           notes: '',
         },
         {
-          id: `etask-${Date.now()}-3`,
+          id: `etask-${stamp}-3`,
           title: 'Post-Event Kashrut Wrap-up & Meat/Dairy Separation',
           description: 'Ensure all serving gear is crate-sealed and segregated before transport.',
           category: 'Post-Event Wrapup',
@@ -3393,7 +4397,7 @@ app.post('/api/events', (req, res) => {
       ];
 
   const newEvent: KosherEventItem = {
-    id: `evt-${Date.now()}`,
+    id: eventId,
     agencyId: callerAgencyId,
     venueId: targetVenueId,
     venueName: targetVenue?.name || 'Supervised Establishment',
@@ -3418,42 +4422,52 @@ app.post('/api/events', (req, res) => {
     tasks: starterTasks,
     createdByEmail: creatorEmail,
     createdByName: creatorName,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
   };
 
-  events.push(newEvent);
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
+      // Idempotency: same event ID already created.
+      const existing = arr.find((e) => e.id === eventId);
+      if (existing) return { doc: freshDoc, result: existing };
+      return { doc: { ...freshDoc, events: [...arr, newEvent] }, result: newEvent };
+    },
+    { label: 'create-event' }
+  );
+  if (!committed) return;
+  const event = committed.result as KosherEventItem;
 
+  // Side effects ONLY after commit.
   broadcast('EVENT_CREATED', {
-    event: newEvent,
+    event,
     agencyId: callerAgencyId,
     venueId: targetVenueId,
     assignedMashgiachEmail: resolvedMashgiachEmail,
   }, undefined, callerAgencyId);
 
-  // Phone push to the assigned mashgiach (works even with the app closed)
   if (resolvedMashgiachEmail) {
-    const when = newEvent.date ? ` — ${newEvent.date}` : '';
+    const when = event.date ? ` — ${event.date}` : '';
     sendPushToUser(
       resolvedMashgiachEmail,
       '⭐ New event assignment',
-      `${newEvent.title}${when} at ${newEvent.location}`,
-      { url: '/', eventId: newEvent.id }
+      `${event.title}${when} at ${event.location}`,
+      { url: '/', eventId: event.id }
     );
   }
 
-  res.status(201).json({ event: newEvent });
+  res.status(201).json({ event });
 });
 
-app.put('/api/events/:id', (req, res) => {
+app.put('/api/events/:id', async (req, res) => {
   const { id } = req.params;
-  const eventIndex = events.findIndex((e) => e.id === id);
+  const existing = events.find((e) => e.id === id);
 
-  if (eventIndex === -1) {
+  if (!existing) {
     return res.status(404).json({ error: 'Event not found.' });
   }
 
-  const existing = events[eventIndex];
   const {
     title,
     location,
@@ -3474,6 +4488,9 @@ app.put('/api/events/:id', (req, res) => {
     userName,
   } = req.body;
 
+  // Baseline for semantic conflict detection on title/location/date.
+  const baseline = { title: existing.title, location: existing.location, date: existing.date };
+
   let resolvedMashgiachEmail = assignedMashgiachEmail !== undefined ? assignedMashgiachEmail : existing.assignedMashgiachEmail;
   let resolvedMashgiachName = assignedMashgiachName !== undefined ? assignedMashgiachName : existing.assignedMashgiachName;
 
@@ -3483,29 +4500,47 @@ app.put('/api/events/:id', (req, res) => {
       resolvedMashgiachName = matchedUser.name;
     }
   }
+  const updatedAt = new Date().toISOString();
 
-  const updated: KosherEventItem = {
-    ...existing,
-    title: title !== undefined ? title : existing.title,
-    location: location !== undefined ? location : existing.location,
-    date: date !== undefined ? date : existing.date,
-    endDate: endDate !== undefined ? endDate : existing.endDate,
-    startTime: startTime !== undefined ? startTime : existing.startTime,
-    endTime: endTime !== undefined ? endTime : existing.endTime,
-    mashgiachType: mashgiachType !== undefined ? mashgiachType : existing.mashgiachType,
-    assignedMashgiachEmail: resolvedMashgiachEmail,
-    assignedMashgiachName: resolvedMashgiachName,
-    externalMashgiach: externalMashgiach !== undefined ? externalMashgiach : existing.externalMashgiach,
-    menuAttachmentName: menuAttachmentName !== undefined ? menuAttachmentName : existing.menuAttachmentName,
-    menuAttachmentData: menuAttachmentData !== undefined ? menuAttachmentData : existing.menuAttachmentData,
-    notes: notes !== undefined ? notes : existing.notes,
-    status: status !== undefined ? status : existing.status,
-    tasks: updatedTasks !== undefined ? updatedTasks : existing.tasks,
-    updatedAt: new Date().toISOString(),
-  };
-
-  events[eventIndex] = updated;
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshEvents: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
+      const freshEvent = freshEvents.find((e) => e.id === id);
+      if (!freshEvent) return { conflict: 'Event not found (it may have been deleted).' };
+      // Conflict if someone else changed a field this request is editing.
+      for (const field of ['title', 'location', 'date'] as const) {
+        const newVal = { title, location, date }[field];
+        if (newVal !== undefined && (freshEvent as any)[field] !== (baseline as any)[field]) {
+          return { conflict: `Conflict: event ${field} was changed by someone else. Please refresh and try again.` };
+        }
+      }
+      const updated: KosherEventItem = {
+        ...freshEvent,
+        title: title !== undefined ? title : freshEvent.title,
+        location: location !== undefined ? location : freshEvent.location,
+        date: date !== undefined ? date : freshEvent.date,
+        endDate: endDate !== undefined ? endDate : freshEvent.endDate,
+        startTime: startTime !== undefined ? startTime : freshEvent.startTime,
+        endTime: endTime !== undefined ? endTime : freshEvent.endTime,
+        mashgiachType: mashgiachType !== undefined ? mashgiachType : freshEvent.mashgiachType,
+        assignedMashgiachEmail: resolvedMashgiachEmail,
+        assignedMashgiachName: resolvedMashgiachName,
+        externalMashgiach: externalMashgiach !== undefined ? externalMashgiach : freshEvent.externalMashgiach,
+        menuAttachmentName: menuAttachmentName !== undefined ? menuAttachmentName : freshEvent.menuAttachmentName,
+        menuAttachmentData: menuAttachmentData !== undefined ? menuAttachmentData : freshEvent.menuAttachmentData,
+        notes: notes !== undefined ? notes : freshEvent.notes,
+        status: status !== undefined ? status : freshEvent.status,
+        tasks: updatedTasks !== undefined ? updatedTasks : freshEvent.tasks,
+        updatedAt,
+      };
+      const newEvents = freshEvents.map((e) => (e.id === id ? updated : e));
+      return { doc: { ...freshDoc, events: newEvents }, result: updated };
+    },
+    { label: 'update-event' }
+  );
+  if (!committed) return;
+  const updated = committed.result as KosherEventItem;
 
   broadcast('EVENT_UPDATED', {
     event: updated,
@@ -3517,29 +4552,27 @@ app.put('/api/events/:id', (req, res) => {
   res.json({ event: updated });
 });
 
-app.delete('/api/events/:id', (req, res) => {
+app.delete('/api/events/:id', async (req, res) => {
   const { id } = req.params;
-  const eventIndex = events.findIndex((e) => e.id === id);
+  const deletedEvent = events.find((e) => e.id === id);
 
-  if (eventIndex === -1) {
+  if (!deletedEvent) {
     return res.status(404).json({ error: 'Event not found.' });
   }
+  const agencyId = deletedEvent.agencyId;
+  const venueId = deletedEvent.venueId;
 
-  const deletedEvent = events[eventIndex];
-  events.splice(eventIndex, 1);
-  saveState();
-
-  broadcast('EVENT_DELETED', {
-    id,
-    agencyId: deletedEvent.agencyId,
-    venueId: deletedEvent.venueId,
-  }, undefined, deletedEvent.agencyId || 'agency-hkc');
-
-  res.json({ success: true, deletedId: id });
+  const ok = await crudDelete(req, res, 'events', id, {
+    label: 'delete-event',
+    broadcastType: 'EVENT_DELETED',
+    getDeletePayload: () => ({ id, agencyId, venueId }),
+    getAgencyId: () => agencyId || 'agency-hkc',
+  });
+  return;
 });
 
 // Event Task Toggle / Status Endpoint
-app.post('/api/events/:id/tasks/:taskId/toggle', (req, res) => {
+app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
   const { id, taskId } = req.params;
   const { isCompleted, notes, userEmail, userName } = req.body;
 
@@ -3548,37 +4581,58 @@ app.post('/api/events/:id/tasks/:taskId/toggle', (req, res) => {
     return res.status(404).json({ error: 'Event not found.' });
   }
 
-  const task = event.tasks.find((t) => t.id === taskId);
-  if (!task) {
+  const cachedTask = event.tasks.find((t) => t.id === taskId);
+  if (!cachedTask) {
     return res.status(404).json({ error: 'Task not found in this event.' });
   }
 
-  const targetCompleted = isCompleted !== undefined ? Boolean(isCompleted) : !task.isCompleted;
+  // Baseline for semantic conflict detection: the task's completion state as the
+  // client saw it. If someone else toggled it meanwhile, that's a 409.
+  const baselineCompleted = cachedTask.isCompleted;
+  const completedAt = new Date().toISOString();
 
-  task.isCompleted = targetCompleted;
-  if (notes !== undefined) task.notes = notes;
-
-  if (targetCompleted) {
-    task.completedAt = new Date().toISOString();
-    task.completedByName = userName || 'Mashgiach';
-    task.completedByEmail = userEmail || null;
-  } else {
-    task.completedAt = null;
-    task.completedByName = null;
-    task.completedByEmail = null;
-  }
-
-  event.updatedAt = new Date().toISOString();
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshEvents: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
+      const freshEvent = freshEvents.find((e) => e.id === id);
+      if (!freshEvent) return { conflict: 'Event not found (it may have been deleted).' };
+      const freshTasks: any[] = Array.isArray(freshEvent.tasks) ? freshEvent.tasks : [];
+      const freshTask = freshTasks.find((t) => t.id === taskId);
+      if (!freshTask) return { conflict: 'Task not found in this event.' };
+      if (freshTask.isCompleted !== baselineCompleted) {
+        return { conflict: 'Conflict: this event task was changed by someone else. Please refresh and try again.' };
+      }
+      const targetCompleted = isCompleted !== undefined ? Boolean(isCompleted) : !freshTask.isCompleted;
+      const updatedTask = {
+        ...freshTask,
+        isCompleted: targetCompleted,
+        notes: notes !== undefined ? notes : freshTask.notes,
+        completedAt: targetCompleted ? completedAt : null,
+        completedByName: targetCompleted ? (userName || 'Mashgiach') : null,
+        completedByEmail: targetCompleted ? (userEmail || null) : null,
+      };
+      const updatedEvent = {
+        ...freshEvent,
+        tasks: freshTasks.map((t) => (t.id === taskId ? updatedTask : t)),
+        updatedAt: completedAt,
+      };
+      const newEvents = freshEvents.map((e) => (e.id === id ? updatedEvent : e));
+      return { doc: { ...freshDoc, events: newEvents }, result: { event: updatedEvent, task: updatedTask } };
+    },
+    { label: 'toggle-event-task' }
+  );
+  if (!committed) return;
+  const { event: updatedEvent, task: updatedTask } = committed.result as any;
 
   broadcast('EVENT_UPDATED', {
-    event,
-    agencyId: event.agencyId,
-    venueId: event.venueId,
-    assignedMashgiachEmail: event.assignedMashgiachEmail,
-  }, undefined, event.agencyId || 'agency-hkc');
+    event: updatedEvent,
+    agencyId: updatedEvent.agencyId,
+    venueId: updatedEvent.venueId,
+    assignedMashgiachEmail: updatedEvent.assignedMashgiachEmail,
+  }, undefined, updatedEvent.agencyId || 'agency-hkc');
 
-  res.json({ success: true, event, task });
+  res.json({ success: true, event: updatedEvent, task: updatedTask });
 });
 
 app.get('/api/users', (req, res) => {
@@ -3608,7 +4662,7 @@ app.get('/api/users', (req, res) => {
   res.json({ users: agencyUsers });
 });
 
-app.post('/api/users', (req, res) => {
+app.post('/api/users', async (req, res) => {
   const { email, name, role, password, venueId, userEmail, permissions } = req.body;
   if (!email || !name) {
     return res.status(400).json({ error: 'Email and name are required' });
@@ -3622,13 +4676,12 @@ app.post('/api/users', (req, res) => {
     }
   }
 
-  const initialPassword =
-    (password && String(password).trim()) || crypto.randomBytes(9).toString('hex');
-
-  const existing = users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
-  if (existing) {
-    return res.status(409).json({ error: 'A team member with this email already exists' });
-  }
+  // Pre-generate stable ID + hash the password BEFORE the transaction so retries
+  // never create a duplicate user or re-hash (bcrypt is CPU-heavy).
+  const newUserId = `usr_${Date.now()}`;
+  const initialPassword = (password && String(password).trim()) || crypto.randomBytes(9).toString('hex');
+  const passwordHash = bcrypt.hashSync(initialPassword, 10);
+  const cleanEmail = email.trim().toLowerCase();
 
   const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f97316'];
   const validRole =
@@ -3655,79 +4708,114 @@ app.post('/api/users', (req, res) => {
   };
 
   const newUser: UserProfile = {
-    id: `usr_${Date.now()}`,
+    id: newUserId,
     agencyId: callerAgencyId,
-    email: email.trim().toLowerCase(),
+    email: cleanEmail,
     name: name.trim(),
     role: validRole,
     venueId: targetVenueId,
     permissions: defaultPermissions,
     avatarColor: colors[Math.floor(Math.random() * colors.length)],
-    password: bcrypt.hashSync(initialPassword, 10),
+    password: passwordHash,
   };
 
-  users.push(newUser);
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      // Email uniqueness must be checked against FRESH data, not the cache.
+      // (Two concurrent creates with the same email: one wins, the other gets 409 —
+      // the duplicate-user case idempotency alone can't prevent.)
+      const existing = freshUsers.find((u) => u.email.toLowerCase() === cleanEmail);
+      if (existing) return { conflict: 'A team member with this email already exists' };
+      // Idempotency: our own user ID already created by a previous attempt.
+      const selfExisting = freshUsers.find((u) => u.id === newUserId);
+      if (selfExisting) return { doc: freshDoc, result: selfExisting };
+      return { doc: { ...freshDoc, users: [...freshUsers, newUser] }, result: newUser };
+    },
+    { label: 'create-user' }
+  );
+  if (!committed) return;
+  const created = committed.result as UserProfile;
   broadcast('USERS_UPDATED', { users: getSafeUsers(), agencyId: callerAgencyId }, undefined, callerAgencyId);
-  res.status(201).json({ user: getSafeUser(newUser) });
+  res.status(201).json({ user: getSafeUser(created) });
 });
 
 // Update user permissions or role
-app.put('/api/users/:id', (req, res) => {
+app.put('/api/users/:id', async (req, res) => {
   const { id } = req.params;
-  const userIndex = users.findIndex((u) => u.id === id);
-  if (userIndex === -1) {
+  const existingUser = users.find((u) => u.id === id);
+  if (!existingUser) {
     return res.status(404).json({ error: 'Team member not found' });
   }
 
   const { role, permissions, venueId, name, kioskPin } = req.body;
-  const existingUser = users[userIndex];
 
-  if (name !== undefined) {
-    existingUser.name = name.trim();
-  }
+  // Validate PIN outside the transaction (pure validation).
+  let pinUpdate: string | undefined | null = null; // null = no change
   if (kioskPin !== undefined) {
-    // 4-6 digit kiosk PIN, or empty string to clear
     const pin = String(kioskPin).trim();
-    if (pin === '' || /^[0-9]{4,6}$/.test(pin)) {
-      existingUser.kioskPin = pin === '' ? undefined : pin;
+    if (pin !== '' && !/^[0-9]{4,6}$/.test(pin)) {
+      return res.status(400).json({ error: 'Kiosk PIN must be 4-6 digits or empty.' });
     }
-  }
-  if (venueId !== undefined) {
-    existingUser.venueId = venueId;
-  }
-  if (role !== undefined) {
-    existingUser.role =
-      role === 'admin'
-        ? 'admin'
-        : role === 'coordinator'
-        ? 'coordinator'
-        : role === 'owner'
-        ? 'owner'
-        : 'mashgiach';
-  }
-  if (permissions !== undefined) {
-    existingUser.permissions = {
-      ...(existingUser.permissions || {}),
-      ...(permissions.canFillTasks !== undefined ? { canFillTasks: Boolean(permissions.canFillTasks) } : {}),
-      ...(permissions.canAssignTasks !== undefined ? { canAssignTasks: Boolean(permissions.canAssignTasks) } : {}),
-    };
+    pinUpdate = pin === '' ? undefined : pin;
   }
 
-  saveState();
-  broadcast('USERS_UPDATED', { users: getSafeUsers(), agencyId: existingUser.agencyId }, undefined, existingUser.agencyId);
-  res.json({ user: getSafeUser(existingUser) });
+  const baseline = { name: existingUser.name, role: existingUser.role, venueId: existingUser.venueId };
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshUser = freshUsers.find((u) => u.id === id);
+      if (!freshUser) return { conflict: 'Team member not found (they may have been deleted).' };
+      // Conflict if someone else changed a field this request is editing.
+      if (name !== undefined && freshUser.name !== baseline.name) {
+        return { conflict: 'Conflict: this team member\'s name was changed by someone else. Please refresh and try again.' };
+      }
+      if (role !== undefined && freshUser.role !== baseline.role) {
+        return { conflict: 'Conflict: this team member\'s role was changed by someone else. Please refresh and try again.' };
+      }
+      const updated: UserProfile = { ...freshUser };
+      if (name !== undefined) updated.name = name.trim();
+      if (pinUpdate !== null) updated.kioskPin = pinUpdate === undefined ? undefined : pinUpdate;
+      if (venueId !== undefined) updated.venueId = venueId;
+      if (role !== undefined) {
+        updated.role =
+          role === 'admin'
+            ? 'admin'
+            : role === 'coordinator'
+            ? 'coordinator'
+            : role === 'owner'
+            ? 'owner'
+            : 'mashgiach';
+      }
+      if (permissions !== undefined) {
+        updated.permissions = {
+          ...(freshUser.permissions || {}),
+          ...(permissions.canFillTasks !== undefined ? { canFillTasks: Boolean(permissions.canFillTasks) } : {}),
+          ...(permissions.canAssignTasks !== undefined ? { canAssignTasks: Boolean(permissions.canAssignTasks) } : {}),
+        };
+      }
+      const newUsers = freshUsers.map((u) => (u.id === id ? updated : u));
+      return { doc: { ...freshDoc, users: newUsers }, result: updated };
+    },
+    { label: 'update-user' }
+  );
+  if (!committed) return;
+  const updated = committed.result as UserProfile;
+  broadcast('USERS_UPDATED', { users: getSafeUsers(), agencyId: updated.agencyId }, undefined, updated.agencyId);
+  res.json({ user: getSafeUser(updated) });
 });
 
-app.delete('/api/users/:id', (req, res) => {
+app.delete('/api/users/:id', async (req, res) => {
   const { id } = req.params;
-  const userIndex = users.findIndex((u) => u.id === id);
-  if (userIndex === -1) {
+  const userToDelete = users.find((u) => u.id === id);
+  if (!userToDelete) {
     return res.status(404).json({ error: 'Worker not found' });
   }
 
-  const userToDelete = users[userIndex];
-  // Check if primary admin for this agency
+  // Check if primary admin for this agency (permission check — safe on cached data).
   const userAgency = agencies.find((a) => a.id === userToDelete.agencyId);
   if (
     userToDelete.email.toLowerCase() === 'kenan@hartfordkashrut.org' ||
@@ -3735,11 +4823,15 @@ app.delete('/api/users/:id', (req, res) => {
   ) {
     return res.status(400).json({ error: 'Cannot delete the primary administrator account for this agency.' });
   }
+  const deletedAgencyId = userToDelete.agencyId;
 
-  users.splice(userIndex, 1);
-  saveState();
-  broadcast('USERS_UPDATED', { users: getSafeUsers(), deletedId: id, agencyId: userToDelete.agencyId }, undefined, userToDelete.agencyId);
-  res.json({ success: true, deletedId: id });
+  const ok = await crudDelete(req, res, 'users', id, {
+    label: 'delete-user',
+    broadcastType: 'USERS_UPDATED',
+    getDeletePayload: () => ({ users: getSafeUsers(), deletedId: id, agencyId: deletedAgencyId }),
+    getAgencyId: () => deletedAgencyId,
+  });
+  return;
 });
 
 // ---- Kiosk mode: shared tablet login via per-user PIN ----
@@ -3801,8 +4893,29 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: 'Incorrect password. Please try again or request a reset.' });
   }
   if (result === 'valid-needs-upgrade') {
-    user.password = await hashPassword(String(password));
-    saveState();
+    // Upgrade the legacy password hash inside a transaction so the write is
+    // atomic and versioned like every other write. Login still succeeds even
+    // if the upgrade write fails (the user proved they know the password).
+    const newHash = await hashPassword(String(password));
+    try {
+      await commitState(
+        (freshDoc) => {
+          const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+          const freshUser = freshUsers.find((u) => u.id === user.id);
+          if (!freshUser) return { conflict: 'User not found.' };
+          // Only upgrade if the stored password isn't already a bcrypt hash
+          // (another concurrent login may have upgraded it first).
+          if (isBcryptHash(freshUser.password)) {
+            return { doc: freshDoc, result: { upgraded: false } };
+          }
+          const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
+          return { doc: { ...freshDoc, users: newUsers }, result: { upgraded: true } };
+        },
+        { label: 'login-password-upgrade' }
+      );
+    } catch (err) {
+      console.warn('[login] Password-hash upgrade write failed (login still succeeds):', (err as any)?.message);
+    }
   }
 
   const token = signToken(user.id);
@@ -3832,11 +4945,22 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   const code = Math.floor(100000 + Math.random() * 900000).toString();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 min
 
-  // Remove old requests for this email
-  passwordResets = passwordResets.filter((r) => r.email !== normalizedEmail);
-  passwordResets.push({ email: normalizedEmail, code, expiresAt, verified: false });
+  // Persist the reset request transactionally (survives restarts).
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      const newResets = [
+        ...freshResets.filter((r: any) => r.email !== normalizedEmail),
+        { email: normalizedEmail, code, expiresAt, verified: false },
+      ];
+      return { doc: { ...freshDoc, passwordResets: newResets }, result: { success: true } };
+    },
+    { label: 'forgot-password' }
+  );
+  if (!committed) return;
 
-  // Notify admins via push (they pass the code to the user)
+  // Notify admins via push (they pass the code to the user) — only after commit.
   const agencyId = user.agencyId || 'agency-hkc';
   const admins = users.filter((u) =>
     (u.agencyId || 'agency-hkc') === agencyId &&
@@ -3861,23 +4985,67 @@ app.post('/api/auth/verify-reset-code', async (req, res) => {
   const { email, code } = req.body || {};
   const normalizedEmail = String(email || '').trim().toLowerCase();
 
+  // Validate against fresh data (not the in-memory cache) to handle concurrent requests.
+  // Note: we read the current state here for validation; the mutation below re-reads
+  // fresh data inside the transaction, so a concurrent verify can't double-issue.
   const request = passwordResets.find((r) => r.email === normalizedEmail);
   if (!request) {
     return res.status(400).json({ error: 'No reset request found. Please request a new code.' });
   }
   if (new Date(request.expiresAt) < new Date()) {
-    passwordResets = passwordResets.filter((r) => r.email !== normalizedEmail);
+    // Expired — remove it transactionally.
+    await commitState(
+      (freshDoc) => {
+        const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+        return {
+          doc: { ...freshDoc, passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail) },
+          result: null,
+        };
+      },
+      { label: 'verify-reset-code-expired-cleanup' }
+    ).catch(() => {});
     return res.status(400).json({ error: 'Code expired. Please request a new code.' });
   }
   if (request.code !== String(code || '').trim()) {
     return res.status(400).json({ error: 'Incorrect code. Please try again.' });
   }
 
-  // Code verified — issue a one-time reset token
+  // Code verified — issue a one-time reset token, persisted transactionally.
   const resetToken = crypto.randomUUID();
-  request.verified = true;
-  request.resetToken = resetToken;
-  res.json({ success: true, resetToken });
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      const freshRequest = freshResets.find((r: any) => r.email === normalizedEmail);
+      if (!freshRequest) return { conflict: 'No reset request found. Please request a new code.' };
+      if (new Date(freshRequest.expiresAt) < new Date()) {
+        return {
+          doc: { ...freshDoc, passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail) },
+          result: null,
+          // Signal expiry via conflict so the client gets a clear message.
+        };
+      }
+      if (freshRequest.code !== String(code || '').trim()) {
+        return { conflict: 'Incorrect code. Please try again.' };
+      }
+      // Prevent double-verification: if already verified, return the existing token
+      // (idempotent — the client may have retried after a lost response).
+      if (freshRequest.verified && freshRequest.resetToken) {
+        return { doc: freshDoc, result: { resetToken: freshRequest.resetToken } };
+      }
+      const newResets = freshResets.map((r: any) =>
+        r.email === normalizedEmail ? { ...r, verified: true, resetToken } : r
+      );
+      return { doc: { ...freshDoc, passwordResets: newResets }, result: { resetToken } };
+    },
+    { label: 'verify-reset-code' }
+  );
+  if (!committed) return;
+  // If the token was already consumed (expired cleanup path), committed.result is null.
+  if (!committed.result || !committed.result.resetToken) {
+    return res.status(400).json({ error: 'Code expired. Please request a new code.' });
+  }
+  res.json({ success: true, resetToken: committed.result.resetToken });
 });
 
 // Forgot password: Step 3 — set new password with reset token
@@ -3899,12 +5067,36 @@ app.post('/api/auth/reset-password', async (req, res) => {
   const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
   if (!user) return res.status(404).json({ error: 'Account not found.' });
 
-  user.password = await hashPassword(String(newPassword));
-  passwordResets = passwordResets.filter((r) => r.email !== normalizedEmail);
-  saveState();
+  // Hash BEFORE the transaction (CPU-heavy); the hash is deterministic input.
+  const newHash = await hashPassword(String(newPassword));
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshUser = freshUsers.find((u) => u.id === user.id);
+      if (!freshUser) return { conflict: 'Account not found.' };
+      const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      // The reset request must still be valid in fresh data — prevents reuse
+      // of a token that was already consumed by a concurrent request.
+      const freshRequest = freshResets.find(
+        (r) => r.email === normalizedEmail && r.verified && r.resetToken === resetToken
+      );
+      if (!freshRequest) return { conflict: 'Invalid or expired reset token.' };
+      const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
+      // Consume the reset token atomically with the password change.
+      const newResets = freshResets.filter((r) => r.email !== normalizedEmail);
+      return {
+        doc: { ...freshDoc, users: newUsers, passwordResets: newResets },
+        result: { userId: user.id },
+      };
+    },
+    { label: 'reset-password' }
+  );
+  if (!committed) return;
 
   const token = signToken(user.id);
-  res.json({ success: true, user: getSafeUser(user), token });
+  res.json({ success: true, user: getSafeUser(users.find((u) => u.id === user.id)!), token });
 });
 
 // First-run admin setup: sets the admin password. Public, but ONLY works when
@@ -3915,18 +5107,37 @@ app.post('/api/auth/setup', async (req, res) => {
     return res.status(400).json({ error: 'A password of at least 8 characters is required.' });
   }
   const normalizedEmail = String(email).trim().toLowerCase();
-  const userIndex = users.findIndex((u) => u.email.toLowerCase() === normalizedEmail);
-  if (userIndex === -1) {
+  const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  if (!user) {
     return res.status(404).json({ error: 'Account not found.' });
   }
-  const user = users[userIndex];
   if (user.role !== 'admin' || user.password) {
     return res.status(403).json({ error: 'Setup is already complete.' });
   }
-  users[userIndex].password = await hashPassword(String(newPassword).trim());
-  saveState();
+
+  // Hash BEFORE the transaction (CPU-heavy).
+  const newHash = await hashPassword(String(newPassword).trim());
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshUser = freshUsers.find((u) => u.id === user.id);
+      if (!freshUser) return { conflict: 'Account not found.' };
+      // Setup must still be pending in fresh data — if a password already
+      // exists, someone else completed setup first.
+      if (freshUser.role !== 'admin' || freshUser.password) {
+        return { conflict: 'Setup is already complete.' };
+      }
+      const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
+      return { doc: { ...freshDoc, users: newUsers }, result: { userId: user.id } };
+    },
+    { label: 'auth-setup' }
+  );
+  if (!committed) return;
+
   const token = signToken(user.id);
-  res.json({ success: true, user: getSafeUser(users[userIndex]), token });
+  res.json({ success: true, user: getSafeUser(users.find((u) => u.id === user.id)!), token });
 });
 
 // Change Password Endpoint — requires a valid session; the caller can only
@@ -3942,19 +5153,41 @@ app.post('/api/auth/change-password', async (req, res) => {
   }
 
   const authUser = (req as any).authUser;
-  const userIndex = users.findIndex((u) => u.id === authUser.id);
-  if (userIndex === -1) {
+  const user = users.find((u) => u.id === authUser.id);
+  if (!user) {
     return res.status(404).json({ error: 'User account not found.' });
   }
 
-  const user = users[userIndex];
   const result = await checkPassword(String(currentPassword), user.password);
   if (result === 'invalid') {
-    return res.status(401).json({ error: 'Current password does not match.' });
+    return res.status(401).json({ error: 'Current password is incorrect.' });
   }
 
-  users[userIndex].password = await hashPassword(String(newPassword).trim());
-  saveState();
+  // Hash BEFORE the transaction (CPU-heavy).
+  const newHash = await hashPassword(String(newPassword).trim());
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshUser = freshUsers.find((u) => u.id === user.id);
+      if (!freshUser) return { conflict: 'User account not found.' };
+      // Re-verify the current password against FRESH data — if someone changed
+      // it concurrently, the old password no longer proves ownership.
+      // (Synchronous check: the mutator must stay pure and re-runnable.)
+      const freshStored = freshUser.password;
+      const freshValid = isBcryptHash(freshStored)
+        ? bcrypt.compareSync(String(currentPassword), freshStored)
+        : freshStored === String(currentPassword);
+      if (!freshValid) {
+        return { conflict: 'Your password was changed by another session. Please sign in again.' };
+      }
+      const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
+      return { doc: { ...freshDoc, users: newUsers }, result: { success: true } };
+    },
+    { label: 'change-password' }
+  );
+  if (!committed) return;
 
   res.json({ success: true, message: 'Password updated successfully.' });
 });
@@ -3993,39 +5226,48 @@ app.get('/api/airtable/config', (req, res) => {
 });
 
 // Save or Update Airtable Config
-app.post('/api/airtable/config', (req, res) => {
+app.post('/api/airtable/config', async (req, res) => {
   const { venueId, agencyId, apiKey, baseId, tableName, viewName, fieldNameMapping, userEmail } = req.body;
-  
+
   let callerAgencyId = agencyId || 'agency-hkc';
   if (userEmail) {
     const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
     if (caller) callerAgencyId = caller.agencyId || callerAgencyId;
   }
 
-  let existingIndex = airtableConfigs.findIndex(
-    (c) => c.agencyId === callerAgencyId && (venueId ? c.venueId === venueId : true)
+  const configId = `atcfg_${Date.now()}`;
+  const nowIso = new Date().toISOString();
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.airtableConfigs) ? freshDoc.airtableConfigs : [];
+      // Upsert: match on agencyId + venueId against FRESH data.
+      const existingIdx = arr.findIndex(
+        (c) => c.agencyId === callerAgencyId && (venueId ? c.venueId === venueId : true)
+      );
+      const existing = existingIdx >= 0 ? arr[existingIdx] : null;
+      const updatedConfig: AirtableConfigItem = {
+        id: existing ? existing.id : configId,
+        agencyId: callerAgencyId,
+        venueId: venueId || undefined,
+        apiKey: (apiKey || '').trim(),
+        baseId: (baseId || '').trim(),
+        tableName: (tableName || 'Approved Ingredients').trim(),
+        viewName: (viewName || 'Grid view').trim(),
+        fieldNameMapping: fieldNameMapping || (existing ? existing.fieldNameMapping : undefined),
+        lastSyncedAt: existing ? existing.lastSyncedAt : nowIso,
+        autoSyncEnabled: true,
+      };
+      const newArr = existingIdx >= 0
+        ? arr.map((c, i) => (i === existingIdx ? updatedConfig : c))
+        : [...arr, updatedConfig];
+      return { doc: { ...freshDoc, airtableConfigs: newArr }, result: updatedConfig };
+    },
+    { label: 'save-airtable-config' }
   );
-
-  const updatedConfig: AirtableConfigItem = {
-    id: existingIndex >= 0 ? airtableConfigs[existingIndex].id : `atcfg_${Date.now()}`,
-    agencyId: callerAgencyId,
-    venueId: venueId || undefined,
-    apiKey: apiKey !== undefined ? (apiKey ? apiKey.trim() : (existingIndex >= 0 ? airtableConfigs[existingIndex].apiKey : '')) : (existingIndex >= 0 ? airtableConfigs[existingIndex].apiKey : ''),
-    baseId: (baseId || '').trim(),
-    tableName: (tableName || 'Approved Ingredients').trim(),
-    viewName: (viewName || 'Grid view').trim(),
-    fieldNameMapping: fieldNameMapping || (existingIndex >= 0 ? airtableConfigs[existingIndex].fieldNameMapping : undefined),
-    lastSyncedAt: existingIndex >= 0 ? airtableConfigs[existingIndex].lastSyncedAt : new Date().toISOString(),
-    autoSyncEnabled: true,
-  };
-
-  if (existingIndex >= 0) {
-    airtableConfigs[existingIndex] = updatedConfig;
-  } else {
-    airtableConfigs.push(updatedConfig);
-  }
-
-  saveState();
+  if (!committed) return;
+  const updatedConfig = committed.result as AirtableConfigItem;
   res.json({
     success: true,
     config: {
@@ -4123,20 +5365,37 @@ app.post('/api/airtable/sync', async (req, res) => {
         };
       });
 
-      // Replace or merge into approvedIngredients for this venue
-      approvedIngredients = [
-        ...approvedIngredients.filter((i) => i.venueId !== venueId),
-        ...syncedIngredients,
-      ];
-      config.lastSyncedAt = new Date().toISOString();
-      saveState();
+      // Replace the venue's ingredients + update lastSyncedAt atomically.
+      const syncedAt = new Date().toISOString();
+      const committed = await commitOrRespond(
+        req, res,
+        (freshDoc) => {
+          const freshIngredients: any[] = Array.isArray(freshDoc.approvedIngredients) ? freshDoc.approvedIngredients : [];
+          const freshConfigs: any[] = Array.isArray(freshDoc.airtableConfigs) ? freshDoc.airtableConfigs : [];
+          return {
+            doc: {
+              ...freshDoc,
+              approvedIngredients: [
+                ...freshIngredients.filter((i) => i.venueId !== venueId),
+                ...syncedIngredients,
+              ],
+              airtableConfigs: freshConfigs.map((c) =>
+                c.id === config.id ? { ...c, lastSyncedAt: syncedAt } : c
+              ),
+            },
+            result: { syncedAt },
+          };
+        },
+        { label: 'airtable-sync-live' }
+      );
+      if (!committed) return;
 
       broadcast('INGREDIENTS_SYNCED', {
         venueId,
         agencyId: callerAgencyId,
         ingredients: approvedIngredients.filter((i) => i.venueId === venueId),
         count: syncedIngredients.length,
-        syncedAt: config.lastSyncedAt,
+        syncedAt,
       }, undefined, callerAgencyId);
 
       return res.json({
@@ -4144,7 +5403,7 @@ app.post('/api/airtable/sync', async (req, res) => {
         source: 'airtable_live_api',
         count: syncedIngredients.length,
         ingredients: approvedIngredients.filter((i) => i.venueId === venueId),
-        syncedAt: config.lastSyncedAt,
+        syncedAt,
       });
     } catch (err: any) {
       return res.status(500).json({ error: `Failed to fetch from Airtable: ${err.message}` });
@@ -4152,8 +5411,26 @@ app.post('/api/airtable/sync', async (req, res) => {
   }
 
   // If testing / demo mode without live PAT, refresh default ingredients with timestamp
-  config.lastSyncedAt = new Date().toISOString();
-  saveState();
+  const demoSyncedAt = new Date().toISOString();
+  try {
+    await commitState(
+      (freshDoc) => {
+        const freshConfigs: any[] = Array.isArray(freshDoc.airtableConfigs) ? freshDoc.airtableConfigs : [];
+        return {
+          doc: {
+            ...freshDoc,
+            airtableConfigs: freshConfigs.map((c) =>
+              c.id === config.id ? { ...c, lastSyncedAt: demoSyncedAt } : c
+            ),
+          },
+          result: { syncedAt: demoSyncedAt },
+        };
+      },
+      { label: 'airtable-sync-demo' }
+    );
+  } catch (err) {
+    return res.status(503).json({ error: 'Could not save sync timestamp. Please try again.' });
+  }
 
   const venueIngredients = approvedIngredients.filter((i) => i.venueId === venueId);
   broadcast('INGREDIENTS_SYNCED', {
@@ -4161,7 +5438,7 @@ app.post('/api/airtable/sync', async (req, res) => {
     agencyId: callerAgencyId,
     ingredients: venueIngredients,
     count: venueIngredients.length,
-    syncedAt: config.lastSyncedAt,
+    syncedAt: demoSyncedAt,
   }, undefined, callerAgencyId);
 
   res.json({
@@ -4169,7 +5446,7 @@ app.post('/api/airtable/sync', async (req, res) => {
     source: 'airtable_configured_sync',
     count: venueIngredients.length,
     ingredients: venueIngredients,
-    syncedAt: config.lastSyncedAt,
+    syncedAt: demoSyncedAt,
   });
 });
 
@@ -4192,12 +5469,12 @@ app.get('/api/ingredients', (req, res) => {
 });
 
 // Mashgiach verifies or flags an approved ingredient during factory visit
-app.put('/api/ingredients/:id/verify', (req, res) => {
+app.put('/api/ingredients/:id/verify', async (req, res) => {
   const { id } = req.params;
   const { verificationStatus, verificationNotes, userEmail } = req.body;
 
-  const itemIndex = approvedIngredients.findIndex((i) => i.id === id);
-  if (itemIndex === -1) {
+  const existing = approvedIngredients.find((i) => i.id === id);
+  if (!existing) {
     return res.status(404).json({ error: 'Ingredient not found' });
   }
 
@@ -4211,31 +5488,33 @@ app.put('/api/ingredients/:id/verify', (req, res) => {
       verifiedByEmail = caller.email;
     }
   }
+  const verifiedAt = new Date().toISOString();
 
-  const existing = approvedIngredients[itemIndex];
-  const updated: ApprovedIngredientItem = {
-    ...existing,
-    verificationStatus: verificationStatus || 'verified_present',
-    verificationNotes: verificationNotes !== undefined ? verificationNotes : existing.verificationNotes,
-    verifiedAt: verificationStatus === 'unverified' ? null : new Date().toISOString(),
-    verifiedByName: verificationStatus === 'unverified' ? null : verifiedByName,
-    verifiedByEmail: verificationStatus === 'unverified' ? null : verifiedByEmail,
-  };
-
-  approvedIngredients[itemIndex] = updated;
-  saveState();
-
-  broadcast('INGREDIENT_VERIFIED', {
-    ingredient: updated,
-    venueId: updated.venueId,
-    agencyId: updated.agencyId,
-  }, undefined, updated.agencyId || 'agency-hkc');
-
-  res.json({ success: true, ingredient: updated });
+  const ok = await crudUpdate(req, res, 'approvedIngredients', id,
+    (fresh) => ({
+      ...fresh,
+      verificationStatus: verificationStatus || 'verified_present',
+      verificationNotes: verificationNotes !== undefined ? verificationNotes : fresh.verificationNotes,
+      verifiedAt: verificationStatus === 'unverified' ? null : verifiedAt,
+      verifiedByName: verificationStatus === 'unverified' ? null : verifiedByName,
+      verifiedByEmail: verificationStatus === 'unverified' ? null : verifiedByEmail,
+    }),
+    {
+      label: 'verify-ingredient',
+      broadcastType: 'INGREDIENT_VERIFIED',
+      getBroadcastPayload: (updated) => ({
+        ingredient: updated,
+        venueId: updated.venueId,
+        agencyId: updated.agencyId,
+      }),
+      getAgencyId: (updated) => updated.agencyId || 'agency-hkc',
+    }
+  );
+  return;
 });
 
 // Add new Approved Ingredient (Agency Admin or Coordinator)
-app.post('/api/ingredients', (req, res) => {
+app.post('/api/ingredients', async (req, res) => {
   const { venueId, name, brandOrSupplier, kashrutAgency, kosherStatus, lotOrBatch, notes, userEmail } = req.body;
   if (!venueId || !name) {
     return res.status(400).json({ error: 'Venue ID and ingredient name are required.' });
@@ -4251,8 +5530,9 @@ app.post('/api/ingredients', (req, res) => {
     }
   }
 
+  const ingredientId = `ing_${Date.now()}`;
   const newIngredient: ApprovedIngredientItem = {
-    id: `ing_${Date.now()}`,
+    id: ingredientId,
     venueId,
     agencyId: callerAgencyId,
     name: name.trim(),
@@ -4267,38 +5547,41 @@ app.post('/api/ingredients', (req, res) => {
     verificationStatus: 'unverified',
   };
 
-  approvedIngredients.push(newIngredient);
-  saveState();
-
-  broadcast('INGREDIENT_VERIFIED', {
-    ingredient: newIngredient,
-    venueId: newIngredient.venueId,
-    agencyId: newIngredient.agencyId,
-  }, undefined, newIngredient.agencyId || 'agency-hkc');
-
-  res.status(201).json({ success: true, ingredient: newIngredient });
+  const ok = await crudCreate(req, res, 'approvedIngredients', () => newIngredient, {
+    label: 'create-ingredient',
+    broadcastType: 'INGREDIENT_VERIFIED',
+    getBroadcastPayload: (created) => ({
+      ingredient: created,
+      venueId: created.venueId,
+      agencyId: created.agencyId,
+    }),
+    getAgencyId: (created) => created.agencyId || 'agency-hkc',
+  });
+  return;
 });
 
 // Delete an ingredient
-app.delete('/api/ingredients/:id', (req, res) => {
+app.delete('/api/ingredients/:id', async (req, res) => {
   const { id } = req.params;
-  const index = approvedIngredients.findIndex((i) => i.id === id);
-  if (index === -1) {
+  const existing = approvedIngredients.find((i) => i.id === id);
+  if (!existing) {
     return res.status(404).json({ error: 'Ingredient not found' });
   }
-
-  const deleted = approvedIngredients[index];
-  approvedIngredients.splice(index, 1);
-  saveState();
-
-  broadcast('INGREDIENTS_SYNCED', {
-    venueId: deleted.venueId,
-    agencyId: deleted.agencyId,
-    deletedId: id,
-    ingredients: approvedIngredients.filter((i) => i.venueId === deleted.venueId),
-  }, undefined, deleted.agencyId || 'agency-hkc');
-
-  res.json({ success: true, deletedId: id });
+  const venueId = existing.venueId;
+  const agencyId = existing.agencyId;
+  const ok = await crudDelete(req, res, 'approvedIngredients', id, {
+    label: 'delete-ingredient',
+    broadcastType: 'INGREDIENTS_SYNCED',
+    // Called after hydration, so approvedIngredients is already post-delete.
+    getDeletePayload: () => ({
+      venueId,
+      agencyId,
+      deletedId: id,
+      ingredients: approvedIngredients.filter((i) => i.venueId === venueId),
+    }),
+    getAgencyId: () => agencyId || 'agency-hkc',
+  });
+  return;
 });
 
 // Factory Audit Reports: Get List
@@ -4321,7 +5604,7 @@ app.get('/api/factory-reports', (req, res) => {
 });
 
 // Factory Audit Reports: Submit New Mashgiach Inspection Report
-app.post('/api/factory-reports', (req, res) => {
+app.post('/api/factory-reports', async (req, res) => {
   const {
     venueId,
     auditDate,
@@ -4354,9 +5637,13 @@ app.post('/api/factory-reports', (req, res) => {
     }
   }
 
+  // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
+  const reportId = `rpt_${Date.now()}`;
+  const nowIso = new Date().toISOString();
+
   const cleanDiscrepancies: UnapprovedDiscrepancyItem[] = Array.isArray(discrepancies)
-    ? discrepancies.map((d: any) => ({
-        id: d.id || `disc_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+    ? discrepancies.map((d: any, idx: number) => ({
+        id: d.id || `disc_${Date.now()}_${idx}`,
         name: String(d.name || 'Unlabeled Raw Material'),
         brandOrSupplier: d.brandOrSupplier ? String(d.brandOrSupplier) : undefined,
         kashrutSymbolFound: d.kashrutSymbolFound ? String(d.kashrutSymbolFound) : 'None / Non-Kosher',
@@ -4366,7 +5653,7 @@ app.post('/api/factory-reports', (req, res) => {
         notes: String(d.notes || ''),
         actionTaken: d.actionTaken ? String(d.actionTaken) : 'Quarantined by Mashgiach',
         photoUrl: d.photoUrl || undefined,
-        reportedAt: new Date().toISOString(),
+        reportedAt: nowIso,
         reportedByName: mashgiachName,
         reportedByEmail: mashgiachEmail,
       }))
@@ -4378,11 +5665,11 @@ app.post('/api/factory-reports', (req, res) => {
   const totalDiscrepancies = cleanDiscrepancies.length;
 
   const newReport: FactoryAuditReportItem = {
-    id: `rpt_${Date.now()}`,
+    id: reportId,
     agencyId: callerAgencyId,
     venueId,
     venueName: venue?.name || 'Kosher Food Manufacturing Plant',
-    auditDate: auditDate || new Date().toISOString().split('T')[0],
+    auditDate: auditDate || nowIso.split('T')[0],
     startTime: startTime || '09:00 AM',
     endTime: endTime || '14:30 PM',
     mashgiachName,
@@ -4396,20 +5683,31 @@ app.post('/api/factory-reports', (req, res) => {
     summaryNotes: summaryNotes ? String(summaryNotes).trim() : 'Routine factory ingredient audit completed.',
     status: status || (totalDiscrepancies > 0 ? 'critical_violation_found' : 'passed'),
     mashgiachSigned: Boolean(mashgiachSigned),
-    signatureTimestamp: mashgiachSigned ? new Date().toISOString() : undefined,
-    createdAt: new Date().toISOString(),
+    signatureTimestamp: mashgiachSigned ? nowIso : undefined,
+    createdAt: nowIso,
   };
 
-  factoryReports.unshift(newReport);
-  saveState();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.factoryReports) ? freshDoc.factoryReports : [];
+      // Idempotency: same report ID already submitted.
+      const existing = arr.find((r) => r.id === reportId);
+      if (existing) return { doc: freshDoc, result: existing };
+      return { doc: { ...freshDoc, factoryReports: [newReport, ...arr] }, result: newReport };
+    },
+    { label: 'create-factory-report' }
+  );
+  if (!committed) return;
+  const report = committed.result as FactoryAuditReportItem;
 
   broadcast('AUDIT_REPORT_SUBMITTED', {
-    report: newReport,
+    report,
     venueId,
     agencyId: callerAgencyId,
   });
 
-  res.status(201).json({ success: true, report: newReport });
+  res.status(201).json({ success: true, report });
 });
 
 
@@ -4429,7 +5727,7 @@ async function startServer() {
   // We WAIT for the load — no timeout race. Starting with seed state while
   // Firestore is slow would let the first request overwrite real user data.
   // If Firestore is unreachable, the boot fails loudly instead of corrupting.
-  initFirestore();
+  await initFirestore();
   if (firestoreDb) {
     const loaded = await loadStateFromFirestore();
     if (!loaded && !durableStateLoaded) {
@@ -4440,9 +5738,17 @@ async function startServer() {
   }
 
   // Backfill task ordering AFTER the durable load (the hydrate above replaces
-  // in-memory tasks, so this must not run at module level). Persists when it
-  // changes anything so the order sticks.
-  if (normalizeTaskOrder()) saveState();
+  // in-memory tasks, so this must not run at module level). Persists via the
+  // transactional write path when it changes anything so the order sticks.
+  await commitState(
+    (freshDoc) => {
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      const { tasks: normalized, changed } = normalizeTaskOrderPure(freshTasks);
+      if (!changed) return { doc: freshDoc, result: { changed: false } };
+      return { doc: { ...freshDoc, tasks: normalized }, result: { changed: true } };
+    },
+    { label: 'normalize-task-order-boot' }
+  ).catch((err) => console.warn('[Boot] Task-order backfill failed:', (err as any)?.message));
 
   // Web Push: VAPID keys must be ready after durable state loads (env vars
   // take precedence over persisted keys inside ensureVapidKeys).
