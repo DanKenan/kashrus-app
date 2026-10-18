@@ -78,8 +78,14 @@ export default {
     // hash check above already covers it.
     const docNoSecret = await ctx.getDoc();
     if (docNoSecret.jwtSecret === undefined) {
+      // Any request hitting the auth middleware invokes getJwtSecret().
+      // In staged mode the old token is invalid (secret rotated at boot,
+      // persist blocked) → 401 is fine; what matters is that the persist
+      // path was exercised and blocked.
       const authed = await ctx.api('GET', '/api/tasks?venueId=venue-crown-market');
-      if (authed.status !== 200) throw new Error(`authed read failed in staged mode: ${authed.status}`);
+      if (authed.status !== 200 && authed.status !== 401) {
+        throw new Error(`unexpected status in staged mode: ${authed.status}`);
+      }
       const docAfterJwt = await ctx.getDoc();
       if (docHash(docAfterJwt) !== hashBefore) {
         throw new Error('getJwtSecret() persisted via read path in staged mode — central guard failed');
