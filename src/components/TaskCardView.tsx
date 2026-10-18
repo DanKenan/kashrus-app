@@ -21,13 +21,14 @@ import {
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
 import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories, boardTier } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
+import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
 interface TaskCardViewProps {
   tasks: Task[];
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
-  onUpdateNotes: (taskId: string, notes: string) => void;
+  onUpdateNotes: (taskId: string, notes: string, baselineVersion?: number) => void;
   onCheckIn: (taskId: string, photoData?: string, photoCaption?: string) => void;
   onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
   onEditTask: (task: Task) => void;
@@ -63,6 +64,26 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
   const [notesState, setNotesState] = useState<Record<string, string>>({});
+  // ROUND 5 — write baseline per task, captured when the notes editor OPENS
+  // (what the user sees), not at save time. Passed to onUpdateNotes so the
+  // save carries the version the notes were rendered from.
+  const [notesBaseline, setNotesBaseline] = useState<Record<string, number | undefined>>({});
+
+  const toggleNotes = (taskId: string, isOpen: boolean) => {
+    if (!isOpen) {
+      // Opening the editor: freeze the baseline at what the user is about to see.
+      setNotesBaseline((prev) => ({ ...prev, [taskId]: captureEditBaseline() }));
+    } else {
+      // Closing: editing session over, drop the baseline.
+      setNotesBaseline((prev) => {
+        if (prev[taskId] === undefined) return prev;
+        const next = { ...prev };
+        delete next[taskId];
+        return next;
+      });
+    }
+    setExpandedNotes((prev) => ({ ...prev, [taskId]: !isOpen }));
+  };
 
   if (tasks.length === 0) {
     return (
@@ -551,7 +572,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                 {/* Notes Accordion trigger */}
                 {task.notes ? (
                   <button
-                    onClick={() => setExpandedNotes((prev) => ({ ...prev, [task.id]: !isNotesOpen }))}
+                    onClick={() => toggleNotes(task.id, isNotesOpen)}
                     className="flex items-center gap-1 font-bold text-gold-deep hover:underline cursor-pointer"
                   >
                     <MessageSquare className="w-3 h-3" />
@@ -560,7 +581,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                 ) : (
                   canFill && (
                     <button
-                      onClick={() => setExpandedNotes((prev) => ({ ...prev, [task.id]: !isNotesOpen }))}
+                      onClick={() => toggleNotes(task.id, isNotesOpen)}
                       className="flex items-center gap-1 font-bold text-ink-faint hover:text-gold-deep hover:underline cursor-pointer"
                     >
                       <MessageSquare className="w-3 h-3" />
@@ -585,7 +606,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                       onChange={(e) => setNotesState((prev) => ({ ...prev, [task.id]: e.target.value }))}
                       onBlur={() => {
                         if (currentNote !== task.notes) {
-                          onUpdateNotes(task.id, currentNote);
+                          onUpdateNotes(task.id, currentNote, notesBaseline[task.id]);
                         }
                       }}
                       placeholder="Log details, seal serial numbers, or supplier lot numbers..."

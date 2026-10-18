@@ -28,27 +28,67 @@ It returns the full Firestore document as JSON.
 - ❌ **`vapidKeys`** — stripped by design (push must be re-keyed after restore — see below)
 - ❌ **Sessions** — not stored server-side (HMAC tokens); all invalidate when the JWT secret rotates
 
-### The complete backup (beyond the JSON export)
-The JSON export is NOT the whole story. A complete restorable backup has
-three parts, stored **outside GitHub** (encrypted drive / password manager /
-a private GCS bucket — never in git):
+### The complete backup: two tiers, different trust levels
 
-1. **Firestore document export** (`/api/admin/export` → JSON). The data.
-2. **Secret inventory** (separate secure note, never in the JSON):
-   - `RESET_CODE_PEPPER` value (or confirm it's the env var on Cloud Run)
-   - VAPID public/private keys (needed to keep push working after a restore)
-   - Note: the JWT secret is intentionally NOT backed up — restoring it
-     would keep stolen sessions valid. Let it rotate on restore.
-3. **For belt-and-braces**: a Firestore-managed export to GCS:
-   ```bash
-   gcloud firestore export gs://<private-bucket>/firestore-backups/$(date +%Y-%m-%d) \
-     --database='ai-studio-workerscollabora-faedc6a8-580b-463e-86b2-c3e3048ed73d' \
-     --project=gen-lang-client-0875538181
-   ```
-   (Requires a private GCS bucket with Firestore export permissions.)
+**Tier 1 — Ordinary admin export** (`GET /api/admin/export` → JSON).
+Strips ALL credential material: passwords, password hashes, kiosk PINs,
+`jwtSecret`, `vapidKeys`. Safe to handle, store, and move around — but a
+restore from Tier 1 alone means: all users reset passwords via the
+forgot-password flow, all kiosk PINs re-issued, push re-keyed. Acceptable
+for a data-only recovery; annoying for a full disaster.
 
-Recommended cadence: JSON export before every production deploy, plus weekly;
-GCS export monthly.
+**Tier 2 — Full-fidelity disaster-recovery backup** (round 5). For a restore
+where users keep working with no re-issue storm, keep a SEPARATE encrypted
+bundle containing everything Tier 1 strips, stored with restricted access
+(encrypted file in a password manager, or a private GCS bucket with
+limited IAM — never in git, never next to the Tier 1 JSON):
+
+- `kioskPin` per kiosk user (user id → PIN). PINs cannot be extracted from
+  exports (they're stripped) — maintain this inventory separately, recorded
+  when PINs are issued via TeamModal. Re-apply after restore via TeamModal.
+- VAPID public/private keys (keeps push working after restore). Record from
+  the server environment / secret store — never from an export.
+- `RESET_CODE_PEPPER` value (or confirm it remains the Cloud Run env var)
+- Passwords: NOT recoverable by design (bcrypt hashes are one-way). Even
+  Tier 2 cannot restore passwords — users MUST use the forgot-password flow
+  after any restore. Document this; do not promise otherwise.
+- The JWT secret is intentionally EXCLUDED from both tiers — restoring it
+  would keep potentially-stolen sessions valid. Let it rotate on restore;
+  users re-login once.
+
+Tier 2 exists so a restore doesn't lock out the field team (PINs) or break
+push (VAPID). It does NOT avoid the password-reset flow — nothing can.
+
+### Verifying the restore against the NAMED production database (operator)
+
+The automated test (test 18) covers the restore cycle against the emulator's
+default database with the explicit-database-ID code path. The named
+production database still needs a one-time operator verification. Do NOT
+touch production data — verify against a THROWAWAY named database:
+
+```bash
+# 1. Create a throwaway named database (any name, e.g. shutfey-restore-test).
+#    Firebase Console → Firestore → Create database, or:
+gcloud firestore databases create --database=shutfey-restore-test \
+  --location=us-east1 --type=firestore-native \
+  --project=gen-lang-client-0875538181
+
+# 2. Run the restore script (BACKUP_RESTORE.md Option B) pointed at the
+#    throwaway database: temporarily set DATABASE_ID='shutfey-restore-test'
+#    in restore.mjs, with a COPY of a Tier 1 backup.
+
+# 3. Verify: document exists at app-state/main in shutfey-restore-test,
+#    counts match the backup (tasks/venues/users/_v), then boot a local
+#    server against the throwaway DB and confirm the app loads it.
+
+# 4. Delete the throwaway database when done:
+gcloud firestore databases delete --database=shutfey-restore-test \
+  --project=gen-lang-client-0875538181
+```
+
+Record the result here when done:
+- [ ] Throwaway named-DB restore verified (date: ___; counts: tasks=___, venues=___, users=___, `_v`=___)
+- [ ] Throwaway database deleted afterwards
 
 ### Storage
 - Store backups **privately** — encrypted drive, password manager, etc.
@@ -160,11 +200,22 @@ restore script above):
   database (`ai-studio-workerscollabora-faedc6a8-580b-463e-86b2-c3e3048ed73d`),
   and record data counts + version here.**
 
-Production backup verification (Don, before cutover):
-- [ ] Fresh `/api/admin/export` downloaded and stored privately
-- [ ] Counts recorded: tasks=___, venues=___, users=___, _v=___
-- [ ] Secret inventory (part 2) stored securely
-- [ ] `RESET_CODE_PEPPER` provisioned as a Cloud Run env var
+## Pre-cutover release gate (all must be checked before Step 1 of CUTOVER.md)
+
+- [ ] PR #2 merged — production `/api/admin/export` is admin-only
+- [ ] PR #1 CI green (19/19) after sync with `main`
+- [ ] Production Firestore security rules verified (deny-all deployed;
+      confirmed in Firebase console, not assumed)
+- [ ] Exposed kiosk PINs rotated (the 2 PINs from the Oct 17 public backup)
+- [ ] Public backup history addressed (git history scrub of BACKUP-2026-10-17-stage1.json)
+- [ ] `RESET_CODE_PEPPER` provisioned as a Cloud Run env var (stable, not generated)
+- [ ] JWT secret rotation decision made (rotating logs out all users)
+- [ ] Fresh Tier 1 backup downloaded and stored privately, counts recorded:
+      tasks=___, venues=___, users=___, `_v`=___
+- [ ] Tier 2 DR bundle (kiosk PIN inventory + VAPID keys + pepper) stored encrypted
+- [ ] Named-database restore verified via throwaway DB (see above) — or
+      explicitly deferred with reason: ___
+- [ ] Don has approved the cutover window
 
 ## Backup Retention
 

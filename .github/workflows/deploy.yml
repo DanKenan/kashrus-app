@@ -100,7 +100,19 @@ jobs:
           # (see CUTOVER.md). This guarantees old unversioned writers and new
           # transactional writers never serve simultaneously — an ordinary
           # rolling deploy cannot promise that.
-          if os.environ.get('STAGED_DEPLOY', '') != 'false':
+          #
+          # ROUND 5 hardening:
+          # - The workflow REFUSES to proceed if it cannot identify the
+          #   currently-serving revision. A silent fallthrough to
+          #   "traffic follows latest" could route production traffic to the
+          #   new revision mid-migration. (Override for a true first deploy
+          #   with STAGED_DEPLOY=first.)
+          # - The staged revision gets STAGED_REVISION=true: the server
+          #   serves reads/health but refuses ALL writes (503 NOT_YET_LIVE)
+          #   until the operator flips it live during cutover. Even if the
+          #   staged revision's direct URL is hit early, it cannot write.
+          staged = os.environ.get('STAGED_DEPLOY', '')
+          if staged != 'false':
               serving_rev = None
               for t in d['spec'].get('traffic', []) or []:
                   if (t.get('percent') or 0) > 0 and t.get('revisionName'):
@@ -110,20 +122,82 @@ jobs:
                   # Default Cloud Run shape is {latestRevision: true} with no
                   # named revision — the serving revision is the latest ready one.
                   serving_rev = latest_ready
-              if serving_rev:
+              if not serving_rev:
+                  if staged == 'first':
+                      print('STAGED_DEPLOY=first: no serving revision (first deploy) — '
+                            'traffic follows latest revision')
+                  else:
+                      print('::error::STAGED DEPLOY REFUSED: cannot identify the '
+                            'currently-serving revision (no traffic entry with '
+                            'percent>0 and no latestReadyRevisionName). Refusing '
+                            'to deploy rather than risk production traffic '
+                            'following the new revision. If this is a true '
+                            'first deploy, set STAGED_DEPLOY=first.',
+                            file=sys.stderr)
+                      sys.exit(1)
+              else:
                   d['spec']['traffic'] = [
                       {'revisionName': serving_rev, 'percent': 100,
                        'latestRevision': False}
                   ]
                   print('STAGED DEPLOY: new revision gets 0% traffic; '
                         f'pinned to {serving_rev}')
-              else:
-                  # First deploy (no serving revision yet): traffic follows latest.
-                  print('STAGED DEPLOY: no serving revision found — '
-                        'traffic follows latest revision')
+              # Mark the new revision staged: reads + health OK, writes refused.
+              # The cutover removes this env var (creating the live revision).
+              if serving_rev or staged == 'first':
+                  envs = c.get('env', [])
+                  envs = [e for e in envs if e['name'] != 'STAGED_REVISION']
+                  envs.append({'name': 'STAGED_REVISION', 'value': 'true'})
+                  c['env'] = envs
+                  print('STAGED DEPLOY: STAGED_REVISION=true set — new revision '
+                        'cannot write until cutover')
           else:
               print('STAGED_DEPLOY=false: ordinary deploy, new revision '
                     'takes 100% traffic')
           json.dump(d, open(p, 'w'))
           EOF
           gcloud run services replace "$SVC_JSON" --region="$REGION" --project="$PROJECT"
+
+          # POST-DEPLOY ASSERTION (round 5): read back the traffic allocation
+          # and FAIL if the new revision received any traffic. Production
+          # traffic must never accidentally follow the latest revision.
+          if [ "${STAGED_DEPLOY}" != "false" ]; then
+            echo "--- post-deploy traffic assertion ---"
+            NEWEST_REV=$(gcloud run revisions list \
+              --service workers-collaborative-dashboard \
+              --region="$REGION" --project="$PROJECT" \
+              --sort-by "~metadata.creationTimestamp" \
+              --limit 1 --format "value(metadata.name)")
+            export NEWEST_REV
+            echo "newest revision: $NEWEST_REV"
+            NEWEST_PCT=$(gcloud run services describe workers-collaborative-dashboard \
+              --region="$REGION" --project="$PROJECT" --format=json | python3 -c "
+          import json,sys,os
+          d = json.load(sys.stdin)
+          newest = os.environ['NEWEST_REV']
+          for t in d.get('status', {}).get('traffic', []) or []:
+              if t.get('revisionName') == newest:
+                  print(t.get('percent', 0)); break
+          else:
+              # No named entry: check latestRevision entries (would be a leak).
+              for t in d.get('status', {}).get('traffic', []) or []:
+                  if t.get('latestRevision'):
+                      print(t.get('percent', 0)); break
+              else:
+                  print(0)
+          ")
+            echo "traffic on newest revision: ${NEWEST_PCT}%"
+            if [ "${NEWEST_PCT}" != "0" ]; then
+              echo "::error::STAGED DEPLOY LEAK: newest revision $NEWEST_REV has ${NEWEST_PCT}% traffic (expected 0%). Cutover is BLOCKED — investigate before proceeding."
+              exit 1
+            fi
+            echo "OK: newest revision has 0% traffic."
+            # Report the staged revision's direct URL for operator health checks
+            # (supported Cloud Run procedure: each revision has its own URL).
+            NEWEST_URL=$(gcloud run revisions describe "$NEWEST_REV" \
+              --region="$REGION" --project="$PROJECT" --format "value(status.url)")
+            echo "staged revision direct URL: $NEWEST_URL"
+            echo "--- staged health check ---"
+            curl -s --max-time 30 "$NEWEST_URL/api/health" | python3 -m json.tool || \
+              { echo "::error::staged revision health check failed"; exit 1; }
+          fi

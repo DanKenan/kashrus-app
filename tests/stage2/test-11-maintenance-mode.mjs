@@ -65,9 +65,10 @@ export default {
     mustContain("code: 'MAINTENANCE'", 'MAINTENANCE code');
     mustContain('res.status(503)', '503 status for maintenance');
 
-    // 3. Background writers gated.
+    // 3. Background writers gated (round 5: also gated on staged revision —
+    // a staged revision must not run background jobs either).
     mustContain(
-      "if (process.env.FORCE_LOCAL_MODE === 'true') return;",
+      "process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;",
       'background writer gating'
     );
 

@@ -3,7 +3,8 @@
  *
  * Verifies the BACKUP_RESTORE.md procedure without touching production:
  *   1. /api/admin/export returns a complete, restorable snapshot (admin-only;
- *      passwords stripped by design; includes _v, tasks, venues, users).
+ *      passwords AND kiosk PINs stripped by design — verified with a test
+ *      user carrying a populated PIN; includes _v, tasks, venues, users).
  *   2. Wipe the Firestore document (simulated disaster).
  *   3. Restore the export via the Admin SDK, targeting the database with an
  *      EXPLICIT database ID (getFirestore(app, databaseId)) — the exact
@@ -33,6 +34,29 @@ export default {
     if (cr.status !== 201 && cr.status !== 200) throw new Error(`canary create failed: ${cr.status}`);
     const canaryId = (cr.json.task || cr.json).id;
 
+    // --- 1b. Kiosk-PIN user: create a user WITH a populated kioskPin, so the
+    // export-strip check below is meaningful (round 5: the code previously
+    // only stripped password, leaking PINs despite the docs claiming otherwise).
+    const ku = await ctx.api('POST', '/api/users', {
+      email: `test18-pin-${ts}@test.local`,
+      name: `Test18 PIN ${ts}`,
+      role: 'mashgiach',
+    });
+    if (ku.status !== 201 && ku.status !== 200) throw new Error(`pin-user create failed: ${ku.status} ${JSON.stringify(ku.json)}`);
+    const pinUserId = (ku.json.user || ku.json).id;
+    const vPin = await ctx.getVersion();
+    const pinSet = await ctx.api('PUT', `/api/users/${pinUserId}`, {
+      kioskPin: '4821',
+      expectedVersion: vPin,
+    });
+    if (pinSet.status !== 200) throw new Error(`kioskPin set failed: ${pinSet.status} ${JSON.stringify(pinSet.json)}`);
+    // Confirm the PIN is actually populated server-side (via the test doc endpoint).
+    const docCheck = await ctx.getDoc();
+    const pinUserDoc = (docCheck.users || []).find((u) => u.id === pinUserId);
+    if (!pinUserDoc || pinUserDoc.kioskPin !== '4821') {
+      throw new Error('kioskPin was not populated on the test user — strip check would be vacuous');
+    }
+
     // --- 2. Export (admin-only) ---
     const expRes = await fetch(`${baseUrl}/api/admin/export`, { headers: ctx.authHeaders });
     if (expRes.status !== 200) throw new Error(`export failed: ${expRes.status}`);
@@ -60,7 +84,7 @@ export default {
 
     if (!useEmulator) {
       // Mock mode: no Admin SDK surface — structural validation is the test.
-      return `export validated (mock mode): ${counts.tasks} tasks, ${counts.venues} venues, ${counts.users} users, v${counts.version}; passwords stripped; full wipe/restore cycle runs in CI (emulator)`;
+      return `export validated (mock mode): ${counts.tasks} tasks, ${counts.venues} venues, ${counts.users} users, v${counts.version}; passwords AND kiosk PINs stripped (verified with populated-PIN user); full wipe/restore cycle runs in CI (emulator)`;
     }
 
     // --- 3. Full cycle against the emulator, explicit database ID ---
@@ -118,10 +142,15 @@ export default {
       throw new Error(`write after restore failed: ${wr.status} ${JSON.stringify(wr.json)}`);
     }
 
-    // Cleanup canaries.
+    // Cleanup canaries + the PIN test user.
     for (const id of [canaryId, (wr.json.task || wr.json).id]) {
       const v = await ctx.getVersion();
       await ctx.api('DELETE', `/api/tasks/${id}`, { expectedVersion: v });
+    }
+    {
+      const v = await ctx.getVersion();
+      const del = await ctx.api('DELETE', `/api/users/${pinUserId}`, { expectedVersion: v });
+      if (del.status !== 200) throw new Error(`pin-user cleanup failed: ${del.status}`);
     }
 
     try { await app.delete(); } catch {}

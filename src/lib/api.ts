@@ -57,11 +57,26 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
 //
 // The server stamps every /api response with X-State-Version (the _v of the
 // single app-state/main Firestore document) and every WebSocket message with
-// `version`. This module remembers the highest version seen. apiWrite()
-// automatically attaches it as expectedVersion on updates (PUT/PATCH/DELETE),
-// so a stale screen can never silently overwrite newer data: the server
-// rejects with 409 VERSION_CONFLICT (version sent but outdated) or 428
-// STALE_CLIENT (no version sent at all — e.g. an old cached PWA client).
+// `version`. This module remembers the highest version seen.
+//
+// WRITE BASELINE CONTRACT (round 5 — the core rule):
+//   expectedVersion sent with a write = the document version the data being
+//   written was RENDERED FROM. Full stop.
+//
+//   For form-based edits (task edit modal, notes editor, etc.): capture the
+//   baseline when the form LOADS/OPENS via captureEditBaseline(), keep it
+//   until the save succeeds, and pass it as expectedVersion explicitly.
+//   NEVER use the latest-observed version (lastKnownVersion) as a write
+//   baseline for a form: the browser may have heard a newer version over
+//   WebSocket AFTER the form rendered, and sending that newer version would
+//   silently overwrite someone else's change with stale form data.
+//
+//   lastKnownVersion remains useful for optimistic UI freshness (e.g.
+//   "newer data available" banners) — but it is NOT a write baseline.
+//
+// The server rejects with 409 VERSION_CONFLICT (version sent but outdated)
+// or 428 STALE_CLIENT (no version sent at all — e.g. an old cached PWA
+// client).
 // ---------------------------------------------------------------------------
 
 let lastKnownVersion: number | undefined = undefined;
@@ -76,6 +91,48 @@ export function observeVersion(v: unknown): void {
   const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
   if (Number.isFinite(n) && n >= 0 && (lastKnownVersion === undefined || n > lastKnownVersion)) {
     lastKnownVersion = n;
+  }
+}
+
+/**
+ * Capture the write baseline for an edit form. Call this when the form
+ * LOADS or OPENS (not when the user hits save) — it snapshots the document
+ * version the form's data was rendered from. Pass the returned value as
+ * `expectedVersion` to apiWrite when saving.
+ *
+ * Why a snapshot, not getLastKnownVersion() at save time: a WebSocket update
+ * can arrive while the form is open, bumping lastKnownVersion past what the
+ * form shows. Saving with that newer version would silently overwrite the
+ * other user's change with this form's stale data. The snapshot freezes the
+ * baseline at what the user actually saw.
+ *
+ * If the baseline is stale by save time, the server answers 409 and the
+ * existing conflict flow (draft preserved, re-apply banner) handles it.
+ */
+export function captureEditBaseline(): number | undefined {
+  return lastKnownVersion;
+}
+
+/**
+ * Read the document version from a specific fetch Response's
+ * X-State-Version header — WITHOUT touching the global tracker. Use this
+ * for the precise pattern: the version that came with the exact response
+ * whose body populated the form.
+ *
+ *   const res = await apiFetch('/api/tasks/123');
+ *   const baseline = versionFromResponse(res); // version this data came from
+ *   const task = await res.json();
+ *   // ... later, on save:
+ *   await apiWrite('/api/tasks/123', { method: 'PUT', expectedVersion: baseline, ... });
+ */
+export function versionFromResponse(res: Response): number | undefined {
+  try {
+    const h = res.headers.get('X-State-Version');
+    if (!h) return undefined;
+    const n = Number(h);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -196,8 +253,9 @@ export function describeWriteError(status: number, serverMessage?: string): stri
  *     method: 'PUT',
  *     body: JSON.stringify({ ... }),
  *     operationId: actionId,  // same ID on retry
- *     // expectedVersion is injected automatically from the last
- *     // X-State-Version seen; pass explicitly only to override it.
+ *     // expectedVersion: pass the form's captured baseline explicitly for
+ *     // edits (captureEditBaseline() at form load). The auto-injected
+ *     // last-seen version is only a fallback for non-form writes.
  *   });
  */
 export function newActionId(): string {
@@ -211,12 +269,16 @@ export function newActionId(): string {
  * treating the write as successful or showing a success toast.
  *
  * Versioning & idempotency contract (Stage 2):
- * - `expectedVersion`: the DOCUMENT version this client last saw (tracked
- *   automatically from X-State-Version headers and WS messages). For updates
- *   (PUT/PATCH/DELETE) apiWrite injects the tracked version when the caller
- *   doesn't pass one explicitly. The server rejects with 409 VERSION_CONFLICT
- *   if it doesn't match the current version — the screen is stale and must
- *   refresh. For creates (POST to a collection), omit it.
+ * - `expectedVersion`: the DOCUMENT version the data being written was
+ *   RENDERED FROM (the write baseline — see the contract above). For
+ *   form-based edits, capture it with captureEditBaseline() when the form
+ *   loads and pass it explicitly. If omitted on PUT/PATCH/DELETE, apiWrite
+ *   falls back to the last version this client saw — correct only for
+ *   writes whose data was just fetched or re-rendered from the latest
+ *   state; form saves MUST pass an explicit baseline.
+ *   The server rejects with 409 VERSION_CONFLICT if it doesn't match the
+ *   current version — the screen is stale and must refresh. For creates
+ *   (POST to a collection), omit it.
  * - If the server answers 428 STALE_CLIENT, no version was sent at all (old
  *   cached client). The write is rejected safely — never silently applied.
  * - `operationId`: stable UUID per user action (see newActionId()). Generate

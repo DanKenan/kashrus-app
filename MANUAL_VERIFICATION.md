@@ -68,6 +68,18 @@ gcloud run services update workers-collaborative-dashboard \
 - [ ] `FIRESTORE_MOCK=true` can never reach production: the server refuses to
       start when `K_SERVICE` is set (verified in code; do not test on prod).
 
+## 3b. Staged-revision guard (during cutover, Step 4 of CUTOVER.md)
+
+After the staged deploy, before cutover:
+- [ ] `curl -s "$STAGED_URL/api/health"` → `"staged": true`,
+      `"firestore": "connected"`, `"stage2": true`.
+- [ ] Write probe refused (no auth needed — the guard runs before auth):
+      `curl -s -X POST "$STAGED_URL/api/tasks" -H 'Content-Type: application/json' -d '{"title":"probe"}'`
+      → 503, code `NOT_YET_LIVE`.
+- [ ] Reads work: `curl -s "$STAGED_URL/api/tasks"` → 200 (auth as usual).
+- [ ] After cutover, production health shows `"staged"` false/absent and
+      `"maintenance"` false; no `NOT_YET_LIVE` in the logs.
+
 ## 4. Production readiness (Don, before cutover)
 
 - [ ] Firestore security rules: confirm the deny-all `firestore.rules` is

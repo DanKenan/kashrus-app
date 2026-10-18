@@ -19,13 +19,14 @@ import {
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
 import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories, boardTier } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
+import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
 interface TaskTableViewProps {
   tasks: Task[];
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
-  onUpdateNotes: (taskId: string, notes: string) => void;
+  onUpdateNotes: (taskId: string, notes: string, baselineVersion?: number) => void;
   onCheckIn: (taskId: string, photoData?: string, photoCaption?: string) => void;
   onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
   onEditTask: (task: Task) => void;
@@ -60,6 +61,10 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 }) => {
   const [expandedDescriptions, setExpandedDescriptions] = useState<Record<string, boolean>>({});
   const [editingNotes, setEditingNotes] = useState<Record<string, string>>({});
+  // ROUND 5 — write baseline per task, captured when the user FOCUSES the
+  // notes field (the inline editor's "open" moment). The save carries the
+  // version the notes were rendered from, not a later WebSocket update.
+  const [notesBaseline, setNotesBaseline] = useState<Record<string, number | undefined>>({});
   const [saveIndicator, setSaveIndicator] = useState<Record<string, boolean>>({});
 
   const toggleExpand = (id: string) => {
@@ -73,12 +78,19 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   const handleNoteBlur = (taskId: string, currentTaskNotes: string) => {
     const val = editingNotes[taskId];
     if (val !== undefined && val !== currentTaskNotes) {
-      onUpdateNotes(taskId, val);
+      onUpdateNotes(taskId, val, notesBaseline[taskId]);
       setSaveIndicator((prev) => ({ ...prev, [taskId]: true }));
       setTimeout(() => {
         setSaveIndicator((prev) => ({ ...prev, [taskId]: false }));
       }, 1500);
     }
+    // Editing session over: next focus captures a fresh baseline.
+    setNotesBaseline((prev) => {
+      if (prev[taskId] === undefined) return prev;
+      const next = { ...prev };
+      delete next[taskId];
+      return next;
+    });
   };
 
   if (tasks.length === 0) {
@@ -497,6 +509,10 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                           rows={2}
                           value={noteValue || ''}
                           onChange={(e) => handleNoteChange(task.id, e.target.value)}
+                          onFocus={() => {
+                            // Freeze the baseline: this is what the user sees now.
+                            setNotesBaseline((prev) => ({ ...prev, [task.id]: captureEditBaseline() }));
+                          }}
                           onBlur={() => handleNoteBlur(task.id, task.notes || '')}
                           placeholder="Log notes or seal IDs..."
                           className="w-full text-xs p-2 rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:outline-none focus:border-gold transition resize-none tactile-1"

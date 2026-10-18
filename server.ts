@@ -170,6 +170,20 @@ function isTestMode(): boolean {
 }
 
 /**
+ * ROUND 5 — staged-revision guard state.
+ * Production reads STAGED_REVISION from the environment (baked into the
+ * staged revision by the deploy workflow; removed to go live). The test
+ * suite toggles it at runtime via /api/__test__/staged (test mode only)
+ * because the server runs in a child process the tests cannot restart
+ * with different env vars.
+ */
+let stagedOverride: boolean | undefined = undefined;
+function isStagedRevision(): boolean {
+  if (stagedOverride !== undefined) return stagedOverride;
+  return process.env.STAGED_REVISION === 'true';
+}
+
+/**
  * Client IP for rate limiting.
  *
  * Cloud Run sits behind Google's load balancer, which appends the real client
@@ -366,6 +380,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'GET', path: '/__test__/last-reset-code' },
         { method: 'POST', path: '/__test__/expire-reset' },
         { method: 'POST', path: '/__test__/inject-fixture' },
+        { method: 'POST', path: '/__test__/staged' },
       ]
     : []),
 ];
@@ -393,6 +408,26 @@ app.use('/api', (req, res, next) => {
     return res.status(503).json({
       error: 'Maintenance mode — writes are temporarily disabled. Your data is safe; please try again shortly.',
       code: 'MAINTENANCE',
+    });
+  }
+
+  // ROUND 5 — staged-revision guard. A revision deployed with
+  // STAGED_REVISION=true is staged for cutover verification: it serves reads
+  // and health checks, but MUST NOT write to production before the operator
+  // flips it live (CUTOVER.md). This guarantees old unversioned writers and
+  // new transactional writers can never be live simultaneously, even if the
+  // staged revision's direct URL is hit before cutover. The flag is removed
+  // with `gcloud run services update --remove-env-vars STAGED_REVISION
+  // --no-traffic` (which creates the live revision); it is never flipped
+  // in-place on a serving revision.
+  // Exemption: the test-only toggle endpoint itself must stay reachable so
+  // the suite can turn the guard off again (test endpoints don't exist in
+  // production — see isTestMode()).
+  const isStagedToggle = req.path === '/__test__/staged';
+  if (isStagedRevision() && !isStagedToggle && req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+    return res.status(503).json({
+      error: 'This app revision is staged for verification and is not live yet. Please wait for the cutover to complete.',
+      code: 'NOT_YET_LIVE',
     });
   }
 
@@ -2710,14 +2745,15 @@ function cleanupExpiredMedia() {
   }
 }
 
-// Run media cleanup daily (not in maintenance mode — it's a write)
+// Run media cleanup daily (not in maintenance mode — it's a write;
+// not on a staged revision either — staged revisions must not write at all)
 setInterval(() => {
-  if (process.env.FORCE_LOCAL_MODE === 'true') return;
+  if (process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
   cleanupExpiredMedia();
 }, 24 * 60 * 60 * 1000);
 // Run once at startup (delayed to avoid slowing boot)
 setTimeout(() => {
-  if (process.env.FORCE_LOCAL_MODE === 'true') return;
+  if (process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
   cleanupExpiredMedia();
 }, 60000);
 
@@ -2766,9 +2802,10 @@ function checkOverdueTasks() {
   }
 }
 
-// Run overdue check every 15 minutes (not in maintenance mode)
+// Run overdue check every 15 minutes (not in maintenance mode;
+// not on a staged revision — staged revisions must not write at all)
 setInterval(() => {
-  if (process.env.FORCE_LOCAL_MODE === 'true') return;
+  if (process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
   checkOverdueTasks();
 }, 15 * 60 * 1000);
 
@@ -3112,7 +3149,8 @@ async function executeDailyReset(
 // Uses America/New_York consistently with executeDailyReset's todayStr.
 setInterval(() => {
   // Maintenance mode: no background writes. The daily reset is a write.
-  if (process.env.FORCE_LOCAL_MODE === 'true') return;
+  // Staged revision: no background writes either (must not write pre-cutover).
+  if (process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   if (today !== currentWorkDate) {
     console.log(`[Scheduled Reset] Rollover detected from ${currentWorkDate} to ${today}`);
@@ -3129,11 +3167,14 @@ setInterval(() => {
 // uptime checks must reach it without auth.
 app.get('/api/health', (req, res) => {
   const maintenance = process.env.FORCE_LOCAL_MODE === 'true';
+  const staged = isStagedRevision();
   const firestore = maintenance ? 'maintenance' : (firestoreDb ? 'connected' : firestoreInitStatus);
   res.json({
     status: maintenance ? 'maintenance' : (firestore === 'connected' ? 'ok' : 'degraded'),
     firestore,
     maintenance,
+    staged,
+    stage2: true,
     version: stateVersion,
     uptime: Math.floor(process.uptime()),
     time: new Date().toISOString(),
@@ -3194,12 +3235,18 @@ app.get('/api/admin/export', (req, res) => {
   // the full database. Fixed 2026-10-18 (matches hotfix/admin-export-auth).
   if (!requireAdmin(req, res)) return;
   const snapshot = stateSnapshot();
-  // Strip sensitive fields from export
+  // Strip sensitive fields from export. Passwords AND kiosk PINs are stripped
+  // from ALL exports (round 5 fix — the docs claimed PINs were stripped but
+  // the code only removed password). Ordinary admin exports must never carry
+  // credential material; the separate full-fidelity DR backup (BACKUP_RESTORE.md)
+  // is the only place credential material lives, stored encrypted.
   const safe = {
     ...snapshot,
     users: (snapshot.users || []).map((u: any) => ({
       ...u,
       password: undefined,
+      passwordHash: undefined,
+      kioskPin: undefined,
     })),
     jwtSecret: undefined,
     vapidKeys: undefined,
@@ -4063,6 +4110,16 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
+  });
+
+  // TEST ONLY: toggles the staged-revision guard at runtime (round 5).
+  // Production uses the STAGED_REVISION env var; the test suite cannot restart
+  // the server child process with different env, so this endpoint flips the
+  // in-process override instead. Gated by isTestMode() like all __test__
+  // endpoints (unreachable on Cloud Run).
+  app.post('/api/__test__/staged', async (req, res) => {
+    stagedOverride = (req.body || {}).enabled === true ? true : (req.body || {}).enabled === false ? false : undefined;
+    res.json({ staged: isStagedRevision() });
   });
 
   // TEST ONLY: runs the exact scheduled-midnight code path

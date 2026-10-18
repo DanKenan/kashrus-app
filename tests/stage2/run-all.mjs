@@ -83,6 +83,8 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-16-scheduled-reset-broadcast.mjs')).default,
     (await import('./test-17-idempotency-op-scoping.mjs')).default,
     (await import('./test-18-isolated-restore.mjs')).default,
+    (await import('./test-19-stale-form-baseline.mjs')).default,
+    (await import('./test-20-staged-revision.mjs')).default,
   ];
 
   const results = [];

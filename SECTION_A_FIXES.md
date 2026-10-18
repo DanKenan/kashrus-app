@@ -433,3 +433,102 @@ genuine retry (same op/target/payload) → 200 cached. PASSES.
 
 **Tests:** 18/18 pass (mock mode locally; real-emulator run in CI).
 `npx tsc --noEmit` clean.
+
+---
+
+## Round 5 — Final release-gate corrections (2026-10-18)
+
+Reviewer verdict on 5b91f5e: NO-GO until three targeted corrections.
+All three are fixed below. **Tests: 20/20 pass. `npx tsc --noEmit` clean.**
+
+### R5-1. Exclusive cutover: maintenance window + staged-revision write guard
+
+**Was wrong:** the zero-traffic deploy preserved old traffic, but nothing
+conclusively stopped old writers before new ones began — the old revision
+could serve requests during the drain wait, and the staged revision could
+write if its direct URL was hit early.
+
+**Changed (three independent mechanisms):**
+1. **Short controlled maintenance window.** CUTOVER.md is now a single
+   operator sequence: Step 1 puts the serving revision into maintenance mode
+   (`gcloud run services update ... --update-env-vars FORCE_LOCAL_MODE=true`)
+   — all mutations return 503, old writers conclusively stopped, in-flight
+   requests drain (Step 2 verifies via the request log).
+2. **Staged revision cannot write.** The deploy workflow bakes
+   `STAGED_REVISION=true` into the new revision's container env. Server-side
+   (`server.ts`): the `/api` middleware refuses ALL mutations with 503
+   `NOT_YET_LIVE`; all background jobs (daily reset, media cleanup, overdue
+   check) skip; `/api/health` reports `staged: true`. Even a direct hit on
+   the staged URL cannot write. The cutover creates the live revision with
+   `gcloud run services update --remove-env-vars STAGED_REVISION,FORCE_LOCAL_MODE --no-traffic`,
+   then one atomic `update-traffic`.
+3. **Workflow refuses to proceed blindly.** If the serving revision cannot
+   be identified, the job FAILS (`sys.exit(1)`) instead of falling through
+   to "traffic follows latest" (`STAGED_DEPLOY=first` overrides for a true
+   first deploy). Post-deploy assertion reads back traffic allocation and
+   fails if the new revision has >0% traffic. The workflow prints the staged
+   revision's direct URL (via `gcloud run revisions describe ... value(status.url)`)
+   and curls `/api/health`.
+
+**Test 20** (new, runtime — not source inspection): toggles the guard via
+`/api/__test__/staged`, verifies reads + health work, all mutations →
+503 `NOT_YET_LIVE` with zero version movement, then unstaging restores
+writes. PASSES.
+
+### R5-2. Stale-form versioning: baseline captured at form open
+
+**Was wrong (core issue):** `apiWrite()` injected the highest document
+version the browser had *observed* (via headers/WebSocket). An open form
+rendering v1 data, after a v2 WebSocket update, saved with `expectedVersion:
+v2` — silently overwriting another user's v2 change with stale v1-based text.
+
+**Changed:**
+- `src/lib/api.ts`: new `captureEditBaseline()` (snapshots the tracked
+  version at form-open time) and `versionFromResponse(res)` (reads
+  X-State-Version from the exact response that populated the form). The
+  version-contract docs now state: **write baseline = the version the data
+  was rendered from, full stop.** Auto-injection of the last-seen version
+  remains only as a fallback for non-form writes.
+- `TaskModal`: captures baseline in the `useEffect` that loads `taskToEdit`;
+  passes it via `onSave(taskData, { baselineVersion })`.
+- `TaskCardView` / `TaskTableView` notes editors: capture baseline when the
+  editor opens (accordion open / textarea focus); pass through
+  `onUpdateNotes(taskId, notes, baselineVersion)`; baseline cleared when the
+  editing session ends.
+- `App.tsx` `handleSaveTask` / `handleUpdateNotes`: accept the baseline and
+  send it as explicit `expectedVersion` (overriding auto-injection).
+
+**Test 19** (new): user A "opens the form" (captures `X-State-Version` from
+the real GET response header — the actual mechanism, no hard-coded version);
+user B writes (v2); A's real WS client hears v2; A saves the stale form with
+the v1 baseline → **409**, B's notes intact. A control task demonstrates the
+old behavior (send heard v2) would silently overwrite. PASSES.
+
+### R5-3. Backup security: kiosk PINs stripped + full-fidelity DR backup
+
+**Was wrong:** `BACKUP_RESTORE.md` claimed kiosk PINs were stripped, but the
+export code only removed `password` — PINs leaked into every export.
+
+**Changed:**
+- `server.ts` `/api/admin/export`: strips `password`, `passwordHash`, AND
+  `kioskPin` from all user records (all exports, no exceptions).
+- **Test 18 extended:** creates a user with a populated kioskPin (`'4821'`),
+  confirms it's populated server-side, then verifies the export contains no
+  PIN. The pre-existing strip check is now meaningful. PASSES.
+- `BACKUP_RESTORE.md`: two-tier backup documented honestly —
+  **Tier 1** (ordinary export: all credential material stripped; restore
+  means password resets + PIN re-issue) and **Tier 2** (full-fidelity DR
+  bundle: kiosk PIN inventory recorded at issuance, VAPID keys, pepper —
+  encrypted, restricted access; passwords still unrecoverable by design, JWT
+  secret intentionally excluded). Named-database operator verification via a
+  throwaway named DB (create → restore → verify → delete; never production).
+  Consolidated pre-cutover release-gate checklist (PR #2 merged, rules
+  verified, PINs rotated, history scrubbed, pepper provisioned, fresh backup
+  with counts, Tier 2 stored, CI green after main sync).
+- `EMERGENCY.md`: restore row updated — test 18 executed (was "NOT been
+  executed"); PINs listed among stripped credentials.
+- `PWA_UPDATE.md`: new-client section rewritten for the form-baseline
+  contract (was: "auto-attaches the tracked version").
+
+**Tests:** 20/20 pass (mock mode locally; real-emulator run in CI).
+`npx tsc --noEmit` clean.

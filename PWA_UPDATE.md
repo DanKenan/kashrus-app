@@ -27,9 +27,16 @@ cleared. The user refreshes (or taps "Update App") and retries.
 - Every API response carries `X-State-Version`; every WebSocket message
   carries `version`. The client tracks the highest seen (verified: test 15
   asserts the header is present and matches the document version).
-- `apiWrite()` automatically attaches the tracked version to PUT/PATCH/DELETE
-  (verified in code; the auto-injection is exercised by the test suite's
-  update calls, which now all send versions).
+- **Write baseline contract (round 5):** `expectedVersion` sent with a write
+  is the version the data being written was RENDERED FROM — not the latest
+  version the browser happened to hear. Form-based edits (task edit modal,
+  notes editors) capture their baseline when the form OPENS
+  (`captureEditBaseline()` in `src/lib/api.ts`) and pass it explicitly.
+  `apiWrite()`'s auto-injection of the last-seen version remains only as a
+  fallback for non-form writes. Verified by test 19: a save carrying the
+  form's baseline after another user's change → 409, other user's work
+  intact; the old behavior (send latest-heard version) is demonstrated to
+  silently overwrite on a control task.
 - On 428, `apiWrite()` persists the attempted write as a draft in
   localStorage (key, label, endpoint, method, body) and the app shows a
   banner after refresh: "Unsaved change preserved" with **Re-apply** (resends

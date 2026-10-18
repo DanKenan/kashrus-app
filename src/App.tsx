@@ -559,7 +559,10 @@ export default function App() {
   };
 
   // Update Task Notes
-  const handleUpdateNotes = async (taskId: string, notes: string) => {
+  // ROUND 5: baselineVersion is the version the notes editor rendered from
+  // (captured when the editor opened). It travels as expectedVersion — never
+  // the latest version heard over WebSocket after the editor rendered.
+  const handleUpdateNotes = async (taskId: string, notes: string, baselineVersion?: number) => {
     if (!currentUser) {
       showToast('Please sign in to update task notes.');
       return;
@@ -594,6 +597,8 @@ export default function App() {
         userEmail: currentUser.email,
         userName: currentUser.name,
       }),
+      // Write baseline = what the notes editor showed, captured at open.
+      ...(baselineVersion !== undefined ? { expectedVersion: baselineVersion } : {}),
       // Preserve the notes if the client is stale (428) — the required
       // refresh must not silently discard them.
       draft: {
@@ -756,7 +761,10 @@ export default function App() {
 
   // Save Task (Create or Edit). Returns true only when the server confirmed the
   // write — the TaskModal stays open on failure so the user's input is preserved.
-  const handleSaveTask = async (taskData: Partial<Task>): Promise<boolean> => {
+  // ROUND 5: opts.baselineVersion is the version the edit form rendered from
+  // (captured when the modal opened). It travels as expectedVersion — never
+  // the latest version heard over WebSocket after the form rendered.
+  const handleSaveTask = async (taskData: Partial<Task>, opts?: { baselineVersion?: number }): Promise<boolean> => {
     if (!currentUser || !canUserAssignTasks(currentUser)) {
       showToast('You do not have permission to create or edit assignments.');
       return false;
@@ -772,6 +780,8 @@ export default function App() {
           venueId: currentVenue?.id,
           userEmail: currentUser.email,
         }),
+        // Write baseline = what the form showed, captured at modal open.
+        ...(opts?.baselineVersion !== undefined ? { expectedVersion: opts.baselineVersion } : {}),
         // Preserve the edit if the client is stale (428) — the modal stays
         // open on failure, and the draft survives the required refresh.
         draft: {
