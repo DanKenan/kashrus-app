@@ -1,12 +1,13 @@
 /**
- * Runs Part 2 PR B entity tests.
+ * Runs Part 2 PR B + PR C tests.
  */
 import testEntities from './test-entities.mjs';
+import testDualwrite from './test-dualwrite.mjs';
 
-const tests = [testEntities];
+const tests = [testEntities, testDualwrite];
 
 export async function runAll() {
-  console.log(`\n=== Part 2 PR B Entity Tests (${tests.length} tests) ===\n`);
+  console.log(`\n=== Part 2 Tests (${tests.length} tests) ===\n`);
   let passed = 0, failed = 0;
   for (const test of tests) {
     try {

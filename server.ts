@@ -2065,6 +2065,8 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
  * loud DEGRADED warning on every write attempt. On Cloud Run (K_SERVICE)
  * this fallback never happens: a failed Firestore init refuses to start.
  */
+import { dualWriteChangedEntities } from './src/server/dualwrite.js';
+
 async function commitState(
   mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
   options: CommitOptions = {}
@@ -2270,6 +2272,13 @@ async function commitState(
         const payloadSize = JSON.stringify(payload).length;
         if (payloadSize > SIZE_LIMIT_BYTES) {
           throw new DocumentTooLargeError(payloadSize, SIZE_LIMIT_BYTES);
+        }
+        // PR C: Dual-write changed entities to per-entity collections.
+        // Uses the SAME transaction (tx) — if the monolith write fails,
+        // the per-entity writes roll back too. Atomic.
+        // Reads still come from the monolith; this builds the mirror for PR D.
+        if (pristineBefore) {
+          await dualWriteChangedEntities(tx, firestoreDb, pristineBefore, outcome.doc);
         }
         tx.set(docRef, payload);
         return { result: outcome.result, version: currentVersion + 1, doc: payload };
