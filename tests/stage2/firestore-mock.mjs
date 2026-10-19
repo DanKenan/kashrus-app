@@ -140,15 +140,33 @@ export class MockFirestore {
 
   /**
    * PR 1 test-harness correction: the mock lacked Firestore's collection().
-   * Returns a minimal CollectionReference supporting doc(id) and get()
-   * (empty snapshot). (Pre-existing gap: Part 2 step D's dual-write calls
+   * Returns a minimal CollectionReference supporting doc(id) and get().
+   * get() serves the mock's stored documents under `name/` (never a silent
+   * empty snapshot — an empty result means genuinely no docs).
+   * (Pre-existing gap: Part 2 step D's dual-write calls
    * firestoreDb.collection(); the mock on main only had doc()/runTransaction().)
    */
   collection(name) {
     const self = this;
+    const prefix = `${name}/`;
     return {
-      doc: (id) => self.doc(`${name}/${id}`),
-      get: async () => ({ docs: [], empty: true, size: 0, forEach: () => {} }),
+      doc: (id) => self.doc(`${prefix}${id}`),
+      get: async () => {
+        const docs = Object.entries(self._docs)
+          .filter(([path, data]) => path.startsWith(prefix) && data !== undefined)
+          .map(([path, data]) => ({
+            id: path.slice(prefix.length),
+            ref: self.doc(path),
+            exists: true,
+            data: () => JSON.parse(JSON.stringify(data)),
+          }));
+        return {
+          docs,
+          empty: docs.length === 0,
+          size: docs.length,
+          forEach: (fn) => docs.forEach(fn),
+        };
+      },
     };
   }
 

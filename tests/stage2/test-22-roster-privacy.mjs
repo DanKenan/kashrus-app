@@ -46,6 +46,7 @@ function connectWs(baseUrl, token) {
     const wsUrl = baseUrl.replace(/^http/, 'ws') + `/ws?token=${token}`;
     const ws = new WebSocket(wsUrl);
     const messages = [];
+    const conn = { ws, messages, closeCode: null, closed: false };
     const timer = setTimeout(() => reject(new Error('WS connect timeout')), 10000);
     ws.onopen = () => {};
     ws.onmessage = (ev) => {
@@ -55,7 +56,7 @@ function connectWs(baseUrl, token) {
       // Resolve on INITIAL_STATE (proves auth + agency scoping worked).
       if (messages.some((m) => m.type === 'INITIAL_STATE')) {
         clearTimeout(timer);
-        resolve({ ws, messages });
+        resolve(conn);
       }
     };
     ws.onerror = (e) => {
@@ -63,8 +64,13 @@ function connectWs(baseUrl, token) {
       reject(new Error(`WS error: ${e?.message || 'unknown'}`));
     };
     ws.onclose = (ev) => {
+      conn.closed = true;
+      conn.closeCode = ev.code;
       clearTimeout(timer);
-      reject(new Error(`WS closed before INITIAL_STATE (code ${ev.code})`));
+      // Only reject if we never got INITIAL_STATE (auth failure path).
+      if (!messages.some((m) => m.type === 'INITIAL_STATE')) {
+        reject(new Error(`WS closed before INITIAL_STATE (code ${ev.code})`));
+      }
     };
   });
 }
@@ -117,7 +123,7 @@ function assertAgencyScopedArrays(payload, agencyId, label) {
 export default {
   name: 'Test 22: Roster privacy — per-recipient agency filtering',
   whatItProves:
-    'Roster payloads (INITIAL_STATE, USERS_UPDATED create/update/delete, CLEAN_SLATE_RESET, DEMO_RESTORED) are scoped per-recipient to their own agency with emails only for task-assigners. No cross-agency receipt; /api/agencies, /api/users, clean-slate and restore-demo responses scoped; userEmail param ignored.',
+    'Roster payloads (INITIAL_STATE, USERS_UPDATED create/update/delete, CLEAN_SLATE_RESET, DEMO_RESTORED) are scoped per-recipient to their own agency with emails only for task-assigners. Recipients resolve by user ID + agency (never email-alone). Deleted users sockets are closed (4401) and receive no further agency data. No cross-agency receipt; /api/agencies, /api/users, clean-slate and restore-demo responses scoped; userEmail param ignored.',
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
@@ -306,15 +312,24 @@ export default {
       throw new Error('clean-slate HTTP response: non-admin agency-B users should be wiped');
     }
     const csAdminB = await waitForType(connAdminB.messages, 'CLEAN_SLATE_RESET');
-    const csStaffB = await waitForType(connStaffB.messages, 'CLEAN_SLATE_RESET');
-    const csAssignerB = await waitForType(connAssignerB.messages, 'CLEAN_SLATE_RESET');
     assertRoster(csAdminB.payload.users, AGENCY_B, true, 'CLEAN_SLATE_RESET (agency-B admin)');
-    // staffB/assignerB users were wiped: their sockets fail closed (no emails).
-    assertRoster(csStaffB.payload.users, AGENCY_B, false, 'CLEAN_SLATE_RESET (wiped mashgiach socket)');
-    assertRoster(csAssignerB.payload.users, AGENCY_B, false, 'CLEAN_SLATE_RESET (wiped assigner socket)');
     for (const key of ['venues', 'tasks', 'events']) {
       if (!Array.isArray(csAdminB.payload[key]) || csAdminB.payload[key].length !== 0) {
         throw new Error(`CLEAN_SLATE_RESET: ${key} should be empty`);
+      }
+    }
+    // staffB/assignerB were wiped by clean-slate: the server must CLOSE their
+    // sockets (4401) — a deleted user receives no further agency data at all.
+    await new Promise((r) => setTimeout(r, 2000));
+    for (const [conn, label] of [[connStaffB, 'wiped mashgiach'], [connAssignerB, 'wiped assigner']]) {
+      if (!conn.closed || conn.closeCode !== 4401) {
+        throw new Error(
+          `CLEAN_SLATE_RESET: ${label} socket not closed with 4401 after wipe ` +
+          `(closed=${conn.closed}, code=${conn.closeCode}, readyState=${conn.ws.readyState})`
+        );
+      }
+      if (conn.messages.some((m) => m.type === 'CLEAN_SLATE_RESET')) {
+        throw new Error(`CLEAN_SLATE_RESET: ${label} received broadcast after wipe`);
       }
     }
     await new Promise((r) => setTimeout(r, 1500));
@@ -332,15 +347,22 @@ export default {
     assertRoster(rdJson.users, AGENCY_B, true, 'restore-demo HTTP response (agency-B admin)');
     assertAgencyScopedArrays(rdJson, AGENCY_B, 'restore-demo HTTP response');
     const rdAdminB = await waitForType(connAdminB.messages, 'DEMO_RESTORED');
-    const rdStaffB = await waitForType(connStaffB.messages, 'DEMO_RESTORED');
     assertRoster(rdAdminB.payload.users, AGENCY_B, true, 'DEMO_RESTORED (agency-B admin)');
-    assertRoster(rdStaffB.payload.users, AGENCY_B, false, 'DEMO_RESTORED (wiped mashgiach socket, fail closed)');
     assertAgencyScopedArrays(rdAdminB.payload, AGENCY_B, 'DEMO_RESTORED (agency-B admin)');
     await new Promise((r) => setTimeout(r, 1500));
     assertNoType([connHkc, connNoAgency], 'DEMO_RESTORED', 'DEMO_RESTORED cross-agency');
+    // Wiped users' sockets were closed at clean-slate: still closed, nothing received.
+    for (const [conn, label] of [[connStaffB, 'wiped mashgiach'], [connAssignerB, 'wiped assigner']]) {
+      if (!conn.closed) {
+        throw new Error(`DEMO_RESTORED: ${label} socket unexpectedly open after wipe`);
+      }
+      if (conn.messages.some((m) => m.type === 'DEMO_RESTORED')) {
+        throw new Error(`DEMO_RESTORED: ${label} received agency data after wipe`);
+      }
+    }
 
     for (const c of allConns) c.ws.close();
 
-    return 'all roster broadcasts (INITIAL_STATE, USERS_UPDATED create/update/delete, CLEAN_SLATE_RESET, DEMO_RESTORED) agency-scoped per recipient; emails only for task-assigners; no cross-agency or agency-less receipt; HTTP responses scoped; userEmail param ignored';
+    return 'all roster broadcasts agency-scoped per recipient (ID+agency resolution); emails only for task-assigners; deleted users sockets closed with 4401, no further agency data; no cross-agency or agency-less receipt; HTTP responses scoped; userEmail param ignored';
   },
 };

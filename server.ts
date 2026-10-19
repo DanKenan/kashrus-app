@@ -1334,9 +1334,18 @@ function getSafeUsersForAgency(
     });
 }
 
-/** Resolve a broadcast recipient's CURRENT user record (fresh permissions, not socket-time). */
-function recipientForMeta(meta: { email: string }) {
-  return users.find((u) => u.email.toLowerCase() === meta.email.toLowerCase());
+/** Resolve a broadcast recipient's CURRENT user record for permission lookups.
+ * Resolves by the socket's authenticated user ID (never by email alone — the
+ * same email can exist in several agencies) and verifies the user still
+ * exists AND belongs to the socket's authenticated agency. A permission
+ * lookup must never cross an agency boundary. Returns undefined when the
+ * recipient is gone or moved (fail closed). */
+function recipientForMeta(meta: { userId: string; agencyId: string }) {
+  const u = users.find((x) => x.id === meta.userId);
+  if (!u) return undefined;
+  const norm = (v?: string) => v || 'agency-hkc';
+  if (norm(u.agencyId) !== meta.agencyId) return undefined;
+  return u;
 }
 
 const INITIAL_TASKS: TaskItem[] = [];
@@ -3008,7 +3017,8 @@ app.post('/api/push/unsubscribe', async (req, res) => {
 
 // WebSocket Setup
 const wss = new WebSocketServer({ server, path: '/ws' });
-const activeSockets = new Map<WebSocket, { email: string; name: string; agencyId: string; role?: string }>();
+type SocketMeta = { userId: string; email: string; name: string; agencyId: string; role?: string };
+const activeSockets = new Map<WebSocket, SocketMeta>();
 
 function agencyStateFor(agencyId: string, recipient?: { role?: string; permissions?: { canAssignTasks?: boolean } }) {
   const norm = (v?: string) => v || 'agency-hkc';
@@ -3033,7 +3043,7 @@ function broadcast(
   // Optional per-recipient payload transform (e.g. role-trimmed rosters).
   // Receives the socket's meta and the base payload; must return the payload
   // for THAT recipient. When omitted, every recipient gets the same payload.
-  varyByRecipient?: (meta: { email: string; name: string; agencyId: string; role?: string }, basePayload: any) => any
+  varyByRecipient?: (meta: SocketMeta, basePayload: any) => any
 ) {
   // The envelope carries the current document version so clients can keep
   // their last-known version fresh without polling (see src/lib/api.ts).
@@ -3070,6 +3080,17 @@ function broadcast(
     // Agency-scoped broadcasts only reach that agency's sockets.
     if (agencyId && (!meta || meta.agencyId !== agencyId)) continue;
     if (!meta) continue;
+    // Recipient-specific payloads must never reach a deleted, moved, or
+    // de-authorized user: resolve the CURRENT record and verify it still
+    // belongs to this socket's agency. A deleted user's session is over —
+    // close the socket so no further agency data can reach it.
+    if (!recipientForMeta(meta)) {
+      try {
+        client.close(4401, 'Unauthorized');
+      } catch {}
+      activeSockets.delete(client);
+      continue;
+    }
     client.send(envelopeFor(varyByRecipient(meta, payload)));
   }
 }
@@ -3092,7 +3113,7 @@ wss.on('connection', (ws, req) => {
   }
 
   const agencyId = authedUser.agencyId || 'agency-hkc';
-  activeSockets.set(ws, { email: authedUser.email, name: authedUser.name, agencyId, role: authedUser.role });
+  activeSockets.set(ws, { userId: authedUser.id, email: authedUser.email, name: authedUser.name, agencyId, role: authedUser.role });
 
   // Initial state: ONLY this user's agency. Never the whole platform.
   ws.send(
@@ -3114,6 +3135,7 @@ wss.on('connection', (ws, req) => {
       const parsed = JSON.parse(data.toString());
       if (parsed.type === 'USER_PRESENCE' && parsed.payload) {
         activeSockets.set(ws, {
+          userId: authedUser.id,
           email: authedUser.email,
           name: authedUser.name,
           agencyId,

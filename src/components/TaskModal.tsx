@@ -1034,14 +1034,22 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {knownWorkers.map((w) => {
-                    const isChecked = selectedWorkers.includes(w.email || '');
+                    const workerEmail = w.email || '';
+                    // Without an email the worker cannot be assigned (assignments
+                    // are keyed by email) — disable rather than toggling ''.
+                    const noEmail = !w.email;
+                    const isChecked = !noEmail && selectedWorkers.includes(workerEmail);
                     return (
                       <button
                         key={rosterKey(w)}
                         type="button"
-                        onClick={() => toggleWorker(w.email || '')}
+                        disabled={noEmail}
+                        title={noEmail ? 'No contact email — cannot be assigned' : undefined}
+                        onClick={() => toggleWorker(workerEmail)}
                         className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition ${
-                          isChecked
+                          noEmail
+                            ? 'bg-sunken border-line text-ink-faint opacity-60 cursor-not-allowed'
+                            : isChecked
                             ? 'bg-emerald-50 border-emerald-300 text-emerald-800 dark:bg-emerald-950/70 dark:border-emerald-700 dark:text-emerald-300'
                             : 'bg-surface border-line text-ink-soft'
                         }`}
