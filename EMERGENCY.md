@@ -423,13 +423,12 @@ Carried forward from `STAGE4_PLAN.md`:
 - [ ] Fix flaky Test 2 in `tests/stage2/harness.mjs` (concurrent writes: both
   requests got 409 instead of one 200 + one 409 — pre-existing timing race,
   observed 2026-10-18; re-run passed).
-- [ ] Module-level `currentWorkDate` in server.ts is initialized once at startup
-  to the UTC date (`new Date().toISOString().split('T')[0]`) and never updated
-  by resets — it also feeds health/status responses and the midnight-rollover
-  comparison. Between 00:00–04:00 UTC it disagrees with America/New_York by a
-  full day. The snapshot archive date still depends on it (see next item);
-  the initialization itself should use the NY date or be refreshed from the
-  doc. Tracked in PR #27, not part of the logging PR.
+- [ ] Module-level `currentWorkDate` in server.ts is initialized using UTC;
+  subsequently refreshed through Firestore hydration, but may hold the wrong
+  work date before hydration. It also feeds health/status responses and the
+  midnight-rollover comparison. Between 00:00–04:00 UTC it can disagree with
+  America/New_York by a full day. The snapshot archive date still depends on
+  it (see next item). Tracked in PR #27, not part of the logging PR.
 - [ ] Daily-reset snapshot archive date uses the module-level `currentWorkDate`
   instead of the NY date (`todayStr`) — between 00:00–04:00 UTC the snapshot
   is dated with the wrong day (observed 2026-10-18: Test 10 failed with

@@ -74,12 +74,14 @@ function scrubText(text: string): string {
     out = out.replace(re, '[redacted]');
   }
   // key=value or key: value where the key looks sensitive
-  // (e.g. "password=hunter2", "apiKey: abc123", "sessionId=example123")
+  // (e.g. "password=hunter2", "apiKey: abc123", "sessionId=example123",
+  // 'password: "example123"', 'jwtSecret="example123"',
+  // '{"apiKey":"example123"}' — quoted keys and values included).
+  // The value matcher accepts double-quoted, single-quoted, or unquoted
+  // values; the whole value (quotes included) becomes [redacted].
+  const KEY_PART = `["']?[A-Za-z0-9_.-]*?${TEXT_SENSITIVE_KEY.source}[A-Za-z0-9_.-]*["']?`;
   out = out.replace(
-    new RegExp(
-      `([A-Za-z0-9_.-]*?${TEXT_SENSITIVE_KEY.source}[A-Za-z0-9_.-]*\\s*[:=]\\s*)([^\\s,;}"]+)`,
-      'gi'
-    ),
+    new RegExp(`(${KEY_PART}\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^\\s,;}]+)`, 'gi'),
     '$1[redacted]'
   );
   return out;

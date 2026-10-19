@@ -149,6 +149,40 @@ const testLogging = {
       `expected >=5 redactions, got ${JSON.stringify(e6.message)}`
     );
 
+    // Quoted credential values are redacted (single, double, JSON-style)
+    const out7 = await captureWrites(() => {
+      log.error(
+        '[x] quoted',
+        'password: "example123" jwtSecret="example123" {"apiKey":\'example123\'}'
+      );
+    });
+    const e7 = JSON.parse(out7.stderr[0]);
+    assert(
+      !e7.message.includes('example123'),
+      `quoted secrets must be redacted, got ${JSON.stringify(e7.message)}`
+    );
+    assert(
+      (e7.message.match(/\[redacted\]/g) || []).length === 3,
+      `expected 3 redactions, got ${JSON.stringify(e7.message)}`
+    );
+
+    // The four alert prefixes must survive scrubText byte-for-byte
+    for (const prefix of [
+      '[alert-test] TEST ALERT',
+      '[consistency] ERROR',
+      '[commitOrRespond:save-task]',
+      '[getJwtSecret] Persist failed',
+    ]) {
+      const outP = await captureWrites(() => {
+        log.error(`${prefix} details here`);
+      });
+      const eP = JSON.parse(outP.stderr[0]);
+      assert(
+        eP.message.startsWith(prefix),
+        `prefix must survive scrubbing: ${JSON.stringify(prefix)} got ${JSON.stringify(eP.message)}`
+      );
+    }
+
     // --- Case 1b: Cloud Run JOB (CLOUD_RUN_JOB only, no K_SERVICE) ---
     // Jobs don't set K_SERVICE — the logger must still emit structured JSON.
     delete process.env.K_SERVICE;
