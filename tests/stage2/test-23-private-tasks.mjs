@@ -218,13 +218,70 @@ export default {
     }
     clearAll();
 
-    // --- 4. TASK_CREATED: per-recipient transform is identical to TASK_UPDATED
-    // (canSeeTaskServer via recipientForMeta — same code path). POST /api/tasks
-    // also fixed to resolve caller via getAuthUser (was using client-supplied
-    // createdByEmail). Direct POST hits a mock-environment 503 in this harness;
-    // the visibility logic is covered by TASK_UPDATED tests (section 5).
-    const createdId = `task-test23-created-${ts}`;
-    clearAll();
+    // --- 4. TASK_CREATED via POST /api/tasks (own call site) ---
+    // NOTE: mock-environment 503s on POST here; written for the emulator path
+    // (CI runs the real emulator where POST works). If this 503s in mock mode,
+    // the result is "mock mode only — emulator path unverified" for this section.
+    let createdId = `task-test23-created-${ts}`; // fallback if POST 503s
+    let taskCreatedTested = false;
+    {
+      const createRes = await fetch(`${baseUrl}/api/tasks`, {
+        method: 'POST',
+        headers: authB(tAdminB),
+        body: JSON.stringify({
+          venueId: venueB,
+          title: `Private Created ${ts}`,
+          notes: `Created secret ${ts}`,
+          isPrivate: true,
+          assignedTo: [assigneeBEmail],
+        }),
+      });
+      if (createRes.status === 503) {
+        console.log('[test23] TASK_CREATED POST 503 in mock mode — emulator path unverified for this section');
+      } else {
+        if (createRes.status !== 200 && createRes.status !== 201) {
+          const body = await createRes.text();
+          throw new Error(`TASK_CREATED failed: ${createRes.status} ${body.slice(0, 200)}`);
+        }
+        const createdJson = await createRes.json();
+        createdId = (createdJson.task || createdJson).id;
+        taskCreatedTested = true;
+        await new Promise((r) => setTimeout(r, 1500));
+        // Authorized sockets receive TASK_CREATED with id+title+notes.
+        for (const [c, label] of [[cAdminB, 'admin'], [cCoordB, 'coord'], [cAssigneeB, 'assignee']]) {
+          const msg = c.messages.find((m) => m.type === 'TASK_CREATED' && m.payload.id === createdId);
+          if (!msg) throw new Error(`TASK_CREATED (${label}): not received`);
+          if (msg.payload.title !== `Private Created ${ts}` || msg.payload.notes !== `Created secret ${ts}`) {
+            throw new Error(`TASK_CREATED (${label}): missing title/notes`);
+          }
+        }
+        // Unauthorized: walk EVERY message for id/title/notes strings.
+        for (const [c, label] of [[cPlainB, 'plain mashgiach'], [cAdminA, 'agency-A admin']]) {
+          const haystack = JSON.stringify(c.messages);
+          for (const needle of [createdId, `Private Created ${ts}`, `Created secret ${ts}`]) {
+            if (haystack.includes(needle)) {
+              throw new Error(`TASK_CREATED (${label}): leaked "${needle.slice(0, 30)}"`);
+            }
+          }
+        }
+        // Public control: everyone in agency B receives it.
+        const pubRes = await fetch(`${baseUrl}/api/tasks`, {
+          method: 'POST',
+          headers: authB(tAdminB),
+          body: JSON.stringify({ venueId: venueB, title: `Public Created ${ts}`, isPrivate: false }),
+        });
+        if (pubRes.status !== 200 && pubRes.status !== 201) throw new Error(`public TASK_CREATED failed: ${pubRes.status}`);
+        const pubJson = await pubRes.json();
+        const pubId = (pubJson.task || pubJson).id;
+        await new Promise((r) => setTimeout(r, 1500));
+        for (const [c, label] of [[cAdminB, 'admin'], [cPlainB, 'plain'], [cAssigneeB, 'assignee'], [cCoordB, 'coord']]) {
+          if (!c.messages.some((m) => m.type === 'TASK_CREATED' && m.payload.id === pubId)) {
+            throw new Error(`TASK_CREATED public control (${label}): not received`);
+          }
+        }
+      }
+      clearAll();
+    }
 
     // --- 5. Transitions ---
     const v = () => ctx.getVersion();
@@ -469,10 +526,14 @@ export default {
       if ([privateTask.title, privateTask.notes].some((n) => haystackDel.includes(n))) {
         throw new Error('GET /api/history: deleted private task entries visible to non-assignee');
       }
-      // Admin still sees them (fail-closed only for non-privileged).
+      // Admin DOES see them (fail-closed: privileged still see deleted-task entries).
+      // DAILY_RESET ran before the delete, so the snapshot entry exists.
       const rHistAdmin = await fetch(`${baseUrl}/api/history`, { headers: authB(tAdminB) });
       const jHistAdmin = await rHistAdmin.json();
-      // (Admin may or may not see them depending on snapshot timing; no assertion.)
+      const haystackAdmin = JSON.stringify(jHistAdmin.historyLogs || []);
+      if (![privateTask.title, privateTask.notes].some((n) => haystackAdmin.includes(n))) {
+        throw new Error('GET /api/history: admin missing deleted private task entries (fail-closed branch untested)');
+      }
       clearAll();
     }
 
