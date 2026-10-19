@@ -499,9 +499,33 @@ function getAuthUser(req: any): UserProfile | undefined {
   return (req as any).authUser as UserProfile | undefined;
 }
 
-/** The caller's agency, from the verified session user. */
+/** The caller's agency, from the verified session user.
+ *
+ * Throws when there is no authenticated user — an unauthenticated request
+ * must NEVER silently become an HKC caller. The 'agency-hkc' fallback applies
+ * ONLY to an authenticated legacy user record with no agencyId set.
+ * Every /api route is behind the auth middleware (401 before handlers run),
+ * so the throw is unreachable in normal flow; it is fail-closed by design. */
 function callerAgencyId(req: any): string {
-  return getAuthUser(req)?.agencyId || 'agency-hkc';
+  const user = getAuthUser(req);
+  if (!user) {
+    throw new Error('callerAgencyId: no authenticated user on request');
+  }
+  return user.agencyId || 'agency-hkc';
+}
+
+/**
+ * Require an authenticated session user. Sends 401 and returns null when
+ * there is none; otherwise returns the verified user record. Use at the top
+ * of every handler that keys data or attribution off the caller.
+ */
+function requireAuthUser(req: any, res: any): UserProfile | null {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    return null;
+  }
+  return user;
 }
 
 /**
@@ -1693,6 +1717,33 @@ function hydrateState(parsed: any) {
           );
         } else {
           eventTaskTemplates = [];
+        }
+
+        // These were missing from the non-demo-cleared branch: without them,
+        // a restart would empty the in-memory arrays even though Firestore
+        // has the data (GET endpoints would return []).
+        if (Array.isArray(parsed.incidents)) {
+          incidents = parsed.incidents;
+        } else {
+          incidents = [];
+        }
+
+        if (Array.isArray(parsed.announcements)) {
+          announcements = parsed.announcements;
+        } else {
+          announcements = [];
+        }
+
+        if (Array.isArray(parsed.handoffNotes)) {
+          handoffNotes = parsed.handoffNotes;
+        } else {
+          handoffNotes = [];
+        }
+
+        if (Array.isArray(parsed.taskTemplates)) {
+          taskTemplates = parsed.taskTemplates;
+        } else {
+          taskTemplates = [];
         }
       }
 
@@ -3082,11 +3133,15 @@ app.get('/api/push/public-key', (_req, res) => {
 });
 
 app.post('/api/push/subscribe', async (req, res) => {
-  const { userEmail, subscription } = req.body as any;
-  if (!userEmail || !subscription?.endpoint || !subscription?.keys) {
-    return res.status(400).json({ error: 'userEmail and subscription required' });
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { subscription } = req.body as any;
+  if (!subscription?.endpoint || !subscription?.keys) {
+    return res.status(400).json({ error: 'subscription required' });
   }
-  const email = String(userEmail).trim().toLowerCase();
+  // Subscription ownership is keyed by the VERIFIED session user, never a
+  // client-supplied email.
+  const email = caller.email.trim().toLowerCase();
   const createdAt = new Date().toISOString();
   const committed = await commitOrRespond(
     req, res,
@@ -3106,10 +3161,12 @@ app.post('/api/push/subscribe', async (req, res) => {
 });
 
 app.post('/api/push/unsubscribe', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const { endpoint } = req.body as any;
-  // Only the caller's own subscription for that endpoint can be removed
-  // (userEmail is forced to the authenticated user by the auth middleware).
-  const callerEmail = String((req.body as any)?.userEmail || '').trim().toLowerCase();
+  // Only the caller's own subscription for that endpoint can be removed —
+  // identity comes from the VERIFIED session user, never the request body.
+  const callerEmail = caller.email.trim().toLowerCase();
   if (endpoint) {
     const committed = await commitOrRespond(
       req, res,
@@ -3498,12 +3555,20 @@ app.get('/api/health', (req, res) => {
 
 // Storage stats — how much space media is using (admin only)
 app.get('/api/admin/storage', (req, res) => {
+  const admin = requireAdmin(req, res);
+  if (!admin) return;
+  // Storage totals are scoped to the caller's agency — never all agencies.
+  const agencyId = admin.agencyId || 'agency-hkc';
+  const agencyTasks = tasks.filter((t) => (t.agencyId || 'agency-hkc') === agencyId);
+  const agencyNotes = handoffNotes.filter((n) => (n.agencyId || 'agency-hkc') === agencyId);
+  const agencyIncidents = incidents.filter((i) => i.agencyId === agencyId);
+
   let photoBytes = 0;
   let audioBytes = 0;
   let photoCount = 0;
   let audioCount = 0;
 
-  for (const task of tasks) {
+  for (const task of agencyTasks) {
     for (const ci of task.checkIns || []) {
       if ((ci as any).photoData) {
         photoBytes += (ci as any).photoData.length;
@@ -3511,13 +3576,13 @@ app.get('/api/admin/storage', (req, res) => {
       }
     }
   }
-  for (const note of handoffNotes) {
+  for (const note of agencyNotes) {
     if ((note as any).voiceNoteData) {
       audioBytes += (note as any).voiceNoteData.length;
       audioCount++;
     }
   }
-  for (const incident of incidents) {
+  for (const incident of agencyIncidents) {
     if (incident.photoData) {
       photoBytes += incident.photoData.length;
       photoCount++;
@@ -3570,12 +3635,16 @@ app.get('/api/admin/export', (req, res) => {
 
 // Custom task templates — Don's own library (replaces generic ones)
 app.get('/api/task-templates', (req, res) => {
-  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const agencyId = caller.agencyId || 'agency-hkc';
   res.json({ templates: taskTemplates.filter((t) => t.agencyId === agencyId) });
 });
 
 app.post('/api/task-templates', async (req, res) => {
-  const { name, description, tasks: templateTasks, fromVenueId, createdByEmail } = req.body || {};
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { name, description, tasks: templateTasks, fromVenueId } = req.body || {};
   if (!name?.trim()) {
     return res.status(400).json({ error: 'Template name is required.' });
   }
@@ -3616,7 +3685,7 @@ app.post('/api/task-templates', async (req, res) => {
         name: String(name).trim(),
         description: description?.trim(),
         tasks: taskDefs,
-        createdByEmail: createdByEmail || '',
+        createdByEmail: caller.email,
         createdAt: new Date().toISOString(),
       };
       return { doc: { ...freshDoc, taskTemplates: [...arr, template] }, result: template };
@@ -3631,7 +3700,7 @@ app.post('/api/task-templates/:id/apply', async (req, res) => {
   const template = taskTemplates.find((t) => t.id === req.params.id);
   if (!template) return res.status(404).json({ error: 'Template not found.' });
 
-  const { venueId, createdByEmail } = req.body || {};
+  const { venueId } = req.body || {};
   if (!venueId) return res.status(400).json({ error: 'Venue ID is required.' });
 
   // The template and the target venue must both belong to the caller's agency.
@@ -3699,22 +3768,29 @@ app.delete('/api/task-templates/:id', async (req, res) => {
 
 // Incidents — "oh no" flow: photo + voice + instant alert + auto-task
 app.get('/api/incidents', (req, res) => {
-  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const agencyId = caller.agencyId || 'agency-hkc';
   const venueId = String(req.query.venueId || '');
   const status = String(req.query.status || '');
   let list = incidents.filter((i) => i.agencyId === agencyId);
-  if (venueId) list = list.filter((i) => i.venueId === venueId);
+  if (venueId) {
+    if (!requireOwnVenue(req, res, venueId, venues)) return;
+    list = list.filter((i) => i.venueId === venueId);
+  }
   if (status) list = list.filter((i) => i.status === status);
   res.json({ incidents: list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
 });
 
 app.post('/api/incidents', async (req, res) => {
-  const { venueId, title, description, severity, photoData, voiceNoteData, reporterEmail, reporterName } = req.body || {};
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { venueId, title, description, severity, photoData, voiceNoteData } = req.body || {};
   if (!venueId || !title?.trim()) {
     return res.status(400).json({ error: 'Venue and title are required.' });
   }
 
-  const agencyId = callerAgencyId(req);
+  const agencyId = caller.agencyId || 'agency-hkc';
   const now = new Date().toISOString();
   // The incident's venue must belong to the caller's agency.
   if (!requireOwnVenue(req, res, venueId, venues)) return;
@@ -3740,8 +3816,8 @@ app.post('/api/incidents', async (req, res) => {
         id: incidentId,
         agencyId,
         venueId,
-        reporterEmail: reporterEmail || '',
-        reporterName: reporterName || 'Mashgiach',
+        reporterEmail: caller.email,
+        reporterName: caller.name,
         title: String(title).trim(),
         description: String(description || '').trim(),
         severity: sev,
@@ -3809,15 +3885,18 @@ app.post('/api/incidents', async (req, res) => {
 });
 
 app.post('/api/incidents/:id/resolve', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const incident = incidents.find((i) => i.id === req.params.id);
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
   if (!requireSameAgency(req, res, incident, 'incidents')) return;
-  const { resolvedBy } = req.body || {};
   const resolvedAt = new Date().toISOString();
+  // Attribution from the VERIFIED session user, never the request body.
+  const resolvedBy = caller.email;
   const ok = await crudUpdate(req, res, 'incidents', req.params.id,
     (fresh) => {
       if (fresh.status === 'resolved') return fresh; // idempotent
-      return { ...fresh, status: 'resolved', resolvedAt, resolvedBy: resolvedBy || '' };
+      return { ...fresh, status: 'resolved', resolvedAt, resolvedBy };
     },
     {
       label: 'resolve-incident',
@@ -4312,33 +4391,31 @@ app.get('/admin/media-check', (req, res) => {
 // Broadcast announcements — one-way team updates (NOT a chat)
 // Categories: assignment, update, notice, urgent. Targeted by role.
 app.get('/api/announcements', (req, res) => {
-  const agencyId = (req as any).agencyId || 'agency-hkc';
-  const userEmail = String(req.query.userEmail || '').toLowerCase();
-  const user = users.find((u) => u.email.toLowerCase() === userEmail);
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const agencyId = caller.agencyId || 'agency-hkc';
 
   const now = new Date().toISOString();
   let list = announcements.filter((a) => a.agencyId === agencyId);
   // Filter expired
   list = list.filter((a) => !a.expiresAt || a.expiresAt > now);
-  // Filter by role targeting
-  if (user) {
-    list = list.filter((a) =>
-      a.targetRoles.includes('all') || a.targetRoles.includes(user.role)
-    );
-  }
+  // Filter by role targeting (verified session user, never a query param)
+  list = list.filter((a) =>
+    a.targetRoles.includes('all') || a.targetRoles.includes(caller.role)
+  );
   res.json({
     announcements: list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
   });
 });
 
 app.post('/api/announcements', async (req, res) => {
-  const { title, body, category, targetRoles, venueId, expiresAt, authorName } = req.body || {};
+  const { title, body, category, targetRoles, venueId, expiresAt } = req.body || {};
   if (!title?.trim()) {
     return res.status(400).json({ error: 'Title is required.' });
   }
 
   // Only admin/coordinator can post announcements — the author is ALWAYS the
-  // authenticated session user, never a client-supplied email.
+  // authenticated session user, never a client-supplied email or name.
   const author = getAuthUser(req);
   if (!author || !['admin', 'coordinator'].includes(author.role)) {
     return res.status(403).json({ error: 'Only admins and coordinators can post announcements.' });
@@ -4360,7 +4437,7 @@ app.post('/api/announcements', async (req, res) => {
         id: announcementId,
         agencyId,
         authorEmail: author.email,
-        authorName: authorName || author.name,
+        authorName: author.name,
         title: String(title).trim(),
         body: String(body || '').trim(),
         category: (['assignment', 'update', 'notice', 'urgent'] as const).includes(category) ? category : 'update',
@@ -4419,7 +4496,15 @@ app.delete('/api/announcements/:id', async (req, res) => {
 
 // Agency dashboard — overview of all venues with task stats (admin/coordinator)
 app.get('/api/admin/dashboard', (req, res) => {
-  const agencyId = (req as any).agencyId || 'agency-hkc';
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  // Dashboard is admin OR coordinator only — 403 otherwise. Both roles may
+  // see private-task titles per the #29 visibility rule, so the overdue list
+  // below stays within that gate; do not widen the role set later.
+  if (caller.role !== 'admin' && caller.role !== 'coordinator') {
+    return res.status(403).json({ error: 'Only administrators and coordinators can view the dashboard.' });
+  }
+  const agencyId = caller.agencyId || 'agency-hkc';
   const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === agencyId);
 
   const venueStats = agencyVenues.map((venue) => {
@@ -4496,28 +4581,41 @@ app.get('/api/admin/dashboard', (req, res) => {
       venueCount: agencyVenues.length,
       totalTasks: allTasks.length,
       completedTasks: allTasks.filter((t) => t.isCompleted).length,
-      totalHandoffNotes: handoffNotes.length,
+      totalHandoffNotes: handoffNotes.filter((n) => (n.agencyId || 'agency-hkc') === agencyId).length,
     },
   });
 });
 
 // Shift handoff notes — mashgiach-to-mashgiach communication
 app.get('/api/handoff-notes', (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const agencyId = caller.agencyId || 'agency-hkc';
   const venueId = String(req.query.venueId || '');
-  const notes = venueId
-    ? handoffNotes.filter((n) => n.venueId === venueId)
-    : handoffNotes;
+  if (venueId && !requireOwnVenue(req, res, venueId, venues)) return;
+  // Notes are agency-scoped (match the task scoping pattern); non-admins
+  // additionally see only their own venue's notes when they have one.
+  const callerVenueId: string | undefined = (caller as any).venueId;
+  let notes = handoffNotes.filter((n) => (n.agencyId || 'agency-hkc') === agencyId);
+  if (venueId) {
+    notes = notes.filter((n) => n.venueId === venueId);
+  } else if (caller.role !== 'admin' && callerVenueId) {
+    notes = notes.filter((n) => n.venueId === callerVenueId);
+  }
   res.json({ notes: notes.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
 });
 
 app.post('/api/handoff-notes', async (req, res) => {
-  const { venueId, content, shift, authorEmail, authorName, voiceNoteData } = req.body || {};
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { venueId, content, shift, voiceNoteData } = req.body || {};
   if (!venueId || (!content?.trim() && !voiceNoteData)) {
     return res.status(400).json({ error: 'Venue and note content (or voice note) are required.' });
   }
   const noteId = `handoff-${crypto.randomUUID()}`;
   // Notes belong to the caller's agency; the venue must be theirs too.
-  const agencyId = callerAgencyId(req);
+  // Attribution comes from the VERIFIED session user, never the body.
+  const agencyId = caller.agencyId || 'agency-hkc';
   if (!requireOwnVenue(req, res, venueId, venues)) return;
   const createdAt = new Date().toISOString();
 
@@ -4531,8 +4629,8 @@ app.post('/api/handoff-notes', async (req, res) => {
         id: noteId,
         agencyId,
         venueId,
-        authorEmail: authorEmail || (req as any).userEmail || '',
-        authorName: authorName || 'Mashgiach',
+        authorEmail: caller.email,
+        authorName: caller.name,
         content: String(content || '').trim(),
         shift: shift || 'General',
         voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/') ? voiceNoteData.slice(0, 1000000) : undefined,
@@ -4731,11 +4829,9 @@ app.get('/api/agencies', (req, res) => {
 
 // Get current agency details for logged in user
 app.get('/api/agencies/current', (req, res) => {
-  const { userEmail } = req.query;
-  const user = userEmail
-    ? users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase())
-    : null;
-  const agencyId = user?.agencyId || 'agency-hkc';
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const agencyId = caller.agencyId || 'agency-hkc';
   const agency = agencies.find((a) => a.id === agencyId) || agencies[0];
   const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === agencyId);
   const agencyUsers = users.filter((u) => (u.agencyId || 'agency-hkc') === agencyId);
@@ -4919,7 +5015,11 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
   // (for cross-agency test fixtures that can't be created via the scoped
   // HTTP API). Used by test-10 and test-16.
   app.post('/api/__test__/inject-fixture', async (req, res) => {
-    const { venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [] } = req.body || {};
+    const {
+      venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [],
+      events = [], incidents = [], handoffNotes = [], announcements = [],
+      taskTemplates = [], eventTaskTemplates = [], approvedIngredients = [], factoryReports = [],
+    } = req.body || {};
     try {
       await commitState(
         (freshDoc) => {
@@ -4931,13 +5031,24 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
           }
           const mergedUsers = [...(freshDoc.users || []), ...newUsers];
           return {
-            doc: { ...freshDoc, venues: newVenues, tasks: newTasks, agencies: mergedAgencies, users: mergedUsers },
+            doc: {
+              ...freshDoc,
+              venues: newVenues, tasks: newTasks, agencies: mergedAgencies, users: mergedUsers,
+              events: [...(freshDoc.events || []), ...events],
+              incidents: [...(freshDoc.incidents || []), ...incidents],
+              handoffNotes: [...(freshDoc.handoffNotes || []), ...handoffNotes],
+              announcements: [...(freshDoc.announcements || []), ...announcements],
+              taskTemplates: [...(freshDoc.taskTemplates || []), ...taskTemplates],
+              eventTaskTemplates: [...(freshDoc.eventTaskTemplates || []), ...eventTaskTemplates],
+              approvedIngredients: [...(freshDoc.approvedIngredients || []), ...approvedIngredients],
+              factoryReports: [...(freshDoc.factoryReports || []), ...factoryReports],
+            },
             result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length },
           };
         },
         { label: 'test-inject-fixture' }
       );
-      res.json({ success: true, injected: venues.length + tasks.length + newAgencies.length + newUsers.length });
+      res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
@@ -5019,23 +5130,15 @@ if (isTestMode()) {
 }
 
 app.get('/api/venues', (req, res) => {
-  const { userEmail } = req.query;
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
 
-  let callerAgencyId = 'agency-hkc';
-  let isCallerAdmin = true;
-  let callerVenueId: string | undefined = undefined;
-
-  if (userEmail) {
-    const user = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (user) {
-      callerAgencyId = user.agencyId || 'agency-hkc';
-      isCallerAdmin = user.role === 'admin';
-      callerVenueId = user.venueId;
-    }
-  }
+  const agencyId = caller.agencyId || 'agency-hkc';
+  const isCallerAdmin = caller.role === 'admin';
+  const callerVenueId: string | undefined = (caller as any).venueId;
 
   // Filter venues STRICTLY by caller's agency
-  let accessibleVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === callerAgencyId);
+  let accessibleVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === agencyId);
 
   // If worker or owner, additionally filter to their assigned venue within the agency
   if (!isCallerAdmin) {
@@ -5506,6 +5609,8 @@ app.post('/api/tasks', async (req, res) => {
 
 // Update task status, notes, or configuration
 app.put('/api/tasks/:id', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const { id } = req.params;
   const existing = tasks.find((t) => t.id === id);
 
@@ -5524,8 +5629,6 @@ app.put('/api/tasks/:id', async (req, res) => {
     currentStatus,
     isCompleted,
     notes,
-    userEmail,
-    userName,
     title,
     description,
     category,
@@ -5567,31 +5670,29 @@ app.put('/api/tasks/:id', async (req, res) => {
     targetTime2 !== undefined ||
     priority !== undefined;
 
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === userEmail.trim().toLowerCase());
-    if (caller) {
-      // Check definition edit permissions
-      if (isDefinitionEdit) {
-        const canAssign =
-          caller.role === 'admin' ||
-          caller.role === 'coordinator' ||
-          caller.permissions?.canAssignTasks === true;
-        if (!canAssign) {
-          return res.status(403).json({ error: 'You do not have permission to edit task definitions.' });
-        }
+  // Permission checks against the VERIFIED session user (never a body email).
+  {
+    // Check definition edit permissions
+    if (isDefinitionEdit) {
+      const canAssign =
+        caller.role === 'admin' ||
+        caller.role === 'coordinator' ||
+        caller.permissions?.canAssignTasks === true;
+      if (!canAssign) {
+        return res.status(403).json({ error: 'You do not have permission to edit task definitions.' });
       }
+    }
 
-      // Check fill / complete / notes permission
-      if (hasStatusChange) {
-        const canFill =
-          caller.role === 'admin' ||
-          (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
-          ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
-          (caller.role === 'owner' && caller.permissions?.canFillTasks === true);
+    // Check fill / complete / notes permission
+    if (hasStatusChange) {
+      const canFill =
+        caller.role === 'admin' ||
+        (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
+        ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
+        (caller.role === 'owner' && caller.permissions?.canFillTasks === true);
 
-        if (!canFill) {
-          return res.status(403).json({ error: 'You do not have permission to fill or update task statuses.' });
-        }
+      if (!canFill) {
+        return res.status(403).json({ error: 'You do not have permission to fill or update task statuses.' });
       }
     }
   }
@@ -5637,8 +5738,8 @@ app.put('/api/tasks/:id', async (req, res) => {
         return { doc: freshDoc, result: freshTask };
       }
 
-      const updatedByEmail = finalIsCompleted ? (userEmail || freshTask.updatedByEmail || null) : null;
-      const updatedByName = finalIsCompleted ? (userName || freshTask.updatedByName || null) : null;
+      const updatedByEmail = finalIsCompleted ? (caller.email || freshTask.updatedByEmail || null) : null;
+      const updatedByName = finalIsCompleted ? (caller.name || freshTask.updatedByName || null) : null;
       const updatedAt = finalIsCompleted ? (hasStatusChange ? new Date().toISOString() : freshTask.updatedAt) : null;
 
       const updated: TaskItem = {
@@ -5678,12 +5779,14 @@ app.put('/api/tasks/:id', async (req, res) => {
   if (!committed) return;
 
   const updated = committed.result as TaskItem;
-  broadcastTaskUpdated(oldTaskVisibility, updated, userEmail);
+  broadcastTaskUpdated(oldTaskVisibility, updated, caller.email);
   res.json(updated);
 });
 
 // Remove one check-in entry (tapped by mistake, logged in error).
 app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const { id, checkInId } = req.params;
   const existing = tasks.find((t) => t.id === id);
 
@@ -5692,22 +5795,20 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
   }
   if (!requireSameAgency(req, res, existing, 'tasks')) return;
 
-  const { userEmail } = req.body || {};
   const entry = (existing.checkIns || []).find((c: any) => c.id === checkInId);
   if (!entry) {
     return res.status(404).json({ error: 'Check-in not found' });
   }
 
   // The person who logged it, or anyone with fill permission, can remove it.
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    const isLogger = entry.byEmail && entry.byEmail.toLowerCase() === String(userEmail).trim().toLowerCase();
+  // Identity comes from the VERIFIED session user, never the request body.
+  {
+    const isLogger = entry.byEmail && entry.byEmail.toLowerCase() === caller.email.toLowerCase();
     const canFill =
-      caller &&
-      (caller.role === 'admin' ||
-        (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
-        ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
-        (caller.role === 'owner' && caller.permissions?.canFillTasks === true));
+      caller.role === 'admin' ||
+      (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
+      ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
+      (caller.role === 'owner' && caller.permissions?.canFillTasks === true);
     if (!isLogger && !canFill) {
       return res.status(403).json({ error: 'You do not have permission to remove checks.' });
     }
@@ -5739,13 +5840,15 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
   if (!committed) return;
   const updated = committed.result as TaskItem;
 
-  broadcastTaskUpdated(updated, updated, userEmail);
+  broadcastTaskUpdated(updated, updated, caller.email);
   res.json(updated);
 });
 
 // Log one repeatable check-in on a task (inputType 'check_in'): every tap
 // appends a {byName, byEmail, at} record under the task.
 app.post('/api/tasks/:id/check-in', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const { id } = req.params;
   const existing = tasks.find((t) => t.id === id);
 
@@ -5754,18 +5857,16 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
   }
   if (!requireSameAgency(req, res, existing, 'tasks')) return;
 
-  const { userEmail, userName, photoData, photoCaption } = req.body;
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) {
-      const canFill =
-        caller.role === 'admin' ||
-        (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
-        ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
-        (caller.role === 'owner' && caller.permissions?.canFillTasks === true);
-      if (!canFill) {
-        return res.status(403).json({ error: 'You do not have permission to log checks.' });
-      }
+  const { photoData, photoCaption } = req.body;
+  // Fill permission checked against the VERIFIED session user.
+  {
+    const canFill =
+      caller.role === 'admin' ||
+      (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
+      ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
+      (caller.role === 'owner' && caller.permissions?.canFillTasks === true);
+    if (!canFill) {
+      return res.status(403).json({ error: 'You do not have permission to log checks.' });
     }
   }
 
@@ -5774,8 +5875,8 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
   const checkInId = `checkin-${crypto.randomUUID()}`;
   const checkIn: TaskCheckInItem = {
     id: checkInId,
-    byName: userName || null,
-    byEmail: userEmail || null,
+    byName: caller.name || null,
+    byEmail: caller.email || null,
     at: now,
     photoData: typeof photoData === 'string' && photoData.startsWith('data:image/') ? photoData.slice(0, 500000) : undefined, // cap at ~500KB
     photoCaption: typeof photoCaption === 'string' ? photoCaption.slice(0, 200) : undefined,
@@ -5798,8 +5899,8 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
       const updated: TaskItem = {
         ...freshTask,
         checkIns: [...(freshTask.checkIns || []), checkIn],
-        updatedByEmail: userEmail || freshTask.updatedByEmail || null,
-        updatedByName: userName || freshTask.updatedByName || null,
+        updatedByEmail: caller.email || freshTask.updatedByEmail || null,
+        updatedByName: caller.name || freshTask.updatedByName || null,
         updatedAt: now,
       };
       const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
@@ -5813,7 +5914,7 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
   if (!committed) return;
 
   const updated = committed.result as TaskItem;
-  broadcastTaskUpdated(updated, updated, userEmail);
+  broadcastTaskUpdated(updated, updated, caller.email);
   res.json(updated);
 });
 
@@ -6121,9 +6222,14 @@ app.get('/api/history', (req, res) => {
 // Admin-defined tasks that pre-fill every new event notification.
 // The event creator can delete any that don't apply and add event-specific ones.
 app.get('/api/event-task-templates', (req, res) => {
-  const { agencyId } = req.query;
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  // Agency-scoped: the caller's own agency plus global templates (no
+  // agencyId). A client-supplied agencyId is ignored — it must never widen
+  // the read to another agency.
+  const agencyId = caller.agencyId || 'agency-hkc';
   const list = eventTaskTemplates
-    .filter((t) => !agencyId || !t.agencyId || t.agencyId === agencyId)
+    .filter((t) => !t.agencyId || t.agencyId === agencyId)
     .sort((a, b) => a.sortOrder - b.sortOrder);
   res.json({ templates: list });
 });
@@ -6194,25 +6300,17 @@ app.delete('/api/event-task-templates/:id', async (req, res) => {
 });
 
 app.get('/api/events', (req, res) => {
-  const { venueId, userEmail } = req.query;
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { venueId } = req.query;
 
-  let callerAgencyId = 'agency-hkc';
-  let callerRole = 'admin';
-  let callerVenueId: string | undefined = undefined;
-  let normalizedUserEmail = '';
-
-  if (userEmail) {
-    normalizedUserEmail = String(userEmail).trim().toLowerCase();
-    const user = users.find((u) => u.email.toLowerCase() === normalizedUserEmail);
-    if (user) {
-      callerAgencyId = user.agencyId || 'agency-hkc';
-      callerRole = user.role;
-      callerVenueId = user.venueId;
-    }
-  }
+  const agencyId = caller.agencyId || 'agency-hkc';
+  const callerRole = caller.role;
+  const callerVenueId: string | undefined = (caller as any).venueId;
+  const callerEmail = caller.email.toLowerCase();
 
   // Filter events strictly by agency
-  let agencyEvents = events.filter((e) => (e.agencyId || 'agency-hkc') === callerAgencyId);
+  let agencyEvents = events.filter((e) => (e.agencyId || 'agency-hkc') === agencyId);
 
   // If user is owner or coordinator, restrict to their venue unless admin
   if (callerRole === 'owner') {
@@ -6221,10 +6319,11 @@ app.get('/api/events', (req, res) => {
     // Mashgiach sees events assigned to them OR events in their venue
     agencyEvents = agencyEvents.filter(
       (e) =>
-        (e.assignedMashgiachEmail && e.assignedMashgiachEmail.toLowerCase() === normalizedUserEmail) ||
+        (e.assignedMashgiachEmail && e.assignedMashgiachEmail.toLowerCase() === callerEmail) ||
         (callerVenueId && e.venueId === callerVenueId)
     );
   } else if (venueId && venueId !== 'all') {
+    if (!requireOwnVenue(req, res, String(venueId), venues)) return;
     agencyEvents = agencyEvents.filter((e) => e.venueId === String(venueId));
   }
 
@@ -6235,6 +6334,8 @@ app.get('/api/events', (req, res) => {
 });
 
 app.post('/api/events', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const {
     venueId,
     title,
@@ -6251,25 +6352,15 @@ app.post('/api/events', async (req, res) => {
     menuAttachmentData,
     notes,
     tasks: initialTasks,
-    userEmail,
-    userName,
   } = req.body;
 
   if (!title || !location || !date) {
     return res.status(400).json({ error: 'Title, location, and date are required.' });
   }
 
-  let callerAgencyId = 'agency-hkc';
-  let creatorEmail = userEmail || 'admin@kosherkitchen.com';
-  let creatorName = userName || 'Staff Member';
-
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) {
-      callerAgencyId = caller.agencyId || 'agency-hkc';
-      creatorName = caller.name;
-    }
-  }
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  const creatorEmail = caller.email;
+  const creatorName = caller.name;
 
   const targetVenueId = venueId || 'venue-crown-market';
   // The event's venue must belong to the caller's agency.
@@ -6418,8 +6509,6 @@ app.put('/api/events/:id', async (req, res) => {
     notes,
     status,
     tasks: updatedTasks,
-    userEmail,
-    userName,
   } = req.body;
 
   // Baseline for semantic conflict detection on title/location/date.
@@ -6508,8 +6597,10 @@ app.delete('/api/events/:id', async (req, res) => {
 
 // Event Task Toggle / Status Endpoint
 app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const { id, taskId } = req.params;
-  const { isCompleted, notes, userEmail, userName } = req.body;
+  const { isCompleted, notes } = req.body;
 
   const event = events.find((e) => e.id === id);
   if (!event) {
@@ -6545,8 +6636,8 @@ app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
         isCompleted: targetCompleted,
         notes: notes !== undefined ? notes : freshTask.notes,
         completedAt: targetCompleted ? completedAt : null,
-        completedByName: targetCompleted ? (userName || 'Mashgiach') : null,
-        completedByEmail: targetCompleted ? (userEmail || null) : null,
+        completedByName: targetCompleted ? caller.name : null,
+        completedByEmail: targetCompleted ? caller.email : null,
       };
       const updatedEvent = {
         ...freshEvent,
@@ -7337,12 +7428,12 @@ app.post('/api/auth/change-password', async (req, res) => {
 
 // Get Airtable Config for agency or venue
 app.get('/api/airtable/config', (req, res) => {
-  const { venueId, userEmail } = req.query;
-  let callerAgencyId = 'agency-hkc';
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) callerAgencyId = caller.agencyId || 'agency-hkc';
-  }
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { venueId } = req.query;
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+
+  if (venueId && !requireOwnVenue(req, res, String(venueId), venues)) return;
 
   const config =
     (venueId ? airtableConfigs.find((c) => c.venueId === venueId && c.agencyId === callerAgencyId) : null) ||
@@ -7428,20 +7519,17 @@ app.post('/api/airtable/config', async (req, res) => {
 
 // Sync from Airtable directly or simulate with custom/live schema
 app.post('/api/airtable/sync', async (req, res) => {
-  const { venueId, userEmail } = req.body;
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { venueId } = req.body;
   if (!venueId) {
     return res.status(400).json({ error: 'venueId is required to sync factory ingredients.' });
   }
 
-  let callerAgencyId = 'agency-hkc';
-  let callerName = 'System';
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) {
-      callerAgencyId = caller.agencyId || 'agency-hkc';
-      callerName = caller.name;
-    }
-  }
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  const callerName = caller.name;
+
+  if (!requireOwnVenue(req, res, venueId, venues)) return;
 
   const config =
     airtableConfigs.find((c) => c.venueId === venueId && c.agencyId === callerAgencyId) ||
@@ -7600,16 +7688,14 @@ app.post('/api/airtable/sync', async (req, res) => {
 
 // Get Approved Ingredients for a Venue
 app.get('/api/ingredients', (req, res) => {
-  const { venueId, userEmail } = req.query;
-  let callerAgencyId = 'agency-hkc';
-
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) callerAgencyId = caller.agencyId || 'agency-hkc';
-  }
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { venueId } = req.query;
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   let items = approvedIngredients.filter((i) => (i.agencyId || 'agency-hkc') === callerAgencyId);
   if (venueId) {
+    if (!requireOwnVenue(req, res, String(venueId), venues)) return;
     items = items.filter((i) => i.venueId === venueId);
   }
 
@@ -7618,8 +7704,10 @@ app.get('/api/ingredients', (req, res) => {
 
 // Mashgiach verifies or flags an approved ingredient during factory visit
 app.put('/api/ingredients/:id/verify', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const { id } = req.params;
-  const { verificationStatus, verificationNotes, userEmail } = req.body;
+  const { verificationStatus, verificationNotes } = req.body;
 
   const existing = approvedIngredients.find((i) => i.id === id);
   if (!existing) {
@@ -7627,16 +7715,8 @@ app.put('/api/ingredients/:id/verify', async (req, res) => {
   }
   if (!requireSameAgency(req, res, existing, 'ingredients')) return;
 
-  let verifiedByName = 'Factory Mashgiach';
-  let verifiedByEmail = userEmail || null;
-
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) {
-      verifiedByName = caller.name;
-      verifiedByEmail = caller.email;
-    }
-  }
+  const verifiedByName = caller.name;
+  const verifiedByEmail = caller.email;
   const verifiedAt = new Date().toISOString();
 
   const ok = await crudUpdate(req, res, 'approvedIngredients', id,
@@ -7664,20 +7744,15 @@ app.put('/api/ingredients/:id/verify', async (req, res) => {
 
 // Add new Approved Ingredient (Agency Admin or Coordinator)
 app.post('/api/ingredients', async (req, res) => {
-  const { venueId, name, brandOrSupplier, kashrutAgency, kosherStatus, lotOrBatch, notes, userEmail } = req.body;
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { venueId, name, brandOrSupplier, kashrutAgency, kosherStatus, lotOrBatch, notes } = req.body;
   if (!venueId || !name) {
     return res.status(400).json({ error: 'Venue ID and ingredient name are required.' });
   }
 
-  let callerAgencyId = 'agency-hkc';
-  let approverName = 'HKC Rabbinic Council';
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) {
-      callerAgencyId = caller.agencyId || 'agency-hkc';
-      approverName = caller.name;
-    }
-  }
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  const approverName = caller.name;
   // The ingredient's venue must belong to the caller's agency.
   if (!requireOwnVenue(req, res, venueId, venues)) return;
 
@@ -7738,15 +7813,14 @@ app.delete('/api/ingredients/:id', async (req, res) => {
 
 // Factory Audit Reports: Get List
 app.get('/api/factory-reports', (req, res) => {
-  const { venueId, userEmail } = req.query;
-  let callerAgencyId = 'agency-hkc';
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) callerAgencyId = caller.agencyId || 'agency-hkc';
-  }
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { venueId } = req.query;
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   let reports = factoryReports.filter((r) => r.agencyId === callerAgencyId);
   if (venueId) {
+    if (!requireOwnVenue(req, res, String(venueId), venues)) return;
     reports = reports.filter((r) => r.venueId === venueId);
   }
 
@@ -7757,6 +7831,8 @@ app.get('/api/factory-reports', (req, res) => {
 
 // Factory Audit Reports: Submit New Mashgiach Inspection Report
 app.post('/api/factory-reports', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const {
     venueId,
     auditDate,
@@ -7768,7 +7844,6 @@ app.post('/api/factory-reports', async (req, res) => {
     summaryNotes,
     status,
     mashgiachSigned,
-    userEmail,
   } = req.body;
 
   if (!venueId) {
@@ -7778,18 +7853,9 @@ app.post('/api/factory-reports', async (req, res) => {
   const venue = venues.find((v) => v.id === venueId);
   // The report's venue must belong to the caller's agency (and determines the agency).
   if (!requireOwnVenue(req, res, venueId, venues)) return;
-  let callerAgencyId = venue?.agencyId || 'agency-hkc';
-  let mashgiachName = 'Rabbi Shimon Klein (Factory Mashgiach)';
-  let mashgiachEmail = userEmail || 'factory.mashgiach@hartfordkashrut.org';
-
-  if (userEmail) {
-    const caller = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (caller) {
-      callerAgencyId = caller.agencyId || callerAgencyId;
-      mashgiachName = caller.name;
-      mashgiachEmail = caller.email;
-    }
-  }
+  const callerAgencyId = venue?.agencyId || caller.agencyId || 'agency-hkc';
+  const mashgiachName = caller.name;
+  const mashgiachEmail = caller.email;
 
   // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
   const reportId = `rpt_${crypto.randomUUID()}`;
