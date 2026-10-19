@@ -6824,10 +6824,9 @@ app.put('/api/users/:id', async (req, res) => {
       });
       for (const client of wss.clients) {
         if (client.readyState !== WebSocket.OPEN) continue;
-        const meta = activeSockets.get(client);
-        if (meta && meta.userId === updated.id) {
-          client.send(freshState);
-        }
+        const meta = authorizeSocket(client);
+        if (!meta || meta.userId !== updated.id) continue;
+        client.send(freshState);
       }
     }
   }
