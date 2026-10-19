@@ -5364,20 +5364,21 @@ app.post('/api/tasks', async (req, res) => {
     return res.status(400).json({ error: 'Title is required' });
   }
 
-  const caller = createdByEmail
-    ? users.find((u) => u.email.toLowerCase() === String(createdByEmail).trim().toLowerCase())
-    : null;
-  const callerAgencyId = caller?.agencyId || 'agency-hkc';
+  // Checklist C: resolve the caller by authenticated user ID + agency (never
+  // by the client-supplied createdByEmail). Fail closed.
+  const caller = getAuthUser(req);
+  if (!caller) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   // Permission check: Admin, Coordinator, or user with canAssignTasks permission
-  if (caller) {
-    const isAllowedToAssign =
-      caller.role === 'admin' ||
-      caller.role === 'coordinator' ||
-      caller.permissions?.canAssignTasks === true;
-    if (!isAllowedToAssign) {
-      return res.status(403).json({ error: 'You do not have permission to assign or create new tasks.' });
-    }
+  const isAllowedToAssign =
+    caller.role === 'admin' ||
+    caller.role === 'coordinator' ||
+    caller.permissions?.canAssignTasks === true;
+  if (!isAllowedToAssign) {
+    return res.status(403).json({ error: 'You do not have permission to assign or create new tasks.' });
   }
 
   const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === callerAgencyId);
@@ -6786,6 +6787,29 @@ app.put('/api/users/:id', async (req, res) => {
     ...base,
     users: getSafeUsersForAgency(updated.agencyId, recipientForMeta(meta)),
   }));
+  // ChatGPT round-1 (3): if the role/permission change revoked the user's
+  // access to private tasks, their OPEN sockets still hold the old copies.
+  // Send TASK_DELETED for every private task they can no longer see.
+  {
+    const oldUser = existingUser;
+    const lostTasks = tasks.filter(
+      (t) =>
+        (t.agencyId || 'agency-hkc') === (updated.agencyId || 'agency-hkc') &&
+        canSeeTaskServer(t, oldUser) &&
+        !canSeeTaskServer(t, updated)
+    );
+    if (lostTasks.length > 0) {
+      for (const t of lostTasks) {
+        broadcast(
+          'TASK_DELETED',
+          { id: t.id, venueId: t.venueId, agencyId: t.agencyId },
+          undefined,
+          t.agencyId || 'agency-hkc',
+          (meta) => (meta.userId === updated.id ? { id: t.id, venueId: t.venueId, agencyId: t.agencyId } : null)
+        );
+      }
+    }
+  }
   res.json({ user: getSafeUser(updated) });
 });
 

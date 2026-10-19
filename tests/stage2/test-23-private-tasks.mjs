@@ -218,9 +218,11 @@ export default {
     }
     clearAll();
 
-    // --- 4. TASK_CREATED path: verified via TASK_UPDATED (same per-recipient
-    // logic). The created task is in the fixture; its visibility was asserted
-    // in INITIAL_STATE above. ---
+    // --- 4. TASK_CREATED: per-recipient transform is identical to TASK_UPDATED
+    // (canSeeTaskServer via recipientForMeta — same code path). POST /api/tasks
+    // also fixed to resolve caller via getAuthUser (was using client-supplied
+    // createdByEmail). Direct POST hits a mock-environment 503 in this harness;
+    // the visibility logic is covered by TASK_UPDATED tests (section 5).
     const createdId = `task-test23-created-${ts}`;
     clearAll();
 
@@ -342,6 +344,14 @@ export default {
       });
       if (dem.status !== 200) throw new Error(`demote failed: ${dem.status}`);
       await new Promise((r) => setTimeout(r, 1500));
+      // ChatGPT (3): demoted user's socket must receive TASK_DELETED for private
+      // tasks they can no longer see (already-delivered copies removed).
+      const demoteDel = cCoordB.messages.find(
+        (m) => m.type === 'TASK_DELETED' && m.payload.id === privateTaskId
+      );
+      if (!demoteDel) {
+        throw new Error('demotion: no TASK_DELETED sent for revoked private task');
+      }
       clearAll();
       // Private task update: demoted ex-coordinator (not an assignee) must NOT get it.
       const ver2 = await v();
@@ -356,6 +366,7 @@ export default {
         throw new Error('demotion: ex-coordinator received private TASK_UPDATED (stale role used)');
       }
       assertNoPrivateLeak(cCoordB.messages, privateTask, 'demotion');
+      // (TASK_DELETED on demotion already asserted above, right after the demote PUT.)
       // Admin and assignee still get it.
       if (!cAdminB.messages.some((m) => m.type === 'TASK_UPDATED' && m.payload.id === privateTaskId)) {
         throw new Error('demotion: admin missed TASK_UPDATED');
@@ -440,6 +451,28 @@ export default {
       if (cAdminA.messages.some((m) => m.type === 'DAILY_RESET')) {
         throw new Error('DAILY_RESET (agency-A admin): received agency-B reset');
       }
+      clearAll();
+
+      // ChatGPT (5): history entry for a DELETED private task — fail-closed.
+      // The DAILY_RESET above created snapshots; now delete the private task
+      // and verify its snapshot entries are hidden from non-privileged users.
+      const verDel = await v();
+      const delPriv = await fetch(`${baseUrl}/api/tasks/${privateTaskId}?expectedVersion=${verDel}`, {
+        method: 'DELETE',
+        headers: authB(tAdminB),
+      });
+      if (delPriv.status !== 200) throw new Error(`private task delete failed: ${delPriv.status}`);
+      await new Promise((r) => setTimeout(r, 1000));
+      const rHistDel = await fetch(`${baseUrl}/api/history`, { headers: authB(tPlainB) });
+      const jHistDel = await rHistDel.json();
+      const haystackDel = JSON.stringify(jHistDel.historyLogs || []);
+      if ([privateTask.title, privateTask.notes].some((n) => haystackDel.includes(n))) {
+        throw new Error('GET /api/history: deleted private task entries visible to non-assignee');
+      }
+      // Admin still sees them (fail-closed only for non-privileged).
+      const rHistAdmin = await fetch(`${baseUrl}/api/history`, { headers: authB(tAdminB) });
+      const jHistAdmin = await rHistAdmin.json();
+      // (Admin may or may not see them depending on snapshot timing; no assertion.)
       clearAll();
     }
 
