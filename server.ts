@@ -1352,6 +1352,90 @@ function recipientForMeta(meta: { userId: string; agencyId: string }) {
 }
 
 /**
+ * Server-side mirror of client canSeeTask (src/lib/permissions.ts).
+ * Admin/coordinator of the task's agency see every task; others see only
+ * non-private tasks or tasks whose assignedTo contains their email
+ * (case-insensitive). Unknown/deleted recipient → fail closed (false).
+ */
+function canSeeTaskServer(
+  task: { isPrivate?: boolean; assignedTo?: string[] },
+  recipient: UserProfile | undefined
+): boolean {
+  if (!task.isPrivate) return true;
+  if (!recipient) return false;
+  if (recipient.role === 'admin' || recipient.role === 'coordinator') return true;
+  const email = recipient.email.toLowerCase();
+  return (task.assignedTo || []).some((a) => a.toLowerCase() === email);
+}
+
+/** Tasks of an agency visible to a specific recipient (private-task rule). */
+function tasksForRecipient(agencyId: string, recipient: UserProfile | undefined) {
+  const norm = (v?: string) => v || 'agency-hkc';
+  return tasks.filter(
+    (t) => norm(t.agencyId) === agencyId && canSeeTaskServer(t, recipient)
+  );
+}
+
+/**
+ * Broadcast a task update with transition handling (addendum item 1).
+ * - Recipients who can see the NEW task get TASK_UPDATED (full).
+ * - Recipients who could see the OLD task but not the NEW one get TASK_DELETED
+ *   (their client holds a stale copy that must be removed immediately).
+ * - Recipients who could see neither get nothing.
+ * oldTask and newTask are the visibility-relevant snapshots ({isPrivate, assignedTo}).
+ */
+function broadcastTaskUpdated(
+  oldTask: { isPrivate?: boolean; assignedTo?: string[] },
+  newTask: any,
+  senderEmail?: string
+) {
+  const agencyId = newTask.agencyId || 'agency-hkc';
+  broadcast(
+    'TASK_UPDATED',
+    newTask,
+    senderEmail,
+    agencyId,
+    (meta, task) => (canSeeTaskServer(task, recipientForMeta(meta)) ? task : null)
+  );
+  broadcast(
+    'TASK_DELETED',
+    { id: newTask.id, venueId: newTask.venueId, agencyId },
+    undefined,
+    agencyId,
+    (meta, base) => {
+      const recipient = recipientForMeta(meta);
+      const sawOld = canSeeTaskServer(oldTask, recipient);
+      const seesNew = canSeeTaskServer(newTask, recipient);
+      return sawOld && !seesNew ? base : null;
+    }
+  );
+}
+
+/**
+ * History logs of an agency with snapshot entries filtered per recipient.
+ * Each entry references a task by taskId; entries for private tasks the
+ * recipient cannot see are removed. If the task no longer exists (deleted),
+ * fail closed for non-admin/coordinator (exclude); admins/coordinators see
+ * everything anyway. Returns new objects (never mutates the stored logs).
+ */
+function historyLogsForRecipient(agencyId: string, recipient: UserProfile | undefined) {
+  const norm = (v?: string) => v || 'agency-hkc';
+  const isPrivileged = recipient?.role === 'admin' || recipient?.role === 'coordinator';
+  const taskById = new Map(tasks.map((t) => [t.id, t]));
+  return historyLogs
+    .filter((h) => norm(h.agencyId) === agencyId)
+    .map((h) => {
+      if (!Array.isArray((h as any).entries)) return h;
+      const entries = (h as any).entries.filter((e: any) => {
+        const task = taskById.get(e.taskId);
+        if (!task) return isPrivileged; // deleted task: fail closed
+        return canSeeTaskServer(task, recipient);
+      });
+      return { ...h, entries };
+    });
+}
+
+/**
  * Authorize a socket for broadcast receipt. Returns the socket's metadata
  * when the socket carries authenticated metadata AND its user still exists
  * and belongs to the socket's agency; otherwise closes the socket (4401)
@@ -3044,12 +3128,12 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 type SocketMeta = { userId: string; email: string; name: string; agencyId: string; role?: string };
 const activeSockets = new Map<WebSocket, SocketMeta>();
 
-function agencyStateFor(agencyId: string, recipient?: { role?: string; permissions?: { canAssignTasks?: boolean } }) {
+function agencyStateFor(agencyId: string, recipient?: UserProfile) {
   const norm = (v?: string) => v || 'agency-hkc';
   return {
     venues: venues.filter((v) => norm(v.agencyId) === agencyId),
-    tasks: tasks.filter((t) => norm(t.agencyId) === agencyId),
-    historyLogs: historyLogs.filter((h) => norm(h.agencyId) === agencyId),
+    tasks: tasksForRecipient(agencyId, recipient),
+    historyLogs: historyLogsForRecipient(agencyId, recipient),
     events: events.filter((e) => norm(e.agencyId) === agencyId),
     airtableConfigs: airtableConfigs.filter((c) => norm(c.agencyId) === agencyId),
     approvedIngredients: approvedIngredients.filter((i) => norm(i.agencyId) === agencyId),
@@ -3097,13 +3181,17 @@ function broadcast(
   }
 
   // Per-recipient path: the payload is computed for each authorized socket.
+  // If the transform returns null/undefined, the socket is skipped (not sent)
+  // — used when the recipient is not allowed to see the payload at all.
   for (const client of wss.clients) {
     if (client.readyState !== WebSocket.OPEN) continue;
     const meta = authorizeSocket(client);
     if (!meta) continue;
     // Agency-scoped broadcasts only reach that agency's sockets.
     if (agencyId && meta.agencyId !== agencyId) continue;
-    client.send(envelopeFor(varyByRecipient(meta, payload)));
+    const finalPayload = varyByRecipient(meta, payload);
+    if (finalPayload === null || finalPayload === undefined) continue;
+    client.send(envelopeFor(finalPayload));
   }
 }
 
@@ -3333,13 +3421,26 @@ async function executeDailyReset(
   for (const a of broadcastAgencies) {
     const aid = a.id;
     const agencySnapshots = allSnapshots.filter((s: any) => (s.agencyId || 'agency-hkc') === aid);
-    broadcast('DAILY_RESET', {
-      venueId: targetVenueId || 'all',
-      tasks: tasks.filter((t) => (t.agencyId || 'agency-hkc') === aid),
-      historyLogs: historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === aid),
-      currentWorkDate,
-      snapshots: agencySnapshots,
-    }, undefined, aid);
+    broadcast(
+      'DAILY_RESET',
+      {
+        venueId: targetVenueId || 'all',
+        tasks: tasks.filter((t) => (t.agencyId || 'agency-hkc') === aid),
+        historyLogs: historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === aid),
+        currentWorkDate,
+        snapshots: agencySnapshots,
+      },
+      undefined,
+      aid,
+      (meta, base) => {
+        const recipient = recipientForMeta(meta);
+        return {
+          ...base,
+          tasks: base.tasks.filter((t: any) => canSeeTaskServer(t, recipient)),
+          historyLogs: historyLogsForRecipient(aid, recipient),
+        };
+      }
+    );
   }
 
   return committed;
@@ -5183,21 +5284,18 @@ app.delete('/api/venues/:id', async (req, res) => {
 // -------------------------------------------------------------
 
 app.get('/api/tasks', (req, res) => {
-  const { venueId, userEmail } = req.query;
+  const { venueId } = req.query;
 
-  let callerAgencyId = 'agency-hkc';
-  let isCallerAdmin = true;
-  let callerVenueId: string | undefined = undefined;
-
-  if (userEmail) {
-    const user = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (user) {
-      callerAgencyId = user.agencyId || 'agency-hkc';
-      isCallerAdmin = user.role === 'admin';
-      callerVenueId = user.venueId;
-    }
+  // Checklist C: resolve the caller by authenticated user ID + agency (never
+  // by the client-supplied userEmail query param). Fail closed.
+  const caller = getAuthUser(req);
+  if (!caller) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
-
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  const isCallerAdmin = caller.role === 'admin';
+  const callerVenueId = caller.venueId;
+  const callerEmailNorm = caller.email.toLowerCase();
   const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === callerAgencyId);
   let targetVenueId = venueId ? String(venueId) : agencyVenues[0]?.id || 'venue-crown-market';
 
@@ -5214,21 +5312,8 @@ app.get('/api/tasks', (req, res) => {
   const filteredTasks = tasks.filter(
     (t) => t.venueId === targetVenueId && (t.agencyId || 'agency-hkc') === callerAgencyId
   );
-  // Private assignments: only the assignees, coordinators and admins may see them
-  const callerEmailNorm = userEmail ? String(userEmail).trim().toLowerCase() : '';
-  const callerUser = callerEmailNorm
-    ? users.find((u) => u.email.toLowerCase() === callerEmailNorm)
-    : undefined;
-  const canSeePrivate =
-    isCallerAdmin || (callerUser && callerUser.role === 'coordinator');
-  const visibleTasks = canSeePrivate
-    ? filteredTasks
-    : filteredTasks.filter(
-        (t) =>
-          !t.isPrivate ||
-          (callerEmailNorm !== '' &&
-            (t.assignedTo || []).some((a) => a.toLowerCase() === callerEmailNorm))
-      );
+  // Private assignments: shared helper with the WS paths (checklist C).
+  const visibleTasks = filteredTasks.filter((t) => canSeeTaskServer(t, caller));
   const activeVenue = agencyVenues.find((v) => v.id === targetVenueId) || agencyVenues[0] || venues[0];
 
   res.json({
@@ -5382,7 +5467,13 @@ app.post('/api/tasks', async (req, res) => {
   const created = committed.result as TaskItem;
 
   // Side effects ONLY after successful commit.
-  broadcast('TASK_CREATED', created, createdByEmail, created.agencyId || 'agency-hkc');
+  broadcast(
+    'TASK_CREATED',
+    created,
+    createdByEmail,
+    created.agencyId || 'agency-hkc',
+    (meta, task) => (canSeeTaskServer(task, recipientForMeta(meta)) ? task : null)
+  );
 
   // Phone push to specifically-assigned mashgichim (not for global 'all' tasks)
   const assignees = (created.assignedTo || []).filter(
@@ -5410,6 +5501,12 @@ app.put('/api/tasks/:id', async (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
   if (!requireSameAgency(req, res, existing, 'tasks')) return;
+
+  // Capture pre-update visibility for transition handling (addendum item 1).
+  const oldTaskVisibility = {
+    isPrivate: existing.isPrivate,
+    assignedTo: existing.assignedTo,
+  };
 
   const {
     currentStatus,
@@ -5569,7 +5666,7 @@ app.put('/api/tasks/:id', async (req, res) => {
   if (!committed) return;
 
   const updated = committed.result as TaskItem;
-  broadcast('TASK_UPDATED', updated, userEmail, updated.agencyId || 'agency-hkc');
+  broadcastTaskUpdated(oldTaskVisibility, updated, userEmail);
   res.json(updated);
 });
 
@@ -5630,7 +5727,7 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
   if (!committed) return;
   const updated = committed.result as TaskItem;
 
-  broadcast('TASK_UPDATED', updated, userEmail, updated.agencyId || 'agency-hkc');
+  broadcastTaskUpdated(updated, updated, userEmail);
   res.json(updated);
 });
 
@@ -5704,7 +5801,7 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
   if (!committed) return;
 
   const updated = committed.result as TaskItem;
-  broadcast('TASK_UPDATED', updated, userEmail, updated.agencyId || 'agency-hkc');
+  broadcastTaskUpdated(updated, updated, userEmail);
   res.json(updated);
 });
 
@@ -5734,7 +5831,18 @@ app.delete('/api/tasks/:id', async (req, res) => {
   );
   if (!committed) return;
 
-  broadcast('TASK_DELETED', { id, venueId: delVenueId, agencyId: delAgencyId }, undefined, delAgencyId || 'agency-hkc');
+  broadcast(
+    'TASK_DELETED',
+    { id, venueId: delVenueId, agencyId: delAgencyId },
+    undefined,
+    delAgencyId || 'agency-hkc',
+    (meta, base) => {
+      // If the deleted task was private and the recipient couldn't see it,
+      // they never knew it existed — don't reveal even the id.
+      const recipient = recipientForMeta(meta);
+      return canSeeTaskServer(deletedTask, recipient) ? base : null;
+    }
+  );
   res.json({ success: true, deletedId: id });
 });
 
@@ -5903,10 +6011,14 @@ app.post('/api/admin/restore-demo', async (req, res) => {
     tasks: agencyTasks,
     events: agencyEvents,
     isDemoCleared: false,
-  }, undefined, callerAgencyId, (meta, base) => ({
-    ...base,
-    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
-  }));
+  }, undefined, callerAgencyId, (meta, base) => {
+    const recipient = recipientForMeta(meta);
+    return {
+      ...base,
+      tasks: base.tasks.filter((t: any) => canSeeTaskServer(t, recipient)),
+      users: getSafeUsersForAgency(callerAgencyId, recipient),
+    };
+  });
 
   res.json({
     success: true,
