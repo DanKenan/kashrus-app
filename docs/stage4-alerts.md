@@ -83,14 +83,19 @@ retries that ultimately succeed.
    resource.type="cloud_run_revision"
    resource.labels.service_name="workers-collaborative-dashboard"
    severity>=ERROR
-   textPayload =~ "\\[commitOrRespond:[^]]+\\]"
+   jsonPayload.message =~ "\\[commitOrRespond:[^]]+\\]"
    ```
+   (Server logs are structured JSON on Cloud Run: the text lives in
+   `jsonPayload.message`, not `textPayload`. Bare-string terms like
+   `"[consistency] ERROR"` still match any field, but any `textPayload`
+   filter must use `jsonPayload.message`. `severity>=ERROR` is real now —
+   plain `console.error` used to land as DEFAULT.)
    (Verify this matches real entries in Logs Explorer before creating the policy —
    the exact label text varies per operation.)
 2. Create alert → any matching entry → Notify `don-email`.
    Name: `shutfey-failed-saves`.
 3. Optional separate informational filter for retry warnings:
-   `textPayload =~ "\\[commitState:[^]]+\\] Transaction failed"` at
+   `jsonPayload.message =~ "\\[commitState:[^]]+\\] Transaction failed"` at
    `severity>=WARNING` — for diagnosis, not paging.
 
 Doc: https://cloud.google.com/logging/docs/alerting/log-based-alerts

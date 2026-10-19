@@ -45,6 +45,7 @@
  *   --format=cjs --packages=external --outfile=dist/restore-backup.cjs
  */
 
+import { log } from './log.ts';
 import admin from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
@@ -385,11 +386,11 @@ async function main() {
   const confirm = args.confirm === true;
 
   if (!source) {
-    console.error('Usage: node dist/restore-backup.cjs --source gs://<bucket>/tier1/<date>/<run>/ --target-db <throwaway-id> --confirm');
+    log.error('Usage: node dist/restore-backup.cjs --source gs://<bucket>/tier1/<date>/<run>/ --target-db <throwaway-id> --confirm');
     process.exit(1);
   }
   if (!targetDb) {
-    console.error('Missing --target-db');
+    log.error('Missing --target-db');
     process.exit(1);
   }
 
@@ -401,7 +402,7 @@ async function main() {
     await runRestore({ source, targetDb, projectId, confirm, firestoreDb: db, storage });
     process.exit(0);
   } catch (e: any) {
-    console.error(e?.message || e);
+    log.error(e?.message || e);
     process.exit(1);
   }
 }

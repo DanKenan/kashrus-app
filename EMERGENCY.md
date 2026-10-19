@@ -197,7 +197,7 @@ post-backup writes after a total-restore.
     'resource.type="cloud_run_revision" AND resource.labels.service_name="workers-collaborative-dashboard"' \
     --project gen-lang-client-0875538181 \
     --limit 50 \
-    --format "table(timestamp, textPayload)" \
+    --format "table(timestamp, severity, jsonPayload.message, textPayload)" \
     | grep -iE "commitState|conflict|failed|error"
   ```
 
@@ -423,6 +423,19 @@ Carried forward from `STAGE4_PLAN.md`:
 - [ ] Fix flaky Test 2 in `tests/stage2/harness.mjs` (concurrent writes: both
   requests got 409 instead of one 200 + one 409 — pre-existing timing race,
   observed 2026-10-18; re-run passed).
+- [ ] Module-level `currentWorkDate` in server.ts is initialized using UTC;
+  subsequently refreshed through Firestore hydration, but may hold the wrong
+  work date before hydration. It also feeds health/status responses and the
+  midnight-rollover comparison. Between 00:00–04:00 UTC it can disagree with
+  America/New_York by a full day. The snapshot archive date still depends on
+  it (see next item). Tracked in PR #27, not part of the logging PR.
+- [ ] Daily-reset snapshot archive date uses the module-level `currentWorkDate`
+  instead of the NY date (`todayStr`) — between 00:00–04:00 UTC the snapshot
+  is dated with the wrong day (observed 2026-10-18: Test 10 failed with
+  snapshot date 2026-10-19 vs NY today 2026-10-18). The scheduled-rollover
+  path also needs the archive date to be the workday being closed
+  (`freshDoc.currentWorkDate`), not today. Tracked in PR #27
+  ("Daily reset archive date: close the right workday").
 - [ ] Step E (stop dual-write): **deferred by Don's decision** — do not revive
   without him.
 - [ ] Ingredients / factory-inspections migration: **do not touch** until Don

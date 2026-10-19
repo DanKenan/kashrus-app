@@ -19,6 +19,7 @@
  * GCS markers, not Firestore writes.
  */
 
+import { log } from './log.ts';
 import admin from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
@@ -33,18 +34,18 @@ async function main() {
   const backupBucket = process.env.BACKUP_BUCKET;
 
   if (!projectId || !databaseId || !backupBucket) {
-    console.error('[backup-job] Missing required env vars: FIREBASE_PROJECT_ID, FIRESTORE_DATABASE_ID, BACKUP_BUCKET');
+    log.error('[backup-job] Missing required env vars: FIREBASE_PROJECT_ID, FIRESTORE_DATABASE_ID, BACKUP_BUCKET');
     process.exit(1);
   }
 
   // Require EXACT match to production — a wrong database must not produce
   // a misleading "successful" backup.
   if (projectId !== PROD_PROJECT_ID) {
-    console.error(`[backup-job] REFUSING: project ${projectId} != production ${PROD_PROJECT_ID}`);
+    log.error(`[backup-job] REFUSING: project ${projectId} != production ${PROD_PROJECT_ID}`);
     process.exit(1);
   }
   if (databaseId !== PROD_DATABASE_ID) {
-    console.error(`[backup-job] REFUSING: database ${databaseId} != production ${PROD_DATABASE_ID}`);
+    log.error(`[backup-job] REFUSING: database ${databaseId} != production ${PROD_DATABASE_ID}`);
     process.exit(1);
   }
 
@@ -62,8 +63,8 @@ async function main() {
     console.log(`[backup-job] SUCCESS: ${manifest.createdAt}, v${manifest.monolithVersion}, checksum ${manifest.checksum.slice(0, 16)}`);
     process.exit(0);
   } catch (e: any) {
-    console.error('[backup-job] FAILED:', e?.message);
-    console.error(e?.stack);
+    log.error('[backup-job] FAILED:', e?.message);
+    log.error(e?.stack);
     process.exit(1);
   }
 }

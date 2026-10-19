@@ -14,6 +14,7 @@
  *   Cloud Monitoring alert pipeline delivers to his email/phone.
  */
 
+import { log } from './log.ts';
 const FIRESTORE_STATE_DOC = 'app-state/main';
 const MONOLITH_SIZE_WARN_BYTES = 800 * 1024; // 800 KiB warning
 const MAX_CONSISTENCY_RETRIES = 3;
@@ -79,7 +80,7 @@ async function checkBackupStaleness(firestoreDb: any): Promise<{ stale: boolean;
   if (!bucketName) {
     // Monitoring is enabled (this code is running) but bucket not configured.
     // That's an error, not a healthy "unknown" — fail closed.
-    console.error('[consistency] ERROR: BACKUP_BUCKET not configured — backup monitoring enabled but no bucket. Stale.');
+    log.error('[consistency] ERROR: BACKUP_BUCKET not configured — backup monitoring enabled but no bucket. Stale.');
     return { stale: true, lastAt: null };
   }
   try {
@@ -155,12 +156,12 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
     // not a stable null. Never let null === null appear "stable".
     if (versionBefore === null) {
       lastError = `Cannot read monolith version (attempt ${attempt})`;
-      console.error(`[consistency] ERROR: ${lastError}`);
+      log.error(`[consistency] ERROR: ${lastError}`);
       continue;
     }
     if (sizeBytes === null) {
       lastError = `Cannot read monolith size (attempt ${attempt})`;
-      console.error(`[consistency] ERROR: ${lastError}`);
+      log.error(`[consistency] ERROR: ${lastError}`);
       continue;
     }
 
@@ -169,27 +170,27 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
       status = await perEntityStatus(firestoreDb);
     } catch (e: any) {
       lastError = e?.message || 'perEntityStatus failed';
-      console.error(`[consistency] ERROR: perEntityStatus failed (attempt ${attempt}): ${lastError}`);
+      log.error(`[consistency] ERROR: perEntityStatus failed (attempt ${attempt}): ${lastError}`);
       continue;
     }
     const versionAfter = await getMonolithVersion(firestoreDb);
     if (versionAfter === null) {
       lastError = `Cannot read monolith version after check (attempt ${attempt})`;
-      console.error(`[consistency] ERROR: ${lastError}`);
+      log.error(`[consistency] ERROR: ${lastError}`);
       continue;
     }
 
     // Version changed mid-check — retry (not a mismatch, just unstable read)
     if (versionBefore !== versionAfter) {
       lastError = `Monolith version changed during check (v${versionBefore} → v${versionAfter}), retrying`;
-      console.error(`[consistency] WARNING: ${lastError}`);
+      log.warn(`[consistency] WARNING: ${lastError}`);
       continue;
     }
 
     const sizeWarn = sizeBytes >= MONOLITH_SIZE_WARN_BYTES;
     const backup = await checkBackupStaleness(firestoreDb);
     if (backup.stale) {
-      console.error(
+      log.error(
         `[consistency] ERROR: BACKUP STALE — last successful backup: ${backup.lastAt || 'never'} ` +
         `(threshold: 26h)`
       );
@@ -198,13 +199,13 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
 
     if (!status.match) {
       // Log IDs + reasons only — perEntityStatus never includes secrets
-      console.error(
+      log.error(
         `[consistency] ERROR: MISMATCH detected (attempt ${attempt}):`,
         JSON.stringify(status.mismatches.map(m => `${m.collection}/${m.id}: ${m.reason}`))
       );
     }
     if (sizeWarn) {
-      console.error(
+      log.error(
         `[consistency] ERROR: MONOLITH SIZE WARNING: ${Math.round(sizeBytes / 1024)} KiB ` +
         `(warn at 800 KiB, hard cap 900 KiB)`
       );
@@ -224,7 +225,7 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
 
   // All retries failed — emit ERROR and report failure
   const finalError = `Unstable or unreadable after ${MAX_CONSISTENCY_RETRIES} attempts. ${lastError || ''}`;
-  console.error(`[consistency] ERROR: ${finalError}`);
+  log.error(`[consistency] ERROR: ${finalError}`);
   return {
     ok: false,
     monolithVersion: null,
