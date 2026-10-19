@@ -80,8 +80,11 @@ export default {
     const ts = Date.now();
 
     // --- 1. Canary task ---
+    // NOTE: no venueId — the endpoint defaults task creation and task listing
+    // to the agency's first venue, so the verification GET below finds it.
+    // (Hardcoding 'venue-crown-market' breaks the lookup: that ID matches no
+    // real venue, and the list endpoint filters by venues[0].)
     const cr = await ctx.api('POST', '/api/tasks', {
-      venueId: 'venue-crown-market',
       title: `Test19 Notes ${ts}`,
       notes: 'original notes',
       createdByEmail: ADMIN_EMAIL,
@@ -166,7 +169,6 @@ export default {
     // with stale data) WOULD silently overwrite — i.e. this test guards a
     // real regression, not a tautology. Separate task so B's data stays clean. ---
     const cr2 = await ctx.api('POST', '/api/tasks', {
-      venueId: 'venue-crown-market',
       title: `Test19 Control ${ts}`,
       notes: 'control original',
       createdByEmail: ADMIN_EMAIL,
