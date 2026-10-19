@@ -55,6 +55,10 @@ const SECRET_WORDS = [
 
 function isSecretKey(key: string): boolean {
   const lower = key.toLowerCase();
+  // Hash-suffixed secret names: "passwordHash" → stem "password" is secret,
+  // "kioskPinHash" → stem "kioskPin" is secret. (Forward defence: PR 2a's PIN
+  // hashing introduces kioskPinHash; without this, backups would leak it.)
+  if (/hash$/i.test(key) && key.length > 4 && isSecretKey(key.slice(0, -4))) return true;
   // Exact match (ignoring _ and -)
   const normalized = lower.replace(/[_-]/g, '');
   if (SECRET_WORDS.includes(normalized)) return true;

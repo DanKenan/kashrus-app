@@ -92,6 +92,8 @@ export default {
         refreshToken: 'ref123', // must scrub
         privateKey: 'pk123', // must scrub even outside vapidKeys
         nested: { kioskPin: '9999', ok: 'fine' },
+        passwordHash: 'ph123', // hash-suffixed secret name → scrub (PR 1)
+        kioskPinHash: 'kph123', // hash-suffixed secret name → scrub (PR 1, forward defence for PR 2a)
         arr: [{ apiKey: 'key123' }, { name: 'x' }],
         jwtSecret: 'jwt123',
         apiKeyLabel: 'My API Key', // must PRESERVE (false positive before)
@@ -110,6 +112,8 @@ export default {
       if (out.refreshToken !== '[REDACTED]') throw new Error('refreshToken not scrubbed (was missed)');
       if (out.privateKey !== '[REDACTED]') throw new Error('privateKey not scrubbed (was missed)');
       if (out.nested.kioskPin !== '[REDACTED]') throw new Error('nested kioskPin not scrubbed');
+      if (out.passwordHash !== '[REDACTED]') throw new Error('passwordHash not scrubbed (hash-suffix gap)');
+      if (out.kioskPinHash !== '[REDACTED]') throw new Error('kioskPinHash not scrubbed (hash-suffix gap)');
       if (out.arr[0].apiKey !== '[REDACTED]') throw new Error('array apiKey not scrubbed');
       if (out.jwtSecret !== '[REDACTED]') throw new Error('jwtSecret not scrubbed');
       if (out.pushSubscriptions[0].keys.auth !== '[REDACTED]') throw new Error('push keys.auth not scrubbed!');
