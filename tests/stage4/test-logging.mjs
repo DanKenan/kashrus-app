@@ -81,16 +81,90 @@ const testLogging = {
     );
     assert(!('error' in e2), 'no error field when no Error argument is passed');
 
-    // Sensitive keys in object args are redacted, never dumped
+    // Sensitive keys in object args are redacted, never dumped (nested too)
     const out3 = await captureWrites(() => {
-      log.error('[x] context', { apiToken: 'abc123', attempt: 2 });
+      log.error('[x] context', {
+        apiToken: 'abc123',
+        attempt: 2,
+        nested: { resetPepper: 'pepper-secret', vapidKeys: { public: 'pub', private: 'priv' } },
+      });
     });
     const e3 = JSON.parse(out3.stderr[0]);
     assert(
       e3.message.includes('[redacted]') && !e3.message.includes('abc123'),
       `sensitive values must be redacted, got ${JSON.stringify(e3.message)}`
     );
+    assert(!e3.message.includes('pepper-secret'), 'nested resetPepper must be redacted');
+    assert(!e3.message.includes('"private":"priv"'), 'nested vapid private key must be redacted');
     assert(e3.message.includes('"attempt":2'), 'non-sensitive fields must survive redaction');
+
+    // Raw strings carrying credential shapes are scrubbed
+    const out4 = await captureWrites(() => {
+      log.error('[x] auth failed', 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig');
+    });
+    const e4 = JSON.parse(out4.stderr[0]);
+    assert(
+      !e4.message.includes('Bearer eyJ') && e4.message.includes('[redacted]'),
+      `Bearer token in raw string must be scrubbed, got ${JSON.stringify(e4.message)}`
+    );
+
+    // Error stacks carrying credential shapes are scrubbed (message+stack kept)
+    const errWithSecret = new Error('connect failed: password=hunter2');
+    errWithSecret.stack = 'Error: connect failed: password=hunter2\n    at https://example.com/?apiKey=sekret123';
+    const out5 = await captureWrites(() => {
+      log.error('[x] boom', errWithSecret);
+    });
+    const e5 = JSON.parse(out5.stderr[0]);
+    assert(
+      !e5.error.message.includes('hunter2') && e5.error.message.includes('[redacted]'),
+      `error.message must be scrubbed, got ${JSON.stringify(e5.error.message)}`
+    );
+    assert(
+      !e5.error.stack.includes('sekret123') && e5.error.stack.includes('[redacted]'),
+      `error.stack must be scrubbed, got ${JSON.stringify(e5.error.stack).slice(0, 120)}`
+    );
+    assert(
+      e5.error.stack.includes('Error: connect failed'),
+      'scrubbed stack must keep the useful frame text'
+    );
+
+    // scrubText coverage matches SENSITIVE_KEY: session/cookie/PIN/JWT/
+    // verification-code assignments and Basic auth in free text
+    const out6 = await captureWrites(() => {
+      log.error(
+        '[x] session',
+        'sessionId=example123 cookie: example123 pin=1234 verificationCode: 123456 ' +
+          'Authorization: Basic Zm9vOmJhcg== token=shh'
+      );
+    });
+    const e6 = JSON.parse(out6.stderr[0]);
+    for (const secret of ['example123', '1234', '123456', 'Zm9vOmJhcg==', 'shh']) {
+      assert(
+        !e6.message.includes(secret),
+        `free-text secret must be scrubbed, found "${secret}" in ${JSON.stringify(e6.message)}`
+      );
+    }
+    assert(
+      (e6.message.match(/\[redacted\]/g) || []).length >= 5,
+      `expected >=5 redactions, got ${JSON.stringify(e6.message)}`
+    );
+
+    // --- Case 1b: Cloud Run JOB (CLOUD_RUN_JOB only, no K_SERVICE) ---
+    // Jobs don't set K_SERVICE — the logger must still emit structured JSON.
+    delete process.env.K_SERVICE;
+    process.env.CLOUD_RUN_JOB = 'shutfey-backup-tier1';
+    const { log: jobLog } = await import('../../src/server/log.ts?job=1');
+    const outJob = await captureWrites(() => {
+      jobLog.error('[backup-job] FAILED: boom');
+    });
+    assert(outJob.stderr.length === 1, `job: expected 1 stderr write, got ${outJob.stderr.length}`);
+    const eJob = JSON.parse(outJob.stderr[0]);
+    assert(eJob.severity === 'ERROR', `job: severity should be "ERROR", got ${JSON.stringify(eJob.severity)}`);
+    assert(
+      eJob.message.startsWith('[backup-job] FAILED: boom'),
+      `job: message must be structured, got ${JSON.stringify(eJob.message)}`
+    );
+    delete process.env.CLOUD_RUN_JOB;
 
     // --- Case 2: local (no K_SERVICE/CLOUD_RUN_JOB) -> plain text ---
     delete process.env.K_SERVICE;

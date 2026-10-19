@@ -27,9 +27,12 @@
  * - Message prefixes are preserved verbatim ("[alert-test] TEST ALERT",
  *   "[consistency] ERROR", "[commitOrRespond:<label>]") so existing log-filter
  *   text terms keep matching.
- * - Object arguments are serialized with sensitive keys redacted — any key
- *   matching token/password/secret/credential/api-key/auth/session/cookie/pin/jwt
- *   becomes "[redacted]", so a log line can never carry credentials or tokens.
+ * - Object arguments are serialized with sensitive keys redacted, and free
+ *   text (string args, error messages, stacks) is scrubbed for known
+ *   credential shapes (Bearer tokens, Google/ GitHub tokens, JWTs,
+ *   key=value pairs with sensitive keys). This redacts known shapes — it
+ *   cannot identify arbitrary secret-bearing strings, so callers must still
+ *   avoid logging raw request bodies, documents, or credentials.
  *
  * Only erasable TypeScript syntax is used (no enums/namespaces) so this file
  * loads under plain `node` type-stripping as well as tsx/esbuild.
@@ -40,21 +43,59 @@ export type LogSeverity = 'ERROR' | 'WARNING' | 'INFO';
 // Cloud Run services set K_SERVICE; Cloud Run jobs set CLOUD_RUN_JOB instead.
 const ON_GCP: boolean = !!process.env.K_SERVICE || !!process.env.CLOUD_RUN_JOB;
 
-// Never let a log line carry secrets: any object key that looks like a
-// credential, token, or secret has its value redacted before serialization.
-// (ChatGPT review requirement: the serializer must never dump request bodies,
-// Firestore documents, tokens, or credentials.)
-const SENSITIVE_KEY = /(token|password|secret|credential|api[-_]?key|private[-_]?key|auth|session|cookie|pin|jwt)/i;
+// Redact known secret shapes from log output. Two layers:
+// 1. Object keys that look like credentials/tokens/secrets have their values
+//    redacted (covers nested objects — the JSON replacer recurses).
+// 2. Free text (string args, error messages, stack traces) is scrubbed for
+//    credential shapes: Bearer tokens, Google/GitHub tokens, JWTs, and
+//    key=value pairs with sensitive keys.
+// This redacts KNOWN shapes; it cannot identify arbitrary secret-bearing
+// strings. Callers must still avoid logging raw request bodies, Firestore
+// documents, or credentials.
+const SENSITIVE_KEY =
+  /(token|password|secret|credential|api[-_]?key|private[-_]?key|auth|session|cookie|pin|jwt|pepper|vapid|code[-_]?hash|reset[-_]?code|verification[-_]?code)/i;
+
+const TEXT_SECRET_PATTERNS: RegExp[] = [
+  /Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, // Authorization: Bearer <token>
+  /Basic\s+[A-Za-z0-9+/]+=*/gi, // Authorization: Basic <base64 credentials>
+  /\bya29\.[A-Za-z0-9\-_]+/g, // Google OAuth access token
+  /\b(ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,})\b/g, // GitHub tokens
+  /\beyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\b/g, // JWT
+];
+
+// Key names scrubbed in free text — derived from SENSITIVE_KEY so the two
+// can never drift out of line.
+const TEXT_SENSITIVE_KEY = new RegExp(`(?:${SENSITIVE_KEY.source})`, 'i');
+
+function scrubText(text: string): string {
+  let out = text;
+  for (const re of TEXT_SECRET_PATTERNS) {
+    re.lastIndex = 0;
+    out = out.replace(re, '[redacted]');
+  }
+  // key=value or key: value where the key looks sensitive
+  // (e.g. "password=hunter2", "apiKey: abc123", "sessionId=example123")
+  out = out.replace(
+    new RegExp(
+      `([A-Za-z0-9_.-]*?${TEXT_SENSITIVE_KEY.source}[A-Za-z0-9_.-]*\\s*[:=]\\s*)([^\\s,;}"]+)`,
+      'gi'
+    ),
+    '$1[redacted]'
+  );
+  return out;
+}
 
 function argToText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (value instanceof Error) return `${value.name}: ${value.message}`;
+  if (typeof value === 'string') return scrubText(value);
+  if (value instanceof Error) return scrubText(`${value.name}: ${value.message}`);
   if (value === null || value === undefined) return String(value);
   if (typeof value === 'object') {
     try {
-      return JSON.stringify(value, (key, v) =>
-        key && SENSITIVE_KEY.test(key) ? '[redacted]' : v
-      );
+      return JSON.stringify(value, (key, v) => {
+        if (key && SENSITIVE_KEY.test(key)) return '[redacted]';
+        if (typeof v === 'string') return scrubText(v);
+        return v;
+      });
     } catch {
       return String(value);
     }
@@ -85,7 +126,12 @@ function emit(severity: LogSeverity, args: unknown[]): void {
   };
   const err = firstErrorOf(args);
   if (err) {
-    entry.error = { message: err.message, stack: err.stack };
+    // Keep message+stack (Don debugs alerts from them), scrubbed for
+    // credential shapes — an exception's text can carry a token.
+    entry.error = {
+      message: scrubText(err.message),
+      stack: typeof err.stack === 'string' ? scrubText(err.stack) : err.stack,
+    };
   }
   const line = JSON.stringify(entry);
   if (severity === 'ERROR') process.stderr.write(line + '\n');

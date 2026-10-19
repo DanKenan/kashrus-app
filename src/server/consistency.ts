@@ -183,7 +183,7 @@ export async function runConsistencyCheck(firestoreDb: any): Promise<Consistency
     // Version changed mid-check — retry (not a mismatch, just unstable read)
     if (versionBefore !== versionAfter) {
       lastError = `Monolith version changed during check (v${versionBefore} → v${versionAfter}), retrying`;
-      log.error(`[consistency] WARNING: ${lastError}`);
+      log.warn(`[consistency] WARNING: ${lastError}`);
       continue;
     }
 
