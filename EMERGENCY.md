@@ -197,7 +197,7 @@ post-backup writes after a total-restore.
     'resource.type="cloud_run_revision" AND resource.labels.service_name="workers-collaborative-dashboard"' \
     --project gen-lang-client-0875538181 \
     --limit 50 \
-    --format "table(timestamp, textPayload)" \
+    --format "table(timestamp, jsonPayload.message)" \
     | grep -iE "commitState|conflict|failed|error"
   ```
 

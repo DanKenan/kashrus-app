@@ -9,6 +9,7 @@ import webpush from 'web-push';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import * as media from './src/server/media.js';
+import { log } from './src/server/log.ts';
 
 // ---------------------------------------------------------------------------
 // Auth: bcrypt passwords + signed session tokens (HMAC-SHA256 JWT)
@@ -25,7 +26,7 @@ function getJwtSecret(): string {
     commitState(
       (freshDoc) => ({ doc: { ...freshDoc, jwtSecret }, result: null }),
       { label: 'persist-jwt-secret' }
-    ).catch((err) => console.warn('[getJwtSecret] Persist failed:', (err as any)?.message));
+    ).catch((err) => log.warn('[getJwtSecret] Persist failed:', (err as any)?.message));
   }
   return jwtSecret;
 }
@@ -87,15 +88,15 @@ async function initResetPepper(): Promise<void> {
         return;
       }
     } catch (err: any) {
-      console.warn('[Security] Could not read reset pepper from Firestore:', err?.message);
+      log.warn('[Security] Could not read reset pepper from Firestore:', err?.message);
     }
   }
   // 3. Generate and persist (first boot only).
   _resetPepper = crypto.randomBytes(32).toString('hex');
   if (!process.env.K_SERVICE) {
-    console.warn('[Security] Generated ephemeral reset pepper for local dev. Set RESET_CODE_PEPPER env var for production.');
+    log.warn('[Security] Generated ephemeral reset pepper for local dev. Set RESET_CODE_PEPPER env var for production.');
   } else {
-    console.error('[Security] WARNING: No RESET_CODE_PEPPER env var on Cloud Run. Using generated pepper persisted to Firestore. Set the env var to fix this (see docs).');
+    log.error('[Security] WARNING: No RESET_CODE_PEPPER env var on Cloud Run. Using generated pepper persisted to Firestore. Set the env var to fix this (see docs).');
   }
   // Persist transactionally so it survives restarts.
   if (firestoreDb) {
@@ -112,7 +113,7 @@ async function initResetPepper(): Promise<void> {
         { label: 'init-reset-pepper' }
       );
     } catch (err: any) {
-      console.warn('[Security] Could not persist reset pepper:', err?.message);
+      log.warn('[Security] Could not persist reset pepper:', err?.message);
     }
   }
 }
@@ -1541,7 +1542,7 @@ function hydrateState(parsed: any) {
         stateVersion = parsed._v;
       }
   } catch (err) {
-    console.warn('Could not hydrate state:', err);
+    log.warn('Could not hydrate state:', err);
   }
 }
 
@@ -1555,7 +1556,7 @@ function loadState() {
       hydrateState(JSON.parse(raw));
     }
   } catch (err) {
-    console.warn('Could not read store.json, using defaults:', err);
+    log.warn('Could not read store.json, using defaults:', err);
   }
 }
 
@@ -1597,7 +1598,7 @@ function saveState() {
     }
     fs.writeFileSync(DATA_FILE, JSON.stringify(stateSnapshot(), null, 2), 'utf-8');
   } catch (err) {
-    console.warn('Could not save store.json:', err);
+    log.warn('Could not save store.json:', err);
   }
   // Best-effort durable save to Firestore (never blocks, never throws).
   persistToFirestore();
@@ -1656,7 +1657,7 @@ async function initFirestore() {
   // is deliberately NOT triggered by this path: the degraded mode is the
   // operator's explicit choice.
   if (process.env.FORCE_LOCAL_MODE === 'true') {
-    console.warn('[Firestore] FORCE_LOCAL_MODE=true — skipping Firestore init entirely (local file only, NO durability).');
+    log.warn('[Firestore] FORCE_LOCAL_MODE=true — skipping Firestore init entirely (local file only, NO durability).');
     firestoreInitStatus = 'disabled';
     return;
   }
@@ -1665,7 +1666,7 @@ async function initFirestore() {
     // Used by the Stage 2 test suite (FIRESTORE_MOCK=true). NEVER on Cloud Run.
     if (process.env.FIRESTORE_MOCK === 'true') {
       if (process.env.K_SERVICE) {
-        console.error('[FATAL] FIRESTORE_MOCK=true on Cloud Run (K_SERVICE set). Refusing to start with mock data in production.');
+        log.error('[FATAL] FIRESTORE_MOCK=true on Cloud Run (K_SERVICE set). Refusing to start with mock data in production.');
         process.exit(1);
       }
       const mockMod = await import('./tests/stage2/firestore-mock.mjs');
@@ -1710,11 +1711,11 @@ async function initFirestore() {
       // Firestore must NEVER serve in silent degraded mode (writes would
       // land in the ephemeral container and be lost on the next deploy).
       // Crash the boot so Cloud Run surfaces the failure loudly instead.
-      console.error('[Firestore] FATAL: Firestore init failed on Cloud Run — refusing to start:', err?.message);
+      log.error('[Firestore] FATAL: Firestore init failed on Cloud Run — refusing to start:', err?.message);
       process.exit(1);
     }
     firestoreInitStatus = 'degraded-local';
-    console.warn('[Firestore] Init failed — durable persistence disabled (file only):', err?.message);
+    log.warn('[Firestore] Init failed — durable persistence disabled (file only):', err?.message);
   }
 }
 
@@ -1787,7 +1788,7 @@ async function loadStateFromFirestore(): Promise<boolean> {
     }
     return true;
   } catch (err: any) {
-    console.warn('[Firestore] Could not load state:', err?.message);
+    log.warn('[Firestore] Could not load state:', err?.message);
     return false;
   }
 }
@@ -1801,7 +1802,7 @@ async function loadStateFromFirestore(): Promise<boolean> {
 // forgotten caller fails safe instead of silently corrupting data. If you see
 // this warning in logs, that caller must be migrated to commitState().
 function persistToFirestore() {
-  console.warn('[Firestore] persistToFirestore() is retired — use commitState(). Call ignored.');
+  log.warn('[Firestore] persistToFirestore() is retired — use commitState(). Call ignored.');
 }
 
 // ============================================================================
@@ -2134,7 +2135,7 @@ async function commitState(
 
   // ---- Fallback: no Firestore (local dev only — fail-closed on Cloud Run) ----
   if (!firestoreDb) {
-    console.warn(`[Firestore] DEGRADED: writing to local file only — data will NOT persist across restarts`);
+    log.warn(`[Firestore] DEGRADED: writing to local file only — data will NOT persist across restarts`);
     const beforeDoc = stateSnapshot();
     // Dev-fallback idempotency: no durable store here, so check the
     // in-memory fallback map (synchronous section — atomic in the event loop).
@@ -2174,7 +2175,7 @@ async function commitState(
         if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
         fs.writeFileSync(DATA_FILE, JSON.stringify(stateSnapshot(), null, 2), 'utf-8');
       } catch (err) {
-        console.warn('[commitState] File fallback save failed:', (err as any)?.message);
+        log.warn('[commitState] File fallback save failed:', (err as any)?.message);
       }
     }
     const result = { result: outcome.result, version: stateVersion };
@@ -2346,7 +2347,7 @@ async function commitState(
         // dual-wrote to per-entity collections, and hydrateState loads the same
         // entity data from the monolith doc. Both layouts are in sync.
       } else {
-        console.warn(
+        log.warn(
           `[commitState:${label}] Skipping stale hydration: committed v${committedVersion} <= current v${stateVersion}. ` +
           `Newer state already in cache — not overwriting.`
         );
@@ -2386,7 +2387,7 @@ async function commitState(
         throw err;
       }
       // Firestore errors (unavailable, deadline exceeded, etc.)
-      console.warn(`[commitState:${label}] Transaction failed (attempt ${attempt}/${maxAttempts}):`, err?.message);
+      log.warn(`[commitState:${label}] Transaction failed (attempt ${attempt}/${maxAttempts}):`, err?.message);
       lastError = err;
       if (attempt < maxAttempts) continue;
       throw new FirestoreUnavailableError(`Save failed after ${maxAttempts} attempts: ${err?.message || 'unknown error'}. Your data was NOT saved — please retry.`);
@@ -2502,19 +2503,19 @@ async function commitOrRespond(
       return null;
     }
     if (err instanceof DocumentTooLargeError) {
-      console.error(`[commitOrRespond:${options.label || 'unnamed'}] ${err.message}`);
+      log.error(`[commitOrRespond:${options.label || 'unnamed'}] ${err.message}`);
       res.status(503).json({ error: err.message, code: 'SIZE_LIMIT' });
       return null;
     }
     if (err instanceof FirestoreUnavailableError) {
-      console.error(`[commitOrRespond:${options.label || 'unnamed'}] ${err.message}`);
+      log.error(`[commitOrRespond:${options.label || 'unnamed'}] ${err.message}`);
       res.status(503).json({
         error: 'Could not save — the database is unreachable. Your changes were NOT saved. Please try again.',
         code: 'SAVE_FAILED',
       });
       return null;
     }
-    console.error(`[commitOrRespond:${options.label || 'unnamed'}] Unexpected error:`, err);
+    log.error(`[commitOrRespond:${options.label || 'unnamed'}] Unexpected error:`, err);
     res.status(500).json({ error: 'Save failed. Your changes were NOT saved. Please try again.', code: 'SAVE_FAILED' });
     return null;
   }
@@ -2726,7 +2727,7 @@ function ensureVapidKeys() {
     commitState(
       (freshDoc) => ({ doc: { ...freshDoc, vapidKeys }, result: null }),
       { label: 'persist-vapid-keys' }
-    ).catch((err) => console.warn('[Push] VAPID key persist failed:', (err as any)?.message));
+    ).catch((err) => log.warn('[Push] VAPID key persist failed:', (err as any)?.message));
   }
   webpush.setVapidDetails(
     'mailto:kenan@hartfordkashrut.org',
@@ -2760,9 +2761,9 @@ function sendPushToUser(userEmail: string, title: string, body: string, data?: a
               };
             },
             { label: 'prune-dead-push-subscription' }
-          ).catch((e) => console.warn('[Push] Dead-subscription prune failed:', (e as any)?.message));
+          ).catch((e) => log.warn('[Push] Dead-subscription prune failed:', (e as any)?.message));
         } else {
-          console.warn('[Push] Send failed:', err?.message || err);
+          log.warn('[Push] Send failed:', err?.message || err);
         }
       });
   }
@@ -2847,7 +2848,7 @@ function cleanupExpiredMedia() {
         };
       },
       { label: 'media-cleanup' }
-    ).catch((err) => console.warn('[MediaCleanup] Persist failed:', (err as any)?.message));
+    ).catch((err) => log.warn('[MediaCleanup] Persist failed:', (err as any)?.message));
   }
 }
 
@@ -3224,7 +3225,7 @@ async function executeDailyReset(
       { label: 'daily-reset', operationId: opts.operationId }
     );
   } catch (err) {
-    console.warn('[DailyReset] Transaction failed:', (err as any)?.message);
+    log.warn('[DailyReset] Transaction failed:', (err as any)?.message);
     throw err;
   }
 
@@ -3263,7 +3264,7 @@ setInterval(() => {
     // Async: resolves only after the transaction commits. Log-and-continue on
     // failure — the next 60s tick retries the rollover.
     executeDailyReset(undefined, 'scheduled_midnight_cron').catch((err) =>
-      console.warn('[Scheduled Reset] Failed:', (err as any)?.message)
+      log.warn('[Scheduled Reset] Failed:', (err as any)?.message)
     );
   }
 }, 60000);
@@ -3674,7 +3675,7 @@ function mediaErrorResponse(req: any, res: any, e: any, genericMessage: string, 
   if (e instanceof media.MediaError) {
     res.status(e.status).json({ error: e.message, code: e.code });
   } else {
-    console.error(`[media] ${logPrefix} error:`, e);
+    log.error(`[media] ${logPrefix} error:`, e);
     const user = getAuthUser(req);
     const detail = user?.role === 'admin' && e?.message ? `: ${e.message}` : '';
     res.status(500).json({ error: genericMessage + detail });
@@ -3876,7 +3877,7 @@ async function verifySchedulerOidc(req: any): Promise<boolean> {
     'https://workers-collaborative-dashboard-1080260390009.us-east1.run.app';
 
   if (!expectedSa) {
-    console.warn('[media] SCHEDULER_SERVICE_ACCOUNT not configured; OIDC verification disabled.');
+    log.warn('[media] SCHEDULER_SERVICE_ACCOUNT not configured; OIDC verification disabled.');
     return false;
   }
 
@@ -3891,17 +3892,17 @@ async function verifySchedulerOidc(req: any): Promise<boolean> {
     if (!payload) return false;
     // Verify the token was issued for the expected service account
     if (payload.email !== expectedSa) {
-      console.warn(`[media] OIDC email mismatch: ${payload.email} !== ${expectedSa}`);
+      log.warn(`[media] OIDC email mismatch: ${payload.email} !== ${expectedSa}`);
       return false;
     }
     // Verify issuer is Google
     if (payload.iss !== 'https://accounts.google.com' && payload.iss !== 'accounts.google.com') {
-      console.warn(`[media] OIDC issuer mismatch: ${payload.iss}`);
+      log.warn(`[media] OIDC issuer mismatch: ${payload.iss}`);
       return false;
     }
     return true;
   } catch (e: any) {
-    console.warn('[media] OIDC verification failed:', e?.message);
+    log.warn('[media] OIDC verification failed:', e?.message);
     return false;
   }
 }
@@ -3921,7 +3922,7 @@ app.post('/api/media/sweep', async (req, res) => {
     // If any deletions failed, return 500 so Cloud Scheduler retries.
     // The sweeper marks failed records with deleteError for the next run.
     if (result.errors.length > 0) {
-      console.error(`[media] Sweeper completed with ${result.errors.length} errors:`, result.errors);
+      log.error(`[media] Sweeper completed with ${result.errors.length} errors:`, result.errors);
       res.status(500).json({
         error: 'Sweeper completed with deletion errors; will retry.',
         ...result,
@@ -3930,7 +3931,7 @@ app.post('/api/media/sweep', async (req, res) => {
     }
     res.json(result);
   } catch (e: any) {
-    console.error('[media] sweep error:', e);
+    log.error('[media] sweep error:', e);
     res.status(500).json({ error: 'Sweeper failed.' });
   }
 });
@@ -3961,7 +3962,7 @@ app.post('/api/internal/consistency-check', async (req, res) => {
     }
     res.json(result);
   } catch (e: any) {
-    console.error('[consistency] check error:', e);
+    log.error('[consistency] check error:', e);
     res.status(500).json({ error: 'Consistency check failed.', detail: e?.message });
   }
 });
@@ -3975,7 +3976,7 @@ app.post('/api/internal/test-alert', async (req, res) => {
   const admin = requireAdmin(req, res);
   if (!admin) return;
   const stamp = new Date().toISOString();
-  console.error(`[alert-test] TEST ALERT from Shutfey admin at ${stamp}. If you received this, the monitoring pipeline works.`);
+  log.error(`[alert-test] TEST ALERT from Shutfey admin at ${stamp}. If you received this, the monitoring pipeline works.`);
   res.json({ ok: true, sentAt: stamp, message: 'Test alert logged. Check your email/phone for the Cloud Monitoring notification.' });
 });
 
@@ -4081,13 +4082,13 @@ app.delete('/api/media/:id/test-cleanup', async (req, res) => {
       try {
         await store.storage.bucket(store.bucketName).file(doc.storagePath).delete({ ignoreNotFound: true });
       } catch (e: any) {
-        console.warn(`[media] test-cleanup storage delete failed: ${e?.message}`);
+        log.warn(`[media] test-cleanup storage delete failed: ${e?.message}`);
       }
     }
     await docRef.delete();
     res.json({ ok: true, deleted: req.params.id });
   } catch (e: any) {
-    console.error('[media] test-cleanup error:', e);
+    log.error('[media] test-cleanup error:', e);
     res.status(500).json({ error: 'Cleanup failed.' });
   }
 });
@@ -5760,7 +5761,7 @@ app.post('/api/admin/migrate-copy', async (req, res) => {
     const result = await migrateCopy(firestoreDb);
     res.json({ ok: true, ...result });
   } catch (e: any) {
-    console.error('[migration] copy error:', e);
+    log.error('[migration] copy error:', e);
     res.status(500).json({ error: 'Migration copy failed.', detail: e?.message });
   }
 });
@@ -5782,7 +5783,7 @@ app.get('/api/admin/per-entity-status', async (req, res) => {
     const result = await perEntityStatus(firestoreDb);
     res.json(result);
   } catch (e: any) {
-    console.error('[migration] status error:', e);
+    log.error('[migration] status error:', e);
     res.status(500).json({ error: 'Status check failed.', detail: e?.message });
   }
 });
@@ -6634,7 +6635,7 @@ app.post('/api/auth/login', async (req, res) => {
         { label: 'login-password-upgrade' }
       );
     } catch (err) {
-      console.warn('[login] Password-hash upgrade write failed (login still succeeds):', (err as any)?.message);
+      log.warn('[login] Password-hash upgrade write failed (login still succeeds):', (err as any)?.message);
     }
   }
 
@@ -7582,7 +7583,7 @@ async function startServer() {
       return { doc: { ...freshDoc, tasks: normalized }, result: { changed: true } };
     },
     { label: 'normalize-task-order-boot' }
-  ).catch((err) => console.warn('[Boot] Task-order backfill failed:', (err as any)?.message));
+  ).catch((err) => log.warn('[Boot] Task-order backfill failed:', (err as any)?.message));
 
   // Web Push: VAPID keys must be ready after durable state loads (env vars
   // take precedence over persisted keys inside ensureVapidKeys).
@@ -7595,7 +7596,7 @@ async function startServer() {
     // Boot must never die on a startup-write failure. The server starts and
     // serves; the failed backfill is logged for investigation. Data safety
     // is preserved because reads loaded successfully above.
-    console.error('[Boot] Startup writes failed (non-fatal, server continuing):', err?.message);
+    log.error('[Boot] Startup writes failed (non-fatal, server continuing):', err?.message);
   }
   }
 

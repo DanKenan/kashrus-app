@@ -20,6 +20,7 @@
  * enforced by the sweeper, not by backup retention).
  */
 
+import { log } from './log.ts';
 import crypto from 'crypto';
 
 const FIRESTORE_STATE_DOC = 'app-state/main';
@@ -195,7 +196,7 @@ export async function runTier1Backup(
     const versionAfter = monolithSnapAfter.data()?._v;
     if (versionBefore !== versionAfter) {
       lastError = `Monolith version changed during backup (v${versionBefore} → v${versionAfter}), retrying`;
-      console.warn(`[backup] ${lastError} (attempt ${attempt})`);
+      log.warn(`[backup] ${lastError} (attempt ${attempt})`);
       continue;
     }
 

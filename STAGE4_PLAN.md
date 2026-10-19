@@ -73,7 +73,7 @@ EMERGENCY.md remains the incident runbook — Stage 4 does not rewrite it, only 
 1. **Uptime check** on `https://workers-collaborative-dashboard-1080260390009.us-east1.run.app/api/health` — 5-min interval, alert on 2 consecutive failures.
 2. **Log-based alerts** (Cloud Logging → Alerting):
    - `severity=ERROR` on the Cloud Run service → notification.
-   - `textPayload =~ "commitState.*failed"` → notification.
+   - `jsonPayload.message =~ "commitState.*failed"` → notification. (Server logs are structured JSON on Cloud Run — text lives in `jsonPayload.message`, not `textPayload`.)
    - `httpRequest.status=503 AND httpRequest.requestUrl =~ "/api/"` spike → notification (maintenance mode is intentional; unexpected 503s are not — correlate with deploys).
 3. **Notification channel:** Don's phone (SMS via the alerting notification channel) + email. One channel is fine — two is better. Don chooses.
 4. **Dashboard:** a single Cloud Monitoring dashboard with the table above — request rate, 5xx rate, Firestore reads/writes vs quota, Storage bytes. Bookmark it; it's the "is the app healthy" page.
