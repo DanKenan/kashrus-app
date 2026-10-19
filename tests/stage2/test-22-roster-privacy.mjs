@@ -24,21 +24,24 @@
  * canAssignTasks, and an agency-less user; trigger each broadcast and assert
  * per-recipient scoping.
  */
-import { createHmac } from 'node:crypto';
 
 const AGENCY_B = 'agency-test22-b';
 
-function base64url(s) {
-  return Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-/** Mint a session JWT for a user ID using the server's JWT secret. */
-function mintToken(userId, jwtSecret) {
-  const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const now = Math.floor(Date.now() / 1000);
-  const payload = base64url(JSON.stringify({ sub: userId, iat: now, exp: now + 30 * 24 * 3600 }));
-  const sig = base64url(createHmac('sha256', jwtSecret).update(`${header}.${payload}`).digest());
-  return `${header}.${payload}.${sig}`;
+/** Mint a session JWT server-side (test-only endpoint). Never reads the
+ * signing secret from the doc — Test 18's restore cycle strips jwtSecret
+ * by design, so the doc has none from Test 18 onward. */
+async function mintToken(baseUrl, userId) {
+  const res = await fetch(`${baseUrl}/api/__test__/mint-token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+  if (res.status !== 200) {
+    throw new Error(`mint-token failed for ${userId}: ${res.status}`);
+  }
+  const { token } = await res.json();
+  if (!token) throw new Error(`mint-token returned no token for ${userId}`);
+  return token;
 }
 
 function connectWs(baseUrl, token) {
@@ -155,13 +158,12 @@ export default {
     });
     if (inj.status !== 200) throw new Error(`fixture inject failed: ${inj.status} ${JSON.stringify(inj.json)}`);
 
-    const doc = await ctx.getDoc();
-    const jwtSecret = doc.jwtSecret || process.env.JWT_SECRET;
-    if (!jwtSecret) throw new Error('no jwtSecret available to mint tokens');
-    const tokenAdminB = mintToken(adminBId, jwtSecret);
-    const tokenStaffB = mintToken(staffBId, jwtSecret);
-    const tokenAssignerB = mintToken(assignerBId, jwtSecret);
-    const tokenNoAgency = mintToken(noAgencyId, jwtSecret);
+    // Sessions come from the server-side mint-token endpoint — never from
+    // doc.jwtSecret (stripped by Test 18's restore by design).
+    const tokenAdminB = await mintToken(baseUrl, adminBId);
+    const tokenStaffB = await mintToken(baseUrl, staffBId);
+    const tokenAssignerB = await mintToken(baseUrl, assignerBId);
+    const tokenNoAgency = await mintToken(baseUrl, noAgencyId);
     const authB = (t) => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${t}` });
 
     // --- 2. WS clients ---
@@ -298,7 +300,7 @@ export default {
           throw new Error(`fast-path: fp user ${suffix} create failed: ${res.status}`);
         }
         const { user } = await res.json();
-        const conn = await connectWs(baseUrl, mintToken(user.id, jwtSecret));
+        const conn = await connectWs(baseUrl, await mintToken(baseUrl, user.id));
         if (!conn.messages.some((m) => m.type === 'INITIAL_STATE')) {
           throw new Error(`fast-path: fp socket ${suffix} got no INITIAL_STATE`);
         }

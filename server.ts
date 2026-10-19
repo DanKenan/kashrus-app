@@ -382,6 +382,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/staged' },
         { method: 'POST', path: '/__test__/revoke-user-silent' },
         { method: 'POST', path: '/__test__/drop-socket-meta' },
+        { method: 'POST', path: '/__test__/mint-token' },
       ]
     : []),
 ];
@@ -4803,6 +4804,40 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     }
   });
 
+  // TEST ONLY: injects venues/tasks/agencies/users directly into Firestore
+  // (for cross-agency test fixtures that can't be created via the scoped
+  // HTTP API). Used by test-10 and test-16.
+  app.post('/api/__test__/inject-fixture', async (req, res) => {
+    const { venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [] } = req.body || {};
+    try {
+      await commitState(
+        (freshDoc) => {
+          const newVenues = [...(freshDoc.venues || []), ...venues];
+          const newTasks = [...(freshDoc.tasks || []), ...tasks];
+          const mergedAgencies = [...(freshDoc.agencies || [])];
+          for (const a of newAgencies) {
+            if (!mergedAgencies.some((x: any) => x && x.id === a.id)) mergedAgencies.push(a);
+          }
+          const mergedUsers = [...(freshDoc.users || []), ...newUsers];
+          return {
+            doc: { ...freshDoc, venues: newVenues, tasks: newTasks, agencies: mergedAgencies, users: mergedUsers },
+            result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length },
+          };
+        },
+        { label: 'test-inject-fixture' }
+      );
+      res.json({ success: true, injected: venues.length + tasks.length + newAgencies.length + newUsers.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+}
+
+// Test-only broadcast-authorization endpoints. Registered ONLY when
+// isTestMode() is true (STAGE2_TEST_MODE=true AND not on Cloud Run), in a
+// dedicated block separate from the FIRESTORE_MOCK endpoints — they must
+// never exist outside test mode, even with FIRESTORE_MOCK=true.
+if (isTestMode()) {
   // TEST ONLY: silently revokes a user (removes from the in-memory users array
   // and persists) WITHOUT broadcasting. Lets tests verify broadcast
   // authorization independently of the revocation broadcast (which would
@@ -4853,29 +4888,19 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     }
   });
 
-  // TEST ONLY: injects venues/tasks/agencies/users directly into Firestore
-  // (for cross-agency test fixtures that can't be created via the scoped
-  // HTTP API). Used by test-10 and test-16.
-  app.post('/api/__test__/inject-fixture', async (req, res) => {
-    const { venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [] } = req.body || {};
+  // TEST ONLY: mints a session JWT for a user ID, signing server-side with
+  // getJwtSecret(). Lets tests obtain valid sessions without reading the
+  // signing secret from the doc (Test 18's restore cycle strips jwtSecret by
+  // design). Test mode only — never a production credential.
+  app.post('/api/__test__/mint-token', async (req, res) => {
+    const { userId } = req.body || {};
     try {
-      await commitState(
-        (freshDoc) => {
-          const newVenues = [...(freshDoc.venues || []), ...venues];
-          const newTasks = [...(freshDoc.tasks || []), ...tasks];
-          const mergedAgencies = [...(freshDoc.agencies || [])];
-          for (const a of newAgencies) {
-            if (!mergedAgencies.some((x: any) => x && x.id === a.id)) mergedAgencies.push(a);
-          }
-          const mergedUsers = [...(freshDoc.users || []), ...newUsers];
-          return {
-            doc: { ...freshDoc, venues: newVenues, tasks: newTasks, agencies: mergedAgencies, users: mergedUsers },
-            result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length },
-          };
-        },
-        { label: 'test-inject-fixture' }
-      );
-      res.json({ success: true, injected: venues.length + tasks.length + newAgencies.length + newUsers.length });
+      if (!userId || typeof userId !== 'string') {
+        return res.status(400).json({ error: 'userId required' });
+      }
+      const user = users.find((u) => u.id === userId);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      res.json({ token: signToken(userId) });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
