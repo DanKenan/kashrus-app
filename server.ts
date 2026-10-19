@@ -6788,9 +6788,12 @@ app.put('/api/users/:id', async (req, res) => {
     ...base,
     users: getSafeUsersForAgency(updated.agencyId, recipientForMeta(meta)),
   }));
-  // ChatGPT round-1 (3): if the role/permission change revoked the user's
-  // access to private tasks, their OPEN sockets still hold the old copies.
-  // Send TASK_DELETED for every private task they can no longer see.
+  // ChatGPT round-1 (3) + round-2: if the role/permission change revoked the
+  // user's access to private tasks, their OPEN sockets still hold the old
+  // copies (tasks AND historyLogs). Send TASK_DELETED for every private task
+  // they can no longer see, then a fresh permission-filtered INITIAL_STATE
+  // so their history view is replaced wholesale (client handles INITIAL_STATE
+  // by replacing tasks/historyLogs/events/users — App.tsx ~L414).
   {
     const oldUser = existingUser;
     const lostTasks = tasks.filter(
@@ -6808,6 +6811,23 @@ app.put('/api/users/:id', async (req, res) => {
           t.agencyId || 'agency-hkc',
           (meta) => (meta.userId === updated.id ? { id: t.id, venueId: t.venueId, agencyId: t.agencyId } : null)
         );
+      }
+      // Fresh filtered INITIAL_STATE to the affected user's sockets only.
+      const freshState = JSON.stringify({
+        type: 'INITIAL_STATE',
+        payload: {
+          ...agencyStateFor(updated.agencyId || 'agency-hkc', updated),
+          activeWorkersCount: activeSockets.size,
+        },
+        timestamp: new Date().toISOString(),
+        version: typeof stateVersion === 'number' ? stateVersion : undefined,
+      });
+      for (const client of wss.clients) {
+        if (client.readyState !== WebSocket.OPEN) continue;
+        const meta = activeSockets.get(client);
+        if (meta && meta.userId === updated.id) {
+          client.send(freshState);
+        }
       }
     }
   }

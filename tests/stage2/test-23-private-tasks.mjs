@@ -412,6 +412,16 @@ export default {
 
     // --- 7. Demotion: coordinator -> mashgiach while connected ---
     {
+      // Seed history: run a reset so the coordinator's socket holds history
+      // with the private task's title/notes before demotion.
+      const seedReset = await fetch(`${baseUrl}/api/reset-daily`, {
+        method: 'POST',
+        headers: authB(tAdminB),
+        body: JSON.stringify({}),
+      });
+      if (seedReset.status !== 200) throw new Error(`seed reset failed: ${seedReset.status}`);
+      await new Promise((r) => setTimeout(r, 2000));
+      clearAll();
       const ver = await v();
       const dem = await fetch(`${baseUrl}/api/users/${coordBId}?expectedVersion=${ver}`, {
         method: 'PUT',
@@ -427,6 +437,27 @@ export default {
       );
       if (!demoteDel) {
         throw new Error('demotion: no TASK_DELETED sent for revoked private task');
+      }
+      // ChatGPT round-2: demoted socket must receive a fresh INITIAL_STATE that
+      // replaces its history view — whole JSON must carry neither the private
+      // title nor the notes. Admin's socket is untouched.
+      const initials = cCoordB.messages.filter((m) => m.type === 'INITIAL_STATE');
+      // (Connect-time INITIAL_STATE was cleared after the seed reset; the
+      // demotion sends a fresh one.)
+      if (initials.length < 1) {
+        throw new Error('demotion: no fresh INITIAL_STATE sent to demoted socket');
+      }
+      const fresh = initials[initials.length - 1];
+      const freshHaystack = JSON.stringify(fresh);
+      for (const needle of [privateTask.title, privateTask.notes, privateTask.id]) {
+        if (freshHaystack.includes(needle)) {
+          throw new Error(`demotion: fresh INITIAL_STATE leaks "${needle.slice(0, 30)}"`);
+        }
+      }
+      // Admin's socket: no fresh INITIAL_STATE (untouched; cleared after seed).
+      const adminInitials = cAdminB.messages.filter((m) => m.type === 'INITIAL_STATE');
+      if (adminInitials.length !== 0) {
+        throw new Error('demotion: admin socket received unexpected INITIAL_STATE');
       }
       clearAll();
       // Private task update: demoted ex-coordinator (not an assignee) must NOT get it.
