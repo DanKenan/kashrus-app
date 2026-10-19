@@ -7462,6 +7462,12 @@ app.get('/api/airtable/config', (req, res) => {
   if (!caller) return;
   const venueScope = scopedVenueIds(req, res);
   if (!venueScope) return;
+  // Empty scope (non-admin with no venue): 403 — a venue-less caller gets
+  // no config, not the agency-level one. This check runs BEFORE the lookup
+  // below, which would otherwise fall through to the agency config.
+  if (venueScope !== 'agency' && venueScope.length === 0) {
+    return res.status(403).json({ error: 'No venue assigned.' });
+  }
   const callerAgencyId = caller.agencyId || 'agency-hkc';
   // For non-privileged callers the venue is forced to their own venue;
   // privileged callers may narrow by ?venueId (already validated).

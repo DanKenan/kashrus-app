@@ -87,12 +87,14 @@ export default {
     const adminAId = `user-test24-admina-${ts}`;
     const mashAId = `user-test24-masha-${ts}`;
     const mashA2Id = `user-test24-masha2-${ts}`;
+    const mashNoVenueId = `user-test24-mashnov-${ts}`;
     const coordAId = `user-test24-coorda-${ts}`;
     const adminBId = `user-test24-adminb-${ts}`;
     const mashBId = `user-test24-mashb-${ts}`;
     const adminAEmail = `test24-admina-${ts}@test.local`;
     const mashAEmail = `test24-masha-${ts}@test.local`;
     const mashA2Email = `test24-masha2-${ts}@test.local`;
+    const mashNoVenueEmail = `test24-mashnov-${ts}@test.local`;
     const coordAEmail = `test24-coorda-${ts}@test.local`;
     const adminBEmail = `test24-adminb-${ts}@test.local`;
     const mashBEmail = `test24-mashb-${ts}@test.local`;
@@ -134,6 +136,7 @@ export default {
         { id: adminAId, email: adminAEmail, name: 'T24 Admin A', role: 'admin', agencyId: AGENCY_A },
         { id: mashAId, email: mashAEmail, name: 'T24 Mash A', role: 'mashgiach', agencyId: AGENCY_A, venueId: venueA },
         { id: mashA2Id, email: mashA2Email, name: 'T24 Mash A2', role: 'mashgiach', agencyId: AGENCY_A, venueId: venueA2 },
+        { id: mashNoVenueId, email: mashNoVenueEmail, name: 'T24 Mash NoVenue', role: 'mashgiach', agencyId: AGENCY_A },
         { id: coordAId, email: coordAEmail, name: 'T24 Coord A', role: 'coordinator', agencyId: AGENCY_A },
         { id: adminBId, email: adminBEmail, name: 'T24 Admin B', role: 'admin', agencyId: AGENCY_B },
         { id: mashBId, email: mashBEmail, name: 'T24 Mash B', role: 'mashgiach', agencyId: AGENCY_B, venueId: venueB },
@@ -184,6 +187,7 @@ export default {
     const tAdminB = await mintToken(baseUrl, adminBId);
     const tMashB = await mintToken(baseUrl, mashBId);
     const tMashA2 = await mintToken(baseUrl, mashA2Id);
+    const tMashNoVenue = await mintToken(baseUrl, mashNoVenueId);
     const tCoordA = await mintToken(baseUrl, coordAId);
 
     // --- 2. F1 spoof: A's token + ?userEmail=<B admin> must return only A's data ---
@@ -378,16 +382,37 @@ export default {
         throw new Error('toggle: forged userEmail was stored');
       }
 
-      // POST /api/tasks/:id/check-in: byEmail must be the session user
+      // POST /api/tasks/:id/check-in: byEmail must be the session user (strict)
       const ver5 = await ctx.getVersion();
       const cr = await postJson(baseUrl, `/api/tasks/${taskAId}/check-in?expectedVersion=${ver5}`, tAdminA, {
         notes: `Check-in ${ts}`, userEmail: 'forged@example.com', userName: 'Forged',
       });
       if (cr.status !== 200 && cr.status !== 201) throw new Error(`check-in: ${cr.status}`);
-      const checkIn = cr.body.checkIn || cr.body;
-      const checkInEmail = checkIn.byEmail || checkIn.updatedByEmail;
-      if (checkInEmail && checkInEmail !== adminAEmail) {
-        throw new Error(`check-in attribution wrong: ${checkInEmail} (expected ${adminAEmail})`);
+      // Read the task back; the new check-in must carry the session user's email.
+      const gr = await fetch(`${baseUrl}/api/tasks`, { headers: auth(tAdminA) });
+      const gb = await gr.json();
+      const taskBack = (gb.tasks || []).find((t) => t.id === taskAId);
+      if (!taskBack) throw new Error('check-in: task not found on read-back');
+      const latestCheckIn = (taskBack.checkIns || []).slice(-1)[0];
+      if (!latestCheckIn) throw new Error('check-in: no check-in entry stored (Rule L)');
+      if (latestCheckIn.byEmail !== adminAEmail) {
+        throw new Error(`check-in attribution wrong: ${latestCheckIn.byEmail} (expected ${adminAEmail})`);
+      }
+
+      // PUT /api/tasks/:id completion: updatedByEmail must be the session user.
+      // (The handler sets updatedByEmail from caller.email when finalIsCompleted.)
+      const ver6 = await ctx.getVersion();
+      const pur = await fetch(`${baseUrl}/api/tasks/${taskAId}?expectedVersion=${ver6}`, {
+        method: 'PUT', headers: auth(tAdminA),
+        body: JSON.stringify({ isCompleted: true, userEmail: 'forged@example.com', userName: 'Forged' }),
+      });
+      if (pur.status !== 200) throw new Error(`PUT complete task: ${pur.status}`);
+      const gr2 = await fetch(`${baseUrl}/api/tasks`, { headers: auth(tAdminA) });
+      const gb2 = await gr2.json();
+      const taskBack2 = (gb2.tasks || []).find((t) => t.id === taskAId);
+      if (!taskBack2) throw new Error('PUT: task not found on read-back');
+      if (taskBack2.updatedByEmail !== adminAEmail) {
+        throw new Error(`PUT attribution wrong: ${taskBack2.updatedByEmail} (expected ${adminAEmail})`);
       }
     }
 
@@ -417,6 +442,31 @@ export default {
       const cids3 = (cb3.notes || []).map((n) => n.id);
       if (!cids3.includes(noteA2Id) || cids3.includes(noteAId)) {
         throw new Error('venue scoping: coordinator ?venueId=venueA2 should see only venueA2');
+      }
+      // mashgiach with NO venueId → [] on all five GETs (never agency-wide)
+      for (const [path, key] of [
+        ['/api/handoff-notes', 'notes'],
+        ['/api/incidents', 'incidents'],
+        ['/api/ingredients', 'ingredients'],
+        ['/api/factory-reports', 'reports'],
+        ['/api/history', 'historyLogs'],
+      ]) {
+        const r = await fetch(`${baseUrl}${path}`, { headers: auth(tMashNoVenue) });
+        if (r.status !== 200) throw new Error(`no-venue: ${path} → ${r.status} (expected 200 with [])`);
+        const b = await r.json();
+        const items = b[key] || [];
+        if (items.length !== 0) {
+          throw new Error(`no-venue: ${path} returned ${items.length} rows (expected 0)`);
+        }
+      }
+      // mashgiach with NO venueId: system defaults to 'venue-crown-market' (legacy).
+      // Must NOT get agency-level config — only the empty default shape.
+      const acr = await fetch(`${baseUrl}/api/airtable/config`, { headers: auth(tMashNoVenue) });
+      if (acr.status !== 200) throw new Error(`no-venue: /api/airtable/config → ${acr.status} (expected 200)`);
+      const acb = await acr.json();
+      const cfg = acb.config || acb;
+      if (cfg.baseId || cfg.hasApiKey) {
+        throw new Error('no-venue: got agency config (baseId/apiKey present) — should be empty default');
       }
     }
 
