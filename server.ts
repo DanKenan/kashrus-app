@@ -3099,7 +3099,8 @@ async function executeDailyReset(
   const stamp = crypto.randomUUID();
 
   // Build a single history snapshot from a venue + its tasks (pure function).
-  const buildSnapshot = (v: any, venueTasks: any[]): HistoryLog => {
+  // archiveDate is the workday being closed (computed in the mutator below).
+  const buildSnapshot = (v: any, venueTasks: any[], archiveDate: string): HistoryLog => {
     const completedCount = venueTasks.filter((t) => t.isCompleted).length;
     const totalCount = venueTasks.length;
     const rate = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
@@ -3107,7 +3108,7 @@ async function executeDailyReset(
       id: `hist-${v.id}-${stamp}`,
       agencyId: v.agencyId || 'agency-hkc',
       venueId: v.id,
-      date: currentWorkDate,
+      date: archiveDate,
       totalTasks: totalCount,
       completedTasks: completedCount,
       completionRate: rate,
@@ -3202,8 +3203,16 @@ async function executeDailyReset(
         const targetVenues = targetVenueId
           ? scopedVenues.filter((v) => v.id === targetVenueId)
           : scopedVenues;
+        // The archive date is the workday being closed:
+        // - Scheduled rollover: the previous workday (freshDoc.currentWorkDate,
+        //   which differs from todayStr — that's what triggered the reset).
+        // - Manual force reset: today's work (todayStr).
+        // (Never the module-level currentWorkDate: it's initialized once at
+        // startup to the UTC date — one day AHEAD of New York between
+        // 00:00–04:00 UTC — and resets never update it.)
+        const archiveDate = opts.force ? todayStr : freshDoc.currentWorkDate || todayStr;
         const snapshots = targetVenues.map((v) =>
-          buildSnapshot(v, freshTasks.filter((t) => t.venueId === v.id))
+          buildSnapshot(v, freshTasks.filter((t) => t.venueId === v.id), archiveDate)
         );
         // Scoped venue IDs for task filtering (null = all venues, system reset).
         const scopedVenueIds = scopeAgencyId ? new Set(targetVenues.map((v) => v.id)) : null;
@@ -4717,7 +4726,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
   // (for cross-agency test fixtures that can't be created via the scoped
   // HTTP API). Used by test-10 and test-16.
   app.post('/api/__test__/inject-fixture', async (req, res) => {
-    const { venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [] } = req.body || {};
+    const { venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [], currentWorkDate: newWorkDate } = req.body || {};
     try {
       await commitState(
         (freshDoc) => {
@@ -4729,7 +4738,16 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
           }
           const mergedUsers = [...(freshDoc.users || []), ...newUsers];
           return {
-            doc: { ...freshDoc, venues: newVenues, tasks: newTasks, agencies: mergedAgencies, users: mergedUsers },
+            doc: {
+              ...freshDoc,
+              venues: newVenues,
+              tasks: newTasks,
+              agencies: mergedAgencies,
+              users: mergedUsers,
+              // Test-only: allow pinning the workday (e.g. to simulate a
+              // scheduled rollover from the previous workday).
+              ...(newWorkDate ? { currentWorkDate: newWorkDate } : {}),
+            },
             result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length },
           };
         },
@@ -5585,14 +5603,18 @@ app.post('/api/reset-daily', async (req, res) => {
   if (!admin) return;
   const agencyId = admin.agencyId || 'agency-hkc';
 
-  const { venueId, resetBy, operationId } = req.body;
+  const { venueId, resetBy, operationId, force } = req.body;
   // A targeted reset must reference the caller's own agency venue.
   if (venueId && !requireOwnVenue(req, res, venueId, venues)) return;
   try {
     // Await the CONFIRMED transaction before responding or broadcasting.
     // Agency-scoped: only the caller's agency venues are reset.
+    // force defaults to true (manual admin reset). Passing force:false
+    // exercises the scheduled-rollover path (used by the internal midnight
+    // scheduler and the Stage 2 test suite); it no-ops if the workday is
+    // already today.
     const outcome = await executeDailyReset(venueId, resetBy || 'Admin Manual', {
-      force: true,
+      force: force !== false,
       operationId: operationId || crypto.randomUUID(),
       agencyId,
     });

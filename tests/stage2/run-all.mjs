@@ -75,6 +75,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-8-password-reset-security.mjs')).default,
     (await import('./test-9-airtable-key-preservation.mjs')).default,
     (await import('./test-10-daily-reset.mjs')).default,
+    (await import('./test-10b-scheduled-rollover.mjs')).default,
     (await import('./test-11-maintenance-mode.mjs')).default,
     (await import('./test-12-out-of-order-hydration.mjs')).default,
     (await import('./test-13-noop-detection.mjs')).default,
