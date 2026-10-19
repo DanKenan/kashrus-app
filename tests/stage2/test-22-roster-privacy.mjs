@@ -123,7 +123,7 @@ function assertAgencyScopedArrays(payload, agencyId, label) {
 export default {
   name: 'Test 22: Roster privacy — per-recipient agency filtering',
   whatItProves:
-    'Roster payloads (INITIAL_STATE, USERS_UPDATED create/update/delete, CLEAN_SLATE_RESET, DEMO_RESTORED) are scoped per-recipient to their own agency with emails only for task-assigners. Recipients resolve by user ID + agency (never email-alone). Deleted users sockets are closed (4401) and receive no further agency data. No cross-agency receipt; /api/agencies, /api/users, clean-slate and restore-demo responses scoped; userEmail param ignored.',
+    'Roster payloads (INITIAL_STATE, USERS_UPDATED create/update/delete, CLEAN_SLATE_RESET, DEMO_RESTORED) are scoped per-recipient to their own agency with emails only for task-assigners. Recipients resolve by user ID + agency (never email-alone). Authorization is enforced on BOTH broadcast paths: deleted users sockets are closed (4401) and receive no further agency data, including ordinary fast-path broadcasts. No cross-agency receipt; /api/agencies, /api/users, clean-slate and restore-demo responses scoped; userEmail param ignored.',
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
@@ -273,6 +273,81 @@ export default {
     assertNoType([connHkc, connNoAgency], 'USERS_UPDATED', 'USERS_UPDATED delete cross-agency');
     clearAll();
 
+    // --- 6b. Fast-path broadcast authorization (regression for round-3 HIGH) ---
+    // A deleted user's socket must not receive ordinary agency broadcasts
+    // (fast path, no varyByRecipient). The per-recipient USERS_UPDATED close
+    // on delete is the primary mechanism; the fast-path authorization check
+    // is the backstop. This test verifies the end-to-end property: after
+    // deletion, a normal agency-scoped broadcast reaches valid recipients
+    // but the revoked socket receives nothing and stays closed.
+    {
+      const fpEmail = `fp-user-${ts}@agency-b.test`;
+      const fpCreate = await fetch(`${baseUrl}/api/users`, {
+        method: 'POST',
+        headers: authB(tokenAdminB),
+        body: JSON.stringify({
+          email: fpEmail,
+          name: 'Fp User',
+          role: 'mashgiach',
+          agencyId: AGENCY_B,
+          venueId: `venue-test22-b-${ts}`,
+          password: 'Temp1234!',
+        }),
+      });
+      if (fpCreate.status !== 200 && fpCreate.status !== 201) {
+        throw new Error(`fast-path: fp user create failed: ${fpCreate.status}`);
+      }
+      const fpCreated = await fpCreate.json();
+      const fpUserId = fpCreated.user.id;
+      const connFp = await connectWs(baseUrl, mintToken(fpUserId, jwtSecret));
+      if (!connFp.messages.some((m) => m.type === 'INITIAL_STATE')) {
+        throw new Error('fast-path: fp socket got no INITIAL_STATE');
+      }
+      connFp.messages.length = 0;
+
+      // Delete the user: the per-recipient USERS_UPDATED broadcast must close
+      // the socket (4401) — a deleted user's session is over.
+      const vFp = await ctx.getVersion();
+      const fpDel = await fetch(`${baseUrl}/api/users/${fpUserId}?expectedVersion=${vFp}`, {
+        method: 'DELETE',
+        headers: authB(tokenAdminB),
+      });
+      if (fpDel.status !== 200) throw new Error(`fast-path: fp user delete failed: ${fpDel.status}`);
+      await new Promise((r) => setTimeout(r, 1500));
+      if (!connFp.closed || connFp.closeCode !== 4401) {
+        throw new Error(
+          `fast-path: fp socket not closed after delete (closed=${connFp.closed}, code=${connFp.closeCode})`
+        );
+      }
+
+      // Trigger a normal agency-scoped broadcast with NO varyByRecipient.
+      clearAll();
+      const probe = await fetch(`${baseUrl}/api/tasks`, {
+        method: 'POST',
+        headers: authB(tokenAdminB),
+        body: JSON.stringify({ title: `Fast-path probe ${ts}`, createdByEmail: adminBEmail }),
+      });
+      if (probe.status !== 200 && probe.status !== 201) {
+        throw new Error(`fast-path: probe task create failed: ${probe.status}`);
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+
+      // The revoked socket receives nothing and stays closed...
+      if (connFp.messages.some((m) => m.type === 'TASK_CREATED')) {
+        throw new Error('fast-path: deleted user socket received TASK_CREATED');
+      }
+      if (!connFp.closed) {
+        throw new Error('fast-path: deleted user socket unexpectedly open');
+      }
+      // ...while a valid recipient DID get the fast-path broadcast (no regression)...
+      if (!connAdminB.messages.some((m) => m.type === 'TASK_CREATED')) {
+        throw new Error('fast-path: valid admin socket missed TASK_CREATED (fast-path regression)');
+      }
+      // ...and it stayed inside agency B.
+      assertNoType([connHkc, connNoAgency], 'TASK_CREATED', 'TASK_CREATED cross-agency');
+      clearAll();
+    }
+
     // --- 7. GET /api/agencies: own agency only, no adminEmail, no counts ---
     const ag = await fetch(`${baseUrl}/api/agencies`, { headers: authB(tokenAdminB) });
     const agJson = await ag.json();
@@ -363,6 +438,6 @@ export default {
 
     for (const c of allConns) c.ws.close();
 
-    return 'all roster broadcasts agency-scoped per recipient (ID+agency resolution); emails only for task-assigners; deleted users sockets closed with 4401, no further agency data; no cross-agency or agency-less receipt; HTTP responses scoped; userEmail param ignored';
+    return 'all roster broadcasts agency-scoped per recipient (ID+agency resolution); emails only for task-assigners; authorization on both broadcast paths — deleted users sockets closed with 4401, no further agency data incl. fast-path broadcasts; no cross-agency or agency-less receipt; HTTP responses scoped; userEmail param ignored';
   },
 };

@@ -3063,10 +3063,19 @@ function broadcast(
     const message = envelopeFor(payload);
     for (const client of wss.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
+      const meta = activeSockets.get(client);
       // Agency-scoped broadcasts only reach that agency's sockets.
-      if (agencyId) {
-        const meta = activeSockets.get(client);
-        if (!meta || meta.agencyId !== agencyId) continue;
+      if (agencyId && (!meta || meta.agencyId !== agencyId)) continue;
+      // Authorization on BOTH paths: the socket's user must still exist and
+      // belong to the socket's agency. A deleted/revoked user's session is
+      // over — close it so no agency data can reach it. The single serialized
+      // message is still shared by all authorized recipients.
+      if (meta && !recipientForMeta(meta)) {
+        try {
+          client.close(4401, 'Unauthorized');
+        } catch {}
+        activeSockets.delete(client);
+        continue;
       }
       client.send(message);
     }
