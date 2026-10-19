@@ -144,6 +144,14 @@ export default {
           notes: `Secret notes ${ts}`,
           isPrivate: true,
           assignedTo: [assigneeBEmail],
+          category: 'General',
+          categories: ['General'],
+          daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+          targetTime: 'End of Day',
+          currentStatus: 'pending',
+          isCompleted: false,
+          createdAt: new Date(ts).toISOString(),
+          sortOrder: 0,
         },
         {
           id: `task-test23-public-${ts}`,
@@ -152,6 +160,14 @@ export default {
           title: `Public Task ${ts}`,
           notes: `Open notes ${ts}`,
           isPrivate: false,
+          category: 'General',
+          categories: ['General'],
+          daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+          targetTime: 'End of Day',
+          currentStatus: 'pending',
+          isCompleted: false,
+          createdAt: new Date(ts).toISOString(),
+          sortOrder: 1,
         },
         {
           id: `task-test23-created-${ts}`,
@@ -161,6 +177,14 @@ export default {
           notes: `Created secret ${ts}`,
           isPrivate: true,
           assignedTo: [assigneeBEmail],
+          category: 'General',
+          categories: ['General'],
+          daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+          targetTime: 'End of Day',
+          currentStatus: 'pending',
+          isCompleted: false,
+          createdAt: new Date(ts).toISOString(),
+          sortOrder: 2,
         },
       ],
     });
@@ -219,11 +243,9 @@ export default {
     clearAll();
 
     // --- 4. TASK_CREATED via POST /api/tasks (own call site) ---
-    // NOTE: mock-environment 503s on POST here; written for the emulator path
-    // (CI runs the real emulator where POST works). If this 503s in mock mode,
-    // the result is "mock mode only — emulator path unverified" for this section.
-    let createdId = `task-test23-created-${ts}`; // fallback if POST 503s
-    let taskCreatedTested = false;
+    // Non-2xx on this POST FAILS the test — no skip branch (a test must never
+    // pass around its own subject).
+    let createdId;
     {
       const createRes = await fetch(`${baseUrl}/api/tasks`, {
         method: 'POST',
@@ -231,34 +253,31 @@ export default {
         body: JSON.stringify({
           venueId: venueB,
           title: `Private Created ${ts}`,
-          notes: `Created secret ${ts}`,
           isPrivate: true,
           assignedTo: [assigneeBEmail],
         }),
       });
-      if (createRes.status === 503) {
-        console.log('[test23] TASK_CREATED POST 503 in mock mode — emulator path unverified for this section');
-      } else {
-        if (createRes.status !== 200 && createRes.status !== 201) {
-          const body = await createRes.text();
-          throw new Error(`TASK_CREATED failed: ${createRes.status} ${body.slice(0, 200)}`);
-        }
+      if (createRes.status !== 200 && createRes.status !== 201) {
+        const body = await createRes.text();
+        throw new Error(`TASK_CREATED failed: ${createRes.status} ${body.slice(0, 200)}`);
+      }
+      {
         const createdJson = await createRes.json();
         createdId = (createdJson.task || createdJson).id;
-        taskCreatedTested = true;
         await new Promise((r) => setTimeout(r, 1500));
         // Authorized sockets receive TASK_CREATED with id+title+notes.
         for (const [c, label] of [[cAdminB, 'admin'], [cCoordB, 'coord'], [cAssigneeB, 'assignee']]) {
           const msg = c.messages.find((m) => m.type === 'TASK_CREATED' && m.payload.id === createdId);
           if (!msg) throw new Error(`TASK_CREATED (${label}): not received`);
-          if (msg.payload.title !== `Private Created ${ts}` || msg.payload.notes !== `Created secret ${ts}`) {
-            throw new Error(`TASK_CREATED (${label}): missing title/notes`);
+          // POST /api/tasks does not accept notes; assert id+title present.
+          if (msg.payload.title !== `Private Created ${ts}`) {
+            throw new Error(`TASK_CREATED (${label}): missing title`);
           }
         }
-        // Unauthorized: walk EVERY message for id/title/notes strings.
+        // Unauthorized: walk EVERY message for id/title strings.
         for (const [c, label] of [[cPlainB, 'plain mashgiach'], [cAdminA, 'agency-A admin']]) {
           const haystack = JSON.stringify(c.messages);
-          for (const needle of [createdId, `Private Created ${ts}`, `Created secret ${ts}`]) {
+          for (const needle of [createdId, `Private Created ${ts}`]) {
             if (haystack.includes(needle)) {
               throw new Error(`TASK_CREATED (${label}): leaked "${needle.slice(0, 30)}"`);
             }
@@ -279,8 +298,8 @@ export default {
             throw new Error(`TASK_CREATED public control (${label}): not received`);
           }
         }
+        clearAll();
       }
-      clearAll();
     }
 
     // --- 5. Transitions ---

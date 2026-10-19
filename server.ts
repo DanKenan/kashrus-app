@@ -5453,7 +5453,8 @@ app.post('/api/tasks', async (req, res) => {
         .filter((t) => t.venueId === targetVenueId)
         .sort(
           (a, b) =>
-            (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.createdAt.localeCompare(b.createdAt)
+            (a.sortOrder ?? 0) - (b.sortOrder ?? 0) ||
+            String(a.createdAt || '').localeCompare(String(b.createdAt || ''))
         );
       let insertAt = siblings.findIndex(
         (t) => targetTimeMinutes(t.targetTime) > newTimeKey || (targetTimeMinutes(t.targetTime) === newTimeKey && t.createdAt > nowIso)
