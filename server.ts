@@ -1412,6 +1412,24 @@ function broadcastTaskUpdated(
 }
 
 /**
+ * Filter snapshot/history entries per recipient (shared by historyLogsForRecipient
+ * and the DAILY_RESET snapshots payload — same entry shape).
+ */
+function filterLogEntries(logs: any[], recipient: UserProfile | undefined) {
+  const isPrivileged = recipient?.role === 'admin' || recipient?.role === 'coordinator';
+  const taskById = new Map(tasks.map((t) => [t.id, t]));
+  return logs.map((h) => {
+    if (!Array.isArray((h as any).entries)) return h;
+    const entries = (h as any).entries.filter((e: any) => {
+      const task = taskById.get(e.taskId);
+      if (!task) return isPrivileged; // deleted task: fail closed
+      return canSeeTaskServer(task, recipient);
+    });
+    return { ...h, entries };
+  });
+}
+
+/**
  * History logs of an agency with snapshot entries filtered per recipient.
  * Each entry references a task by taskId; entries for private tasks the
  * recipient cannot see are removed. If the task no longer exists (deleted),
@@ -1420,19 +1438,10 @@ function broadcastTaskUpdated(
  */
 function historyLogsForRecipient(agencyId: string, recipient: UserProfile | undefined) {
   const norm = (v?: string) => v || 'agency-hkc';
-  const isPrivileged = recipient?.role === 'admin' || recipient?.role === 'coordinator';
-  const taskById = new Map(tasks.map((t) => [t.id, t]));
-  return historyLogs
-    .filter((h) => norm(h.agencyId) === agencyId)
-    .map((h) => {
-      if (!Array.isArray((h as any).entries)) return h;
-      const entries = (h as any).entries.filter((e: any) => {
-        const task = taskById.get(e.taskId);
-        if (!task) return isPrivileged; // deleted task: fail closed
-        return canSeeTaskServer(task, recipient);
-      });
-      return { ...h, entries };
-    });
+  return filterLogEntries(
+    historyLogs.filter((h) => norm(h.agencyId) === agencyId),
+    recipient
+  );
 }
 
 /**
@@ -3438,6 +3447,7 @@ async function executeDailyReset(
           ...base,
           tasks: base.tasks.filter((t: any) => canSeeTaskServer(t, recipient)),
           historyLogs: historyLogsForRecipient(aid, recipient),
+          snapshots: filterLogEntries(base.snapshots, recipient),
         };
       }
     );
@@ -6077,23 +6087,22 @@ app.get('/api/admin/per-entity-status', async (req, res) => {
 });
 
 app.get('/api/history', (req, res) => {
-  const { venueId, userEmail } = req.query;
+  const { venueId } = req.query;
 
-  let callerAgencyId = 'agency-hkc';
+  // Checklist C: resolve the caller by authenticated user ID + agency (never
+  // by the client-supplied userEmail query param). Fail closed.
+  const caller = getAuthUser(req);
+  if (!caller) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
   let targetVenueId = venueId ? String(venueId) : null;
-
-  if (userEmail) {
-    const user = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (user) {
-      callerAgencyId = user.agencyId || 'agency-hkc';
-      if (user.role !== 'admin') {
-        targetVenueId = user.venueId || null;
-      }
-    }
+  if (caller.role !== 'admin') {
+    targetVenueId = caller.venueId || null;
   }
 
-  // Filter logs strictly by caller agency
-  const agencyHistory = historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === callerAgencyId);
+  // Filter logs strictly by caller agency, then by the private-task rule.
+  const agencyHistory = historyLogsForRecipient(callerAgencyId, caller);
 
   if (targetVenueId) {
     res.json({ historyLogs: agencyHistory.filter((h) => h.venueId === targetVenueId) });
