@@ -529,6 +529,41 @@ function requireAuthUser(req: any, res: any): UserProfile | null {
 }
 
 /**
+ * Venue scoping for read endpoints (one helper so the rule can't drift).
+ * Admin/coordinator: agency-wide; an optional ?venueId narrows it but must
+ * be the caller's own agency (requireOwnVenue), else 403.
+ * Every other role: own venue only. A different ?venueId → 403. No own
+ * venue → empty list (never the whole agency).
+ * Returns 'agency' for agency-wide, a venue-id array otherwise, or null
+ * when the response was already sent (401/403).
+ */
+function scopedVenueIds(req: any, res: any): string[] | 'agency' | null {
+  const caller = getAuthUser(req);
+  if (!caller) {
+    res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    return null;
+  }
+  const queryVenueId = String(req.query.venueId || '');
+  const privileged = caller.role === 'admin' || caller.role === 'coordinator';
+
+  if (privileged) {
+    if (queryVenueId) {
+      if (!requireOwnVenue(req, res, queryVenueId, venues)) return null;
+      return [queryVenueId];
+    }
+    return 'agency';
+  }
+
+  const ownVenueId: string | undefined = (caller as any).venueId;
+  if (!ownVenueId) return []; // no venue assigned → empty, never agency-wide
+  if (queryVenueId && queryVenueId !== ownVenueId) {
+    res.status(403).json({ error: 'You can only view your own venue.' });
+    return null;
+  }
+  return [ownVenueId];
+}
+
+/**
  * Require the caller to be an agency admin. Sends 403 and returns null when
  * the check fails; otherwise returns the verified admin user.
  */
@@ -3771,12 +3806,12 @@ app.get('/api/incidents', (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
   const agencyId = caller.agencyId || 'agency-hkc';
-  const venueId = String(req.query.venueId || '');
+  const venueScope = scopedVenueIds(req, res);
+  if (!venueScope) return;
   const status = String(req.query.status || '');
   let list = incidents.filter((i) => i.agencyId === agencyId);
-  if (venueId) {
-    if (!requireOwnVenue(req, res, venueId, venues)) return;
-    list = list.filter((i) => i.venueId === venueId);
+  if (venueScope !== 'agency') {
+    list = list.filter((i) => venueScope.includes(i.venueId));
   }
   if (status) list = list.filter((i) => i.status === status);
   res.json({ incidents: list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
@@ -4591,16 +4626,13 @@ app.get('/api/handoff-notes', (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
   const agencyId = caller.agencyId || 'agency-hkc';
-  const venueId = String(req.query.venueId || '');
-  if (venueId && !requireOwnVenue(req, res, venueId, venues)) return;
-  // Notes are agency-scoped (match the task scoping pattern); non-admins
-  // additionally see only their own venue's notes when they have one.
-  const callerVenueId: string | undefined = (caller as any).venueId;
+  // Per-role venue scoping: a non-admin cannot read another venue's notes
+  // via ?venueId (requireOwnVenue alone only proves agency ownership).
+  const venueScope = scopedVenueIds(req, res);
+  if (!venueScope) return;
   let notes = handoffNotes.filter((n) => (n.agencyId || 'agency-hkc') === agencyId);
-  if (venueId) {
-    notes = notes.filter((n) => n.venueId === venueId);
-  } else if (caller.role !== 'admin' && callerVenueId) {
-    notes = notes.filter((n) => n.venueId === callerVenueId);
+  if (venueScope !== 'agency') {
+    notes = notes.filter((n) => venueScope.includes(n.venueId));
   }
   res.json({ notes: notes.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
 });
@@ -6190,8 +6222,6 @@ app.get('/api/admin/per-entity-status', async (req, res) => {
 });
 
 app.get('/api/history', (req, res) => {
-  const { venueId } = req.query;
-
   // Checklist C: resolve the caller by authenticated user ID + agency (never
   // by the client-supplied userEmail query param). Fail closed.
   const caller = getAuthUser(req);
@@ -6199,18 +6229,18 @@ app.get('/api/history', (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   const callerAgencyId = caller.agencyId || 'agency-hkc';
-  let targetVenueId = venueId ? String(venueId) : null;
-  if (caller.role !== 'admin') {
-    targetVenueId = caller.venueId || null;
-  }
+  // Per-role venue scoping: non-admin/coordinator with no own venue gets an
+  // empty list, never whole-agency history.
+  const venueScope = scopedVenueIds(req, res);
+  if (!venueScope) return;
 
   // Filter logs strictly by caller agency, then by the private-task rule.
   const agencyHistory = historyLogsForRecipient(callerAgencyId, caller);
 
-  if (targetVenueId) {
-    res.json({ historyLogs: agencyHistory.filter((h) => h.venueId === targetVenueId) });
-  } else {
+  if (venueScope === 'agency') {
     res.json({ historyLogs: agencyHistory });
+  } else {
+    res.json({ historyLogs: agencyHistory.filter((h) => venueScope.includes(h.venueId)) });
   }
 });
 
@@ -7430,10 +7460,12 @@ app.post('/api/auth/change-password', async (req, res) => {
 app.get('/api/airtable/config', (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
-  const { venueId } = req.query;
+  const venueScope = scopedVenueIds(req, res);
+  if (!venueScope) return;
   const callerAgencyId = caller.agencyId || 'agency-hkc';
-
-  if (venueId && !requireOwnVenue(req, res, String(venueId), venues)) return;
+  // For non-privileged callers the venue is forced to their own venue;
+  // privileged callers may narrow by ?venueId (already validated).
+  const venueId = venueScope === 'agency' ? String(req.query.venueId || '') : venueScope[0];
 
   const config =
     (venueId ? airtableConfigs.find((c) => c.venueId === venueId && c.agencyId === callerAgencyId) : null) ||
@@ -7690,13 +7722,13 @@ app.post('/api/airtable/sync', async (req, res) => {
 app.get('/api/ingredients', (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
-  const { venueId } = req.query;
+  const venueScope = scopedVenueIds(req, res);
+  if (!venueScope) return;
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   let items = approvedIngredients.filter((i) => (i.agencyId || 'agency-hkc') === callerAgencyId);
-  if (venueId) {
-    if (!requireOwnVenue(req, res, String(venueId), venues)) return;
-    items = items.filter((i) => i.venueId === venueId);
+  if (venueScope !== 'agency') {
+    items = items.filter((i) => venueScope.includes(i.venueId));
   }
 
   res.json({ ingredients: items });
@@ -7815,13 +7847,13 @@ app.delete('/api/ingredients/:id', async (req, res) => {
 app.get('/api/factory-reports', (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
-  const { venueId } = req.query;
+  const venueScope = scopedVenueIds(req, res);
+  if (!venueScope) return;
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   let reports = factoryReports.filter((r) => r.agencyId === callerAgencyId);
-  if (venueId) {
-    if (!requireOwnVenue(req, res, String(venueId), venues)) return;
-    reports = reports.filter((r) => r.venueId === venueId);
+  if (venueScope !== 'agency') {
+    reports = reports.filter((r) => venueScope.includes(r.venueId));
   }
 
   // Sort newest first

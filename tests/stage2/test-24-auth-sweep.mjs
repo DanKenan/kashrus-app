@@ -82,13 +82,18 @@ export default {
   async run(baseUrl, ctx) {
     const ts = Date.now();
     const venueA = `venue-test24-a-${ts}`;
+    const venueA2 = `venue-test24-a2-${ts}`;
     const venueB = `venue-test24-b-${ts}`;
     const adminAId = `user-test24-admina-${ts}`;
     const mashAId = `user-test24-masha-${ts}`;
+    const mashA2Id = `user-test24-masha2-${ts}`;
+    const coordAId = `user-test24-coorda-${ts}`;
     const adminBId = `user-test24-adminb-${ts}`;
     const mashBId = `user-test24-mashb-${ts}`;
     const adminAEmail = `test24-admina-${ts}@test.local`;
     const mashAEmail = `test24-masha-${ts}@test.local`;
+    const mashA2Email = `test24-masha2-${ts}@test.local`;
+    const coordAEmail = `test24-coorda-${ts}@test.local`;
     const adminBEmail = `test24-adminb-${ts}@test.local`;
     const mashBEmail = `test24-mashb-${ts}@test.local`;
 
@@ -109,6 +114,10 @@ export default {
     const ingBId = `ing-test24-b-${ts}`;
     const repAId = `report-test24-a-${ts}`;
     const repBId = `report-test24-b-${ts}`;
+    const taskAId = `task-test24-a-${ts}`;
+    const evtTaskAId = `etask-test24-a-${ts}`;
+    const noteA2Id = `handoff-test24-a2-${ts}`;
+    const incidentA2Id = `incident-test24-a2-${ts}`;
 
     // --- 1. Fixtures: everything via inject-fixture (single commit) ---
     const inj = await ctx.api('POST', '/api/__test__/inject-fixture', {
@@ -118,24 +127,32 @@ export default {
       ],
       venues: [
         { id: venueA, name: `Test24 Venue A ${ts}`, agencyId: AGENCY_A },
+        { id: venueA2, name: `Test24 Venue A2 ${ts}`, agencyId: AGENCY_A },
         { id: venueB, name: `Test24 Venue B ${ts}`, agencyId: AGENCY_B },
       ],
       users: [
         { id: adminAId, email: adminAEmail, name: 'T24 Admin A', role: 'admin', agencyId: AGENCY_A },
         { id: mashAId, email: mashAEmail, name: 'T24 Mash A', role: 'mashgiach', agencyId: AGENCY_A, venueId: venueA },
+        { id: mashA2Id, email: mashA2Email, name: 'T24 Mash A2', role: 'mashgiach', agencyId: AGENCY_A, venueId: venueA2 },
+        { id: coordAId, email: coordAEmail, name: 'T24 Coord A', role: 'coordinator', agencyId: AGENCY_A },
         { id: adminBId, email: adminBEmail, name: 'T24 Admin B', role: 'admin', agencyId: AGENCY_B },
         { id: mashBId, email: mashBEmail, name: 'T24 Mash B', role: 'mashgiach', agencyId: AGENCY_B, venueId: venueB },
       ],
+      tasks: [
+        { id: taskAId, agencyId: AGENCY_A, venueId: venueA, title: `Task A ${ts}`, category: 'General', categories: ['General'], daysOfWeek: [0,1,2,3,4,5,6], targetTime: 'End of Day', currentStatus: 'pending', isCompleted: false, createdAt: new Date(ts).toISOString(), sortOrder: 0 },
+      ],
       events: [
-        { id: eventAId, agencyId: AGENCY_A, venueId: venueA, title: `Event A ${ts}`, location: 'Hall A', date: '2026-11-01', tasks: [] },
+        { id: eventAId, agencyId: AGENCY_A, venueId: venueA, title: `Event A ${ts}`, location: 'Hall A', date: '2026-11-01', tasks: [{ id: evtTaskAId, title: `EvtTask A ${ts}`, isCompleted: false }] },
         { id: eventBId, agencyId: AGENCY_B, venueId: venueB, title: `Event B ${ts}`, location: 'Hall B', date: '2026-11-01', tasks: [] },
       ],
       incidents: [
         { id: incidentAId, agencyId: AGENCY_A, venueId: venueA, title: `Incident A ${ts}`, description: 'd', severity: 'medium', status: 'open', reporterEmail: adminAEmail, reporterName: 'T24 Admin A', createdAt: new Date(ts).toISOString() },
+        { id: incidentA2Id, agencyId: AGENCY_A, venueId: venueA2, title: `Incident A2 ${ts}`, description: 'd', severity: 'medium', status: 'open', reporterEmail: adminAEmail, reporterName: 'T24 Admin A', createdAt: new Date(ts).toISOString() },
         { id: incidentBId, agencyId: AGENCY_B, venueId: venueB, title: `Incident B ${ts}`, description: 'd', severity: 'medium', status: 'open', reporterEmail: adminBEmail, reporterName: 'T24 Admin B', createdAt: new Date(ts).toISOString() },
       ],
       handoffNotes: [
         { id: noteAId, agencyId: AGENCY_A, venueId: venueA, authorEmail: mashAEmail, authorName: 'T24 Mash A', content: `Note A ${ts}`, shift: 'Morning', createdAt: new Date(ts).toISOString() },
+        { id: noteA2Id, agencyId: AGENCY_A, venueId: venueA2, authorEmail: mashA2Email, authorName: 'T24 Mash A2', content: `Note A2 ${ts}`, shift: 'Morning', createdAt: new Date(ts).toISOString() },
         { id: noteBId, agencyId: AGENCY_B, venueId: venueB, authorEmail: mashBEmail, authorName: 'T24 Mash B', content: `Note B ${ts}`, shift: 'Morning', createdAt: new Date(ts).toISOString() },
       ],
       announcements: [
@@ -166,6 +183,8 @@ export default {
     const tMashA = await mintToken(baseUrl, mashAId);
     const tAdminB = await mintToken(baseUrl, adminBId);
     const tMashB = await mintToken(baseUrl, mashBId);
+    const tMashA2 = await mintToken(baseUrl, mashA2Id);
+    const tCoordA = await mintToken(baseUrl, coordAId);
 
     // --- 2. F1 spoof: A's token + ?userEmail=<B admin> must return only A's data ---
     const spoofQ = `?userEmail=${encodeURIComponent(adminBEmail)}`;
@@ -343,12 +362,83 @@ export default {
       }
     }
     {
-      // Event task toggle with forged userEmail/userName in body
-      const r = await postJson(baseUrl, '/api/handoff-notes', tMashA, {
-        venueId: venueA, content: `Forge2 ${ts}`, authorEmail: 'x@y.z', authorName: 'X',
+      // Event task toggle: completedByEmail must be the session user, not the body
+      // (the endpoint ignores any body userEmail/userName; attribution is from caller).
+      const ver3 = await ctx.getVersion();
+      const tr = await postJson(baseUrl, `/api/events/${eventAId}/tasks/${evtTaskAId}/toggle?expectedVersion=${ver3}`, tMashA, {
+        isCompleted: true, userEmail: 'forged@example.com', userName: 'Forged',
       });
-      const note = r.body.note || r.body;
-      if (note.authorEmail === 'x@y.z') throw new Error('handoff-note authorEmail forgery succeeded');
+      if (tr.status !== 200) throw new Error(`toggle event task: ${tr.status}`);
+      const toggled = (tr.body.event?.tasks || []).find((t) => t.id === evtTaskAId);
+      if (!toggled) throw new Error('toggle: task not in response');
+      if (toggled.completedByEmail !== mashAEmail) {
+        throw new Error(`toggle attribution wrong: ${toggled.completedByEmail} (expected ${mashAEmail})`);
+      }
+      if (toggled.completedByEmail === 'forged@example.com') {
+        throw new Error('toggle: forged userEmail was stored');
+      }
+
+      // POST /api/tasks/:id/check-in: byEmail must be the session user
+      const ver5 = await ctx.getVersion();
+      const cr = await postJson(baseUrl, `/api/tasks/${taskAId}/check-in?expectedVersion=${ver5}`, tAdminA, {
+        notes: `Check-in ${ts}`, userEmail: 'forged@example.com', userName: 'Forged',
+      });
+      if (cr.status !== 200 && cr.status !== 201) throw new Error(`check-in: ${cr.status}`);
+      const checkIn = cr.body.checkIn || cr.body;
+      const checkInEmail = checkIn.byEmail || checkIn.updatedByEmail;
+      if (checkInEmail && checkInEmail !== adminAEmail) {
+        throw new Error(`check-in attribution wrong: ${checkInEmail} (expected ${adminAEmail})`);
+      }
+    }
+
+    /* ---- 7. Venue scoping: non-admin cannot read another venue's rows ---- */
+    {
+      // mashgiach A1 (venueA) tries ?venueId=venueA2 → 403 on all five GETs
+      for (const path of ['/api/handoff-notes', '/api/incidents', '/api/ingredients', '/api/factory-reports', '/api/airtable/config']) {
+        const r = await fetch(`${baseUrl}${path}?venueId=${venueA2}`, { headers: auth(tMashA) });
+        if (r.status !== 403) throw new Error(`venue scoping: mashA ?venueId=venueA2 on ${path} → ${r.status} (expected 403)`);
+      }
+      // mashgiach A1 without ?venueId → only venueA rows (not venueA2, not whole agency)
+      const nr = await fetch(`${baseUrl}/api/handoff-notes`, { headers: auth(tMashA) });
+      const nb = await nr.json();
+      const ids = (nb.notes || []).map((n) => n.id);
+      if (!ids.includes(noteAId)) throw new Error('venue scoping: mashA missing own venue note');
+      if (ids.includes(noteA2Id)) throw new Error('venue scoping: mashA sees venueA2 note without ?venueId');
+      // coordinator of A → both venues (agency-wide)
+      const cr2 = await fetch(`${baseUrl}/api/handoff-notes`, { headers: auth(tCoordA) });
+      const cb2 = await cr2.json();
+      const cids = (cb2.notes || []).map((n) => n.id);
+      if (!cids.includes(noteAId) || !cids.includes(noteA2Id)) {
+        throw new Error('venue scoping: coordinator should see both venues notes');
+      }
+      // coordinator with ?venueId=venueA2 → only venueA2
+      const cr3 = await fetch(`${baseUrl}/api/handoff-notes?venueId=${venueA2}`, { headers: auth(tCoordA) });
+      const cb3 = await cr3.json();
+      const cids3 = (cb3.notes || []).map((n) => n.id);
+      if (!cids3.includes(noteA2Id) || cids3.includes(noteAId)) {
+        throw new Error('venue scoping: coordinator ?venueId=venueA2 should see only venueA2');
+      }
+    }
+
+    /* ---- 8. Restart regression: hydrateState restores all four collections ---- */
+    {
+      // Fixtures reached memory via inject-fixture → commitState → Firestore.
+      // Restart the server; the four collections must still answer via GET.
+      await ctx.restartServer();
+      const tAdminA2 = await mintToken(baseUrl, adminAId); // token survives restart (same jwtSecret in test)
+      const checks = [
+        ['/api/incidents', 'incidents', incidentAId],
+        ['/api/handoff-notes', 'notes', noteAId],
+        ['/api/announcements', 'announcements', annAId],
+        ['/api/task-templates', 'templates', tmplAId],
+      ];
+      for (const [path, key, id] of checks) {
+        const r = await fetch(`${baseUrl}${path}`, { headers: auth(tAdminA2) });
+        if (r.status !== 200) throw new Error(`restart: ${path} → ${r.status}`);
+        const b = await r.json();
+        const ids = (b[key] || []).map((x) => x.id);
+        if (!ids.includes(id)) throw new Error(`restart: ${path} missing ${id} (hydrateState regression)`);
+      }
     }
   },
 };
