@@ -380,6 +380,8 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/expire-reset' },
         { method: 'POST', path: '/__test__/inject-fixture' },
         { method: 'POST', path: '/__test__/staged' },
+        { method: 'POST', path: '/__test__/revoke-user-silent' },
+        { method: 'POST', path: '/__test__/drop-socket-meta' },
       ]
     : []),
 ];
@@ -1346,6 +1348,27 @@ function recipientForMeta(meta: { userId: string; agencyId: string }) {
   const norm = (v?: string) => v || 'agency-hkc';
   if (norm(u.agencyId) !== meta.agencyId) return undefined;
   return u;
+}
+
+/**
+ * Authorize a socket for broadcast receipt. Returns the socket's metadata
+ * when the socket carries authenticated metadata AND its user still exists
+ * and belongs to the socket's agency; otherwise closes the socket (4401)
+ * and returns null. A socket without metadata, or whose user was deleted,
+ * moved, or revoked, must never receive data — on either broadcast path,
+ * scoped or unscoped. Fail closed: an unauthorizable socket is terminated,
+ * not skipped silently.
+ */
+function authorizeSocket(client: WebSocket): SocketMeta | null {
+  const meta = activeSockets.get(client);
+  if (!meta || !recipientForMeta(meta)) {
+    try {
+      client.close(4401, 'Unauthorized');
+    } catch {}
+    activeSockets.delete(client);
+    return null;
+  }
+  return meta;
 }
 
 const INITIAL_TASKS: TaskItem[] = [];
@@ -3058,48 +3081,27 @@ function broadcast(
       version: typeof stateVersion === 'number' ? stateVersion : undefined,
     });
 
-  // Fast path: one message for every recipient.
+  // Fast path: one message for every authorized recipient (serialized once).
   if (!varyByRecipient) {
     const message = envelopeFor(payload);
     for (const client of wss.clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
-      const meta = activeSockets.get(client);
+      const meta = authorizeSocket(client);
+      if (!meta) continue;
       // Agency-scoped broadcasts only reach that agency's sockets.
-      if (agencyId && (!meta || meta.agencyId !== agencyId)) continue;
-      // Authorization on BOTH paths: the socket's user must still exist and
-      // belong to the socket's agency. A deleted/revoked user's session is
-      // over — close it so no agency data can reach it. The single serialized
-      // message is still shared by all authorized recipients.
-      if (meta && !recipientForMeta(meta)) {
-        try {
-          client.close(4401, 'Unauthorized');
-        } catch {}
-        activeSockets.delete(client);
-        continue;
-      }
+      if (agencyId && meta.agencyId !== agencyId) continue;
       client.send(message);
     }
     return;
   }
 
-  // Per-recipient path: the payload is computed for each socket.
+  // Per-recipient path: the payload is computed for each authorized socket.
   for (const client of wss.clients) {
     if (client.readyState !== WebSocket.OPEN) continue;
-    const meta = activeSockets.get(client);
-    // Agency-scoped broadcasts only reach that agency's sockets.
-    if (agencyId && (!meta || meta.agencyId !== agencyId)) continue;
+    const meta = authorizeSocket(client);
     if (!meta) continue;
-    // Recipient-specific payloads must never reach a deleted, moved, or
-    // de-authorized user: resolve the CURRENT record and verify it still
-    // belongs to this socket's agency. A deleted user's session is over —
-    // close the socket so no further agency data can reach it.
-    if (!recipientForMeta(meta)) {
-      try {
-        client.close(4401, 'Unauthorized');
-      } catch {}
-      activeSockets.delete(client);
-      continue;
-    }
+    // Agency-scoped broadcasts only reach that agency's sockets.
+    if (agencyId && meta.agencyId !== agencyId) continue;
     client.send(envelopeFor(varyByRecipient(meta, payload)));
   }
 }
@@ -4796,6 +4798,56 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
       );
       const committed = await executeDailyReset(undefined, 'test-scheduled-reset');
       res.json({ success: true, version: committed ? committed.version : null });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // TEST ONLY: silently revokes a user (removes from the in-memory users array
+  // and persists) WITHOUT broadcasting. Lets tests verify broadcast
+  // authorization independently of the revocation broadcast (which would
+  // close the socket itself). Test mode only — the route does not exist in
+  // production (see isTestMode()).
+  app.post('/api/__test__/revoke-user-silent', async (req, res) => {
+    const { userId } = req.body || {};
+    try {
+      const committed = await commitState(
+        (freshDoc) => {
+          const before = (freshDoc.users || []).length;
+          const remaining = (freshDoc.users || []).filter((u: any) => u.id !== userId);
+          if (remaining.length === before) {
+            return { doc: freshDoc, result: { revoked: false } };
+          }
+          return { doc: { ...freshDoc, users: remaining }, result: { revoked: true } };
+        },
+        { label: 'test-revoke-user-silent' }
+      );
+      // commitState hydrates the in-memory cache, so recipientForMeta() sees
+      // the revocation immediately — but NOTHING is broadcast.
+      if (!committed || !committed.result.revoked) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      res.json({ ok: true, revoked: userId });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // TEST ONLY: drops the authenticated metadata for a user's sockets WITHOUT
+  // closing them, simulating a socket that somehow lost its metadata. Lets
+  // tests verify that metadata-less sockets are closed (not sent data) on
+  // broadcast. Test mode only.
+  app.post('/api/__test__/drop-socket-meta', async (req, res) => {
+    const { userId } = req.body || {};
+    try {
+      let dropped = 0;
+      for (const [client, meta] of activeSockets) {
+        if (meta.userId === userId) {
+          activeSockets.delete(client);
+          dropped++;
+        }
+      }
+      res.json({ ok: true, dropped });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }

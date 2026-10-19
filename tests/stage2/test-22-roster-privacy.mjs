@@ -273,54 +273,66 @@ export default {
     assertNoType([connHkc, connNoAgency], 'USERS_UPDATED', 'USERS_UPDATED delete cross-agency');
     clearAll();
 
-    // --- 6b. Fast-path broadcast authorization (regression for round-3 HIGH) ---
-    // A deleted user's socket must not receive ordinary agency broadcasts
-    // (fast path, no varyByRecipient). The per-recipient USERS_UPDATED close
-    // on delete is the primary mechanism; the fast-path authorization check
-    // is the backstop. This test verifies the end-to-end property: after
-    // deletion, a normal agency-scoped broadcast reaches valid recipients
-    // but the revoked socket receives nothing and stays closed.
+    // --- 6b. Broadcast authorization isolation (regression for round-3/5 HIGH) ---
+    // Verifies authorizeSocket() independently of the revocation broadcast:
+    // (a) an OPEN socket whose user was silently revoked (no roster broadcast,
+    //     so the socket is still open) must be closed by a fast-path broadcast;
+    // (b) an OPEN socket with no authenticated metadata must be closed too.
+    // Uses test-only endpoints (revoke-user-silent, drop-socket-meta).
     {
-      const fpEmail = `fp-user-${ts}@agency-b.test`;
-      const fpCreate = await fetch(`${baseUrl}/api/users`, {
+      const mkUser = async (suffix) => {
+        const email = `fp-${suffix}-${ts}@agency-b.test`;
+        const res = await fetch(`${baseUrl}/api/users`, {
+          method: 'POST',
+          headers: authB(tokenAdminB),
+          body: JSON.stringify({
+            email,
+            name: `Fp ${suffix}`,
+            role: 'mashgiach',
+            agencyId: AGENCY_B,
+            venueId: `venue-test22-b-${ts}`,
+            password: 'Temp1234!',
+          }),
+        });
+        if (res.status !== 200 && res.status !== 201) {
+          throw new Error(`fast-path: fp user ${suffix} create failed: ${res.status}`);
+        }
+        const { user } = await res.json();
+        const conn = await connectWs(baseUrl, mintToken(user.id, jwtSecret));
+        if (!conn.messages.some((m) => m.type === 'INITIAL_STATE')) {
+          throw new Error(`fast-path: fp socket ${suffix} got no INITIAL_STATE`);
+        }
+        conn.messages.length = 0;
+        return { userId: user.id, conn };
+      };
+
+      // (a) Silently revoked user, socket still OPEN.
+      const revoked = await mkUser('revoked');
+      const revRes = await fetch(`${baseUrl}/api/__test__/revoke-user-silent`, {
         method: 'POST',
         headers: authB(tokenAdminB),
-        body: JSON.stringify({
-          email: fpEmail,
-          name: 'Fp User',
-          role: 'mashgiach',
-          agencyId: AGENCY_B,
-          venueId: `venue-test22-b-${ts}`,
-          password: 'Temp1234!',
-        }),
+        body: JSON.stringify({ userId: revoked.userId }),
       });
-      if (fpCreate.status !== 200 && fpCreate.status !== 201) {
-        throw new Error(`fast-path: fp user create failed: ${fpCreate.status}`);
+      if (revRes.status !== 200) throw new Error(`fast-path: silent revoke failed: ${revRes.status}`);
+      if (revoked.conn.closed) {
+        throw new Error('fast-path: socket closed by silent revoke (it must stay open to isolate the check)');
       }
-      const fpCreated = await fpCreate.json();
-      const fpUserId = fpCreated.user.id;
-      const connFp = await connectWs(baseUrl, mintToken(fpUserId, jwtSecret));
-      if (!connFp.messages.some((m) => m.type === 'INITIAL_STATE')) {
-        throw new Error('fast-path: fp socket got no INITIAL_STATE');
-      }
-      connFp.messages.length = 0;
 
-      // Delete the user: the per-recipient USERS_UPDATED broadcast must close
-      // the socket (4401) — a deleted user's session is over.
-      const vFp = await ctx.getVersion();
-      const fpDel = await fetch(`${baseUrl}/api/users/${fpUserId}?expectedVersion=${vFp}`, {
-        method: 'DELETE',
+      // (b) Socket with no authenticated metadata, still OPEN.
+      const noMeta = await mkUser('nometa');
+      const dropRes = await fetch(`${baseUrl}/api/__test__/drop-socket-meta`, {
+        method: 'POST',
         headers: authB(tokenAdminB),
+        body: JSON.stringify({ userId: noMeta.userId }),
       });
-      if (fpDel.status !== 200) throw new Error(`fast-path: fp user delete failed: ${fpDel.status}`);
-      await new Promise((r) => setTimeout(r, 1500));
-      if (!connFp.closed || connFp.closeCode !== 4401) {
-        throw new Error(
-          `fast-path: fp socket not closed after delete (closed=${connFp.closed}, code=${connFp.closeCode})`
-        );
+      const dropJson = await dropRes.json();
+      if (dropJson.dropped !== 1) throw new Error(`fast-path: expected 1 meta dropped, got ${dropJson.dropped}`);
+      if (noMeta.conn.closed) {
+        throw new Error('fast-path: socket closed by meta drop (it must stay open to isolate the check)');
       }
 
-      // Trigger a normal agency-scoped broadcast with NO varyByRecipient.
+      // Trigger a normal agency-scoped broadcast with NO varyByRecipient
+      // (fast path). Both unauthorized sockets must be closed, not sent data.
       clearAll();
       const probe = await fetch(`${baseUrl}/api/tasks`, {
         method: 'POST',
@@ -332,14 +344,18 @@ export default {
       }
       await new Promise((r) => setTimeout(r, 1500));
 
-      // The revoked socket receives nothing and stays closed...
-      if (connFp.messages.some((m) => m.type === 'TASK_CREATED')) {
-        throw new Error('fast-path: deleted user socket received TASK_CREATED');
+      for (const [target, label] of [[revoked, 'silently-revoked'], [noMeta, 'metadata-less']]) {
+        if (target.conn.messages.some((m) => m.type === 'TASK_CREATED')) {
+          throw new Error(`fast-path: ${label} socket received TASK_CREATED`);
+        }
+        if (!target.conn.closed || target.conn.closeCode !== 4401) {
+          throw new Error(
+            `fast-path: ${label} socket not closed with 4401 ` +
+            `(closed=${target.conn.closed}, code=${target.conn.closeCode})`
+          );
+        }
       }
-      if (!connFp.closed) {
-        throw new Error('fast-path: deleted user socket unexpectedly open');
-      }
-      // ...while a valid recipient DID get the fast-path broadcast (no regression)...
+      // Sanity: a valid recipient DID get the fast-path broadcast (no regression)...
       if (!connAdminB.messages.some((m) => m.type === 'TASK_CREATED')) {
         throw new Error('fast-path: valid admin socket missed TASK_CREATED (fast-path regression)');
       }
