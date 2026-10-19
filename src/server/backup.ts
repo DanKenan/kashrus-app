@@ -55,6 +55,10 @@ const SECRET_WORDS = [
 
 function isSecretKey(key: string): boolean {
   const lower = key.toLowerCase();
+  // Hash-suffixed secret names: "passwordHash" → stem "password" is secret,
+  // "kioskPinHash" → stem "kioskPin" is secret. (Forward defence: PR 2a's PIN
+  // hashing introduces kioskPinHash; without this, backups would leak it.)
+  if (/hash$/i.test(key) && key.length > 4 && isSecretKey(key.slice(0, -4))) return true;
   // Exact match (ignoring _ and -)
   const normalized = lower.replace(/[_-]/g, '');
   if (SECRET_WORDS.includes(normalized)) return true;
@@ -121,6 +125,15 @@ export function scrubSecrets(obj: any, path: string = ''): any {
   for (const [k, v] of Object.entries(obj)) {
     if (isSecretKey(k)) {
       out[k] = '[REDACTED]';
+    } else if (k === 'keys' && v && typeof v === 'object' && !Array.isArray(v)) {
+      // Web Push-style key bundles ({ p256dh, auth }) carry an `auth` secret
+      // wherever they appear in the tree — scrub it at any nesting depth,
+      // not only under pushSubscriptions.
+      const keysOut: any = {};
+      for (const [kk, vv] of Object.entries(v)) {
+        keysOut[kk] = kk === 'auth' ? '[REDACTED]' : scrubSecrets(vv, path ? `${path}.${k}.${kk}` : `${k}.${kk}`);
+      }
+      out[k] = keysOut;
     } else {
       out[k] = scrubSecrets(v, path ? `${path}.${k}` : k);
     }

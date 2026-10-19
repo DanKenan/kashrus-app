@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Building2, CheckCircle2, AlertTriangle, MessageSquare, X, Phone, User } from 'lucide-react';
 import { apiFetch } from '../lib/api';
+import { rosterKey } from '../lib/rosterDisplay';
 
 interface VenueStat {
   venue: { id: string; name: string; category?: string };
@@ -196,7 +197,7 @@ export function AgencyDashboard({ onClose, onSelectVenue }: AgencyDashboardProps
                     {vs.mashgichim.map((m) => (
                       m.phone ? (
                         <a
-                          key={m.email}
+                          key={rosterKey(m)}
                           href={`tel:${m.phone}`}
                           onClick={(e) => e.stopPropagation()}
                           className="flex items-center gap-1 px-2 py-1 rounded-lg bg-gold/10 hover:bg-gold/20 text-[11px] font-semibold text-gold-deep transition"
@@ -205,7 +206,7 @@ export function AgencyDashboard({ onClose, onSelectVenue }: AgencyDashboardProps
                           {m.name}
                         </a>
                       ) : (
-                        <span key={m.email} className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sunken text-[11px] text-ink-faint">
+                        <span key={rosterKey(m)} className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sunken text-[11px] text-ink-faint">
                           <User className="w-3 h-3" />
                           {m.name}
                         </span>

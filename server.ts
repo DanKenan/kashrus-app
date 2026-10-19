@@ -380,6 +380,9 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/expire-reset' },
         { method: 'POST', path: '/__test__/inject-fixture' },
         { method: 'POST', path: '/__test__/staged' },
+        { method: 'POST', path: '/__test__/revoke-user-silent' },
+        { method: 'POST', path: '/__test__/drop-socket-meta' },
+        { method: 'POST', path: '/__test__/mint-token' },
       ]
     : []),
 ];
@@ -1302,8 +1305,71 @@ function getSafeUser(user: UserProfile) {
   };
 }
 
-function getSafeUsers() {
-  return users.map(getSafeUser);
+/** Whether a roster recipient may see contact emails. Mirrors the client's
+ * canUserAssignTasks (src/lib/permissions.ts): assignments are keyed by email,
+ * so anyone who can assign tasks keeps emails; everyone else gets names/roles
+ * only. Fail closed: unknown recipient → no emails. */
+function recipientSeesRosterEmails(recipient?: { role?: string; permissions?: { canAssignTasks?: boolean } }): boolean {
+  if (!recipient) return false;
+  if (recipient.role === 'admin') return true;
+  if (recipient.role === 'coordinator') return recipient.permissions?.canAssignTasks !== false;
+  return recipient.permissions?.canAssignTasks === true;
+}
+
+function getSafeUsersForAgency(
+  agencyId: string,
+  recipient?: { role?: string; permissions?: { canAssignTasks?: boolean } }
+) {
+  // Privacy: a roster payload is ALWAYS scoped to one agency and trimmed by recipient.
+  // - Every recipient sees only users of their own agency (never the platform roster).
+  // - Contact emails are visible only to recipients who can assign tasks
+  //   (admin, coordinator unless explicitly revoked, or granted canAssignTasks);
+  //   other roles get names/roles/venues/avatar colors for display.
+  const norm = (v?: string) => v || 'agency-hkc';
+  const showEmails = recipientSeesRosterEmails(recipient);
+  return users
+    .filter((u) => norm(u.agencyId) === agencyId)
+    .map((u) => {
+      const safe = getSafeUser(u);
+      if (showEmails) return safe;
+      const { email, ...rest } = safe;
+      return rest;
+    });
+}
+
+/** Resolve a broadcast recipient's CURRENT user record for permission lookups.
+ * Resolves by the socket's authenticated user ID (never by email alone — the
+ * same email can exist in several agencies) and verifies the user still
+ * exists AND belongs to the socket's authenticated agency. A permission
+ * lookup must never cross an agency boundary. Returns undefined when the
+ * recipient is gone or moved (fail closed). */
+function recipientForMeta(meta: { userId: string; agencyId: string }) {
+  const u = users.find((x) => x.id === meta.userId);
+  if (!u) return undefined;
+  const norm = (v?: string) => v || 'agency-hkc';
+  if (norm(u.agencyId) !== meta.agencyId) return undefined;
+  return u;
+}
+
+/**
+ * Authorize a socket for broadcast receipt. Returns the socket's metadata
+ * when the socket carries authenticated metadata AND its user still exists
+ * and belongs to the socket's agency; otherwise closes the socket (4401)
+ * and returns null. A socket without metadata, or whose user was deleted,
+ * moved, or revoked, must never receive data — on either broadcast path,
+ * scoped or unscoped. Fail closed: an unauthorizable socket is terminated,
+ * not skipped silently.
+ */
+function authorizeSocket(client: WebSocket): SocketMeta | null {
+  const meta = activeSockets.get(client);
+  if (!meta || !recipientForMeta(meta)) {
+    try {
+      client.close(4401, 'Unauthorized');
+    } catch {}
+    activeSockets.delete(client);
+    return null;
+  }
+  return meta;
 }
 
 const INITIAL_TASKS: TaskItem[] = [];
@@ -2975,9 +3041,10 @@ app.post('/api/push/unsubscribe', async (req, res) => {
 
 // WebSocket Setup
 const wss = new WebSocketServer({ server, path: '/ws' });
-const activeSockets = new Map<WebSocket, { email: string; name: string; agencyId: string }>();
+type SocketMeta = { userId: string; email: string; name: string; agencyId: string; role?: string };
+const activeSockets = new Map<WebSocket, SocketMeta>();
 
-function agencyStateFor(agencyId: string) {
+function agencyStateFor(agencyId: string, recipient?: { role?: string; permissions?: { canAssignTasks?: boolean } }) {
   const norm = (v?: string) => v || 'agency-hkc';
   return {
     venues: venues.filter((v) => norm(v.agencyId) === agencyId),
@@ -2987,32 +3054,56 @@ function agencyStateFor(agencyId: string) {
     airtableConfigs: airtableConfigs.filter((c) => norm(c.agencyId) === agencyId),
     approvedIngredients: approvedIngredients.filter((i) => norm(i.agencyId) === agencyId),
     factoryReports: factoryReports.filter((r) => norm(r.agencyId) === agencyId),
-    users: getSafeUsers().filter((u: any) => norm(u.agencyId) === agencyId),
+    users: getSafeUsersForAgency(agencyId, recipient),
     currentWorkDate,
   };
 }
 
-function broadcast(type: string, payload: any, senderEmail?: string, agencyId?: string) {
+function broadcast(
+  type: string,
+  payload: any,
+  senderEmail?: string,
+  agencyId?: string,
+  // Optional per-recipient payload transform (e.g. role-trimmed rosters).
+  // Receives the socket's meta and the base payload; must return the payload
+  // for THAT recipient. When omitted, every recipient gets the same payload.
+  varyByRecipient?: (meta: SocketMeta, basePayload: any) => any
+) {
   // The envelope carries the current document version so clients can keep
   // their last-known version fresh without polling (see src/lib/api.ts).
   // Broadcasts are sent only after the commit hydrated the cache, so
   // stateVersion is the version that produced this payload.
-  const message = JSON.stringify({
-    type,
-    payload,
-    timestamp: new Date().toISOString(),
-    senderEmail,
-    version: typeof stateVersion === 'number' ? stateVersion : undefined,
-  });
+  const envelopeFor = (finalPayload: any) =>
+    JSON.stringify({
+      type,
+      payload: finalPayload,
+      timestamp: new Date().toISOString(),
+      senderEmail,
+      version: typeof stateVersion === 'number' ? stateVersion : undefined,
+    });
 
+  // Fast path: one message for every authorized recipient (serialized once).
+  if (!varyByRecipient) {
+    const message = envelopeFor(payload);
+    for (const client of wss.clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      const meta = authorizeSocket(client);
+      if (!meta) continue;
+      // Agency-scoped broadcasts only reach that agency's sockets.
+      if (agencyId && meta.agencyId !== agencyId) continue;
+      client.send(message);
+    }
+    return;
+  }
+
+  // Per-recipient path: the payload is computed for each authorized socket.
   for (const client of wss.clients) {
     if (client.readyState !== WebSocket.OPEN) continue;
+    const meta = authorizeSocket(client);
+    if (!meta) continue;
     // Agency-scoped broadcasts only reach that agency's sockets.
-    if (agencyId) {
-      const meta = activeSockets.get(client);
-      if (!meta || meta.agencyId !== agencyId) continue;
-    }
-    client.send(message);
+    if (agencyId && meta.agencyId !== agencyId) continue;
+    client.send(envelopeFor(varyByRecipient(meta, payload)));
   }
 }
 
@@ -3034,14 +3125,14 @@ wss.on('connection', (ws, req) => {
   }
 
   const agencyId = authedUser.agencyId || 'agency-hkc';
-  activeSockets.set(ws, { email: authedUser.email, name: authedUser.name, agencyId });
+  activeSockets.set(ws, { userId: authedUser.id, email: authedUser.email, name: authedUser.name, agencyId, role: authedUser.role });
 
   // Initial state: ONLY this user's agency. Never the whole platform.
   ws.send(
     JSON.stringify({
       type: 'INITIAL_STATE',
       payload: {
-        ...agencyStateFor(agencyId),
+        ...agencyStateFor(agencyId, authedUser),
         activeWorkersCount: activeSockets.size,
       },
       timestamp: new Date().toISOString(),
@@ -3056,9 +3147,11 @@ wss.on('connection', (ws, req) => {
       const parsed = JSON.parse(data.toString());
       if (parsed.type === 'USER_PRESENCE' && parsed.payload) {
         activeSockets.set(ws, {
+          userId: authedUser.id,
           email: authedUser.email,
           name: authedUser.name,
           agencyId,
+          role: authedUser.role,
         });
         broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
       }
@@ -4513,18 +4606,16 @@ app.post('/api/agencies/register', async (req, res) => {
   });
 });
 
-// List all registered kosher agencies (with overview counts)
+// The caller's own agency (public fields only) — never a cross-agency listing.
 app.get('/api/agencies', (req, res) => {
-  const safeAgencies = agencies.map((a) => {
-    const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === a.id);
-    const agencyUsers = users.filter((u) => (u.agencyId || 'agency-hkc') === a.id);
-    return {
-      ...a,
-      venuesCount: agencyVenues.length,
-      workersCount: agencyUsers.length,
-    };
-  });
-  res.json({ agencies: safeAgencies });
+  // Privacy: an authenticated user sees ONLY their own agency, and only its
+  // public fields (id/name/seal). No admin emails, no user/venue counts,
+  // no cross-agency listing.
+  const agencyId = callerAgencyId(req);
+  const a = agencies.find((x: any) => x.id === agencyId) as any;
+  if (!a) return res.status(404).json({ error: 'Agency not found.' });
+  const { id, name, certificationSeal, shortCode } = a;
+  res.json({ agencies: [{ id, name, certificationSeal, shortCode }] });
 });
 
 // Get current agency details for logged in user
@@ -4736,6 +4827,80 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
         { label: 'test-inject-fixture' }
       );
       res.json({ success: true, injected: venues.length + tasks.length + newAgencies.length + newUsers.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+}
+
+// Test-only broadcast-authorization endpoints. Registered ONLY when
+// isTestMode() is true (STAGE2_TEST_MODE=true AND not on Cloud Run), in a
+// dedicated block separate from the FIRESTORE_MOCK endpoints — they must
+// never exist outside test mode, even with FIRESTORE_MOCK=true.
+if (isTestMode()) {
+  // TEST ONLY: silently revokes a user (removes from the in-memory users array
+  // and persists) WITHOUT broadcasting. Lets tests verify broadcast
+  // authorization independently of the revocation broadcast (which would
+  // close the socket itself). Test mode only — the route does not exist in
+  // production (see isTestMode()).
+  app.post('/api/__test__/revoke-user-silent', async (req, res) => {
+    const { userId } = req.body || {};
+    try {
+      const committed = await commitState(
+        (freshDoc) => {
+          const before = (freshDoc.users || []).length;
+          const remaining = (freshDoc.users || []).filter((u: any) => u.id !== userId);
+          if (remaining.length === before) {
+            return { doc: freshDoc, result: { revoked: false } };
+          }
+          return { doc: { ...freshDoc, users: remaining }, result: { revoked: true } };
+        },
+        { label: 'test-revoke-user-silent' }
+      );
+      // commitState hydrates the in-memory cache, so recipientForMeta() sees
+      // the revocation immediately — but NOTHING is broadcast.
+      if (!committed || !committed.result.revoked) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      res.json({ ok: true, revoked: userId });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // TEST ONLY: drops the authenticated metadata for a user's sockets WITHOUT
+  // closing them, simulating a socket that somehow lost its metadata. Lets
+  // tests verify that metadata-less sockets are closed (not sent data) on
+  // broadcast. Test mode only.
+  app.post('/api/__test__/drop-socket-meta', async (req, res) => {
+    const { userId } = req.body || {};
+    try {
+      let dropped = 0;
+      for (const [client, meta] of activeSockets) {
+        if (meta.userId === userId) {
+          activeSockets.delete(client);
+          dropped++;
+        }
+      }
+      res.json({ ok: true, dropped });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // TEST ONLY: mints a session JWT for a user ID, signing server-side with
+  // getJwtSecret(). Lets tests obtain valid sessions without reading the
+  // signing secret from the doc (Test 18's restore cycle strips jwtSecret by
+  // design). Test mode only — never a production credential.
+  app.post('/api/__test__/mint-token', async (req, res) => {
+    const { userId } = req.body || {};
+    try {
+      if (!userId || typeof userId !== 'string') {
+        return res.status(400).json({ error: 'userId required' });
+      }
+      const user = users.find((u) => u.id === userId);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      res.json({ token: signToken(userId) });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
@@ -5665,9 +5830,11 @@ app.post('/api/admin/clean-slate', async (req, res) => {
     venues: [],
     tasks: [],
     events: [],
-    users: getSafeUsers(),
     isDemoCleared: true,
-  }, undefined, callerAgencyId);
+  }, undefined, callerAgencyId, (meta, base) => ({
+    ...base,
+    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
+  }));
 
   res.json({
     success: true,
@@ -5675,7 +5842,7 @@ app.post('/api/admin/clean-slate', async (req, res) => {
     venues: [],
     tasks: [],
     events: [],
-    users: getSafeUsers(),
+    users: getSafeUsersForAgency(callerAgencyId, caller),
     message: 'All demo facilities and example data have been cleared. Ready to start from scratch!',
   });
 });
@@ -5723,22 +5890,31 @@ app.post('/api/admin/restore-demo', async (req, res) => {
   );
   if (!committed) return;
 
+  // Privacy: every payload below is scoped to the caller's agency. The client
+  // REPLACES its venues/tasks/events/users from this broadcast, so unfiltered
+  // arrays would show one agency's data inside another agency's app.
+  const normAgency = (v?: string) => v || 'agency-hkc';
+  const agencyVenues = venues.filter((v) => normAgency(v.agencyId) === callerAgencyId);
+  const agencyTasks = tasks.filter((t) => normAgency(t.agencyId) === callerAgencyId);
+  const agencyEvents = events.filter((e) => normAgency(e.agencyId) === callerAgencyId);
   broadcast('DEMO_RESTORED', {
     agencyId: callerAgencyId,
-    venues,
-    tasks,
-    events,
-    users: getSafeUsers(),
+    venues: agencyVenues,
+    tasks: agencyTasks,
+    events: agencyEvents,
     isDemoCleared: false,
-  }, undefined, callerAgencyId);
+  }, undefined, callerAgencyId, (meta, base) => ({
+    ...base,
+    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
+  }));
 
   res.json({
     success: true,
     isDemoCleared: false,
-    venues,
-    tasks,
-    events,
-    users: getSafeUsers(),
+    venues: agencyVenues,
+    tasks: agencyTasks,
+    events: agencyEvents,
+    users: getSafeUsersForAgency(callerAgencyId, caller),
     message: 'Demo facilities, mashgichim, and inspection tasks have been restored.',
   });
 });
@@ -6276,27 +6452,26 @@ app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
 });
 
 app.get('/api/users', (req, res) => {
-  const { venueId, userEmail } = req.query;
+  const { venueId } = req.query;
 
-  let callerAgencyId = 'agency-hkc';
+  // Privacy: the roster is scoped from the verified session token, NEVER from
+  // a client-supplied email. (Previously the userEmail query param let any
+  // authenticated user read another agency's roster by passing one of its
+  // emails.) Fields are trimmed by the caller's role, like the WS roster.
+  const agencyId = callerAgencyId(req);
+  const caller = getAuthUser(req);
+
   let targetVenueId = venueId ? String(venueId) : null;
-
-  if (userEmail) {
-    const user = users.find((u) => u.email.toLowerCase() === String(userEmail).trim().toLowerCase());
-    if (user) {
-      callerAgencyId = user.agencyId || 'agency-hkc';
-      if (user.role !== 'admin') {
-        targetVenueId = user.venueId || null;
-      }
-    }
+  if (caller && caller.role !== 'admin') {
+    targetVenueId = caller.venueId || null;
   }
 
   // Scope to caller's agency
-  let agencyUsers = getSafeUsers().filter((u) => (u.agencyId || 'agency-hkc') === callerAgencyId);
+  let agencyUsers = getSafeUsersForAgency(agencyId, caller ?? undefined);
 
   if (targetVenueId) {
     // Return users assigned to this venue OR agency admins
-    agencyUsers = agencyUsers.filter((u) => u.role === 'admin' || u.venueId === targetVenueId);
+    agencyUsers = agencyUsers.filter((u: any) => u.role === 'admin' || u.venueId === targetVenueId);
   }
 
   res.json({ users: agencyUsers });
@@ -6383,7 +6558,10 @@ app.post('/api/users', async (req, res) => {
   );
   if (!committed) return;
   const created = committed.result as UserProfile;
-  broadcast('USERS_UPDATED', { users: getSafeUsers(), agencyId: callerAgencyId }, undefined, callerAgencyId);
+  broadcast('USERS_UPDATED', { agencyId: callerAgencyId }, undefined, callerAgencyId, (meta, base) => ({
+    ...base,
+    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
+  }));
   res.status(201).json({ user: getSafeUser(created) });
 });
 
@@ -6483,7 +6661,10 @@ app.put('/api/users/:id', async (req, res) => {
   );
   if (!committed) return;
   const updated = committed.result as UserProfile;
-  broadcast('USERS_UPDATED', { users: getSafeUsers(), agencyId: updated.agencyId }, undefined, updated.agencyId);
+  broadcast('USERS_UPDATED', { agencyId: updated.agencyId }, undefined, updated.agencyId, (meta, base) => ({
+    ...base,
+    users: getSafeUsersForAgency(updated.agencyId, recipientForMeta(meta)),
+  }));
   res.json({ user: getSafeUser(updated) });
 });
 
@@ -6511,7 +6692,7 @@ app.delete('/api/users/:id', async (req, res) => {
     const userAgency = agencies.find((a) => a.id === userToDelete.agencyId);
     if (
       userToDelete.email.toLowerCase() === 'kenan@hartfordkashrut.org' ||
-      (userAgency && userToDelete.email.toLowerCase() === userAgency.adminEmail.toLowerCase())
+      (userAgency && userToDelete.email.toLowerCase() === userAgency.adminEmail?.toLowerCase())
     ) {
       return res.status(400).json({ error: 'Cannot delete the primary administrator account for this agency.' });
     }
@@ -6548,9 +6729,13 @@ app.delete('/api/users/:id', async (req, res) => {
   if (!committed) return;
   broadcast(
     'USERS_UPDATED',
-    { users: getSafeUsers(), deletedId: id, agencyId: deletedAgencyId },
+    { deletedId: id, agencyId: deletedAgencyId },
     undefined,
-    deletedAgencyId
+    deletedAgencyId,
+    (meta, base) => ({
+      ...base,
+      users: getSafeUsersForAgency(deletedAgencyId, recipientForMeta(meta)),
+    })
   );
   res.json({ success: true, deletedId: id });
 });
@@ -6709,6 +6894,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   }
 
   // Notify admins via push (they pass the code to the user) — only after commit.
+  // Privacy: the reset code is NEVER broadcast over WebSocket. It was
+  // previously sent in plaintext to every connected client of the agency.
   const agencyId = user.agencyId || 'agency-hkc';
   const admins = users.filter((u) =>
     (u.agencyId || 'agency-hkc') === agencyId &&
@@ -6722,9 +6909,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       { type: 'password-reset', email: normalizedEmail }
     );
   }
-  // Also broadcast so admin sees it in-app
-  broadcast('PASSWORD_RESET_REQUESTED', { email: normalizedEmail, code, userName: user.name }, undefined, agencyId);
-
+  // (No WebSocket broadcast: reset codes must never travel in plaintext
+  // to every connected client.)
   res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
 });
 

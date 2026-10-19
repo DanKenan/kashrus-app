@@ -134,7 +134,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
     }
 
     const emailClean = email.trim().toLowerCase();
-    if (users.some((u) => u.email.toLowerCase() === emailClean)) {
+    if (users.some((u) => (u.email?.toLowerCase() || '') === emailClean)) {
       setError('A team member with this email already exists.');
       return;
     }
@@ -248,7 +248,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
     if (!searchQuery) return true;
     const q = searchQuery.toLowerCase();
     const roleLabel = getRoleLabel(u.role).toLowerCase();
-    return u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q) || u.role.includes(q) || roleLabel.includes(q);
+    return u.name.toLowerCase().includes(q) || (u.email?.toLowerCase() || '').includes(q) || u.role.includes(q) || roleLabel.includes(q);
   });
 
   return (

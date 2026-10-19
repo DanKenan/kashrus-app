@@ -19,6 +19,7 @@ import {
 import { KosherEvent, User as UserType, Venue } from '../types';
 import { getRoleLabel } from '../lib/permissions';
 import { apiFetch, apiWrite } from '../lib/api';
+import { rosterDisplayHandle, rosterEmailLower } from '../lib/rosterDisplay';
 
 // Staff roles that can be assigned to supervise an event — everyone on the
 // team except venue owners. ('worker' is the app's Mashgiach role.)
@@ -203,7 +204,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
     try {
       const selectedMashgiachObj = availableMashgichim.find(
-        (m) => m.email.toLowerCase() === selectedMashgiachEmail.toLowerCase()
+        (m) => rosterEmailLower(m) === selectedMashgiachEmail.toLowerCase()
       );
 
       const payload = {
@@ -475,8 +476,8 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                       <option value="">No venue mashgichim found - select Other</option>
                     ) : (
                       relevantMashgichim.map((m) => (
-                        <option key={m.id} value={m.email}>
-                          {m.name} — {getRoleLabel(m.role)} ({m.email})
+                        <option key={m.id} value={m.email || ''}>
+                          {m.name} — {getRoleLabel(m.role)}{m.email ? ` (${rosterDisplayHandle(m)})` : ''}
                         </option>
                       ))
                     )}
