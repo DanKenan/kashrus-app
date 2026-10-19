@@ -1302,21 +1302,41 @@ function getSafeUser(user: UserProfile) {
   };
 }
 
-function getSafeUsersForAgency(agencyId: string, role?: string) {
-  // Privacy: a roster payload is ALWAYS scoped to one agency and trimmed by role.
+/** Whether a roster recipient may see contact emails. Mirrors the client's
+ * canUserAssignTasks (src/lib/permissions.ts): assignments are keyed by email,
+ * so anyone who can assign tasks keeps emails; everyone else gets names/roles
+ * only. Fail closed: unknown recipient → no emails. */
+function recipientSeesRosterEmails(recipient?: { role?: string; permissions?: { canAssignTasks?: boolean } }): boolean {
+  if (!recipient) return false;
+  if (recipient.role === 'admin') return true;
+  if (recipient.role === 'coordinator') return recipient.permissions?.canAssignTasks !== false;
+  return recipient.permissions?.canAssignTasks === true;
+}
+
+function getSafeUsersForAgency(
+  agencyId: string,
+  recipient?: { role?: string; permissions?: { canAssignTasks?: boolean } }
+) {
+  // Privacy: a roster payload is ALWAYS scoped to one agency and trimmed by recipient.
   // - Every recipient sees only users of their own agency (never the platform roster).
-  // - Only admin/coordinator see contact emails (needed for assignment + team
-  //   management); other roles get names/roles/venues/avatar colors for display.
+  // - Contact emails are visible only to recipients who can assign tasks
+  //   (admin, coordinator unless explicitly revoked, or granted canAssignTasks);
+  //   other roles get names/roles/venues/avatar colors for display.
   const norm = (v?: string) => v || 'agency-hkc';
-  const privileged = role === 'admin' || role === 'coordinator';
+  const showEmails = recipientSeesRosterEmails(recipient);
   return users
     .filter((u) => norm(u.agencyId) === agencyId)
     .map((u) => {
       const safe = getSafeUser(u);
-      if (privileged) return safe;
+      if (showEmails) return safe;
       const { email, ...rest } = safe;
       return rest;
     });
+}
+
+/** Resolve a broadcast recipient's CURRENT user record (fresh permissions, not socket-time). */
+function recipientForMeta(meta: { email: string }) {
+  return users.find((u) => u.email.toLowerCase() === meta.email.toLowerCase());
 }
 
 const INITIAL_TASKS: TaskItem[] = [];
@@ -2990,7 +3010,7 @@ app.post('/api/push/unsubscribe', async (req, res) => {
 const wss = new WebSocketServer({ server, path: '/ws' });
 const activeSockets = new Map<WebSocket, { email: string; name: string; agencyId: string; role?: string }>();
 
-function agencyStateFor(agencyId: string, role?: string) {
+function agencyStateFor(agencyId: string, recipient?: { role?: string; permissions?: { canAssignTasks?: boolean } }) {
   const norm = (v?: string) => v || 'agency-hkc';
   return {
     venues: venues.filter((v) => norm(v.agencyId) === agencyId),
@@ -3000,7 +3020,7 @@ function agencyStateFor(agencyId: string, role?: string) {
     airtableConfigs: airtableConfigs.filter((c) => norm(c.agencyId) === agencyId),
     approvedIngredients: approvedIngredients.filter((i) => norm(i.agencyId) === agencyId),
     factoryReports: factoryReports.filter((r) => norm(r.agencyId) === agencyId),
-    users: getSafeUsersForAgency(agencyId, role),
+    users: getSafeUsersForAgency(agencyId, recipient),
     currentWorkDate,
   };
 }
@@ -3079,7 +3099,7 @@ wss.on('connection', (ws, req) => {
     JSON.stringify({
       type: 'INITIAL_STATE',
       payload: {
-        ...agencyStateFor(agencyId, authedUser.role),
+        ...agencyStateFor(agencyId, authedUser),
         activeWorkersCount: activeSockets.size,
       },
       timestamp: new Date().toISOString(),
@@ -5705,7 +5725,7 @@ app.post('/api/admin/clean-slate', async (req, res) => {
     isDemoCleared: true,
   }, undefined, callerAgencyId, (meta, base) => ({
     ...base,
-    users: getSafeUsersForAgency(callerAgencyId, meta.role),
+    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
   }));
 
   res.json({
@@ -5714,7 +5734,7 @@ app.post('/api/admin/clean-slate', async (req, res) => {
     venues: [],
     tasks: [],
     events: [],
-    users: getSafeUsersForAgency(callerAgencyId, caller.role),
+    users: getSafeUsersForAgency(callerAgencyId, caller),
     message: 'All demo facilities and example data have been cleared. Ready to start from scratch!',
   });
 });
@@ -5777,7 +5797,7 @@ app.post('/api/admin/restore-demo', async (req, res) => {
     isDemoCleared: false,
   }, undefined, callerAgencyId, (meta, base) => ({
     ...base,
-    users: getSafeUsersForAgency(callerAgencyId, meta.role),
+    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
   }));
 
   res.json({
@@ -5786,7 +5806,7 @@ app.post('/api/admin/restore-demo', async (req, res) => {
     venues: agencyVenues,
     tasks: agencyTasks,
     events: agencyEvents,
-    users: getSafeUsersForAgency(callerAgencyId, caller.role),
+    users: getSafeUsersForAgency(callerAgencyId, caller),
     message: 'Demo facilities, mashgichim, and inspection tasks have been restored.',
   });
 });
@@ -6339,7 +6359,7 @@ app.get('/api/users', (req, res) => {
   }
 
   // Scope to caller's agency
-  let agencyUsers = getSafeUsersForAgency(agencyId, caller?.role);
+  let agencyUsers = getSafeUsersForAgency(agencyId, caller ?? undefined);
 
   if (targetVenueId) {
     // Return users assigned to this venue OR agency admins
@@ -6432,7 +6452,7 @@ app.post('/api/users', async (req, res) => {
   const created = committed.result as UserProfile;
   broadcast('USERS_UPDATED', { agencyId: callerAgencyId }, undefined, callerAgencyId, (meta, base) => ({
     ...base,
-    users: getSafeUsersForAgency(callerAgencyId, meta.role),
+    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
   }));
   res.status(201).json({ user: getSafeUser(created) });
 });
@@ -6535,7 +6555,7 @@ app.put('/api/users/:id', async (req, res) => {
   const updated = committed.result as UserProfile;
   broadcast('USERS_UPDATED', { agencyId: updated.agencyId }, undefined, updated.agencyId, (meta, base) => ({
     ...base,
-    users: getSafeUsersForAgency(updated.agencyId, meta.role),
+    users: getSafeUsersForAgency(updated.agencyId, recipientForMeta(meta)),
   }));
   res.json({ user: getSafeUser(updated) });
 });
@@ -6564,7 +6584,7 @@ app.delete('/api/users/:id', async (req, res) => {
     const userAgency = agencies.find((a) => a.id === userToDelete.agencyId);
     if (
       userToDelete.email.toLowerCase() === 'kenan@hartfordkashrut.org' ||
-      (userAgency && userToDelete.email.toLowerCase() === userAgency.adminEmail.toLowerCase())
+      (userAgency && userToDelete.email.toLowerCase() === userAgency.adminEmail?.toLowerCase())
     ) {
       return res.status(400).json({ error: 'Cannot delete the primary administrator account for this agency.' });
     }
@@ -6606,7 +6626,7 @@ app.delete('/api/users/:id', async (req, res) => {
     deletedAgencyId,
     (meta, base) => ({
       ...base,
-      users: getSafeUsersForAgency(deletedAgencyId, meta.role),
+      users: getSafeUsersForAgency(deletedAgencyId, recipientForMeta(meta)),
     })
   );
   res.json({ success: true, deletedId: id });

@@ -2,20 +2,27 @@
  * Test 22: Roster privacy — per-recipient agency filtering (PR 1).
  *
  * Every roster payload the server sends must be scoped to the recipient's own
- * agency, with role-appropriate fields:
- *   - USERS_UPDATED / CLEAN_SLATE_RESET / DEMO_RESTORED broadcasts: each socket
- *     gets only its own agency's users (previously the whole platform roster).
- *   - Only admin/coordinator see contact emails; other roles get names/roles/
- *     venues (no emails) — assignment pickers are privileged-only flows.
+ * agency, with recipient-appropriate fields:
+ *   - INITIAL_STATE / USERS_UPDATED (create/update/delete) / CLEAN_SLATE_RESET /
+ *     DEMO_RESTORED broadcasts: each socket gets only its own agency's users
+ *     (previously the whole platform roster).
+ *   - Contact emails are visible only to recipients who can assign tasks
+ *     (admin, coordinator unless explicitly revoked, or granted canAssignTasks —
+ *     mirroring the client's canUserAssignTasks); everyone else gets
+ *     names/roles/venues. Unknown/deleted recipients fail closed (no emails).
+ *   - No socket of another agency — and no unregistered (agency-less) socket —
+ *     receives another agency's payload at all.
  *   - GET /api/agencies: caller's own agency only, public fields (no adminEmail,
  *     no counts, no cross-agency listing).
  *   - GET /api/users: scoped from the verified session token, never from a
  *     client-supplied userEmail query param.
+ *   - POST /api/admin/clean-slate and POST /api/admin/restore-demo HTTP
+ *     responses: scoped to the caller's agency.
  *
  * Method: real WebSocket clients (native Node WebSocket) for an agency-hkc
- * admin, an agency-B admin and an agency-B mashgiach; trigger USERS_UPDATED
- * by creating a user in agency B; assert per-recipient scoping of every
- * roster payload, plus the HTTP endpoints.
+ * admin, an agency-B admin, an agency-B mashgiach, an agency-B mashgiach with
+ * canAssignTasks, and an agency-less user; trigger each broadcast and assert
+ * per-recipient scoping.
  */
 import { createHmac } from 'node:crypto';
 
@@ -34,7 +41,7 @@ function mintToken(userId, jwtSecret) {
   return `${header}.${payload}.${sig}`;
 }
 
-function connectWs(baseUrl, token, label) {
+function connectWs(baseUrl, token) {
   return new Promise((resolve, reject) => {
     const wsUrl = baseUrl.replace(/^http/, 'ws') + `/ws?token=${token}`;
     const ws = new WebSocket(wsUrl);
@@ -75,22 +82,34 @@ function waitForType(messages, type, timeoutMs = 15000) {
   });
 }
 
-/** Assert a roster payload: only the expected agency, no secrets, role-trimmed emails. */
+/** Assert a roster payload: only the expected agency, no secrets, recipient-trimmed emails. */
 function assertRoster(users, agencyId, expectEmails, label) {
   if (!Array.isArray(users)) throw new Error(`${label}: users is not an array`);
   for (const u of users) {
     if ((u.agencyId || 'agency-hkc') !== agencyId) {
       throw new Error(`${label}: roster leaked another agency's user: ${u.id} (${u.agencyId})`);
     }
-    if ('password' in u || 'kioskPin' in u) {
+    if ('password' in u || 'kioskPin' in u || 'passwordHash' in u || 'kioskPinHash' in u) {
       throw new Error(`${label}: roster leaked a secret field for ${u.id}`);
     }
-    const hasEmail = 'email' in u && u.email;
+    const hasEmail = 'email' in u && !!u.email;
     if (expectEmails && !hasEmail) {
-      throw new Error(`${label}: privileged role should see emails (${u.id})`);
+      throw new Error(`${label}: recipient who can assign should see emails (${u.id})`);
     }
     if (!expectEmails && hasEmail) {
-      throw new Error(`${label}: non-privileged role should NOT see emails (${u.id})`);
+      throw new Error(`${label}: recipient who cannot assign should NOT see emails (${u.id})`);
+    }
+  }
+}
+
+/** Assert a broadcast's venues/tasks/events arrays are agency-scoped. */
+function assertAgencyScopedArrays(payload, agencyId, label) {
+  for (const [key, arr] of [['venues', payload.venues], ['tasks', payload.tasks], ['events', payload.events]]) {
+    if (!Array.isArray(arr)) throw new Error(`${label}: ${key} is not an array`);
+    for (const item of arr) {
+      if ((item.agencyId || 'agency-hkc') !== agencyId) {
+        throw new Error(`${label}: ${key} leaked another agency's record: ${item.id}`);
+      }
     }
   }
 }
@@ -98,22 +117,34 @@ function assertRoster(users, agencyId, expectEmails, label) {
 export default {
   name: 'Test 22: Roster privacy — per-recipient agency filtering',
   whatItProves:
-    'Roster payloads (USERS_UPDATED/INITIAL_STATE broadcasts, /api/agencies, /api/users) are scoped to the recipient\'s own agency with role-appropriate fields. No cross-agency roster, no admin emails, no secret fields, and the userEmail query param no longer scopes the roster.',
+    'Roster payloads (INITIAL_STATE, USERS_UPDATED create/update/delete, CLEAN_SLATE_RESET, DEMO_RESTORED) are scoped per-recipient to their own agency with emails only for task-assigners. No cross-agency receipt; /api/agencies, /api/users, clean-slate and restore-demo responses scoped; userEmail param ignored.',
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
     const adminBId = `user-test22-adminb-${ts}`;
     const staffBId = `user-test22-staffb-${ts}`;
+    const assignerBId = `user-test22-assignerb-${ts}`;
+    const noAgencyId = `user-test22-noagency-${ts}`;
     const adminBEmail = `test22-adminb-${ts}@test.local`;
     const staffBEmail = `test22-staffb-${ts}@test.local`;
+    const assignerBEmail = `test22-assignerb-${ts}@test.local`;
+    const noAgencyEmail = `test22-noagency-${ts}@test.local`;
+    const newBEmail = `test22-new-${ts}@test.local`;
 
-    // --- 1. Fixtures: agency B with an admin and a mashgiach ---
+    // --- 1. Fixtures: agency B with admin, plain mashgiach, canAssignTasks
+    // mashgiach, plus an agency-less user (unregistered-socket case) ---
     const inj = await ctx.api('POST', '/api/__test__/inject-fixture', {
       agencies: [{ id: AGENCY_B, name: 'Test Agency B 22' }],
       venues: [{ id: `venue-test22-b-${ts}`, name: `Test22 Venue B ${ts}`, agencyId: AGENCY_B }],
       users: [
         { id: adminBId, email: adminBEmail, name: 'Test22 Admin B', role: 'admin', agencyId: AGENCY_B },
         { id: staffBId, email: staffBEmail, name: 'Test22 Staff B', role: 'mashgiach', agencyId: AGENCY_B },
+        {
+          id: assignerBId, email: assignerBEmail, name: 'Test22 Assigner B',
+          role: 'mashgiach', agencyId: AGENCY_B, permissions: { canAssignTasks: true },
+        },
+        // No agencyId: falls back to agency-hkc; must never see agency-B payloads.
+        { id: noAgencyId, email: noAgencyEmail, name: 'Test22 NoAgency', role: 'mashgiach' },
       ],
     });
     if (inj.status !== 200) throw new Error(`fixture inject failed: ${inj.status} ${JSON.stringify(inj.json)}`);
@@ -123,9 +154,11 @@ export default {
     if (!jwtSecret) throw new Error('no jwtSecret available to mint tokens');
     const tokenAdminB = mintToken(adminBId, jwtSecret);
     const tokenStaffB = mintToken(staffBId, jwtSecret);
+    const tokenAssignerB = mintToken(assignerBId, jwtSecret);
+    const tokenNoAgency = mintToken(noAgencyId, jwtSecret);
     const authB = (t) => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${t}` });
 
-    // --- 2. WS clients: hkc admin (ctx token), agency-B admin, agency-B mashgiach ---
+    // --- 2. WS clients ---
     const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -137,54 +170,104 @@ export default {
     const connHkc = await connectWs(baseUrl, loginJson.token);
     const connAdminB = await connectWs(baseUrl, tokenAdminB);
     const connStaffB = await connectWs(baseUrl, tokenStaffB);
+    const connAssignerB = await connectWs(baseUrl, tokenAssignerB);
+    const connNoAgency = await connectWs(baseUrl, tokenNoAgency);
+    const allConns = [connHkc, connAdminB, connStaffB, connAssignerB, connNoAgency];
+    const clearAll = () => allConns.forEach((c) => { c.messages.length = 0; });
+    const assertNoType = (conns, type, label) => {
+      for (const c of conns) {
+        if (c.messages.some((m) => m.type === type)) throw new Error(`${label}: unexpected ${type} received`);
+      }
+    };
 
-    // --- 3. INITIAL_STATE rosters are agency-scoped + role-trimmed ---
-    const initB = connStaffB.messages.find((m) => m.type === 'INITIAL_STATE');
-    assertRoster(initB.payload.users, AGENCY_B, false, 'INITIAL_STATE (agency-B mashgiach)');
-    const initAdminB = connAdminB.messages.find((m) => m.type === 'INITIAL_STATE');
-    assertRoster(initAdminB.payload.users, AGENCY_B, true, 'INITIAL_STATE (agency-B admin)');
-    const initHkc = connHkc.messages.find((m) => m.type === 'INITIAL_STATE');
-    for (const u of initHkc.payload.users) {
-      if ((u.agencyId || 'agency-hkc') === AGENCY_B) {
-        throw new Error('INITIAL_STATE (hkc admin): leaked agency-B user');
+    // --- 3. INITIAL_STATE: agency-scoped + recipient-trimmed ---
+    assertRoster(
+      connAdminB.messages.find((m) => m.type === 'INITIAL_STATE').payload.users,
+      AGENCY_B, true, 'INITIAL_STATE (agency-B admin)'
+    );
+    assertRoster(
+      connStaffB.messages.find((m) => m.type === 'INITIAL_STATE').payload.users,
+      AGENCY_B, false, 'INITIAL_STATE (agency-B mashgiach)'
+    );
+    assertRoster(
+      connAssignerB.messages.find((m) => m.type === 'INITIAL_STATE').payload.users,
+      AGENCY_B, true, 'INITIAL_STATE (agency-B canAssignTasks mashgiach)'
+    );
+    for (const [conn, label] of [[connHkc, 'hkc admin'], [connNoAgency, 'agency-less user']]) {
+      for (const u of conn.messages.find((m) => m.type === 'INITIAL_STATE').payload.users) {
+        if ((u.agencyId || 'agency-hkc') === AGENCY_B) {
+          throw new Error(`INITIAL_STATE (${label}): leaked agency-B user`);
+        }
       }
     }
+    clearAll();
 
-    // Clear buffers — from here we only care about the triggered broadcast.
-    connHkc.messages.length = 0;
-    connAdminB.messages.length = 0;
-    connStaffB.messages.length = 0;
-
-    // --- 4. Trigger USERS_UPDATED in agency B (create user as agency-B admin) ---
+    // --- 4. USERS_UPDATED (create): per-recipient roster, no cross-agency receipt ---
     const cr = await fetch(`${baseUrl}/api/users`, {
       method: 'POST',
       headers: authB(tokenAdminB),
-      body: JSON.stringify({
-        email: `test22-new-${ts}@test.local`,
-        name: 'Test22 New B',
-        role: 'mashgiach',
-        password: 'test-password-123',
-      }),
+      body: JSON.stringify({ email: newBEmail, name: 'Test22 New B', role: 'mashgiach', password: 'test-password-123' }),
     });
     if (cr.status !== 200 && cr.status !== 201) {
       throw new Error(`agency-B user create failed: ${cr.status} ${JSON.stringify(await cr.json())}`);
     }
-
-    const msgAdminB = await waitForType(connAdminB.messages, 'USERS_UPDATED');
-    const msgStaffB = await waitForType(connStaffB.messages, 'USERS_UPDATED');
-    assertRoster(msgAdminB.payload.users, AGENCY_B, true, 'USERS_UPDATED (agency-B admin)');
-    assertRoster(msgStaffB.payload.users, AGENCY_B, false, 'USERS_UPDATED (agency-B mashgiach)');
-    if (!msgAdminB.payload.users.some((u) => u.email === `test22-new-${ts}@test.local`)) {
-      throw new Error('USERS_UPDATED (agency-B admin): new user missing from roster');
+    const newUserId = (await cr.json()).user?.id;
+    const cuAdminB = await waitForType(connAdminB.messages, 'USERS_UPDATED');
+    const cuStaffB = await waitForType(connStaffB.messages, 'USERS_UPDATED');
+    const cuAssignerB = await waitForType(connAssignerB.messages, 'USERS_UPDATED');
+    assertRoster(cuAdminB.payload.users, AGENCY_B, true, 'USERS_UPDATED create (agency-B admin)');
+    assertRoster(cuStaffB.payload.users, AGENCY_B, false, 'USERS_UPDATED create (agency-B mashgiach)');
+    assertRoster(cuAssignerB.payload.users, AGENCY_B, true, 'USERS_UPDATED create (agency-B assigner)');
+    if (!cuAdminB.payload.users.some((u) => u.email === newBEmail)) {
+      throw new Error('USERS_UPDATED create (agency-B admin): new user missing from roster');
     }
-
-    // hkc admin must NOT receive agency B's USERS_UPDATED at all.
     await new Promise((r) => setTimeout(r, 1500));
-    if (connHkc.messages.some((m) => m.type === 'USERS_UPDATED')) {
-      throw new Error('hkc admin received USERS_UPDATED for agency B');
-    }
+    assertNoType([connHkc, connNoAgency], 'USERS_UPDATED', 'USERS_UPDATED create cross-agency');
+    clearAll();
 
-    // --- 5. GET /api/agencies: own agency only, no adminEmail, no counts ---
+    // --- 5. USERS_UPDATED (update): rename staffB as agency-B admin ---
+    const v1 = await ctx.getVersion();
+    const up = await fetch(`${baseUrl}/api/users/${staffBId}`, {
+      method: 'PUT',
+      headers: authB(tokenAdminB),
+      body: JSON.stringify({ name: 'Test22 Staff B Renamed', expectedVersion: v1 }),
+    });
+    if (up.status !== 200) throw new Error(`agency-B user update failed: ${up.status} ${JSON.stringify(await up.json())}`);
+    const uuAdminB = await waitForType(connAdminB.messages, 'USERS_UPDATED');
+    const uuStaffB = await waitForType(connStaffB.messages, 'USERS_UPDATED');
+    const uuAssignerB = await waitForType(connAssignerB.messages, 'USERS_UPDATED');
+    assertRoster(uuAdminB.payload.users, AGENCY_B, true, 'USERS_UPDATED update (agency-B admin)');
+    assertRoster(uuStaffB.payload.users, AGENCY_B, false, 'USERS_UPDATED update (agency-B mashgiach)');
+    assertRoster(uuAssignerB.payload.users, AGENCY_B, true, 'USERS_UPDATED update (agency-B assigner)');
+    if (!uuAdminB.payload.users.some((u) => u.id === staffBId && u.name === 'Test22 Staff B Renamed')) {
+      throw new Error('USERS_UPDATED update: renamed user missing from roster');
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+    assertNoType([connHkc, connNoAgency], 'USERS_UPDATED', 'USERS_UPDATED update cross-agency');
+    clearAll();
+
+    // --- 6. USERS_UPDATED (delete): remove the created user ---
+    const v2 = await ctx.getVersion();
+    const del = await fetch(`${baseUrl}/api/users/${newUserId}?expectedVersion=${v2}`, {
+      method: 'DELETE',
+      headers: authB(tokenAdminB),
+    });
+    if (del.status !== 200) throw new Error(`agency-B user delete failed: ${del.status} ${JSON.stringify(await del.json())}`);
+    const udAdminB = await waitForType(connAdminB.messages, 'USERS_UPDATED');
+    const udStaffB = await waitForType(connStaffB.messages, 'USERS_UPDATED');
+    const udAssignerB = await waitForType(connAssignerB.messages, 'USERS_UPDATED');
+    assertRoster(udAdminB.payload.users, AGENCY_B, true, 'USERS_UPDATED delete (agency-B admin)');
+    assertRoster(udStaffB.payload.users, AGENCY_B, false, 'USERS_UPDATED delete (agency-B mashgiach)');
+    assertRoster(udAssignerB.payload.users, AGENCY_B, true, 'USERS_UPDATED delete (agency-B assigner)');
+    if (udAdminB.payload.deletedId !== newUserId) throw new Error('USERS_UPDATED delete: deletedId missing');
+    if (udAdminB.payload.users.some((u) => u.id === newUserId)) {
+      throw new Error('USERS_UPDATED delete: deleted user still in roster');
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+    assertNoType([connHkc, connNoAgency], 'USERS_UPDATED', 'USERS_UPDATED delete cross-agency');
+    clearAll();
+
+    // --- 7. GET /api/agencies: own agency only, no adminEmail, no counts ---
     const ag = await fetch(`${baseUrl}/api/agencies`, { headers: authB(tokenAdminB) });
     const agJson = await ag.json();
     if (ag.status !== 200) throw new Error(`GET /api/agencies failed: ${ag.status}`);
@@ -197,26 +280,67 @@ export default {
       if (banned in only) throw new Error(`GET /api/agencies: leaked ${banned}`);
     }
 
-    // --- 6. GET /api/users: token-scoped, role-trimmed; userEmail param ignored ---
-    const us = await fetch(`${baseUrl}/api/users`, { headers: authB(tokenStaffB) });
-    const usJson = await us.json();
-    assertRoster(usJson.users, AGENCY_B, false, 'GET /api/users (agency-B mashgiach)');
-
-    const usSpoof = await fetch(
-      `${baseUrl}/api/users?userEmail=kenan@hartfordkashrut.org`,
-      { headers: authB(tokenStaffB) }
-    );
-    const usSpoofJson = await usSpoof.json();
-    for (const u of usSpoofJson.users || []) {
+    // --- 8. GET /api/users: token-scoped, recipient-trimmed; userEmail param ignored ---
+    const usAssigner = await fetch(`${baseUrl}/api/users`, { headers: authB(tokenAssignerB) });
+    assertRoster((await usAssigner.json()).users, AGENCY_B, true, 'GET /api/users (agency-B assigner)');
+    const usStaff = await fetch(`${baseUrl}/api/users`, { headers: authB(tokenStaffB) });
+    assertRoster((await usStaff.json()).users, AGENCY_B, false, 'GET /api/users (agency-B mashgiach)');
+    const usSpoof = await fetch(`${baseUrl}/api/users?userEmail=kenan@hartfordkashrut.org`, { headers: authB(tokenStaffB) });
+    for (const u of (await usSpoof.json()).users || []) {
       if ((u.agencyId || 'agency-hkc') !== AGENCY_B) {
-        throw new Error('GET /api/users: userEmail query param leaked another agency\'s roster');
+        throw new Error("GET /api/users: userEmail query param leaked another agency's roster");
       }
     }
 
-    connHkc.ws.close();
-    connAdminB.ws.close();
-    connStaffB.ws.close();
+    // --- 9. CLEAN_SLATE_RESET: broadcast + HTTP response scoped ---
+    // (Destructive to agency B only; this test runs last in the suite.)
+    const cs = await fetch(`${baseUrl}/api/admin/clean-slate`, {
+      method: 'POST',
+      headers: authB(tokenAdminB),
+      body: JSON.stringify({}),
+    });
+    if (cs.status !== 200) throw new Error(`clean-slate failed: ${cs.status} ${JSON.stringify(await cs.json())}`);
+    const csJson = await cs.json();
+    assertRoster(csJson.users, AGENCY_B, true, 'clean-slate HTTP response (agency-B admin)');
+    if (csJson.users.some((u) => u.id === staffBId || u.id === assignerBId)) {
+      throw new Error('clean-slate HTTP response: non-admin agency-B users should be wiped');
+    }
+    const csAdminB = await waitForType(connAdminB.messages, 'CLEAN_SLATE_RESET');
+    const csStaffB = await waitForType(connStaffB.messages, 'CLEAN_SLATE_RESET');
+    const csAssignerB = await waitForType(connAssignerB.messages, 'CLEAN_SLATE_RESET');
+    assertRoster(csAdminB.payload.users, AGENCY_B, true, 'CLEAN_SLATE_RESET (agency-B admin)');
+    // staffB/assignerB users were wiped: their sockets fail closed (no emails).
+    assertRoster(csStaffB.payload.users, AGENCY_B, false, 'CLEAN_SLATE_RESET (wiped mashgiach socket)');
+    assertRoster(csAssignerB.payload.users, AGENCY_B, false, 'CLEAN_SLATE_RESET (wiped assigner socket)');
+    for (const key of ['venues', 'tasks', 'events']) {
+      if (!Array.isArray(csAdminB.payload[key]) || csAdminB.payload[key].length !== 0) {
+        throw new Error(`CLEAN_SLATE_RESET: ${key} should be empty`);
+      }
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+    assertNoType([connHkc, connNoAgency], 'CLEAN_SLATE_RESET', 'CLEAN_SLATE_RESET cross-agency');
+    clearAll();
 
-    return 'roster payloads agency-scoped per recipient; emails admin/coordinator-only; /api/agencies stripped+scoped; userEmail param ignored';
+    // --- 10. DEMO_RESTORED: broadcast + HTTP response scoped ---
+    const rd = await fetch(`${baseUrl}/api/admin/restore-demo`, {
+      method: 'POST',
+      headers: authB(tokenAdminB),
+      body: JSON.stringify({}),
+    });
+    if (rd.status !== 200) throw new Error(`restore-demo failed: ${rd.status} ${JSON.stringify(await rd.json())}`);
+    const rdJson = await rd.json();
+    assertRoster(rdJson.users, AGENCY_B, true, 'restore-demo HTTP response (agency-B admin)');
+    assertAgencyScopedArrays(rdJson, AGENCY_B, 'restore-demo HTTP response');
+    const rdAdminB = await waitForType(connAdminB.messages, 'DEMO_RESTORED');
+    const rdStaffB = await waitForType(connStaffB.messages, 'DEMO_RESTORED');
+    assertRoster(rdAdminB.payload.users, AGENCY_B, true, 'DEMO_RESTORED (agency-B admin)');
+    assertRoster(rdStaffB.payload.users, AGENCY_B, false, 'DEMO_RESTORED (wiped mashgiach socket, fail closed)');
+    assertAgencyScopedArrays(rdAdminB.payload, AGENCY_B, 'DEMO_RESTORED (agency-B admin)');
+    await new Promise((r) => setTimeout(r, 1500));
+    assertNoType([connHkc, connNoAgency], 'DEMO_RESTORED', 'DEMO_RESTORED cross-agency');
+
+    for (const c of allConns) c.ws.close();
+
+    return 'all roster broadcasts (INITIAL_STATE, USERS_UPDATED create/update/delete, CLEAN_SLATE_RESET, DEMO_RESTORED) agency-scoped per recipient; emails only for task-assigners; no cross-agency or agency-less receipt; HTTP responses scoped; userEmail param ignored';
   },
 };

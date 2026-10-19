@@ -15,6 +15,7 @@ import {
   type CustomCategory,
 } from '../lib/categoryStyle';
 import { MonthlyCalendarPicker } from './MonthlyCalendarPicker';
+import { rosterDisplayHandle, rosterKey } from '../lib/rosterDisplay';
 
 /** Structured time value: 12-hour clock the app can reliably process. */
 export interface PickerTime {
@@ -123,7 +124,7 @@ interface TaskModalProps {
   onClose: () => void;
   onSave: (taskData: Partial<Task>, opts?: { baselineVersion?: number }) => Promise<boolean> | void;
   taskToEdit?: Task | null;
-  knownWorkers: Array<{ email: string; name: string }>;
+  knownWorkers: Array<{ email?: string; name: string; id?: string }>;
   currentUserEmail?: string | null;
 }
 
@@ -1033,12 +1034,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {knownWorkers.map((w) => {
-                    const isChecked = selectedWorkers.includes(w.email);
+                    const isChecked = selectedWorkers.includes(w.email || '');
                     return (
                       <button
-                        key={w.email}
+                        key={rosterKey(w)}
                         type="button"
-                        onClick={() => toggleWorker(w.email)}
+                        onClick={() => toggleWorker(w.email || '')}
                         className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition ${
                           isChecked
                             ? 'bg-emerald-50 border-emerald-300 text-emerald-800 dark:bg-emerald-950/70 dark:border-emerald-700 dark:text-emerald-300'
@@ -1046,7 +1047,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                         }`}
                       >
                         {isChecked ? '✓ ' : '+ '}
-                        {w.name} ({w.email.split('@')[0]})
+                        {w.name} ({rosterDisplayHandle(w)})
                       </button>
                     );
                   })}

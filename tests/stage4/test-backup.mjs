@@ -104,6 +104,22 @@ export default {
         passwordResets: [
           { email: 'a@x.com', code: 'plaintext123', codeHash: 'hash123', expiresAt: '2026-01-01' },
         ],
+        // PR 1 (ChatGPT finding 4): deeply nested credential fixture.
+        agency: {
+          name: 'Nested Agency',
+          settings: {
+            credentials: {
+              passwordHash: 'nested-ph-456',
+              kioskPinHash: 'nested-kph-456',
+              resetToken: 'nested-reset-tok-789',
+            },
+            displayName: 'Nested Display',
+          },
+          integrations: [
+            { provider: 'push', keys: { auth: 'nested-auth-000', p256dh: 'nested-pub-111' } },
+            { provider: 'email', apiKey: 'nested-apikey-222', label: 'Email Service' },
+          ],
+        },
       };
       const out = scrubSecrets(input);
       if (out.password !== '[REDACTED]') throw new Error('password not scrubbed');
@@ -126,6 +142,33 @@ export default {
       if (out.apiKeyLabel !== 'My API Key') throw new Error('apiKeyLabel falsely scrubbed!');
       if (out.keyboard !== 'qwerty') throw new Error('keyboard falsely scrubbed!');
       if (out.nested.ok !== 'fine') throw new Error('non-secret nested modified');
+      // Deeply nested credential fixture assertions.
+      const nc = out.agency.settings.credentials;
+      if (nc.passwordHash !== '[REDACTED]') throw new Error('nested passwordHash not scrubbed');
+      if (nc.kioskPinHash !== '[REDACTED]') throw new Error('nested kioskPinHash not scrubbed');
+      if (nc.resetToken !== '[REDACTED]') throw new Error('nested resetToken not scrubbed');
+      if (out.agency.settings.displayName !== 'Nested Display') throw new Error('nested label modified');
+      if (out.agency.integrations[0].keys.auth !== '[REDACTED]') throw new Error('nested push auth not scrubbed');
+      if (out.agency.integrations[0].keys.p256dh !== 'nested-pub-111') throw new Error('nested p256dh should be preserved');
+      if (out.agency.integrations[1].apiKey !== '[REDACTED]') throw new Error('nested apiKey not scrubbed');
+      if (out.agency.integrations[1].label !== 'Email Service') throw new Error('nested label falsely scrubbed');
+      // Serialized-backup assertion: NO secret VALUE may survive anywhere in the
+      // sanitized JSON, while ordinary labels must still be present.
+      const serialized = JSON.stringify(out);
+      for (const secret of [
+        'secret123', 'cp123', 'tok123', 'ref123', 'pk123', '9999', 'ph123', 'kph123',
+        'key123', 'jwt123', 'authsecret123', 'plaintext123', 'hash123',
+        'nested-ph-456', 'nested-kph-456', 'nested-reset-tok-789',
+        'nested-auth-000', 'nested-apikey-222',
+      ]) {
+        if (serialized.includes(secret)) throw new Error(`sanitized backup leaks secret value: ${secret}`);
+      }
+      for (const label of [
+        'Crown Market', 'My API Key', 'qwerty', 'fine', 'https://push.example',
+        'a@x.com', 'Nested Agency', 'Nested Display', 'Email Service', 'nested-pub-111',
+      ]) {
+        if (!serialized.includes(label)) throw new Error(`sanitized backup lost ordinary label: ${label}`);
+      }
       console.log('  ✓ scrubSecrets: catches tokens/keys/auth/codes, preserves labels');
     }
 
