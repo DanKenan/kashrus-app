@@ -607,9 +607,152 @@ function requireAuthUser(req: any, res: any): UserProfile | null {
 }
 
 /**
- * Venue scoping for read endpoints (one helper so the rule can't drift).
- * Admin/coordinator: agency-wide; an optional ?venueId narrows it but must
- * be the caller's own agency (requireOwnVenue), else 403.
+ * RULE T — venue scope for a caller (rule N: one helper, used everywhere).
+ * "Coordinators only lead in the venues they are assigned to. Only the admin
+ * is over everything." Don's decision, Oct 19 2026.
+ *
+ * Admin → 'agency' (the whole agency).
+ * Any other role → [their own venueId] (an ARRAY so multi-venue coordinators
+ * in PR 9 are a one-line change), or [] when no venue is assigned.
+ * Unknown/missing user or role → [] (fail closed).
+ */
+function venueScopeFor(user: UserProfile | null | undefined): 'agency' | string[] {
+  if (!user || typeof (user as any).role !== 'string') return [];
+  if ((user as any).role === 'admin') return 'agency';
+  const venueId = (user as any).venueId;
+  return typeof venueId === 'string' && venueId.length > 0 ? [venueId] : [];
+}
+
+/** A7/B6: field-write gate for ingredients/factory-reports — admin, or a
+ * coordinator at the venue, or a canFill mashgiach/worker (or owner with
+ * canFillTasks) at the venue. The venue check is separate from the role
+ * grant: both must pass for a non-admin. */
+function mayDoFieldWrite(user: UserProfile | null | undefined, venueId: string): boolean {
+  if (!user) return false;
+  if ((user as any).role === 'admin') return true;
+  if (!callerMaySeeVenue(user, venueId)) return false;
+  if ((user as any).role === 'coordinator') return true;
+  return canFillTasks(user);
+}
+
+/** Event task-work gate (toggle + tasks-only PUT): admin, the venue's
+ * coordinator, or a canFill caller at the event's venue or assigned to the
+ * event. (A mashgiach assigned to supervise an event at another venue may
+ * work its tasks — own records — per the documented exception; fix round 1.) */
+/**
+ * Normalize one STORED user record the same way hydration does (legacy
+ * role 'worker' → 'mashgiach', default permissions, legacy agencyId and
+ * venueId defaults, never reset passwords). Rule N: one function, used in
+ * hydration AND on freshCaller inside the PUT /api/events transaction
+ * before the caller-change compare — comparing the raw stored record
+ * against the hydrated cache false-fires for legacy records (the doc
+ * keeps 'worker'/missing fields forever; the cache is normalized).
+ */
+function normalizeStoredUser(u: any): any {
+  let assignedVenue = u.venueId;
+  if (!assignedVenue && u.role !== 'admin') {
+    assignedVenue = 'venue-crown-market';
+  }
+  // Convert legacy role 'worker' to 'mashgiach'
+  const role = u.role === 'worker' ? 'mashgiach' : (u.role || 'mashgiach');
+  const permissions = u.permissions || {
+    canFillTasks: role === 'admin' || role === 'coordinator' || role === 'mashgiach',
+    canAssignTasks: role === 'admin' || role === 'coordinator',
+  };
+  return {
+    ...u,
+    role,
+    permissions,
+    agencyId: u.agencyId || 'agency-hkc',
+    venueId: assignedVenue,
+    // NEVER reset passwords on state load. Passwords are only set
+    // via explicit flows (setup, change-password, forgot-password).
+    password: u.password || '',
+  };
+}
+
+/**
+ * Event visibility — ONE rule used by GET /api/events, agencyStateFor
+ * (INITIAL_STATE), DEMO_RESTORED snapshots, and the EVENT_* broadcasts
+ * (item 7, fix round 1). Admin sees everything. Anyone sees events at
+ * venues in their scope (rule T). PLUS the documented exception: a
+ * mashgiach or worker ASSIGNED to an event sees that one event even at
+ * another venue — "own records": the agency assigned them to supervise a
+ * catered event at another location. The assignment email comes from the
+ * STORED event and the recipient email from the AUTHENTICATED record —
+ * never from a client-supplied field. The exception grants THAT ONE EVENT
+ * only: never the other venue's tasks, roster, incidents, or history.
+ */
+function canSeeEventServer(event: any, recipient: UserProfile | null | undefined): boolean {
+  if (!recipient) return false;
+  const r = recipient as any;
+  if (r.role === 'admin') return true;
+  if (callerMaySeeVenue(recipient, event?.venueId)) return true;
+  if ((r.role === 'mashgiach' || r.role === 'worker') &&
+      (event?.assignedMashgiachEmail || '').toLowerCase() === r.email.toLowerCase()) return true;
+  return false;
+}
+
+/**
+ * True when the recipient is the email named by an EVENT payload as the
+ * event's assigned mashgiach (current or previous assignee).
+ */
+function eventAssigneeIs(recipient: any, email: any): boolean {
+  return typeof email === 'string' && !!email &&
+    (email || '').toLowerCase() === (recipient?.email || '').toLowerCase();
+}
+
+function mayFillEventTasks(user: UserProfile | null | undefined, event: any): boolean {
+  if (!user) return false;
+  if ((user as any).role === 'admin') return true;
+  if ((user as any).role === 'coordinator' && callerMaySeeVenue(user, (event as any)?.venueId)) return true;
+  return canFillTasks(user) && (
+    callerMaySeeVenue(user, (event as any)?.venueId) ||
+    ((event as any)?.assignedMashgiachEmail || '').toLowerCase() === (user as any).email.toLowerCase()
+  );
+}
+
+/** canFillTasks mirrors the role defaults: admin always; coordinator,
+ * mashgiach and worker unless explicitly revoked; owner only when granted.
+ * Used where the UI lets a role fill/check (task check-ins, event toggles). */
+function canFillTasks(user: UserProfile | null | undefined): boolean {
+  if (!user) return false;
+  const role = (user as any).role;
+  const perms = (user as any).permissions;
+  if (role === 'admin') return true;
+  if (role === 'coordinator' || role === 'mashgiach' || role === 'worker') {
+    return perms?.canFillTasks !== false;
+  }
+  return perms?.canFillTasks === true;
+}
+
+/** Non-admin callers may see only venues inside their own scope. */
+function callerMaySeeVenue(user: UserProfile | null | undefined, venueId: string): boolean {
+  if (!user || typeof venueId !== 'string' || venueId.length === 0) return false;
+  if ((user as any).role === 'admin') return true;
+  return venueScopeFor(user).includes(venueId);
+}
+
+/**
+ * requireOwnVenue PLUS rule-T venue access for non-admins.
+ * Kiosk sessions are untouched: a kiosk token stays the tablet's venue.
+ * Returns false and 403s when the caller may not act on the venue:
+ * "You can only work in your own venue."
+ */
+function requireVenueAccess(req: any, res: any, venueId: string): boolean {
+  if (!requireOwnVenue(req, res, venueId, venues)) return false;
+  const caller = getAuthUser(req);
+  if (!callerMaySeeVenue(caller, venueId)) {
+    res.status(403).json({ error: 'You can only work in your own venue.' });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Venue scoping for read endpoints (rule N: one helper so the rule can't drift).
+ * RULE T: ADMIN ONLY is agency-wide. A coordinator takes the own-venue branch
+ * (a different ?venueId → 403; no own venue → []).
  * Every other role: own venue only. A different ?venueId → 403. No own
  * venue → empty list (never the whole agency).
  * Returns 'agency' for agency-wide, a venue-id array otherwise, or null
@@ -638,9 +781,10 @@ function scopedVenueIds(req: any, res: any): string[] | 'agency' | null {
     return [kioskVenueId];
   }
   const queryVenueId = String(req.query.venueId || '');
-  const privileged = caller.role === 'admin' || caller.role === 'coordinator';
 
-  if (privileged) {
+  // RULE T: agency-wide belongs to the admin alone. Every other role —
+  // coordinator included — takes the own-venue branch below.
+  if (caller.role === 'admin') {
     if (queryVenueId) {
       if (!requireOwnVenue(req, res, queryVenueId, venues)) return null;
       return [queryVenueId];
@@ -648,13 +792,13 @@ function scopedVenueIds(req: any, res: any): string[] | 'agency' | null {
     return 'agency';
   }
 
-  const ownVenueId: string | undefined = (caller as any).venueId;
-  if (!ownVenueId) return []; // no venue assigned → empty, never agency-wide
-  if (queryVenueId && queryVenueId !== ownVenueId) {
+  const scope = venueScopeFor(caller);
+  if (scope.length === 0) return []; // no venue assigned → empty, never agency-wide
+  if (queryVenueId && !scope.includes(queryVenueId)) {
     res.status(403).json({ error: 'You can only view your own venue.' });
     return null;
   }
-  return [ownVenueId];
+  return queryVenueId ? [queryVenueId] : scope;
 }
 
 /**
@@ -1473,17 +1617,29 @@ function recipientSeesRosterEmails(recipient?: { role?: string; permissions?: { 
 
 function getSafeUsersForAgency(
   agencyId: string,
-  recipient?: { role?: string; permissions?: { canAssignTasks?: boolean } }
+  recipient?: { role?: string; permissions?: { canAssignTasks?: boolean }; venueId?: string }
 ) {
-  // Privacy: a roster payload is ALWAYS scoped to one agency and trimmed by recipient.
+  // Privacy + RULE T: a roster payload is ALWAYS scoped to one agency and
+  // trimmed by recipient. Admins see the whole agency roster; everyone else
+  // sees only users at their own venue(s) PLUS the agency's admins.
   // - Every recipient sees only users of their own agency (never the platform roster).
   // - Contact emails are visible only to recipients who can assign tasks
-  //   (admin, coordinator unless explicitly revoked, or granted canAssignTasks);
-  //   other roles get names/roles/venues/avatar colors for display.
+  //   (admin, coordinator unless explicitly revoked, or granted canAssignTasks),
+  //   and only for the users they actually get.
+  // - A venue-less non-admin gets []. Other roles get names/roles/venues/avatar
+  //   colors for display.
   const norm = (v?: string) => v || 'agency-hkc';
   const showEmails = recipientSeesRosterEmails(recipient);
+  const isAdmin = recipient?.role === 'admin';
+  const scope = isAdmin ? 'agency' : venueScopeFor(recipient as any);
+  // A venue-less non-admin gets nothing at all — not even the admin list.
+  if (scope !== 'agency' && (scope as string[]).length === 0) return [];
   return users
     .filter((u) => norm(u.agencyId) === agencyId)
+    .filter((u) => {
+      if (isAdmin || scope === 'agency') return true;
+      return u.role === 'admin' || (typeof u.venueId === 'string' && scope.includes(u.venueId));
+    })
     .map((u) => {
       const safe = getSafeUser(u);
       if (showEmails) return safe;
@@ -1508,17 +1664,22 @@ function recipientForMeta(meta: { userId: string; agencyId: string }) {
 
 /**
  * Server-side mirror of client canSeeTask (src/lib/permissions.ts).
- * Admin/coordinator of the task's agency see every task; others see only
- * non-private tasks or tasks whose assignedTo contains their email
- * (case-insensitive). Unknown/deleted recipient → fail closed (false).
+ * RULE T: the admin of the task's agency sees every task. Everyone else —
+ * coordinator included — must first be INSIDE the task's venue (venueScopeFor);
+ * then the private rule applies: a coordinator sees private tasks at their own
+ * venue; mashgiach/owner/worker see non-private tasks or tasks assigned to
+ * them (by email, case-insensitive). Unknown/deleted recipient → fail closed.
+ * (Agency match is the caller's job: tasksForRecipient filters by agency.)
  */
 function canSeeTaskServer(
-  task: { isPrivate?: boolean; assignedTo?: string[] },
+  task: { isPrivate?: boolean; assignedTo?: string[]; venueId?: string },
   recipient: UserProfile | undefined
 ): boolean {
-  if (!task.isPrivate) return true;
   if (!recipient) return false;
-  if (recipient.role === 'admin' || recipient.role === 'coordinator') return true;
+  if (recipient.role === 'admin') return true;
+  if (!callerMaySeeVenue(recipient, (task as any).venueId || '')) return false;
+  if (!task.isPrivate) return true;
+  if (recipient.role === 'coordinator') return true;
   const email = recipient.email.toLowerCase();
   return (task.assignedTo || []).some((a) => a.toLowerCase() === email);
 }
@@ -1567,17 +1728,79 @@ function broadcastTaskUpdated(
 }
 
 /**
+ * Broadcast an event update with transition handling (item 7, fix round 1) —
+ * mirrors broadcastTaskUpdated for private tasks:
+ * - Recipients who can see the NEW event get EVENT_UPDATED (full).
+ * - Recipients who could see the OLD event but not the NEW one get
+ *   EVENT_DELETED (their client holds a stale copy that must be removed
+ *   immediately — this is the stale-assignment path: when an admin
+ *   reassigns the event away from a mashgiach, that mashgiach gets the
+ *   delete, and their next toggle 403s anyway via mayFillEventTasks).
+ * oldEvent/newEvent are the stored snapshots (assignedMashgiachEmail matters).
+ */
+function broadcastEventUpdated(
+  oldEvent: any,
+  newEvent: any,
+  senderEmail?: string
+) {
+  const agencyId = newEvent.agencyId || 'agency-hkc';
+  broadcast(
+    'EVENT_UPDATED',
+    {
+      event: newEvent,
+      agencyId,
+      venueId: newEvent.venueId,
+      assignedMashgiachEmail: newEvent.assignedMashgiachEmail,
+    },
+    senderEmail,
+    agencyId,
+    (meta, payload) => {
+      const recipient = recipientForMeta(meta);
+      return canSeeEventServer(newEvent, recipient) ? payload : null;
+    }
+  );
+  broadcast(
+    'EVENT_DELETED',
+    {
+      id: newEvent.id,
+      agencyId,
+      venueId: newEvent.venueId,
+      // Only the previous assignee rides along — the stale assignee does not
+      // need to learn who replaced them (LOW a, fix round 2).
+      previousAssignee: oldEvent?.assignedMashgiachEmail,
+    },
+    undefined,
+    agencyId,
+    (meta, base) => {
+      const recipient = recipientForMeta(meta);
+      const sawOld = canSeeEventServer(oldEvent, recipient);
+      const seesNew = canSeeEventServer(newEvent, recipient);
+      return sawOld && !seesNew ? base : null;
+    }
+  );
+}
+
+/**
  * Filter snapshot/history entries per recipient (shared by historyLogsForRecipient
  * and the DAILY_RESET snapshots payload — same entry shape).
  */
 function filterLogEntries(logs: any[], recipient: UserProfile | undefined) {
-  const isPrivileged = recipient?.role === 'admin' || recipient?.role === 'coordinator';
+  // RULE T: privileged = admin only. A non-admin never receives a log whose
+  // venue is outside their scope (the whole log is dropped, not just entries).
+  // Inside an own-venue log, a coordinator counts as privileged for
+  // deleted-task entries; everyone else fails closed on those.
+  const isAdmin = recipient?.role === 'admin';
+  const scope = venueScopeFor(recipient);
   const taskById = new Map(tasks.map((t) => [t.id, t]));
-  return logs.map((h) => {
+  const keepLog = (h: any) =>
+    isAdmin || (typeof h?.venueId === 'string' && scope.includes(h.venueId));
+  return logs.filter(keepLog).map((h) => {
     if (!Array.isArray((h as any).entries)) return h;
+    const privilegedInVenue =
+      isAdmin || (recipient?.role === 'coordinator' && scope.includes(h.venueId));
     const entries = (h as any).entries.filter((e: any) => {
       const task = taskById.get(e.taskId);
-      if (!task) return isPrivileged; // deleted task: fail closed
+      if (!task) return privilegedInVenue; // deleted task: fail closed unless privileged here
       return canSeeTaskServer(task, recipient);
     });
     return { ...h, entries };
@@ -1831,28 +2054,10 @@ function hydrateState(parsed: any) {
         }
 
         if (Array.isArray(parsed.users)) {
-          users = parsed.users.map((u: any) => {
-            let assignedVenue = u.venueId;
-            if (!assignedVenue && u.role !== 'admin') {
-              assignedVenue = 'venue-crown-market';
-            }
-            // Convert legacy role 'worker' to 'mashgiach'
-            const role = u.role === 'worker' ? 'mashgiach' : (u.role || 'mashgiach');
-            const permissions = u.permissions || {
-              canFillTasks: role === 'admin' || role === 'coordinator' || role === 'mashgiach',
-              canAssignTasks: role === 'admin' || role === 'coordinator',
-            };
-            return {
-              ...u,
-              role,
-              permissions,
-              agencyId: u.agencyId || 'agency-hkc',
-              venueId: assignedVenue,
-              // NEVER reset passwords on state load. Passwords are only set
-              // via explicit flows (setup, change-password, forgot-password).
-              password: u.password || '', 
-            };
-          });
+          // Rule N: one normalization function, used here and on
+          // freshCaller inside the PUT /api/events transaction (see
+          // normalizeStoredUser).
+          users = parsed.users.map((u: any) => normalizeStoredUser(u));
 
           // Ensure primary agency admin exists
           const adminUser = DEFAULT_USERS[0];
@@ -3448,16 +3653,175 @@ function kioskFilterPayload(meta: SocketMeta, type: string, payload: any): any {
   }
 }
 
+/**
+ * RULE T — staff venue filter for WebSocket broadcasts (the kiosk filter's
+ * generalization to every NON-admin, non-kiosk socket). Applied to the OUTPUT
+ * of varyByRecipient (as the kiosk filter is), so per-recipient transforms
+ * (rosters, private-task filtering) run first.
+ *
+ * Explicit type classification (keep in sync with the kiosk allowlist above):
+ * - PASS (no venue data): USER_PRESENCE, EVENT_TEMPLATES_UPDATED,
+ *   INITIAL_STATE (built scoped by agencyStateFor). AGENCY_UPDATED and
+ *   AGENCY_REGISTERED pass with the agency reduced to its public profile
+ *   (name, shortCode, certificationSeal, region, contactPhone, customDomain)
+ *   for non-admin sockets — the full object also carries adminEmail.
+ * - VENUE-FILTERED: TASK_CREATED/UPDATED/DELETED (by task venueId; since
+ *   fix round 1, delete payloads for tasks/events/handoff notes carry their
+ *   venueId and a venue-LESS delete drops — fail closed),
+ *   TASKS_UPDATED ({ venueId }),
+ *   HANDOFF_NOTE (note.venueId), HANDOFF_NOTE_DELETED (venueId in payload),
+ *   INCIDENT_CREATED/UPDATED (incident.venueId), ANNOUNCEMENT (absent venueId
+ *   = agency-wide, passes), ANNOUNCEMENT_DELETED (absent venueId = agency-wide, passes),
+ *   EVENT_CREATED/UPDATED/DELETED (event venueId), INGREDIENT_VERIFIED and
+ *   AUDIT_REPORT_SUBMITTED (payload venueId), VENUE_CREATED/UPDATED/DELETED
+ *   (own venue only), DAILY_RESET/DEMO_RESTORED/CLEAN_SLATE_RESET (arrays
+ *   filtered to scope), USERS_UPDATED (scoped roster via getSafeUsersForAgency),
+ *   INGREDIENTS_SYNCED (venueId if present).
+ * - UNKNOWN type → drop + one warn log (fail closed).
+ */
+const staffWsUnknownWarned = new Set<string>();
+
+function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): any {
+  const recipient = recipientForMeta(meta);
+  if (!recipient) return null; // user gone/moved — fail closed
+  if (recipient.role === 'admin') return payload;
+  const scope = venueScopeFor(recipient) as string[];
+  const inScope = (v: any) => typeof v === 'string' && scope.includes(v);
+  const p = payload || {};
+  switch (type) {
+    case 'USER_PRESENCE':
+    case 'EVENT_TEMPLATES_UPDATED':
+    case 'INITIAL_STATE':
+      return payload;
+    case 'AGENCY_UPDATED':
+    case 'AGENCY_REGISTERED': {
+      // (fix round 1) These pass, but the payload is reduced to the agency's
+      // PUBLIC profile for non-admin sockets. The full agency object also
+      // carries adminEmail and createdAt, which are not public.
+      const a = p.agency || {};
+      const pub = {
+        id: a.id, name: a.name, shortCode: a.shortCode,
+        certificationSeal: a.certificationSeal, region: a.region,
+        contactPhone: a.contactPhone, customDomain: a.customDomain,
+      };
+      const { adminEmail: _drop, ...rest } = p;
+      return { ...rest, agency: pub };
+    }
+    case 'INGREDIENTS_SYNCED':
+      return !p.venueId || inScope(p.venueId) ? payload : null;
+    case 'TASK_CREATED':
+    case 'TASK_UPDATED': {
+      const task = p.task || p;
+      return inScope(task?.venueId) ? payload : null;
+    }
+    case 'TASK_DELETED': {
+      const vid = (p.task || p)?.venueId ?? p.venueId;
+      if (!vid) return null; // fail closed: venue-less delete payloads drop
+      return inScope(vid) ? payload : null;
+    }
+    case 'TASKS_UPDATED':
+      return inScope(p.venueId) ? payload : null;
+    case 'HANDOFF_NOTE': {
+      const note = p.note || p;
+      return inScope(note?.venueId) ? payload : null;
+    }
+    case 'HANDOFF_NOTE_DELETED':
+      // Fail closed: a note delete without its venueId does not reach a
+      // non-admin socket (the payload now carries venueId — see the handler).
+      return inScope(p.venueId) ? payload : null;
+    case 'ANNOUNCEMENT_DELETED':
+      // An announcement delete without venueId = agency-wide announcement.
+      return !p.venueId || inScope(p.venueId) ? payload : null;
+    case 'INCIDENT_CREATED':
+    case 'INCIDENT_UPDATED': {
+      const inc = p.incident || p;
+      return inScope(inc?.venueId) ? payload : null;
+    }
+    case 'ANNOUNCEMENT': {
+      const ann = p.announcement || p;
+      return !ann?.venueId || inScope(ann.venueId) ? payload : null;
+    }
+    case 'EVENT_CREATED':
+    case 'EVENT_UPDATED': {
+      // Item 7: one rule — canSeeEventServer — built from the payload's
+      // event/venueId/assignedMashgiachEmail. The assignee exception lets a
+      // mashgiach assigned to another venue's event follow it live.
+      const snapshot = {
+        venueId: p.venueId ?? (p.event || {}).venueId,
+        assignedMashgiachEmail: p.assignedMashgiachEmail ?? (p.event || {}).assignedMashgiachEmail,
+      };
+      return canSeeEventServer(snapshot, recipient) ? payload : null;
+    }
+    case 'EVENT_DELETED': {
+      const vid = (p.event || p)?.venueId ?? p.venueId;
+      if (!vid) return null; // fail closed: venue-less delete payloads drop
+      if (inScope(vid)) return payload;
+      // The event's assigned mashgiach (or the previous assignee after a
+      // reassignment) must see the delete so their client drops the event —
+      // same transition mechanism as private tasks.
+      if (eventAssigneeIs(recipient, p.assignedMashgiachEmail) ||
+          eventAssigneeIs(recipient, p.previousAssignee)) return payload;
+      return null;
+    }
+    case 'INGREDIENT_VERIFIED':
+    case 'AUDIT_REPORT_SUBMITTED':
+      return inScope(p.venueId) || inScope((p.report || {})?.venueId) ? payload : null;
+    case 'VENUE_CREATED':
+    case 'VENUE_UPDATED': {
+      const vid = (p.venue || p)?.id ?? p.venueId ?? p.id;
+      return vid && inScope(vid) ? payload : null;
+    }
+    case 'VENUE_DELETED': {
+      const vid = p.deletedVenueId ?? p.venueId ?? p.id;
+      return vid && inScope(vid) ? payload : null;
+    }
+    case 'DAILY_RESET':
+    case 'DEMO_RESTORED':
+    case 'CLEAN_SLATE_RESET':
+      return {
+        ...p,
+        tasks: (p.tasks || []).filter((t: any) => inScope(t?.venueId)),
+        historyLogs: (p.historyLogs || []).filter((h: any) => inScope(h?.venueId)),
+        snapshots: (p.snapshots || []).filter((sn: any) => inScope(sn?.venueId)),
+        venues: (p.venues || []).filter((v: any) => inScope(v?.id)),
+        events: (p.events || []).filter((e: any) => canSeeEventServer(e, recipient)),
+      };
+    case 'USERS_UPDATED':
+      return Array.isArray(p.users)
+        ? { ...p, users: getSafeUsersForAgency(meta.agencyId, recipient) }
+        : payload;
+    default:
+      if (!staffWsUnknownWarned.has(type)) {
+        staffWsUnknownWarned.add(type);
+        console.warn(`[ws] dropping unknown broadcast type for non-admin socket: ${type}`);
+      }
+      return null;
+  }
+}
+
 function agencyStateFor(agencyId: string, recipient?: UserProfile) {
+  // RULE T: tasks/history/users are filtered by their own helpers (items 2–4).
+  // Venues, events and the factory data below are additionally filtered to the
+  // recipient's scope — admins pass through untouched, everyone else gets only
+  // their own venue(s), and a venue-less non-admin gets none.
   const norm = (v?: string) => v || 'agency-hkc';
+  const isAdmin = recipient?.role === 'admin';
+  const scope = isAdmin ? 'agency' : venueScopeFor(recipient);
+  const inScopeVenue = (venueId: any) =>
+    scope === 'agency' || (typeof venueId === 'string' && scope.includes(venueId));
+  const inScopeId = (id: any) =>
+    scope === 'agency' || (typeof id === 'string' && scope.includes(id));
   return {
-    venues: venues.filter((v) => norm(v.agencyId) === agencyId),
+    venues: venues.filter((v) => norm(v.agencyId) === agencyId && inScopeId(v.id)),
     tasks: tasksForRecipient(agencyId, recipient),
     historyLogs: historyLogsForRecipient(agencyId, recipient),
-    events: events.filter((e) => norm(e.agencyId) === agencyId),
-    airtableConfigs: airtableConfigs.filter((c) => norm(c.agencyId) === agencyId),
-    approvedIngredients: approvedIngredients.filter((i) => norm(i.agencyId) === agencyId),
-    factoryReports: factoryReports.filter((r) => norm(r.agencyId) === agencyId),
+    // Events use canSeeEventServer: venue scope PLUS the assigned-mashgiach
+    // exception (item 7) so an assigned event at another venue survives in
+    // the recipient's live state exactly as GET /api/events shows it.
+    events: events.filter((e) => norm(e.agencyId) === agencyId && canSeeEventServer(e, recipient)),
+    airtableConfigs: airtableConfigs.filter((c) => norm(c.agencyId) === agencyId && inScopeVenue(c.venueId)),
+    approvedIngredients: approvedIngredients.filter((i) => norm(i.agencyId) === agencyId && inScopeVenue(i.venueId)),
+    factoryReports: factoryReports.filter((r) => norm(r.agencyId) === agencyId && inScopeVenue(r.venueId)),
     users: getSafeUsersForAgency(agencyId, recipient),
     currentWorkDate,
   };
@@ -3503,7 +3867,14 @@ function broadcast(
         client.send(envelopeFor(filtered));
         continue;
       }
-      client.send(message);
+      // Staff sockets: RULE T venue filter (admins pass through untouched).
+      const staffFiltered = staffVenueFilterPayload(meta, type, payload);
+      if (staffFiltered === null) continue;
+      if (staffFiltered === payload) {
+        client.send(message);
+      } else {
+        client.send(envelopeFor(staffFiltered));
+      }
     }
     return;
   }
@@ -3530,7 +3901,10 @@ function broadcast(
     }
     const finalPayload = varyByRecipient(meta, payload);
     if (finalPayload === null || finalPayload === undefined) continue;
-    client.send(envelopeFor(finalPayload));
+    // Staff sockets: RULE T venue filter on the transform's OUTPUT.
+    const staffFiltered = staffVenueFilterPayload(meta, type, finalPayload);
+    if (staffFiltered === null) continue;
+    client.send(envelopeFor(staffFiltered));
   }
 }
 
@@ -3963,6 +4337,12 @@ app.get('/api/task-templates', (req, res) => {
 app.post('/api/task-templates', async (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
+  // A2: no UI uses this API. Rule T: admin, or coordinator copying their own
+  // venue (checked via fromVenueId below). A coordinator creating a blank
+  // template (no fromVenueId) is allowed — it carries no venue data.
+  if (caller.role !== 'admin' && caller.role !== 'coordinator') {
+    return res.status(403).json({ error: 'Only admins and coordinators can create task templates.' });
+  }
   const { name, description, tasks: templateTasks, fromVenueId } = req.body || {};
   if (!name?.trim()) {
     return res.status(400).json({ error: 'Template name is required.' });
@@ -3988,8 +4368,9 @@ app.post('/api/task-templates', async (req, res) => {
   const templateId = `tmpl-${crypto.randomUUID()}`;
   // New templates belong to the caller's agency (never trust a client value).
   const agencyId = callerAgencyId(req);
-  // Copying another agency's venue tasks into a template would leak their data.
-  if (fromVenueId && !requireOwnVenue(req, res, fromVenueId, venues)) return;
+  // Copying another venue's tasks into a template leaks their data to the
+  // template owner — and RULE T: a non-admin may only copy their own venue.
+  if (fromVenueId && !requireVenueAccess(req, res, fromVenueId)) return;
 
   const committed = await commitOrRespond(
     req, res,
@@ -4016,15 +4397,24 @@ app.post('/api/task-templates', async (req, res) => {
 });
 
 app.post('/api/task-templates/:id/apply', async (req, res) => {
+  // A2: admin, or coordinator applying to their own venue (checked below).
+  const applyCaller = getAuthUser(req);
+  if (!applyCaller) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+  if (applyCaller.role !== 'admin' && applyCaller.role !== 'coordinator') {
+    return res.status(403).json({ error: 'Only admins and coordinators can apply task templates.' });
+  }
   const template = taskTemplates.find((t) => t.id === req.params.id);
   if (!template) return res.status(404).json({ error: 'Template not found.' });
 
   const { venueId } = req.body || {};
   if (!venueId) return res.status(400).json({ error: 'Venue ID is required.' });
 
-  // The template and the target venue must both belong to the caller's agency.
+  // The template and the target venue must both belong to the caller's agency;
+  // RULE T: a non-admin may only apply a template to their own venue.
   if (!requireSameAgency(req, res, template, 'templates')) return;
-  if (!requireOwnVenue(req, res, venueId, venues)) return;
+  if (!requireVenueAccess(req, res, venueId)) return;
   const agencyId = callerAgencyId(req);
   const now = new Date().toISOString();
   // Pre-generate stable IDs so transaction retries don't duplicate tasks.
@@ -4078,9 +4468,17 @@ app.post('/api/task-templates/:id/apply', async (req, res) => {
 });
 
 app.delete('/api/task-templates/:id', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
   const existing = taskTemplates.find((t) => t.id === req.params.id);
   if (!existing) return res.status(404).json({ error: 'Template not found.' });
   if (!requireSameAgency(req, res, existing, 'templates')) return;
+  // A2: a coordinator may delete only templates they created themselves
+  // (createdByEmail); everyone else non-admin is 403.
+  if (caller.role !== 'admin' &&
+      !(caller.role === 'coordinator' && (existing as any).createdByEmail === caller.email)) {
+    return res.status(403).json({ error: 'You can only delete templates you created.' });
+  }
   const ok = await crudDelete(req, res, 'taskTemplates', req.params.id, { label: 'delete-task-template' });
   return;
 });
@@ -4111,8 +4509,8 @@ app.post('/api/incidents', async (req, res) => {
 
   const agencyId = caller.agencyId || 'agency-hkc';
   const now = new Date().toISOString();
-  // The incident's venue must belong to the caller's agency.
-  if (!requireOwnVenue(req, res, venueId, venues)) return;
+  // RULE T: the incident's venue must be the caller's own venue (admins: the agency).
+  if (!requireVenueAccess(req, res, venueId)) return;
   const venue = venues.find((v) => v.id === venueId);
   const venueName = venue?.name || 'Venue';
 
@@ -4185,9 +4583,10 @@ app.post('/api/incidents', async (req, res) => {
   const incident = committed.result as Incident;
 
   // Side effects ONLY after commit.
+  // RULE T: admins of the agency + coordinators of THIS venue only.
   const admins = users.filter((u) =>
     (u.agencyId || 'agency-hkc') === agencyId &&
-    (u.role === 'admin' || u.role === 'coordinator')
+    (u.role === 'admin' || (u.role === 'coordinator' && callerMaySeeVenue(u, venueId)))
   );
   for (const admin of admins) {
     sendPushToUser(
@@ -4209,6 +4608,16 @@ app.post('/api/incidents/:id/resolve', async (req, res) => {
   const incident = incidents.find((i) => i.id === req.params.id);
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
   if (!requireSameAgency(req, res, incident, 'incidents')) return;
+  // A3: admin, or coordinator at the incident's venue, or a canFill
+  // mashgiach/worker at that venue (the ones on site); owner/other → 403.
+  const mayResolve =
+    caller.role === 'admin' ||
+    (caller.role === 'coordinator' && callerMaySeeVenue(caller, incident.venueId)) ||
+    ((caller.role === 'mashgiach' || caller.role === 'worker') && canFillTasks(caller) &&
+      callerMaySeeVenue(caller, incident.venueId));
+  if (!mayResolve) {
+    return res.status(403).json({ error: 'You can only resolve incidents at your own venue.' });
+  }
   const resolvedAt = new Date().toISOString();
   // Attribution from the VERIFIED session user, never the request body.
   const resolvedBy = caller.email;
@@ -4228,9 +4637,22 @@ app.post('/api/incidents/:id/resolve', async (req, res) => {
 });
 
 app.post('/api/incidents/:id/acknowledge', async (req, res) => {
+  // A3: same gate as resolve.
+  const ackCaller = getAuthUser(req);
+  if (!ackCaller) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
   const incident = incidents.find((i) => i.id === req.params.id);
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
   if (!requireSameAgency(req, res, incident, 'incidents')) return;
+  const mayAck =
+    ackCaller.role === 'admin' ||
+    (ackCaller.role === 'coordinator' && callerMaySeeVenue(ackCaller, incident.venueId)) ||
+    ((ackCaller.role === 'mashgiach' || ackCaller.role === 'worker') && canFillTasks(ackCaller) &&
+      callerMaySeeVenue(ackCaller, incident.venueId));
+  if (!mayAck) {
+    return res.status(403).json({ error: 'You can only acknowledge incidents at your own venue.' });
+  }
   const ok = await crudUpdate(req, res, 'incidents', req.params.id,
     (fresh) => {
       if (fresh.status === 'acknowledged' || fresh.status === 'resolved') return fresh; // idempotent
@@ -4299,11 +4721,15 @@ app.post('/api/media/intent', async (req, res) => {
     const db = requireMediaDb(req, res);
     if (!db) return;
     const agencyId = callerAgencyId(req);
-    // venueId is optional; if supplied, verify user has access to it.
-    // Admins can access all venues in their agency; others must match their venueId.
+    // (fix round 1) A non-admin MUST supply venueId — uploading into an
+    // unscoped (admin-level) record is not allowed. Admins may create
+    // agency-level intents with no venue.
     const { mimeType, sizeBytes, sha256, venueId } = req.body || {};
-    if (venueId && user.role !== 'admin' && user.venueId !== venueId) {
-      res.status(403).json({ error: 'No access to this venue.' });
+    if (user.role !== 'admin' && !venueId) {
+      res.status(403).json({ error: 'You can only work in your own venue.' });
+      return;
+    }
+    if (venueId && !requireVenueAccess(req, res, String(venueId))) {
       return;
     }
     const result = await media.createIntent(db, {
@@ -4339,10 +4765,17 @@ app.post('/api/media/:id/uploaded', async (req, res) => {
     }
     const mediaDoc = doc.data();
     if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
-    // Venue access: if media is venue-scoped, verify user can access that venue.
-    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
-      res.status(403).json({ error: 'No access to this venue.' });
-      return;
+    // (fix round 1) A venue-less media doc is admin-only; a venue-scoped doc
+    // goes to the admin or to non-admins inside its venue (rule T).
+    if (user.role !== 'admin') {
+      if (!mediaDoc.venueId) {
+        res.status(403).json({ error: 'No access to this media.' });
+        return;
+      }
+      if (!callerMaySeeVenue(user, mediaDoc.venueId)) {
+        res.status(403).json({ error: 'No access to this venue.' });
+        return;
+      }
     }
     await media.markUploaded(db, req.params.id);
     res.json({ ok: true });
@@ -4371,9 +4804,17 @@ app.post('/api/media/:id/validate', async (req, res) => {
     }
     const mediaDoc = doc.data();
     if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
-    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
-      res.status(403).json({ error: 'No access to this venue.' });
-      return;
+    // (fix round 1) A venue-less media doc is admin-only; a venue-scoped doc
+    // goes to the admin or to non-admins inside its venue (rule T).
+    if (user.role !== 'admin') {
+      if (!mediaDoc.venueId) {
+        res.status(403).json({ error: 'No access to this media.' });
+        return;
+      }
+      if (!callerMaySeeVenue(user, mediaDoc.venueId)) {
+        res.status(403).json({ error: 'No access to this venue.' });
+        return;
+      }
     }
     const validated = await media.validateUpload(db, req.params.id);
     res.json({ ok: true, state: validated.state });
@@ -4403,9 +4844,17 @@ app.post('/api/media/:id/commit', async (req, res) => {
     }
     const mediaDoc = doc.data();
     if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
-    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
-      res.status(403).json({ error: 'No access to this venue.' });
-      return;
+    // (fix round 1) A venue-less media doc is admin-only; a venue-scoped doc
+    // goes to the admin or to non-admins inside its venue (rule T).
+    if (user.role !== 'admin') {
+      if (!mediaDoc.venueId) {
+        res.status(403).json({ error: 'No access to this media.' });
+        return;
+      }
+      if (!callerMaySeeVenue(user, mediaDoc.venueId)) {
+        res.status(403).json({ error: 'No access to this venue.' });
+        return;
+      }
     }
     const { entityType, entityId } = req.body || {};
     if (!entityType || !entityId) {
@@ -4416,6 +4865,31 @@ app.post('/api/media/:id/commit', async (req, res) => {
     const ALLOWED_ENTITY_TYPES = new Set(['task', 'incident', 'handoff-note', 'announcement']);
     if (!ALLOWED_ENTITY_TYPES.has(entityType)) {
       res.status(400).json({ error: `Entity type not allowed: ${entityType}` });
+      return;
+    }
+    // (fix round 1, B2) Validate the target entity: it must exist (404), be
+    // in the caller's agency, for non-admins its venueId must be in their
+    // scope, and it must MATCH the media doc's venueId when the doc has one.
+    // Without this, a caller could attach media across venues/agencies.
+    const entityCollections: Record<string, any[]> = {
+      'task': tasks,
+      'incident': incidents,
+      'handoff-note': handoffNotes,
+      'announcement': announcements,
+    };
+    const targetEntity = (entityCollections[entityType] || []).find((e: any) => e.id === entityId);
+    if (!targetEntity) {
+      res.status(404).json({ error: 'Target entity not found.' });
+      return;
+    }
+    if (!requireSameAgency(req, res, targetEntity, entityType)) return;
+    if (mediaDoc.venueId && (targetEntity as any).venueId !== mediaDoc.venueId) {
+      res.status(403).json({ error: 'Media and target entity are in different venues.' });
+      return;
+    }
+    if (user.role !== 'admin' && (targetEntity as any).venueId &&
+        !callerMaySeeVenue(user, (targetEntity as any).venueId)) {
+      res.status(403).json({ error: 'No access to this venue.' });
       return;
     }
     // Phase 3A note: attachedTo is metadata recording the intended attachment.
@@ -4448,9 +4922,17 @@ app.get('/api/media/:id/download', async (req, res) => {
     }
     const mediaDoc = doc.data();
     if (!requireSameAgency(req, res, mediaDoc, 'media')) return;
-    if (mediaDoc.venueId && user.role !== 'admin' && user.venueId !== mediaDoc.venueId) {
-      res.status(403).json({ error: 'No access to this venue.' });
-      return;
+    // (fix round 1) A venue-less media doc is admin-only; a venue-scoped doc
+    // goes to the admin or to non-admins inside its venue (rule T).
+    if (user.role !== 'admin') {
+      if (!mediaDoc.venueId) {
+        res.status(403).json({ error: 'No access to this media.' });
+        return;
+      }
+      if (!callerMaySeeVenue(user, mediaDoc.venueId)) {
+        res.status(403).json({ error: 'No access to this venue.' });
+        return;
+      }
     }
     const url = await media.getDownloadUrl(db, req.params.id);
     res.json({ downloadUrl: url });
@@ -4722,6 +5204,12 @@ app.get('/api/announcements', (req, res) => {
   list = list.filter((a) =>
     a.targetRoles.includes('all') || a.targetRoles.includes(caller.role)
   );
+  // RULE T venue filter: non-admins see agency-wide announcements (no venueId)
+  // plus announcements for their own venue(s) only.
+  if (caller.role !== 'admin' && (req as any).kiosk !== true) {
+    const scope = venueScopeFor(caller);
+    list = list.filter((a) => !a.venueId || scope.includes(a.venueId));
+  }
   res.json({
     announcements: list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
   });
@@ -4743,6 +5231,13 @@ app.post('/api/announcements', async (req, res) => {
   const agencyId = callerAgencyId(req);
   // An announcement targeted at a venue must reference the caller's own agency venue.
   if (venueId && !requireOwnVenue(req, res, venueId, venues)) return;
+  // RULE T: a coordinator MUST target a venue in their scope — posting an
+  // agency-wide announcement or to another venue is reserved for admins.
+  if (author.role === 'coordinator') {
+    if (!venueId || !callerMaySeeVenue(author, venueId)) {
+      return res.status(403).json({ error: 'Coordinators can only post announcements for their own venue.' });
+    }
+  }
   const announcementId = `announce-${crypto.randomUUID()}`;
   const createdAt = new Date().toISOString();
 
@@ -4775,9 +5270,12 @@ app.post('/api/announcements', async (req, res) => {
   const announcement = committed.result as Announcement;
 
   // Side effects ONLY after commit.
+  // RULE T: a venue-targeted announcement pushes only to that venue's users
+  // (plus the agency's admins); agency-wide announcements push as before.
   const targets = users.filter((u) =>
     (u.agencyId || 'agency-hkc') === agencyId &&
-    (announcement.targetRoles.includes('all') || announcement.targetRoles.includes(u.role))
+    (announcement.targetRoles.includes('all') || announcement.targetRoles.includes(u.role)) &&
+    (!announcement.venueId || u.role === 'admin' || u.venueId === announcement.venueId)
   );
   const icon = announcement.category === 'urgent' ? '🚨' : announcement.category === 'assignment' ? '📋' : '📢';
   for (const target of targets) {
@@ -4803,11 +5301,20 @@ app.delete('/api/announcements/:id', async (req, res) => {
   const existing = announcements.find((a) => a.id === req.params.id);
   if (!existing) return res.status(404).json({ error: 'Announcement not found.' });
   if (!requireSameAgency(req, res, existing, 'announcements')) return;
+  // RULE T: a coordinator may delete only announcements at their own venue.
+  // Agency-wide announcements (no venueId) are admin-only.
+  if (caller.role === 'coordinator') {
+    if (!existing.venueId || !callerMaySeeVenue(caller, existing.venueId)) {
+      return res.status(403).json({ error: 'Coordinators can only delete announcements for their own venue.' });
+    }
+  }
   const agencyId = existing.agencyId;
   const ok = await crudDelete(req, res, 'announcements', req.params.id, {
     label: 'delete-announcement',
     broadcastType: 'ANNOUNCEMENT_DELETED',
-    getDeletePayload: () => ({ id: req.params.id }),
+    // VenueId rides along so the WS staff filter can scope the delete (an
+    // announcement with no venueId is agency-wide and passes for everyone).
+    getDeletePayload: () => ({ id: req.params.id, venueId: (existing as any).venueId }),
     getAgencyId: () => agencyId,
   });
   return;
@@ -4824,7 +5331,14 @@ app.get('/api/admin/dashboard', (req, res) => {
     return res.status(403).json({ error: 'Only administrators and coordinators can view the dashboard.' });
   }
   const agencyId = caller.agencyId || 'agency-hkc';
-  const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === agencyId);
+  // RULE T: the admin sees all venues; a coordinator sees only their own
+  // venue(s), with totals computed over those only. A coordinator with no
+  // venue gets { venues: [], totals: zeros }, 200 (handled below by the
+  // empty venue list).
+  const dashboardScope = venueScopeFor(caller);
+  const agencyVenues = venues
+    .filter((v) => (v.agencyId || 'agency-hkc') === agencyId)
+    .filter((v) => dashboardScope === 'agency' || dashboardScope.includes(v.id));
 
   const venueStats = agencyVenues.map((venue) => {
     const venueTasks = tasks.filter((t) => t.venueId === venue.id);
@@ -4888,19 +5402,22 @@ app.get('/api/admin/dashboard', (req, res) => {
     };
   });
 
-  // Agency-wide totals
-  const allTasks = tasks.filter((t) => {
-    const v = venues.find((vv) => vv.id === t.venueId);
-    return v && (v.agencyId || 'agency-hkc') === agencyId;
-  });
+  // Totals over the caller's venues only (RULE T): a coordinator's totals
+  // cover their own venue(s), never the agency. A venue-less coordinator gets
+  // zeros because venueStats is empty.
+  const dashVenueIds = agencyVenues.map((v) => v.id);
+  const scopedTasks = tasks.filter(
+    (t) => dashVenueIds.includes(t.venueId) && ((t.agencyId || 'agency-hkc') === agencyId)
+  );
+  const scopedNotes = handoffNotes.filter((n) => dashVenueIds.includes(n.venueId));
 
   res.json({
     venues: venueStats,
     totals: {
       venueCount: agencyVenues.length,
-      totalTasks: allTasks.length,
-      completedTasks: allTasks.filter((t) => t.isCompleted).length,
-      totalHandoffNotes: handoffNotes.filter((n) => (n.agencyId || 'agency-hkc') === agencyId).length,
+      totalTasks: scopedTasks.length,
+      completedTasks: scopedTasks.filter((t) => t.isCompleted).length,
+      totalHandoffNotes: scopedNotes.length,
     },
   });
 });
@@ -4934,7 +5451,8 @@ app.post('/api/handoff-notes', async (req, res) => {
   // Notes belong to the caller's agency; the venue must be theirs too.
   // Attribution comes from the VERIFIED session user, never the body.
   const agencyId = caller.agencyId || 'agency-hkc';
-  if (!requireOwnVenue(req, res, venueId, venues)) return;
+  // RULE T: the note's venue must be the caller's own venue (admins: the agency).
+  if (!requireVenueAccess(req, res, venueId)) return;
   const createdAt = new Date().toISOString();
 
   const committed = await commitOrRespond(
@@ -4968,10 +5486,24 @@ app.delete('/api/handoff-notes/:id', async (req, res) => {
   const existing = handoffNotes.find((n) => n.id === req.params.id);
   if (!existing) return res.status(404).json({ error: 'Handoff note not found.' });
   if (!requireSameAgency(req, res, existing, 'handoff notes')) return;
+  // A4: mirrors the UI (HandoffNotes.tsx shows delete only on the caller's OWN
+  // note). Server: the author, or admin, or a coordinator at the note's venue.
+  const delCaller = getAuthUser(req);
+  if (!delCaller) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+  const mayDeleteNote =
+    delCaller.role === 'admin' ||
+    (existing as any).authorEmail === delCaller.email ||
+    (delCaller.role === 'coordinator' && callerMaySeeVenue(delCaller, existing.venueId));
+  if (!mayDeleteNote) {
+    return res.status(403).json({ error: 'You can only delete your own notes.' });
+  }
   const ok = await crudDelete(req, res, 'handoffNotes', req.params.id, {
     label: 'delete-handoff-note',
     broadcastType: 'HANDOFF_NOTE_DELETED',
-    getDeletePayload: () => ({ id: req.params.id }),
+    // VenueId rides along so the WS staff filter can scope the delete.
+    getDeletePayload: () => ({ id: req.params.id, venueId: existing.venueId }),
     getAgencyId: () => existing.agencyId,
   });
   return;
@@ -5167,9 +5699,9 @@ app.get('/api/agencies/current', (req, res) => {
 app.put('/api/agencies/current', async (req, res) => {
   // Agency settings: admin only, verified from the session token.
   const user = requireAdmin(req, res);
-  if (!user) {
-    return res.status(403).json({ error: 'Only kosher agency administrators can edit agency profile settings.' });
-  }
+  // requireAdmin already sent the 403 — returning here without sending again.
+  // (Sending a second response crashes the process: ERR_HTTP_HEADERS_SENT.)
+  if (!user) return;
   const { name, shortCode, certificationSeal, region, contactPhone, customDomain } = req.body;
 
   const agencyId = user.agencyId || 'agency-hkc';
@@ -5248,6 +5780,48 @@ app.get('/api/agencies/by-domain', (req, res) => {
 // Registered when FIRESTORE_MOCK=true (local mock) or STAGE2_TEST_MODE=true
 // (real-emulator CI). Never enabled in production.
 if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
+  // TEST ONLY: write a full events array into the stored doc WITHOUT
+  // committing (no version bump, no hydration). Lets test-26 stage the
+  // production race for fix round 2: the in-memory cache keeps the old
+  // assignment while the doc's fresh event is reassigned, so the PUT's
+  // in-transaction re-gate must refuse an in-flight save.
+  app.post('/api/__test__/doc-set-events', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const db = firestoreDb;
+    if (!db) return res.status(503).json({ error: 'db unavailable' });
+    const { events } = req.body || {};
+    if (!Array.isArray(events)) return res.status(400).json({ error: 'events array required' });
+    const docRef = db.collection('app-state').doc('main');
+    const snap = await docRef.get();
+    const doc = (snap && snap.data && snap.data()) || {};
+    await docRef.set({ ...doc, events });
+    res.json({ ok: true });
+  });
+  // TEST ONLY: seed a media doc directly into the `media` collection so the
+  // commit gates can be tested without GCS Storage (unavailable in mock and
+  // emulator runs). test-26 uses it for the 2c media validation tests.
+  app.post('/api/__test__/media/seed-doc', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const db = requireMediaDb(req, res);
+    if (!db) return;
+    const { id, agencyId, venueId, state = 'INTENT' } = req.body || {};
+    if (!id || !agencyId) {
+      return res.status(400).json({ error: 'id and agencyId are required.' });
+    }
+    await db.collection('media').doc(String(id)).set({
+      id: String(id),
+      agencyId: String(agencyId),
+      venueId: venueId ? String(venueId) : null,
+      uploadedBy: 'test-seed',
+      state,
+      mimeType: 'image/jpeg',
+      sizeBytes: 10,
+      sha256: '0'.repeat(64),
+      storagePath: `media/${agencyId}/${id}.jpg`,
+      createdAt: new Date().toISOString(),
+    });
+    res.json({ ok: true, id });
+  });
   app.get('/api/__test__/firestore-doc', async (req, res) => {
     if (process.env.FIRESTORE_MOCK === 'true') {
       if (!firestoreDb || !firestoreDb._read) {
@@ -5504,11 +6078,13 @@ app.get('/api/venues', (req, res) => {
     const kioskVenueId = (req as any).kioskVenueId;
     accessibleVenues = accessibleVenues.filter((v) => v.id === kioskVenueId);
   } else if (!isCallerAdmin) {
-    // If worker or owner, additionally filter to their assigned venue within the agency
-    if (callerVenueId) {
-      accessibleVenues = accessibleVenues.filter((v) => v.id === callerVenueId);
-    } else if (accessibleVenues.length > 0) {
-      accessibleVenues = [accessibleVenues[0]];
+    // RULE T: a non-admin with no venue gets [], never the agency's first
+    // venue. (Coordinators take the same branch as everyone else now.)
+    const scope = venueScopeFor(caller);
+    if (scope.length === 0) {
+      accessibleVenues = [];
+    } else {
+      accessibleVenues = accessibleVenues.filter((v) => scope.includes(v.id));
     }
   }
 
@@ -5546,9 +6122,8 @@ app.post('/api/venues', async (req, res) => {
   } = req.body;
 
   const caller = requireAdmin(req, res);
-  if (!caller) {
-    return res.status(403).json({ error: 'Only agency administrators can create new venue platforms.' });
-  }
+  // requireAdmin already sent the 403 — see the note above; never double-send.
+  if (!caller) return;
   const callerAgencyId = caller.agencyId || 'agency-hkc';
   let callerAgency: Agency | undefined = undefined;
 
@@ -5662,9 +6237,8 @@ app.put('/api/venues/:id', async (req, res) => {
   const { name, category, address, certification, ownerEmail } = req.body;
 
   const caller = requireAdmin(req, res);
-  if (!caller) {
-    return res.status(403).json({ error: 'Only administrators can modify venue settings.' });
-  }
+  // requireAdmin already sent the 403 — see the note above; never double-send.
+  if (!caller) return;
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   const existing = venues.find((v) => v.id === id);
@@ -5714,9 +6288,8 @@ app.delete('/api/venues/:id', async (req, res) => {
   const { id } = req.params;
 
   const caller = requireAdmin(req, res);
-  if (!caller) {
-    return res.status(403).json({ error: 'Only administrators can remove venue platforms.' });
-  }
+  // requireAdmin already sent the 403 — see the note above; never double-send.
+  if (!caller) return;
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   const existing = venues.find((v) => v.id === id);
@@ -5773,6 +6346,19 @@ app.get('/api/tasks', (req, res) => {
   const callerVenueId = caller.venueId;
   const callerEmailNorm = caller.email.toLowerCase();
   const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === callerAgencyId);
+
+  // RULE T: a non-admin with no venue gets { tasks: [], venue: null, venueId: null },
+  // never the first venue. A non-admin ?venueId for another venue is ignored.
+  if (!isCallerAdmin) {
+    const ownScope = venueScopeFor(caller);
+    if (ownScope.length === 0) {
+      return res.json({ tasks: [], venue: null, venueId: null });
+    }
+    if (venueId && !ownScope.includes(String(venueId))) {
+      return res.json({ tasks: [], venue: null, venueId: null });
+    }
+  }
+
   let targetVenueId = venueId ? String(venueId) : agencyVenues[0]?.id || 'venue-crown-market';
 
   // Strict tenant boundary: workers and owners only access their assigned venue
@@ -5848,9 +6434,19 @@ app.post('/api/tasks', async (req, res) => {
   }
 
   const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === callerAgencyId);
-  const targetVenueId = venueId || agencyVenues[0]?.id || 'venue-crown-market';
-  // The task's venue must belong to the caller's agency.
-  if (!requireOwnVenue(req, res, targetVenueId, venues)) return;
+  // RULE T: a non-admin with no venue gets 403, never a default venue. An admin
+  // without a body venueId falls back to the agency's first venue.
+  let targetVenueId: string;
+  if (caller.role === 'admin') {
+    targetVenueId = venueId || agencyVenues[0]?.id || 'venue-crown-market';
+    if (!requireOwnVenue(req, res, targetVenueId, venues)) return;
+  } else {
+    if (!venueId) {
+      return res.status(403).json({ error: 'You can only work in your own venue.' });
+    }
+    targetVenueId = String(venueId);
+    if (!requireVenueAccess(req, res, targetVenueId)) return;
+  }
 
   let defaultStatus = 'pending';
   if (inputType === 'yes_no') {
@@ -6008,10 +6604,20 @@ app.put('/api/tasks/:id', async (req, res) => {
     }
   }
 
+  // RULE T: a non-admin phone session may only touch tasks at their own
+  // venue (the kiosk branch above already restricts kiosk sessions).
+  if ((req as any).kiosk !== true) {
+    const caller = getAuthUser(req);
+    if (caller && caller.role !== 'admin' && !callerMaySeeVenue(caller, existing.venueId)) {
+      return res.status(403).json({ error: 'You can only work on tasks at your own venue.' });
+    }
+  }
+
   // Capture pre-update visibility for transition handling (addendum item 1).
   const oldTaskVisibility = {
     isPrivate: existing.isPrivate,
     assignedTo: existing.assignedTo,
+    venueId: existing.venueId,
   };
 
   const {
@@ -6194,6 +6800,10 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
       });
     }
   }
+  // RULE T: a non-admin phone session may only act on their own venue's tasks.
+  if (caller.role !== 'admin' && !callerMaySeeVenue(caller, existing.venueId)) {
+    return res.status(403).json({ error: 'You can only work on tasks at your own venue.' });
+  }
 
   const entry = (existing.checkIns || []).find((c: any) => c.id === checkInId);
   if (!entry) {
@@ -6272,6 +6882,10 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
       });
     }
   }
+  // RULE T: a non-admin phone session may only check in at their own venue.
+  if ((req as any).kiosk !== true && caller.role !== 'admin' && !callerMaySeeVenue(caller, existing.venueId)) {
+    return res.status(403).json({ error: 'You can only work on tasks at your own venue.' });
+  }
 
   const { photoData, photoCaption } = req.body;
   // Fill permission checked against the VERIFIED session user.
@@ -6342,6 +6956,22 @@ app.delete('/api/tasks/:id', async (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
   if (!requireSameAgency(req, res, deletedTask, 'tasks')) return;
+  // A1: role gate mirrors the UI (TaskCardView/TaskTableView only show delete
+  // to canUserAssignTasks). B6: the venue check is separate from the role grant.
+  const caller = getAuthUser(req);
+  if (!caller) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+  const mayDelete =
+    caller.role === 'admin' ||
+    caller.role === 'coordinator' ||
+    (caller as any).permissions?.canAssignTasks === true;
+  if (!mayDelete) {
+    return res.status(403).json({ error: 'You do not have permission to delete tasks.' });
+  }
+  if (caller.role !== 'admin' && !callerMaySeeVenue(caller, deletedTask.venueId)) {
+    return res.status(403).json({ error: 'You can only work on tasks at your own venue.' });
+  }
   const { venueId: delVenueId, agencyId: delAgencyId } = deletedTask;
 
   const committed = await commitOrRespond(
@@ -6649,8 +7279,10 @@ app.get('/api/event-task-templates', (req, res) => {
 });
 
 function canManageTemplates(req: any): boolean {
+  // RULE T: default event tasks are agency-wide config — ADMIN ONLY.
+  // (The error text already says "Only admins can manage default event tasks.")
   const caller = getAuthUser(req);
-  return !!caller && (caller.role === 'admin' || caller.role === 'coordinator');
+  return !!caller && caller.role === 'admin';
 }
 
 app.post('/api/event-task-templates', async (req, res) => {
@@ -6726,16 +7358,12 @@ app.get('/api/events', (req, res) => {
   // Filter events strictly by agency
   let agencyEvents = events.filter((e) => (e.agencyId || 'agency-hkc') === agencyId);
 
-  // If user is owner or coordinator, restrict to their venue unless admin
-  if (callerRole === 'owner') {
-    agencyEvents = agencyEvents.filter((e) => e.venueId === callerVenueId);
-  } else if (callerRole === 'mashgiach') {
-    // Mashgiach sees events assigned to them OR events in their venue
-    agencyEvents = agencyEvents.filter(
-      (e) =>
-        (e.assignedMashgiachEmail && e.assignedMashgiachEmail.toLowerCase() === callerEmail) ||
-        (callerVenueId && e.venueId === callerVenueId)
-    );
+  // Visibility: admin sees everything; owner/coordinator/mashgiach/worker
+  // are filtered by canSeeEventServer (rule T + the assigned-mashgiach
+  // exception — see the helper). Other roles keep the venueId-param behavior.
+  if (callerRole === 'owner' || callerRole === 'coordinator' ||
+      callerRole === 'mashgiach' || callerRole === 'worker') {
+    agencyEvents = agencyEvents.filter((e) => canSeeEventServer(e, caller));
   } else if (venueId && venueId !== 'all') {
     if (!requireOwnVenue(req, res, String(venueId), venues)) return;
     agencyEvents = agencyEvents.filter((e) => e.venueId === String(venueId));
@@ -6776,9 +7404,19 @@ app.post('/api/events', async (req, res) => {
   const creatorEmail = caller.email;
   const creatorName = caller.name;
 
-  const targetVenueId = venueId || 'venue-crown-market';
-  // The event's venue must belong to the caller's agency.
-  if (!requireOwnVenue(req, res, targetVenueId, venues)) return;
+  // A6: anyone may create an event, but a non-admin only at their own venue
+  // (the 'venue-crown-market' default applies to admins only).
+  let targetVenueId: string;
+  if (caller.role === 'admin') {
+    targetVenueId = venueId || 'venue-crown-market';
+    if (!requireOwnVenue(req, res, targetVenueId, venues)) return;
+  } else {
+    if (!venueId) {
+      return res.status(403).json({ error: 'You can only work in your own venue.' });
+    }
+    targetVenueId = String(venueId);
+    if (!requireVenueAccess(req, res, targetVenueId)) return;
+  }
   const targetVenue = venues.find((v) => v.id === targetVenueId);
 
   // Resolve assigned mashgiach details
@@ -6906,6 +7544,34 @@ app.put('/api/events/:id', async (req, res) => {
     return res.status(404).json({ error: 'Event not found.' });
   }
   if (!requireSameAgency(req, res, existing, 'events')) return;
+  // A5 (fix round 1): field-aware gate. The client saves an event task
+  // change by PUTting the WHOLE event object, so the gate must compare the
+  // body against the existing event. Changing DEFINITION fields
+  // (title/location/date/times/mashgiach assignment/menu attachments) needs
+  // admin or venue-coordinator. Changing only tasks/status/notes takes the
+  // same gate as the event-task toggle. Transport fields (userEmail,
+  // expectedVersion, operationId) are ignored by the comparison.
+  const caller = getAuthUser(req);
+  if (!caller) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+  const EVENT_DEFINITION_FIELDS = [
+    'title', 'location', 'date', 'endDate', 'startTime', 'endTime',
+    'mashgiachType', 'assignedMashgiachEmail', 'assignedMashgiachName',
+    'externalMashgiach', 'menuAttachmentName', 'menuAttachmentData',
+  ];
+  const changesDefinition = EVENT_DEFINITION_FIELDS.some(
+    (f) => (req.body as any)[f] !== undefined &&
+      JSON.stringify((req.body as any)[f]) !== JSON.stringify((existing as any)[f])
+  );
+  if (changesDefinition) {
+    if (caller.role !== 'admin' &&
+        !(caller.role === 'coordinator' && callerMaySeeVenue(caller, existing.venueId))) {
+      return res.status(403).json({ error: 'You can only edit event details at your own venue.' });
+    }
+  } else if (!mayFillEventTasks(caller, existing)) {
+    return res.status(403).json({ error: 'You can only check event tasks at your own venue.' });
+  }
 
   const {
     title,
@@ -6925,8 +7591,11 @@ app.put('/api/events/:id', async (req, res) => {
     tasks: updatedTasks,
   } = req.body;
 
-  // Baseline for semantic conflict detection on title/location/date.
-  const baseline = { title: existing.title, location: existing.location, date: existing.date };
+  // Baseline for semantic conflict detection: every definition field as
+  // the requester saw it (fix round 2 MEDIUM: conflict-check every
+  // definition field the body changes, not just three).
+  const baseline: Record<string, any> = {};
+  for (const f of EVENT_DEFINITION_FIELDS) baseline[f] = (existing as any)[f];
 
   let resolvedMashgiachEmail = assignedMashgiachEmail !== undefined ? assignedMashgiachEmail : existing.assignedMashgiachEmail;
   let resolvedMashgiachName = assignedMashgiachName !== undefined ? assignedMashgiachName : existing.assignedMashgiachName;
@@ -6945,32 +7614,82 @@ app.put('/api/events/:id', async (req, res) => {
       const freshEvents: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
       const freshEvent = freshEvents.find((e) => e.id === id);
       if (!freshEvent) return { conflict: 'Event not found (it may have been deleted).' };
-      // Conflict if someone else changed a field this request is editing.
-      for (const field of ['title', 'location', 'date'] as const) {
-        const newVal = { title, location, date }[field];
-        if (newVal !== undefined && (freshEvent as any)[field] !== (baseline as any)[field]) {
-          return { conflict: `Conflict: event ${field} was changed by someone else. Please refresh and try again.` };
-        }
+      // Fix round 2 HIGH (rule AB): authorization inside the transaction
+      // re-resolves the caller AND the target from the FRESH doc. The
+      // pre-commit gate ran against the cached event; an admin reassignment
+      // committed between the gate and this transaction must not be
+      // silently overridden by an in-flight tasks-only save.
+      // Rule N: normalize the stored record through hydration's own
+      // function before comparing it to the hydrated cache caller —
+      // legacy doc records ('worker', no agencyId/venueId/permissions)
+      // otherwise false-fire as "access changed" on every event save.
+      const freshCallerRaw: any = (freshDoc.users || []).find((u: any) => u.id === (caller as any).id);
+      const freshCaller: any = freshCallerRaw ? normalizeStoredUser(freshCallerRaw) : freshCallerRaw;
+      // Compare the authorization-relevant signature — role, venue,
+      // agency, permissions — on two NORMALIZED records (the cache caller
+      // is already normalized by hydration; freshCaller is normalized
+      // above). The legacy asymmetry can no longer false-fire.
+      if (!freshCaller ||
+          freshCaller.agencyId !== (caller as any).agencyId ||
+          freshCaller.role !== (caller as any).role ||
+          (freshCaller as any).venueId !== (caller as any).venueId ||
+          JSON.stringify(freshCaller.permissions) !== JSON.stringify((caller as any).permissions)) {
+        return { conflict: 'Your access changed while saving. Please refresh and try again.' };
       }
-      const updated: KosherEventItem = {
-        ...freshEvent,
-        title: title !== undefined ? title : freshEvent.title,
-        location: location !== undefined ? location : freshEvent.location,
-        date: date !== undefined ? date : freshEvent.date,
-        endDate: endDate !== undefined ? endDate : freshEvent.endDate,
-        startTime: startTime !== undefined ? startTime : freshEvent.startTime,
-        endTime: endTime !== undefined ? endTime : freshEvent.endTime,
-        mashgiachType: mashgiachType !== undefined ? mashgiachType : freshEvent.mashgiachType,
-        assignedMashgiachEmail: resolvedMashgiachEmail,
-        assignedMashgiachName: resolvedMashgiachName,
-        externalMashgiach: externalMashgiach !== undefined ? externalMashgiach : freshEvent.externalMashgiach,
-        menuAttachmentName: menuAttachmentName !== undefined ? menuAttachmentName : freshEvent.menuAttachmentName,
-        menuAttachmentData: menuAttachmentData !== undefined ? menuAttachmentData : freshEvent.menuAttachmentData,
-        notes: notes !== undefined ? notes : freshEvent.notes,
-        status: status !== undefined ? status : freshEvent.status,
-        tasks: updatedTasks !== undefined ? updatedTasks : freshEvent.tasks,
-        updatedAt,
-      };
+      // Fix round 2 HIGH: inside the transaction, the gate is re-run on
+      // the FRESH event. A privileged save conflict-checks every
+      // definition field the body changes (MEDIUM); a non-privileged save
+      // is tasks/status/notes only, and stale definition fields in the body
+      // are silently dropped — the caller may still work the fresh event's
+      // tasks when they remain allowed on the fresh record.
+      const freshPrivileged = freshCaller.role === 'admin' ||
+        (freshCaller.role === 'coordinator' && callerMaySeeVenue(freshCaller, freshEvent.venueId));
+      const freshTaskWorker = mayFillEventTasks(freshCaller, freshEvent);
+      if (!freshPrivileged && !freshTaskWorker) {
+        return { conflict: 'You are no longer assigned to this event.' };
+      }
+      let updated: KosherEventItem;
+      if (freshPrivileged) {
+        // Privileged save: conflict-check EVERY definition field the body
+        // changes against the fresh event (MEDIUM).
+        for (const field of EVENT_DEFINITION_FIELDS) {
+          const newVal = (req.body as any)[field];
+          if (newVal !== undefined &&
+              JSON.stringify((freshEvent as any)[field]) !== JSON.stringify(baseline[field])) {
+            return { conflict: `Conflict: event ${field} was changed by someone else. Please refresh and try again.` };
+          }
+        }
+        updated = {
+          ...freshEvent,
+          title: title !== undefined ? title : freshEvent.title,
+          location: location !== undefined ? location : freshEvent.location,
+          date: date !== undefined ? date : freshEvent.date,
+          endDate: endDate !== undefined ? endDate : freshEvent.endDate,
+          startTime: startTime !== undefined ? startTime : freshEvent.startTime,
+          endTime: endTime !== undefined ? endTime : freshEvent.endTime,
+          mashgiachType: mashgiachType !== undefined ? mashgiachType : freshEvent.mashgiachType,
+          assignedMashgiachEmail: resolvedMashgiachEmail,
+          assignedMashgiachName: resolvedMashgiachName,
+          externalMashgiach: externalMashgiach !== undefined ? externalMashgiach : freshEvent.externalMashgiach,
+          menuAttachmentName: menuAttachmentName !== undefined ? menuAttachmentName : freshEvent.menuAttachmentName,
+          menuAttachmentData: menuAttachmentData !== undefined ? menuAttachmentData : freshEvent.menuAttachmentData,
+          notes: notes !== undefined ? notes : freshEvent.notes,
+          status: status !== undefined ? status : freshEvent.status,
+          tasks: updatedTasks !== undefined ? updatedTasks : freshEvent.tasks,
+          updatedAt,
+        };
+      } else {
+        // Non-privileged (tasks/status/notes) save: definition fields come
+        // from the FRESH event unconditionally — a tasks-only save can never
+        // silently undo an admin's concurrent reassignment (MEDIUM).
+        updated = {
+          ...freshEvent,
+          notes: notes !== undefined ? notes : freshEvent.notes,
+          status: status !== undefined ? status : freshEvent.status,
+          tasks: updatedTasks !== undefined ? updatedTasks : freshEvent.tasks,
+          updatedAt,
+        };
+      }
       const newEvents = freshEvents.map((e) => (e.id === id ? updated : e));
       return { doc: { ...freshDoc, events: newEvents }, result: updated };
     },
@@ -6979,12 +7698,10 @@ app.put('/api/events/:id', async (req, res) => {
   if (!committed) return;
   const updated = committed.result as KosherEventItem;
 
-  broadcast('EVENT_UPDATED', {
-    event: updated,
-    agencyId: updated.agencyId,
-    venueId: updated.venueId,
-    assignedMashgiachEmail: updated.assignedMashgiachEmail,
-  }, undefined, updated.agencyId || 'agency-hkc');
+  // Item 7: transition-aware broadcast — the stale-assignment path (an
+  // admin reassigning the event away from a mashgiach) sends that mashgiach
+  // EVENT_DELETED so their client drops the event immediately.
+  broadcastEventUpdated(existing, updated, caller?.email);
 
   res.json({ event: updated });
 });
@@ -6997,13 +7714,23 @@ app.delete('/api/events/:id', async (req, res) => {
     return res.status(404).json({ error: 'Event not found.' });
   }
   if (!requireSameAgency(req, res, deletedEvent, 'events')) return;
+  // A5: same role gate as PUT (UI gates delete to admin only; rule T lets the
+  // venue's coordinator lead at their venue).
+  const delCaller = getAuthUser(req);
+  if (!delCaller) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+  if (delCaller.role !== 'admin' &&
+      !(delCaller.role === 'coordinator' && callerMaySeeVenue(delCaller, deletedEvent.venueId))) {
+    return res.status(403).json({ error: 'You can only delete events at your own venue.' });
+  }
   const agencyId = deletedEvent.agencyId;
   const venueId = deletedEvent.venueId;
 
   const ok = await crudDelete(req, res, 'events', id, {
     label: 'delete-event',
     broadcastType: 'EVENT_DELETED',
-    getDeletePayload: () => ({ id, agencyId, venueId }),
+    getDeletePayload: () => ({ id, agencyId, venueId, assignedMashgiachEmail: deletedEvent.assignedMashgiachEmail }),
     getAgencyId: () => agencyId || 'agency-hkc',
   });
   return;
@@ -7021,6 +7748,12 @@ app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
     return res.status(404).json({ error: 'Event not found.' });
   }
   if (!requireSameAgency(req, res, event, 'events')) return;
+  // A5: role gate mirrors the UI. A coordinator leads at their own venue only
+  // (rule T). canFill mashgichim/workers participate when the event is at
+  // their venue or assigned to them; owners only with canFillTasks at the venue.
+  if (!mayFillEventTasks(caller, event)) {
+    return res.status(403).json({ error: 'You can only check event tasks at your own venue.' });
+  }
 
   const cachedTask = event.tasks.find((t) => t.id === taskId);
   if (!cachedTask) {
@@ -7099,9 +7832,13 @@ app.get('/api/users', (req, res) => {
   const agencyId = callerAgencyId(req);
   const caller = getAuthUser(req);
 
+  // RULE T: a non-admin with no venue gets [], never the whole roster.
+  // A spoofed ?venueId from a non-admin is ignored (own venue, or nothing).
   let targetVenueId = venueId ? String(venueId) : null;
   if (caller && caller.role !== 'admin') {
-    targetVenueId = caller.venueId || null;
+    const ownScope = venueScopeFor(caller);
+    if (ownScope.length === 0) return res.json({ users: [] });
+    targetVenueId = ownScope[0];
   }
 
   // Scope to caller's agency
@@ -7389,7 +8126,12 @@ app.put('/api/users/:id', async (req, res) => {
         canSeeTaskServer(t, oldUser) &&
         !canSeeTaskServer(t, updated)
     );
-    if (lostTasks.length > 0) {
+    // Item 13 (ChatGPT): refresh whenever the target's role OR venueId changed —
+    // a coordinator moved from venue A to B must lose A's data on connected
+    // clients immediately, even if the lost-task count happens to be zero.
+    const reassigned =
+      oldUser.role !== updated.role || (oldUser as any).venueId !== (updated as any).venueId;
+    if (lostTasks.length > 0 || reassigned) {
       for (const t of lostTasks) {
         broadcast(
           'TASK_DELETED',
@@ -7891,9 +8633,10 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   // Privacy: the reset code is NEVER broadcast over WebSocket. It was
   // previously sent in plaintext to every connected client of the agency.
   const agencyId = user.agencyId || 'agency-hkc';
+  // RULE T: admins of the agency + coordinators of the reset user's venue only.
   const admins = users.filter((u) =>
     (u.agencyId || 'agency-hkc') === agencyId &&
-    ['admin', 'coordinator'].includes(u.role)
+    (u.role === 'admin' || (u.role === 'coordinator' && callerMaySeeVenue(u, (user as any).venueId || '')))
   );
   for (const admin of admins) {
     sendPushToUser(
@@ -8460,6 +9203,10 @@ app.put('/api/ingredients/:id/verify', async (req, res) => {
     return res.status(404).json({ error: 'Ingredient not found' });
   }
   if (!requireSameAgency(req, res, existing, 'ingredients')) return;
+  // A7: admin, coordinator at the venue, or canFill mashgiach/worker at the venue.
+  if (!mayDoFieldWrite(caller, existing.venueId)) {
+    return res.status(403).json({ error: 'You can only verify ingredients at your own venue.' });
+  }
 
   const verifiedByName = caller.name;
   const verifiedByEmail = caller.email;
@@ -8499,8 +9246,12 @@ app.post('/api/ingredients', async (req, res) => {
 
   const callerAgencyId = caller.agencyId || 'agency-hkc';
   const approverName = caller.name;
-  // The ingredient's venue must belong to the caller's agency.
-  if (!requireOwnVenue(req, res, venueId, venues)) return;
+  // RULE T + A7: the venue must be the caller's own AND the role must be one
+  // that does field writes (admin, coordinator, canFill mashgiach/worker).
+  if (!requireVenueAccess(req, res, venueId)) return;
+  if (!mayDoFieldWrite(caller, venueId)) {
+    return res.status(403).json({ error: 'You can only add ingredients at your own venue.' });
+  }
 
   const ingredientId = `ing_${crypto.randomUUID()}`;
   const newIngredient: ApprovedIngredientItem = {
@@ -8540,6 +9291,11 @@ app.delete('/api/ingredients/:id', async (req, res) => {
     return res.status(404).json({ error: 'Ingredient not found' });
   }
   if (!requireSameAgency(req, res, existing, 'ingredients')) return;
+  // A7: admin, coordinator at the venue, or canFill mashgiach/worker at the venue.
+  const delCaller = getAuthUser(req);
+  if (!mayDoFieldWrite(delCaller, existing.venueId)) {
+    return res.status(403).json({ error: 'You can only delete ingredients at your own venue.' });
+  }
   const venueId = existing.venueId;
   const agencyId = existing.agencyId;
   const ok = await crudDelete(req, res, 'approvedIngredients', id, {
@@ -8597,8 +9353,12 @@ app.post('/api/factory-reports', async (req, res) => {
   }
 
   const venue = venues.find((v) => v.id === venueId);
-  // The report's venue must belong to the caller's agency (and determines the agency).
-  if (!requireOwnVenue(req, res, venueId, venues)) return;
+  // RULE T + A7: the venue must be the caller's own AND the role must be one
+  // that does field writes (admin, coordinator, canFill mashgiach/worker).
+  if (!requireVenueAccess(req, res, venueId)) return;
+  if (!mayDoFieldWrite(caller, venueId)) {
+    return res.status(403).json({ error: 'You can only submit factory reports at your own venue.' });
+  }
   const callerAgencyId = venue?.agencyId || caller.agencyId || 'agency-hkc';
   const mashgiachName = caller.name;
   const mashgiachEmail = caller.email;
@@ -8671,7 +9431,7 @@ app.post('/api/factory-reports', async (req, res) => {
     report,
     venueId,
     agencyId: callerAgencyId,
-  });
+  }, undefined, callerAgencyId);
 
   res.status(201).json({ success: true, report });
 });

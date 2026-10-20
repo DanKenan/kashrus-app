@@ -77,13 +77,17 @@ export function canUserAssignTasks(user: User | null | undefined): boolean {
  * Whether a user may see a task. Private tasks are visible only to their
  * assignees plus admins and coordinators.
  */
+// Server-side mirror: canSeeTaskServer (server.ts). RULE T: venue first.
 export function canSeeTask(
-  task: { isPrivate?: boolean; assignedTo?: string[] },
+  task: { isPrivate?: boolean; assignedTo?: string[]; venueId?: string },
   user: User | null | undefined
 ): boolean {
-  if (!task.isPrivate) return true;
   if (!user) return false;
-  if (user.role === 'admin' || user.role === 'coordinator') return true;
+  if (user.role === 'admin') return true;
+  if ((user as any).venueId !== undefined && task.venueId !== undefined &&
+      (user as any).venueId !== task.venueId) return false;
+  if (!task.isPrivate) return true;
+  if (user.role === 'coordinator') return true;
   const email = user.email.toLowerCase();
   return (task.assignedTo || []).some((a) => a.toLowerCase() === email);
 }

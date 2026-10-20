@@ -137,7 +137,8 @@ export default {
         { id: mashAId, email: mashAEmail, name: 'T24 Mash A', role: 'mashgiach', agencyId: AGENCY_A, venueId: venueA },
         { id: mashA2Id, email: mashA2Email, name: 'T24 Mash A2', role: 'mashgiach', agencyId: AGENCY_A, venueId: venueA2 },
         { id: mashNoVenueId, email: mashNoVenueEmail, name: 'T24 Mash NoVenue', role: 'mashgiach', agencyId: AGENCY_A },
-        { id: coordAId, email: coordAEmail, name: 'T24 Coord A', role: 'coordinator', agencyId: AGENCY_A },
+        // Rule T: the coordinator is assigned to venueA only (not agency-wide).
+        { id: coordAId, email: coordAEmail, name: 'T24 Coord A', role: 'coordinator', agencyId: AGENCY_A, venueId: venueA },
         { id: adminBId, email: adminBEmail, name: 'T24 Admin B', role: 'admin', agencyId: AGENCY_B },
         { id: mashBId, email: mashBEmail, name: 'T24 Mash B', role: 'mashgiach', agencyId: AGENCY_B, venueId: venueB },
       ],
@@ -429,19 +430,17 @@ export default {
       const ids = (nb.notes || []).map((n) => n.id);
       if (!ids.includes(noteAId)) throw new Error('venue scoping: mashA missing own venue note');
       if (ids.includes(noteA2Id)) throw new Error('venue scoping: mashA sees venueA2 note without ?venueId');
-      // coordinator of A → both venues (agency-wide)
+      // RULE T: coordinator of venueA → only venueA notes (not agency-wide)
       const cr2 = await fetch(`${baseUrl}/api/handoff-notes`, { headers: auth(tCoordA) });
       const cb2 = await cr2.json();
       const cids = (cb2.notes || []).map((n) => n.id);
-      if (!cids.includes(noteAId) || !cids.includes(noteA2Id)) {
-        throw new Error('venue scoping: coordinator should see both venues notes');
+      if (!cids.includes(noteAId) || cids.includes(noteA2Id)) {
+        throw new Error('venue scoping: coordinator should see own-venue notes only');
       }
-      // coordinator with ?venueId=venueA2 → only venueA2
+      // coordinator with ?venueId=venueA2 → 403
       const cr3 = await fetch(`${baseUrl}/api/handoff-notes?venueId=${venueA2}`, { headers: auth(tCoordA) });
-      const cb3 = await cr3.json();
-      const cids3 = (cb3.notes || []).map((n) => n.id);
-      if (!cids3.includes(noteA2Id) || cids3.includes(noteAId)) {
-        throw new Error('venue scoping: coordinator ?venueId=venueA2 should see only venueA2');
+      if (cr3.status !== 403) {
+        throw new Error(`venue scoping: coordinator ?venueId=venueA2 → ${cr3.status} (expected 403)`);
       }
       // mashgiach with NO venueId → [] on all five GETs (never agency-wide)
       for (const [path, key] of [
@@ -459,8 +458,12 @@ export default {
           throw new Error(`no-venue: ${path} returned ${items.length} rows (expected 0)`);
         }
       }
-      // mashgiach with NO venueId: system defaults to 'venue-crown-market' (legacy).
-      // Must NOT get agency-level config — only the empty default shape.
+      // mashgiach with NO venueId: must NOT get agency-level config (baseId/apiKey).
+      // Note: by this point the test server has restarted, so hydration's legacy
+      // default has assigned this user 'venue-crown-market'; they get that
+      // venue's (empty) default. The fail-closed 403 for a TRULY venue-less user
+      // is covered in test-26 (no restart there). What must never happen here:
+      // another venue's config leaking to this user.
       const acr = await fetch(`${baseUrl}/api/airtable/config`, { headers: auth(tMashNoVenue) });
       if (acr.status !== 200) throw new Error(`no-venue: /api/airtable/config → ${acr.status} (expected 200)`);
       const acb = await acr.json();
