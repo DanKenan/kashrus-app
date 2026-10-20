@@ -299,7 +299,8 @@ export interface ServerBroadcastMessage {
     | 'INGREDIENTS_SYNCED'
     | 'AUDIT_REPORT_SUBMITTED'
     | 'CLEAN_SLATE_RESET'
-    | 'DEMO_RESTORED';
+    | 'DEMO_RESTORED'
+    | 'KIOSK_DEVICES_UPDATED';
   payload: any;
   timestamp: string;
   senderEmail?: string;

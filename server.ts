@@ -288,12 +288,16 @@ function signToken(userId: string): string {
 }
 
 /** Kiosk session token: venue-scoped, 12h expiry, kiosk:true claim.
- * pv = the kiosk PIN version (kioskPinSetAt) — a PIN change revokes old tokens. */
-function signKioskToken(userId: string, agencyId: string, venueId: string, pv: string): string {
+ * pv = the kiosk PIN version (String(kioskPinRev), 2b — a PIN change
+ * increments the revision and revokes old tokens; pre-2b tokens carrying a
+ * kioskPinSetAt timestamp as pv simply fail re-validation).
+ * dev = the DEVICE id this session is bound to (2b): the token is valid
+ * only while that device exists and still points at the same agency/venue. */
+function signKioskToken(userId: string, agencyId: string, venueId: string, pv: string, dev: string): string {
   const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const now = Math.floor(Date.now() / 1000);
   const payload = base64url(
-    JSON.stringify({ sub: userId, kiosk: true, agencyId, venueId, pv, iat: now, exp: now + KIOSK_TOKEN_TTL_SECONDS })
+    JSON.stringify({ sub: userId, kiosk: true, agencyId, venueId, pv, dev, iat: now, exp: now + KIOSK_TOKEN_TTL_SECONDS })
   );
   const sig = base64url(
     crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest()
@@ -301,7 +305,7 @@ function signKioskToken(userId: string, agencyId: string, venueId: string, pv: s
   return `${header}.${payload}.${sig}`;
 }
 
-function verifyToken(token: string): { userId: string; kiosk?: boolean; agencyId?: string; venueId?: string; pv?: string } | null {
+function verifyToken(token: string): { userId: string; kiosk?: boolean; agencyId?: string; venueId?: string; pv?: string; dev?: string } | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
@@ -324,6 +328,7 @@ function verifyToken(token: string): { userId: string; kiosk?: boolean; agencyId
       agencyId: typeof data.agencyId === 'string' ? data.agencyId : undefined,
       venueId: typeof data.venueId === 'string' ? data.venueId : undefined,
       pv: typeof data.pv === 'string' ? data.pv : undefined,
+      dev: typeof data.dev === 'string' ? data.dev : undefined,
     };
   } catch {
     return null;
@@ -386,12 +391,15 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'POST', path: '/agencies/register' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
-  // Kiosk: the PIN itself is the credential; /kiosk/users only returns names.
-  { method: 'GET', path: '/kiosk/users' },
+  // Kiosk (2b): a tablet is paired to one venue by an admin/coordinator.
+  // Pairing start/status and the device record are authenticated by the
+  // secrets they carry; login requires the device header. The old public
+  // venue picker and staff list are GONE.
+  { method: 'POST', path: '/kiosk/pairing/start' },
+  { method: 'GET', path: '/kiosk/pairing/status' },
+  { method: 'GET', path: '/kiosk/device' },
+  { method: 'POST', path: '/kiosk/device/unpair' },
   { method: 'POST', path: '/kiosk/login' },
-  // Kiosk setup: venue names only (no sensitive data) so a fresh tablet can
-  // pick its establishment before anyone logs in.
-  { method: 'GET', path: '/kiosk/venues' },
   // Test-only endpoints (registered only when STAGE2_TEST_MODE=true; the
   // routes themselves don't exist in production, but list them here so the
   // auth middleware doesn't 401 them in test mode).
@@ -508,15 +516,31 @@ app.use('/api', async (req, res, next) => {
     const tokenAgencyId = payload.agencyId;
     const tokenVenueId = payload.venueId;
     const tokenPv = payload.pv;
-    // Fail closed: a kiosk token without agencyId, venueId or pv is invalid —
-    // never fall through as a phone session. pv must match the current PIN
-    // version (a PIN re-save revokes old tokens).
+    const tokenDev = payload.dev;
+    // Fail closed: a kiosk token without agencyId, venueId, pv or dev is
+    // invalid — never fall through as a phone session. pv must match the
+    // current PIN revision (a PIN re-save revokes old tokens; pre-2b tokens
+    // carrying a timestamp pv fail here, as do 2a-era tokens with no dev).
+    // C1: the session is bound to its DEVICE — the device must still exist
+    // and still point at the token's agency and venue (unpair kills it).
+    // Addendum finding 1: device PROOF on every request — the request must
+    // also carry X-Kiosk-Device, and the device it resolves to (hash
+    // compare, timing-safe) must be the token's own device. A valid token
+    // with no header, or with ANOTHER tablet's credential, is a 401.
+    const device = typeof tokenDev === 'string' ? liveKioskDevice(tokenDev) : null;
+    const provedDevice = resolveKioskDevice(req);
     const stillValid =
       !!tokenAgencyId &&
       !!tokenVenueId &&
       !!tokenPv &&
+      !!device &&
+      device.agencyId === tokenAgencyId &&
+      device.venueId === tokenVenueId &&
+      !!provedDevice &&
+      provedDevice.id === tokenDev &&
       user.kioskPinHash &&
-      (user as any).kioskPinSetAt === tokenPv &&
+      pinRevOf(user) !== undefined &&
+      String(pinRevOf(user)) === tokenPv &&
       (user.agencyId || 'agency-hkc') === tokenAgencyId &&
       (user as any).venueId === tokenVenueId;
     if (!stillValid) {
@@ -524,6 +548,7 @@ app.use('/api', async (req, res, next) => {
     }
     (req as any).kiosk = true;
     (req as any).kioskVenueId = tokenVenueId;
+    (req as any).kioskDeviceId = tokenDev;
   }
 
   // Force the verified identity: endpoints keying off userEmail now see the
@@ -1183,7 +1208,8 @@ interface UserProfile {
   password?: string;
   kioskPin?: string; // 4-6 digit PIN for shared kiosk tablets (never sent to clients)
   kioskPinHash?: string; // bcrypt hash of the kiosk PIN (cost 10); kioskPin is legacy plain
-  kioskPinSetAt?: string; // ISO timestamp of the last PIN write — kiosk tokens carry it as pv; a change revokes old tokens
+  kioskPinSetAt?: string; // ISO timestamp of the last PIN write (informational; stripped from safe users)
+  kioskPinRev?: number; // PIN revision counter (2b): kiosk tokens carry String(kioskPinRev) as pv; any PIN set/clear/legacy-upgrade increments it, revoking old tokens
   venueId?: string; // Mashgichim, Coordinators and Owners belong to a specific venue; Admins have access to all in their agency
   permissions?: UserPermissions;
 }
@@ -1846,12 +1872,19 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
   if (meta.kiosk) {
     const user = users.find((u) => u.id === meta.userId);
     // No 'agency-hkc' fallback: a kiosk meta without kioskAgencyId/pv is invalid.
+    // C1: the bound device must still exist and match the socket's
+    // agency/venue; pv is the PIN revision (2b).
+    const device = meta.kioskDeviceId ? liveKioskDevice(meta.kioskDeviceId) : null;
     const stillValid =
       user &&
       user.kioskPinHash &&
       meta.kioskAgencyId &&
       meta.kioskPv &&
-      (user as any).kioskPinSetAt === meta.kioskPv &&
+      device &&
+      device.agencyId === meta.kioskAgencyId &&
+      device.venueId === meta.kioskVenueId &&
+      pinRevOf(user) !== undefined &&
+      String(pinRevOf(user)) === meta.kioskPv &&
       (user.agencyId || 'agency-hkc') === meta.kioskAgencyId &&
       (user as any).venueId === meta.kioskVenueId;
     if (!stillValid) {
@@ -1890,6 +1923,46 @@ function emptyKioskPinLockouts(): KioskPinLockouts {
   return { users: {}, tablets: {} };
 }
 let kioskPinLockouts: KioskPinLockouts = emptyKioskPinLockouts();
+
+/**
+ * Kiosk devices (2b): a tablet is PAIRED to exactly one venue by an admin or
+ * that venue's coordinator. The device authenticates with a random secret;
+ * only its sha256 hash is ever stored (rule M). Kiosk sign-in works only on
+ * a paired tablet, and only for that tablet's venue.
+ */
+interface KioskDevice {
+  id: string;
+  agencyId: string;
+  venueId: string;
+  name: string;
+  secretHash: string; // sha256 hex of the device secret — NEVER the plain secret
+  createdAt: string;
+  pairedByUserId: string;
+  pairedByName: string;
+  lastSeenAt?: string;
+}
+let kioskDevices: KioskDevice[] = [];
+
+/** A pending/approved pairing, keyed by pairingId. Pruned of expired and
+ * claimed entries on every pairing write. */
+interface KioskPairing {
+  pairingCodeHash: string; // sha256 hex of the 6-char pairing code (named so backup.ts's scrub catches it)
+  secretHash: string; // sha256 hex of the device secret minted at start
+  ip: string;
+  createdAt: number; // ms epoch
+  expiresAt: number; // ms epoch
+  status: 'pending' | 'approved';
+  deviceId?: string;
+  venueId?: string;
+  venueName?: string;
+  approvedAt?: number; // ms epoch, stamped by the pair commit
+  claimExpiresAt?: number; // ms epoch: approvedAt + TTL, stamped at first claim
+}
+let kioskPairings: { [pairingId: string]: KioskPairing } = {};
+
+/** Pairing rate-limit buckets (persisted like the PIN lockouts):
+ * keys 'start|<ip>', 'caller|<userId>', 'pairip|<ip>' → attempt timestamps. */
+let kioskPairingLimits: { [key: string]: string[] } = {};
 let eventTaskTemplates: EventTaskTemplate[] = [];
 let currentWorkDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 let isDemoCleared = false;
@@ -1982,6 +2055,40 @@ function hydrateState(parsed: any) {
         };
       } else {
         kioskPinLockouts = emptyKioskPinLockouts();
+      }
+
+      // Kiosk devices + pairings (2b). Malformed device entries are dropped
+      // (fail closed: an unparseable device can never authenticate).
+      if (Array.isArray(parsed.kioskDevices)) {
+        kioskDevices = (parsed.kioskDevices as any[]).filter(
+          (d) => d && typeof d.id === 'string' && d.id &&
+            typeof d.secretHash === 'string' && d.secretHash &&
+            typeof d.venueId === 'string' && d.venueId &&
+            typeof d.agencyId === 'string' && d.agencyId
+        );
+      } else {
+        kioskDevices = [];
+      }
+      if (parsed.kioskPairings && typeof parsed.kioskPairings === 'object') {
+        kioskPairings = {};
+        for (const [pid, pr] of Object.entries(parsed.kioskPairings as any)) {
+          const r: any = pr as any;
+          if (r && typeof r.pairingCodeHash === 'string' && typeof r.secretHash === 'string' &&
+              (r.status === 'pending' || r.status === 'approved') &&
+              typeof r.expiresAt === 'number') {
+            kioskPairings[pid] = r;
+          }
+        }
+      } else {
+        kioskPairings = {};
+      }
+      if (parsed.kioskPairingLimits && typeof parsed.kioskPairingLimits === 'object') {
+        kioskPairingLimits = {};
+        for (const [k, v] of Object.entries(parsed.kioskPairingLimits as any)) {
+          if (Array.isArray(v)) kioskPairingLimits[k] = v.filter((t) => typeof t === 'string');
+        }
+      } else {
+        kioskPairingLimits = {};
       }
 
       if (Array.isArray(parsed.agencies) && parsed.agencies.length > 0) {
@@ -2178,6 +2285,9 @@ function stateSnapshot() {
     passwordResets,
     passwordResetRateLimits,
     kioskPinLockouts,
+    kioskDevices,
+    kioskPairings,
+    kioskPairingLimits,
   };
 }
 
@@ -2541,7 +2651,7 @@ const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const IDEMPOTENCY_MAX_RECORDS = 1000;
 
 /** Exact-match sensitive field names (case-insensitive) stripped from cached results. */
-const IDEMPOTENCY_SENSITIVE_FIELDS = new Set(['password', 'passwordhash', 'kioskpin', 'kioskpinhash', 'resettoken', 'apikey']);
+const IDEMPOTENCY_SENSITIVE_FIELDS = new Set(['password', 'passwordhash', 'kioskpin', 'kioskpinhash', 'resettoken', 'apikey', 'secrethash', 'devicesecret', 'pairingcodehash', 'code']);
 
 /**
  * Deep-strip sensitive fields from a result before caching it as an
@@ -3571,7 +3681,7 @@ app.post('/api/push/unsubscribe', async (req, res) => {
 
 // WebSocket Setup
 const wss = new WebSocketServer({ server, path: '/ws' });
-type SocketMeta = { userId: string; email: string; name: string; agencyId: string; role?: string; kiosk?: boolean; kioskVenueId?: string; kioskAgencyId?: string; kioskPv?: string };
+type SocketMeta = { userId: string; email: string; name: string; agencyId: string; role?: string; kiosk?: boolean; kioskVenueId?: string; kioskAgencyId?: string; kioskPv?: string; kioskDeviceId?: string };
 const activeSockets = new Map<WebSocket, SocketMeta>();
 
 /**
@@ -3693,6 +3803,11 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
     case 'EVENT_TEMPLATES_UPDATED':
     case 'INITIAL_STATE':
       return payload;
+    case 'KIOSK_DEVICES_UPDATED':
+      // Venue-targeted (C4): admins get everything (early return above);
+      // a coordinator gets their own venue's device changes — nobody else.
+      // The payload carries NO device records — { agencyId, venueId } only.
+      return recipient.role === 'coordinator' && inScope(p.venueId) ? payload : null;
     case 'AGENCY_UPDATED':
     case 'AGENCY_REGISTERED': {
       // (fix round 1) These pass, but the payload is reduced to the agency's
@@ -3914,6 +4029,7 @@ wss.on('connection', (ws, req) => {
   let kioskVenueId: string | undefined;
   let kioskAgencyId: string | undefined;
   let kioskPv: string | undefined;
+  let kioskDeviceId: string | undefined;
   let isKiosk = false;
   try {
     const url = new URL(req.url || '/ws', 'http://localhost');
@@ -3923,11 +4039,13 @@ wss.on('connection', (ws, req) => {
     isKiosk = payload?.kiosk === true;
     if (isKiosk) {
       // Branch on the kiosk CLAIM, not on the presence of a venue id — a
-      // kiosk token without agencyId, venueId or pv fails closed (never a phone session).
+      // kiosk token without agencyId, venueId, pv or dev fails closed
+      // (never a phone session).
       kioskVenueId = payload.venueId;
       kioskAgencyId = payload.agencyId;
       kioskPv = payload.pv;
-      if (!kioskVenueId || !kioskAgencyId || !kioskPv) {
+      kioskDeviceId = payload.dev;
+      if (!kioskVenueId || !kioskAgencyId || !kioskPv || !kioskDeviceId) {
         ws.close(4401, 'Unauthorized');
         return;
       }
@@ -3940,11 +4058,17 @@ wss.on('connection', (ws, req) => {
     ws.close(4401, 'Unauthorized');
     return;
   }
-  // Kiosk token: re-validate the user (same revocation rule as the middleware).
+  // Kiosk token: re-validate the user AND the bound device (same revocation
+  // rule as the middleware; pv is the PIN revision).
   if (isKiosk) {
+    const device = liveKioskDevice(kioskDeviceId);
     const stillValid =
       authedUser.kioskPinHash &&
-      (authedUser as any).kioskPinSetAt === kioskPv &&
+      device &&
+      device.agencyId === kioskAgencyId &&
+      device.venueId === kioskVenueId &&
+      pinRevOf(authedUser) !== undefined &&
+      String(pinRevOf(authedUser)) === kioskPv &&
       (authedUser.agencyId || 'agency-hkc') === (kioskAgencyId || 'agency-hkc') &&
       authedUser.venueId === kioskVenueId;
     if (!stillValid) {
@@ -3954,48 +4078,96 @@ wss.on('connection', (ws, req) => {
   }
 
   const agencyId = authedUser.agencyId || 'agency-hkc';
-  activeSockets.set(ws, {
-    userId: authedUser.id, email: authedUser.email, name: authedUser.name,
-    agencyId, role: authedUser.role,
-    kiosk: isKiosk, kioskVenueId, kioskAgencyId, kioskPv,
-  });
 
-  // Initial state: ONLY this user's agency. Never the whole platform.
-  // Kiosk sockets get the per-type allowlist: their venue's tasks/history,
-  // the venue roster (no emails), and the single venue — nothing else.
-  const baseState = agencyStateFor(agencyId, authedUser);
-  const kioskState = kioskVenueId
-    ? {
-        ...baseState,
-        tasks: (baseState.tasks || []).filter((t: any) => t.venueId === kioskVenueId),
-        historyLogs: (baseState.historyLogs || []).filter((h: any) => h.venueId === kioskVenueId),
-        venues: (baseState.venues || []).filter((v: any) => v.id === kioskVenueId),
-        users: (baseState.users || [])
-          .filter((u: any) => u.venueId === kioskVenueId)
-          .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role })),
-        events: [],
-        airtableConfigs: [],
-        approvedIngredients: [],
-        factoryReports: [],
-      }
-    : baseState;
-  ws.send(
-    JSON.stringify({
-      type: 'INITIAL_STATE',
-      payload: {
-        ...kioskState,
-        activeWorkersCount: activeSockets.size,
-      },
-      timestamp: new Date().toISOString(),
-      version: typeof stateVersion === 'number' ? stateVersion : undefined,
-    })
-  );
+  // Addendum finding 1: a kiosk socket proves its device with its FIRST
+  // frame — { type: 'KIOSK_DEVICE', credential: '<deviceId>.<secret>' } —
+  // because a browser cannot set headers on a WebSocket and the secret must
+  // never travel in the URL. Until that frame verifies, the server sends
+  // NOTHING and the socket has NO activeSockets entry; a wrong frame, or
+  // none within 5 s, closes 4401. Phone sockets expect no frame (and an
+  // unexpected one is ignored — rule X: meta is never rebuilt from a
+  // client message).
+  let connected = false;
+  let proofTimer: ReturnType<typeof setTimeout> | null = null;
 
-  broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
+  const finishConnect = () => {
+    connected = true;
+    activeSockets.set(ws, {
+      userId: authedUser.id, email: authedUser.email, name: authedUser.name,
+      agencyId, role: authedUser.role,
+      kiosk: isKiosk, kioskVenueId, kioskAgencyId, kioskPv, kioskDeviceId,
+    });
+
+    // Initial state: ONLY this user's agency. Never the whole platform.
+    // Kiosk sockets get the per-type allowlist: their venue's tasks/history,
+    // the venue roster (no emails), and the single venue — nothing else.
+    const baseState = agencyStateFor(agencyId, authedUser);
+    const kioskState = kioskVenueId
+      ? {
+          ...baseState,
+          tasks: (baseState.tasks || []).filter((t: any) => t.venueId === kioskVenueId),
+          historyLogs: (baseState.historyLogs || []).filter((h: any) => h.venueId === kioskVenueId),
+          venues: (baseState.venues || []).filter((v: any) => v.id === kioskVenueId),
+          users: (baseState.users || [])
+            .filter((u: any) => u.venueId === kioskVenueId)
+            .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role })),
+          events: [],
+          airtableConfigs: [],
+          approvedIngredients: [],
+          factoryReports: [],
+        }
+      : baseState;
+    ws.send(
+      JSON.stringify({
+        type: 'INITIAL_STATE',
+        payload: {
+          ...kioskState,
+          activeWorkersCount: activeSockets.size,
+        },
+        timestamp: new Date().toISOString(),
+        version: typeof stateVersion === 'number' ? stateVersion : undefined,
+      })
+    );
+
+    broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
+  };
+
+  if (isKiosk) {
+    proofTimer = setTimeout(() => {
+      try {
+        ws.close(4401, 'Unauthorized');
+      } catch {}
+    }, 5000);
+  } else {
+    finishConnect();
+  }
 
   ws.on('message', (data) => {
     try {
       const parsed = JSON.parse(data.toString());
+      if (isKiosk && !connected) {
+        // The FIRST frame on a kiosk socket must be the device proof:
+        // the credential must resolve (hash compare) to the token's own
+        // device, at the token's agency and venue.
+        const proved = parsed?.type === 'KIOSK_DEVICE'
+          ? verifyKioskDeviceCredential(parsed.credential, kioskDeviceId)
+          : null;
+        if (!proved || proved.agencyId !== kioskAgencyId || proved.venueId !== kioskVenueId) {
+          if (proofTimer) clearTimeout(proofTimer);
+          try {
+            ws.close(4401, 'Unauthorized');
+          } catch {}
+          return;
+        }
+        if (proofTimer) clearTimeout(proofTimer);
+        finishConnect();
+        return;
+      }
+      if (parsed.type === 'KIOSK_DEVICE') {
+        // Phone socket, or a repeat frame: ignored — never rebuild meta
+        // from a client message (rule X).
+        return;
+      }
       if (parsed.type === 'USER_PRESENCE' && parsed.payload) {
         // Rule X: never rebuild security meta from a client message.
         // Presence changes nothing security-relevant — keep the meta as is.
@@ -4007,8 +4179,11 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    if (proofTimer) clearTimeout(proofTimer);
     activeSockets.delete(ws);
-    broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
+    if (connected) {
+      broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
+    }
   });
 });
 
@@ -4310,6 +4485,11 @@ app.get('/api/admin/export', (req, res) => {
   // is the only place credential material lives, stored encrypted.
   const safe = {
     ...snapshot,
+    // 2b: device records export WITHOUT their secret hashes, and pairings
+    // (which include code hashes + IPs) are omitted entirely.
+    kioskDevices: (snapshot.kioskDevices || []).map((d: any) => ({ ...d, secretHash: undefined })),
+    kioskPairings: undefined,
+    kioskPairingLimits: undefined,
     users: (snapshot.users || []).map((u: any) => ({
       ...u,
       password: undefined,
@@ -5797,6 +5977,41 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     await docRef.set({ ...doc, events });
     res.json({ ok: true });
   });
+  // TEST ONLY: write a kioskPinLockouts object into the stored doc WITHOUT
+  // committing (no version bump, no hydration). Lets test-27 seed STALE
+  // lockout entries (fails older than the 15-minute window) so the next
+  // kiosk-login commit must prune them (A4). Same pattern as doc-set-events.
+  app.post('/api/__test__/doc-set-lockouts', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const db = firestoreDb;
+    if (!db) return res.status(503).json({ error: 'db unavailable' });
+    const { kioskPinLockouts } = req.body || {};
+    if (!kioskPinLockouts || typeof kioskPinLockouts !== 'object') {
+      return res.status(400).json({ error: 'kioskPinLockouts object required' });
+    }
+    const docRef = db.collection('app-state').doc('main');
+    const snap = await docRef.get();
+    const doc = (snap && snap.data && snap.data()) || {};
+    await docRef.set({ ...doc, kioskPinLockouts });
+    res.json({ ok: true });
+  });
+  // TEST ONLY: write a full users array into the stored doc WITHOUT
+  // committing (no version bump, no hydration). Lets test-27 stage the
+  // finding-2 race for pairing: the cache keeps coordinator P at venue P1
+  // while the doc's fresh record sits at P2, so the pair transaction's
+  // fresh-caller re-gate must refuse. Same pattern as doc-set-events.
+  app.post('/api/__test__/doc-set-users', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const db = firestoreDb;
+    if (!db) return res.status(503).json({ error: 'db unavailable' });
+    const { users } = req.body || {};
+    if (!Array.isArray(users)) return res.status(400).json({ error: 'users array required' });
+    const docRef = db.collection('app-state').doc('main');
+    const snap = await docRef.get();
+    const doc = (snap && snap.data && snap.data()) || {};
+    await docRef.set({ ...doc, users });
+    res.json({ ok: true });
+  });
   // TEST ONLY: seed a media doc directly into the `media` collection so the
   // commit gates can be tested without GCS Storage (unavailable in mock and
   // emulator runs). test-26 uses it for the 2c media validation tests.
@@ -6023,13 +6238,15 @@ if (isTestMode()) {
   // Test-only: mint a kiosk token with arbitrary claims (for malformed-token tests).
   app.post('/api/__test__/mint-kiosk-token', async (req, res) => {
     try {
-      const { userId, agencyId, venueId, kiosk } = req.body || {};
+      const { userId, agencyId, venueId, kiosk, pv, dev } = req.body || {};
       const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
       const now = Math.floor(Date.now() / 1000);
       const claims: any = { sub: userId, iat: now, exp: now + 3600 };
       if (kiosk !== false) claims.kiosk = true;
       if (agencyId !== undefined) claims.agencyId = agencyId;
       if (venueId !== undefined) claims.venueId = venueId;
+      if (pv !== undefined) claims.pv = pv;
+      if (dev !== undefined) claims.dev = dev;
       const payload = base64url(JSON.stringify(claims));
       const sig = base64url(
         crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest()
@@ -6049,12 +6266,48 @@ if (isTestMode()) {
     try {
       await commitState(
         (freshDoc) => ({
-          doc: { ...freshDoc, kioskPinLockouts: emptyKioskPinLockouts() },
+          // 2b: also reset the pairing rate-limit buckets, so a test can
+          // exercise the pairing start/pair limits from a clean slate.
+          doc: { ...freshDoc, kioskPinLockouts: emptyKioskPinLockouts(), kioskPairingLimits: {} },
           result: { cleared: true },
         }),
         { label: 'test-kiosk-clear-lockouts' }
       );
       res.json({ cleared: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Test-only: force-expire one kiosk pairing so test-27 can exercise the
+  // expired-code and expired-status paths without waiting ten minutes.
+  // Admin-checked like the other state-mutating test hooks (rule AL).
+  app.post('/api/__test__/expire-kiosk-pairing', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { pairingId } = req.body || {};
+    if (!pairingId || typeof pairingId !== 'string') {
+      return res.status(400).json({ error: 'pairingId required' });
+    }
+    try {
+      const committed = await commitState(
+        (freshDoc) => {
+          const pairings = {
+            ...((freshDoc.kioskPairings || {}) as { [k: string]: KioskPairing }),
+          };
+          const pairing = pairings[pairingId];
+          if (!pairing) return { doc: freshDoc, result: { expired: false } };
+          pairings[pairingId] = { ...pairing, expiresAt: Date.now() - 1000, claimExpiresAt: Date.now() - 1000 };
+          return {
+            doc: { ...freshDoc, kioskPairings: pairings },
+            result: { expired: true },
+          };
+        },
+        { label: 'test-expire-kiosk-pairing' }
+      );
+      if (!(committed as any)?.result?.expired) {
+        return res.status(404).json({ error: 'Pairing not found' });
+      }
+      res.json({ expired: true });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
@@ -6309,6 +6562,12 @@ app.delete('/api/venues/:id', async (req, res) => {
       }
       const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
       const freshHistory: any[] = Array.isArray(freshDoc.historyLogs) ? freshDoc.historyLogs : [];
+      // 2b (finding 6): the venue's paired kiosk tablets die with the
+      // venue, in the SAME commit — a device is only usable while its
+      // venue exists. Their ids ride the result so the handler can close
+      // their sockets after the commit.
+      const freshDevices: any[] = Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : [];
+      const removedDeviceIds = freshDevices.filter((d) => d && d.venueId === id).map((d) => d.id);
       // Atomic cascade: venue + its tasks + its history all removed together.
       return {
         doc: {
@@ -6316,14 +6575,21 @@ app.delete('/api/venues/:id', async (req, res) => {
           venues: freshVenues.filter((v) => v.id !== id),
           tasks: freshTasks.filter((t) => t.venueId !== id),
           historyLogs: freshHistory.filter((h) => h.venueId !== id),
+          kioskDevices: freshDevices.filter((d) => d && d.venueId !== id),
         },
-        result: { success: true, deletedVenueId: id },
+        result: { success: true, deletedVenueId: id, removedDeviceIds },
       };
     },
     { label: 'delete-venue', requireVersion: true }
   );
   if (!committed) return;
 
+  // Kill the deleted venue's kiosk sessions immediately (their devices
+  // died with the venue above).
+  const removedDeviceIds: string[] = (committed as any)?.result?.removedDeviceIds || [];
+  for (const deviceId of removedDeviceIds) {
+    closeKioskSocketsForDevice(deviceId);
+  }
   broadcast('VENUE_DELETED', { deletedVenueId: id, agencyId: callerAgencyId }, undefined, callerAgencyId);
   res.json({ success: true, deletedVenueId: id });
 });
@@ -8079,6 +8345,11 @@ app.put('/api/users/:id', async (req, res) => {
         updated.kioskPin = undefined; // drop any legacy plain PIN on explicit set/clear
         // PIN version: any kiosk token issued before this instant is revoked.
         updated.kioskPinSetAt = new Date().toISOString();
+        // 2b: the revision counter is the token version now (pv). Set in
+        // the SAME transaction as the hash; a re-save with the same digits
+        // still bumps it (old sessions die). A non-integer stored value
+        // restarts from 0 (validated on read — see pinRevOf).
+        updated.kioskPinRev = (pinRevOf(freshUser) ?? 0) + 1;
       }
       if (venueId !== undefined) updated.venueId = venueId;
       if (role !== undefined) {
@@ -8238,21 +8509,617 @@ app.delete('/api/users/:id', async (req, res) => {
 // Public list of PIN-enabled staff for one venue (no PINs, no emails exposed).
 // Public venue list for kiosk setup: id + name only, no sensitive data.
 // A fresh tablet needs this before anyone logs in.
-app.get('/api/kiosk/venues', (req, res) => {
-  res.json({
-    venues: venues.map((v) => ({ id: v.id, name: v.name })),
-  });
+// 2b: the public venue picker (GET /api/kiosk/venues) and the public staff
+// list (GET /api/kiosk/users) are REMOVED. A tablet is paired to one venue
+// (below); it never lists venues or staff for a venue it isn't bound to.
+
+// B1 — a fresh tablet starts a pairing. Public, rate-limited per IP, and
+// the ONLY response that ever carries the device secret (once).
+app.post('/api/kiosk/pairing/start', async (req, res) => {
+  if (kioskBodyTooLarge(req)) {
+    return res.status(400).json({ error: 'Request too large.' });
+  }
+  const clientIp = getClientIp(req);
+  const nowMs = Date.now();
+  const START_MAX = 10;
+  try {
+    const committed = await commitState(
+      (freshDoc) => {
+        const limits = prunePairingLimitsMap(
+          (freshDoc.kioskPairingLimits && typeof freshDoc.kioskPairingLimits === 'object'
+            ? freshDoc.kioskPairingLimits : {}) as { [k: string]: string[] },
+          nowMs
+        );
+        const key = `start|${clientIp}`;
+        const attempts = limits[key] || [];
+        if (attempts.length >= START_MAX) {
+          return { doc: freshDoc, result: { limited: true } };
+        }
+        limits[key] = [...attempts, new Date(nowMs).toISOString()];
+        const pairings = pruneKioskPairings(
+          (freshDoc.kioskPairings && typeof freshDoc.kioskPairings === 'object' ? freshDoc.kioskPairings : {}) as { [k: string]: KioskPairing },
+          nowMs
+        );
+        // 6-char code, unique among pending codes.
+        let code = '';
+        for (let tries = 0; tries < 10; tries++) {
+          code = Array.from({ length: 6 }, () => PAIRING_ALPHABET[crypto.randomInt(PAIRING_ALPHABET.length)]).join('');
+          const hash = sha256Hex(code);
+          const clash = Object.values(pairings).some((pr) => pr.status === 'pending' && pr.pairingCodeHash === hash);
+          if (!clash) break;
+          code = '';
+        }
+        if (!code) return { doc: freshDoc, result: { limited: true } };
+        const deviceSecret = crypto.randomBytes(32).toString('base64url');
+        const pairingId = `pair-${crypto.randomBytes(9).toString('hex')}`;
+        const expiresAt = nowMs + PAIRING_TTL_MS;
+        pairings[pairingId] = {
+          pairingCodeHash: sha256Hex(code),
+          secretHash: sha256Hex(deviceSecret),
+          ip: clientIp,
+          createdAt: nowMs,
+          expiresAt,
+          status: 'pending',
+        };
+        return {
+          doc: { ...freshDoc, kioskPairings: pairings, kioskPairingLimits: limits },
+          result: { pairingId, code, deviceSecret, expiresAt },
+        };
+      },
+      { label: 'kiosk-pairing-start' }
+    );
+    const r: any = (committed as any)?.result || {};
+    if (r.limited) {
+      res.set('Retry-After', '900');
+      return res.status(429).json({ error: 'Too many pairing attempts. Try again in 15 minutes.' });
+    }
+    // The code and secret are returned ONCE, here — never stored in plain
+    // form, never logged.
+    return res.json({ pairingId: r.pairingId, code: r.code, deviceSecret: r.deviceSecret, expiresAt: new Date(r.expiresAt).toISOString() });
+  } catch (err) {
+    log.warn('[kiosk] pairing start failed:', (err as any)?.message);
+    return res.status(503).json({ error: 'Please try again in a moment.' });
+  }
 });
 
-app.get('/api/kiosk/users', (req, res) => {
-  const venueId = String(req.query.venueId || '').trim();
-  if (!venueId) return res.status(400).json({ error: 'venueId required' });
-  const staff = users
-    .filter((u) => u.venueId === venueId && (u.kioskPin || u.kioskPinHash) && ['mashgiach', 'worker', 'coordinator'].includes(u.role))
-    .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
-  const venue = venues.find((v) => v.id === venueId);
-  res.json({ venueName: venue?.name || 'Kiosk', users: staff });
+// B2 — the tablet polls for approval with its pairing secret. One 404
+// message covers unknown id, wrong secret, and expired. Polling is a PURE
+// READ (no commit) except the FIRST claim after approval, which stamps
+// claimExpiresAt. Approval does NOT consume the pairing (addendum,
+// finding 3): the same secret re-claims the same device idempotently
+// until claimExpiresAt (approvedAt + 10 min), then it's gone (404).
+app.get('/api/kiosk/pairing/status', async (req, res) => {
+  if (kioskHeaderTooLong(req, 'x-kiosk-pairing')) {
+    return res.status(400).json({ error: 'Request too large.' });
+  }
+  const parsed = parseKioskSecretHeader(req, 'x-kiosk-pairing');
+  const notFound = () => res.status(404).json({ error: 'Pairing expired. Start again on the tablet.' });
+  if (!parsed) return notFound();
+  const nowMs = Date.now();
+  const pairing = kioskPairings[parsed.id];
+  if (!pairing) return notFound();
+  if (!timingSafeStrEq(sha256Hex(parsed.secret), pairing.secretHash)) return notFound();
+  if (pairing.status === 'pending') {
+    if (pairing.expiresAt <= nowMs) return notFound();
+    return res.json({ status: 'pending', expiresAt: new Date(pairing.expiresAt).toISOString() });
+  }
+  // Approved: usable until the claim deadline (checked here, at approval
+  // time — not only by pruning).
+  const claimExpiresAt = pairing.claimExpiresAt ?? (pairing.approvedAt ?? pairing.expiresAt) + PAIRING_TTL_MS;
+  if (claimExpiresAt <= nowMs) return notFound();
+  const device = kioskDevices.find((d) => d.id === pairing.deviceId);
+  if (!device) return notFound();
+  if (pairing.claimExpiresAt === undefined) {
+    // First claim: stamp the deadline in one commit. Later claims are
+    // pure reads of the same approved device.
+    try {
+      await commitState(
+        (freshDoc) => {
+          const pairings = { ...((freshDoc.kioskPairings || {}) as { [k: string]: KioskPairing }) };
+          const fresh = pairings[parsed.id];
+          if (fresh && fresh.status === 'approved' && fresh.claimExpiresAt === undefined) {
+            pairings[parsed.id] = { ...fresh, claimExpiresAt: (fresh.approvedAt ?? fresh.expiresAt) + PAIRING_TTL_MS };
+          }
+          return { doc: { ...freshDoc, kioskPairings: pairings }, result: { ok: true } };
+        },
+        { label: 'kiosk-pairing-claim' }
+      );
+    } catch {}
+  }
+  const safe = safeKioskDevice(device);
+  return res.json({ status: 'approved', device: { id: safe.id, name: safe.name, venueId: safe.venueId, venueName: safe.venueName, agencyId: safe.agencyId } });
 });
+
+// B3 — a paired tablet reads its own venue + PIN-enabled staff roster.
+// Authenticated by the device secret; never by a venue parameter.
+app.get('/api/kiosk/device', (req, res) => {
+  if (kioskHeaderTooLong(req, 'x-kiosk-device')) {
+    return res.status(400).json({ error: 'Request too large.' });
+  }
+  const device = resolveKioskDevice(req);
+  if (!device) {
+    return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
+  }
+  const staff = users
+    .filter((u) => u.venueId === device.venueId && (u.kioskPin || u.kioskPinHash) && ['mashgiach', 'worker', 'coordinator'].includes(u.role))
+    .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
+  const safe = safeKioskDevice(device);
+  // Touch lastSeenAt at most once per 10 minutes — best-effort, never
+  // blocks the response, never throws into it.
+  const lastSeenMs = device.lastSeenAt ? new Date(device.lastSeenAt).getTime() : 0;
+  if (Date.now() - lastSeenMs > 10 * 60 * 1000) {
+    commitState(
+      (freshDoc) => {
+        const devs: any[] = Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : [];
+        const next = devs.map((d) => (d && d.id === device.id ? { ...d, lastSeenAt: new Date().toISOString() } : d));
+        return { doc: { ...freshDoc, kioskDevices: next }, result: { ok: true } };
+      },
+      { label: 'kiosk-device-seen' }
+    ).catch(() => {});
+  }
+  return res.json({ device: { id: safe.id, name: safe.name, venueId: safe.venueId, venueName: safe.venueName }, users: staff });
+});
+
+// B5 — a tablet unpairs itself ("exit kiosk mode"). Device-authenticated;
+// kills its own sessions (C3) in the same request.
+app.post('/api/kiosk/device/unpair', async (req, res) => {
+  if (kioskHeaderTooLong(req, 'x-kiosk-device')) {
+    return res.status(400).json({ error: 'Request too large.' });
+  }
+  const device = resolveKioskDevice(req);
+  if (!device) {
+    return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
+  }
+  try {
+    await commitState(
+      (freshDoc) => {
+        const devs: any[] = Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : [];
+        return {
+          doc: { ...freshDoc, kioskDevices: devs.filter((d) => d && d.id !== device.id) },
+          result: { ok: true },
+        };
+      },
+      { label: 'kiosk-device-self-unpair' }
+    );
+  } catch (err) {
+    log.warn('[kiosk] self-unpair failed:', (err as any)?.message);
+    return res.status(503).json({ error: 'Please try again in a moment.' });
+  }
+  closeKioskSocketsForDevice(device.id);
+  broadcast('KIOSK_DEVICES_UPDATED', { agencyId: device.agencyId, venueId: device.venueId }, undefined, device.agencyId);
+  return res.json({ ok: true });
+});
+
+// D1 — the "Kiosk tablets" list (phone session). Admin: the whole agency's
+// devices; coordinator: their own venue's only (rule T); others → 403.
+app.get('/api/kiosk/devices', (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  if (caller.role !== 'admin' && caller.role !== 'coordinator') {
+    return res.status(403).json({ error: 'Only admins and coordinators can manage kiosk tablets.' });
+  }
+  const agencyId = caller.agencyId || 'agency-hkc';
+  let list = kioskDevices.filter((d) => d.agencyId === agencyId);
+  if (caller.role === 'coordinator') {
+    const scope = venueScopeFor(caller);
+    list = scope === 'agency' ? list : list.filter((d) => (scope as string[]).includes(d.venueId));
+  }
+  return res.json({ devices: list.map(safeKioskDevice) });
+});
+
+// D2 — pair a tablet: the phone enters the code the tablet shows.
+app.post('/api/kiosk/devices/pair', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  if (caller.role !== 'admin' && caller.role !== 'coordinator') {
+    return res.status(403).json({ error: 'Only admins and coordinators can pair kiosk tablets.' });
+  }
+  // Input bounds first (finding 5): small body, code exactly 6 chars,
+  // name at most 40 — anything over is a 400 before any lookup.
+  if (kioskBodyTooLarge(req)) {
+    return res.status(400).json({ error: 'Request too large.' });
+  }
+  const { code, venueId, name } = req.body || {};
+  const normalizedCode = String(code || '').trim().toUpperCase();
+  if (normalizedCode.length !== 6) {
+    return res.status(400).json({ error: 'Enter the 6-character code from the tablet.' });
+  }
+  if (!venueId || typeof venueId !== 'string') {
+    return res.status(400).json({ error: 'venueId is required.' });
+  }
+  const rawName = name === undefined || name === null ? '' : String(name).trim();
+  if (rawName.length > 40) {
+    return res.status(400).json({ error: 'Tablet name is too long (40 characters max).' });
+  }
+  // Venue gate (rule T), first pass from the cache: admin → any venue in
+  // their agency; coordinator → their own venue only. The authoritative
+  // gate re-runs inside the main transaction on the FRESH caller and
+  // venue (finding 2 / rule AB).
+  const venue = venues.find((v) => v.id === venueId);
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  if (!venue) {
+    return res.status(404).json({ error: 'Venue not found.' });
+  }
+  if ((venue.agencyId || 'agency-hkc') !== callerAgencyId) {
+    return res.status(403).json({ error: 'You can only pair tablets for venues in your own agency.' });
+  }
+  if (caller.role === 'coordinator' && !callerMaySeeVenue(caller, venueId)) {
+    return res.status(403).json({ error: 'You can only pair tablets for your own venue.' });
+  }
+  const deviceName = rawName || `${venue.name} tablet`;
+  const clientIp = getClientIp(req);
+  const nowMs = Date.now();
+  const attemptTs = new Date(nowMs).toISOString();
+  const CALLER_MAX = 5;
+  const IP_MAX = 20;
+  const callerKey = `caller|${caller.id}`;
+  const ipKey = `pairip|${clientIp}`;
+  const readLimits = (doc: any) =>
+    prunePairingLimitsMap(
+      (doc.kioskPairingLimits && typeof doc.kioskPairingLimits === 'object'
+        ? doc.kioskPairingLimits : {}) as { [k: string]: string[] },
+      nowMs
+    );
+  // Finding 4: ATOMIC reservation BEFORE any hash compare (the 2a login
+  // pattern). The attempt is counted per caller (5/15 min) and per IP
+  // (20/15 min) in its own transaction; a locked bucket answers 429 even
+  // for a right code; a failed reservation write fails CLOSED (503, no
+  // compare ever happens).
+  let reservation: any;
+  try {
+    reservation = await commitState(
+      (freshDoc) => {
+        const limits = readLimits(freshDoc);
+        if ((limits[callerKey] || []).length >= CALLER_MAX || (limits[ipKey] || []).length >= IP_MAX) {
+          return { doc: { ...freshDoc, kioskPairingLimits: limits }, result: { locked: true } };
+        }
+        limits[callerKey] = [...(limits[callerKey] || []), attemptTs];
+        limits[ipKey] = [...(limits[ipKey] || []), attemptTs];
+        return { doc: { ...freshDoc, kioskPairingLimits: limits }, result: { locked: false } };
+      },
+      { label: 'kiosk-pair-reservation' }
+    );
+  } catch (err) {
+    log.warn('[kiosk] pair reservation failed:', (err as any)?.message);
+    return res.status(503).json({ error: 'Please try again in a moment.' });
+  }
+  if ((reservation as any)?.result?.locked) {
+    res.set('Retry-After', '900');
+    return res.status(429).json({ error: 'Too many wrong codes. Try again in 15 minutes.' });
+  }
+  try {
+    const committed = await commitState(
+      (freshDoc) => {
+        // Finding 2 (rule AB + rule N): re-read the CALLER from the fresh
+        // doc, normalized exactly like hydration, and re-run the whole
+        // gate against fresh data — a coordinator reassigned between the
+        // cache read and this commit can no longer pair for the old venue,
+        // and the destination venue must still exist in the caller's
+        // (fresh) agency.
+        const rawUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+        const rawCaller = rawUsers.find((u) => u && u.id === caller.id);
+        if (!rawCaller) {
+          return { doc: freshDoc, result: { forbidden: true } };
+        }
+        const freshCaller = normalizeStoredUser(rawCaller);
+        if (freshCaller.role !== 'admin' && freshCaller.role !== 'coordinator') {
+          return { doc: freshDoc, result: { forbidden: true } };
+        }
+        const freshAgencyId = freshCaller.agencyId || 'agency-hkc';
+        const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+        const freshVenue = freshVenues.find((v) => v.id === venueId);
+        if (!freshVenue || (freshVenue.agencyId || 'agency-hkc') !== freshAgencyId) {
+          return { doc: freshDoc, result: { forbidden: true } };
+        }
+        if (freshCaller.role === 'coordinator' && freshCaller.venueId !== venueId) {
+          return { doc: freshDoc, result: { forbidden: true } };
+        }
+        // The code must map to a pairing that is still pending and
+        // unexpired AT COMMIT TIME.
+        const pairings = pruneKioskPairings(
+          (freshDoc.kioskPairings && typeof freshDoc.kioskPairings === 'object' ? freshDoc.kioskPairings : {}) as { [k: string]: KioskPairing },
+          nowMs
+        );
+        const codeHash = sha256Hex(normalizedCode);
+        const entry = Object.entries(pairings).find(([, pr]) => pr.status === 'pending' && timingSafeStrEq(pr.pairingCodeHash, codeHash));
+        if (!entry) {
+          // Wrong/unknown/expired/used code — the reservation already
+          // counted this attempt. One message for all four.
+          return {
+            doc: { ...freshDoc, kioskPairings: pairings },
+            result: { invalid: true },
+          };
+        }
+        const [pairingId, pairing] = entry;
+        const deviceId = `kdev-${crypto.randomBytes(9).toString('hex')}`;
+        const device: KioskDevice = {
+          id: deviceId,
+          agencyId: freshAgencyId,
+          venueId,
+          name: deviceName,
+          secretHash: pairing.secretHash,
+          createdAt: new Date(nowMs).toISOString(),
+          pairedByUserId: freshCaller.id,
+          pairedByName: freshCaller.name,
+        };
+        const devs: any[] = Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : [];
+        pairings[pairingId] = { ...pairing, status: 'approved', deviceId, venueId, venueName: freshVenue.name, approvedAt: nowMs };
+        // Success: take this attempt back out of the rate-limit buckets
+        // (the 2a login pattern — only WRONG attempts accumulate).
+        const limits = readLimits(freshDoc);
+        for (const key of [callerKey, ipKey]) {
+          const arr = limits[key] || [];
+          const idx = arr.indexOf(attemptTs);
+          if (idx >= 0) arr.splice(idx, 1);
+          if (arr.length === 0) delete limits[key];
+          else limits[key] = arr;
+        }
+        return {
+          doc: { ...freshDoc, kioskDevices: [...devs, device], kioskPairings: pairings, kioskPairingLimits: limits },
+          result: { device },
+        };
+      },
+      { label: 'kiosk-device-pair' }
+    );
+    const r: any = (committed as any)?.result || {};
+    if (r.forbidden) {
+      return res.status(409).json({ error: 'Your access changed while pairing. Refresh and try again.' });
+    }
+    if (r.invalid) {
+      return res.status(404).json({ error: "That code isn't valid. Check the tablet and try again." });
+    }
+    broadcast('KIOSK_DEVICES_UPDATED', { agencyId: r.device.agencyId, venueId }, undefined, r.device.agencyId);
+    return res.status(201).json({ device: safeKioskDevice(r.device) });
+  } catch (err) {
+    log.warn('[kiosk] pair failed:', (err as any)?.message);
+    return res.status(503).json({ error: 'Please try again in a moment.' });
+  }
+});
+
+// D3 — unpair a tablet (phone session). A device in the caller's agency at
+// another venue → 403 for a coordinator; a device in another agency → 404
+// (never reveal it exists). Unpair kills the device's sessions (C3).
+app.delete('/api/kiosk/devices/:id', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  if (caller.role !== 'admin' && caller.role !== 'coordinator') {
+    return res.status(403).json({ error: 'Only admins and coordinators can manage kiosk tablets.' });
+  }
+  if (String(req.params.id || '').length > 64) {
+    return res.status(404).json({ error: 'Tablet not found.' });
+  }
+  const device = kioskDevices.find((d) => d.id === req.params.id);
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  if (!device || device.agencyId !== callerAgencyId) {
+    return res.status(404).json({ error: 'Tablet not found.' });
+  }
+  if (caller.role === 'coordinator' && !callerMaySeeVenue(caller, device.venueId)) {
+    return res.status(403).json({ error: 'You can only unpair tablets at your own venue.' });
+  }
+  let unpairResult: any;
+  try {
+    const committed = await commitState(
+      (freshDoc) => {
+        // Finding 2: re-read caller AND device from the fresh doc and
+        // re-run the gate there — a coordinator reassigned since the
+        // cache read can no longer unpair the old venue's tablet.
+        const devs: any[] = Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : [];
+        const freshDevice = devs.find((d) => d && d.id === device.id);
+        if (!freshDevice) {
+          // Already gone (concurrent unpair / venue cascade) — the end
+          // state the caller asked for already holds.
+          return { doc: freshDoc, result: { ok: true, alreadyGone: true } };
+        }
+        const rawUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+        const rawCaller = rawUsers.find((u) => u && u.id === caller.id);
+        if (!rawCaller) {
+          return { doc: freshDoc, result: { forbidden: true } };
+        }
+        const freshCaller = normalizeStoredUser(rawCaller);
+        const freshAgencyId = freshCaller.agencyId || 'agency-hkc';
+        if (freshDevice.agencyId !== freshAgencyId) {
+          return { doc: freshDoc, result: { forbidden: true } };
+        }
+        if (freshCaller.role === 'coordinator' && freshCaller.venueId !== freshDevice.venueId) {
+          return { doc: freshDoc, result: { forbidden: true } };
+        }
+        if (freshCaller.role !== 'admin' && freshCaller.role !== 'coordinator') {
+          return { doc: freshDoc, result: { forbidden: true } };
+        }
+        return {
+          doc: { ...freshDoc, kioskDevices: devs.filter((d) => d && d.id !== device.id) },
+          result: { ok: true },
+        };
+      },
+      { label: 'kiosk-device-unpair' }
+    );
+    unpairResult = (committed as any)?.result || {};
+  } catch (err) {
+    log.warn('[kiosk] unpair failed:', (err as any)?.message);
+    return res.status(503).json({ error: 'Please try again in a moment.' });
+  }
+  if (unpairResult.forbidden) {
+    return res.status(409).json({ error: 'Your access changed. Refresh and try again.' });
+  }
+  if (!unpairResult.alreadyGone) {
+    closeKioskSocketsForDevice(device.id);
+    broadcast('KIOSK_DEVICES_UPDATED', { agencyId: device.agencyId, venueId: device.venueId }, undefined, device.agencyId);
+  }
+  return res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Kiosk pairing & devices (2b) — helpers
+// ---------------------------------------------------------------------------
+
+const sha256Hex = (v: string): string => crypto.createHash('sha256').update(v).digest('hex');
+
+function timingSafeStrEq(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
+
+const PAIRING_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
+const PAIRING_TTL_MS = 10 * 60 * 1000;
+const PAIRING_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+
+/** Parse an 'X-Kiosk-*' header of the form '<id>.<secret>'. */
+function parseKioskSecretHeader(req: any, headerName: string): { id: string; secret: string } | null {
+  const raw = String(req.headers[headerName] || '');
+  const dot = raw.indexOf('.');
+  if (dot <= 0 || dot === raw.length - 1) return null;
+  const id = raw.slice(0, dot);
+  if (id.length > 64) return null;
+  return { id, secret: raw.slice(dot + 1) };
+}
+
+/**
+ * The PIN revision of a user record, validated on read (addendum): only a
+ * non-negative INTEGER counts. Anything else (missing, float, string) is
+ * "no revision" — tokens carrying it fail, and the next PIN write restarts
+ * the counter from a clean integer.
+ */
+function pinRevOf(u: any): number | undefined {
+  const r = u?.kioskPinRev;
+  return Number.isInteger(r) && r >= 0 ? r : undefined;
+}
+
+/**
+ * A device is usable only while it exists AND its venue still exists AND
+ * that venue still belongs to the device's agency (addendum, finding 6).
+ */
+function liveKioskDevice(id: string | undefined): KioskDevice | null {
+  if (!id) return null;
+  const device = kioskDevices.find((d) => d.id === id);
+  if (!device) return null;
+  const venue = venues.find((v) => v.id === device.venueId);
+  if (!venue) return null;
+  if ((venue.agencyId || 'agency-hkc') !== device.agencyId) return null;
+  return device;
+}
+
+/**
+ * Resolve the caller's kiosk DEVICE from the X-Kiosk-Device header
+ * ('<deviceId>.<deviceSecret>'). Returns null for a missing header, an
+ * unknown id, a wrong secret, or a device whose venue is gone/moved —
+ * callers answer all of them identically.
+ */
+function resolveKioskDevice(req: any): KioskDevice | null {
+  const parsed = parseKioskSecretHeader(req, 'x-kiosk-device');
+  if (!parsed) return null;
+  const device = liveKioskDevice(parsed.id);
+  if (!device) return null;
+  if (!timingSafeStrEq(sha256Hex(parsed.secret), device.secretHash)) return null;
+  return device;
+}
+
+/**
+ * Verify a device credential string ('<deviceId>.<secret>') — the WS proof
+ * frame's form of the X-Kiosk-Device header. When expectedId is given, the
+ * credential must be for THAT device (a valid credential for a different
+ * tablet proves nothing). Hash compare is timing-safe.
+ */
+function verifyKioskDeviceCredential(credential: unknown, expectedId?: string): KioskDevice | null {
+  if (typeof credential !== 'string' || credential.length === 0 || credential.length > 200) return null;
+  const dot = credential.indexOf('.');
+  if (dot <= 0 || dot === credential.length - 1) return null;
+  const id = credential.slice(0, dot);
+  if (id.length > 64) return null;
+  if (expectedId && id !== expectedId) return null;
+  const device = liveKioskDevice(id);
+  if (!device) return null;
+  if (!timingSafeStrEq(sha256Hex(credential.slice(dot + 1)), device.secretHash)) return null;
+  return device;
+}
+
+/** Finding 5: an X-Kiosk-* header over 200 chars is a 400, before any lookup. */
+function kioskHeaderTooLong(req: any, headerName: string): boolean {
+  const raw = req.headers[headerName];
+  return typeof raw === 'string' && raw.length > 200;
+}
+
+/** Finding 5: JSON bodies on the pairing routes stay small (4 KB is ample). */
+function kioskBodyTooLarge(req: any): boolean {
+  try {
+    return JSON.stringify(req.body || {}).length > 4096;
+  } catch {
+    return true;
+  }
+}
+
+/** The SAFE device shape — the only form a device record ever leaves in. */
+function safeKioskDevice(d: KioskDevice) {
+  const venue = venues.find((v) => v.id === d.venueId);
+  return {
+    id: d.id,
+    name: d.name,
+    venueId: d.venueId,
+    venueName: venue?.name || d.venueId,
+    agencyId: d.agencyId,
+    createdAt: d.createdAt,
+    pairedByName: d.pairedByName,
+    lastSeenAt: d.lastSeenAt,
+  };
+}
+
+/** The moment a pairing stops being usable: pending pairings die at
+ * expiresAt; approved ones live until their claim deadline (claimExpiresAt,
+ * or approvedAt + TTL before the first claim stamps it). */
+function pairingEffectiveExpiry(pr: KioskPairing): number {
+  if (pr.status === 'approved') {
+    return pr.claimExpiresAt ?? (pr.approvedAt ?? pr.expiresAt) + PAIRING_TTL_MS;
+  }
+  return pr.expiresAt;
+}
+
+/** Drop expired pairings (pending or approved past their claim deadline). */
+function pruneKioskPairings(map: { [k: string]: KioskPairing }, nowMs: number) {
+  const out: { [k: string]: KioskPairing } = {};
+  for (const [k, v] of Object.entries(map || {})) {
+    if (v && typeof v.expiresAt === 'number' && pairingEffectiveExpiry(v) > nowMs) out[k] = v;
+  }
+  return out;
+}
+
+/** Drop pairing-limit timestamps older than the window; drop empty buckets. */
+function prunePairingLimitsMap(map: { [k: string]: string[] }, nowMs: number) {
+  const out: { [k: string]: string[] } = {};
+  for (const [k, v] of Object.entries(map || {})) {
+    const kept = (Array.isArray(v) ? v : []).filter((t) => nowMs - new Date(t).getTime() < PAIRING_LIMIT_WINDOW_MS);
+    if (kept.length) out[k] = kept;
+  }
+  return out;
+}
+
+/**
+ * A4 (2a backlog): prune dead PIN-lockout entries — every fail older than
+ * the window AND no live lock. Applied inside every kiosk-login commit.
+ */
+function pruneKioskPinLockouts(lockouts: KioskPinLockouts, nowMs: number, windowMs: number): KioskPinLockouts {
+  const pruneMap = (m: { [k: string]: { fails: string[]; lockedUntil?: number } }) => {
+    const out: { [k: string]: { fails: string[]; lockedUntil?: number } } = {};
+    for (const [k, v] of Object.entries(m || {})) {
+      const fails = (v?.fails || []).filter((t) => nowMs - new Date(t).getTime() < windowMs);
+      const locked = (v?.lockedUntil || 0) > nowMs;
+      if (fails.length || locked) out[k] = { fails, ...(v?.lockedUntil ? { lockedUntil: v.lockedUntil } : {}) };
+    }
+    return out;
+  };
+  return { users: pruneMap(lockouts.users || {}), tablets: pruneMap(lockouts.tablets || {}) };
+}
+
+/** Kill every live kiosk socket bound to a device (C3 — unpair is immediate). */
+function closeKioskSocketsForDevice(deviceId: string) {
+  for (const [ws, meta] of activeSockets.entries()) {
+    if (meta.kiosk && meta.kioskDeviceId === deviceId) {
+      try {
+        ws.close(4401, 'Unauthorized');
+      } catch {}
+      activeSockets.delete(ws);
+    }
+  }
+}
 
 // Verify a kiosk PIN and return a venue-scoped kiosk session token.
 // PINs are bcrypt-hashed (cost 10); legacy plain PINs are upgraded on login.
@@ -8262,8 +9129,19 @@ app.get('/api/kiosk/users', (req, res) => {
 // Unknown userIds count against the tablet bucket the request names
 // (no bypass by changing identifiers).
 app.post('/api/kiosk/login', async (req, res) => {
-  const { userId, pin, venueId: bodyVenueId } = req.body;
+  if (kioskHeaderTooLong(req, 'x-kiosk-device')) {
+    return res.status(400).json({ error: 'Request too large.' });
+  }
+  const { userId, pin } = req.body;
   if (!userId || !pin) return res.status(400).json({ error: 'Missing credentials' });
+  // 2b: the tablet must be PAIRED. A missing/invalid device header → 401
+  // KIOSK_UNPAIRED and NOTHING is counted (no lockout writes at all). The
+  // venue is the DEVICE's venue — any body venueId is ignored entirely.
+  const device = resolveKioskDevice(req);
+  if (!device) {
+    return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
+  }
+  const venueId = device.venueId;
   const user = users.find((u) => u.id === userId);
 
   const clientIp = getClientIp(req);
@@ -8275,13 +9153,16 @@ app.post('/api/kiosk/login', async (req, res) => {
   // Unknown user: count against the tablet bucket (venue|ip) so it shares
   // one consistent limiter with real attempts from the same tablet.
   if (!user) {
-    const unknownKey = bodyVenueId ? `${bodyVenueId}|${clientIp}` : `unknown|${clientIp}`;
+    const unknownKey = `${venueId}|${clientIp}`;
     try {
       const locked = await commitState(
         (freshDoc) => {
-          const fresh = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
-            ? freshDoc.kioskPinLockouts
-            : { users: {}, tablets: {} }) as KioskPinLockouts;
+          const fresh = pruneKioskPinLockouts(
+            (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
+              ? freshDoc.kioskPinLockouts
+              : { users: {}, tablets: {} }) as KioskPinLockouts,
+            nowMs, LOCK_WINDOW_MS
+          );
           const prune = (arr: any): string[] =>
             (Array.isArray(arr) ? arr : []).filter((t: string) => nowMs - new Date(t).getTime() < LOCK_WINDOW_MS);
           const entry = fresh.tablets[unknownKey] || { fails: [] };
@@ -8322,14 +9203,16 @@ app.post('/api/kiosk/login', async (req, res) => {
     return res.status(401).json({ error: 'Wrong code. Try again.' });
   }
 
-  // Admins don't get kiosk sessions (kiosk/users already hides them).
+  // Admins don't get kiosk sessions (the device roster already hides them).
   if (user.role === 'admin') {
     return res.status(403).json({ error: 'Kiosk login is not available for this account.' });
   }
-  const venueId = (user as any).venueId;
-  if (!venueId) {
-    return res.status(403).json({ error: 'No venue assigned to this user.' });
-  }
+  // 2b venue binding: the user must belong to the DEVICE's venue and agency.
+  // Any other case is answered exactly like a wrong PIN (counted by the
+  // reservation below) — never reveal that the user is at another venue.
+  const userMatchesDevice =
+    (user as any).venueId === device.venueId &&
+    (user.agencyId || 'agency-hkc') === device.agencyId;
 
   const tabletKey = `${venueId}|${clientIp}`;
   const ipKey = `ip|${clientIp}`;
@@ -8346,9 +9229,12 @@ app.post('/api/kiosk/login', async (req, res) => {
   try {
     const res = await commitState(
       (freshDoc) => {
-        const fresh = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
-          ? freshDoc.kioskPinLockouts
-          : { users: {}, tablets: {} }) as KioskPinLockouts;
+        const fresh = pruneKioskPinLockouts(
+          (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
+            ? freshDoc.kioskPinLockouts
+            : { users: {}, tablets: {} }) as KioskPinLockouts,
+          nowMs, LOCK_WINDOW_MS
+        );
         const prune = (arr: any): string[] =>
           (Array.isArray(arr) ? arr : []).filter((t: string) => nowMs - new Date(t).getTime() < LOCK_WINDOW_MS);
         const reserve = (
@@ -8402,7 +9288,12 @@ app.post('/api/kiosk/login', async (req, res) => {
   }
 
   // Verify the PIN (hash first; legacy plain with transparent upgrade).
-  // This compare was counted by the reservation above.
+  // This compare was counted by the reservation above. A user who is not at
+  // this device never reaches the compare — the attempt was counted and the
+  // answer is the same 'Wrong code' a bad PIN gets.
+  if (!userMatchesDevice) {
+    return res.status(401).json({ error: 'Wrong code. Try again.' });
+  }
   const pinStr = String(pin).trim();
   let pinValid = false;
   let needsUpgrade = false;
@@ -8431,6 +9322,14 @@ app.post('/api/kiosk/login', async (req, res) => {
         const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
         const freshUser = freshUsers.find((u) => u.id === user.id);
         if (!freshUser) return { conflict: 'User not found.' };
+        // 2b: re-verify the DEVICE against the fresh doc (rule AB) — a
+        // device unpaired between the header check and this commit must
+        // not mint a token.
+        const freshDevices: any[] = Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : [];
+        const freshDevice = freshDevices.find((d) => d && d.id === device.id);
+        if (!freshDevice || freshDevice.venueId !== device.venueId || freshDevice.agencyId !== device.agencyId) {
+          return { conflict: 'This tablet is not paired.' };
+        }
         // Re-verify against the FRESH record: the hash (or plain PIN) must be
         // the one just compared, agency/venue unchanged, role not admin, and
         // no lock placed meanwhile. Any difference → conflict, no token.
@@ -8458,16 +9357,27 @@ app.post('/api/kiosk/login', async (req, res) => {
             nu.kioskPinHash = newHash;
             nu.kioskPin = undefined;
             nu.kioskPinSetAt = new Date().toISOString();
+            // 2b: a legacy upgrade increments the PIN revision, in the
+            // same transaction as the hash write.
+            nu.kioskPinRev = (pinRevOf(nu) ?? 0) + 1;
           }
           // Pre-pv users: stamp the version on first post-pv login.
           if (!nu.kioskPinSetAt && nu.kioskPinHash) {
             nu.kioskPinSetAt = new Date().toISOString();
           }
+          // 2b: the first post-rev login stamps the revision (rev = 1);
+          // the token's pv is String(kioskPinRev) from now on.
+          if (pinRevOf(nu) === undefined && nu.kioskPinHash) {
+            nu.kioskPinRev = 1;
+          }
           return nu;
         });
-        const fresh = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
-          ? freshDoc.kioskPinLockouts
-          : { users: {}, tablets: {} }) as KioskPinLockouts;
+        const fresh = pruneKioskPinLockouts(
+          (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
+            ? freshDoc.kioskPinLockouts
+            : { users: {}, tablets: {} }) as KioskPinLockouts,
+          nowMs, LOCK_WINDOW_MS
+        );
         const users2 = { ...(fresh.users || {}) };
         delete users2[user.id];
         // Only failures accumulate: remove this attempt's timestamp from BOTH
@@ -8477,10 +9387,15 @@ app.post('/api/kiosk/login', async (req, res) => {
         const attemptTs = new Date(nowMs).toISOString();
         const removeAttempt = (key: string) => {
           if (tablets2[key]) {
-            tablets2[key] = {
-              ...tablets2[key],
-              fails: (tablets2[key].fails || []).filter((t: string) => t !== attemptTs),
-            };
+            const fails = (tablets2[key].fails || []).filter((t: string) => t !== attemptTs);
+            // A4: an entry with no fails left and no ACTIVE lock is a dead
+            // key — drop it instead of leaving an empty husk in the doc
+            // (an active lockedUntil is never shortened by cleanup).
+            if (fails.length === 0 && !((tablets2[key].lockedUntil || 0) > nowMs)) {
+              delete tablets2[key];
+            } else {
+              tablets2[key] = { ...tablets2[key], fails };
+            }
           }
         };
         removeAttempt(tabletKey);
@@ -8488,17 +9403,17 @@ app.post('/api/kiosk/login', async (req, res) => {
         const freshTarget = newUsers.find((u) => u.id === user.id);
         return {
           doc: { ...freshDoc, users: newUsers, kioskPinLockouts: { ...fresh, users: users2, tablets: tablets2 } },
-          result: { kioskPinSetAt: (freshTarget as any)?.kioskPinSetAt },
+          result: { kioskPinRev: (freshTarget as any)?.kioskPinRev },
         };
       },
       { label: 'kiosk-login-success' }
     );
-    const pv = (committed as any)?.result?.kioskPinSetAt;
-    if (!pv) {
-      // The commit didn't record a PIN version — fail closed, no token.
+    const pv = (committed as any)?.result?.kioskPinRev;
+    if (pv === undefined || pv === null) {
+      // The commit didn't record a PIN revision — fail closed, no token.
       return res.status(503).json({ error: 'Please try again in a moment.' });
     }
-    kioskToken = signKioskToken(user.id, agencyId, venueId, pv);
+    kioskToken = signKioskToken(user.id, agencyId, venueId, String(pv), device.id);
   } catch (err) {
     // Success requires the committed transition (counter reset / rehash).
     // If it didn't land, no token — the tablet must try again.

@@ -12,10 +12,9 @@ interface KioskStaff {
 }
 
 interface KioskLoginProps {
-  venueId: string | null;
-  onPickVenue: (venueId: string) => void;
   onLoginSuccess: (user: User) => void;
   onExitKiosk: () => void;
+  onUnpaired?: () => void;
   darkMode: boolean;
 }
 
@@ -24,9 +23,8 @@ interface KioskLoginProps {
  * Hung on a wall in the establishment: pick your name, punch in your
  * 4-6 digit code, and you're in. Big targets, no typing, no passwords.
  */
-export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, darkMode }: KioskLoginProps) {
+export function KioskLogin({ onLoginSuccess, onExitKiosk, onUnpaired, darkMode }: KioskLoginProps) {
   const [venueName, setVenueName] = useState('Loading…');
-  const [venues, setVenues] = useState<{ id: string; name: string }[]>([]);
   const [staff, setStaff] = useState<KioskStaff[]>([]);
   const [selected, setSelected] = useState<KioskStaff | null>(null);
   const [pin, setPin] = useState('');
@@ -35,29 +33,33 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    if (!venueId) {
-      // No venue yet — let the installer pick which establishment this tablet belongs to.
-      apiFetch('/api/kiosk/venues')
-        .then((r) => r.json())
-        .then((d) => {
-          setVenues(Array.isArray(d.venues) ? d.venues : Array.isArray(d) ? d : []);
-          setLoaded(true);
-        })
-        .catch(() => setLoaded(true));
-      return;
-    }
-    apiFetch(`/api/kiosk/users?venueId=${encodeURIComponent(venueId)}`)
-      .then((r) => r.json())
-      .then((d) => {
-        setVenueName(d.venueName || 'Kiosk');
+    let cancelled = false;
+    // The tablet is paired to exactly one venue: the server returns that
+    // venue's name and its PIN-enabled staff for the device credential.
+    apiFetch('/api/kiosk/device')
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!r.ok) {
+          if (d.code === 'KIOSK_UNPAIRED') {
+            onUnpaired?.();
+            return;
+          }
+          throw new Error(d.error || 'Could not load this tablet.');
+        }
+        setVenueName(d.device?.venueName || 'Kiosk');
         setStaff(Array.isArray(d.users) ? d.users : []);
         setLoaded(true);
       })
       .catch(() => {
+        if (cancelled) return;
         setVenueName('Kiosk');
         setLoaded(true);
       });
-  }, [venueId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [onUnpaired]);
 
   const pressDigit = (d: string) => {
     setError('');
@@ -126,25 +128,6 @@ export function KioskLogin({ venueId, onPickVenue, onLoginSuccess, onExitKiosk, 
 
       {!loaded ? (
         <p className="mt-16 text-ink-soft animate-pulse">Loading…</p>
-      ) : !venueId ? (
-        <div className="mt-10 w-full max-w-md flex flex-col gap-4">
-          <p className="text-center text-ink-soft font-semibold">Which establishment is this tablet for?</p>
-          {venues.map((v) => (
-            <button
-              key={v.id}
-              onClick={() => onPickVenue(v.id)}
-              className="tactile-4 bg-card border-2 border-line-strong rounded-3xl px-6 py-5 text-xl font-extrabold font-sans active:scale-[0.98] transition-transform text-center"
-            >
-              {v.name}
-            </button>
-          ))}
-          <button
-            onClick={onExitKiosk}
-            className="mt-4 text-center text-xs text-ink-faint underline underline-offset-2"
-          >
-            ← Back to regular sign-in
-          </button>
-        </div>
       ) : !selected ? (
         <div className="mt-10 w-full max-w-md flex flex-col gap-4">
           <p className="text-center text-ink-soft font-semibold">Tap your name</p>

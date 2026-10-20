@@ -56,6 +56,7 @@ interface HeaderProps {
   eventsCount?: number;
   onOpenSupabaseModal: () => void;
   onOpenTeamModal: () => void;
+  onOpenKioskDevices?: () => void;
   onResetDailyBoard: () => void;
   isRealtimeConnected: boolean;
   activeWorkersCount: number;
@@ -87,6 +88,7 @@ export const Header: React.FC<HeaderProps> = ({
   eventsCount = 0,
   onOpenSupabaseModal,
   onOpenTeamModal,
+  onOpenKioskDevices,
   onResetDailyBoard,
   isRealtimeConnected,
   activeWorkersCount,
@@ -110,7 +112,7 @@ export const Header: React.FC<HeaderProps> = ({
   });
 
   // Enter kiosk mode: this device becomes a shared wall tablet.
-  // The kiosk PIN screen (with venue picker on first launch) takes over on reload.
+  // The pairing screen (or the PIN screen, once paired) takes over on reload.
   const enterKioskMode = () => {
     if (typeof window !== 'undefined') {
       localStorage.setItem('kiosk_mode', '1');
@@ -432,6 +434,16 @@ export const Header: React.FC<HeaderProps> = ({
                             <Tablet className="w-4 h-4 text-gold-deep" />
                             <span>Enter kiosk mode</span>
                           </button>
+                          {onOpenKioskDevices && (
+                            <button
+                              onClick={() => { setUserMenuOpen(false); onOpenKioskDevices(); }}
+                              className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
+                              title="Pair or unpair kiosk tablets"
+                            >
+                              <Tablet className="w-4 h-4 text-gold-deep" />
+                              <span>Kiosk tablets</span>
+                            </button>
+                          )}
                         </div>
                       )}
 
@@ -704,14 +716,26 @@ export const Header: React.FC<HeaderProps> = ({
               <PushNotificationToggle userEmail={currentUser.email} />
               <UpdateAppButton />
               {canEnterKiosk && (
-                <button
-                  onClick={enterKioskMode}
-                  className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-surface transition cursor-pointer text-ink-soft"
-                  title="Lock this device to the mashgiach sign-in screen"
-                >
-                  <Tablet className="w-4 h-4 text-gold-deep" />
-                  <span>Enter kiosk mode</span>
-                </button>
+                <>
+                  <button
+                    onClick={enterKioskMode}
+                    className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-surface transition cursor-pointer text-ink-soft"
+                    title="Lock this device to the mashgiach sign-in screen"
+                  >
+                    <Tablet className="w-4 h-4 text-gold-deep" />
+                    <span>Enter kiosk mode</span>
+                  </button>
+                  {onOpenKioskDevices && (
+                    <button
+                      onClick={() => { setMobileMenuOpen(false); onOpenKioskDevices(); }}
+                      className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-surface transition cursor-pointer text-ink-soft"
+                      title="Pair or unpair kiosk tablets"
+                    >
+                      <Tablet className="w-4 h-4 text-gold-deep" />
+                      <span>Kiosk tablets</span>
+                    </button>
+                  )}
+                </>
               )}
             </div>
           )}

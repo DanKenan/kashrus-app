@@ -42,6 +42,8 @@ const PER_ENTITY_COLLECTIONS = [
 const SECRET_WORDS = [
   'password',
   'kioskpin',
+  'pairingcode',
+  'devicesecret',
   'jwtsecret',
   'vapid',
   'pepper',
