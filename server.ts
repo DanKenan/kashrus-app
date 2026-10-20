@@ -640,6 +640,38 @@ function mayDoFieldWrite(user: UserProfile | null | undefined, venueId: string):
  * event. (A mashgiach assigned to supervise an event at another venue may
  * work its tasks — own records — per the documented exception; fix round 1.) */
 /**
+ * Normalize one STORED user record the same way hydration does (legacy
+ * role 'worker' → 'mashgiach', default permissions, legacy agencyId and
+ * venueId defaults, never reset passwords). Rule N: one function, used in
+ * hydration AND on freshCaller inside the PUT /api/events transaction
+ * before the caller-change compare — comparing the raw stored record
+ * against the hydrated cache false-fires for legacy records (the doc
+ * keeps 'worker'/missing fields forever; the cache is normalized).
+ */
+function normalizeStoredUser(u: any): any {
+  let assignedVenue = u.venueId;
+  if (!assignedVenue && u.role !== 'admin') {
+    assignedVenue = 'venue-crown-market';
+  }
+  // Convert legacy role 'worker' to 'mashgiach'
+  const role = u.role === 'worker' ? 'mashgiach' : (u.role || 'mashgiach');
+  const permissions = u.permissions || {
+    canFillTasks: role === 'admin' || role === 'coordinator' || role === 'mashgiach',
+    canAssignTasks: role === 'admin' || role === 'coordinator',
+  };
+  return {
+    ...u,
+    role,
+    permissions,
+    agencyId: u.agencyId || 'agency-hkc',
+    venueId: assignedVenue,
+    // NEVER reset passwords on state load. Passwords are only set
+    // via explicit flows (setup, change-password, forgot-password).
+    password: u.password || '',
+  };
+}
+
+/**
  * Event visibility — ONE rule used by GET /api/events, agencyStateFor
  * (INITIAL_STATE), DEMO_RESTORED snapshots, and the EVENT_* broadcasts
  * (item 7, fix round 1). Admin sees everything. Anyone sees events at
@@ -2022,28 +2054,10 @@ function hydrateState(parsed: any) {
         }
 
         if (Array.isArray(parsed.users)) {
-          users = parsed.users.map((u: any) => {
-            let assignedVenue = u.venueId;
-            if (!assignedVenue && u.role !== 'admin') {
-              assignedVenue = 'venue-crown-market';
-            }
-            // Convert legacy role 'worker' to 'mashgiach'
-            const role = u.role === 'worker' ? 'mashgiach' : (u.role || 'mashgiach');
-            const permissions = u.permissions || {
-              canFillTasks: role === 'admin' || role === 'coordinator' || role === 'mashgiach',
-              canAssignTasks: role === 'admin' || role === 'coordinator',
-            };
-            return {
-              ...u,
-              role,
-              permissions,
-              agencyId: u.agencyId || 'agency-hkc',
-              venueId: assignedVenue,
-              // NEVER reset passwords on state load. Passwords are only set
-              // via explicit flows (setup, change-password, forgot-password).
-              password: u.password || '', 
-            };
-          });
+          // Rule N: one normalization function, used here and on
+          // freshCaller inside the PUT /api/events transaction (see
+          // normalizeStoredUser).
+          users = parsed.users.map((u: any) => normalizeStoredUser(u));
 
           // Ensure primary agency admin exists
           const adminUser = DEFAULT_USERS[0];
@@ -5772,6 +5786,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
   // assignment while the doc's fresh event is reassigned, so the PUT's
   // in-transaction re-gate must refuse an in-flight save.
   app.post('/api/__test__/doc-set-events', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const db = firestoreDb;
     if (!db) return res.status(503).json({ error: 'db unavailable' });
     const { events } = req.body || {};
@@ -5786,6 +5801,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
   // commit gates can be tested without GCS Storage (unavailable in mock and
   // emulator runs). test-26 uses it for the 2c media validation tests.
   app.post('/api/__test__/media/seed-doc', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const db = requireMediaDb(req, res);
     if (!db) return;
     const { id, agencyId, venueId, state = 'INTENT' } = req.body || {};
@@ -7603,18 +7619,21 @@ app.put('/api/events/:id', async (req, res) => {
       // pre-commit gate ran against the cached event; an admin reassignment
       // committed between the gate and this transaction must not be
       // silently overridden by an in-flight tasks-only save.
-      const freshCaller: any = (freshDoc.users || []).find((u: any) => u.id === (caller as any).id);
-      // Compare the authorization-relevant signature only — role, venue,
-      // agency, and canFillTasks (the one permission this route's gates
-      // read, computed with the same role defaults on both sides).
-      // Hydration merges permission defaults into the cached copy, so a raw
-      // object compare (or flags like canAssignTasks, defaulted for admins
-      // in the cache only) false-fires.
+      // Rule N: normalize the stored record through hydration's own
+      // function before comparing it to the hydrated cache caller —
+      // legacy doc records ('worker', no agencyId/venueId/permissions)
+      // otherwise false-fire as "access changed" on every event save.
+      const freshCallerRaw: any = (freshDoc.users || []).find((u: any) => u.id === (caller as any).id);
+      const freshCaller: any = freshCallerRaw ? normalizeStoredUser(freshCallerRaw) : freshCallerRaw;
+      // Compare the authorization-relevant signature — role, venue,
+      // agency, permissions — on two NORMALIZED records (the cache caller
+      // is already normalized by hydration; freshCaller is normalized
+      // above). The legacy asymmetry can no longer false-fire.
       if (!freshCaller ||
           freshCaller.agencyId !== (caller as any).agencyId ||
           freshCaller.role !== (caller as any).role ||
           (freshCaller as any).venueId !== (caller as any).venueId ||
-          canFillTasks(freshCaller) !== canFillTasks(caller as any)) {
+          JSON.stringify(freshCaller.permissions) !== JSON.stringify((caller as any).permissions)) {
         return { conflict: 'Your access changed while saving. Please refresh and try again.' };
       }
       // Fix round 2 HIGH: inside the transaction, the gate is re-run on

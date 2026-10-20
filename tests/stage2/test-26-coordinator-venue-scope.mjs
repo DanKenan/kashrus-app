@@ -777,6 +777,84 @@ export default {
       if (!(freshMed.tasks || []).some((t) => t.id === medTaskB)) throw new Error('fixr2 MEDIUM: the task did not commit');
     }
 
+    /* ---- 10d. Legacy user shape: normalization symmetry (round-2 follow-up) ---- */
+    {
+      // A legacy-shaped record STRAIGHT from Don's production data shape:
+      // role 'worker', no agencyId, no venueId, no permissions. Hydration
+      // normalizes it in the cache (role 'mashgiach', agency 'agency-hkc',
+      // venue 'venue-crown-market', default permissions); the stored doc
+      // keeps the raw legacy values forever. Before the extraction of
+      // normalizeStoredUser, the PUT /api/events transaction compared the
+      // raw doc record against the normalized cache record and EVERY save
+      // from this user 409'd "Your access changed while saving".
+      const legacyId = `user-test26-legacy-${ts}`;
+      const legacyEmail = `legacy-${ts}@test.local`;
+      const legacyEvtId = `evt-test26-legacy-${ts}`;
+      const legacyTaskA = `evttask-test26-legacy-a-${ts}`;
+      const legacyTaskB = `evttask-test26-legacy-b-${ts}`;
+      const legacyTaskC = `evttask-test26-legacy-c-${ts}`;
+      const injLegacy = await ctx.api('POST', '/api/__test__/inject-fixture', {
+        venues: [{ id: 'venue-crown-market', agencyId: 'agency-hkc', name: `T26 Crown ${ts}`, category: 'Supermarket', address: '1 Crown St', certification: 'HKC', createdAt: new Date(ts).toISOString() }],
+        users: [{ id: legacyId, name: 'T26 Legacy', email: legacyEmail, role: 'worker' }],
+        events: [{
+          id: legacyEvtId, agencyId: 'agency-hkc', venueId: 'venue-crown-market',
+          title: `Legacy event ${ts}`, location: 'Crown', date: '2026-11-07',
+          assignedMashgiachEmail: legacyEmail,
+          tasks: [{ id: legacyTaskA, title: `Legacy task A ${ts}`, isCompleted: false }],
+        }],
+      });
+      if (injLegacy.status !== 200) throw new Error(`fixr2f legacy inject: ${injLegacy.status}`);
+      // The inject commit hydrated the cache: mint the legacy user's token.
+      const legacyMint = await fetch(`${baseUrl}/api/__test__/mint-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: legacyId }),
+      });
+      const legacyTokBody = await legacyMint.json();
+      const tLegacy = legacyTokBody.token;
+      if (!tLegacy) throw new Error('fixr2f: could not mint the legacy user token');
+      const legacyGet = await fetch(`${baseUrl}/api/events`, { headers: auth(tLegacy) });
+      const legacyGetBody = await legacyGet.json();
+      const legacyEvt = (legacyGetBody.events || []).find((e) => e.id === legacyEvtId);
+      if (!legacyEvt) throw new Error('fixr2f: legacy user cannot see their assigned event');
+      // The real tasks-only whole-event save → 200 (no false "access changed").
+      const legacyPut = await fetch(`${baseUrl}/api/events/${legacyEvtId}`, {
+        method: 'PUT', headers: auth(tLegacy),
+        body: JSON.stringify(await apiWriteBody({
+          ...legacyEvt,
+          tasks: [...(legacyEvt.tasks || []), { id: legacyTaskB, title: `Legacy task B ${ts}`, isCompleted: false }],
+        })),
+      });
+      if (legacyPut.status !== 200) throw new Error(`fixr2f legacy save: ${legacyPut.status} — ${await legacyPut.text().catch(() => '')} (expected 200)`);
+      const readDocEventsF = async () => {
+        const dr = await fetch(`${baseUrl}/api/__test__/firestore-doc`, { headers: auth(tAdminX) });
+        const docJson = await dr.json();
+        return (docJson.events || docJson.doc?.events || []);
+      };
+      const freshLegacy = (await readDocEventsF()).find((e) => e.id === legacyEvtId);
+      if (!(freshLegacy.tasks || []).some((t) => t.id === legacyTaskB)) throw new Error('fixr2f: the legacy task is NOT in the fresh doc');
+      // Negative twin (the race, legacy shape): doc-only move of the event to
+      // A2 + reassignment → the in-flight tasks-only save → 409/403, and the
+      // fresh event's tasks stay unchanged.
+      const docEvents = await readDocEventsF();
+      const mapped = docEvents.map((e) => (e.id === legacyEvtId ? { ...e, venueId: vA2, assignedMashgiachEmail: `masha2-${ts}@test.local` } : e));
+      const setR = await fetch(`${baseUrl}/api/__test__/doc-set-events`, {
+        method: 'POST', headers: auth(tAdminX),
+        body: JSON.stringify({ events: mapped }),
+      });
+      if (setR.status !== 200) throw new Error(`fixr2f doc-set-events: ${setR.status}`);
+      const stalePut = await fetch(`${baseUrl}/api/events/${legacyEvtId}`, {
+        method: 'PUT', headers: auth(tLegacy),
+        body: JSON.stringify(await apiWriteBody({
+          ...legacyEvt,
+          tasks: [...(legacyEvt.tasks || []), { id: legacyTaskC, title: `Legacy task C ${ts}`, isCompleted: false }],
+        })),
+      });
+      if (stalePut.status !== 409 && stalePut.status !== 403) throw new Error(`fixr2f legacy stale save: ${stalePut.status} (expected 409/403)`);
+      const freshAfter = (await readDocEventsF()).find((e) => e.id === legacyEvtId);
+      if ((freshAfter.tasks || []).some((t) => t.id === legacyTaskC)) throw new Error('fixr2f: the refused save WROTE its task');
+    }
+
     /* ---- 11. Reassignment: moving the coordinator A1 → A2 refreshes their sockets ---- */
     {
       const conn = await connectWs(baseUrl, tCoord);
