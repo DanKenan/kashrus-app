@@ -451,6 +451,39 @@ export default {
       if (!(await unreadIds(T[adminX])).includes(k)) throw new Error('T14 the admin still has it unread');
     }
 
+    // ---- T16 (plan Q4): the reporter sees "seen by a recipient" — one boolean, no names, no counts ----
+    {
+      const id = (await raise(T[mashA1], { venueId: A1, title: `seen feedback ${ts}` })).body.incident.id;
+      const mine0 = (await list(T[mashA1], `?venueId=${A1}`)).list.find((i) => i.id === id);
+      eq(mine0.seenByRecipient, false, 'T16 nobody has read it yet');
+      const s = await post(T[coordA1], '/api/updates/seen', { venueId: A1, alertIds: [id] });
+      eq(s.body.recorded, 1, 'T16 recipient mark recorded');
+      const mine1 = (await list(T[mashA1], `?venueId=${A1}`)).list.find((i) => i.id === id);
+      eq(mine1.seenByRecipient, true, 'T16 the reporter learns a recipient read it');
+      const keys = Object.keys(mine1);
+      for (const bad of ['readers', 'readBy', 'seenBy', 'read', 'total']) if (keys.includes(bad)) throw new Error(`T16 leaks ${bad}`);
+      const asAdmin = (await list(T[adminX], `?venueId=${A1}`)).list.find((i) => i.id === id);
+      eq(asAdmin.seenByRecipient, undefined, 'T16 only the reporter gets the flag');
+    }
+
+    // ---- T17 (review r1): the list is scoped to the requested venue; out of scope fails closed ----
+    {
+      const inA1 = (await raise(T[mashA1], { venueId: A1, title: `scope A1 ${ts}` })).body.incident.id;
+      const inA2 = (await raise(T[mashA2], { venueId: A2, title: `scope A2 ${ts}` })).body.incident.id;
+      const a1 = await list(T[adminX], `?venueId=${A1}`);
+      eq(a1.status, 200, 'T17 admin venue A1 list');
+      if (!a1.list.some((i) => i.id === inA1)) throw new Error('T17 admin A1 list misses the A1 alert');
+      if (a1.list.some((i) => i.venueId !== A1)) throw new Error(`T17 admin A1 list carries other venues: ${[...new Set(a1.list.map((i) => i.venueId))].join(',')}`);
+      const a2 = await list(T[adminX], `?venueId=${A2}`);
+      if (!a2.list.some((i) => i.id === inA2) || a2.list.some((i) => i.venueId !== A2)) throw new Error('T17 admin A2 list is not exactly venue A2');
+      const all = await list(T[adminX]);
+      if (!all.list.some((i) => i.id === inA1) || !all.list.some((i) => i.id === inA2)) throw new Error('T17 admin with no venue sees the agency');
+      eq((await get(T[coordA1], `/api/incidents?venueId=${A2}`)).status, 403, 'T17 coordinator asking for another venue → 403');
+      eq((await get(T[mashA1], `/api/incidents?venueId=${A2}`)).status, 403, 'T17 mashgiach asking for another venue → 403');
+      const own = await list(T[coordA1]);
+      if (own.list.some((i) => i.venueId !== A1)) throw new Error('T17 coordinator without venueId sees only own venue');
+    }
+
     // ---- T15 (v2.1 A12): inline media is capped and budgeted; alerts never wedge ordinary writes ----
     {
       const P = (n) => 'data:image/jpeg;base64,' + 'P'.repeat(n);
@@ -482,6 +515,6 @@ export default {
       if (sz > 700 * 1024) throw new Error(`T15 the document is too close to the 900 KiB guard (${Math.round(sz / 1024)} KiB)`);
     }
 
-    return 'T1–T15 pass: routing exact (admins + venue coordinators, never the reporter), replay-safe, media refused not truncated, rule T on REST + WS with clean payloads, only recipients acknowledge, per-user marks, roster-scoped ✓✓, mute = silent not absent, kiosk sees no alerts; v2: concurrent raise = one alert/task/push, recipient-only marks, receipts follow the current roster, ack races fixed, badge clears on ack without a read mark, media is capped and budgeted so alerts never wedge ordinary writes.';
+    return 'T1–T15 pass: routing exact (admins + venue coordinators, never the reporter), replay-safe, media refused not truncated, rule T on REST + WS with clean payloads, only recipients acknowledge, per-user marks, roster-scoped ✓✓, mute = silent not absent, kiosk sees no alerts; v2: concurrent raise = one alert/task/push, recipient-only marks, receipts follow the current roster, ack races fixed, badge clears on ack without a read mark, media is capped and budgeted so alerts never wedge ordinary writes; the reporter gets one "seen by a recipient" flag; the list is scoped to the requested venue.';
   },
 };

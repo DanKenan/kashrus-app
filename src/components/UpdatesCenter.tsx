@@ -135,7 +135,9 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
         fetchAnnouncements(ctrl.signal),
         fetchNotes(c.venueId, ctrl.signal),
         c.kiosk ? Promise.resolve([] as AlertItem[]) : fetchAlerts(c.venueId, ctrl.signal),
-        seesReceipts ? fetchReceipts(c.venueId, ctrl.signal) : Promise.resolve(null),
+        // Receipts are supplementary: a failed or thrown receipts read never
+        // blocks the alerts, announcements or notes from showing.
+        seesReceipts ? fetchReceipts(c.venueId, ctrl.signal).catch(() => null) : Promise.resolve(null),
       ]);
       if (isStale(k)) return;
       // The sheet is for THIS venue: agency-wide items plus this venue's.
