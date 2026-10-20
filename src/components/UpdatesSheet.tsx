@@ -19,9 +19,14 @@ interface UpdatesSheetProps {
   onTabChange: (tab: UpdatesTab) => void;
   unreadAnnouncements: number;
   unreadNotes: number;
+  /** 5b: unread recipient alerts; null = no Alerts tab (the kiosk). */
+  unreadAlerts: number | null;
   // Tab bodies
   announcements: React.ReactNode;
   notes: React.ReactNode;
+  alerts: React.ReactNode;
+  /** 5b: drawn over the tab body (the ✓✓ reader list). */
+  overlay?: React.ReactNode;
 }
 
 export function UpdatesSheet({
@@ -31,8 +36,11 @@ export function UpdatesSheet({
   onTabChange,
   unreadAnnouncements,
   unreadNotes,
+  unreadAlerts,
   announcements,
   notes,
+  alerts,
+  overlay,
 }: UpdatesSheetProps) {
   const [expanded, setExpanded] = useState(false);
   const [entered, setEntered] = useState(false);
@@ -93,20 +101,27 @@ export function UpdatesSheet({
 
   if (!open) return null;
 
-  const tabBtn = (tab: UpdatesTab, label: string, count: number) => (
+  // 5b (Q7, decision (c)): three tabs on a 320 px phone — the words stay
+  // whole on one line, never clipped, and the count chip sits BENEATH the
+  // label. The strip is at least 48 px and grows if it must.
+  const tabBtn = (tab: UpdatesTab, label: string, count: number, alarm = false) => (
     <button
       key={tab}
       type="button"
       role="tab"
       aria-selected={activeTab === tab}
       onClick={() => onTabChange(tab)}
-      className={`pressable flex-1 h-12 flex items-center justify-center gap-2 text-base font-bold border-b-2 transition cursor-pointer ${
+      className={`pressable flex-1 min-w-0 min-h-12 px-1 py-1 flex flex-col items-center justify-center gap-0.5 text-[15px] sm:text-base font-bold border-b-2 transition cursor-pointer ${
         activeTab === tab ? 'border-gold text-ink' : 'border-transparent text-ink-faint'
       }`}
     >
-      {label}
+      <span className="whitespace-nowrap leading-tight">{label}</span>
       {count > 0 && (
-        <span className="min-w-5 h-5 px-1 rounded-full bg-gold text-white text-xs font-bold flex items-center justify-center">
+        <span
+          className={`min-w-5 h-5 px-1 rounded-full text-xs font-bold flex items-center justify-center ${alarm ? '' : 'bg-gold text-white'}`}
+          style={alarm ? { backgroundColor: 'var(--bad)', color: 'var(--bad-bg)' } : undefined}
+          aria-label={`${count} unread`}
+        >
           {count > 9 ? '9+' : count}
         </span>
       )}
@@ -151,9 +166,17 @@ export function UpdatesSheet({
         <div className="flex px-2 border-b border-line shrink-0" role="tablist" aria-label="Updates tabs">
           {tabBtn('announcements', 'Announcements', unreadAnnouncements)}
           {tabBtn('notes', 'Shift notes', unreadNotes)}
+          {unreadAlerts !== null && tabBtn('alerts', 'Alerts', unreadAlerts, true)}
         </div>
 
-        {activeTab === 'announcements' ? announcements : notes}
+        <div className="relative flex-1 min-h-0 flex flex-col">
+          {activeTab === 'alerts' && unreadAlerts !== null
+            ? alerts
+            : activeTab === 'notes'
+              ? notes
+              : announcements}
+          {overlay}
+        </div>
       </div>
     </div>
   );

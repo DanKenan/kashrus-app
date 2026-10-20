@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { MessageSquare, Trash2, Mic, Square, Play, Send, X } from 'lucide-react';
 import { apiWrite } from '../lib/api';
-import { HandoffNoteItem, useVisibleMarks } from '../lib/updates';
+import { HandoffNoteItem, MarkKind, useVisibleMarks } from '../lib/updates';
 
 // 5a — Shift notes as the Updates sheet's second tab body (was an
 // unrendered panel). The note box + mic are pinned at the bottom for
@@ -26,7 +26,7 @@ interface HandoffNotesProps {
   currentUserEmail: string;
   currentUserName: string;
   active: boolean;
-  onMark: (kind: 'a' | 'n', id: string) => void;
+  onMark: (kind: MarkKind, id: string) => void;
   onPosted: (item: HandoffNoteItem) => void;
   onDeleted: (id: string) => void;
 }

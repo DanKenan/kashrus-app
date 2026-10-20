@@ -11,6 +11,7 @@ import { realtimeSocket } from '../lib/socketClient';
 import {
   AnnouncementItem,
   HandoffNoteItem,
+  MarkKind,
   UnreadState,
   UpdatesContext,
   fetchAnnouncements,
@@ -19,8 +20,16 @@ import {
   seenQueue,
   updatesCtxKey,
 } from '../lib/updates';
+import {
+  AlertItem,
+  AlertSeverity,
+  Receipts,
+  fetchAlertMute,
+  fetchAlerts,
+  fetchReceipts,
+} from '../lib/alerts';
 
-export type UpdatesTab = 'announcements' | 'notes';
+export type UpdatesTab = 'announcements' | 'notes' | 'alerts';
 
 const EMPTY_UNREAD: UnreadState = {
   announcements: 0,
@@ -28,12 +37,38 @@ const EMPTY_UNREAD: UnreadState = {
   urgent: [],
   unreadAnnouncementIds: [],
   unreadNoteIds: [],
+  alerts: 0,
+  unreadAlertIds: [],
 };
+
+/** 5b (A6): the raise-form draft. Text lives here, under the context key —
+ * it survives sheet close, tab switches and failed sends, and dies only on
+ * a server-confirmed send, an explicit Discard, or a context change. The
+ * photo/voice bytes live here too, IN MEMORY ONLY (never stored anywhere),
+ * under the same lifetime. draftGen increments on every clear so async
+ * steps in the reporter can tell their result belongs to a dead draft. */
+export interface AlertDraft {
+  title: string;
+  description: string;
+  severity: AlertSeverity;
+  clientRef: string;
+}
+const newClientRef = () =>
+  typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `ref-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+const emptyDraft = (): AlertDraft => ({ title: '', description: '', severity: 'medium', clientRef: newClientRef() });
 
 export function useUpdatesCenter(ctx: UpdatesContext | null) {
   const [unread, setUnread] = useState<UnreadState>(EMPTY_UNREAD);
   const [announcements, setAnnouncements] = useState<AnnouncementItem[]>([]);
   const [notes, setNotes] = useState<HandoffNoteItem[]>([]);
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [receipts, setReceipts] = useState<Receipts | null>(null);
+  const [mutedUntil, setMutedUntilState] = useState<string | null>(null);
+  const [alertDraft, setAlertDraftState] = useState<AlertDraft>(emptyDraft);
+  const [alertMedia, setAlertMediaState] = useState<{ photoData?: string; voiceNoteData?: string }>({});
+  const [draftGen, setDraftGen] = useState(0);
   const [listsLoading, setListsLoading] = useState(false);
   const [sheetOpen, setSheetOpenState] = useState(false);
   const [activeTab, setActiveTab] = useState<UpdatesTab>('announcements');
@@ -85,6 +120,8 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     });
   }, []);
 
+  const seesReceipts = !!ctx && !ctx.kiosk && (ctx.role === 'admin' || ctx.role === 'coordinator');
+
   const loadLists = useCallback(async () => {
     const c = ctxRef.current;
     if (!c) return;
@@ -94,31 +131,51 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     const k = updatesCtxKey(c);
     setListsLoading(true);
     try {
-      const [anns, nts] = await Promise.all([
+      const [anns, nts, alts, recs] = await Promise.all([
         fetchAnnouncements(ctrl.signal),
         fetchNotes(c.venueId, ctrl.signal),
+        c.kiosk ? Promise.resolve([] as AlertItem[]) : fetchAlerts(c.venueId, ctrl.signal),
+        seesReceipts ? fetchReceipts(c.venueId, ctrl.signal) : Promise.resolve(null),
       ]);
       if (isStale(k)) return;
       // The sheet is for THIS venue: agency-wide items plus this venue's.
       setAnnouncements(anns.filter((a) => !a.venueId || a.venueId === c.venueId));
       setNotes(nts);
+      setAlerts(alts);
+      if (recs) setReceipts(recs);
     } catch {
       /* keep whatever is already on screen */
     } finally {
       if (!isStale(k)) setListsLoading(false);
     }
-  }, [isStale]);
+  }, [isStale, seesReceipts]);
 
   // Context generation changed (or first mount): clear everything from the
-  // previous context, close the sheet, and count fresh for the new one.
+  // previous context, close the sheet, and count fresh for the new one. The
+  // alert draft and its in-memory media die here too (A6: context change is
+  // one of only three ways a draft ends).
   useEffect(() => {
     setUnread(EMPTY_UNREAD);
     setAnnouncements([]);
     setNotes([]);
+    setAlerts([]);
+    setReceipts(null);
+    setMutedUntilState(null);
+    setAlertDraftState(emptyDraft());
+    setAlertMediaState({});
+    setDraftGen((g) => g + 1);
     setSheetOpenState(false);
     setHighlightId(null);
     abortRef.current?.abort();
-    if (ctx && !ctx.kiosk) void refreshUnread();
+    if (ctx && !ctx.kiosk) {
+      void refreshUnread();
+      // Warm the lists: the alert banner needs the open alerts, and the
+      // sheet opens instantly. The kiosk never loads alerts.
+      void loadLists();
+      void fetchAlertMute().then((u) => {
+        if (u !== undefined && keyRef.current === ctxKey) setMutedUntilState(u);
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctxKey]);
 
@@ -132,10 +189,11 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
       const t = msg?.type;
       if (
         t !== 'ANNOUNCEMENT' && t !== 'ANNOUNCEMENT_DELETED' &&
-        t !== 'HANDOFF_NOTE' && t !== 'HANDOFF_NOTE_DELETED'
+        t !== 'HANDOFF_NOTE' && t !== 'HANDOFF_NOTE_DELETED' &&
+        t !== 'INCIDENT_CREATED' && t !== 'INCIDENT_UPDATED'
       ) return;
       const p = msg.payload || {};
-      const item = p.announcement || p.note || p;
+      const item = p.announcement || p.note || p.incident || p;
       const vId = item?.venueId;
       const agency = item?.agencyId;
       if (agency && agency !== ctx.agencyId) return;
@@ -169,7 +227,7 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
   // original context) and drop it from the local unread sets at once; the
   // next unread refresh confirms the server's numbers.
   const markVisible = useCallback(
-    (kind: 'a' | 'n', id: string) => {
+    (kind: MarkKind, id: string) => {
       const c = ctxRef.current;
       if (!c || c.kiosk) return;
       seenQueue.enqueue(c, kind, id);
@@ -184,6 +242,11 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
             urgent: u.urgent.filter((x) => x.id !== id),
           };
         }
+        if (kind === 'i') {
+          if (!u.unreadAlertIds.includes(id)) return u;
+          const ids = u.unreadAlertIds.filter((x) => x !== id);
+          return { ...u, alerts: ids.length, unreadAlertIds: ids };
+        }
         if (!u.unreadNoteIds.includes(id)) return u;
         const ids = u.unreadNoteIds.filter((x) => x !== id);
         return { ...u, notes: ids.length, unreadNoteIds: ids };
@@ -192,23 +255,65 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     [],
   );
 
+  // Draft controls (A6). A confirmed send and an explicit Discard are the
+  // only in-context ways a draft ends; both bump the generation so a late
+  // async result (photo processing, a recording) is dropped, never attached.
+  const setAlertDraft = useCallback((patch: Partial<AlertDraft>) => {
+    setAlertDraftState((d) => ({ ...d, ...patch }));
+  }, []);
+  const setAlertMedia = useCallback((m: { photoData?: string; voiceNoteData?: string }) => {
+    setAlertMediaState(m);
+  }, []);
+  const clearAlertDraft = useCallback(() => {
+    setAlertDraftState(emptyDraft());
+    setAlertMediaState({});
+    setDraftGen((g) => g + 1);
+  }, []);
+
+  const setMutedUntil = useCallback((u: string | null) => setMutedUntilState(u), []);
+
   const dismissUrgent = useCallback(
     (id: string) => markVisible('a', id),
     [markVisible],
   );
 
   const bellCount = useMemo(
-    () => (ctx?.kiosk ? null : unread.announcements + unread.notes),
+    () => (ctx?.kiosk ? null : unread.announcements + unread.notes + unread.alerts),
     [ctx?.kiosk, unread],
   );
   const topUrgent = !ctx?.kiosk && unread.urgent.length > 0 ? unread.urgent[0] : null;
+  // 5b (C4): the newest open High/Critical alert routed to me that I have
+  // not seen yet gets the red banner until it is seen. The unread id set is
+  // recipient-only (server A2), so a banner here is always mine to see.
+  const topAlert = useMemo(() => {
+    if (!ctx || ctx.kiosk) return null;
+    const unreadSet = new Set(unread.unreadAlertIds);
+    const hit = alerts.find(
+      (a) => a.status === 'open' && (a.severity === 'high' || a.severity === 'critical') && unreadSet.has(a.id),
+    );
+    return hit ? { id: hit.id, title: hit.title, createdAt: hit.createdAt } : null;
+  }, [ctx, alerts, unread]);
+
+  const dismissAlertBanner = useCallback((id: string) => markVisible('i', id), [markVisible]);
 
   return {
     unread,
     bellCount,
     topUrgent,
+    topAlert,
     announcements,
     notes,
+    alerts,
+    receipts,
+    seesReceipts,
+    mutedUntil,
+    setMutedUntil,
+    alertDraft,
+    alertMedia,
+    draftGen,
+    setAlertDraft,
+    setAlertMedia,
+    clearAlertDraft,
     listsLoading,
     sheetOpen,
     setSheetOpen,
@@ -219,6 +324,7 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     loadLists,
     markVisible,
     dismissUrgent,
+    dismissAlertBanner,
   };
 }
 

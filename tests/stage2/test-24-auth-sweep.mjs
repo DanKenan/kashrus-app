@@ -296,8 +296,15 @@ export default {
       });
       if (r.status !== 200 && r.status !== 201) throw new Error(`forge incident: ${r.status}`);
       const inc = r.body.incident || r.body;
-      if (inc.reporterEmail !== mashAEmail) {
-        throw new Error(`incident attribution: got ${inc.reporterEmail}, want ${mashAEmail}`);
+      // 5b: alert payloads carry no emails — the STORED attribution is checked
+      // (the thing F4 protects), and the response must say it is the caller's.
+      if (inc.reporterEmail !== undefined) {
+        throw new Error('incident response must not carry reporterEmail (5b privacy)');
+      }
+      if (inc.mine !== true) throw new Error('incident response: mine should be true for the caller');
+      const stored = ((await ctx.getDoc())?.incidents || []).find((i) => i.id === inc.id);
+      if (!stored || stored.reporterEmail !== mashAEmail) {
+        throw new Error(`incident attribution: got ${stored?.reporterEmail}, want ${mashAEmail}`);
       }
       if (inc.reporterName !== 'T24 Mash A') {
         throw new Error(`incident attribution name: got ${inc.reporterName}`);
@@ -336,10 +343,15 @@ export default {
         resolvedBy: 'forged@example.com',
       });
       if (r.status !== 200 && r.status !== 201) throw new Error(`resolve incident: ${r.status}`);
+      // 5b: names in payloads, emails only in storage — check both.
       const get = await getJson(baseUrl, '/api/incidents', tAdminA);
       const inc = (get.body.incidents || []).find((i) => i.id === incidentAId);
-      if (!inc || inc.resolvedBy !== adminAEmail) {
-        throw new Error(`resolve attribution: got ${inc?.resolvedBy}, want ${adminAEmail}`);
+      if (!inc || inc.resolvedByName !== 'T24 Admin A' || inc.resolvedBy !== undefined) {
+        throw new Error(`resolve attribution (payload): got ${inc?.resolvedByName} / ${inc?.resolvedBy}`);
+      }
+      const stored = ((await ctx.getDoc())?.incidents || []).find((i) => i.id === incidentAId);
+      if (!stored || stored.resolvedBy !== adminAEmail) {
+        throw new Error(`resolve attribution: got ${stored?.resolvedBy}, want ${adminAEmail}`);
       }
     }
     {

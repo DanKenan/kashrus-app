@@ -8,10 +8,13 @@ export function UrgentBanner({
   item,
   onView,
   onDismiss,
+  kicker = 'Urgent',
 }: {
   item: { id: string; title: string; createdAt: string };
   onView: (id: string) => void;
   onDismiss: (id: string) => void;
+  /** 5b: the same banner serves open High/Critical alerts with kicker "Alert". */
+  kicker?: string;
 }) {
   return (
     <div
@@ -23,7 +26,7 @@ export function UrgentBanner({
         <span className="flex items-center gap-2 min-w-0 flex-1" style={{ color: 'var(--bad)' }}>
           <AlertTriangle className="w-5 h-5 shrink-0" />
           <span dir="auto" className="text-base font-bold truncate">
-            <span className="uppercase text-xs font-black tracking-wide mr-2">Urgent</span>
+            <span className="uppercase text-xs font-black tracking-wide mr-2">{kicker}</span>
             {item.title}
           </span>
         </span>

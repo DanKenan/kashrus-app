@@ -55,15 +55,34 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
 });
 
 // ---- Web Push: show the notification, even with the app closed ----
+/** A push/click URL is honoured only as a path on this origin. */
+function isSameOriginPath(u: string): boolean {
+  if (!u.startsWith('/') || u.startsWith('//') || u.startsWith('/\\')) return false;
+  try {
+    return new URL(u, self.location.origin).origin === self.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 self.addEventListener('push', (event: PushEvent) => {
   let title = 'Shutfey';
   let body = '';
   let url = '/';
+  // 5b: each alert carries its own tag (one notification per alert, never
+  // replacing another), and the receiver's mute arrives as silent: true —
+  // the notification is still shown, just without sound or vibration.
+  let tag = 'kashrus-push';
+  let silent = false;
   try {
     const data = event.data?.json() ?? {};
     if (typeof data.title === 'string') title = data.title;
     if (typeof data.body === 'string') body = data.body;
-    if (typeof data?.data?.url === 'string') url = data.data.url;
+    // A5: same-origin path only — a plain startsWith('/') would let a
+    // protocol-relative "//evil.example" through as a redirect.
+    if (typeof data?.data?.url === 'string' && isSameOriginPath(data.data.url)) url = data.data.url;
+    if (typeof data?.data?.tag === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(data.data.tag)) tag = data.data.tag;
+    silent = data?.data?.silent === true;
   } catch {
     // keep defaults
   }
@@ -73,15 +92,19 @@ self.addEventListener('push', (event: PushEvent) => {
       icon: '/pwa-192x192.png',
       badge: '/pwa-192x192.png',
       data: { url },
-      tag: 'kashrus-push',
-    })
+      tag,
+      silent,
+      // A re-sent alert with the same tag sounds again unless muted.
+      renotify: tag !== 'kashrus-push' && !silent,
+    } as NotificationOptions)
   );
 });
 
 // Tapping the notification opens/focuses the app.
 self.addEventListener('notificationclick', (event: NotificationEvent) => {
   event.notification.close();
-  const url = (event.notification.data as { url?: string } | undefined)?.url || '/';
+  const rawUrl = (event.notification.data as { url?: string } | undefined)?.url || '/';
+  const url = isSameOriginPath(rawUrl) ? rawUrl : '/';
   event.waitUntil(
     (async () => {
       const windows = await self.clients.matchAll({
@@ -91,6 +114,8 @@ self.addEventListener('notificationclick', (event: NotificationEvent) => {
       for (const client of windows) {
         if ('focus' in client) {
           await (client as WindowClient).focus();
+          // 5b: an open app jumps to the alert itself.
+          client.postMessage({ type: 'OPEN_URL', url });
           return;
         }
       }
