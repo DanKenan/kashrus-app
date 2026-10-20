@@ -326,9 +326,9 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
           </p>
           <button
             onClick={onEndShift}
-            className={`pressable shrink-0 ${btn64} px-4 sm:px-6 rounded-xl bg-red-700 text-white text-base sm:text-k-body font-semibold e2`}
+            className={`pressable shrink-0 max-w-[50%] ${btn64} px-4 sm:px-6 rounded-xl bg-red-700 text-white text-base sm:text-k-body font-semibold e2`}
           >
-            End shift — {currentUser.name.split(' ')[0]}
+            <span dir="auto" className="block truncate">End shift — {currentUser.name.split(' ')[0]}</span>
           </button>
         </div>
       </div>
@@ -634,7 +634,14 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                               <img
                                 src={c.photoData}
                                 alt={c.photoCaption || 'Check-in photo'}
-                                className="mt-2 w-full max-w-md rounded-lg border border-line object-cover max-h-60"
+                                className="mt-2 w-full max-w-md rounded-lg border border-line object-cover max-h-60 cursor-pointer"
+                                onClick={() => {
+                                  // Same tap-to-enlarge as TaskCardView.
+                                  const w = window.open();
+                                  if (w) {
+                                    w.document.write(`<img src="${c.photoData}" style="max-width:100%"/>`);
+                                  }
+                                }}
                               />
                             )}
                           </li>
