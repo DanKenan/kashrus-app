@@ -39,9 +39,9 @@ export default function App() {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('theme_mode');
       if (saved) return saved === 'dark';
-      return true; // default to the dark theme
+      return false; // default to the day theme (Don, Oct 20 2026)
     }
-    return true;
+    return false;
   });
 
   useEffect(() => {
