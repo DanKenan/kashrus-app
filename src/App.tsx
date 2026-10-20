@@ -15,6 +15,8 @@ import { UrgentBanner } from './components/UrgentBanner';
 import { Announcements } from './components/Announcements';
 import { HandoffNotes } from './components/HandoffNotes';
 import { useUpdatesCenter } from './components/UpdatesCenter';
+import { AlertsTab } from './components/AlertsTab';
+import { ReadersPanel } from './components/Receipts';
 import type { UpdatesContext } from './lib/updates';
 import { KioskPairing } from './components/KioskPairing';
 import { KioskDevicesModal } from './components/KioskDevicesModal';
@@ -366,6 +368,48 @@ export default function App() {
     [currentUser, currentVenue, isKiosk, updatesGen],
   );
   const updates = useUpdatesCenter(updatesCtx);
+
+  // 5b: the ✓✓ reader list opens over the sheet's body (admin/coordinator
+  // only — the server refuses anyone else).
+  const [readersFor, setReadersFor] = useState<{ kind: 'announcement' | 'alert'; id: string; title: string } | null>(null);
+  useEffect(() => { if (!updates.sheetOpen) setReadersFor(null); }, [updates.sheetOpen]);
+
+  // 5b: a tapped alert notification opens the Alerts tab on that alert —
+  // from a cold start (?updates=alerts&alert=<id>) or, with the app already
+  // open, from the service worker's OPEN_URL message (A5/A10: only the two
+  // params are read, from a same-origin URL; nothing navigates or reloads,
+  // and an unsent draft is never cleared by it). Never on the kiosk.
+  const [pendingAlertLink, setPendingAlertLink] = useState<string | null>(() => {
+    try {
+      const q = new URLSearchParams(window.location.search);
+      return q.get('updates') === 'alerts' ? q.get('alert') || '' : null;
+    } catch { return null; }
+  });
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      const d = e.data as { type?: string; url?: string } | undefined;
+      if (d?.type !== 'OPEN_URL' || typeof d.url !== 'string') return;
+      try {
+        const u = new URL(d.url, window.location.origin);
+        if (u.origin !== window.location.origin) return;
+        if (u.searchParams.get('updates') === 'alerts') setPendingAlertLink(u.searchParams.get('alert') || '');
+      } catch { /* ignore */ }
+    };
+    navigator.serviceWorker?.addEventListener('message', onMsg);
+    return () => navigator.serviceWorker?.removeEventListener('message', onMsg);
+  }, []);
+  useEffect(() => {
+    if (pendingAlertLink === null || !updatesCtx) return;
+    if (!isKiosk) updates.setSheetOpen(true, 'alerts', pendingAlertLink || null);
+    setPendingAlertLink(null);
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.delete('updates');
+      u.searchParams.delete('alert');
+      window.history.replaceState(null, '', u.pathname + (u.search ? u.search : '') + u.hash);
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAlertLink, updatesCtx]);
 
   // If user signs in with a non-admin role, lock active venue to their assigned venueId
   useEffect(() => {
@@ -1528,7 +1572,17 @@ export default function App() {
         />
       )}
 
-      {/* 5a: Updates sheet (Announcements | Shift notes) */}
+      {/* 5b: newest open High/Critical alert routed to me, until seen */}
+      {!updates.topUrgent && updates.topAlert && (
+        <UrgentBanner
+          item={updates.topAlert}
+          kicker="Alert"
+          onView={(id) => updates.setSheetOpen(true, 'alerts', id)}
+          onDismiss={(id) => updates.dismissAlertBanner(id)}
+        />
+      )}
+
+      {/* Updates sheet (Announcements | Shift notes | Alerts) */}
       <UpdatesSheet
         open={updates.sheetOpen}
         onClose={() => updates.setSheetOpen(false)}
@@ -1536,6 +1590,44 @@ export default function App() {
         onTabChange={updates.setActiveTab}
         unreadAnnouncements={updates.unread.announcements}
         unreadNotes={updates.unread.notes}
+        unreadAlerts={isKiosk ? null : updates.unread.alerts}
+        overlay={
+          readersFor && currentVenue ? (
+            <ReadersPanel
+              kind={readersFor.kind}
+              id={readersFor.id}
+              venueId={currentVenue.id}
+              title={readersFor.title}
+              onClose={() => setReadersFor(null)}
+            />
+          ) : null
+        }
+        alerts={
+          <AlertsTab
+            items={updates.alerts}
+            loading={updates.listsLoading}
+            unreadIds={new Set(updates.unread.unreadAlertIds)}
+            role={currentUser?.role || ''}
+            viewerVenueIds={venues.map((v) => v.id)}
+            canFillTasks={canUserFillTasks(currentUser)}
+            venueId={currentVenue?.id || ''}
+            active={updates.sheetOpen && updates.activeTab === 'alerts'}
+            highlightId={updates.highlightId}
+            receipts={updates.seesReceipts ? (updates.receipts?.alerts ?? {}) : null}
+            mutedUntil={updates.mutedUntil}
+            onMuteChange={updates.setMutedUntil}
+            onMark={updates.markVisible}
+            onChanged={() => { void updates.loadLists(); void updates.refreshUnread(); }}
+            onOpenReaders={(id, title) => setReadersFor({ kind: 'alert', id, title })}
+            draft={updates.alertDraft}
+            media={updates.alertMedia}
+            draftGen={updates.draftGen}
+            onDraftChange={updates.setAlertDraft}
+            onMediaChange={updates.setAlertMedia}
+            onDiscardDraft={updates.clearAlertDraft}
+            onDraftSent={updates.clearAlertDraft}
+          />
+        }
         announcements={
           <Announcements
             items={updates.announcements}
@@ -1557,6 +1649,8 @@ export default function App() {
             onMark={updates.markVisible}
             onPosted={() => { void updates.loadLists(); void updates.refreshUnread(); }}
             onDeleted={() => { void updates.loadLists(); void updates.refreshUnread(); }}
+            receipts={updates.seesReceipts ? (updates.receipts?.announcements ?? {}) : null}
+            onOpenReaders={(id, title) => setReadersFor({ kind: 'announcement', id, title })}
           />
         }
         notes={

@@ -45,7 +45,13 @@ export interface UnreadState {
   urgent: { id: string; title: string; createdAt: string }[];
   unreadAnnouncementIds: string[];
   unreadNoteIds: string[];
+  // 5b: alerts at this venue that are not mine, not resolved and not marked.
+  alerts: number;
+  unreadAlertIds: string[];
 }
+
+/** 5b: read-mark kinds — announcement, shift note, alert. */
+export type MarkKind = 'a' | 'n' | 'i';
 
 export interface UpdatesContext {
   userId: string;
@@ -73,6 +79,8 @@ export async function fetchUnread(venueId: string, signal?: AbortSignal): Promis
     urgent: Array.isArray(d.urgent) ? d.urgent : [],
     unreadAnnouncementIds: Array.isArray(d.unreadAnnouncementIds) ? d.unreadAnnouncementIds : [],
     unreadNoteIds: Array.isArray(d.unreadNoteIds) ? d.unreadNoteIds : [],
+    alerts: d.alerts || 0,
+    unreadAlertIds: Array.isArray(d.unreadAlertIds) ? d.unreadAlertIds : [],
   };
 }
 
@@ -98,6 +106,7 @@ interface PendingBatch {
   ctx: UpdatesContext;
   ann: Set<string>;
   notes: Set<string>;
+  alerts: Set<string>;
   timer: ReturnType<typeof setTimeout> | null;
   sending: boolean;
   failures: number;
@@ -124,15 +133,15 @@ class SeenQueue {
     return updatesCtxKey(ctx);
   }
 
-  enqueue(ctx: UpdatesContext, kind: 'a' | 'n', id: string) {
+  enqueue(ctx: UpdatesContext, kind: MarkKind, id: string) {
     if (ctx.kiosk) return; // the kiosk never marks (read-only, server refuses too)
     const key = this.key(ctx);
     let b = this.batches.get(key);
     if (!b) {
-      b = { ctx, ann: new Set(), notes: new Set(), timer: null, sending: false, failures: 0, firstAt: Date.now(), reconciledAt: 0 };
+      b = { ctx, ann: new Set(), notes: new Set(), alerts: new Set(), timer: null, sending: false, failures: 0, firstAt: Date.now(), reconciledAt: 0 };
       this.batches.set(key, b);
     }
-    (kind === 'a' ? b.ann : b.notes).add(id);
+    (kind === 'a' ? b.ann : kind === 'n' ? b.notes : b.alerts).add(id);
     this.schedule(b, 2000);
   }
 
@@ -152,29 +161,32 @@ class SeenQueue {
       this.batches.delete(this.key(b.ctx));
       return;
     }
-    if (b.ann.size === 0 && b.notes.size === 0) {
+    if (b.ann.size === 0 && b.notes.size === 0 && b.alerts.size === 0) {
       this.batches.delete(this.key(b.ctx));
       return;
     }
     b.sending = true;
-    const ann = [...b.ann].slice(0, 200);
-    const notes = [...b.notes].slice(0, Math.max(0, 200 - ann.length));
+    // Alerts first: they matter most if a batch ever hits the 200 cap.
+    const alerts = [...b.alerts].slice(0, 200);
+    const ann = [...b.ann].slice(0, Math.max(0, 200 - alerts.length));
+    const notes = [...b.notes].slice(0, Math.max(0, 200 - alerts.length - ann.length));
     try {
       const res = await apiFetch('/api/updates/seen', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ venueId: b.ctx.venueId, announcementIds: ann, noteIds: notes }),
+        body: JSON.stringify({ venueId: b.ctx.venueId, announcementIds: ann, noteIds: notes, alertIds: alerts }),
       });
       if (!res.ok) throw new Error(`seen ${res.status}`);
       ann.forEach((id) => b.ann.delete(id));
       notes.forEach((id) => b.notes.delete(id));
+      alerts.forEach((id) => b.alerts.delete(id));
       b.failures = 0;
     } catch {
       // Stay pending in the same context and retry (plan C6).
       b.failures += 1;
     } finally {
       b.sending = false;
-      if (b.ann.size > 0 || b.notes.size > 0) {
+      if (b.ann.size > 0 || b.notes.size > 0 || b.alerts.size > 0) {
         // The badge went optimistic the moment the item was seen. If the
         // marks are not landing — two failed sends in a row, or anything
         // still pending ~10 s after it was marked — the owner refetches the
@@ -204,7 +216,7 @@ export function useVisibleMarks(
   containerRef: RefObject<HTMLElement | null>,
   active: boolean,
   depsKey: string,
-  onMark: (kind: 'a' | 'n', id: string) => void,
+  onMark: (kind: MarkKind, id: string) => void,
 ) {
   const markedRef = useRef(new Set<string>());
   const onMarkRef = useRef(onMark);
@@ -223,7 +235,7 @@ export function useVisibleMarks(
       (entries) => {
         for (const e of entries) {
           const el = e.target as HTMLElement;
-          const kind = el.dataset.markKind as 'a' | 'n' | undefined;
+          const kind = el.dataset.markKind as MarkKind | undefined;
           const id = el.dataset.markId;
           if (!kind || !id) continue;
           const key = `${kind}:${id}`;

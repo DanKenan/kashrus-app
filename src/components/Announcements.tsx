@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Megaphone, Plus, X, Trash2, ClipboardList, Bell, AlertTriangle, Info, Check } from 'lucide-react';
 import { apiWrite } from '../lib/api';
-import { AnnouncementItem, useVisibleMarks } from '../lib/updates';
+import { AnnouncementItem, MarkKind, useVisibleMarks } from '../lib/updates';
+import { ReceiptCount } from '../lib/alerts';
+import { ReceiptLine } from './Receipts';
 
 // 5a — Announcements as the Updates sheet's first tab body (was an
 // unrendered modal). Compose sits at the top for admin/coordinator only;
@@ -40,9 +42,12 @@ interface AnnouncementsProps {
   venueId: string;
   active: boolean;
   highlightId?: string | null;
-  onMark: (kind: 'a' | 'n', id: string) => void;
+  onMark: (kind: MarkKind, id: string) => void;
   onPosted: (item: AnnouncementItem) => void;
   onDeleted: (id: string) => void;
+  /** 5b: ✓✓ counts by announcement id; null = this viewer sees no receipts. */
+  receipts?: Record<string, ReceiptCount> | null;
+  onOpenReaders?: (id: string, title: string) => void;
 }
 
 export function Announcements({
@@ -60,6 +65,8 @@ export function Announcements({
   onMark,
   onPosted,
   onDeleted,
+  receipts = null,
+  onOpenReaders,
 }: AnnouncementsProps) {
   const [showCompose, setShowCompose] = useState(false);
   const [title, setTitle] = useState('');
@@ -295,6 +302,9 @@ export function Announcements({
                 <p className="text-xs text-ink-faint mt-2">
                   {a.authorName} · {new Date(a.createdAt).toLocaleString()}
                 </p>
+                {receipts && onOpenReaders && (
+                  <ReceiptLine count={receipts[a.id]} onOpen={() => onOpenReaders(a.id, a.title)} />
+                )}
               </article>
             );
           })

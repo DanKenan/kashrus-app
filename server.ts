@@ -416,6 +416,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/drop-socket-meta' },
         { method: 'POST', path: '/__test__/mint-token' },
         { method: 'POST', path: '/__test__/mint-kiosk-token' },
+        { method: 'GET', path: '/__test__/alert-routing' },
       ]
     : []),
 ];
@@ -811,6 +812,90 @@ function rememberDeletedAnnouncement(a: any) {
   (t as any).unref?.();
 }
 
+/**
+ * 5b — ONE rule for who sees an alert (an incident), used by GET
+ * /api/incidents, GET /api/incidents/:id/media, the WS staff filter,
+ * POST /api/updates/seen, GET /api/updates/unread and the receipts routes.
+ * Fail closed.
+ * - same agency;
+ * - a kiosk session never (the routes are off the kiosk allowlist and
+ *   kioskMaySee drops INCIDENT_*): the kiosk sheet stays read-only;
+ * - admin: every alert of the own agency;
+ * - everyone else, coordinator included: alerts at their own venue(s) (rule T).
+ */
+function incidentVisibleTo(user: UserProfile | null | undefined, inc: any): boolean {
+  if (!user || !inc || typeof inc !== 'object') return false;
+  if ((inc.agencyId || 'agency-hkc') !== ((user as any).agencyId || 'agency-hkc')) return false;
+  if ((user as any).role === 'admin') return true;
+  return typeof inc.venueId === 'string' && callerMaySeeVenue(user, inc.venueId);
+}
+
+const sameEmail = (a: any, b: any) =>
+  typeof a === 'string' && typeof b === 'string' && a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/**
+ * 5b — who an alert is ROUTED to, and whose read marks its ✓✓ count: the
+ * agency's admins plus the coordinators of the alert's venue — never the
+ * reporter, never another venue's coordinator, never another agency. One
+ * helper for both, so the push list and the receipt list cannot drift.
+ * Delivery is immediate and 24/7 (Don, Oct 19): there are no server-side
+ * quiet hours; a recipient's own mute makes the push silent, never absent.
+ */
+function alertRecipients(inc: any): UserProfile[] {
+  if (!inc || typeof inc.venueId !== 'string') return [];
+  const agencyId = inc.agencyId || 'agency-hkc';
+  return users.filter((u) =>
+    (u.agencyId || 'agency-hkc') === agencyId &&
+    (u.role === 'admin' || (u.role === 'coordinator' && callerMaySeeVenue(u, inc.venueId))) &&
+    !sameEmail(u.email, inc.reporterEmail)
+  );
+}
+
+/**
+ * 5b (plan v2, A2) — ONE recipient predicate for alert read marks, the
+ * unread badge, ✓✓ counts, reader lists and "Seen by a recipient": a user
+ * counts for an alert only if the alert is routed to them. Viewing is
+ * broader (rule T) — a venue mashgiach can open the Alerts tab but never
+ * adds to a count and gets no alert badge.
+ */
+function isAlertRecipient(user: UserProfile | null | undefined, inc: any): boolean {
+  if (!user || !inc) return false;
+  return alertRecipients(inc).some((u) => u.id === user.id);
+}
+
+/**
+ * 5b — an alert as a viewer may see it. No media bytes (fetched on demand
+ * from GET /api/incidents/:id/media, behind the same visibility rule) and no
+ * email addresses (reporter / acknowledger / resolver are names only;
+ * `mine` tells the viewer which alerts they raised).
+ */
+function publicIncident(inc: any, viewer?: UserProfile | null) {
+  return {
+    id: inc.id,
+    agencyId: inc.agencyId,
+    venueId: inc.venueId,
+    title: inc.title,
+    description: inc.description,
+    severity: inc.severity,
+    status: inc.status,
+    createdAt: inc.createdAt,
+    linkedTaskId: inc.linkedTaskId,
+    reporterName: inc.reporterName,
+    acknowledgedAt: inc.acknowledgedAt,
+    acknowledgedByName: inc.acknowledgedByName,
+    resolvedAt: inc.resolvedAt,
+    resolvedByName: inc.resolvedByName,
+    hasPhoto: typeof inc.photoData === 'string' && inc.photoData.length > 0,
+    hasVoice: typeof inc.voiceNoteData === 'string' && inc.voiceNoteData.length > 0,
+    mine: !!viewer && sameEmail(inc.reporterEmail, (viewer as any).email),
+  };
+}
+
+/** 5b — WS INCIDENT_* carry a refetch signal only (REST is the authority). */
+function incidentSignal(inc: any) {
+  return { incident: { id: inc.id, agencyId: inc.agencyId, venueId: inc.venueId, status: inc.status } };
+}
+
 /** Non-admin callers may see only venues inside their own scope. */
 function callerMaySeeVenue(user: UserProfile | null | undefined, venueId: string): boolean {
   if (!user || typeof venueId !== 'string' || venueId.length === 0) return false;
@@ -1078,8 +1163,13 @@ interface Incident {
   status: 'open' | 'acknowledged' | 'resolved';
   linkedTaskId?: string;
   createdAt: string;
+  // 5b: who moved it along, recorded from the VERIFIED session user.
+  acknowledgedAt?: string;
+  acknowledgedBy?: string; // email — server-only, never in a payload
+  acknowledgedByName?: string;
   resolvedAt?: string;
-  resolvedBy?: string;
+  resolvedBy?: string; // email — server-only, never in a payload
+  resolvedByName?: string;
 }
 
 interface Announcement {
@@ -3310,6 +3400,8 @@ interface CrudHelperOptions {
   broadcastType?: string;
   getAgencyId?: (item: any) => string;
   getBroadcastPayload?: (item: any, result: any) => any;
+  /** 5b: shape the HTTP response (default: the updated item as stored). */
+  getResponse?: (item: any) => any;
   /**
    * Updates/deletes of existing entities require the client to send the
    * version it rendered (expectedVersion). Always true for these helpers —
@@ -3396,7 +3488,7 @@ async function crudUpdate(
     const agencyId = opts.getAgencyId ? opts.getAgencyId(updated) : undefined;
     broadcast(opts.broadcastType, payload, undefined, agencyId);
   }
-  res.json(updated);
+  res.json(opts.getResponse ? opts.getResponse(updated) : updated);
   return true;
 }
 
@@ -3511,7 +3603,7 @@ function ensureVapidKeys() {
 }
 
 /** Send a push notification to every device a user subscribed. Fire-and-forget. */
-function sendPushToUser(userEmail: string, title: string, body: string, data?: any) {
+function sendPushToUser(userEmail: string, title: string, body: string, data?: any, onError?: (err: any) => void) {
   if (!vapidKeys) return;
   const email = userEmail.trim().toLowerCase();
   const subs = pushSubscriptions.filter((s) => s.userEmail.toLowerCase() === email);
@@ -3536,6 +3628,8 @@ function sendPushToUser(userEmail: string, title: string, body: string, data?: a
             },
             { label: 'prune-dead-push-subscription' }
           ).catch((e) => log.warn('[Push] Dead-subscription prune failed:', (e as any)?.message));
+        } else if (onError) {
+          onError(err);
         } else {
           log.warn('[Push] Send failed:', err?.message || err);
         }
@@ -3938,8 +4032,9 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
     }
     case 'INCIDENT_CREATED':
     case 'INCIDENT_UPDATED': {
+      // 5b: one rule with REST (incidentVisibleTo); the payload is a signal only.
       const inc = p.incident || p;
-      return inScope(inc?.venueId) ? payload : null;
+      return inScope(inc?.venueId) && incidentVisibleTo(recipient, inc) ? payload : null;
     }
     case 'ANNOUNCEMENT': {
       // 5a: venue scope AND role targeting (the same helper as GET /api/announcements).
@@ -4753,8 +4848,10 @@ app.delete('/api/task-templates/:id', async (req, res) => {
   return;
 });
 
-// Incidents — "oh no" flow: photo + voice + instant alert + auto-task
-app.get('/api/incidents', (req, res) => {
+// Incidents — "oh no" flow: photo + voice + instant alert + auto-task.
+// 5b: these are the app's ALERTS (Updates → Alerts tab). Payloads are
+// publicIncident(): no media bytes, no emails.
+app.get('/api/incidents', async (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
   const agencyId = caller.agencyId || 'agency-hkc';
@@ -4765,16 +4862,100 @@ app.get('/api/incidents', (req, res) => {
   if (venueScope !== 'agency') {
     list = list.filter((i) => venueScope.includes(i.venueId));
   }
+  list = list.filter((i) => incidentVisibleTo(caller, i));
   if (status) list = list.filter((i) => i.status === status);
-  res.json({ incidents: list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
+  list.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const out = list.map((i) => publicIncident(i, caller));
+  // 5b (Q4): the reporter sees "Seen by a recipient" once at least one
+  // recipient has a read mark. Computed HERE only — read marks live outside
+  // app-state, so POST/ack/resolve responses leave the field unset. No
+  // names, no counts, and it never stands in for acknowledgment.
+  const mineIdx = out.map((o, idx) => (o.mine ? idx : -1)).filter((idx) => idx >= 0);
+  if (mineIdx.length > 0) {
+    try {
+      const recipUsers = mineIdx.flatMap((idx) => alertRecipients(list[idx]));
+      const marks = await loadUpdateReadsMany(recipUsers);
+      for (const idx of mineIdx) {
+        const inc = list[idx];
+        (out[idx] as any).seenByRecipient = alertRecipients(inc)
+          .some((u) => { const r = marks.get(u.id); return !!r && !!r.i[inc.id]; });
+      }
+    } catch {
+      // Marks unreadable: leave the field unset rather than guess.
+    }
+  }
+  res.json({ incidents: out });
 });
+
+// 5b: an alert's photo / voice note, on demand, behind the same rule as the
+// list. Unknown and not-visible answer the same 404 (no existence oracle).
+app.get('/api/incidents/:id/media', (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const inc = incidents.find((i) => i.id === req.params.id);
+  if (!inc || !incidentVisibleTo(caller, inc)) {
+    return res.status(404).json({ error: 'Alert not found.' });
+  }
+  res.set('Cache-Control', 'private, no-store');
+  res.json({ photoData: inc.photoData || null, voiceNoteData: inc.voiceNoteData || null });
+});
+
+// 5b: inline media caps (the alert lives in app-state/main, which must stay
+// under the 900 KiB guard). Over the cap = 413, never a silent truncation
+// (a cut base64 string is a corrupt file). The client sends a photo resized
+// to at most 1024 px JPEG and a voice note of at most 30 s at a low bitrate.
+const ALERT_TITLE_MAX = 140;
+const ALERT_DESCRIPTION_MAX = 2000;
+// v2.1 A12: small caps (photo downscaled ≤ 1024 px on the client; voice
+// ≤ 30 s) and a per-agency budget for inline media in the shared app-state
+// document (the document refuses any commit over 900 KiB, which would
+// block ordinary task writes and check-in photos).
+const ALERT_PHOTO_MAX_CHARS = 120_000;
+const ALERT_VOICE_MAX_CHARS = 90_000;
+const ALERT_MEDIA_BUDGET_CHARS = 300 * 1024;
+// Media may only be added while the projected document stays under this
+// size — the rest is headroom for ordinary writes.
+const ALERT_DOC_HEADROOM_BYTES = 700 * 1024;
+/** Inline media (base64 chars) an agency currently keeps in the document. */
+function inlineMediaChars(doc: any, agencyId: string): number {
+  const mine = (x: any) => (x?.agencyId || 'agency-hkc') === agencyId;
+  let n = 0;
+  for (const i of (doc.incidents || [])) if (mine(i)) n += (i.photoData?.length || 0) + (i.voiceNoteData?.length || 0);
+  for (const t of (doc.tasks || [])) if (mine(t)) for (const c of (t.checkIns || [])) n += (c?.photoData?.length || 0);
+  for (const h of (doc.handoffNotes || [])) if (mine(h)) n += (h?.voiceNoteData?.length || 0);
+  return n;
+}
+
+// 5b (test mode only): the routing decision of each alert, so Test 30 can
+// prove who would be notified without sending a real push to anyone.
+const testAlertRouting = new Map<string, { email: string; silent: boolean }[]>();
+const testAlertAttempts = new Map<string, number>(); // v2 A4: push dispatches per alert (test mode)
 
 app.post('/api/incidents', async (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
-  const { venueId, title, description, severity, photoData, voiceNoteData } = req.body || {};
-  if (!venueId || !title?.trim()) {
+  const { venueId, title, description, severity, photoData, voiceNoteData, clientRef } = req.body || {};
+  if (!venueId || typeof title !== 'string' || !title.trim()) {
     return res.status(400).json({ error: 'Venue and title are required.' });
+  }
+  if (title.trim().length > ALERT_TITLE_MAX ||
+      (description !== undefined && description !== null &&
+        (typeof description !== 'string' || description.length > ALERT_DESCRIPTION_MAX))) {
+    return res.status(400).json({ error: 'The alert text is too long.', code: 'TEXT_TOO_LONG' });
+  }
+  const photoOk = photoData === undefined || photoData === null || photoData === '' ||
+    (typeof photoData === 'string' && photoData.startsWith('data:image/'));
+  const voiceOk = voiceNoteData === undefined || voiceNoteData === null || voiceNoteData === '' ||
+    (typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/'));
+  if (!photoOk || !voiceOk) {
+    return res.status(400).json({ error: 'Unsupported attachment.', code: 'BAD_MEDIA' });
+  }
+  if ((typeof photoData === 'string' && photoData.length > ALERT_PHOTO_MAX_CHARS) ||
+      (typeof voiceNoteData === 'string' && voiceNoteData.length > ALERT_VOICE_MAX_CHARS)) {
+    return res.status(413).json({ error: 'The photo or voice note is too large.', code: 'MEDIA_TOO_LARGE' });
+  }
+  if (clientRef !== undefined && (typeof clientRef !== 'string' || !/^[A-Za-z0-9-]{8,64}$/.test(clientRef))) {
+    return res.status(400).json({ error: 'Invalid request.' });
   }
 
   const agencyId = caller.agencyId || 'agency-hkc';
@@ -4784,10 +4965,16 @@ app.post('/api/incidents', async (req, res) => {
   const venue = venues.find((v) => v.id === venueId);
   const venueName = venue?.name || 'Venue';
 
-  // Pre-generate stable IDs so transaction retries don't duplicate.
-  const incidentId = `incident-${crypto.randomUUID()}`;
-  const followUpId = `task-${crypto.randomUUID()}`;
+  // Stable IDs: a retried request (same clientRef from the same user) maps to
+  // the SAME alert and follow-up task, so a flaky network never raises a
+  // second alert. Without clientRef, a fresh id per request (old behaviour).
+  const refHash = typeof clientRef === 'string'
+    ? crypto.createHash('sha256').update(`${agencyId}|${caller.id}|${clientRef}`).digest('hex').slice(0, 32)
+    : null;
+  const incidentId = refHash ? `incident-${refHash}` : `incident-${crypto.randomUUID()}`;
+  const followUpId = refHash ? `task-incident-${refHash}` : `task-${crypto.randomUUID()}`;
   const sev = (['low', 'medium', 'high', 'critical'].includes(severity) ? severity : 'medium') as Incident['severity'];
+  let created = false;
 
   const committed = await commitOrRespond(
     req, res,
@@ -4797,19 +4984,33 @@ app.post('/api/incidents', async (req, res) => {
       // Idempotency: if this incident ID already exists, return it.
       const existingIncident = freshIncidents.find((i) => i.id === incidentId);
       if (existingIncident) {
+        created = false;
         return { doc: freshDoc, result: existingIncident };
       }
+      // v2.1 A12: two checks against the SAME transactional state (atomic
+      // with the create): the agency's inline-media budget AND the
+      // projected size of the whole document. Text always goes; only the
+      // attachment is refused.
+      const incomingMedia = (typeof photoData === 'string' ? photoData.length : 0) + (typeof voiceNoteData === 'string' ? voiceNoteData.length : 0);
+      if (incomingMedia > 0 && (
+        inlineMediaChars(freshDoc, agencyId) + incomingMedia > ALERT_MEDIA_BUDGET_CHARS ||
+        Buffer.byteLength(JSON.stringify(freshDoc)) + incomingMedia + 4096 > ALERT_DOC_HEADROOM_BYTES
+      )) {
+        created = false;
+        return { doc: freshDoc, result: { __mediaBudget: true } };
+      }
+      created = true;
       const incident: Incident = {
         id: incidentId,
         agencyId,
         venueId,
         reporterEmail: caller.email,
         reporterName: caller.name,
-        title: String(title).trim(),
+        title: title.trim(),
         description: String(description || '').trim(),
         severity: sev,
-        photoData: typeof photoData === 'string' && photoData.startsWith('data:image/') ? photoData.slice(0, 500000) : undefined,
-        voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/') ? voiceNoteData.slice(0, 1000000) : undefined,
+        photoData: typeof photoData === 'string' && photoData ? photoData : undefined,
+        voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData ? voiceNoteData : undefined,
         status: 'open',
         createdAt: now,
         linkedTaskId: followUpId,
@@ -4850,26 +5051,52 @@ app.post('/api/incidents', async (req, res) => {
     { label: 'create-incident' }
   );
   if (!committed) return;
+  if ((committed.result as any)?.__mediaBudget) {
+    return res.status(413).json({ error: 'Too many photos and voice notes are stored right now. Send the alert without the attachment.', code: 'MEDIA_BUDGET' });
+  }
   const incident = committed.result as Incident;
+  // A replayed request answers with the stored alert and notifies nobody again.
+  if (!created) return res.json({ incident: publicIncident(incident, caller), replayed: true });
 
-  // Side effects ONLY after commit.
-  // RULE T: admins of the agency + coordinators of THIS venue only.
-  const admins = users.filter((u) =>
-    (u.agencyId || 'agency-hkc') === agencyId &&
-    (u.role === 'admin' || (u.role === 'coordinator' && callerMaySeeVenue(u, venueId)))
-  );
-  for (const admin of admins) {
+  // Side effects ONLY after commit. Immediately, day or night: no quiet hours.
+  // A recipient's own mute makes the push silent (still delivered). A mute
+  // lookup that fails or is slow fails LOUD (normal push), never quiet.
+  const recipients = alertRecipients(incident);
+  const muted = await alertMuteSetFor(recipients).catch(() => new Set<string>());
+  const routing: { email: string; silent: boolean }[] = [];
+  // C1: a push failure never hides the committed alert (it is already
+  // stored and visible in the app). The first failure per alert logs ONE
+  // bounded line — id, recipient count, error class; no emails, no
+  // payload. Push is best-effort in 5b; "Alert push retry" is a named
+  // follow-up item.
+  let pushFailureLogged = false;
+  const onPushError = (err: any) => {
+    if (pushFailureLogged) return;
+    pushFailureLogged = true;
+    log.warn(`[alerts] push failed for ${incident.id} (${recipients.length} recipients): ${err?.name || 'Error'}${err?.statusCode ? ` ${err.statusCode}` : ''}`);
+  };
+  for (const r of recipients) {
+    const silent = muted.has(r.id);
+    routing.push({ email: r.email, silent });
     sendPushToUser(
-      admin.email,
+      r.email,
       `🚨 ${incident.severity.toUpperCase()}: ${incident.title}`,
       `${venueName} — reported by ${incident.reporterName}`,
-      { incidentId: incident.id, venueId, type: 'incident' }
+      {
+        // 5b (A5): the push data contract is exactly these three keys, end
+        // to end — sw.ts reads url / tag / silent and nothing else.
+        url: `/?updates=alerts&alert=${encodeURIComponent(incident.id)}`,
+        tag: `alert-${incident.id}`,
+        silent,
+      },
+      onPushError
     );
   }
-  broadcast('INCIDENT_CREATED', { incident }, undefined, agencyId);
+  if (isTestMode()) { testAlertRouting.set(incident.id, routing); testAlertAttempts.set(incident.id, (testAlertAttempts.get(incident.id) || 0) + 1); }
+  broadcast('INCIDENT_CREATED', incidentSignal(incident), undefined, agencyId);
   broadcast('TASKS_UPDATED', { venueId }, undefined, agencyId);
 
-  res.json({ incident });
+  res.json({ incident: publicIncident(incident, caller) });
 });
 
 app.post('/api/incidents/:id/resolve', async (req, res) => {
@@ -4891,23 +5118,28 @@ app.post('/api/incidents/:id/resolve', async (req, res) => {
   const resolvedAt = new Date().toISOString();
   // Attribution from the VERIFIED session user, never the request body.
   const resolvedBy = caller.email;
+  const resolvedByName = caller.name;
   const ok = await crudUpdate(req, res, 'incidents', req.params.id,
     (fresh) => {
       if (fresh.status === 'resolved') return fresh; // idempotent
-      return { ...fresh, status: 'resolved', resolvedAt, resolvedBy };
+      return { ...fresh, status: 'resolved', resolvedAt, resolvedBy, resolvedByName };
     },
     {
       label: 'resolve-incident',
       broadcastType: 'INCIDENT_UPDATED',
-      getBroadcastPayload: (updated) => ({ incident: updated }),
+      getBroadcastPayload: (updated) => incidentSignal(updated),
       getAgencyId: (updated) => updated.agencyId,
+      getResponse: (updated) => ({ incident: publicIncident(updated, caller) }),
     }
   );
   return;
 });
 
 app.post('/api/incidents/:id/acknowledge', async (req, res) => {
-  // A3: same gate as resolve.
+  // 5b: "Acknowledged" means a RECIPIENT has taken it — an admin, or a
+  // coordinator of the alert's venue (the people it is routed to). On-site
+  // staff can still resolve it, but cannot mark someone else's alert as seen
+  // on the receivers' behalf.
   const ackCaller = getAuthUser(req);
   if (!ackCaller) {
     return res.status(401).json({ error: 'Sign in required. Please log in again.' });
@@ -4917,22 +5149,25 @@ app.post('/api/incidents/:id/acknowledge', async (req, res) => {
   if (!requireSameAgency(req, res, incident, 'incidents')) return;
   const mayAck =
     ackCaller.role === 'admin' ||
-    (ackCaller.role === 'coordinator' && callerMaySeeVenue(ackCaller, incident.venueId)) ||
-    ((ackCaller.role === 'mashgiach' || ackCaller.role === 'worker') && canFillTasks(ackCaller) &&
-      callerMaySeeVenue(ackCaller, incident.venueId));
+    (ackCaller.role === 'coordinator' && callerMaySeeVenue(ackCaller, incident.venueId));
   if (!mayAck) {
-    return res.status(403).json({ error: 'You can only acknowledge incidents at your own venue.' });
+    return res.status(403).json({ error: 'Only an admin or this venue\'s coordinator can acknowledge an alert.' });
   }
+  const acknowledgedAt = new Date().toISOString();
   const ok = await crudUpdate(req, res, 'incidents', req.params.id,
     (fresh) => {
       if (fresh.status === 'acknowledged' || fresh.status === 'resolved') return fresh; // idempotent
-      return { ...fresh, status: 'acknowledged' };
+      return {
+        ...fresh, status: 'acknowledged',
+        acknowledgedAt, acknowledgedBy: ackCaller.email, acknowledgedByName: ackCaller.name,
+      };
     },
     {
       label: 'acknowledge-incident',
       broadcastType: 'INCIDENT_UPDATED',
-      getBroadcastPayload: (updated) => ({ incident: updated }),
+      getBroadcastPayload: (updated) => incidentSignal(updated),
       getAgencyId: (updated) => updated.agencyId,
+      getResponse: (updated) => ({ incident: publicIncident(updated, ackCaller) }),
     }
   );
   return;
@@ -5762,12 +5997,13 @@ app.post('/api/handoff-notes', async (req, res) => {
 // never part of an announcement/note payload. 5b reads the same store for
 // the ✓✓ counts. Without Firestore (local file mode) marks live in memory.
 // ---------------------------------------------------------------------------
-type UpdateReads = { agencyId: string; userId: string; a: Record<string, string>; n: Record<string, string>; updatedAt?: string };
+// 5b: `i` holds alert (incident) marks — same store, same rules.
+type UpdateReads = { agencyId: string; userId: string; a: Record<string, string>; n: Record<string, string>; i: Record<string, string>; updatedAt?: string };
 const localUpdateReads = new Map<string, UpdateReads>();
 const updateReadsKey = (user: UserProfile) => `${(user as any).agencyId || 'agency-hkc'}__${user.id}`;
 
 function emptyUpdateReads(user: UserProfile): UpdateReads {
-  return { agencyId: (user as any).agencyId || 'agency-hkc', userId: user.id, a: {}, n: {} };
+  return { agencyId: (user as any).agencyId || 'agency-hkc', userId: user.id, a: {}, n: {}, i: {} };
 }
 
 /** Read the caller's marks. Identity = the authenticated server-side user, never request fields. */
@@ -5783,7 +6019,7 @@ function sanitizeUpdateReads(user: UserProfile, d: any): UpdateReads {
   const empty = emptyUpdateReads(user);
   // Fail closed on a doc that is not this user's (should never happen).
   if (!d || d.userId !== user.id || d.agencyId !== empty.agencyId) return empty;
-  return { ...empty, a: d.a || {}, n: d.n || {} };
+  return { ...empty, a: d.a || {}, n: d.n || {}, i: d.i || {} };
 }
 
 const UPDATE_READS_CAP = 5000;
@@ -5795,24 +6031,26 @@ const UPDATE_READS_CAP = 5000;
  * item counts as read ONLY when it has its own mark (review round 1: no
  * timestamp floor, so an item nobody saw can never be promoted to read).
  */
-async function addUpdateReads(user: UserProfile, annIds: string[], noteIds: string[]): Promise<number> {
+async function addUpdateReads(user: UserProfile, annIds: string[], noteIds: string[], alertIds: string[] = []): Promise<number> {
   const key = updateReadsKey(user);
   const now = new Date().toISOString();
   const createdOf = new Map<string, string>();
   for (const x of announcements) createdOf.set(`a:${x.id}`, x.createdAt);
   for (const x of handoffNotes) createdOf.set(`n:${x.id}`, x.createdAt);
+  for (const x of incidents) createdOf.set(`i:${x.id}`, x.createdAt);
   let recorded = 0;
   const apply = (rec: UpdateReads): UpdateReads => {
     recorded = 0;
     for (const id of annIds) if (!rec.a[id]) { rec.a[id] = now; recorded++; }
     for (const id of noteIds) if (!rec.n[id]) { rec.n[id] = now; recorded++; }
-    const prune = (kind: 'a' | 'n') => {
+    for (const id of alertIds) if (!rec.i[id]) { rec.i[id] = now; recorded++; }
+    const prune = (kind: 'a' | 'n' | 'i') => {
       const m = rec[kind];
       const live = Object.keys(m).filter((id) => createdOf.has(`${kind}:${id}`));
       live.sort((x, y) => (createdOf.get(`${kind}:${y}`) || '').localeCompare(createdOf.get(`${kind}:${x}`) || ''));
       rec[kind] = Object.fromEntries(live.slice(0, UPDATE_READS_CAP).map((id) => [id, m[id]]));
     };
-    prune('a'); prune('n');
+    prune('a'); prune('n'); prune('i');
     rec.updatedAt = now;
     return rec;
   };
@@ -5831,7 +6069,7 @@ async function addUpdateReads(user: UserProfile, annIds: string[], noteIds: stri
 }
 
 /** An item is read only when it carries the caller's own mark. */
-function isRead(rec: UpdateReads, kind: 'a' | 'n', id: string, _createdAt?: string): boolean {
+function isRead(rec: UpdateReads, kind: 'a' | 'n' | 'i', id: string, _createdAt?: string): boolean {
   return !!rec[kind][id];
 }
 
@@ -5863,8 +6101,9 @@ app.post('/api/updates/seen', async (req, res) => {
   // Validate BEFORE processing: arrays of strings, combined ≤ 200, de-duplicated.
   const rawA = req.body?.announcementIds ?? [];
   const rawN = req.body?.noteIds ?? [];
+  const rawI = req.body?.alertIds ?? [];
   const okArr = (v: any) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 200);
-  if (!okArr(rawA) || !okArr(rawN) || rawA.length + rawN.length > 200) {
+  if (!okArr(rawA) || !okArr(rawN) || !okArr(rawI) || rawA.length + rawN.length + rawI.length > 200) {
     return res.status(400).json({ error: 'Invalid request.' });
   }
   const annIds = [...new Set(rawA as string[])].filter((id) => {
@@ -5874,8 +6113,15 @@ app.post('/api/updates/seen', async (req, res) => {
   });
   const visibleNotes = new Set(notesVisibleAt(user, venueId).map((n) => n.id));
   const noteIds = [...new Set(rawN as string[])].filter((id) => visibleNotes.has(id));
+  // 5b (A2): an alert mark needs the alert at this venue AND the caller to
+  // be one of its recipients — a viewer's mark never counts.
+  const alertIds = [...new Set(rawI as string[])].filter((id) => {
+    const inc = incidents.find((x) => x.id === id);
+    return !!inc && inc.venueId === venueId && isAlertRecipient(user, inc);
+  });
   try {
-    const recorded = annIds.length + noteIds.length > 0 ? await addUpdateReads(user, annIds, noteIds) : 0;
+    const recorded = annIds.length + noteIds.length + alertIds.length > 0
+      ? await addUpdateReads(user, annIds, noteIds, alertIds) : 0;
     // Aggregate count only — never per-id success/failure.
     res.json({ ok: true, recorded });
   } catch (e: any) {
@@ -5898,6 +6144,13 @@ app.get('/api/updates/unread', async (req, res) => {
       .filter((a) => !a.venueId || a.venueId === venueId) // this venue's sheet: agency-wide + this venue
       .filter((a) => a.authorEmail !== email && !isRead(rec, 'a', a.id, a.createdAt));
     const notes = notesVisibleAt(user, venueId).filter((n) => n.authorEmail !== email && !isRead(rec, 'n', n.id, n.createdAt));
+    // 5b (A2 + A3): unread alerts = alerts ROUTED to the caller (recipients
+    // only) at this venue, not yet resolved, without the caller's own mark,
+    // and not ones the caller acknowledged (badge rule only — acknowledging
+    // never writes a read mark, so ✓✓ stays honest).
+    const alerts = alertsVisibleAt(user, venueId)
+      .filter((i) => isAlertRecipient(user, i) && i.status !== 'resolved' && !isRead(rec, 'i', i.id) &&
+        !sameEmail((i as any).acknowledgedBy, email));
     const urgent = anns
       .filter((a) => a.category === 'urgent')
       .sort((x, y) => y.createdAt.localeCompare(x.createdAt))
@@ -5905,17 +6158,220 @@ app.get('/api/updates/unread', async (req, res) => {
       .map((a) => ({ id: a.id, title: a.title, createdAt: a.createdAt }));
     // The unread ids ride along so the client can put an honest dot on the
     // exact items the counts describe (anns/notes above ARE the unread sets:
-    // visible at this venue, not the caller's own, not read — floor honoured).
+    // visible at this venue, not the caller's own, not read).
     res.json({
       announcements: anns.length,
       notes: notes.length,
+      alerts: alerts.length,
       urgent,
       unreadAnnouncementIds: anns.map((a) => a.id),
       unreadNoteIds: notes.map((n) => n.id),
+      unreadAlertIds: alerts.map((i) => i.id),
     });
   } catch (e: any) {
     console.warn(`[updates/unread] could not read marks: ${String(e?.message || e).slice(0, 120)}`);
     res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5b — Alerts read receipts (✓✓) and the receiver's own mute.
+// ---------------------------------------------------------------------------
+
+/** Alerts of ONE venue the user may see (the venue gate has already applied rule T). */
+function alertsVisibleAt(user: UserProfile, venueId: string): Incident[] {
+  return incidents.filter((i) => i.venueId === venueId && incidentVisibleTo(user, i));
+}
+
+/** Whose read status a viewer may see: the same people their roster shows
+ * (getSafeUsersForAgency) — admins see the agency; a coordinator sees users
+ * at their own venue(s) plus the agency's admins. Nobody else sees receipts. */
+function receiptViewerMaySee(viewer: UserProfile, u: UserProfile): boolean {
+  if ((u.agencyId || 'agency-hkc') !== ((viewer as any).agencyId || 'agency-hkc')) return false;
+  if (viewer.role === 'admin') return true;
+  if (viewer.role !== 'coordinator') return false;
+  const scope = venueScopeFor(viewer) as string[];
+  return u.role === 'admin' || (typeof (u as any).venueId === 'string' && scope.includes((u as any).venueId));
+}
+
+/** The intended readers of an item, as this viewer may see them. Announcements:
+ * everyone the announcement is visible to (rule N), minus its author.
+ * Alerts: the routing list (alertRecipients), which already excludes the reporter. */
+function receiptAudience(viewer: UserProfile, kind: 'a' | 'i', item: any): UserProfile[] {
+  const agencyId = (viewer as any).agencyId || 'agency-hkc';
+  const base = kind === 'i'
+    ? alertRecipients(item)
+    : users.filter((u) =>
+        (u.agencyId || 'agency-hkc') === agencyId &&
+        !sameEmail(u.email, item.authorEmail) &&
+        announcementVisibleTo(u, item));
+  return base.filter((u) => receiptViewerMaySee(viewer, u));
+}
+
+/** Marks of many users at once (each doc read under its owner's identity rules). */
+async function loadUpdateReadsMany(list: UserProfile[]): Promise<Map<string, UpdateReads>> {
+  const out = new Map<string, UpdateReads>();
+  const uniq = [...new Map(list.map((u) => [u.id, u])).values()];
+  const recs = await Promise.all(uniq.map((u) => loadUpdateReads(u)));
+  uniq.forEach((u, idx) => out.set(u.id, recs[idx]));
+  return out;
+}
+
+/** Receipts gate: the updates venue gate (kiosk 403, rule T venue) + admin/coordinator only. */
+function receiptsGate(req: any, res: any): { user: UserProfile; venueId: string } | null {
+  const g = updatesVenueGate(req, res);
+  if (!g) return null;
+  if (g.user.role !== 'admin' && g.user.role !== 'coordinator') {
+    res.status(403).json({ error: 'Only admins and coordinators can see who read an update.', code: 'RECEIPTS_FORBIDDEN' });
+    return null;
+  }
+  return g;
+}
+
+/** The items whose receipts this viewer may ask for in THIS venue's sheet. */
+function receiptItems(user: UserProfile, venueId: string) {
+  const agencyId = (user as any).agencyId || 'agency-hkc';
+  const anns = announcements
+    .filter((a) => a.agencyId === agencyId)
+    .filter((a) => announcementVisibleTo(user, a))
+    .filter((a) => !a.venueId || a.venueId === venueId);
+  const alerts = alertsVisibleAt(user, venueId);
+  return { anns, alerts };
+}
+
+// ✓✓ counts for the sheet: { id, read, total } per announcement and alert.
+// Counts only — no names here.
+app.get('/api/updates/receipts', async (req, res) => {
+  const g = receiptsGate(req, res);
+  if (!g) return;
+  const { user, venueId } = g;
+  try {
+    const { anns, alerts } = receiptItems(user, venueId);
+    const audA = new Map(anns.map((a) => [a.id, receiptAudience(user, 'a', a)]));
+    const audI = new Map(alerts.map((i) => [i.id, receiptAudience(user, 'i', i)]));
+    const everyone = [...audA.values(), ...audI.values()].flat();
+    const marks = await loadUpdateReadsMany(everyone);
+    const count = (aud: UserProfile[], kind: 'a' | 'i', id: string) => ({
+      id,
+      read: aud.filter((u) => { const r = marks.get(u.id); return !!r && isRead(r, kind, id); }).length,
+      total: aud.length,
+    });
+    res.set('Cache-Control', 'private, no-store');
+    res.json({
+      announcements: anns.map((a) => count(audA.get(a.id) || [], 'a', a.id)),
+      alerts: alerts.map((i) => count(audI.get(i.id) || [], 'i', i.id)),
+    });
+  } catch (e: any) {
+    console.warn(`[updates/receipts] could not read marks: ${String(e?.message || e).slice(0, 120)}`);
+    res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
+  }
+});
+
+// Reader list for ONE item: names + roles (no emails, no ids), who has read
+// it and when, and who has not yet. Unknown, other-venue and not-visible
+// items answer the same 404.
+app.get('/api/updates/receipts/:kind/:id', async (req, res) => {
+  const g = receiptsGate(req, res);
+  if (!g) return;
+  const { user, venueId } = g;
+  const kind = req.params.kind === 'announcement' ? 'a' : req.params.kind === 'alert' ? 'i' : null;
+  if (!kind) return res.status(404).json({ error: 'Not found.' });
+  const { anns, alerts } = receiptItems(user, venueId);
+  const item: any = kind === 'a' ? anns.find((a) => a.id === req.params.id) : alerts.find((i) => i.id === req.params.id);
+  if (!item) return res.status(404).json({ error: 'Not found.' });
+  try {
+    const aud = receiptAudience(user, kind, item);
+    const marks = await loadUpdateReadsMany(aud);
+    const read: { name: string; role: string; readAt: string }[] = [];
+    const notYet: { name: string; role: string }[] = [];
+    for (const u of aud) {
+      const r = marks.get(u.id);
+      const at = r ? r[kind][item.id] : undefined;
+      if (at) read.push({ name: u.name, role: u.role, readAt: at });
+      else notYet.push({ name: u.name, role: u.role });
+    }
+    read.sort((x, y) => x.readAt.localeCompare(y.readAt));
+    notYet.sort((x, y) => x.name.localeCompare(y.name));
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ id: item.id, read, notYet, total: aud.length });
+  } catch (e: any) {
+    console.warn(`[updates/receipts] could not read marks: ${String(e?.message || e).slice(0, 120)}`);
+    res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
+  }
+});
+
+// The receiver controls silence (Don, Oct 19): a per-user mute that makes
+// alert pushes SILENT for a while — they are still delivered immediately.
+// One small doc per user, alertMute/{agencyId}__{userId}, outside app-state/main.
+const localAlertMute = new Map<string, string>();
+const ALERT_MUTE_MAX_MINUTES = 24 * 60;
+
+async function loadAlertMuteUntil(user: UserProfile): Promise<string | null> {
+  const key = updateReadsKey(user);
+  let until: any = null;
+  if (!firestoreDb) until = localAlertMute.get(key) || null;
+  else {
+    const snap = await firestoreDb.collection('alertMute').doc(key).get();
+    const d = snap.exists ? snap.data() : null;
+    // Fail closed toward LOUD: a doc that is not this user's means no mute.
+    if (d && d.userId === user.id && d.agencyId === ((user as any).agencyId || 'agency-hkc')) until = d.until || null;
+  }
+  return typeof until === 'string' && until > new Date().toISOString() ? until : null;
+}
+
+/** Which recipients are muted right now. Bounded: a slow or failing store
+ * answers "nobody muted" (loud) after 1.5 s — an alert never waits on a mute. */
+async function alertMuteSetFor(list: UserProfile[]): Promise<Set<string>> {
+  const lookup = Promise.all(list.map(async (u) => ((await loadAlertMuteUntil(u)) ? u.id : null)))
+    .then((ids) => new Set(ids.filter((x): x is string => !!x)));
+  const timeout = new Promise<Set<string>>((resolve) => {
+    const t = setTimeout(() => resolve(new Set()), 1500);
+    (t as any).unref?.();
+  });
+  return Promise.race([lookup.catch(() => new Set<string>()), timeout]);
+}
+
+function alertMuteGate(req: any, res: any): UserProfile | null {
+  const user = requireAuthUser(req, res);
+  if (!user) return null;
+  if ((req as any).kiosk === true) {
+    res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
+    return null;
+  }
+  return user;
+}
+
+app.get('/api/updates/alert-mute', async (req, res) => {
+  const user = alertMuteGate(req, res);
+  if (!user) return;
+  try {
+    res.json({ mutedUntil: await loadAlertMuteUntil(user) });
+  } catch {
+    res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
+  }
+});
+
+app.put('/api/updates/alert-mute', async (req, res) => {
+  const user = alertMuteGate(req, res);
+  if (!user) return;
+  const minutes = req.body?.minutes;
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > ALERT_MUTE_MAX_MINUTES) {
+    return res.status(400).json({ error: 'Invalid request.' });
+  }
+  const until = minutes === 0 ? null : new Date(Date.now() + minutes * 60_000).toISOString();
+  const key = updateReadsKey(user);
+  try {
+    if (!firestoreDb) {
+      if (until) localAlertMute.set(key, until); else localAlertMute.delete(key);
+    } else {
+      await firestoreDb.collection('alertMute').doc(key).set({
+        agencyId: (user as any).agencyId || 'agency-hkc', userId: user.id, until, updatedAt: new Date().toISOString(),
+      });
+    }
+    res.json({ mutedUntil: until });
+  } catch (e: any) {
+    console.warn(`[alert-mute] could not save: ${String(e?.message || e).slice(0, 120)}`);
+    res.status(503).json({ error: 'Could not save. Please retry.', code: 'SAVE_FAILED' });
   }
 });
 
@@ -6378,6 +6834,13 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
   // TEST ONLY: injects venues/tasks/agencies/users directly into Firestore
   // (for cross-agency test fixtures that can't be created via the scoped
   // HTTP API). Used by test-10 and test-16.
+  // TEST ONLY (5b): who an alert was routed to, and whether silently. No push
+  // is sent in tests (no VAPID keys); this is the routing decision itself.
+  app.get('/api/__test__/alert-routing', (req, res) => {
+    const id = String(req.query.id || '');
+    res.json({ routing: testAlertRouting.get(id) || null, attempts: testAlertAttempts.get(id) || 0 });
+  });
+
   app.post('/api/__test__/inject-fixture', async (req, res) => {
     const {
       venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [],
