@@ -5883,7 +5883,16 @@ app.get('/api/updates/unread', async (req, res) => {
       .sort((x, y) => y.createdAt.localeCompare(x.createdAt))
       .slice(0, 3)
       .map((a) => ({ id: a.id, title: a.title, createdAt: a.createdAt }));
-    res.json({ announcements: anns.length, notes: notes.length, urgent });
+    // The unread ids ride along so the client can put an honest dot on the
+    // exact items the counts describe (anns/notes above ARE the unread sets:
+    // visible at this venue, not the caller's own, not read — floor honoured).
+    res.json({
+      announcements: anns.length,
+      notes: notes.length,
+      urgent,
+      unreadAnnouncementIds: anns.map((a) => a.id),
+      unreadNoteIds: notes.map((n) => n.id),
+    });
   } catch (e: any) {
     console.warn(`[updates/unread] could not read marks: ${String(e?.message || e).slice(0, 120)}`);
     res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
