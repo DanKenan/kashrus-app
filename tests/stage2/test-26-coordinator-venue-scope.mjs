@@ -95,6 +95,10 @@ export default {
     const taskA2Id = `task-test26-a2-${ts}`;
     const noteA1Id = `note-test26-a1-${ts}`;
     const noteA2Id = `note-test26-a2-${ts}`;
+    const noteWsA1Id = `note-test26-wsa1-${ts}`;
+    const noteWsA2Id = `note-test26-wsa2-${ts}`;
+    const evtAssignedId = `evt-test26-assigned-${ts}`;
+    const evtAssignedTaskId = `evttask-test26-assigned-${ts}`;
     const incA1Id = `inc-test26-a1-${ts}`;
     const incA2Id = `inc-test26-a2-${ts}`;
     const evtA1Id = `evt-test26-a1-${ts}`;
@@ -138,6 +142,8 @@ export default {
       handoffNotes: [
         { id: noteA1Id, agencyId: AGENCY_X, venueId: vA1, content: `Note A1 ${ts}`, authorEmail: mashA1Email, authorName: 'T26 Mash A1', shift: 'Morning', createdAt: new Date(ts).toISOString() },
         { id: noteA2Id, agencyId: AGENCY_X, venueId: vA2, content: `Note A2 ${ts}`, authorEmail: `masha2-${ts}@test.local`, authorName: 'T26 Mash A2', shift: 'Morning', createdAt: new Date(ts).toISOString() },
+        { id: noteWsA1Id, agencyId: AGENCY_X, venueId: vA1, content: `Note WS A1 ${ts}`, authorEmail: mashA1Email, authorName: 'T26 Mash A1', shift: 'Morning', createdAt: new Date(ts).toISOString() },
+        { id: noteWsA2Id, agencyId: AGENCY_X, venueId: vA2, content: `Note WS A2 ${ts}`, authorEmail: `masha2-${ts}@test.local`, authorName: 'T26 Mash A2', shift: 'Morning', createdAt: new Date(ts).toISOString() },
       ],
       incidents: [
         { id: incA1Id, agencyId: AGENCY_X, venueId: vA1, title: `Incident A1 ${ts}`, description: 'd1', severity: 'high', status: 'open', reporterEmail: mashA1Email, reporterName: 'T26 Mash A1', createdAt: new Date(ts).toISOString() },
@@ -146,6 +152,9 @@ export default {
       events: [
         { id: evtA1Id, agencyId: AGENCY_X, venueId: vA1, title: `Event A1 ${ts}`, location: 'Hall 1', date: '2026-11-02', tasks: [{ id: evtTaskA1Id, title: `EvtTask A1 ${ts}`, isCompleted: false }] },
         { id: evtA2Id, agencyId: AGENCY_X, venueId: vA2, title: `Event A2 ${ts}`, location: 'Hall 2', date: '2026-11-02', tasks: [] },
+        // Fix 5 exception: an A2 event ASSIGNED to mashA1 (own record — the
+        // agency assigned a mashgiach to a catered event at another venue).
+        { id: evtAssignedId, agencyId: AGENCY_X, venueId: vA2, title: `Event Assigned ${ts}`, location: 'Offsite', date: '2026-11-04', assignedMashgiachEmail: mashA1Email, tasks: [{ id: evtAssignedTaskId, title: `EvtTask Assigned ${ts}`, isCompleted: false }] },
       ],
       approvedIngredients: [
         { id: ingA1Id, agencyId: AGENCY_X, venueId: vA1, name: `Ing A1 ${ts}`, kosherStatus: 'approved', verificationStatus: 'unverified' },
@@ -432,11 +441,57 @@ export default {
         body: JSON.stringify(await apiWriteBody({ title: 'nope' })),
       });
       if (putBad.status !== 403) throw new Error(`coord PUT event A2: ${putBad.status} (expected 403)`);
+      // title = DEFINITION field → mashgiach PUT changing it → 403 (kept from
+      // the first round of test-26; rule AB — it codifies the intended gate).
       const putMash = await fetch(`${baseUrl}/api/events/${evtA1Id}`, {
         method: 'PUT', headers: auth(tMashA1),
         body: JSON.stringify(await apiWriteBody({ title: 'nope' })),
       });
-      if (putMash.status !== 403) throw new Error(`mash PUT event: ${putMash.status} (expected 403)`);
+      if (putMash.status !== 403) throw new Error(`mash PUT event (title change): ${putMash.status} (expected 403)`);
+      // Fix 1 positive (the EventsModal "Add task" bar regression): the mashgiach
+      // PUTs the REAL client body — the whole A1 event + one appended task,
+      // definition untouched → 200, and the task is there on read-back.
+      const evtsRes = await fetch(`${baseUrl}/api/events`, { headers: auth(tMashA1) });
+      const evtsBody = await evtsRes.json();
+      const fullEvent = (evtsBody.events || []).find((e) => e.id === evtA1Id);
+      if (!fullEvent) throw new Error('fix1: mashA1 cannot read the A1 event to build the client body');
+      const addTaskBody = await apiWriteBody({
+        ...fullEvent,
+        tasks: [...(fullEvent.tasks || []), { id: `etask-test26-${ts}`, title: `Added by mash ${ts}`, isCompleted: false }],
+      });
+      const putAdd = await fetch(`${baseUrl}/api/events/${evtA1Id}`, {
+        method: 'PUT', headers: auth(tMashA1), body: JSON.stringify(addTaskBody),
+      });
+      if (putAdd.status !== 200) throw new Error(`fix1 mash add-task PUT: ${putAdd.status} (expected 200)`);
+      const evtsRes2 = await fetch(`${baseUrl}/api/events`, { headers: auth(tMashA1) });
+      const evtsBody2 = await evtsRes2.json();
+      const back = (evtsBody2.events || []).find((e) => e.id === evtA1Id);
+      if (!(back.tasks || []).some((t) => t.title === `Added by mash ${ts}`)) throw new Error('fix1: appended task missing on read-back');
+      // Mash at A1 sending the same tasks-only PUT against an A2 event → 403.
+      const a2EventObj = { id: evtA2Id, agencyId: AGENCY_X, venueId: vA2, title: `Event A2 ${ts}`, location: 'Hall 2', date: '2026-11-02', tasks: [] };
+      const putA2 = await fetch(`${baseUrl}/api/events/${evtA2Id}`, {
+        method: 'PUT', headers: auth(tMashA1),
+        body: JSON.stringify(await apiWriteBody({ ...a2EventObj, tasks: [{ id: `etask-bad-${ts}`, title: 'bad', isCompleted: false }] })),
+      });
+      if (putA2.status !== 403) throw new Error(`mash PUT A2 event tasks-only: ${putA2.status} (expected 403)`);
+      // Fix 5 (own-records exception): mashA1 is ASSIGNED to an A2 event →
+      // sees it in GET /api/events and can toggle its tasks; a NON-assigned
+      // A1 mashgiach (canFillTasks=false) does not see it and toggle → 403.
+      const seeAssigned = (evtsBody.events || []).some((e) => e.id === evtAssignedId);
+      if (!seeAssigned) throw new Error('fix5: assigned mashgiach does not see the A2 event in GET /api/events');
+      const togAssigned = await fetch(`${baseUrl}/api/events/${evtAssignedId}/tasks/${evtAssignedTaskId}/toggle`, {
+        method: 'POST', headers: auth(tMashA1),
+        body: JSON.stringify(await apiWriteBody({ isCompleted: true })),
+      });
+      if (togAssigned.status !== 200) throw new Error(`fix5 assigned toggle: ${togAssigned.status} (expected 200)`);
+      const evtsNoFill = await fetch(`${baseUrl}/api/events`, { headers: auth(tNoFill) });
+      const evtsNoFillBody = await evtsNoFill.json();
+      if ((evtsNoFillBody.events || []).some((e) => e.id === evtAssignedId)) throw new Error('fix5: non-assigned A1 mashgiach SEES the A2 event (LEAK)');
+      const togNotAssigned = await fetch(`${baseUrl}/api/events/${evtAssignedId}/tasks/${evtAssignedTaskId}/toggle`, {
+        method: 'POST', headers: auth(tNoFill),
+        body: JSON.stringify(await apiWriteBody({ isCompleted: true })),
+      });
+      if (togNotAssigned.status !== 403) throw new Error(`fix5 non-assigned toggle: ${togNotAssigned.status} (expected 403)`);
       // POST events: mashgiach creates at own venue → 200; at A2 → 403
       const postOwn = await fetch(`${baseUrl}/api/events`, {
         method: 'POST', headers: auth(tMashA1),
@@ -481,11 +536,59 @@ export default {
 
     /* ---- 9. Media intent venue gate (B2) ---- */
     {
+      const intentBase = { mimeType: 'image/jpeg', sizeBytes: 10, sha256: '0'.repeat(64) };
       const intentBad = await fetch(`${baseUrl}/api/media/intent`, {
         method: 'POST', headers: auth(tCoord),
-        body: JSON.stringify({ venueId: vA2, mimeType: 'image/jpeg', sizeBytes: 10, sha256: '0'.repeat(64) }),
+        body: JSON.stringify({ ...intentBase, venueId: vA2 }),
       });
       if (intentBad.status !== 403) throw new Error(`coord media intent A2: ${intentBad.status} (expected 403)`);
+      // fix round 1 (a): a non-admin intent WITHOUT venueId → 403 (required).
+      const intentNoVenue = await fetch(`${baseUrl}/api/media/intent`, {
+        method: 'POST', headers: auth(tCoord),
+        body: JSON.stringify(intentBase),
+      });
+      if (intentNoVenue.status !== 403) throw new Error(`coord media intent no-venue: ${intentNoVenue.status} (expected 403)`);
+      // Coordinator intent for their OWN venue passes the gate (storage is
+      // unconfigured in mock/emulator runs, so any later failure is 503
+      // NOT_CONFIGURED or 201 — never 403).
+      const intentOwn = await fetch(`${baseUrl}/api/media/intent`, {
+        method: 'POST', headers: auth(tCoord),
+        body: JSON.stringify({ ...intentBase, venueId: vA1 }),
+      });
+      if (intentOwn.status === 403) throw new Error('coord media intent A1 blocked at the venue gate (403)');
+      // fix round 1 (b): commit validation. Seed INTENT-state media docs in
+      // the test-only collection (GCS is unavailable here; the gates run
+      // BEFORE the state/storage checks, which is exactly what these assert).
+      const seed = async (id, venueId) => {
+        const r = await fetch(`${baseUrl}/api/__test__/media/seed-doc`, {
+          method: 'POST', headers: auth(tAdminX),
+          body: JSON.stringify({ id, agencyId: AGENCY_X, venueId }),
+        });
+        if (r.status !== 200) throw new Error(`media seed ${id}: ${r.status}`);
+      };
+      await seed(`media-t26-a1-${ts}`, vA1);
+      await seed(`media-t26-orphan-${ts}`, null);
+      const commit = (token, mediaId, entityId) => fetch(`${baseUrl}/api/media/${mediaId}/commit`, {
+        method: 'POST', headers: auth(token),
+        body: JSON.stringify({ entityType: 'task', entityId }),
+      });
+      // A1 media doc onto an A2 task → 403 (venue mismatch).
+      const commitCross = await commit(tCoord, `media-t26-a1-${ts}`, taskA2Id);
+      if (commitCross.status !== 403) throw new Error(`commit A1 doc onto A2 task: ${commitCross.status} (expected 403)`);
+      // Nonexistent entity → 404.
+      const commit404 = await commit(tCoord, `media-t26-a1-${ts}`, `task-nope-${ts}`);
+      if (commit404.status !== 404) throw new Error(`commit onto missing entity: ${commit404.status} (expected 404)`);
+      // A1 doc onto an A1 task: gates PASS — the only allowed failure is the
+      // downstream lifecycle state check (state INTENT ≠ VALIDATED → 400),
+      // never 403/404.
+      const commitOwn = await commit(tCoord, `media-t26-a1-${ts}`, taskA1Id);
+      if (commitOwn.status === 403 || commitOwn.status === 404) throw new Error(`commit A1 doc onto A1 task blocked at the gates: ${commitOwn.status}`);
+      // fix round 1 (c): a venue-less media doc is admin-only — coordinator
+      // download → 403; admin passes the gate (fails later at storage, not 403).
+      const dlBad = await fetch(`${baseUrl}/api/media/media-t26-orphan-${ts}/download`, { headers: auth(tCoord) });
+      if (dlBad.status !== 403) throw new Error(`coord download venue-less media: ${dlBad.status} (expected 403)`);
+      const dlAdmin = await fetch(`${baseUrl}/api/media/media-t26-orphan-${ts}/download`, { headers: auth(tAdminX) });
+      if (dlAdmin.status === 403) throw new Error('admin download venue-less media blocked at the gate (403)');
     }
 
     /* ---- 10. WebSocket: INITIAL_STATE + live broadcasts are venue-scoped ---- */
@@ -525,7 +628,65 @@ export default {
       await new Promise((r) => setTimeout(r, 1500));
       const coordSawInc = connCoord.messages.some((m) => m.type === 'INCIDENT_CREATED');
       if (coordSawInc) throw new Error('WS coord: received INCIDENT_CREATED for A2 (LEAK)');
+      // Fix 3: delete broadcasts carry venueId now. Admin deletes the A2 note
+      // → the coordinator socket must NOT receive the delete; the A1 note
+      // deleted → it MUST arrive (with venueId in the payload).
+      connCoord.messages.length = 0;
+      const delA2 = await fetch(`${baseUrl}/api/handoff-notes/${noteWsA2Id}?expectedVersion=${await ctx.getVersion()}`, { method: 'DELETE', headers: auth(tAdminX) });
+      if (delA2.status !== 200) throw new Error(`fix3 delete A2 note (admin): ${delA2.status}`);
+      await new Promise((r) => setTimeout(r, 1200));
+      if (connCoord.messages.some((m) => m.type === 'HANDOFF_NOTE_DELETED')) throw new Error('fix3: A2 HANDOFF_NOTE_DELETED leaked to coordinator');
+      const delA1 = await fetch(`${baseUrl}/api/handoff-notes/${noteWsA1Id}?expectedVersion=${await ctx.getVersion()}`, { method: 'DELETE', headers: auth(tCoord) });
+      if (delA1.status !== 200) throw new Error(`fix3 delete A1 note (coord): ${delA1.status}`);
+      await new Promise((r) => setTimeout(r, 1200));
+      const gotDelete = connCoord.messages.find((m) => m.type === 'HANDOFF_NOTE_DELETED');
+      if (!gotDelete) throw new Error('fix3: coordinator did not receive A1 HANDOFF_NOTE_DELETED');
+      if ((gotDelete.payload || {}).venueId !== vA1) throw new Error('fix3: HANDOFF_NOTE_DELETED payload missing venueId');
       connCoord.ws.close(); connAdmin.ws.close();
+    }
+
+    /* ---- 10b. Item 7: the assigned-event exception on the WS side ---- */
+    {
+      const mashA2Email = `masha2-${ts}@test.local`;
+      const connMash = await connectWs(baseUrl, tMashA1);
+      const connNoFill = await connectWs(baseUrl, tNoFill);
+      // Assigned A1 mashgiach gets the A2 event in INITIAL_STATE.
+      const initEvents = ids(connMash.initialState?.payload?.events);
+      if (!initEvents.includes(evtAssignedId)) throw new Error('fix7: assigned mashgiach INITIAL_STATE missing the A2 event');
+      // Admin makes a notes-only update → mashA1 receives EVENT_UPDATED;
+      // the non-assigned A1 mashgiach receives nothing for that event.
+      connMash.messages.length = 0; connNoFill.messages.length = 0;
+      const evtsAdmin = await fetch(`${baseUrl}/api/events`, { headers: auth(tAdminX) });
+      const evtsAdminBody = await evtsAdmin.json();
+      const fullAssigned = (evtsAdminBody.events || []).find((e) => e.id === evtAssignedId);
+      if (!fullAssigned) throw new Error('fix7: admin cannot read the assigned event');
+      const upd = await fetch(`${baseUrl}/api/events/${evtAssignedId}`, {
+        method: 'PUT', headers: auth(tAdminX),
+        body: JSON.stringify(await apiWriteBody({ ...fullAssigned, notes: `updated ${ts}` })),
+      });
+      if (upd.status !== 200) throw new Error(`fix7 admin notes update: ${upd.status}`);
+      await new Promise((r) => setTimeout(r, 1500));
+      const mashGotUpd = connMash.messages.some((m) => m.type === 'EVENT_UPDATED' && (m.payload?.event?.id === evtAssignedId || m.payload?.eventId === evtAssignedId));
+      if (!mashGotUpd) throw new Error('fix7: assigned mashgiach did NOT receive EVENT_UPDATED');
+      const noFillGot = connNoFill.messages.some((m) => (m.type === 'EVENT_UPDATED' || m.type === 'EVENT_CREATED') && JSON.stringify(m.payload).includes(evtAssignedId));
+      if (noFillGot) throw new Error('fix7: non-assigned mashgiach received an EVENT_* message for the A2 event (LEAK)');
+      // Reassignment: admin assigns the event to mashA2 instead. The stale
+      // assignee gets EVENT_DELETED, and their next toggle → 403.
+      connMash.messages.length = 0;
+      const reassign = await fetch(`${baseUrl}/api/events/${evtAssignedId}`, {
+        method: 'PUT', headers: auth(tAdminX),
+        body: JSON.stringify(await apiWriteBody({ ...fullAssigned, notes: `updated ${ts}`, assignedMashgiachEmail: mashA2Email })),
+      });
+      if (reassign.status !== 200) throw new Error(`fix7 reassign PUT: ${reassign.status}`);
+      await new Promise((r) => setTimeout(r, 1500));
+      const staleDelete = connMash.messages.some((m) => m.type === 'EVENT_DELETED' && (m.payload?.id === evtAssignedId));
+      if (!staleDelete) throw new Error('fix7: stale assignee did NOT receive EVENT_DELETED after reassignment');
+      const staleToggle = await fetch(`${baseUrl}/api/events/${evtAssignedId}/tasks/${evtAssignedTaskId}/toggle`, {
+        method: 'POST', headers: auth(tMashA1),
+        body: JSON.stringify(await apiWriteBody({ isCompleted: false })),
+      });
+      if (staleToggle.status !== 403) throw new Error(`fix7 stale-assignee toggle: ${staleToggle.status} (expected 403)`);
+      connMash.ws.close(); connNoFill.ws.close();
     }
 
     /* ---- 11. Reassignment: moving the coordinator A1 → A2 refreshes their sockets ---- */
