@@ -131,11 +131,22 @@ export function issueTypeForReason(reason: unknown): ConsistencyIssueType {
  *   <item>: <detail>; …[ and X more]. Details: INFO lines run=<id>
  * Items/details are sanitized and capped (48 / 80 chars) here, so every
  * caller (production run, demo alert, tests) gets the same safe text.
+ *
+ * opts.capped: the per-entity check lists at most 20 mismatches, so when
+ * the mismatch list hit that cap the total is a floor, not an exact count —
+ * the line reads "20+ issues:" (counts and "and X more" unchanged).
+ *
+ * Note (fix round 1, LOW): the 0-issues form of this line is unreachable in
+ * production — the formatter is only called with the ERROR prefix when at
+ * least one issue exists (perEntityStatus match === zero mismatches, and
+ * every other not-ok branch adds an issue first). It exists so the
+ * formatter is total and demo/test callers get a sane line.
  */
 export function formatConsistencySummary(
   prefix: string,
   runId: string,
-  issues: ConsistencyIssue[]
+  issues: ConsistencyIssue[],
+  opts: { capped?: boolean } = {}
 ): string {
   const clean = (issues || []).map((i) => ({
     type: validIssueType(i?.type),
@@ -153,7 +164,8 @@ export function formatConsistencySummary(
     (sorted.length > 3 ? ` (+${sorted.length - 3} more types)` : '');
   const itemsText = clean.slice(0, 3).map((i) => `${i.item}: ${i.detail}`).join('; ');
   const moreText = n > 3 ? ` and ${n - 3} more` : '';
-  return `${prefix} run=${runId} — ${n} ${n === 1 ? 'issue' : 'issues'}: ${countsText}. ${itemsText}${moreText}. ${suffix}`;
+  const totalText = opts.capped ? `${n}+` : `${n}`;
+  return `${prefix} run=${runId} — ${totalText} ${n === 1 ? 'issue' : 'issues'}: ${countsText}. ${itemsText}${moreText}. ${suffix}`;
 }
 
 /** Run id: c-YYYYMMDD-HHMM-xxxx (UTC, minute precision + 4 random hex). */
@@ -215,6 +227,14 @@ export interface ConsistencyCheckOpts {
    * mid-run still reports the findings collected so far.
    */
   sink?: { runId: string; issues: ConsistencyIssue[] };
+  /**
+   * Emission marker shared with the route (single-writer rule): the handler
+   * sets runId as soon as it has one and emitted=true immediately after its
+   * one summary log call, so the route can tell "no summary was emitted"
+   * (route owes the ERROR) from "summary emitted, response failed" (route
+   * must never add a second ERROR).
+   */
+  alert?: { runId?: string; emitted: boolean };
 }
 
 /**
@@ -309,7 +329,12 @@ export async function runConsistencyCheck(
       detail: sanitizeText(detail, 80),
     };
     issues.push(issue);
-    log.info(`[consistency] INFO run=${runId} ${issue.type} ${issue.item}: ${issue.detail}`);
+    // Best-effort only: once the issue is in the collector, a failing INFO
+    // write must never throw — it could otherwise suppress the run's one
+    // ERROR summary (fix round 1). Swallow and continue.
+    try {
+      log.info(`[consistency] INFO run=${runId} ${issue.type} ${issue.item}: ${issue.detail}`);
+    } catch { /* the summary still carries this finding */ }
   };
 
   // Dynamic import to avoid circular dependencies; works with both .ts (tests)
@@ -344,7 +369,10 @@ export async function runConsistencyCheck(
     try {
       status = await perEntityStatus(firestoreDb);
     } catch (e: any) {
-      lastError = e?.message || 'perEntityStatus failed';
+      // Bounded: an unbounded exception message could make this WARNING
+      // line multi-line / huge (fix round 1). boundedReason collapses and
+      // caps it; the text still lands in result.error via lastError.
+      lastError = boundedReason(e);
       log.warn(`[consistency] WARNING run=${runId} perEntityStatus failed (attempt ${attempt}): ${lastError}`);
       continue;
     }
@@ -392,9 +420,12 @@ export async function runConsistencyCheck(
       }
     }
     const ok = status.match && !sizeWarn && !backup.stale;
+    // migration.ts caps the mismatch list at 20 — at the cap the issue
+    // total is a floor, and the summary must say so ("20+ issues").
+    const mismatchesCapped = status.mismatches.length >= 20;
     const summary = ok
       ? `[consistency] INFO run=${runId} ok: 0 issues (venues ${status.monolith.venues}, users ${status.monolith.users}, tasks ${status.monolith.tasks}; monolith ${Math.round(sizeBytes / 1024)} KiB; last backup ${backup.lastAt || 'never'})`
-      : formatConsistencySummary(CONSISTENCY_ERROR_PREFIX, runId, issues);
+      : formatConsistencySummary(CONSISTENCY_ERROR_PREFIX, runId, issues, { capped: mismatchesCapped });
 
     return {
       ok,
@@ -452,19 +483,26 @@ export async function handleConsistencyCheck(
     body = result;
     line = result.summary;
     isError = result.issues.length > 0;
+    if (opts.alert) opts.alert.runId = result.runId;
   } catch (e: any) {
     const runId = sink.runId || newConsistencyRunId();
     const detail = boundedReason(e);
     const issue: ConsistencyIssue = { type: 'check-error', item: 'run', detail };
-    log.info(`[consistency] INFO run=${runId} ${issue.type} ${issue.item}: ${issue.detail}`);
+    // Best-effort only (fix round 1): this INFO write must never throw on
+    // the way to the one ERROR emit below.
+    try {
+      log.info(`[consistency] INFO run=${runId} ${issue.type} ${issue.item}: ${issue.detail}`);
+    } catch { /* the summary still carries this finding */ }
     const allIssues = [...sink.issues, issue];
     line = formatConsistencySummary(CONSISTENCY_ERROR_PREFIX, runId, allIssues);
     httpStatus = 500;
     body = { ok: false, runId, issues: allIssues, summary: line, error: detail };
     isError = true;
+    if (opts.alert) opts.alert.runId = runId;
   }
   // Exactly one emit site for the whole run.
   if (isError) log.error(line);
   else log.info(line);
+  if (opts.alert) opts.alert.emitted = true;
   return { httpStatus, body };
 }

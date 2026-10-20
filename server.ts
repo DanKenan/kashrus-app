@@ -5217,28 +5217,18 @@ app.post('/api/media/sweep', async (req, res) => {
  * Returns non-2xx on failure so Cloud Scheduler retries / alerts.
  */
 app.post('/api/internal/consistency-check', async (req, res) => {
-  let runId: string | undefined;
-  try {
-    const isScheduler = (req as any).schedulerAuth === true;
-    if (!isScheduler) {
-      const admin = requireAdmin(req, res);
-      if (!admin) return;
-    }
-    if (!firestoreDb) {
-      res.status(503).json({ error: 'Firestore not available.' });
-      return;
-    }
-    const { handleConsistencyCheck } = await import('./src/server/consistency.js');
-    const { httpStatus, body } = await handleConsistencyCheck(firestoreDb);
-    runId = (body as any)?.runId;
-    res.status(httpStatus).json(body);
-  } catch (e: any) {
-    // Last resort only (e.g. the response write itself failed). The run's one
-    // "[consistency] ERROR" line is emitted inside handleConsistencyCheck, so
-    // this path must never log at ERROR — WARNING with the run id instead.
-    log.warn(`[consistency] WARNING run=${runId || 'unknown'} route error: ${e?.message || e}`);
-    if (!res.headersSent) res.status(500).json({ error: 'Consistency check failed.' });
+  const isScheduler = (req as any).schedulerAuth === true;
+  if (!isScheduler) {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
   }
+  // The body lives in src/server/consistency-route.ts: it owns the 503,
+  // the handler call, and the single-writer safety net (an emission marker
+  // shared with the handler, so a failure before the handler runs still
+  // produces exactly one "[consistency] ERROR" — and a failure after the
+  // summary never produces a second one).
+  const { consistencyRoute } = await import('./src/server/consistency-route.js');
+  await consistencyRoute(firestoreDb, res);
 });
 
 /**

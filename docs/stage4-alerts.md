@@ -152,8 +152,9 @@ summary line for the whole run. Every finding is also written as its own
 run writes one INFO "ok" line and no alert. The admin page's second button,
 "Fire demo grouped alert", sends one real alert built from sample data in
 exactly this grouped shape (marked "not real data") so the phone view can be
-checked without a real failure. Alerts are delivered immediately, 24/7; any
-silencing is the receiver's own setting.
+checked without a real failure. The check lists at most 20 mismatches per
+run; '20+' means the list was cut. Alerts are delivered immediately, 24/7;
+any silencing is the receiver's own setting.
 
 ### 3b. Cloud Run Job failure — `shutfey-backup-tier1` (email + SMS)
 

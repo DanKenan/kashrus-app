@@ -12,6 +12,7 @@
  */
 import { writeFileSync } from 'node:fs';
 import { handleConsistencyCheck } from '../../../src/server/consistency.ts';
+import { consistencyRoute } from '../../../src/server/consistency-route.ts';
 import { createMockDb, venue, user, emailKey } from '../test-consistency.mjs';
 
 const [scenario, resultFile] = process.argv.slice(2);
@@ -48,6 +49,52 @@ if (scenario === 'grouped') {
       throw new Error('gcs exploded\nsecond line');
     },
   });
+} else if (scenario === 'info-throws') {
+  // The first finding's INFO line goes out; every later stdout write throws.
+  // addIssue must swallow it (best-effort) so the ERROR summary survives.
+  let writes = 0;
+  const origWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (...args) => {
+    writes++;
+    if (writes > 1) throw new Error('stdout broken');
+    return origWrite(...args);
+  };
+  out = await handleConsistencyCheck(groupedDb(), { checkBackup: freshBackup });
+} else if (scenario === 'status-throws') {
+  // perEntityStatus throws a long multi-line error (via collection reads):
+  // the retry WARNING lines must come out bounded and single-line.
+  const base = groupedDb();
+  const db = {
+    doc: (...a) => base.doc(...a),
+    collection: () => {
+      throw new Error('per-entity read exploded badly on the first line\nsecond line of the failure\n' + 'x'.repeat(300));
+    },
+  };
+  out = await handleConsistencyCheck(db, { checkBackup: freshBackup });
+} else if (scenario === 'route-import-fails') {
+  // The module that carries the handler fails to load: the route owes the
+  // run exactly one ERROR line in the summary shape (run=pre-run).
+  const recorded = { statusCode: 0, body: undefined };
+  const res = {
+    headersSent: false,
+    status(c) { recorded.statusCode = c; return this; },
+    json(b) { recorded.body = b; return this; },
+  };
+  await consistencyRoute(groupedDb(), res, async () => {
+    throw new Error('Cannot find module ./consistency.js\nRequire stack: fake');
+  });
+  out = { httpStatus: recorded.statusCode, body: recorded.body };
+} else if (scenario === 'route-json-throws') {
+  // The summary is emitted, then the response write throws: the route must
+  // add a WARNING, never a second ERROR. Default loader = the real module.
+  const recorded = { statusCode: 0 };
+  const res = {
+    headersSent: false,
+    status(c) { recorded.statusCode = c; return this; },
+    json() { throw new Error('res.json exploded'); },
+  };
+  await consistencyRoute(groupedDb(), res);
+  out = { httpStatus: recorded.statusCode, body: null };
 } else {
   throw new Error(`unknown scenario: ${scenario}`);
 }
