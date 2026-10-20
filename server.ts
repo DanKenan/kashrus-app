@@ -10,6 +10,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import * as media from './src/server/media.js';
 import { log } from './src/server/log.ts';
+import { mountStaticFiles } from './src/server/static-files.ts';
 import { consistencyRoute } from './src/server/consistency-route.js';
 
 // ---------------------------------------------------------------------------
@@ -11194,10 +11195,8 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    // Cache headers that let every deploy reach phones (see static-files.ts).
+    mountStaticFiles(app, distPath);
   }
 
   server.listen(PORT, '0.0.0.0', () => {

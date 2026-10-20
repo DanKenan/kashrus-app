@@ -5,8 +5,9 @@ import testConsistency from './test-consistency.mjs';
 import testBackup from './test-backup.mjs';
 import testRestore from './test-restore.mjs';
 import testLogging from './test-logging.mjs';
+import testStaticCache from './test-static-cache.mjs';
 
-const tests = [testConsistency, testBackup, testRestore, testLogging];
+const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache];
 
 export async function runAll() {
   console.log(`\n=== Stage 4 PR A Tests (${tests.length} tests) ===\n`);
