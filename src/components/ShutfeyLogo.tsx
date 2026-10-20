@@ -17,10 +17,10 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
   agencyShortCode,
 }) => {
   const iconSizes = {
-    sm: 'w-7 h-7 sm:w-8 sm:h-8 rounded-xl',
-    md: 'w-8 h-8 sm:w-9 sm:h-9 rounded-2xl',
-    lg: 'w-10 h-10 sm:w-12 sm:h-12 rounded-2xl',
-    xl: 'w-14 h-14 sm:w-16 sm:h-16 rounded-2xl',
+    sm: 'w-7 h-7 sm:w-8 sm:h-8',
+    md: 'w-8 h-8 sm:w-9 sm:h-9',
+    lg: 'w-10 h-10 sm:w-12 sm:h-12',
+    xl: 'w-14 h-14 sm:w-16 sm:h-16',
   };
 
   const titleSizes = {
@@ -56,8 +56,8 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
           <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap`}>
             Shutfey
           </span>
-          <span className={`${titleSizes[size]} text-gold leading-tight font-sans whitespace-nowrap ${size === 'sm' ? 'hidden sm:inline' : ''}`} aria-hidden="true">·</span>
-          <span dir="rtl" className={`${titleSizes[size]} text-ink leading-tight font-hebrew whitespace-nowrap ${size === 'sm' ? 'hidden sm:inline' : ''}`}>
+          <span className={`${titleSizes[size]} text-gold leading-tight font-sans whitespace-nowrap ${size === 'sm' ? 'hidden xl:inline' : ''}`} aria-hidden="true">·</span>
+          <span dir="rtl" className={`${titleSizes[size]} text-ink leading-tight font-hebrew whitespace-nowrap ${size === 'sm' ? 'hidden xl:inline' : ''}`}>
             שותפי
           </span>
           {agencyShortCode ? (
