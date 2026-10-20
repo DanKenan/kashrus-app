@@ -10,6 +10,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import * as media from './src/server/media.js';
 import { log } from './src/server/log.ts';
+import { consistencyRoute } from './src/server/consistency-route.js';
 
 // ---------------------------------------------------------------------------
 // Auth: bcrypt passwords + signed session tokens (HMAC-SHA256 JWT)
@@ -5217,28 +5218,19 @@ app.post('/api/media/sweep', async (req, res) => {
  * Returns non-2xx on failure so Cloud Scheduler retries / alerts.
  */
 app.post('/api/internal/consistency-check', async (req, res) => {
-  try {
-    const isScheduler = (req as any).schedulerAuth === true;
-    if (!isScheduler) {
-      const admin = requireAdmin(req, res);
-      if (!admin) return;
-    }
-    if (!firestoreDb) {
-      res.status(503).json({ error: 'Firestore not available.' });
-      return;
-    }
-    const { runConsistencyCheck } = await import('./src/server/consistency.js');
-    const result = await runConsistencyCheck(firestoreDb);
-    if (!result.ok) {
-      // Non-2xx: mismatch, size warning, or unstable read
-      res.status(500).json(result);
-      return;
-    }
-    res.json(result);
-  } catch (e: any) {
-    log.error('[consistency] check error:', e);
-    res.status(500).json({ error: 'Consistency check failed.', detail: e?.message });
+  const isScheduler = (req as any).schedulerAuth === true;
+  if (!isScheduler) {
+    const admin = requireAdmin(req, res);
+    if (!admin) return;
   }
+  // The body lives in src/server/consistency-route.ts: it owns the 503,
+  // the handler call, and the single-writer safety net (an emission marker
+  // shared with the handler, so a failure before the handler runs still
+  // produces exactly one "[consistency] ERROR" — and a failure after the
+  // summary never produces a second one). Statically imported above: a load
+  // failure must be a boot failure, never an unhandled rejection inside
+  // this handler (fix round 2).
+  await consistencyRoute(firestoreDb, res);
 });
 
 /**
@@ -5250,6 +5242,17 @@ app.post('/api/internal/test-alert', async (req, res) => {
   const admin = requireAdmin(req, res);
   if (!admin) return;
   const stamp = new Date().toISOString();
+  if ((req.body as any)?.mode === 'demo') {
+    // Demo of the grouped consistency summary, from fixed sample data —
+    // shows Don exactly what a grouped night looks like on his phone, and
+    // can never be mistaken for a real finding. Logging only; no data read
+    // or written. Never uses the "[consistency] ERROR" prefix.
+    const { demoConsistencySummary } = await import('./src/server/consistency.js');
+    const { summary } = demoConsistencySummary(stamp);
+    log.error(summary);
+    res.json({ ok: true, sentAt: stamp, mode: 'demo', summary });
+    return;
+  }
   log.error(`[alert-test] TEST ALERT from Shutfey admin at ${stamp}. If you received this, the monitoring pipeline works.`);
   res.json({ ok: true, sentAt: stamp, message: 'Test alert logged. Check your email/phone for the Cloud Monitoring notification.' });
 });

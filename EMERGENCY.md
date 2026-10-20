@@ -392,6 +392,10 @@ state — don't rely on log silence alone.
   (not daily) — OIDC, verify 200 not 401, set `--max-retry-attempts 3`.
 - [ ] Create notification channels (email + SMS) and all alerts in
   `docs/stage4-alerts.md`; fire the test alert; confirm delivery.
+  (One consistency run = at most one alert: a single grouped
+  `[consistency] ERROR` summary with a run id; the per-finding details are
+  the `[consistency] INFO run=<id>` lines in Logs Explorer. Alerts are
+  delivered immediately, 24/7; any silencing is the receiver's own setting.)
 - [ ] Sweeper scheduler: set `--max-retry-attempts 3` on `shutfey-media-sweeper`.
 
 **Hygiene:**

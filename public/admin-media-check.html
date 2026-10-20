@@ -80,6 +80,7 @@
   <h2>8. Test Monitoring Alert</h2>
   <p>Fires a real ERROR log line to verify the Cloud Monitoring alert pipeline reaches your email/phone.</p>
   <button onclick="fireTestAlert()">Fire Test Alert</button>
+  <button onclick="fireDemoAlert()">Fire demo grouped alert</button>
   <div id="test-alert-result"></div>
 </div>
 </div>
@@ -404,6 +405,7 @@ async function checkMigration() {
 }
 
 async function fireTestAlert() {
+  if (!window.confirm('This sends a real alert to the configured recipients (email + SMS). Continue?')) return;
   const el = document.getElementById('test-alert-result');
   el.innerHTML = '';
   step(el, 'Firing test alert...', null);
@@ -418,6 +420,28 @@ async function fireTestAlert() {
   } catch (e) {
     el.innerHTML = '';
     step(el, 'Test alert', false, e.message);
+  }
+}
+
+async function fireDemoAlert() {
+  if (!window.confirm('This sends a real alert to the configured recipients (email + SMS). Continue?')) return;
+  const el = document.getElementById('test-alert-result');
+  el.innerHTML = '';
+  step(el, 'Firing demo grouped alert...', null);
+  try {
+    const r = await api('POST', '/api/internal/test-alert', { mode: 'demo' });
+    el.innerHTML = '';
+    if (r.status !== 200) {
+      step(el, 'Demo alert', false, r.json.error || 'Failed');
+      return;
+    }
+    step(el, 'Demo alert fired', true, 'Check your email/phone — it should look like this:');
+    const pre = document.createElement('pre');
+    pre.textContent = r.json.summary;
+    el.appendChild(pre);
+  } catch (e) {
+    el.innerHTML = '';
+    step(el, 'Demo alert', false, e.message);
   }
 }
 </script>
