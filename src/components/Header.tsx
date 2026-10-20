@@ -138,11 +138,17 @@ export const Header: React.FC<HeaderProps> = ({
           
           {/* Brand, Venue Switcher & Status */}
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            {/* The agency tag beside "Shutfey" must never be covered: the logo
+                never shrinks; the venue button gives up width first (its name
+                truncates with …). Below 360 px the word "Shutfey" steps aside
+                (mark + agency tag stay) so the venue button keeps a usable size. */}
             <ShutfeyLogo 
               size="sm" 
               showSubtitle={false}
               agencyName={currentUser?.agencyName}
               agencyShortCode={currentUser?.agencyShortCode}
+              compactBelow360
+              className="shrink-0"
             />
 
             {/* Active Venue Selector Button */}
@@ -150,19 +156,19 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="admin-venue-switcher-btn"
                 onClick={openVenuesModal}
-                className="group flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-sunken hover:bg-line/40 border border-line transition cursor-pointer tactile-1 shrink-0"
+                className="group flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-sunken hover:bg-line/40 border border-line transition cursor-pointer tactile-1 min-w-11 min-h-11"
                 title="Switch to another kosher venue"
               >
                 <Building2 className="w-3.5 h-3.5 text-gold-deep shrink-0" />
-                <span className="text-xs font-bold text-ink truncate max-w-[130px] sm:max-w-[170px]">
+                <span className="text-xs font-bold text-ink truncate min-w-0 max-w-[130px] sm:max-w-[170px]">
                   {currentVenue?.name || 'Select Venue'}
                 </span>
-                <ChevronDown className="w-3 h-3 text-ink-faint group-hover:text-ink-soft transition" />
+                <ChevronDown className="w-3 h-3 text-ink-faint group-hover:text-ink-soft transition shrink-0" />
               </button>
             ) : currentVenue ? (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/40 text-emerald-900 dark:text-emerald-200 tactile-1 shrink-0">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/40 text-emerald-900 dark:text-emerald-200 tactile-1 min-w-9">
                 <Building2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                <span className="text-xs font-bold truncate max-w-[130px] sm:max-w-[170px]">
+                <span className="text-xs font-bold truncate min-w-0 max-w-[130px] sm:max-w-[170px]">
                   {currentVenue.name}
                 </span>
               </div>
@@ -512,11 +518,13 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="mobile-header-new-task-btn"
                 onClick={onOpenTaskModal}
-                className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-gold to-gold-deep active:scale-95 text-white text-xs font-bold shadow-xs cursor-pointer shrink-0"
+                className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 min-w-11 min-h-11 rounded-xl bg-gradient-to-r from-gold to-gold-deep active:scale-95 text-white text-xs font-bold shadow-xs cursor-pointer shrink-0"
                 title="Add New Assignment"
+                aria-label="Add new assignment"
               >
                 <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
-                <span className="text-xs font-bold">New</span>
+                {/* Narrow phones: icon only, so the venue name has room */}
+                <span className="text-xs font-bold hidden min-[400px]:inline">New</span>
               </button>
             )}
 
