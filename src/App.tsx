@@ -7,7 +7,6 @@ import { TaskTableView } from './components/TaskTableView';
 import { TaskCardView } from './components/TaskCardView';
 import { TaskModal } from './components/TaskModal';
 import { HistoryLogModal } from './components/HistoryLogModal';
-import { SupabaseModal } from './components/SupabaseModal';
 import { LoginPage } from './components/LoginPage';
 import { KioskLogin } from './components/KioskLogin';
 import { KioskPairing } from './components/KioskPairing';
@@ -288,7 +287,6 @@ export default function App() {
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [taskToEdit, setTaskToEdit] = useState<Task | null>(null);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
-  const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
   const [isKioskDevicesOpen, setIsKioskDevicesOpen] = useState(false);
@@ -1456,7 +1454,6 @@ export default function App() {
         onOpenCreateEvent={() => setIsCreateEventModalOpen(true)}
         onOpenFactoryAudit={() => setIsFactoryAuditOpen(true)}
         eventsCount={events.length}
-        onOpenSupabaseModal={() => setIsSupabaseModalOpen(true)}
         onOpenTeamModal={() => setIsTeamModalOpen(true)}
         onOpenKioskDevices={() => setIsKioskDevicesOpen(true)}
         onResetDailyBoard={handleResetDailyBoard}
@@ -1703,10 +1700,6 @@ export default function App() {
                   Team Roster ({knownUsers.length})
                 </button>
                 <span>•</span>
-                <button onClick={() => setIsSupabaseModalOpen(true)} className="hover:underline text-emerald-600 dark:text-emerald-400">
-                  Supabase SQL & RLS
-                </button>
-                <span>•</span>
               </>
             )}
             <button onClick={() => setIsHistoryModalOpen(true)} className="hover:underline text-ink-soft">
@@ -1733,11 +1726,6 @@ export default function App() {
         isOpen={isHistoryModalOpen}
         onClose={() => setIsHistoryModalOpen(false)}
         historyLogs={historyLogs}
-      />
-
-      <SupabaseModal
-        isOpen={isSupabaseModalOpen}
-        onClose={() => setIsSupabaseModalOpen(false)}
       />
 
       <ChangePasswordModal
