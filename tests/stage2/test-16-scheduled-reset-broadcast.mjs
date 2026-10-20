@@ -91,7 +91,9 @@ export default {
         notes: 'agency-b secret notes — must never leak to agency-hkc',
         currentStatus: 'done',
       }],
-      users: [{ id: userBId, email: `test16-b-${ts}@test.local`, name: 'Test16 B', role: 'mashgiach', agencyId: AGENCY_B }],
+      // The agency-B user needs a venue (rule T: non-admins with no venue get
+      // nothing). The fixture's intent is agency scoping, not venue scoping.
+      users: [{ id: userBId, email: `test16-b-${ts}@test.local`, name: 'Test16 B', role: 'mashgiach', agencyId: AGENCY_B, venueId: venueBId }],
     });
     if (inj.status !== 200) throw new Error(`fixture inject failed: ${inj.status} ${JSON.stringify(inj.json)}`);
 

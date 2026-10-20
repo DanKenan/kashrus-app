@@ -16,6 +16,9 @@ interface AnnouncementsProps {
   currentUserEmail: string;
   currentUserName: string;
   currentUserRole: string;
+  // RULE T: a coordinator's announcement must carry their own venue — the
+  // server 403s a coordinator post without one. Admins post agency-wide.
+  currentUserVenueId?: string;
   onClose: () => void;
 }
 
@@ -35,7 +38,7 @@ const ROLE_LABELS: Record<string, string> = {
   worker: 'Workers',
 };
 
-export function Announcements({ currentUserEmail, currentUserName, currentUserRole, onClose }: AnnouncementsProps) {
+export function Announcements({ currentUserEmail, currentUserName, currentUserRole, currentUserVenueId, onClose }: AnnouncementsProps) {
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCompose, setShowCompose] = useState(false);
@@ -75,6 +78,10 @@ export function Announcements({ currentUserEmail, currentUserName, currentUserRo
         targetRoles,
         authorEmail: currentUserEmail,
         authorName: currentUserName,
+        // RULE T: coordinators post to their own venue (required server-side).
+        ...(currentUserRole === 'coordinator' && currentUserVenueId
+          ? { venueId: currentUserVenueId }
+          : {}),
       }),
     });
     if (!result.ok) {

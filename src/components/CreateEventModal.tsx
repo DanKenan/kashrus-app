@@ -86,7 +86,10 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
   const [templates, setTemplates] = useState<{ id: string; title: string }[]>([]);
   const [showTemplateManager, setShowTemplateManager] = useState(false);
   const [newTemplateInput, setNewTemplateInput] = useState('');
-  const canManageTemplates = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
+  // Client mirror of server canManageTemplates (server.ts): default event
+  // tasks are agency-wide config — ADMIN ONLY. A coordinator who had this
+  // power loses it (rule T: agency-wide defaults are not a venue-level power).
+  const canManageTemplates = currentUser?.role === 'admin';
 
   // Load the default task set each time the modal opens.
   useEffect(() => {

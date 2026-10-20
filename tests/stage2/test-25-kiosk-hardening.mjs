@@ -829,7 +829,7 @@ export default {
       await fetch(`${baseUrl}/api/users/${coord2Id}?expectedVersion=${ver}`, {
         method: 'PUT', headers: auth(tAdmin), body: JSON.stringify({ venueId: venueB }),
       });
-      // Her PUT for the venueA mashgiach must now fail (fresh-doc check).
+      // Their PUT for the venueA mashgiach must now fail (fresh-doc check). // rule U: no gendered wording for roles
       const ver2 = await ctx.getVersion();
       const r = await fetch(`${baseUrl}/api/users/${target}?expectedVersion=${ver2}`, {
         method: 'PUT', headers: auth(tCoord2), body: JSON.stringify({ kioskPin: '9999' }),
