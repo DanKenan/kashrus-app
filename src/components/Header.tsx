@@ -53,6 +53,8 @@ interface HeaderProps {
   onOpenCreateEvent: () => void;
   onOpenFactoryAudit?: () => void;
   eventsCount?: number;
+  /** 5a: the Updates bell, rendered beside the venue pill (App owns it). */
+  updatesBell?: React.ReactNode;
   onOpenTeamModal: () => void;
   onOpenKioskDevices?: () => void;
   onResetDailyBoard: () => void;
@@ -84,6 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenCreateEvent,
   onOpenFactoryAudit,
   eventsCount = 0,
+  updatesBell,
   onOpenTeamModal,
   onOpenKioskDevices,
   onResetDailyBoard,
@@ -164,6 +167,9 @@ export const Header: React.FC<HeaderProps> = ({
                 </span>
               </div>
             ) : null}
+
+            {/* 5a: Updates bell — always-visible row, beside the venue pill */}
+            {updatesBell}
 
             {/* Compact Live indicator */}
             <div className="hidden sm:flex items-center gap-1.5 text-xs text-ink-faint pl-1">
