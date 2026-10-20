@@ -5072,7 +5072,7 @@ app.post('/api/incidents', async (req, res) => {
   const onPushError = (err: any) => {
     if (pushFailureLogged) return;
     pushFailureLogged = true;
-    log.warn(`[alerts] push failed for ${incident.id} (${recipients.length} recipients): ${err?.name || 'Error'}`);
+    log.warn(`[alerts] push failed for ${incident.id} (${recipients.length} recipients): ${err?.name || 'Error'}${err?.statusCode ? ` ${err.statusCode}` : ''}`);
   };
   for (const r of recipients) {
     const silent = muted.has(r.id);

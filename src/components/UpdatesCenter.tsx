@@ -261,7 +261,9 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
   const setAlertDraft = useCallback((patch: Partial<AlertDraft>) => {
     setAlertDraftState((d) => ({ ...d, ...patch }));
   }, []);
-  const setAlertMedia = useCallback((m: { photoData?: string; voiceNoteData?: string }) => {
+  // Accepts a value or an updater: async steps (recorder, photo shrink) merge
+  // into the CURRENT media, so a photo picked during a recording is kept.
+  const setAlertMedia = useCallback((m: { photoData?: string; voiceNoteData?: string } | ((prev: { photoData?: string; voiceNoteData?: string }) => { photoData?: string; voiceNoteData?: string })) => {
     setAlertMediaState(m);
   }, []);
   const clearAlertDraft = useCallback(() => {

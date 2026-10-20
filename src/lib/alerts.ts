@@ -68,7 +68,7 @@ export interface RaiseAlertInput {
   clientRef: string;
 }
 
-export interface RaiseResult { ok: boolean; alert?: AlertItem; tooLarge?: boolean; error?: string }
+export interface RaiseResult { ok: boolean; alert?: AlertItem; tooLarge?: boolean; budget?: boolean; error?: string }
 
 export async function raiseAlert(input: RaiseAlertInput): Promise<RaiseResult> {
   const result = await apiWrite('/api/incidents', {
@@ -80,7 +80,9 @@ export async function raiseAlert(input: RaiseAlertInput): Promise<RaiseResult> {
   // 413 = an attachment over the cap; 503 SIZE_LIMIT = the shared record is
   // full. Either way the alert itself can still go without attachments.
   const tooLarge = result.status === 413 || (result.status === 503 && /SIZE_LIMIT/.test(String((result as any).code || result.error || '')));
-  return { ok: false, tooLarge, error: result.error || 'Could not send the alert.' };
+  // A12: MEDIA_BUDGET = the venue's stored media is full (the file itself is within the cap).
+  const budget = result.status === 413 && /MEDIA_BUDGET/.test(String((result as any).code || ''));
+  return { ok: false, tooLarge, budget, error: result.error || 'Could not send the alert.' };
 }
 
 async function transition(id: string, action: 'acknowledge' | 'resolve'): Promise<{ ok: boolean; alert?: AlertItem; error?: string }> {

@@ -89,7 +89,7 @@ function RaiseAlertForm({
   media: { photoData?: string; voiceNoteData?: string };
   draftGen: number;
   onDraftChange: (patch: Partial<AlertDraft>) => void;
-  onMediaChange: (m: { photoData?: string; voiceNoteData?: string }) => void;
+  onMediaChange: (m: { photoData?: string; voiceNoteData?: string } | ((prev: { photoData?: string; voiceNoteData?: string }) => { photoData?: string; voiceNoteData?: string })) => void;
   onDiscard: () => void;
   onCancel: () => void;
   onRaised: (a: AlertItem) => void;
@@ -143,7 +143,10 @@ function RaiseAlertForm({
     }
     if (!alive(session, gen)) { stream.getTracks().forEach((t) => t.stop()); return; }
     streamRef.current = stream;
-    const rec = new MediaRecorder(stream);
+    // A low bitrate so a 30 s note fits the 90k-char cap (A12). The browser
+    // default (~128 kbps in Chrome) fills the cap in about 4 s.
+    let rec: MediaRecorder;
+    try { rec = new MediaRecorder(stream, { audioBitsPerSecond: 16000 }); } catch { rec = new MediaRecorder(stream); }
     chunksRef.current = [];
     rec.ondataavailable = (e) => chunksRef.current.push(e.data);
     rec.onstop = () => {
@@ -161,7 +164,7 @@ function RaiseAlertForm({
           setRecState('idle');
           return;
         }
-        onMediaChange({ ...media, voiceNoteData: data });
+        onMediaChange((prev) => ({ ...prev, voiceNoteData: data }));
         setRecState('preview');
       };
       reader.readAsDataURL(blob);
@@ -190,7 +193,7 @@ function RaiseAlertForm({
     // A venue switch during processing attaches nothing late (A6/BE).
     if (!alive(session, gen)) return;
     if (!data) { setError("Couldn't use that photo. Try another one."); return; }
-    onMediaChange({ ...media, photoData: data });
+    onMediaChange((prev) => ({ ...prev, photoData: data }));
   };
 
   const send = async (withoutMedia = false) => {
@@ -214,7 +217,9 @@ function RaiseAlertForm({
     // Keep everything typed and recorded; the same reference makes the
     // retry safe (no second alert). A 413 keeps the text intact too.
     setTooLarge(!!r.tooLarge);
-    setError(r.tooLarge ? 'The photo or voice note is too large to send.' : "Couldn't send. Try again.");
+    setError(r.budget
+      ? 'Too many photos and voice notes are stored right now. Your words can still go.'
+      : r.tooLarge ? 'The photo or voice note is too large to send.' : "Couldn't send. Try again.");
   };
 
   const hasContent = !!title || !!description || !!photo || !!voice;
@@ -278,7 +283,7 @@ function RaiseAlertForm({
       {photo && (
         <div className="flex items-center gap-2">
           <img src={photo} alt="Photo to send" className="w-16 h-16 rounded-lg object-cover border border-line" />
-          <button type="button" onClick={() => onMediaChange({ voiceNoteData: media.voiceNoteData })} className="pressable min-h-11 px-3 rounded-lg border border-line text-sm font-bold cursor-pointer">
+          <button type="button" onClick={() => onMediaChange((prev) => ({ voiceNoteData: prev.voiceNoteData }))} className="pressable min-h-11 px-3 rounded-lg border border-line text-sm font-bold cursor-pointer">
             Remove photo
           </button>
         </div>
@@ -298,7 +303,7 @@ function RaiseAlertForm({
         <div className="flex items-center gap-2">
           <Play className="w-4 h-4 text-ink-faint shrink-0" />
           <audio src={voice} controls preload="metadata" className="flex-1 h-11 min-w-0" />
-          <button type="button" onClick={() => { onMediaChange({ photoData: media.photoData }); setRecState('idle'); }} className="pressable min-h-11 px-3 rounded-lg border border-line text-sm font-bold cursor-pointer">
+          <button type="button" onClick={() => { onMediaChange((prev) => ({ photoData: prev.photoData })); setRecState('idle'); }} className="pressable min-h-11 px-3 rounded-lg border border-line text-sm font-bold cursor-pointer">
             Remove
           </button>
         </div>
@@ -502,7 +507,13 @@ function AlertRow({
         </p>
       )}
 
-      {receipt !== null && <ReceiptLine count={receipt} onOpen={onOpenReaders} />}
+      {/* Plan v2 A1: reads and acknowledgment are separate words — a ✓✓ count never means "handled". */}
+      {receipt !== null && (
+        <div className="flex flex-wrap items-center gap-x-2">
+          <ReceiptLine count={receipt} onOpen={onOpenReaders} />
+          {a.status === 'open' && <span className="text-sm font-bold text-ink-soft mt-2">· Not acknowledged</span>}
+        </div>
+      )}
 
       {confirmResolve ? (
         <div className="flex items-center gap-2 mt-2 p-2 rounded-lg bg-sunken">
@@ -555,7 +566,7 @@ interface AlertsTabProps {
   media: { photoData?: string; voiceNoteData?: string };
   draftGen: number;
   onDraftChange: (patch: Partial<AlertDraft>) => void;
-  onMediaChange: (m: { photoData?: string; voiceNoteData?: string }) => void;
+  onMediaChange: (m: { photoData?: string; voiceNoteData?: string } | ((prev: { photoData?: string; voiceNoteData?: string }) => { photoData?: string; voiceNoteData?: string })) => void;
   onDiscardDraft: () => void;
   onDraftSent: () => void;
 }
