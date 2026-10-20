@@ -5,6 +5,18 @@
 
 @variant dark (&:where(.dark, .dark *));
 
+/* Frank Ruhl Libre — Hebrew subset only (SPEC §2 / Decision Q1). Loaded via a
+   hand-written @font-face so the Latin subset never ships; the unicode-range
+   means the file is fetched only when Hebrew text renders. */
+@font-face {
+  font-family: "Frank Ruhl Libre Variable";
+  font-style: normal;
+  font-weight: 300 900;
+  font-display: swap;
+  src: url("@fontsource-variable/frank-ruhl-libre/files/frank-ruhl-libre-hebrew-wght-normal.woff2") format("woff2");
+  unicode-range: U+0590-05FF, U+FB1D-FB4F;
+}
+
 /* ------------------------------------------------------------------
    Warm tactile design tokens.
    Semantic colors are CSS vars that flip with `.dark`, exposed to
@@ -12,34 +24,57 @@
    border-line` automatically adapt — no `dark:` variants needed.
 ------------------------------------------------------------------ */
 :root {
-  --paper: oklch(0.968 0.010 80);        /* app background — warm paper */
-  --surface: oklch(0.998 0.003 90);      /* cards, sheets */
-  --sunken: oklch(0.946 0.014 78);       /* wells, inputs, troughs */
-  --line: oklch(0.884 0.020 78);         /* hairline borders */
-  --line-strong: oklch(0.792 0.030 74);  /* emphasized borders */
-  --ink: oklch(0.272 0.024 62);          /* primary text */
-  --ink-soft: oklch(0.462 0.022 68);     /* secondary text */
-  --ink-faint: oklch(0.618 0.020 72);    /* tertiary text */
-  --gold: oklch(0.622 0.145 74);         /* brand accent */
-  --gold-deep: oklch(0.512 0.132 70);    /* accent pressed / text on light */
-  --gold-ink: oklch(0.398 0.118 68);     /* accent text */
-  --gold-wash: oklch(0.952 0.045 78);    /* accent tint bg */
+  --paper: oklch(0.968 0.010 80);  /* #F8F4ED — app background — warm paper */
+  --surface: oklch(0.998 0.003 90);  /* #FFFEFC — cards, sheets */
+  --sunken: oklch(0.946 0.014 78);  /* #F2ECE3 — wells, inputs, troughs */
+  --line: oklch(0.884 0.020 78);  /* #E0D7CA — hairline borders */
+  --line-strong: oklch(0.792 0.030 74);  /* #C7B9A7 — emphasized borders */
+  --ink: oklch(0.272 0.024 62);  /* #30241B — primary text */
+  --ink-soft: oklch(0.462 0.022 68);  /* #61574C — secondary text */
+  --ink-faint: oklch(0.618 0.020 72);  /* #8D8479 — tertiary text */
+  --gold: oklch(0.622 0.145 74);  /* #B97600 — brand accent */
+  --gold-deep: oklch(0.512 0.132 70);  /* #955500 — accent pressed / text on light */
+  --gold-ink: oklch(0.398 0.118 68);  /* #6F3700 — accent text */
+  --gold-wash: oklch(0.952 0.045 78);  /* #FFECCE — accent tint bg */
+  --ok: #166534;                         /* status: done / ok */
+  --ok-bg: #E8F3EC;                      /* status bg: done / ok */
+  --warn: #92400E;                       /* status: due soon / attention */
+  --warn-bg: #FEF3E2;                    /* status bg: due soon / attention */
+  --bad: #B91C1C;                        /* status: overdue, serious, errors */
+  --bad-bg: #FDECEC;                     /* status bg: overdue, serious, errors */
+  --done-tint: #FBF3E4;                  /* subtle warm tint on a done card */
+  --scrim: rgb(26 18 10 / 0.6);          /* modal backdrop (#1A120A at 60%) */
+  --line-control: #8D8479;               /* interactive control edges (SPEC 1c) */
+  --avatar-fallback: #955500;           /* avatar bg when the user has no stored colour */
+  --dur-fast: 120ms;                     /* motion: press, toggles, colour changes */
+  --dur-base: 200ms;                     /* motion: fades, small moves, chips */
+  --dur-slow: 320ms;                     /* motion: sheets, seal settling, page-level */
   color-scheme: light;
 }
 
 .dark {
-  --paper: oklch(0.232 0.018 62);
-  --surface: oklch(0.278 0.020 62);
-  --sunken: oklch(0.208 0.016 60);
-  --line: oklch(0.368 0.026 64);
-  --line-strong: oklch(0.462 0.032 64);
-  --ink: oklch(0.942 0.010 80);
-  --ink-soft: oklch(0.762 0.018 74);
-  --ink-faint: oklch(0.604 0.020 70);
-  --gold: oklch(0.768 0.138 78);
-  --gold-deep: oklch(0.702 0.138 76);
-  --gold-ink: oklch(0.884 0.108 80);
-  --gold-wash: oklch(0.300 0.055 70);
+  --paper: oklch(0.232 0.018 62);  /* #241C15 */
+  --surface: oklch(0.278 0.020 62);  /* #30261E */
+  --sunken: oklch(0.208 0.016 60);  /* #1D1610 */
+  --line: oklch(0.368 0.026 64);  /* #493C31 */
+  --line-strong: oklch(0.462 0.032 64);  /* #665546 */
+  --ink: oklch(0.942 0.010 80);  /* #EFEBE4 */
+  --ink-soft: oklch(0.762 0.018 74);  /* #B9B0A5 */
+  --ink-faint: oklch(0.604 0.020 70);  /* #898075 */
+  --gold: oklch(0.768 0.138 78);  /* #E3A73D */
+  --gold-deep: oklch(0.702 0.138 76);  /* #CF9122 */
+  --gold-ink: oklch(0.884 0.108 80);  /* #FED184 */
+  --gold-wash: oklch(0.300 0.055 70);  /* #3F280A */
+  --ok: #7BD3A0;
+  --ok-bg: #1E3326;
+  --warn: #F2BE6B;
+  --warn-bg: #3A2A12;
+  --bad: #F49A92;
+  --bad-bg: #3F1F1C;
+  --done-tint: #382B1C;
+  --scrim: rgb(26 18 10 / 0.6);
+  --line-control: #898075;
+  --avatar-fallback: #CF9122;
   color-scheme: dark;
 }
 
@@ -57,8 +92,32 @@
   --color-gold-ink: var(--gold-ink);
   --color-gold-wash: var(--gold-wash);
 
+  --color-ok: var(--ok);
+  --color-ok-bg: var(--ok-bg);
+  --color-warn: var(--warn);
+  --color-warn-bg: var(--warn-bg);
+  --color-bad: var(--bad);
+  --color-bad-bg: var(--bad-bg);
+  --color-done-tint: var(--done-tint);
+  --color-scrim: var(--scrim);
+  --color-line-control: var(--line-control);
+  --color-avatar-fallback: var(--avatar-fallback);
+
   --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-hebrew: "Frank Ruhl Libre Variable", "DM Sans", serif;
+  --ease-shutfey: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --text-k-body: 20px;
+  --text-k-body--line-height: 28px;
+  --text-k-title: 28px;
+  --text-k-title--line-height: 36px;
+  --text-k-display: 36px;
+  --text-k-display--line-height: 44px;
+  --text-k-hero: 64px;
+  --text-k-hero--line-height: 72px;
+  --text-k-clock: 128px;
+  --text-k-clock--line-height: 128px;
 }
 
 @layer base {
@@ -135,11 +194,33 @@
     0 48px 88px -24px rgb(74 52 20 / 0.38);
 }
 
+/* Elevation roles (SPEC §3): e1 = tactile-1, e2 = tactile-2, e3 = tactile-4. */
+@utility e1 {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.7),
+    0 1px 2px rgb(74 52 20 / 0.07);
+}
+@utility e2 {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.7),
+    0 1px 2px rgb(74 52 20 / 0.06),
+    0 8px 20px -8px rgb(74 52 20 / 0.16);
+}
+@utility e3 {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.7),
+    0 4px 8px rgb(74 52 20 / 0.08),
+    0 28px 56px -16px rgb(74 52 20 / 0.30);
+}
+
 .dark .tactile-1 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 1px 2px rgb(0 0 0 / 0.45); }
 .dark .tactile-2 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 20px -8px rgb(0 0 0 / 0.55); }
 .dark .tactile-3 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 2px 4px rgb(0 0 0 / 0.4), 0 16px 36px -12px rgb(0 0 0 / 0.6); }
 .dark .tactile-4 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 4px 8px rgb(0 0 0 / 0.45), 0 28px 56px -16px rgb(0 0 0 / 0.65); }
 .dark .tactile-5 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 8px 16px rgb(0 0 0 / 0.5), 0 48px 88px -24px rgb(0 0 0 / 0.7); }
+.dark .e1 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 1px 2px rgb(0 0 0 / 0.45); }
+.dark .e2 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 20px -8px rgb(0 0 0 / 0.55); }
+.dark .e3 { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 4px 8px rgb(0 0 0 / 0.45), 0 28px 56px -16px rgb(0 0 0 / 0.65); }
 
 /* Physical press feedback for buttons */
 @utility pressable {
@@ -160,6 +241,12 @@
 /* Tabular numerals for times, counts, IDs */
 @utility tnum {
   font-variant-numeric: tabular-nums;
+}
+
+/* Hebrew runs (Hebrew date, the lockup) — never wired into --font-sans. */
+@utility font-hebrew {
+  font-family: var(--font-hebrew);
+  unicode-bidi: isolate;
 }
 
 /* ------------------------------------------------------------------

@@ -1,0 +1,7 @@
+DESIGN CHECKLIST (added by D1, Oct 20 2026 — applies to every PR that changes appearance)
+AN. The spec is the law: docs/design/SPEC.md. A new colour, size, radius, shadow or duration enters only by amending SPEC.md in the same reviewed PR; reviewers reject raw values (raw palette classes, #hex, text-[<12px], ad-hoc ms).
+AO. Screenshots on every PR that changes appearance: 390×844 (phone), 1024×768 and 1180×820 (tablet/kiosk), 1440×900 (desk), day AND night, before and after, taken with the messy-content set (docs/design/messy-content.md). A screenshot that cannot be taken as specified is documented as an exception in the PR, never manufactured.
+AP. Messy-content set passes: 100-character task names, 15+ kiosk tasks, Hebrew and mixed-direction text, two-line venue names, several alerts at once, empty records, long incident text, larger text (200 % zoom / iOS largest), reduced motion on. A design that only works with sample data is not finished.
+AQ. Design ratchet: `node scripts/design-audit.mjs --check` — the counts of raw colours, sub-12 px sizes and raw durations may go down, never up (baseline in docs/design/baseline.json; report-only CI job for now).
+AR. Honest states: no success visuals (seal, tint, chime, "Recorded") before the server's confirmed response; skeletons not spinners for content; reduced motion honoured for CSS and JS motion.
+AS. One purpose per PR: a design PR changes no logic, data, permissions or routes; a security/function PR does not restyle.

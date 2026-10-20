@@ -429,7 +429,7 @@ export const Header: React.FC<HeaderProps> = ({
                           <button
                             onClick={enterKioskMode}
                             className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
-                            title="Lock this device to the mashgiach sign-in screen"
+                            title="Lock this device to the staff sign-in screen"
                           >
                             <Tablet className="w-4 h-4 text-gold-deep" />
                             <span>Enter kiosk mode</span>
@@ -720,7 +720,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <button
                     onClick={enterKioskMode}
                     className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-surface transition cursor-pointer text-ink-soft"
-                    title="Lock this device to the mashgiach sign-in screen"
+                    title="Lock this device to the staff sign-in screen"
                   >
                     <Tablet className="w-4 h-4 text-gold-deep" />
                     <span>Enter kiosk mode</span>

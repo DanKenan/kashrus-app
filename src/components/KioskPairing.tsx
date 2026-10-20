@@ -111,7 +111,7 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
       <KeepingKosherLogo size="md" darkMode={darkMode} />
 
       <div className="mt-6 text-center">
-        <p className="text-xs font-bold uppercase tracking-[0.2em] text-gold-deep">Mashgiach sign-in</p>
+        <p className="text-xs font-bold uppercase tracking-[0.2em] text-gold-deep">Staff sign-in</p>
         <h1 className="mt-1 text-3xl font-black font-sans">Pair this tablet</h1>
         <p className="mt-3 max-w-md text-ink-soft font-semibold">
           In the app, open Kiosk tablets and enter this code.
