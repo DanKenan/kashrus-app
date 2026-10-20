@@ -9339,7 +9339,7 @@ app.get('/api/kiosk/pairing/status', async (req, res) => {
 
 // B3 — a paired tablet reads its own venue + PIN-enabled staff roster.
 // Authenticated by the device secret; never by a venue parameter.
-app.get('/api/kiosk/device', (req, res) => {
+app.get('/api/kiosk/device', async (req, res) => {
   if (kioskHeaderTooLong(req, 'x-kiosk-device')) {
     return res.status(400).json({ error: 'Request too large.' });
   }
@@ -9352,10 +9352,16 @@ app.get('/api/kiosk/device', (req, res) => {
     .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
   const safe = safeKioskDevice(device);
   // Touch lastSeenAt at most once per 10 minutes — best-effort, never
-  // blocks the response, never throws into it.
+  // throws into the response (a failed touch still serves the roster).
+  // The touch is AWAITED before the response: it bumps the document
+  // version, and the X-State-Version header on this response must carry
+  // the bumped version. Fire-and-forget, the commit landed AFTER the
+  // header went out (it retries behind the sign-in and the first task
+  // writes), the tablet never heard the new version, and its next task
+  // write answered 409 "data changed, refresh" right after PIN sign-in.
   const lastSeenMs = device.lastSeenAt ? new Date(device.lastSeenAt).getTime() : 0;
   if (Date.now() - lastSeenMs > 10 * 60 * 1000) {
-    commitState(
+    await commitState(
       (freshDoc) => {
         const devs: any[] = Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : [];
         const next = devs.map((d) => (d && d.id === device.id ? { ...d, lastSeenAt: new Date().toISOString() } : d));
