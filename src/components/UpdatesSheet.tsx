@@ -55,22 +55,38 @@ export function UpdatesSheet({
     const panel = panelRef.current;
     const prevFocus = document.getElementById('updates-bell');
     panel?.focus();
+    const focusables = () =>
+      [...panel.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, audio[controls], [tabindex]:not([tabindex="-1"])',
+      )].filter((el) => !el.hasAttribute('disabled') && el.offsetParent !== null);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { closeRef.current(); return; }
-      if (e.key !== 'Tab' || !panel) return;
-      const focusables = panel.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, audio[controls], [tabindex]:not([tabindex="-1"])',
-      );
-      const list = [...focusables].filter((el) => !el.hasAttribute('disabled') && el.offsetParent !== null);
+      if (e.key !== 'Tab') return;
+      const list = focusables();
       if (list.length === 0) return;
       const first = list[0];
       const last = list[list.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      // Focus on the panel container itself (its tabIndex=-1 landing spot),
+      // or anywhere outside the sheet, must not Tab out of the dialog.
+      if (!panel.contains(document.activeElement) || document.activeElement === panel) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      }
+      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     };
+    // Native controls (audio) and programmatic focus can land outside the
+    // sheet without a Tab keypress — pull any such focus back inside.
+    const onFocusIn = (e: FocusEvent) => {
+      if (e.target instanceof Node && !panel.contains(e.target)) {
+        focusables()[0]?.focus();
+      }
+    };
     document.addEventListener('keydown', onKey);
+    document.addEventListener('focusin', onFocusIn);
     return () => {
       document.removeEventListener('keydown', onKey);
+      document.removeEventListener('focusin', onFocusIn);
       (prevFocus as HTMLElement | null)?.focus?.();
     };
   }, [open ]);

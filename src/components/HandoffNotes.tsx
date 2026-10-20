@@ -57,6 +57,12 @@ export function HandoffNotes({
   const [confirmId, setConfirmId] = useState<string | null>(null);
 
   const listRef = useRef<HTMLDivElement | null>(null);
+  // Mic lifecycle guards: nothing from an in-flight permission prompt, a
+  // recorder callback or a file read may set state after unmount or after
+  // the context moved on (the sheet unmounts on every context switch).
+  const disposedRef = useRef(false);
+  const recordSessionRef = useRef(0);
+  const startedAtRef = useRef(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -74,7 +80,10 @@ export function HandoffNotes({
   // Leaving the sheet / switching context / kiosk idle sign-out unmounts
   // this component: release the mic and stop everything (plan C4).
   useEffect(() => {
+    disposedRef.current = false;
     return () => {
+      disposedRef.current = true;
+      recordSessionRef.current += 1;
       stopTimer();
       try { mediaRecorderRef.current?.stop(); } catch { /* already stopped */ }
       streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -84,37 +93,51 @@ export function HandoffNotes({
 
   const startRecording = async () => {
     setErrorMsg(null);
+    const session = ++recordSessionRef.current;
+    let stream: MediaStream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      const recorder = new MediaRecorder(stream);
-      chunksRef.current = [];
-      recorder.ondataavailable = (e) => chunksRef.current.push(e.data);
-      recorder.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        if (blob.size === 0) { setRecordState('idle'); return; }
-        const reader = new FileReader();
-        reader.onload = () => {
-          setVoiceNoteData(reader.result as string);
-          setRecordState('preview');
-        };
-        reader.readAsDataURL(blob);
-      };
-      recorder.start();
-      mediaRecorderRef.current = recorder;
-      setElapsed(0);
-      setRecordState('recording');
-      let secs = 0;
-      timerRef.current = setInterval(() => {
-        secs += 1;
-        setElapsed(Math.min(secs, MAX_RECORD_SECONDS));
-        if (secs >= MAX_RECORD_SECONDS) stopRecording();
-      }, 1000);
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
-      setErrorMsg('Microphone is not available on this device.');
+      if (!disposedRef.current) setErrorMsg('Microphone is not available on this device.');
+      return;
     }
+    // The permission prompt can outlive the component (sheet closed, context
+    // switched while it was open): a late stream is stopped on the spot and
+    // never recorded from.
+    if (disposedRef.current || session !== recordSessionRef.current) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    streamRef.current = stream;
+    const recorder = new MediaRecorder(stream);
+    chunksRef.current = [];
+    recorder.ondataavailable = (e) => chunksRef.current.push(e.data);
+    recorder.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      if (disposedRef.current || session !== recordSessionRef.current) return;
+      const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+      if (blob.size === 0) { setRecordState('idle'); return; }
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (disposedRef.current || session !== recordSessionRef.current) return;
+        setVoiceNoteData(reader.result as string);
+        setRecordState('preview');
+      };
+      reader.readAsDataURL(blob);
+    };
+    recorder.start();
+    mediaRecorderRef.current = recorder;
+    setElapsed(0);
+    setRecordState('recording');
+    // The 2-minute cap runs on real elapsed time, not tick counts — a
+    // throttled interval can never stretch a recording past the cap.
+    startedAtRef.current = Date.now();
+    timerRef.current = setInterval(() => {
+      const secs = Math.floor((Date.now() - startedAtRef.current) / 1000);
+      setElapsed(Math.min(secs, MAX_RECORD_SECONDS));
+      if (secs >= MAX_RECORD_SECONDS) stopRecording();
+    }, 250);
   };
 
   const stopRecording = () => {

@@ -58,6 +58,11 @@ export interface UpdatesContext {
   gen: number;
 }
 
+/** The full context identity — stale checks compare ALL of it, not gen alone. */
+export function updatesCtxKey(ctx: UpdatesContext): string {
+  return `${ctx.userId}|${ctx.agencyId}|${ctx.venueId}|${ctx.kiosk ? 'kiosk' : 'app'}|${ctx.gen}`;
+}
+
 export async function fetchUnread(venueId: string, signal?: AbortSignal): Promise<UnreadState | null> {
   const res = await apiFetch(`/api/updates/unread?venueId=${encodeURIComponent(venueId)}`, { signal });
   if (!res.ok) return null;
@@ -95,18 +100,28 @@ interface PendingBatch {
   notes: Set<string>;
   timer: ReturnType<typeof setTimeout> | null;
   sending: boolean;
+  failures: number;
+  firstAt: number;
+  reconciledAt: number;
 }
 
 class SeenQueue {
   private batches = new Map<string, PendingBatch>();
   private currentUserId: () => string | null = () => null;
+  private reconcileHandler: ((ctxKey: string) => void) | null = null;
 
   setIdentityProvider(fn: () => string | null) {
     this.currentUserId = fn;
   }
 
+  /** Called when a batch's marks may not have landed (see flush): the owner
+   * refetches the server's unread numbers for that context if it is current. */
+  setReconcileHandler(fn: (ctxKey: string) => void) {
+    this.reconcileHandler = fn;
+  }
+
   private key(ctx: UpdatesContext) {
-    return `${ctx.userId}__${ctx.agencyId}__${ctx.venueId}__${ctx.gen}`;
+    return updatesCtxKey(ctx);
   }
 
   enqueue(ctx: UpdatesContext, kind: 'a' | 'n', id: string) {
@@ -114,7 +129,7 @@ class SeenQueue {
     const key = this.key(ctx);
     let b = this.batches.get(key);
     if (!b) {
-      b = { ctx, ann: new Set(), notes: new Set(), timer: null, sending: false };
+      b = { ctx, ann: new Set(), notes: new Set(), timer: null, sending: false, failures: 0, firstAt: Date.now(), reconciledAt: 0 };
       this.batches.set(key, b);
     }
     (kind === 'a' ? b.ann : b.notes).add(id);
@@ -153,12 +168,26 @@ class SeenQueue {
       if (!res.ok) throw new Error(`seen ${res.status}`);
       ann.forEach((id) => b.ann.delete(id));
       notes.forEach((id) => b.notes.delete(id));
+      b.failures = 0;
     } catch {
       // Stay pending in the same context and retry (plan C6).
+      b.failures += 1;
     } finally {
       b.sending = false;
-      if (b.ann.size > 0 || b.notes.size > 0) this.schedule(b, 5000);
-      else this.batches.delete(this.key(b.ctx));
+      if (b.ann.size > 0 || b.notes.size > 0) {
+        // The badge went optimistic the moment the item was seen. If the
+        // marks are not landing — two failed sends in a row, or anything
+        // still pending ~10 s after it was marked — the owner refetches the
+        // server's numbers so a locally-invented count never sticks.
+        const stuck = b.failures >= 2 || Date.now() - b.firstAt > 10000;
+        if (stuck && Date.now() - b.reconciledAt > 10000) {
+          b.reconciledAt = Date.now();
+          this.reconcileHandler?.(this.key(b.ctx));
+        }
+        this.schedule(b, 5000);
+      } else {
+        this.batches.delete(this.key(b.ctx));
+      }
     }
   }
 }

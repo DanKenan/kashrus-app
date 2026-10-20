@@ -17,6 +17,7 @@ import {
   fetchNotes,
   fetchUnread,
   seenQueue,
+  updatesCtxKey,
 } from '../lib/updates';
 
 export type UpdatesTab = 'announcements' | 'notes';
@@ -40,6 +41,12 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
 
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
+  // Stale checks compare the FULL context (user, agency, venue, kiosk, gen)
+  // — a response, socket signal or queued mark from any other context is
+  // dropped, even one that shares the generation number.
+  const ctxKey = ctx ? updatesCtxKey(ctx) : '';
+  const keyRef = useRef('');
+  keyRef.current = ctxKey;
   const abortRef = useRef<AbortController | null>(null);
   const sheetOpenRef = useRef(false);
   sheetOpenRef.current = sheetOpen;
@@ -50,20 +57,33 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     seenQueue.setIdentityProvider(() => ctxRef.current?.userId ?? null);
   }, []);
 
-  const isStale = useCallback((gen: number) => ctxRef.current?.gen !== gen, []);
+  const isStale = useCallback((key: string) => keyRef.current !== key, []);
 
   const refreshUnread = useCallback(async () => {
     const c = ctxRef.current;
     if (!c || c.kiosk) return; // the kiosk shows no count and never fetches one
+    const k = updatesCtxKey(c);
     const ctrl = new AbortController();
     try {
       const u = await fetchUnread(c.venueId, ctrl.signal);
-      if (!u || isStale(c.gen)) return;
+      if (!u || isStale(k)) return;
       setUnread(u);
     } catch {
       /* a failed count refresh keeps the last honest numbers */
     }
   }, [isStale]);
+  const refreshUnreadRef = useRef(refreshUnread);
+  refreshUnreadRef.current = refreshUnread;
+
+  // If a seen batch is not landing (two failed sends, or ~10 s pending), the
+  // queue asks for a reconcile: show the server's numbers for the CURRENT
+  // context instead of the optimistic local ones. Batches from an old
+  // context keep retrying there and never touch this one's badge.
+  useEffect(() => {
+    seenQueue.setReconcileHandler((batchKey) => {
+      if (batchKey === keyRef.current) void refreshUnreadRef.current();
+    });
+  }, []);
 
   const loadLists = useCallback(async () => {
     const c = ctxRef.current;
@@ -71,20 +91,21 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+    const k = updatesCtxKey(c);
     setListsLoading(true);
     try {
       const [anns, nts] = await Promise.all([
         fetchAnnouncements(ctrl.signal),
         fetchNotes(c.venueId, ctrl.signal),
       ]);
-      if (isStale(c.gen)) return;
+      if (isStale(k)) return;
       // The sheet is for THIS venue: agency-wide items plus this venue's.
       setAnnouncements(anns.filter((a) => !a.venueId || a.venueId === c.venueId));
       setNotes(nts);
     } catch {
       /* keep whatever is already on screen */
     } finally {
-      if (!isStale(c.gen)) setListsLoading(false);
+      if (!isStale(k)) setListsLoading(false);
     }
   }, [isStale]);
 
@@ -99,13 +120,15 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     abortRef.current?.abort();
     if (ctx && !ctx.kiosk) void refreshUnread();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctx?.gen]);
+  }, [ctxKey]);
 
   // WebSocket = refetch signal only, and only for this context's venue.
   useEffect(() => {
     if (!ctx) return;
+    const subscribedKey = updatesCtxKey(ctx);
     let debounce: ReturnType<typeof setTimeout> | null = null;
     const unsub = realtimeSocket.onMessage((msg: any) => {
+      if (keyRef.current !== subscribedKey) return;
       const t = msg?.type;
       if (
         t !== 'ANNOUNCEMENT' && t !== 'ANNOUNCEMENT_DELETED' &&
