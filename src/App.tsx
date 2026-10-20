@@ -9,6 +9,7 @@ import { TaskModal } from './components/TaskModal';
 import { HistoryLogModal } from './components/HistoryLogModal';
 import { LoginPage } from './components/LoginPage';
 import { KioskLogin } from './components/KioskLogin';
+import { KioskTaskPanel } from './components/KioskTaskPanel';
 import { UpdatesBell } from './components/UpdatesBell';
 import { UpdatesSheet, announcementCanDelete } from './components/UpdatesSheet';
 import { UrgentBanner } from './components/UrgentBanner';
@@ -290,6 +291,8 @@ export default function App() {
     return 'all';
   });
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
+  // Kiosk only (D3a): the kiosk list is the default; table and cards stay one tap away.
+  const [kioskView, setKioskView] = useState<'list' | 'table' | 'cards'>('list');
   const [showOnlyTodaySchedule, setShowOnlyTodaySchedule] = useState(false);
 
   // Modals
@@ -1482,6 +1485,72 @@ export default function App() {
     );
   }
 
+  const taskTableView = (
+    <TaskTableView
+      tasks={sortedTasks}
+      currentUser={currentUser}
+      onUpdateStatus={handleUpdateStatus}
+      onUpdateNotes={handleUpdateNotes}
+      onEditTask={(task) => {
+        if (!canUserAssignTasks(currentUser)) {
+          showToast('You do not have permission to edit task definitions.');
+          return;
+        }
+        setTaskToEdit(task);
+        setIsTaskModalOpen(true);
+      }}
+      onDeleteTask={handleDeleteTask}
+      onOpenTaskModal={handleOpenCreateTask}
+      onCheckIn={handleCheckIn}
+      onRemoveCheckIn={handleRemoveCheckIn}
+      onMoveTask={handleMoveTask}
+      canReorder={canUserAssignTasks(currentUser)}
+    />
+  );
+  const taskCardView = (
+    <TaskCardView
+      tasks={sortedTasks}
+      currentUser={currentUser}
+      onUpdateStatus={handleUpdateStatus}
+      onUpdateNotes={handleUpdateNotes}
+      onCheckIn={handleCheckIn}
+      onRemoveCheckIn={handleRemoveCheckIn}
+      onMoveTask={handleMoveTask}
+      canReorder={canUserAssignTasks(currentUser)}
+      onEditTask={(task) => {
+        if (!canUserAssignTasks(currentUser)) {
+          showToast('You do not have permission to edit task definitions.');
+          return;
+        }
+        setTaskToEdit(task);
+        setIsTaskModalOpen(true);
+      }}
+      onDeleteTask={handleDeleteTask}
+      onOpenTaskModal={handleOpenCreateTask}
+    />
+  );
+
+  // Admin "Delete venue" (same confirm on the stats card and the kiosk panel).
+  const deleteVenueAction =
+    currentUser?.role === 'admin' && currentVenue
+      ? () => {
+          const targetVenue = currentVenue;
+          setConfirmModalConfig({
+            isOpen: true,
+            title: `Delete "${targetVenue.name}"?`,
+            message: `Are you sure you want to delete "${targetVenue.name}" and all its shift assignments and logs? This action cannot be undone.`,
+            confirmText: 'Delete Venue',
+            cancelText: 'Cancel',
+            variant: 'danger',
+            icon: 'trash',
+            onConfirm: async () => {
+              setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+              await handleDeleteVenue(targetVenue.id);
+            },
+          });
+        }
+      : undefined;
+
   return (
     <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
       {/* Stale-draft banner: changes preserved across the refresh that a
@@ -1518,8 +1587,9 @@ export default function App() {
         </div>
       )}
 
-      {/* Kiosk: always-visible End shift button for the wall tablet */}
-      {isKiosk && (
+      {/* Kiosk: always-visible End shift button for the wall tablet. With a
+          venue, the kiosk panel carries it in its sticky strip instead (D3a). */}
+      {isKiosk && venues.length === 0 && (
         <button
           onClick={handleLogout}
           className="fixed bottom-5 left-5 z-50 tactile-4 bg-red-700 text-white text-base font-extrabold font-sans px-6 py-4 rounded-2xl shadow-lg active:scale-95 transition-transform"
@@ -1718,8 +1788,8 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* Live Progress Header / Owner Audit Banner */}
-            {currentUser?.role === 'owner' ? (
+            {/* Live Progress Header / Owner Audit Banner (the kiosk shows its own progress ring) */}
+            {isKiosk ? null : currentUser?.role === 'owner' ? (
               <OwnerAuditBanner
                 totalTasks={totalTasks}
                 completedTasks={completedTasks}
@@ -1745,26 +1815,7 @@ export default function App() {
                 isRealtimeConnected={isRealtimeConnected}
                 activeWorkersCount={activeWorkersCount}
                 isAdmin={currentUser?.role === 'admin'}
-                onDeleteVenue={
-                  currentUser?.role === 'admin' && currentVenue
-                    ? () => {
-                        const targetVenue = currentVenue;
-                        setConfirmModalConfig({
-                          isOpen: true,
-                          title: `Delete "${targetVenue.name}"?`,
-                          message: `Are you sure you want to delete "${targetVenue.name}" and all its shift assignments and logs? This action cannot be undone.`,
-                          confirmText: 'Delete Venue',
-                          cancelText: 'Cancel',
-                          variant: 'danger',
-                          icon: 'trash',
-                          onConfirm: async () => {
-                            setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
-                            await handleDeleteVenue(targetVenue.id);
-                          },
-                        });
-                      }
-                    : undefined
-                }
+                onDeleteVenue={deleteVenueAction}
               />
             )}
 
@@ -1824,29 +1875,33 @@ export default function App() {
           </div>
         )}
 
-        {/* Search, Categories, Layout Switcher & New Assignment Button */}
-        <TaskFilterBar
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
-          selectedCategory={selectedCategory}
-          onCategoryChange={setSelectedCategory}
-          categories={categories}
-          categoryCounts={categoryCounts}
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-          showOnlyTodaySchedule={showOnlyTodaySchedule}
-          onToggleScheduleFilter={() => setShowOnlyTodaySchedule(!showOnlyTodaySchedule)}
-          onOpenTaskModal={handleOpenCreateTask}
-          isAdmin={canUserAssignTasks(currentUser)}
-        />
-
-        {/* Dynamic View Mode: Excel-like Table View vs Responsive Card View */}
-        {viewMode === 'table' ? (
-          <TaskTableView
+        {isKiosk ? (
+          <KioskTaskPanel
             tasks={sortedTasks}
             currentUser={currentUser}
+            venueName={currentVenue?.name}
+            activeFilter={activeTabFilter}
+            onSelectFilter={setActiveTabFilter}
+            totalTasks={totalTasks}
+            completedTasks={completedTasks}
+            myTotal={myTotal}
+            myCompleted={myCompleted}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            selectedCategory={selectedCategory}
+            onCategoryChange={setSelectedCategory}
+            categories={categories}
+            categoryCounts={categoryCounts}
+            showOnlyTodaySchedule={showOnlyTodaySchedule}
+            onToggleScheduleFilter={() => setShowOnlyTodaySchedule(!showOnlyTodaySchedule)}
+            view={kioskView}
+            onViewChange={setKioskView}
             onUpdateStatus={handleUpdateStatus}
             onUpdateNotes={handleUpdateNotes}
+            onCheckIn={handleCheckIn}
+            onRemoveCheckIn={handleRemoveCheckIn}
+            onMoveTask={handleMoveTask}
+            canReorder={canUserAssignTasks(currentUser)}
             onEditTask={(task) => {
               if (!canUserAssignTasks(currentUser)) {
                 showToast('You do not have permission to edit task definitions.');
@@ -1857,32 +1912,33 @@ export default function App() {
             }}
             onDeleteTask={handleDeleteTask}
             onOpenTaskModal={handleOpenCreateTask}
-            onCheckIn={handleCheckIn}
-            onRemoveCheckIn={handleRemoveCheckIn}
-            onMoveTask={handleMoveTask}
-            canReorder={canUserAssignTasks(currentUser)}
-          />
+            isAdmin={canUserAssignTasks(currentUser)}
+            onDeleteVenue={deleteVenueAction}
+            onEndShift={handleLogout}
+          >
+            {kioskView === 'table' ? taskTableView : kioskView === 'cards' ? taskCardView : null}
+          </KioskTaskPanel>
         ) : (
-          <TaskCardView
-            tasks={sortedTasks}
-            currentUser={currentUser}
-            onUpdateStatus={handleUpdateStatus}
-            onUpdateNotes={handleUpdateNotes}
-            onCheckIn={handleCheckIn}
-            onRemoveCheckIn={handleRemoveCheckIn}
-            onMoveTask={handleMoveTask}
-            canReorder={canUserAssignTasks(currentUser)}
-            onEditTask={(task) => {
-              if (!canUserAssignTasks(currentUser)) {
-                showToast('You do not have permission to edit task definitions.');
-                return;
-              }
-              setTaskToEdit(task);
-              setIsTaskModalOpen(true);
-            }}
-            onDeleteTask={handleDeleteTask}
+          <>
+          {/* Search, Categories, Layout Switcher & New Assignment Button */}
+          <TaskFilterBar
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            selectedCategory={selectedCategory}
+            onCategoryChange={setSelectedCategory}
+            categories={categories}
+            categoryCounts={categoryCounts}
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+            showOnlyTodaySchedule={showOnlyTodaySchedule}
+            onToggleScheduleFilter={() => setShowOnlyTodaySchedule(!showOnlyTodaySchedule)}
             onOpenTaskModal={handleOpenCreateTask}
+            isAdmin={canUserAssignTasks(currentUser)}
           />
+
+            {/* Dynamic View Mode: Excel-like Table View vs Responsive Card View */}
+            {viewMode === 'table' ? taskTableView : taskCardView}
+          </>
         )}
           </>
         )}
