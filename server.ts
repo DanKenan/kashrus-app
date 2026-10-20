@@ -789,6 +789,27 @@ function publicUpdate<T extends { readBy?: string[] }>(item: T): Omit<T, 'readBy
 
 const KNOWN_ANNOUNCEMENT_ROLES = ['all', 'admin', 'coordinator', 'owner', 'mashgiach', 'worker'];
 
+/**
+ * 5a (review round 1): an ANNOUNCEMENT_DELETED event carries only { id, venueId },
+ * but it must reach exactly the sockets that were allowed to see the item.
+ * The delete handler records the deleted item's visibility metadata here
+ * (agency, venue, targetRoles, author — no content) for a short while, and
+ * both WS filters decide with announcementVisibleTo(). No entry = drop
+ * (fail closed).
+ */
+const deletedAnnouncementMeta = new Map<string, { agencyId?: string; venueId?: string; targetRoles: string[]; authorEmail?: string }>();
+function rememberDeletedAnnouncement(a: any) {
+  if (!a?.id) return;
+  deletedAnnouncementMeta.set(a.id, {
+    agencyId: a.agencyId,
+    venueId: a.venueId,
+    targetRoles: Array.isArray(a.targetRoles) ? a.targetRoles : ['all'],
+    authorEmail: a.authorEmail,
+  });
+  const t = setTimeout(() => deletedAnnouncementMeta.delete(a.id), 5 * 60 * 1000);
+  (t as any).unref?.();
+}
+
 /** Non-admin callers may see only venues inside their own scope. */
 function callerMaySeeVenue(user: UserProfile | null | undefined, venueId: string): boolean {
   if (!user || typeof venueId !== 'string' || venueId.length === 0) return false;
@@ -3776,8 +3797,11 @@ function kioskMaySee(meta: SocketMeta, type: string, payload: any): boolean {
       const ann = payload?.announcement || payload;
       return announcementVisibleTo(recipientForMeta(meta), ann, venueId);
     }
-    case 'ANNOUNCEMENT_DELETED':
-      return !payload?.venueId || payload.venueId === venueId;
+    case 'ANNOUNCEMENT_DELETED': {
+      // Same audience as the item itself: tablet venue + the signed-in role.
+      const m = deletedAnnouncementMeta.get(payload?.id);
+      return !!m && announcementVisibleTo(recipientForMeta(meta), m, venueId);
+    }
     case 'USER_PRESENCE':
       return true;
     case 'USERS_UPDATED':
@@ -3906,9 +3930,11 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
       // Fail closed: a note delete without its venueId does not reach a
       // non-admin socket (the payload now carries venueId — see the handler).
       return inScope(p.venueId) ? payload : null;
-    case 'ANNOUNCEMENT_DELETED':
-      // An announcement delete without venueId = agency-wide announcement.
-      return !p.venueId || inScope(p.venueId) ? payload : null;
+    case 'ANNOUNCEMENT_DELETED': {
+      // Same audience as the item itself (venue + role targeting + author).
+      const m = deletedAnnouncementMeta.get(p.id);
+      return m && announcementVisibleTo(recipient, m) ? payload : null;
+    }
     case 'INCIDENT_CREATED':
     case 'INCIDENT_UPDATED': {
       const inc = p.incident || p;
@@ -5552,6 +5578,7 @@ app.delete('/api/announcements/:id', async (req, res) => {
     }
   }
   const agencyId = existing.agencyId;
+  rememberDeletedAnnouncement(existing);
   const ok = await crudDelete(req, res, 'announcements', req.params.id, {
     label: 'delete-announcement',
     broadcastType: 'ANNOUNCEMENT_DELETED',
@@ -5734,7 +5761,7 @@ app.post('/api/handoff-notes', async (req, res) => {
 // never part of an announcement/note payload. 5b reads the same store for
 // the ✓✓ counts. Without Firestore (local file mode) marks live in memory.
 // ---------------------------------------------------------------------------
-type UpdateReads = { agencyId: string; userId: string; a: Record<string, string>; n: Record<string, string>; aFloor?: string; nFloor?: string; updatedAt?: string };
+type UpdateReads = { agencyId: string; userId: string; a: Record<string, string>; n: Record<string, string>; updatedAt?: string };
 const localUpdateReads = new Map<string, UpdateReads>();
 const updateReadsKey = (user: UserProfile) => `${(user as any).agencyId || 'agency-hkc'}__${user.id}`;
 
@@ -5755,16 +5782,17 @@ function sanitizeUpdateReads(user: UserProfile, d: any): UpdateReads {
   const empty = emptyUpdateReads(user);
   // Fail closed on a doc that is not this user's (should never happen).
   if (!d || d.userId !== user.id || d.agencyId !== empty.agencyId) return empty;
-  return { ...empty, a: d.a || {}, n: d.n || {}, aFloor: d.aFloor, nFloor: d.nFloor };
+  return { ...empty, a: d.a || {}, n: d.n || {} };
 }
 
-const UPDATE_READS_CAP = 2000;
+const UPDATE_READS_CAP = 5000;
 /**
  * Apply new marks ATOMICALLY (a transaction: two devices marking at once
- * never overwrite each other). Pruning keeps only ids that still exist; if
- * more than UPDATE_READS_CAP remain, the oldest ITEMS are folded into a
- * floor (createdAt) — an item at or before the floor counts as read, so an
- * evicted mark never turns a still-visible old item back to unread.
+ * never overwrite each other). Pruning keeps only marks for items that still
+ * exist. Above UPDATE_READS_CAP per kind, the marks of the OLDEST items are
+ * dropped — those items turn back to unread, never the other way round: an
+ * item counts as read ONLY when it has its own mark (review round 1: no
+ * timestamp floor, so an item nobody saw can never be promoted to read).
  */
 async function addUpdateReads(user: UserProfile, annIds: string[], noteIds: string[]): Promise<number> {
   const key = updateReadsKey(user);
@@ -5775,20 +5803,13 @@ async function addUpdateReads(user: UserProfile, annIds: string[], noteIds: stri
   let recorded = 0;
   const apply = (rec: UpdateReads): UpdateReads => {
     recorded = 0;
-    for (const id of annIds) if (!rec.a[id] && !isRead(rec, 'a', id, createdOf.get(`a:${id}`))) { rec.a[id] = now; recorded++; }
-    for (const id of noteIds) if (!rec.n[id] && !isRead(rec, 'n', id, createdOf.get(`n:${id}`))) { rec.n[id] = now; recorded++; }
+    for (const id of annIds) if (!rec.a[id]) { rec.a[id] = now; recorded++; }
+    for (const id of noteIds) if (!rec.n[id]) { rec.n[id] = now; recorded++; }
     const prune = (kind: 'a' | 'n') => {
       const m = rec[kind];
       const live = Object.keys(m).filter((id) => createdOf.has(`${kind}:${id}`));
       live.sort((x, y) => (createdOf.get(`${kind}:${y}`) || '').localeCompare(createdOf.get(`${kind}:${x}`) || ''));
-      const keep = live.slice(0, UPDATE_READS_CAP);
-      const evicted = live.slice(UPDATE_READS_CAP);
-      if (evicted.length) {
-        const newest = createdOf.get(`${kind}:${evicted[0]}`) || '';
-        const floorKey = kind === 'a' ? 'aFloor' : 'nFloor';
-        if (!rec[floorKey] || newest > (rec[floorKey] as string)) (rec as any)[floorKey] = newest;
-      }
-      rec[kind] = Object.fromEntries(keep.map((id) => [id, m[id]]));
+      rec[kind] = Object.fromEntries(live.slice(0, UPDATE_READS_CAP).map((id) => [id, m[id]]));
     };
     prune('a'); prune('n');
     rec.updatedAt = now;
@@ -5808,11 +5829,9 @@ async function addUpdateReads(user: UserProfile, annIds: string[], noteIds: stri
   return recorded;
 }
 
-/** An item is read when it has a mark, or it is at/before the floor. */
-function isRead(rec: UpdateReads, kind: 'a' | 'n', id: string, createdAt?: string): boolean {
-  if (rec[kind][id]) return true;
-  const floor = kind === 'a' ? rec.aFloor : rec.nFloor;
-  return !!(floor && createdAt && createdAt <= floor);
+/** An item is read only when it carries the caller's own mark. */
+function isRead(rec: UpdateReads, kind: 'a' | 'n', id: string, _createdAt?: string): boolean {
+  return !!rec[kind][id];
 }
 
 /** Notes of ONE venue in the caller's agency (the venue gate below has already applied rule T). */

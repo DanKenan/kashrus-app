@@ -15,6 +15,8 @@
  * Every positive check has its negative twin (rule G).
  * T5 admin/author visibility, T6 payload validation + concurrent marks,
  * T7 venue-filtered delete events (ChatGPT plan review, Oct 20).
+ * T8 role-targeted delete events (staff + kiosk), T9 no read promotion
+ * (ChatGPT PR #38 review round 1).
  */
 
 const AX = 'agency-test29-x';
@@ -378,6 +380,49 @@ export default {
       if (!dels.some((d) => d.includes(a1.body.announcement.id))) throw new Error('T7 A1 delete event missing for A1 mashgiach');
       if (dels.some((d) => /title|body/.test(d))) throw new Error('T7 delete payload carries content');
       wsM1.ws.close();
+    }
+
+    // ---- T8 (review round 1): delete events follow the item's own audience (role + venue), staff and kiosk ----
+    {
+      const wsM = await connectWs(baseUrl, T[mashA1]);
+      const wsC = await connectWs(baseUrl, T[coordA1]);
+      deviceHeader = await pairDevice(baseUrl, T[adminX], A1);
+      const kM = await kioskLogin(baseUrl, mashA1, '2911');
+      const kC = await kioskLogin(baseUrl, coordA1, '2912');
+      const wsKM = await connectWs(baseUrl, kM, true);
+      const wsKC = await connectWs(baseUrl, kC, true);
+      await sleep(500);
+      const coordOnly = await post(T[adminX], '/api/announcements', { title: `coord-only del ${ts}`, venueId: A1, targetRoles: ['coordinator'] });
+      const cid = coordOnly.body.announcement?.id;
+      if (!cid) throw new Error('T8 post coordinator-only failed');
+      await sleep(800);
+      for (const c of [wsM, wsC, wsKM, wsKC]) noReadBy(c.messages, 'T8 WS payloads');
+      const ver = await ctx.getVersion();
+      const d = await fetch(`${baseUrl}/api/announcements/${cid}?expectedVersion=${ver}`, { method: 'DELETE', headers: auth(T[adminX]), body: JSON.stringify({ expectedVersion: ver }) });
+      if (d.status !== 200) throw new Error(`T8 delete: ${d.status}`);
+      await sleep(1500);
+      const got = (c) => c.messages.some((m) => m.type === 'ANNOUNCEMENT_DELETED' && JSON.stringify(m.payload).includes(cid));
+      if (!got(wsC)) throw new Error('T8 coordinator socket missed the delete of a coordinator-only item');
+      if (got(wsM)) throw new Error('T8 mashgiach socket received the delete of a coordinator-only item');
+      if (!got(wsKC)) throw new Error('T8 kiosk(coordinator) missed the delete of a coordinator-only item');
+      if (got(wsKM)) throw new Error('T8 kiosk(mashgiach) received the delete of a coordinator-only item');
+      [wsM, wsC, wsKM, wsKC].forEach((c) => c.ws.close());
+    }
+
+    // ---- T9 (review round 1): an older item nobody opened stays unread when newer items are marked ----
+    {
+      const old = await post(T[adminX], '/api/announcements', { title: `old unseen ${ts}`, venueId: A1 });
+      await sleep(20);
+      const newer = [];
+      for (let i = 0; i < 5; i++) newer.push((await post(T[adminX], '/api/announcements', { title: `newer ${i} ${ts}`, venueId: A1 })).body.announcement.id);
+      const before = (await unread(T[coordA1], A1)).announcements;
+      const s = await post(T[coordA1], '/api/updates/seen', { venueId: A1, announcementIds: newer, noteIds: [] });
+      if (s.status !== 200) throw new Error(`T9 seen: ${s.status}`);
+      const u = await unread(T[coordA1], A1);
+      if (u.announcements !== before - 5) throw new Error(`T9 unread ${before} → ${u.announcements} (expected −5)`);
+      if (Array.isArray(u.unreadAnnouncementIds) && !u.unreadAnnouncementIds.includes(old.body.announcement.id)) {
+        throw new Error('T9 the older unseen item was promoted to read');
+      }
     }
   },
 };
