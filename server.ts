@@ -252,6 +252,7 @@ async function hashPassword(plain: string): Promise<string> {
   return bcrypt.hash(plain, 10);
 }
 
+
 /** Returns 'valid' | 'valid-needs-upgrade' (legacy plaintext matched) | 'invalid'. */
 async function checkPassword(
   plain: string,
@@ -274,6 +275,7 @@ function base64url(input: Buffer | string): string {
 }
 
 const TOKEN_TTL_SECONDS = 30 * 24 * 3600; // 30 days
+const KIOSK_TOKEN_TTL_SECONDS = 12 * 3600; // 12 hours
 
 function signToken(userId: string): string {
   const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
@@ -285,7 +287,21 @@ function signToken(userId: string): string {
   return `${header}.${payload}.${sig}`;
 }
 
-function verifyToken(token: string): { userId: string } | null {
+/** Kiosk session token: venue-scoped, 12h expiry, kiosk:true claim.
+ * pv = the kiosk PIN version (kioskPinSetAt) — a PIN change revokes old tokens. */
+function signKioskToken(userId: string, agencyId: string, venueId: string, pv: string): string {
+  const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const now = Math.floor(Date.now() / 1000);
+  const payload = base64url(
+    JSON.stringify({ sub: userId, kiosk: true, agencyId, venueId, pv, iat: now, exp: now + KIOSK_TOKEN_TTL_SECONDS })
+  );
+  const sig = base64url(
+    crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest()
+  );
+  return `${header}.${payload}.${sig}`;
+}
+
+function verifyToken(token: string): { userId: string; kiosk?: boolean; agencyId?: string; venueId?: string; pv?: string } | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
@@ -302,7 +318,13 @@ function verifyToken(token: string): { userId: string } | null {
     const data = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
     if (typeof data.exp !== 'number' || data.exp < Math.floor(Date.now() / 1000)) return null;
     if (typeof data.sub !== 'string' || !data.sub) return null;
-    return { userId: data.sub };
+    return {
+      userId: data.sub,
+      kiosk: data.kiosk === true ? true : undefined,
+      agencyId: typeof data.agencyId === 'string' ? data.agencyId : undefined,
+      venueId: typeof data.venueId === 'string' ? data.venueId : undefined,
+      pv: typeof data.pv === 'string' ? data.pv : undefined,
+    };
   } catch {
     return null;
   }
@@ -383,6 +405,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/revoke-user-silent' },
         { method: 'POST', path: '/__test__/drop-socket-meta' },
         { method: 'POST', path: '/__test__/mint-token' },
+        { method: 'POST', path: '/__test__/mint-kiosk-token' },
       ]
     : []),
 ];
@@ -475,6 +498,34 @@ app.use('/api', async (req, res, next) => {
     return res.status(401).json({ error: 'Sign in required. Please log in again.' });
   }
 
+  // Kiosk session: mark the request; the scope middleware enforces the allowlist.
+  // Re-validate the user on every kiosk request (revocation without a token
+  // store): the token is valid only while the user still exists, still has a
+  // kioskPinHash (PIN removed = kiosk access revoked), still belongs to the
+  // token's agencyId, and is still assigned to the token's venueId. Any
+  // mismatch → 401 so the tablet returns to the PIN screen.
+  if (payload?.kiosk === true) {
+    const tokenAgencyId = payload.agencyId;
+    const tokenVenueId = payload.venueId;
+    const tokenPv = payload.pv;
+    // Fail closed: a kiosk token without agencyId, venueId or pv is invalid —
+    // never fall through as a phone session. pv must match the current PIN
+    // version (a PIN re-save revokes old tokens).
+    const stillValid =
+      !!tokenAgencyId &&
+      !!tokenVenueId &&
+      !!tokenPv &&
+      user.kioskPinHash &&
+      (user as any).kioskPinSetAt === tokenPv &&
+      (user.agencyId || 'agency-hkc') === tokenAgencyId &&
+      (user as any).venueId === tokenVenueId;
+    if (!stillValid) {
+      return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    }
+    (req as any).kiosk = true;
+    (req as any).kioskVenueId = tokenVenueId;
+  }
+
   // Force the verified identity: endpoints keying off userEmail now see the
   // authenticated user, never a client-supplied impersonation.
   (req as any).authUser = user;
@@ -483,6 +534,33 @@ app.use('/api', async (req, res, next) => {
   }
   if (req.body && typeof req.body === 'object') {
     (req.body as any).userEmail = user.email;
+  }
+
+  // Kiosk scope enforcement: a kiosk token is accepted ONLY on the allowlist.
+  // Everything else → 403 KIOSK_SCOPE (never 401, so the tablet doesn't bounce
+  // to login). The venue scoping within allowlisted routes is handled by
+  // scopedVenueIds (kiosk branch) and the per-route venue checks.
+  if ((req as any).kiosk === true) {
+    const method = req.method;
+    const path = req.path; // stripped of /api prefix
+    const allowed =
+      (method === 'GET' && path === '/tasks') ||
+      (method === 'PUT' && /^\/tasks\/[^/]+$/.test(path)) ||
+      (method === 'POST' && /^\/tasks\/[^/]+\/check-in$/.test(path)) ||
+      (method === 'DELETE' && /^\/tasks\/[^/]+\/check-in\/[^/]+$/.test(path)) ||
+      (method === 'GET' && path === '/history') ||
+      (method === 'GET' && path === '/handoff-notes') ||
+      (method === 'POST' && path === '/handoff-notes') ||
+      (method === 'GET' && path === '/announcements') ||
+      (method === 'GET' && path === '/venues') ||
+      (method === 'GET' && path === '/users') ||
+      (method === 'GET' && path === '/health');
+    if (!allowed) {
+      return res.status(403).json({
+        error: 'This kiosk session can only clock in and out.',
+        code: 'KIOSK_SCOPE',
+      });
+    }
   }
   next();
 });
@@ -542,6 +620,22 @@ function scopedVenueIds(req: any, res: any): string[] | 'agency' | null {
   if (!caller) {
     res.status(401).json({ error: 'Sign in required. Please log in again.' });
     return null;
+  }
+  // Kiosk session: always venue-scoped to the token's venue, never agency-wide,
+  // regardless of the user's role. A coordinator on a wall tablet gets the
+  // tablet's scope, not coordinator powers.
+  if ((req as any).kiosk === true) {
+    const kioskVenueId: string | undefined = (req as any).kioskVenueId;
+    if (!kioskVenueId) return []; // fail closed: no venue → empty
+    const queryVenueId = String(req.query.venueId || '');
+    if (queryVenueId && queryVenueId !== kioskVenueId) {
+      res.status(403).json({
+        error: 'This kiosk session can only clock in and out.',
+        code: 'KIOSK_SCOPE',
+      });
+      return null;
+    }
+    return [kioskVenueId];
   }
   const queryVenueId = String(req.query.venueId || '');
   const privileged = caller.role === 'admin' || caller.role === 'coordinator';
@@ -944,6 +1038,8 @@ interface UserProfile {
   avatarColor: string;
   password?: string;
   kioskPin?: string; // 4-6 digit PIN for shared kiosk tablets (never sent to clients)
+  kioskPinHash?: string; // bcrypt hash of the kiosk PIN (cost 10); kioskPin is legacy plain
+  kioskPinSetAt?: string; // ISO timestamp of the last PIN write — kiosk tokens carry it as pv; a change revokes old tokens
   venueId?: string; // Mashgichim, Coordinators and Owners belong to a specific venue; Admins have access to all in their agency
   permissions?: UserPermissions;
 }
@@ -1354,7 +1450,7 @@ interface EventTaskTemplate {
 }
 
 function getSafeUser(user: UserProfile) {
-  const { password, kioskPin, ...safe } = user;
+  const { password, kioskPin, kioskPinHash, kioskPinSetAt, ...safe } = user;
   const userAgency = agencies.find((a) => a.id === user.agencyId) || agencies[0];
   return {
     ...safe,
@@ -1521,6 +1617,28 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
     activeSockets.delete(client);
     return null;
   }
+  // Kiosk sockets are re-validated on every delivery (same revocation rule
+  // as the HTTP middleware): the user must still exist, still have a
+  // kioskPinHash, and still sit in the token's agency and venue.
+  if (meta.kiosk) {
+    const user = users.find((u) => u.id === meta.userId);
+    // No 'agency-hkc' fallback: a kiosk meta without kioskAgencyId/pv is invalid.
+    const stillValid =
+      user &&
+      user.kioskPinHash &&
+      meta.kioskAgencyId &&
+      meta.kioskPv &&
+      (user as any).kioskPinSetAt === meta.kioskPv &&
+      (user.agencyId || 'agency-hkc') === meta.kioskAgencyId &&
+      (user as any).venueId === meta.kioskVenueId;
+    if (!stillValid) {
+      try {
+        client.close(4401, 'Unauthorized');
+      } catch {}
+      activeSockets.delete(client);
+      return null;
+    }
+  }
   return meta;
 }
 
@@ -1539,8 +1657,18 @@ let incidents: Incident[] = [];
 let announcements: Announcement[] = [];
 let passwordResets: PasswordResetRequest[] = [];
 let passwordResetRateLimits: PasswordResetRateLimits = emptyRateLimits();
+
+/** Kiosk PIN lockout state (persisted in the state doc, survives restarts). */
+interface KioskPinLockouts {
+  users: { [userId: string]: { fails: string[]; lockedUntil?: number } };
+  tablets: { [key: string]: { fails: string[]; lockedUntil?: number } }; // key = venueId|ip
+}
+function emptyKioskPinLockouts(): KioskPinLockouts {
+  return { users: {}, tablets: {} };
+}
+let kioskPinLockouts: KioskPinLockouts = emptyKioskPinLockouts();
 let eventTaskTemplates: EventTaskTemplate[] = [];
-let currentWorkDate = new Date().toISOString().split('T')[0];
+let currentWorkDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 let isDemoCleared = false;
 
 const INITIAL_EVENTS: KosherEventItem[] = [];
@@ -1620,6 +1748,17 @@ function hydrateState(parsed: any) {
         };
       } else {
         passwordResetRateLimits = emptyRateLimits();
+      }
+
+      // Kiosk PIN lockouts (persisted; survives restarts).
+      if (parsed.kioskPinLockouts && typeof parsed.kioskPinLockouts === 'object') {
+        const kl = parsed.kioskPinLockouts;
+        kioskPinLockouts = {
+          users: typeof kl.users === 'object' && kl.users ? kl.users : {},
+          tablets: typeof kl.tablets === 'object' && kl.tablets ? kl.tablets : {},
+        };
+      } else {
+        kioskPinLockouts = emptyKioskPinLockouts();
       }
 
       if (Array.isArray(parsed.agencies) && parsed.agencies.length > 0) {
@@ -1833,6 +1972,7 @@ function stateSnapshot() {
     resetPepper: (globalThis as any).__resetPepper || undefined,
     passwordResets,
     passwordResetRateLimits,
+    kioskPinLockouts,
   };
 }
 
@@ -2196,11 +2336,11 @@ const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const IDEMPOTENCY_MAX_RECORDS = 1000;
 
 /** Exact-match sensitive field names (case-insensitive) stripped from cached results. */
-const IDEMPOTENCY_SENSITIVE_FIELDS = new Set(['password', 'passwordhash', 'kioskpin', 'resettoken', 'apikey']);
+const IDEMPOTENCY_SENSITIVE_FIELDS = new Set(['password', 'passwordhash', 'kioskpin', 'kioskpinhash', 'resettoken', 'apikey']);
 
 /**
  * Deep-strip sensitive fields from a result before caching it as an
- * idempotency record. Removes password/passwordHash/kioskPin/resetToken/
+ * idempotency record. Removes password/passwordHash/kioskPin/kioskPinHash/resetToken/
  * apiKey and any field whose name contains 'secret' or 'token'
  * (case-insensitive). Never mutates the input.
  */
@@ -3226,8 +3366,87 @@ app.post('/api/push/unsubscribe', async (req, res) => {
 
 // WebSocket Setup
 const wss = new WebSocketServer({ server, path: '/ws' });
-type SocketMeta = { userId: string; email: string; name: string; agencyId: string; role?: string };
+type SocketMeta = { userId: string; email: string; name: string; agencyId: string; role?: string; kiosk?: boolean; kioskVenueId?: string; kioskAgencyId?: string; kioskPv?: string };
 const activeSockets = new Map<WebSocket, SocketMeta>();
+
+/**
+ * Kiosk socket allowlist (one helper for broadcasts AND INITIAL_STATE).
+ * A kiosk socket receives ONLY:
+ * - TASK_CREATED/TASK_UPDATED/TASK_DELETED when the task's venueId ===
+ *   the kiosk venue; TASKS_UPDATED ({ venueId }) when it matches
+ * - HANDOFF_NOTE when note.venueId matches
+ * - ANNOUNCEMENT (agency-scoped; the REST allowlist includes it)
+ * - USER_PRESENCE (counts only)
+ * - USERS_UPDATED as the venue roster (names/roles/avatars, no emails)
+ * - DAILY_RESET/DEMO_RESTORED/CLEAN_SLATE_RESET with tasks/historyLogs/
+ *   snapshots filtered to the kiosk venue (so the board isn't stale)
+ * Everything else is dropped (the REST allowlist denies it too).
+ */
+function kioskMaySee(meta: SocketMeta, type: string, payload: any): boolean {
+  const venueId = meta.kioskVenueId;
+  if (!venueId) return false;
+  switch (type) {
+    case 'TASK_CREATED':
+    case 'TASK_UPDATED':
+    case 'TASK_DELETED': {
+      const task = payload?.task || payload;
+      return task?.venueId === venueId;
+    }
+    case 'TASKS_UPDATED': {
+      // Broadcast as { venueId } — pass through only for the kiosk venue.
+      return payload?.venueId === venueId;
+    }
+    case 'HANDOFF_NOTE': {
+      const note = payload?.note || payload;
+      return note?.venueId === venueId;
+    }
+    case 'ANNOUNCEMENT':
+    case 'USER_PRESENCE':
+      return true;
+    case 'USERS_UPDATED':
+    case 'DAILY_RESET':
+    case 'DEMO_RESTORED':
+    case 'CLEAN_SLATE_RESET':
+      // Allowed; the payload is venue-filtered by kioskFilterPayload below.
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Venue-filter a broadcast payload for a kiosk socket. Runs on the
+ * varyByRecipient OUTPUT (the base payload may be just { agencyId } — the
+ * user/venue lists are produced by the transform). Returns the filtered
+ * payload, or null to drop the message.
+ */
+function kioskFilterPayload(meta: SocketMeta, type: string, payload: any): any {
+  const venueId = meta.kioskVenueId;
+  if (!venueId) return null;
+  const p = payload || {};
+  const roster = (users: any[]) =>
+    (users || [])
+      .filter((u: any) => u?.venueId === venueId)
+      .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
+  switch (type) {
+    case 'USERS_UPDATED':
+      return { ...p, users: roster(p.users) };
+    case 'DAILY_RESET':
+    case 'DEMO_RESTORED':
+    case 'CLEAN_SLATE_RESET':
+      return {
+        ...p,
+        tasks: (p.tasks || []).filter((t: any) => t?.venueId === venueId),
+        historyLogs: (p.historyLogs || []).filter((h: any) => h?.venueId === venueId),
+        snapshots: (p.snapshots || []).filter((s: any) => s?.venueId === venueId),
+        venues: (p.venues || []).filter((v: any) => v?.id === venueId),
+        events: [],
+        users: p.users ? roster(p.users) : p.users,
+      };
+    default:
+      return payload;
+  }
+}
 
 function agencyStateFor(agencyId: string, recipient?: UserProfile) {
   const norm = (v?: string) => v || 'agency-hkc';
@@ -3276,6 +3495,14 @@ function broadcast(
       if (!meta) continue;
       // Agency-scoped broadcasts only reach that agency's sockets.
       if (agencyId && meta.agencyId !== agencyId) continue;
+      // Kiosk sockets: per-type allowlist + venue-filtered payload.
+      if (meta.kiosk) {
+        if (!kioskMaySee(meta, type, payload)) continue;
+        const filtered = kioskFilterPayload(meta, type, payload);
+        if (filtered === null) continue;
+        client.send(envelopeFor(filtered));
+        continue;
+      }
       client.send(message);
     }
     return;
@@ -3290,6 +3517,17 @@ function broadcast(
     if (!meta) continue;
     // Agency-scoped broadcasts only reach that agency's sockets.
     if (agencyId && meta.agencyId !== agencyId) continue;
+    // Kiosk sockets: per-type allowlist (on the base payload), then the
+    // per-recipient transform, then the venue filter on ITS output.
+    if (meta.kiosk) {
+      if (!kioskMaySee(meta, type, payload)) continue;
+      const finalPayload = varyByRecipient(meta, payload);
+      if (finalPayload === null || finalPayload === undefined) continue;
+      const filtered = kioskFilterPayload(meta, type, finalPayload);
+      if (filtered === null) continue;
+      client.send(envelopeFor(filtered));
+      continue;
+    }
     const finalPayload = varyByRecipient(meta, payload);
     if (finalPayload === null || finalPayload === undefined) continue;
     client.send(envelopeFor(finalPayload));
@@ -3299,11 +3537,27 @@ function broadcast(
 wss.on('connection', (ws, req) => {
   // Token via ?token=… query param (set by the client from its session).
   let authedUser: any = null;
+  let kioskVenueId: string | undefined;
+  let kioskAgencyId: string | undefined;
+  let kioskPv: string | undefined;
+  let isKiosk = false;
   try {
     const url = new URL(req.url || '/ws', 'http://localhost');
     const token = url.searchParams.get('token') || '';
     const payload = token ? verifyToken(token) : null;
     authedUser = payload ? users.find((u) => u.id === payload.userId) : null;
+    isKiosk = payload?.kiosk === true;
+    if (isKiosk) {
+      // Branch on the kiosk CLAIM, not on the presence of a venue id — a
+      // kiosk token without agencyId, venueId or pv fails closed (never a phone session).
+      kioskVenueId = payload.venueId;
+      kioskAgencyId = payload.agencyId;
+      kioskPv = payload.pv;
+      if (!kioskVenueId || !kioskAgencyId || !kioskPv) {
+        ws.close(4401, 'Unauthorized');
+        return;
+      }
+    }
   } catch {
     authedUser = null;
   }
@@ -3312,16 +3566,50 @@ wss.on('connection', (ws, req) => {
     ws.close(4401, 'Unauthorized');
     return;
   }
+  // Kiosk token: re-validate the user (same revocation rule as the middleware).
+  if (isKiosk) {
+    const stillValid =
+      authedUser.kioskPinHash &&
+      (authedUser as any).kioskPinSetAt === kioskPv &&
+      (authedUser.agencyId || 'agency-hkc') === (kioskAgencyId || 'agency-hkc') &&
+      authedUser.venueId === kioskVenueId;
+    if (!stillValid) {
+      ws.close(4401, 'Unauthorized');
+      return;
+    }
+  }
 
   const agencyId = authedUser.agencyId || 'agency-hkc';
-  activeSockets.set(ws, { userId: authedUser.id, email: authedUser.email, name: authedUser.name, agencyId, role: authedUser.role });
+  activeSockets.set(ws, {
+    userId: authedUser.id, email: authedUser.email, name: authedUser.name,
+    agencyId, role: authedUser.role,
+    kiosk: isKiosk, kioskVenueId, kioskAgencyId, kioskPv,
+  });
 
   // Initial state: ONLY this user's agency. Never the whole platform.
+  // Kiosk sockets get the per-type allowlist: their venue's tasks/history,
+  // the venue roster (no emails), and the single venue — nothing else.
+  const baseState = agencyStateFor(agencyId, authedUser);
+  const kioskState = kioskVenueId
+    ? {
+        ...baseState,
+        tasks: (baseState.tasks || []).filter((t: any) => t.venueId === kioskVenueId),
+        historyLogs: (baseState.historyLogs || []).filter((h: any) => h.venueId === kioskVenueId),
+        venues: (baseState.venues || []).filter((v: any) => v.id === kioskVenueId),
+        users: (baseState.users || [])
+          .filter((u: any) => u.venueId === kioskVenueId)
+          .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role })),
+        events: [],
+        airtableConfigs: [],
+        approvedIngredients: [],
+        factoryReports: [],
+      }
+    : baseState;
   ws.send(
     JSON.stringify({
       type: 'INITIAL_STATE',
       payload: {
-        ...agencyStateFor(agencyId, authedUser),
+        ...kioskState,
         activeWorkersCount: activeSockets.size,
       },
       timestamp: new Date().toISOString(),
@@ -3335,13 +3623,8 @@ wss.on('connection', (ws, req) => {
     try {
       const parsed = JSON.parse(data.toString());
       if (parsed.type === 'USER_PRESENCE' && parsed.payload) {
-        activeSockets.set(ws, {
-          userId: authedUser.id,
-          email: authedUser.email,
-          name: authedUser.name,
-          agencyId,
-          role: authedUser.role,
-        });
+        // Rule X: never rebuild security meta from a client message.
+        // Presence changes nothing security-relevant — keep the meta as is.
         broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
       }
     } catch (e) {
@@ -3658,6 +3941,7 @@ app.get('/api/admin/export', (req, res) => {
       password: undefined,
       passwordHash: undefined,
       kioskPin: undefined,
+      kioskPinHash: undefined,
     })),
     jwtSecret: undefined,
     vapidKeys: undefined,
@@ -4640,7 +4924,9 @@ app.get('/api/handoff-notes', (req, res) => {
 app.post('/api/handoff-notes', async (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
-  const { venueId, content, shift, voiceNoteData } = req.body || {};
+  const { content, shift, voiceNoteData } = req.body || {};
+  // Kiosk: the note carries the token's venue, not a body venueId.
+  const venueId = (req as any).kiosk === true ? (req as any).kioskVenueId : req.body?.venueId;
   if (!venueId || (!content?.trim() && !voiceNoteData)) {
     return res.status(400).json({ error: 'Venue and note content (or voice note) are required.' });
   }
@@ -5159,6 +5445,46 @@ if (isTestMode()) {
       res.status(500).json({ error: err?.message });
     }
   });
+
+  // Test-only: mint a kiosk token with arbitrary claims (for malformed-token tests).
+  app.post('/api/__test__/mint-kiosk-token', async (req, res) => {
+    try {
+      const { userId, agencyId, venueId, kiosk } = req.body || {};
+      const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+      const now = Math.floor(Date.now() / 1000);
+      const claims: any = { sub: userId, iat: now, exp: now + 3600 };
+      if (kiosk !== false) claims.kiosk = true;
+      if (agencyId !== undefined) claims.agencyId = agencyId;
+      if (venueId !== undefined) claims.venueId = venueId;
+      const payload = base64url(JSON.stringify(claims));
+      const sig = base64url(
+        crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest()
+      );
+      res.json({ token: `${header}.${payload}.${sig}` });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Test-only: clear kiosk PIN lockouts (for lock-expiry tests).
+  app.post('/api/__test__/kiosk-clear-lockouts', async (req, res) => {
+    const caller = requireAuthUser(req, res);
+    if (!caller || caller.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    try {
+      await commitState(
+        (freshDoc) => ({
+          doc: { ...freshDoc, kioskPinLockouts: emptyKioskPinLockouts() },
+          result: { cleared: true },
+        }),
+        { label: 'test-kiosk-clear-lockouts' }
+      );
+      res.json({ cleared: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
 }
 
 app.get('/api/venues', (req, res) => {
@@ -5172,8 +5498,13 @@ app.get('/api/venues', (req, res) => {
   // Filter venues STRICTLY by caller's agency
   let accessibleVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === agencyId);
 
-  // If worker or owner, additionally filter to their assigned venue within the agency
-  if (!isCallerAdmin) {
+  // Kiosk session: the token's venue ONLY, regardless of the user's role
+  // (a coordinator on a wall tablet gets the tablet's scope, not coordinator powers).
+  if ((req as any).kiosk === true) {
+    const kioskVenueId = (req as any).kioskVenueId;
+    accessibleVenues = accessibleVenues.filter((v) => v.id === kioskVenueId);
+  } else if (!isCallerAdmin) {
+    // If worker or owner, additionally filter to their assigned venue within the agency
     if (callerVenueId) {
       accessibleVenues = accessibleVenues.filter((v) => v.id === callerVenueId);
     } else if (accessibleVenues.length > 0) {
@@ -5650,6 +5981,32 @@ app.put('/api/tasks/:id', async (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
   if (!requireSameAgency(req, res, existing, 'tasks')) return;
+  // Kiosk: task must belong to the token's venue, and only the
+  // completion/status fields may change (title, notes, assignment, venue,
+  // private flag, schedule… → 403 KIOSK_SCOPE).
+  if ((req as any).kiosk === true) {
+    const kioskVenueId = (req as any).kioskVenueId;
+    if (existing.venueId !== kioskVenueId) {
+      return res.status(403).json({
+        error: 'This kiosk session can only clock in and out.',
+        code: 'KIOSK_SCOPE',
+      });
+    }
+    const bodyKeys = Object.keys(req.body || {}).filter(
+      (k) => !['userEmail', 'userName', 'expectedVersion', 'operationId'].includes(k)
+    );
+    // Only the completion/status fields the task board uses; the attribution
+    // fields (userEmail/userName) are overwritten server-side from the session
+    // anyway. Anything else → 403 KIOSK_SCOPE.
+    const allowed = new Set(['currentStatus', 'isCompleted']);
+    const forbidden = bodyKeys.filter((k) => !allowed.has(k));
+    if (forbidden.length > 0) {
+      return res.status(403).json({
+        error: 'This kiosk session can only clock in and out.',
+        code: 'KIOSK_SCOPE',
+      });
+    }
+  }
 
   // Capture pre-update visibility for transition handling (addendum item 1).
   const oldTaskVisibility = {
@@ -5826,10 +6183,27 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
   if (!requireSameAgency(req, res, existing, 'tasks')) return;
+  // Kiosk: task must belong to the token's venue, and only the caller's OWN
+  // check-in may be deleted (clock-out); anyone else's → 403.
+  if ((req as any).kiosk === true) {
+    const kioskVenueId = (req as any).kioskVenueId;
+    if (existing.venueId !== kioskVenueId) {
+      return res.status(403).json({
+        error: 'This kiosk session can only clock in and out.',
+        code: 'KIOSK_SCOPE',
+      });
+    }
+  }
 
   const entry = (existing.checkIns || []).find((c: any) => c.id === checkInId);
   if (!entry) {
     return res.status(404).json({ error: 'Check-in not found' });
+  }
+  if ((req as any).kiosk === true && entry.byEmail !== caller.email) {
+    return res.status(403).json({
+      error: 'This kiosk session can only clock in and out.',
+      code: 'KIOSK_SCOPE',
+    });
   }
 
   // The person who logged it, or anyone with fill permission, can remove it.
@@ -5888,6 +6262,16 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
   if (!requireSameAgency(req, res, existing, 'tasks')) return;
+  // Kiosk: task must belong to the token's venue.
+  if ((req as any).kiosk === true) {
+    const kioskVenueId = (req as any).kioskVenueId;
+    if (existing.venueId !== kioskVenueId) {
+      return res.status(403).json({
+        error: 'This kiosk session can only clock in and out.',
+        code: 'KIOSK_SCOPE',
+      });
+    }
+  }
 
   const { photoData, photoCaption } = req.body;
   // Fill permission checked against the VERIFIED session user.
@@ -6698,6 +7082,16 @@ app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
 app.get('/api/users', (req, res) => {
   const { venueId } = req.query;
 
+  // Kiosk: venue roster only (names/roles/avatars, no emails) for the token's
+  // venue. The board needs this to render names.
+  if ((req as any).kiosk === true) {
+    const kioskVenueId = (req as any).kioskVenueId;
+    const roster = users
+      .filter((u) => (u.agencyId || 'agency-hkc') === callerAgencyId(req) && u.venueId === kioskVenueId)
+      .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
+    return res.json({ users: roster });
+  }
+
   // Privacy: the roster is scoped from the verified session token, NEVER from
   // a client-supplied email. (Previously the userEmail query param let any
   // authenticated user read another agency's roster by passing one of its
@@ -6811,9 +7205,21 @@ app.post('/api/users', async (req, res) => {
 
 // Update user permissions or role
 app.put('/api/users/:id', async (req, res) => {
-  // Only admins can update users — verified from the session token.
-  const caller = requireAdmin(req, res);
+  // Admins can update users. Coordinators may ONLY set/re-save a kiosk PIN
+  // (Don's decision 8:50 PM ET Oct 19): the body must contain kioskPin and
+  // NOTHING else, the target must be in the caller's agency, and the target's
+  // role must be mashgiach or worker (never admin, never coordinator).
+  // A kiosk token is always 403 KIOSK_SCOPE here.
+  const caller = requireAuthUser(req, res);
   if (!caller) return;
+  if ((req as any).kiosk === true) {
+    return res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
+  }
+  const callerIsAdmin = caller.role === 'admin';
+  const callerIsCoordinator = caller.role === 'coordinator';
+  if (!callerIsAdmin && !callerIsCoordinator) {
+    return res.status(403).json({ error: 'Only admins can manage team members.' });
+  }
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
   const { id } = req.params;
@@ -6828,14 +7234,38 @@ app.put('/api/users/:id', async (req, res) => {
 
   const { role, permissions, venueId, name, kioskPin } = req.body;
 
-  // Validate PIN outside the transaction (pure validation).
-  let pinUpdate: string | undefined | null = null; // null = no change
+  // Coordinator PIN-only path (Don 8:54 PM ET Oct 19 — own VENUE only):
+  // body must be EXACTLY { kioskPin }; target must be in the caller's agency
+  // AND at the caller's venue; target role mashgiach/worker only.
+  // A coordinator with no venueId fails closed before any lookup.
+  if (callerIsCoordinator) {
+    const callerVenueId = (caller as any).venueId;
+    if (!callerVenueId) {
+      return res.status(403).json({ error: 'Coordinators can only set kiosk PINs for their own venue.' });
+    }
+    // Ignore transport/attribution fields the client and middleware add:
+    // userEmail (middleware), adminEmail (App.tsx), expectedVersion and
+    // operationId (apiWrite). Anything else → not a PIN-only body.
+    const TRANSPORT_FIELDS = ['userEmail', 'adminEmail', 'expectedVersion', 'operationId'];
+    const bodyKeys = Object.keys(req.body || {}).filter((k) => !TRANSPORT_FIELDS.includes(k));
+    const onlyPin = bodyKeys.length === 1 && bodyKeys[0] === 'kioskPin';
+    const targetOk =
+      (existingUser.role === 'mashgiach' || existingUser.role === 'worker') &&
+      (existingUser as any).venueId === callerVenueId;
+    if (!onlyPin || !targetOk) {
+      return res.status(403).json({ error: 'Coordinators can only set kiosk PINs for mashgichim and workers at their own venue.' });
+    }
+  }
+
+  // Validate PIN outside the transaction (pure validation); hash it here so
+  // the plaintext never reaches the transaction or the stored user record.
+  let pinHashUpdate: string | undefined | null = null; // null = no change
   if (kioskPin !== undefined) {
     const pin = String(kioskPin).trim();
     if (pin !== '' && !/^[0-9]{4,6}$/.test(pin)) {
       return res.status(400).json({ error: 'Kiosk PIN must be 4-6 digits or empty.' });
     }
-    pinUpdate = pin === '' ? undefined : pin;
+    pinHashUpdate = pin === '' ? undefined : await hashPassword(pin);
   }
 
   const baseline = { name: existingUser.name, role: existingUser.role, venueId: existingUser.venueId };
@@ -6849,6 +7279,27 @@ app.put('/api/users/:id', async (req, res) => {
       // Re-verify agency against FRESH data (the cached check above is a fast path).
       if ((freshUser.agencyId || 'agency-hkc') !== callerAgencyId) {
         return { conflict: 'You can only manage team members in your own agency.' };
+      }
+      // Coordinator path: resolve the caller's OWN fresh record (still
+      // exists, still coordinator, same agency, has a venue), then re-verify
+      // the target against the FRESH caller (own venue, mashgiach/worker only).
+      if (callerIsCoordinator) {
+        const freshCaller = freshUsers.find((u) => u.id === caller.id);
+        const freshCallerOk =
+          freshCaller &&
+          freshCaller.role === 'coordinator' &&
+          (freshCaller.agencyId || 'agency-hkc') === callerAgencyId &&
+          !!(freshCaller as any).venueId;
+        if (!freshCallerOk) {
+          return { conflict: 'Coordinators can only set kiosk PINs for mashgichim and workers at their own venue.' };
+        }
+        const freshTargetOk =
+          (freshUser.role === 'mashgiach' || freshUser.role === 'worker') &&
+          (freshUser.agencyId || 'agency-hkc') === callerAgencyId &&
+          (freshUser as any).venueId === (freshCaller as any).venueId;
+        if (!freshTargetOk) {
+          return { conflict: 'Coordinators can only set kiosk PINs for mashgichim and workers at their own venue.' };
+        }
       }
       // Conflict if someone else changed a field this request is editing.
       if (name !== undefined && freshUser.name !== baseline.name) {
@@ -6886,7 +7337,12 @@ app.put('/api/users/:id', async (req, res) => {
       }
       const updated: UserProfile = { ...freshUser };
       if (name !== undefined) updated.name = name.trim();
-      if (pinUpdate !== null) updated.kioskPin = pinUpdate === undefined ? undefined : pinUpdate;
+      if (pinHashUpdate !== null) {
+        updated.kioskPinHash = pinHashUpdate === undefined ? undefined : pinHashUpdate;
+        updated.kioskPin = undefined; // drop any legacy plain PIN on explicit set/clear
+        // PIN version: any kiosk token issued before this instant is revoked.
+        updated.kioskPinSetAt = new Date().toISOString();
+      }
       if (venueId !== undefined) updated.venueId = venueId;
       if (role !== undefined) {
         updated.role = newRole;
@@ -6899,7 +7355,17 @@ app.put('/api/users/:id', async (req, res) => {
         };
       }
       const newUsers = freshUsers.map((u) => (u.id === id ? updated : u));
-      return { doc: { ...freshDoc, users: newUsers }, result: updated };
+      // Setting or clearing the PIN also clears any kiosk lockout for the user
+      // (admin unlock path — no separate endpoint).
+      let lockouts = freshDoc.kioskPinLockouts;
+      if (pinHashUpdate !== null && lockouts && typeof lockouts === 'object') {
+        const users2 = { ...((lockouts as any).users || {}) };
+        delete users2[id];
+        lockouts = { ...(lockouts as any), users: users2 };
+      }
+      const doc: any = { ...freshDoc, users: newUsers };
+      if (lockouts !== freshDoc.kioskPinLockouts) doc.kioskPinLockouts = lockouts;
+      return { doc, result: updated };
     },
     { label: 'update-user', requireVersion: true }
   );
@@ -7040,22 +7506,264 @@ app.get('/api/kiosk/users', (req, res) => {
   const venueId = String(req.query.venueId || '').trim();
   if (!venueId) return res.status(400).json({ error: 'venueId required' });
   const staff = users
-    .filter((u) => u.venueId === venueId && u.kioskPin && ['mashgiach', 'worker', 'coordinator'].includes(u.role))
+    .filter((u) => u.venueId === venueId && (u.kioskPin || u.kioskPinHash) && ['mashgiach', 'worker', 'coordinator'].includes(u.role))
     .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
   const venue = venues.find((v) => v.id === venueId);
   res.json({ venueName: venue?.name || 'Kiosk', users: staff });
 });
 
-// Verify a kiosk PIN and return the user session (with a signed token, so the
-// kiosk session is authenticated like any other login).
-app.post('/api/kiosk/login', (req, res) => {
-  const { userId, pin } = req.body;
+// Verify a kiosk PIN and return a venue-scoped kiosk session token.
+// PINs are bcrypt-hashed (cost 10); legacy plain PINs are upgraded on login.
+// Lockout: 5 wrong PINs in 15 min locks the user for 15 min; 20 wrong from
+// one venue+IP in 15 min locks that tablet for 15 min. Counters live in the
+// state doc (survive restarts); the check-and-increment runs in a transaction.
+// Unknown userIds count against the tablet bucket the request names
+// (no bypass by changing identifiers).
+app.post('/api/kiosk/login', async (req, res) => {
+  const { userId, pin, venueId: bodyVenueId } = req.body;
   if (!userId || !pin) return res.status(400).json({ error: 'Missing credentials' });
   const user = users.find((u) => u.id === userId);
-  if (!user || !user.kioskPin || user.kioskPin !== String(pin).trim()) {
+
+  const clientIp = getClientIp(req);
+  const nowMs = Date.now();
+  const LOCK_WINDOW_MS = 15 * 60 * 1000;
+  const USER_MAX = 5;
+  const TABLET_MAX = 20;
+
+  // Unknown user: count against the tablet bucket (venue|ip) so it shares
+  // one consistent limiter with real attempts from the same tablet.
+  if (!user) {
+    const unknownKey = bodyVenueId ? `${bodyVenueId}|${clientIp}` : `unknown|${clientIp}`;
+    try {
+      const locked = await commitState(
+        (freshDoc) => {
+          const fresh = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
+            ? freshDoc.kioskPinLockouts
+            : { users: {}, tablets: {} }) as KioskPinLockouts;
+          const prune = (arr: any): string[] =>
+            (Array.isArray(arr) ? arr : []).filter((t: string) => nowMs - new Date(t).getTime() < LOCK_WINDOW_MS);
+          const entry = fresh.tablets[unknownKey] || { fails: [] };
+          if (entry.lockedUntil && entry.lockedUntil > nowMs) {
+            return { doc: freshDoc, result: { locked: true, retryAfter: entry.lockedUntil - nowMs } };
+          }
+          const fails = [...prune(entry.fails), new Date(nowMs).toISOString()];
+          const updated: { fails: string[]; lockedUntil?: number } = { fails };
+          if (fails.length > TABLET_MAX) updated.lockedUntil = nowMs + LOCK_WINDOW_MS;
+          // IP-wide bucket in the same reservation (stops venue-id cycling).
+          const ipKey2 = `ip|${clientIp}`;
+          const ipEntry = fresh.tablets[ipKey2] || { fails: [] };
+          const ipFails = [...prune(ipEntry.fails), new Date(nowMs).toISOString()];
+          const ipUpdated: { fails: string[]; lockedUntil?: number } = { fails: ipFails };
+          let ipLocked = false;
+          if (ipFails.length > 40) {
+            ipUpdated.lockedUntil = nowMs + LOCK_WINDOW_MS;
+            ipLocked = true;
+          }
+          const tabletsOut = { ...fresh.tablets, [unknownKey]: updated, [ipKey2]: ipUpdated };
+          if (ipLocked) {
+            return { doc: { ...freshDoc, kioskPinLockouts: { ...fresh, tablets: tabletsOut } }, result: { locked: true, retryAfter: LOCK_WINDOW_MS } };
+          }
+          return {
+            doc: { ...freshDoc, kioskPinLockouts: { ...fresh, tablets: tabletsOut } },
+            result: { locked: false },
+          };
+        },
+        { label: 'kiosk-pin-fail-unknown' }
+      );
+      if ((locked.result as any)?.locked) {
+        const retrySec = Math.ceil(((locked.result as any).retryAfter || 60000) / 1000);
+        res.set('Retry-After', String(retrySec));
+        return res.status(429).json({ error: `Too many wrong codes. Try again in ${Math.ceil(retrySec / 60)} minutes.` });
+      }
+    } catch {}
+    // Don't reveal whether the user exists.
     return res.status(401).json({ error: 'Wrong code. Try again.' });
   }
-  res.json({ user: getSafeUser(user), token: signToken(user.id) });
+
+  // Admins don't get kiosk sessions (kiosk/users already hides them).
+  if (user.role === 'admin') {
+    return res.status(403).json({ error: 'Kiosk login is not available for this account.' });
+  }
+  const venueId = (user as any).venueId;
+  if (!venueId) {
+    return res.status(403).json({ error: 'No venue assigned to this user.' });
+  }
+
+  const tabletKey = `${venueId}|${clientIp}`;
+  const ipKey = `ip|${clientIp}`;
+  const IP_MAX = 40;
+
+  // ATOMIC reservation: count the ATTEMPT (not the failure) inside one
+  // transaction BEFORE any compare. A burst of parallel attempts serializes
+  // here — 5 get a compare, the rest are refused. If the reservation
+  // commit fails, fail closed (no compare for an uncounted attempt).
+  // Buckets: per-user (5), per venue+IP tablet (20), per IP (40, stops
+  // identifier/venue cycling). Threshold: N compares allowed, the (N+1)th
+  // refused — "after 5 wrong PINs" means 5×401 then 429.
+  let reservation: { allowed: boolean; retryAfterMs?: number };
+  try {
+    const res = await commitState(
+      (freshDoc) => {
+        const fresh = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
+          ? freshDoc.kioskPinLockouts
+          : { users: {}, tablets: {} }) as KioskPinLockouts;
+        const prune = (arr: any): string[] =>
+          (Array.isArray(arr) ? arr : []).filter((t: string) => nowMs - new Date(t).getTime() < LOCK_WINDOW_MS);
+        const reserve = (
+          bucket: { [k: string]: { fails: string[]; lockedUntil?: number } },
+          key: string,
+          max: number
+        ): [{ [k: string]: { fails: string[]; lockedUntil?: number } }, { allowed: boolean; retryAfterMs?: number }] => {
+          const entry = bucket[key] || { fails: [] };
+          if (entry.lockedUntil && entry.lockedUntil > nowMs) {
+            return [bucket, { allowed: false, retryAfterMs: entry.lockedUntil - nowMs }];
+          }
+          const fails = [...prune(entry.fails), new Date(nowMs).toISOString()];
+          const updated: { fails: string[]; lockedUntil?: number } = { fails };
+          // Refuse when the count BEFORE this attempt already reached max:
+          // N compares allowed, the (N+1)th is refused and locks the bucket.
+          if (fails.length > max) {
+            updated.lockedUntil = nowMs + LOCK_WINDOW_MS;
+            return [{ ...bucket, [key]: updated }, { allowed: false, retryAfterMs: LOCK_WINDOW_MS }];
+          }
+          return [{ ...bucket, [key]: updated }, { allowed: true }];
+        };
+        const [users2, userRes] = reserve(fresh.users || {}, userId, USER_MAX);
+        if (!userRes.allowed) {
+          return { doc: { ...freshDoc, kioskPinLockouts: { ...fresh, users: users2 } }, result: userRes };
+        }
+        const [tablets2, tabletRes] = reserve(fresh.tablets || {}, tabletKey, TABLET_MAX);
+        if (!tabletRes.allowed) {
+          return { doc: { ...freshDoc, kioskPinLockouts: { ...fresh, users: users2, tablets: tablets2 } }, result: tabletRes };
+        }
+        const [tablets3, ipRes] = reserve(tablets2, ipKey, IP_MAX);
+        return {
+          doc: { ...freshDoc, kioskPinLockouts: { users: users2, tablets: tablets3 } },
+          result: ipRes,
+        };
+      },
+      { label: 'kiosk-pin-attempt' }
+    );
+    reservation = (res as any).result || { allowed: false };
+  } catch (err) {
+    // Reservation failed (version conflict, Firestore unavailable): fail closed.
+    // Never compare a PIN for an attempt that couldn't be counted.
+    log.warn('[kiosk] attempt reservation failed (fail closed):', (err as any)?.message);
+    return res.status(503).json({ error: 'Please try again in a moment.' });
+  }
+
+  if (!reservation.allowed) {
+    const retrySec = Math.max(1, Math.ceil((reservation.retryAfterMs || 60000) / 1000));
+    const retryMin = Math.ceil(retrySec / 60);
+    res.set('Retry-After', String(retrySec));
+    return res.status(429).json({ error: `Too many wrong codes. Try again in ${retryMin} minutes.` });
+  }
+
+  // Verify the PIN (hash first; legacy plain with transparent upgrade).
+  // This compare was counted by the reservation above.
+  const pinStr = String(pin).trim();
+  let pinValid = false;
+  let needsUpgrade = false;
+  if (user.kioskPinHash && isBcryptHash(user.kioskPinHash)) {
+    pinValid = await bcrypt.compare(pinStr, user.kioskPinHash);
+  } else if (user.kioskPin) {
+    pinValid = user.kioskPin === pinStr;
+    needsUpgrade = pinValid;
+  }
+
+  if (!pinValid) {
+    // Already counted by the reservation; nothing more to write.
+    return res.status(401).json({ error: 'Wrong code. Try again.' });
+  }
+
+  // Success: clear the user's fail counter, upgrade a legacy plain PIN to
+  // bcrypt in the same transaction, and mint the venue-scoped kiosk token.
+  // The token is minted only after the commit lands (counter reset / rehash),
+  // carrying the fresh PIN version (pv) so a later PIN change revokes it.
+  const agencyId = user.agencyId || 'agency-hkc';
+  let kioskToken: string | null = null;
+  try {
+    const newHash = needsUpgrade ? await hashPassword(pinStr) : null;
+    const committed = await commitState(
+      (freshDoc) => {
+        const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+        const freshUser = freshUsers.find((u) => u.id === user.id);
+        if (!freshUser) return { conflict: 'User not found.' };
+        // Re-verify against the FRESH record: the hash (or plain PIN) must be
+        // the one just compared, agency/venue unchanged, role not admin, and
+        // no lock placed meanwhile. Any difference → conflict, no token.
+        const hashMatches = needsUpgrade
+          ? (freshUser as any).kioskPin === user.kioskPin
+          : (freshUser as any).kioskPinHash === user.kioskPinHash;
+        const freshOk =
+          hashMatches &&
+          (freshUser.agencyId || 'agency-hkc') === agencyId &&
+          (freshUser as any).venueId === venueId &&
+          freshUser.role !== 'admin';
+        if (!freshOk) return { conflict: 'User changed during login. Please try again.' };
+        const freshLocks = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
+          ? freshDoc.kioskPinLockouts
+          : { users: {}, tablets: {} }) as KioskPinLockouts;
+        const userLock = (freshLocks.users || {})[user.id];
+        const tabletLock = (freshLocks.tablets || {})[tabletKey];
+        if ((userLock?.lockedUntil || 0) > nowMs || (tabletLock?.lockedUntil || 0) > nowMs) {
+          return { conflict: 'Too many wrong codes. Please try again later.' };
+        }
+        const newUsers = freshUsers.map((u) => {
+          if (u.id !== user.id) return u;
+          const nu: any = { ...u };
+          if (newHash && !isBcryptHash(nu.kioskPinHash)) {
+            nu.kioskPinHash = newHash;
+            nu.kioskPin = undefined;
+            nu.kioskPinSetAt = new Date().toISOString();
+          }
+          // Pre-pv users: stamp the version on first post-pv login.
+          if (!nu.kioskPinSetAt && nu.kioskPinHash) {
+            nu.kioskPinSetAt = new Date().toISOString();
+          }
+          return nu;
+        });
+        const fresh = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
+          ? freshDoc.kioskPinLockouts
+          : { users: {}, tablets: {} }) as KioskPinLockouts;
+        const users2 = { ...(fresh.users || {}) };
+        delete users2[user.id];
+        // Only failures accumulate: remove this attempt's timestamp from BOTH
+        // the venue|ip and the ip|<ip> buckets so a busy wall tablet (or several
+        // tablets behind one public IP) can't lock itself by legitimate use.
+        const tablets2 = { ...(fresh.tablets || {}) };
+        const attemptTs = new Date(nowMs).toISOString();
+        const removeAttempt = (key: string) => {
+          if (tablets2[key]) {
+            tablets2[key] = {
+              ...tablets2[key],
+              fails: (tablets2[key].fails || []).filter((t: string) => t !== attemptTs),
+            };
+          }
+        };
+        removeAttempt(tabletKey);
+        removeAttempt(`ip|${clientIp}`);
+        const freshTarget = newUsers.find((u) => u.id === user.id);
+        return {
+          doc: { ...freshDoc, users: newUsers, kioskPinLockouts: { ...fresh, users: users2, tablets: tablets2 } },
+          result: { kioskPinSetAt: (freshTarget as any)?.kioskPinSetAt },
+        };
+      },
+      { label: 'kiosk-login-success' }
+    );
+    const pv = (committed as any)?.result?.kioskPinSetAt;
+    if (!pv) {
+      // The commit didn't record a PIN version — fail closed, no token.
+      return res.status(503).json({ error: 'Please try again in a moment.' });
+    }
+    kioskToken = signKioskToken(user.id, agencyId, venueId, pv);
+  } catch (err) {
+    // Success requires the committed transition (counter reset / rehash).
+    // If it didn't land, no token — the tablet must try again.
+    log.warn('[kiosk] login success write failed:', (err as any)?.message);
+    return res.status(503).json({ error: 'Please try again in a moment.' });
+  }
+  res.json({ user: getSafeUser(user), token: kioskToken });
 });
 
 // Formal Login Endpoint — bcrypt passwords, signed session token on success.
@@ -8047,6 +8755,45 @@ async function startServer() {
   // Security migration: hash any legacy plaintext passwords still in state.
   // Runs once per boot; already-hashed passwords are untouched.
   await migratePasswordsToBcrypt();
+
+  // Kiosk PIN migration: hash any legacy plaintext kiosk PINs in place.
+  // Same values (no reset, no rotation); users notice nothing. Skipped on
+  // staged/read-only/maintenance revisions (the !staged gate above covers it).
+  // One commitState labelled kiosk-pin-hash-migration.
+  try {
+    const needsMigration = users.some((u) => u.kioskPin && !u.kioskPinHash);
+    if (needsMigration) {
+      // Hash outside the transaction (bcrypt is async); the transaction only
+      // swaps the fields on fresh data.
+      const hashes = new Map<string, string>();
+      for (const u of users) {
+        if (u.kioskPin && !u.kioskPinHash) {
+          hashes.set(u.id, await hashPassword(String(u.kioskPin).trim()));
+        }
+      }
+      await commitState(
+        (freshDoc) => {
+          const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+          let changed = false;
+          const newUsers = freshUsers.map((u) => {
+            const h = hashes.get(u.id);
+            if (h && u.kioskPin && !isBcryptHash(u.kioskPinHash)) {
+              changed = true;
+              const nu: any = { ...u, kioskPinHash: h, kioskPin: undefined, kioskPinSetAt: new Date().toISOString() };
+              return nu;
+            }
+            return u;
+          });
+          if (!changed) return { doc: freshDoc, result: { changed: false } };
+          return { doc: { ...freshDoc, users: newUsers }, result: { changed: true } };
+        },
+        { label: 'kiosk-pin-hash-migration' }
+      );
+      log.info('[Boot] Kiosk PIN hash migration complete.');
+    }
+  } catch (err: any) {
+    log.warn('[Boot] Kiosk PIN hash migration failed (non-fatal):', err?.message);
+  }
   } catch (err: any) {
     // Boot must never die on a startup-write failure. The server starts and
     // serves; the failed backfill is logged for investigation. Data safety

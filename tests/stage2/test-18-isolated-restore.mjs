@@ -50,11 +50,15 @@ export default {
       expectedVersion: vPin,
     });
     if (pinSet.status !== 200) throw new Error(`kioskPin set failed: ${pinSet.status} ${JSON.stringify(pinSet.json)}`);
-    // Confirm the PIN is actually populated server-side (via the test doc endpoint).
+    // Confirm the PIN hash is actually populated server-side (via the test doc endpoint).
+    // (PUT /api/users hashes kioskPin to kioskPinHash; plain kioskPin is never stored.)
     const docCheck = await ctx.getDoc();
     const pinUserDoc = (docCheck.users || []).find((u) => u.id === pinUserId);
-    if (!pinUserDoc || pinUserDoc.kioskPin !== '4821') {
-      throw new Error('kioskPin was not populated on the test user — strip check would be vacuous');
+    if (!pinUserDoc || !pinUserDoc.kioskPinHash || !String(pinUserDoc.kioskPinHash).startsWith('$2')) {
+      throw new Error('kioskPinHash was not populated on the test user — strip check would be vacuous');
+    }
+    if (pinUserDoc.kioskPin) {
+      throw new Error('plain kioskPin stored in doc (should be hash only)');
     }
 
     // --- 2. Export (admin-only) ---
