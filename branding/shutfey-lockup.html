@@ -2,26 +2,33 @@
 <html>
 <head>
 <meta charset="utf-8">
-<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800&display=swap" rel="stylesheet">
+<title>Shutfey — brand lockups (D2)</title>
 <style>
-  body { margin:0; background:#fff; display:flex; justify-content:center; padding:40px; font-family:'Montserrat',sans-serif; }
-  .lockup { text-align:center; }
-  .mark-img { width:380px; height:380px; object-fit:contain; }
-  .wordmark { font-size:92px; font-weight:800; color:#173a5e; letter-spacing:-2px; margin-top:0; }
-  .hebrew-row { display:flex; align-items:center; justify-content:center; gap:18px; margin-top:6px; }
-  .hebrew { font-size:44px; font-weight:700; color:#1b7f93; }
-  .dash { width:64px; height:7px; background:#f2a02c; border-radius:4px; }
+  body { margin:0; font-family: system-ui, sans-serif; display:grid; grid-template-columns:1fr 1fr; }
+  figure { margin:0; padding:32px; text-align:center; }
+  figcaption { font-size:13px; margin-top:12px; opacity:.65; }
+  .day { background:#F8F4ED; color:#30241B; }
+  .night { background:#241B12; color:#F3EBDD; }
+  img.stacked { width:240px; }
+  img.horizontal { width:420px; max-width:100%; }
 </style>
 </head>
 <body>
-<div class="lockup">
-  <img class="mark-img" src="media-generation-shutfey-v5-people-pot-check-0-53a6ee27-30cb-4d5c-b88d-1dbd1ecdf303.webp" alt="Shutfey mark">
-  <div class="wordmark">Shutfey</div>
-  <div class="hebrew-row">
-    <div class="dash"></div>
-    <div class="hebrew">שותפי</div>
-    <div class="dash"></div>
-  </div>
-</div>
+  <figure class="day">
+    <img class="stacked" src="shutfey-lockup-day.png" alt="Shutfey · שותפי — stacked lockup, day">
+    <figcaption>Stacked lockup — day</figcaption>
+  </figure>
+  <figure class="night">
+    <img class="stacked" src="shutfey-lockup-night.png" alt="Shutfey · שותפי — stacked lockup, night">
+    <figcaption>Stacked lockup — night</figcaption>
+  </figure>
+  <figure class="day">
+    <img class="horizontal" src="shutfey-lockup-h-day.png" alt="Shutfey · שותפי — horizontal lockup, day">
+    <figcaption>Horizontal lockup — day</figcaption>
+  </figure>
+  <figure class="night">
+    <img class="horizontal" src="shutfey-lockup-h-night.png" alt="Shutfey · שותפי — horizontal lockup, night">
+    <figcaption>Horizontal lockup — night</figcaption>
+  </figure>
 </body>
 </html>

@@ -40,12 +40,13 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
   return (
     <div className={`flex items-center gap-2 sm:gap-2.5 min-w-0 ${className}`}>
       {/* Shutfey brand mark */}
-      <div className={`${iconSizes[size]} shrink-0 flex items-center justify-center`} aria-hidden="true">
+      <div className="shrink-0 text-ink">
         {/* D2 master mark (direction B): ink ring opened at the top, gold check breaking out.
-            STAND-IN geometry — replaced by Tab's master SVG paths when the assets land. */}
-        <svg viewBox="0 0 48 48" className="w-full h-full" fill="none">
-          <circle cx="24" cy="24" r="17" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" strokeDasharray="93 14" transform="rotate(38 24 24)" className="text-ink dark:text-[#F3EBDD]" />
-          <polyline points="15,25 22,32 35,17" stroke="#B97600" strokeWidth="5.5" strokeLinecap="round" strokeLinejoin="round" className="dark:stroke-[#E3A73D]" />
+            Master paths identical to public/brand/shutfey-mark.svg; currentColor = ink token
+            (cream at night), var(--gold) flips with .dark — one drawing serves both themes. */}
+        <svg viewBox="0 0 100 100" className={iconSizes[size]} role="img" aria-label="Shutfey">
+          <path d="M80.68,42.63 A34,34 0 1 1 53.90,18.52" fill="none" stroke="currentColor" strokeWidth="11" strokeLinecap="round" />
+          <path d="M31,54 L45,69 L84,28" fill="none" stroke="var(--gold)" strokeWidth="11" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </div>
 
@@ -55,8 +56,8 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
           <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap`}>
             Shutfey
           </span>
-          <span className={`${titleSizes[size]} text-gold-deep leading-tight font-sans whitespace-nowrap ${size === 'sm' ? 'hidden sm:inline' : ''}`} aria-hidden="true">·</span>
-          <span className={`${titleSizes[size]} text-ink leading-tight font-hebrew whitespace-nowrap ${size === 'sm' ? 'hidden sm:inline' : ''}`}>
+          <span className={`${titleSizes[size]} text-gold leading-tight font-sans whitespace-nowrap ${size === 'sm' ? 'hidden sm:inline' : ''}`} aria-hidden="true">·</span>
+          <span dir="rtl" className={`${titleSizes[size]} text-ink leading-tight font-hebrew whitespace-nowrap ${size === 'sm' ? 'hidden sm:inline' : ''}`}>
             שותפי
           </span>
           {agencyShortCode ? (
