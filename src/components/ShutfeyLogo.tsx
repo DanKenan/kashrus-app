@@ -17,9 +17,11 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
   agencyShortCode,
 }) => {
   // Heights are the box sizes the component has always used; the mark is 1.28:1,
-  // so the width follows the height (width = height x 1.28).
+  // so the width follows the height (width = height x 1.28). At size sm the
+  // 640-1279 px band uses a 25 px height (32 px wide — the old tile's width):
+  // the header has no slack there and a 40 px-wide mark overflowed the page.
   const iconSizes = {
-    sm: 'h-7 sm:h-8',
+    sm: 'h-7 sm:h-[25px] xl:h-8',
     md: 'h-8 sm:h-9',
     lg: 'h-10 sm:h-12',
     xl: 'h-14 sm:h-16',
