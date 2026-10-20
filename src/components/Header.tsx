@@ -7,7 +7,6 @@ import {
   Plus, 
   RotateCcw, 
   History, 
-  Database, 
   Sun, 
   Moon, 
   LogOut, 
@@ -54,7 +53,6 @@ interface HeaderProps {
   onOpenCreateEvent: () => void;
   onOpenFactoryAudit?: () => void;
   eventsCount?: number;
-  onOpenSupabaseModal: () => void;
   onOpenTeamModal: () => void;
   onOpenKioskDevices?: () => void;
   onResetDailyBoard: () => void;
@@ -86,7 +84,6 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenCreateEvent,
   onOpenFactoryAudit,
   eventsCount = 0,
-  onOpenSupabaseModal,
   onOpenTeamModal,
   onOpenKioskDevices,
   onResetDailyBoard,
@@ -310,14 +307,6 @@ export const Header: React.FC<HeaderProps> = ({
 
                   {currentUser?.role === 'admin' && (
                     <div className="pt-1 mt-1 border-t border-line/70">
-                      <button
-                        onClick={() => { setToolsMenuOpen(false); onOpenSupabaseModal(); }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer text-ink-soft"
-                      >
-                        <Database className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                        <span>Database & Security (RLS)</span>
-                      </button>
-
                       <button
                         onClick={() => { setToolsMenuOpen(false); onResetDailyBoard(); }}
                         className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold hover:bg-gold-wash text-gold-deep transition text-left cursor-pointer"
@@ -674,15 +663,6 @@ export const Header: React.FC<HeaderProps> = ({
               <History className="w-4 h-4 text-gold-deep" />
               <span>History Log</span>
             </button>
-            {currentUser?.role === 'admin' && (
-              <button
-                onClick={() => { setMobileMenuOpen(false); onOpenSupabaseModal(); }}
-                className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-ink-soft bg-sunken col-span-2 cursor-pointer"
-              >
-                <Database className="w-4 h-4 text-emerald-500" />
-                <span>Supabase / RLS</span>
-              </button>
-            )}
           </div>
 
           {currentUser?.role === 'admin' && (
