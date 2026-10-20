@@ -34,6 +34,15 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
   const [busy, setBusy] = useState(false);
   const startingRef = useRef(false);
 
+  // Same inline-arrow trap as KioskLogin: keep the latest onPaired in a
+  // ref so the polling effect is created once per pairing — with the
+  // callback in its deps, every parent re-render would tear down and
+  // recreate the 3 s interval and fire an immediate extra poll.
+  const onPairedRef = useRef(onPaired);
+  useEffect(() => {
+    onPairedRef.current = onPaired;
+  }, [onPaired]);
+
   const startPairing = useCallback(async () => {
     if (startingRef.current) return;
     startingRef.current = true;
@@ -83,7 +92,7 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
           const storedDevice = `${device.id}.${deviceSecret}`;
           setKioskDevice(storedDevice);
           setKioskVenueName(device.venueName || null);
-          onPaired(storedDevice);
+          onPairedRef.current(storedDevice);
         }
       } catch {
         // A failed poll is not fatal; the next poll tries again.
@@ -95,7 +104,7 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
       stopped = true;
       clearInterval(timer);
     };
-  }, [pairingId, deviceSecret, expired, onPaired]);
+  }, [pairingId, deviceSecret, expired]);
 
   return (
     <div className="min-h-screen bg-paper text-ink flex flex-col items-center px-6 py-8 transition-colors">

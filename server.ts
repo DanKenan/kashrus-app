@@ -1955,8 +1955,7 @@ interface KioskPairing {
   deviceId?: string;
   venueId?: string;
   venueName?: string;
-  approvedAt?: number; // ms epoch, stamped by the pair commit
-  claimExpiresAt?: number; // ms epoch: approvedAt + TTL, stamped at first claim
+  approvedAt?: number; // ms epoch, stamped by the pair commit; the claim deadline is DERIVED (approvedAt + TTL), never stored
 }
 let kioskPairings: { [pairingId: string]: KioskPairing } = {};
 
@@ -2057,23 +2056,34 @@ function hydrateState(parsed: any) {
         kioskPinLockouts = emptyKioskPinLockouts();
       }
 
-      // Kiosk devices + pairings (2b). Malformed device entries are dropped
-      // (fail closed: an unparseable device can never authenticate).
+      // Kiosk devices + pairings (2b). Malformed entries are dropped (fail
+      // closed: a device that cannot be validated can never authenticate).
+      // A device's secretHash must be exactly 64 lowercase hex chars and
+      // its name a string; a pairing's hashes likewise. DUPLICATE device
+      // ids are dropped ENTIRELY — with two records for one id, neither is
+      // trustworthy.
       if (Array.isArray(parsed.kioskDevices)) {
-        kioskDevices = (parsed.kioskDevices as any[]).filter(
+        const HEX64 = /^[0-9a-f]{64}$/;
+        const wellFormed = (parsed.kioskDevices as any[]).filter(
           (d) => d && typeof d.id === 'string' && d.id &&
-            typeof d.secretHash === 'string' && d.secretHash &&
+            typeof d.secretHash === 'string' && HEX64.test(d.secretHash) &&
+            typeof d.name === 'string' &&
             typeof d.venueId === 'string' && d.venueId &&
             typeof d.agencyId === 'string' && d.agencyId
         );
+        const idCounts = new Map<string, number>();
+        for (const d of wellFormed) idCounts.set(d.id, (idCounts.get(d.id) || 0) + 1);
+        kioskDevices = wellFormed.filter((d) => idCounts.get(d.id) === 1);
       } else {
         kioskDevices = [];
       }
       if (parsed.kioskPairings && typeof parsed.kioskPairings === 'object') {
+        const HEX64 = /^[0-9a-f]{64}$/;
         kioskPairings = {};
         for (const [pid, pr] of Object.entries(parsed.kioskPairings as any)) {
           const r: any = pr as any;
-          if (r && typeof r.pairingCodeHash === 'string' && typeof r.secretHash === 'string' &&
+          if (r && typeof r.pairingCodeHash === 'string' && HEX64.test(r.pairingCodeHash) &&
+              typeof r.secretHash === 'string' && HEX64.test(r.secretHash) &&
               (r.status === 'pending' || r.status === 'approved') &&
               typeof r.expiresAt === 'number') {
             kioskPairings[pid] = r;
@@ -6126,6 +6136,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
       venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [],
       events = [], incidents = [], handoffNotes = [], announcements = [],
       taskTemplates = [], eventTaskTemplates = [], approvedIngredients = [], factoryReports = [],
+      kioskDevices: newKioskDevices = [],
     } = req.body || {};
     try {
       await commitState(
@@ -6149,8 +6160,9 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
               eventTaskTemplates: [...(freshDoc.eventTaskTemplates || []), ...eventTaskTemplates],
               approvedIngredients: [...(freshDoc.approvedIngredients || []), ...approvedIngredients],
               factoryReports: [...(freshDoc.factoryReports || []), ...factoryReports],
+              kioskDevices: [...(freshDoc.kioskDevices || []), ...newKioskDevices],
             },
-            result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length },
+            result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length + newKioskDevices.length },
           };
         },
         { label: 'test-inject-fixture' }
@@ -6296,7 +6308,10 @@ if (isTestMode()) {
           };
           const pairing = pairings[pairingId];
           if (!pairing) return { doc: freshDoc, result: { expired: false } };
-          pairings[pairingId] = { ...pairing, expiresAt: Date.now() - 1000, claimExpiresAt: Date.now() - 1000 };
+          // The claim deadline is DERIVED (approvedAt + TTL), so expiring
+          // an approved pairing means pushing approvedAt past the whole
+          // claim window, not just past now.
+          pairings[pairingId] = { ...pairing, expiresAt: Date.now() - 1000, approvedAt: Date.now() - PAIRING_TTL_MS - 1000 };
           return {
             doc: { ...freshDoc, kioskPairings: pairings },
             result: { expired: true },
@@ -8583,11 +8598,11 @@ app.post('/api/kiosk/pairing/start', async (req, res) => {
 });
 
 // B2 — the tablet polls for approval with its pairing secret. One 404
-// message covers unknown id, wrong secret, and expired. Polling is a PURE
-// READ (no commit) except the FIRST claim after approval, which stamps
-// claimExpiresAt. Approval does NOT consume the pairing (addendum,
-// finding 3): the same secret re-claims the same device idempotently
-// until claimExpiresAt (approvedAt + 10 min), then it's gone (404).
+// message covers unknown id, wrong secret, and expired. Polling is a
+// PURE READ in every case: approval does NOT consume the pairing
+// (addendum, finding 3) — the same secret re-claims the same device
+// idempotently until the claim deadline, which is DERIVED from the
+// approval stamp (approvedAt + 10 min), never stored or written.
 app.get('/api/kiosk/pairing/status', async (req, res) => {
   if (kioskHeaderTooLong(req, 'x-kiosk-pairing')) {
     return res.status(400).json({ error: 'Request too large.' });
@@ -8603,29 +8618,11 @@ app.get('/api/kiosk/pairing/status', async (req, res) => {
     if (pairing.expiresAt <= nowMs) return notFound();
     return res.json({ status: 'pending', expiresAt: new Date(pairing.expiresAt).toISOString() });
   }
-  // Approved: usable until the claim deadline (checked here, at approval
-  // time — not only by pruning).
-  const claimExpiresAt = pairing.claimExpiresAt ?? (pairing.approvedAt ?? pairing.expiresAt) + PAIRING_TTL_MS;
-  if (claimExpiresAt <= nowMs) return notFound();
+  // Approved: usable until the derived claim deadline (checked here, at
+  // read time — not only by pruning).
+  if (pairingEffectiveExpiry(pairing) <= nowMs) return notFound();
   const device = kioskDevices.find((d) => d.id === pairing.deviceId);
   if (!device) return notFound();
-  if (pairing.claimExpiresAt === undefined) {
-    // First claim: stamp the deadline in one commit. Later claims are
-    // pure reads of the same approved device.
-    try {
-      await commitState(
-        (freshDoc) => {
-          const pairings = { ...((freshDoc.kioskPairings || {}) as { [k: string]: KioskPairing }) };
-          const fresh = pairings[parsed.id];
-          if (fresh && fresh.status === 'approved' && fresh.claimExpiresAt === undefined) {
-            pairings[parsed.id] = { ...fresh, claimExpiresAt: (fresh.approvedAt ?? fresh.expiresAt) + PAIRING_TTL_MS };
-          }
-          return { doc: { ...freshDoc, kioskPairings: pairings }, result: { ok: true } };
-        },
-        { label: 'kiosk-pairing-claim' }
-      );
-    } catch {}
-  }
   const safe = safeKioskDevice(device);
   return res.json({ status: 'approved', device: { id: safe.id, name: safe.name, venueId: safe.venueId, venueName: safe.venueName, agencyId: safe.agencyId } });
 });
@@ -8641,7 +8638,7 @@ app.get('/api/kiosk/device', (req, res) => {
     return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
   }
   const staff = users
-    .filter((u) => u.venueId === device.venueId && (u.kioskPin || u.kioskPinHash) && ['mashgiach', 'worker', 'coordinator'].includes(u.role))
+    .filter((u) => u.venueId === device.venueId && (u.agencyId || 'agency-hkc') === device.agencyId && (u.kioskPin || u.kioskPinHash) && ['mashgiach', 'worker', 'coordinator'].includes(u.role))
     .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
   const safe = safeKioskDevice(device);
   // Touch lastSeenAt at most once per 10 minutes — best-effort, never
@@ -9064,11 +9061,11 @@ function safeKioskDevice(d: KioskDevice) {
 }
 
 /** The moment a pairing stops being usable: pending pairings die at
- * expiresAt; approved ones live until their claim deadline (claimExpiresAt,
- * or approvedAt + TTL before the first claim stamps it). */
+ * expiresAt; approved ones live until their claim deadline, which is
+ * DERIVED (approvedAt + TTL) — status polling never writes. */
 function pairingEffectiveExpiry(pr: KioskPairing): number {
   if (pr.status === 'approved') {
-    return pr.claimExpiresAt ?? (pr.approvedAt ?? pr.expiresAt) + PAIRING_TTL_MS;
+    return (pr.approvedAt ?? pr.expiresAt) + PAIRING_TTL_MS;
   }
   return pr.expiresAt;
 }
@@ -9203,14 +9200,15 @@ app.post('/api/kiosk/login', async (req, res) => {
     return res.status(401).json({ error: 'Wrong code. Try again.' });
   }
 
-  // Admins don't get kiosk sessions (the device roster already hides them).
-  if (user.role === 'admin') {
-    return res.status(403).json({ error: 'Kiosk login is not available for this account.' });
-  }
-  // 2b venue binding: the user must belong to the DEVICE's venue and agency.
-  // Any other case is answered exactly like a wrong PIN (counted by the
-  // reservation below) — never reveal that the user is at another venue.
+  // 2b venue binding: the user must belong to the DEVICE's venue and
+  // agency — and must not be an admin. EVERY other case (other venue,
+  // other agency, admin) is answered exactly like a wrong PIN, counted by
+  // the reservation below: an admin id must be indistinguishable from a
+  // nonexistent one, or a tablet holder could enumerate admin accounts.
+  // Admins still never get a session — the success commit re-checks
+  // `role !== 'admin'` against the fresh doc.
   const userMatchesDevice =
+    user.role !== 'admin' &&
     (user as any).venueId === device.venueId &&
     (user.agencyId || 'agency-hkc') === device.agencyId;
 

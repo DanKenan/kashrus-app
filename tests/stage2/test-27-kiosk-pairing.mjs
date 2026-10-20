@@ -470,8 +470,41 @@ export default {
       if (otherAgency.status !== 401 || otherAgency.body.error !== 'Wrong code. Try again.') {
         throw new Error(`login mash Q1 on P1 tablet: ${otherAgency.status} ${JSON.stringify(otherAgency.body)}`);
       }
-      const admin = await kioskLogin(deviceP1.header, adminPId, PIN_P1);
-      if (admin.status !== 403) throw new Error(`admin via kiosk: ${admin.status} (expected 403)`);
+      // Fix round 1: an admin id must be INDISTINGUISHABLE from a
+      // nonexistent, other-venue, or other-agency id — same status, same
+      // body, each attempt counted. (The admin answer used to be a
+      // tell-tale 403 that enumerated admin accounts.)
+      const lockFails = async (uid) =>
+        ((await ctx.getDoc())?.kioskPinLockouts?.users?.[uid]?.fails || []).length;
+      const tabletFails = async () =>
+        ((await ctx.getDoc())?.kioskPinLockouts?.tablets?.[`${P1}|127.0.0.1`]?.fails || []).length;
+      const cases = [
+        ['nonexistent', `user-nope-${ts}`, '0000'],
+        ['admin', adminPId, PIN_P1],
+        ['other venue', mashP2Id, PIN_P2],
+        ['other agency', mashQ1Id, PIN_Q1],
+      ];
+      const seen = [];
+      for (const [label, uid, pin] of cases) {
+        const userBefore = await lockFails(uid);
+        const tabletBefore = await tabletFails();
+        const r = await kioskLogin(deviceP1.header, uid, pin);
+        if (r.status !== 401 || r.body.error !== 'Wrong code. Try again.') {
+          throw new Error(`${label} kiosk login: ${r.status} ${JSON.stringify(r.body)} (expected generic 401)`);
+        }
+        seen.push(r.body);
+        if ((await tabletFails()) !== tabletBefore + 1) {
+          throw new Error(`${label} attempt was not counted in the tablet bucket`);
+        }
+        if (label !== 'nonexistent' && (await lockFails(uid)) !== userBefore + 1) {
+          throw new Error(`${label} attempt was not counted in its user bucket`);
+        }
+      }
+      for (const body of seen) {
+        if (JSON.stringify(body) !== JSON.stringify(seen[0])) {
+          throw new Error('failed kiosk logins are distinguishable — ids are enumerable');
+        }
+      }
     }
 
     /* ---- Part 6: unpair kills REST + WS immediately; re-pairing works ---- */
@@ -645,6 +678,46 @@ export default {
       if (updM) throw new Error('mashgiach socket received KIOSK_DEVICES_UPDATED');
       connA.ws.close(); connC.ws.close(); connM.ws.close();
       await deleteDevice(tAdminP, d8b.deviceId);
+      // Fix 3a: the device roster matches the AGENCY as well as the venue —
+      // a user stored at this venue under another agency never appears.
+      const xUserId = `user-test27-xagency-${ts}`;
+      const injX = await ctx.api('POST', '/api/__test__/inject-fixture', {
+        users: [{ id: xUserId, email: `xagency-${ts}@test.local`, name: 'T27 XAgency', role: 'mashgiach', agencyId: QAGENCY, venueId: P1, kioskPin: '9898' }],
+      });
+      if (injX.status !== 200) throw new Error(`xagency inject: ${injX.status}`);
+      const roster8 = await getDevice(deviceP1.header);
+      if (roster8.status !== 200) throw new Error(`roster after xagency inject: ${roster8.status}`);
+      if ((roster8.body.users || []).some((u) => u.id === xUserId)) {
+        throw new Error('roster leaked a cross-agency user stored at the venue');
+      }
+      // Fix 3b: malformed and duplicate device records never authenticate
+      // (hydration drops them, fail closed).
+      const dupId = `kdev-dup-${ts}`;
+      const badId = `kdev-bad-${ts}`;
+      const mkDev = (id, name, secretHash) => ({
+        id, agencyId: PAGENCY, venueId: P1, name, secretHash,
+        createdAt: new Date(ts).toISOString(), pairedByUserId: adminPId, pairedByName: 'T27 Admin P',
+      });
+      const injD = await ctx.api('POST', '/api/__test__/inject-fixture', {
+        kioskDevices: [
+          mkDev(dupId, 'Dup A', sha256Hex('dup-secret-a')),
+          mkDev(dupId, 'Dup B', sha256Hex('dup-secret-b')),
+          mkDev(badId, 'Bad Hash', 'not-a-hex-hash'),
+        ],
+      });
+      if (injD.status !== 200) throw new Error(`device inject: ${injD.status}`);
+      await ctx.restartServer();
+      for (const [label, hdr] of [
+        ['duplicate id (secret a)', `${dupId}.dup-secret-a`],
+        ['duplicate id (secret b)', `${dupId}.dup-secret-b`],
+        ['malformed hash', `${badId}.whatever-secret`],
+      ]) {
+        const r = await getDevice(hdr);
+        if (r.status !== 401) throw new Error(`${label} device authenticated: ${r.status} (expected 401)`);
+      }
+      // Positive twin: the real P1 tablet still authenticates after all that.
+      const alive = await getDevice(deviceP1.header);
+      if (alive.status !== 200) throw new Error(`real device after malformed seeds: ${alive.status}`);
     }
 
     /* ---- Part 9: PIN revision revokes tokens; stale lockouts pruned ---- */

@@ -281,6 +281,22 @@ export default {
       }
     }
 
+    /* ---- Part 1e: an admin id on the kiosk is just a wrong code ---- */
+    {
+      // Fix round 1 (2b): the admin answer used to be a tell-tale 403.
+      // Now an admin id is indistinguishable from a nonexistent one —
+      // same status, same body — so admin accounts can't be enumerated
+      // from a paired tablet.
+      const adminTry = await kioskLogin(baseUrl, adminId, '9999');
+      const ghostTry = await kioskLogin(baseUrl, `ghost-${ts}`, '9999');
+      if (adminTry.status !== 401 || adminTry.body.error !== 'Wrong code. Try again.') {
+        throw new Error(`admin kiosk login: ${adminTry.status} ${JSON.stringify(adminTry.body)} (expected generic 401)`);
+      }
+      if (ghostTry.status !== adminTry.status || JSON.stringify(ghostTry.body) !== JSON.stringify(adminTry.body)) {
+        throw new Error('admin and nonexistent kiosk logins differ — admin ids are enumerable');
+      }
+    }
+
     /* ---- Part 2a: 5 wrong → 6th (even correct) → 429 ---- */
     {
       // Use a fresh user to avoid interference from earlier logins.

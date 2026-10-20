@@ -32,6 +32,16 @@ export function KioskLogin({ onLoginSuccess, onExitKiosk, onUnpaired, darkMode }
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
+  // The parent passes onUnpaired as an inline arrow — a new function on
+  // every render. Keep the latest callback in a ref so the load effect
+  // below runs ONCE per mount; with the callback in its deps, every
+  // parent re-render (on an unauthenticated tablet, every realtime
+  // socket status flip) would re-fetch the device and roster.
+  const onUnpairedRef = useRef(onUnpaired);
+  useEffect(() => {
+    onUnpairedRef.current = onUnpaired;
+  }, [onUnpaired]);
+
   useEffect(() => {
     let cancelled = false;
     // The tablet is paired to exactly one venue: the server returns that
@@ -42,7 +52,7 @@ export function KioskLogin({ onLoginSuccess, onExitKiosk, onUnpaired, darkMode }
         if (cancelled) return;
         if (!r.ok) {
           if (d.code === 'KIOSK_UNPAIRED') {
-            onUnpaired?.();
+            onUnpairedRef.current?.();
             return;
           }
           throw new Error(d.error || 'Could not load this tablet.');
@@ -59,7 +69,7 @@ export function KioskLogin({ onLoginSuccess, onExitKiosk, onUnpaired, darkMode }
     return () => {
       cancelled = true;
     };
-  }, [onUnpaired]);
+  }, []);
 
   const pressDigit = (d: string) => {
     setError('');
