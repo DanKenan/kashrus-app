@@ -9,6 +9,13 @@ import { TaskModal } from './components/TaskModal';
 import { HistoryLogModal } from './components/HistoryLogModal';
 import { LoginPage } from './components/LoginPage';
 import { KioskLogin } from './components/KioskLogin';
+import { UpdatesBell } from './components/UpdatesBell';
+import { UpdatesSheet, announcementCanDelete } from './components/UpdatesSheet';
+import { UrgentBanner } from './components/UrgentBanner';
+import { Announcements } from './components/Announcements';
+import { HandoffNotes } from './components/HandoffNotes';
+import { useUpdatesCenter } from './components/UpdatesCenter';
+import type { UpdatesContext } from './lib/updates';
 import { KioskPairing } from './components/KioskPairing';
 import { KioskDevicesModal } from './components/KioskDevicesModal';
 import { LandingPage } from './components/LandingPage';
@@ -325,6 +332,40 @@ export default function App() {
     }
     return venues[0] || null;
   }, [venues, currentVenueId, currentUser]);
+
+  // 5a — Updates panel context. The generation bumps whenever the signed-in
+  // context changes (user, agency, venue, kiosk session): the Updates center
+  // then drops everything from the old context — lists, counts, banner,
+  // drafts, recordings (plan C5). The kiosk idle sign-out reaches here as a
+  // logout, so its sheet and state clear the same way (plan C4).
+  const updatesCtxKey = currentUser
+    ? `${currentUser.id}|${currentUser.agencyId || 'agency-hkc'}|${currentVenue?.id || ''}|${isKiosk ? 'kiosk' : 'app'}`
+    : '';
+  // The generation is derived synchronously during render (React's
+  // adjust-state-during-render pattern): the context object below is never
+  // observed with a new venue and a stale generation, not even for one frame.
+  const [updatesGenState, setUpdatesGenState] = useState({ key: '', gen: 0 });
+  if (updatesGenState.key !== updatesCtxKey) {
+    setUpdatesGenState({ key: updatesCtxKey, gen: updatesGenState.gen + 1 });
+  }
+  const updatesGen = updatesGenState.gen;
+  const updatesCtx: UpdatesContext | null = useMemo(
+    () =>
+      currentUser && currentVenue
+        ? {
+            userId: currentUser.id,
+            email: currentUser.email,
+            name: currentUser.name,
+            role: currentUser.role,
+            agencyId: currentUser.agencyId || 'agency-hkc',
+            venueId: currentVenue.id,
+            kiosk: isKiosk,
+            gen: updatesGen,
+          }
+        : null,
+    [currentUser, currentVenue, isKiosk, updatesGen],
+  );
+  const updates = useUpdatesCenter(updatesCtx);
 
   // If user signs in with a non-admin role, lock active venue to their assigned venueId
   useEffect(() => {
@@ -1464,6 +1505,11 @@ export default function App() {
         onToggleDarkMode={() => setDarkMode(!darkMode)}
         completionRate={completionRate}
         currentVenue={currentVenue}
+        updatesBell={
+          currentUser ? (
+            <UpdatesBell count={updates.bellCount} onClick={() => updates.setSheetOpen(true)} />
+          ) : undefined
+        }
         allVenues={venues}
         onSelectVenue={handleSelectVenue}
         onOpenVenuesDirectory={() => setIsVenuesDirectoryOpen(true)}
@@ -1471,6 +1517,69 @@ export default function App() {
         isDemoCleared={isDemoCleared}
         onCleanSlate={handleCleanSlate}
         onRestoreDemo={handleRestoreDemo}
+      />
+
+      {/* 5a: newest unread urgent announcement for this venue */}
+      {updates.topUrgent && (
+        <UrgentBanner
+          item={updates.topUrgent}
+          onView={(id) => updates.setSheetOpen(true, 'announcements', id)}
+          onDismiss={(id) => updates.dismissUrgent(id)}
+        />
+      )}
+
+      {/* 5a: Updates sheet (Announcements | Shift notes) */}
+      <UpdatesSheet
+        open={updates.sheetOpen}
+        onClose={() => updates.setSheetOpen(false)}
+        activeTab={updates.activeTab}
+        onTabChange={updates.setActiveTab}
+        unreadAnnouncements={updates.unread.announcements}
+        unreadNotes={updates.unread.notes}
+        announcements={
+          <Announcements
+            items={updates.announcements}
+            loading={updates.listsLoading}
+            readOnly={isKiosk}
+            canPost={!!currentUser && ['admin', 'coordinator'].includes(currentUser.role)}
+            canDelete={(item) =>
+              !!currentUser &&
+              !!currentVenue &&
+              announcementCanDelete(item, currentUser.role, currentVenue.id)
+            }
+            unreadIds={new Set(updates.unread.unreadAnnouncementIds)}
+            currentUserEmail={currentUser?.email || ''}
+            currentUserName={currentUser?.name || ''}
+            currentUserRole={currentUser?.role || ''}
+            venueId={currentVenue?.id || ''}
+            active={updates.sheetOpen && updates.activeTab === 'announcements'}
+            highlightId={updates.highlightId}
+            onMark={updates.markVisible}
+            onPosted={() => { void updates.loadLists(); void updates.refreshUnread(); }}
+            onDeleted={() => { void updates.loadLists(); void updates.refreshUnread(); }}
+          />
+        }
+        notes={
+          <HandoffNotes
+            items={updates.notes}
+            loading={updates.listsLoading}
+            readOnly={isKiosk}
+            unreadIds={new Set(updates.unread.unreadNoteIds)}
+            venueId={currentVenue?.id || ''}
+            currentUserEmail={currentUser?.email || ''}
+            currentUserName={currentUser?.name || ''}
+            active={updates.sheetOpen && updates.activeTab === 'notes'}
+            canDelete={(note) =>
+              !!currentUser &&
+              (note.authorEmail === currentUser.email ||
+                currentUser.role === 'admin' ||
+                (currentUser.role === 'coordinator' && note.venueId === currentVenue?.id))
+            }
+            onMark={updates.markVisible}
+            onPosted={() => { void updates.loadLists(); void updates.refreshUnread(); }}
+            onDeleted={() => { void updates.loadLists(); void updates.refreshUnread(); }}
+          />
+        }
       />
 
       {/* Main Body */}

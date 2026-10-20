@@ -575,8 +575,8 @@ app.use('/api', async (req, res, next) => {
       (method === 'POST' && /^\/tasks\/[^/]+\/check-in$/.test(path)) ||
       (method === 'DELETE' && /^\/tasks\/[^/]+\/check-in\/[^/]+$/.test(path)) ||
       (method === 'GET' && path === '/history') ||
+      // 5a: the kiosk Updates sheet is READ-ONLY — no note writes, no read marks.
       (method === 'GET' && path === '/handoff-notes') ||
-      (method === 'POST' && path === '/handoff-notes') ||
       (method === 'GET' && path === '/announcements') ||
       (method === 'GET' && path === '/venues') ||
       (method === 'GET' && path === '/users') ||
@@ -750,6 +750,64 @@ function canFillTasks(user: UserProfile | null | undefined): boolean {
     return perms?.canFillTasks !== false;
   }
   return perms?.canFillTasks === true;
+}
+
+/**
+ * 5a — ONE rule for who sees an announcement (rule N), used by GET
+ * /api/announcements, the WS staff + kiosk filters, POST /api/updates/seen
+ * and GET /api/updates/unread. Fail closed.
+ * - same agency, not expired;
+ * - kiosk session: agency-wide or the TABLET's venue, AND role targeting
+ *   for the logged-in user, whatever the role (an admin on a wall tablet
+ *   gets the tablet's scope, not the agency);
+ * - admin: every announcement of the own agency (they manage/delete them);
+ * - everyone else: agency-wide or own venue(s) (venueScopeFor), AND
+ *   targetRoles has 'all' or the user's role (or they wrote it).
+ */
+function announcementVisibleTo(user: UserProfile | null | undefined, ann: any, kioskVenueId?: string): boolean {
+  if (!user || !ann || typeof ann !== 'object') return false;
+  if ((ann.agencyId || 'agency-hkc') !== ((user as any).agencyId || 'agency-hkc')) return false;
+  if (ann.expiresAt && String(ann.expiresAt) <= new Date().toISOString()) return false;
+  const roles: string[] = Array.isArray(ann.targetRoles) ? ann.targetRoles : [];
+  const roleOk = roles.includes('all') || roles.includes((user as any).role);
+  if (kioskVenueId !== undefined) {
+    if (!kioskVenueId) return false;
+    return roleOk && (!ann.venueId || ann.venueId === kioskVenueId);
+  }
+  if ((user as any).role === 'admin') return true;
+  const venueOk = !ann.venueId || (venueScopeFor(user) as string[]).includes(ann.venueId);
+  const own = typeof ann.authorEmail === 'string' && ann.authorEmail === (user as any).email;
+  return venueOk && (roleOk || own);
+}
+
+/** 5a: readBy is server-only — strip it from every response and broadcast. */
+function publicUpdate<T extends { readBy?: string[] }>(item: T): Omit<T, 'readBy'> {
+  if (!item || typeof item !== 'object') return item as any;
+  const { readBy: _drop, ...rest } = item as any;
+  return rest;
+}
+
+const KNOWN_ANNOUNCEMENT_ROLES = ['all', 'admin', 'coordinator', 'owner', 'mashgiach', 'worker'];
+
+/**
+ * 5a (review round 1): an ANNOUNCEMENT_DELETED event carries only { id, venueId },
+ * but it must reach exactly the sockets that were allowed to see the item.
+ * The delete handler records the deleted item's visibility metadata here
+ * (agency, venue, targetRoles, author — no content) for a short while, and
+ * both WS filters decide with announcementVisibleTo(). No entry = drop
+ * (fail closed).
+ */
+const deletedAnnouncementMeta = new Map<string, { agencyId?: string; venueId?: string; targetRoles: string[]; authorEmail?: string }>();
+function rememberDeletedAnnouncement(a: any) {
+  if (!a?.id) return;
+  deletedAnnouncementMeta.set(a.id, {
+    agencyId: a.agencyId,
+    venueId: a.venueId,
+    targetRoles: Array.isArray(a.targetRoles) ? a.targetRoles : ['all'],
+    authorEmail: a.authorEmail,
+  });
+  const t = setTimeout(() => deletedAnnouncementMeta.delete(a.id), 5 * 60 * 1000);
+  (t as any).unref?.();
 }
 
 /** Non-admin callers may see only venues inside their own scope. */
@@ -984,6 +1042,8 @@ interface HandoffNote {
   shift: string; // e.g. "Morning", "Afternoon", "Evening"
   voiceNoteData?: string; // base64 audio
   createdAt: string;
+  /** 5a: user ids that have SEEN this note (server-only; stripped from every response/broadcast). */
+  readBy?: string[];
 }
 
 interface TaskTemplate {
@@ -1033,6 +1093,8 @@ interface Announcement {
   venueId?: string; // optional: scoped to a specific venue
   createdAt: string;
   expiresAt?: string;
+  /** 5a: user ids that have SEEN this item (server-only; stripped from every response/broadcast). */
+  readBy?: string[];
 }
 
 interface PasswordResetRequest {
@@ -3726,7 +3788,20 @@ function kioskMaySee(meta: SocketMeta, type: string, payload: any): boolean {
       const note = payload?.note || payload;
       return note?.venueId === venueId;
     }
-    case 'ANNOUNCEMENT':
+    case 'HANDOFF_NOTE_DELETED':
+      // 5a: a deleted note must leave the tablet too (venueId rides the payload).
+      return payload?.venueId === venueId;
+    case 'ANNOUNCEMENT': {
+      // 5a / RULE T: one rule for REST and WS — the tablet's venue + the
+      // logged-in user's role targeting, whatever that role is.
+      const ann = payload?.announcement || payload;
+      return announcementVisibleTo(recipientForMeta(meta), ann, venueId);
+    }
+    case 'ANNOUNCEMENT_DELETED': {
+      // Same audience as the item itself: tablet venue + the signed-in role.
+      const m = deletedAnnouncementMeta.get(payload?.id);
+      return !!m && announcementVisibleTo(recipientForMeta(meta), m, venueId);
+    }
     case 'USER_PRESENCE':
       return true;
     case 'USERS_UPDATED':
@@ -3855,17 +3930,20 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
       // Fail closed: a note delete without its venueId does not reach a
       // non-admin socket (the payload now carries venueId — see the handler).
       return inScope(p.venueId) ? payload : null;
-    case 'ANNOUNCEMENT_DELETED':
-      // An announcement delete without venueId = agency-wide announcement.
-      return !p.venueId || inScope(p.venueId) ? payload : null;
+    case 'ANNOUNCEMENT_DELETED': {
+      // Same audience as the item itself (venue + role targeting + author).
+      const m = deletedAnnouncementMeta.get(p.id);
+      return m && announcementVisibleTo(recipient, m) ? payload : null;
+    }
     case 'INCIDENT_CREATED':
     case 'INCIDENT_UPDATED': {
       const inc = p.incident || p;
       return inScope(inc?.venueId) ? payload : null;
     }
     case 'ANNOUNCEMENT': {
+      // 5a: venue scope AND role targeting (the same helper as GET /api/announcements).
       const ann = p.announcement || p;
-      return !ann?.venueId || inScope(ann.venueId) ? payload : null;
+      return announcementVisibleTo(recipient, ann) ? payload : null;
     }
     case 'EVENT_CREATED':
     case 'EVENT_UPDATED': {
@@ -5388,21 +5466,13 @@ app.get('/api/announcements', (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
   const agencyId = caller.agencyId || 'agency-hkc';
-
-  const now = new Date().toISOString();
-  let list = announcements.filter((a) => a.agencyId === agencyId);
-  // Filter expired
-  list = list.filter((a) => !a.expiresAt || a.expiresAt > now);
-  // Filter by role targeting (verified session user, never a query param)
-  list = list.filter((a) =>
-    a.targetRoles.includes('all') || a.targetRoles.includes(caller.role)
-  );
-  // RULE T venue filter: non-admins see agency-wide announcements (no venueId)
-  // plus announcements for their own venue(s) only.
-  if (caller.role !== 'admin' && (req as any).kiosk !== true) {
-    const scope = venueScopeFor(caller);
-    list = list.filter((a) => !a.venueId || scope.includes(a.venueId));
-  }
+  // 5a / RULE T: one helper decides (agency, expiry, role targeting, venue —
+  // the TABLET's venue for a kiosk session, whatever the user's role).
+  const kioskVenueId = (req as any).kiosk === true ? String((req as any).kioskVenueId || '') : undefined;
+  const list = announcements
+    .filter((a) => a.agencyId === agencyId)
+    .filter((a) => announcementVisibleTo(caller, a, kioskVenueId))
+    .map(publicUpdate);
   res.json({
     announcements: list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
   });
@@ -5448,7 +5518,13 @@ app.post('/api/announcements', async (req, res) => {
         title: String(title).trim(),
         body: String(body || '').trim(),
         category: (['assignment', 'update', 'notice', 'urgent'] as const).includes(category) ? category : 'update',
-        targetRoles: Array.isArray(targetRoles) && targetRoles.length > 0 ? targetRoles : ['all'],
+        // 5a: only known role names; nothing valid → everyone.
+        targetRoles: (() => {
+          const r = Array.isArray(targetRoles)
+            ? [...new Set(targetRoles.filter((x: any) => typeof x === 'string' && KNOWN_ANNOUNCEMENT_ROLES.includes(x)))]
+            : [];
+          return r.length === 0 || r.includes('all') ? ['all'] : r;
+        })(),
         venueId: venueId || undefined,
         createdAt,
         expiresAt: expiresAt || undefined,
@@ -5480,9 +5556,9 @@ app.post('/api/announcements', async (req, res) => {
       { announcementId: announcement.id, type: 'announcement' }
     );
   }
-  broadcast('ANNOUNCEMENT', { announcement }, undefined, agencyId);
+  broadcast('ANNOUNCEMENT', { announcement: publicUpdate(announcement) }, undefined, agencyId);
 
-  res.json({ announcement });
+  res.json({ announcement: publicUpdate(announcement) });
 });
 
 app.delete('/api/announcements/:id', async (req, res) => {
@@ -5502,6 +5578,7 @@ app.delete('/api/announcements/:id', async (req, res) => {
     }
   }
   const agencyId = existing.agencyId;
+  rememberDeletedAnnouncement(existing);
   const ok = await crudDelete(req, res, 'announcements', req.params.id, {
     label: 'delete-announcement',
     broadcastType: 'ANNOUNCEMENT_DELETED',
@@ -5628,7 +5705,7 @@ app.get('/api/handoff-notes', (req, res) => {
   if (venueScope !== 'agency') {
     notes = notes.filter((n) => venueScope.includes(n.venueId));
   }
-  res.json({ notes: notes.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
+  res.json({ notes: notes.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(publicUpdate) });
 });
 
 app.post('/api/handoff-notes', async (req, res) => {
@@ -5671,8 +5748,174 @@ app.post('/api/handoff-notes', async (req, res) => {
   );
   if (!committed) return;
   const note = committed.result as HandoffNote;
-  broadcast('HANDOFF_NOTE', { note }, undefined, note.agencyId);
-  res.json({ note });
+  broadcast('HANDOFF_NOTE', { note: publicUpdate(note) }, undefined, note.agencyId);
+  res.json({ note: publicUpdate(note) });
+});
+
+// ---------------------------------------------------------------------------
+// 5a — Updates read state. Per user, per item, recorded when the item was
+// actually visible on screen. Stored OUTSIDE the versioned app-state/main
+// document (a mark there would bump the global version and give every open
+// form a false 409, and readBy arrays would grow toward the 900 KiB limit):
+// one small doc per user, updateReads/{agencyId}__{userId}. Not broadcast,
+// never part of an announcement/note payload. 5b reads the same store for
+// the ✓✓ counts. Without Firestore (local file mode) marks live in memory.
+// ---------------------------------------------------------------------------
+type UpdateReads = { agencyId: string; userId: string; a: Record<string, string>; n: Record<string, string>; updatedAt?: string };
+const localUpdateReads = new Map<string, UpdateReads>();
+const updateReadsKey = (user: UserProfile) => `${(user as any).agencyId || 'agency-hkc'}__${user.id}`;
+
+function emptyUpdateReads(user: UserProfile): UpdateReads {
+  return { agencyId: (user as any).agencyId || 'agency-hkc', userId: user.id, a: {}, n: {} };
+}
+
+/** Read the caller's marks. Identity = the authenticated server-side user, never request fields. */
+async function loadUpdateReads(user: UserProfile): Promise<UpdateReads> {
+  const key = updateReadsKey(user);
+  const empty = emptyUpdateReads(user);
+  if (!firestoreDb) return localUpdateReads.get(key) || empty;
+  const snap = await firestoreDb.collection('updateReads').doc(key).get();
+  return sanitizeUpdateReads(user, snap.exists ? snap.data() : null);
+}
+
+function sanitizeUpdateReads(user: UserProfile, d: any): UpdateReads {
+  const empty = emptyUpdateReads(user);
+  // Fail closed on a doc that is not this user's (should never happen).
+  if (!d || d.userId !== user.id || d.agencyId !== empty.agencyId) return empty;
+  return { ...empty, a: d.a || {}, n: d.n || {} };
+}
+
+const UPDATE_READS_CAP = 5000;
+/**
+ * Apply new marks ATOMICALLY (a transaction: two devices marking at once
+ * never overwrite each other). Pruning keeps only marks for items that still
+ * exist. Above UPDATE_READS_CAP per kind, the marks of the OLDEST items are
+ * dropped — those items turn back to unread, never the other way round: an
+ * item counts as read ONLY when it has its own mark (review round 1: no
+ * timestamp floor, so an item nobody saw can never be promoted to read).
+ */
+async function addUpdateReads(user: UserProfile, annIds: string[], noteIds: string[]): Promise<number> {
+  const key = updateReadsKey(user);
+  const now = new Date().toISOString();
+  const createdOf = new Map<string, string>();
+  for (const x of announcements) createdOf.set(`a:${x.id}`, x.createdAt);
+  for (const x of handoffNotes) createdOf.set(`n:${x.id}`, x.createdAt);
+  let recorded = 0;
+  const apply = (rec: UpdateReads): UpdateReads => {
+    recorded = 0;
+    for (const id of annIds) if (!rec.a[id]) { rec.a[id] = now; recorded++; }
+    for (const id of noteIds) if (!rec.n[id]) { rec.n[id] = now; recorded++; }
+    const prune = (kind: 'a' | 'n') => {
+      const m = rec[kind];
+      const live = Object.keys(m).filter((id) => createdOf.has(`${kind}:${id}`));
+      live.sort((x, y) => (createdOf.get(`${kind}:${y}`) || '').localeCompare(createdOf.get(`${kind}:${x}`) || ''));
+      rec[kind] = Object.fromEntries(live.slice(0, UPDATE_READS_CAP).map((id) => [id, m[id]]));
+    };
+    prune('a'); prune('n');
+    rec.updatedAt = now;
+    return rec;
+  };
+  if (!firestoreDb) {
+    const rec = apply({ ...(localUpdateReads.get(key) || emptyUpdateReads(user)) });
+    if (recorded > 0) localUpdateReads.set(key, rec);
+    return recorded;
+  }
+  const ref = firestoreDb.collection('updateReads').doc(key);
+  await firestoreDb.runTransaction(async (tx: any) => {
+    const snap = await tx.get(ref);
+    const rec = apply(sanitizeUpdateReads(user, snap.exists ? snap.data() : null));
+    if (recorded > 0) tx.set(ref, JSON.parse(JSON.stringify(rec)));
+  });
+  return recorded;
+}
+
+/** An item is read only when it carries the caller's own mark. */
+function isRead(rec: UpdateReads, kind: 'a' | 'n', id: string, _createdAt?: string): boolean {
+  return !!rec[kind][id];
+}
+
+/** Notes of ONE venue in the caller's agency (the venue gate below has already applied rule T). */
+function notesVisibleAt(user: UserProfile, venueId: string): HandoffNote[] {
+  const agencyId = (user as any).agencyId || 'agency-hkc';
+  return handoffNotes.filter((n) => (n.agencyId || 'agency-hkc') === agencyId && n.venueId === venueId);
+}
+
+/** Shared venue gate for the two routes: kiosk → 403 (read-only, also not on the
+ * allowlist); venue must exist in the caller's agency and be in scope. */
+function updatesVenueGate(req: any, res: any): { user: UserProfile; venueId: string } | null {
+  const user = requireAuthUser(req, res);
+  if (!user) return null;
+  if ((req as any).kiosk === true) {
+    res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
+    return null;
+  }
+  const venueId = String((req.body && req.body.venueId) || (req.query && req.query.venueId) || '');
+  if (!venueId) { res.status(400).json({ error: 'venueId is required.' }); return null; }
+  if (!requireVenueAccess(req, res, venueId)) return null;
+  return { user, venueId };
+}
+
+app.post('/api/updates/seen', async (req, res) => {
+  const g = updatesVenueGate(req, res);
+  if (!g) return;
+  const { user, venueId } = g;
+  // Validate BEFORE processing: arrays of strings, combined ≤ 200, de-duplicated.
+  const rawA = req.body?.announcementIds ?? [];
+  const rawN = req.body?.noteIds ?? [];
+  const okArr = (v: any) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 200);
+  if (!okArr(rawA) || !okArr(rawN) || rawA.length + rawN.length > 200) {
+    return res.status(400).json({ error: 'Invalid request.' });
+  }
+  const annIds = [...new Set(rawA as string[])].filter((id) => {
+    const a = announcements.find((x) => x.id === id);
+    // Skip silently (no existence oracle): unknown, not visible to this user, or another venue's.
+    return !!a && announcementVisibleTo(user, a) && (!a.venueId || a.venueId === venueId);
+  });
+  const visibleNotes = new Set(notesVisibleAt(user, venueId).map((n) => n.id));
+  const noteIds = [...new Set(rawN as string[])].filter((id) => visibleNotes.has(id));
+  try {
+    const recorded = annIds.length + noteIds.length > 0 ? await addUpdateReads(user, annIds, noteIds) : 0;
+    // Aggregate count only — never per-id success/failure.
+    res.json({ ok: true, recorded });
+  } catch (e: any) {
+    console.warn(`[updates/seen] could not record marks: ${String(e?.message || e).slice(0, 120)}`);
+    res.status(503).json({ error: 'Could not save. Please retry.', code: 'SAVE_FAILED' });
+  }
+});
+
+app.get('/api/updates/unread', async (req, res) => {
+  const g = updatesVenueGate(req, res);
+  if (!g) return;
+  const { user, venueId } = g;
+  try {
+    const rec = await loadUpdateReads(user);
+    const email = (user as any).email;
+    const agencyId = (user as any).agencyId || 'agency-hkc';
+    const anns = announcements
+      .filter((a) => a.agencyId === agencyId)
+      .filter((a) => announcementVisibleTo(user, a))
+      .filter((a) => !a.venueId || a.venueId === venueId) // this venue's sheet: agency-wide + this venue
+      .filter((a) => a.authorEmail !== email && !isRead(rec, 'a', a.id, a.createdAt));
+    const notes = notesVisibleAt(user, venueId).filter((n) => n.authorEmail !== email && !isRead(rec, 'n', n.id, n.createdAt));
+    const urgent = anns
+      .filter((a) => a.category === 'urgent')
+      .sort((x, y) => y.createdAt.localeCompare(x.createdAt))
+      .slice(0, 3)
+      .map((a) => ({ id: a.id, title: a.title, createdAt: a.createdAt }));
+    // The unread ids ride along so the client can put an honest dot on the
+    // exact items the counts describe (anns/notes above ARE the unread sets:
+    // visible at this venue, not the caller's own, not read — floor honoured).
+    res.json({
+      announcements: anns.length,
+      notes: notes.length,
+      urgent,
+      unreadAnnouncementIds: anns.map((a) => a.id),
+      unreadNoteIds: notes.map((n) => n.id),
+    });
+  } catch (e: any) {
+    console.warn(`[updates/unread] could not read marks: ${String(e?.message || e).slice(0, 120)}`);
+    res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
+  }
 });
 
 app.delete('/api/handoff-notes/:id', async (req, res) => {

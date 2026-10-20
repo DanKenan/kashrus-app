@@ -93,6 +93,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-26-coordinator-venue-scope.mjs')).default,
     (await import('./test-27-kiosk-pairing.mjs')).default,
     (await import('./test-28-alert-grouping.mjs')).default,
+    (await import('./test-29-updates-panel.mjs')).default,
   ];
 
   const results = [];
