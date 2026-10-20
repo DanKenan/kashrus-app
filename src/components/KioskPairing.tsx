@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
-import { KeepingKosherLogo } from './KeepingKosherLogo';
+import { ShutfeyLogo } from './ShutfeyLogo';
 import { apiFetch, setKioskDevice, setKioskVenueName } from '../lib/api';
 
 interface KioskPairingProps {
@@ -108,7 +108,7 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
 
   return (
     <div className="min-h-screen bg-paper text-ink flex flex-col items-center px-6 py-8 transition-colors">
-      <KeepingKosherLogo size="md" darkMode={darkMode} />
+      <ShutfeyLogo size="md" darkMode={darkMode} />
 
       <div className="mt-6 text-center">
         <p className="text-xs font-bold uppercase tracking-[0.2em] text-gold-deep">Staff sign-in</p>

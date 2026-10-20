@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Delete, LogIn } from 'lucide-react';
-import { KeepingKosherLogo } from './KeepingKosherLogo';
+import { ShutfeyLogo } from './ShutfeyLogo';
 import type { User } from '../types';
 import { apiFetch, setSessionToken } from '../lib/api';
 
@@ -128,7 +128,7 @@ export function KioskLogin({ onLoginSuccess, onExitKiosk, onUnpaired, darkMode }
   return (
     <div className="min-h-screen bg-paper text-ink flex flex-col items-center px-6 py-8 transition-colors">
       <button onClick={handleLogoTap} aria-label="Shutfey logo" className="cursor-default">
-        <KeepingKosherLogo size="md" darkMode={darkMode} />
+        <ShutfeyLogo size="md" darkMode={darkMode} />
       </button>
 
       <div className="mt-6 text-center">

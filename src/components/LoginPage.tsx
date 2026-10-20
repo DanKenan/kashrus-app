@@ -15,7 +15,7 @@ import {
   UserPlus,
   Factory
 } from 'lucide-react';
-import { KeepingKosherLogo } from './KeepingKosherLogo';
+import { ShutfeyLogo } from './ShutfeyLogo';
 import { LandingBackButton } from './LandingPage';
 import { User as UserType } from '../types';
 import { AgencySignupForm } from './AgencySignupForm';
@@ -141,7 +141,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       <header className="relative z-10 w-full px-4 sm:px-6 py-4 sm:py-5 flex items-center justify-between max-w-7xl mx-auto">
         <div className="flex items-center gap-3">
           {onBack && <LandingBackButton onBack={onBack} />}
-          <KeepingKosherLogo size="sm" showSubtitle={true} />
+          <ShutfeyLogo size="sm" showSubtitle={true} />
         </div>
         
         <div className="flex items-center gap-2 sm:gap-3">
@@ -173,7 +173,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             {/* Header / Brand Emblem */}
             <div className="text-center mb-5">
               <div className="flex justify-center mb-3">
-                <KeepingKosherLogo size="lg" showSubtitle={false} />
+                <ShutfeyLogo size="lg" showSubtitle={false} />
               </div>
               <h1 className="text-xl sm:text-2xl font-black tracking-tight text-ink">
                 {authMode === 'signup' ? 'Kosher Agency Registration' : 'Kosher Shift & Daily Board'}
@@ -422,7 +422,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
       {/* Footer */}
       <footer className="relative z-10 w-full px-6 py-4 text-center text-xs text-ink-faint dark:text-ink-soft border-t border-line/60">
-        KeepingKosher Multi-Agency Kashrut Operations &copy; {new Date().getFullYear()} &bull; All Rights Reserved
+        Shutfey Multi-Agency Kashrut Operations &copy; {new Date().getFullYear()} &bull; All Rights Reserved
       </footer>
 
       {showForgot && (

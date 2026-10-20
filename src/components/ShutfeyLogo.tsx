@@ -9,18 +9,22 @@ interface LogoProps {
   agencyShortCode?: string;
 }
 
-export const KeepingKosherLogo: React.FC<LogoProps> = ({
+export const ShutfeyLogo: React.FC<LogoProps> = ({
   size = 'md',
   showSubtitle = true,
   className = '',
   agencyName,
   agencyShortCode,
 }) => {
+  // Heights are the box sizes the component has always used; the mark is 1.28:1,
+  // so the width follows the height (width = height x 1.28). At size sm the
+  // 640-1279 px band uses a 25 px height (32 px wide — the old tile's width):
+  // the header has no slack there and a 40 px-wide mark overflowed the page.
   const iconSizes = {
-    sm: 'w-7 h-7 sm:w-8 sm:h-8 rounded-xl',
-    md: 'w-8 h-8 sm:w-9 sm:h-9 rounded-2xl',
-    lg: 'w-10 h-10 sm:w-12 sm:h-12 rounded-2xl',
-    xl: 'w-14 h-14 sm:w-16 sm:h-16 rounded-2xl',
+    sm: 'h-7 sm:h-[25px] xl:h-8',
+    md: 'h-8 sm:h-9',
+    lg: 'h-10 sm:h-12',
+    xl: 'h-14 sm:h-16',
   };
 
   const titleSizes = {
@@ -39,15 +43,23 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
 
   return (
     <div className={`flex items-center gap-2 sm:gap-2.5 min-w-0 ${className}`}>
-      {/* Shutfey brand mark */}
-      <div
-        className={`${iconSizes[size]} shrink-0 bg-white flex items-center justify-center overflow-hidden ring-2 ring-black/5`}
-      >
+      {/* Shutfey brand mark — Don's drawing (Oct 14, 2026): three partners above the pot,
+          with the check. Traced to SVG and recoloured in D2 (V3: ink / gold-deep / gold;
+          night: cream / gold-deep / gold). The day and night files swap on the .dark class,
+          so every call site works unchanged. No tile and no ring: the SVG has no background. */}
+      <div className="shrink-0">
         <img
-          src="/shutfey-mark.png"
+          src="/brand/shutfey-mark.svg"
           alt="Shutfey"
-          className="w-full h-full object-contain"
           draggable={false}
+          className={`${iconSizes[size]} w-auto dark:hidden`}
+        />
+        <img
+          src="/brand/shutfey-mark-night.svg"
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          className={`${iconSizes[size]} w-auto hidden dark:block`}
         />
       </div>
 
@@ -56,6 +68,10 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
         <div className="flex items-center gap-1 sm:gap-1.5 flex-nowrap">
           <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap`}>
             Shutfey
+          </span>
+          <span className={`${titleSizes[size]} text-gold leading-tight font-sans whitespace-nowrap ${size === 'sm' ? 'hidden xl:inline' : ''}`} aria-hidden="true">·</span>
+          <span dir="rtl" className={`${titleSizes[size]} text-ink leading-tight font-hebrew whitespace-nowrap ${size === 'sm' ? 'hidden xl:inline' : ''}`}>
+            שותפי
           </span>
           {agencyShortCode ? (
             <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-gold-wash text-gold-ink border border-gold/40 shrink-0">

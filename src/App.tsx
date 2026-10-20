@@ -39,9 +39,9 @@ export default function App() {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('theme_mode');
       if (saved) return saved === 'dark';
-      return true; // default to the dark theme
+      return false; // default to the day theme (Don, Oct 20 2026)
     }
-    return true;
+    return false;
   });
 
   useEffect(() => {
@@ -1311,7 +1311,7 @@ export default function App() {
       localStorage.setItem('current_user', JSON.stringify(user));
       localStorage.removeItem('selected_venue_id');
     }
-    showToast(`Welcome to ${user.agencyName || 'KeepingKosher'}, ${user.name}!`);
+    showToast(`Welcome to ${user.agencyName || 'Shutfey'}, ${user.name}!`);
   };
 
   // Public screens: the landing home page opens first; auth form on demand.
@@ -1688,7 +1688,7 @@ export default function App() {
       {/* Footer */}
       <footer className="mt-auto border-t border-line py-4 px-6 text-center text-xs text-ink-faint">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>KeepingKosher Operations & Audit Engine</span>
+          <span>Shutfey Operations & Audit Engine</span>
           <div className="flex items-center gap-3">
             {currentUser?.role === 'admin' && (
               <>

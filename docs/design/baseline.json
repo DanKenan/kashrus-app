@@ -1,1 +1,9 @@
-{"counts":{"paletteColourClasses":737,"radiusOutsideSet":18,"rawDurations":1,"rawHexInClassOrStyle":40,"textBelow12px":261}}
+{
+  "counts": {
+    "paletteColourClasses": 735,
+    "rawHexInClassOrStyle": 40,
+    "textBelow12px": 261,
+    "radiusOutsideSet": 18,
+    "rawDurations": 1
+  }
+}

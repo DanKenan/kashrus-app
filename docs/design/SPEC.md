@@ -150,10 +150,10 @@ Never: the seal next to the word "kosher", on a certificate-like layout, or as d
 - Gender-neutral (Don, Oct 19, rule U/AF): role names or "they/their"; never "his/her". Role words are the app's own: Admin, Coordinator, Mashgiach (plural mashgichim) — "Mashgiach" is the professional title and is used for every person in the role regardless of gender; no pronouns attach to it. (Decision Q17)
 - The seal's words: "Done", "Confirmed by Eli", "Day closed · 1 open". Never "kosher", "certified" or "approved" for a seal.
 - Hebrew text is shown, not translated; no Hebrew interface (rejected as a feature).
-- Product name: "Shutfey" / "Shutfey · שותפיה" (lockup, D2). "KeepingKosher", "KosherSuper", "Kosher Supervisor" are retired in D2.
+- Product name: "Shutfey" / "Shutfey · שותפי" (lockup, D2). Earlier product names are retired as of D2 (see git history).
 
 ## 8. Logo and agency-logo criteria (for D2 and step 12)
-- Logo: two colours (`ink` + `gold`; night cream #F3EBDD + night `gold` #E3A73D, the values in Tab's review), no white tile, legible at 32 px and as an app icon (maskable safe zone), check stroke shared with the seal.
+- Logo: Don's mark (Oct 14, 2026 — three partners above the pot, with the check), traced to SVG and recoloured to the palette in D2 (V3: ink / gold-deep / gold; night cream / gold-deep / gold). The drawing is not redrawn per screen. Default theme: day (Don, Oct 20 2026).
 - Agency logo (step 12, Decision Q18): a **32 px-high bounding box** in the header, proportions preserved, width capped at 120 px; a mark that would be wider or unreadable at that height falls back to the agency's short code in `ink` text. It sits to the left of the Shutfey mark (right in RTL), separated by a 1 px `line` divider; the two carry equal visual weight, not identical dimensions. Never distorted, never recoloured gold, never inside or touching the seal, never on a tinted tile. On phones under 390 px the agency mark collapses to the short code first; the Shutfey mark stays.
 
 ## 9. Components (minimum set)

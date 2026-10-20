@@ -30,7 +30,7 @@ import {
   Tablet
 } from 'lucide-react';
 import { User, Venue } from '../types';
-import { KeepingKosherLogo } from './KeepingKosherLogo';
+import { ShutfeyLogo } from './ShutfeyLogo';
 import { PWAInstallButton } from './PWAInstallButton';
 import { PushNotificationToggle } from './PushNotificationToggle';
 import { UpdateAppButton } from './UpdateAppButton';
@@ -135,7 +135,7 @@ export const Header: React.FC<HeaderProps> = ({
           
           {/* Brand, Venue Switcher & Status */}
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-            <KeepingKosherLogo 
+            <ShutfeyLogo 
               size="sm" 
               showSubtitle={false}
               agencyName={currentUser?.agencyName}
