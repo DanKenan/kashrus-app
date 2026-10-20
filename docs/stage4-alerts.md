@@ -141,6 +141,20 @@ Real log lines (grepped 2026-10-18):
 To test: fire the test alert from `/admin/media-check` → "Fire Test Alert" →
 confirm email + SMS arrive.
 
+**What one alert means now** (grouped summaries): one consistency run sends
+at most ONE alert — a single `[consistency] ERROR` summary line with the
+run's total and type counts (e.g. "12 issues: 7 mismatch-missing,
+3 mismatch-field, 2 mismatch-orphan"), the first 3 findings, and a run id
+(`run=c-…`). An *issue* is one finding inside a run; an *alert* is the one
+summary line for the whole run. Every finding is also written as its own
+`[consistency] INFO run=<id> …` line: in Logs Explorer, search
+`jsonPayload.message:"run=<id>"` to see all the details for that run. A clean
+run writes one INFO "ok" line and no alert. The admin page's second button,
+"Fire demo grouped alert", sends one real alert built from sample data in
+exactly this grouped shape (marked "not real data") so the phone view can be
+checked without a real failure. Alerts are delivered immediately, 24/7; any
+silencing is the receiver's own setting.
+
 ### 3b. Cloud Run Job failure — `shutfey-backup-tier1` (email + SMS)
 
 Separate from §3a: this watches the **job execution itself** (crash, IAM

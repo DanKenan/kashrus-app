@@ -5217,6 +5217,7 @@ app.post('/api/media/sweep', async (req, res) => {
  * Returns non-2xx on failure so Cloud Scheduler retries / alerts.
  */
 app.post('/api/internal/consistency-check', async (req, res) => {
+  let runId: string | undefined;
   try {
     const isScheduler = (req as any).schedulerAuth === true;
     if (!isScheduler) {
@@ -5227,17 +5228,16 @@ app.post('/api/internal/consistency-check', async (req, res) => {
       res.status(503).json({ error: 'Firestore not available.' });
       return;
     }
-    const { runConsistencyCheck } = await import('./src/server/consistency.js');
-    const result = await runConsistencyCheck(firestoreDb);
-    if (!result.ok) {
-      // Non-2xx: mismatch, size warning, or unstable read
-      res.status(500).json(result);
-      return;
-    }
-    res.json(result);
+    const { handleConsistencyCheck } = await import('./src/server/consistency.js');
+    const { httpStatus, body } = await handleConsistencyCheck(firestoreDb);
+    runId = (body as any)?.runId;
+    res.status(httpStatus).json(body);
   } catch (e: any) {
-    log.error('[consistency] check error:', e);
-    res.status(500).json({ error: 'Consistency check failed.', detail: e?.message });
+    // Last resort only (e.g. the response write itself failed). The run's one
+    // "[consistency] ERROR" line is emitted inside handleConsistencyCheck, so
+    // this path must never log at ERROR — WARNING with the run id instead.
+    log.warn(`[consistency] WARNING run=${runId || 'unknown'} route error: ${e?.message || e}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Consistency check failed.' });
   }
 });
 
@@ -5250,6 +5250,17 @@ app.post('/api/internal/test-alert', async (req, res) => {
   const admin = requireAdmin(req, res);
   if (!admin) return;
   const stamp = new Date().toISOString();
+  if ((req.body as any)?.mode === 'demo') {
+    // Demo of the grouped consistency summary, from fixed sample data —
+    // shows Don exactly what a grouped night looks like on his phone, and
+    // can never be mistaken for a real finding. Logging only; no data read
+    // or written. Never uses the "[consistency] ERROR" prefix.
+    const { demoConsistencySummary } = await import('./src/server/consistency.js');
+    const { summary } = demoConsistencySummary(stamp);
+    log.error(summary);
+    res.json({ ok: true, sentAt: stamp, mode: 'demo', summary });
+    return;
+  }
   log.error(`[alert-test] TEST ALERT from Shutfey admin at ${stamp}. If you received this, the monitoring pipeline works.`);
   res.json({ ok: true, sentAt: stamp, message: 'Test alert logged. Check your email/phone for the Cloud Monitoring notification.' });
 });
