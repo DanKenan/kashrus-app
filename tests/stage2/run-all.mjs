@@ -89,6 +89,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-22-roster-privacy.mjs')).default,
     (await import('./test-23-private-tasks.mjs')).default,
     (await import('./test-24-auth-sweep.mjs')).default,
+    (await import('./test-25-kiosk-hardening.mjs')).default,
   ];
 
   const results = [];

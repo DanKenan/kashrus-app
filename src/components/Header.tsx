@@ -253,7 +253,7 @@ export const Header: React.FC<HeaderProps> = ({
                     </button>
                   )}
 
-                  {currentUser?.role === 'admin' && (
+                  {(currentUser?.role === 'admin' || currentUser?.role === 'coordinator') && (
                     <button
                       onClick={() => { setToolsMenuOpen(false); onOpenTeamModal(); }}
                       className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer"
@@ -644,7 +644,7 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
 
           <div className="grid grid-cols-2 gap-2 pt-1">
-            {currentUser?.role === 'admin' && (
+            {(currentUser?.role === 'admin' || currentUser?.role === 'coordinator') && (
               <button
                 onClick={() => { setMobileMenuOpen(false); onOpenTeamModal(); }}
                 className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-ink-soft bg-sunken cursor-pointer"

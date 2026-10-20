@@ -108,6 +108,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
   const [userToDelete, setUserToDelete] = useState<UserType | null>(null);
+  // Coordinator view: read-only team list; the ONLY control is the Kiosk PIN
+  // editor on mashgiach/worker rows (Don's decision 8:50 PM ET Oct 19).
+  const isCoordinatorView = currentUser?.role === 'coordinator';
   const [actionAlert, setActionAlert] = useState<string | null>(null);
 
   if (!isOpen) return null;
@@ -244,7 +247,18 @@ export const TeamModal: React.FC<TeamModalProps> = ({
     }
   };
 
-  const filteredUsers = users.filter((u) => {
+  // Coordinator view: own venue only (same agencyId AND venueId as the
+  // coordinator; a venue-less coordinator sees an empty list).
+  const venueScopedUsers = isCoordinatorView
+    ? users.filter(
+        (u) =>
+          (u.agencyId || 'agency-hkc') === (currentUser?.agencyId || 'agency-hkc') &&
+          !!currentUser?.venueId &&
+          (u as any).venueId === currentUser?.venueId
+      )
+    : users;
+
+  const filteredUsers = venueScopedUsers.filter((u) => {
     if (!searchQuery) return true;
     const q = searchQuery.toLowerCase();
     const roleLabel = getRoleLabel(u.role).toLowerCase();
@@ -290,7 +304,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           
-          {/* Section 1: Add New Member Form */}
+          {/* Section 1: Add New Member Form (admin only) */}
+          {!isCoordinatorView && (
           <div className="p-4 rounded-2xl bg-sunken border border-line tactile-1">
             <h3 className="text-xs font-bold uppercase tracking-wider text-ink-faint mb-3 flex items-center gap-1.5">
               <UserPlus className="w-3.5 h-3.5 text-emerald-500" />
@@ -421,6 +436,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
             </form>
           </div>
 
+          )} {/* end admin-only Add Member form */}
+
           {/* Section 2: Team Roster List with Inline Permission Toggles */}
           <div>
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
@@ -480,8 +497,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                             </span>
                           )}
 
-                          {/* Role Selector / Badge */}
-                          {onUpdateUser && !isPrimaryAdmin ? (
+                          {/* Role Selector / Badge (coordinators: badge only) */}
+                          {onUpdateUser && !isPrimaryAdmin && !isCoordinatorView ? (
                             <select
                               value={user.role}
                               onChange={(e) => handleChangeUserRole(user, e.target.value as UserRole)}
@@ -524,7 +541,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 
                     {/* Permissions Toggles for Fill & Assign */}
                     <div className="flex flex-wrap items-center gap-3 shrink-0">
-                      {/* Can Fill Tasks Toggle */}
+                      {/* Can Fill Tasks Toggle (admin only) */}
+                      {!isCoordinatorView && (
+                      <>
                       <button
                         type="button"
                         onClick={() => handleTogglePermission(user, 'canFillTasks', canFillVal)}
@@ -556,12 +575,20 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         <span>Assign Tasks: {canAssignVal ? 'Allowed' : 'Disabled'}</span>
                       </button>
 
+                      </>
+                      )} {/* end admin-only permission toggles */}
+
                       <span className="text-xs text-ink-faint tnum hidden xl:inline" title="Tasks assigned to this user">
                         {assignedCount} tasks
                       </span>
 
-                      {/* Kiosk PIN — 4-6 digit code for shared wall tablets */}
-                      {onUpdateUser && !isPrimaryAdmin && ['mashgiach', 'worker', 'coordinator'].includes(user.role) && (
+                      {/* Kiosk PIN — 4-6 digit code for shared wall tablets.
+                          Coordinators: only on mashgiach/worker rows. */}
+                      {onUpdateUser && !isPrimaryAdmin && (
+                        isCoordinatorView
+                          ? ['mashgiach', 'worker'].includes(user.role)
+                          : ['mashgiach', 'worker', 'coordinator'].includes(user.role)
+                      ) && (
                         <KioskPinEditor
                           userId={user.id}
                           onSave={(pin) => handleSaveKioskPin(user, pin)}
@@ -569,8 +596,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         />
                       )}
 
-                      {/* Delete Member Button */}
-                      {!isPrimaryAdmin && (
+                      {/* Delete Member Button (admin only) */}
+                      {!isPrimaryAdmin && !isCoordinatorView && (
                         <button
                           onClick={() => handleDelete(user)}
                           className="p-1.5 rounded-lg text-ink-faint hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition cursor-pointer"

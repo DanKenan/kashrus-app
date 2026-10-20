@@ -9,6 +9,7 @@
  * Preserves the EXACT shape of UserProfile, including auth fields:
  * - password: bcrypt hash (NEVER sent to clients, NEVER logged)
  * - kioskPin: 4-6 digit PIN (NEVER sent to clients)
+ * - kioskPinHash: bcrypt hash of the kiosk PIN (NEVER sent to clients)
  * - permissions: UserPermissions
  *
  * Email uniqueness is enforced transactionally via usersByEmail.
@@ -31,6 +32,7 @@ export interface UserDoc {
   avatarColor: string;
   password?: string; // bcrypt hash — NEVER exposed via API
   kioskPin?: string; // NEVER exposed via API
+  kioskPinHash?: string; // bcrypt hash of kiosk PIN — NEVER exposed via API
   venueId?: string;
   permissions?: UserPermissions;
   createdAt: string;
@@ -146,10 +148,12 @@ export async function listUsersByAgency(
 }
 
 /**
- * Sanitize a UserDoc for API responses — strips password and kioskPin.
+ * Sanitize a UserDoc for API responses — strips password, kioskPin, kioskPinHash.
  * NEVER send auth secrets to clients.
  */
-export function sanitizeUser(doc: UserDoc): Omit<UserDoc, 'password' | 'kioskPin'> {
-  const { password, kioskPin, ...safe } = doc;
+export function sanitizeUser(
+  doc: UserDoc
+): Omit<UserDoc, 'password' | 'kioskPin' | 'kioskPinHash'> {
+  const { password, kioskPin, kioskPinHash, ...safe } = doc;
   return safe;
 }
