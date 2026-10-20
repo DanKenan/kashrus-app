@@ -8,7 +8,16 @@
  *    shows a bcrypt hash and no kioskPin.
  *  - Admin PUT with kioskPin stores a hash; the PUT response, USERS_UPDATED
  *    broadcast, and GET /api/users carry neither field.
- *  - /api/kiosk/users lists users with kioskPin OR kioskPinHash (names only).
+ *  - /api/kiosk/device lists the PAIRED venue's users with kioskPin OR
+ *    kioskPinHash (names only); the old /api/kiosk/users + /api/kiosk/venues
+ *    are closed (2b).
+ *
+ * 2b note: every kiosk login in this test happens on a PAIRED tablet — the
+ * helper pairs a device first (pairDevice + useDevice) and sends the
+ * X-Kiosk-Device header, exactly like the real client. Assertions are
+ * unchanged from 2a except Part 1d (device roster instead of the public
+ * picker) and Part 14 (unknown-user attempts now ride a paired device;
+ * invented body venueIds are ignored).
  *
  * Part 2 (lockout):
  *  - 5 wrong PINs → 401 each; 6th (even correct) → 429 + message + Retry-After
@@ -46,9 +55,43 @@ function auth(token) {
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
 
+/* auth + the kiosk device proof header (addendum, finding 1): a request
+ * carrying a kiosk token must also carry X-Kiosk-Device for the device the
+ * token was minted on. `useDevice` selects that device (as it does for
+ * kioskLogin and connectWs). */
+function authK(token) {
+  return { ...auth(token), ...(deviceHeader ? { 'X-Kiosk-Device': deviceHeader } : {}) };
+}
+
+/* ---- 2b: pairing helpers (the tablet side of the flow) ---- */
+let deviceHeader = null;
+function useDevice(d) { deviceHeader = d ? d.header : null; }
+
+async function pairDevice(baseUrl, adminToken, venueId, name) {
+  const start = await fetch(`${baseUrl}/api/kiosk/pairing/start`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  if (start.status !== 200) throw new Error(`pairing/start: ${start.status}`);
+  const s = await start.json();
+  const pair = await fetch(`${baseUrl}/api/kiosk/devices/pair`, {
+    method: 'POST', headers: auth(adminToken),
+    body: JSON.stringify({ code: s.code, venueId, ...(name ? { name } : {}) }),
+  });
+  if (pair.status !== 201) throw new Error(`devices/pair: ${pair.status} ${JSON.stringify(await pair.json().catch(() => ({})))}`);
+  const status = await fetch(`${baseUrl}/api/kiosk/pairing/status`, {
+    headers: { 'X-Kiosk-Pairing': `${s.pairingId}.${s.deviceSecret}` },
+  });
+  if (status.status !== 200) throw new Error(`pairing/status: ${status.status}`);
+  const sb = await status.json();
+  if (sb.status !== 'approved' || !sb.device) throw new Error('pairing not approved');
+  return { header: `${sb.device.id}.${s.deviceSecret}`, deviceId: sb.device.id, secret: s.deviceSecret };
+}
+
 async function kioskLogin(baseUrl, userId, pin) {
   const res = await fetch(`${baseUrl}/api/kiosk/login`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(deviceHeader ? { 'X-Kiosk-Device': deviceHeader } : {}) },
     body: JSON.stringify({ userId, pin }),
   });
   const body = await res.json().catch(() => ({}));
@@ -79,6 +122,12 @@ function connectWs(baseUrl, token, opts = {}) {
       }),
     };
     const timer = setTimeout(() => reject(new Error('WS connect timeout')), 10000);
+    ws.onopen = () => {
+      // Device proof (finding 1): the first frame on a kiosk socket.
+      if (deviceHeader) {
+        try { ws.send(JSON.stringify({ type: 'KIOSK_DEVICE', credential: deviceHeader })); } catch {}
+      }
+    };
     ws.onmessage = (ev) => {
       try { messages.push(JSON.parse(String(ev.data))); } catch {}
       if (messages.some((m) => m.type === 'INITIAL_STATE')) {
@@ -139,6 +188,9 @@ export default {
     });
     if (inj.status !== 200) throw new Error(`inject-fixture: ${inj.status}`);
     const tAdmin = await mintToken(baseUrl, adminId);
+    const deviceA = await pairDevice(baseUrl, tAdmin, venueA, 'T25 Tablet A');
+    const deviceB = await pairDevice(baseUrl, tAdmin, venueB, 'T25 Tablet B');
+    useDevice(deviceA);
 
     /* ---- Part 1a: correct PIN logs in, kiosk token, no PIN fields in JSON ---- */
     let kioskTokenA;
@@ -153,15 +205,20 @@ export default {
       const payload = JSON.parse(Buffer.from(kioskTokenA.split('.')[1], 'base64').toString());
       if (payload.kiosk !== true) throw new Error('kiosk token missing kiosk:true claim');
       if (payload.venueId !== venueA) throw new Error(`kiosk token venueId ${payload.venueId} !== ${venueA}`);
+      if (payload.dev !== deviceA.deviceId) throw new Error(`kiosk token dev ${payload.dev} !== paired device ${deviceA.deviceId}`);
+      if (!/^\d+$/.test(String(payload.pv || ''))) throw new Error(`kiosk token pv is not the PIN revision: ${payload.pv}`);
       const ttlHrs = (payload.exp - payload.iat) / 3600;
       if (Math.abs(ttlHrs - 12) > 0.1) throw new Error(`kiosk token TTL ${ttlHrs}h, expected 12h`);
     }
 
     /* ---- Part 1b: legacy plain PIN upgraded to bcrypt on login ---- */
     {
-      // mashB still has a plain kioskPin; log in to trigger the upgrade.
+      // mashB still has a plain kioskPin; log in on venue B's tablet to
+      // trigger the upgrade (2b: the tablet must be the user's own venue).
+      useDevice(deviceB);
       const r = await kioskLogin(baseUrl, mashBId, PIN_B);
       if (r.status !== 200) throw new Error(`legacy login: ${r.status}`);
+      useDevice(deviceA);
       // Read the Firestore doc; the user must now have a bcrypt hash, no plain PIN.
       const dr = await fetch(`${baseUrl}/api/__test__/firestore-doc`, { headers: auth(tAdmin) });
       const doc = await dr.json();
@@ -203,14 +260,41 @@ export default {
       if (lr.status !== 200) throw new Error(`coord kiosk login after PUT: ${lr.status}`);
     }
 
-    /* ---- Part 1d: /api/kiosk/users lists PIN users (names only) ---- */
+    /* ---- Part 1d: /api/kiosk/device lists the paired venue's PIN users ---- */
     {
-      const r = await fetch(`${baseUrl}/api/kiosk/users?venueId=${venueA}`);
-      if (r.status !== 200) throw new Error(`/api/kiosk/users: ${r.status}`);
+      const r = await fetch(`${baseUrl}/api/kiosk/device`, {
+        headers: { 'X-Kiosk-Device': deviceA.header },
+      });
+      if (r.status !== 200) throw new Error(`/api/kiosk/device: ${r.status}`);
       const b = await r.json();
-      assertNoPinFields(b, '/api/kiosk/users');
+      assertNoPinFields(b, '/api/kiosk/device');
+      if (b.device?.venueId !== venueA) throw new Error('/api/kiosk/device: wrong venue');
       const ids = (b.users || []).map((u) => u.id);
-      if (!ids.includes(mashAId)) throw new Error('/api/kiosk/users missing mashA');
+      if (!ids.includes(mashAId)) throw new Error('/api/kiosk/device missing mashA');
+      if (ids.includes(mashBId)) throw new Error('/api/kiosk/device leaked the other venue’s mashgiach');
+      // The old public pickers are closed (2b): no token → 401.
+      for (const path of [`/api/kiosk/users?venueId=${venueA}`, '/api/kiosk/venues']) {
+        const closed = await fetch(`${baseUrl}${path}`);
+        if (closed.status !== 401 && closed.status !== 404) {
+          throw new Error(`${path}: ${closed.status} (expected 401/404 — route closed)`);
+        }
+      }
+    }
+
+    /* ---- Part 1e: an admin id on the kiosk is just a wrong code ---- */
+    {
+      // Fix round 1 (2b): the admin answer used to be a tell-tale 403.
+      // Now an admin id is indistinguishable from a nonexistent one —
+      // same status, same body — so admin accounts can't be enumerated
+      // from a paired tablet.
+      const adminTry = await kioskLogin(baseUrl, adminId, '9999');
+      const ghostTry = await kioskLogin(baseUrl, `ghost-${ts}`, '9999');
+      if (adminTry.status !== 401 || adminTry.body.error !== 'Wrong code. Try again.') {
+        throw new Error(`admin kiosk login: ${adminTry.status} ${JSON.stringify(adminTry.body)} (expected generic 401)`);
+      }
+      if (ghostTry.status !== adminTry.status || JSON.stringify(ghostTry.body) !== JSON.stringify(adminTry.body)) {
+        throw new Error('admin and nonexistent kiosk logins differ — admin ids are enumerable');
+      }
     }
 
     /* ---- Part 2a: 5 wrong → 6th (even correct) → 429 ---- */
@@ -260,7 +344,7 @@ export default {
       const tMash = await mintToken(baseUrl, mashAId);
       for (const [label, tok] of [['kiosk', kioskTok], ['mashgiach', tMash]]) {
         const r = await fetch(`${baseUrl}/api/__test__/kiosk-clear-lockouts`, {
-          method: 'POST', headers: auth(tok),
+          method: 'POST', headers: label === 'kiosk' ? authK(tok) : auth(tok),
         });
         if (r.status !== 403) throw new Error(`clear-lockouts as ${label}: ${r.status} (expected 403)`);
       }
@@ -318,7 +402,7 @@ export default {
       ];
       for (const [method, path] of checks) {
         const r = await fetch(`${baseUrl}${path}`, {
-          method, headers: auth(kioskToken),
+          method, headers: authK(kioskToken),
           body: method === 'POST' || method === 'PUT' ? JSON.stringify({}) : undefined,
         });
         if (r.status !== 403) throw new Error(`kiosk ${method} ${path}: ${r.status} (expected 403)`);
@@ -334,7 +418,7 @@ export default {
       if (lr.status !== 200) throw new Error(`coord kiosk login: ${lr.status}`);
       const kioskCoord = lr.body.token;
       const r = await fetch(`${baseUrl}/api/users/${mashAId}`, {
-        method: 'PUT', headers: auth(kioskCoord), body: JSON.stringify({ name: 'Hacked' }),
+        method: 'PUT', headers: authK(kioskCoord), body: JSON.stringify({ name: 'Hacked' }),
       });
       if (r.status !== 403) throw new Error(`kiosk coord PUT /api/users: ${r.status} (expected 403)`);
     }
@@ -343,7 +427,7 @@ export default {
     {
       const kioskToken = kioskTokenA; // venueA
       // GET /api/tasks → only venueA tasks.
-      const tr = await fetch(`${baseUrl}/api/tasks`, { headers: auth(kioskToken) });
+      const tr = await fetch(`${baseUrl}/api/tasks`, { headers: authK(kioskToken) });
       const tb = await tr.json();
       const tids = (tb.tasks || []).map((t) => t.id);
       if (!tids.includes(taskAId)) throw new Error('kiosk GET /api/tasks missing own venue task');
@@ -351,11 +435,11 @@ export default {
       // PUT on other venue's task → 403.
       const ver = await ctx.getVersion();
       const pr = await fetch(`${baseUrl}/api/tasks/${taskBId}?expectedVersion=${ver}`, {
-        method: 'PUT', headers: auth(kioskToken), body: JSON.stringify({ notes: 'x' }),
+        method: 'PUT', headers: authK(kioskToken), body: JSON.stringify({ notes: 'x' }),
       });
       if (pr.status !== 403) throw new Error(`kiosk PUT other venue task: ${pr.status} (expected 403)`);
       // GET /api/history → only venueA.
-      const hr = await fetch(`${baseUrl}/api/history`, { headers: auth(kioskToken) });
+      const hr = await fetch(`${baseUrl}/api/history`, { headers: authK(kioskToken) });
       const hb = await hr.json();
       for (const h of hb.historyLogs || []) {
         if (h.venueId && h.venueId !== venueA) throw new Error('kiosk GET /api/history leaked other venue');
@@ -395,14 +479,14 @@ export default {
       const ver = await ctx.getVersion();
       // PUT with a forbidden field (title) → 403 KIOSK_SCOPE.
       const pr = await fetch(`${baseUrl}/api/tasks/${taskAId}?expectedVersion=${ver}`, {
-        method: 'PUT', headers: auth(kioskToken), body: JSON.stringify({ title: 'Hacked' }),
+        method: 'PUT', headers: authK(kioskToken), body: JSON.stringify({ title: 'Hacked' }),
       });
       if (pr.status !== 403) throw new Error(`kiosk PUT title: ${pr.status} (expected 403)`);
       // PUT with the exact client body (currentStatus, isCompleted, userEmail,
       // userName — App.tsx L539-548) → 200. userName/userEmail are server-overwritten.
       const ver2 = await ctx.getVersion();
       const pr2 = await fetch(`${baseUrl}/api/tasks/${taskAId}?expectedVersion=${ver2}`, {
-        method: 'PUT', headers: auth(kioskToken),
+        method: 'PUT', headers: authK(kioskToken),
         body: JSON.stringify({ currentStatus: 'done', isCompleted: true, userEmail: 'x@y.z', userName: 'X' }),
       });
       if (pr2.status !== 200) throw new Error(`kiosk PUT client body: ${pr2.status} (expected 200)`);
@@ -419,7 +503,7 @@ export default {
         method: 'PUT', headers: auth(tAdmin), body: JSON.stringify({ kioskPin: '' }),
       });
       if (pr.status !== 200) throw new Error(`remove PIN: ${pr.status}`);
-      const r1 = await fetch(`${baseUrl}/api/tasks`, { headers: auth(liveToken) });
+      const r1 = await fetch(`${baseUrl}/api/tasks`, { headers: authK(liveToken) });
       if (r1.status !== 401) throw new Error(`PIN removed: ${r1.status} (expected 401)`);
       // Restore PIN for the next checks.
       const ver2 = await ctx.getVersion();
@@ -433,14 +517,16 @@ export default {
       await fetch(`${baseUrl}/api/users/${mashAId}?expectedVersion=${ver3}`, {
         method: 'PUT', headers: auth(tAdmin), body: JSON.stringify({ venueId: venueB }),
       });
-      const r2 = await fetch(`${baseUrl}/api/tasks`, { headers: auth(liveToken2) });
+      const r2 = await fetch(`${baseUrl}/api/tasks`, { headers: authK(liveToken2) });
       if (r2.status !== 401) throw new Error(`venue moved: ${r2.status} (expected 401)`);
     }
 
     /* ---- Part 3g: kiosk socket receives no other-venue/incident/event payloads ---- */
     {
-      // mashA was moved to venueB in Part 4 — mint a fresh token for the
-      // current venue (note posted to venueA, the OTHER venue now).
+      // mashA was moved to venueB in Part 4 — log in on venue B's tablet to
+      // mint a fresh token for the current venue (note posted to venueA,
+      // the OTHER venue now).
+      useDevice(deviceB);
       const lr = await kioskLogin(baseUrl, mashAId, PIN_A);
       if (lr.status !== 200) throw new Error(`3g login: ${lr.status}`);
       const conn = await connectWs(baseUrl, lr.body.token);
@@ -474,6 +560,7 @@ export default {
 
     /* ---- Part 4b: admin PIN set clears a lock ---- */
     {
+      useDevice(deviceA);
       const uid = `user-test25-unlock-${ts}`;
       await ctx.api('POST', '/api/__test__/inject-fixture', {
         users: [{ id: uid, email: `unlock-${ts}@test.local`, name: 'T25 Unlock', role: 'mashgiach', agencyId: AGENCY, venueId: venueA, kioskPin: '4444' }],
@@ -493,6 +580,7 @@ export default {
 
     /* ---- Part 5: USER_PRESENCE must not downgrade a kiosk socket ---- */
     {
+      useDevice(deviceB);
       const lr = await kioskLogin(baseUrl, mashBId, PIN_B);
       if (lr.status !== 200) throw new Error(`presence test login: ${lr.status}`);
       const conn = await connectWs(baseUrl, lr.body.token);
@@ -533,6 +621,8 @@ export default {
         users: [{ id: adminBId, email: `adminb-${ts}@test.local`, name: 'T25 Admin B', role: 'admin', agencyId: agencyB }],
       });
       const tAdminB2 = await mintToken(baseUrl, adminBId);
+      const deviceC = await pairDevice(baseUrl, tAdminB2, venueC, 'T25 Tablet C');
+      useDevice(deviceC);
       const lr = await kioskLogin(baseUrl, mashCId, '1357');
       if (lr.status !== 200) throw new Error(`agency B kiosk login: ${lr.status}`);
       const conn = await connectWs(baseUrl, lr.body.token);
@@ -576,6 +666,7 @@ export default {
 
     /* ---- Part 8: open kiosk socket revoked on PIN removal / venue move / user delete ---- */
     {
+      useDevice(deviceA);
       const uid = `user-test25-revoke-${ts}`;
       await ctx.api('POST', '/api/__test__/inject-fixture', {
         users: [{ id: uid, email: `revoke-${ts}@test.local`, name: 'T25 Revoke', role: 'mashgiach', agencyId: AGENCY, venueId: venueA, kioskPin: '5555' }],
@@ -603,7 +694,7 @@ export default {
       // (Part 1c set the PIN to '9999'.)
       const lr = await kioskLogin(baseUrl, coordAId, '9999');
       if (lr.status !== 200) throw new Error(`coordinator kiosk login: ${lr.status}`);
-      const r = await fetch(`${baseUrl}/api/venues`, { headers: auth(lr.body.token) });
+      const r = await fetch(`${baseUrl}/api/venues`, { headers: authK(lr.body.token) });
       if (r.status !== 200) throw new Error(`kiosk venues: ${r.status}`);
       const b = await r.json();
       const venues = b.venues || [];
@@ -676,6 +767,7 @@ export default {
     /* ---- Part 3h: kiosk socket during DEMO_RESTORED gets only its venue ---- */
     {
       // mashA was moved to venueB in Part 4; use mashB (venueB).
+      useDevice(deviceB);
       const lr = await kioskLogin(baseUrl, mashBId, PIN_B);
       if (lr.status !== 200) throw new Error(`3h login: ${lr.status}`);
       const conn = await connectWs(baseUrl, lr.body.token);
@@ -706,6 +798,7 @@ export default {
 
     /* ---- Part 10: coordinator PIN scope (own venue only) ---- */
     {
+      useDevice(deviceA);
       const tCoord = await mintToken(baseUrl, coordId);
       const putPin = async (tok, targetId, body) => {
         const ver = await ctx.getVersion();
@@ -776,7 +869,7 @@ export default {
       await fetch(`${baseUrl}/api/users/${uid}?expectedVersion=${ver}`, {
         method: 'PUT', headers: auth(tAdmin), body: JSON.stringify({ kioskPin: '2468' }),
       });
-      const r1 = await fetch(`${baseUrl}/api/tasks`, { headers: auth(liveToken) });
+      const r1 = await fetch(`${baseUrl}/api/tasks`, { headers: authK(liveToken) });
       if (r1.status !== 401) throw new Error(`old token after PIN re-save: ${r1.status} (expected 401)`);
       // Socket closed on next delivery.
       ver = await ctx.getVersion();
@@ -862,13 +955,18 @@ export default {
       }
     }
 
-    /* ---- Part 14: IP-wide bucket stops venue-id cycling ---- */
+    /* ---- Part 14: IP-wide bucket stops identifier cycling ---- */
     {
-      // 41 unknown-user attempts across 41 invented venueIds from one IP → locked.
+      // 2b: unknown-user attempts count only on a PAIRED tablet (an
+      // unpaired request is refused before any counting). The attempts ride
+      // venue A's device; the invented body venueIds are ignored — the
+      // venue is the device's. 41 unknown users from one IP → locked.
+      useDevice(deviceA);
       let lastStatus = 0;
       for (let i = 0; i < 41; i++) {
         const r = await fetch(`${baseUrl}/api/kiosk/login`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Kiosk-Device': deviceA.header },
           body: JSON.stringify({ userId: `ghost-${ts}-${i}`, pin: '0000', venueId: `invented-${ts}-${i}` }),
         });
         lastStatus = r.status;

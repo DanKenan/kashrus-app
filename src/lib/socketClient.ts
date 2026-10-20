@@ -1,5 +1,5 @@
 import { ServerBroadcastMessage } from '../types';
-import { getSessionToken } from './api';
+import { getSessionToken, getKioskDevice } from './api';
 
 type MessageListener = (message: ServerBroadcastMessage) => void;
 type StatusListener = (connected: boolean) => void;
@@ -44,6 +44,18 @@ class RealtimeSocket {
         if (this.reconnectTimer) {
           clearTimeout(this.reconnectTimer);
           this.reconnectTimer = null;
+        }
+        // 2b device proof (addendum, finding 1): on a paired kiosk tablet,
+        // the FIRST frame must prove the device — a browser cannot set
+        // headers on a WebSocket, and the secret never goes in the URL.
+        // The server sends nothing until this verifies. On a phone socket
+        // (no device credential stored) nothing is sent, and the server
+        // ignores an unexpected frame there anyway.
+        const deviceCredential = getKioskDevice();
+        if (deviceCredential) {
+          try {
+            this.socket?.send(JSON.stringify({ type: 'KIOSK_DEVICE', credential: deviceCredential }));
+          } catch {}
         }
         if (this.currentUserEmail) {
           this.sendPresence(this.currentUserEmail, this.currentUserName);

@@ -2,6 +2,52 @@
 // Use apiFetch('/api/...') everywhere instead of raw fetch().
 
 const TOKEN_KEY = 'shutfey_session_token';
+const KIOSK_DEVICE_KEY = 'kiosk_device';
+const KIOSK_VENUE_NAME_KEY = 'kiosk_venue_name';
+
+/** The paired-tablet credential ('<deviceId>.<deviceSecret>'), stored only on the tablet. */
+export function getKioskDevice(): string | null {
+  try {
+    return localStorage.getItem(KIOSK_DEVICE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setKioskDevice(device: string | null): void {
+  try {
+    if (device) localStorage.setItem(KIOSK_DEVICE_KEY, device);
+    else localStorage.removeItem(KIOSK_DEVICE_KEY);
+  } catch {
+    // storage unavailable — the tablet will return to pairing
+  }
+}
+
+export function clearKioskDevice(): void {
+  setKioskDevice(null);
+  try {
+    localStorage.removeItem(KIOSK_VENUE_NAME_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function getKioskVenueName(): string | null {
+  try {
+    return localStorage.getItem(KIOSK_VENUE_NAME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setKioskVenueName(name: string | null): void {
+  try {
+    if (name) localStorage.setItem(KIOSK_VENUE_NAME_KEY, name);
+    else localStorage.removeItem(KIOSK_VENUE_NAME_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 export function getSessionToken(): string | null {
   try {
@@ -36,17 +82,40 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);
   }
+  const kioskDevice = getKioskDevice();
+  if (kioskDevice && !headers.has('X-Kiosk-Device')) {
+    headers.set('X-Kiosk-Device', kioskDevice);
+  }
   const res = await fetch(input, { ...init, headers });
   // Track the server's document version from every API response so writes
   // can send back the version this client last saw (version contract).
   trackVersionHeader(res);
-  if (res.status === 401 && token) {
-    // Token expired or revoked — clear it and tell the app to show login.
-    clearSession();
+  if (res.status === 401) {
+    let responseCode: string | undefined;
     try {
-      window.dispatchEvent(new CustomEvent('shutfey:unauthorized'));
+      const body = await res.clone().json();
+      if (body && typeof body.code === 'string') responseCode = body.code;
     } catch {
-      // ignore
+      // ignore — not every 401 carries a JSON body
+    }
+    if (responseCode === 'KIOSK_UNPAIRED') {
+      // The tablet is no longer paired: drop the stored device credential so
+      // the tablet returns to the pairing screen.
+      clearKioskDevice();
+      try {
+        window.dispatchEvent(new CustomEvent('shutfey:kiosk-unpaired'));
+      } catch {
+        // ignore
+      }
+    }
+    if (token) {
+      // Token expired or revoked — clear it and tell the app to show login.
+      clearSession();
+      try {
+        window.dispatchEvent(new CustomEvent('shutfey:unauthorized'));
+      } catch {
+        // ignore
+      }
     }
   }
   return res;

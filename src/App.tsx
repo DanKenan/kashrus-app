@@ -10,6 +10,8 @@ import { HistoryLogModal } from './components/HistoryLogModal';
 import { SupabaseModal } from './components/SupabaseModal';
 import { LoginPage } from './components/LoginPage';
 import { KioskLogin } from './components/KioskLogin';
+import { KioskPairing } from './components/KioskPairing';
+import { KioskDevicesModal } from './components/KioskDevicesModal';
 import { LandingPage } from './components/LandingPage';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { TeamModal } from './components/TeamModal';
@@ -26,7 +28,7 @@ import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
-import { apiFetch, apiWrite, clearSession, getSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft } from './lib/api';
+import { apiFetch, apiWrite, clearSession, getSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice } from './lib/api';
 
 const DEFAULT_USERS: User[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', permissions: { canFillTasks: true, canAssignTasks: true } },
@@ -87,21 +89,26 @@ export default function App() {
 
   // ---- Kiosk mode: shared wall tablet ----
   // Activated via ?kiosk=1 (persisted in localStorage so it survives reloads).
-  // Optional &venue=VENUE_ID preselects the establishment; otherwise the
-  // tablet asks on first launch and remembers the pick.
+  // A tablet is paired to ONE venue: with no stored device credential it
+  // shows the pairing screen; once paired it shows that venue's PIN screen.
+  // There is no venue picker and no ?venue= parameter any more.
   const [kioskMode, setKioskMode] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     try {
       const params = new URLSearchParams(window.location.search);
       if (params.get('kiosk') === '0') {
+        // Best-effort self-unpair BEFORE the stored credential is cleared.
+        if (getKioskDevice()) {
+          void apiFetch('/api/kiosk/device/unpair', { method: 'POST' }).catch(() => {});
+        }
         localStorage.removeItem('kiosk_mode');
         localStorage.removeItem('kiosk_venue_id');
+        clearKioskDevice();
         return false;
       }
       if (params.get('kiosk') === '1') {
         localStorage.setItem('kiosk_mode', '1');
-        const urlVenue = params.get('venue');
-        if (urlVenue) localStorage.setItem('kiosk_venue_id', urlVenue);
+        localStorage.removeItem('kiosk_venue_id');
         // Kiosk is a clean slate — clear any existing user session so the
         // tablet doesn't leak the previous user's agency context.
         try {
@@ -110,25 +117,45 @@ export default function App() {
         } catch {}
         return true;
       }
+      localStorage.removeItem('kiosk_venue_id');
       return localStorage.getItem('kiosk_mode') === '1';
     } catch {
       return false;
     }
   });
-  const [kioskVenueId, setKioskVenueId] = useState<string | null>(() => {
+  const [kioskDevice, setKioskDeviceState] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null;
     try {
       const params = new URLSearchParams(window.location.search);
-      return params.get('venue') || localStorage.getItem('kiosk_venue_id');
+      if (params.get('kiosk') === '0') return null;
+      return getKioskDevice();
     } catch {
       return null;
     }
   });
   const isKiosk = kioskMode;
 
-  const exitKioskMode = () => {
+  // If the server ever answers KIOSK_UNPAIRED, api.ts clears the stored
+  // device and dispatches this event — drop back to the pairing screen.
+  useEffect(() => {
+    const onUnpaired = () => setKioskDeviceState(null);
+    window.addEventListener('shutfey:kiosk-unpaired', onUnpaired);
+    return () => window.removeEventListener('shutfey:kiosk-unpaired', onUnpaired);
+  }, []);
+
+  const exitKioskMode = async () => {
+    // Best-effort self-unpair while the device credential is still stored
+    // (apiFetch attaches it as the X-Kiosk-Device header).
+    if (getKioskDevice()) {
+      try {
+        await apiFetch('/api/kiosk/device/unpair', { method: 'POST' });
+      } catch {
+        // ignore — leaving kiosk mode must not be blocked by the network
+      }
+    }
+    clearKioskDevice();
+    setKioskDeviceState(null);
     setKioskMode(false);
-    setKioskVenueId(null);
     if (typeof window !== 'undefined') {
       localStorage.removeItem('kiosk_mode');
       localStorage.removeItem('kiosk_venue_id');
@@ -264,6 +291,7 @@ export default function App() {
   const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
+  const [isKioskDevicesOpen, setIsKioskDevicesOpen] = useState(false);
   const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
   const [isCreateEventModalOpen, setIsCreateEventModalOpen] = useState(false);
   const [events, setEvents] = useState<KosherEvent[]>([]);
@@ -1291,7 +1319,7 @@ export default function App() {
   // Public screens: the landing home page opens first; auth form on demand.
   // Require authentication to view tasks and shift operations
   if (!currentUser) {
-    // Kiosk tablets go straight to the PIN screen (or venue picker on first launch).
+    // Kiosk tablets pair once, then go straight to their venue's PIN screen.
     if (isKiosk) {
       return (
         <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
@@ -1301,16 +1329,20 @@ export default function App() {
               <span>{toastMessage}</span>
             </div>
           )}
-          <KioskLogin
-            venueId={kioskVenueId}
-            onPickVenue={(id) => {
-              setKioskVenueId(id);
-              if (typeof window !== 'undefined') localStorage.setItem('kiosk_venue_id', id);
-            }}
-            onLoginSuccess={handleLoginSuccess}
-            onExitKiosk={exitKioskMode}
-            darkMode={darkMode}
-          />
+          {!kioskDevice ? (
+            <KioskPairing
+              onPaired={(device) => setKioskDeviceState(device)}
+              onExitKiosk={exitKioskMode}
+              darkMode={darkMode}
+            />
+          ) : (
+            <KioskLogin
+              onLoginSuccess={handleLoginSuccess}
+              onExitKiosk={exitKioskMode}
+              onUnpaired={() => setKioskDeviceState(null)}
+              darkMode={darkMode}
+            />
+          )}
         </div>
       );
     }
@@ -1426,6 +1458,7 @@ export default function App() {
         eventsCount={events.length}
         onOpenSupabaseModal={() => setIsSupabaseModalOpen(true)}
         onOpenTeamModal={() => setIsTeamModalOpen(true)}
+        onOpenKioskDevices={() => setIsKioskDevicesOpen(true)}
         onResetDailyBoard={handleResetDailyBoard}
         isRealtimeConnected={isRealtimeConnected}
         activeWorkersCount={activeWorkersCount}
@@ -1712,6 +1745,13 @@ export default function App() {
         onClose={() => setIsChangePasswordOpen(false)}
         currentUser={currentUser}
         onSuccessToast={(msg) => showToast(msg)}
+      />
+
+      <KioskDevicesModal
+        isOpen={isKioskDevicesOpen}
+        onClose={() => setIsKioskDevicesOpen(false)}
+        currentUser={currentUser}
+        venues={venues}
       />
 
       <TeamModal
