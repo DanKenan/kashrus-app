@@ -132,7 +132,7 @@ export function KioskLogin({ onLoginSuccess, onExitKiosk, onUnpaired, darkMode }
       </button>
 
       <div className="mt-6 text-center">
-        <p className="text-xs font-bold uppercase tracking-[0.2em] text-gold-deep">Mashgiach sign-in</p>
+        <p className="text-xs font-bold uppercase tracking-[0.2em] text-gold-deep">Staff sign-in</p>
         <h1 className="mt-1 text-3xl font-black font-sans">{venueName}</h1>
       </div>
 
