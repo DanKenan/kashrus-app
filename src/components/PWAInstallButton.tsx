@@ -110,7 +110,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
               <Smartphone className="w-5 h-5 text-gold-deep" />
             </div>
             <div>
-              <h4 className="text-xs sm:text-sm font-bold leading-tight text-ink">Install Kosher Supervisor App</h4>
+              <h4 className="text-xs sm:text-sm font-bold leading-tight text-ink">Install Shutfey App</h4>
               <p className="text-[11px] text-ink-soft mt-0.5">
                 Fast home-screen access, instant task verification, offline support, and full-screen mobile app experience.
               </p>
@@ -140,7 +140,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
       <button
         onClick={handleInstallClick}
         disabled={isInstalling}
-        title="Install Kosher Supervisor on your phone or computer"
+        title="Install Shutfey on your phone or computer"
         className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold rounded-xl pressable bg-gradient-to-b from-gold to-gold-deep text-white tactile-1 cursor-pointer shrink-0 ${className}`}
       >
         <Download className="w-3.5 h-3.5" />

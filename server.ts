@@ -5849,7 +5849,7 @@ app.post('/api/agencies/register', async (req, res) => {
 
   res.status(201).json({
     success: true,
-    message: `Welcome to KeepingKosher! Agency ${cleanAgencyName} has been established.`,
+    message: `Welcome to Shutfey! Agency ${cleanAgencyName} has been established.`,
     agency,
     user: getSafeUser(user),
     token: signToken(user.id),

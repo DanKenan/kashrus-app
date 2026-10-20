@@ -11,7 +11,7 @@ import {
   Building2,
   Tablet,
 } from 'lucide-react';
-import { KeepingKosherLogo } from './KeepingKosherLogo';
+import { ShutfeyLogo } from './ShutfeyLogo';
 import { PWAInstallButton } from './PWAInstallButton';
 import { UpdateAppButton } from './UpdateAppButton';
 import { User as UserType } from '../types';
@@ -62,7 +62,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
       {/* Top bar */}
       <header className="relative z-10 w-full px-4 sm:px-6 py-4 sm:py-5 flex items-center justify-between max-w-6xl mx-auto">
-        <KeepingKosherLogo size="sm" showSubtitle={true} />
+        <ShutfeyLogo size="sm" showSubtitle={true} />
         <div className="flex items-center gap-2 sm:gap-3">
           <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface/80 border border-line text-[11px] font-medium text-ink-soft backdrop-blur-sm">
             <ShieldCheck className="w-3.5 h-3.5 text-gold-deep" />
@@ -83,8 +83,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       {/* Hero */}
       <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-4 sm:px-6 py-10 sm:py-14 w-full max-w-6xl mx-auto">
         <div className="flex flex-col items-center text-center max-w-2xl">
-          <h1 className="sr-only">KeepingKosher — Kosher operations platform</h1>
-          <KeepingKosherLogo size="xl" showSubtitle={false} />
+          <h1 className="sr-only">Shutfey — Kosher operations platform</h1>
+          <ShutfeyLogo size="xl" showSubtitle={false} />
           <p className="mt-6 text-sm sm:text-base text-ink-soft leading-relaxed">
             The daily operations board for kosher agencies, mashgichim, and venues —
             shift rosters, compliance checklists, and factory audits in one warm, tactile workspace.
@@ -102,7 +102,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 <div className="min-w-0">
                   <p className="text-[11px] font-bold uppercase tracking-wider text-ink-faint">Welcome back</p>
                   <p className="text-lg font-bold text-ink truncate">{savedUser.name || savedUser.email}</p>
-                  <p className="text-xs text-ink-faint truncate">{savedUser.agencyName || 'KeepingKosher'}</p>
+                  <p className="text-xs text-ink-faint truncate">{savedUser.agencyName || 'Shutfey'}</p>
                 </div>
               </div>
               <button
@@ -197,7 +197,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       {/* Footer */}
       <footer className="relative z-10 w-full px-4 py-5 text-center">
         <p className="text-[11px] text-ink-faint">
-          Hartford Kashrut Commission (HKC) • KeepingKosher — Institutional Kashrus Oversight
+          Hartford Kashrut Commission (HKC) • Shutfey — Institutional Kashrus Oversight
         </p>
       </footer>
     </div>

@@ -150,7 +150,7 @@ Never: the seal next to the word "kosher", on a certificate-like layout, or as d
 - Gender-neutral (Don, Oct 19, rule U/AF): role names or "they/their"; never "his/her". Role words are the app's own: Admin, Coordinator, Mashgiach (plural mashgichim) — "Mashgiach" is the professional title and is used for every person in the role regardless of gender; no pronouns attach to it. (Decision Q17)
 - The seal's words: "Done", "Confirmed by Eli", "Day closed · 1 open". Never "kosher", "certified" or "approved" for a seal.
 - Hebrew text is shown, not translated; no Hebrew interface (rejected as a feature).
-- Product name: "Shutfey" / "Shutfey · שותפיה" (lockup, D2). "KeepingKosher", "KosherSuper", "Kosher Supervisor" are retired in D2.
+- Product name: "Shutfey" / "Shutfey · שותפי" (lockup, D2). "KeepingKosher", "KosherSuper", "Kosher Supervisor" are retired in D2.
 
 ## 8. Logo and agency-logo criteria (for D2 and step 12)
 - Logo: two colours (`ink` + `gold`; night cream #F3EBDD + night `gold` #E3A73D, the values in Tab's review), no white tile, legible at 32 px and as an app icon (maskable safe zone), check stroke shared with the seal.

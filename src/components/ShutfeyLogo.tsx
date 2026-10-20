@@ -9,7 +9,7 @@ interface LogoProps {
   agencyShortCode?: string;
 }
 
-export const KeepingKosherLogo: React.FC<LogoProps> = ({
+export const ShutfeyLogo: React.FC<LogoProps> = ({
   size = 'md',
   showSubtitle = true,
   className = '',
@@ -40,15 +40,13 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
   return (
     <div className={`flex items-center gap-2 sm:gap-2.5 min-w-0 ${className}`}>
       {/* Shutfey brand mark */}
-      <div
-        className={`${iconSizes[size]} shrink-0 bg-white flex items-center justify-center overflow-hidden ring-2 ring-black/5`}
-      >
-        <img
-          src="/shutfey-mark.png"
-          alt="Shutfey"
-          className="w-full h-full object-contain"
-          draggable={false}
-        />
+      <div className={`${iconSizes[size]} shrink-0 flex items-center justify-center`} aria-hidden="true">
+        {/* D2 master mark (direction B): ink ring opened at the top, gold check breaking out.
+            STAND-IN geometry — replaced by Tab's master SVG paths when the assets land. */}
+        <svg viewBox="0 0 48 48" className="w-full h-full" fill="none">
+          <circle cx="24" cy="24" r="17" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" strokeDasharray="93 14" transform="rotate(38 24 24)" className="text-ink dark:text-[#F3EBDD]" />
+          <polyline points="15,25 22,32 35,17" stroke="#B97600" strokeWidth="5.5" strokeLinecap="round" strokeLinejoin="round" className="dark:stroke-[#E3A73D]" />
+        </svg>
       </div>
 
       {/* Brand wordmark */}
@@ -56,6 +54,10 @@ export const KeepingKosherLogo: React.FC<LogoProps> = ({
         <div className="flex items-center gap-1 sm:gap-1.5 flex-nowrap">
           <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap`}>
             Shutfey
+          </span>
+          <span className={`${titleSizes[size]} text-gold-deep leading-tight font-sans whitespace-nowrap ${size === 'sm' ? 'hidden sm:inline' : ''}`} aria-hidden="true">·</span>
+          <span className={`${titleSizes[size]} text-ink leading-tight font-hebrew whitespace-nowrap ${size === 'sm' ? 'hidden sm:inline' : ''}`}>
+            שותפי
           </span>
           {agencyShortCode ? (
             <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-gold-wash text-gold-ink border border-gold/40 shrink-0">

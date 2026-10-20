@@ -49,7 +49,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
 
 // ---- Web Push: show the notification, even with the app closed ----
 self.addEventListener('push', (event: PushEvent) => {
-  let title = 'Kosher Supervisor';
+  let title = 'Shutfey';
   let body = '';
   let url = '/';
   try {
