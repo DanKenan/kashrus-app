@@ -462,7 +462,7 @@ export default {
       const putAdd = await fetch(`${baseUrl}/api/events/${evtA1Id}`, {
         method: 'PUT', headers: auth(tMashA1), body: JSON.stringify(addTaskBody),
       });
-      if (putAdd.status !== 200) throw new Error(`fix1 mash add-task PUT: ${putAdd.status} (expected 200)`);
+      if (putAdd.status !== 200) throw new Error(`fix1 mash add-task PUT: ${putAdd.status} — ${await putAdd.text().catch(() => '')}`);
       const evtsRes2 = await fetch(`${baseUrl}/api/events`, { headers: auth(tMashA1) });
       const evtsBody2 = await evtsRes2.json();
       const back = (evtsBody2.events || []).find((e) => e.id === evtA1Id);
@@ -664,7 +664,7 @@ export default {
         method: 'PUT', headers: auth(tAdminX),
         body: JSON.stringify(await apiWriteBody({ ...fullAssigned, notes: `updated ${ts}` })),
       });
-      if (upd.status !== 200) throw new Error(`fix7 admin notes update: ${upd.status}`);
+      if (upd.status !== 200) throw new Error(`fix7 admin notes update: ${upd.status} — ${await upd.text().catch(() => '')}`);
       await new Promise((r) => setTimeout(r, 1500));
       const mashGotUpd = connMash.messages.some((m) => m.type === 'EVENT_UPDATED' && (m.payload?.event?.id === evtAssignedId || m.payload?.eventId === evtAssignedId));
       if (!mashGotUpd) throw new Error('fix7: assigned mashgiach did NOT receive EVENT_UPDATED');
@@ -687,6 +687,94 @@ export default {
       });
       if (staleToggle.status !== 403) throw new Error(`fix7 stale-assignee toggle: ${staleToggle.status} (expected 403)`);
       connMash.ws.close(); connNoFill.ws.close();
+    }
+
+    /* ---- 10c. Fix round 2: in-transaction re-gate (stale-assignment race) ---- */
+    {
+      const mashA2Email = `masha2-${ts}@test.local`;
+      const raceEvtId = `evt-test26-race-${ts}`;
+      const raceTaskA = `evttask-test26-racea-${ts}`;
+      const raceTaskB = `evttask-test26-raceb-${ts}`;
+      // An A2 event assigned to mashA1 (committed via fixture → cache + doc agree).
+      const inj = await ctx.api('POST', '/api/__test__/inject-fixture', {
+        events: [{
+          id: raceEvtId, agencyId: AGENCY_X, venueId: vA2,
+          title: `Race event ${ts}`, location: 'Offsite', date: '2026-11-05',
+          assignedMashgiachEmail: mashA1Email,
+          tasks: [{ id: raceTaskA, title: `Race task A ${ts}`, isCompleted: false }],
+        }],
+      });
+      if (inj.status !== 200) throw new Error(`fixr2 inject race event: ${inj.status}`);
+      const readDocEvents = async () => {
+        const dr = await fetch(`${baseUrl}/api/__test__/firestore-doc`, { headers: auth(tAdminX) });
+        const docJson = await dr.json();
+        return (docJson.events || docJson.doc?.events || []);
+      };
+      const stageDocReassign = async (evtId, newEmail) => {
+        const docEvents = await readDocEvents();
+        const mapped = docEvents.map((e) => (e.id === evtId ? { ...e, assignedMashgiachEmail: newEmail } : e));
+        const r = await fetch(`${baseUrl}/api/__test__/doc-set-events`, {
+          method: 'POST', headers: auth(tAdminX),
+          body: JSON.stringify({ events: mapped }),
+        });
+        if (r.status !== 200) throw new Error(`fixr2 doc-set-events: ${r.status}`);
+      };
+      // mashA1 fetches the event (cache view: assigned to them) and builds
+      // the real whole-event tasks-only save.
+      const mashGet = await fetch(`${baseUrl}/api/events`, { headers: auth(tMashA1) });
+      const mashGetBody = await mashGet.json();
+      const raceEvt = (mashGetBody.events || []).find((e) => e.id === raceEvtId);
+      if (!raceEvt) throw new Error('fixr2: mashA1 cannot see their assigned race event');
+      const racePutBody = await apiWriteBody({
+        ...raceEvt,
+        tasks: [...(raceEvt.tasks || []), { id: raceTaskB, title: `Race task B ${ts}`, isCompleted: false }],
+      });
+      // Admin reassigns the event in the DOC only — the in-memory cache still
+      // says assigned-to-mashA1, so the pre-commit gate passes.
+      await stageDocReassign(raceEvtId, mashA2Email);
+      // The in-flight save must be REFUSED by the in-transaction re-gate
+      // (409 conflict or 403), and the fresh event's tasks stay unchanged.
+      const racePut = await fetch(`${baseUrl}/api/events/${raceEvtId}`, {
+        method: 'PUT', headers: auth(tMashA1), body: JSON.stringify(racePutBody),
+      });
+      if (racePut.status !== 409 && racePut.status !== 403) throw new Error(`fixr2 stale race save: ${racePut.status} (expected 409/403)`);
+      const docAfter = await readDocEvents();
+      const freshRace = docAfter.find((e) => e.id === raceEvtId);
+      if (!freshRace) throw new Error('fixr2: race event missing from the fresh doc');
+      if (freshRace.assignedMashgiachEmail !== mashA2Email) throw new Error('fixr2: fresh event assignee changed (save leaked through)');
+      if ((freshRace.tasks || []).some((t) => t.id === raceTaskB)) throw new Error('fixr2: refused save WROTE its task into the fresh event');
+      // MEDIUM: an A1 event (mashA1's own venue) — stale definition fields in
+      // a tasks-only body are silently dropped: the save COMMITS, the fresh
+      // event keeps the admin's new assignee and gains the task.
+      const medEvtId = `evt-test26-med-${ts}`;
+      const medTaskA = `evttask-test26-meda-${ts}`;
+      const medTaskB = `evttask-test26-medb-${ts}`;
+      const injMed = await ctx.api('POST', '/api/__test__/inject-fixture', {
+        events: [{
+          id: medEvtId, agencyId: AGENCY_X, venueId: vA1,
+          title: `Med event ${ts}`, location: 'Hall 1', date: '2026-11-06',
+          assignedMashgiachEmail: mashA1Email,
+          tasks: [{ id: medTaskA, title: `Med task A ${ts}`, isCompleted: false }],
+        }],
+      });
+      if (injMed.status !== 200) throw new Error(`fixr2 inject med event: ${injMed.status}`);
+      const medGet = await fetch(`${baseUrl}/api/events`, { headers: auth(tMashA1) });
+      const medGetBody = await medGet.json();
+      const medEvt = (medGetBody.events || []).find((e) => e.id === medEvtId);
+      if (!medEvt) throw new Error('fixr2: mashA1 cannot see the A1 med event');
+      await stageDocReassign(medEvtId, mashA2Email);
+      const medPut = await fetch(`${baseUrl}/api/events/${medEvtId}`, {
+        method: 'PUT', headers: auth(tMashA1),
+        body: JSON.stringify(await apiWriteBody({
+          ...medEvt,
+          tasks: [...(medEvt.tasks || []), { id: medTaskB, title: `Med task B ${ts}`, isCompleted: false }],
+        })),
+      });
+      if (medPut.status !== 200) throw new Error(`fixr2 MEDIUM save: ${medPut.status} (expected 200)`);
+      const docAfterMed = await readDocEvents();
+      const freshMed = docAfterMed.find((e) => e.id === medEvtId);
+      if (freshMed.assignedMashgiachEmail !== mashA2Email) throw new Error('fixr2 MEDIUM: stale body assignment overwrote the fresh assignee');
+      if (!(freshMed.tasks || []).some((t) => t.id === medTaskB)) throw new Error('fixr2 MEDIUM: the task did not commit');
     }
 
     /* ---- 11. Reassignment: moving the coordinator A1 → A2 refreshes their sockets ---- */

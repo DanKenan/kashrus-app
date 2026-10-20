@@ -1733,7 +1733,8 @@ function broadcastEventUpdated(
       id: newEvent.id,
       agencyId,
       venueId: newEvent.venueId,
-      assignedMashgiachEmail: newEvent.assignedMashgiachEmail,
+      // Only the previous assignee rides along — the stale assignee does not
+      // need to learn who replaced them (LOW a, fix round 2).
       previousAssignee: oldEvent?.assignedMashgiachEmail,
     },
     undefined,
@@ -5765,6 +5766,22 @@ app.get('/api/agencies/by-domain', (req, res) => {
 // Registered when FIRESTORE_MOCK=true (local mock) or STAGE2_TEST_MODE=true
 // (real-emulator CI). Never enabled in production.
 if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
+  // TEST ONLY: write a full events array into the stored doc WITHOUT
+  // committing (no version bump, no hydration). Lets test-26 stage the
+  // production race for fix round 2: the in-memory cache keeps the old
+  // assignment while the doc's fresh event is reassigned, so the PUT's
+  // in-transaction re-gate must refuse an in-flight save.
+  app.post('/api/__test__/doc-set-events', async (req, res) => {
+    const db = firestoreDb;
+    if (!db) return res.status(503).json({ error: 'db unavailable' });
+    const { events } = req.body || {};
+    if (!Array.isArray(events)) return res.status(400).json({ error: 'events array required' });
+    const docRef = db.collection('app-state').doc('main');
+    const snap = await docRef.get();
+    const doc = (snap && snap.data && snap.data()) || {};
+    await docRef.set({ ...doc, events });
+    res.json({ ok: true });
+  });
   // TEST ONLY: seed a media doc directly into the `media` collection so the
   // commit gates can be tested without GCS Storage (unavailable in mock and
   // emulator runs). test-26 uses it for the 2c media validation tests.
@@ -7558,8 +7575,11 @@ app.put('/api/events/:id', async (req, res) => {
     tasks: updatedTasks,
   } = req.body;
 
-  // Baseline for semantic conflict detection on title/location/date.
-  const baseline = { title: existing.title, location: existing.location, date: existing.date };
+  // Baseline for semantic conflict detection: every definition field as
+  // the requester saw it (fix round 2 MEDIUM: conflict-check every
+  // definition field the body changes, not just three).
+  const baseline: Record<string, any> = {};
+  for (const f of EVENT_DEFINITION_FIELDS) baseline[f] = (existing as any)[f];
 
   let resolvedMashgiachEmail = assignedMashgiachEmail !== undefined ? assignedMashgiachEmail : existing.assignedMashgiachEmail;
   let resolvedMashgiachName = assignedMashgiachName !== undefined ? assignedMashgiachName : existing.assignedMashgiachName;
@@ -7578,32 +7598,79 @@ app.put('/api/events/:id', async (req, res) => {
       const freshEvents: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
       const freshEvent = freshEvents.find((e) => e.id === id);
       if (!freshEvent) return { conflict: 'Event not found (it may have been deleted).' };
-      // Conflict if someone else changed a field this request is editing.
-      for (const field of ['title', 'location', 'date'] as const) {
-        const newVal = { title, location, date }[field];
-        if (newVal !== undefined && (freshEvent as any)[field] !== (baseline as any)[field]) {
-          return { conflict: `Conflict: event ${field} was changed by someone else. Please refresh and try again.` };
-        }
+      // Fix round 2 HIGH (rule AB): authorization inside the transaction
+      // re-resolves the caller AND the target from the FRESH doc. The
+      // pre-commit gate ran against the cached event; an admin reassignment
+      // committed between the gate and this transaction must not be
+      // silently overridden by an in-flight tasks-only save.
+      const freshCaller: any = (freshDoc.users || []).find((u: any) => u.id === (caller as any).id);
+      // Compare the authorization-relevant signature only — role, venue,
+      // agency, and canFillTasks (the one permission this route's gates
+      // read, computed with the same role defaults on both sides).
+      // Hydration merges permission defaults into the cached copy, so a raw
+      // object compare (or flags like canAssignTasks, defaulted for admins
+      // in the cache only) false-fires.
+      if (!freshCaller ||
+          freshCaller.agencyId !== (caller as any).agencyId ||
+          freshCaller.role !== (caller as any).role ||
+          (freshCaller as any).venueId !== (caller as any).venueId ||
+          canFillTasks(freshCaller) !== canFillTasks(caller as any)) {
+        return { conflict: 'Your access changed while saving. Please refresh and try again.' };
       }
-      const updated: KosherEventItem = {
-        ...freshEvent,
-        title: title !== undefined ? title : freshEvent.title,
-        location: location !== undefined ? location : freshEvent.location,
-        date: date !== undefined ? date : freshEvent.date,
-        endDate: endDate !== undefined ? endDate : freshEvent.endDate,
-        startTime: startTime !== undefined ? startTime : freshEvent.startTime,
-        endTime: endTime !== undefined ? endTime : freshEvent.endTime,
-        mashgiachType: mashgiachType !== undefined ? mashgiachType : freshEvent.mashgiachType,
-        assignedMashgiachEmail: resolvedMashgiachEmail,
-        assignedMashgiachName: resolvedMashgiachName,
-        externalMashgiach: externalMashgiach !== undefined ? externalMashgiach : freshEvent.externalMashgiach,
-        menuAttachmentName: menuAttachmentName !== undefined ? menuAttachmentName : freshEvent.menuAttachmentName,
-        menuAttachmentData: menuAttachmentData !== undefined ? menuAttachmentData : freshEvent.menuAttachmentData,
-        notes: notes !== undefined ? notes : freshEvent.notes,
-        status: status !== undefined ? status : freshEvent.status,
-        tasks: updatedTasks !== undefined ? updatedTasks : freshEvent.tasks,
-        updatedAt,
-      };
+      // Fix round 2 HIGH: inside the transaction, the gate is re-run on
+      // the FRESH event. A privileged save conflict-checks every
+      // definition field the body changes (MEDIUM); a non-privileged save
+      // is tasks/status/notes only, and stale definition fields in the body
+      // are silently dropped — the caller may still work the fresh event's
+      // tasks when they remain allowed on the fresh record.
+      const freshPrivileged = freshCaller.role === 'admin' ||
+        (freshCaller.role === 'coordinator' && callerMaySeeVenue(freshCaller, freshEvent.venueId));
+      const freshTaskWorker = mayFillEventTasks(freshCaller, freshEvent);
+      if (!freshPrivileged && !freshTaskWorker) {
+        return { conflict: 'You are no longer assigned to this event.' };
+      }
+      let updated: KosherEventItem;
+      if (freshPrivileged) {
+        // Privileged save: conflict-check EVERY definition field the body
+        // changes against the fresh event (MEDIUM).
+        for (const field of EVENT_DEFINITION_FIELDS) {
+          const newVal = (req.body as any)[field];
+          if (newVal !== undefined &&
+              JSON.stringify((freshEvent as any)[field]) !== JSON.stringify(baseline[field])) {
+            return { conflict: `Conflict: event ${field} was changed by someone else. Please refresh and try again.` };
+          }
+        }
+        updated = {
+          ...freshEvent,
+          title: title !== undefined ? title : freshEvent.title,
+          location: location !== undefined ? location : freshEvent.location,
+          date: date !== undefined ? date : freshEvent.date,
+          endDate: endDate !== undefined ? endDate : freshEvent.endDate,
+          startTime: startTime !== undefined ? startTime : freshEvent.startTime,
+          endTime: endTime !== undefined ? endTime : freshEvent.endTime,
+          mashgiachType: mashgiachType !== undefined ? mashgiachType : freshEvent.mashgiachType,
+          assignedMashgiachEmail: resolvedMashgiachEmail,
+          assignedMashgiachName: resolvedMashgiachName,
+          externalMashgiach: externalMashgiach !== undefined ? externalMashgiach : freshEvent.externalMashgiach,
+          menuAttachmentName: menuAttachmentName !== undefined ? menuAttachmentName : freshEvent.menuAttachmentName,
+          menuAttachmentData: menuAttachmentData !== undefined ? menuAttachmentData : freshEvent.menuAttachmentData,
+          notes: notes !== undefined ? notes : freshEvent.notes,
+          status: status !== undefined ? status : freshEvent.status,
+          tasks: updatedTasks !== undefined ? updatedTasks : freshEvent.tasks,
+          updatedAt,
+        };
+      } else {
+        // Non-privileged (tasks/status/notes) save: definition fields come
+        // from the FRESH event unconditionally — a tasks-only save can never
+        // silently undo an admin's concurrent reassignment (MEDIUM).
+        updated = {
+          ...freshEvent,
+          notes: notes !== undefined ? notes : freshEvent.notes,
+          status: status !== undefined ? status : freshEvent.status,
+          tasks: updatedTasks !== undefined ? updatedTasks : freshEvent.tasks,
+          updatedAt,
+        };
+      }
       const newEvents = freshEvents.map((e) => (e.id === id ? updated : e));
       return { doc: { ...freshDoc, events: newEvents }, result: updated };
     },
