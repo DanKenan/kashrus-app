@@ -1,4 +1,7 @@
-import React, { useLayoutEffect, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
+import { Seal } from './Seal';
+import { primeChime, playChime } from '../lib/kioskChime';
 import {
   Check,
   X,
@@ -47,7 +50,7 @@ interface KioskTaskPanelProps {
   completedTasks: number;
   myTotal: number;
   myCompleted: number;
-  onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
+  onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => Promise<boolean>;
   onUpdateNotes: (taskId: string, notes: string, baselineVersion?: number) => void;
   onCheckIn: (taskId: string, photoData?: string, photoCaption?: string) => void;
   onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
@@ -171,6 +174,10 @@ function ProgressRing({ done, total }: { done: number; total: number }) {
   );
 }
 
+type Saving = Record<string, { op: number; toDone: boolean }>;
+type Confirmation = { taskId: string; title: string; firstName: string; op: number; phase: 'confirmed' | 'undoing' };
+const sealEase = [0.22, 1, 0.36, 1] as const;
+
 const btn64 = 'min-h-11 min-w-11 sm:min-h-16 sm:min-w-16';
 
 export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
@@ -213,10 +220,76 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   // Same baseline rule as TaskCardView: frozen when the notes editor opens.
   const [notesBaseline, setNotesBaseline] = useState<Record<string, number | undefined>>({});
 
+  const [saving, setSaving] = useState<Saving>({});
+  // The ref makes the duplicate-tap and operation guards synchronous, before React renders.
+  const savingRef = useRef<Saving>({});
+  const savingMine = useRef<Record<string, boolean>>({});
+  const [bar, setBar] = useState<Confirmation | null>(null);
+  const opSeq = useRef(0);
+  const barOp = useRef<number | null>(null);
+  const mounted = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reducedMotion = useReducedMotion();
+
+  const clearTimer = () => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
+  };
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; clearTimer(); };
+  }, []);
+
+  const updateToggle = async (taskId: string, title: string, toDone: boolean, undoBarOp?: number) => {
+    if (savingRef.current[taskId]) return;
+    // The exiting bar can still be drawn for 200ms after its five-second window closes.
+    if (undoBarOp !== undefined && barOp.current !== undoBarOp) return;
+    const op = ++opSeq.current;
+    const firstName = currentUser.name.split(' ')[0];
+    savingRef.current = { ...savingRef.current, [taskId]: { op, toDone } };
+    const task = tasks.find((t) => t.id === taskId);
+    savingMine.current[taskId] = !!task && (task.assignedTo.includes('all') || task.assignedTo.includes(currentUser.email));
+    setSaving(savingRef.current);
+    if (toDone) primeChime();
+    if (undoBarOp !== undefined) {
+      clearTimer();
+      setBar((current) => current?.op === undoBarOp ? { ...current, phase: 'undoing' } : current);
+    }
+    let confirmed = false;
+    try {
+      confirmed = await onUpdateStatus(taskId, toDone ? 'completed' : 'pending', toDone);
+    } catch { /* App owns rollback and the error toast; no second error surface here. */ }
+    if (!mounted.current || savingRef.current[taskId]?.op !== op) return;
+    const next = { ...savingRef.current };
+    delete next[taskId];
+    delete savingMine.current[taskId];
+    savingRef.current = next;
+    setSaving(next);
+    if (confirmed && toDone) {
+      // Do not check the filtered tasks: Pending hides the optimistic row before this response.
+      clearTimer();
+      barOp.current = op;
+      setBar({ taskId, title, firstName, op, phase: 'confirmed' });
+      playChime();
+      timer.current = setTimeout(() => {
+        timer.current = null;
+        if (barOp.current === op) barOp.current = null;
+        if (mounted.current) setBar((current) => current?.op === op ? null : current);
+      }, 5000);
+    } else if (undoBarOp !== undefined) {
+      // An older undo must not dismiss a newer row's confirmation.
+      if (barOp.current === undoBarOp) barOp.current = null;
+      setBar((current) => current?.op === undoBarOp ? null : current);
+    }
+  };
+
   const canFill = canUserFillTasks(currentUser);
   const canAssign = canUserAssignTasks(currentUser);
-  const remaining = Math.max(0, totalTasks - completedTasks);
-  const ringDone = activeFilter === 'mine' ? myCompleted : completedTasks;
+  const savingCompletions = Object.entries<{ op: number; toDone: boolean }>(saving).filter(([, entry]) => entry.toDone);
+  const displayedCompleted = Math.max(0, completedTasks - savingCompletions.length);
+  const displayedMyCompleted = Math.max(0, myCompleted - savingCompletions.filter(([id]) => savingMine.current[id]).length);
+  const remaining = Math.max(0, totalTasks - displayedCompleted);
+  const ringDone = activeFilter === 'mine' ? displayedMyCompleted : displayedCompleted;
   const ringTotal = activeFilter === 'mine' ? myTotal : totalTasks;
 
   const toggleRow = (id: string) => {
@@ -258,7 +331,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
 
   const filters: { key: TabFilter; label: string }[] = [
     { key: 'all', label: `All Tasks (${totalTasks})` },
-    { key: 'mine', label: `Assigned to Me (${myCompleted}/${myTotal})` },
+    { key: 'mine', label: `Assigned to Me (${displayedMyCompleted}/${myTotal})` },
     { key: 'pending', label: `Pending (${remaining})` },
   ];
 
@@ -266,18 +339,33 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   const rowControl = (task: Task) => {
     if (!canFill) return null;
     if (task.inputType === 'toggle' || task.inputType === 'checkbox') {
+      const busy = !!saving[task.id];
+      const done = !busy && task.isCompleted;
       return (
         <button
           data-kiosk-check
-          onClick={() => onUpdateStatus(task.id, task.isCompleted ? 'pending' : 'completed', !task.isCompleted)}
-          aria-pressed={task.isCompleted}
-          aria-label={task.isCompleted ? `Undo: ${task.title}` : `Mark done: ${task.title}`}
-          title={task.isCompleted ? 'Click to cancel verification' : 'Sign and mark as complete'}
-          className={`pressable shrink-0 w-11 h-11 sm:w-16 sm:h-16 rounded-xl flex items-center justify-center border-2 ${
-            task.isCompleted ? 'bg-gold-deep border-gold-deep text-paper e2' : 'bg-surface border-line-control text-ink-faint'
+          onClick={() => updateToggle(task.id, task.title, !task.isCompleted, task.isCompleted && bar?.taskId === task.id ? bar.op : undefined)}
+          disabled={busy}
+          aria-busy={busy}
+          aria-pressed={done}
+          aria-label={busy ? `Saving: ${task.title}` : done ? `Undo: ${task.title}` : `Mark done: ${task.title}`}
+          title={busy ? 'Saving…' : done ? 'Click to cancel verification' : 'Sign and mark as complete'}
+          className={`pressable relative shrink-0 w-11 h-11 sm:w-16 sm:h-16 rounded-xl flex items-center justify-center border-2 ${
+            done ? 'bg-gold-deep border-gold-deep text-paper e2' : 'bg-surface border-line-control text-ink-faint'
           }`}
+          style={{ transition: 'background-color 120ms cubic-bezier(0.22,1,0.36,1), border-color 120ms cubic-bezier(0.22,1,0.36,1), transform 120ms cubic-bezier(0.22,1,0.36,1)' }}
         >
-          <Check className="w-6 h-6 sm:w-8 sm:h-8" strokeWidth={3} aria-hidden />
+          <span
+            aria-hidden
+            className="absolute w-6 h-6 sm:w-8 sm:h-8 rounded-full border border-line-strong dark:border-ink-faint"
+            style={{ opacity: done ? 0 : 1, transition: 'opacity 120ms cubic-bezier(0.22,1,0.36,1)' }}
+          />
+          <Check
+            className="w-6 h-6 sm:w-8 sm:h-8"
+            style={{ opacity: done ? 1 : 0, transition: 'opacity 120ms cubic-bezier(0.22,1,0.36,1)' }}
+            strokeWidth={3}
+            aria-hidden
+          />
         </button>
       );
     }
@@ -462,7 +550,8 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
       ) : (
         <ul className="flex flex-col gap-2">
           {tasks.map((task, i) => {
-            const st = rowStatus(task);
+            const phase = saving[task.id];
+            const st = phase ? { word: 'Saving…', tone: 'open' as const } : rowStatus(task);
             const isOpen = !!open[task.id];
             const mine = isDirectlyAssigned(task, currentUser);
             const tier = boardTier(task, currentUser?.email);
@@ -476,11 +565,12 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
               <li
                 key={task.id}
                 data-kiosk-row
+                data-kiosk-phase={phase ? phase.toDone ? 'saving' : 'undoing' : undefined}
                 data-task-id={task.id}
                 aria-expanded={isOpen}
                 style={categoryVars(task.category)}
-                className={`relative rounded-2xl border overflow-hidden ${
-                  task.isCompleted ? 'bg-done-tint border-line' : 'bg-surface border-line e1'
+                className={`relative rounded-2xl border overflow-hidden ${task.inputType === 'toggle' || task.inputType === 'checkbox' ? 'transition-colors duration-[120ms] ease-[cubic-bezier(0.22,1,0.36,1)]' : ''} ${
+                  !phase && task.isCompleted ? 'bg-done-tint border-line' : 'bg-surface border-line e1'
                 }`}
               >
                 <div className="cat-spine absolute start-0 top-0 bottom-0 w-[5px]" aria-hidden />
@@ -721,6 +811,50 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
           })}
         </ul>
       )}
+
+      <AnimatePresence>
+        {bar && (
+          <motion.div
+            key="confirmation"
+            data-kiosk-confirm
+            role="status"
+            aria-live="polite"
+            initial={{ y: reducedMotion ? 0 : 12, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ opacity: 0, transition: { duration: reducedMotion ? 0.00001 : 0.2, ease: sealEase } }}
+            transition={{ duration: reducedMotion ? 0.00001 : 0.32, ease: sealEase }}
+            className="fixed inset-x-0 bottom-0 z-40 flex items-center gap-3 border-t border-line bg-surface px-3 sm:px-6 pt-3"
+            style={{ paddingBottom: 'calc(12px + env(safe-area-inset-bottom))' }}
+          >
+            {bar.phase === 'confirmed' ? (
+              <motion.div
+                key={bar.op}
+                data-kiosk-seal
+                className="shrink-0"
+                initial={{ scale: reducedMotion ? 1 : 0.8, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ duration: reducedMotion ? 0.00001 : 0.2, delay: reducedMotion ? 0 : 0.08, ease: sealEase }}
+              >
+                <Seal size={40} label="Recorded" />
+              </motion.div>
+            ) : (
+              <span aria-hidden className="shrink-0 w-10 h-10 rounded-full border border-line-strong dark:border-ink-faint" />
+            )}
+            <p dir="auto" className="min-w-0 flex-1 truncate text-k-body font-semibold text-ink">
+              {bar.phase === 'undoing' ? 'Undoing…' : bar.firstName ? `Recorded. Thank you, ${bar.firstName}.` : 'Recorded. Thank you.'}
+            </p>
+            <button
+              data-kiosk-undo
+              aria-label={`Undo: ${bar.title}`}
+              disabled={bar.phase === 'undoing'}
+              onClick={() => updateToggle(bar.taskId, bar.title, false, bar.op)}
+              className="pressable shrink-0 h-16 min-w-16 px-4 rounded-xl border-2 border-line-control bg-surface text-ink text-k-body font-semibold"
+            >
+              Undo
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {onDeleteVenue && (
         <div className="mt-8 flex justify-center">
