@@ -176,7 +176,7 @@ export function Announcements({
                       type="button"
                       onClick={() => setCategory(c)}
                       className={`pressable flex items-center gap-1.5 px-3 h-11 rounded-full border text-sm font-bold transition cursor-pointer ${
-                        selected ? 'bg-ink text-white border-ink' : 'border-line text-ink-soft'
+                        selected ? 'bg-ink text-paper border-ink' : 'border-line text-ink-soft'
                       }`}
                       style={selected && c === 'urgent' ? { backgroundColor: 'var(--bad)', borderColor: 'var(--bad)' } : undefined}
                     >
@@ -212,7 +212,7 @@ export function Announcements({
               type="button"
               onClick={post}
               disabled={!title.trim() || posting}
-              className="pressable w-full h-12 rounded-xl bg-ink text-white text-base font-bold disabled:opacity-50 transition cursor-pointer"
+              className="pressable w-full h-12 rounded-xl bg-ink text-paper text-base font-bold disabled:opacity-50 transition cursor-pointer"
             >
               {posting ? 'Posting…' : 'Post announcement'}
             </button>
@@ -284,14 +284,14 @@ export function Announcements({
                       type="button"
                       onClick={() => remove(a.id)}
                       aria-label={`Delete announcement: ${a.title}`}
-                      className="pressable p-2 rounded-lg text-ink-faint hover:text-ink transition cursor-pointer shrink-0"
+                      className="pressable w-11 h-11 -mt-2 -mr-2 flex items-center justify-center rounded-lg text-ink-faint hover:text-ink transition cursor-pointer shrink-0"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
                   )}
                 </div>
-                <h3 className={`text-base mt-1.5 ${unread ? 'font-extrabold' : 'font-bold'}`}>{a.title}</h3>
-                {a.body && <p className="text-base mt-1 whitespace-pre-wrap text-ink-soft">{a.body}</p>}
+                <h3 dir="auto" className={`text-base mt-1.5 ${unread ? 'font-extrabold' : 'font-bold'}`}>{a.title}</h3>
+                {a.body && <p dir="auto" className="text-base mt-1 whitespace-pre-wrap text-ink-soft">{a.body}</p>}
                 <p className="text-xs text-ink-faint mt-2">
                   {a.authorName} · {new Date(a.createdAt).toLocaleString()}
                 </p>

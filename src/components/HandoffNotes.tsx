@@ -19,6 +19,8 @@ interface HandoffNotesProps {
   items: HandoffNoteItem[];
   loading: boolean;
   readOnly: boolean;
+  /** Mirrors the server: own notes, the admin, or this venue's coordinator. */
+  canDelete: (note: HandoffNoteItem) => boolean;
   unreadIds: Set<string>;
   venueId: string;
   currentUserEmail: string;
@@ -35,6 +37,7 @@ export function HandoffNotes({
   items,
   loading,
   readOnly,
+  canDelete,
   unreadIds,
   venueId,
   currentUserEmail,
@@ -51,6 +54,7 @@ export function HandoffNotes({
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [rates, setRates] = useState<Record<string, number>>({});
+  const [confirmId, setConfirmId] = useState<string | null>(null);
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -209,12 +213,12 @@ export function HandoffNotes({
                       </span>
                     )}
                   </div>
-                  {!readOnly && mine && (
+                  {!readOnly && canDelete(note) && confirmId !== note.id && (
                     <button
                       type="button"
-                      onClick={() => remove(note.id)}
-                      aria-label="Delete my note"
-                      className="pressable p-2 rounded-lg text-ink-faint hover:text-ink transition cursor-pointer shrink-0"
+                      onClick={() => setConfirmId(note.id)}
+                      aria-label="Delete this note"
+                      className="pressable w-11 h-11 -mt-2 -mr-2 flex items-center justify-center rounded-lg text-ink-faint hover:text-ink transition cursor-pointer shrink-0"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -223,8 +227,28 @@ export function HandoffNotes({
                 <p className="text-xs text-ink-faint mt-0.5">
                   {new Date(note.createdAt).toLocaleString()}
                 </p>
+                {confirmId === note.id && (
+                  <div className="flex items-center gap-2 mt-2 p-2 rounded-lg" style={{ backgroundColor: 'var(--bad-bg)' }}>
+                    <span className="text-sm font-bold flex-1" style={{ color: 'var(--bad)' }}>Delete this note?</span>
+                    <button
+                      type="button"
+                      onClick={() => { setConfirmId(null); void remove(note.id); }}
+                      className="pressable px-3 h-11 rounded-lg text-sm font-bold cursor-pointer"
+                      style={{ backgroundColor: 'var(--bad)', color: 'var(--bad-bg)' }}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmId(null)}
+                      className="pressable px-3 h-11 rounded-lg border border-line bg-surface text-sm font-bold cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
                 {note.content && (
-                  <p className={`text-base whitespace-pre-wrap mt-1.5 ${unread ? 'font-semibold' : ''}`}>
+                  <p dir="auto" className={`text-base whitespace-pre-wrap mt-1.5 ${unread ? 'font-semibold' : ''}`}>
                     {note.content}
                   </p>
                 )}
@@ -238,7 +262,7 @@ export function HandoffNotes({
                       src={note.voiceNoteData}
                       controls
                       preload="metadata"
-                      className="flex-1 h-10 min-w-0"
+                      className="flex-1 h-11 min-w-0"
                     />
                     <div className="flex rounded-lg border border-line overflow-hidden shrink-0" role="group" aria-label="Playback speed">
                       {[1, 1.5].map((r) => (
@@ -246,7 +270,7 @@ export function HandoffNotes({
                           key={r}
                           type="button"
                           onClick={() => setRate(note.id, r)}
-                          className={`pressable px-2.5 h-10 text-sm font-bold cursor-pointer ${rate === r ? 'bg-ink text-white' : 'text-ink-soft'}`}
+                          className={`pressable px-3 h-11 text-sm font-bold cursor-pointer ${rate === r ? 'bg-ink text-paper' : 'text-ink-soft'}`}
                         >
                           {r}×
                         </button>

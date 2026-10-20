@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Header } from './components/Header';
 import { StatsProgressBar } from './components/StatsProgressBar';
 import { OwnerAuditBanner } from './components/OwnerAuditBanner';
@@ -338,17 +338,17 @@ export default function App() {
   // then drops everything from the old context — lists, counts, banner,
   // drafts, recordings (plan C5). The kiosk idle sign-out reaches here as a
   // logout, so its sheet and state clear the same way (plan C4).
-  const [updatesGen, setUpdatesGen] = useState(0);
   const updatesCtxKey = currentUser
     ? `${currentUser.id}|${currentUser.agencyId || 'agency-hkc'}|${currentVenue?.id || ''}|${isKiosk ? 'kiosk' : 'app'}`
     : '';
-  const prevUpdatesCtxKey = useRef('');
-  useEffect(() => {
-    if (prevUpdatesCtxKey.current !== updatesCtxKey) {
-      prevUpdatesCtxKey.current = updatesCtxKey;
-      setUpdatesGen((g) => g + 1);
-    }
-  }, [updatesCtxKey]);
+  // The generation is derived synchronously during render (React's
+  // adjust-state-during-render pattern): the context object below is never
+  // observed with a new venue and a stale generation, not even for one frame.
+  const [updatesGenState, setUpdatesGenState] = useState({ key: '', gen: 0 });
+  if (updatesGenState.key !== updatesCtxKey) {
+    setUpdatesGenState({ key: updatesCtxKey, gen: updatesGenState.gen + 1 });
+  }
+  const updatesGen = updatesGenState.gen;
   const updatesCtx: UpdatesContext | null = useMemo(
     () =>
       currentUser && currentVenue
@@ -1569,6 +1569,12 @@ export default function App() {
             currentUserEmail={currentUser?.email || ''}
             currentUserName={currentUser?.name || ''}
             active={updates.sheetOpen && updates.activeTab === 'notes'}
+            canDelete={(note) =>
+              !!currentUser &&
+              (note.authorEmail === currentUser.email ||
+                currentUser.role === 'admin' ||
+                (currentUser.role === 'coordinator' && note.venueId === currentVenue?.id))
+            }
             onMark={updates.markVisible}
             onPosted={() => { void updates.loadLists(); void updates.refreshUnread(); }}
             onDeleted={() => { void updates.loadLists(); void updates.refreshUnread(); }}

@@ -22,7 +22,7 @@ export function UrgentBanner({
       <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-2.5 flex items-center gap-3">
         <span className="flex items-center gap-2 min-w-0 flex-1" style={{ color: 'var(--bad)' }}>
           <AlertTriangle className="w-5 h-5 shrink-0" />
-          <span className="text-base font-bold truncate">
+          <span dir="auto" className="text-base font-bold truncate">
             <span className="uppercase text-xs font-black tracking-wide mr-2">Urgent</span>
             {item.title}
           </span>
@@ -30,8 +30,8 @@ export function UrgentBanner({
         <button
           type="button"
           onClick={() => onView(item.id)}
-          className="pressable shrink-0 px-3 h-11 flex items-center rounded-lg text-sm font-bold text-white cursor-pointer"
-          style={{ backgroundColor: 'var(--bad)' }}
+          className="pressable shrink-0 px-3 h-11 flex items-center rounded-lg text-sm font-bold cursor-pointer"
+          style={{ backgroundColor: 'var(--bad)', color: 'var(--bad-bg)' }}
         >
           View
         </button>

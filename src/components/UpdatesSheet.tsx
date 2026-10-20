@@ -115,7 +115,7 @@ export function UpdatesSheet({
           type="button"
           aria-label={expanded ? 'Shrink panel' : 'Expand panel'}
           onClick={() => setExpanded((e) => !e)}
-          className="sm:hidden w-full pt-2.5 pb-1 flex justify-center cursor-pointer shrink-0"
+          className="sm:hidden w-full h-11 flex items-center justify-center cursor-pointer shrink-0"
         >
           <span className="w-10 h-1.5 rounded-full bg-line" />
         </button>
