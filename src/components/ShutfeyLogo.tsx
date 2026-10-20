@@ -7,6 +7,8 @@ interface LogoProps {
   lightMode?: boolean;
   agencyName?: string;
   agencyShortCode?: string;
+  /** Header only: below 360 px hide the word "Shutfey" (mark + agency tag stay). */
+  compactBelow360?: boolean;
 }
 
 export const ShutfeyLogo: React.FC<LogoProps> = ({
@@ -15,6 +17,7 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
   className = '',
   agencyName,
   agencyShortCode,
+  compactBelow360 = false,
 }) => {
   // Heights are the box sizes the component has always used; the mark is 1.28:1,
   // so the width follows the height (width = height x 1.28). At size sm the
@@ -66,7 +69,7 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
       {/* Brand wordmark */}
       <div className="flex flex-col justify-center min-w-0 overflow-hidden">
         <div className="flex items-center gap-1 sm:gap-1.5 flex-nowrap">
-          <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap`}>
+          <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap ${compactBelow360 ? 'max-[359px]:hidden' : ''}`}>
             Shutfey
           </span>
           <span className={`${titleSizes[size]} text-gold leading-tight font-sans whitespace-nowrap ${size === 'sm' ? 'hidden xl:inline' : ''}`} aria-hidden="true">·</span>
