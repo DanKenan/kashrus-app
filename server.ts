@@ -10,6 +10,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import * as media from './src/server/media.js';
 import { log } from './src/server/log.ts';
+import { consistencyRoute } from './src/server/consistency-route.js';
 
 // ---------------------------------------------------------------------------
 // Auth: bcrypt passwords + signed session tokens (HMAC-SHA256 JWT)
@@ -5226,8 +5227,9 @@ app.post('/api/internal/consistency-check', async (req, res) => {
   // the handler call, and the single-writer safety net (an emission marker
   // shared with the handler, so a failure before the handler runs still
   // produces exactly one "[consistency] ERROR" — and a failure after the
-  // summary never produces a second one).
-  const { consistencyRoute } = await import('./src/server/consistency-route.js');
+  // summary never produces a second one). Statically imported above: a load
+  // failure must be a boot failure, never an unhandled rejection inside
+  // this handler (fix round 2).
   await consistencyRoute(firestoreDb, res);
 });
 
