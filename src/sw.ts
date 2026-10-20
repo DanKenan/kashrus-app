@@ -38,13 +38,20 @@ registerRoute(
   })
 );
 
-// Allow the page to activate a waiting update immediately
-// (virtual:pwa-register posts { type: 'SKIP_WAITING' } on update).
+// A new version waits until the page tells it to take over
+// (lib/swUpdate.ts posts { type: 'SKIP_WAITING' }: from the "Update app"
+// button, or when the app is opened). It never takes over on its own.
 self.addEventListener('message', (event: ExtendableMessageEvent) => {
   const data = event.data as { type?: string } | undefined;
   if (data && data.type === 'SKIP_WAITING') {
     void self.skipWaiting();
   }
+});
+
+// Once active, control every open page of the app straight away (also the
+// very first visit), so 'controllerchange' fires and offline works at once.
+self.addEventListener('activate', (event: ExtendableEvent) => {
+  event.waitUntil(self.clients.claim());
 });
 
 // ---- Web Push: show the notification, even with the app closed ----
