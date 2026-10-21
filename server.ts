@@ -1947,12 +1947,23 @@ function recipientManages(recipient: any, target: any): boolean {
  * (a boolean — never the hash or digits) and the optional phoneNumber, only
  * when the recipient manages the target. Otherwise exactly getSafeUser().
  * Rule N: the one place these two fields are added to any payload.
+ * 9a2: also the one place `venueIds` is added (same-agency admins only).
  */
 function managerViewOf(user: UserProfile, recipient: any) {
   const safe: any = getSafeUser(user);
   if (!recipientManages(recipient, user)) return safe;
   safe.hasKioskPin = !!(user.kioskPinHash || user.kioskPin);
   if (typeof user.phoneNumber === 'string' && user.phoneNumber) safe.phoneNumber = user.phoneNumber;
+  // 9a2: a same-agency ADMIN also sees the target's venue scope (`venueIds`):
+  // the sanitized 9a scope of the CURRENT stored record (home if valid +
+  // venueAccess ∩ the agency's current venues), never raw venueAccess. Admin
+  // targets are agency-wide, so the field is omitted for them. Nobody else
+  // (coordinator, mashgiach, worker, owner, another agency's admin) gets it.
+  if (recipient.role === 'admin' && (recipient.agencyId || 'agency-hkc') === (user.agencyId || 'agency-hkc')) {
+    const stored = users.find((u) => u.id === user.id) || user;
+    const scope = venueScopeFor(stored);
+    if (Array.isArray(scope)) safe.venueIds = [...scope];
+  }
   return safe;
 }
 
