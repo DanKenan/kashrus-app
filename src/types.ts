@@ -19,6 +19,7 @@ export interface TaskCheckIn {
 }
 
 export interface KosherAgency {
+  logoRev?: string | null;
   id: string;
   name: string; // e.g. "Hartford Kashrut Commission (HKC)", "Chicago Rabbinical Council (cRc)"
   shortCode: string; // e.g. "HKC", "cRc"
@@ -40,6 +41,7 @@ export interface Venue {
   category: string;
   address?: string;
   certification?: string;
+  certificationDetail?: string;
   ownerEmail?: string;
   createdAt: string;
   timeZone?: string; // Item 6: IANA zone for this venue's work day (absent = the agency's zone)
@@ -50,6 +52,7 @@ export interface Venue {
 }
 
 export interface User {
+  agencyLogoRev?: string | null;
   id: string;
   agencyId?: string; // Which kosher agency this user belongs to
   agencyName?: string; // Display name of user's kosher agency

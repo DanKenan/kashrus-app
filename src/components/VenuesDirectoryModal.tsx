@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
+import { CertificationBadge } from './CertificationBadge';
 import { ProgressRing } from './ProgressRing';
 import { 
   X, 
   Building2, 
   Plus, 
-  ShieldCheck, 
   MapPin, 
   Users, 
   ArrowRight, 
@@ -104,6 +104,9 @@ const VenueTimeZoneRow: React.FC<{
 };
 
 interface VenuesDirectoryModalProps {
+  agencyName?: string;
+  agencyShortCode?: string;
+  agencyLogoSrc?: string | null;
   isOpen: boolean;
   onClose: () => void;
   venues: Venue[];
@@ -119,6 +122,9 @@ interface VenuesDirectoryModalProps {
 }
 
 export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
+  agencyName,
+  agencyShortCode,
+  agencyLogoSrc,
   isOpen,
   onClose,
   venues,
@@ -305,8 +311,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                       )}
                       {venue.certification && (
                         <div className="flex items-start gap-1.5 text-ok">
-                          <ShieldCheck className="w-3 h-3 mt-0.5 text-ok shrink-0" />
-                          <span dir="auto" className="min-w-0 break-words">{venue.certification}</span>
+                          <CertificationBadge certification={venue.certification} certificationDetail={venue.certificationDetail} agencyName={agencyName} agencyShortCode={agencyShortCode} logoSrc={agencyLogoSrc} iconClassName="w-3 h-3 mt-0.5 text-ok shrink-0" />
                         </div>
                       )}
                       <VenueTimeZoneRow
