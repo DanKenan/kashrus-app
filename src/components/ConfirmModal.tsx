@@ -31,14 +31,14 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
   const renderIcon = () => {
     switch (icon) {
       case 'trash':
-        return <Trash2 className="w-6 h-6 text-rose-600 dark:text-rose-400" />;
+        return <Trash2 className="w-6 h-6" />;
       case 'rotate':
-        return <RotateCcw className="w-6 h-6 text-gold-deep dark:text-gold" />;
+        return <RotateCcw className="w-6 h-6" />;
       case 'shield':
-        return <ShieldAlert className="w-6 h-6 text-gold-deep dark:text-gold" />;
+        return <ShieldAlert className="w-6 h-6" />;
       case 'alert':
       default:
-        return <AlertTriangle className="w-6 h-6 text-gold-deep dark:text-gold" />;
+        return <AlertTriangle className="w-6 h-6" />;
     }
   };
 
@@ -46,19 +46,19 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
     switch (variant) {
       case 'warning':
         return {
-          iconBg: 'bg-gold-wash ring-8 ring-gold-wash/50',
-          btnBg: 'pressable bg-gradient-to-b from-gold to-gold-deep text-white',
+          iconBg: 'bg-warn-bg text-warn',
+          btnBg: 'pressable bg-gold-deep text-paper',
         };
       case 'primary':
         return {
-          iconBg: 'bg-gold-wash ring-8 ring-gold-wash/50',
-          btnBg: 'pressable bg-gradient-to-b from-gold to-gold-deep text-white',
+          iconBg: 'bg-ok-bg text-ok',
+          btnBg: 'pressable bg-gold-deep text-paper',
         };
       case 'danger':
       default:
         return {
-          iconBg: 'bg-rose-100 dark:bg-rose-950/60 ring-8 ring-rose-50 dark:ring-rose-950/30',
-          btnBg: 'pressable bg-rose-600 hover:bg-rose-700 text-white',
+          iconBg: 'bg-bad-bg text-bad',
+          btnBg: 'pressable bg-bad text-paper',
         };
     }
   };
@@ -66,9 +66,9 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
   const styles = getVariantStyles();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1a120a]/60 backdrop-blur-xs animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-scrim backdrop-blur-sm animate-fade-in">
       <div 
-        className="w-full max-w-md rounded-2xl bg-surface border border-line tactile-5 overflow-hidden p-6 animate-slide-up"
+        className="w-full max-w-md rounded-2xl bg-surface border border-line e3 overflow-hidden p-6 animate-slide-up"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4">
@@ -88,7 +88,8 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded-lg text-ink-faint hover:text-ink-soft hover:bg-sunken transition cursor-pointer"
+            className="w-11 h-11 shrink-0 inline-flex items-center justify-center rounded-lg transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
+            aria-label="Close"
           >
             <X className="w-4 h-4" />
           </button>
@@ -99,7 +100,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
             type="button"
             onClick={onClose}
             disabled={isLoading}
-            className="px-4 py-2 rounded-xl text-xs font-semibold text-ink-soft bg-sunken hover:brightness-95 pressable cursor-pointer disabled:opacity-50"
+            className="px-4 py-2 rounded-xl text-xs font-semibold pressable cursor-pointer disabled:opacity-50 bg-surface border border-line-control text-ink hover:bg-sunken"
           >
             {cancelText}
           </button>

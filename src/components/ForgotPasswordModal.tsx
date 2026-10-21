@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Mail, KeyRound, Lock } from 'lucide-react';
+import { X, Mail, KeyRound, Lock, AlertTriangle } from 'lucide-react';
 
 interface ForgotPasswordModalProps {
   onClose: () => void;
@@ -95,14 +95,14 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="bg-white dark:bg-zinc-900 rounded-2xl max-w-sm w-full">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm p-4">
+      <div className="bg-surface border border-line e3 rounded-2xl max-w-sm w-full">
         <div className="p-4 border-b border-line flex items-center justify-between">
           <h2 className="text-base font-bold flex items-center gap-2">
-            <KeyRound className="w-5 h-5 text-gold-deep" />
+            <KeyRound className="w-5 h-5 text-ink-soft" />
             Reset Password
           </h2>
-          <button onClick={onClose} className="p-2 rounded-lg hover:bg-sunken transition cursor-pointer">
+          <button onClick={onClose} className="w-11 h-11 shrink-0 inline-flex items-center justify-center rounded-lg transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken" aria-label="Close">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -110,24 +110,24 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
         <div className="p-4 space-y-3">
           {step === 1 && (
             <>
-              <p className="text-xs text-ink-faint">
+              <p className="text-xs text-ink-soft">
                 Enter your email. Your agency admin will receive a reset code and pass it to you.
               </p>
               <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-faint" />
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-soft" />
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
-                  className="w-full pl-10 pr-3 py-2.5 text-sm rounded-xl border border-line bg-sunken"
+                  className="w-full pl-10 pr-3 py-2.5 text-base rounded-xl border border-line-control bg-sunken"
                   onKeyDown={(e) => e.key === 'Enter' && requestCode()}
                 />
               </div>
               <button
                 onClick={requestCode}
                 disabled={!email.trim() || busy}
-                className="w-full py-2.5 rounded-xl bg-gold text-white text-sm font-bold disabled:opacity-50 transition cursor-pointer"
+                className="w-full py-2.5 rounded-xl bg-gold-deep text-paper text-sm font-bold disabled:opacity-50 transition cursor-pointer"
               >
                 {busy ? 'Sending...' : 'Send Reset Code'}
               </button>
@@ -136,7 +136,7 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
 
           {step === 2 && (
             <>
-              <p className="text-xs text-ink-faint">
+              <p className="text-xs text-ink-soft">
                 Enter the 6-digit code your admin gave you. It expires in 15 minutes.
               </p>
               <input
@@ -144,19 +144,19 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
                 onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                 placeholder="123456"
                 inputMode="numeric"
-                className="w-full px-3 py-2.5 text-center text-2xl font-black tracking-[0.3em] rounded-xl border border-line bg-sunken"
+                className="w-full px-3 py-2.5 text-center text-2xl font-bold tracking-[0.3em] rounded-xl border border-line-control bg-sunken"
                 onKeyDown={(e) => e.key === 'Enter' && verifyCode()}
               />
               <button
                 onClick={verifyCode}
                 disabled={code.length !== 6 || busy}
-                className="w-full py-2.5 rounded-xl bg-gold text-white text-sm font-bold disabled:opacity-50 transition cursor-pointer"
+                className="w-full py-2.5 rounded-xl bg-gold-deep text-paper text-sm font-bold disabled:opacity-50 transition cursor-pointer"
               >
                 {busy ? 'Verifying...' : 'Verify Code'}
               </button>
               <button
                 onClick={() => setStep(1)}
-                className="w-full text-center text-xs text-ink-faint hover:text-ink transition cursor-pointer"
+                className="w-full text-center text-xs transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
               >
                 ← Back
               </button>
@@ -165,37 +165,37 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
 
           {step === 3 && (
             <>
-              <p className="text-xs text-ink-faint">
+              <p className="text-xs text-ink-soft">
                 Code verified. Set your new password.
               </p>
-              <p className="text-xs text-ink-faint" data-testid="reset-signout-note">
+              <p className="text-xs text-ink-soft" data-testid="reset-signout-note">
                 Setting a new password signs you out on your other devices.
               </p>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-faint" />
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-soft" />
                 <input
                   type="password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   placeholder="New password (min 8 characters)"
-                  className="w-full pl-10 pr-3 py-2.5 text-sm rounded-xl border border-line bg-sunken"
+                  className="w-full pl-10 pr-3 py-2.5 text-base rounded-xl border border-line-control bg-sunken"
                 />
               </div>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-faint" />
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-soft" />
                 <input
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   placeholder="Confirm new password"
-                  className="w-full pl-10 pr-3 py-2.5 text-sm rounded-xl border border-line bg-sunken"
+                  className="w-full pl-10 pr-3 py-2.5 text-base rounded-xl border border-line-control bg-sunken"
                   onKeyDown={(e) => e.key === 'Enter' && setPassword()}
                 />
               </div>
               <button
                 onClick={setPassword}
                 disabled={busy}
-                className="w-full py-2.5 rounded-xl bg-gold text-white text-sm font-bold disabled:opacity-50 transition cursor-pointer"
+                className="w-full py-2.5 rounded-xl bg-gold-deep text-paper text-sm font-bold disabled:opacity-50 transition cursor-pointer"
               >
                 {busy ? 'Setting...' : 'Set New Password'}
               </button>
@@ -203,8 +203,8 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
           )}
 
           {error && (
-            <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-600 text-xs font-semibold">
-              {error}
+            <div className="p-2.5 rounded-xl bg-bad-bg border border-bad text-bad text-xs font-semibold flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" /><span>{error}</span>
             </div>
           )}
         </div>
