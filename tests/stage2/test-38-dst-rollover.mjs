@@ -20,6 +20,35 @@
 
 const ADMIN_EMAIL = 'kenan@hartfordkashrut.org';
 
+/**
+ * A ctx whose requests carry a FRESH admin token: after Test 18 the harness's
+ * login token can be invalid (rule F), so mint one for the seed admin
+ * (usr_admin, agency-hkc) via the test-only mint-token route.
+ */
+async function freshAdminCtx(baseUrl, ctx) {
+  let headers = ctx.authHeaders;
+  try {
+    const r = await fetch(`${baseUrl}/api/__test__/mint-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: 'usr_admin' }),
+    });
+    if (r.status === 200) {
+      const j = await r.json();
+      if (j.token) headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${j.token}` };
+    }
+  } catch {}
+  const api = async (method, path, body) => {
+    const res = await fetch(`${baseUrl}${path}`, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+    let json = null;
+    try { json = await res.json(); } catch {}
+    return { status: res.status, json };
+  };
+  const getDoc = async () => (await api('GET', '/api/__test__/firestore-doc')).json.doc;
+  const getVersion = async () => (await api('GET', '/api/__test__/firestore-doc')).json.version;
+  return { ...ctx, authHeaders: headers, api, getDoc, getVersion };
+}
+
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
 }
@@ -122,7 +151,8 @@ export default {
   whatItProves:
     'Rollovers happen once per local midnight across US and Israel DST changes (never in the repeated or skipped hour); an outage closes in one catch-up snapshot; concurrent resets archive once; overdue alerts are per venue-local day.',
 
-  async run(baseUrl, ctx) {
+  async run(baseUrl, harnessCtx) {
+    const ctx = await freshAdminCtx(baseUrl, harnessCtx);
     const ts = Date.now();
     const details = [];
     const saved = await saveWorkDates(ctx);

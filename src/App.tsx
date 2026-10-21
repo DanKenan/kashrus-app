@@ -31,7 +31,7 @@ import { EventsModal } from './components/EventsModal';
 import { CreateEventModal } from './components/CreateEventModal';
 import { ConfirmModal } from './components/ConfirmModal';
 import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
-import { venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
+import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
 import { realtimeSocket } from './lib/socketClient';
@@ -564,6 +564,17 @@ export default function App() {
           setTasks(msg.payload.tasks.filter((t: Task) => canSeeTask(t, currentUser)));
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(msg.payload.historyLogs);
         showToast('Daily board has refreshed for the day! Previous records archived.');
+      } else if (msg.type === 'AGENCY_UPDATED' && msg.payload?.agency?.id) {
+        // Item 6: the agency zone decides "today" for venues without their own
+        // zone — apply the confirmed change for the signed-in user's own
+        // agency (no reload). Absent/invalid zone = America/New_York.
+        const ag = msg.payload.agency;
+        const nextTz = isValidTimeZone(ag.timeZone) ? ag.timeZone : undefined;
+        setCurrentUser((prev) =>
+          prev && (prev.agencyId || 'agency-hkc') === ag.id && prev.agencyTimeZone !== nextTz
+            ? { ...prev, agencyTimeZone: nextTz }
+            : prev
+        );
       } else if (msg.type === 'VENUE_UPDATED' && msg.payload?.venue?.id) {
         // Item 6: a venue edit (e.g. its time zone) — update only a venue this
         // client already holds; never add one.

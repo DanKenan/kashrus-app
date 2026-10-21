@@ -4167,7 +4167,8 @@ function kioskFilterPayload(meta: SocketMeta, type: string, payload: any): any {
  * - PASS (no venue data): USER_PRESENCE, EVENT_TEMPLATES_UPDATED,
  *   INITIAL_STATE (built scoped by agencyStateFor). AGENCY_UPDATED and
  *   AGENCY_REGISTERED pass with the agency reduced to its public profile
- *   (name, shortCode, certificationSeal, region, contactPhone, customDomain)
+ *   (name, shortCode, certificationSeal, region, contactPhone, customDomain,
+ *   timeZone)
  *   for non-admin sockets — the full object also carries adminEmail.
  * - VENUE-FILTERED: TASK_CREATED/UPDATED/DELETED (by task venueId; since
  *   fix round 1, delete payloads for tasks/events/handoff notes carry their
@@ -4212,6 +4213,9 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
         id: a.id, name: a.name, shortCode: a.shortCode,
         certificationSeal: a.certificationSeal, region: a.region,
         contactPhone: a.contactPhone, customDomain: a.customDomain,
+        // Item 6: the agency zone decides "today" for inherited venues on
+        // every client (not sensitive).
+        timeZone: a.timeZone,
       };
       const { adminEmail: _drop, ...rest } = p;
       return { ...rest, agency: pub };
@@ -7686,8 +7690,15 @@ app.post('/api/venues', async (req, res) => {
           venues: [...freshVenues, newVenue],
           users: newUsers,
           tasks: [...freshTasks, ...tasksToAdd],
+          // B2: existing venues' markers are materialized from the legacy
+          // date in the same commit; the new venue starts on today in its zone.
           venueWorkDates: {
-            ...sanitizeVenueWorkDates(freshDoc.venueWorkDates),
+            ...materializedWorkDates(
+              freshDoc,
+              freshVenues,
+              Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [],
+              venueNow
+            ),
             [newVenueId]: workDateIn(
               venueTimeZoneIn(newVenue, Array.isArray(freshDoc.agencies) ? freshDoc.agencies : []),
               venueNow

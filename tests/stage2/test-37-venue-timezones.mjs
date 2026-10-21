@@ -28,6 +28,35 @@
 
 const ADMIN_EMAIL = 'kenan@hartfordkashrut.org';
 
+/**
+ * A ctx whose requests carry a FRESH admin token: after Test 18 the harness's
+ * login token can be invalid (rule F), so mint one for the seed admin
+ * (usr_admin, agency-hkc) via the test-only mint-token route.
+ */
+async function freshAdminCtx(baseUrl, ctx) {
+  let headers = ctx.authHeaders;
+  try {
+    const r = await fetch(`${baseUrl}/api/__test__/mint-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: 'usr_admin' }),
+    });
+    if (r.status === 200) {
+      const j = await r.json();
+      if (j.token) headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${j.token}` };
+    }
+  } catch {}
+  const api = async (method, path, body) => {
+    const res = await fetch(`${baseUrl}${path}`, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+    let json = null;
+    try { json = await res.json(); } catch {}
+    return { status: res.status, json };
+  };
+  const getDoc = async () => (await api('GET', '/api/__test__/firestore-doc')).json.doc;
+  const getVersion = async () => (await api('GET', '/api/__test__/firestore-doc')).json.version;
+  return { ...ctx, authHeaders: headers, api, getDoc, getVersion };
+}
+
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
 }
@@ -109,12 +138,36 @@ async function asUser(baseUrl, token, method, path, body) {
   return { status: r.status, json };
 }
 
+/** Open a WS as `token`; resolves after INITIAL_STATE with { ws, messages }. */
+function connectWs(baseUrl, token) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(baseUrl.replace(/^http/, 'ws') + `/ws?token=${encodeURIComponent(token)}`);
+    const messages = [];
+    const timer = setTimeout(() => reject(new Error('WS connect timeout')), 10000);
+    ws.onmessage = (ev) => {
+      try { messages.push(JSON.parse(String(ev.data))); } catch {}
+      if (messages.some((m) => m.type === 'INITIAL_STATE')) { clearTimeout(timer); resolve({ ws, messages }); }
+    };
+    ws.onerror = (e) => { clearTimeout(timer); reject(new Error(`WS error: ${e?.message || 'unknown'}`)); };
+  });
+}
+async function waitFor(messages, pred, ms = 8000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const hit = messages.find(pred);
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return null;
+}
+
 export default {
   name: 'Test 37: Per-venue time zones (rollover, archive date, legacy, zone changes, rule T)',
   whatItProves:
     "Each venue's work day and daily reset follow its own IANA zone (venue -> agency -> New York); only due venues reset; snapshots carry the closed workday; legacy data migrates without reinterpretation; zone changes never reset or go backwards; zone writes are admin-only within the agency.",
 
-  async run(baseUrl, ctx) {
+  async run(baseUrl, harnessCtx) {
+    const ctx = await freshAdminCtx(baseUrl, harnessCtx);
     const ts = Date.now();
     const details = [];
     const saved = await saveWorkDates(ctx);
@@ -323,15 +376,30 @@ export default {
       const vc = await ctx.getVersion();
       const clr = await ctx.api('PUT', `/api/venues/${ny.id}`, { timeZone: null, expectedVersion: vc });
       assert(clr.status === 200 && !clr.json.venue.timeZone, 'clear NY zone failed');
+      // An already-open staff client hears the agency zone change (non-admin
+      // public profile carries timeZone) and, later, its clearing.
+      const live = await connectWs(baseUrl, mTok);
       const va = await ctx.getVersion();
       const agH = await ctx.api('PUT', '/api/agencies/current', { timeZone: 'America/Los_Angeles', expectedVersion: va });
       assert(agH.status === 200 && agH.json.agency.timeZone === 'America/Los_Angeles', `HKC agency zone failed: ${agH.status}`);
+      const heard = await waitFor(live.messages, (m) => m.type === 'AGENCY_UPDATED' && m.payload?.agency?.timeZone === 'America/Los_Angeles');
+      assert(heard, 'open mashgiach client did not receive AGENCY_UPDATED with the new zone');
+      assert(!('adminEmail' in heard.payload.agency), 'non-admin AGENCY_UPDATED leaked adminEmail');
       const me = await ctx.api('PUT', `/api/venues/${ny.id}`, { name: `T37 NY ${ts}`, expectedVersion: await ctx.getVersion() });
       assert(me.status === 200 && me.json.effectiveTimeZone === 'America/Los_Angeles', `inherited zone should be LA: ${me.json && me.json.effectiveTimeZone}`);
       assert(clr.json && true, '');
       const jx = await ctx.api('PUT', `/api/venues/${jlm.id}`, { name: `T37 JLM ${ts}`, expectedVersion: await ctx.getVersion() });
       assert(jx.json.effectiveTimeZone === 'Asia/Jerusalem', `venue zone should win over agency: ${jx.json.effectiveTimeZone}`);
-      details.push('venue without zone inherits agency zone; venue zone wins');
+      const vz = await ctx.getVersion();
+      const agClr = await ctx.api('PUT', '/api/agencies/current', { timeZone: '', expectedVersion: vz });
+      assert(agClr.status === 200 && !agClr.json.agency.timeZone, `clearing agency zone failed: ${agClr.status}`);
+      const heardClr = await waitFor(
+        live.messages,
+        (m) => m.type === 'AGENCY_UPDATED' && m.payload?.agency?.id === 'agency-hkc' && !m.payload.agency.timeZone
+      );
+      assert(heardClr, 'open client did not hear the agency zone being cleared');
+      try { live.ws.close(); } catch {}
+      details.push('venue without zone inherits agency zone; venue zone wins; open staff client hears agency zone set + cleared (no adminEmail)');
     } finally {
       // Put the HKC agency zone back (other tests assume New York).
       try {
