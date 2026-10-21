@@ -15,6 +15,7 @@ import {
   ExternalLink,
   ShieldCheck,
   Copy,
+  Trash2,
 } from 'lucide-react';
 import { KosherEvent, EventTask, User as UserType, Venue } from '../types';
 import { venueTimeZone, workDateIn } from '../lib/workday';
@@ -33,7 +34,7 @@ interface EventsModalProps {
   onDeleteEvent?: (eventId: string) => Promise<void>;
   /** Item 7: open the copy dialog for this event (admin / venue coordinator). */
   onCopyEvent?: (event: KosherEvent) => void;
-  /** Item 7: select this event (e.g. the copy just created). */
+  /** Item 7: select this event (for example, the copy just created). */
   focusEventId?: string | null;
 }
 
@@ -143,14 +144,14 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   return (
     <div
       id="events-modal-overlay"
-      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-[#1a120a]/60 backdrop-blur-xs animate-fade-in overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-scrim backdrop-blur-sm animate-fade-in overflow-y-auto"
     >
-      <div className="bg-surface w-full max-w-5xl h-[88vh] rounded-2xl tactile-5 border border-line flex flex-col overflow-hidden my-auto animate-slide-up">
+      <div className="bg-surface w-full max-w-5xl h-[88vh] rounded-2xl e3 border border-line flex flex-col overflow-hidden my-auto animate-slide-up">
         
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-line bg-sunken">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-gold to-gold-deep text-white flex items-center justify-center tactile-2">
+            <div className="w-10 h-10 rounded-xl text-ink flex items-center justify-center e2">
               <Calendar className="w-5 h-5" />
             </div>
             <div>
@@ -158,11 +159,11 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                 <h2 className="text-base font-bold text-ink">
                   Kosher Events & Banquets Hub
                 </h2>
-                <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-gold-wash text-gold-ink border border-gold/40">
+                <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-sunken text-ink-soft border border-line-control">
                   {filteredEvents.length} {filteredEvents.length === 1 ? 'Event' : 'Events'}
                 </span>
               </div>
-              <p className="text-xs text-ink-soft">
+              <p className="text-sm text-ink-soft">
                 Manage banquet schedules, mashgiach assignments, menus, and on-site event checklists.
               </p>
             </div>
@@ -173,15 +174,15 @@ export const EventsModal: React.FC<EventsModalProps> = ({
             <button
               id="open-create-event-btn"
               onClick={onOpenCreateEvent}
-              className="px-3 py-1.5 text-xs font-bold rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-1 flex items-center gap-1.5 transition cursor-pointer pressable"
+              className="px-3 py-1.5 text-xs font-bold rounded-xl e1 flex items-center gap-1.5 transition cursor-pointer pressable bg-surface border border-line-control text-ink hover:bg-sunken"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Notify New Event</span>
             </button>
 
-            <button
+            <button aria-label="Close"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-ink-faint hover:text-ink-soft hover:bg-sunken transition cursor-pointer"
+              className="w-11 h-11 inline-flex items-center justify-center rounded-lg text-ink-soft hover:bg-sunken shrink-0 cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -194,12 +195,12 @@ export const EventsModal: React.FC<EventsModalProps> = ({
           {/* Left Panel: Events List with Filter */}
           <div className="w-full md:w-80 lg:w-96 border-b md:border-b-0 md:border-r border-line flex flex-col bg-sunken/50">
             {/* Filter Pills */}
-            <div className="p-3 border-b border-line flex gap-1.5 bg-surface">
+            <div className="p-3 border-b border-line flex flex-wrap gap-1.5 bg-sunken">
               <button
                 onClick={() => setFilterMode('all')}
                 className={`px-2.5 py-1 text-xs rounded-lg font-semibold transition cursor-pointer ${
                   filterMode === 'all'
-                    ? 'bg-gold text-white tactile-1 pressable'
+                    ? 'bg-surface text-ink e1 pressable'
                     : 'text-ink-soft hover:bg-sunken pressable'
                 }`}
               >
@@ -210,7 +211,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                   onClick={() => setFilterMode('my_assigned')}
                   className={`px-2.5 py-1 text-xs rounded-lg font-semibold transition cursor-pointer ${
                     filterMode === 'my_assigned'
-                      ? 'bg-gold text-white tactile-1 pressable'
+                      ? 'bg-surface text-ink e1 pressable'
                       : 'text-ink-soft hover:bg-sunken pressable'
                   }`}
                 >
@@ -221,7 +222,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                 onClick={() => setFilterMode('upcoming')}
                 className={`px-2.5 py-1 text-xs rounded-lg font-semibold transition cursor-pointer ${
                   filterMode === 'upcoming'
-                    ? 'bg-gold text-white tactile-1 pressable'
+                    ? 'bg-surface text-ink e1 pressable'
                     : 'text-ink-soft hover:bg-sunken pressable'
                 }`}
               >
@@ -232,12 +233,13 @@ export const EventsModal: React.FC<EventsModalProps> = ({
             {/* List */}
             <div className="flex-1 overflow-y-auto p-3 space-y-2">
               {filteredEvents.length === 0 ? (
-                <div className="text-center py-12 px-4 text-ink-faint">
-                  <Calendar className="w-8 h-8 mx-auto mb-2 opacity-30 text-gold-deep" />
-                  <p className="text-xs font-medium">No events found in this category.</p>
+                <div data-empty-state className="text-center py-12 px-4 text-ink-soft">
+                  <Calendar className="w-8 h-8 mx-auto mb-2 opacity-30 text-ink-soft" />
+                  <p className="text-sm font-medium">No events found in this category.</p>
+                  <p className="text-sm text-ink-soft mt-2">Create an event to plan its tasks and team.</p>
                   <button
                     onClick={onOpenCreateEvent}
-                    className="mt-3 text-xs font-bold text-gold-deep hover:underline cursor-pointer"
+                    className="mt-3 text-xs font-bold hover:underline cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
                   >
                     + Register the first event
                   </button>
@@ -257,7 +259,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                       onClick={() => setSelectedEventId(evt.id)}
                       className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer lift ${
                         isSelected
-                          ? 'border-gold bg-gold-wash tactile-1 ring-1 ring-gold/30'
+                          ? 'border-line-control bg-surface e1 ring-1 ring-line-control'
                           : 'border-line bg-surface/70 hover:bg-surface'
                       }`}
                     >
@@ -266,25 +268,25 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                           {evt.title}
                         </span>
                         {isAssignedToMe && (
-                          <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 shrink-0">
+                          <span className="text-xs font-bold px-1.5 py-0.2 rounded bg-ok-bg text-ok shrink-0">
                             Assigned to You
                           </span>
                         )}
                       </div>
 
-                      <div className="flex items-center gap-1.5 text-[11px] text-gold-deep font-semibold mb-1">
+                      <div className="flex items-center gap-1.5 text-xs text-ink-soft font-semibold mb-1">
                         <Calendar className="w-3 h-3 shrink-0" />
                         <span className="tnum">{evt.date}</span>
                         {evt.startTime && <span>• {evt.startTime}</span>}
                       </div>
 
-                      <div className="flex items-center gap-1.5 text-[11px] text-ink-soft truncate mb-2">
-                        <MapPin className="w-3 h-3 shrink-0 text-ink-faint" />
+                      <div className="flex items-center gap-1.5 text-xs text-ink-soft truncate mb-2">
+                        <MapPin className="w-3 h-3 shrink-0 text-ink-soft" />
                         <span className="truncate">{evt.location}</span>
                       </div>
 
                       {/* Progress Bar & Mashgiach Badge */}
-                      <div className="flex items-center justify-between text-[10px] pt-2 border-t border-line">
+                      <div className="flex items-center justify-between text-xs pt-2 border-t border-line">
                         <span className="text-ink-soft">
                           Tasks: {completedCount}/{totalCount}
                         </span>
@@ -304,22 +306,22 @@ export const EventsModal: React.FC<EventsModalProps> = ({
           </div>
 
           {/* Right Panel: Selected Event Details & Tasks */}
-          <div className="flex-1 flex flex-col overflow-y-auto bg-surface p-6">
+          <div className="min-w-0 flex-1 flex flex-col overflow-y-auto bg-surface p-6">
             {activeEvent ? (
               <div className="space-y-6">
                 {/* Event Top Banner */}
-                <div className="p-4.5 rounded-2xl bg-gradient-to-r from-gold/10 via-gold/5 to-transparent border border-gold/40 tactile-1">
+                <div className="p-4.5 rounded-2xl border border-line-control e1">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
                     <div>
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-gold-deep text-white">
+                        <span className="px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wider bg-sunken text-ink">
                           Kosher Event
                         </span>
                         <span className="text-xs text-ink-soft font-medium">
                           Origin: <strong>{activeEvent.venueName || 'Supervised Venue'}</strong>
                         </span>
                       </div>
-                      <h3 className="text-lg font-black text-ink">
+                      <h3 className="text-lg font-bold text-ink">
                         {activeEvent.title}
                       </h3>
                     </div>
@@ -330,7 +332,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                           <button
                             id="copy-event-btn"
                             onClick={() => onCopyEvent!(activeEvent)}
-                            className="min-h-[44px] px-3 text-xs font-semibold text-gold-ink bg-gold-wash border border-gold/40 rounded-lg transition cursor-pointer pressable flex items-center gap-1.5"
+                            className="min-h-[44px] px-3 text-xs font-semibold rounded-lg transition cursor-pointer pressable flex items-center gap-1.5 bg-surface border border-line-control text-ink hover:bg-sunken"
                           >
                             <Copy className="w-3.5 h-3.5" />
                             Copy event
@@ -339,8 +341,9 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                         {isAdmin && onDeleteEvent && (
                           <button
                             onClick={() => onDeleteEvent(activeEvent.id)}
-                            className="px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition cursor-pointer"
+                            className="px-2.5 py-1 text-xs font-semibold rounded-lg transition cursor-pointer bg-surface border border-line-control text-bad hover:bg-sunken"
                           >
+                            <Trash2 className="w-3.5 h-3.5 text-bad" />
                             Delete Event
                           </button>
                         )}
@@ -351,9 +354,9 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                   {/* Metadata Grid */}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-3 border-t border-line">
                     <div className="flex items-center gap-2">
-                      <Calendar className="w-4 h-4 text-gold-deep shrink-0" />
+                      <Calendar className="w-4 h-4 text-ink-soft shrink-0" />
                       <div>
-                        <div className="text-[10px] text-ink-faint font-semibold uppercase">Date & Time</div>
+                        <div className="text-xs text-ink-soft font-semibold uppercase">Date & Time</div>
                         <div className="font-semibold text-ink">
                           {activeEvent.date} {activeEvent.startTime && `(${activeEvent.startTime} - ${activeEvent.endTime || ''})`}
                         </div>
@@ -361,9 +364,9 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
-                      <MapPin className="w-4 h-4 text-gold-deep shrink-0" />
+                      <MapPin className="w-4 h-4 text-ink-soft shrink-0" />
                       <div>
-                        <div className="text-[10px] text-ink-faint font-semibold uppercase">Location</div>
+                        <div className="text-xs text-ink-soft font-semibold uppercase">Location</div>
                         <div className="font-semibold text-ink truncate max-w-xs">
                           {activeEvent.location}
                         </div>
@@ -371,9 +374,9 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
-                      <User className="w-4 h-4 text-gold-deep shrink-0" />
+                      <User className="w-4 h-4 text-ink-soft shrink-0" />
                       <div>
-                        <div className="text-[10px] text-ink-faint font-semibold uppercase">Supervising Mashgiach</div>
+                        <div className="text-xs text-ink-soft font-semibold uppercase">Supervising Mashgiach</div>
                         <div className="font-semibold text-ink">
                           {isAdmin ? (
                             <select
@@ -411,7 +414,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                                   });
                                 }
                               }}
-                              className="text-xs font-bold text-gold-ink bg-surface border border-gold/40 rounded-lg px-2 py-1 mt-0.5 cursor-pointer"
+                              className="w-full font-bold px-2 py-1 mt-0.5 cursor-pointer min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                             >
                               <option value="unassigned">-- Unassigned --</option>
                               {availableMashgichim
@@ -425,15 +428,15 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                             </select>
                           ) : (
                             activeEvent.mashgiachType === 'assigned_user' ? (
-                              <span className="text-emerald-700 dark:text-emerald-400 font-bold">
+                              <span className="text-ok font-bold">
                                 {activeEvent.assignedMashgiachName || activeEvent.assignedMashgiachEmail}
                               </span>
                             ) : activeEvent.mashgiachType === 'external' ? (
-                              <span className="text-gold-deep font-bold">
+                              <span className="text-ink-soft font-bold">
                                 {activeEvent.externalMashgiach?.name || 'External'} (Other)
                               </span>
                             ) : (
-                              <span className="text-ink-faint italic">Unassigned</span>
+                              <span className="text-ink-soft italic">Unassigned</span>
                             )
                           )}
                         </div>
@@ -443,8 +446,8 @@ export const EventsModal: React.FC<EventsModalProps> = ({
 
                   {/* If External Mashgiach, show contact card */}
                   {activeEvent.mashgiachType === 'external' && activeEvent.externalMashgiach && (
-                    <div className="mt-3 p-3 rounded-xl bg-gold-wash border border-gold/40 text-xs flex flex-wrap items-center gap-4">
-                      <span className="font-bold text-gold-ink">
+                    <div className="mt-3 p-3 rounded-xl bg-sunken border border-line-control text-xs flex flex-wrap items-center gap-4">
+                      <span className="font-bold text-ink-soft">
                         External Mashgiach Contact:
                       </span>
                       {activeEvent.externalMashgiach.phone && (
@@ -452,7 +455,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                           href={`tel:${activeEvent.externalMashgiach.phone}`}
                           className="flex items-center gap-1 text-ink-soft hover:text-gold-deep font-medium"
                         >
-                          <Phone className="w-3 h-3 text-gold-deep" />
+                          <Phone className="w-3 h-3 text-ink-soft" />
                           <span>{activeEvent.externalMashgiach.phone}</span>
                         </a>
                       )}
@@ -461,7 +464,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                           href={`mailto:${activeEvent.externalMashgiach.email}`}
                           className="flex items-center gap-1 text-ink-soft hover:text-gold-deep font-medium"
                         >
-                          <Mail className="w-3 h-3 text-gold-deep" />
+                          <Mail className="w-3 h-3 text-ink-soft" />
                           <span>{activeEvent.externalMashgiach.email}</span>
                         </a>
                       )}
@@ -472,7 +475,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                   {(activeEvent.menuAttachmentName || activeEvent.notes) && (
                     <div className="mt-3 pt-3 border-t border-line flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between text-xs">
                       {activeEvent.notes && (
-                        <p className="text-ink-soft italic text-[11px]">
+                        <p className="text-ink-soft italic text-sm">
                           <strong>Guidance:</strong> {activeEvent.notes}
                         </p>
                       )}
@@ -481,9 +484,9 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                         <button
                           type="button"
                           onClick={() => handleViewMenu(activeEvent)}
-                          className="px-3 py-1.5 rounded-lg bg-surface border border-gold/40 text-gold-ink font-semibold flex items-center gap-1.5 hover:bg-gold-wash transition cursor-pointer shrink-0 tactile-1 pressable"
+                          className="px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition cursor-pointer shrink-0 e1 pressable bg-surface border border-line-control text-ink hover:bg-sunken"
                         >
-                          <Paperclip className="w-3.5 h-3.5 text-gold-deep" />
+                          <Paperclip className="w-3.5 h-3.5 text-ink-soft" />
                           <span>View Menu ({activeEvent.menuAttachmentName})</span>
                           <ExternalLink className="w-3 h-3 ml-0.5" />
                         </button>
@@ -497,15 +500,15 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                   <div className="flex items-center justify-between mb-3">
                     <div>
                       <h4 className="text-sm font-bold text-ink flex items-center gap-2">
-                        <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                        <ShieldCheck className="w-4 h-4 text-ok" />
                         <span>Event Kashrut Verification Tasks</span>
                       </h4>
-                      <p className="text-xs text-ink-soft">
+                      <p className="text-sm text-ink-soft">
                         Check off items as they are inspected on-site by the mashgiach.
                       </p>
                     </div>
 
-                    <span className="text-xs font-bold text-gold-ink bg-gold-wash px-2.5 py-1 rounded-lg border border-gold/40">
+                    <span className="text-xs font-bold text-ink-soft bg-sunken px-2.5 py-1 rounded-lg border border-line-control">
                       {activeEvent.tasks?.filter((t) => t.isCompleted).length || 0} / {activeEvent.tasks?.length || 0} Completed
                     </span>
                   </div>
@@ -518,7 +521,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                           key={task.id}
                           className={`p-3 rounded-xl border transition ${
                             task.isCompleted
-                              ? 'bg-emerald-50/70 dark:bg-emerald-950/20 border-emerald-300 dark:border-emerald-800/80'
+                              ? 'bg-ok-bg border-ok '
                               : 'bg-surface border-line'
                           }`}
                         >
@@ -529,22 +532,22 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                               className="flex items-start gap-2.5 text-left cursor-pointer flex-1"
                             >
                               {task.isCompleted ? (
-                                <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 mt-0.5 shrink-0" />
+                                <CheckCircle2 className="w-4 h-4 text-ok mt-0.5 shrink-0" />
                               ) : (
-                                <Circle className="w-4 h-4 text-ink-faint mt-0.5 shrink-0" />
+                                <Circle className="w-4 h-4 text-ink-soft mt-0.5 shrink-0" />
                               )}
                               <div>
                                 <div
-                                  className={`text-xs font-semibold ${
+                                  className={`text-sm font-semibold ${
                                     task.isCompleted
-                                      ? 'text-emerald-900 dark:text-emerald-200 line-through opacity-85'
+                                      ? 'text-ok line-through opacity-85'
                                       : 'text-ink'
                                   }`}
                                 >
                                   {task.title}
                                 </div>
                                 {task.description && (
-                                  <p className="text-[11px] text-ink-soft mt-0.5">
+                                  <p className="text-sm text-ink-soft mt-0.5">
                                     {task.description}
                                   </p>
                                 )}
@@ -553,11 +556,11 @@ export const EventsModal: React.FC<EventsModalProps> = ({
 
                             {task.isCompleted && (
                               <div className="text-right shrink-0">
-                                <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 block">
+                                <span className="text-xs font-bold text-ok block">
                                   ✓ Verified
                                 </span>
                                 {task.completedByName && (
-                                  <span className="text-[10px] text-ink-faint block">
+                                  <span className="text-xs text-ink-soft block">
                                     by {task.completedByName}
                                   </span>
                                 )}
@@ -582,13 +585,17 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                                   onToggleEventTask(activeEvent.id, task.id, task.isCompleted, taskNotesInput[task.id]);
                                 }
                               }}
-                              className="flex-1 text-[11px] px-2.5 py-1 rounded-lg bg-sunken border border-line text-ink focus:outline-none focus:ring-1 focus:ring-gold"
+                              className="flex-1 px-2.5 py-1 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                             />
                           </div>
                         </div>
                       ))
                     ) : (
-                      <p className="text-xs text-ink-faint italic">No tasks added to this event yet.</p>
+                      <div data-empty-state className="text-sm text-ink-soft">
+                        <FileText className="w-6 h-6 mb-2" />
+                        <p className="italic">No tasks added to this event yet.</p>
+                        <p className="mt-2">Add the first task below.</p>
+                      </div>
                     )}
                   </div>
 
@@ -604,13 +611,13 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                           handleAddNewTaskToActiveEvent();
                         }
                       }}
-                      placeholder="Add an event task (e.g. Verify sealed Cambro temperatures)..."
-                      className="flex-1 px-3 py-1.5 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                      placeholder="Add an event task"
+                      className="flex-1 px-3 py-1.5 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                     />
                     <button
                       type="button"
                       onClick={handleAddNewTaskToActiveEvent}
-                      className="px-3.5 py-1.5 text-xs font-bold rounded-xl bg-gold hover:bg-gold-deep text-white flex items-center gap-1 transition cursor-pointer tactile-1 pressable"
+                      className="px-3.5 py-1.5 text-xs font-bold rounded-xl flex items-center gap-1 transition cursor-pointer e1 pressable bg-gold-deep text-paper"
                     >
                       <Plus className="w-3.5 h-3.5" />
                       <span>Add Task</span>
@@ -619,17 +626,17 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                 </div>
               </div>
             ) : (
-              <div className="flex-1 flex flex-col items-center justify-center text-center text-ink-faint">
-                <Calendar className="w-12 h-12 mb-3 text-gold-deep opacity-40" />
+              <div className="flex-1 flex flex-col items-center justify-center text-center text-ink-soft">
+                <Calendar className="w-12 h-12 mb-3 text-ink-soft opacity-40" />
                 <h4 className="text-sm font-bold text-ink-soft">
                   No Event Selected
                 </h4>
-                <p className="text-xs text-ink-faint mt-1 max-w-sm">
+                <p className="text-sm text-ink-soft mt-1 max-w-sm">
                   Select an event from the left panel or click "Notify New Event" to register a catered dinner or banquet.
                 </p>
                 <button
                   onClick={onOpenCreateEvent}
-                  className="mt-4 px-4 py-2 text-xs font-bold rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 transition cursor-pointer pressable"
+                  className="mt-4 px-4 py-2 text-xs font-bold rounded-xl e2 transition cursor-pointer pressable bg-surface border border-line-control text-ink hover:bg-sunken"
                 >
                   + Notify New Event
                 </button>
@@ -645,7 +652,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
           </span>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 font-semibold text-xs rounded-xl bg-surface hover:bg-sunken text-ink-soft transition cursor-pointer pressable"
+            className="px-4 py-1.5 font-semibold text-xs rounded-xl transition cursor-pointer pressable bg-surface border border-line-control text-ink hover:bg-sunken"
           >
             Close
           </button>
