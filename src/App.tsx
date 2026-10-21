@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue, filterToVenue } from './lib/venueSelection';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
+import { AgencyDashboard } from './components/AgencyDashboard';
 import { Header } from './components/Header';
 import { StatsProgressBar } from './components/StatsProgressBar';
 import { initialTaskView, readPhoneTaskView, rememberPhoneTaskView, type TaskViewMode } from './lib/taskViewPref';
@@ -149,6 +150,12 @@ export default function App() {
     }
   });
   const isKiosk = kioskMode;
+  const [adminHome, setAdminHome] = useState(() => !isKiosk && currentUser?.role === 'admin');
+  const [adminHomeReloadKey, setAdminHomeReloadKey] = useState(0);
+  const openAgencyHome = () => {
+    setAdminHome(true);
+    setAdminHomeReloadKey((key) => key + 1);
+  };
 
   // If the server ever answers KIOSK_UNPAIRED, api.ts clears the stored
   // device and dispatches this event — drop back to the pairing screen.
@@ -1510,6 +1517,7 @@ export default function App() {
     setEvents([]);
     setKnownUsers([]);
     setIsVenueSwitcherOpen(false);
+    setAdminHome(false);
     setCurrentUser(null);
     setCurrentVenueId(null);
     setVenues([]);
@@ -1536,6 +1544,8 @@ export default function App() {
     setEvents([]);
     setKnownUsers([]);
     setIsVenueSwitcherOpen(false);
+    setAdminHome(!isKiosk && user.role === 'admin');
+    if (!isKiosk && user.role === 'admin') setAdminHomeReloadKey((key) => key + 1);
     setCurrentUser(user);
     setSavedSession(user);
     setCurrentVenueId(null);
@@ -1755,6 +1765,8 @@ export default function App() {
       {/* Navigation Header (D3c: not on a signed-in kiosk; KioskTaskPanel carries its own calm top bar) */}
       {!isKiosk && (
       <Header
+        isAgencyHome={adminHome}
+        onOpenAgencyHome={currentUser.role === 'admin' ? openAgencyHome : undefined}
         currentUser={currentUser}
         onLogout={handleLogout}
         onOpenChangePassword={() => setIsChangePasswordOpen(true)}
@@ -1944,6 +1956,11 @@ export default function App() {
               </button>
             </div>
           </div>
+        ) : !isKiosk && currentUser.role === 'admin' && adminHome ? (
+          <AgencyDashboard
+            reloadKey={adminHomeReloadKey}
+            onSelectVenue={(id) => { setAdminHome(false); handleSelectVenue(id); }}
+          />
         ) : (
           <>
             {/* Live Progress Header / Owner Audit Banner (the kiosk shows its own progress ring) */}
@@ -2221,7 +2238,7 @@ export default function App() {
         onClose={() => setIsVenuesDirectoryOpen(false)}
         venues={venues}
         currentVenue={currentVenue}
-        onSelectVenue={handleSelectVenue}
+        onSelectVenue={(id) => { setAdminHome(false); handleSelectVenue(id); }}
         onOpenCreateVenue={() => {
           setIsVenuesDirectoryOpen(false);
           setIsCreateVenueOpen(true);

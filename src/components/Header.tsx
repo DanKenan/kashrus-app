@@ -32,7 +32,8 @@ import {
   Sparkles,
   Trash2,
   Factory,
-  Tablet
+  Tablet,
+  Home
 } from 'lucide-react';
 import { User, Venue } from '../types';
 import { ShutfeyLogo } from './ShutfeyLogo';
@@ -42,6 +43,8 @@ import { UpdateAppButton } from './UpdateAppButton';
 import { getRoleLabel, canUserAssignTasks } from '../lib/permissions';
 
 interface HeaderProps {
+  isAgencyHome?: boolean;
+  onOpenAgencyHome?: () => void;
   currentUser: User | null;
   currentVenue: Venue | null;
   allVenues: Venue[];
@@ -77,6 +80,8 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  isAgencyHome,
+  onOpenAgencyHome,
   currentUser,
   currentVenue,
   allVenues,
@@ -213,6 +218,18 @@ export const Header: React.FC<HeaderProps> = ({
 
             {/* 5a: Updates bell — always-visible row, beside the venue pill */}
             {updatesBell}
+            {currentUser?.role === 'admin' && onOpenAgencyHome && (
+              <button
+                type="button"
+                onClick={onOpenAgencyHome}
+                aria-label="Agency home"
+                aria-current={isAgencyHome ? 'page' : undefined}
+                className="min-w-11 min-h-11 shrink-0 inline-flex items-center justify-center gap-2 px-2 rounded-xl bg-surface border border-line-control text-ink hover:bg-sunken pressable cursor-pointer"
+              >
+                <Home aria-hidden="true" className="w-5 h-5" />
+                <span className="hidden sm:inline text-sm font-semibold">Home</span>
+              </button>
+            )}
 
             {/* Compact Live indicator */}
             <div className="hidden sm:flex items-center gap-1.5 text-xs text-ink-faint pl-1">
@@ -673,6 +690,18 @@ export const Header: React.FC<HeaderProps> = ({
                   <span>New Venue</span>
                 </button>
               </div>
+              {onOpenAgencyHome && (
+                <button
+                  type="button"
+                  onClick={() => { setMobileMenuOpen(false); onOpenAgencyHome(); }}
+                  aria-label="Agency home"
+                  aria-current={isAgencyHome ? 'page' : undefined}
+                  className="w-full min-w-11 min-h-11 flex items-center gap-2 px-3 rounded-xl bg-surface border border-line-control text-ink hover:bg-sunken text-sm font-semibold pressable cursor-pointer"
+                >
+                  <Home aria-hidden="true" className="w-5 h-5" />
+                  <span>Agency home</span>
+                </button>
+              )}
             </div>
           )}
 

@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Building2, CheckCircle2, AlertTriangle, MessageSquare, X, Phone, User } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Building2, CheckCircle2, AlertTriangle, MessageSquare, Phone, User } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { rosterKey } from '../lib/rosterDisplay';
 
@@ -38,131 +38,151 @@ interface DashboardData {
 }
 
 interface AgencyDashboardProps {
-  onClose: () => void;
+  reloadKey?: number;
   onSelectVenue: (venueId: string) => void;
 }
 
-export function AgencyDashboard({ onClose, onSelectVenue }: AgencyDashboardProps) {
+export function AgencyDashboard({ onSelectVenue, reloadKey }: AgencyDashboardProps) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const [failed, setFailed] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
+  const generation = useRef(0);
+
   useEffect(() => {
-    loadDashboard();
-  }, []);
-
-  const loadDashboard = async () => {
-    try {
-      const res = await apiFetch('/api/admin/dashboard');
-      const d = await res.json();
-      setData(d);
-    } catch (e) {
-      console.error('Failed to load dashboard:', e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-        <div className="bg-white dark:bg-zinc-900 rounded-2xl p-8">
-          <div className="text-sm">Loading dashboard...</div>
-        </div>
-      </div>
-    );
-  }
+    const request = ++generation.current;
+    setLoading(true);
+    setFailed(false);
+    const load = async () => {
+      try {
+        const res = await apiFetch('/api/admin/dashboard');
+        if (!res.ok) throw new Error('Failed to load dashboard');
+        const raw = await res.json();
+        const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : 0;
+        const array = <T,>(value: T[] | undefined): T[] => Array.isArray(value) ? value : [];
+        const next: DashboardData = {
+          totals: {
+            venueCount: number(raw?.totals?.venueCount),
+            totalTasks: number(raw?.totals?.totalTasks),
+            completedTasks: number(raw?.totals?.completedTasks),
+            totalHandoffNotes: number(raw?.totals?.totalHandoffNotes),
+          },
+          venues: array<VenueStat>(raw?.venues).map((vs) => ({
+            ...vs,
+            venue: vs.venue ?? { id: '', name: '' },
+            totalTasks: number(vs.totalTasks),
+            completedTasks: number(vs.completedTasks),
+            completionRate: Math.min(100, Math.max(0, number(vs.completionRate))),
+            overdueTasks: number(vs.overdueTasks),
+            overdueTaskList: array(vs.overdueTaskList),
+            recentNotes: array(vs.recentNotes),
+            mashgichim: array(vs.mashgichim),
+            openIncidents: array(vs.openIncidents),
+          })),
+        };
+        if (generation.current === request) setData(next);
+      } catch {
+        if (generation.current === request) setFailed(true);
+      } finally {
+        if (generation.current === request) setLoading(false);
+      }
+    };
+    void load();
+    return () => { generation.current += 1; };
+  }, [reloadKey, retryKey]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-white dark:bg-zinc-900 rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
-        <div className="sticky top-0 bg-white dark:bg-zinc-900 border-b border-line p-4 flex items-center justify-between">
-          <h2 className="text-lg font-bold">Agency Dashboard</h2>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-lg hover:bg-sunken transition cursor-pointer"
-          >
-            <X className="w-5 h-5" />
-          </button>
+    <section className="space-y-4 text-ink">
+      <h2 className="text-2xl font-semibold">Agency Dashboard</h2>
+      {loading ? <p className="text-base text-ink-soft">Loading dashboard...</p> : failed ? (
+        <div className="space-y-4">
+          <p role="alert" className="text-base text-bad">Couldn't load the dashboard.</p>
+          <button type="button" onClick={() => setRetryKey((key) => key + 1)} className="min-h-11 px-4 rounded-xl bg-gold-deep text-surface dark:text-paper text-base font-semibold pressable cursor-pointer">Retry</button>
         </div>
-
-        <div className="p-4 space-y-4">
+      ) : (
+        <div className="space-y-4">
           {/* Totals */}
           {data && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="p-3 rounded-xl bg-sunken text-center">
-                <div className="text-2xl font-bold">{data.totals.venueCount}</div>
-                <div className="text-[11px] text-ink-faint">Venues</div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl bg-surface border border-line e1 text-center">
+                <div className="text-2xl font-semibold">{data.totals.venueCount}</div>
+                <div className="text-xs text-ink-soft">Venues</div>
               </div>
-              <div className="p-3 rounded-xl bg-sunken text-center">
-                <div className="text-2xl font-bold">{data.totals.totalTasks}</div>
-                <div className="text-[11px] text-ink-faint">Total Tasks</div>
+              <div className="p-4 rounded-xl bg-surface border border-line e1 text-center">
+                <div className="text-2xl font-semibold">{data.totals.totalTasks}</div>
+                <div className="text-xs text-ink-soft">Total Tasks</div>
               </div>
-              <div className="p-3 rounded-xl bg-sunken text-center">
-                <div className="text-2xl font-bold text-emerald-600">
+              <div className="p-4 rounded-xl bg-surface border border-line e1 text-center">
+                <div className="text-2xl font-semibold text-ok">
                   {data.totals.completedTasks}
                 </div>
-                <div className="text-[11px] text-ink-faint">Completed</div>
+                <div className="text-xs text-ink-soft">Completed</div>
               </div>
-              <div className="p-3 rounded-xl bg-sunken text-center">
-                <div className="text-2xl font-bold text-gold-deep">
+              <div className="p-4 rounded-xl bg-surface border border-line e1 text-center">
+                <div className="text-2xl font-semibold text-ink">
                   {data.totals.totalHandoffNotes}
                 </div>
-                <div className="text-[11px] text-ink-faint">Handoff Notes</div>
+                <div className="text-xs text-ink-soft">Handoff Notes</div>
               </div>
             </div>
           )}
 
           {/* Venue cards */}
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {data?.venues.map((vs) => (
-              <button
-                key={vs.venue.id}
-                onClick={() => { onSelectVenue(vs.venue.id); onClose(); }}
-                className="w-full text-left p-4 rounded-xl border border-line hover:border-gold/40 hover:shadow-sm transition cursor-pointer bg-white dark:bg-black"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <Building2 className="w-5 h-5 text-gold-deep shrink-0" />
-                    <div>
-                      <div className="font-bold text-sm">{vs.venue.name}</div>
-                      {vs.venue.category && (
-                        <div className="text-[11px] text-ink-faint">{vs.venue.category}</div>
-                      )}
+              <article key={vs.venue.id} className="min-w-0 p-4 sm:p-6 rounded-xl border border-line e1 bg-surface">
+                <button
+                  type="button"
+                  aria-label={`Open ${vs.venue.name} board`}
+                  onClick={() => onSelectVenue(vs.venue.id)}
+                  className="w-full min-h-11 text-left rounded-lg hover:bg-sunken pressable cursor-pointer"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Building2 className="w-5 h-5 text-ink-soft shrink-0" />
+                      <div className="min-w-0 break-words">
+                        <div className="font-semibold text-base">{vs.venue.name}</div>
+                        {vs.venue.category && (
+                          <div className="text-xs text-ink-soft">{vs.venue.category}</div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-xl font-semibold">{vs.completionRate}%</div>
+                      <div className="text-xs text-ink-soft">
+                        {vs.completedTasks}/{vs.totalTasks} done
+                      </div>
                     </div>
                   </div>
-                  <div className="text-right shrink-0">
-                    <div className="text-lg font-bold">{vs.completionRate}%</div>
-                    <div className="text-[10px] text-ink-faint">
-                      {vs.completedTasks}/{vs.totalTasks} done
-                    </div>
-                  </div>
-                </div>
+
+                </button>
 
                 {/* Progress bar */}
-                <div className="mt-2 h-1.5 rounded-full bg-sunken overflow-hidden">
+                <div role="progressbar" aria-valuenow={vs.completionRate} aria-valuemin={0} aria-valuemax={100} aria-label={`${vs.venue.name} progress`} className="mt-2 h-2 rounded-full bg-sunken overflow-hidden">
                   <div
-                    className="h-full rounded-full bg-emerald-500 transition-all"
+                    className="h-full rounded-full bg-gold"
                     style={{ width: `${vs.completionRate}%` }}
                   />
                 </div>
 
                 {/* Alerts */}
-                <div className="mt-2 flex items-center gap-3 text-[11px]">
+                <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
                   {vs.overdueTasks > 0 && (
-                    <span className="flex items-center gap-1 text-rose-600 font-semibold">
-                      <AlertTriangle className="w-3.5 h-3.5" />
+                    <span className="flex items-center gap-1 text-bad font-semibold">
+                      <AlertTriangle className="w-4 h-4" />
                       {vs.overdueTasks} overdue
                     </span>
                   )}
                   {vs.recentNotes.length > 0 && (
-                    <span className="flex items-center gap-1 text-ink-faint">
-                      <MessageSquare className="w-3.5 h-3.5" />
+                    <span className="flex items-center gap-1 text-ink-soft">
+                      <MessageSquare className="w-4 h-4" />
                       {vs.recentNotes.length} recent note{vs.recentNotes.length > 1 ? 's' : ''}
                     </span>
                   )}
                   {vs.overdueTasks === 0 && vs.recentNotes.length === 0 && (
-                    <span className="flex items-center gap-1 text-emerald-600">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span className="flex items-center gap-1 text-ok">
+                      <CheckCircle2 className="w-4 h-4" />
                       All clear
                     </span>
                   )}
@@ -171,7 +191,7 @@ export function AgencyDashboard({ onClose, onSelectVenue }: AgencyDashboardProps
                 {/* Recent notes preview */}
                 {vs.recentNotes.length > 0 && (
                   <div className="mt-2 pt-2 border-t border-line/60">
-                    <div className="text-[11px] text-ink-faint line-clamp-2">
+                    <div className="text-xs text-ink-soft line-clamp-2">
                       <span className="font-semibold">{vs.recentNotes[0].authorName}:</span>{' '}
                       {vs.recentNotes[0].content}
                     </div>
@@ -182,10 +202,10 @@ export function AgencyDashboard({ onClose, onSelectVenue }: AgencyDashboardProps
                 {vs.openIncidents.length > 0 && (
                   <div className="mt-2 pt-2 border-t border-line/60 space-y-1">
                     {vs.openIncidents.slice(0, 2).map((inc) => (
-                      <div key={inc.id} className="flex items-center gap-1.5 text-[11px]">
-                        <AlertTriangle className={`w-3.5 h-3.5 shrink-0 ${inc.severity === 'critical' ? 'text-rose-600' : inc.severity === 'high' ? 'text-orange-500' : 'text-gold-deep'}`} />
+                      <div key={inc.id} className="flex items-center gap-1.5 text-xs">
+                        <AlertTriangle className={`w-4 h-4 shrink-0 ${inc.severity === 'critical' ? 'text-bad' : 'text-warn'}`} />
                         <span className="font-semibold truncate">{inc.title}</span>
-                        <span className="text-ink-faint shrink-0">({inc.severity})</span>
+                        <span className="text-ink-soft shrink-0">({inc.severity})</span>
                       </div>
                     ))}
                   </div>
@@ -193,38 +213,38 @@ export function AgencyDashboard({ onClose, onSelectVenue }: AgencyDashboardProps
 
                 {/* Mashgichim — tap to call */}
                 {vs.mashgichim.length > 0 && (
-                  <div className="mt-2 pt-2 border-t border-line/60 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()}>
+                  <div className="mt-2 pt-2 border-t border-line/60 flex flex-wrap gap-1.5">
                     {vs.mashgichim.map((m) => (
-                      m.phone ? (
+                      m.phone?.trim() ? (
                         <a
                           key={rosterKey(m)}
                           href={`tel:${m.phone}`}
-                          onClick={(e) => e.stopPropagation()}
-                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-gold/10 hover:bg-gold/20 text-[11px] font-semibold text-gold-deep transition"
+
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg min-h-11 bg-sunken hover:bg-line/40 text-xs font-medium text-ink pressable"
                         >
-                          <Phone className="w-3 h-3" />
+                          <Phone className="w-4 h-4" />
                           {m.name}
                         </a>
                       ) : (
-                        <span key={rosterKey(m)} className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sunken text-[11px] text-ink-faint">
-                          <User className="w-3 h-3" />
+                        <span key={rosterKey(m)} className="flex items-center gap-1 px-2 py-1 rounded-lg bg-sunken text-xs text-ink-soft">
+                          <User className="w-4 h-4" />
                           {m.name}
                         </span>
                       )
                     ))}
                   </div>
                 )}
-              </button>
+              </article>
             ))}
           </div>
 
           {data?.venues.length === 0 && (
-            <div className="text-center py-8 text-sm text-ink-faint">
+            <div className="text-center py-8 text-sm text-ink-soft">
               No venues yet. Create your first venue to get started.
             </div>
           )}
         </div>
-      </div>
-    </div>
+      )}
+    </section>
   );
 }
