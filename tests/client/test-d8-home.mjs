@@ -4,7 +4,7 @@
  *       one 44px "Open <venue> board" button per card -> onSelectVenue(id), tel: links never
  *       inside that button, progressbar aria, nothing under 12px, tokens only, tolerant of
  *       missing fields; loading, error + Retry (refetch), empty; stale responses ignored.
- *   H*  Header: admins get one "Agency home" button (44px, aria-current=page when home);
+ *   H*  Header: admins get one "Agency dashboard" button (44px, aria-current=page when home);
  *       without the new props the header is unchanged (test-9b-switcher covers main parity).
  * Run: npx tsx tests/client/test-d8-home.mjs
  */
@@ -102,16 +102,17 @@ const staff = { ...admin, id: 'u1', role: 'mashgiach', venueId: 'v1' };
 const hp = { currentVenue: A, allVenues: [A], onOpenCreateVenue: noop, onSelectVenue: noop, onLogout: noop, onOpenTaskModal: noop, onOpenHistoryModal: noop, onOpenEventsModal: noop, onOpenCreateEvent: noop, onOpenTeamModal: noop, onResetDailyBoard: noop, isRealtimeConnected: true, activeWorkersCount: 1, totalWorkersCount: 3, darkMode: false, onToggleDarkMode: noop, completionRate: 50 };
 const H = (p) => dec(renderToStaticMarkup(React.createElement(Header, { ...hp, ...p })));
 const hh = H({ currentUser: admin, isAgencyHome: true, onOpenAgencyHome: noop });
-const hb = (hh.match(/<button[^>]*aria-label="Agency home"[^>]*>/g) || []);
-ok('H1 admin gets exactly one visible "Agency home" button in the bar', hb.length === 1, String(hb.length));
+const hb = (hh.match(/<button[^>]*aria-label="Agency dashboard"[^>]*>/g) || []);
+ok('H1 admin gets exactly one visible "Agency dashboard" button in the bar', hb.length === 1, String(hb.length));
 ok('H2 it is >=44px', /min-h-11|min-h-\[44px\]|h-11/.test(hb[0] || '') && /min-w-11|min-w-\[44px\]|w-11|px-/.test(hb[0] || ''));
 ok('H3 aria-current=page while home', /aria-current="page"/.test(hb[0] || ''));
-ok('H4 no aria-current when on a board', !/aria-current="page"/.test((H({ currentUser: admin, isAgencyHome: false, onOpenAgencyHome: noop }).match(/<button[^>]*aria-label="Agency home"[^>]*>/) || [''])[0]));
-ok('H5 non-admin never gets it', !/Agency home/.test(H({ currentUser: staff, isAgencyHome: false, onOpenAgencyHome: noop })));
-ok('H6 without the new props the admin header has no Agency home button', !/Agency home/.test(H({ currentUser: admin })));
+ok('H4 no aria-current when on a board', !/aria-current="page"/.test((H({ currentUser: admin, isAgencyHome: false, onOpenAgencyHome: noop }).match(/<button[^>]*aria-label="Agency dashboard"[^>]*>/) || [''])[0]));
+ok('H8 visible label is "Dashboard", never "Home" (Don: Home = main venue)', />Dashboard</.test(hh) && !/>Home</.test(hh));
+ok('H5 non-admin never gets it', !/Agency dashboard/.test(H({ currentUser: staff, isAgencyHome: false, onOpenAgencyHome: noop })));
+ok('H6 without the new props the admin header has no Agency dashboard button', !/Agency dashboard/.test(H({ currentUser: admin })));
 let opened = 0;
 const hm = mount(Header, { ...hp, currentUser: admin, isAgencyHome: false, onOpenAgencyHome: () => { opened++; } });
-await hm.render(); await hm.click('Agency home');
+await hm.render(); await hm.click('Agency dashboard');
 ok('H7 tapping it opens home', opened === 1);
 
 console.log(`${passed} passed, ${failures} failed.`);
