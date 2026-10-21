@@ -119,7 +119,7 @@ export function UpdatesSheet({
       <span className="whitespace-nowrap leading-tight">{label}</span>
       {count > 0 && (
         <span
-          className="min-w-5 h-5 px-1 rounded-full text-xs font-bold flex items-center justify-center bg-gold-deep text-paper"
+          className={`min-w-5 h-5 px-1 rounded-full text-xs font-bold flex items-center justify-center ${alarm ? 'bg-bad text-paper' : 'bg-gold-deep text-paper'}`}
           aria-label={`${count} unread`}
         >
           {count > 9 ? '9+' : count}
@@ -137,7 +137,7 @@ export function UpdatesSheet({
         className={`absolute bg-surface border border-line text-ink e3 flex flex-col outline-none
           max-sm:inset-x-0 max-sm:bottom-0 max-sm:rounded-t-2xl
           ${expanded ? 'max-sm:h-[100dvh]' : 'max-sm:h-[85dvh]'}
-          sm:top-0 sm:right-0 sm:h-full sm:w-[420px] sm:max-w-full sm:rounded-2xl
+          sm:top-0 sm:right-0 sm:h-full sm:w-[420px] sm:max-w-full sm:border-l sm:border-line sm:rounded-none
           motion-safe:transition-transform ${entered ? '' : 'max-sm:translate-y-full sm:translate-x-full'}`}
         style={{ transitionDuration: 'var(--dur-slow)' }}
       >

@@ -182,8 +182,9 @@ export function Announcements({
                       key={c}
                       type="button"
                       onClick={() => setCategory(c)}
+                      aria-pressed={selected}
                       className={`pressable flex items-center gap-1.5 px-3 h-11 rounded-full border text-sm font-bold transition cursor-pointer ${
-                        selected ? 'bg-sunken text-ink border-line-control' : 'bg-surface border-line-control text-ink hover:bg-sunken'
+                        selected ? 'bg-gold-wash border-gold-deep text-gold-ink' : 'bg-surface border-line-control text-ink hover:bg-sunken'
                       }`}
                       style={selected && c === 'urgent' ? { backgroundColor: 'var(--bad-bg)', color: 'var(--bad)', borderColor: 'var(--bad)' } : undefined}
                     >
@@ -204,8 +205,9 @@ export function Announcements({
                       key={r}
                       type="button"
                       onClick={() => toggleRole(r)}
+                      aria-pressed={selected}
                       className={`pressable flex items-center gap-1 px-3 h-11 rounded-full border text-sm font-semibold transition cursor-pointer ${
-                        selected ? 'bg-sunken border-line-control text-ink' : 'bg-surface border-line-control text-ink hover:bg-sunken'
+                        selected ? 'bg-gold-wash border-gold-deep text-gold-ink' : 'bg-surface border-line-control text-ink hover:bg-sunken'
                       }`}
                     >
                       {selected && <Check className="w-4 h-4" />}
