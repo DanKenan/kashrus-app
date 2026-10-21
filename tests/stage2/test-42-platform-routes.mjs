@@ -185,9 +185,8 @@ export default {
     const loginJson = await login.json().catch(() => ({}));
     assert(!loginJson.token && loginJson.success !== true, `no session with the attacker password (got ${login.status} ${JSON.stringify(loginJson).slice(0, 80)})`);
 
-    // 6. Clean-slate mode keeps working after restore-demo's retirement.
-    //    restore-demo used to be the only thing that turned the app-wide
-    //    isDemoCleared flag back off; any agency's clean-slate turns it on.
+    // 6. Cleared mode (legacy stored isDemoCleared) keeps working after
+    //    restore-demo's retirement and Clean Slate's removal (8x).
     //    Hydration's clean-slate branch must still normalise users (the
     //    in-transaction "access changed" check compares normalised records)
     //    and load event task templates.
@@ -195,11 +194,9 @@ export default {
     const mashH = `user-t42-mashh-${ts}`;
     const evtH = `evt-t42h-${ts}`;
     const etplH = `etpl-t42h-${ts}`;
-    const cs = await fetch(`${baseUrl}/api/admin/clean-slate`, { method: 'POST', headers: callers['agency B admin'], body: JSON.stringify({}) });
-    assert(cs.status === 200, `agency B clean-slate: ${cs.status}`);
-    // Item 8k: clean-slate no longer writes the app-wide flag (it is per
-    // agency now); the legacy stored flag still steers the boot loader, so
-    // this section seeds it directly to keep exercising that branch.
+    // Item 8x: Clean Slate is removed; the legacy stored flag still steers
+    // the boot loader (stored data may carry it), so this section seeds it
+    // directly to keep exercising that branch.
     const seed = await ctx.api('POST', '/api/__test__/doc-merge', { fields: { isDemoCleared: true } });
     assert(seed.status === 200, `seed legacy flag: ${seed.status}`);
     const inj6 = await ctx.api('POST', '/api/__test__/inject-fixture', {

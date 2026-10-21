@@ -90,7 +90,7 @@ export interface IdentityEnforceOptions {
   /**
    * 9a: the ONLY way venueAccess changes beyond the home venue. Row id → the
    * full list the server validated in this commit (admin venue grant, venue
-   * deletion, Clean Slate). The home venue is always kept. Rows not in the map
+   * deletion). The home venue is always kept. Rows not in the map
    * keep their PREVIOUS stored list while their home venue is unchanged; a
    * home-venue change without an entry here resets the list to [venueId].
    */

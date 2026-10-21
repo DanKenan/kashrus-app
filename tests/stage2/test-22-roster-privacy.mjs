@@ -3,8 +3,8 @@
  *
  * Every roster payload the server sends must be scoped to the recipient's own
  * agency, with recipient-appropriate fields:
- *   - INITIAL_STATE / USERS_UPDATED (create/update/delete) / CLEAN_SLATE_RESET /
- *     DEMO_RESTORED broadcasts: each socket gets only its own agency's users
+ *   - INITIAL_STATE / USERS_UPDATED (create/update/delete) / DEMO_RESTORED
+ *     broadcasts: each socket gets only its own agency's users
  *     (previously the whole platform roster).
  *   - Contact emails are visible only to recipients who can assign tasks
  *     (admin, coordinator unless explicitly revoked, or granted canAssignTasks —
@@ -16,8 +16,8 @@
  *     no counts, no cross-agency listing).
  *   - GET /api/users: scoped from the verified session token, never from a
  *     client-supplied userEmail query param.
- *   - POST /api/admin/clean-slate HTTP (restore-demo is retired since 8i: 410)
- *     responses: scoped to the caller's agency.
+ *   - POST /api/admin/clean-slate is removed (8x: 404, nothing written, no
+ *     broadcast); restore-demo is retired since 8i (410).
  *
  * Method: real WebSocket clients (native Node WebSocket) for an agency-hkc
  * admin, an agency-B admin, an agency-B mashgiach, an agency-B mashgiach with
@@ -126,7 +126,7 @@ function assertAgencyScopedArrays(payload, agencyId, label) {
 export default {
   name: 'Test 22: Roster privacy — per-recipient agency filtering',
   whatItProves:
-    'Roster payloads (INITIAL_STATE, USERS_UPDATED create/update/delete, CLEAN_SLATE_RESET, DEMO_RESTORED) are scoped per-recipient to their own agency with emails only for task-assigners. Recipients resolve by user ID + agency (never email-alone). Authorization is enforced on BOTH broadcast paths: deleted users sockets are closed (4401) and receive no further agency data, including ordinary fast-path broadcasts. No cross-agency receipt; /api/agencies, /api/users, clean-slate and restore-demo responses scoped; userEmail param ignored.',
+    'Roster payloads (INITIAL_STATE, USERS_UPDATED create/update/delete, DEMO_RESTORED) are scoped per-recipient to their own agency with emails only for task-assigners. Recipients resolve by user ID + agency (never email-alone). Authorization is enforced on BOTH broadcast paths: deleted users sockets are closed (4401) and receive no further agency data, including ordinary fast-path broadcasts. No cross-agency receipt; /api/agencies, /api/users responses scoped; clean-slate removed (404, no write, no broadcast); restore-demo retired (410); userEmail param ignored.',
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
@@ -391,42 +391,18 @@ export default {
       }
     }
 
-    // --- 9. CLEAN_SLATE_RESET: broadcast + HTTP response scoped ---
-    // (Destructive to agency B only; this test runs last in the suite.)
+    // --- 9. Clean Slate is removed (8x): 404 for an agency admin, nothing
+    // written, no CLEAN_SLATE_RESET broadcast to anyone.
+    const vBeforeCs = await ctx.getVersion();
     const cs = await fetch(`${baseUrl}/api/admin/clean-slate`, {
       method: 'POST',
       headers: authB(tokenAdminB),
       body: JSON.stringify({}),
     });
-    if (cs.status !== 200) throw new Error(`clean-slate failed: ${cs.status} ${JSON.stringify(await cs.json())}`);
-    const csJson = await cs.json();
-    assertRoster(csJson.users, AGENCY_B, true, 'clean-slate HTTP response (agency-B admin)');
-    if (csJson.users.some((u) => u.id === staffBId || u.id === assignerBId)) {
-      throw new Error('clean-slate HTTP response: non-admin agency-B users should be wiped');
-    }
-    const csAdminB = await waitForType(connAdminB.messages, 'CLEAN_SLATE_RESET');
-    assertRoster(csAdminB.payload.users, AGENCY_B, true, 'CLEAN_SLATE_RESET (agency-B admin)');
-    for (const key of ['venues', 'tasks', 'events']) {
-      if (!Array.isArray(csAdminB.payload[key]) || csAdminB.payload[key].length !== 0) {
-        throw new Error(`CLEAN_SLATE_RESET: ${key} should be empty`);
-      }
-    }
-    // staffB/assignerB were wiped by clean-slate: the server must CLOSE their
-    // sockets (4401) — a deleted user receives no further agency data at all.
-    await new Promise((r) => setTimeout(r, 2000));
-    for (const [conn, label] of [[connStaffB, 'wiped mashgiach'], [connAssignerB, 'wiped assigner']]) {
-      if (!conn.closed || conn.closeCode !== 4401) {
-        throw new Error(
-          `CLEAN_SLATE_RESET: ${label} socket not closed with 4401 after wipe ` +
-          `(closed=${conn.closed}, code=${conn.closeCode}, readyState=${conn.ws.readyState})`
-        );
-      }
-      if (conn.messages.some((m) => m.type === 'CLEAN_SLATE_RESET')) {
-        throw new Error(`CLEAN_SLATE_RESET: ${label} received broadcast after wipe`);
-      }
-    }
+    if (cs.status !== 404) throw new Error(`clean-slate must be 404 (removed in 8x), got ${cs.status}`);
     await new Promise((r) => setTimeout(r, 1500));
-    assertNoType([connHkc, connNoAgency], 'CLEAN_SLATE_RESET', 'CLEAN_SLATE_RESET cross-agency');
+    assertNoType(allConns, 'CLEAN_SLATE_RESET', 'CLEAN_SLATE_RESET after removal');
+    if ((await ctx.getVersion()) !== vBeforeCs) throw new Error('clean-slate (removed) must not write');
     clearAll();
 
     // --- 10. restore-demo is retired (8i): 410 for an agency admin, nothing
