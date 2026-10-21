@@ -44,6 +44,20 @@ export function stripServerOnlyUserFields<T extends Record<string, any>>(obj: T)
   return out;
 }
 
+/**
+ * 9a: home venue first (when set), then the other ids — strings only, no
+ * duplicates. Agency membership is NOT decided here (rows do not carry the
+ * venue list); every read decides it against the CURRENT venues
+ * (src/server/venue-scope.ts), so a stale or foreign id grants nothing.
+ */
+export function mergeVenueAccess(homeVenueId: unknown, list: readonly unknown[]): string[] {
+  const out: string[] = [];
+  const add = (x: unknown) => { if (typeof x === 'string' && x && !out.includes(x)) out.push(x); };
+  add(homeVenueId);
+  for (const x of Array.isArray(list) ? list : []) add(x);
+  return out;
+}
+
 /** Derived fields for a migrated row (pure). */
 export function deriveIdentityFields(
   row: any,
@@ -73,6 +87,14 @@ export interface IdentityEnforceOptions {
    * before row, never from the mutator's output. A new row is never bumped.
    */
   bumpTokenEpochIds?: ReadonlySet<string>;
+  /**
+   * 9a: the ONLY way venueAccess changes beyond the home venue. Row id → the
+   * full list the server validated in this commit (admin venue grant, venue
+   * deletion, Clean Slate). The home venue is always kept. Rows not in the map
+   * keep their PREVIOUS stored list while their home venue is unchanged; a
+   * home-venue change without an entry here resets the list to [venueId].
+   */
+  venueAccessSetById?: ReadonlyMap<string, readonly string[]>;
   /**
    * Called (row id + field name only, never values) when a mutator's output
    * tried to set, change or remove a server-only identity field. The change
@@ -125,8 +147,14 @@ export function enforceIdentityFields(
     }
     if (out.personId) {
       const d = deriveIdentityFields(out, afterAgencies);
-      out.venueAccess = d.venueAccess;
+      const set = opts.venueAccessSetById?.get(row.id);
+      if (set) out.venueAccess = mergeVenueAccess(out.venueId, set);
+      else if (prev && prev.personId && prev.venueId === out.venueId && Array.isArray(prev.venueAccess))
+        out.venueAccess = mergeVenueAccess(out.venueId, prev.venueAccess);
+      else out.venueAccess = d.venueAccess;
       out.isPrimaryAdmin = d.isPrimaryAdmin;
+      if (opts.onViolation && !set && prev && prev.venueId === out.venueId && row.venueAccess !== undefined && JSON.stringify(row.venueAccess) !== JSON.stringify(out.venueAccess))
+        opts.onViolation(row.id, 'venueAccess');
     }
     return out;
   });

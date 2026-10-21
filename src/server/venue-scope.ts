@@ -1,0 +1,74 @@
+/**
+ * Item 9a ("9a plan v2"): one person, several venues of ONE agency.
+ * Pure helpers; server.ts passes the CURRENT venues on every call.
+ *
+ * Fail closed: an empty, malformed or foreign list never means "all venues".
+ * Scope = the home venue (exactly as before 9a) + venueAccess ∩ venues whose
+ * CURRENT agencyId is the person's agency. Unmigrated rows: home only.
+ */
+export type VenueLite = { id: string; agencyId?: string };
+export type ScopeUser = { role?: string; agencyId?: string; venueId?: string; personId?: string; venueAccess?: unknown };
+
+const DEFAULT_AGENCY = 'agency-hkc';
+const agencyOf = (x: { agencyId?: string } | undefined) => (x && typeof x.agencyId === 'string' && x.agencyId) || DEFAULT_AGENCY;
+
+/** Venue ids that currently belong to `agencyId`. */
+export function agencyVenueIds(venues: readonly VenueLite[], agencyId: string): Set<string> {
+  const out = new Set<string>();
+  for (const v of venues || []) if (v && typeof v.id === 'string' && v.id && agencyOf(v) === agencyId) out.add(v.id);
+  return out;
+}
+
+/**
+ * Sanitize a stored or requested list: strings only, de-duplicated, each a
+ * current venue of the agency, home venue (if valid) first and always kept.
+ */
+export function sanitizeVenueAccess(list: unknown, homeVenueId: unknown, valid: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  const add = (x: unknown) => { if (typeof x === 'string' && x && valid.has(x) && !out.includes(x)) out.push(x); };
+  add(homeVenueId);
+  if (Array.isArray(list)) for (const x of list) add(x);
+  return out;
+}
+
+/** Non-admin venue scope; admins are 'agency'. Unmigrated rows: home venue only. */
+export function venueScope(user: ScopeUser | null | undefined, venues: readonly VenueLite[]): 'agency' | string[] {
+  if (!user || typeof user.role !== 'string') return [];
+  if (user.role === 'admin') return 'agency';
+  // The home venue keeps its pre-9a meaning exactly (rule T: [venueId]).
+  const home = typeof user.venueId === 'string' && user.venueId ? user.venueId : null;
+  const out = home ? [home] : [];
+  if (!user.personId || !Array.isArray(user.venueAccess)) return out;
+  // Extra venues: only server-granted ids of venues the person's agency owns NOW.
+  const valid = agencyVenueIds(venues, agencyOf(user));
+  for (const x of user.venueAccess) if (typeof x === 'string' && x && valid.has(x) && !out.includes(x)) out.push(x);
+  return out;
+}
+
+/**
+ * Which venue a venue-taking request targets.
+ * requested in scope -> it; requested outside -> forbidden; none -> home (if valid) else null.
+ */
+export function resolveTargetVenue(
+  user: ScopeUser | null | undefined,
+  venues: readonly VenueLite[],
+  requested: unknown
+): { ok: true; venueId: string | null } | { ok: false } {
+  const scope = venueScope(user, venues);
+  const req = typeof requested === 'string' && requested ? requested : null;
+  if (scope === 'agency') {
+    if (!req) return { ok: true, venueId: null };
+    return agencyVenueIds(venues, agencyOf(user!)).has(req) ? { ok: true, venueId: req } : { ok: false };
+  }
+  if (req) return scope.includes(req) ? { ok: true, venueId: req } : { ok: false };
+  const home = typeof user?.venueId === 'string' && scope.includes(user.venueId) ? user.venueId : null;
+  return { ok: true, venueId: home };
+}
+
+/** Venues two non-admin people actually share (coordinator management). */
+export function sharedVenues(a: ScopeUser, b: ScopeUser, venues: readonly VenueLite[]): string[] {
+  const sa = venueScope(a, venues), sb = venueScope(b, venues);
+  if (sa === 'agency' || sb === 'agency') return [];
+  if (agencyOf(a) !== agencyOf(b)) return [];
+  return sa.filter((x) => sb.includes(x));
+}
