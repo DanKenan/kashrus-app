@@ -94,9 +94,11 @@ export function hebrewDateFor(instant: Date | number, tz: string, lat?: number, 
     const afterSunset = sunset !== null && at >= sunset;
     const civil = afterSunset ? addDays(date, 1) : date;
     const [y, m, d] = civil.split('-').map(Number);
-    const parts = new Intl.DateTimeFormat('he-u-ca-hebrew', {
+    const formatter = new Intl.DateTimeFormat('he-u-ca-hebrew', {
       day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
-    }).formatToParts(new Date(Date.UTC(y, m - 1, d, 12)));
+    });
+    if (formatter.resolvedOptions().calendar !== 'hebrew') return fallback;
+    const parts = formatter.formatToParts(new Date(Date.UTC(y, m - 1, d, 12)));
     const day = Number(parts.find(p => p.type === 'day')?.value);
     const month = parts.find(p => p.type === 'month')?.value || '';
     const year = Number(parts.find(p => p.type === 'year')?.value);
