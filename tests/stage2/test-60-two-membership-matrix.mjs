@@ -261,15 +261,54 @@ export default {
       wsX?.close(); wsY?.close();
     }
 
-    // ---- V5: writes across the boundary ----
+    // ---- V5: writes across the boundary (create / update / complete / delete) ----
+    // Each operation runs once in the row's own venue as a positive control (the
+    // route contract is right and the role may do it), then same-agency
+    // out-of-venue and cross-agency: refused (403/404), nothing written.
     {
-      for (const [who, v] of [['x', 'b1'], ['x', 'a2'], ['y', 'a1'], ['y', 'b2']]) {
+      const refused = async (label, fn, marker) => {
         const v0 = await ctx.getVersion();
-        const w = await write('PUT', `/api/tasks/${ids[v].task}`, tok[who], { title: `HACK ${who} ${v}` });
-        assert(w.status === 403 || w.status === 404, `V5 ${who} -> ${v} task: ${w.status} ${w.text.slice(0, 120)}`);
-        await unchanged(v0, `V5 ${who} -> ${v}`);
+        const w = await fn();
+        assert(w.status === 403 || w.status === 404, `V5 ${label}: expected refusal, got ${w.status} ${w.text.slice(0, 120)}`);
+        await unchanged(v0, `V5 ${label}`);
+        if (marker) assert(!J(await ctx.getDoc()).includes(marker), `V5 ${label}: ${marker} persisted`);
+      };
+      const ok = async (label, fn) => {
+        const w = await fn();
+        assert(w.status === 200 || w.status === 201, `V5 control ${label}: ${w.status} ${w.text.slice(0, 160)}`);
+        return w;
+      };
+      const newTask = (venueId, title) => ({ venueId, title, category: 'General', categories: ['General'], inputType: 'yes_no', assignedTo: ['all'], scheduleType: 'recurring', daysOfWeek: [0, 1, 2, 3, 4, 5, 6], targetTime: 'End of Day', priority: 'medium' });
+      const ops = {
+        update: (who, v) => write('PUT', `/api/tasks/${ids[v].task}`, tok[who], { title: `HACK ${who} ${v} ${ts}` }),
+        complete: (who, v) => write('PUT', `/api/tasks/${ids[v].task}`, tok[who], { isCompleted: true, currentStatus: 'yes' }),
+        checkIn: (who, v) => write('POST', `/api/tasks/${ids[v].task}/check-in`, tok[who], {}),
+        alert: (who, v) => write('POST', '/api/incidents', tok[who], { severity: 'low', venueId: VID[v], title: `T60 V5 alert ${who} ${v} ${ts}` }),
+        note: (who, v) => write('POST', '/api/handoff-notes', tok[who], { venueId: VID[v], content: `T60 V5 note ${who} ${v} ${ts}`, shift: 'Morning' }),
+        createTask: (who, v) => write('POST', '/api/tasks', tok[who], newTask(VID[v], `T60 V5 task ${who} ${v} ${ts}`)),
+        deleteTask: (who, v) => write('DELETE', `/api/tasks/${ids[v].task}`, tok[who], {}),
+      };
+      const markers = { alert: (who, v) => `T60 V5 alert ${who} ${v} ${ts}`, note: (who, v) => `T60 V5 note ${who} ${v} ${ts}`, createTask: (who, v) => `T60 V5 task ${who} ${v} ${ts}`, update: (who, v) => `HACK ${who} ${v} ${ts}` };
+      // positive controls (own venue)
+      for (const [who, v] of [['x', 'a1'], ['y', 'b1']]) {
+        for (const op of ['complete', 'checkIn', 'alert', 'note']) await ok(`${who} ${op} ${v}`, () => ops[op](who, v));
       }
-      console.log('  ✓ V5 cross-boundary writes refused, nothing written');
+      // Y (coordinator) may also create and delete in B1: create a throwaway, then delete it
+      const yc = await ok('y createTask b1', () => ops.createTask('y', 'b1'));
+      const ycId = yc.json?.task?.id || yc.json?.id || ((await ctx.getDoc()).tasks || []).find((t) => t.title === `T60 V5 task y b1 ${ts}`)?.id;
+      assert(ycId, `V5 control: Y's created task id ${J(yc.json)}`);
+      await ok('y deleteTask b1', () => write('DELETE', `/api/tasks/${ycId}`, tok.y, {}));
+      // refusals: same-agency out-of-venue, then cross-agency
+      const cases = [['x', 'a2'], ['x', 'b1'], ['x', 'b2'], ['y', 'b2'], ['y', 'a1'], ['y', 'a2']];
+      for (const [who, v] of cases) {
+        const before = J(((await ctx.getDoc()).tasks || []).find((x) => x.id === ids[v].task));
+        for (const op of ['update', 'complete', 'checkIn', 'alert', 'note', 'createTask', 'deleteTask']) {
+          await refused(`${who} ${op} ${v}`, () => ops[op](who, v), markers[op] ? markers[op](who, v) : null);
+        }
+        const after = J(((await ctx.getDoc()).tasks || []).find((x) => x.id === ids[v].task));
+        assert(before !== undefined && after === before, `V5 ${who} -> ${v}: the task was touched ${after}`);
+      }
+      console.log('  ✓ V5 create/update/complete/check-in/delete/alert/note refused out of venue and across agencies; own-venue controls pass');
     }
     await projections('V', X, 'T60 X renamed');
 
@@ -401,6 +440,10 @@ export default {
         assert(t.status === 200 && (t.json?.historyRemoved || 0) >= 2, `H1 sweep ${t.status} ${J(t.json)}`);
         await sleep(1000);
         const px = wx.messages.filter((m) => m.type === 'HISTORY_PRUNED'), py = wy.messages.filter((m) => m.type === 'HISTORY_PRUNED');
+        assert(px.length === 1 && py.length === 1, `H1 each row gets exactly one HISTORY_PRUNED (X ${px.length}, Y ${py.length})`);
+        const hx = (px[0].payload?.historyLogs || []).map((h) => h.id), hy = (py[0].payload?.historyLogs || []).map((h) => h.id);
+        assert(hx.includes(ids.a1.hist) && !hx.includes(`hist-t60-old-a1-${ts}`), `H1 X's list is A1's kept history ${J(hx)}`);
+        assert(hy.includes(ids.b1.hist) && !hy.includes(`hist-t60-old-b1-${ts}`), `H1 Y's list is B1's kept history ${J(hy)}`);
         noneOf(px, [B, B1, B2, ...all(['a2', 'b1', 'b2'])], 'H1 X HISTORY_PRUNED');
         noneOf(py, [A, A1, A2, ...all(['b2', 'a1', 'a2'])], 'H1 Y HISTORY_PRUNED');
         const d = await ctx.getDoc();
