@@ -429,6 +429,98 @@ export default {
       console.log('  ✓ field-value spot-check catches tampered value');
     }
 
+    // ---- Item 8b: two accepted schemas (7-set with identity projections, legacy 5-set) ----
+    function makeBackup7(extraColls = {}) {
+      const payload = {
+        monolith: { _v: 7, venues: [{ id: 'v1', name: 'Crown' }], users: [{ id: 'u1', email: 'a@x.com', personId: 'u1' }] },
+        collections: {
+          tasks: [],
+          venues: [{ id: 'v1', name: 'Crown', _v: 1 }],
+          users: [{ id: 'u1', email: 'a@x.com', personId: 'u1', _v: 1 }],
+          usersByEmail: [],
+          media: [],
+          people: [{ id: 'u1', name: 'A', primaryEmail: 'a@x.com', status: 'active', createdAt: '2026-10-21T00:00:00.000Z', _v: 1 }],
+          emails: [{ id: 'k1', personId: 'u1', status: 'active', verified: false, source: 'admin-entered', addedAt: '2026-10-21T00:00:00.000Z' }],
+          ...extraColls,
+        },
+      };
+      const dataJson = JSON.stringify(payload);
+      const checksum = crypto.createHash('sha256').update(dataJson, 'utf8').digest('hex');
+      const collections = {};
+      for (const [k, v] of Object.entries(payload.collections)) collections[k] = v.length;
+      const manifest = {
+        version: 1, createdAt: new Date().toISOString(), databaseId: PROD_DB, tier: 'tier1',
+        collections, monolithPresent: true, monolithVersion: 7, checksum, secretsScrubbed: true,
+      };
+      return { manifest, dataJson };
+    }
+    const captureLogs = async (fn) => {
+      const lines = [];
+      const orig = console.log;
+      console.log = (...a) => { lines.push(a.join(' ')); };
+      try { return { out: await fn(), lines }; } finally { console.log = orig; }
+    };
+
+    // Test 17 (8b): the 7-collection set restores all seven, verified
+    {
+      const { manifest, dataJson } = makeBackup7();
+      const db = createMockDb();
+      const storage = createMockStorage(manifest, dataJson);
+      const { out } = await captureLogs(() => runRestore({ ...base, targetDb: 'restore-drill-014', firestoreDb: db, storage }));
+      if (out.counts.people !== 1 || out.counts.emails !== 1) throw new Error(`7-set counts wrong: ${JSON.stringify(out.counts)}`);
+      if (out.identityProjections !== 'restored') throw new Error(`identityProjections ${out.identityProjections}`);
+      if (!db._docs.has('people/u1') || !db._docs.has('emails/k1')) throw new Error('people/emails not written');
+      if (db._docs.get('emails/k1').verified !== false) throw new Error('emails doc changed in restore');
+      console.log('  ✓ 8b: 7-collection backup restores people + emails (verified)');
+    }
+
+    // Test 18 (8b): a legacy 5-set still restores; projections reported absent
+    {
+      const { manifest, dataJson } = makeBackup();
+      const db = createMockDb();
+      const storage = createMockStorage(manifest, dataJson);
+      const { out, lines } = await captureLogs(() => runRestore({ ...base, targetDb: 'restore-drill-015', firestoreDb: db, storage }));
+      if (out.identityProjections !== 'absent') throw new Error(`legacy identityProjections ${out.identityProjections}`);
+      if ([...db._docs.keys()].some((k) => k.startsWith('people/') || k.startsWith('emails/'))) throw new Error('legacy restore invented projections');
+      if (!lines.some((l) => l.includes('identity projections not restored (legacy 5-collection backup)'))) throw new Error('legacy note not printed');
+      if (!lines.some((l) => l.includes('identity projections: absent'))) throw new Error('verification output lacks "identity projections: absent"');
+      console.log('  ✓ 8b: legacy 5-collection backup restores, no projections, says so');
+    }
+
+    // Test 19 (8b): a 6-set (5 + people, no emails) is refused before any write
+    {
+      const { manifest, dataJson } = makeBackup7();
+      const payload = JSON.parse(dataJson);
+      delete payload.collections.emails;
+      const j6 = JSON.stringify(payload);
+      const m6 = { ...manifest, collections: { ...manifest.collections }, checksum: crypto.createHash('sha256').update(j6, 'utf8').digest('hex') };
+      delete m6.collections.emails;
+      const db = createMockDb();
+      const storage = createMockStorage(m6, j6);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-016', firestoreDb: db, storage });
+        throw new Error('Should have refused a 6-collection set');
+      } catch (e) {
+        if (!e.message.includes('missing collections') || !e.message.includes('emails')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      if (db._docs.size !== 0) throw new Error('6-set refusal wrote something');
+      console.log('  ✓ 8b: 6-collection set (people without emails) refused, nothing written');
+    }
+
+    // Test 20 (8b): 7-set + an unexpected collection is refused
+    {
+      const { manifest, dataJson } = makeBackup7({ evil: [] });
+      const db = createMockDb();
+      const storage = createMockStorage(manifest, dataJson);
+      try {
+        await runRestore({ ...base, targetDb: 'restore-drill-017', firestoreDb: db, storage });
+        throw new Error('Should have refused 7-set + evil');
+      } catch (e) {
+        if (!e.message.includes('unexpected collections')) throw new Error(`Wrong error: ${e.message}`);
+      }
+      console.log('  ✓ 8b: 7-collection set + unexpected collection refused');
+    }
+
     console.log('  ✓ All restore tests passed');
   },
 };

@@ -226,6 +226,30 @@ export default {
       console.log('  ✓ Tier 1 backup: unique paths, version check, GCS marker (no Firestore write)');
     }
 
+    // Test 2b (item 8b): the backup is the 7-collection set — people and
+    // emails are captured, and none of their fields is redacted.
+    {
+      const monolith = { _v: 6, venues: [], users: [{ id: 'u1', email: 'a@x.com', personId: 'u1', venueAccess: [], isPrimaryAdmin: false }] };
+      const collections = {
+        'users/u1': { id: 'u1', email: 'a@x.com', personId: 'u1', _v: 1 },
+        'people/u1': { id: 'u1', name: 'A', primaryEmail: 'a@x.com', status: 'active', createdAt: '2026-10-21T00:00:00.000Z', _v: 1 },
+        'emails/k1': { personId: 'u1', status: 'retired', verified: false, source: 'admin-entered', addedAt: 'x', retiredAt: 'y', previousPersonIds: ['u0'], reassignedAt: 'z' },
+      };
+      const db = createMockDb(monolith, collections);
+      const storage = createMockStorage();
+      const manifest = await runTier1Backup(db, storage, 'test-bucket', 'test-db');
+      const keys = Object.keys(manifest.collections).sort().join(',');
+      if (keys !== 'emails,media,people,tasks,users,usersByEmail,venues') throw new Error(`backup collections: ${keys}`);
+      if (manifest.collections.people !== 1 || manifest.collections.emails !== 1) throw new Error('people/emails not counted');
+      const dataKey = [...storage.files.keys()].find(k => k.endsWith('backup.json'));
+      const written = JSON.parse(storage.files.get(dataKey).data);
+      if (JSON.stringify(written).includes('[REDACTED]')) throw new Error('an identity field was redacted');
+      const e = written.collections.emails[0];
+      if (e.personId !== 'u1' || e.previousPersonIds[0] !== 'u0' || e.verified !== false) throw new Error('emails doc not captured verbatim');
+      if (written.monolith.users[0].personId !== 'u1') throw new Error('row personId not captured');
+      console.log('  ✓ 8b: backup captures people + emails (7 collections), nothing redacted');
+    }
+
     // Test 3: Refuses when monolith missing or _v invalid
     {
       const db1 = createMockDb(null, {});
