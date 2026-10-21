@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue, filterToVenue } from './lib/venueSelection';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
+import { AgencyDashboard } from './components/AgencyDashboard';
 import { Header } from './components/Header';
 import { StatsProgressBar } from './components/StatsProgressBar';
 import { initialTaskView, readPhoneTaskView, rememberPhoneTaskView, type TaskViewMode } from './lib/taskViewPref';
@@ -149,6 +150,19 @@ export default function App() {
     }
   });
   const isKiosk = kioskMode;
+  const [adminHome, setAdminHome] = useState(() => !isKiosk && currentUser?.role === 'admin');
+  const [adminHomeReloadKey, setAdminHomeReloadKey] = useState(0);
+  const leaveHomeThen = (fn: () => void) => () => {
+    if (adminHome) {
+      setAdminHome(false);
+      return;
+    }
+    fn();
+  };
+  const openAgencyHome = () => {
+    setAdminHome(true);
+    setAdminHomeReloadKey((key) => key + 1);
+  };
 
   // If the server ever answers KIOSK_UNPAIRED, api.ts clears the stored
   // device and dispatches this event — drop back to the pairing screen.
@@ -952,6 +966,7 @@ export default function App() {
   };
 
   const handleVenueCreated = (newVenue: Venue) => {
+    if (adminHome) setAdminHomeReloadKey((key) => key + 1);
     // Dedupe by id: guards against a VENUE_CREATED broadcast (or double
     // submit) landing before/after this local append.
     setVenues((prev) => (prev.some((v) => v.id === newVenue.id) ? prev : [...prev, newVenue]));
@@ -1513,6 +1528,7 @@ export default function App() {
     setEvents([]);
     setKnownUsers([]);
     setIsVenueSwitcherOpen(false);
+    setAdminHome(false);
     setCurrentUser(null);
     setCurrentVenueId(null);
     setVenues([]);
@@ -1539,6 +1555,8 @@ export default function App() {
     setEvents([]);
     setKnownUsers([]);
     setIsVenueSwitcherOpen(false);
+    setAdminHome(!isKiosk && user.role === 'admin');
+    if (!isKiosk && user.role === 'admin') setAdminHomeReloadKey((key) => key + 1);
     setCurrentUser(user);
     setSavedSession(user);
     setCurrentVenueId(null);
@@ -1758,11 +1776,13 @@ export default function App() {
       {/* Navigation Header (D3c: not on a signed-in kiosk; KioskTaskPanel carries its own calm top bar) */}
       {!isKiosk && (
       <Header
+        isAgencyHome={adminHome}
+        onOpenAgencyHome={currentUser.role === 'admin' ? openAgencyHome : undefined}
         currentUser={currentUser}
         onLogout={handleLogout}
         onOpenChangePassword={() => setIsChangePasswordOpen(true)}
-        onOpenTaskModal={handleOpenCreateTask}
-        onOpenHistoryModal={() => setIsHistoryModalOpen(true)}
+        onOpenTaskModal={leaveHomeThen(handleOpenCreateTask)}
+        onOpenHistoryModal={leaveHomeThen(() => setIsHistoryModalOpen(true))}
         onOpenEventsModal={() => setIsEventsModalOpen(true)}
         onOpenCreateEvent={() => setIsCreateEventModalOpen(true)}
         onOpenFactoryAudit={() => setIsFactoryAuditOpen(true)}
@@ -1779,7 +1799,7 @@ export default function App() {
         currentVenue={currentVenue}
         updatesBell={
           currentUser ? (
-            <UpdatesBell count={updates.bellCount} onClick={() => updates.setSheetOpen(true)} />
+            <UpdatesBell count={updates.bellCount} onClick={leaveHomeThen(() => updates.setSheetOpen(true))} />
           ) : undefined
         }
         allVenues={venues}
@@ -1947,6 +1967,11 @@ export default function App() {
               </button>
             </div>
           </div>
+        ) : !isKiosk && currentUser.role === 'admin' && adminHome ? (
+          <AgencyDashboard
+            reloadKey={adminHomeReloadKey}
+            onSelectVenue={(id) => { setAdminHome(false); handleSelectVenue(id); }}
+          />
         ) : (
           <>
             {/* Live Progress Header / Owner Audit Banner (the kiosk shows its own progress ring) */}
@@ -2115,12 +2140,12 @@ export default function App() {
         <PhoneNav
           user={currentUser}
           hasVenues={venues.length > 0}
-          onOpenTaskModal={handleOpenCreateTask}
-          onOpenShiftNote={() => updates.setSheetOpen(true, 'notes')}
+          onOpenTaskModal={leaveHomeThen(handleOpenCreateTask)}
+          onOpenShiftNote={leaveHomeThen(() => updates.setSheetOpen(true, 'notes'))}
           onOpenVenues={() => setIsVenuesDirectoryOpen(true)}
           onOpenTeam={() => setIsTeamModalOpen(true)}
           onOpenEvents={() => setIsEventsModalOpen(true)}
-          onOpenHistory={() => setIsHistoryModalOpen(true)}
+          onOpenHistory={leaveHomeThen(() => setIsHistoryModalOpen(true))}
         />
       )}
 
@@ -2224,7 +2249,7 @@ export default function App() {
         onClose={() => setIsVenuesDirectoryOpen(false)}
         venues={venues}
         currentVenue={currentVenue}
-        onSelectVenue={handleSelectVenue}
+        onSelectVenue={(id) => { setAdminHome(false); handleSelectVenue(id); }}
         onOpenCreateVenue={() => {
           setIsVenuesDirectoryOpen(false);
           setIsCreateVenueOpen(true);
