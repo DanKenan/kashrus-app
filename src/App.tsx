@@ -29,6 +29,7 @@ import { CreateVenueModal } from './components/CreateVenueModal';
 import { VenuesDirectoryModal } from './components/VenuesDirectoryModal';
 import { EventsModal } from './components/EventsModal';
 import { CreateEventModal } from './components/CreateEventModal';
+import { CopyEventDialog } from './components/CopyEventDialog';
 import { ConfirmModal } from './components/ConfirmModal';
 import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
@@ -306,6 +307,9 @@ export default function App() {
   const [isKioskDevicesOpen, setIsKioskDevicesOpen] = useState(false);
   const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
   const [isCreateEventModalOpen, setIsCreateEventModalOpen] = useState(false);
+  // Item 7: the event being copied (dialog open while set) and the new copy to select.
+  const [copySourceEvent, setCopySourceEvent] = useState<KosherEvent | null>(null);
+  const [focusEventId, setFocusEventId] = useState<string | null>(null);
   const [events, setEvents] = useState<KosherEvent[]>([]);
   const [isFactoryAuditOpen, setIsFactoryAuditOpen] = useState(false);
 
@@ -1214,6 +1218,34 @@ export default function App() {
     }
   };
 
+  // Item 7: copy an event. The server builds the copy (task names only, never
+  // assignments) and answers only after the write is saved (rule BR).
+  const handleCopyEvent = async (
+    eventId: string,
+    title: string,
+    date: string,
+    operationId: string
+  ): Promise<string | null> => {
+    try {
+      const result = await apiWrite(`/api/events/${eventId}/copy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, date }),
+        operationId,
+      });
+      if (!result.ok) return result.error || 'Could not copy the event. Please try again.';
+      const created = result.data?.event as KosherEvent | undefined;
+      if (!created?.id) return 'Could not copy the event. Please try again.';
+      setEvents((prev) => [created, ...prev.filter((e) => e.id !== created.id)]);
+      setCopySourceEvent(null);
+      setFocusEventId(created.id);
+      showToast('Event copied. No one is assigned yet.');
+      return null;
+    } catch (err: any) {
+      return err?.message || 'Could not copy the event. Please try again.';
+    }
+  };
+
   const handleDeleteEvent = async (eventId: string) => {
     setConfirmModalConfig({
       isOpen: true,
@@ -2110,6 +2142,18 @@ export default function App() {
         onToggleEventTask={handleToggleEventTask}
         onUpdateEvent={handleUpdateEvent}
         onDeleteEvent={handleDeleteEvent}
+        onCopyEvent={(evt) => setCopySourceEvent(evt)}
+        focusEventId={focusEventId}
+      />
+
+      {/* Item 7: Copy event dialog */}
+      <CopyEventDialog
+        isOpen={!!copySourceEvent}
+        event={copySourceEvent}
+        venue={copySourceEvent ? venues.find((v) => v.id === copySourceEvent.venueId) || null : null}
+        currentUser={currentUser}
+        onClose={() => setCopySourceEvent(null)}
+        onCopy={handleCopyEvent}
       />
 
       {/* Create / Notify Event Modal */}
