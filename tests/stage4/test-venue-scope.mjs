@@ -25,6 +25,13 @@ const run = async function () {
   // venue moved to another agency after the grant
   const Vmoved = V.map((v) => (v.id === 'v2' ? { ...v, agencyId: 'B' } : v));
   ok(J(venueScope(m({ venueAccess: ['v1', 'v2'] }), Vmoved)) === J(['v1']), 'current agency re-checked on every call');
+  // home venue that exists in ANOTHER agency never authorizes (migrated and unmigrated)
+  ok(J(venueScope(m({ venueId: 'vb', venueAccess: ['vb'] }), V)) === J([]), 'migrated: foreign home excluded');
+  ok(J(venueScope(m({ venueId: 'vb', venueAccess: ['vb', 'v2'] }), V)) === J(['v2']), 'migrated: foreign home excluded, own grant kept');
+  ok(J(venueScope(m({ venueId: 'vb', personId: undefined }), V)) === J([]), 'unmigrated: foreign home excluded');
+  ok(J(resolveTargetVenue(m({ venueId: 'vb', venueAccess: [] }), V, 'vb')) === J({ ok: false }) && J(resolveTargetVenue(m({ venueId: 'vb', venueAccess: [] }), V, undefined)) === J({ ok: true, venueId: null }), 'foreign home: not targetable, no default');
+  ok(J(sharedVenues(m({ role: 'coordinator', venueId: 'vb' }), m({ venueId: 'vb' }), V)) === J([]), 'two agency-A users on the same foreign venue share nothing');
+  ok(J(sharedVenues(m({ role: 'coordinator', venueId: 'vb', personId: undefined }), m({ venueId: 'vb', personId: undefined }), V)) === J([]), 'same, unmigrated');
   const u = m({ venueAccess: ['v1', 'v2'] });
   ok(J(resolveTargetVenue(u, V, 'v2')) === J({ ok: true, venueId: 'v2' }), 'explicit V2 allowed');
   ok(J(resolveTargetVenue(u, V, 'v3')) === J({ ok: false }), 'V3 forbidden');

@@ -3,7 +3,8 @@
  *
  * Proves on the real server and emulator:
  *  1 before any grant a coordinator sees only the home venue; login payload
- *    myVenueIds = [home]
+ *    myVenueIds = [home]; a stored home venue that belongs to ANOTHER agency
+ *    grants nothing (no tasks, no shared-venue PIN authority)
  *  2 PUT /api/users/:id/venues (admin, fresh caller + target, audited) grants
  *    V2: login myVenueIds = [V1, V2]; GET /api/tasks?venueId=V2 returns V2's
  *    tasks; no venue → home; V3 and another agency's venue → nothing;
@@ -69,11 +70,14 @@ export default {
         { id: U('mash2'), email: E('mash2'), name: 'T53 Mash V2', role: 'mashgiach', agencyId: A, venueId: V2 },
         { id: U('mash3'), email: E('mash3'), name: 'T53 Mash V3', role: 'mashgiach', agencyId: A, venueId: V3 },
         { id: U('adminB'), email: E('adminB'), name: 'T53 Admin B', role: 'admin', agencyId: B },
+        // malformed: agency-A people whose stored home venue is agency B's
+        { id: U('coordX'), email: E('coordX'), name: 'T53 Coord X', role: 'coordinator', agencyId: A, venueId: VB },
+        { id: U('mashX'), email: E('mashX'), name: 'T53 Mash X', role: 'mashgiach', agencyId: A, venueId: VB },
       ],
       tasks: [task(`task-t53-1-${ts}`, A, V1), task(`task-t53-2-${ts}`, A, V2), task(`task-t53-3-${ts}`, A, V3), task(`task-t53-b-${ts}`, B, VB)],
     });
     assert(r.status === 200, `inject-fixture ${r.status} ${J(r.json)}`);
-    for (const k of ['adminA', 'coord', 'mash2', 'mash3', 'adminB']) await hook('set-password', { userId: U(k), password: PW });
+    for (const k of ['adminA', 'coord', 'mash2', 'mash3', 'adminB', 'coordX']) await hook('set-password', { userId: U(k), password: PW });
     const tAdminA = (await loginFull('adminA')).token, tAdminB = (await loginFull('adminB')).token;
     let coordLogin = await loginFull('coord');
     let tCoord = coordLogin.token;
@@ -85,6 +89,18 @@ export default {
     r = await tasksAt(tCoord, V2);
     assert(r.status === 200 && taskIds(r).length === 0 && r.json.venueId === null, `V2 before grant ${r.status} ${J(r.json).slice(0, 160)}`);
     assert((await docUser(U('coord')))?.personId === U('coord'), 'fixture rows are migrated (personId)');
+
+    // 1b a home venue that exists in ANOTHER agency grants nothing
+    {
+      const lx = await loginFull('coordX');
+      assert(J(lx.user?.myVenueIds) === J([]), `foreign home myVenueIds ${J(lx.user?.myVenueIds)}`);
+      let x = await tasksAt(lx.token, VB);
+      assert(taskIds(x).length === 0, `foreign home tasks ${J(x.json).slice(0, 160)}`);
+      x = await tasksAt(lx.token, null);
+      assert(!taskIds(x).includes(`task-t53-b-${ts}`), `foreign home default tasks ${J(x.json).slice(0, 160)}`);
+      x = await write('PUT', `/api/users/${U('mashX')}`, lx.token, { kioskPin: '5359' });
+      assert(x.status === 403, `two A users on B's venue share nothing: PIN ${x.status}`);
+    }
 
     // 5 refusals first (nothing written)
     const coordBefore = J((await docUser(U('coord'))).venueAccess);

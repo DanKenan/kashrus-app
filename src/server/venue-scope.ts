@@ -3,8 +3,9 @@
  * Pure helpers; server.ts passes the CURRENT venues on every call.
  *
  * Fail closed: an empty, malformed or foreign list never means "all venues".
- * Scope = the home venue (exactly as before 9a) + venueAccess ∩ venues whose
- * CURRENT agencyId is the person's agency. Unmigrated rows: home only.
+ * Scope = the home venue (unless it is an existing venue of ANOTHER agency) +
+ * venueAccess ∩ venues whose CURRENT agencyId is the person's agency.
+ * Unmigrated rows: home only.
  */
 export type VenueLite = { id: string; agencyId?: string };
 export type ScopeUser = { role?: string; agencyId?: string; venueId?: string; personId?: string; venueAccess?: unknown };
@@ -35,12 +36,17 @@ export function sanitizeVenueAccess(list: unknown, homeVenueId: unknown, valid: 
 export function venueScope(user: ScopeUser | null | undefined, venues: readonly VenueLite[]): 'agency' | string[] {
   if (!user || typeof user.role !== 'string') return [];
   if (user.role === 'admin') return 'agency';
-  // The home venue keeps its pre-9a meaning exactly (rule T: [venueId]).
-  const home = typeof user.venueId === 'string' && user.venueId ? user.venueId : null;
+  // The home venue keeps its pre-9a meaning (rule T: [venueId]) with one
+  // tenant check: a home venue that EXISTS and belongs to another agency is
+  // excluded. A dangling home id (venue deleted) stays, as before 9a — it
+  // names no venue, so it grants nothing.
+  const agency = agencyOf(user);
+  const valid = agencyVenueIds(venues, agency);
+  let home = typeof user.venueId === 'string' && user.venueId ? user.venueId : null;
+  if (home && !valid.has(home) && (venues || []).some((v) => v && v.id === home)) home = null;
   const out = home ? [home] : [];
   if (!user.personId || !Array.isArray(user.venueAccess)) return out;
   // Extra venues: only server-granted ids of venues the person's agency owns NOW.
-  const valid = agencyVenueIds(venues, agencyOf(user));
   for (const x of user.venueAccess) if (typeof x === 'string' && x && valid.has(x) && !out.includes(x)) out.push(x);
   return out;
 }
