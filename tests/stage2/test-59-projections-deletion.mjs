@@ -166,10 +166,12 @@ export default {
     }
     // ---- O ----
     {
-      Y = await build();
+      // 10e: forgot is refused for a multi person, so the pending reset is
+      // created while X is still single, then Y joins.
       r = await call('POST', '/api/auth/forgot-password', ipH(), { email: E('x') });
       assert(r.status === 200, `forgot ${r.status}`);
       assert(((await ctx.getDoc()).passwordResets || []).some((x) => x.email === E('x')), 'a pending reset exists for the email');
+      Y = await build();
       const yBefore = await rowOf(Y);
       const v0 = await ctx.getVersion();
       r = await del(tA, U('x'));

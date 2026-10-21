@@ -16,13 +16,12 @@
  *     reaches X (documented own-agency exception); Y (coordinator) gets neither
  *  V5 REST writes across the boundary: generic refusal, nothing written
  *  P1-P5 push: per-row delivery; concurrent subscribe; endpoint follows the
- *     latest subscriber; delete Y keeps X; forgot-password -> agency A admin only
+ *     latest subscriber; delete Y keeps X; forgot-password -> no push (10e)
  *  O1 venue owner with P's email: generic refusal in A and B, X/Y untouched
  *  K1 kiosk with a SHARED email: X's PIN on Y's tile = wrong PIN on Y only
  *  E1 admin exports per agency; H1 HISTORY_PRUNED per agency
- *  L1 R1 R2 PRE-10e BASELINE (later auth PRs update these deliberately): login
- *     resolves X; reset is bound to X and changes only X; bad/expired token
- *     changes nothing
+ *  L1 R1 R2 (10e): login resolves X; agency-assisted reset is refused for P
+ *     (no record, nothing verifies, X/Y unchanged); a bad token changes nothing
  *  C1 consistency + owner-derived projections after every block (usersByEmail
  *     read directly from the store)
  */
@@ -81,7 +80,7 @@ async function usersByEmailDoc(key) {
 export default {
   name: 'Test 60: two-membership matrix (10c checkpoint after 10d)',
   whatItProves:
-    'One person with memberships in two agencies (X owner in A, Y coordinator in B, same email): REST, WS, push, reset, venue owner, kiosk, exports and history never cross X/Y; the event exception keyed by email stays inside its agency; pre-10e login/reset baseline pinned (resolves the credential owner, changes only it).',
+    'One person with memberships in two agencies (X owner in A, Y coordinator in B, same email): REST, WS, push, reset, venue owner, kiosk, exports and history never cross X/Y; the event exception keyed by email stays inside its agency; login resolves the credential owner and agency-assisted reset is refused for the multi person (10e).',
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
@@ -364,16 +363,17 @@ export default {
       assert(w.status === 200 || w.status === 201, `annA2 ${w.status}`);
       e = (await log()).filter((x) => String(x.title).includes(`T60 annA2 ${ts}`));
       assert(!eps(e).includes(EP('sw')) && eps(e).includes(EP('x')), `P3 A push on the switched endpoint ${J(eps(e))}`);
-      // P5: forgot-password -> agency A's admin only; one reset record, X's
+      // P5 (10e R7): forgot-password for a multi person pushes to NO agency
+      // and creates no reset record (same answer as an unknown email).
       await clear();
       const fp = await call('POST', '/api/auth/forgot-password', ipH(), { email: PE });
       assert(fp.status === 200, `P5 forgot ${fp.status}`);
+      await sleep(300);
       e = (await log()).filter((x) => String(x.title).startsWith('🔑 Password reset code'));
-      assert(J(eps(e)) === J([EP('ada')]), `P5 reset-code push endpoints ${J(eps(e))}`);
+      assert(e.length === 0, `P5 no reset-code push anywhere ${J(eps(e))}`);
       const resets = ((await ctx.getDoc()).passwordResets || []).filter((x) => x.email === PE);
-      assert(resets.length === 1, `P5 exactly one reset record ${resets.length}`);
-      if (resets[0].userId !== undefined) assert(resets[0].userId === X, `P5 the reset is X's ${resets[0].userId}`);
-      console.log('  ✓ P1/P2/P3/P5 push per row; concurrent subscribe; endpoint follows Y; reset code -> agency A admin only');
+      assert(resets.length === 0, `P5 no reset record ${resets.length}`);
+      console.log('  ✓ P1/P2/P3/P5 push per row; concurrent subscribe; endpoint follows Y; no reset code for a multi person (10e)');
     }
 
     // ---- O1: venue owner with P's email ----
@@ -456,7 +456,7 @@ export default {
     }
     await projections('P/O/K/E/H', X, 'T60 X renamed');
 
-    // ---- L1 / R1 / R2: PRE-10e BASELINE (later auth PRs update these deliberately) ----
+    // ---- L1 / R1 / R2 (10e): login resolves the owner; agency-assisted reset is refused for P ----
     {
       // L1: login resolves the credential owner X; never a Y session
       let lg = await call('POST', '/api/auth/login', jsonH, { email: PE, password: PW });
@@ -468,38 +468,18 @@ export default {
       let rr = await call('POST', '/api/auth/reset-password', jsonH, { email: PE, resetToken: 'not-a-real-token-0000', newPassword: 'stage2-t60-nope' });
       assert(rr.status !== 200, `R2 invalid token must be refused: ${rr.status}`);
       await unchanged(v0, 'R2 invalid token');
-      // R2 (expired): an expired code yields no reset token and changes neither row.
-      // (verify-reset-code checks expiresAt; the test hook expire-reset ages the
-      // request. Finding for 10e, not pinned here: reset-password itself does not
-      // re-check expiresAt once a request is verified.)
-      {
-        const fp0 = await call('POST', '/api/auth/forgot-password', ipH(), { email: PE });
-        assert(fp0.status === 200, `R2 forgot ${fp0.status}`);
-        const code0 = (await (await fetch(`${baseUrl}/api/__test__/last-reset-code?email=${encodeURIComponent(PE)}`)).json()).code;
-        assert((await hook('expire-reset', { email: PE })).status === 200, 'R2 expire-reset');
-        const xs = J(await rowOf(X)), ys = J(await rowOf(Y));
-        rr = await call('POST', '/api/auth/verify-reset-code', ipH(), { email: PE, code: code0 });
-        assert(rr.status !== 200 && !rr.json?.resetToken, `R2 expired code must not verify: ${rr.status} ${rr.text.slice(0, 120)}`);
-        assert(J(await rowOf(X)) === xs && J(await rowOf(Y)) === ys, 'R2 expired code changed a row');
-      }
-      // R1: a fresh request is bound to X; a successful reset changes only X
+      // R1 (10e R7): forgot creates nothing for P, so no code verifies and
+      // neither row changes; the old password still logs in as X.
+      const xs = J(await rowOf(X)), ys = J(await rowOf(Y));
       const fp = await call('POST', '/api/auth/forgot-password', ipH(), { email: PE });
       assert(fp.status === 200, `R1 forgot ${fp.status}`);
-      const code2 = (await (await fetch(`${baseUrl}/api/__test__/last-reset-code?email=${encodeURIComponent(PE)}`)).json()).code;
-      const ip2 = ipH();
-      rr = await call('POST', '/api/auth/verify-reset-code', ip2, { email: PE, code: code2 });
-      assert(rr.status === 200 && rr.json?.resetToken, `R1 verify 2 ${rr.status} ${rr.text.slice(0, 120)}`);
-      const xBefore = await rowOf(X), yBefore = await rowOf(Y);
-      rr = await call('POST', '/api/auth/reset-password', jsonH, { email: PE, resetToken: rr.json.resetToken, newPassword: 'stage2-t60-newpass' });
-      assert(rr.status === 200 && rr.json?.user?.id === X, `R1 reset resolves X: ${rr.status} ${rr.text.slice(0, 160)}`);
-      const xAfter = await rowOf(X), yAfter = await rowOf(Y);
-      assert(xAfter.password && xAfter.password !== xBefore.password, 'R1 X\'s credential changed');
-      assert(J(yAfter) === J(yBefore), `R1 Y unchanged (no password, same membership fields) ${J(yAfter)}`);
-      assert(yAfter.password === undefined, 'R1 Y still holds no credential');
-      lg = await call('POST', '/api/auth/login', jsonH, { email: PE, password: 'stage2-t60-newpass' });
-      assert(lg.status === 200 && lg.json?.user?.id === X, `R1 new password logs in as X: ${lg.status}`);
-      assert(!((await ctx.getDoc()).passwordResets || []).some((x) => x.email === PE), 'R1 no pending reset left');
-      console.log('  ✓ L1/R1/R2 PRE-10e BASELINE: login and reset resolve X only; bad/expired tokens change nothing');
+      assert(!((await ctx.getDoc()).passwordResets || []).some((x) => x.email === PE), 'R1 no pending reset for P');
+      rr = await call('POST', '/api/auth/verify-reset-code', ipH(), { email: PE, code: '123456' });
+      assert(rr.status !== 200 && !rr.json?.resetToken, `R1 nothing verifies: ${rr.status}`);
+      assert(J(await rowOf(X)) === xs && J(await rowOf(Y)) === ys, 'R1 X/Y unchanged');
+      lg = await call('POST', '/api/auth/login', jsonH, { email: PE, password: PW });
+      assert(lg.status === 200 && lg.json?.user?.id === X, `R1 old password still logs in as X: ${lg.status}`);
+      console.log('  ✓ L1/R1/R2 (10e): login resolves X only; agency-assisted reset refused for P; bad tokens change nothing');
     }
     await projections('L/R', X, 'T60 X renamed');
 
@@ -525,6 +505,6 @@ export default {
       assert(!((await ctx.getDoc()).passwordResets || []).some((x) => x.email === PE), 'cleanup: no pending reset');
       console.log('  ✓ P4 delete Y keeps X; cleanup retires P, no subscriptions or resets left');
     }
-    return 'X(A, owner) + Y(B, coordinator) share one email: REST/WS reads and payloads, writes, events (assignment exception inside its agency), pushes (per row, concurrent, endpoint switch, reset code to agency A admin), venue owner refusal, kiosk, exports, history prune all stay per row; PRE-10e baseline: login/reset resolve X only, bad/expired token inert; projections from the owner throughout; cleanup retires P';
+    return 'X(A, owner) + Y(B, coordinator) share one email: REST/WS reads and payloads, writes, events (assignment exception inside its agency), pushes (per row, concurrent, endpoint switch, no reset code for the multi person), venue owner refusal, kiosk, exports, history prune all stay per row; 10e: login resolves X only, agency-assisted reset refused for P, bad token inert; projections from the owner throughout; cleanup retires P';
   },
 };
