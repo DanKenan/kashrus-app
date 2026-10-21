@@ -8,9 +8,15 @@
  *  2 POST /api/agencies/register refuses a taken email (an admin of another
  *    agency, a staff member of another agency) with one text that names no
  *    account and no agency; every well-formed attempt from one client IP is
- *    counted BEFORE the email is looked at: 10 attempts per hour, the 11th is
- *    429 for a taken AND for a fresh email (nothing created); another IP is
- *    not affected; a body operationId does not swallow the registration.
+ *    counted BEFORE the email is looked at (process-local bounded limiter,
+ *    no state-document write): 10 attempts per hour, the 11th is 429 for a
+ *    taken AND a fresh email (nothing created, nothing written, a new
+ *    operationId does not get past it); another IP is not affected; a body
+ *    operationId does not swallow the registration; an identical retry of a
+ *    successful registration gets the generic 409 (as before 10a), echoes no
+ *    stored result, writes nothing, and the person can sign in.
+ *  Limits that remain (not claimed as closed): needsSetup and sign-up
+ *  success vs refusal still reveal that an email is taken.
  *  3 POST /api/users: an email used in ANOTHER agency gets "This email can't
  *    be added directly." (no agency, no name); an email of the caller's own
  *    team keeps "A team member with this email already exists"; nothing is
@@ -80,10 +86,20 @@ export default {
     assert(fresh1.status === 201 && fresh1.json?.agency?.id, `fresh registration with an operationId must be created: ${fresh1.status} ${fresh1.text.slice(0, 200)}`);
     const reg1Login = await call('POST', '/api/auth/login', jsonH, { email: E('reg1'), password: 'stage2-t56-regpass' });
     assert(reg1Login.status === 200, `the registered admin can sign in (registration really happened): ${reg1Login.status}`);
-    // attempts 2..10 (taken emails: other agency's admin, other agency's staff, the one just registered)
+    // attempt 2: an identical retry of that successful registration (same
+    // operationId, same body) -> the same generic refusal as before 10a (the
+    // email is taken now), no second agency, no stored result echoed back.
+    const vRetry = await ctx.getVersion();
+    const retry = await call('POST', '/api/agencies/register', ipH(ipX), regBody(E('reg1'), 1, { operationId: `op-t56-${ts}` }));
+    assert(retry.status === 409, `identical retry of a successful registration: 409 like before 10a, got ${retry.status} ${retry.text.slice(0, 160)}`);
+    assert(!/\$2[aby]\$|password|token/i.test(retry.text), `the retry answer must carry no stored result: ${retry.text.slice(0, 160)}`);
+    assert((await ctx.getVersion()) === vRetry, 'the retry writes nothing (no second agency)');
+    const reg1Again = await call('POST', '/api/auth/login', jsonH, { email: E('reg1'), password: 'stage2-t56-regpass' });
+    assert(reg1Again.status === 200, 'after a lost response the person signs in with the password they chose');
+    // attempts 3..10 (taken emails: other agency's admin, other agency's staff, the one just registered)
     const taken = [E('adminB'), E('mashB'), E('reg1')];
-    const refusals = [];
-    for (let n = 2; n <= 10; n++) {
+    const refusals = [retry];
+    for (let n = 3; n <= 10; n++) {
       const g = await call('POST', '/api/agencies/register', ipH(ipX), regBody(taken[n % taken.length], n));
       refusals.push(g);
       assert(g.status === 409, `taken email attempt ${n} must be 409, got ${g.status} ${g.text.slice(0, 160)}`);
@@ -92,15 +108,18 @@ export default {
     for (const g of refusals) assert(g.text === t0, `every taken-email refusal must be identical: ${g.text} vs ${t0}`);
     assert(refusals[0].json?.error === "This email can't be used to register a new agency.", `register text: ${t0}`);
     assert(!leakWords.test(t0) && !t0.includes(NAME_B) && !t0.includes(B), `register refusal must name nothing: ${t0}`);
-    // attempt 11 and 12 from ipX: limited, for a taken AND a fresh email
-    const v0 = await ctx.getVersion();
+    // attempt 11 and 12 from ipX: limited, for a taken AND a fresh email (and
+    // a random operationId does not get past the limiter)
     const lim1 = await call('POST', '/api/agencies/register', ipH(ipX), regBody(E('adminB'), 11));
-    const lim2 = await call('POST', '/api/agencies/register', ipH(ipX), regBody(E('reg12'), 12));
+    const lim2 = await call('POST', '/api/agencies/register', ipH(ipX), regBody(E('reg12'), 12, { operationId: `op-t56-other-${ts}` }));
     assert(lim1.status === 429 && lim2.status === 429, `11th/12th attempts from one IP must be 429/429, got ${lim1.status}/${lim2.status}`);
     assert(lim1.json?.code === 'RATE_LIMITED' && lim2.json?.code === 'RATE_LIMITED', 'limited answers carry RATE_LIMITED');
     const reg12Login = await call('POST', '/api/auth/login', jsonH, { email: E('reg12'), password: 'stage2-t56-regpass' });
     assert(reg12Login.status === 401, `a limited registration must create nothing (login ${reg12Login.status})`);
-    void v0;
+    // the limiter writes nothing to the state document
+    const vLim = await ctx.getVersion();
+    const lim3 = await call('POST', '/api/agencies/register', ipH(ipX), regBody(E('adminB'), 14));
+    assert(lim3.status === 429 && (await ctx.getVersion()) === vLim, 'a limited attempt writes nothing');
     // another IP is not affected
     const otherIp = await call('POST', '/api/agencies/register', ipH(ipY), regBody(E('mashB'), 13));
     assert(otherIp.status === 409 && otherIp.text === t0, `another IP is not limited (taken -> same 409): ${otherIp.status} ${otherIp.text.slice(0, 120)}`);

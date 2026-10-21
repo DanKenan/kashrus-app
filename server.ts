@@ -28,6 +28,7 @@ import {
 import { classifySessionClaims, resolveSessionRow, sessionClaimsFor, type SessionClaims } from './src/server/session-token.ts';
 import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
+import { createWindowLimiter } from './src/server/window-limiter.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
@@ -7294,7 +7295,7 @@ app.delete('/api/handoff-notes/:id', async (req, res) => {
 // 10a: the register refusal names no account and no agency; the per-IP
 // limit counts every well-formed attempt (taken email or not).
 const REGISTER_EMAIL_REFUSED_TEXT = "This email can't be used to register a new agency.";
-const REGISTER_MAX_PER_IP_PER_HOUR = 10;
+const registerLimiter = createWindowLimiter({ max: 10, windowMs: 60 * 60 * 1000, maxKeys: 10000 });
 
 app.post('/api/agencies/register', async (req, res) => {
   const {
@@ -7326,33 +7327,18 @@ app.post('/api/agencies/register', async (req, res) => {
   const cleanAdminEmail = adminEmail.trim().toLowerCase();
   // 10a: every well-formed registration attempt is counted per client IP
   // BEFORE the email is looked at (taken or not), so the "email taken"
-  // refusal cannot be used for fast enumeration. Stored in the existing
-  // passwordResetRateLimits.ipRequests map under a 'register|' key (no new
-  // state field; forgot-password keys are bare IPs, so they never collide).
-  const registerIpKey = `register|${getClientIp(req)}`;
-  // A separate commit WITHOUT the request's idempotency scope (operationId /
-  // expectedVersion belong to the registration commit below, never to this
-  // counter). Fail closed: no counted attempt -> no registration.
-  try {
-    await commitState(
-      (freshDoc) => {
-        const raw = freshDoc.passwordResetRateLimits;
-        const limits: PasswordResetRateLimits = raw && typeof raw === 'object'
-          ? { emailRequests: raw.emailRequests || {}, ipRequests: raw.ipRequests || {}, ipVerifies: raw.ipVerifies || {} }
-          : emptyRateLimits();
-        // Throws RateLimitError (never retried) when over the limit.
-        const after = checkRateLimit(limits, 'ipRequests', registerIpKey, REGISTER_MAX_PER_IP_PER_HOUR, Date.now());
-        return { doc: { ...freshDoc, passwordResetRateLimits: after }, result: { ok: true } };
-      },
-      { label: 'register-rate-limit' }
-    );
-  } catch (err: any) {
-    if (err instanceof RateLimitError) {
-      res.setHeader('Retry-After', String(err.retryAfterSec));
-      return res.status(429).json({ error: err.message, code: 'RATE_LIMITED' });
-    }
-    log.error('[register] rate-limit reservation failed:', err?.message);
-    return res.status(503).json({ error: 'Registration is temporarily unavailable. Please try again.' });
+  // refusal cannot be used for fast enumeration. The counter is process-local
+  // and bounded (window-limiter.ts): a public route never writes the state
+  // document per request. A retry of a registration that already succeeded
+  // gets the same generic 409 as before 10a (the email is taken by then); the
+  // person signs in with the password they chose.
+  const registerHit = registerLimiter.hit(`register|${getClientIp(req)}`, Date.now());
+  if (!registerHit.allowed) {
+    res.setHeader('Retry-After', String(registerHit.retryAfterSec));
+    return res.status(429).json({
+      error: `Too many requests. Please try again in ${Math.ceil(registerHit.retryAfterSec / 60)} minute(s).`,
+      code: 'RATE_LIMITED',
+    });
   }
   if (users.some((u) => u.email.toLowerCase() === cleanAdminEmail)) {
     return res.status(409).json({ error: REGISTER_EMAIL_REFUSED_TEXT });
