@@ -25,6 +25,7 @@ import {
   findDomainClash,
   withCustomDomain,
 } from './src/server/agency-fields.js';
+import { classifySessionClaims, resolveSessionRow, sessionClaimsFor, type SessionClaims } from './src/server/session-token.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
@@ -319,14 +320,27 @@ function base64url(input: Buffer | string): string {
 const TOKEN_TTL_SECONDS = 30 * 24 * 3600; // 30 days
 const KIOSK_TOKEN_TTL_SECONDS = 12 * 3600; // 12 hours
 
+/** Legacy v1 token { sub, iat, exp }. Item 8d: only signSessionToken calls
+ * this shape now (for rows without personId) and the compatibility tests. */
 function signToken(userId: string): string {
+  return signClaims({ sub: userId });
+}
+
+function signClaims(claims: Record<string, unknown>): string {
   const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const now = Math.floor(Date.now() / 1000);
-  const payload = base64url(JSON.stringify({ sub: userId, iat: now, exp: now + TOKEN_TTL_SECONDS }));
+  const payload = base64url(JSON.stringify({ ...claims, iat: now, exp: now + TOKEN_TTL_SECONDS }));
   const sig = base64url(
     crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest()
   );
   return `${header}.${payload}.${sig}`;
+}
+
+/** Item 8d: the session token login / reset-password / register issue.
+ * v2 { v:2, sub: personId, mem: row id, ep: tokenEpoch||0 } for a migrated
+ * row (personId === id); the legacy v1 { sub } for any other row. */
+function signSessionToken(row: { id: string; personId?: string; tokenEpoch?: unknown }): string {
+  return signClaims(sessionClaimsFor(row));
 }
 
 /** Kiosk session token: venue-scoped, 12h expiry, kiosk:true claim.
@@ -347,7 +361,7 @@ function signKioskToken(userId: string, agencyId: string, venueId: string, pv: s
   return `${header}.${payload}.${sig}`;
 }
 
-function verifyToken(token: string): { userId: string; kiosk?: boolean; agencyId?: string; venueId?: string; pv?: string; dev?: string } | null {
+function verifyToken(token: string): SessionClaims | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
@@ -363,15 +377,8 @@ function verifyToken(token: string): { userId: string; kiosk?: boolean; agencyId
     }
     const data = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
     if (typeof data.exp !== 'number' || data.exp < Math.floor(Date.now() / 1000)) return null;
-    if (typeof data.sub !== 'string' || !data.sub) return null;
-    return {
-      userId: data.sub,
-      kiosk: data.kiosk === true ? true : undefined,
-      agencyId: typeof data.agencyId === 'string' ? data.agencyId : undefined,
-      venueId: typeof data.venueId === 'string' ? data.venueId : undefined,
-      pv: typeof data.pv === 'string' ? data.pv : undefined,
-      dev: typeof data.dev === 'string' ? data.dev : undefined,
-    };
+    // Item 8d: strict classification (kiosk | v1 | v2, anything else null).
+    return classifySessionClaims(data);
   } catch {
     return null;
   }
@@ -542,7 +549,8 @@ app.use('/api', async (req, res, next) => {
   const authHeader = String(req.headers.authorization || '');
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   const payload = token ? verifyToken(token) : null;
-  const user = payload ? users.find((u) => u.id === payload.userId) : undefined;
+  // Item 8d: ONE row resolver for HTTP and WS (v2 binding + epoch, v1 epoch 0, kiosk by id).
+  const user = resolveSessionRow(payload, users as any[]) as UserProfile | undefined;
 
   if (!user) {
     return res.status(401).json({ error: 'Sign in required. Please log in again.' });
@@ -554,7 +562,7 @@ app.use('/api', async (req, res, next) => {
   // kioskPinHash (PIN removed = kiosk access revoked), still belongs to the
   // token's agencyId, and is still assigned to the token's venueId. Any
   // mismatch → 401 so the tablet returns to the PIN screen.
-  if (payload?.kiosk === true) {
+  if (payload?.kind === 'kiosk') {
     const tokenAgencyId = payload.agencyId;
     const tokenVenueId = payload.venueId;
     const tokenPv = payload.pv;
@@ -3152,6 +3160,10 @@ type MutatorOutcome =
       result: any;
       /** 8c ONLY (identity migrator): legacy rows that gain personId = row.id in this commit. */
       identityMigrateRowIds?: string[];
+      /** 8d: rows whose tokenEpoch goes up by exactly 1 in this commit (revokes
+       * their v1 and v2 tokens). The ONLY way tokenEpoch changes; in 8d only a
+       * test hook uses it. */
+      tokenEpochBumpIds?: string[];
     }
   | { conflict: string; conflictStatus?: number; conflictCode?: string };
 
@@ -3277,7 +3289,7 @@ import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityE
  * migrated (personId = id); derived fields are recomputed. See
  * src/server/identity.ts.
  */
-function applyIdentityInvariant(identityBase: any, outDoc: any, migrateRowIds?: string[]): any {
+function applyIdentityInvariant(identityBase: any, outDoc: any, migrateRowIds?: string[], tokenEpochBumpIds?: string[]): any {
   if (!outDoc || !Array.isArray(outDoc.users)) return outDoc;
   const beforeUsers = Array.isArray(identityBase?.users) ? identityBase.users : [];
   const agencies = Array.isArray(outDoc.agencies) ? outDoc.agencies : [];
@@ -3285,6 +3297,7 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, migrateRowIds?: 
     ...outDoc,
     users: enforceIdentityFields(beforeUsers, outDoc.users, agencies, {
       migrateRowIds: migrateRowIds && migrateRowIds.length ? new Set(migrateRowIds) : undefined,
+      bumpTokenEpochIds: tokenEpochBumpIds && tokenEpochBumpIds.length ? new Set(tokenEpochBumpIds) : undefined,
       onViolation: (rowId, field) =>
         log.warn(`[identity] reverted a mutator change to server-only field ${field} on user ${rowId}`),
     }),
@@ -3342,7 +3355,7 @@ async function commitState(
     if ('conflict' in outcome) {
       throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
     }
-    outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc, outcome.identityMigrateRowIds);
+    outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc, outcome.identityMigrateRowIds, outcome.tokenEpochBumpIds);
     hydrateState(outcome.doc);
     // No-op detection (fallback path): skip the file write when nothing
     // changed. (The transactional path additionally skips the _v bump.)
@@ -3454,7 +3467,7 @@ async function commitState(
         if ('conflict' in outcome) {
           throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
         }
-        outcome.doc = applyIdentityInvariant(identityBase, outcome.doc, outcome.identityMigrateRowIds);
+        outcome.doc = applyIdentityInvariant(identityBase, outcome.doc, outcome.identityMigrateRowIds, outcome.tokenEpochBumpIds);
 
         // No-op detection: the mutator changed nothing meaningful — skip the
         // Firestore write entirely, do NOT increment _v, return success with
@@ -4716,9 +4729,10 @@ wss.on('connection', (ws, req) => {
     const url = new URL(req.url || '/ws', 'http://localhost');
     const token = url.searchParams.get('token') || '';
     const payload = token ? verifyToken(token) : null;
-    authedUser = payload ? users.find((u) => u.id === payload.userId) : null;
-    isKiosk = payload?.kiosk === true;
-    if (isKiosk) {
+    // Item 8d: the same resolver as the HTTP middleware.
+    authedUser = resolveSessionRow(payload, users as any[]) || null;
+    isKiosk = payload?.kind === 'kiosk';
+    if (payload && payload.kind === 'kiosk') {
       // Branch on the kiosk CLAIM, not on the presence of a venue id — a
       // kiosk token without agencyId, venueId, pv or dev fails closed
       // (never a phone session).
@@ -7312,7 +7326,7 @@ app.post('/api/agencies/register', async (req, res) => {
     message: `Welcome to Shutfey! Agency ${cleanAgencyName} has been established.`,
     agency: agencyView,
     user: getSafeUser(user),
-    token: signToken(user.id),
+    token: signSessionToken(users.find((u) => u.id === user.id) || user),
     venue,
     tasks: createdTasks,
   });
@@ -7816,6 +7830,43 @@ if (isTestMode()) {
     identityMigrationBypassPlanAtBatch = Number.isInteger(n) && n > 0 ? n : null;
     res.json({ ok: true, atBatch: identityMigrationBypassPlanAtBatch });
   });
+  // ---- Item 8d test hooks (session tokens). isTestMode() only. ----
+  // Signs arbitrary claims with the server's own secret (iat/exp added unless
+  // given), so the suite can present validly signed but malformed tokens.
+  app.post('/api/__test__/sign-claims', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const claims = (req.body || {}).claims;
+    if (!claims || typeof claims !== 'object' || Array.isArray(claims)) return res.status(400).json({ error: 'claims object required' });
+    const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+    const now = Math.floor(Date.now() / 1000);
+    const payload = base64url(JSON.stringify({ iat: now, exp: now + 3600, ...claims }));
+    const sig = base64url(crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest());
+    res.json({ token: `${header}.${payload}.${sig}` });
+  });
+  // Bumps one row's tokenEpoch by 1 through commitState's tokenEpochBumpIds
+  // (the only sanctioned path). 8d has no production writer; the next PR
+  // (sign-out other devices on password reset) adds the first real one.
+  app.post('/api/__test__/bump-token-epoch', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const userId = String((req.body || {}).userId || '');
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    try {
+      const committed: any = await commitState(
+        (freshDoc) => {
+          const fu: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+          const row = fu.find((u) => u && u.id === userId);
+          if (!row) return { doc: freshDoc, result: null };
+          return { doc: { ...freshDoc, users: [...fu] }, result: { bumped: true }, tokenEpochBumpIds: [userId] };
+        },
+        { label: 'test-bump-token-epoch' }
+      );
+      if (!committed?.result?.bumped) return res.status(404).json({ error: 'User not found' });
+      const row: any = users.find((u) => u.id === userId);
+      res.json({ ok: true, tokenEpoch: row?.tokenEpoch ?? null });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
   // The next migrator call stops after `maxBatches` batches ('batch-cap'), once.
   app.post('/api/__test__/identity-migration-batch-cap', (req, res) => {
     if (!requireAdmin(req, res)) return;
@@ -8017,7 +8068,8 @@ if (isTestMode()) {
       }
       const user = users.find((u) => u.id === userId);
       if (!user) return res.status(404).json({ error: 'User not found' });
-      res.json({ token: signToken(userId) });
+      // Item 8d: the same token login would issue; { legacy: true } forces v1.
+      res.json({ token: req.body?.legacy === true ? signToken(userId) : signSessionToken(user as any) });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
@@ -11843,7 +11895,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
   }
 
-  const token = signToken(user.id);
+  const token = signSessionToken(users.find((u) => u.id === user.id) || user);
   res.json({
     success: true,
     user: getSafeUser(user),
@@ -12089,7 +12141,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
   );
   if (!committed) return;
 
-  const token = signToken(user.id);
+  const token = signSessionToken(users.find((u) => u.id === user.id) || user);
   res.json({ success: true, user: getSafeUser(users.find((u) => u.id === user.id)!), token });
 });
 
