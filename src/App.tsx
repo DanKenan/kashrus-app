@@ -1603,7 +1603,8 @@ export default function App() {
         </button>
       )}
 
-      {/* Navigation Header */}
+      {/* Navigation Header (D3c: not on a signed-in kiosk; KioskTaskPanel carries its own calm top bar) */}
+      {!isKiosk && (
       <Header
         currentUser={currentUser}
         onLogout={handleLogout}
@@ -1637,6 +1638,7 @@ export default function App() {
         onCleanSlate={handleCleanSlate}
         onRestoreDemo={handleRestoreDemo}
       />
+      )}
 
       {/* 5a: newest unread urgent announcement for this venue */}
       {updates.topUrgent && (
@@ -1825,7 +1827,7 @@ export default function App() {
             )}
 
         {/* Factory & Airtable Ingredients Audit Quick Banner (Shown for Industrial Plant facilities) */}
-        {(currentVenue?.category?.toLowerCase().includes('industrial') || currentVenue?.category?.toLowerCase().includes('plant') || currentVenue?.category?.toLowerCase().includes('factory')) && (
+        {!isKiosk && (currentVenue?.category?.toLowerCase().includes('industrial') || currentVenue?.category?.toLowerCase().includes('plant') || currentVenue?.category?.toLowerCase().includes('factory')) && (
           <div className={`${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:order-1' : ''} mb-4 px-4 py-3 rounded-[20px] bg-gold-wash border border-gold/30 tactile-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-fade-in`}>
             <div className="flex items-center gap-3 min-w-0">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2 shrink-0">
@@ -1920,6 +1922,10 @@ export default function App() {
             isAdmin={canUserAssignTasks(currentUser)}
             onDeleteVenue={deleteVenueAction}
             onEndShift={handleLogout}
+            updatesBell={<UpdatesBell count={updates.bellCount} onClick={() => updates.setSheetOpen(true)} />}
+            darkMode={darkMode}
+            onToggleDarkMode={() => setDarkMode(!darkMode)}
+            isRealtimeConnected={isRealtimeConnected}
           >
             {kioskView === 'table' ? taskTableView : kioskView === 'cards' ? taskCardView : null}
           </KioskTaskPanel>
@@ -1962,7 +1968,8 @@ export default function App() {
         />
       )}
 
-      {/* Footer */}
+      {/* Footer (D3c: not on a signed-in kiosk) */}
+      {!isKiosk && (
       <footer className="mt-auto border-t border-line py-4 px-6 text-center text-xs text-ink-faint">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
           <span>Shutfey Operations & Audit Engine</span>
@@ -1985,6 +1992,7 @@ export default function App() {
           </div>
         </div>
       </footer>
+      )}
 
       {/* Modals */}
       <TaskModal

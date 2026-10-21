@@ -7,7 +7,16 @@
  */
 
 /** A random 4-digit code from the browser's CSPRNG, skipping the obvious
- * ones (all the same digit, straight runs like 1234 / 9876). */
+ * ones (all the same digit, straight runs like 1234 / 9876).
+ * D3c (ChatGPT's #46 review): after 50 rejected picks it THROWS — there is
+ * no fixed fallback code. The caller shows a message and saves nothing. */
+export class KioskCodeGenerationError extends Error {
+  constructor() {
+    super("Couldn't make a code. Try again, or type one.");
+    this.name = 'KioskCodeGenerationError';
+  }
+}
+
 export function generateKioskCode(): string {
   const weak = (c: string) =>
     /^(\d)\1{3}$/.test(c) || '0123456789'.includes(c) || '9876543210'.includes(c);
@@ -17,7 +26,7 @@ export function generateKioskCode(): string {
     const code = String(buf[0] % 10000).padStart(4, '0');
     if (!weak(code)) return code;
   }
-  return '4821';
+  throw new KioskCodeGenerationError();
 }
 
 export const KIOSK_CODE_PATTERN = /^[0-9]{4,6}$/;

@@ -263,8 +263,14 @@ export const KioskCodeDialog: React.FC<KioskCodeDialogProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setCode(generateKioskCode());
-                    setError(null);
+                    // D3c: generation can fail (no fixed fallback code); say so, save nothing.
+                    try {
+                      setCode(generateKioskCode());
+                      setError(null);
+                    } catch (e) {
+                      setCode('');
+                      setError(e instanceof Error && e.message ? e.message : "Couldn't make a code. Try again, or type one.");
+                    }
                   }}
                   className={`${btn} bg-sunken border border-line text-ink`}
                   title="Make up a random code"
