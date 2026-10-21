@@ -94,13 +94,13 @@ export default {
 
     // --- 2. A's browser session: setup (post-test-18 restore) + login + WS.
     // NOTE: test 18 (restore cycle) runs before this test and strips
-    // passwords — re-establish via setup, mirroring the real post-restore
-    // flow and the harness startup. This MUST happen before capturing the
+    // passwords — re-establish the password, as the harness startup does. This MUST happen before capturing the
     // form baseline: setup is a version-bumping write.
-    await fetch(`${baseUrl}/api/auth/setup`, {
+    // (8i: public setup is closed; the test-only endpoint re-sets it.)
+    await fetch(`${baseUrl}/api/__test__/set-password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: ADMIN_EMAIL, newPassword: 'stage2-test-password' }),
+      body: JSON.stringify({ userId: 'usr_admin', password: 'stage2-test-password' }),
     });
     const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',

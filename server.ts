@@ -10,6 +10,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import * as media from './src/server/media.js';
 import { buildAdminExport } from './src/server/admin-export.js';
+import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
 import {
   DEFAULT_TIME_ZONE,
@@ -438,6 +439,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/revoke-user-silent' },
         { method: 'POST', path: '/__test__/drop-socket-meta' },
         { method: 'POST', path: '/__test__/mint-token' },
+        { method: 'POST', path: '/__test__/set-password' },
         { method: 'POST', path: '/__test__/mint-kiosk-token' },
         { method: 'GET', path: '/__test__/alert-routing' },
       ]
@@ -998,6 +1000,25 @@ function requireAdmin(req: any, res: any): UserProfile | null {
     return null;
   }
   return user;
+}
+
+/**
+ * 8i: require the pinned platform operator (src/server/platform-auth.ts) for
+ * routes that act on the WHOLE platform. Decided on the current stored user
+ * record; kiosk sessions never qualify. Sends 403 and returns null otherwise.
+ */
+function requirePlatformOperator(req: any, res: any): UserProfile | null {
+  const sessionUser = getAuthUser(req);
+  if (!isPlatformOperator(sessionUser?.id, (req as any).kiosk === true, users as any)) {
+    res.status(403).json({ error: PLATFORM_OPERATOR_FORBIDDEN });
+    return null;
+  }
+  return users.find((u) => u.id === sessionUser!.id) || null;
+}
+
+/** 8i: re-check right before a long platform operation executes (after awaits). */
+function stillPlatformOperator(req: any): boolean {
+  return isPlatformOperator(getAuthUser(req)?.id, (req as any).kiosk === true, users as any);
 }
 
 /**
@@ -2450,11 +2471,17 @@ function hydrateState(parsed: any) {
         approvedIngredients = Array.isArray(parsed.approvedIngredients) ? parsed.approvedIngredients : [];
         factoryReports = Array.isArray(parsed.factoryReports) ? parsed.factoryReports : [];
 
+        // Same normalisation and template load as the other branch (rule N):
+        // the in-transaction caller checks compare against NORMALIZED cache
+        // users, and event task templates must survive a reload here too.
         if (Array.isArray(parsed.users) && parsed.users.length > 0) {
-          users = parsed.users;
+          users = parsed.users.map((u: any) => normalizeStoredUser(u));
         } else {
-          users = [DEFAULT_USERS[0]];
+          users = [{ ...DEFAULT_USERS[0] }];
         }
+        eventTaskTemplates = Array.isArray(parsed.eventTaskTemplates)
+          ? parsed.eventTaskTemplates.filter((t: any) => t && t.id && t.title)
+          : [];
       } else {
         if (Array.isArray(parsed.venues)) {
           venues = parsed.venues.map((v: any) => ({
@@ -5935,13 +5962,15 @@ app.post('/api/media/sweep', async (req, res) => {
   try {
     // Accept either: verified scheduler OIDC (set by middleware) OR admin session.
     // The middleware already verified the OIDC token; we just check the flag.
+    // 8i: platform-wide job — verified scheduler OIDC or the pinned operator.
     const isScheduler = (req as any).schedulerAuth === true;
-    if (!isScheduler) {
-      const admin = requireAdmin(req, res);
-      if (!admin) return;
-    }
+    if (!isScheduler && !requirePlatformOperator(req, res)) return;
     const db = requireMediaDb(req, res);
     if (!db) return;
+    if (!isScheduler && !stillPlatformOperator(req)) {
+      res.status(403).json({ error: PLATFORM_OPERATOR_FORBIDDEN });
+      return;
+    }
     const result = await media.sweepOrphans(db);
     // If any deletions failed, return 500 so Cloud Scheduler retries.
     // The sweeper marks failed records with deleteError for the next run.
@@ -5967,11 +5996,9 @@ app.post('/api/media/sweep', async (req, res) => {
  * Returns non-2xx on failure so Cloud Scheduler retries / alerts.
  */
 app.post('/api/internal/consistency-check', async (req, res) => {
+  // 8i: platform-wide job — verified scheduler OIDC or the pinned operator.
   const isScheduler = (req as any).schedulerAuth === true;
-  if (!isScheduler) {
-    const admin = requireAdmin(req, res);
-    if (!admin) return;
-  }
+  if (!isScheduler && !requirePlatformOperator(req, res)) return;
   // The body lives in src/server/consistency-route.ts: it owns the 503,
   // the handler call, and the single-writer safety net (an emission marker
   // shared with the handler, so a failure before the handler runs still
@@ -5988,8 +6015,8 @@ app.post('/api/internal/consistency-check', async (req, res) => {
  * the Cloud Monitoring alert pipeline delivers to his email/phone.
  */
 app.post('/api/internal/test-alert', async (req, res) => {
-  const admin = requireAdmin(req, res);
-  if (!admin) return;
+  // 8i: pages Don — the pinned platform operator only.
+  if (!requirePlatformOperator(req, res)) return;
   const stamp = new Date().toISOString();
   if ((req.body as any)?.mode === 'demo') {
     // Demo of the grouped consistency summary, from fixed sample data —
@@ -6026,8 +6053,8 @@ app.get('/api/media/status', (req, res) => {
  * Returns per-index readiness. If an index is still building, Firestore throws.
  */
 app.get('/api/media/check-indexes', async (req, res) => {
-  const admin = requireAdmin(req, res);
-  if (!admin) return;
+  // 8i: platform infrastructure status — the pinned platform operator only.
+  if (!requirePlatformOperator(req, res)) return;
   const db = requireMediaDb(req, res);
   if (!db) return;
 
@@ -7486,6 +7513,32 @@ if (isTestMode()) {
     }
   });
 
+  // TEST ONLY (8i): set a user's password (bcrypt) — replaces the harness's
+  // use of the public first-run setup route, which 8i closed. Test mode only.
+  app.post('/api/__test__/set-password', async (req, res) => {
+    const { userId, password } = req.body || {};
+    if (!userId || typeof userId !== 'string' || typeof password !== 'string' || password.length < 8) {
+      return res.status(400).json({ error: 'userId and password (8+) required' });
+    }
+    const newHash = await hashPassword(password);
+    try {
+      await commitState(
+        (freshDoc) => {
+          const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+          if (!freshUsers.some((u) => u && u.id === userId)) throw new Error('User not found');
+          return {
+            doc: { ...freshDoc, users: freshUsers.map((u) => (u.id === userId ? { ...u, password: newHash } : u)) },
+            result: { userId },
+          };
+        },
+        { label: 'test-set-password' }
+      );
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(err?.message === 'User not found' ? 404 : 500).json({ error: err?.message });
+    }
+  });
+
   // Test-only: mint a kiosk token with arbitrary claims (for malformed-token tests).
   app.post('/api/__test__/mint-kiosk-token', async (req, res) => {
     try {
@@ -8708,80 +8761,14 @@ app.post('/api/admin/clean-slate', async (req, res) => {
   });
 });
 
-// Admin Restores Demonstration Facilities and Data
-app.post('/api/admin/restore-demo', async (req, res) => {
-  const caller = requireAdmin(req, res);
-  if (!caller) {
-    return res.status(403).json({ error: 'Only administrators can restore demonstration data.' });
-  }
-
-  const callerAgencyId = caller.agencyId || 'agency-hkc';
-
-  const committed = await commitOrRespond(
-    req, res,
-    (freshDoc) => {
-      const replaceAgency = (arr: any[], seeds: any[]) => [
-        ...(Array.isArray(arr) ? arr : []).filter((x) => (x.agencyId || 'agency-hkc') !== callerAgencyId),
-        ...seeds,
-      ];
-      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
-      const newUsers = [...freshUsers];
-      for (const defUser of DEFAULT_USERS) {
-        if (!newUsers.some((u) => u.email.toLowerCase() === defUser.email.toLowerCase())) {
-          newUsers.push({ ...defUser });
-        }
-      }
-      // Re-seed default venues, tasks, events, and users atomically.
-      return {
-        doc: {
-          ...freshDoc,
-          venues: replaceAgency(freshDoc.venues, DEFAULT_VENUES),
-          tasks: replaceAgency(freshDoc.tasks, INITIAL_TASKS),
-          historyLogs: replaceAgency(freshDoc.historyLogs, INITIAL_HISTORY),
-          events: replaceAgency(freshDoc.events, INITIAL_EVENTS),
-          airtableConfigs: replaceAgency(freshDoc.airtableConfigs, INITIAL_AIRTABLE_CONFIGS),
-          approvedIngredients: replaceAgency(freshDoc.approvedIngredients, INITIAL_APPROVED_INGREDIENTS),
-          users: newUsers,
-          isDemoCleared: false,
-        },
-        result: { success: true, isDemoCleared: false },
-      };
-    },
-    { label: 'restore-demo' }
-  );
-  if (!committed) return;
-
-  // Privacy: every payload below is scoped to the caller's agency. The client
-  // REPLACES its venues/tasks/events/users from this broadcast, so unfiltered
-  // arrays would show one agency's data inside another agency's app.
-  const normAgency = (v?: string) => v || 'agency-hkc';
-  const agencyVenues = venues.filter((v) => normAgency(v.agencyId) === callerAgencyId);
-  const agencyTasks = tasks.filter((t) => normAgency(t.agencyId) === callerAgencyId);
-  const agencyEvents = events.filter((e) => normAgency(e.agencyId) === callerAgencyId);
-  broadcast('DEMO_RESTORED', {
-    agencyId: callerAgencyId,
-    venues: agencyVenues,
-    tasks: agencyTasks,
-    events: agencyEvents,
-    isDemoCleared: false,
-  }, undefined, callerAgencyId, (meta, base) => {
-    const recipient = recipientForMeta(meta);
-    return {
-      ...base,
-      tasks: base.tasks.filter((t: any) => canSeeTaskServer(t, recipient)),
-      users: getSafeUsersForAgency(callerAgencyId, recipient),
-    };
-  });
-
-  res.json({
-    success: true,
-    isDemoCleared: false,
-    venues: agencyVenues,
-    tasks: agencyTasks,
-    events: agencyEvents,
-    users: getSafeUsersForAgency(callerAgencyId, caller),
-    message: 'Demo facilities, mashgichim, and inspection tasks have been restored.',
-  });
+// Admin "Restore demonstration data" — retired in 8i. Every demo seed list is
+// empty, so the old handler only DELETED the caller agency's venues, tasks,
+// history, events, Airtable configs and approved ingredients (no undo), and
+// re-created the seed admin account (usr_admin, empty password) even when an
+// admin of another agency called it. 410 for everyone: no state is read or
+// written and no user is ever created. (The button is retired in a later UI PR.)
+app.post('/api/admin/restore-demo', (req, res) => {
+  res.status(410).json({ error: 'There is no demo data to restore.' });
 });
 
 /**
@@ -8791,14 +8778,18 @@ app.post('/api/admin/restore-demo', async (req, res) => {
  * The monolith is never modified or deleted.
  */
 app.post('/api/admin/migrate-copy', async (req, res) => {
-  const admin = requireAdmin(req, res);
-  if (!admin) return;
+  // 8i: platform-wide write — the pinned platform operator only.
+  if (!requirePlatformOperator(req, res)) return;
   if (!firestoreDb) {
     res.status(503).json({ error: 'Firestore not available.' });
     return;
   }
   try {
     const { migrateCopy } = await import('./src/server/migration.js');
+    if (!stillPlatformOperator(req)) {
+      res.status(403).json({ error: PLATFORM_OPERATOR_FORBIDDEN });
+      return;
+    }
     const result = await migrateCopy(firestoreDb);
     res.json({ ok: true, ...result });
   } catch (e: any) {
@@ -8813,8 +8804,8 @@ app.post('/api/admin/migrate-copy', async (req, res) => {
  * Never returns password hashes, PINs, or secrets.
  */
 app.get('/api/admin/per-entity-status', async (req, res) => {
-  const admin = requireAdmin(req, res);
-  if (!admin) return;
+  // 8i: reports on every agency's records — the pinned platform operator only.
+  if (!requirePlatformOperator(req, res)) return;
   if (!firestoreDb) {
     res.status(503).json({ error: 'Firestore not available.' });
     return;
@@ -11243,45 +11234,14 @@ app.post('/api/auth/reset-password', async (req, res) => {
   res.json({ success: true, user: getSafeUser(users.find((u) => u.id === user.id)!), token });
 });
 
-// First-run admin setup: sets the admin password. Public, but ONLY works when
-// the admin account has no password yet — it becomes a no-op forever after.
-app.post('/api/auth/setup', async (req, res) => {
-  const { email, newPassword } = req.body;
-  if (!email || !newPassword || String(newPassword).trim().length < 8) {
-    return res.status(400).json({ error: 'A password of at least 8 characters is required.' });
-  }
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
-  if (!user) {
-    return res.status(404).json({ error: 'Account not found.' });
-  }
-  if (user.role !== 'admin' || user.password) {
-    return res.status(403).json({ error: 'Setup is already complete.' });
-  }
-
-  // Hash BEFORE the transaction (CPU-heavy).
-  const newHash = await hashPassword(String(newPassword).trim());
-
-  const committed = await commitOrRespond(
-    req, res,
-    (freshDoc) => {
-      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
-      const freshUser = freshUsers.find((u) => u.id === user.id);
-      if (!freshUser) return { conflict: 'Account not found.' };
-      // Setup must still be pending in fresh data — if a password already
-      // exists, someone else completed setup first.
-      if (freshUser.role !== 'admin' || freshUser.password) {
-        return { conflict: 'Setup is already complete.' };
-      }
-      const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
-      return { doc: { ...freshDoc, users: newUsers }, result: { userId: user.id } };
-    },
-    { label: 'auth-setup' }
-  );
-  if (!committed) return;
-
-  const token = signToken(user.id);
-  res.json({ success: true, user: getSafeUser(users.find((u) => u.id === user.id)!), token });
+// First-run admin setup — disabled in 8i. It was public and set a password on
+// ANY admin account that had none, which a stranger could claim (e.g. after
+// the seed admin was re-created without a password). "No password stored" is
+// not proof of who is asking, so public bootstrap is closed for every request:
+// no state is read or written. First-run bootstrap moves to a separately
+// reviewed operator workflow; forgotten passwords use the reset-code flow.
+app.post('/api/auth/setup', (req, res) => {
+  res.status(403).json({ error: 'Setup is already complete.' });
 });
 
 // Change Password Endpoint — requires a valid session; the caller can only

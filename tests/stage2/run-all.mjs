@@ -14,17 +14,17 @@
  */
 export async function runAll(baseUrl, extraCtx = {}) {
   // Authenticate as the default admin user for all test requests.
-  // The seed admin (kenan@hartfordkashrut.org) starts with no password;
-  // /api/auth/setup sets it on first use.
-  const setupRes = await fetch(`${baseUrl}/api/auth/setup`, {
+  // The seed admin (kenan@hartfordkashrut.org, usr_admin) starts with no
+  // password. Public first-run setup is closed since 8i, so the harness sets
+  // it through the test-only endpoint (test mode only).
+  const setupRes = await fetch(`${baseUrl}/api/__test__/set-password`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'kenan@hartfordkashrut.org', newPassword: 'stage2-test-password' }),
+    body: JSON.stringify({ userId: 'usr_admin', password: 'stage2-test-password' }),
   });
-  // 200 = setup done; 403 = already set up (from a previous run); both fine.
-  if (setupRes.status !== 200 && setupRes.status !== 403) {
+  if (setupRes.status !== 200) {
     const t = await setupRes.text();
-    throw new Error(`auth setup failed: ${setupRes.status} ${t}`);
+    throw new Error(`test password set failed: ${setupRes.status} ${t}`);
   }
   const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
     method: 'POST',
@@ -105,6 +105,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-39-copy-event.mjs')).default,
     (await import('./test-40-any-time-tasks.mjs')).default,
     (await import('./test-41-admin-export-scope.mjs')).default,
+    (await import('./test-42-platform-routes.mjs')).default,
   ];
 
   const results = [];
