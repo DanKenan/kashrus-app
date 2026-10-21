@@ -1,0 +1,276 @@
+{
+ "kiosk": {
+  "inv": [
+   "Kiosk tablets",
+   "Pair a tablet to one venue, or unpair it.",
+   "Pair a tablet",
+   "Code",
+   "Venue",
+   "Beth El Social Hall — Main Ballroom (upstairs)",
+   "Riverside Kitchen",
+   "Tablet name",
+   "(optional)",
+   "Pair tablet",
+   "Paired tablets",
+   "Kitchen tablet (back door)",
+   "· Last seen Just now",
+   "Unpair",
+   "aria-label=Close kiosk tablets",
+   "placeholder=ABC234",
+   "placeholder=Kitchen tablet",
+   "option=v1",
+   "option=v2"
+  ]
+ },
+ "kioskFlow": {
+  "fetch": [
+   [
+    "POST",
+    "/api/kiosk/devices/pair",
+    {
+     "code": "XYZ789",
+     "venueId": "v2",
+     "name": "Bakery tablet"
+    }
+   ],
+   [
+    "DELETE",
+    "/api/kiosk/devices/d1",
+    null
+   ]
+  ]
+ },
+ "kioskEmpty": {
+  "inv": [
+   "Kiosk tablets",
+   "Pair a tablet to one venue, or unpair it.",
+   "Pair a tablet",
+   "Code",
+   "Venue",
+   "Beth El Social Hall — Main Ballroom (upstairs)",
+   "Riverside Kitchen",
+   "Tablet name",
+   "(optional)",
+   "Pair tablet",
+   "Paired tablets",
+   "No tablets are paired yet.",
+   "aria-label=Close kiosk tablets",
+   "placeholder=ABC234",
+   "placeholder=Kitchen tablet",
+   "option=v1",
+   "option=v2"
+  ]
+ },
+ "code": {
+  "inv": [
+   "Kiosk code for Moshe Klein",
+   "Staff tap their name on the kiosk tablet and enter this code.",
+   "Code (4–6 digits)",
+   "Generate",
+   "Save code",
+   "Phone (optional, for sending the code)",
+   "Save phone",
+   "Outside the US, start with + and the country code. Only admins and the venue's coordinator see it.",
+   "aria-label=Kiosk code for Moshe Klein",
+   "aria-label=Close",
+   "placeholder=••••",
+   "title=Make up a random code",
+   "placeholder=(860) 555-0123"
+  ]
+ },
+ "codeShown": {
+  "inv": [
+   "Moshe's kiosk code",
+   "Shown only now. Send it, then tap Done.",
+   "If it's forgotten later, tap Reset code to make a new one.",
+   "WhatsApp",
+   "SMS",
+   "Copy",
+   "Done",
+   "aria-label=Kiosk code for Moshe Klein",
+   "aria-label=Close"
+  ]
+ },
+ "codeHas": {
+  "inv": [
+   "Kiosk code for Moshe Klein",
+   "A code is set. Saving a new one replaces it, and the old one stops working.",
+   "Code (4–6 digits)",
+   "Generate",
+   "Save code",
+   "Remove code",
+   "aria-label=Kiosk code for Moshe Klein",
+   "aria-label=Close",
+   "placeholder=••••",
+   "title=Make up a random code"
+  ]
+ },
+ "codeRemoveAsk": {
+  "inv": [
+   "Kiosk code for Moshe Klein",
+   "A code is set. Saving a new one replaces it, and the old one stops working.",
+   "Code (4–6 digits)",
+   "Generate",
+   "Save code",
+   "Remove the code? Moshe can't use the kiosk until a new one is set.",
+   "Keep",
+   "Remove",
+   "aria-label=Kiosk code for Moshe Klein",
+   "aria-label=Close",
+   "placeholder=••••",
+   "title=Make up a random code"
+  ]
+ },
+ "codeCalls": {
+  "calls": [
+   [
+    "save",
+    4
+   ],
+   "close",
+   "remove2",
+   "close2",
+   [
+    "phone",
+    "+18605550199"
+   ]
+  ]
+ },
+ "confirm_danger": {
+  "inv": [
+   "Delete \"Kiddush (past)\"?",
+   "This cannot be undone. בס״ד",
+   "Keep it",
+   "Yes, delete"
+  ]
+ },
+ "confirm_danger_calls": {
+  "calls": [
+   "confirm",
+   "cancel"
+  ]
+ },
+ "confirm_warning": {
+  "inv": [
+   "Delete \"Kiddush (past)\"?",
+   "This cannot be undone. בס״ד",
+   "Keep it",
+   "Yes, delete"
+  ]
+ },
+ "confirm_warning_calls": {
+  "calls": [
+   "confirm",
+   "cancel"
+  ]
+ },
+ "confirm_primary": {
+  "inv": [
+   "Delete \"Kiddush (past)\"?",
+   "This cannot be undone. בס״ד",
+   "Keep it",
+   "Yes, delete"
+  ]
+ },
+ "confirm_primary_calls": {
+  "calls": [
+   "confirm",
+   "cancel"
+  ]
+ },
+ "changePw": {
+  "inv": [
+   "Change Password",
+   "Update credentials for Yossi Abramowitz-Goldberger",
+   "Current Password",
+   "New Password (min 6 characters)",
+   "Confirm New Password",
+   "Show passwords",
+   "Cancel",
+   "Save New Password",
+   "placeholder=Enter current password",
+   "placeholder=Enter new password",
+   "placeholder=Re-enter new password"
+  ]
+ },
+ "changePwFlow": {
+  "fetch": [
+   [
+    "POST",
+    "/api/auth/change-password",
+    {
+     "email": "admin@test.local",
+     "currentPassword": "oldpass1",
+     "newPassword": "newpass12"
+    }
+   ]
+  ],
+  "calls": [
+   "Password changed successfully."
+  ]
+ },
+ "changePwDone": {
+  "inv": [
+   "Change Password",
+   "Update credentials for Yossi Abramowitz-Goldberger",
+   "Password Updated",
+   "Your password has been changed successfully."
+  ]
+ },
+ "forgot1": {
+  "inv": [
+   "Reset Password",
+   "Enter your email. Your agency admin will receive a reset code and pass it to you.",
+   "Send Reset Code",
+   "placeholder=you@example.com"
+  ]
+ },
+ "forgot2": {
+  "inv": [
+   "Reset Password",
+   "Enter the 6-digit code your admin gave you. It expires in 15 minutes.",
+   "Verify Code",
+   "← Back",
+   "placeholder=123456"
+  ]
+ },
+ "forgot3": {
+  "inv": [
+   "Reset Password",
+   "Code verified. Set your new password.",
+   "Setting a new password signs you out on your other devices.",
+   "Set New Password",
+   "placeholder=New password (min 8 characters)",
+   "placeholder=Confirm new password"
+  ]
+ },
+ "forgotFlow": {
+  "fetch": [
+   [
+    "POST",
+    "/api/auth/forgot-password",
+    {
+     "email": "admin@test.local"
+    }
+   ],
+   [
+    "POST",
+    "/api/auth/verify-reset-code",
+    {
+     "email": "admin@test.local",
+     "code": "654321"
+    }
+   ],
+   [
+    "POST",
+    "/api/auth/reset-password",
+    {
+     "email": "admin@test.local",
+     "resetToken": "rt",
+     "newPassword": "brandnew99"
+    }
+   ]
+  ],
+  "calls": []
+ }
+}
