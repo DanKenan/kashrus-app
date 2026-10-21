@@ -7816,6 +7816,13 @@ if (isTestMode()) {
     identityMigrationBypassPlanAtBatch = Number.isInteger(n) && n > 0 ? n : null;
     res.json({ ok: true, atBatch: identityMigrationBypassPlanAtBatch });
   });
+  // The next migrator call stops after `maxBatches` batches ('batch-cap'), once.
+  app.post('/api/__test__/identity-migration-batch-cap', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const n = Number((req.body || {}).maxBatches);
+    identityMigrationMaxBatchesOverride = Number.isInteger(n) && n > 0 ? n : null;
+    res.json({ ok: true, maxBatches: identityMigrationMaxBatchesOverride });
+  });
   // Write or delete one people/emails doc directly (simulates history,
   // corruption and races in the emulator). data null = delete.
   app.post('/api/__test__/identity-doc', async (req, res) => {
@@ -9338,6 +9345,7 @@ app.post('/api/admin/migrate-copy', async (req, res) => {
  */
 let identityMigrationInterruptAfter: number | null = null; // test hook only (isTestMode)
 let identityMigrationBypassPlanAtBatch: number | null = null; // test hook only: exercises the final guard
+let identityMigrationMaxBatchesOverride: number | null = null; // test hook only: exercises 'batch-cap' (one call)
 app.post('/api/admin/identity-migration', async (req, res) => {
   const caller = requireAdmin(req, res);
   if (!caller) return;
@@ -9406,7 +9414,7 @@ app.post('/api/admin/identity-migration', async (req, res) => {
     }
 
     while (!exhausted) {
-      if (batches >= mig.MAX_BATCHES_PER_CALL) {
+      if (batches >= (isTestMode() && identityMigrationMaxBatchesOverride !== null ? identityMigrationMaxBatchesOverride : mig.MAX_BATCHES_PER_CALL)) {
         stopReason = 'batch-cap';
         break;
       }
@@ -9525,6 +9533,7 @@ app.post('/api/admin/identity-migration', async (req, res) => {
   } catch (e: any) {
     if (e?.testInterrupt) {
       identityMigrationBypassPlanAtBatch = null;
+      identityMigrationMaxBatchesOverride = null;
       res.status(500).json({ error: 'interrupted (test hook)', nextCursor: cursor, batches });
       return;
     }
@@ -9563,17 +9572,19 @@ app.post('/api/admin/identity-migration', async (req, res) => {
     }
     conflicts = finalConflicts;
     blocked = mig.dedupeConflicts(finalConflicts).length;
-    if (!apply) stopReason = 'dry-run-complete';
-    else if (pending > 0) stopReason = 'rescan';
-    else if (blocked > 0) stopReason = 'blocked';
-    else stopReason = 'done';
+    // Signed four-state contract: done | batch-cap | blocked | aborted.
+    // stopReason says why the walk ended; complete is the only "nothing left"
+    // signal (dry-run results and late work are told apart by apply/pending).
+    stopReason = blocked > 0 ? 'blocked' : 'done';
   }
-  if (isTestMode()) identityMigrationBypassPlanAtBatch = null; // one call only
+  if (isTestMode()) { identityMigrationBypassPlanAtBatch = null; identityMigrationMaxBatchesOverride = null; } // one call only
   const deduped = mig.dedupeConflicts(conflicts as any);
   res.json({
     step,
     apply,
-    complete: apply && stopReason === 'done',
+    // true only when the final read found no remaining work AND no conflicts
+    // (a dry-run with work to do is stopReason 'done', complete false, pending > 0).
+    complete: exhausted && stopReason === 'done' && pending === 0 && blocked === 0,
     stopReason,
     ...(abortReason ? { abortReason } : {}),
     nextCursor: exhausted && stopReason !== 'aborted' ? null : cursor,

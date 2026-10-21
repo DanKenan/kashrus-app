@@ -19,6 +19,8 @@
  *  - an unmigrated row never owned a people doc, so an existing people/{row.id}
  *    (active or retired) is another identity's: conflict 'person-doc-exists';
  *  - a retired people doc is never revived: conflict 'person-doc-retired';
+ *  - a people doc whose embedded id is another person's (or whose status is
+ *    unknown) is never overwritten by repair: conflict 'person-doc-mismatch';
  *  - an emails mapping active for another person is never taken over:
  *    conflict 'email-active-other-person'.
  * Conflicts are reported as user id + reason code only (no emails, names or
@@ -40,7 +42,8 @@ export type ConflictReason =
   | 'email-duplicate'
   | 'email-active-other-person'
   | 'person-doc-exists'
-  | 'person-doc-retired';
+  | 'person-doc-retired'
+  | 'person-doc-mismatch';
 
 export interface Conflict {
   userId: string;
@@ -216,6 +219,13 @@ export function planRepairBatch(
       conflicts.push({ userId: row.id, reason: 'person-doc-retired' });
       continue;
     }
+    if (person && (person.id !== pid || person.status !== 'active')) {
+      // The document at people/{personId} does not carry this identity (its
+      // embedded id is another person's, or its status is not one we know).
+      // Never "repair" it by overwriting: report and write nothing.
+      conflicts.push({ userId: row.id, reason: 'person-doc-mismatch' });
+      continue;
+    }
     const e = usableEmail(row);
     const k = e ? emailKey(e) : '';
     const mapping = k ? emailDocs.get(k) || null : null;
@@ -229,8 +239,9 @@ export function planRepairBatch(
     }
     const name = typeof row.name === 'string' ? row.name : '';
     const rowWrites: ProjectionWrite[] = [];
-    const personStale =
-      !person || person.id !== pid || person.name !== name || person.primaryEmail !== e || person.status !== 'active';
+    // person is absent, or bound (id === pid, status active): only name and
+    // primaryEmail can be stale.
+    const personStale = !person || person.name !== name || person.primaryEmail !== e;
     if (personStale) {
       rowWrites.push({
         collection: 'people',

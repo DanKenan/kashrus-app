@@ -118,7 +118,15 @@ export default {
       assert(!w['people/r4'] && !w['people/r5'] && !w[`emails/${emailKey('r5@x.com')}`], 'nothing written for conflicted rows');
       const again = mig.planRepairBatch(doc, [r2], people, emails, now);
       assert(again.writes.length === 0 && again.ok === 1, 'nothing missing → zero writes');
-      console.log('  ✓ repair planning: missing/stale only, 8b shapes, retired person never revived, no mapping takeover, history kept');
+      // a people doc at people/{personId} carrying ANOTHER identity (embedded id
+      // differs) or an unknown status → 'person-doc-mismatch', nothing written
+      const r7 = row('r7', 'r7@x.com', { personId: 'r7' });
+      const r8 = row('r8', 'r8@x.com', { personId: 'r8' });
+      const peopleX = new Map([['r7', P('someone-else', 'x@else.test')], ['r8', P('r8', 'r8@x.com', { status: 'frozen' })]]);
+      const mx = mig.planRepairBatch({ users: [r7, r8] }, [r7, r8], peopleX, new Map(), now);
+      const byX = Object.fromEntries(mx.conflicts.map((x) => [x.userId, x.reason]));
+      assert(byX.r7 === 'person-doc-mismatch' && byX.r8 === 'person-doc-mismatch' && mx.writes.length === 0 && mx.repaired.length === 0, `mismatch ${JSON.stringify(byX)} writes ${mx.writes.length}`);
+      console.log('  ✓ repair planning: missing/stale only, 8b shapes, retired person never revived, foreign people doc never overwritten, no mapping takeover, history kept');
     }
 
     // --- dual-write final guard ---

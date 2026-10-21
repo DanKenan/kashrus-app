@@ -24,6 +24,12 @@
  *    reports 1 and writes nothing; apply repairs it with the monolith version
  *    unchanged; a clean rerun writes nothing; a retired people doc of a bound
  *    row is never revived ('person-doc-retired')
+ *  8b repair never overwrites a people doc carrying another identity
+ *    ('person-doc-mismatch', byte-identical on dry-run and apply); a bound
+ *    person's stale name still repairs in place
+ *  R response contract: stopReason only done | batch-cap | blocked | aborted
+ *    (dry-run, batch-cap via test hook, blocked, completed, aborted covered);
+ *    complete false whenever work or conflicts remain
  *  9 coordinator / mashgiach → 403, kiosk token refused; responses carry ids
  *    and reason codes only (no email addresses); agency slug backfilled once
  */
@@ -96,9 +102,19 @@ export default {
     r = await migrate('a', { step: 'rows' });
     assert(r.status === 200, `dry-run ${r.status} ${r.text}`);
     noEmails(r, 'dry-run');
-    assert(r.json.apply === false && r.json.stopReason === 'dry-run-complete' && r.json.complete === false, `dry-run shape ${r.text}`);
+    // signed contract: a dry-run that walked to the end is 'done'; complete is
+    // false because work remains (pending > 0).
+    assert(r.json.apply === false && r.json.stopReason === 'done' && r.json.complete === false && r.json.nextCursor === null, `dry-run shape ${r.text}`);
+    assert(['done', 'batch-cap', 'blocked', 'aborted'].includes(r.json.stopReason), 'stopReason outside the signed four');
     assert(r.json.counts.rowsMigrated === 250 && r.json.pending === 250 && r.json.blocked === 0 && r.json.batches === 3, `dry-run counts ${r.text}`);
     assert(r.json.slugBackfill === 'would-set', `slug dry-run ${r.json.slugBackfill}`);
+    // batch-cap (test hook lowers the 10-batch cap to 1 for one call): stops
+    // after batch 1 with the cursor, complete false, nothing written.
+    await hook('identity-migration-batch-cap', { maxBatches: 1 });
+    r = await migrate('a', { step: 'rows' });
+    assert(r.status === 200 && r.json.stopReason === 'batch-cap' && r.json.complete === false && r.json.batches === 1 && r.json.nextCursor === uid('a', 99) && r.json.counts.rowsMigrated === 99, `batch-cap dry-run ${r.text}`);
+    r = await migrate('a', { step: 'rows', cursor: uid('a', 99) });
+    assert(r.status === 200 && r.json.stopReason === 'done' && r.json.batches === 2 && r.json.counts.rowsMigrated === 151 && r.json.complete === false, `batch-cap resume ${r.text}`);
     r = await migrate('a', { step: 'rows', apply: 'true' });
     assert(r.status === 200 && r.json.apply === false, `apply "true" must be a dry run ${r.text}`);
     assert((await ctx.getVersion()) === v0, 'dry-run changed the version');
@@ -211,7 +227,7 @@ export default {
     await hook('identity-doc', { collection: 'people', id: uid('a', 7), data: null });
     v0 = await ctx.getVersion();
     r = await migrate('a', { step: 'repair' });
-    assert(r.status === 200 && r.json.counts.projectionsRepaired === 1 && r.json.pending === 1 && r.json.stopReason === 'dry-run-complete', `repair dry-run ${r.text}`);
+    assert(r.status === 200 && r.json.counts.projectionsRepaired === 1 && r.json.pending === 1 && r.json.stopReason === 'done' && r.json.complete === false, `repair dry-run ${r.text}`);
     b = await bulk([uid('a', 7)], []);
     assert(b.people[uid('a', 7)] === null, 'repair dry-run wrote');
     r = await migrate('a', { step: 'repair', apply: true });
@@ -228,6 +244,25 @@ export default {
     b = await bulk([uid('a', 7)], []);
     assert(b.people[uid('a', 7)].status === 'retired', 'retired person revived by repair');
     await hook('identity-doc', { collection: 'people', id: uid('a', 7), data: { ...pRet, status: 'active', retiredAt: undefined } });
+
+    // repair never overwrites a people doc that carries ANOTHER identity
+    // (active, embedded id of someone else) → 'person-doc-mismatch', byte-identical.
+    const foreign = { id: `person-other-${ts}`, name: 'Someone Else', primaryEmail: 'someone@else.test', status: 'active', createdAt: 'y', _v: 4 };
+    await hook('identity-doc', { collection: 'people', id: uid('a', 8), data: foreign });
+    const before8 = JSON.stringify((await bulk([uid('a', 8)], [])).people[uid('a', 8)]);
+    for (const apply of [false, true]) {
+      r = await migrate('a', { step: 'repair', apply });
+      assert(r.status === 200 && r.json.stopReason === 'blocked' && r.json.complete === false && r.json.conflicts.some((c) => c.userId === uid('a', 8) && c.reason === 'person-doc-mismatch'), `mismatch ${apply} ${r.text}`);
+      noEmails(r, `mismatch ${apply}`);
+      assert(JSON.stringify((await bulk([uid('a', 8)], [])).people[uid('a', 8)]) === before8, `foreign people doc changed by repair (apply ${apply})`);
+    }
+    assert((await ctx.getVersion()) === v0, 'mismatch repair wrote the monolith');
+    // ordinary stale fields on a correctly bound person still repair
+    await hook('identity-doc', { collection: 'people', id: uid('a', 8), data: { id: uid('a', 8), name: 'old name', primaryEmail: em('a', 8), status: 'active', createdAt: 'z', _v: 2 } });
+    r = await migrate('a', { step: 'repair', apply: true });
+    assert(r.json.stopReason === 'done' && r.json.complete === true && r.json.counts.projectionsRepaired === 1, `bound stale repair ${r.text}`);
+    b = await bulk([uid('a', 8)], []);
+    assert(b.people[uid('a', 8)].name === rowOf(await ctx.getDoc(), uid('a', 8)).name && b.people[uid('a', 8)]._v === 3 && b.people[uid('a', 8)].createdAt === 'z', 'bound stale person not repaired in place');
 
     // bad input
     r = await migrate('a', { step: 'everything', apply: true });
