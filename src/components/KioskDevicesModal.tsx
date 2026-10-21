@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Tablet, X } from 'lucide-react';
+import { Tablet, X, AlertTriangle, Check, Unlink } from 'lucide-react';
 import { User, Venue } from '../types';
 import { apiFetch } from '../lib/api';
 import { realtimeSocket } from '../lib/socketClient';
@@ -163,21 +163,21 @@ export const KioskDevicesModal: React.FC<KioskDevicesModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1a120a]/60 backdrop-blur-xs overflow-y-auto">
-      <div className="bg-surface rounded-2xl w-full max-w-2xl tactile-4 border border-line my-8 overflow-hidden flex flex-col max-h-[90vh] animate-slide-up">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-scrim backdrop-blur-sm overflow-y-auto">
+      <div className="bg-surface rounded-2xl w-full max-w-2xl e3 border border-line my-8 overflow-hidden flex flex-col max-h-[90vh] animate-slide-up">
         <div className="flex items-center justify-between px-6 py-4 border-b border-line shrink-0">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-gold-wash text-gold-deep">
+            <div className="p-2 rounded-xl bg-sunken text-ink-soft">
               <Tablet className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base font-bold text-ink">Kiosk tablets</h2>
-              <p className="text-xs text-ink-faint">Pair a tablet to one venue, or unpair it.</p>
+              <p className="text-xs text-ink-soft">Pair a tablet to one venue, or unpair it.</p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-2 rounded-xl text-ink-soft hover:bg-sunken transition cursor-pointer"
+            className="w-11 h-11 shrink-0 inline-flex items-center justify-center rounded-lg transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
             aria-label="Close kiosk tablets"
           >
             <X className="w-5 h-5" />
@@ -195,7 +195,7 @@ export const KioskDevicesModal: React.FC<KioskDevicesModalProps> = ({
                   onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))}
                   placeholder="ABC234"
                   autoComplete="off"
-                  className="w-full text-sm px-3 py-2 rounded-xl border border-line bg-sunken text-ink uppercase tracking-[0.2em] focus:outline-none focus:border-gold"
+                  className="w-full text-base px-3 py-2 rounded-xl border border-line-control bg-sunken text-ink uppercase tracking-[0.2em] focus:outline-none focus:border-gold"
                 />
               </label>
               <label className="block">
@@ -208,7 +208,7 @@ export const KioskDevicesModal: React.FC<KioskDevicesModalProps> = ({
                   <select
                     value={venueId}
                     onChange={(e) => setVenueId(e.target.value)}
-                    className="w-full text-sm px-3 py-2 rounded-xl border border-line bg-sunken text-ink focus:outline-none focus:border-gold"
+                    className="w-full text-base px-3 py-2 rounded-xl border border-line-control bg-sunken text-ink focus:outline-none focus:border-gold"
                   >
                     {venues.map((v) => (
                       <option key={v.id} value={v.id}>{v.name}</option>
@@ -218,20 +218,20 @@ export const KioskDevicesModal: React.FC<KioskDevicesModalProps> = ({
               </label>
             </div>
             <label className="block">
-              <span className="block text-xs font-bold text-ink-soft mb-1">Tablet name <span className="font-normal text-ink-faint">(optional)</span></span>
+              <span className="block text-xs font-bold text-ink-soft mb-1">Tablet name <span className="font-normal text-ink-soft">(optional)</span></span>
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value.slice(0, 40))}
                 placeholder="Kitchen tablet"
-                className="w-full text-sm px-3 py-2 rounded-xl border border-line bg-sunken text-ink focus:outline-none focus:border-gold"
+                className="w-full text-base px-3 py-2 rounded-xl border border-line-control bg-sunken text-ink focus:outline-none focus:border-gold"
               />
             </label>
-            {error && <p className="text-sm font-bold text-red-600">{error}</p>}
-            {message && <p className="text-sm font-bold text-emerald-600">{message}</p>}
+            {error && <p className="text-sm bg-bad-bg border border-bad text-bad rounded-xl p-3 flex items-start gap-2"><AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" /><span>{error}</span></p>}
+            {message && <p className="text-sm bg-ok-bg text-ok rounded-xl p-3 flex items-start gap-2"><Check className="w-4 h-4 shrink-0" aria-hidden="true" /><span>{message}</span></p>}
             <button
               type="submit"
               disabled={busy}
-              className="px-4 py-2 rounded-xl bg-gold hover:bg-gold-deep text-white text-xs font-bold transition cursor-pointer disabled:opacity-40"
+              className="px-4 py-2 rounded-xl bg-gold-deep text-paper text-xs font-bold transition cursor-pointer disabled:opacity-40"
             >
               Pair tablet
             </button>
@@ -242,22 +242,27 @@ export const KioskDevicesModal: React.FC<KioskDevicesModalProps> = ({
             {loading ? (
               <p className="text-sm text-ink-soft animate-pulse">Loading…</p>
             ) : devices.length === 0 ? (
-              <p className="text-sm text-ink-soft">No tablets are paired yet.</p>
+              <div data-empty-state className="text-sm text-ink-soft space-y-2">
+                <Tablet className="w-5 h-5" aria-hidden="true" />
+                <p>No tablets are paired yet.</p>
+                <p>Pair a tablet with the code shown on its screen.</p>
+              </div>
             ) : (
               <div className="space-y-2">
                 {devices.map((device) => (
                   <div key={device.id} className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl bg-sunken border border-line">
                     <div className="min-w-0">
                       <p className="text-sm font-bold text-ink truncate">{device.name}</p>
-                      <p className="text-xs text-ink-faint truncate">
+                      <p className="text-xs text-ink-soft truncate">
                         {device.venueName} · Last seen {relativeLastSeen(device.lastSeenAt)}
                       </p>
                     </div>
                     <button
                       onClick={() => void handleUnpair(device)}
                       disabled={busy}
-                      className="px-3 py-1.5 rounded-xl text-xs font-bold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition cursor-pointer disabled:opacity-40 shrink-0"
+                      className="px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-40 shrink-0 inline-flex items-center gap-2 bg-surface border border-line-control text-bad hover:bg-sunken"
                     >
+                      <Unlink className="w-4 h-4" aria-hidden="true" />
                       Unpair
                     </button>
                   </div>
