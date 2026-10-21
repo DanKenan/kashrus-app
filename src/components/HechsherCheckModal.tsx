@@ -39,7 +39,7 @@ export const HechsherCheckModal: React.FC<HechsherCheckModalProps> = ({
   return (
     <div className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div className="absolute inset-0 bg-scrim backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full sm:max-w-lg bg-surface border border-line rounded-2xl e3 max-h-[92vh] overflow-y-auto">
+      <div className="relative w-full sm:max-w-lg bg-surface border border-line rounded-t-2xl sm:rounded-2xl e3 max-h-[92vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-line/70 sticky top-0 bg-surface z-10">
           <div className="flex items-center gap-2">
@@ -68,7 +68,7 @@ export const HechsherCheckModal: React.FC<HechsherCheckModalProps> = ({
             /* Capture step */
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="w-full flex flex-col items-center justify-center gap-3 py-10 px-4 rounded-2xl border-2 border-dashed active:scale-[0.99] transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
+              className="w-full flex flex-col items-center justify-center gap-3 py-10 px-4 rounded-2xl border-2 border-dashed active:scale-[0.99] transition cursor-pointer bg-surface border-line-control text-ink hover:bg-sunken"
             >
               <span className="w-14 h-14 rounded-2xl bg-sunken flex items-center justify-center e2">
                 <Camera className="w-7 h-7 text-ink" />
@@ -84,7 +84,7 @@ export const HechsherCheckModal: React.FC<HechsherCheckModalProps> = ({
               <div className="grid grid-cols-2 gap-3">
                 {/* Photo */}
                 <div className="rounded-2xl overflow-hidden border border-line bg-sunken">
-                  <p className="text-sm font-bold uppercase tracking-wider text-ink-soft px-3 pt-2">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-ink-soft px-3 pt-2">
                     Label photo
                   </p>
                   <img
@@ -95,7 +95,7 @@ export const HechsherCheckModal: React.FC<HechsherCheckModalProps> = ({
                 </div>
                 {/* Approved record */}
                 <div className="rounded-2xl border border-line bg-sunken px-3 py-2 space-y-1.5">
-                  <p className="text-sm font-bold uppercase tracking-wider text-ink-soft">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-ink-soft">
                     Approved record
                   </p>
                   <p className="text-sm font-bold text-ink leading-tight">{ingredient.name}</p>
@@ -150,7 +150,7 @@ export const HechsherCheckModal: React.FC<HechsherCheckModalProps> = ({
             accept="image/*"
             capture="environment"
             onChange={handleFile}
-            className="hidden border bg-surface border-line-control rounded-lg text-base focus:ring-2 focus:ring-gold/40 focus:border-gold"
+            className="hidden"
             aria-hidden="true"
           />
         </div>

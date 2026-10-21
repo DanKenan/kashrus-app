@@ -172,7 +172,7 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
                 ? 'bg-bad-bg border-bad text-bad'
                 : 'bg-sunken border-line text-ink-soft'
             }`}>
-              <div className={`text-xl font-bold ${discrepancyCount > 0 ? 'text-bad ' : 'text-ink'}`}>
+              <div className={`text-xl font-bold ${discrepancyCount > 0 ? 'text-bad' : 'text-ink'}`}>
                 {discrepancyCount}
               </div>
               <div className="text-xs font-medium">
@@ -316,7 +316,7 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
                 type="checkbox"
                 checked={mashgiachSigned}
                 onChange={(e) => setMashgiachSigned(e.target.checked)}
-                className="w-4 h-4 accent-gold bg-surface border-line-control rounded-lg text-base focus:ring-2 focus:ring-gold/40 focus:border-gold"
+                className="w-4 h-4 accent-gold cursor-pointer"
               />
               <span>I hereby certify this report accurately reflects the physical state of the factory</span>
             </label>

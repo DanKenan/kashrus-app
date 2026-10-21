@@ -466,7 +466,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                         <tr 
                           key={item.id} 
                           className={`hover:bg-sunken/60 transition ${
-                            isVerified ? 'bg-ok-bg' : ''
+                            isVerified ? 'bg-ok-bg/40' : ''
                           }`}
                         >
                           <td className="py-3 px-3">
