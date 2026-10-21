@@ -652,7 +652,10 @@ export default function App() {
       } else if (msg.type === 'HISTORY_PRUNED' && msg.payload) {
         // 8r: history older than 7 days was removed on the server; replace
         // the list with the server's committed, per-recipient copy.
-        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(filterStaffVenue ? filterToVenue(msg.payload.historyLogs, currentVenue?.id) : msg.payload.historyLogs);
+        if (Array.isArray(msg.payload.historyLogs)) {
+          if (!filterStaffVenue) setHistoryLogs(msg.payload.historyLogs);
+          else setHistoryLogs(filterToVenue(msg.payload.historyLogs, currentVenue?.id));
+        }
       } else if (msg.type === 'AGENCY_UPDATED' && msg.payload?.agency?.id) {
         // Item 6: the agency zone decides "today" for venues without their own
         // zone — apply the confirmed change for the signed-in user's own
