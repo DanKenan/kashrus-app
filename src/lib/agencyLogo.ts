@@ -99,3 +99,26 @@ export async function resizeForLogo(file: File, deps: ResizeDeps = {}): Promise<
     throw new Error('That image is too large. Try a smaller or simpler image.');
   } finally { image.close?.(); }
 }
+
+/** Live fix (Oct 21): a session restored from localStorage (saved before #97)
+ * has no agencyLogoRev, so the logo feature stays hidden until the next login.
+ * The server's roster rows (INITIAL_STATE / USERS_UPDATED) carry the user's own
+ * row with the fresh agency fields; copy just those onto the signed-in user.
+ * Only fields the row actually has are copied (a kiosk roster row has none).
+ * Returns prev itself when nothing changes. */
+const SELF_AGENCY_FIELDS = ['agencyLogoRev', 'agencyName', 'agencyShortCode', 'agencySeal', 'agencyTimeZone'] as const;
+export function withFreshAgencyFields<T extends { id: string }>(prev: T | null, rows: unknown): T | null {
+  if (!prev || !Array.isArray(rows)) return prev;
+  const self = rows.find((r) => r && typeof r === 'object' && (r as { id?: unknown }).id === prev.id) as Record<string, unknown> | undefined;
+  if (!self) return prev;
+  let next: T | null = null;
+  for (const key of SELF_AGENCY_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(self, key)) continue;
+    const value = self[key];
+    if (key === 'agencyLogoRev' && value !== null && !validRev(value)) continue;
+    const had = Object.prototype.hasOwnProperty.call(prev, key);
+    if (had && (prev as Record<string, unknown>)[key] === value) continue;
+    next = { ...(next || prev), [key]: value };
+  }
+  return next || prev;
+}
