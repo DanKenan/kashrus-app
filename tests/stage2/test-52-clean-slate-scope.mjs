@@ -16,7 +16,9 @@
  *    legacy global flag true AND false; the stored global is never written
  *  6 restart: A stays cleared, B boots with its data
  *  7 gate: with STAGE2_TEST_MODE=false and no CLEAN_SLATE_ENABLED, Clean Slate
- *    is 403 CLEAN_SLATE_DISABLED (nothing written) and doc-merge is 404
+ *    is 403 CLEAN_SLATE_DISABLED (nothing written) and doc-merge is 404 with a
+ *    valid admin session (mock harness: exactly FIRESTORE_MOCK=true +
+ *    STAGE2_TEST_MODE=false; doc-merge is registered under isTestMode() only)
  */
 function assert(c, m) { if (!c) throw new Error(m); }
 const auth = (t) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' });
@@ -200,12 +202,22 @@ export default {
       assert((await venuesFlag(tAdminA)) === true && (await venuesFlag(tAdminB)) === false, 'after restart: A true, B false');
       const vb = await call('GET', '/api/venues', auth(tAdminB));
       assert((vb.json?.venues || []).some((v) => v.id === VB), 'B venue missing after restart');
+      // Same persistence as the rest of the suite. Mock harness: FIRESTORE_MOCK=true
+      // is already set, so this is exactly FIRESTORE_MOCK=true + STAGE2_TEST_MODE=false
+      // (the broad FIRESTORE_MOCK||isTestMode hook block is entered; doc-merge,
+      // registered under isTestMode() only, must not exist). Real emulator: test mode off.
+      const mockHarness = process.env.FIRESTORE_MOCK === 'true' || !process.env.FIRESTORE_EMULATOR_HOST;
+      const mode = mockHarness ? 'FIRESTORE_MOCK=true + STAGE2_TEST_MODE=false' : 'real emulator, STAGE2_TEST_MODE=false';
       await ctx.restartServer({ STAGE2_TEST_MODE: 'false' });
       try {
+        // the admin session is valid in this mode, so a 404 below is route
+        // registration, not an auth failure
+        const who = await call('GET', '/api/venues', auth(tAdminB));
+        assert(who.status === 200, `admin session must be valid with test mode off (${mode}), got ${who.status}`);
         const g = await call('POST', '/api/admin/clean-slate', auth(tAdminB), {});
-        assert(g.status === 403 && g.json?.code === 'CLEAN_SLATE_DISABLED', `gate off: ${g.status} ${g.text.slice(0, 120)}`);
+        assert(g.status === 403 && g.json?.code === 'CLEAN_SLATE_DISABLED', `gate off (${mode}): ${g.status} ${g.text.slice(0, 120)}`);
         const m = await call('POST', '/api/__test__/doc-merge', auth(tAdminB), { fields: { isDemoCleared: true } });
-        assert(m.status === 404, `doc-merge outside test mode must be 404, got ${m.status}`);
+        assert(m.status === 404, `doc-merge must be 404 (${mode}), got ${m.status}`);
       } finally {
         await ctx.restartServer();
       }

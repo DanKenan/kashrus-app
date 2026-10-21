@@ -7618,25 +7618,6 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     await docRef.set({ ...doc, users });
     res.json({ ok: true });
   });
-  // Item 8k (TEST ONLY): merge a few top-level fields straight into the
-  // stored doc (no route writes them this way); the next commit's hydrate
-  // picks them up. Covers the legacy app-wide isDemoCleared (true/false) and
-  // seeds the keyed kiosk/push/reset structures Clean Slate must scope.
-  app.post('/api/__test__/doc-merge', async (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    const db = firestoreDb;
-    if (!db) return res.status(503).json({ error: 'db unavailable' });
-    const fields = (req.body || {}).fields;
-    const allowed = ['isDemoCleared', 'kioskPairings', 'kioskPinLockouts', 'kioskPairingLimits', 'pushSubscriptions', 'passwordResets', 'passwordResetRateLimits'];
-    if (!fields || typeof fields !== 'object' || Object.keys(fields).some((k) => !allowed.includes(k))) {
-      return res.status(400).json({ error: `fields must be an object with keys from ${allowed.join(', ')}` });
-    }
-    const docRef = db.collection('app-state').doc('main');
-    const snap = await docRef.get();
-    const doc = (snap && snap.data && snap.data()) || {};
-    await docRef.set({ ...doc, ...fields });
-    res.json({ ok: true });
-  });
   // TEST ONLY: seed a media doc directly into the `media` collection so the
   // commit gates can be tested without GCS Storage (unavailable in mock and
   // emulator runs). test-26 uses it for the 2c media validation tests.
@@ -7875,6 +7856,25 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 // dedicated block separate from the FIRESTORE_MOCK endpoints — they must
 // never exist outside test mode, even with FIRESTORE_MOCK=true.
 if (isTestMode()) {
+  // Item 8k (TEST ONLY; isTestMode() only, never under FIRESTORE_MOCK alone): merge a few top-level fields straight into the
+  // stored doc (no route writes them this way); the next commit's hydrate
+  // picks them up. Covers the legacy app-wide isDemoCleared (true/false) and
+  // seeds the keyed kiosk/push/reset structures Clean Slate must scope.
+  app.post('/api/__test__/doc-merge', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const db = firestoreDb;
+    if (!db) return res.status(503).json({ error: 'db unavailable' });
+    const fields = (req.body || {}).fields;
+    const allowed = ['isDemoCleared', 'kioskPairings', 'kioskPinLockouts', 'kioskPairingLimits', 'pushSubscriptions', 'passwordResets', 'passwordResetRateLimits'];
+    if (!fields || typeof fields !== 'object' || Object.keys(fields).some((k) => !allowed.includes(k))) {
+      return res.status(400).json({ error: `fields must be an object with keys from ${allowed.join(', ')}` });
+    }
+    const docRef = db.collection('app-state').doc('main');
+    const snap = await docRef.get();
+    const doc = (snap && snap.data && snap.data()) || {};
+    await docRef.set({ ...doc, ...fields });
+    res.json({ ok: true });
+  });
   // TEST ONLY (8r; isTestMode() only, never under FIRESTORE_MOCK alone): reopen the hourly retention-sweep gate (next tick sweeps).
   app.post('/api/__test__/history-retention-gate', (req, res) => {
     lastRetentionSweepAt = null;
