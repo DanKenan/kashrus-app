@@ -18,7 +18,9 @@ const run = async function () {
   ok(J(venueScope(m({ venueAccess: ['vb'] }), V)) === J(['v1']), 'foreign venue never authorizes');
   ok(J(venueScope(m({ venueId: 'gone', venueAccess: ['gone2', 'vb'] }), V)) === J(['gone']), 'removed home + junk: home id as before, never another venue');
   ok(J(venueScope(m({ venueId: undefined, venueAccess: ['vb', 'zz'] }), V)) === J([]), 'no home + foreign/unknown = none');
-  ok(J(venueScope(m({ venueId: 'gone', venueAccess: ['v2'] }), V)) === J(['gone', 'v2']), 'removed home: only the explicit grant is added');
+  ok(J(venueScope(m({ venueId: 'gone', venueAccess: ['gone', 'v2'] }), V)) === J(['gone', 'v2']), 'removed home: only the explicit grant is added');
+  ok(J(venueScope(m({ venueId: 'v3', venueAccess: ['v1', 'v2'] }), V)) === J(['v3']), 'stale list written for another home grants nothing extra');
+  ok(J(venueScope(m({ venueId: undefined, venueAccess: ['v2'] }), V)) === J(['v2']), 'no home: granted venue only');
   ok(J(venueScope(m({ personId: undefined, venueAccess: ['v1', 'v2'] }), V)) === J(['v1']), 'unmigrated: home only');
   ok(venueScope({ role: 'admin', agencyId: 'A' }, V) === 'agency', 'admin agency');
   ok(J(venueScope(null, V)) === J([]) && J(venueScope({}, V)) === J([]), 'no user = none');
@@ -65,6 +67,8 @@ const run = async function () {
   let g8 = enforceIdentityFields([{ id: 'l1', role: 'mashgiach', venueId: 'v1' }], [{ id: 'l1', role: 'mashgiach', venueId: 'v1', venueAccess: ['v2'] }], ag, opt());
   ok(g8[0].venueAccess === undefined, 'unmigrated row carries no venueAccess');
   ok(J(mergeVenueAccess(undefined, ['v2', '', null, 'v2'])) === J(['v2']), 'merge without home');
+  let g9 = enforceIdentityFields([{ id: 'u9', personId: 'u9', role: 'coordinator', agencyId: 'A', venueId: 'v2', venueAccess: ['v1'] }], [{ id: 'u9', personId: 'u9', role: 'coordinator', agencyId: 'A', venueId: 'v2', venueAccess: ['v1'] }], ag, opt());
+  ok(J(g9[0].venueAccess) === J(['v2']), 'a stale stored list headed by another venue resets to [home]');
   console.log(`venue-scope: ${n}/${n} passed`);
 };
 export default { name: 'venue-scope (9a)', whatItProves: 'Multi-venue scope fails closed: home venue as before; extra venues only server-granted, current-agency; defaults to home; admins never cross agencies; coordinators share only real venues.', run };

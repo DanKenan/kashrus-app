@@ -149,7 +149,11 @@ export function enforceIdentityFields(
       const d = deriveIdentityFields(out, afterAgencies);
       const set = opts.venueAccessSetById?.get(row.id);
       if (set) out.venueAccess = mergeVenueAccess(out.venueId, set);
-      else if (prev && prev.personId && prev.venueId === out.venueId && Array.isArray(prev.venueAccess))
+      else if (
+        prev && prev.personId && prev.venueId === out.venueId && Array.isArray(prev.venueAccess) &&
+        // a stored list is home-first; one headed by another venue is stale → reset
+        (!out.venueId || prev.venueAccess[0] === out.venueId)
+      )
         out.venueAccess = mergeVenueAccess(out.venueId, prev.venueAccess);
       else out.venueAccess = d.venueAccess;
       out.isPrimaryAdmin = d.isPrimaryAdmin;

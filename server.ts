@@ -693,7 +693,16 @@ function requireAuthUser(req: any, res: any): UserProfile | null {
  */
 function personAtVenue(u: any, venueId: string | undefined | null): boolean {
   if (!u || typeof venueId !== 'string' || !venueId) return false;
-  const full = (u.personId === undefined && typeof u.id === 'string' && users.find((x: any) => x && x.id === u.id)) || u;
+  // The row's OWN role and home decide (a kiosk acting copy keeps its tablet
+  // venue); only the server-only list is borrowed from the cached row, and
+  // only when that row is the same person-state (same role and home).
+  let full: any = u;
+  if (u.personId === undefined && typeof u.id === 'string') {
+    const stored: any = users.find((x: any) => x && x.id === u.id);
+    if (stored && stored.personId && stored.role === u.role && stored.venueId === u.venueId) {
+      full = { ...u, personId: stored.personId, venueAccess: stored.venueAccess };
+    }
+  }
   const s = venueScopeFor(full as any);
   return s !== 'agency' && s.includes(venueId);
 }
@@ -4477,7 +4486,7 @@ function initialStateForSocket(meta: SocketMeta | undefined): any | null {
     historyLogs: (baseState.historyLogs || []).filter((h: any) => h.venueId === kioskVenueId),
     venues: (baseState.venues || []).filter((v: any) => v.id === kioskVenueId),
     users: (baseState.users || [])
-      .filter((u: any) => u && u.role !== 'admin' && personAtVenue(u, kioskVenueId))
+      .filter((u: any) => u && (u.venueId === kioskVenueId || personAtVenue(u, kioskVenueId)))
       .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role })),
     events: [],
     airtableConfigs: [],
@@ -4499,7 +4508,7 @@ function kioskFilterPayload(meta: SocketMeta, type: string, payload: any): any {
   const p = payload || {};
   const roster = (users: any[]) =>
     (users || [])
-      .filter((u: any) => u && u.role !== 'admin' && personAtVenue(u, venueId))
+      .filter((u: any) => u && (u.venueId === venueId || personAtVenue(u, venueId)))
       .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
   switch (type) {
     case 'USERS_UPDATED':
@@ -10622,7 +10631,7 @@ app.get('/api/users', (req, res) => {
   if ((req as any).kiosk === true) {
     const kioskVenueId = (req as any).kioskVenueId;
     const roster = users
-      .filter((u) => (u.agencyId || 'agency-hkc') === callerAgencyId(req) && u.role !== 'admin' && personAtVenue(u, kioskVenueId))
+      .filter((u) => (u.agencyId || 'agency-hkc') === callerAgencyId(req) && (u.venueId === kioskVenueId || personAtVenue(u, kioskVenueId)))
       .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
     return res.json({ users: roster });
   }

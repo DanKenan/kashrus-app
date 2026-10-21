@@ -46,6 +46,10 @@ export function venueScope(user: ScopeUser | null | undefined, venues: readonly 
   if (home && !valid.has(home) && (venues || []).some((v) => v && v.id === home)) home = null;
   const out = home ? [home] : [];
   if (!user.personId || !Array.isArray(user.venueAccess)) return out;
+  // A stored list is written home-first for the home it was granted under
+  // (identity.ts). A list whose head is not the current home is stale (written
+  // for another home, e.g. by a raw write) and grants nothing extra.
+  if (typeof user.venueId === 'string' && user.venueId && user.venueAccess[0] !== user.venueId) return out;
   // Extra venues: only server-granted ids of venues the person's agency owns NOW.
   for (const x of user.venueAccess) if (typeof x === 'string' && x && valid.has(x) && !out.includes(x)) out.push(x);
   return out;
