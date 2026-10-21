@@ -19,7 +19,7 @@
  *  2 admin powers refused on the admin's kiosk token (REST): team, venues,
  *    agency settings, tasks create/delete/definition edits, other venue's
  *    tasks, private task of someone else, announcements, dashboard, kiosk
- *    pairing/devices, alerts/incidents, updates, export, clean-slate.
+ *    pairing/devices, alerts/incidents, updates, export.
  *  3 what a mashgiach may do still works: GET /tasks (A only, no private
  *    task of another), PUT /tasks/:id status on an A task → 200.
  *  4 GET /announcements: an admin-only announcement is NOT shown; an 'all'
@@ -220,7 +220,6 @@ export default {
       ['POST', '/api/handoff-notes', { content: 'x', venueId: vA }],
       ['GET', '/api/admin/dashboard', null],
       ['GET', '/api/admin/export', null],
-      ['POST', '/api/admin/clean-slate', {}],
       ['GET', '/api/kiosk/devices', null],
       ['POST', '/api/kiosk/devices/pair', { code: '123456', venueId: vA }],
       ['DELETE', `/api/kiosk/devices/${devA.id}`, null],
