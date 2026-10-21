@@ -134,7 +134,12 @@ export default {
       rl: ((d.passwordResetRateLimits || {}).emailRequests || {})[E('mashB').toLowerCase()],
       wd: (d.venueWorkDates || {})[VB],
     });
-    const idDocs = async (k) => (await ctx.api('GET', `/api/__test__/identity-docs?personId=${encodeURIComponent(U(k))}&email=${encodeURIComponent(E(k))}`)).json;
+    // identity-docs also returns the monolith version (_v), which every commit
+    // bumps; compare only the projections themselves.
+    const idDocs = async (k) => {
+      const j = (await ctx.api('GET', `/api/__test__/identity-docs?personId=${encodeURIComponent(U(k))}&email=${encodeURIComponent(E(k))}`)).json || {};
+      return { people: j.people ?? null, emails: j.emails ?? null };
+    };
     const before = await ctx.getDoc();
     const bBefore = bSlice(before);
     const idB0 = J(await idDocs('mashB')), idAdminB0 = J(await idDocs('adminB')), idAdminA0 = J(await idDocs('adminA'));
@@ -178,8 +183,9 @@ export default {
 
     // ---- 2. B byte-identical; identity ----
     assert(bSlice(after) === bBefore, 'agency B data changed');
-    assert(J(await idDocs('mashB')) === idB0 && J(await idDocs('adminB')) === idAdminB0, 'B identity projections changed');
-    assert(J(await idDocs('adminA')) === idAdminA0, 'kept A admin projections changed');
+    const idB1 = J(await idDocs('mashB')), idAdminB1 = J(await idDocs('adminB')), idAdminA1 = J(await idDocs('adminA'));
+    assert(idB1 === idB0 && idAdminB1 === idAdminB0, `B identity projections changed: ${idB0.slice(0, 300)} -> ${idB1.slice(0, 300)} | ${idAdminB0.slice(0, 300)} -> ${idAdminB1.slice(0, 300)}`);
+    assert(idAdminA1 === idAdminA0, `kept A admin projections changed: ${idAdminA0.slice(0, 300)} -> ${idAdminA1.slice(0, 300)}`);
     const idMashA1 = await idDocs('mashA');
     assert(idMashA1.people?.status === 'retired', `removed user people doc not retired ${J(idMashA1.people)}`);
     assert(idMashA1.emails?.status === 'retired', `removed user emails doc not retired ${J(idMashA1.emails)}`);
