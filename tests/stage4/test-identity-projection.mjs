@@ -170,6 +170,20 @@ export default {
       threw = '';
       try { await dualWriteChangedEntities(mockTx(), mockDb, doc([ownerX()]), doc([ownerX(), row('z', 'p@x.com', { agencyId: 'ag-z' })])); } catch (e) { threw = e.message; }
       assert(/Duplicate email/.test(threw), `new shared email must abort with "Duplicate email", got "${threw}"`);
+      // [10D-RV1] B1: two DIFFERENT persons sharing one email (stored, untouched):
+      // a name-only edit writes the user doc but NO people/emails/usersByEmail
+      const zRow = row('z', 'p@x.com', { agencyId: 'ag-z', name: 'Z' });
+      tx = mockTx();
+      await dualWriteChangedEntities(tx, mockDb, doc([ownerX(), zRow]), doc([ownerX(), { ...zRow, name: 'Z renamed' }]));
+      assert(idWrites(tx).length === 0, `untouched email-shared problem: a name edit writes no projection ${J(idWrites(tx))}`);
+      assert(tx.writes.some((x) => x.collection === 'users' && x.id === 'z'), 'the user doc itself is still written');
+      // ... repairing it (z gets its own email) restores the projections in the same commit
+      tx = mockTx({ [`emails/${key}`]: { personId: 'x', status: 'active' } });
+      await dualWriteChangedEntities(tx, mockDb, doc([ownerX(), zRow]), doc([ownerX(), { ...zRow, email: 'z@x.com' }]));
+      const rw = idWrites(tx);
+      assert(rw.some((x) => x.collection === 'usersByEmail' && x.id === key && x.data?.userId === 'x'), `repair: p@x.com -> x ${J(rw)}`);
+      assert(rw.some((x) => x.collection === 'usersByEmail' && x.id === emailKey('z@x.com') && x.data?.userId === 'z'), 'repair: z@x.com -> z');
+      assert(rw.some((x) => x.collection === 'emails' && x.id === emailKey('z@x.com') && x.data?.personId === 'z'), 'repair: emails z');
       // newProjectionProblems: same problem, same shapes = tolerated
       const pb = identityProjection(bad, AG);
       const r = newProjectionProblems(pb, bad, pb, bad);

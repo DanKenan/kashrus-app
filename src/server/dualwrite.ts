@@ -90,9 +90,20 @@ export async function dualWriteChangedEntities(
   }
   const toleratedEmails = new Set<string>();
   const toleratedPersons = new Set<string>();
+  // [10D-RV1] B1: an email-shared problem names rows, not a person; every
+  // person owning one of its rows (before or after) is part of that untouched
+  // problem, so its people/emails projections are not written either.
+  const personOfRow = new Map<string, string>();
+  for (const u of [...(before.users || []), ...(after.users || [])]) {
+    if (u && typeof u.id === 'string' && typeof u.personId === 'string' && u.personId) personOfRow.set(u.id, u.personId);
+  }
   for (const p of tolerated) {
     if (p.email) toleratedEmails.add(p.email);
     if (p.personId) toleratedPersons.add(p.personId);
+    for (const id of p.rowIds) {
+      const pid = personOfRow.get(id);
+      if (pid) toleratedPersons.add(pid);
+    }
   }
 
   // usersByEmail: net lookup changes, at most one write per email key.
