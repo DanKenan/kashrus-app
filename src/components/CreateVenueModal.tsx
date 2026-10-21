@@ -115,29 +115,29 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   return (
     <div 
       id="create-venue-modal-overlay"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1a120a]/60 backdrop-blur-xs animate-fade-in overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-scrim backdrop-blur-sm animate-fade-in overflow-y-auto"
     >
-      <div className="bg-surface w-full max-w-2xl rounded-2xl tactile-4 animate-slide-up border border-line overflow-hidden my-8">
+      <div className="bg-surface w-full max-w-2xl rounded-2xl e3 animate-slide-up border border-line overflow-hidden my-8">
         
         {/* Modal Header */}
         <div className="flex items-center justify-between px-6 py-4.5 border-b border-line bg-sunken">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2">
+            <div className="w-10 h-10 rounded-xl bg-gold-wash text-gold-ink flex items-center justify-center e2">
               <Building2 className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base font-bold text-ink">
                 Set Up New Kosher Venue Platform
               </h2>
-              <p className="text-xs text-ink-soft">
+              <p className="text-sm text-ink-soft">
                 Create an isolated operational platform with mashgichim, owner audit portal, and compliance logs.
               </p>
             </div>
           </div>
-          <button
+          <button aria-label="Close"
             id="close-create-venue-modal-btn"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-ink-faint hover:text-ink hover:bg-sunken transition cursor-pointer"
+            className="w-11 h-11 inline-flex items-center justify-center rounded-lg text-ink-soft hover:bg-sunken shrink-0 cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -145,7 +145,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
 
         {/* Error notification */}
         {errorMessage && (
-          <div className="mx-6 mt-4 p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-xs text-rose-700 dark:text-rose-300">
+          <div className="mx-6 mt-4 p-3.5 rounded-xl bg-bad-bg border border-bad text-xs text-bad ">
             {errorMessage}
           </div>
         )}
@@ -155,7 +155,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
           
           {/* Section 1: Venue Details */}
           <div className="space-y-3.5">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-faint flex items-center gap-1.5">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-soft flex items-center gap-1.5">
               <Building2 className="w-3.5 h-3.5 text-gold-deep" />
               <span>1. Kosher Establishment Profile</span>
             </h3>
@@ -171,7 +171,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Establishment Name"
-                  className="w-full px-3.5 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                  className="w-full px-3.5 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>
 
@@ -185,7 +185,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   onChange={(e) => {
                     setCategory(e.target.value);
                   }}
-                  className="w-full px-3.5 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:border-gold focus:outline-none"
+                  className="w-full px-3.5 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 >
                   <option value="Industrial">Industrial / Factory Plant (Airtable & Audits)</option>
                   <option value="Food Service">Food Service</option>
@@ -197,7 +197,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
               </div>
 
               {category === 'Other' && (
-                <div className="sm:col-span-2 p-3.5 rounded-xl bg-gold-wash/60 border border-gold/40 tactile-1 space-y-1.5 animate-fade-in">
+                <div className="sm:col-span-2 p-3.5 rounded-xl bg-gold-wash/60 border border-gold/40 e1 space-y-1.5 animate-fade-in">
                   <div className="flex items-center justify-between">
                     <label 
                       htmlFor="venue-custom-category-input"
@@ -215,7 +215,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                     value={customCategory}
                     onChange={(e) => setCustomCategory(e.target.value)}
                     placeholder="Category Name"
-                    className="w-full px-3 py-2 text-xs rounded-lg bg-surface border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                    className="w-full px-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   />
                 </div>
               )}
@@ -225,13 +225,13 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   Address
                 </label>
                 <div className="relative">
-                  <MapPin className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
+                  <MapPin className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-soft" />
                   <input
                     type="text"
                     value={address}
                     onChange={(e) => setAddress(e.target.value)}
                     placeholder="Address"
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                    className="w-full pl-8.5 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   />
                 </div>
               </div>
@@ -245,7 +245,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   data-venue-timezone
                   value={timeZone}
                   onChange={(e) => setTimeZone(e.target.value)}
-                  className="w-full px-3.5 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:border-gold focus:outline-none"
+                  className="w-full px-3.5 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 >
                   <option value="">Same as agency ({timeZoneLabel(agencyTimeZone || DEFAULT_TIME_ZONE)})</option>
                   {COMMON_TIME_ZONES.map((z) => (
@@ -254,7 +254,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                     </option>
                   ))}
                 </select>
-                <p className="mt-1 text-xs text-ink-faint">The venue's day, "today" and the daily reset at midnight follow this zone.</p>
+                <p className="mt-1 text-sm text-ink-soft">The venue's day, "today" and the daily reset at midnight follow this zone.</p>
               </div>
 
               <div className="sm:col-span-2">
@@ -262,13 +262,13 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   Certification
                 </label>
                 <div className="relative">
-                  <ShieldCheck className="w-3.5 h-3.5 absolute left-3 top-2.5 text-emerald-500" />
+                  <ShieldCheck className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ok" />
                   <input
                     type="text"
                     value={certification}
                     onChange={(e) => setCertification(e.target.value)}
                     placeholder="Certification Standard"
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                    className="w-full pl-8.5 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   />
                 </div>
               </div>
@@ -276,11 +276,11 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
           </div>
           {/* Section 3: Venue Owner Account Provisioning */}
           <div className="space-y-3 pt-2 border-t border-line">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-faint flex items-center gap-1.5">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-soft flex items-center gap-1.5">
               <User className="w-3.5 h-3.5 text-gold-deep" />
               <span>3. Establish Venue Owner Account (Optional)</span>
             </h3>
-            <p className="text-[11px] text-ink-soft">
+            <p className="text-sm text-ink-soft">
               The owner logs into their isolated platform in read-only audit mode to review shift progress and history logs.
             </p>
 
@@ -294,7 +294,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   value={ownerName}
                   onChange={(e) => setOwnerName(e.target.value)}
                   placeholder="Full Name"
-                  className="w-full px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                  className="w-full px-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>
 
@@ -307,7 +307,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   value={ownerEmail}
                   onChange={(e) => setOwnerEmail(e.target.value)}
                   placeholder="Email"
-                  className="w-full px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                  className="w-full px-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>
 
@@ -320,7 +320,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   value={ownerPassword}
                   onChange={(e) => setOwnerPassword(e.target.value)}
                   placeholder="Password"
-                  className="w-full px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                  className="w-full px-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>
             </div>
@@ -331,18 +331,18 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-xs font-semibold rounded-xl text-ink-soft hover:text-ink hover:bg-sunken transition cursor-pointer"
+              className="px-4 py-2 text-xs font-semibold rounded-xl transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={isLoading}
-              className="pressable px-5 py-2 text-xs font-bold rounded-xl bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white tactile-2 flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              className="pressable px-5 py-2 text-xs font-bold rounded-xl hover:brightness-105 e2 flex items-center gap-1.5 disabled:opacity-50 cursor-pointer bg-gold-deep text-paper"
             >
               {isLoading ? (
                 <>
-                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <div className="w-3.5 h-3.5 border-2 border-paper border-t-transparent rounded-full animate-spin" />
                   <span>Configuring Venue...</span>
                 </>
               ) : (
