@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { PhoneNav } from './components/PhoneNav';
 import { Header } from './components/Header';
 import { StatsProgressBar } from './components/StatsProgressBar';
 import { OwnerAuditBanner } from './components/OwnerAuditBanner';
@@ -1554,7 +1555,7 @@ export default function App() {
       : undefined;
 
   return (
-    <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
+    <div data-phone-layout={!isKiosk ? true : undefined} className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
       {/* Stale-draft banner: changes preserved across the refresh that a
           428 STALE_CLIENT required. Re-apply sends them with a fresh version. */}
       {staleDrafts.length > 0 && (
@@ -1749,7 +1750,7 @@ export default function App() {
       />
 
       {/* Main Body */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-12">
+      <main className={`flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-12 ${!isKiosk ? 'max-sm:pb-[calc(136px+env(safe-area-inset-bottom))]' : ''} ${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:flex max-sm:flex-col' : ''}`}>
         
         {/* Welcome Empty State for newly registered Kosher Agencies or when starting from scratch */}
         {venues.length === 0 ? (
@@ -1823,7 +1824,7 @@ export default function App() {
 
         {/* Factory & Airtable Ingredients Audit Quick Banner (Shown for Industrial Plant facilities) */}
         {(currentVenue?.category?.toLowerCase().includes('industrial') || currentVenue?.category?.toLowerCase().includes('plant') || currentVenue?.category?.toLowerCase().includes('factory')) && (
-          <div className="mb-4 px-4 py-3 rounded-[20px] bg-gold-wash border border-gold/30 tactile-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-fade-in">
+          <div className={`${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:order-1' : ''} mb-4 px-4 py-3 rounded-[20px] bg-gold-wash border border-gold/30 tactile-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-fade-in`}>
             <div className="flex items-center gap-3 min-w-0">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2 shrink-0">
                 <Factory className="w-4 h-4" />
@@ -1856,7 +1857,7 @@ export default function App() {
 
         {/* Compact Kosher Events Alert (Only shown when active events exist) */}
         {events.length > 0 && (
-          <div className="mb-4 px-4 py-2.5 rounded-2xl bg-gold-wash border border-gold/40 tactile-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-fade-in">
+          <div className={`${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:order-2' : ''} mb-4 px-4 py-2.5 rounded-2xl bg-gold-wash border border-gold/40 tactile-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-fade-in`}>
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="p-1.5 rounded-lg bg-gold/15 text-gold-deep shrink-0 border border-gold/30">
                 <Calendar className="w-4 h-4" />
@@ -1945,6 +1946,19 @@ export default function App() {
           </>
         )}
       </main>
+
+      {currentUser && !isKiosk && (
+        <PhoneNav
+          user={currentUser}
+          hasVenues={venues.length > 0}
+          onOpenTaskModal={handleOpenCreateTask}
+          onOpenShiftNote={() => updates.setSheetOpen(true, 'notes')}
+          onOpenVenues={() => setIsVenuesDirectoryOpen(true)}
+          onOpenTeam={() => setIsTeamModalOpen(true)}
+          onOpenEvents={() => setIsEventsModalOpen(true)}
+          onOpenHistory={() => setIsHistoryModalOpen(true)}
+        />
+      )}
 
       {/* Footer */}
       <footer className="mt-auto border-t border-line py-4 px-6 text-center text-xs text-ink-faint">

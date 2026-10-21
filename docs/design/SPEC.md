@@ -165,6 +165,16 @@ Never: the seal next to the word "kosher", on a certificate-like layout, or as d
 - **States** (button, input, interactive row — every one of them has all six): *focus* — 2 px `gold` ring, 2 px offset, keyboard and tap alike; *hover* (pointer devices only) — `e2` for cards, a `sunken` wash for rows, 4 % darker fill for buttons; *pressed* — scale 0.97 over `dur-fast`; *disabled* — 50 % opacity, no shadow, no press, cursor not-allowed, never removed from the layout; *loading* — same size, label "Saving…" or a skeleton, disabled; *error* — `bad` text + icon under the control, border `bad`, never colour alone.
 - **Responsive principles** (layout itself is D3a/D4/D6): 320 px is the minimum width that must not break; 390×844 is the reference phone; 1024×768 the tablet and 1180×820 the kiosk tablet; 1440×900 the desk. Content reflows, never shrinks below the type floor; one column under 640 px; the primary action stays reachable by thumb on phones (bottom 40 % of the screen).
 
+### D4 phone layout — Field Companion (plan v3)
+
+Below 640 px, outside kiosk: the header is 56 px at default text size (55 px content row + existing 1 px border), allowed to grow for larger text. The role navigation uses `surface`, a 1 px `line` top border, `e2` (`tactile-2`), and a 64 px bar (63 px content + 1 px border, allowed to grow with text) plus `env(safe-area-inset-bottom)`. Icons are 24 px; labels are 12 px; active Tasks uses ink, weight 600 and a 2 px ink indicator. Owner has no bar; unknown roles default deny.
+
+The single phone action is a 56 px circle (`full` radius), `gold-deep` fill and `paper` icon in both themes, `e2` (`tactile-2`), 16 px from the right edge and 16 px above the bar. Press uses `dur-fast`, scale 0.97; reduced motion disables it. Existing assignment permission selects New task; otherwise coordinator/mashgiach/worker gets Shift note. No venue means no action. Shift note uses the existing sheet and returns focus to the header bell; UpdatesSheet remains untouched.
+
+The 40 px progress ring has a `line-strong` day / `ink-faint` night track and `gold` progress fill, `dur-base` fill transition disabled for reduced motion, with adjacent “N of M done” words (or “Awaiting Daily Roster” for zero tasks). Today is a surface / line / `r-lg` / `e1` card with 16 px padding and wrapping filters, each at least 44 px tall.
+
+Non-kiosk, non-owner phone main order: Today (−2), search/view/categories (−1), task list (0), industrial banner (1), events banner (2), Venue details masthead (3), reset/agency line (4). Stats renders once using `contents`; filters and task views are never duplicated. Venue details is one visual card: surface sections share left/right edges and touch without a gap; top has top/side borders and `r-lg` top corners with 16 px padding; bottom has side/bottom borders and `r-lg` bottom corners with 16 px side/bottom padding. Urgent/alert banners stay above main. Main reserves the bar, safe area and action clearance. At 640 px and above the existing layout is preserved; kiosk and owner board order stay unchanged. Only existing colour, radius, elevation and duration tokens are used.
+
 ## 10. Screenshot and messy-data rules (added to the pre-review checklist)
 - Every PR that changes appearance attaches screenshots at **390×844 (phone)**, **1024×768 and 1180×820 (tablet/kiosk)** and **1440×900 (desk)**, day **and** night, before and after.
 - Each is taken with the shared messy-content set (`shutfey-d1-messy-content-fixtures.txt`): 100-character task names, 15+ kiosk tasks, Hebrew and mixed-direction text, two-line venue names, several alerts at once, empty records, long incident text, larger text (browser zoom 200 % / iOS largest), reduced motion on.
@@ -198,6 +208,8 @@ Never: the seal next to the word "kosher", on a certificate-like layout, or as d
 | Q17 | "Mashgiach" stays as the neutral professional title. |
 | Q18 | Agency logo: 32 px bounding box, proportions kept, 120 px max width, short-code fallback, left of the mark (right in RTL) with a 1 px divider. |
 | Q19 | D1 visual budget: zero pixel change; only the unused Plus Jakarta Sans request is removed. |
+
+D4 amendment follows “Agreed — ChatGPT — D4 plan v3” and “Agreed — Tab — D4 plan v3”; the phone dimensions and ordering above are the agreed exception to legacy component dimensions. Real-emulator and screenshot parity checks belong to Tab’s PR-head review under workflow v1.
 
 ## 12. Recorded for later (not D1)
 - `animate-shake` (3 uses, undefined) — remove in D7. `tactile-3/5`, radius 20/28, `text-lg`, sizes under 12 px, `font-black`, raw `emerald/rose/white` colours, the three avatar fallbacks, the raw modal hex (13 files) — fixed by the D-step that touches each screen; the audit script tracks the counts.

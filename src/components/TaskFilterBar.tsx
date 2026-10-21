@@ -36,7 +36,7 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
   const totalCount = Object.values(counts).reduce((a, b) => a + b, 0);
 
   return (
-    <div className="flex flex-col gap-3 mb-5">
+    <div className="max-sm:-order-1 flex flex-col gap-3 mb-5">
       {/* Row 1: search + controls */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
         {/* Search Bar */}
@@ -48,12 +48,13 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
             placeholder="Search inspections, mashgiach name, notes..."
-            className="w-full pl-10 pr-9 py-2.5 text-xs sm:text-sm rounded-2xl bg-surface border border-line text-ink placeholder-ink-faint focus:outline-none focus:border-gold transition tactile-1"
+            className="max-sm:min-h-11 max-sm:text-base w-full pl-10 pr-9 py-2.5 text-xs sm:text-sm rounded-2xl bg-surface border border-line text-ink placeholder-ink-faint focus:outline-none focus:border-gold transition tactile-1"
           />
           {searchQuery && (
             <button
               onClick={() => onSearchChange('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint hover:text-ink cursor-pointer"
+              aria-label="Clear search"
+              className="max-sm:min-h-11 max-sm:min-w-11 max-sm:right-0 max-sm:flex max-sm:items-center max-sm:justify-center absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint hover:text-ink cursor-pointer"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -81,7 +82,7 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
             <button
               id="view-cards-btn"
               onClick={() => onViewModeChange('cards')}
-              className={`pressable p-1.5 rounded-xl transition cursor-pointer ${
+              className={`max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center pressable p-1.5 rounded-xl transition cursor-pointer ${
                 viewMode === 'cards'
                   ? 'bg-surface text-gold-deep tactile-1 font-bold'
                   : 'text-ink-faint hover:text-ink-soft'
@@ -93,7 +94,7 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
             <button
               id="view-table-btn"
               onClick={() => onViewModeChange('table')}
-              className={`pressable p-1.5 rounded-xl transition cursor-pointer ${
+              className={`max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center pressable p-1.5 rounded-xl transition cursor-pointer ${
                 viewMode === 'table'
                   ? 'bg-surface text-gold-deep tactile-1 font-bold'
                   : 'text-ink-faint hover:text-ink-soft'
@@ -109,7 +110,7 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
             <button
               id="filter-bar-add-task-btn"
               onClick={onOpenTaskModal}
-              className="pressable shrink-0 inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-black rounded-2xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 hover:brightness-105 transition cursor-pointer"
+              className="max-sm:hidden pressable shrink-0 inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-black rounded-2xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 hover:brightness-105 transition cursor-pointer"
               title="Register a new daily task assignment"
             >
               <Plus className="w-4 h-4 stroke-[2.5]" />
