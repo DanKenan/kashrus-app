@@ -97,9 +97,24 @@ export default {
       console.log('  ✓ mashgiach → 403 on test-alert {}, test-alert demo, consistency-check');
     }
 
-    // 3. Admin, no body → today's response, byte-for-byte shape.
+    // 2b (8i). An ordinary agency admin is NOT the platform operator: 403 on
+    //    all three, before any alert/demo/summary line can be written.
     {
-      const r = await post('/api/internal/test-alert', auth(tAdmin));
+      const a = await post('/api/internal/test-alert', auth(tAdmin), {});
+      assert(a.status === 403, `agency admin classic test-alert must be 403 (8i), got ${a.status}`);
+      const b = await post('/api/internal/test-alert', auth(tAdmin), { mode: 'demo' });
+      assert(b.status === 403 && !b.json?.summary, `agency admin demo test-alert must be 403 (8i), got ${b.status}`);
+      const c = await post('/api/internal/consistency-check', auth(tAdmin), {});
+      assert(c.status === 403 && !c.json?.runId, `agency admin consistency-check must be 403 (8i), got ${c.status}`);
+      console.log('  ✓ agency admin → 403 on test-alert {}, test-alert demo, consistency-check (8i)');
+    }
+    // The pinned platform operator (usr_admin, the seed admin the harness set a
+    // password for) runs them.
+    const opHeaders = auth(await mintToken(baseUrl, 'usr_admin'));
+
+    // 3. Operator, no body → today's response, byte-for-byte shape.
+    {
+      const r = await post('/api/internal/test-alert', opHeaders);
       assert(r.status === 200, `classic test-alert status ${r.status}`);
       assert(r.json?.ok === true, 'classic test-alert ok');
       assert(typeof r.json?.sentAt === 'string' && r.json.sentAt.length > 0, 'classic test-alert sentAt');
@@ -114,7 +129,7 @@ export default {
 
     // 4. Admin, {"mode":"demo"} → grouped demo summary.
     {
-      const r = await post('/api/internal/test-alert', auth(tAdmin), { mode: 'demo' });
+      const r = await post('/api/internal/test-alert', opHeaders, { mode: 'demo' });
       assert(r.status === 200, `demo test-alert status ${r.status}`);
       assert(r.json?.ok === true && r.json?.mode === 'demo', 'demo response shape');
       const s = r.json?.summary || '';
@@ -129,7 +144,7 @@ export default {
     // 5. Admin consistency check → grouped body, non-2xx (backup
     //    unconfigured in the test env), no writes.
     {
-      const r = await post('/api/internal/consistency-check', auth(tAdmin), {});
+      const r = await post('/api/internal/consistency-check', opHeaders, {});
       assert(r.status === 500, `consistency-check in test env must be non-2xx (500), got ${r.status}`);
       const b = r.json || {};
       assert(/^c-\d{8}-\d{4}-[0-9a-f]{4}$/.test(b.runId || ''), `runId shape: ${b.runId}`);
