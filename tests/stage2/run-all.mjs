@@ -103,6 +103,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-37-venue-timezones.mjs')).default,
     (await import('./test-38-dst-rollover.mjs')).default,
     (await import('./test-39-copy-event.mjs')).default,
+    (await import('./test-40-any-time-tasks.mjs')).default,
   ];
 
   const results = [];

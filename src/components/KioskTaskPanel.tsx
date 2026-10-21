@@ -1,3 +1,4 @@
+import { ANY_TIME_LABEL, isAnyTimeTask } from '../lib/anyTime';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Seal } from './Seal';
@@ -734,7 +735,9 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                           </span>
                           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
                             {/* Only a real clock time ("End of Shift" and other words stay in the expanded schedule). */}
-                            {task.targetTime && /\d{1,2}:\d{2}/.test(task.targetTime) && (
+                            {isAnyTimeTask(task) ? (
+                              <span data-kiosk-anytime className="tnum inline-flex items-center gap-1 rounded-full bg-sunken border border-line px-2 text-base text-ink-soft font-medium shrink-0">{ANY_TIME_LABEL}</span>
+                            ) : task.targetTime && /\d{1,2}:\d{2}/.test(task.targetTime) && (
                               <span data-kiosk-due className="tnum inline-flex items-center gap-1 rounded-full bg-sunken border border-line px-2 text-base text-ink font-medium shrink-0">
                                 <Clock className="w-4 h-4" aria-hidden /> Due {formatTaskTimes(task)}
                               </span>
