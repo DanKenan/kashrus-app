@@ -13,8 +13,9 @@ import testMigrateIdentity from './test-migrate-identity.mjs';
 import testSessionToken from './test-session-token.mjs';
 import testVenueScope from './test-venue-scope.mjs';
 import testCertOptions from './test-cert-options.mjs';
+import testIdentityInvariants from './test-identity-invariants.mjs';
 
-const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken, testVenueScope, testCertOptions];
+const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken, testVenueScope, testCertOptions, testIdentityInvariants];
 
 export async function runAll() {
   console.log(`\n=== Stage 4 PR A Tests (${tests.length} tests) ===\n`);

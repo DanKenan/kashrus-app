@@ -12,6 +12,7 @@
  */
 
 import crypto from 'crypto';
+import { identityGroups, groupIssues } from './identity.ts';
 
 const FIRESTORE_STATE_DOC = 'app-state/main';
 
@@ -217,7 +218,7 @@ export async function migrateCopy(firestoreDb: any): Promise<{
 export async function perEntityStatus(firestoreDb: any): Promise<{
   monolith: { venues: number; users: number; tasks: number };
   perEntity: { venues: number; users: number; tasks: number; usersByEmail: number; people: number; emails: number };
-  identity: { migratedRows: number; unmigratedRows: number; peopleActive: number; peopleRetired: number; emailsActive: number; emailsRetired: number };
+  identity: { migratedRows: number; unmigratedRows: number; peopleActive: number; peopleRetired: number; emailsActive: number; emailsRetired: number; multiGroups: number; invalidGroups: number };
   match: boolean;
   mismatches: Array<{ collection: string; id: string; reason: string }>;
 }> {
@@ -399,6 +400,28 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
     }
   }
 
+  // 10b (plan v4 10b/C6) — READ-ONLY identity invariant check on the stored
+  // users[]: every group of 2+ rows sharing an email or a personId in which a
+  // row carries personId is checked with the same rules the commit-time
+  // checker uses (identity.ts groupIssues). Legacy shared-email rows without
+  // personId are already reported above as duplicate emails. Row ids and
+  // codes only; nothing is written. Run before any Phase C activation.
+  let multiGroups = 0;
+  let invalidGroups = 0;
+  const monolithUsers: any[] = Array.isArray(monolith.users) ? monolith.users : [];
+  const usersById = new Map<string, any>(monolithUsers.filter((u: any) => u && typeof u.id === 'string').map((u: any) => [u.id, u] as [string, any]));
+  for (const g of identityGroups(monolithUsers)) {
+    if (g.length < 2) continue;
+    const rows = g.map((id) => usersById.get(id));
+    if (!rows.some((r: any) => typeof r?.personId === 'string' && r.personId)) continue;
+    multiGroups++;
+    const issues = groupIssues(rows, Array.isArray(monolith.agencies) ? monolith.agencies : []);
+    if (issues.length) invalidGroups++;
+    for (const issue of issues) {
+      mismatches.push({ collection: 'users', id: issue.rowIds.join(','), reason: `identity invariant: ${issue.code}` });
+    }
+  }
+
   return {
     monolith: {
       venues: (monolith.venues || []).length,
@@ -413,7 +436,7 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
       people: peopleSnap.size,
       emails: emailsSnap.size,
     },
-    identity: { migratedRows, unmigratedRows, peopleActive, peopleRetired, emailsActive, emailsRetired },
+    identity: { migratedRows, unmigratedRows, peopleActive, peopleRetired, emailsActive, emailsRetired, multiGroups, invalidGroups },
     match: mismatches.length === 0,
     mismatches: mismatches.slice(0, 20),
   };

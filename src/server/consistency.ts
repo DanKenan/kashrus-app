@@ -68,6 +68,7 @@ export const CONSISTENCY_ISSUE_TYPES = [
   'mismatch-orphan',
   'mismatch-duplicate-email',
   'mismatch-email-lookup',
+  'identity-invariant',
   'mismatch-other',
   'backup-stale',
   'backup-unconfigured',
@@ -114,6 +115,8 @@ export function issueTypeForReason(reason: unknown): ConsistencyIssueType {
   if (r.startsWith('Field mismatch')) return 'mismatch-field';
   if (r === 'In per-entity but not in monolith (orphan)') return 'mismatch-orphan';
   if (r === 'Duplicate normalized email in monolith') return 'mismatch-duplicate-email';
+  // 10b: the read-only identity invariant check (migration.ts perEntityStatus).
+  if (r.startsWith('identity invariant:')) return 'identity-invariant';
   if (
     r === 'Missing email lookup' ||
     r === 'Email lookup points to wrong user' ||
