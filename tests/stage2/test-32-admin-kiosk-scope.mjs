@@ -220,6 +220,7 @@ export default {
       ['POST', '/api/handoff-notes', { content: 'x', venueId: vA }],
       ['GET', '/api/admin/dashboard', null],
       ['GET', '/api/admin/export', null],
+      ['PUT', '/api/agency/certification-options', { options: ['x'] }],
       ['GET', '/api/kiosk/devices', null],
       ['POST', '/api/kiosk/devices/pair', { code: '123456', venueId: vA }],
       ['DELETE', `/api/kiosk/devices/${devA.id}`, null],

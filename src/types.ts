@@ -24,6 +24,8 @@ export interface KosherAgency {
   shortCode: string; // e.g. "HKC", "cRc"
   adminEmail: string; // primary administrator email
   certificationSeal: string; // e.g. "Glatt Kosher & Mehadrin Kashrut"
+  /** Item V1: the agency's "Certification details" choices (server-computed: saved list, else Glatt meat / Dairy / DE / Parve). Admin edits via PUT /api/agency/certification-options. */
+  certificationOptions?: string[];
   region: string; // e.g. "Hartford, Connecticut & New England"
   contactPhone?: string;
   createdAt: string;
