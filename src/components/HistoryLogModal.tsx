@@ -87,10 +87,10 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
           
           {/* Left: Date Snapshots List */}
           <div className="w-full md:w-64 border-r border-line p-3 overflow-y-auto shrink-0 bg-sunken/50">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-ink-faint block px-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-ink-faint block px-2">
               Archived Board Days
             </span>
-            <span className="text-[10px] text-ink-faint block mb-2 px-2" data-testid="history-retention-note">
+            <span className="text-xs text-ink-faint block mb-2 px-2" data-testid="history-retention-note">
               Kept for 7 days
             </span>
             {historyLogs.length === 0 ? (
@@ -112,7 +112,7 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                       <div className="flex flex-wrap items-center gap-2 w-full">
                         <span data-ledger-day-ring className="shrink-0"><ProgressRing done={snap.completedTasks} total={snap.totalTasks} size={24} /></span>
                         <span className="font-bold tnum min-w-0 break-words flex-1">{snap.date}</span>
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold tnum ${
+                        <span className={`px-1.5 py-0.5 rounded text-xs font-bold tnum ${
                           snap.completionRate === 100 
                             ? 'bg-ok-bg text-ok'
                             : 'bg-gold-wash text-gold-ink'
@@ -120,7 +120,7 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                           {snap.completionRate}%
                         </span>
                       </div>
-                      <span className="text-[10px] text-ink-faint tnum">
+                      <span className="text-xs text-ink-faint tnum">
                         {snap.completedTasks}/{snap.totalTasks} completed
                       </span>
                     </button>
@@ -211,12 +211,12 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                               </div>
                               <div className="flex flex-wrap items-start gap-2 mt-1">
                                 <span
-                                  className="cat-chip border text-[10px] font-bold px-1.5 py-0.5 rounded-full inline-flex min-w-0 break-words"
+                                  className="cat-chip border text-xs font-bold px-1.5 py-0.5 rounded-full inline-flex min-w-0 break-words"
                                   style={categoryVars(entry.category)}
                                 >
                                   {entry.category}
                                 </span>
-                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-sunken border border-line text-[10px] font-bold uppercase text-ink-soft min-w-0 break-words">
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-sunken border border-line text-xs font-bold uppercase text-ink-soft min-w-0 break-words">
                                   <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`} />
                                   <span className="min-w-0 break-words">{entry.status}</span>
                                 </span>
