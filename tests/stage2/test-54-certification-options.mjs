@@ -60,13 +60,15 @@ export default {
       venues: [{ id: VA, name: 'T54 VA', agencyId: A }, { id: VB, name: 'T54 VB', agencyId: B }],
       users: [
         { id: U('adminA'), email: E('adminA'), name: 'T54 Admin A', role: 'admin', agencyId: A },
+        { id: U('adminA2'), email: E('adminA2'), name: 'T54 Admin A2', role: 'admin', agencyId: A },
         { id: U('coordA'), email: E('coordA'), name: 'T54 Coord A', role: 'coordinator', agencyId: A, venueId: VA },
         { id: U('mashA'), email: E('mashA'), name: 'T54 Mash A', role: 'mashgiach', agencyId: A, venueId: VA },
         { id: U('adminB'), email: E('adminB'), name: 'T54 Admin B', role: 'admin', agencyId: B },
       ],
     });
     assert(r.status === 200, `inject-fixture ${r.status} ${J(r.json)}`);
-    for (const k of ['adminA', 'coordA', 'mashA', 'adminB']) await hook('set-password', { userId: U(k), password: PW });
+    for (const k of ['adminA', 'adminA2', 'coordA', 'mashA', 'adminB']) await hook('set-password', { userId: U(k), password: PW });
+    const tAdminA2 = await login('adminA2');
     const tAdminA = await login('adminA'), tCoordA = await login('coordA'), tMashA = await login('mashA'), tAdminB = await login('adminB');
     const optsVia = async (tok) => {
       const a = await call('GET', '/api/agencies', auth(tok));
@@ -138,6 +140,15 @@ export default {
     r = await write('PUT', '/api/agency/certification-options', tAdminB, { options: ['B only'] });
     assert(r.status === 200, `agency B admin PUT ${r.status}`);
     assert(J((await agencyDoc(B)).certificationOptions) === J(['B only']) && J((await agencyDoc(A)).certificationOptions) === J(NEW), 'B admin changes only B');
+    // fresh re-check: an admin demoted in the committed doc only (the in-memory
+    // copy still says admin) is refused 403 with a still-valid session; no write.
+    const doc3 = await ctx.getDoc();
+    const demotedUsers = (doc3.users || []).map((u) => (u.id === U('adminA2') ? { ...u, role: 'coordinator' } : u));
+    const ds = await ctx.api('POST', '/api/__test__/doc-set-users', { users: demotedUsers });
+    assert(ds.status === 200, `doc-set-users ${ds.status}`);
+    r = await write('PUT', '/api/agency/certification-options', tAdminA2, { options: ['Demoted'] });
+    assert(r.status === 403, `demoted admin must be 403, got ${r.status} ${r.text.slice(0, 120)}`);
+    assert(J((await agencyDoc(A)).certificationOptions) === J(NEW), 'demoted admin changed nothing');
 
     // ---- 4. the settings PUT keeps the list; the stored seal is untouched ----
     r = await write('PUT', '/api/agencies/current', tAdminA, { region: 'R2', certificationOptions: ['Smuggled'] });
@@ -160,6 +171,6 @@ export default {
       assert(J((await optsVia(tA2)).list) === J(NEW), 'list survives restart');
       assert((await agencyDoc(A)).certificationSeal === SEAL_A, 'seal survives restart unchanged');
     }
-    return 'defaults until saved; admin-only, agency-scoped, normalised replace; real AGENCY_UPDATED payloads (admin + mashgiach carry the list, no admin-only field to staff, nothing to agency B); 403/400/409 write nothing; settings PUT keeps the list and the stored seal; new venue defaults to agency name; survives restart';
+    return 'defaults until saved; admin-only, agency-scoped, normalised replace; real AGENCY_UPDATED payloads (admin + mashgiach carry the list, no admin-only field to staff, nothing to agency B); 403/400/409 write nothing (incl. a demoted admin, fresh re-check); settings PUT keeps the list and the stored seal; new venue defaults to agency name; survives restart';
   },
 };
