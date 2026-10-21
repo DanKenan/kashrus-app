@@ -68,6 +68,7 @@ export default {
     const ts = Date.now();
     const vA = `venue-t41xa-${ts}`;
     const vB = `venue-t41xb-${ts}`;
+    const vH = `venue-t41xh-${ts}`; // a home-agency venue of this test's own (no dependence on earlier tests)
     const ids = {
       adminA: `user-t41x-admina-${ts}`, adminB: `user-t41x-adminb-${ts}`,
       coordB: `user-t41x-coordb-${ts}`, mashB: `user-t41x-mashb-${ts}`,
@@ -87,6 +88,7 @@ export default {
       venues: [
         { id: vA, name: `T41X Venue A ${ts}`, agencyId: A },
         { id: vB, name: `T41X Venue B ${ts}`, agencyId: B },
+        { id: vH, name: `T41X Venue HKC ${ts}`, agencyId: 'agency-hkc' },
       ],
       users: [
         { id: ids.adminA, email: marks.aEmail, name: marks.aName, role: 'admin', agencyId: A, phoneNumber: '+18605550141', password: '$2a$10$abcdefghijklmnopqrstuuJ2ZbYh0G2b3d4e5f6g7h8i9j0k1l2m3' },
@@ -98,9 +100,13 @@ export default {
       tasks: [
         { id: `task-t41xa-${ts}`, title: marks.aTask, venueId: vA, agencyId: A, status: 'pending' },
         { id: `task-t41xb-${ts}`, title: marks.bTask, venueId: vB, agencyId: B, status: 'pending', extra: [{ clientSecret: `LEAK-NESTED-${ts}`, note: 'kept' }] },
-        { id: `task-t41xo-${ts}`, title: `T41X-ORPHAN-${ts}`, status: 'pending' },
+        // Orphan: no agencyId and a venue that does not exist. (A record with NO
+        // owner fields at all is normalised to the home agency + its default venue
+        // when the server hydrates from Firestore — the app-wide legacy rule — so
+        // the fail-closed case worth proving end to end is the unknown venue.)
+        { id: `task-t41xo-${ts}`, title: `T41X-ORPHAN-${ts}`, venueId: `venue-t41x-ghost-${ts}`, status: 'pending' },
         { id: `task-t41xm-${ts}`, title: `T41X-MISMATCH-${ts}`, agencyId: B, venueId: vA, status: 'pending' },
-        { id: `task-t41xh-${ts}`, title: marks.hkcTask, venueId: 'venue-crown-market', agencyId: 'agency-hkc', status: 'pending' },
+        { id: `task-t41xh-${ts}`, title: marks.hkcTask, venueId: vH, agencyId: 'agency-hkc', status: 'pending' },
       ],
     });
     assert(inj.status === 200, `inject-fixture: ${inj.status}`);
@@ -131,7 +137,7 @@ export default {
     assert(Array.isArray(bTask.extra) && bTask.extra[0]?.note === 'kept' && !('clientSecret' in bTask.extra[0]), 'nested secret inside an array must be scrubbed, data kept');
     for (const m of [`T41X-ORPHAN-${ts}`, `T41X-MISMATCH-${ts}`]) assert(!eB.text.includes(m), `ambiguous/inconsistent ownership must be omitted: "${m}"`);
     assert(eB.json.restorable === false && !('_v' in eB.json) && !('currentWorkDate' in eB.json) && !('isDemoCleared' in eB.json), 'agency export must not look like a whole app-state backup');
-    for (const m of [marks.aTask, marks.aName, marks.aEmail, marks.hkcTask, 'kenan@hartfordkashrut.org', A, vA, 'venue-crown-market']) {
+    for (const m of [marks.aTask, marks.aName, marks.aEmail, marks.hkcTask, 'kenan@hartfordkashrut.org', A, vA, vH, 'venue-crown-market']) {
       assert(!eB.text.includes(m), `admin B export leaks "${m}"`);
     }
     for (const vid of Object.keys(eB.json.venueWorkDates || {})) assert(vid === vB, `admin B export leaks work date of ${vid}`);
@@ -152,7 +158,7 @@ export default {
     assert(reg.status === 201 && regJson.token, `register: ${reg.status}`);
     const eI = await exportAs(baseUrl, auth(regJson.token));
     assert(eI.status === 200 && eI.json?.exportScope === 'agency' && eI.json.exportAgencyId === regJson.agency?.id, 'intruder export must be agency-scoped');
-    for (const m of [marks.aTask, marks.aName, marks.aEmail, marks.bTask, marks.hkcTask, 'kenan@hartfordkashrut.org', A, B, 'agency-hkc', 'venue-crown-market']) {
+    for (const m of [marks.aTask, marks.aName, marks.aEmail, marks.bTask, marks.hkcTask, 'kenan@hartfordkashrut.org', A, B, vH, 'agency-hkc', 'venue-crown-market']) {
       assert(!eI.text.includes(m), `self-registered agency export leaks "${m}"`);
     }
     checkNoSecrets('intruder', eI, apiKeyValue);

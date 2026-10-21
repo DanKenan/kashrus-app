@@ -26,8 +26,15 @@ export default {
     const useEmulator = !!process.env.FIRESTORE_EMULATOR_HOST;
 
     // --- 1. Canary task so we can prove the restore brought data back ---
+    // 8h: the export keeps a task only when its venue exists and belongs to
+    // the caller's agency, so the canary lives on a real home-agency venue.
+    const canaryVenue = `venue-t18-${ts}`;
+    const vinj = await ctx.api('POST', '/api/__test__/inject-fixture', {
+      venues: [{ id: canaryVenue, name: `Test18 Venue ${ts}`, agencyId: 'agency-hkc' }],
+    });
+    if (vinj.status !== 200) throw new Error(`canary venue inject failed: ${vinj.status}`);
     const cr = await ctx.api('POST', '/api/tasks', {
-      venueId: 'venue-crown-market',
+      venueId: canaryVenue,
       title: `Test18 Canary ${ts}`,
       createdByEmail: 'kenan@hartfordkashrut.org',
     });
@@ -142,7 +149,7 @@ export default {
 
     // The live doc is still writable.
     const wr = await ctx.api('POST', '/api/tasks', {
-      venueId: 'venue-crown-market',
+      venueId: canaryVenue,
       title: `Test18 Post-Roundtrip ${ts}`,
       createdByEmail: 'kenan@hartfordkashrut.org',
     });
