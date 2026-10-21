@@ -15,7 +15,7 @@
  * counted, never deleted, and never stop the others from being processed.
  */
 
-import { addDays, effectiveTimeZone, workDateIn } from '../lib/workday.js';
+import { addDays, effectiveTimeZone, workDateIn } from '../lib/workday.ts';
 
 export const HISTORY_RETENTION_DAYS = 7;
 export const RETENTION_SWEEP_INTERVAL_MS = 60 * 60 * 1000;

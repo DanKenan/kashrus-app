@@ -13,8 +13,13 @@
  *    so that agency's clients hear the prune)
  *  3 a second sweep within the hour does nothing; after the gate reopens a
  *    clean sweep is a version-neutral no-op (nothing broadcast)
- *  4 the gate hook is registered only in test mode (404 with FIRESTORE_MOCK=true
- *    and STAGE2_TEST_MODE=false)
+ *  4 the gate hook is registered only in test mode: with STAGE2_TEST_MODE=false
+ *    it is 8t's explicit 404, on the harness's own persistence. In the mock
+ *    harness that run is exactly FIRESTORE_MOCK=true + STAGE2_TEST_MODE=false
+ *    (the old FIRESTORE_MOCK||isTestMode block is entered, the hook is not).
+ *    The persistence is kept so the suite's admin token stays valid; a
+ *    swap to an empty mock store would answer 401 from the auth middleware,
+ *    which proves nothing about the route.
  */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const auth = (token) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' });
@@ -161,12 +166,15 @@ export default {
       await ctx.api('POST', '/api/__test__/clock', { iso: null });
     }
 
-    // ---- 4. the gate hook exists ONLY in test mode: 404 under mock persistence alone ----
+    // ---- 4. the gate hook exists ONLY in test mode: 404 outside it ----
+    // Same persistence as the rest of the suite (mock harness: FIRESTORE_MOCK=true
+    // already, so this is the mock-alone case; real emulator: test mode off).
     if (typeof ctx.restartServer === 'function') {
-      await ctx.restartServer({ STAGE2_TEST_MODE: 'false', FIRESTORE_MOCK: 'true' });
+      const mockHarness = process.env.FIRESTORE_MOCK === 'true' || !process.env.FIRESTORE_EMULATOR_HOST;
+      await ctx.restartServer({ STAGE2_TEST_MODE: 'false' });
       try {
         const g = await fetch(`${baseUrl}/api/__test__/history-retention-gate`, { method: 'POST', headers: ctx.authHeaders, body: '{}' });
-        assert(g.status === 404, `history-retention-gate must be 404 with FIRESTORE_MOCK=true and STAGE2_TEST_MODE=false, got ${g.status}`);
+        assert(g.status === 404, `history-retention-gate must be 404 with STAGE2_TEST_MODE=false (${mockHarness ? 'FIRESTORE_MOCK=true' : 'real emulator'}), got ${g.status}`);
       } finally {
         await ctx.restartServer();
       }
