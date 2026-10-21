@@ -1,5 +1,5 @@
-import { ProgressRing } from './ProgressRing';
 import React, { useState } from 'react';
+import { ProgressRing } from './ProgressRing';
 import { 
   X, 
   Building2, 
@@ -297,14 +297,14 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                     {/* Address & Certification */}
                     <div className="space-y-1 text-[11px] text-ink-soft mb-3.5">
                       {venue.address && (
-                        <div className="flex items-center gap-1.5 text-ink-soft">
-                          <MapPin className="w-3 h-3 text-ink-faint shrink-0" />
+                        <div className="flex items-start gap-1.5 text-ink-soft">
+                          <MapPin className="w-3 h-3 mt-0.5 text-ink-faint shrink-0" />
                           <span dir="auto" className="min-w-0 break-words">{venue.address}</span>
                         </div>
                       )}
                       {venue.certification && (
-                        <div className="flex items-center gap-1.5 text-ok">
-                          <ShieldCheck className="w-3 h-3 text-ok shrink-0" />
+                        <div className="flex items-start gap-1.5 text-ok">
+                          <ShieldCheck className="w-3 h-3 mt-0.5 text-ok shrink-0" />
                           <span dir="auto" className="min-w-0 break-words">{venue.certification}</span>
                         </div>
                       )}

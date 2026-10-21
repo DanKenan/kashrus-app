@@ -1,5 +1,5 @@
-import { ProgressRing } from './ProgressRing';
 import React, { useState } from 'react';
+import { ProgressRing } from './ProgressRing';
 import { X, Calendar, Download, Search } from 'lucide-react';
 import { DailySnapshot } from '../types';
 import { formatExactTime } from '../lib/utils';
@@ -159,7 +159,7 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                     <button
                       id="export-csv-btn"
                       onClick={handleExportCSV}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl pressable bg-ok-bg hover:bg-sunken text-ok tactile-1 transition"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl pressable bg-surface border border-line-control text-ink hover:bg-sunken tactile-1 transition"
                     >
                       <Download className="w-3.5 h-3.5" />
                       <span>Export CSV</span>
@@ -190,10 +190,10 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                           <div
                             key={entry.id}
                             data-ledger-row
-                            className="min-w-0 border-b border-line py-3 grid grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[96px_160px_minmax(0,1fr)_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs"
+                            className="min-w-0 border-b border-line py-3 grid grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[96px_160px_minmax(0,1fr)_minmax(0,1fr)] gap-x-3 gap-y-2 text-base"
                           >
                             <div className="min-w-0 tnum text-ink-soft break-words">
-                              {(entry.completedByName || entry.completedByEmail) && <>{formatExactTime(entry.completedAt)}<span className="sm:hidden"> ·</span></>}
+                              {entry.completedAt && <>{formatExactTime(entry.completedAt)}<span className="sm:hidden"> ·</span></>}
                             </div>
                             <div dir="auto" className="min-w-0 break-words text-ink-soft">
                               {entry.completedByName || entry.completedByEmail ? (
