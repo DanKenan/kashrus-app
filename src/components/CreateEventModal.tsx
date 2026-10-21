@@ -223,6 +223,13 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
   // E1: every assignable person of the agency (rule T), this venue first.
   const mashgiachGroups = groupAssignableMashgichim(availableMashgichim, currentUser, venueId);
   const relevantMashgichim = orderedMashgichim(mashgiachGroups);
+  const seenMashgiachNames = new Set<string>();
+  const duplicateMashgiachNames = new Set<string>();
+  for (const person of relevantMashgichim) {
+    const displayName = person.name.trim().toLowerCase();
+    if (seenMashgiachNames.has(displayName)) duplicateMashgiachNames.add(displayName);
+    seenMashgiachNames.add(displayName);
+  }
   const selectedMashgiachEmail = resolveMashgiachEmail(pickedMashgiachEmail, relevantMashgichim);
   const venueNameOf = (id?: string) => allVenues.find((v) => v.id === id)?.name || '';
 
@@ -617,7 +624,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                           <optgroup key={label} label={label}>
                             {list.map((m) => (
                               <option key={m.id} value={m.email || ''}>
-                                {m.name} — {getRoleLabel(m.role)}{m.email ? ` (${rosterDisplayHandle(m)})` : ''}
+                                {m.name} — {getRoleLabel(m.role)}{m.email && duplicateMashgiachNames.has(m.name.trim().toLowerCase()) ? ` (${rosterDisplayHandle(m)})` : ''}
                                 {showVenue && venueNameOf(m.venueId) ? ` · ${venueNameOf(m.venueId)}` : ''}
                               </option>
                             ))}

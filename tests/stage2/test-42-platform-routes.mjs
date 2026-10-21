@@ -197,6 +197,11 @@ export default {
     const etplH = `etpl-t42h-${ts}`;
     const cs = await fetch(`${baseUrl}/api/admin/clean-slate`, { method: 'POST', headers: callers['agency B admin'], body: JSON.stringify({}) });
     assert(cs.status === 200, `agency B clean-slate: ${cs.status}`);
+    // Item 8k: clean-slate no longer writes the app-wide flag (it is per
+    // agency now); the legacy stored flag still steers the boot loader, so
+    // this section seeds it directly to keep exercising that branch.
+    const seed = await ctx.api('POST', '/api/__test__/doc-merge', { fields: { isDemoCleared: true } });
+    assert(seed.status === 200, `seed legacy flag: ${seed.status}`);
     const inj6 = await ctx.api('POST', '/api/__test__/inject-fixture', {
       venues: [{ id: vH, name: `T42 Venue H ${ts}`, agencyId: 'agency-hkc' }],
       // A stored record without permissions (legacy shape) — hydration must normalise it.

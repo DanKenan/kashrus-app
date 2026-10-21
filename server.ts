@@ -26,6 +26,7 @@ import {
   withCustomDomain,
 } from './src/server/agency-fields.js';
 import { classifySessionClaims, resolveSessionRow, sessionClaimsFor, type SessionClaims } from './src/server/session-token.ts';
+import { planCleanSlate, agencyIsCleared } from './src/server/clean-slate.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
@@ -7855,6 +7856,25 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 // dedicated block separate from the FIRESTORE_MOCK endpoints — they must
 // never exist outside test mode, even with FIRESTORE_MOCK=true.
 if (isTestMode()) {
+  // Item 8k (TEST ONLY; isTestMode() only, never under FIRESTORE_MOCK alone): merge a few top-level fields straight into the
+  // stored doc (no route writes them this way); the next commit's hydrate
+  // picks them up. Covers the legacy app-wide isDemoCleared (true/false) and
+  // seeds the keyed kiosk/push/reset structures Clean Slate must scope.
+  app.post('/api/__test__/doc-merge', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const db = firestoreDb;
+    if (!db) return res.status(503).json({ error: 'db unavailable' });
+    const fields = (req.body || {}).fields;
+    const allowed = ['isDemoCleared', 'kioskPairings', 'kioskPinLockouts', 'kioskPairingLimits', 'pushSubscriptions', 'passwordResets', 'passwordResetRateLimits'];
+    if (!fields || typeof fields !== 'object' || Object.keys(fields).some((k) => !allowed.includes(k))) {
+      return res.status(400).json({ error: `fields must be an object with keys from ${allowed.join(', ')}` });
+    }
+    const docRef = db.collection('app-state').doc('main');
+    const snap = await docRef.get();
+    const doc = (snap && snap.data && snap.data()) || {};
+    await docRef.set({ ...doc, ...fields });
+    res.json({ ok: true });
+  });
   // TEST ONLY (8r; isTestMode() only, never under FIRESTORE_MOCK alone): reopen the hourly retention-sweep gate (next tick sweeps).
   app.post('/api/__test__/history-retention-gate', (req, res) => {
     lastRetentionSweepAt = null;
@@ -8279,7 +8299,9 @@ app.get('/api/venues', (req, res) => {
     };
   });
 
-  res.json({ venues: venuesWithStats, isDemoCleared });
+  // Item 8k: the cleared state is per agency (the legacy global flag only
+  // steers the boot loader and never an agency's answer).
+  res.json({ venues: venuesWithStats, isDemoCleared: agencyIsCleared(agencies as any[], agencyId) });
 });
 
 // Admin creates a brand new venue within their agency
@@ -9335,42 +9357,35 @@ app.post('/api/reset-daily', async (req, res) => {
 
 // Admin Wipes All Demo Data to Start Completely From Scratch
 app.post('/api/admin/clean-slate', async (req, res) => {
+  // requireAdmin has already sent the 403 when it returns null; send nothing
+  // more (a second send crashed the server: ERR_HTTP_HEADERS_SENT).
   const caller = requireAdmin(req, res);
-  if (!caller) {
-    return res.status(403).json({ error: 'Only administrators can reset the platform to a clean slate.' });
+  if (!caller) return;
+  // Item 8k gate: Clean Slate deletes an agency's data. It runs only where
+  // the operator has switched it on (CLEAN_SLATE_ENABLED=true) or in the
+  // test harness (isTestMode). On live it stays off until Don's explicit OK.
+  if (!(process.env.CLEAN_SLATE_ENABLED === 'true' || isTestMode())) {
+    return res.status(403).json({ error: 'Clean Slate is turned off on this server.', code: 'CLEAN_SLATE_DISABLED' });
   }
 
   const callerAgencyId = caller.agencyId || 'agency-hkc';
-  const callerEmailLower = caller.email.toLowerCase();
 
   const committed = await commitOrRespond(
     req, res,
     (freshDoc) => {
-      const keep = (arr: any[]) =>
-        (Array.isArray(arr) ? arr : []).filter((x) => (x.agencyId || 'agency-hkc') !== callerAgencyId);
-      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
-      // Wipe agency data atomically; keep admin users.
+      // Item 8k ("8k plan v2"): one agency only, ownership decided on the
+      // fresh doc; the legacy global isDemoCleared is never written.
+      const plan = planCleanSlate(freshDoc, callerAgencyId, { id: caller.id, email: caller.email }, new Date().toISOString());
       return {
-        doc: {
-          ...freshDoc,
-          tasks: keep(freshDoc.tasks),
-          historyLogs: keep(freshDoc.historyLogs),
-          events: keep(freshDoc.events),
-          venues: keep(freshDoc.venues),
-          airtableConfigs: keep(freshDoc.airtableConfigs),
-          approvedIngredients: keep(freshDoc.approvedIngredients),
-          factoryReports: keep(freshDoc.factoryReports),
-          users: freshUsers.filter(
-            (u) => (u.agencyId || 'agency-hkc') !== callerAgencyId || u.role === 'admin' || u.email.toLowerCase() === callerEmailLower
-          ),
-          isDemoCleared: true,
-        },
-        result: { success: true, isDemoCleared: true },
+        doc: { ...freshDoc, ...plan.patch },
+        result: { success: true, isDemoCleared: true, removed: plan.removed, keptUnattributed: plan.keptUnattributed },
       };
     },
     { label: 'clean-slate' }
   );
   if (!committed) return;
+  const r: any = (committed as any).result || {};
+  log.info(`[clean-slate] agency ${callerAgencyId}: removed ${JSON.stringify(r.removed || {})}; kept unattributed ${JSON.stringify(r.keptUnattributed || {})}`);
 
   broadcast('CLEAN_SLATE_RESET', {
     agencyId: callerAgencyId,
@@ -9390,6 +9405,7 @@ app.post('/api/admin/clean-slate', async (req, res) => {
     tasks: [],
     events: [],
     users: getSafeUsersForAgency(callerAgencyId, caller),
+    keptUnattributed: r.keptUnattributed || {},
     message: 'All demo facilities and example data have been cleared. Ready to start from scratch!',
   });
 });
