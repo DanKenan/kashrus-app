@@ -163,15 +163,15 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
       <div className="bg-surface w-full max-w-4xl rounded-2xl e3 animate-slide-up border border-line overflow-hidden flex flex-col max-h-[85vh]">
         
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4.5 border-b border-line bg-sunken">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gold-wash text-gold-ink flex items-center justify-center e2">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 px-6 py-4.5 border-b border-line bg-sunken">
+          <div className="flex items-center gap-3 w-full sm:w-auto flex-1 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-gold-wash text-gold-ink flex items-center justify-center e2 shrink-0">
               <Building2 className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-bold text-ink flex items-center gap-2">
-                <span>Kosher Venues & Restaurants Platform Hub</span>
-                <span className="tnum text-xs font-semibold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40">
+            <div className="flex-1 min-w-0">
+              <h2 className="text-base font-bold text-ink flex flex-col items-start sm:flex-row sm:flex-wrap sm:items-center gap-2">
+                <span className="min-w-0 break-words">Kosher Venues & Restaurants Platform Hub</span>
+                <span className="tnum text-xs font-semibold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 shrink-0">
                   {venues.length} Facilities
                 </span>
               </h2>
@@ -181,7 +181,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center justify-end gap-2 w-full sm:w-auto shrink-0">
             {isAdmin && (
               <button
                 id="directory-create-venue-btn"
@@ -189,7 +189,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                   onClose();
                   onOpenCreateVenue();
                 }}
-                className="pressable px-3 py-1.5 text-xs font-bold rounded-lg hover:brightness-105 e1 flex items-center gap-1.5 cursor-pointer bg-gold-deep text-paper"
+                className="pressable px-3 py-1.5 text-xs font-bold rounded-lg hover:brightness-105 e1 flex items-center gap-1.5 cursor-pointer bg-gold-deep text-paper shrink-0 whitespace-nowrap"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>New Venue</span>

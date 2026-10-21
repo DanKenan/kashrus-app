@@ -242,21 +242,21 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       <div className="bg-surface rounded-2xl w-full max-w-4xl e3 border border-line my-8 overflow-hidden flex flex-col max-h-[90vh] animate-slide-up">
         
         {/* Modal Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-line shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-gold-wash text-gold-ink">
+        <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-line shrink-0">
+          <div className="flex items-center gap-3 flex-1 min-w-0">
+            <div className="p-2 rounded-xl bg-gold-wash text-gold-ink shrink-0">
               <Users className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-bold text-ink flex items-center gap-2">
-                <span>Mashgiach Team & Access Permissions</span>
+            <div className="flex-1 min-w-0">
+              <h2 className="text-base font-bold text-ink flex flex-wrap items-center gap-2">
+                <span className="basis-full sm:basis-auto min-w-0 break-words">Mashgiach Team & Access Permissions</span>
                 {currentVenue && (
-                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 font-semibold flex items-center gap-1">
+                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 font-semibold flex items-center gap-1 min-w-0 max-w-full break-words">
                     <Building2 className="w-3 h-3" />
                     {currentVenue.name}
                   </span>
                 )}
-                <span className="text-xs px-2 py-0.5 rounded-full bg-sunken text-ink-soft font-semibold">
+                <span className="text-xs px-2 py-0.5 rounded-full bg-sunken text-ink-soft font-semibold shrink-0">
                   {users.length} members
                 </span>
               </h2>
