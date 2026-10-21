@@ -142,7 +142,7 @@ export function Announcements({
           <button
             type="button"
             onClick={() => setShowCompose((s) => !s)}
-            className="pressable w-full h-12 rounded-xl bg-gold text-white text-base font-bold flex items-center justify-center gap-2 cursor-pointer"
+            className={`pressable w-full h-12 rounded-xl text-base font-bold flex items-center justify-center gap-2 cursor-pointer ${showCompose ? 'bg-surface border border-line-control text-ink hover:bg-sunken' : 'bg-gold-deep text-paper'}`}
           >
             {showCompose ? <X className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
             {showCompose ? 'Cancel' : 'New announcement'}
@@ -161,14 +161,14 @@ export function Announcements({
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Headline"
               aria-label="Announcement headline"
-              className="w-full px-3 h-12 text-base rounded-lg bg-surface border border-line"
+              className="w-full px-3 h-12 text-base rounded-lg bg-surface border border-line-control text-ink"
             />
             <textarea
               value={body}
               onChange={(e) => setBody(e.target.value)}
               placeholder="Details…"
               aria-label="Announcement details"
-              className="w-full px-3 py-2.5 text-base rounded-lg bg-surface border border-line min-h-20"
+              className="w-full px-3 py-2.5 text-base rounded-lg bg-surface border border-line-control text-ink min-h-20"
             />
             <div>
               <div className="text-xs font-bold text-ink-soft mb-1.5">Kind</div>
@@ -182,10 +182,11 @@ export function Announcements({
                       key={c}
                       type="button"
                       onClick={() => setCategory(c)}
+                      aria-pressed={selected}
                       className={`pressable flex items-center gap-1.5 px-3 h-11 rounded-full border text-sm font-bold transition cursor-pointer ${
-                        selected ? 'bg-ink text-paper border-ink' : 'border-line text-ink-soft'
+                        selected ? 'bg-gold-wash border-gold-deep text-gold-ink' : 'bg-surface border-line-control text-ink hover:bg-sunken'
                       }`}
-                      style={selected && c === 'urgent' ? { backgroundColor: 'var(--bad)', borderColor: 'var(--bad)' } : undefined}
+                      style={selected && c === 'urgent' ? { backgroundColor: 'var(--bad-bg)', color: 'var(--bad)', borderColor: 'var(--bad)' } : undefined}
                     >
                       <Icon className="w-4 h-4" />
                       {cfg.label}
@@ -204,8 +205,9 @@ export function Announcements({
                       key={r}
                       type="button"
                       onClick={() => toggleRole(r)}
+                      aria-pressed={selected}
                       className={`pressable flex items-center gap-1 px-3 h-11 rounded-full border text-sm font-semibold transition cursor-pointer ${
-                        selected ? 'bg-gold-wash border-gold text-gold-ink' : 'border-line text-ink-soft'
+                        selected ? 'bg-gold-wash border-gold-deep text-gold-ink' : 'bg-surface border-line-control text-ink hover:bg-sunken'
                       }`}
                     >
                       {selected && <Check className="w-4 h-4" />}
@@ -219,7 +221,7 @@ export function Announcements({
               type="button"
               onClick={post}
               disabled={!title.trim() || posting}
-              className="pressable w-full h-12 rounded-xl bg-ink text-paper text-base font-bold disabled:opacity-50 transition cursor-pointer"
+              className="pressable w-full h-12 rounded-xl bg-gold-deep text-paper text-base font-bold disabled:opacity-50 transition cursor-pointer"
             >
               {posting ? 'Posting…' : 'Post announcement'}
             </button>
@@ -243,10 +245,10 @@ export function Announcements({
             ))}
           </div>
         ) : items.length === 0 ? (
-          <div className="text-center py-10">
-            <Megaphone className="w-8 h-8 text-ink-faint mx-auto mb-2" />
+          <div data-empty-state className="text-center py-10">
+            <Megaphone className="w-8 h-8 text-ink-soft mx-auto mb-2" />
             <p className="text-base text-ink-soft">No announcements yet.</p>
-            <p className="text-sm text-ink-faint mt-1">Updates for the whole team will show up here.</p>
+            <p className="text-sm text-ink-soft mt-1">Updates for the whole team will show up here.</p>
           </div>
         ) : (
           items.map((a) => {
@@ -276,7 +278,7 @@ export function Announcements({
                       <Icon className="w-3.5 h-3.5" />
                       {cfg.label}
                     </span>
-                    <span className="text-xs text-ink-faint">
+                    <span className="text-xs text-ink-soft">
                       for {a.targetRoles.map((r) => ROLE_LABELS[r] || r).join(', ')}
                     </span>
                     {unread && (
@@ -291,15 +293,15 @@ export function Announcements({
                       type="button"
                       onClick={() => remove(a.id)}
                       aria-label={`Delete announcement: ${a.title}`}
-                      className="pressable w-11 h-11 -mt-2 -mr-2 flex items-center justify-center rounded-lg text-ink-faint hover:text-ink transition cursor-pointer shrink-0"
+                      className="pressable w-11 h-11 -mt-2 -mr-2 flex items-center justify-center rounded-lg bg-surface border border-line-control text-ink hover:bg-sunken transition cursor-pointer shrink-0"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
                   )}
                 </div>
-                <h3 dir="auto" className={`text-base mt-1.5 ${unread ? 'font-extrabold' : 'font-bold'}`}>{a.title}</h3>
+                <h3 dir="auto" className={`text-base mt-1.5 ${unread ? 'font-bold text-ink' : 'font-semibold text-ink-soft'}`}>{a.title}</h3>
                 {a.body && <p dir="auto" className="text-base mt-1 whitespace-pre-wrap text-ink-soft">{a.body}</p>}
-                <p className="text-xs text-ink-faint mt-2">
+                <p className="text-xs text-ink-soft mt-2">
                   {a.authorName} · {new Date(a.createdAt).toLocaleString()}
                 </p>
                 {receipts && onOpenReaders && (

@@ -233,8 +233,7 @@ function RaiseAlertForm({
             <button
               type="button"
               onClick={() => void send(true)}
-              className="pressable min-h-11 px-3 rounded-lg text-sm font-bold cursor-pointer"
-              style={{ backgroundColor: 'var(--bad)', color: 'var(--bad-bg)' }}
+              className="pressable min-h-11 px-3 rounded-lg text-sm font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
             >
               Send without the attachment
             </button>
@@ -249,7 +248,7 @@ function RaiseAlertForm({
           dir="auto"
           maxLength={ALERT_TITLE_MAX}
           placeholder="e.g. Seal broken on the meat fridge"
-          className="mt-1 w-full h-12 px-3 text-base rounded-lg bg-surface border border-line"
+          className="mt-1 w-full h-12 px-3 text-base rounded-lg bg-surface border border-line-control text-ink"
         />
       </label>
       <div role="radiogroup" aria-label="How serious" className="grid grid-cols-4 gap-1.5">
@@ -261,7 +260,9 @@ function RaiseAlertForm({
             aria-checked={severity === s.id}
             onClick={() => onDraftChange({ severity: s.id })}
             className={`pressable min-h-11 rounded-lg border text-sm font-bold cursor-pointer ${
-              severity === s.id ? 'bg-ink text-paper border-ink' : 'bg-surface border-line text-ink-soft'
+              severity === s.id
+                ? s.id === 'low' ? 'bg-ok-bg border-ok text-ok' : s.id === 'medium' ? 'bg-warn-bg border-warn text-warn' : 'bg-bad-bg border-bad text-bad'
+                : 'bg-surface border-line-control text-ink hover:bg-sunken'
             }`}
           >
             {s.label}
@@ -276,14 +277,14 @@ function RaiseAlertForm({
           dir="auto"
           rows={3}
           maxLength={ALERT_DESCRIPTION_MAX}
-          className="mt-1 w-full px-3 py-2 text-base rounded-lg bg-surface border border-line resize-none"
+          className="mt-1 w-full px-3 py-2 text-base rounded-lg bg-surface border border-line-control text-ink resize-none"
         />
       </label>
 
       {photo && (
         <div className="flex items-center gap-2">
           <img src={photo} alt="Photo to send" className="w-16 h-16 rounded-lg object-cover border border-line" />
-          <button type="button" onClick={() => onMediaChange((prev) => ({ voiceNoteData: prev.voiceNoteData }))} className="pressable min-h-11 px-3 rounded-lg border border-line text-sm font-bold cursor-pointer">
+          <button type="button" onClick={() => onMediaChange((prev) => ({ voiceNoteData: prev.voiceNoteData }))} className="pressable min-h-11 px-3 rounded-lg text-sm font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken">
             Remove photo
           </button>
         </div>
@@ -294,16 +295,16 @@ function RaiseAlertForm({
             <span className="w-2.5 h-2.5 rounded-full animate-pulse" style={{ backgroundColor: 'var(--bad)' }} />
             Recording {mmss(elapsed)} / {mmss(ALERT_VOICE_MAX_SECONDS)}
           </span>
-          <button type="button" onClick={stopRecording} className="pressable flex items-center gap-1.5 px-3 min-h-11 rounded-lg border border-line text-sm font-bold cursor-pointer">
+          <button type="button" onClick={stopRecording} className="pressable flex items-center gap-1.5 px-3 min-h-11 rounded-lg text-sm font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken">
             <Square className="w-4 h-4" /> Stop
           </button>
         </div>
       )}
       {recState === 'preview' && voice && (
         <div className="flex items-center gap-2">
-          <Play className="w-4 h-4 text-ink-faint shrink-0" />
+          <Play className="w-4 h-4 text-ink-soft shrink-0" />
           <audio src={voice} controls preload="metadata" className="flex-1 h-11 min-w-0" />
-          <button type="button" onClick={() => { onMediaChange((prev) => ({ photoData: prev.photoData })); setRecState('idle'); }} className="pressable min-h-11 px-3 rounded-lg border border-line text-sm font-bold cursor-pointer">
+          <button type="button" onClick={() => { onMediaChange((prev) => ({ photoData: prev.photoData })); setRecState('idle'); }} className="pressable min-h-11 px-3 rounded-lg text-sm font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken">
             Remove
           </button>
         </div>
@@ -312,36 +313,35 @@ function RaiseAlertForm({
       <div className="flex gap-2 flex-wrap">
         <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={pickPhoto} />
         {!photo && (
-          <button type="button" onClick={() => fileRef.current?.click()} className="pressable flex items-center gap-2 px-3 min-h-12 rounded-xl border border-line bg-surface text-base font-bold cursor-pointer">
+          <button type="button" onClick={() => fileRef.current?.click()} className="pressable flex items-center gap-2 px-3 min-h-12 rounded-xl text-base font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken">
             <Camera className="w-5 h-5" /> Photo
           </button>
         )}
         {recState === 'idle' && !voice && (
-          <button type="button" onClick={startRecording} className="pressable flex items-center gap-2 px-3 min-h-12 rounded-xl border border-line bg-surface text-base font-bold cursor-pointer">
+          <button type="button" onClick={startRecording} className="pressable flex items-center gap-2 px-3 min-h-12 rounded-xl text-base font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken">
             <Mic className="w-5 h-5" /> Voice
           </button>
         )}
       </div>
       <div className="flex gap-2">
-        <button type="button" onClick={onCancel} className="pressable px-4 min-h-12 rounded-xl border border-line bg-surface text-base font-bold cursor-pointer">
+        <button type="button" onClick={onCancel} className="pressable px-4 min-h-12 rounded-xl text-base font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken">
           Cancel
         </button>
         <button
           type="button"
           onClick={() => void send(false)}
           disabled={sending || !title.trim() || recState === 'recording'}
-          className="pressable flex-1 flex items-center justify-center gap-2 min-h-12 rounded-xl text-base font-bold disabled:opacity-50 cursor-pointer"
-          style={{ backgroundColor: 'var(--bad)', color: 'var(--bad-bg)' }}
+          className="pressable flex-1 flex items-center justify-center gap-2 min-h-12 rounded-xl bg-gold-deep text-paper text-base font-bold disabled:opacity-50 cursor-pointer"
         >
           <Send className="w-5 h-5" /> {sending ? 'Sending…' : 'Send alert now'}
         </button>
       </div>
       {hasContent && (
-        <button type="button" onClick={onDiscard} className="pressable min-h-11 px-2 text-sm font-semibold text-ink-faint cursor-pointer">
+        <button type="button" onClick={onDiscard} className="pressable min-h-11 px-2 text-sm font-semibold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken">
           Discard draft
         </button>
       )}
-      <p className="text-xs text-ink-faint">
+      <p className="text-xs text-ink-soft">
         Goes at once to this venue's coordinators and the agency's admins, day or night.
       </p>
     </div>
@@ -375,22 +375,22 @@ function MuteRow({ mutedUntil, onChange }: { mutedUntil: string | null; onChange
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="pressable w-full min-h-12 px-3 flex items-center gap-2 text-left cursor-pointer"
+        className="pressable w-full min-h-12 px-3 flex items-center gap-2 text-left cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
       >
         {muted ? <BellOff className="w-5 h-5 text-ink-soft shrink-0" /> : <Bell className="w-5 h-5 text-ink-soft shrink-0" />}
         <span className="flex-1 text-base font-semibold">
           {muted ? `Alert sound off until ${untilWord}` : 'Alert sound on'}
         </span>
-        <ChevronDown className={`w-5 h-5 text-ink-faint transition ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown className={`w-5 h-5 text-ink-soft transition ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
         <div className="px-3 pb-3 space-y-2">
-          <p className="text-xs text-ink-faint">Alerts always arrive right away. This only silences the sound on your devices.</p>
+          <p className="text-xs text-ink-soft">Alerts always arrive right away. This only silences the sound on your devices.</p>
           <div className="flex flex-wrap gap-2">
-            <button type="button" disabled={busy} onClick={() => void set(60)} className="pressable h-11 px-3 rounded-lg border border-line text-sm font-bold cursor-pointer disabled:opacity-50">Silence 1 hour</button>
-            <button type="button" disabled={busy} onClick={() => void set(minutesUntilMorning())} className="pressable h-11 px-3 rounded-lg border border-line text-sm font-bold cursor-pointer disabled:opacity-50">Until 7 AM</button>
+            <button type="button" disabled={busy} onClick={() => void set(60)} className="pressable h-11 px-3 rounded-lg text-sm font-bold cursor-pointer disabled:opacity-50 bg-surface border border-line-control text-ink hover:bg-sunken">Silence 1 hour</button>
+            <button type="button" disabled={busy} onClick={() => void set(minutesUntilMorning())} className="pressable h-11 px-3 rounded-lg text-sm font-bold cursor-pointer disabled:opacity-50 bg-surface border border-line-control text-ink hover:bg-sunken">Until 7 AM</button>
             {muted && (
-              <button type="button" disabled={busy} onClick={() => void set(0)} className="pressable h-11 px-3 rounded-lg bg-ink text-paper text-sm font-bold cursor-pointer disabled:opacity-50">Sound on</button>
+              <button type="button" disabled={busy} onClick={() => void set(0)} className="pressable h-11 px-3 rounded-lg text-sm font-bold cursor-pointer disabled:opacity-50 bg-surface border border-line-control text-ink hover:bg-sunken">Sound on</button>
             )}
           </div>
           {failed && <p className="text-sm" style={{ color: 'var(--bad)' }}>Couldn't change it. Try again.</p>}
@@ -446,7 +446,7 @@ function AlertRow({
       <div className="flex items-center gap-2 flex-wrap">
         <span
           className="inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full"
-          style={serious ? { backgroundColor: 'var(--bad-bg)', color: 'var(--bad)' } : { backgroundColor: 'var(--warn-bg)', color: 'var(--warn)' }}
+          style={serious ? { backgroundColor: 'var(--bad-bg)', color: 'var(--bad)' } : a.severity === 'low' ? { backgroundColor: 'var(--ok-bg)', color: 'var(--ok)' } : { backgroundColor: 'var(--warn-bg)', color: 'var(--warn)' }}
         >
           <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
           {SEVERITIES.find((s) => s.id === a.severity)?.label || a.severity}
@@ -469,10 +469,10 @@ function AlertRow({
             <span className="w-2 h-2 rounded-full bg-gold" /> New
           </span>
         )}
-        {a.mine && <span className="text-xs font-bold text-ink-faint">Your alert</span>}
+        {a.mine && <span className="text-xs font-bold text-ink-soft">Your alert</span>}
       </div>
-      <h3 dir="auto" className={`text-base mt-1.5 ${unread ? 'font-black' : 'font-bold'}`}>{a.title}</h3>
-      <p className="text-xs text-ink-faint mt-0.5">
+      <h3 dir="auto" className={`text-base mt-1.5 ${unread ? 'font-bold text-ink' : 'font-semibold text-ink-soft'}`}>{a.title}</h3>
+      <p className="text-xs text-ink-soft mt-0.5">
         <span dir="auto">{a.reporterName}</span> · {timeAgo(a.createdAt)}
       </p>
       {a.description && <p dir="auto" className="text-base whitespace-pre-wrap mt-1.5">{a.description}</p>}
@@ -481,7 +481,7 @@ function AlertRow({
         <button
           type="button"
           onClick={() => void loadMedia()}
-          className="pressable mt-2 h-11 px-3 rounded-lg border border-line text-sm font-bold inline-flex items-center gap-2 cursor-pointer"
+          className="pressable mt-2 h-11 px-3 rounded-lg text-sm font-bold inline-flex items-center gap-2 cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
         >
           {a.hasPhoto ? <ImageIcon className="w-4 h-4" /> : <Play className="w-4 h-4" />}
           {mediaState === 'loading'
@@ -518,18 +518,18 @@ function AlertRow({
       {confirmResolve ? (
         <div className="flex items-center gap-2 mt-2 p-2 rounded-lg bg-sunken">
           <span className="text-sm font-bold flex-1">Mark this alert resolved?</span>
-          <button type="button" disabled={busy} onClick={() => { setConfirmResolve(false); onResolve(); }} className="pressable px-3 h-11 rounded-lg bg-ink text-paper text-sm font-bold cursor-pointer">Resolve</button>
-          <button type="button" onClick={() => setConfirmResolve(false)} className="pressable px-3 h-11 rounded-lg border border-line bg-surface text-sm font-bold cursor-pointer">Cancel</button>
+          <button type="button" disabled={busy} onClick={() => { setConfirmResolve(false); onResolve(); }} className="pressable px-3 h-11 rounded-lg text-sm font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken">Resolve</button>
+          <button type="button" onClick={() => setConfirmResolve(false)} className="pressable px-3 h-11 rounded-lg text-sm font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken">Cancel</button>
         </div>
       ) : (canAck || canResolve) && (
         <div className="flex gap-2 mt-2">
           {canAck && (
-            <button type="button" disabled={busy} onClick={onAck} className="pressable flex-1 h-11 rounded-lg bg-ink text-paper text-sm font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50">
+            <button type="button" disabled={busy} onClick={onAck} className="pressable flex-1 h-11 rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 bg-surface border border-line-control text-ink hover:bg-sunken">
               <Check className="w-4 h-4" /> Acknowledge
             </button>
           )}
           {canResolve && (
-            <button type="button" disabled={busy} onClick={() => setConfirmResolve(true)} className="pressable flex-1 h-11 rounded-lg border border-line text-sm font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50">
+            <button type="button" disabled={busy} onClick={() => setConfirmResolve(true)} className="pressable flex-1 h-11 rounded-lg text-sm font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 bg-surface border border-line-control text-ink hover:bg-sunken">
               <CheckCircle2 className="w-4 h-4" /> Resolve
             </button>
           )}
@@ -654,8 +654,7 @@ export function AlertsTab({
           <button
             type="button"
             onClick={() => setComposing(true)}
-            className="pressable w-full h-12 rounded-xl text-base font-bold flex items-center justify-center gap-2 cursor-pointer"
-            style={{ backgroundColor: 'var(--bad)', color: 'var(--bad-bg)' }}
+            className="pressable w-full h-12 rounded-xl bg-gold-deep text-paper text-base font-bold flex items-center justify-center gap-2 cursor-pointer"
           >
             <ShieldAlert className="w-5 h-5" /> Raise an alert
           </button>
@@ -687,9 +686,10 @@ export function AlertsTab({
             ))}
           </div>
         ) : active_.length === 0 ? (
-          <div className="text-center py-8">
+          <div data-empty-state className="text-center py-8">
             <CheckCircle2 className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--ok)' }} />
             <p className="text-base text-ink-soft">No open alerts at this venue.</p>
+            {!composing && <p className="text-base text-ink-soft mt-1">Raise one above if something needs attention.</p>}
           </div>
         ) : (
           active_.map(row)
@@ -701,7 +701,7 @@ export function AlertsTab({
               type="button"
               onClick={() => setShowResolved((v) => !v)}
               aria-expanded={showResolved}
-              className="pressable w-full min-h-11 flex items-center justify-between text-sm font-bold text-ink-soft cursor-pointer"
+              className="pressable w-full min-h-11 flex items-center justify-between text-sm font-bold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
             >
               Resolved ({resolved.length})
               <ChevronDown className={`w-5 h-5 transition ${showResolved ? 'rotate-180' : ''}`} />
