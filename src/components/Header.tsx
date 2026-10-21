@@ -45,6 +45,8 @@ interface HeaderProps {
   currentUser: User | null;
   currentVenue: Venue | null;
   allVenues: Venue[];
+  switchableVenues?: Venue[];
+  onOpenVenueSwitcher?: () => void;
   onOpenVenuesHub?: () => void;
   onOpenVenuesDirectory?: () => void;
   onOpenCreateVenue: () => void;
@@ -78,6 +80,8 @@ export const Header: React.FC<HeaderProps> = ({
   currentUser,
   currentVenue,
   allVenues,
+  switchableVenues = [],
+  onOpenVenueSwitcher,
   onOpenVenuesHub,
   onOpenVenuesDirectory,
   onOpenCreateVenue,
@@ -110,6 +114,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   const openVenuesModal = onOpenVenuesHub || onOpenVenuesDirectory || (() => {});
+  const canSwitchVenue = !!currentUser && currentUser.role !== 'admin' && switchableVenues.length >= 2 && !!onOpenVenueSwitcher;
   const venueTz = venueTimeZone(currentVenue, currentUser);
 
   // Enter kiosk mode: this device becomes a shared wall tablet.
@@ -182,6 +187,18 @@ export const Header: React.FC<HeaderProps> = ({
                 </span>
                 {/* H1: fixed px so large text does not grow the target */}
                 <ChevronDown className="w-[12px] h-[12px] text-ink-faint group-hover:text-ink-soft transition shrink-0" />
+              </button>
+            ) : currentVenue && canSwitchVenue ? (
+              <button
+                type="button"
+                onClick={onOpenVenueSwitcher}
+                aria-haspopup="dialog"
+                aria-label={`Switch venue, current: ${currentVenue.name}`}
+                className="flex items-center gap-2 px-3 py-1 rounded-xl bg-ok-bg border border-line-control text-ok tactile-1 min-w-11 min-h-11 pressable cursor-pointer"
+              >
+                <Building2 className="w-4 h-4 shrink-0" />
+                <span className="text-xs font-bold truncate min-w-0 max-w-[130px] sm:max-w-[170px]">{currentVenue.name}</span>
+                <ChevronDown className="w-4 h-4 shrink-0" />
               </button>
             ) : currentVenue ? (
               // H1: fixed px so large text does not grow the target
@@ -611,6 +628,21 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <UserIcon className="w-4 h-4" />
               <span>Sign In to Your Account</span>
+            </button>
+          )}
+
+          {canSwitchVenue && currentVenue && (
+            <button
+              type="button"
+              onClick={() => { setMobileMenuOpen(false); onOpenVenueSwitcher?.(); }}
+              aria-haspopup="dialog"
+              aria-label={`Switch venue, current: ${currentVenue.name}`}
+              className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl bg-ok-bg border border-line-control text-ok pressable cursor-pointer"
+            >
+              <Building2 className="w-4 h-4 shrink-0" />
+              <span>Switch venue</span>
+              <span className="truncate min-w-0 ml-auto">{currentVenue.name}</span>
+              <ChevronDown className="w-4 h-4 shrink-0" />
             </button>
           )}
 
