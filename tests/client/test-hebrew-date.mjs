@@ -147,5 +147,33 @@ for (const [key, iso] of Object.entries(fx.sunset)) {
   check('NaN coords -> zone-city', n.basis === 'zone-city', n.basis);
 }
 
+// 11. An engine without the Hebrew calendar must not show the Gregorian date as if it were Hebrew
+//     (Intl silently falls back to another calendar). Simulate it and expect the empty fallback.
+{
+  const Real = Intl.DateTimeFormat;
+  try {
+    const Fake = function (locales, options) {
+      const f = new Real(locales, options);
+      if (String(locales).includes('ca-hebrew')) {
+        const g = new Real('he', options); // Gregorian formatter wearing the Hebrew locale tag
+        return {
+          format: (d) => g.format(d),
+          formatToParts: (d) => g.formatToParts(d),
+          resolvedOptions: () => ({ ...g.resolvedOptions(), calendar: 'gregory' }),
+        };
+      }
+      return f;
+    };
+    Fake.supportedLocalesOf = Real.supportedLocalesOf;
+    Intl.DateTimeFormat = Fake;
+    const r = hebrewDateFor(new Date('2026-10-21T16:00:00Z'), 'Asia/Jerusalem');
+    check('no hebrew calendar -> empty text', r.text === '' && r.textShort === '' && r.day === 0, JSON.stringify(r));
+  } finally {
+    Intl.DateTimeFormat = Real;
+  }
+  const back = hebrewDateFor(new Date('2026-10-21T16:00:00Z'), 'Asia/Jerusalem');
+  check('hebrew calendar restored', back.text === 'י״א בחשוון תשפ״ז', back.text); // 16:00Z is after Jerusalem's 15:00Z sunset
+}
+
 console.log(`hebrew-date: ${checks - failures}/${checks} passed (worst sunset diff ${worst.toFixed(2)} min)`);
 process.exit(failures ? 1 : 0);
