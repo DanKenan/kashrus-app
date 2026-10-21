@@ -16,7 +16,7 @@
  *     no counts, no cross-agency listing).
  *   - GET /api/users: scoped from the verified session token, never from a
  *     client-supplied userEmail query param.
- *   - POST /api/admin/clean-slate and POST /api/admin/restore-demo HTTP
+ *   - POST /api/admin/clean-slate HTTP (restore-demo is retired since 8i: 410)
  *     responses: scoped to the caller's agency.
  *
  * Method: real WebSocket clients (native Node WebSocket) for an agency-hkc
@@ -429,30 +429,19 @@ export default {
     assertNoType([connHkc, connNoAgency], 'CLEAN_SLATE_RESET', 'CLEAN_SLATE_RESET cross-agency');
     clearAll();
 
-    // --- 10. DEMO_RESTORED: broadcast + HTTP response scoped ---
+    // --- 10. restore-demo is retired (8i): 410 for an agency admin, nothing
+    // written, no DEMO_RESTORED broadcast to anyone (it used to delete the
+    // caller agency's data and re-create the seed admin account).
+    const vBeforeRd = await ctx.getVersion();
     const rd = await fetch(`${baseUrl}/api/admin/restore-demo`, {
       method: 'POST',
       headers: authB(tokenAdminB),
       body: JSON.stringify({}),
     });
-    if (rd.status !== 200) throw new Error(`restore-demo failed: ${rd.status} ${JSON.stringify(await rd.json())}`);
-    const rdJson = await rd.json();
-    assertRoster(rdJson.users, AGENCY_B, true, 'restore-demo HTTP response (agency-B admin)');
-    assertAgencyScopedArrays(rdJson, AGENCY_B, 'restore-demo HTTP response');
-    const rdAdminB = await waitForType(connAdminB.messages, 'DEMO_RESTORED');
-    assertRoster(rdAdminB.payload.users, AGENCY_B, true, 'DEMO_RESTORED (agency-B admin)');
-    assertAgencyScopedArrays(rdAdminB.payload, AGENCY_B, 'DEMO_RESTORED (agency-B admin)');
+    if (rd.status !== 410) throw new Error(`restore-demo must be 410 (8i), got ${rd.status}`);
     await new Promise((r) => setTimeout(r, 1500));
-    assertNoType([connHkc, connNoAgency], 'DEMO_RESTORED', 'DEMO_RESTORED cross-agency');
-    // Wiped users' sockets were closed at clean-slate: still closed, nothing received.
-    for (const [conn, label] of [[connStaffB, 'wiped mashgiach'], [connAssignerB, 'wiped assigner']]) {
-      if (!conn.closed) {
-        throw new Error(`DEMO_RESTORED: ${label} socket unexpectedly open after wipe`);
-      }
-      if (conn.messages.some((m) => m.type === 'DEMO_RESTORED')) {
-        throw new Error(`DEMO_RESTORED: ${label} received agency data after wipe`);
-      }
-    }
+    assertNoType(allConns, 'DEMO_RESTORED', 'DEMO_RESTORED after retirement');
+    if ((await ctx.getVersion()) !== vBeforeRd) throw new Error('restore-demo (retired) must not write');
 
     for (const c of allConns) c.ws.close();
 
