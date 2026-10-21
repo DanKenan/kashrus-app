@@ -63,6 +63,16 @@ class MockDocumentReference {
   async set(data) {
     this._store._docs[this.path] = JSON.parse(JSON.stringify(data));
   }
+  /**
+   * 8k test-harness correction: DocumentReference.delete() was missing, so the
+   * 8c test hook POST /api/__test__/identity-doc (data null = delete) crashed
+   * the mock server ("ref.delete is not a function") and tests 49-52 could not
+   * run under FIRESTORE_MOCK=true. Same semantics as set(): in-memory, like a
+   * direct (non-transaction) write.
+   */
+  async delete() {
+    delete this._store._docs[this.path];
+  }
 }
 
 class MockTransaction {
