@@ -50,13 +50,17 @@ const cur = {
 };
 if (DUMP) { fs.writeFileSync(BASE, JSON.stringify(cur, null, 1)); console.log('baseline written'); process.exit(0); }
 const base = JSON.parse(fs.readFileSync(BASE, 'utf8'));
+// The Hebrew date (aria-label + both spans) changes every evening at sunset; the frozen baseline holds the
+// day it was recorded. Normalise every Hebrew-letter run on BOTH sides so parity checks markup, not the date.
+const heb = (h) => h.replace(/[\u05D0-\u05EA][\u0590-\u05FF\u05F3\u05F4"' ]*/g, 'HEB');
+for (const k of Object.keys(cur)) { cur[k] = heb(cur[k]); base[k] = heb(base[k]); }
 
 // H1-H3: parity with main when the switcher must not show (no new props, and with them)
 ok('H1 single-venue staff header = main', cur.staffSingle === base.staffSingle);
 ok('H2 admin header = main', cur.adminTwo === base.adminTwo);
 ok('H3 staff with no venue = main', cur.staffNoVenue === base.staffNoVenue);
 let opened = 0;
-const withProps = (p) => strip(headerHtml({ switchableVenues: p.sw, onOpenVenueSwitcher: () => { opened++; }, ...p }));
+const withProps = (p) => heb(strip(headerHtml({ switchableVenues: p.sw, onOpenVenueSwitcher: () => { opened++; }, ...p })));
 ok('H4 single eligible venue + new props = main', withProps({ currentUser: staff1, currentVenue: A, allVenues: [A], sw: [A] }) === base.staffSingle);
 ok('H5 admin + new props (2 switchable) = main', withProps({ currentUser: admin, currentVenue: A, allVenues: [A, B], sw: [A, B] }) === base.adminTwo);
 
