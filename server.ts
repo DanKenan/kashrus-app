@@ -2380,6 +2380,9 @@ let factoryReports: FactoryAuditReportItem[] = [];
 // with the rest of the state so subscriptions survive restarts and deploys.
 interface PushSubscriptionRecord {
   userEmail: string;
+  /** Item 8t: the verified subscriber's id + agency (absent on legacy records). */
+  userId?: string;
+  agencyId?: string;
   endpoint: string;
   keys: { p256dh: string; auth: string };
   createdAt: string;
@@ -3898,11 +3901,47 @@ function ensureVapidKeys() {
   );
 }
 
+/** TEST ONLY (item 8t): every push target attempted, recorded BEFORE any
+ * network send. Only written when isTestMode() (never on Cloud Run). */
+const testPushLog: Array<{ path: string; recipientUserId: string | null; email: string; endpoint: string; title: string }> = [];
+
 /** Send a push notification to every device a user subscribed. Fire-and-forget. */
 function sendPushToUser(userEmail: string, title: string, body: string, data?: any, onError?: (err: any) => void) {
-  if (!vapidKeys) return;
   const email = userEmail.trim().toLowerCase();
   const subs = pushSubscriptions.filter((s) => s.userEmail.toLowerCase() === email);
+  deliverPush(subs, 'email', null, title, body, data, onError);
+}
+
+/**
+ * Item 8t: identity-bound delivery. Only subscriptions carrying the
+ * recipient's verified userId AND agency receive it. Legacy records (no
+ * userId) are NOT used here — they cannot be attributed to a current identity
+ * (ChatGPT 8t v2 must-fix); those devices get these pushes again after the
+ * user re-subscribes through the normal toggle.
+ */
+function sendPushToRecipient(user: any, title: string, body: string, data?: any, onError?: (err: any) => void) {
+  if (!user || !user.id) return;
+  const agencyId = normalizeStoredUser(user).agencyId || 'agency-hkc';
+  const subs = pushSubscriptions.filter((s) => s.userId === user.id && s.agencyId === agencyId);
+  deliverPush(subs, 'identity', user.id, title, body, data, onError);
+}
+
+function deliverPush(
+  subs: PushSubscriptionRecord[],
+  path: string,
+  recipientUserId: string | null,
+  title: string,
+  body: string,
+  data?: any,
+  onError?: (err: any) => void
+) {
+  if (isTestMode()) {
+    for (const sub of subs) {
+      testPushLog.push({ path, recipientUserId, email: sub.userEmail, endpoint: sub.endpoint, title });
+    }
+    if (testPushLog.length > 5000) testPushLog.splice(0, testPushLog.length - 5000);
+  }
+  if (!vapidKeys) return;
   for (const sub of subs) {
     const payload = JSON.stringify({ title, body, data: data || {} });
     webpush
@@ -4039,6 +4078,42 @@ setTimeout(() => {
 // or several server instances is NOT claimed (pre-existing limitation).
 const OVERDUE_KEY_RETENTION_MS = 36 * 60 * 60 * 1000;
 const overdueNotified = new Map<string, number>();
+/**
+ * Item 8t: who may receive a push about a task. Only users of the TASK'S
+ * agency (task.agencyId, else its venue's agency, else 'agency-hkc'), who
+ * may see the task under the existing server rule (canSeeTaskServer: rule-T
+ * venue scope + private-task rule), and who are named by it:
+ *  - assignedTo includes 'all' (or is empty): the agency's users at the
+ *    task's venue + the agency's admins (unless explicitOnly);
+ *  - explicit emails: only those resolving to such a user.
+ * Unknown / other-agency / invisible emails are silently omitted; the task's
+ * stored assignedTo is never rewritten. De-duplicated by user id.
+ */
+function taskPushRecipients(task: any, usersList: any[], venuesList: any[], opts: { explicitOnly?: boolean } = {}): any[] {
+  if (!task) return [];
+  const venue = (venuesList || []).find((v: any) => v && v.id === task.venueId);
+  const taskAgency = task.agencyId || venue?.agencyId || 'agency-hkc';
+  const assigned: string[] = Array.isArray(task.assignedTo) && task.assignedTo.length > 0 ? task.assignedTo : ['all'];
+  const toAll = assigned.some((a) => typeof a === 'string' && a.toLowerCase() === 'all') && !opts.explicitOnly;
+  const explicit = new Set(
+    assigned.filter((a) => typeof a === 'string' && a.toLowerCase() !== 'all').map((a) => a.trim().toLowerCase())
+  );
+  const out: any[] = [];
+  const seen = new Set<string>();
+  for (const raw of usersList || []) {
+    if (!raw || !raw.id || typeof raw.email !== 'string' || seen.has(raw.id)) continue;
+    const u = normalizeStoredUser(raw);
+    if ((u.agencyId || 'agency-hkc') !== taskAgency) continue;
+    if (!canSeeTaskServer(task, u as any)) continue;
+    const named = explicit.has(raw.email.trim().toLowerCase());
+    const inAll = toAll && (u.role === 'admin' || u.venueId === task.venueId);
+    if (!named && !inAll) continue;
+    seen.add(raw.id);
+    out.push(u);
+  }
+  return out;
+}
+
 function checkOverdueTasks(now: Date = serverNow()): string[] {
   const nowMs = now.getTime();
   const sentKeys: string[] = [];
@@ -4068,15 +4143,12 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
 
     const venueName = venue?.name || 'your venue';
 
-    // Notify assigned users, or all venue users if assigned to 'all'
-    const assigned = Array.isArray(task.assignedTo) ? task.assignedTo : ['all'];
-    const notifyEmails = assigned.includes('all')
-      ? users.filter((u) => u.venueId === task.venueId || !u.venueId).map((u) => u.email)
-      : assigned;
-
-    for (const email of notifyEmails) {
-      sendPushToUser(
-        email,
+    // Item 8t: recipients are resolved inside the TASK'S agency and must be
+    // able to see the task (canSeeTaskServer); delivery is identity-bound.
+    // ('all' = the agency's users at the venue + the agency's admins.)
+    for (const recipient of taskPushRecipients(task, users, venues)) {
+      sendPushToRecipient(
+        recipient,
         `Overdue: ${task.title}`,
         `${venueName} — was due at ${task.targetTime}`,
         { taskId: task.id, venueId: task.venueId, type: 'overdue' }
@@ -4109,6 +4181,10 @@ app.post('/api/push/subscribe', async (req, res) => {
   // Subscription ownership is keyed by the VERIFIED session user, never a
   // client-supplied email.
   const email = caller.email.trim().toLowerCase();
+  // Item 8t: bind the subscription to the verified identity (id + agency),
+  // so identity-bound pushes never reach a device by email alone.
+  const subUserId = caller.id;
+  const subAgencyId = normalizeStoredUser(caller).agencyId || 'agency-hkc';
   const createdAt = new Date().toISOString();
   const committed = await commitOrRespond(
     req, res,
@@ -4117,7 +4193,7 @@ app.post('/api/push/subscribe', async (req, res) => {
       // Upsert by endpoint against FRESH data.
       const newArr = [
         ...arr.filter((s) => s.endpoint !== subscription.endpoint),
-        { userEmail: email, endpoint: subscription.endpoint, keys: subscription.keys, createdAt },
+        { userEmail: email, userId: subUserId, agencyId: subAgencyId, endpoint: subscription.endpoint, keys: subscription.keys, createdAt },
       ];
       return { doc: { ...freshDoc, pushSubscriptions: newArr }, result: { success: true } };
     },
@@ -7563,6 +7639,31 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 // dedicated block separate from the FIRESTORE_MOCK endpoints — they must
 // never exist outside test mode, even with FIRESTORE_MOCK=true.
 if (isTestMode()) {
+  // TEST ONLY (item 8t): push targets attempted (recorded before any send).
+  // Registered ONLY under isTestMode() — not under the broader FIRESTORE_MOCK
+  // block — so mock-without-test-mode and production both get the 404 below.
+  app.get('/api/__test__/push-log', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    res.json({ log: testPushLog });
+  });
+  app.post('/api/__test__/push-log/clear', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    testPushLog.length = 0;
+    res.json({ ok: true });
+  });
+  // TEST ONLY (item 8t): seed a LEGACY push subscription (no userId/agencyId),
+  // the shape every subscription had before 8t.
+  app.post('/api/__test__/seed-legacy-push-sub', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    // (field is subEmail: a global guard rewrites any body userEmail to the caller's)
+    const { subEmail: userEmail, endpoint } = req.body || {};
+    if (typeof userEmail !== 'string' || typeof endpoint !== 'string') return res.status(400).json({ error: 'subEmail + endpoint required' });
+    await commitState((freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
+      return { doc: { ...freshDoc, pushSubscriptions: [...arr.filter((s) => s.endpoint !== endpoint), { userEmail: userEmail.trim().toLowerCase(), endpoint, keys: { p256dh: 'x', auth: 'y' }, createdAt: new Date().toISOString() }] }, result: null };
+    }, { label: 'test-seed-legacy-push-sub' });
+    res.json({ ok: true });
+  });
   // TEST ONLY: silently revokes a user (removes from the in-memory users array
   // and persists) WITHOUT broadcasting. Lets tests verify broadcast
   // authorization independently of the revocation broadcast (which would
@@ -7736,6 +7837,12 @@ if (isTestMode()) {
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
+  });
+} else {
+  // Item 8t: outside test mode every /api/__test__ path is an explicit 404
+  // (none of the hooks above exist; this makes that unambiguous for GETs too).
+  app.all(/^\/api\/__test__(\/.*)?$/, (_req, res) => {
+    res.status(404).json({ error: 'Not found.' });
   });
 }
 
@@ -8321,14 +8428,13 @@ app.post('/api/tasks', async (req, res) => {
     (meta, task) => (canSeeTaskServer(task, recipientForMeta(meta)) ? task : null)
   );
 
-  // Phone push to specifically-assigned mashgichim (not for global 'all' tasks)
-  const assignees = (created.assignedTo || []).filter(
-    (a) => a && a.toLowerCase() !== 'all'
-  );
-  for (const email of assignees) {
-    if (createdByEmail && email.toLowerCase() === createdByEmail.toLowerCase()) continue;
-    sendPushToUser(
-      email,
+  // Phone push to specifically-assigned mashgichim (not for global 'all' tasks).
+  // Item 8t: only explicit assignees of the task's agency who may see it;
+  // identity-bound delivery.
+  for (const recipient of taskPushRecipients(created, users, venues, { explicitOnly: true })) {
+    if (createdByEmail && recipient.email.toLowerCase() === createdByEmail.toLowerCase()) continue;
+    sendPushToRecipient(
+      recipient,
       '📋 New task assigned to you',
       `${created.title}${created.targetTime ? ` — ${created.targetTime}` : ''}`,
       { url: '/', taskId: created.id }
@@ -10191,8 +10297,20 @@ app.delete('/api/users/:id', async (req, res) => {
           return { conflict: 'Cannot delete the last administrator of the agency.' };
         }
       }
+      // Item 8t: the deleted user's push subscriptions go in the SAME commit
+      // (identity-bound by userId, plus legacy records under their email —
+      // emails are unique, so a legacy record under it is theirs).
+      const targetEmail = typeof freshTarget.email === 'string' ? freshTarget.email.trim().toLowerCase() : '';
+      const freshSubs: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
+      const keptSubs = freshSubs.filter(
+        (s) => !(s && (s.userId === id || (!s.userId && typeof s.userEmail === 'string' && s.userEmail.trim().toLowerCase() === targetEmail)))
+      );
       return {
-        doc: { ...freshDoc, users: freshUsers.filter((u) => u.id !== id) },
+        doc: {
+          ...freshDoc,
+          users: freshUsers.filter((u) => u.id !== id),
+          ...(keptSubs.length !== freshSubs.length ? { pushSubscriptions: keptSubs } : {}),
+        },
         result: { success: true, deletedId: id },
       };
     },
