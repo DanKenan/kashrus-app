@@ -23,6 +23,8 @@ export const SERVER_ONLY_AGENCY_FIELDS = [
   'domainVerificationToken',
   'domainVerifiedAt',
   'domainLastCheckedAt',
+  // Item 12: set only by PUT/DELETE /api/agency/logo.
+  'logoRev',
 ] as const;
 
 export const RESERVED_SLUGS = new Set([
@@ -175,7 +177,7 @@ export function isVerifiedDomainFor(agency: any, host: string): boolean {
 
 export const AGENCY_PUBLIC_FIELDS = [
   'id', 'name', 'shortCode', 'certificationSeal', 'region', 'contactPhone',
-  'timeZone', 'slug', 'brandName', 'logoUrl',
+  'timeZone', 'slug', 'brandName', 'logoUrl', 'logoRev',
 ] as const;
 
 export const AGENCY_ADMIN_EXTRA_FIELDS = [
@@ -195,14 +197,25 @@ export function agencyPublicProfile(agency: any): Record<string, any> {
   const out = pick(agency, AGENCY_PUBLIC_FIELDS);
   // Item V1: the agency's certification options, classified PUBLIC (labels
   // only). Computed (stored valid list, else defaults), never the raw value.
-  if (agency && typeof agency === 'object') out.certificationOptions = effectiveCertOptions(agency);
+  if (agency && typeof agency === 'object') {
+    out.certificationOptions = effectiveCertOptions(agency);
+    out.logoRev = logoRevOf(agency);
+  }
   return out;
+}
+
+/** Item 12: the logo revision, ALWAYS present on a projection (string or null — the client's feature signal). */
+function logoRevOf(agency: any): string | null {
+  return typeof agency?.logoRev === 'string' && agency.logoRev ? agency.logoRev : null;
 }
 
 /** What the agency's own admin sees: public profile + settings. Never the DNS proof value. */
 export function agencyAdminView(agency: any): Record<string, any> {
   const out = pick(agency, [...AGENCY_PUBLIC_FIELDS, ...AGENCY_ADMIN_EXTRA_FIELDS]);
-  if (agency && typeof agency === 'object') out.certificationOptions = effectiveCertOptions(agency);
+  if (agency && typeof agency === 'object') {
+    out.certificationOptions = effectiveCertOptions(agency);
+    out.logoRev = logoRevOf(agency);
+  }
   return out;
 }
 
