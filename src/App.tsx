@@ -1234,7 +1234,7 @@ export default function App() {
         operationId,
       });
       if (!result.ok) return result.error || 'Could not copy the event. Please try again.';
-      const created = result.data?.event as KosherEvent | undefined;
+      const created = (result.data?.event || result.data) as KosherEvent | undefined;
       if (!created?.id) return 'Could not copy the event. Please try again.';
       setEvents((prev) => [created, ...prev.filter((e) => e.id !== created.id)]);
       setCopySourceEvent(null);

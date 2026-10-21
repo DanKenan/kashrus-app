@@ -3434,22 +3434,11 @@ async function commitState(
 let stateVersion = 0;
 
 /**
- * Helper for Express handlers: runs commitState and maps errors to HTTP
- * responses. Returns the commit result on success, or sends the error
- * response and returns null.
- *
- * Usage:
- *   const committed = await commitOrRespond(req, res, mutator, { label: 'create-task' });
- *   if (!committed) return; // response already sent
- *   broadcast(...); // only after commit
- *   res.status(201).json(committed.result);
+ * The idempotency scope of a write request, derived ONE way for
+ * commitOrRespond and for replayCommittedOperation (item 7): caller-scoped
+ * key, payload fingerprint and target.
  */
-async function commitOrRespond(
-  req: any,
-  res: any,
-  mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
-  options: Omit<CommitOptions, 'expectedVersion' | 'operationId'> = {}
-): Promise<CommitResult | null> {
+function idempotencyScopeFor(req: any) {
   const body = req.body || {};
   const query = req.query || {};
   const expectedVersion =
@@ -3481,6 +3470,58 @@ async function commitOrRespond(
   const opTarget = req.params && (req.params as any).id
     ? `${req.path.split('/')[2] || 'unknown'}:${(req.params as any).id}`
     : undefined;
+
+  return { expectedVersion, operationId, idempotencyKey, authUserId, payloadHash, opTarget };
+}
+
+/**
+ * Item 7: answer a retry of an operation that ALREADY committed, before the
+ * route's own checks run against today's (possibly changed) data. Returns
+ * true after sending the stored result (or a 409 for the same operationId
+ * with a different payload); false when no live receipt matches — the route
+ * then runs its normal first-attempt checks. Writes nothing: on a miss the
+ * probe's mutator refuses, inside the same transaction that read the receipts.
+ */
+async function replayCommittedOperation(req: any, res: any, label: string): Promise<boolean> {
+  const scope = idempotencyScopeFor(req);
+  if (!scope.operationId || !scope.idempotencyKey) return false;
+  try {
+    await commitState(() => ({ conflict: 'receipt-probe' }), {
+      label, operationId: scope.operationId, idempotencyKey: scope.idempotencyKey,
+      idempotencyUserId: scope.authUserId, payloadHash: scope.payloadHash,
+      opType: label, opMethod: req.method, opTarget: scope.opTarget,
+    });
+  } catch (err: any) {
+    if (err instanceof DuplicateOperationError) {
+      res.json(err.cachedResult.result);
+      return true;
+    }
+    if (err instanceof PayloadMismatchError) {
+      res.status(409).json({ error: err.message, code: 'PAYLOAD_MISMATCH' });
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Helper for Express handlers: runs commitState and maps errors to HTTP
+ * responses. Returns the commit result on success, or sends the error
+ * response and returns null.
+ *
+ * Usage:
+ *   const committed = await commitOrRespond(req, res, mutator, { label: 'create-task' });
+ *   if (!committed) return; // response already sent
+ *   broadcast(...); // only after commit
+ *   res.status(201).json(committed.result);
+ */
+async function commitOrRespond(
+  req: any,
+  res: any,
+  mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
+  options: Omit<CommitOptions, 'expectedVersion' | 'operationId'> = {}
+): Promise<CommitResult | null> {
+  const { expectedVersion, operationId, idempotencyKey, authUserId, payloadHash, opTarget } = idempotencyScopeFor(req);
 
   // Version contract: updates to existing data MUST carry the version the
   // client rendered. A client that sends no version is too old (cached PWA)
@@ -9065,7 +9106,7 @@ app.post('/api/events', async (req, res) => {
       const arr: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
       // Idempotency: same event ID already created.
       const existing = arr.find((e) => e.id === eventId);
-      if (existing) return { doc: freshDoc, result: existing };
+      if (existing) return { doc: freshDoc, result: { event: existing } };
       return { doc: { ...freshDoc, events: [...arr, newEvent] }, result: newEvent };
     },
     { label: 'create-event' }
@@ -9109,10 +9150,11 @@ const EVENT_COPY_TITLE_MAX = 200;
  * event.
  */
 function eventCopySpanDays(src: any): number | null | 'bad' {
+  const start = src?.date;
+  if (!isWorkDate(start) || addDays(start, 0) !== start) return 'bad';
   const end = src?.endDate;
   if (end === undefined || end === null || end === '') return null;
-  const start = src?.date;
-  if (!isWorkDate(start) || !isWorkDate(end) || addDays(start, 0) !== start || addDays(end, 0) !== end) return 'bad';
+  if (!isWorkDate(end) || addDays(end, 0) !== end) return 'bad';
   const span = Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000);
   return span >= 0 ? span : 'bad';
 }
@@ -9170,6 +9212,9 @@ function buildEventCopy(
 app.post('/api/events/:id/copy', async (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
+  // A retry of a copy that already committed gets that copy back, even if the
+  // source, the venue, the caller's access or "today" changed since (plan v2).
+  if (await replayCommittedOperation(req, res, 'copy-event')) return;
   const { id } = req.params;
   const source = events.find((e) => e.id === id);
   if (!source) {
@@ -9226,7 +9271,7 @@ app.post('/api/events/:id/copy', async (req, res) => {
     (freshDoc) => {
       const arr: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
       const existing = arr.find((e) => e.id === eventId);
-      if (existing) return { doc: freshDoc, result: existing };
+      if (existing) return { doc: freshDoc, result: { event: existing } };
       // Re-authorize against the COMMITTED document (rule T): the source,
       // its venue and the caller's role/venue may have changed while this
       // request was in flight. Fail closed; nothing is written.
@@ -9252,12 +9297,13 @@ app.post('/api/events/:id/copy', async (req, res) => {
         venueName: freshVenue.name || venueName,
         caller: { email: caller.email, name: caller.name },
       });
-      return { doc: { ...freshDoc, events: [...arr, copy] }, result: copy };
+      // Stored as { event } so a retry gets the same shape as the first 201.
+      return { doc: { ...freshDoc, events: [...arr, copy] }, result: { event: copy } };
     },
     { label: 'copy-event' }
   );
   if (!committed) return;
-  const event = committed.result as KosherEventItem;
+  const event = (committed.result as { event: KosherEventItem }).event;
 
   // Side effects ONLY after commit (rule BR). Nobody is assigned → no push.
   // A retry with the same operationId never reaches here: commitOrRespond

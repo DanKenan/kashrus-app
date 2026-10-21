@@ -70,6 +70,17 @@ export default {
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
+    // After Test 18 the harness's login token can be invalid (rule F), so the
+    // test-only routes go through a FRESH seed-admin token (as Tests 37/38).
+    const seedTok = await mintToken(baseUrl, 'usr_admin');
+    const tapi = async (method, path, body) => {
+      const r = await fetch(`${baseUrl}${path}`, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedTok}` }, body: body !== undefined ? JSON.stringify(body) : undefined });
+      let json = null;
+      try { json = await r.json(); } catch {}
+      return { status: r.status, json };
+    };
+    const getDoc = async () => (await tapi('GET', '/api/__test__/firestore-doc')).json.doc;
+    const getVersion = async () => (await tapi('GET', '/api/__test__/firestore-doc')).json.version;
     const vNY = `venue-test39-ny-${ts}`;
     const vJLM = `venue-test39-jlm-${ts}`;
     const vOther = `venue-test39-other-${ts}`;
@@ -90,6 +101,8 @@ export default {
     const srcEmptyId = `evt-test39-empty-${ts}`;
     const srcGoneId = `evt-test39-gone-${ts}`;
     const srcBadId = `evt-test39-bad-${ts}`;
+    const srcBad1Id = `evt-test39-bad1-${ts}`;
+    const srcRetryId = `evt-test39-retry-${ts}`;
     const srcTitle = `T39 Wedding ${ts}`;
 
     const source = {
@@ -109,7 +122,7 @@ export default {
       ],
     };
 
-    await ctx.api('POST', '/api/__test__/inject-fixture', {
+    await tapi('POST', '/api/__test__/inject-fixture', {
       agencies: [
         { id: AGENCY_X, name: 'Test39 Agency X' },
         { id: AGENCY_Y, name: 'Test39 Agency Y' },
@@ -134,6 +147,8 @@ export default {
         { id: srcJlmId, agencyId: AGENCY_X, venueId: vJLM, title: `T39 JLM event ${ts}`, location: 'Hall J', date: '2026-10-01', startTime: '07:00 PM', endTime: '10:00 PM', mashgiachType: 'unassigned', status: 'confirmed', tasks: [{ id: `t39-j-${ts}`, title: 'Check', isCompleted: false }] },
         { id: srcEmptyId, agencyId: AGENCY_X, venueId: vNY, title: `T39 Empty ${ts}`, location: 'Room 2', date: '2026-10-01', mashgiachType: 'unassigned', status: 'confirmed', tasks: [] },
         { id: srcBadId, agencyId: AGENCY_X, venueId: vNY, title: `T39 Bad dates ${ts}`, location: 'Room 3', date: '2026-10-05', endDate: '2026-10-02', mashgiachType: 'unassigned', status: 'confirmed', tasks: [] },
+        { id: srcBad1Id, agencyId: AGENCY_X, venueId: vNY, title: `T39 Bad day ${ts}`, location: 'Room 4', date: '2026-02-30', mashgiachType: 'unassigned', status: 'confirmed', tasks: [] },
+        { id: srcRetryId, agencyId: AGENCY_X, venueId: vNY, title: `T39 Retry src ${ts}`, location: 'Room 5', date: '2026-10-01', mashgiachType: 'unassigned', status: 'confirmed', tasks: [{ id: `t39-r-${ts}`, title: 'Check', isCompleted: true, notes: 'x' }] },
         { id: srcGoneId, agencyId: AGENCY_X, venueId: vGone, title: `T39 Gone ${ts}`, location: 'Nowhere', date: '2026-10-01', mashgiachType: 'unassigned', status: 'confirmed', tasks: [] },
       ],
     });
@@ -153,7 +168,7 @@ export default {
       try { json = await r.json(); } catch {}
       return { status: r.status, json };
     };
-    const storedEvents = async () => ((await ctx.getDoc()).events || []);
+    const storedEvents = async () => ((await getDoc()).events || []);
     const copiesOf = (arr, title) => arr.filter((e) => e.title === title && e.id !== srcId);
     const sourceBefore = (await storedEvents()).find((e) => e.id === srcId);
     assert(sourceBefore && sourceBefore.assignedMashgiachEmail === mashEmail, 'fixture source event not stored');
@@ -254,7 +269,7 @@ export default {
       const n = (await storedEvents()).filter((e) => e.title === `T39 Copy Renamed ${ts}`).length;
       assert(n === 1, `retry duplicated the copy (${n} stored)`);
 
-      const v = await ctx.getVersion();
+      const v = await getVersion();
       const bump = await copy('adminX', srcEmptyId, { date: '2027-05-02' }); // moves the version on
       assert(bump.status === 201, `bump copy: ${bump.status}`);
       assert(same(bump.json.event.tasks, []), 'a source with no tasks must copy no tasks (no starter tasks)');
@@ -281,14 +296,16 @@ export default {
       assert(gone.status === 409, `venue gone: expected 409, got ${gone.status}`);
       const bad = await copy('adminX', srcBadId, { date: '2027-06-01' });
       assert(bad.status === 409, `reversed source dates: expected 409, got ${bad.status}`);
+      const bad1 = await copy('adminX', srcBad1Id, { date: '2027-06-01' });
+      assert(bad1.status === 409, `one-day source with an impossible date (Feb 30): expected 409, got ${bad1.status}`);
       assert((await storedEvents()).length === before, 'a rejected copy was stored');
-      checks.push('400 bad dates/titles, 404 missing event, 409 venue gone / malformed source dates, nothing stored');
+      checks.push('400 bad dates/titles, 404 missing event, 409 venue gone / malformed source dates (incl. a one-day Feb 30), nothing stored');
     }
 
     /* ---- 5. "Today" is the venue's date (item 6), fake clock ---- */
     try {
       // 23:30Z Nov 3: New York is 6:30 PM Nov 3; Jerusalem is 1:30 AM Nov 4.
-      const c = await ctx.api('POST', '/api/__test__/clock', { iso: '2026-11-03T23:30:00.000Z' });
+      const c = await tapi('POST', '/api/__test__/clock', { iso: '2026-11-03T23:30:00.000Z' });
       assert(c.status === 200, `clock: ${c.status}`);
       const jlmPast = await copy('adminX', srcJlmId, { date: '2026-11-03' });
       assert(jlmPast.status === 400, `JLM venue, Nov 3 (already yesterday there): expected 400, got ${jlmPast.status}`);
@@ -302,7 +319,7 @@ export default {
       assert(nyPast.status === 400, `NY venue, Nov 2: expected 400, got ${nyPast.status}`);
       checks.push('venue-local today: JLM rejects Nov 3 / accepts Nov 4 while NY accepts Nov 3 / rejects Nov 2; spans kept');
     } finally {
-      await ctx.api('POST', '/api/__test__/clock', { iso: null });
+      await tapi('POST', '/api/__test__/clock', { iso: null });
     }
 
     /* ---- 6. Retries and races (rule T re-check inside the transaction) ---- */
@@ -336,30 +353,77 @@ export default {
 
       // The caller's venue changed in the COMMITTED doc while the cache still
       // has the old one: the in-transaction re-check must refuse.
-      const doc0 = await ctx.getDoc();
+      const doc0 = await getDoc();
       const usersOrig = doc0.users;
       const eventsOrig = doc0.events;
       try {
         const moved = usersOrig.map((u) => (u.id === ids.coordNY ? { ...u, venueId: vOther } : u));
-        const s1 = await ctx.api('POST', '/api/__test__/doc-set-users', { users: moved });
+        const s1 = await tapi('POST', '/api/__test__/doc-set-users', { users: moved });
         assert(s1.status === 200, `doc-set-users: ${s1.status}`);
         const r = await copy('coordNY', srcId, { date: '2027-07-03', title: `T39 Race user ${ts}` });
         assert(r.status === 409, `coordinator moved mid-flight: expected 409, got ${r.status} ${JSON.stringify(r.json)}`);
       } finally {
-        await ctx.api('POST', '/api/__test__/doc-set-users', { users: usersOrig });
+        await tapi('POST', '/api/__test__/doc-set-users', { users: usersOrig });
       }
       try {
         const without = eventsOrig.filter((e) => e.id !== srcId);
-        const s2 = await ctx.api('POST', '/api/__test__/doc-set-events', { events: without });
+        const s2 = await tapi('POST', '/api/__test__/doc-set-events', { events: without });
         assert(s2.status === 200, `doc-set-events: ${s2.status}`);
         const r = await copy('adminX', srcId, { date: '2027-07-04', title: `T39 Race event ${ts}` });
         assert(r.status === 409, `source deleted mid-flight: expected 409, got ${r.status} ${JSON.stringify(r.json)}`);
       } finally {
-        await ctx.api('POST', '/api/__test__/doc-set-events', { events: eventsOrig });
+        await tapi('POST', '/api/__test__/doc-set-events', { events: eventsOrig });
       }
       const after = await storedEvents();
       assert(after.every((e) => e.title !== `T39 Race user ${ts}` && e.title !== `T39 Race event ${ts}`), 'a refused in-flight copy was stored');
       checks.push('same operationId (concurrent + later retry) → one event, one broadcast; different input → 409; in-flight venue move / source delete → 409, nothing stored');
+    }
+
+    /* ---- 7. A retry of a COMMITTED copy gets it back after the world moved
+     *          (plan v2): "today" passed the copy's date, then the source was
+     *          deleted. No second event, no second broadcast. ---- */
+    {
+      const wsX = await connectWs(baseUrl, tok.adminX);
+      try {
+        const op = `op39-late-${ts}`;
+        const body = { date: '2027-08-01', title: `T39 Late retry ${ts}` };
+        const r1 = await copy('adminX', srcRetryId, body, { operationId: op });
+        assert(r1.status === 201, `late-retry first copy: ${r1.status} ${JSON.stringify(r1.json)}`);
+        const copyId = r1.json.event.id;
+        try {
+          const c = await tapi('POST', '/api/__test__/clock', { iso: '2027-08-03T12:00:00.000Z' });
+          assert(c.status === 200, `clock: ${c.status}`);
+          const r2 = await copy('adminX', srcRetryId, body, { operationId: op });
+          assert((r2.status === 200 || r2.status === 201) && (r2.json.event || r2.json).id === copyId,
+            `retry after the date passed: expected the same copy, got ${r2.status} ${JSON.stringify(r2.json)}`);
+          const fresh = await copy('adminX', srcRetryId, body);
+          assert(fresh.status === 400, `a NEW copy to a past date must still be refused: got ${fresh.status}`);
+        } finally {
+          await tapi('POST', '/api/__test__/clock', { iso: null });
+        }
+        const del = await fetch(`${baseUrl}/api/events/${srcRetryId}?expectedVersion=${await getVersion()}&operationId=op39-del-${ts}`, {
+          method: 'DELETE', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok.adminX}` },
+          body: JSON.stringify({ expectedVersion: await getVersion(), operationId: `op39-del-${ts}` }),
+        });
+        assert(del.status === 200 || del.status === 204, `delete source: ${del.status}`);
+        assert(!(await storedEvents()).some((e) => e.id === srcRetryId), 'source still stored after delete');
+        const r3 = await copy('adminX', srcRetryId, body, { operationId: op });
+        assert((r3.status === 200 || r3.status === 201) && (r3.json.event || r3.json).id === copyId,
+          `retry after the source was deleted: expected the same copy, got ${r3.status} ${JSON.stringify(r3.json)}`);
+        assert(r3.json.event && r3.json.event.id === copyId, 'a retry must answer in the same { event } shape as the first 201');
+        const mism = await copy('adminX', srcRetryId, { ...body, date: '2027-08-02' }, { operationId: op });
+        assert(mism.status === 409, `same operationId, different input, source gone: expected 409, got ${mism.status}`);
+        const first = await copy('adminX', srcRetryId, body);
+        assert(first.status === 404, `a NEW copy of the deleted source: expected 404, got ${first.status}`);
+        const stored = (await storedEvents()).filter((e) => e.title === `T39 Late retry ${ts}`);
+        assert(stored.length === 1, `late retries stored ${stored.length} copies`);
+        await new Promise((res) => setTimeout(res, 1200));
+        const n = wsX.messages.filter((m) => m.type === 'EVENT_CREATED' && ((m.payload || m.data || m).event || {}).id === copyId).length;
+        assert(n === 1, `late retries re-broadcast the copy (${n} EVENT_CREATED)`);
+      } finally {
+        try { wsX.ws.close(); } catch {}
+      }
+      checks.push('retry of a committed copy after its date passed and after the source was deleted → same copy, same shape, one event, one broadcast; new attempts still refused (400/404), different input 409');
     }
 
     return checks.join('; ');
