@@ -87,7 +87,7 @@ ok('S3 44px Close with aria-label Close', /<button[^>]*aria-label="Close"[^>]*cl
 const rows = sm.find((e) => e.type === 'button' && e.props['aria-label'] !== 'Close');
 ok('S4 one row per venue', rows.length === 3, String(rows.length));
 ok('S5 rows are >=44px', rows.every((r) => /min-h-11|h-11|min-h-\[44px\]/.test(r.props.className || '')));
-ok('S6 Home tag only on the home venue', (sh.match(/>Home</g) || []).length === 1 && /Beth El Social Hall[^<]*<\/span><span[^>]*>Home</.test(sh));
+ok('S6 Main tag only on the home venue', (sh.match(/>Main</g) || []).length === 1 && /Beth El Social Hall[^<]*<\/span><span[^>]*>Main</.test(sh));
 ok('S7 current venue has aria-current=true, others none', rows.filter((r) => r.props['aria-current'] === 'true').length === 1 && rows.find((r) => r.props['aria-current'] === 'true') === rows[1]);
 ok('S8 nothing under 12px / no palette classes / no font-black', !/text-\[(\d|1[01])px\]|text-\[0?\.\d+rem\]|font-black|font-extrabold|(emerald|zinc|slate|gray)-\d|#[0-9a-f]{6}/i.test(sh));
 await sm.click('Crown Market');
