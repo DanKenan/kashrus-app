@@ -1,3 +1,5 @@
+import { AgencyLogoSheet } from './components/AgencyLogoSheet';
+import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev } from './lib/agencyLogo';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue, filterToVenue } from './lib/venueSelection';
@@ -292,6 +294,8 @@ export default function App() {
     }
     return null;
   });
+  const agencyLogoSrc = useAgencyLogo({ userId: currentUser?.id, agencyId: currentUser?.agencyId || 'agency-hkc', rev: currentUser?.agencyLogoRev });
+  const [isAgencyLogoOpen, setIsAgencyLogoOpen] = useState(false);
   const [isVenueSwitcherOpen, setIsVenueSwitcherOpen] = useState(false);
   const [isVenuesDirectoryOpen, setIsVenuesDirectoryOpen] = useState(false);
   const [isCreateVenueOpen, setIsCreateVenueOpen] = useState(false);
@@ -665,11 +669,13 @@ export default function App() {
         // agency (no reload). Absent/invalid zone = America/New_York.
         const ag = msg.payload.agency;
         const nextTz = isValidTimeZone(ag.timeZone) ? ag.timeZone : undefined;
-        setCurrentUser((prev) =>
-          prev && (prev.agencyId || 'agency-hkc') === ag.id && prev.agencyTimeZone !== nextTz
-            ? { ...prev, agencyTimeZone: nextTz }
-            : prev
-        );
+        setCurrentUser((prev) => {
+          if (!prev || (prev.agencyId || 'agency-hkc') !== ag.id) return prev;
+          const hasLogo = Object.prototype.hasOwnProperty.call(ag, 'logoRev');
+          const nextRev = validRev(ag.logoRev) ? ag.logoRev : null;
+          if (prev.agencyTimeZone === nextTz && (!hasLogo || (Object.prototype.hasOwnProperty.call(prev, 'agencyLogoRev') && prev.agencyLogoRev === nextRev))) return prev;
+          return { ...prev, agencyTimeZone: nextTz, ...(hasLogo ? { agencyLogoRev: nextRev } : {}) };
+        });
       } else if (msg.type === 'VENUE_UPDATED' && msg.payload?.venue?.id) {
         // Item 6: a venue edit (e.g. its time zone) — update only a venue this
         // client already holds; never add one.
@@ -1466,6 +1472,8 @@ export default function App() {
 
   // Sign Out Handler
   const handleLogout = () => {
+    clearLogoCache();
+    setIsAgencyLogoOpen(false);
     userRequestContext.current.generation += 1;
     requestContext.current.generation += 1;
     setEvents([]);
@@ -1564,6 +1572,7 @@ export default function App() {
             }}
             onUseDifferentAccount={() => {
               setSavedSession(null);
+              clearLogoCache();
               if (typeof window !== 'undefined') localStorage.removeItem('current_user');
               setAuthInitialMode('login');
               setAuthView('auth');
@@ -1719,6 +1728,7 @@ export default function App() {
       {/* Navigation Header (D3c: not on a signed-in kiosk; KioskTaskPanel carries its own calm top bar) */}
       {!isKiosk && (
       <Header
+        agencyLogoSrc={agencyLogoSrc}
         isAgencyHome={adminHome}
         onOpenAgencyHome={currentUser.role === 'admin' ? openAgencyHome : undefined}
         currentUser={currentUser}
@@ -1911,6 +1921,10 @@ export default function App() {
           </div>
         ) : !isKiosk && currentUser.role === 'admin' && adminHome ? (
           <AgencyDashboard
+            logo={currentUser.role === 'admin' && isLogoFeatureOn(currentUser) ? {
+              agencyName: currentUser.agencyName || '', agencyShortCode: currentUser.agencyShortCode || '',
+              logoSrc: agencyLogoSrc, onOpen: () => setIsAgencyLogoOpen(true),
+            } : undefined}
             reloadKey={adminHomeReloadKey}
             onSelectVenue={(id) => { setAdminHome(false); handleSelectVenue(id); }}
           />
@@ -1939,6 +1953,9 @@ export default function App() {
                 agencyName={currentUser?.agencyName || 'Hartford Kashrut Commission'}
                 venueName={currentVenue?.name}
                 venueCategory={currentVenue?.category}
+                agencyShortCode={currentUser?.agencyShortCode}
+                agencyLogoSrc={agencyLogoSrc}
+                venueCertificationDetail={currentVenue?.certificationDetail}
                 venueCertification={currentVenue?.certification}
                 timeZone={currentVenueTimeZone}
                 isRealtimeConnected={isRealtimeConnected}
@@ -2187,7 +2204,15 @@ export default function App() {
         agencyTimeZone={currentUser.agencyTimeZone}
       />
 
+      {!isKiosk && currentUser.role === 'admin' && isLogoFeatureOn(currentUser) && <AgencyLogoSheet
+        isOpen={isAgencyLogoOpen} onClose={() => setIsAgencyLogoOpen(false)}
+        agencyName={currentUser.agencyName || ''} agencyShortCode={currentUser.agencyShortCode || ''}
+        currentLogoSrc={agencyLogoSrc} onLogoChanged={(rev) => setCurrentUser((prev) => prev ? { ...prev, agencyLogoRev: rev } : prev)}
+      />}
       <VenuesDirectoryModal
+        agencyName={currentUser.agencyName}
+        agencyShortCode={currentUser.agencyShortCode}
+        agencyLogoSrc={agencyLogoSrc}
         isOpen={isVenuesDirectoryOpen}
         onClose={() => setIsVenuesDirectoryOpen(false)}
         venues={venues}

@@ -156,6 +156,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
           category: finalCategory,
           address: address.trim(),
           certification,
+          ...(normalizeOption(detail) ? { certificationDetail: normalizeOption(detail) } : {}),
           ownerName: ownerName.trim() || undefined,
           ownerEmail: ownerEmail.trim() || undefined,
           ownerPassword: ownerPassword.trim() || undefined,

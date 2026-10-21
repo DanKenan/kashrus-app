@@ -1,0 +1,13 @@
+[
+  {
+    "props": {
+      "size": "sm",
+      "showSubtitle": false,
+      "agencyName": "Agency",
+      "agencyShortCode": "AG",
+      "compactBelow360": true,
+      "className": "shrink-0"
+    },
+    "markup": "<link rel=\"preload\" as=\"image\" href=\"/brand/shutfey-mark.svg\"/><link rel=\"preload\" as=\"image\" href=\"/brand/shutfey-mark-night.svg\"/><div class=\"flex items-center gap-2 sm:gap-2.5 min-w-0 shrink-0\"><div class=\"shrink-0\"><img src=\"/brand/shutfey-mark.svg\" alt=\"Shutfey\" draggable=\"false\" class=\"h-7 sm:h-[25px] xl:h-8 w-auto dark:hidden\"/><img src=\"/brand/shutfey-mark-night.svg\" alt=\"\" aria-hidden=\"true\" draggable=\"false\" class=\"h-7 sm:h-[25px] xl:h-8 w-auto hidden dark:block\"/></div><div class=\"flex flex-col justify-center min-w-0 overflow-hidden\"><div class=\"flex items-center gap-1 sm:gap-1.5 flex-nowrap\"><span class=\"text-xs sm:text-sm font-extrabold text-ink leading-tight font-sans whitespace-nowrap max-[359px]:hidden\">Shutfey</span><span class=\"text-xs sm:text-sm font-extrabold text-gold leading-tight font-sans whitespace-nowrap hidden xl:inline\" aria-hidden=\"true\">·</span><span dir=\"rtl\" class=\"text-xs sm:text-sm font-extrabold text-ink leading-tight font-hebrew whitespace-nowrap hidden xl:inline\">שותפי</span><span class=\"text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-gold-wash text-gold-ink border border-gold/40 shrink-0\">AG</span></div></div></div>"
+  }
+]

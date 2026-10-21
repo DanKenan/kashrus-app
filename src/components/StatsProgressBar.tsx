@@ -1,4 +1,5 @@
 import React from 'react';
+import { CertificationBadge } from './CertificationBadge';
 import { ProgressRing } from './ProgressRing';
 import { zoneCityLabel } from '../lib/workday';
 import {
@@ -22,6 +23,9 @@ interface StatsProgressBarProps {
   venueName?: string;
   venueCategory?: string;
   venueCertification?: string;
+  venueCertificationDetail?: string;
+  agencyShortCode?: string;
+  agencyLogoSrc?: string | null;
   isRealtimeConnected?: boolean;
   activeWorkersCount?: number;
   onDeleteVenue?: () => void;
@@ -42,6 +46,9 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
   venueName,
   venueCategory,
   venueCertification,
+  venueCertificationDetail,
+  agencyShortCode,
+  agencyLogoSrc,
   isRealtimeConnected,
   activeWorkersCount,
   onDeleteVenue,
@@ -76,9 +83,8 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
                 </span>
               )}
               {venueCertification && (
-                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-md border border-emerald-200/60 dark:border-emerald-800/50">
-                  <ShieldCheck className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
-                  <span>{venueCertification}</span>
+                <span className="inline-flex items-center gap-1 text-xs font-bold text-ok bg-sunken px-2 py-0.5 rounded-md border border-line">
+                  <CertificationBadge certification={venueCertification} certificationDetail={venueCertificationDetail} agencyName={agencyName} agencyShortCode={agencyShortCode} logoSrc={agencyLogoSrc} iconClassName="w-3 h-3 text-ok" />
                 </span>
               )}
               {isRealtimeConnected !== undefined && (

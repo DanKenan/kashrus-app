@@ -43,6 +43,7 @@ import { UpdateAppButton } from './UpdateAppButton';
 import { getRoleLabel, canUserAssignTasks } from '../lib/permissions';
 
 interface HeaderProps {
+  agencyLogoSrc?: string | null;
   isAgencyHome?: boolean;
   onOpenAgencyHome?: () => void;
   currentUser: User | null;
@@ -79,6 +80,7 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  agencyLogoSrc,
   isAgencyHome,
   onOpenAgencyHome,
   currentUser,
@@ -169,6 +171,7 @@ export const Header: React.FC<HeaderProps> = ({
             <ShutfeyLogo 
               size="sm" 
               showSubtitle={false}
+              agencyLogoSrc={agencyLogoSrc}
               agencyName={currentUser?.agencyName}
               agencyShortCode={currentUser?.agencyShortCode}
               compactBelow360
