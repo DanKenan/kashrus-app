@@ -12682,6 +12682,12 @@ app.post('/api/auth/login', async (req, res) => {
           const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
           const freshUser = freshUsers.find((u) => u.id === user.id);
           if (!freshUser) return { conflict: 'User not found.' };
+          // 10e ([10E-RV1] N1): upgrade only while this row is still the
+          // email's credential row in FRESH data (no transfer meanwhile).
+          const freshAgenciesL: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+          if (credentialRowForEmailIn(freshUsers, freshAgenciesL, normalizedEmail)?.id !== user.id) {
+            return { doc: freshDoc, result: { upgraded: false } };
+          }
           // Only upgrade if the stored password isn't already a bcrypt hash
           // (another concurrent login may have upgraded it first).
           if (isBcryptHash(freshUser.password)) {
@@ -12760,6 +12766,17 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       if (agencyRecoveryRefusedFor(freshUsersF, freshAgenciesF, normalizedEmail)) {
         return {
           doc: { ...freshDoc, passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail), passwordResetRateLimits: afterIp },
+          result: { created: false },
+        };
+      }
+      // 10e ([10E-RV1] B1): the request is created (and the code pushed) only
+      // when the FRESH credential row for the email is still the row resolved
+      // before the transaction; otherwise nothing is created, nothing is
+      // pushed, the counted rate limits stay, and the answer is the generic one.
+      const freshCredF = credentialRowForEmailIn(freshUsersF, freshAgenciesF, normalizedEmail);
+      if (!freshCredF || freshCredF.id !== user.id) {
+        return {
+          doc: { ...freshDoc, passwordResetRateLimits: afterIp },
           result: { created: false },
         };
       }

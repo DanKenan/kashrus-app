@@ -24,6 +24,8 @@
  *     401 (REST) and 4401 (WS), returned token is Y's and current
  *  G  invalid group (second credentialOwner planted on Y): change-password
  *     409 nothing written; login uniform 401; forgot generic, no record
+ *  R  the email's credential row changes between pre-check and commit (stored
+ *     doc only): forgot creates nothing and pushes nothing
  *  H  the reset-rebind hook is 404 outside test mode
  */
 import { createHash } from 'node:crypto';
@@ -98,6 +100,8 @@ export default {
         { id: U('adB'), email: E('adb'), name: 'T62 Admin B', role: 'admin', agencyId: B },
         { id: X, email: PE, name: 'T62 X', role: 'mashgiach', agencyId: A, venueId: A1 },
         { id: Z, email: ZE, name: 'T62 Z', role: 'mashgiach', agencyId: A, venueId: A1 },
+        { id: U('w'), email: E('w'), name: 'T62 W', role: 'mashgiach', agencyId: A, venueId: A1 },
+        { id: U('v'), email: E('v'), name: 'T62 V', role: 'mashgiach', agencyId: B, venueId: B1 },
       ],
     });
     assert(inj.status === 200, `inject-fixture: ${inj.status} ${J(inj.json)}`);
@@ -213,6 +217,27 @@ export default {
       console.log('  ✓ C forgot for a multi person: generic answer, no record, no code, no push');
     }
 
+    // ---- R ([10E-RV1] B1): the email's credential row changes between the
+    // pre-check and the commit. doc-set-users writes the stored doc only (no
+    // rehydrate), so the handler's pre-check still sees W while the
+    // transaction's fresh rows give the email to V (another single-row person,
+    // agency B): nothing is created, nothing is pushed, generic answer.
+    {
+      const WE = E('w');
+      const planted = (await rows()).map((u) => (u.id === U('w') ? { ...u, email: E('w-moved') } : u.id === U('v') ? { ...u, email: WE } : u));
+      assert((await hook('doc-set-users', { users: planted })).status === 200, 'R plant reassignment (stored doc only)');
+      await clearPush();
+      const before = await lastCode(WE);
+      const f = await forgot(WE);
+      assert(f.status === 200 && f.text === unknownBody, `R generic answer: ${f.status} ${f.text}`);
+      assert((await resetsFor(WE)).length === 0, `R no reset record ${J(await resetsFor(WE))}`);
+      assert((await lastCode(WE)) === before, 'R no code cached');
+      await sleep(300);
+      assert(!(await pushLog()).some((e) => String(e.title).startsWith('🔑 Password reset code')), `R no reset push anywhere ${J(await pushLog())}`);
+      await rehydrate('r');
+      console.log('  ✓ R credential row reassigned between pre-check and commit: no request, no push');
+    }
+
     // ---- D3 / D4: binding on single-row Z ----
     {
       const zPw = 'stage2-t62-znew1';
@@ -312,6 +337,6 @@ export default {
         await ctx.restartServer();
       }
     }
-    return 'single-row change-password unchanged; multi P: login -> owner, forgot generic (no record/code/push), pre-multi requests dropped/refused, reset bound to its row (unbound = today), change-password from any membership changes the one credential and bumps every epoch (old tokens 401/4401, fresh token returned), invalid group fails closed; reset-rebind 404 outside test mode';
+    return 'single-row change-password unchanged; multi P: login -> owner, forgot generic (no record/code/push), pre-multi requests dropped/refused, reset bound to its row (unbound = today), change-password from any membership changes the one credential and bumps every epoch (old tokens 401/4401, fresh token returned), invalid group fails closed; a credential row reassigned before the commit gets no request and no push; reset-rebind 404 outside test mode';
   },
 };
