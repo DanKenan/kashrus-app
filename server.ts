@@ -26,7 +26,7 @@ import {
   withCustomDomain,
 } from './src/server/agency-fields.js';
 import { classifySessionClaims, resolveSessionRow, sessionClaimsFor, type SessionClaims } from './src/server/session-token.ts';
-import { planCleanSlate, agencyIsCleared } from './src/server/clean-slate.ts';
+import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
@@ -2617,7 +2617,8 @@ function hydrateState(parsed: any) {
       }
 
       if (isDemoCleared) {
-        // Clean slate: venues, tasks, history, events are strictly what the user created
+        // Cleared (legacy stored flag; 8x removed the route that set it): venues,
+        // tasks, history, events are strictly what the user created
         venues = Array.isArray(parsed.venues) ? parsed.venues : [];
         tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
         historyLogs = Array.isArray(parsed.historyLogs) ? parsed.historyLogs : [];
@@ -4422,7 +4423,7 @@ const activeSockets = new Map<WebSocket, SocketMeta>();
  * - ANNOUNCEMENT (agency-scoped; the REST allowlist includes it)
  * - USER_PRESENCE (counts only)
  * - USERS_UPDATED as the venue roster (names/roles/avatars, no emails)
- * - DAILY_RESET/DEMO_RESTORED/CLEAN_SLATE_RESET with tasks/historyLogs/
+ * - DAILY_RESET/DEMO_RESTORED with tasks/historyLogs/
  *   snapshots filtered to the kiosk venue (so the board isn't stale)
  * Everything else is dropped (the REST allowlist denies it too).
  */
@@ -4463,7 +4464,6 @@ function kioskMaySee(meta: SocketMeta, type: string, payload: any): boolean {
     case 'USERS_UPDATED':
     case 'DAILY_RESET':
     case 'DEMO_RESTORED':
-    case 'CLEAN_SLATE_RESET':
     case 'HISTORY_PRUNED': // 8r: history list only, venue-filtered below
       // Allowed; the payload is venue-filtered by kioskFilterPayload below.
       return true;
@@ -4529,7 +4529,6 @@ function kioskFilterPayload(meta: SocketMeta, type: string, payload: any): any {
       return { historyLogs: (p.historyLogs || []).filter((h: any) => h?.venueId === venueId) };
     case 'DAILY_RESET':
     case 'DEMO_RESTORED':
-    case 'CLEAN_SLATE_RESET':
       return {
         ...p,
         tasks: (p.tasks || []).filter((t: any) => t?.venueId === venueId),
@@ -4566,7 +4565,7 @@ function kioskFilterPayload(meta: SocketMeta, type: string, payload: any): any {
  *   = agency-wide, passes), ANNOUNCEMENT_DELETED (absent venueId = agency-wide, passes),
  *   EVENT_CREATED/UPDATED/DELETED (event venueId), INGREDIENT_VERIFIED and
  *   AUDIT_REPORT_SUBMITTED (payload venueId), VENUE_CREATED/UPDATED/DELETED
- *   (own venue only), DAILY_RESET/DEMO_RESTORED/CLEAN_SLATE_RESET (arrays
+ *   (own venue only), DAILY_RESET/DEMO_RESTORED (arrays
  *   filtered to scope), USERS_UPDATED (scoped roster via getSafeUsersForAgency),
  *   INGREDIENTS_SYNCED (venueId if present).
  * - UNKNOWN type → drop + one warn log (fail closed).
@@ -4677,7 +4676,6 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
     }
     case 'DAILY_RESET':
     case 'DEMO_RESTORED':
-    case 'CLEAN_SLATE_RESET':
       return {
         ...p,
         tasks: (p.tasks || []).filter((t: any) => inScope(t?.venueId)),
@@ -7923,14 +7921,14 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 if (isTestMode()) {
   // Item 8k (TEST ONLY; isTestMode() only, never under FIRESTORE_MOCK alone): merge a few top-level fields straight into the
   // stored doc (no route writes them this way); the next commit's hydrate
-  // picks them up. Covers the legacy app-wide isDemoCleared (true/false) and
-  // seeds the keyed kiosk/push/reset structures Clean Slate must scope.
+  // picks them up. 8x: only the legacy app-wide isDemoCleared (test-42 §6
+  // keeps exercising the boot loader's cleared branch; no route writes it).
   app.post('/api/__test__/doc-merge', async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const db = firestoreDb;
     if (!db) return res.status(503).json({ error: 'db unavailable' });
     const fields = (req.body || {}).fields;
-    const allowed = ['isDemoCleared', 'kioskPairings', 'kioskPinLockouts', 'kioskPairingLimits', 'pushSubscriptions', 'passwordResets', 'passwordResetRateLimits'];
+    const allowed = ['isDemoCleared'];
     if (!fields || typeof fields !== 'object' || Object.keys(fields).some((k) => !allowed.includes(k))) {
       return res.status(400).json({ error: `fields must be an object with keys from ${allowed.join(', ')}` });
     }
@@ -9433,75 +9431,11 @@ app.post('/api/reset-daily', async (req, res) => {
   }
 });
 
-// Admin Wipes All Demo Data to Start Completely From Scratch
-app.post('/api/admin/clean-slate', async (req, res) => {
-  // requireAdmin has already sent the 403 when it returns null; send nothing
-  // more (a second send crashed the server: ERR_HTTP_HEADERS_SENT).
-  const caller = requireAdmin(req, res);
-  if (!caller) return;
-  // Item 8k gate: Clean Slate deletes an agency's data. It runs only where
-  // the operator has switched it on (CLEAN_SLATE_ENABLED=true) or in the
-  // test harness (isTestMode). On live it stays off until Don's explicit OK.
-  if (!(process.env.CLEAN_SLATE_ENABLED === 'true' || isTestMode())) {
-    return res.status(403).json({ error: 'Clean Slate is turned off on this server.', code: 'CLEAN_SLATE_DISABLED' });
-  }
+// Item 8x (Don, Oct 21): Clean Slate (POST /api/admin/clean-slate) is removed
+// entirely: no route, no gate, no CLEAN_SLATE_RESET broadcast. The read side
+// of the flags it used to write (agencies[].cleanSlateAt via agencyIsCleared,
+// legacy app-wide isDemoCleared) stays, because stored data may carry them.
 
-  const callerAgencyId = caller.agencyId || 'agency-hkc';
-
-  const committed = await commitOrRespond(
-    req, res,
-    (freshDoc) => {
-      // Item 8k ("8k plan v2"): one agency only, ownership decided on the
-      // fresh doc; the legacy global isDemoCleared is never written.
-      const plan = planCleanSlate(freshDoc, callerAgencyId, { id: caller.id, email: caller.email }, new Date().toISOString());
-      // 9a: venues this commit removes leave every surviving row's extra venue
-      // grants in the SAME commit (sanctioned path). Rows of other agencies
-      // never legitimately hold them; any that do are pruned of those ids only.
-      const beforeVenueIds = new Set((Array.isArray(freshDoc.venues) ? freshDoc.venues : []).map((v: any) => v && v.id));
-      const afterVenues: any[] = Array.isArray((plan.patch as any).venues) ? (plan.patch as any).venues : (Array.isArray(freshDoc.venues) ? freshDoc.venues : []);
-      const afterIds = new Set(afterVenues.map((v: any) => v && v.id));
-      const gone = new Set([...beforeVenueIds].filter((x) => x && !afterIds.has(x)));
-      const venueAccessSetById: Record<string, string[]> = {};
-      const survivors: any[] = Array.isArray((plan.patch as any).users) ? (plan.patch as any).users : (Array.isArray(freshDoc.users) ? freshDoc.users : []);
-      for (const u of survivors) {
-        if (u && typeof u.id === 'string' && Array.isArray(u.venueAccess) && u.venueAccess.some((x: any) => gone.has(x) && x !== u.venueId)) {
-          venueAccessSetById[u.id] = u.venueAccess.filter((x: any) => !gone.has(x) || x === u.venueId);
-        }
-      }
-      return {
-        venueAccessSetById,
-        doc: { ...freshDoc, ...plan.patch },
-        result: { success: true, isDemoCleared: true, removed: plan.removed, keptUnattributed: plan.keptUnattributed },
-      };
-    },
-    { label: 'clean-slate' }
-  );
-  if (!committed) return;
-  const r: any = (committed as any).result || {};
-  log.info(`[clean-slate] agency ${callerAgencyId}: removed ${JSON.stringify(r.removed || {})}; kept unattributed ${JSON.stringify(r.keptUnattributed || {})}`);
-
-  broadcast('CLEAN_SLATE_RESET', {
-    agencyId: callerAgencyId,
-    venues: [],
-    tasks: [],
-    events: [],
-    isDemoCleared: true,
-  }, undefined, callerAgencyId, (meta, base) => ({
-    ...base,
-    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
-  }));
-
-  res.json({
-    success: true,
-    isDemoCleared: true,
-    venues: [],
-    tasks: [],
-    events: [],
-    users: getSafeUsersForAgency(callerAgencyId, caller),
-    keptUnattributed: r.keptUnattributed || {},
-    message: 'All demo facilities and example data have been cleared. Ready to start from scratch!',
-  });
-});
 
 // Admin "Restore demonstration data" — retired in 8i. Every demo seed list is
 // empty, so the old handler only DELETED the caller agency's venues, tasks,
