@@ -89,7 +89,7 @@ export function VenueSwitcherSheet({
             >
               <span className="min-w-0 break-words">{venue.name}</span>
               {venue.id === homeVenueId && (
-                <span className="shrink-0 px-2 py-1 rounded-full bg-sunken text-xs text-ink-soft">Home</span>
+                <span className="shrink-0 px-2 py-1 rounded-full bg-sunken text-xs text-ink-soft">Main</span>
               )}
               {venue.id === currentVenueId && <Check aria-hidden="true" className="w-5 h-5 shrink-0 ml-auto text-ink" />}
             </button>
