@@ -84,7 +84,10 @@ export function canSeeTask(
 ): boolean {
   if (!user) return false;
   if (user.role === 'admin') return true;
-  if ((user as any).venueId !== undefined && task.venueId !== undefined &&
+  const myVenueIds = (user as User & { myVenueIds?: string[] }).myVenueIds;
+  if (Array.isArray(myVenueIds) && myVenueIds.length > 0) {
+    if (task.venueId === undefined || !myVenueIds.includes(task.venueId)) return false;
+  } else if ((user as any).venueId !== undefined && task.venueId !== undefined &&
       (user as any).venueId !== task.venueId) return false;
   if (!task.isPrivate) return true;
   if (user.role === 'coordinator') return true;
