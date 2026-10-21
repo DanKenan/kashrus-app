@@ -153,7 +153,10 @@ export default function App() {
   const [adminHome, setAdminHome] = useState(() => !isKiosk && currentUser?.role === 'admin');
   const [adminHomeReloadKey, setAdminHomeReloadKey] = useState(0);
   const leaveHomeThen = (fn: () => void) => () => {
-    if (adminHome) setAdminHome(false);
+    if (adminHome) {
+      setAdminHome(false);
+      return;
+    }
     fn();
   };
   const openAgencyHome = () => {
