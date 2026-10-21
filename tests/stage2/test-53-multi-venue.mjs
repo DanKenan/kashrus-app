@@ -19,6 +19,11 @@
  *  6 an unrelated commit + a restart keep the grant (identity invariant)
  *  7 deleting V2 prunes the grant in the same commit; a home-venue change
  *    without a list resets access to the new home (never expands)
+ *  8 (9a2) team records carry `venueIds` (the sanitized scope) ONLY for an
+ *    admin of the same agency (roster + PUT response); admin targets get
+ *    none; coordinator, mashgiach, kiosk and another agency's admin never
+ *    see it (REST + WS INITIAL_STATE/USERS_UPDATED);
+ *    after deletion / home change the admin view follows the stored scope
  */
 function assert(c, m) { if (!c) throw new Error(m); }
 const auth = (t) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' });
@@ -148,9 +153,78 @@ export default {
       for (const u of rr.json?.users || []) assert(u.myVenueIds === undefined && u.venueAccess === undefined && u.personId === undefined, `roster leak ${J(u).slice(0, 160)}`);
     }
 
+    // 8 (9a2) venueIds: ONLY a same-agency admin sees each person's sanitized scope
+    const rosterOf = async (tok) => {
+      const rr = await call('GET', '/api/users', auth(tok));
+      assert(rr.status === 200, `roster ${rr.status}`);
+      return rr.json?.users || [];
+    };
+    const venueIdsSeenBy = async (tok) => Object.fromEntries((await rosterOf(tok)).map((u) => [u.id, u.venueIds]));
+    {
+      const seen = await venueIdsSeenBy(tAdminA);
+      assert(J(seen[U('coord')]) === J([V1, V2]), `9a2 admin sees coord ${J(seen[U('coord')])}`);
+      assert(J(seen[U('mash2')]) === J([V2]), `9a2 admin sees mash2 ${J(seen[U('mash2')])}`);
+      assert(J(seen[U('mash3')]) === J([V3]), `9a2 admin sees mash3 ${J(seen[U('mash3')])}`);
+      assert(J(seen[U('coordX')]) === J([]) && J(seen[U('mashX')]) === J([]), `9a2 foreign home = no venues ${J(seen[U('coordX')])} ${J(seen[U('mashX')])}`);
+      assert(U('adminA') in seen && seen[U('adminA')] === undefined, `9a2 admin target has no venueIds ${J(seen[U('adminA')])}`);
+      const tMash2 = (await loginFull('mash2')).token;
+      for (const [label, tok] of [['coordinator', tCoord], ['mashgiach', tMash2]]) {
+        const users = await rosterOf(tok);
+        assert(users.length > 0, `9a2 ${label} roster not empty`);
+        for (const u of users) assert(u.venueIds === undefined, `9a2 ${label} must not see venueIds ${J(u).slice(0, 160)}`);
+      }
+      const bUsers = await rosterOf(tAdminB);
+      for (const u of bUsers) {
+        assert(!String(u.id).startsWith('user-t53-') || u.id === U('adminB'), `9a2 other-agency admin sees agency A person ${u.id}`);
+        assert(!(u.venueIds || []).some((v) => [V1, V2, V3].includes(v)), `9a2 other-agency admin sees A venues ${J(u).slice(0, 160)}`);
+      }
+      // WS: a recipient-filtered USERS_UPDATED carries venueIds to the same-agency admin only
+      {
+        const connectWs = (tok) => new Promise((resolve, reject) => {
+          const ws = new WebSocket(baseUrl.replace(/^http/, 'ws') + `/ws?token=${tok}`);
+          const conn = { ws, messages: [] };
+          const timer = setTimeout(() => reject(new Error('9a2 WS connect timeout')), 10000);
+          ws.onmessage = (ev) => { try { conn.messages.push(JSON.parse(String(ev.data))); } catch {} if (conn.messages.some((m) => m.type === 'INITIAL_STATE')) { clearTimeout(timer); resolve(conn); } };
+          ws.onerror = (e) => { clearTimeout(timer); reject(new Error(`9a2 WS error ${e?.message || ''}`)); };
+        });
+        const waitType = async (conn, type, ms = 15000) => {
+          const t0 = Date.now();
+          for (;;) { const hit = conn.messages.find((m) => m.type === type); if (hit) return hit; if (Date.now() - t0 > ms) return null; await new Promise((res) => setTimeout(res, 200)); }
+        };
+        const conns = { admin: await connectWs(tAdminA), coord: await connectWs(tCoord), mash: await connectWs(tMash2), adminB: await connectWs(tAdminB) };
+        try {
+          const init = conns.admin.messages.find((m) => m.type === 'INITIAL_STATE');
+          const initMash2 = (init?.payload?.users || []).find((u) => u.id === U('mash2'));
+          assert(initMash2 && J(initMash2.venueIds) === J([V2]), `9a2 admin INITIAL_STATE venueIds ${J(initMash2).slice(0, 160)}`);
+          for (const k of ['coord', 'mash']) {
+            const i = conns[k].messages.find((m) => m.type === 'INITIAL_STATE');
+            for (const u of i?.payload?.users || []) assert(u.venueIds === undefined, `9a2 ${k} INITIAL_STATE must not carry venueIds ${J(u).slice(0, 160)}`);
+          }
+          for (const c of Object.values(conns)) c.messages.length = 0;
+          const ru = await write('PUT', `/api/users/${U('mash2')}`, tAdminA, { name: 'T53 Mash2 (9a2)' });
+          assert(ru.status === 200, `9a2 rename mash2 ${ru.status} ${ru.text.slice(0, 160)}`);
+          const ua = await waitType(conns.admin, 'USERS_UPDATED');
+          assert(ua, '9a2 admin got no USERS_UPDATED');
+          const am = (ua.payload?.users || []).find((u) => u.id === U('mash2'));
+          assert(am && J(am.venueIds) === J([V2]) && J((ua.payload.users.find((u) => u.id === U('coord')) || {}).venueIds) === J([V1, V2]), `9a2 admin USERS_UPDATED venueIds ${J(am).slice(0, 160)}`);
+          assert((ua.payload.users.find((u) => u.id === U('adminA')) || {}).venueIds === undefined, '9a2 admin target in WS has no venueIds');
+          for (const k of ['coord', 'mash']) {
+            const uu = await waitType(conns[k], 'USERS_UPDATED');
+            assert(uu, `9a2 ${k} got no USERS_UPDATED`);
+            for (const u of uu.payload?.users || []) assert(u.venueIds === undefined, `9a2 ${k} USERS_UPDATED must not carry venueIds ${J(u).slice(0, 160)}`);
+          }
+          await new Promise((res) => setTimeout(res, 1000));
+          for (const m of conns.adminB.messages) assert(!J(m).includes(V1) && !J(m).includes(V2) && !J(m).includes(U('mash2')), `9a2 other-agency admin WS saw agency A data ${J(m).slice(0, 160)}`);
+        } finally {
+          for (const c of Object.values(conns)) { try { c.ws.close(); } catch {} }
+        }
+      }
+    }
+
     // 4 coordinator PIN/phone through a shared venue only
     r = await write('PUT', `/api/users/${U('mash2')}`, tCoord, { kioskPin: '5353' });
     assert(r.status === 200, `PIN at shared V2 ${r.status} ${r.text.slice(0, 160)}`);
+    assert(r.json?.user && r.json.user.venueIds === undefined, `9a2 coordinator PUT response has no venueIds ${J(r.json?.user).slice(0, 160)}`);
     r = await write('PUT', `/api/users/${U('mash3')}`, tCoord, { kioskPin: '5354' });
     assert(r.status === 403, `PIN at V3 ${r.status}`);
     r = await write('PUT', `/api/users/${U('mash2')}`, tCoord, { kioskPin: '5355', role: 'coordinator' });
@@ -176,6 +250,10 @@ export default {
       assert(r.status === 200 && r.json?.token, `V2 tablet after grant ${r.status} ${r.text.slice(0, 160)}`);
       assert(r.json.user?.venueId === V2 && r.json.user?.myVenueIds === undefined && r.json.user?.venueAccess === undefined, `kiosk payload ${J(r.json.user).slice(0, 200)}`);
       const kh = { ...auth(r.json.token), 'X-Kiosk-Device': dev };
+      {
+        const kr = await call('GET', '/api/users', kh);
+        assert(kr.status === 200 && (kr.json?.users || []).length > 0 && (kr.json.users).every((u) => u.venueIds === undefined), `9a2 kiosk roster must not carry venueIds ${kr.status} ${J(kr.json).slice(0, 160)}`);
+      }
       let x = await call('GET', '/api/tasks', kh);
       assert(x.status === 200 && x.json.venueId === V2 && J(taskIds(x)) === J([`task-t53-2-${ts}`]), `kiosk tasks ${x.status} ${J(x.json).slice(0, 200)}`);
       x = await call('GET', `/api/tasks?venueId=${V3}`, kh);
@@ -192,6 +270,7 @@ export default {
     // 5 raw venueAccess in an ordinary edit changes nothing; 6 unrelated commit keeps the grant
     r = await write('PUT', `/api/users/${U('coord')}`, tAdminA, { name: 'T53 Coord renamed', venueAccess: [V1, V2, V3, VB] });
     assert(r.status === 200, `rename ${r.status} ${r.text.slice(0, 160)}`);
+    assert(J(r.json?.user?.venueIds) === J([V1, V2]), `9a2 admin PUT response venueIds ${J(r.json?.user?.venueIds)}`);
     assert(J((await docUser(U('coord'))).venueAccess) === J([V1, V2]), `after rename ${J((await docUser(U('coord'))).venueAccess)}`);
     await ctx.restartServer();
     coordLogin = await loginFull('coord'); tCoord = coordLogin.token;
@@ -207,6 +286,14 @@ export default {
     r = await write('PUT', `/api/users/${U('coord')}`, tAdminA, { venueId: V3 });
     assert(r.status === 200, `move home ${r.status} ${r.text.slice(0, 160)}`);
     assert(J((await docUser(U('coord'))).venueAccess) === J([V3]), `home change resets ${J((await docUser(U('coord'))).venueAccess)}`);
+    {
+      const seen = await venueIdsSeenBy(tAdminA);
+      assert(J(seen[U('coord')]) === J([V3]), `9a2 admin view after home change ${J(seen[U('coord')])}`);
+      // a deleted venue is never an EXTRA venue for anyone (9a keeps a removed
+      // HOME id as that person's own scope, so mash2 alone may still show it)
+      assert(Object.entries(seen).every(([id, v]) => id === U('mash2') || !(v || []).includes(V2)), `9a2 deleted V2 only as mash2's own home ${J(seen)}`);
+      assert(J(seen[U('mash2')]) === J([V2]), `9a2 removed home stays the person's own scope (9a rule) ${J(seen[U('mash2')])}`);
+    }
     // B untouched throughout
     const bAdmin = await docUser(U('adminB'));
     assert(bAdmin && bAdmin.agencyId === B, 'agency B intact');
