@@ -7291,6 +7291,11 @@ app.delete('/api/handoff-notes/:id', async (req, res) => {
 // -------------------------------------------------------------
 
 // Register a brand new Kosher Agency & provision initial workspace
+// 10a: the register refusal names no account and no agency; the per-IP
+// limit counts every well-formed attempt (taken email or not).
+const REGISTER_EMAIL_REFUSED_TEXT = "This email can't be used to register a new agency.";
+const REGISTER_MAX_PER_IP_PER_HOUR = 10;
+
 app.post('/api/agencies/register', async (req, res) => {
   const {
     agencyName,
@@ -7319,8 +7324,38 @@ app.post('/api/agencies/register', async (req, res) => {
   }
 
   const cleanAdminEmail = adminEmail.trim().toLowerCase();
+  // 10a: every well-formed registration attempt is counted per client IP
+  // BEFORE the email is looked at (taken or not), so the "email taken"
+  // refusal cannot be used for fast enumeration. Stored in the existing
+  // passwordResetRateLimits.ipRequests map under a 'register|' key (no new
+  // state field; forgot-password keys are bare IPs, so they never collide).
+  const registerIpKey = `register|${getClientIp(req)}`;
+  // A separate commit WITHOUT the request's idempotency scope (operationId /
+  // expectedVersion belong to the registration commit below, never to this
+  // counter). Fail closed: no counted attempt -> no registration.
+  try {
+    await commitState(
+      (freshDoc) => {
+        const raw = freshDoc.passwordResetRateLimits;
+        const limits: PasswordResetRateLimits = raw && typeof raw === 'object'
+          ? { emailRequests: raw.emailRequests || {}, ipRequests: raw.ipRequests || {}, ipVerifies: raw.ipVerifies || {} }
+          : emptyRateLimits();
+        // Throws RateLimitError (never retried) when over the limit.
+        const after = checkRateLimit(limits, 'ipRequests', registerIpKey, REGISTER_MAX_PER_IP_PER_HOUR, Date.now());
+        return { doc: { ...freshDoc, passwordResetRateLimits: after }, result: { ok: true } };
+      },
+      { label: 'register-rate-limit' }
+    );
+  } catch (err: any) {
+    if (err instanceof RateLimitError) {
+      res.setHeader('Retry-After', String(err.retryAfterSec));
+      return res.status(429).json({ error: err.message, code: 'RATE_LIMITED' });
+    }
+    log.error('[register] rate-limit reservation failed:', err?.message);
+    return res.status(503).json({ error: 'Registration is temporarily unavailable. Please try again.' });
+  }
   if (users.some((u) => u.email.toLowerCase() === cleanAdminEmail)) {
-    return res.status(409).json({ error: 'An administrator or staff account with this email already exists on the platform.' });
+    return res.status(409).json({ error: REGISTER_EMAIL_REFUSED_TEXT });
   }
 
   const cleanAgencyName = agencyName.trim();
@@ -7407,7 +7442,7 @@ app.post('/api/agencies/register', async (req, res) => {
       }
       // Email uniqueness against FRESH data (concurrent registrations).
       if (freshUsers.some((u) => u.email.toLowerCase() === cleanAdminEmail)) {
-        return { conflict: 'An administrator or staff account with this email already exists on the platform.' };
+        return { conflict: REGISTER_EMAIL_REFUSED_TEXT };
       }
 
       const tasksToAdd = starterTasks.filter((t) => !freshTasks.some((ft) => ft.id === t.id));
@@ -10763,7 +10798,15 @@ app.post('/api/users', async (req, res) => {
       // (Two concurrent creates with the same email: one wins, the other gets 409 —
       // the duplicate-user case idempotency alone can't prevent.)
       const existing = freshUsers.find((u) => u.email.toLowerCase() === cleanEmail);
-      if (existing) return { conflict: 'A team member with this email already exists' };
+      // 10a: only the caller's OWN agency is named; an email used in another
+      // agency gets a text that says nothing about where it is used.
+      if (existing) {
+        return {
+          conflict: (existing.agencyId || 'agency-hkc') === callerAgencyId
+            ? 'A team member with this email already exists'
+            : "This email can't be added directly.",
+        };
+      }
       // Idempotency: our own user ID already created by a previous attempt.
       const selfExisting = freshUsers.find((u) => u.id === newUserId);
       if (selfExisting) return { doc: freshDoc, result: selfExisting };
@@ -12115,6 +12158,10 @@ app.post('/api/kiosk/login', async (req, res) => {
 
 // Formal Login Endpoint — bcrypt passwords, signed session token on success.
 // Legacy plaintext passwords are transparently upgraded to bcrypt on login.
+// 10a (item 10, plan v4): non-enumerating public answers. These texts never
+// say whether an email exists on the platform or in which agency.
+const LOGIN_FAILED_TEXT = 'Email or password is incorrect.';
+
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
@@ -12124,8 +12171,10 @@ app.post('/api/auth/login', async (req, res) => {
   const normalizedEmail = String(email).trim().toLowerCase();
   const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
 
+  // 10a: one answer for an unknown email and a wrong password, so login
+  // never tells anyone whether an email has a Shutfey account.
   if (!user) {
-    return res.status(401).json({ error: 'Account not found. Please verify your email or ask your admin to register you.' });
+    return res.status(401).json({ error: LOGIN_FAILED_TEXT });
   }
 
   // First-run setup: admin account with no password yet → client shows the
@@ -12137,7 +12186,7 @@ app.post('/api/auth/login', async (req, res) => {
   // No hardcoded fallback passwords: only the stored (bcrypt) password works.
   const result = await checkPassword(String(password), user.password);
   if (result === 'invalid') {
-    return res.status(401).json({ error: 'Incorrect password. Please try again or request a reset.' });
+    return res.status(401).json({ error: LOGIN_FAILED_TEXT });
   }
   if (result === 'valid-needs-upgrade') {
     // Upgrade the legacy password hash inside a transaction so the write is
