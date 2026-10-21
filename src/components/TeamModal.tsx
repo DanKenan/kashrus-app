@@ -238,36 +238,36 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1a120a]/60 backdrop-blur-xs overflow-y-auto">
-      <div className="bg-surface rounded-2xl w-full max-w-4xl tactile-4 border border-line my-8 overflow-hidden flex flex-col max-h-[90vh] animate-slide-up">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-scrim backdrop-blur-sm overflow-y-auto">
+      <div className="bg-surface rounded-2xl w-full max-w-4xl e3 border border-line my-8 overflow-hidden flex flex-col max-h-[90vh] animate-slide-up">
         
         {/* Modal Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-line shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-gold-wash text-gold-deep">
+        <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-line shrink-0">
+          <div className="flex items-center gap-3 flex-1 min-w-0">
+            <div className="hidden sm:flex p-2 rounded-xl bg-gold-wash text-gold-ink shrink-0">
               <Users className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-bold text-ink flex items-center gap-2">
-                <span>Mashgiach Team & Access Permissions</span>
+            <div className="flex-1 min-w-0">
+              <h2 className="text-base font-bold text-ink flex flex-wrap items-center gap-2">
+                <span className="basis-full sm:basis-auto min-w-0">Mashgiach Team & Access Permissions</span>
                 {currentVenue && (
-                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 font-semibold flex items-center gap-1">
+                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 font-semibold flex items-center gap-1 min-w-0 max-w-full break-words">
                     <Building2 className="w-3 h-3" />
                     {currentVenue.name}
                   </span>
                 )}
-                <span className="text-xs px-2 py-0.5 rounded-full bg-sunken text-ink-soft font-semibold">
+                <span className="text-xs px-2 py-0.5 rounded-full bg-sunken text-ink-soft font-semibold shrink-0">
                   {users.length} members
                 </span>
               </h2>
-              <p className="text-xs text-ink-soft">
+              <p className="text-sm text-ink-soft">
                 Manage Mashgichim, Coordinators, and Venue Owners. Toggle permissions to fill tasks and/or assign new tasks.
               </p>
             </div>
           </div>
-          <button
+          <button aria-label="Close"
             onClick={onClose}
-            className="p-1 rounded-lg text-ink-faint hover:text-ink cursor-pointer"
+            className="w-11 h-11 inline-flex items-center justify-center rounded-lg text-ink-soft hover:bg-sunken shrink-0 cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -278,14 +278,14 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           
           {/* Section 1: Add New Member Form (admin only) */}
           {!isCoordinatorView && (
-          <div className="p-4 rounded-2xl bg-sunken border border-line tactile-1">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-faint mb-3 flex items-center gap-1.5">
-              <UserPlus className="w-3.5 h-3.5 text-emerald-500" />
+          <div className="p-4 rounded-2xl bg-sunken border border-line e1">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-soft mb-3 flex items-center gap-1.5">
+              <UserPlus className="w-3.5 h-3.5 text-ok" />
               Add New Team Member
             </h3>
 
             {error && (
-              <div className="mb-3 p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+              <div className="mb-3 p-2.5 rounded-xl bg-bad-bg border border-bad text-xs text-bad flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
                 <span>{error}</span>
               </div>
@@ -298,15 +298,15 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                     Full Name
                   </label>
                   <div className="relative">
-                    <User className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2" />
+                    <User className="w-3.5 h-3.5 text-ink-soft absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       id="new-member-name-input"
                       type="text"
                       required
-                      placeholder="e.g. Rabbi David Cohen"
+                      placeholder="Full name"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-line bg-sunken text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                      className="w-full pl-8 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                     />
                   </div>
                 </div>
@@ -316,7 +316,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                     Email
                   </label>
                   <div className="relative">
-                    <Mail className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Mail className="w-3.5 h-3.5 text-ink-soft absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       id="new-member-email-input"
                       type="email"
@@ -324,7 +324,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       placeholder="e.g. dcohen@hartfordkashrut.org"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-line bg-sunken text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                      className="w-full pl-8 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                     />
                   </div>
                 </div>
@@ -334,7 +334,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                     Password
                   </label>
                   <div className="relative">
-                    <Lock className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Lock className="w-3.5 h-3.5 text-ink-soft absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       id="new-member-password-input"
                       type="password"
@@ -342,7 +342,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       placeholder="Min 6 characters"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-line bg-sunken text-ink placeholder-ink-faint font-mono text-xs focus:border-gold focus:outline-none"
+                      className="w-full pl-8 pr-3 py-2 placeholder-ink-faint font-mono focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                     />
                   </div>
                 </div>
@@ -355,7 +355,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                     id="new-member-role-select"
                     value={role}
                     onChange={(e) => handleRoleChange(e.target.value as UserRole)}
-                    className="w-full py-2 px-3 rounded-xl border border-line bg-sunken text-ink font-medium focus:border-gold focus:outline-none"
+                    className="w-full py-2 px-3 font-medium focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   >
                     <option value="mashgiach">Mashgiach (Field Inspector)</option>
                     <option value="coordinator">Coordinator (Can Add Tasks)</option>
@@ -372,14 +372,14 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                     Phone (optional)
                   </label>
                   <div className="relative">
-                    <Phone className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2" />
+                    <Phone className="w-3.5 h-3.5 text-ink-soft absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       id="new-member-phone-input"
                       type="tel"
                       placeholder="For sending the kiosk code"
                       value={newPhone}
                       onChange={(e) => setNewPhone(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-line bg-sunken text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                      className="w-full pl-8 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                     />
                   </div>
                 </div>
@@ -396,7 +396,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       type="checkbox"
                       checked={canFill}
                       onChange={(e) => setCanFill(e.target.checked)}
-                      className="w-4 h-4 accent-gold rounded border-line cursor-pointer"
+                      className="w-4 h-4 accent-gold rounded border-line-control cursor-pointer"
                     />
                     <span className="text-ink-soft">
                       Can Fill Up Tasks & Notes
@@ -407,7 +407,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       type="checkbox"
                       checked={canAssign}
                       onChange={(e) => setCanAssign(e.target.checked)}
-                      className="w-4 h-4 accent-gold rounded border-line cursor-pointer"
+                      className="w-4 h-4 accent-gold rounded border-line-control cursor-pointer"
                     />
                     <span className="text-ink-soft">
                       Can Assign / Add New Tasks
@@ -419,7 +419,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   id="add-member-submit-btn"
                   type="submit"
                   disabled={isSubmitting}
-                  className="pressable py-2 px-4 rounded-xl bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 disabled:opacity-50 text-white font-bold flex items-center justify-center gap-1.5 tactile-1 cursor-pointer shrink-0"
+                  className="pressable py-2 px-4 rounded-xl hover:brightness-105 disabled:opacity-50 font-bold flex items-center justify-center gap-1.5 e1 cursor-pointer shrink-0 bg-gold-deep text-paper"
                 >
                   <UserPlus className="w-4 h-4" />
                   <span>{isSubmitting ? 'Adding...' : 'Add Team Member'}</span>
@@ -434,10 +434,10 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           <div>
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
               <div>
-                <h3 className="text-xs font-bold uppercase tracking-wider text-ink-faint">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-ink-soft">
                   Active Team Roster & Permissions ({filteredUsers.length})
                 </h3>
-                <p className="text-[11px] text-ink-soft">
+                <p className="text-sm text-ink-soft">
                   Admins can toggle task filling and task assignment permissions directly for any Mashgiach or Owner.
                 </p>
               </div>
@@ -446,11 +446,18 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                 placeholder="Search by name, email, or role..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="text-xs px-3 py-1.5 rounded-xl border border-line bg-sunken text-ink max-w-xs focus:border-gold focus:outline-none"
+                className="px-3 py-1.5 max-w-xs focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
               />
             </div>
 
             <div className="divide-y divide-line border border-line rounded-2xl overflow-hidden bg-surface">
+              {searchQuery && filteredUsers.length === 0 && (
+                <div data-empty-state className="p-6 text-center text-ink-soft">
+                  <Users className="w-8 h-8 mx-auto mb-2" />
+                  <p className="text-sm font-semibold">No team members match your search.</p>
+                  <p className="text-sm mt-2">Try a different name, email or role.</p>
+                </div>
+              )}
               {filteredUsers.map((user) => {
                 const isCurrent = currentUser?.id === user.id;
                 const isPrimaryAdmin = user.email.toLowerCase() === 'kenan@hartfordkashrut.org';
@@ -466,25 +473,25 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                 return (
                   <div
                     key={user.id}
-                    className={`p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-surface tactile-1 lift hover:bg-sunken/50 transition ${
+                    className={`p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-surface e1 lift hover:bg-sunken/50 transition ${
                       isBusy ? 'opacity-50 pointer-events-none' : ''
                     }`}
                   >
                     {/* User Info & Role Dropdown */}
                     <div className="flex items-center gap-3 min-w-0 flex-1">
                       <div
-                        className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold text-white tactile-1 ring-2 ring-gold/30 shrink-0"
-                        style={{ backgroundColor: user.avatarColor || '#3b82f6' }}
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold text-paper e1 ring-2 ring-gold/30 shrink-0"
+                        style={{ backgroundColor: user.avatarColor || 'var(--gold-deep)' }}
                       >
                         {user.name.charAt(0).toUpperCase()}
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <p className="text-xs font-bold text-ink truncate">
+                          <p className="text-sm font-bold text-ink truncate">
                             {user.name}
                           </p>
                           {isCurrent && (
-                            <span className="text-[10px] px-2 py-0.2 rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-bold border border-emerald-500/30">
+                            <span className="text-xs px-2 py-0.2 rounded-md bg-sunken text-ink-soft font-semibold border border-line">
                               You
                             </span>
                           )}
@@ -494,14 +501,10 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                             <select
                               value={user.role}
                               onChange={(e) => handleChangeUserRole(user, e.target.value as UserRole)}
-                              className={`text-[10px] font-bold px-2 py-0.5 rounded-lg uppercase tracking-wider cursor-pointer border ${
+                              className={`text-base font-semibold px-2 py-0.5 rounded-lg uppercase tracking-wider cursor-pointer border border-line-control min-w-0 focus:ring-2 focus:ring-gold/40 focus:border-gold ${
                                 user.role === 'admin'
-                                  ? 'bg-gold-wash text-gold-ink border-gold/40'
-                                  : user.role === 'coordinator'
-                                  ? 'bg-sunken text-ink-soft border-line'
-                                  : user.role === 'owner'
-                                  ? 'bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-500/30'
-                                  : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                                  ? 'bg-gold-wash text-gold-ink'
+                                  : 'bg-sunken text-ink-soft'
                               }`}
                             >
                               <option value="mashgiach">Mashgiach</option>
@@ -511,25 +514,21 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                             </select>
                           ) : (
                             <span
-                              className={`text-[10px] px-2 py-0.5 rounded-md font-bold uppercase tracking-wider ${
+                              className={`text-xs px-2 py-0.5 rounded-md font-semibold uppercase tracking-wider border border-line ${
                                 user.role === 'admin'
                                   ? 'bg-gold-wash text-gold-ink'
-                                  : user.role === 'coordinator'
-                                  ? 'bg-sunken text-ink-soft border border-line'
-                                  : user.role === 'owner'
-                                  ? 'bg-purple-500/10 text-purple-700 dark:text-purple-300 border border-purple-500/30'
-                                  : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-sunken text-ink-soft'
                               }`}
                             >
                               {getRoleLabel(user.role)}
                             </span>
                           )}
                         </div>
-                        <p className="text-xs text-ink-soft truncate">
+                        <p className="text-sm text-ink-soft truncate">
                           {user.email}
                         </p>
                         {user.phoneNumber && (
-                          <p className="text-xs text-ink-faint truncate inline-flex items-center gap-1 tnum">
+                          <p className="text-sm text-ink-soft truncate inline-flex items-center gap-1 tnum">
                             <Phone className="w-3 h-3" />
                             {user.phoneNumber}
                           </p>
@@ -548,12 +547,12 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         disabled={!onUpdateUser || isPrimaryAdmin}
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition cursor-pointer ${
                           canFillVal
-                            ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-700 dark:text-emerald-300'
-                            : 'bg-sunken border-line text-ink-faint line-through'
+                            ? 'bg-ok-bg border-ok text-ok'
+                            : 'bg-sunken border-line text-ink-soft line-through'
                         } ${(!onUpdateUser || isPrimaryAdmin) ? 'cursor-default opacity-80' : 'hover:scale-[1.02]'}`}
                         title="Permission to complete checklist items and save notes"
                       >
-                        <CheckSquare className={`w-3.5 h-3.5 ${canFillVal ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-faint'}`} />
+                        <CheckSquare className={`w-3.5 h-3.5 ${canFillVal ? 'text-ok ' : 'text-ink-soft'}`} />
                         <span>Fill Tasks: {canFillVal ? 'Allowed' : 'Disabled'}</span>
                       </button>
 
@@ -565,18 +564,18 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition cursor-pointer ${
                           canAssignVal
                             ? 'bg-gold-wash border-gold/40 text-gold-ink'
-                            : 'bg-sunken border-line text-ink-faint line-through'
+                            : 'bg-sunken border-line text-ink-soft line-through'
                         } ${(!onUpdateUser || isPrimaryAdmin) ? 'cursor-default opacity-80' : 'hover:scale-[1.02]'}`}
                         title="Permission to create new assignments and edit task definitions"
                       >
-                        <PlusCircle className={`w-3.5 h-3.5 ${canAssignVal ? 'text-gold-deep' : 'text-ink-faint'}`} />
+                        <PlusCircle className={`w-3.5 h-3.5 ${canAssignVal ? 'text-gold-deep' : 'text-ink-soft'}`} />
                         <span>Assign Tasks: {canAssignVal ? 'Allowed' : 'Disabled'}</span>
                       </button>
 
                       </>
                       )} {/* end admin-only permission toggles */}
 
-                      <span className="text-xs text-ink-faint tnum hidden xl:inline" title="Tasks assigned to this user">
+                      <span className="text-xs text-ink-soft tnum hidden xl:inline" title="Tasks assigned to this user">
                         {assignedCount} tasks
                       </span>
 
@@ -605,7 +604,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                             type="button"
                             onClick={() => setCodeTargetId(user.id)}
                             data-testid={user.hasKioskPin ? 'kiosk-code-reset' : 'kiosk-code-set-btn'}
-                            className="pressable inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border border-line bg-sunken hover:bg-gold-wash/60 text-ink cursor-pointer"
+                            className="pressable inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
                           >
                             <KeyRound className="w-3.5 h-3.5 text-gold-deep" />
                             {user.hasKioskPin ? 'Reset code' : 'Set code'}
@@ -617,7 +616,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       {!isPrimaryAdmin && !isCoordinatorView && (
                         <button
                           onClick={() => handleDelete(user)}
-                          className="p-1.5 rounded-lg text-ink-faint hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition cursor-pointer"
+                          className="p-1.5 rounded-lg transition cursor-pointer bg-surface border border-line-control text-bad hover:bg-sunken"
                           title={`Delete ${user.name}`}
                         >
                           <Trash2 className="w-4 h-4" />
@@ -634,12 +633,12 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 
         {/* Modal Footer */}
         <div className="px-6 py-3 border-t border-line bg-sunken flex items-center justify-between shrink-0">
-          <p className="text-xs text-ink-soft">
+          <p className="text-sm text-ink-soft">
             Changes to roles and permissions apply immediately across all live connected sessions.
           </p>
           <button
             onClick={onClose}
-            className="pressable px-4 py-1.5 text-xs font-semibold rounded-xl border border-line bg-sunken hover:bg-gold-wash/60 text-ink cursor-pointer"
+            className="pressable px-4 py-1.5 text-xs font-semibold rounded-xl cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
           >
             Close
           </button>

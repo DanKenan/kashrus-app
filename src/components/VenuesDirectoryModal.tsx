@@ -67,7 +67,7 @@ const VenueTimeZoneRow: React.FC<{
   return (
     <div className="text-xs text-ink-soft" onClick={(e) => e.stopPropagation()} data-venue-timezone-row>
       <div className="flex items-center gap-1.5">
-        <Clock className="w-3 h-3 text-ink-faint shrink-0" />
+        <Clock className="w-3 h-3 text-ink-soft shrink-0" />
         {isAdmin && onVenueUpdated ? (
           <select
             aria-label={`Time zone for ${venue.name}`}
@@ -75,7 +75,7 @@ const VenueTimeZoneRow: React.FC<{
             disabled={saving}
             value={inherited ? '' : (venue.timeZone as string)}
             onChange={(e) => save(e.target.value)}
-            className="min-w-0 flex-1 px-2 py-1 text-xs rounded-lg bg-sunken border border-line text-ink focus:border-gold focus:outline-none disabled:opacity-60"
+            className="min-w-0 flex-1 px-2 py-1 focus:outline-none disabled:opacity-60 min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
           >
             <option value="">Agency default ({timeZoneLabel(agencyTz)})</option>
             {!inherited && !known && <option value={venue.timeZone}>{venue.timeZone}</option>}
@@ -91,7 +91,7 @@ const VenueTimeZoneRow: React.FC<{
             {inherited ? ' · agency default' : ''}
           </span>
         )}
-        {saving && <span className="text-ink-faint">Saving…</span>}
+        {saving && <span className="text-ink-soft">Saving…</span>}
       </div>
       {note && <p className="mt-1 text-ok">{note}</p>}
       {error && (
@@ -158,30 +158,30 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
   return (
     <div
       id="venues-directory-modal-overlay"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#1a120a]/60 backdrop-blur-xs animate-fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-scrim backdrop-blur-sm animate-fade-in"
     >
-      <div className="bg-surface w-full max-w-4xl rounded-2xl tactile-4 animate-slide-up border border-line overflow-hidden flex flex-col max-h-[85vh]">
+      <div className="bg-surface w-full max-w-4xl rounded-2xl e3 animate-slide-up border border-line overflow-hidden flex flex-col max-h-[85vh]">
         
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4.5 border-b border-line bg-sunken">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 px-6 py-4.5 border-b border-line bg-sunken">
+          <div className="flex items-center gap-3 w-full sm:w-auto flex-1 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-gold-wash text-gold-ink hidden sm:flex items-center justify-center e2 shrink-0">
               <Building2 className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-bold text-ink flex items-center gap-2">
-                <span>Kosher Venues & Restaurants Platform Hub</span>
-                <span className="tnum text-xs font-semibold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40">
+            <div className="flex-1 min-w-0">
+              <h2 className="text-base font-bold text-ink flex flex-col items-start sm:flex-row sm:flex-wrap sm:items-center gap-2">
+                <span className="min-w-0">Kosher Venues & Restaurants Platform Hub</span>
+                <span className="tnum text-xs font-semibold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 shrink-0">
                   {venues.length} Facilities
                 </span>
               </h2>
-              <p className="text-xs text-ink-soft">
+              <p className="text-sm text-ink-soft">
                 Switch between venues or establish a new certified kosher restaurant, bakery, or caterer platform.
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center justify-end gap-2 w-full sm:w-auto shrink-0">
             {isAdmin && (
               <button
                 id="directory-create-venue-btn"
@@ -189,16 +189,16 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                   onClose();
                   onOpenCreateVenue();
                 }}
-                className="pressable px-3 py-1.5 text-xs font-bold rounded-lg bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white tactile-1 flex items-center gap-1.5 cursor-pointer"
+                className="pressable px-3 py-1.5 text-xs font-bold rounded-lg hover:brightness-105 e1 flex items-center gap-1.5 cursor-pointer bg-gold-deep text-paper shrink-0 whitespace-nowrap"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>New Venue</span>
               </button>
             )}
-            <button
+            <button aria-label="Close"
               id="close-venues-directory-btn"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-ink-faint hover:text-ink hover:bg-sunken transition cursor-pointer"
+              className="w-11 h-11 inline-flex items-center justify-center rounded-lg text-ink-soft hover:bg-sunken shrink-0 cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -208,13 +208,13 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
         {/* Filter & Search Bar */}
         <div className="p-4 border-b border-line bg-sunken/60 flex flex-col sm:flex-row gap-3 items-center justify-between">
           <div className="relative w-full sm:w-72">
-            <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
+            <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-soft" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search by venue, address, or hashgacha..."
-              className="w-full pl-8.5 pr-3 py-1.5 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+              className="w-full pl-8.5 pr-3 py-1.5 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
             />
           </div>
 
@@ -225,7 +225,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                 onClick={() => setCategoryFilter(cat)}
                 className={`px-2.5 py-1 text-xs font-medium rounded-lg capitalize whitespace-nowrap transition cursor-pointer ${
                   categoryFilter === cat
-                    ? 'bg-gold text-white tactile-1'
+                    ? 'bg-sunken text-ink e1 ring-1 ring-ink-soft'
                     : 'bg-sunken text-ink-soft hover:text-ink border border-line'
                 }`}
               >
@@ -238,9 +238,10 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
         {/* Venues Grid */}
         <div className="p-6 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
           {filteredVenues.length === 0 ? (
-            <div className="col-span-2 text-center py-12 text-ink-faint">
+            <div data-empty-state className="col-span-full text-center py-12 text-ink-soft">
               <Building2 className="w-8 h-8 mx-auto mb-2 opacity-40" />
-              <p className="text-xs font-medium">No venues match your search criteria.</p>
+              <p className="text-sm font-medium">No venues match your search criteria.</p>
+              <p className="text-sm mt-2">Try a different name, address or hashgacha.</p>
             </div>
           ) : (
             filteredVenues.map((venue) => {
@@ -259,8 +260,8 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                   }}
                   className={`p-4 sm:p-6 min-w-0 rounded-2xl border transition text-left relative flex flex-col justify-between cursor-pointer group ${
                     isCurrent
-                      ? 'border-gold/60 bg-gold-wash/60 ring-1 ring-gold/40 tactile-1'
-                      : 'border-line bg-surface tactile-1 lift hover:border-line-strong'
+                      ? 'border-gold/60 bg-gold-wash/60 ring-1 ring-gold/40 e1'
+                      : 'border-line bg-surface e1 lift hover:border-line-strong'
                   }`}
                 >
                   {/* Top line: Name, Category, Active badge */}
@@ -272,12 +273,12 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                             {venue.name}
                           </h3>
                           {isCurrent && (
-                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-gradient-to-b from-gold to-gold-deep text-white shrink-0">
+                            <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink shrink-0">
                               Active Platform
                             </span>
                           )}
                         </div>
-                        <div className="text-[11px] font-medium text-ink-soft mt-0.5">
+                        <div className="text-xs font-medium text-ink-soft mt-0.5">
                           {venue.category}
                         </div>
                       </div>
@@ -286,19 +287,19 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                         <button
                           title="Delete Venue Platform"
                           onClick={(e) => handleDelete(e, venue)}
-                          className="pressable flex items-center gap-1 text-xs text-bad p-1.5 rounded-lg border border-bad bg-bad-bg hover:bg-sunken transition cursor-pointer shrink-0"
+                          className="pressable flex items-center gap-1 text-xs p-1.5 rounded-lg transition cursor-pointer shrink-0 bg-surface border border-line-control text-bad hover:bg-sunken"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
-                          <span className="text-[11px] font-semibold hidden sm:inline">Delete</span>
+                          <span className="text-xs font-semibold hidden sm:inline">Delete</span>
                         </button>
                       )}
                     </div>
 
                     {/* Address & Certification */}
-                    <div className="space-y-1 text-[11px] text-ink-soft mb-3.5">
+                    <div className="space-y-1 text-xs text-ink-soft mb-3.5">
                       {venue.address && (
                         <div className="flex items-start gap-1.5 text-ink-soft">
-                          <MapPin className="w-3 h-3 mt-0.5 text-ink-faint shrink-0" />
+                          <MapPin className="w-3 h-3 mt-0.5 text-ink-soft shrink-0" />
                           <span dir="auto" className="min-w-0 break-words">{venue.address}</span>
                         </div>
                       )}
@@ -321,7 +322,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                   <div className="pt-3 border-t border-line">
                     <div className="flex items-center gap-3 text-xs mb-3">
                       <span data-desk-ring className="shrink-0"><ProgressRing done={completedTasks} total={totalTasks} size={40} /></span>
-                      <span className="min-w-0 flex-1 text-[11px] text-ink-soft tnum">
+                      <span className="min-w-0 flex-1 text-xs text-ink-soft tnum">
                         Shift Completion: <strong>{completedTasks}/{totalTasks}</strong>
                       </span>
                       <span className="text-xs font-bold text-ink tnum">
@@ -330,7 +331,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                      <span className="text-[11px] text-ink-faint flex items-center gap-1">
+                      <span className="text-xs text-ink-soft flex items-center gap-1">
                         <Users className="w-3 h-3" />
                         {venue.workerCount ?? 0} staff members
                       </span>
@@ -338,8 +339,8 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                       <button
                         className={`text-xs font-semibold flex items-center gap-1 px-2.5 py-1 rounded-lg transition ${
                           isCurrent
-                            ? 'text-gold-deep bg-gold-wash border border-gold/40'
-                            : 'text-ink-soft hover:text-gold-deep bg-sunken hover:bg-gold-wash/60'
+                            ? 'bg-sunken text-ink border border-line-control ring-1 ring-ink-soft'
+                            : 'bg-surface border border-line-control text-ink hover:bg-sunken'
                         }`}
                       >
                         <span>{isCurrent ? 'Viewing Now' : 'Switch to Platform'}</span>
@@ -360,7 +361,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
           </span>
           <button
             onClick={onClose}
-            className="pressable px-3.5 py-1.5 text-xs font-semibold rounded-lg border border-line bg-sunken hover:bg-gold-wash/60 text-ink transition cursor-pointer"
+            className="pressable px-3.5 py-1.5 text-xs font-semibold rounded-lg transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
           >
             Close Hub
           </button>
