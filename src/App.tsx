@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
+import { venueStorageKey, eligibleVenuesFor, resolveVenue, filterToVenue } from './lib/venueSelection';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
 import { Header } from './components/Header';
 import { StatsProgressBar } from './components/StatsProgressBar';
@@ -273,8 +274,7 @@ export default function App() {
   const [venues, setVenues] = useState<Venue[]>([]);
   const [currentVenueId, setCurrentVenueId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem(currentUser && currentUser.role !== 'admin'
-        ? `selected_venue_id:${currentUser.id}` : 'selected_venue_id');
+      return localStorage.getItem(currentUser ? venueStorageKey(currentUser) : 'selected_venue_id');
     }
     return null;
   });
@@ -344,11 +344,7 @@ export default function App() {
   });
 
   // The server list is authoritative; grants in the login payload narrow it.
-  const eligibleVenues = useMemo(() => {
-    if (!currentUser || currentUser.role === 'admin') return [];
-    const ids = (currentUser as User & { myVenueIds?: string[] }).myVenueIds;
-    return ids ? venues.filter((venue) => ids.includes(venue.id)) : venues;
-  }, [venues, currentUser]);
+  const eligibleVenues = useMemo(() => eligibleVenuesFor(currentUser, venues), [venues, currentUser]);
 
   // Compute active venue
   const currentVenue = useMemo<Venue | null>(() => {
@@ -356,10 +352,8 @@ export default function App() {
     if (currentUser?.role !== 'admin') {
       if (!currentUser) return null;
       const saved = typeof window !== 'undefined'
-        ? localStorage.getItem(`selected_venue_id:${currentUser.id}`) : currentVenueId;
-      return eligibleVenues.find((v) => v.id === saved)
-        || eligibleVenues.find((v) => v.id === currentUser.venueId)
-        || eligibleVenues[0] || null;
+        ? localStorage.getItem(venueStorageKey(currentUser)) : currentVenueId;
+      return resolveVenue(currentUser, eligibleVenues, saved);
     }
     if (currentVenueId) {
       const match = venues.find((v) => v.id === currentVenueId);
@@ -367,6 +361,14 @@ export default function App() {
     }
     return venues[0] || null;
   }, [venues, currentVenueId, currentUser, eligibleVenues]);
+
+  // Venue discovery survives switches; only an authentication change invalidates it.
+  const userRequestContext = useRef({ userId: currentUser?.id, generation: 0 });
+  if (userRequestContext.current.userId !== currentUser?.id) {
+    userRequestContext.current = { userId: currentUser?.id, generation: userRequestContext.current.generation + 1 };
+  }
+  const socketContext = useRef({ currentUser, venues, eligibleVenues, currentVenueId, currentVenue });
+  socketContext.current = { currentUser, venues, eligibleVenues, currentVenueId, currentVenue };
 
   // Invalidate synchronously so a response cannot land between selection and effects.
   const requestContext = useRef({ key: '', generation: 0 });
@@ -467,7 +469,7 @@ export default function App() {
     } else if (currentUser.role !== 'admin') {
       setCurrentVenueId(currentVenue?.id || null);
       if (currentVenue && typeof window !== 'undefined') {
-        localStorage.setItem(`selected_venue_id:${currentUser.id}`, currentVenue.id);
+        localStorage.setItem(venueStorageKey(currentUser), currentVenue.id);
       }
       if (eligibleVenues.length < 2) setIsVenueSwitcherOpen(false);
     }
@@ -482,9 +484,9 @@ export default function App() {
   // 1. Fetch Venues whenever user changes
   useEffect(() => {
     if (!currentUser) return;
-    const generation = requestContext.current.generation;
+    const generation = userRequestContext.current.generation;
     let cancelled = false;
-    const isCurrent = () => !cancelled && requestContext.current.generation === generation;
+    const isCurrent = () => !cancelled && userRequestContext.current.generation === generation;
     const url = `/api/venues?userEmail=${encodeURIComponent(currentUser.email)}`;
     apiFetch(url)
       .then((res) => res.json())
@@ -506,7 +508,7 @@ export default function App() {
       })
       .catch((err) => console.warn('Could not fetch /api/venues:', err));
     return () => { cancelled = true; };
-  }, [currentUser?.id, currentUser?.email, currentUser?.role, currentVenue?.id]);
+  }, [currentUser?.id, currentUser?.email, currentUser?.role]);
 
   // 2. Fetch Tasks, History, and Users scoped to the active venue
   useEffect(() => {
@@ -571,12 +573,11 @@ export default function App() {
     });
 
     const generation = requestContext.current.generation;
-    const inCurrentVenue = (item: { venueId?: string }) => item.venueId === currentVenue?.id;
     const unsubMsg = realtimeSocket.onMessage((msg: ServerBroadcastMessage) => {
+      const { currentUser, venues, eligibleVenues, currentVenueId, currentVenue } = socketContext.current;
       if (requestContext.current.generation !== generation || !currentUser) return;
-      const grants = (currentUser as User & { myVenueIds?: string[] }).myVenueIds;
       const snapshotVenues: Venue[] = msg.type === 'INITIAL_STATE' && Array.isArray(msg.payload?.venues)
-        ? msg.payload.venues.filter((v: Venue) => !grants || grants.includes(v.id)) : eligibleVenues;
+        ? eligibleVenuesFor(currentUser, msg.payload.venues) : eligibleVenues;
       const filterStaffVenue = currentUser.role !== 'admin' && snapshotVenues.length >= 2;
       if (currentUser.role !== 'admin' && !currentVenue && msg.type !== 'INITIAL_STATE') return;
       // Stage 2 version contract: every broadcast carries the document
@@ -591,12 +592,10 @@ export default function App() {
 
       if (msg.type === 'INITIAL_STATE' && msg.payload) {
         if (currentUser.role !== 'admin') {
-          // A fresh snapshot also reconciles eligibility, even without a venues field.
-          setVenues(Array.isArray(msg.payload.venues) ? msg.payload.venues : [...venues]);
+          if (Array.isArray(msg.payload.venues)) setVenues(msg.payload.venues);
           const saved = typeof window !== 'undefined'
-            ? localStorage.getItem(`selected_venue_id:${currentUser.id}`) : currentVenueId;
-          const nextVenue = snapshotVenues.find((v) => v.id === saved)
-            || snapshotVenues.find((v) => v.id === currentUser.venueId) || snapshotVenues[0];
+            ? localStorage.getItem(venueStorageKey(currentUser)) : currentVenueId;
+          const nextVenue = resolveVenue(currentUser, snapshotVenues, saved);
           if (!nextVenue || nextVenue.id !== currentVenue?.id) {
             setTasks([]);
             setHistoryLogs([]);
@@ -606,9 +605,10 @@ export default function App() {
           }
         }
         if (Array.isArray(msg.payload.tasks))
-          setTasks(msg.payload.tasks.filter((t: Task) => canSeeTask(t, currentUser) && (!filterStaffVenue || inCurrentVenue(t))));
-        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(filterStaffVenue ? msg.payload.historyLogs.filter(inCurrentVenue) : msg.payload.historyLogs);
-        if (Array.isArray(msg.payload.events)) setEvents(msg.payload.events);
+          setTasks((filterStaffVenue ? filterToVenue<Task>(msg.payload.tasks, currentVenue?.id) : msg.payload.tasks)
+            .filter((t: Task) => canSeeTask(t, currentUser)));
+        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(filterStaffVenue ? filterToVenue(msg.payload.historyLogs, currentVenue?.id) : msg.payload.historyLogs);
+        if (Array.isArray(msg.payload.events)) setEvents(filterStaffVenue ? filterToVenue(msg.payload.events, currentVenue?.id) : msg.payload.events);
         if (Array.isArray(msg.payload.users)) setKnownUsers(msg.payload.users);
         if (msg.payload.activeWorkersCount !== undefined) {
           setActiveWorkersCount(msg.payload.activeWorkersCount);
@@ -634,13 +634,14 @@ export default function App() {
         setTasks((prev) => prev.filter((t) => t.id !== msg.payload.id));
       } else if (msg.type === 'DAILY_RESET' && msg.payload) {
         if (Array.isArray(msg.payload.tasks))
-          setTasks(msg.payload.tasks.filter((t: Task) => canSeeTask(t, currentUser) && (!filterStaffVenue || inCurrentVenue(t))));
-        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(filterStaffVenue ? msg.payload.historyLogs.filter(inCurrentVenue) : msg.payload.historyLogs);
+          setTasks((filterStaffVenue ? filterToVenue<Task>(msg.payload.tasks, currentVenue?.id) : msg.payload.tasks)
+            .filter((t: Task) => canSeeTask(t, currentUser)));
+        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(filterStaffVenue ? filterToVenue(msg.payload.historyLogs, currentVenue?.id) : msg.payload.historyLogs);
         showToast('Daily board has refreshed for the day! Previous records archived.');
       } else if (msg.type === 'HISTORY_PRUNED' && msg.payload) {
         // 8r: history older than 7 days was removed on the server; replace
         // the list with the server's committed, per-recipient copy.
-        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(filterStaffVenue ? msg.payload.historyLogs.filter(inCurrentVenue) : msg.payload.historyLogs);
+        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(filterStaffVenue ? filterToVenue(msg.payload.historyLogs, currentVenue?.id) : msg.payload.historyLogs);
       } else if (msg.type === 'AGENCY_UPDATED' && msg.payload?.agency?.id) {
         // Item 6: the agency zone decides "today" for venues without their own
         // zone — apply the confirmed change for the signed-in user's own
@@ -716,7 +717,7 @@ export default function App() {
       unsubStatus();
       unsubMsg();
     };
-  }, [currentUser, currentVenue?.id, venues, eligibleVenues]);
+  }, [currentUser?.id, currentUser?.email, currentUser?.name, currentUser?.role, currentVenue?.id]);
 
   // Update Task Status (Optimistic + REST + WebSocket broadcast)
   const handleUpdateStatus = async (taskId: string, status: TaskStatus, isCompleted: boolean): Promise<boolean> => {
@@ -942,7 +943,7 @@ export default function App() {
     }
     setCurrentVenueId(venueId);
     if (typeof window !== 'undefined') {
-      localStorage.setItem(currentUser.role === 'admin' ? 'selected_venue_id' : `selected_venue_id:${currentUser.id}`, venueId);
+      localStorage.setItem(venueStorageKey(currentUser), venueId);
     }
     showToast(`Switched to platform: ${target.name}`);
   };
@@ -1504,6 +1505,7 @@ export default function App() {
 
   // Sign Out Handler
   const handleLogout = () => {
+    userRequestContext.current.generation += 1;
     requestContext.current.generation += 1;
     setEvents([]);
     setKnownUsers([]);
@@ -1526,6 +1528,7 @@ export default function App() {
   };
 
   const handleLoginSuccess = (user: User) => {
+    userRequestContext.current.generation += 1;
     requestContext.current.generation += 1;
     setVenues([]);
     setTasks([]);
