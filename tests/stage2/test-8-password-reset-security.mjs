@@ -9,6 +9,9 @@
  *  5. Correct code still works after 4 wrong attempts.
  *  6. Reset token is single-use (second use → 400).
  *  7. Expired code → 400.
+ *  8. A VERIFIED reset token that expires before it is used → 400, nothing
+ *     written, the old password still works (reset-password re-checks
+ *     expiresAt before hashing and inside the transaction).
  *
  * Uses dedicated test users to avoid rate-limit interference between scenarios.
  * Requires STAGE2_TEST_MODE=true on the server (test-only endpoints).
@@ -29,6 +32,7 @@ export default {
       forgiving: `pwreset-forgiving-${ts}@test.local`,
       singleuse: `pwreset-singleuse-${ts}@test.local`,
       expired: `pwreset-expired-${ts}@test.local`,
+      lateToken: `pwreset-latetoken-${ts}@test.local`,
     };
 
     // Create test users.
@@ -218,6 +222,40 @@ export default {
       }
     }
 
-    return 'all 7 password-reset security scenarios verified';
+    // --- 8. A verified token that expires before submission → 400, nothing written ---
+    {
+      const email = emails.lateToken;
+      const r = await requestCode(email, 'lateToken');
+      if (r.status !== 200) throw new Error(`forgot-password failed: ${r.status}`);
+      const code = await getCode(email);
+      const v = await verifyCode(email, 'lateToken', code);
+      if (v.status !== 200 || !v.json?.resetToken) throw new Error(`verify failed: ${v.status} ${JSON.stringify(v.json)}`);
+      const token = v.json.resetToken;
+      // The token was issued; now the request passes its expiry.
+      const expRes = await fetch(`${baseUrl}/api/__test__/expire-reset`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }),
+      });
+      if (expRes.status !== 200) throw new Error(`expire-reset failed: ${expRes.status}`);
+      const userBefore = ((await ctx.getDoc()).users || []).find((u) => u.email === email);
+      const v0 = await ctx.getVersion();
+      const res = await fetch(`${baseUrl}/api/auth/reset-password`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, resetToken: token, newPassword: 'late-password-789' }),
+      });
+      let json = null; try { json = await res.json(); } catch {}
+      if (res.status !== 400 || !/expired/i.test(json?.error || '')) {
+        throw new Error(`expired verified token should be 400, got ${res.status}: ${JSON.stringify(json)}`);
+      }
+      if ((await ctx.getVersion()) !== v0) throw new Error('expired verified token: something was written');
+      const userAfter = ((await ctx.getDoc()).users || []).find((u) => u.email === email);
+      if (!userBefore || userAfter?.password !== userBefore.password) throw new Error('expired verified token changed the password');
+      const login = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '10.99.1.8' },
+        body: JSON.stringify({ email, password: 'initial-password-123' }),
+      });
+      if (login.status !== 200) throw new Error(`old password should still work, got ${login.status}`);
+    }
+
+    return 'all 8 password-reset security scenarios verified';
   },
 };

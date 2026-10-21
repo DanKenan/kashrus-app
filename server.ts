@@ -12564,6 +12564,12 @@ app.post('/api/auth/verify-reset-code', async (req, res) => {
 });
 
 // Forgot password: Step 3 — set new password with reset token
+/** A reset request past its expiresAt (or with none parseable) is expired. */
+function resetRequestExpired(request: { expiresAt?: string }, nowMs: number): boolean {
+  const exp = new Date(String(request?.expiresAt ?? '')).getTime();
+  return !Number.isFinite(exp) || exp < nowMs;
+}
+
 app.post('/api/auth/reset-password', async (req, res) => {
   const { email, resetToken, newPassword } = req.body || {};
   const normalizedEmail = String(email || '').trim().toLowerCase();
@@ -12575,7 +12581,9 @@ app.post('/api/auth/reset-password', async (req, res) => {
   const request = passwordResets.find(
     (r) => r.email === normalizedEmail && r.verified && r.resetToken === resetToken
   );
-  if (!request) {
+  // A verified request still expires: the token is valid only until the
+  // request's expiresAt (checked again inside the transaction below).
+  if (!request || resetRequestExpired(request, Date.now())) {
     return res.status(400).json({ error: 'Invalid or expired reset token.' });
   }
 
@@ -12597,7 +12605,9 @@ app.post('/api/auth/reset-password', async (req, res) => {
       const freshRequest = freshResets.find(
         (r) => r.email === normalizedEmail && r.verified && r.resetToken === resetToken
       );
-      if (!freshRequest) return { conflict: 'Invalid or expired reset token.' };
+      if (!freshRequest || resetRequestExpired(freshRequest, Date.now())) {
+        return { conflict: 'Invalid or expired reset token.', conflictStatus: 400 };
+      }
       const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
       // Consume the reset token atomically with the password change.
       const newResets = freshResets.filter((r) => r.email !== normalizedEmail);
