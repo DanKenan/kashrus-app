@@ -75,7 +75,6 @@ interface HeaderProps {
   onToggleDarkMode: () => void;
   completionRate: number;
   isDemoCleared?: boolean;
-  onCleanSlate?: () => void;
   onRestoreDemo?: () => void;
 }
 
@@ -111,7 +110,6 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleDarkMode,
   completionRate,
   isDemoCleared = false,
-  onCleanSlate,
   onRestoreDemo,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
