@@ -3373,7 +3373,7 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
  */
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
-import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, type IdentityOutcomeFields } from './src/server/identity.js';
+import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, applyOwnerTransfer, m4Successor, type IdentityOutcomeFields } from './src/server/identity.js';
 import { venueScope as venueScopeOf, resolveTargetVenue, sharedVenues } from './src/server/venue-scope.js';
 
 /** 10b: the one text for a commit the identity checker refuses (names no agency, no person). */
@@ -3407,7 +3407,16 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, outcome: any, la
   const tokenEpochBumpIds: string[] | undefined = outcome?.tokenEpochBumpIds;
   const venueAccessSetById: Record<string, string[]> | undefined = outcome?.venueAccessSetById;
   const extra = identityOptionsFromOutcome(outcome);
-  const users = enforceIdentityFields(beforeUsers, outDoc.users, agencies, {
+  // 10d (B1): an owner transfer is validated and applied BEFORE the field
+  // enforcement, on the fresh stored rows; an invalid transfer, or an owner
+  // of a multi-row person removed without one, aborts the whole commit.
+  const transfer = applyOwnerTransfer(beforeUsers, outDoc.users, agencies, outcome?.ownerTransfer);
+  if (!transfer.ok) {
+    log.warn(`[identity] commit ${label} REFUSED: owner transfer ${(transfer as { reason?: string }).reason}`);
+    throw new OperationConflictError(IDENTITY_CONFLICT_TEXT, 409, 'IDENTITY_CONFLICT');
+  }
+  const users = enforceIdentityFields(beforeUsers, transfer.users, agencies, {
+    ownerTransferIds: transfer.transferIds,
     migrateRowIds: migrateRowIds && migrateRowIds.length ? new Set(migrateRowIds) : undefined,
     bumpTokenEpochIds: tokenEpochBumpIds && tokenEpochBumpIds.length ? new Set(tokenEpochBumpIds) : undefined,
     venueAccessSetById: venueAccessSetById && Object.keys(venueAccessSetById).length ? new Map(Object.entries(venueAccessSetById)) : undefined,
@@ -3417,7 +3426,19 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, outcome: any, la
     onOriginChange: (rowId, from, to) =>
       log.info(`[identity] credentialOrigin user ${rowId}: ${from ?? 'none'} -> ${to ?? 'none'} (cause ${label})`),
   });
-  const check = checkMembershipInvariants(beforeUsers, users, agencies);
+  // 10d (B3): a group may grow only by rows whose newMembership join the
+  // enforcement ACCEPTED (new row, same email as an existing row of that
+  // person) — derived from the outcome, never from request row ids.
+  const beforeIdSet = new Set<string>(beforeUsers.filter((u: any) => u && typeof u.id === 'string').map((u: any) => u.id));
+  const acceptedJoins = new Set<string>();
+  if (extra.newMembership) {
+    for (const [rowId, pid] of extra.newMembership) {
+      if (beforeIdSet.has(rowId)) continue;
+      const row = users.find((u: any) => u && u.id === rowId);
+      if (row && row.personId === pid && pid !== rowId) acceptedJoins.add(rowId);
+    }
+  }
+  const check = checkMembershipInvariants(beforeUsers, users, agencies, acceptedJoins.size ? { allowGrowthRowIds: acceptedJoins } : {});
   for (const issue of check.preexisting) {
     const sig = `${issue.code}:${issue.rowIds.join(',')}`;
     if (identityPreexistingLogged.has(sig)) continue;
@@ -8145,6 +8166,41 @@ if (isTestMode()) {
     identityMigrationMaxBatchesOverride = Number.isInteger(n) && n > 0 ? n : null;
     res.json({ ok: true, maxBatches: identityMigrationMaxBatchesOverride });
   });
+  // TEST ONLY (item 10d, "Agreed — 10d design v2" B3): build a second
+  // membership of an existing person THROUGH the normal checked commit path.
+  // The new row gets a server-generated id and the owner row's email; the
+  // allowance to grow the group comes only from the newMembership join that
+  // enforceIdentityFields accepts (never from a request row id). This is the
+  // ONLY producer of newMembership before the 10i accept handler.
+  app.post('/api/__test__/identity-build-person', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { ownerUserId, agencyId, role, venueId, name } = req.body || {};
+    if (typeof ownerUserId !== 'string' || typeof agencyId !== 'string' || !ownerUserId || !agencyId) {
+      return res.status(400).json({ error: 'ownerUserId and agencyId required' });
+    }
+    const newId = `usr_mb_${crypto.randomUUID()}`;
+    try {
+      const committed: any = await commitState(
+        (freshDoc) => {
+          const fu: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+          const owner = fu.find((u) => u && u.id === ownerUserId);
+          if (!owner || typeof owner.personId !== 'string' || !owner.personId) return { doc: freshDoc, result: { built: false } };
+          const row: any = {
+            id: newId, agencyId, email: owner.email, name: typeof name === 'string' && name ? name : `${owner.name} (2)`,
+            role: typeof role === 'string' && role ? role : 'mashgiach', avatarColor: '#64748b',
+            ...(typeof venueId === 'string' && venueId ? { venueId } : {}),
+          };
+          return { doc: { ...freshDoc, users: [...fu, row] }, result: { built: true, id: newId }, newMembership: { [newId]: owner.personId } };
+        },
+        { label: 'test-identity-build-person' }
+      );
+      if (!committed?.result?.built) return res.status(404).json({ error: 'owner row with personId not found' });
+      res.json({ ok: true, id: newId });
+    } catch (err: any) {
+      const status = err instanceof OperationConflictError ? err.status : 500;
+      res.status(status).json({ error: err?.message, code: err?.code });
+    }
+  });
   // Write or delete one people/emails doc directly (simulates history,
   // corruption and races in the emulator). data null = delete.
   app.post('/api/__test__/identity-doc', async (req, res) => {
@@ -11298,13 +11354,33 @@ app.delete('/api/users/:id', async (req, res) => {
       const keptSubs = freshSubs.filter(
         (s) => !(s && (s.userId === id || (legacyIsTargets && isLegacyPushSub(s) && typeof s.userEmail === 'string' && s.userEmail.trim().toLowerCase() === targetEmail)))
       );
+      // Item 10d: a row of a MULTI-row person removes only that membership.
+      // If it was the credential owner, M4 picks the successor and commitState
+      // moves the credential (validated, copied from this fresh stored row —
+      // applyOwnerTransfer). Pending reset requests for the shared email are
+      // cleared in the same commit. A single-row person: exactly as before.
+      const pid = typeof freshTarget.personId === 'string' && freshTarget.personId ? freshTarget.personId : '';
+      const personRows = pid ? freshUsers.filter((u) => u && u.personId === pid) : [freshTarget];
+      let ownerTransfer: { fromId: string; toId: string } | undefined;
+      let resetsOut: any[] | undefined;
+      if (personRows.length > 1) {
+        if (freshTarget.credentialOwner === true) {
+          const successor = m4Successor(personRows.filter((u) => u.id !== id));
+          if (successor) ownerTransfer = { fromId: id, toId: successor.id };
+        }
+        const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+        const keptResets = freshResets.filter((r) => !(r && typeof r.email === 'string' && r.email.trim().toLowerCase() === targetEmail));
+        if (keptResets.length !== freshResets.length) resetsOut = keptResets;
+      }
       return {
         doc: {
           ...freshDoc,
           users: freshUsers.filter((u) => u.id !== id),
           ...(keptSubs.length !== freshSubs.length ? { pushSubscriptions: keptSubs } : {}),
+          ...(resetsOut ? { passwordResets: resetsOut } : {}),
         },
         result: { success: true, deletedId: id },
+        ...(ownerTransfer ? { ownerTransfer } : {}),
       };
     },
     { label: 'delete-user', requireVersion: true }

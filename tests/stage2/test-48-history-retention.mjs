@@ -66,8 +66,13 @@ export default {
       assert(r.status === 200, `mint-token ${r.status}`);
       return r.json.token;
     };
-    // Pin the clock to "now" so the background interval stays out of the way.
-    const nowMs = ts;
+    // Pin the clock so the background interval stays out of the way. Not "now":
+    // a fresh venue's marker is the legacy NY workday, so from Jerusalem
+    // midnight until NY midnight (21:00-04:00 UTC in summer) B1 would already be
+    // due for a rollover, and the tick's reset would prune it before the sweep
+    // (CI #92 at 21:00Z: "sweep removed 6"). Noon UTC of the NY workday is the
+    // same calendar date in New York and Jerusalem, so only the sweep runs.
+    const nowMs = Date.parse(`${dayIn(NY, ts)}T12:00:00.000Z`);
     let r = await ctx.api('POST', '/api/__test__/clock', { iso: new Date(nowMs).toISOString() });
     assert(r.status === 200, `clock ${r.status}`);
     let conns = [];

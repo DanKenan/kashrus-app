@@ -1,3 +1,4 @@
+import { identityProjection, newProjectionProblems, emailKey } from './identity.ts';
 /**
  * Stage 3 Part 2, PR C — Dual-write helper.
  *
@@ -68,81 +69,82 @@ export async function dualWriteChangedEntities(
   // yields exactly one write per email key.
   diffArray('users', before.users, after.users);
 
-  const crypto = await import('crypto');
-  const normalizeEmail = (email: string) => email.trim().toLowerCase();
-  const emailKey = (email: string) =>
-    crypto.createHash('sha256').update(normalizeEmail(email)).digest('hex');
-
-  // Build complete email→userId maps
-  const beforeEmailMap = new Map<string, string>(); // normalized email -> userId
-  for (const u of (before.users || [])) {
-    if (u?.email) beforeEmailMap.set(normalizeEmail(u.email), u.id);
-  }
-  const afterEmailMap = new Map<string, string>();
-  for (const u of (after.users || [])) {
-    if (!u?.email) continue;
-    const norm = normalizeEmail(u.email);
-    const existing = afterEmailMap.get(norm);
-    if (existing && existing !== u.id) {
-      throw new Error(
-        `Duplicate email in transaction: ${u.email} used by both ${existing} and ${u.id}`
-      );
+  // Item 10d ("Agreed — 10d design v2"): usersByEmail, people and emails are
+  // ALL derived from one pure function over whole person groups
+  // (identityProjection, src/server/identity.ts), the same function the
+  // consistency check and migration verify use. usersByEmail points at the
+  // person's credential OWNER row (a legacy row without personId: itself);
+  // people/{P} comes from the owner row; emails/{key} -> P. A person group
+  // that is invalid, or an email shared by two identities, is a problem:
+  // newly introduced (or changed) -> the whole commit aborts; an untouched
+  // stored problem -> tolerated, never written.
+  const beforeProj = identityProjection(before.users || [], before.agencies || []);
+  const afterProj = identityProjection(after.users || [], after.agencies || []);
+  const { fresh: freshProblems, tolerated } = newProjectionProblems(beforeProj, before.users || [], afterProj, after.users || []);
+  if (freshProblems.length) {
+    const p = freshProblems[0];
+    if (p.code === 'email-shared') {
+      throw new Error(`Duplicate email in transaction: rows ${p.rowIds.join(', ')} (identity conflict)`);
     }
-    afterEmailMap.set(norm, u.id);
+    throw new Error(`Identity conflict: person ${p.personId} has no valid credential owner (${(p.issues || []).join(',')})`);
+  }
+  const toleratedEmails = new Set<string>();
+  const toleratedPersons = new Set<string>();
+  // [10D-RV1] B1: an email-shared problem names rows, not a person; every
+  // person owning one of its rows (before or after) is part of that untouched
+  // problem, so its people/emails projections are not written either.
+  const personOfRow = new Map<string, string>();
+  for (const u of [...(before.users || []), ...(after.users || [])]) {
+    if (u && typeof u.id === 'string' && typeof u.personId === 'string' && u.personId) personOfRow.set(u.id, u.personId);
+  }
+  for (const p of tolerated) {
+    if (p.email) toleratedEmails.add(p.email);
+    if (p.personId) toleratedPersons.add(p.personId);
+    for (const id of p.rowIds) {
+      const pid = personOfRow.get(id);
+      if (pid) toleratedPersons.add(pid);
+    }
   }
 
-  // Compute net lookup changes: at most one write per email key
+  // usersByEmail: net lookup changes, at most one write per email key.
   interface LookupChange { key: string; userId: string | null; email: string | null }
   const lookupChanges: LookupChange[] = [];
-  const allEmails = new Set([...beforeEmailMap.keys(), ...afterEmailMap.keys()]);
-  for (const email of allEmails) {
-    const beforeUser = beforeEmailMap.get(email) || null;
-    const afterUser = afterEmailMap.get(email) || null;
-    if (beforeUser === afterUser) continue; // No change
+  for (const email of new Set([...beforeProj.lookup.keys(), ...afterProj.lookup.keys()])) {
+    if (toleratedEmails.has(email)) continue;
+    const beforeUser = beforeProj.lookup.get(email) || null;
+    const afterUser = afterProj.lookup.get(email) || null;
+    if (beforeUser === afterUser) continue;
     const key = emailKey(email);
-    if (afterUser) {
-      // Create or reassign (single set covers both)
-      lookupChanges.push({ key, userId: afterUser, email });
-    } else {
-      // Email no longer used — delete the lookup
-      lookupChanges.push({ key, userId: null, email: null });
-    }
+    if (afterUser) lookupChanges.push({ key, userId: afterUser, email });
+    else lookupChanges.push({ key, userId: null, email: null });
   }
 
-
-  // ---- Item 8b: identity projections (people/{personId}, emails/{key}) ----
-  // Derived ONLY from rows that carry personId (commitState has already run
-  // enforceIdentityFields on `after`). Computed from complete before/after
-  // maps so there is exactly one write per people/emails doc. See
-  // src/server/identity.ts for the contract (verified is always false; a
-  // retired or reassigned mapping never resolves to a previous identity).
+  // ---- Item 8b/10d: identity projections (people/{personId}, emails/{key}) ----
+  // verified is always false; a retired or reassigned mapping never resolves
+  // to a previous identity (see src/server/identity.ts).
   const nowIso = new Date().toISOString();
-  const beforePersons = new Map<string, any>(); // personId -> row
-  for (const u of (before.users || [])) {
-    if (u && typeof u.personId === 'string' && u.personId) beforePersons.set(u.personId, u);
-  }
-  const afterPersons = new Map<string, any>();
-  for (const u of (after.users || [])) {
-    if (u && typeof u.personId === 'string' && u.personId) afterPersons.set(u.personId, u);
-  }
-  // emails: key -> personId, before and after (migrated rows only)
-  const beforeEmailPerson = new Map<string, string>();
-  for (const [pid, u] of beforePersons) if (u.email) beforeEmailPerson.set(emailKey(u.email), pid);
-  const afterEmailPerson = new Map<string, string>();
-  for (const [pid, u] of afterPersons) if (u.email) afterEmailPerson.set(emailKey(u.email), pid);
-
+  const beforeHadRows = beforeProj.personIdsWithRows;
+  const afterHasRows = afterProj.personIdsWithRows;
   const peopleIds: string[] = [];
-  for (const pid of new Set([...beforePersons.keys(), ...afterPersons.keys()])) {
-    const b = beforePersons.get(pid);
-    const a = afterPersons.get(pid);
-    if (a && b && a.name === b.name && a.email === b.email) continue; // projection unchanged
+  const peopleCandidates = new Set<string>([...beforeProj.persons.keys(), ...afterProj.persons.keys()]);
+  for (const p of beforeProj.problems) if (p.personId) peopleCandidates.add(p.personId);
+  for (const pid of peopleCandidates) {
+    if (toleratedPersons.has(pid)) continue;
+    const b = beforeProj.persons.get(pid);
+    const a = afterProj.persons.get(pid);
+    if (!a && afterHasRows.has(pid)) continue; // cannot happen (fresh problems abort); defensive
+    if (a && b && a.name === b.name && a.primaryEmail === b.primaryEmail) continue; // projection unchanged
     peopleIds.push(pid);
   }
   const emailKeys: string[] = [];
-  for (const key of new Set([...beforeEmailPerson.keys(), ...afterEmailPerson.keys()])) {
-    if (beforeEmailPerson.get(key) === afterEmailPerson.get(key)) continue;
+  const toleratedKeys = new Set<string>([...toleratedEmails].map((e) => emailKey(e)));
+  for (const key of new Set([...beforeProj.emailPerson.keys(), ...afterProj.emailPerson.keys()])) {
+    if (toleratedKeys.has(key)) continue;
+    if (beforeProj.emailPerson.get(key) === afterProj.emailPerson.get(key)) continue;
     emailKeys.push(key);
   }
+  const beforeEmailPerson = beforeProj.emailPerson;
+  const afterEmailPerson = afterProj.emailPerson;
 
   const readResults = new Map<string, number>(); // "collection/id" -> current _v (0 if not exists)
   // Phase 2: ALL READS — fetch current per-entity docs to get their _v values.
@@ -175,10 +177,10 @@ export async function dualWriteChangedEntities(
   // aborts the whole commit, monolith included).
   const identityWrites: Array<{ collection: string; id: string; data: any }> = [];
   for (const pid of peopleIds) {
-    const a = afterPersons.get(pid);
+    const a = afterProj.persons.get(pid);
     const existing = peopleSnaps.get(pid);
     const v = (existing?._v || 0) + 1;
-    if (a && !beforePersons.has(pid) && existing) {
+    if (a && !beforeHadRows.has(pid) && existing) {
       // 8c final guard: a person who did not exist before this commit (a
       // born-migrated row, or a legacy row the migrator is migrating) may
       // only CREATE people/{id}. An existing doc of any status belongs to
@@ -192,15 +194,15 @@ export async function dualWriteChangedEntities(
         id: pid,
         data: {
           id: pid,
-          name: typeof a.name === 'string' ? a.name : '',
-          primaryEmail: typeof a.email === 'string' ? normalizeEmail(a.email) : '',
+          name: a.name,
+          primaryEmail: a.primaryEmail,
           status: 'active',
           createdAt: existing?.createdAt || nowIso,
           _v: v,
         },
       });
-    } else if (existing && existing.status !== 'retired') {
-      // Row removed: retire, keep the record (no hard delete of identity data).
+    } else if (existing && existing.status !== 'retired' && !afterHasRows.has(pid)) {
+      // Last row removed: retire, keep the record (no hard delete of identity data).
       identityWrites.push({
         collection: 'people',
         id: pid,
@@ -220,7 +222,7 @@ export async function dualWriteChangedEntities(
         // Active for another person: only allowed when that person's row is
         // removed in this same commit (retired and reassigned in one step).
         // (The owner had a row before this commit and has none after it.)
-        if (afterPersons.has(existing.personId) || !beforePersons.has(existing.personId)) {
+        if (afterHasRows.has(existing.personId) || !beforeHadRows.has(existing.personId)) {
           throw new Error('Identity conflict: email mapping is active for another person');
         }
       }
