@@ -685,11 +685,39 @@ function requireAuthUser(req: any, res: any): UserProfile | null {
  * in PR 9 are a one-line change), or [] when no venue is assigned.
  * Unknown/missing user or role → [] (fail closed).
  */
+/**
+ * 9a: does this person (non-admin) work at venueId? Their scope decides —
+ * home venue plus any server-granted venue of their own agency. A payload
+ * row (stripped of server-only fields) is resolved against the cached full
+ * row by id, so the answer never depends on what a client or broadcast saw.
+ */
+function personAtVenue(u: any, venueId: string | undefined | null): boolean {
+  if (!u || typeof venueId !== 'string' || !venueId) return false;
+  // The row's OWN role and home decide (a kiosk acting copy keeps its tablet
+  // venue); only the server-only list is borrowed from the cached row, and
+  // only when that row is the same person-state (same role and home).
+  let full: any = u;
+  if (u.personId === undefined && typeof u.id === 'string') {
+    const stored: any = users.find((x: any) => x && x.id === u.id);
+    if (stored && stored.personId && stored.role === u.role && stored.venueId === u.venueId) {
+      full = { ...u, personId: stored.personId, venueAccess: stored.venueAccess };
+    }
+  }
+  const s = venueScopeFor(full as any);
+  return s !== 'agency' && s.includes(venueId);
+}
+
+/** 9a: does this person's scope meet a non-admin viewer's scope list? */
+function personInScope(u: any, scope: string[]): boolean {
+  if (!u) return false;
+  return scope.some((v) => personAtVenue(u, v));
+}
+
 function venueScopeFor(user: UserProfile | null | undefined): 'agency' | string[] {
-  if (!user || typeof (user as any).role !== 'string') return [];
-  if ((user as any).role === 'admin') return 'agency';
-  const venueId = (user as any).venueId;
-  return typeof venueId === 'string' && venueId.length > 0 ? [venueId] : [];
+  // 9a: a migrated person's server-only venueAccess, intersected with the
+  // venues CURRENTLY owned by their agency (fail closed; never all venues).
+  // Unmigrated rows and empty/malformed lists: the valid home venue only.
+  return venueScopeOf(user as any, venues as any);
 }
 
 /** A7/B6: field-write gate for ingredients/factory-reports — admin, or a
@@ -1867,6 +1895,18 @@ interface EventTaskTemplate {
   sortOrder: number;
 }
 
+/**
+ * 9a: the signed-in person's OWN payload: getSafeUser() + myVenueIds (their
+ * current venue scope; admins get none — they are agency-wide). Used only
+ * where the response goes to that same person (login, reset); never on a
+ * roster or a broadcast user record.
+ */
+function getSelfUser(user: UserProfile) {
+  const full = users.find((u) => u.id === user.id) || user;
+  const scope = venueScopeFor(full);
+  return { ...getSafeUser(user), ...(scope === 'agency' ? {} : { myVenueIds: scope }) };
+}
+
 function getSafeUser(user: UserProfile) {
   const { password, kioskPin, kioskPinHash, kioskPinSetAt, phoneNumber, ...withIdentity } = user;
   // Item 8b: server-only identity fields never leave the server.
@@ -1897,7 +1937,7 @@ function recipientManages(recipient: any, target: any): boolean {
   if (recipient.role === 'coordinator') {
     if (target.role !== 'mashgiach' && target.role !== 'worker') return false;
     const scope = venueScopeFor(recipient);
-    return Array.isArray(scope) && typeof target.venueId === 'string' && scope.includes(target.venueId);
+    return Array.isArray(scope) && personInScope(target, scope); // 9a: a shared venue, not matching home venues
   }
   return false;
 }
@@ -1946,7 +1986,15 @@ const PHONE_NUMBER_ERROR = "That phone number doesn't look right. Use digits, wi
  * session (email + password).
  */
 function kioskActingUser<T extends UserProfile>(user: T, tabletVenueId: string): T {
-  if (!user || (user as any).role !== 'admin') return user;
+  if (!user) return user;
+  if ((user as any).role !== 'admin') {
+    // 9a: a kiosk session is the TABLET's venue only. A multi-venue person
+    // (or one whose home is elsewhere) acts at this tablet with exactly
+    // [tablet venue] as their scope — never their other venues' data.
+    const extra = Array.isArray((user as any).venueAccess) && (user as any).venueAccess.some((v: any) => v !== tabletVenueId);
+    if ((user as any).venueId === tabletVenueId && !extra) return user;
+    return { ...user, venueId: tabletVenueId, ...((user as any).personId ? { venueAccess: [tabletVenueId] } : {}) } as T;
+  }
   return {
     ...user,
     role: 'mashgiach',
@@ -1970,7 +2018,7 @@ function kioskUserFitsVenue(user: any, agencyId: string | undefined, venueId: st
     // admin has no venueId of their own; never fall back to agency scope).
     return venues.some((v: any) => v && v.id === venueId && (v.agencyId || 'agency-hkc') === agencyId);
   }
-  return user.venueId === venueId;
+  return personAtVenue(user, venueId);
 }
 
 /**
@@ -2046,7 +2094,7 @@ function resolveAssignableUser(callerUser: any, email: unknown, usersList: any[]
     if ((u.agencyId || 'agency-hkc') !== agencyId) continue;
     if (!EVENT_ASSIGNABLE_ROLES.has(raw.role) && !EVENT_ASSIGNABLE_ROLES.has(u.role)) continue;
     if (raw.role === 'owner' || u.role === 'owner') continue;
-    if (scope !== 'agency' && !(u.role === 'admin' || (typeof u.venueId === 'string' && (scope as string[]).includes(u.venueId)))) continue;
+    if (scope !== 'agency' && !(u.role === 'admin' || personInScope(raw, scope as string[]))) continue;
     return u;
   }
   return null;
@@ -2075,7 +2123,7 @@ function getSafeUsersForAgency(
     .filter((u) => norm(u.agencyId) === agencyId)
     .filter((u) => {
       if (isAdmin || scope === 'agency') return true;
-      return u.role === 'admin' || (typeof u.venueId === 'string' && scope.includes(u.venueId));
+      return u.role === 'admin' || personInScope(u, scope);
     })
     .map((u) => {
       const safe = managerViewOf(u, recipient);
@@ -3190,6 +3238,10 @@ type MutatorOutcome =
        * their v1 and v2 tokens). The ONLY way tokenEpoch changes; in 8d only a
        * test hook uses it. */
       tokenEpochBumpIds?: string[];
+      /** 9a: row id → the full validated venueAccess list for this commit
+       * (admin venue grant, venue deletion prune). The ONLY way venueAccess
+       * changes beyond the home venue; see src/server/identity.ts. */
+      venueAccessSetById?: Record<string, string[]>;
     }
   | { conflict: string; conflictStatus?: number; conflictCode?: string };
 
@@ -3305,6 +3357,7 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
 import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey } from './src/server/identity.js';
+import { venueScope as venueScopeOf, resolveTargetVenue, sharedVenues } from './src/server/venue-scope.js';
 
 /**
  * Item 8b — the ONE enforcement point for server-only identity fields
@@ -3315,7 +3368,7 @@ import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityE
  * migrated (personId = id); derived fields are recomputed. See
  * src/server/identity.ts.
  */
-function applyIdentityInvariant(identityBase: any, outDoc: any, migrateRowIds?: string[], tokenEpochBumpIds?: string[]): any {
+function applyIdentityInvariant(identityBase: any, outDoc: any, migrateRowIds?: string[], tokenEpochBumpIds?: string[], venueAccessSetById?: Record<string, string[]>): any {
   if (!outDoc || !Array.isArray(outDoc.users)) return outDoc;
   const beforeUsers = Array.isArray(identityBase?.users) ? identityBase.users : [];
   const agencies = Array.isArray(outDoc.agencies) ? outDoc.agencies : [];
@@ -3324,6 +3377,7 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, migrateRowIds?: 
     users: enforceIdentityFields(beforeUsers, outDoc.users, agencies, {
       migrateRowIds: migrateRowIds && migrateRowIds.length ? new Set(migrateRowIds) : undefined,
       bumpTokenEpochIds: tokenEpochBumpIds && tokenEpochBumpIds.length ? new Set(tokenEpochBumpIds) : undefined,
+      venueAccessSetById: venueAccessSetById && Object.keys(venueAccessSetById).length ? new Map(Object.entries(venueAccessSetById)) : undefined,
       onViolation: (rowId, field) =>
         log.warn(`[identity] reverted a mutator change to server-only field ${field} on user ${rowId}`),
     }),
@@ -3381,7 +3435,7 @@ async function commitState(
     if ('conflict' in outcome) {
       throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
     }
-    outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc, outcome.identityMigrateRowIds, outcome.tokenEpochBumpIds);
+    outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc, outcome.identityMigrateRowIds, outcome.tokenEpochBumpIds, outcome.venueAccessSetById);
     hydrateState(outcome.doc);
     // No-op detection (fallback path): skip the file write when nothing
     // changed. (The transactional path additionally skips the _v bump.)
@@ -3493,7 +3547,7 @@ async function commitState(
         if ('conflict' in outcome) {
           throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
         }
-        outcome.doc = applyIdentityInvariant(identityBase, outcome.doc, outcome.identityMigrateRowIds, outcome.tokenEpochBumpIds);
+        outcome.doc = applyIdentityInvariant(identityBase, outcome.doc, outcome.identityMigrateRowIds, outcome.tokenEpochBumpIds, outcome.venueAccessSetById);
 
         // No-op detection: the mutator changed nothing meaningful — skip the
         // Firestore write entirely, do NOT increment _v, return success with
@@ -4211,7 +4265,7 @@ function taskPushRecipients(task: any, usersList: any[], venuesList: any[], opts
     if ((u.agencyId || 'agency-hkc') !== taskAgency) continue;
     if (!canSeeTaskServer(task, u as any)) continue;
     const named = explicit.has(raw.email.trim().toLowerCase());
-    const inAll = toAll && (u.role === 'admin' || u.venueId === task.venueId);
+    const inAll = toAll && (u.role === 'admin' || personAtVenue(raw, task.venueId));
     if (!named && !inAll) continue;
     seen.add(raw.id);
     out.push(u);
@@ -4432,7 +4486,7 @@ function initialStateForSocket(meta: SocketMeta | undefined): any | null {
     historyLogs: (baseState.historyLogs || []).filter((h: any) => h.venueId === kioskVenueId),
     venues: (baseState.venues || []).filter((v: any) => v.id === kioskVenueId),
     users: (baseState.users || [])
-      .filter((u: any) => u.venueId === kioskVenueId)
+      .filter((u: any) => u && (u.venueId === kioskVenueId || personAtVenue(u, kioskVenueId)))
       .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role })),
     events: [],
     airtableConfigs: [],
@@ -4454,7 +4508,7 @@ function kioskFilterPayload(meta: SocketMeta, type: string, payload: any): any {
   const p = payload || {};
   const roster = (users: any[]) =>
     (users || [])
-      .filter((u: any) => u?.venueId === venueId)
+      .filter((u: any) => u && (u.venueId === venueId || personAtVenue(u, venueId)))
       .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
   switch (type) {
     case 'USERS_UPDATED':
@@ -6589,7 +6643,7 @@ app.post('/api/announcements', async (req, res) => {
   const targets = users.filter((u) =>
     (u.agencyId || 'agency-hkc') === agencyId &&
     (announcement.targetRoles.includes('all') || announcement.targetRoles.includes(u.role)) &&
-    (!announcement.venueId || u.role === 'admin' || u.venueId === announcement.venueId)
+    (!announcement.venueId || u.role === 'admin' || personAtVenue(u, announcement.venueId))
   );
   const icon = announcement.category === 'urgent' ? '🚨' : announcement.category === 'assignment' ? '📋' : '📢';
   for (const target of targets) {
@@ -8288,7 +8342,7 @@ app.get('/api/venues', (req, res) => {
     const completedTasks = venueTasks.filter((t) => t.isCompleted).length;
     const totalTasks = venueTasks.length;
     const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
-    const venueWorkers = users.filter((u) => u.venueId === v.id && (u.role === 'mashgiach' || u.role === 'worker' || u.role === 'coordinator'));
+    const venueWorkers = users.filter((u) => personAtVenue(u, v.id) && (u.role === 'mashgiach' || u.role === 'worker' || u.role === 'coordinator'));
 
     return {
       ...v,
@@ -8591,8 +8645,19 @@ app.delete('/api/venues/:id', async (req, res) => {
       // their sockets after the commit.
       const freshDevices: any[] = Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : [];
       const removedDeviceIds = freshDevices.filter((d) => d && d.venueId === id).map((d) => d.id);
+      // 9a: the deleted venue leaves every extra venue grant in the SAME
+      // commit (sanctioned path). Only rows of the venue's own agency carry
+      // it legitimately; a foreign row naming it is pruned too (it never
+      // granted anything — reads re-check the venue's agency).
+      const venueAccessSetById: Record<string, string[]> = {};
+      for (const u of Array.isArray(freshDoc.users) ? freshDoc.users : []) {
+        if (u && typeof u.id === 'string' && Array.isArray(u.venueAccess) && u.venueAccess.includes(id) && u.venueId !== id) {
+          venueAccessSetById[u.id] = u.venueAccess.filter((x: any) => x !== id);
+        }
+      }
       // Atomic cascade: venue + its tasks + its history all removed together.
       return {
+        venueAccessSetById,
         doc: {
           ...freshDoc,
           venues: freshVenues.filter((v) => v.id !== id),
@@ -8652,7 +8717,9 @@ app.get('/api/tasks', (req, res) => {
 
   // Strict tenant boundary: workers and owners only access their assigned venue
   if (!isCallerAdmin) {
-    targetVenueId = callerVenueId || agencyVenues[0]?.id || 'venue-crown-market';
+    // 9a: an explicitly requested venue inside the caller's scope (checked
+    // above) is honoured; no venue requested → the home venue, as before.
+    targetVenueId = (venueId ? String(venueId) : callerVenueId) || agencyVenues[0]?.id || 'venue-crown-market';
   } else {
     // If admin requested a venueId, ensure it belongs to their agency
     if (!agencyVenues.some((v) => v.id === targetVenueId) && agencyVenues.length > 0) {
@@ -9376,7 +9443,22 @@ app.post('/api/admin/clean-slate', async (req, res) => {
       // Item 8k ("8k plan v2"): one agency only, ownership decided on the
       // fresh doc; the legacy global isDemoCleared is never written.
       const plan = planCleanSlate(freshDoc, callerAgencyId, { id: caller.id, email: caller.email }, new Date().toISOString());
+      // 9a: venues this commit removes leave every surviving row's extra venue
+      // grants in the SAME commit (sanctioned path). Rows of other agencies
+      // never legitimately hold them; any that do are pruned of those ids only.
+      const beforeVenueIds = new Set((Array.isArray(freshDoc.venues) ? freshDoc.venues : []).map((v: any) => v && v.id));
+      const afterVenues: any[] = Array.isArray((plan.patch as any).venues) ? (plan.patch as any).venues : (Array.isArray(freshDoc.venues) ? freshDoc.venues : []);
+      const afterIds = new Set(afterVenues.map((v: any) => v && v.id));
+      const gone = new Set([...beforeVenueIds].filter((x) => x && !afterIds.has(x)));
+      const venueAccessSetById: Record<string, string[]> = {};
+      const survivors: any[] = Array.isArray((plan.patch as any).users) ? (plan.patch as any).users : (Array.isArray(freshDoc.users) ? freshDoc.users : []);
+      for (const u of survivors) {
+        if (u && typeof u.id === 'string' && Array.isArray(u.venueAccess) && u.venueAccess.some((x: any) => gone.has(x) && x !== u.venueId)) {
+          venueAccessSetById[u.id] = u.venueAccess.filter((x: any) => !gone.has(x) || x === u.venueId);
+        }
+      }
       return {
+        venueAccessSetById,
         doc: { ...freshDoc, ...plan.patch },
         result: { success: true, isDemoCleared: true, removed: plan.removed, keptUnattributed: plan.keptUnattributed },
       };
@@ -10348,6 +10430,7 @@ app.put('/api/events/:id', async (req, res) => {
           freshCaller.agencyId !== (caller as any).agencyId ||
           freshCaller.role !== (caller as any).role ||
           (freshCaller as any).venueId !== (caller as any).venueId ||
+          JSON.stringify((freshCaller as any).venueAccess ?? null) !== JSON.stringify((caller as any).venueAccess ?? null) ||
           JSON.stringify(freshCaller.permissions) !== JSON.stringify((caller as any).permissions)) {
         return { conflict: 'Your access changed while saving. Please refresh and try again.' };
       }
@@ -10548,7 +10631,7 @@ app.get('/api/users', (req, res) => {
   if ((req as any).kiosk === true) {
     const kioskVenueId = (req as any).kioskVenueId;
     const roster = users
-      .filter((u) => (u.agencyId || 'agency-hkc') === callerAgencyId(req) && u.venueId === kioskVenueId)
+      .filter((u) => (u.agencyId || 'agency-hkc') === callerAgencyId(req) && (u.venueId === kioskVenueId || personAtVenue(u, kioskVenueId)))
       .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
     return res.json({ users: roster });
   }
@@ -10566,7 +10649,9 @@ app.get('/api/users', (req, res) => {
   if (caller && caller.role !== 'admin') {
     const ownScope = venueScopeFor(caller);
     if (ownScope.length === 0) return res.json({ users: [] });
-    targetVenueId = ownScope[0];
+    // 9a: a requested venue inside the scope is honoured; anything else →
+    // the home venue (scope[0]), as before (a spoofed id is ignored).
+    targetVenueId = targetVenueId && ownScope.includes(targetVenueId) ? targetVenueId : ownScope[0];
   }
 
   // Scope to caller's agency
@@ -10574,7 +10659,7 @@ app.get('/api/users', (req, res) => {
 
   if (targetVenueId) {
     // Return users assigned to this venue OR agency admins
-    agencyUsers = agencyUsers.filter((u: any) => u.role === 'admin' || u.venueId === targetVenueId);
+    agencyUsers = agencyUsers.filter((u: any) => u.role === 'admin' || personAtVenue(u, targetVenueId));
   }
 
   res.json({ users: agencyUsers });
@@ -10723,9 +10808,11 @@ app.put('/api/users/:id', async (req, res) => {
     const bodyKeys = Object.keys(req.body || {}).filter((k) => !TRANSPORT_FIELDS.includes(k));
     const COORDINATOR_FIELDS = ['kioskPin', 'phoneNumber'];
     const onlyPin = bodyKeys.length >= 1 && bodyKeys.every((k) => COORDINATOR_FIELDS.includes(k));
+    // 9a: through an actual SHARED venue (both scopes, current agency), not
+    // matching home venues; re-checked on fresh state inside the mutator.
     const targetOk =
       (existingUser.role === 'mashgiach' || existingUser.role === 'worker') &&
-      (existingUser as any).venueId === callerVenueId;
+      sharedVenues(caller as any, existingUser as any, venues as any).length > 0;
     if (!onlyPin || !targetOk) {
       return res.status(403).json({ error: 'Coordinators can only set kiosk PINs for mashgichim and workers at their own venue.' });
     }
@@ -10774,10 +10861,13 @@ app.put('/api/users/:id', async (req, res) => {
         if (!freshCallerOk) {
           return { conflict: 'Coordinators can only set kiosk PINs for mashgichim and workers at their own venue.' };
         }
+        // 9a: a venue the FRESH caller and FRESH target actually share
+        // (both scopes, venues of the agency in the fresh doc).
+        const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
         const freshTargetOk =
           (freshUser.role === 'mashgiach' || freshUser.role === 'worker') &&
           (freshUser.agencyId || 'agency-hkc') === callerAgencyId &&
-          (freshUser as any).venueId === (freshCaller as any).venueId;
+          sharedVenues(freshCaller as any, freshUser as any, freshVenues).length > 0;
         if (!freshTargetOk) {
           return { conflict: 'Coordinators can only set kiosk PINs for mashgichim and workers at their own venue.' };
         }
@@ -10914,6 +11004,102 @@ app.put('/api/users/:id', async (req, res) => {
     }
   }
   res.json({ user: managerViewOf(updated, caller) });
+});
+
+/**
+ * 9a — admin grants a person venues inside the admin's own agency ("9a plan
+ * v2"). Body: { venueIds: string[], expectedVenueIds?: string[] }.
+ * The person's home venue is always kept; the list is the FULL extra set
+ * (send [] to remove all extra venues). Server-only: the list is written
+ * ONLY through commitState's sanctioned venueAccessSetById path, never from a
+ * body field, and the client never sees another person's list.
+ * Fresh, inside the transaction: the CALLER is still an admin of this agency;
+ * the TARGET still exists in this agency, is not an admin, is migrated, and
+ * (when expectedVenueIds is sent) still has exactly that scope; every venue
+ * is a venue of this agency in the fresh doc. Audited like a role change.
+ */
+app.put('/api/users/:id/venues', async (req, res) => {
+  const caller = requireAdmin(req, res);
+  if (!caller) return; // requireAdmin already responded
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  const { id } = req.params;
+  const body = stripServerOnlyUserFields(req.body || {});
+  const raw = (body as any).venueIds;
+  if (!Array.isArray(raw) || raw.length > 50 || !raw.every((x: any) => typeof x === 'string' && x.length > 0 && x.length <= 200)) {
+    return res.status(400).json({ error: 'venueIds must be a list of venue ids.', code: 'VENUE_IDS_INVALID' });
+  }
+  const expected = (body as any).expectedVenueIds;
+  if (expected !== undefined && (!Array.isArray(expected) || !expected.every((x: any) => typeof x === 'string'))) {
+    return res.status(400).json({ error: 'expectedVenueIds must be a list of venue ids.', code: 'VENUE_IDS_INVALID' });
+  }
+  const cached = users.find((u) => u.id === id);
+  if (!cached || (cached.agencyId || 'agency-hkc') !== callerAgencyId) {
+    return res.status(404).json({ error: 'Team member not found.' });
+  }
+  const requested: string[] = Array.from(new Set(raw as string[]));
+  const deny = (msg: string, status: number, code: string) => ({ conflict: msg, conflictStatus: status, conflictCode: code });
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const freshCaller = freshUsers.find((u) => u && u.id === caller.id);
+      if (!freshCaller || freshCaller.role !== 'admin' || (freshCaller.agencyId || 'agency-hkc') !== callerAgencyId) {
+        return deny('Only an admin of this agency can change venue access.', 403, 'NOT_ADMIN');
+      }
+      const target = freshUsers.find((u) => u && u.id === id);
+      if (!target || (target.agencyId || 'agency-hkc') !== callerAgencyId) {
+        return deny('Team member not found (they may have been deleted).', 404, 'NOT_FOUND');
+      }
+      if (target.role === 'admin') {
+        return deny('Admins already cover every venue of the agency.', 400, 'TARGET_IS_ADMIN');
+      }
+      if (!target.personId) {
+        return deny('This account has not been upgraded yet; try again shortly.', 409, 'NOT_MIGRATED');
+      }
+      const before = venueScopeOf(target, freshVenues) as string[];
+      if (expected !== undefined) {
+        const a = [...before].sort().join('\u0000');
+        const b = Array.from(new Set(expected as string[])).sort().join('\u0000');
+        if (a !== b) return deny("Conflict: this person's venues were changed by someone else. Please refresh and try again.", 409, 'VENUES_CHANGED');
+      }
+      const own = new Set(freshVenues.filter((v) => v && (v.agencyId || 'agency-hkc') === callerAgencyId).map((v) => v.id));
+      const bad = requested.filter((v) => !own.has(v));
+      if (bad.length) return deny('Every venue must be a venue of your agency.', 400, 'VENUE_NOT_IN_AGENCY');
+      const list = requested.filter((v) => v !== target.venueId);
+      return {
+        doc: { ...freshDoc, users: [...freshUsers] },
+        venueAccessSetById: { [id]: list },
+        result: { userId: id, before, home: target.venueId || null, list },
+      };
+    },
+    { label: 'set-user-venues', requireVersion: true }
+  );
+  if (!committed) return;
+  const r: any = (committed as any).result || {};
+  const fresh = users.find((u) => u.id === id);
+  const after = fresh ? (venueScopeFor(fresh) as string[]) : [];
+  log.info(`[audit] venue access changed: admin ${caller.id} set user ${id} venues [${(r.before || []).join(',')}] -> [${after.join(',')}] (agency ${callerAgencyId})`);
+  broadcast('USERS_UPDATED', { agencyId: callerAgencyId }, undefined, callerAgencyId, (meta, base) => ({
+    ...base,
+    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
+  }));
+  // The person's open sockets get a fresh scope-filtered INITIAL_STATE (venues
+  // gained or lost apply now), built per socket from its verified identity.
+  for (const client of wss.clients) {
+    if (client.readyState !== WebSocket.OPEN) continue;
+    const meta = authorizeSocket(client);
+    if (!meta || meta.userId !== id) continue;
+    const st = initialStateForSocket(meta);
+    if (!st) continue;
+    client.send(JSON.stringify({
+      type: 'INITIAL_STATE',
+      payload: { ...st, activeWorkersCount: activeSockets.size },
+      timestamp: new Date().toISOString(),
+      version: typeof stateVersion === 'number' ? stateVersion : undefined,
+    }));
+  }
+  res.json({ success: true, userId: id, venueIds: after });
 });
 
 app.delete('/api/users/:id', async (req, res) => {
@@ -11296,7 +11482,7 @@ app.post('/api/kiosk/devices/pair', async (req, res) => {
         if (!freshVenue || (freshVenue.agencyId || 'agency-hkc') !== freshAgencyId) {
           return { doc: freshDoc, result: { forbidden: true } };
         }
-        if (freshCaller.role === 'coordinator' && freshCaller.venueId !== venueId) {
+        if (freshCaller.role === 'coordinator' && !(venueScopeOf(freshCaller as any, freshVenues) as string[]).includes(venueId)) {
           return { doc: freshDoc, result: { forbidden: true } };
         }
         // The code must map to a pairing that is still pending and
@@ -11405,7 +11591,8 @@ app.delete('/api/kiosk/devices/:id', async (req, res) => {
         if (freshDevice.agencyId !== freshAgencyId) {
           return { doc: freshDoc, result: { forbidden: true } };
         }
-        if (freshCaller.role === 'coordinator' && freshCaller.venueId !== freshDevice.venueId) {
+        if (freshCaller.role === 'coordinator' &&
+            !(venueScopeOf(freshCaller as any, Array.isArray(freshDoc.venues) ? freshDoc.venues : []) as string[]).includes(freshDevice.venueId)) {
           return { doc: freshDoc, result: { forbidden: true } };
         }
         if (freshCaller.role !== 'admin' && freshCaller.role !== 'coordinator') {
@@ -11960,7 +12147,7 @@ app.post('/api/auth/login', async (req, res) => {
   const token = signSessionToken(users.find((u) => u.id === user.id) || user);
   res.json({
     success: true,
-    user: getSafeUser(user),
+    user: getSelfUser(user),
     token,
   });
 });
@@ -12033,7 +12220,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   // RULE T: admins of the agency + coordinators of the reset user's venue only.
   const admins = users.filter((u) =>
     (u.agencyId || 'agency-hkc') === agencyId &&
-    (u.role === 'admin' || (u.role === 'coordinator' && callerMaySeeVenue(u, (user as any).venueId || '')))
+    (u.role === 'admin' || (u.role === 'coordinator' && sharedVenues(u as any, user as any, venues as any).length > 0))
   );
   for (const admin of admins) {
     sendPushToUser(
@@ -12217,7 +12404,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
   if (signedOutOthers) revokeUserPhoneSockets(user.id);
 
   const token = signSessionToken(users.find((u) => u.id === user.id) || user);
-  res.json({ success: true, user: getSafeUser(users.find((u) => u.id === user.id)!), token });
+  res.json({ success: true, user: getSelfUser(users.find((u) => u.id === user.id)!), token });
 });
 
 // First-run admin setup — disabled in 8i. It was public and set a password on
