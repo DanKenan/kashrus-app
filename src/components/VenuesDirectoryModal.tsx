@@ -9,9 +9,98 @@ import {
   ArrowRight, 
   Search, 
   Trash2, 
+  Clock,
 } from 'lucide-react';
 import { Venue } from '../types';
 import { ConfirmModal } from './ConfirmModal';
+import { apiWrite } from '../lib/api';
+import {
+  COMMON_TIME_ZONES,
+  effectiveTimeZone,
+  isValidTimeZone,
+  timeZoneLabel,
+  venueTimeZone,
+  zoneCityLabel,
+} from '../lib/workday';
+
+/**
+ * Item 6 — a venue's time zone in the directory: read-only for everyone who
+ * can open it (with "agency default" when inherited); admins get a select.
+ * The new zone shows only after the server confirms (never optimistic); on
+ * failure the old value stays and the reason is shown.
+ */
+const VenueTimeZoneRow: React.FC<{
+  venue: Venue;
+  agencyTimeZone?: string;
+  isAdmin: boolean;
+  onVenueUpdated?: (venue: Venue) => void;
+}> = ({ venue, agencyTimeZone, isAdmin, onVenueUpdated }) => {
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const inherited = !isValidTimeZone(venue.timeZone);
+  const eff = venueTimeZone(venue, { agencyTimeZone });
+  const agencyTz = effectiveTimeZone(undefined, agencyTimeZone);
+  const known = COMMON_TIME_ZONES.some((z) => z.tz === venue.timeZone);
+
+  const save = async (value: string) => {
+    setSaving(true);
+    setNote(null);
+    setError(null);
+    const result = await apiWrite(`/api/venues/${encodeURIComponent(venue.id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timeZone: value }),
+    });
+    setSaving(false);
+    if (!result.ok || !result.data?.venue) {
+      setError(result.error || 'Could not save the time zone.');
+      return;
+    }
+    onVenueUpdated?.(result.data.venue as Venue);
+    const tz = result.data.effectiveTimeZone || eff;
+    const next = result.data.nextResetDate as string | undefined;
+    setNote(next ? `Saved. Next daily reset: ${next}, 12:00 AM (${zoneCityLabel(tz)}).` : 'Saved.');
+  };
+
+  return (
+    <div className="text-xs text-ink-soft" onClick={(e) => e.stopPropagation()} data-venue-timezone-row>
+      <div className="flex items-center gap-1.5">
+        <Clock className="w-3 h-3 text-ink-faint shrink-0" />
+        {isAdmin && onVenueUpdated ? (
+          <select
+            aria-label={`Time zone for ${venue.name}`}
+            data-venue-timezone-select
+            disabled={saving}
+            value={inherited ? '' : (venue.timeZone as string)}
+            onChange={(e) => save(e.target.value)}
+            className="min-w-0 flex-1 px-2 py-1 text-xs rounded-lg bg-sunken border border-line text-ink focus:border-gold focus:outline-none disabled:opacity-60"
+          >
+            <option value="">Agency default ({timeZoneLabel(agencyTz)})</option>
+            {!inherited && !known && <option value={venue.timeZone}>{venue.timeZone}</option>}
+            {COMMON_TIME_ZONES.map((z) => (
+              <option key={z.tz} value={z.tz}>
+                {timeZoneLabel(z.tz)}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span className="truncate" data-venue-timezone-label>
+            {timeZoneLabel(eff)}
+            {inherited ? ' · agency default' : ''}
+          </span>
+        )}
+        {saving && <span className="text-ink-faint">Saving…</span>}
+      </div>
+      {note && <p className="mt-1 text-ok">{note}</p>}
+      {error && (
+        <p role="alert" className="mt-1 text-bad">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+};
 
 interface VenuesDirectoryModalProps {
   isOpen: boolean;
@@ -22,6 +111,10 @@ interface VenuesDirectoryModalProps {
   onOpenCreateVenue: () => void;
   onDeleteVenue?: (venueId: string) => Promise<void>;
   isAdmin: boolean;
+  /** Item 6: the agency's zone (absent = America/New_York). */
+  agencyTimeZone?: string;
+  /** Item 6: called with the server-confirmed venue after a zone save. */
+  onVenueUpdated?: (venue: Venue) => void;
 }
 
 export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
@@ -33,6 +126,8 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
   onOpenCreateVenue,
   onDeleteVenue,
   isAdmin,
+  agencyTimeZone,
+  onVenueUpdated,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
@@ -211,6 +306,12 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                           <span className="truncate">{venue.certification}</span>
                         </div>
                       )}
+                      <VenueTimeZoneRow
+                        venue={venue}
+                        agencyTimeZone={agencyTimeZone}
+                        isAdmin={isAdmin}
+                        onVenueUpdated={onVenueUpdated}
+                      />
                     </div>
                   </div>
 

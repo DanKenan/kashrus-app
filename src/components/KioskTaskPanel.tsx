@@ -50,6 +50,8 @@ interface KioskTaskPanelProps {
   tasks: Task[];
   currentUser: UserType;
   venueName?: string;
+  /** Item 6: the kiosk venue's IANA zone (greeting + top bar clock). */
+  timeZone?: string;
   activeFilter: TabFilter;
   onSelectFilter: (f: TabFilter) => void;
   totalTasks: number;
@@ -223,6 +225,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   darkMode,
   onToggleDarkMode,
   isRealtimeConnected,
+  timeZone,
 }) => {
   const now = useMinuteClock();
   // D3c: "Your tasks" shows To do or Done — a presentation split of the same
@@ -470,6 +473,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
           onToggleDarkMode={onToggleDarkMode}
           isRealtimeConnected={isRealtimeConnected}
           onEndShift={onEndShift}
+          timeZone={timeZone}
         />
       </div>
 
@@ -482,7 +486,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
             </p>
           )}
           <h1 data-kiosk-greeting dir="auto" className="text-k-title lg:text-k-display font-bold text-ink break-words">
-            {greetingFor(now)}, {firstName}
+            {greetingFor(now, timeZone)}, {firstName}
           </h1>
           <ProgressRing done={ringDone} total={ringTotal} />
           {ringTotal > 0 && ringTotal <= 12 && (

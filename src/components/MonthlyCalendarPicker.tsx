@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ChevronLeft, ChevronRight, Calendar as CalendarIcon, X, Check, RotateCcw } from 'lucide-react';
+import { DEFAULT_TIME_ZONE, workDateIn } from '../lib/workday';
 
 interface MonthlyCalendarPickerProps {
   selectedDates: string[]; // ['YYYY-MM-DD', ...]
@@ -7,6 +8,8 @@ interface MonthlyCalendarPickerProps {
   onClearAll: () => void;
   onSelectToday: () => void;
   onSelectTomorrow: () => void;
+  /** Item 6: the venue's IANA zone — "today" is the venue's local date. */
+  timeZone?: string;
 }
 
 export const MonthlyCalendarPicker: React.FC<MonthlyCalendarPickerProps> = ({
@@ -15,12 +18,13 @@ export const MonthlyCalendarPicker: React.FC<MonthlyCalendarPickerProps> = ({
   onClearAll,
   onSelectToday,
   onSelectTomorrow,
+  timeZone = DEFAULT_TIME_ZONE,
 }) => {
-  const today = new Date();
+  // Item 6: today's date in the venue's zone (not the device's, not UTC).
+  const todayStr = workDateIn(timeZone, new Date());
+  const today = new Date(Number(todayStr.slice(0, 4)), Number(todayStr.slice(5, 7)) - 1, Number(todayStr.slice(8, 10)));
   const [viewYear, setViewYear] = useState<number>(today.getFullYear());
   const [viewMonth, setViewMonth] = useState<number>(today.getMonth()); // 0-indexed
-
-  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
   const monthNames = [
     'January', 'February', 'March', 'April', 'May', 'June',
