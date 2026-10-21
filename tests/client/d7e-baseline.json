@@ -1,0 +1,258 @@
+{
+ "sheet": {
+  "inv": [
+   "Updates",
+   "Announcements",
+   "Shift notes",
+   "Alerts",
+   "ANN-BODY",
+   "role=dialog",
+   "aria-label=Updates",
+   "aria-label=Expand panel",
+   "aria-label=Close updates",
+   "role=tablist",
+   "aria-label=Updates tabs",
+   "role=tab",
+   "aria-label=3 unread",
+   "aria-label=2 unread"
+  ]
+ },
+ "sheetCalls": {
+  "calls": [
+   [
+    "tab",
+    "alerts"
+   ],
+   "close"
+  ]
+ },
+ "ann": {
+  "inv": [
+   "New announcement",
+   "Urgent",
+   "for",
+   "New",
+   "Bring gloves. בס״ד",
+   "Update",
+   "for Mashgiach team",
+   "Fridge 3 is fixed",
+   "2/5 read",
+   "aria-label=Delete announcement: Fridge 3 is fixed",
+   "aria-label=Read by 2 of 5. Show who read it"
+  ]
+ },
+ "annCompose": {
+  "inv": [
+   "Cancel",
+   "Kind",
+   "Update",
+   "Notice",
+   "Assignment",
+   "Urgent",
+   "Send to",
+   "Everyone",
+   "Admins",
+   "Coordinators",
+   "Owners",
+   "Mashgiach team",
+   "Workers",
+   "Post announcement",
+   "for",
+   "New",
+   "Bring gloves. בס״ד",
+   "for Mashgiach team",
+   "Fridge 3 is fixed",
+   "2/5 read",
+   "placeholder=Headline",
+   "aria-label=Announcement headline",
+   "placeholder=Details…",
+   "aria-label=Announcement details",
+   "aria-label=Delete announcement: Fridge 3 is fixed",
+   "aria-label=Read by 2 of 5. Show who read it"
+  ]
+ },
+ "annFlow": {
+  "fetch": [
+   [
+    "POST",
+    "/api/announcements",
+    {
+     "title": "Mincha at 1:45",
+     "body": "In the back room",
+     "category": "update",
+     "targetRoles": [
+      "all"
+     ]
+    }
+   ],
+   [
+    "DELETE",
+    "/api/announcements/:id",
+    null
+   ]
+  ],
+  "calls": [
+   [
+    "posted",
+    "Mincha at 1:45"
+   ],
+   [
+    "deleted",
+    "n2"
+   ]
+  ]
+ },
+ "annEmpty": {
+  "inv": [
+   "New announcement",
+   "No announcements yet.",
+   "Updates for the whole team will show up here."
+  ]
+ },
+ "annEmptyRO": {
+  "inv": [
+   "No announcements yet.",
+   "Updates for the whole team will show up here."
+  ]
+ },
+ "annRO": {
+  "inv": [
+   "Urgent",
+   "for",
+   "New",
+   "Bring gloves. בס״ד",
+   "Update",
+   "for Mashgiach team",
+   "Fridge 3 is fixed",
+   "2/5 read",
+   "aria-label=Read by 2 of 5. Show who read it"
+  ]
+ },
+ "banner": {
+  "inv": [
+   "Urgent",
+   "View",
+   "role=alert",
+   "aria-label=Dismiss and mark read"
+  ]
+ },
+ "bannerAlert": {
+  "inv": [
+   "Alert",
+   "Seal broken",
+   "View",
+   "role=alert",
+   "aria-label=Dismiss and mark read"
+  ]
+ },
+ "bannerCalls": {
+  "calls": [
+   [
+    "dismiss",
+    "n1"
+   ]
+  ]
+ },
+ "alerts": {
+  "inv": [
+   "Raise an alert",
+   "Alert sound on",
+   "High",
+   "Open",
+   "New",
+   "Seal broken on the meat fridge (walk-in #2)",
+   "Moshe Klein",
+   "Found at 7am",
+   "3/7 read",
+   "· Not acknowledged",
+   "Acknowledge",
+   "Resolve",
+   "Low",
+   "Acknowledged",
+   "Low on gloves",
+   "Sara Levi",
+   "Acknowledged by",
+   "Don",
+   "aria-label=Read by 3 of 7. Show who read it"
+  ]
+ },
+ "alertsCompose": {
+  "inv": [
+   "What happened?",
+   "Low",
+   "Medium",
+   "High",
+   "Critical",
+   "Details (optional)",
+   "Photo",
+   "Voice",
+   "Cancel",
+   "Send alert now",
+   "Goes at once to this venue's coordinators and the agency's admins, day or night.",
+   "Alert sound on",
+   "Open",
+   "New",
+   "Seal broken on the meat fridge (walk-in #2)",
+   "Moshe Klein",
+   "Found at 7am",
+   "3/7 read",
+   "· Not acknowledged",
+   "Acknowledge",
+   "Resolve",
+   "Acknowledged",
+   "Low on gloves",
+   "Sara Levi",
+   "Acknowledged by",
+   "Don",
+   "placeholder=e.g. Seal broken on the meat fridge",
+   "role=radiogroup",
+   "aria-label=How serious",
+   "role=radio",
+   "aria-label=Read by 3 of 7. Show who read it"
+  ]
+ },
+ "alertsDraft": {
+  "inv": [
+   "What happened?",
+   "Low",
+   "Medium",
+   "High",
+   "Critical",
+   "Details (optional)",
+   "Strong",
+   "Photo",
+   "Voice",
+   "Cancel",
+   "Send alert now",
+   "Discard draft",
+   "Goes at once to this venue's coordinators and the agency's admins, day or night.",
+   "Alert sound on",
+   "Open",
+   "New",
+   "Seal broken on the meat fridge (walk-in #2)",
+   "Moshe Klein",
+   "Found at 7am",
+   "3/7 read",
+   "· Not acknowledged",
+   "Acknowledge",
+   "Resolve",
+   "Acknowledged",
+   "Low on gloves",
+   "Sara Levi",
+   "Acknowledged by",
+   "Don",
+   "placeholder=e.g. Seal broken on the meat fridge",
+   "role=radiogroup",
+   "aria-label=How serious",
+   "role=radio",
+   "aria-label=Read by 3 of 7. Show who read it"
+  ]
+ },
+ "alertsEmpty": {
+  "inv": [
+   "Raise an alert",
+   "Alert sound on",
+   "No open alerts at this venue."
+  ]
+ }
+}
