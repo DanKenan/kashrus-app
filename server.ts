@@ -30,6 +30,8 @@ import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
+import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
+import { credentialMayLink } from './src/server/invites.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
@@ -441,6 +443,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'POST', path: '/auth/forgot-password' },
   { method: 'POST', path: '/auth/verify-reset-code' },
   { method: 'POST', path: '/auth/reset-password' },
+  { method: 'POST', path: '/auth/recover' }, // 10f: public, generic 401, per-IP + per-person limits
   { method: 'POST', path: '/agencies/register' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
@@ -13137,6 +13140,136 @@ app.post('/api/auth/change-password', async (req, res) => {
   }
   const freshCallerRow = users.find((u) => u.id === caller.id) || caller;
   res.json({ success: true, message: 'Password updated successfully.', token: signSessionToken(freshCallerRow) });
+});
+
+// ---------------------------------------------------------------------------
+// 10f (plan v4 B9/C5/D4): recovery codes. Codes live as salted hashes on the
+// person's credential row (recoveryCodeHashes), written only through the
+// identity writer recoveryWriteById. Only a linkable origin
+// (credentialMayLink) can hold codes. Plaintext codes are returned once and
+// never logged, broadcast, exported or backed up.
+// ---------------------------------------------------------------------------
+const RECOVERY_CODES_UNAVAILABLE_TEXT = 'Recovery codes are not available for this account.';
+const RECOVER_FAILED_TEXT = 'Email or recovery code is incorrect.';
+// Per-IP bucket for the public recover route (process-local, like 10a register).
+const recoverLimiter = createWindowLimiter({ max: 20, windowMs: 60 * 60 * 1000, maxKeys: 10000 });
+
+app.post('/api/auth/recovery-codes', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if ((req as any).kiosk === true) return res.status(403).json({ error: RECOVERY_CODES_UNAVAILABLE_TEXT });
+  const authHeader = String(req.headers.authorization || '');
+  const claims = authHeader.startsWith('Bearer ') ? verifyToken(authHeader.slice(7).trim()) : null;
+  if (!claims || (claims as any).kind !== 'v2') return res.status(403).json({ error: RECOVERY_CODES_UNAVAILABLE_TEXT });
+  const { currentPassword } = req.body || {};
+  if (!currentPassword) return res.status(400).json({ error: 'Current password is required.' });
+  const authUser = (req as any).authUser;
+  const caller = users.find((u) => u.id === authUser.id);
+  if (!caller) return res.status(404).json({ error: 'User account not found.' });
+  const owner = credentialRowForRowIn(users, agencies, caller) as UserProfile | null;
+  if (!owner) return res.status(409).json({ error: 'Recovery codes cannot be created right now. Please sign in again.' });
+  if (!credentialMayLink((owner as any).credentialOrigin)) return res.status(403).json({ error: RECOVERY_CODES_UNAVAILABLE_TEXT });
+  const pw = await checkPassword(String(currentPassword), owner.password);
+  if (pw === 'invalid') return res.status(401).json({ error: 'Current password is incorrect.' });
+
+  // N1: generated ONCE, before the transaction; a retry re-commits this same set.
+  const { codes, set } = generateRecoveryCodes(serverNow().toISOString());
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const freshCaller = freshUsers.find((u) => u.id === caller.id);
+      if (!freshCaller) return { conflict: 'User account not found.' };
+      const freshOwner = credentialRowForRowIn(freshUsers, freshAgencies, freshCaller);
+      if (!freshOwner || freshOwner.id !== owner.id || !credentialMayLink(freshOwner.credentialOrigin)) {
+        return { conflict: 'Your account changed. Please sign in again.' };
+      }
+      const freshStored = freshOwner.password;
+      const freshValid = isBcryptHash(freshStored)
+        ? bcrypt.compareSync(String(currentPassword), freshStored)
+        : freshStored === String(currentPassword);
+      if (!freshValid) return { conflict: 'Your password was changed by another session. Please sign in again.' };
+      // D4: the new set replaces every old code.
+      return { doc: freshDoc, result: { issued: true }, recoveryWriteById: { [owner.id]: { codes: set } } };
+    },
+    { label: 'recovery-codes' }
+  );
+  if (!committed) return;
+  log.info(`[recovery] codes issued for user ${owner.id} (count ${codes.length})`);
+  res.json({ codes, createdAt: set.createdAt });
+});
+
+app.post('/api/auth/recover', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const { email, code, newPassword } = req.body || {};
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail || !code) return res.status(400).json({ error: 'Email and recovery code are required.' });
+  if (!newPassword || String(newPassword).length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  }
+  // N4: the per-IP bucket comes BEFORE any expensive work.
+  const hit = recoverLimiter.hit(`recover|${getClientIp(req)}`, Date.now());
+  if (!hit.allowed) {
+    res.set('Retry-After', String(hit.retryAfterSec));
+    return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+  }
+  // Uniform cost: the new password is hashed before the account is looked up.
+  const newHash = await hashPassword(String(newPassword));
+  const cred = credentialRowForEmailIn(users, agencies, normalizedEmail) as UserProfile | null;
+  if (!cred || !credentialMayLink((cred as any).credentialOrigin) || !isRecoveryCodeSet((cred as any).recoveryCodeHashes)) {
+    return res.status(401).json({ error: RECOVER_FAILED_TEXT });
+  }
+  const nowMs = serverNow().getTime();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const freshCred = credentialRowForEmailIn(freshUsers, freshAgencies, normalizedEmail);
+      // N3: fresh owner, eligibility, lock and set — all from the same fresh rows.
+      if (!freshCred || freshCred.id !== cred.id || !credentialMayLink(freshCred.credentialOrigin) || !isRecoveryCodeSet(freshCred.recoveryCodeHashes)) {
+        return { doc: freshDoc, result: { ok: false, write: false } };
+      }
+      if (recoveryLocked(freshCred.recoveryFailures, nowMs)) {
+        return { doc: freshDoc, result: { ok: false, write: false } };
+      }
+      const idx = matchRecoveryCode(freshCred.recoveryCodeHashes, code);
+      if (idx < 0) {
+        // N2: the per-PERSON counter is committed; the answer stays generic.
+        return {
+          doc: freshDoc,
+          result: { ok: false, write: true },
+          recoveryWriteById: { [freshCred.id]: { failures: recordRecoveryFailure(freshCred.recoveryFailures, nowMs) } },
+        };
+      }
+      const personRows = isMultiPersonRow(freshUsers, freshCred) ? personRowsIn(freshUsers, freshCred) : [freshCred];
+      const bumpIds = personRows.filter((u: any) => typeof u.personId === 'string' && u.personId).map((u: any) => u.id);
+      const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      return {
+        doc: {
+          ...freshDoc,
+          users: freshUsers.map((u) => (u.id === freshCred.id ? { ...u, password: newHash } : u)),
+          passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail),
+        },
+        result: { ok: true, bumpIds },
+        // C1: recovery keeps the origin.
+        passwordKeepsOriginIds: [freshCred.id],
+        // burn the code + clear the failures, in the same commit.
+        recoveryWriteById: { [freshCred.id]: { codes: burnRecoveryCode(freshCred.recoveryCodeHashes, idx), failures: null } },
+        // C3 E1: every row of the person.
+        ...(bumpIds.length ? { tokenEpochBumpIds: bumpIds } : {}),
+      };
+    },
+    { label: 'recover' }
+  );
+  if (!committed) return;
+  const result: any = (committed as any).result || {};
+  if (!result.ok) return res.status(401).json({ error: RECOVER_FAILED_TEXT });
+  const bumped: string[] = Array.isArray(result.bumpIds) ? result.bumpIds : [];
+  for (const id of bumped) revokeUserPhoneSockets(id);
+  const fresh = users.find((u) => u.id === cred.id) || cred;
+  log.info(`[recovery] recovered user ${cred.id} (sessions revoked: ${bumped.length})`);
+  res.json({ success: true, user: getSelfUser(fresh), token: signSessionToken(fresh) });
 });
 
 // ==========================================

@@ -148,6 +148,15 @@ export interface IdentityEnforceOptions {
    */
   ownerTransferIds?: ReadonlyMap<string, string>;
   /**
+   * 10f: the ONLY writer of recoveryCodeHashes / recoveryFailures. Row id →
+   * the new value of each field named (null = remove; a field not named is
+   * kept as stored). Honoured only on an EXISTING row that is its person's
+   * credential row in the BEFORE users (a single-row person's own row, or the
+   * multi person's credentialOwner); any other target is reverted and
+   * reported as a violation.
+   */
+  recoveryWriteById?: ReadonlyMap<string, RecoveryWrite>;
+  /**
    * Called (row id + field name only, never values) when a mutator's output
    * tried to set, change or remove a server-only identity field. The change
    * is reverted, and the caller logs it, so it is never silent.
@@ -163,6 +172,12 @@ export interface IdentityEnforceOptions {
  * an option it does not use (the source test pins newMembership to the 10i
  * accept handler).
  */
+/** 10f: a recovery-field write (see recoveryWriteById). */
+export interface RecoveryWrite {
+  codes?: unknown | null;
+  failures?: unknown | null;
+}
+
 export interface IdentityOutcomeFields {
   /** 10b: row id → credentialOrigin set in this commit (see credentialOriginSetById). */
   credentialOriginSetById?: Record<string, CredentialOrigin>;
@@ -172,16 +187,30 @@ export interface IdentityOutcomeFields {
   newMembership?: Record<string, string>;
   /** 10d: a declared owner transfer (validated + applied by applyOwnerTransfer). */
   ownerTransfer?: OwnerTransfer;
+  /** 10f: row id → recovery-field write (see recoveryWriteById). */
+  recoveryWriteById?: Record<string, RecoveryWrite>;
 }
 
-export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership'> {
+export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById'> {
   const o: any = outcome || {};
   const asMap = (r: any) => (r && typeof r === 'object' && !Array.isArray(r) && Object.keys(r).length ? new Map<string, string>(Object.entries(r).filter(([, v]) => typeof v === 'string') as [string, string][]) : undefined);
   return {
     credentialOriginSetById: asMap(o.credentialOriginSetById),
     passwordKeepsOriginIds: Array.isArray(o.passwordKeepsOriginIds) && o.passwordKeepsOriginIds.length ? new Set<string>(o.passwordKeepsOriginIds) : undefined,
     newMembership: asMap(o.newMembership),
+    recoveryWriteById:
+      o.recoveryWriteById && typeof o.recoveryWriteById === 'object' && !Array.isArray(o.recoveryWriteById) && Object.keys(o.recoveryWriteById).length
+        ? new Map<string, RecoveryWrite>(Object.entries(o.recoveryWriteById).filter(([, v]) => v && typeof v === 'object') as [string, RecoveryWrite][])
+        : undefined,
   };
+}
+
+/** 10f: the row is its person's credential row in `rows` (single-row person: itself; multi: the credentialOwner). */
+function isCredentialRowIn(rows: readonly any[], row: any): boolean {
+  if (!row || typeof row.personId !== 'string' || !row.personId) return false;
+  const group = rows.filter((u: any) => u && u.personId === row.personId);
+  if (group.length === 1) return group[0].id === row.id;
+  return row.credentialOwner === true;
 }
 
 function isCredentialOrigin(v: unknown): v is CredentialOrigin {
@@ -233,8 +262,19 @@ export function enforceIdentityFields(
         const from = transferSrc && f !== 'joinedAt' ? transferSrc : prev;
         if (from[f] !== undefined) out[f] = JSON.parse(JSON.stringify(from[f]));
         else delete out[f];
+        // 10f: the recovery fields' one writer (credential row only).
+        const rw = (f === 'recoveryCodeHashes' || f === 'recoveryFailures') ? opts.recoveryWriteById?.get(row.id) : undefined;
+        const key = f === 'recoveryCodeHashes' ? 'codes' : 'failures';
+        if (rw && Object.prototype.hasOwnProperty.call(rw, key) && !transferSrc && isCredentialRowIn(beforeUsers, prev)) {
+          const v = (rw as any)[key];
+          if (v === null || v === undefined) delete out[f];
+          else out[f] = JSON.parse(JSON.stringify(v));
+          continue;
+        }
         if (opts.onViolation && JSON.stringify(row[f]) !== JSON.stringify(out[f])) opts.onViolation(row.id, f);
       }
+      if (opts.onViolation && opts.recoveryWriteById?.has(row.id) && (transferSrc || !isCredentialRowIn(beforeUsers, prev)))
+        opts.onViolation(row.id, 'recoveryWrite');
       if (opts.newMembership?.has(row.id) && opts.onViolation) opts.onViolation(row.id, 'newMembership');
     } else {
       // 10b: a new row is its own person unless newMembership names an
