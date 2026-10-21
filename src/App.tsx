@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { Header } from './components/Header';
 import { StatsProgressBar } from './components/StatsProgressBar';
+import { initialTaskView, readPhoneTaskView, rememberPhoneTaskView, type TaskViewMode } from './lib/taskViewPref';
 import { OwnerAuditBanner } from './components/OwnerAuditBanner';
 import { TaskFilterBar } from './components/TaskFilterBar';
 import { TaskTableView } from './components/TaskTableView';
@@ -293,7 +294,15 @@ export default function App() {
     } catch {}
     return 'all';
   });
-  const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
+  // D4b: phones (< 640 px) open on cards unless the person picked the table on a phone
+  // (remembered); 640–767 opens on cards and 768+ on the table, as before.
+  const [viewMode, setViewMode] = useState<TaskViewMode>(() =>
+    initialTaskView(typeof window !== 'undefined' ? window.innerWidth : 1024, readPhoneTaskView())
+  );
+  const changeViewMode = (mode: TaskViewMode) => {
+    setViewMode(mode);
+    if (typeof window !== 'undefined') rememberPhoneTaskView(mode, window.innerWidth);
+  };
   // Kiosk only (D3a): the kiosk list is the default; table and cards stay one tap away.
   const [kioskView, setKioskView] = useState<'list' | 'table' | 'cards'>('list');
   const [showOnlyTodaySchedule, setShowOnlyTodaySchedule] = useState(false);
@@ -433,13 +442,6 @@ export default function App() {
       }
     }
   }, [currentUser]);
-
-  // Auto detect mobile view
-  useEffect(() => {
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      setViewMode('cards');
-    }
-  }, []);
 
   // Show temporary toast notification
   const showToast = (msg: string) => {
@@ -1996,7 +1998,7 @@ export default function App() {
             categories={categories}
             categoryCounts={categoryCounts}
             viewMode={viewMode}
-            onViewModeChange={setViewMode}
+            onViewModeChange={changeViewMode}
             showOnlyTodaySchedule={showOnlyTodaySchedule}
             onToggleScheduleFilter={() => setShowOnlyTodaySchedule(!showOnlyTodaySchedule)}
             onOpenTaskModal={handleOpenCreateTask}

@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
+  ArrowRight,
   ChevronUp,
   Clock,
   Users,
@@ -93,6 +94,29 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
     });
   };
 
+  // D4b: on phones the table is wider than the screen. Track whether columns
+  // are hidden to the right so a fade and a small arrow can say "scroll".
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [moreRight, setMoreRight] = useState(false);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const update = () => setMoreRight(el.scrollWidth - el.clientWidth - el.scrollLeft > 4);
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    if (ro) {
+      ro.observe(el);
+      if (el.firstElementChild) ro.observe(el.firstElementChild);
+    }
+    return () => {
+      el.removeEventListener('scroll', update);
+      window.removeEventListener('resize', update);
+      ro?.disconnect();
+    };
+  }, [tasks.length]);
+
   if (tasks.length === 0) {
     return (
       <div className="bg-surface rounded-3xl p-12 text-center border border-line tactile-1 animate-fade-in">
@@ -116,11 +140,15 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 
   return (
     <div className="bg-surface rounded-3xl border border-line tactile-2 overflow-hidden transition-colors animate-fade-in">
-      <div className="overflow-x-auto">
+      <div className="relative">
+      <div ref={scrollRef} data-task-table-scroll className="overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-sunken/80 border-b border-line text-[11px] font-bold uppercase tracking-wider text-ink-faint">
-              <th className="py-3.5 pl-6 pr-4 w-[28%] min-w-[240px]">Task & Directive</th>
+              <th className="py-3.5 pl-6 pr-4 w-[28%] min-w-[240px] max-sm:min-w-[184px] max-sm:sticky max-sm:left-0 max-sm:z-10 max-sm:bg-surface max-sm:border-r max-sm:border-line">
+                <span aria-hidden className="sm:hidden absolute inset-0 bg-sunken/80 pointer-events-none" />
+                <span className="relative">Task & Directive</span>
+              </th>
               <th className="py-3.5 px-3 w-[15%] min-w-[130px]">Schedule & Target</th>
               <th className="py-3.5 px-3 w-[14%] min-w-[130px]">Assigned Mashgiach</th>
               <th className="py-3.5 px-4 w-[16%] min-w-[150px]">Verification Status</th>
@@ -156,9 +184,10 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                   }`}
                 >
                   {/* Task Title & Expandable Instruction */}
-                  <td className="relative py-3.5 pl-6 pr-4 align-top">
+                  <td className="relative py-3.5 pl-6 pr-4 align-top max-sm:sticky max-sm:left-0 max-sm:z-10 max-sm:bg-surface max-sm:border-r max-sm:border-line">
+                    {mine && <span aria-hidden className="sm:hidden absolute inset-0 bg-gold-wash/50 pointer-events-none" />}
                     <span className="cat-spine absolute left-0 top-2 bottom-2 w-[4px] rounded-full" aria-hidden />
-                    <div className="space-y-1">
+                    <div className="relative space-y-1">
                       <div className="flex items-start gap-2">
                         {task.priority === 'high' && (
                           <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200 dark:border-rose-900/60">
@@ -572,6 +601,18 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
             })}
           </tbody>
         </table>
+      </div>
+      {moreRight && (
+        <div
+          aria-hidden
+          data-task-table-more
+          className="sm:hidden pointer-events-none absolute inset-y-0 right-0 z-20 w-12 bg-gradient-to-l from-surface via-surface/70 to-transparent"
+        >
+          <span className="absolute top-2.5 right-1.5 w-6 h-6 rounded-full bg-surface border border-line tactile-1 text-ink-soft flex items-center justify-center">
+            <ArrowRight className="w-3.5 h-3.5" />
+          </span>
+        </div>
+      )}
       </div>
     </div>
   );
