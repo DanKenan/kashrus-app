@@ -339,7 +339,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                       <button
                         className={`text-xs font-semibold flex items-center gap-1 px-2.5 py-1 rounded-lg transition ${
                           isCurrent
-                            ? 'bg-surface border border-line-control text-ink hover:bg-sunken'
+                            ? 'bg-sunken text-ink border border-line-control ring-1 ring-ink-soft'
                             : 'bg-surface border border-line-control text-ink hover:bg-sunken'
                         }`}
                       >

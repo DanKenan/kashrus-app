@@ -303,7 +303,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                       id="new-member-name-input"
                       type="text"
                       required
-                      placeholder="e.g. Rabbi David Cohen"
+                      placeholder="Full name"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
                       className="w-full pl-8 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
@@ -547,7 +547,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         disabled={!onUpdateUser || isPrimaryAdmin}
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition cursor-pointer ${
                           canFillVal
-                            ? 'bg-ok-bg border-ok text-ok '
+                            ? 'bg-ok-bg border-ok text-ok'
                             : 'bg-sunken border-line text-ink-soft line-through'
                         } ${(!onUpdateUser || isPrimaryAdmin) ? 'cursor-default opacity-80' : 'hover:scale-[1.02]'}`}
                         title="Permission to complete checklist items and save notes"
