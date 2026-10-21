@@ -2274,9 +2274,34 @@ function historyLogsForRecipient(agencyId: string, recipient: UserProfile | unde
  * scoped or unscoped. Fail closed: an unauthorizable socket is terminated,
  * not skipped silently.
  */
+/** SO: close (4401) and unregister every open phone socket of one row.
+ * Matches on user id AND session type (kiosk sockets are never touched). */
+function revokeUserPhoneSockets(userId: string): number {
+  let n = 0;
+  for (const [client, meta] of Array.from(activeSockets.entries())) {
+    if (!meta || meta.kiosk || meta.userId !== userId) continue;
+    try {
+      client.close(4401, 'Unauthorized');
+    } catch {}
+    activeSockets.delete(client);
+    n++;
+  }
+  if (n) log.info(`[auth] closed ${n} open session socket(s) after a password reset`);
+  return n;
+}
+
 function authorizeSocket(client: WebSocket): SocketMeta | null {
   const meta = activeSockets.get(client);
   if (!meta || !recipientForMeta(meta)) {
+    try {
+      client.close(4401, 'Unauthorized');
+    } catch {}
+    activeSockets.delete(client);
+    return null;
+  }
+  // SO: a phone socket's token must still resolve (same resolver as HTTP):
+  // a bumped tokenEpoch (password reset) or a deleted row fails closed.
+  if (!meta.kiosk && !(meta.tokenClaims && resolveSessionRow(meta.tokenClaims, users as any[]))) {
     try {
       client.close(4401, 'Unauthorized');
     } catch {}
@@ -4313,7 +4338,13 @@ app.post('/api/push/unsubscribe', async (req, res) => {
 
 // WebSocket Setup
 const wss = new WebSocketServer({ server, path: '/ws' });
-type SocketMeta = { userId: string; email: string; name: string; agencyId: string; role?: string; kiosk?: boolean; kioskVenueId?: string; kioskAgencyId?: string; kioskPv?: string; kioskDeviceId?: string };
+type SocketMeta = {
+  userId: string; email: string; name: string; agencyId: string; role?: string; kiosk?: boolean; kioskVenueId?: string; kioskAgencyId?: string; kioskPv?: string; kioskDeviceId?: string;
+  /** SO: the socket's own verified token claims (server-only, never sent).
+   * Re-resolved on every delivery for phone sockets, so a bumped tokenEpoch
+   * or a deleted row stops data even if a path forgets to close the socket. */
+  tokenClaims?: SessionClaims;
+};
 const activeSockets = new Map<WebSocket, SocketMeta>();
 
 /**
@@ -4720,6 +4751,7 @@ function broadcast(
 wss.on('connection', (ws, req) => {
   // Token via ?token=… query param (set by the client from its session).
   let authedUser: any = null;
+  let socketClaims: SessionClaims | null = null;
   let kioskVenueId: string | undefined;
   let kioskAgencyId: string | undefined;
   let kioskPv: string | undefined;
@@ -4729,6 +4761,7 @@ wss.on('connection', (ws, req) => {
     const url = new URL(req.url || '/ws', 'http://localhost');
     const token = url.searchParams.get('token') || '';
     const payload = token ? verifyToken(token) : null;
+    socketClaims = payload;
     // Item 8d: the same resolver as the HTTP middleware.
     authedUser = resolveSessionRow(payload, users as any[]) || null;
     isKiosk = payload?.kind === 'kiosk';
@@ -4784,11 +4817,24 @@ wss.on('connection', (ws, req) => {
   let proofTimer: ReturnType<typeof setTimeout> | null = null;
 
   const finishConnect = () => {
+    // SO: re-resolve this socket's own claims against the CURRENT users
+    // immediately before registration, so a connection authenticated before
+    // a revocation (epoch bump, deletion, kiosk PIN/device change) but
+    // registered after it is closed and never registered.
+    const current = resolveSessionRow(socketClaims, users as any[]);
+    const stillOk = isKiosk
+      ? !!current && kioskSessionStillValid(current, { agencyId: kioskAgencyId, venueId: kioskVenueId, pv: kioskPv, deviceId: kioskDeviceId })
+      : !!current && current.id === authedUser.id;
+    if (!stillOk) {
+      try { ws.close(4401, 'Unauthorized'); } catch {}
+      return;
+    }
     connected = true;
     activeSockets.set(ws, {
       userId: authedUser.id, email: authedUser.email, name: authedUser.name,
       agencyId, role: authedUser.role,
       kiosk: isKiosk, kioskVenueId, kioskAgencyId, kioskPv, kioskDeviceId,
+      tokenClaims: socketClaims || undefined,
     });
 
     // Initial state: ONLY this user's agency. Never the whole platform.
@@ -12132,14 +12178,27 @@ app.post('/api/auth/reset-password', async (req, res) => {
       const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
       // Consume the reset token atomically with the password change.
       const newResets = freshResets.filter((r) => r.email !== normalizedEmail);
+      // SO ("sign-out-on-reset plan v2"): in the SAME commit, bump the row's
+      // tokenEpoch (+1 from the fresh row) so every older session token of
+      // this row is refused. Migrated rows only: a legacy row can only hold
+      // v1 tokens, which need epoch 0, so a bump would lock it out for good.
+      const signOutOthers = typeof freshUser.personId === 'string' && freshUser.personId === freshUser.id;
       return {
         doc: { ...freshDoc, users: newUsers, passwordResets: newResets },
-        result: { userId: user.id },
+        result: { userId: user.id, signedOutOthers: signOutOthers },
+        ...(signOutOthers ? { tokenEpochBumpIds: [user.id] } : {}),
       };
     },
     { label: 'reset-password' }
   );
   if (!committed) return;
+
+  // SO: the in-memory epoch is already bumped (commit hydrated). Close this
+  // user's open phone sockets now, before responding — this runs whether or
+  // not the reset request's own connection is still open. Kiosk sockets are
+  // PIN + device sessions and are left alone.
+  const signedOutOthers = (committed as any)?.result?.signedOutOthers === true;
+  if (signedOutOthers) revokeUserPhoneSockets(user.id);
 
   const token = signSessionToken(users.find((u) => u.id === user.id) || user);
   res.json({ success: true, user: getSafeUser(users.find((u) => u.id === user.id)!), token });
