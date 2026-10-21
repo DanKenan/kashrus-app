@@ -620,14 +620,14 @@ export default function App() {
   }, [currentUser?.email, currentUser?.name, currentVenue?.id]);
 
   // Update Task Status (Optimistic + REST + WebSocket broadcast)
-  const handleUpdateStatus = async (taskId: string, status: TaskStatus, isCompleted: boolean) => {
+  const handleUpdateStatus = async (taskId: string, status: TaskStatus, isCompleted: boolean): Promise<boolean> => {
     if (!currentUser) {
       showToast('Please sign in to update task statuses.');
-      return;
+      return false;
     }
     if (!canUserFillTasks(currentUser)) {
       showToast('You do not have permission to complete tasks.');
-      return;
+      return false;
     }
     const now = new Date().toISOString();
     // Snapshot for rollback: if the write fails we restore this instead of
@@ -663,12 +663,14 @@ export default function App() {
     if (result.ok) {
       // Ensure sync
       setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)));
+      return true;
     } else {
       if (previousTask) {
         setTasks((prev) => prev.map((t) => (t.id === taskId ? previousTask : t)));
       }
       console.error('Failed to update task status:', result.error);
       showToast(result.error || 'Could not update the task status.');
+      return false;
     }
   };
 
