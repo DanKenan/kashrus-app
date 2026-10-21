@@ -3,24 +3,31 @@
  *
  * The greeting follows the tablet's own local hour; the Hebrew date comes
  * from the browser's Hebrew calendar (Intl). Nothing here is stored or sent.
+ *
+ * Item 6: every helper takes an optional IANA zone — the kiosk venue's zone
+ * (server-authorized venue -> agency -> America/New_York) — so the clock,
+ * weekday, greeting and Hebrew date follow the venue, not the tablet's OS
+ * setting. The Hebrew date is the civil-day Hebrew calendar date for that
+ * zone; it does not change at sunset (not modelled).
  */
+import { hourIn } from './workday';
 
 /** "Good morning" 5–11, "Good afternoon" 12–16, otherwise "Good evening". */
-export function greetingFor(date: Date): string {
-  const h = date.getHours();
+export function greetingFor(date: Date, timeZone?: string): string {
+  const h = timeZone ? hourIn(timeZone, date) : date.getHours();
   if (h >= 5 && h < 12) return 'Good morning';
   if (h >= 12 && h < 17) return 'Good afternoon';
   return 'Good evening';
 }
 
 /** "9:14 PM" in the tablet's locale. */
-export function clockText(date: Date): string {
-  return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+export function clockText(date: Date, timeZone?: string): string {
+  return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', ...(timeZone ? { timeZone } : {}) });
 }
 
 /** "Tuesday" in the tablet's locale. */
-export function weekdayText(date: Date): string {
-  return date.toLocaleDateString(undefined, { weekday: 'long' });
+export function weekdayText(date: Date, timeZone?: string): string {
+  return date.toLocaleDateString(undefined, { weekday: 'long', ...(timeZone ? { timeZone } : {}) });
 }
 
 /** Hebrew letter numerals (gematria): 10 -> "י׳", 19 -> "י״ט", 15 -> "ט״ו", 787 -> "תשפ״ז". */
@@ -44,9 +51,14 @@ export function hebrewNumeral(n: number): string {
  * The Hebrew date in Hebrew letters (e.g. "י׳ בחשוון תשפ״ז"), or '' when the
  * browser has no Hebrew calendar. Shown, never translated (spec §7).
  */
-export function hebrewDateText(date: Date): string {
+export function hebrewDateText(date: Date, timeZone?: string): string {
   try {
-    const f = new Intl.DateTimeFormat('he-u-ca-hebrew', { day: 'numeric', month: 'long', year: 'numeric' });
+    const f = new Intl.DateTimeFormat('he-u-ca-hebrew', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      ...(timeZone ? { timeZone } : {}),
+    });
     if (f.resolvedOptions().calendar !== 'hebrew') return '';
     const parts = f.formatToParts(date);
     const day = Number(parts.find((p) => p.type === 'day')?.value);

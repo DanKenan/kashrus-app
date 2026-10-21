@@ -100,6 +100,8 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-33-kiosk-code-phone.mjs')).default,
     (await import('./test-35-kiosk-snapshot-allowlist.mjs')).default,
     (await import('./test-36-kiosk-code-generator.mjs')).default,
+    (await import('./test-37-venue-timezones.mjs')).default,
+    (await import('./test-38-dst-rollover.mjs')).default,
   ];
 
   const results = [];

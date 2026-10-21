@@ -41,6 +41,8 @@ interface KioskTopBarProps {
   onToggleDarkMode?: () => void;
   isRealtimeConnected?: boolean;
   onEndShift: () => void;
+  /** Item 6: the kiosk venue's IANA zone (clock, weekday, Hebrew date). */
+  timeZone?: string;
 }
 
 const btn64 = 'min-h-11 min-w-11 sm:min-h-16 sm:min-w-16';
@@ -55,9 +57,10 @@ export const KioskTopBar: React.FC<KioskTopBarProps> = ({
   onToggleDarkMode,
   isRealtimeConnected,
   onEndShift,
+  timeZone,
 }) => {
   const firstName = userName.split(' ')[0];
-  const hebrew = hebrewDateText(now);
+  const hebrew = hebrewDateText(now, timeZone);
   return (
     <div data-kiosk-topbar className="flex flex-wrap items-center gap-x-4 gap-y-2 sm:gap-x-6 py-2 sm:py-3">
       <div className="flex items-center gap-3 sm:gap-4 min-w-0 flex-1 basis-56">
@@ -74,9 +77,9 @@ export const KioskTopBar: React.FC<KioskTopBarProps> = ({
       </div>
 
       <div data-kiosk-topclock className="flex flex-col items-start sm:items-center shrink-0 leading-tight">
-        <span className="tnum text-xl sm:text-k-title font-semibold text-ink">{clockText(now)}</span>
+        <span className="tnum text-xl sm:text-k-title font-semibold text-ink">{clockText(now, timeZone)}</span>
         <span className="text-base text-ink-soft whitespace-nowrap">
-          {weekdayText(now)}
+          {weekdayText(now, timeZone)}
           {hebrew && (
             <>
               {' · '}

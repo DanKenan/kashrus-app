@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { Venue } from '../types';
 import { apiFetch } from '../lib/api';
+import { COMMON_TIME_ZONES, DEFAULT_TIME_ZONE, timeZoneLabel } from '../lib/workday';
 
 interface CreateVenueModalProps {
   isOpen: boolean;
@@ -19,6 +20,8 @@ interface CreateVenueModalProps {
   adminEmail: string;
   agencyName?: string;
   agencySeal?: string;
+  /** Item 6: the agency's zone (absent = America/New_York), shown as the default. */
+  agencyTimeZone?: string;
 }
 
 export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
@@ -28,8 +31,11 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   adminEmail,
   agencyName,
   agencySeal,
+  agencyTimeZone,
 }) => {
   const [name, setName] = useState('');
+  // Item 6: '' = same as the agency (no own zone stored).
+  const [timeZone, setTimeZone] = useState('');
   const [category, setCategory] = useState('Industrial');
   const [customCategory, setCustomCategory] = useState('');
   const [address, setAddress] = useState('');
@@ -88,6 +94,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
           ownerPassword: ownerPassword.trim() || undefined,
           templateType,
           userEmail: adminEmail,
+          ...(timeZone ? { timeZone } : {}),
         }),
       });
 
@@ -227,6 +234,27 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                     className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
                   />
                 </div>
+              </div>
+
+              <div className="sm:col-span-2">
+                <label htmlFor="venue-timezone-select" className="block text-xs font-semibold text-ink-soft mb-1">
+                  Time zone
+                </label>
+                <select
+                  id="venue-timezone-select"
+                  data-venue-timezone
+                  value={timeZone}
+                  onChange={(e) => setTimeZone(e.target.value)}
+                  className="w-full px-3.5 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:border-gold focus:outline-none"
+                >
+                  <option value="">Same as agency ({timeZoneLabel(agencyTimeZone || DEFAULT_TIME_ZONE)})</option>
+                  {COMMON_TIME_ZONES.map((z) => (
+                    <option key={z.tz} value={z.tz}>
+                      {timeZoneLabel(z.tz)}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-ink-faint">The venue's day, "today" and the daily reset at midnight follow this zone.</p>
               </div>
 
               <div className="sm:col-span-2">

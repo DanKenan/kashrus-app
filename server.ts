@@ -10,6 +10,16 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import * as media from './src/server/media.js';
 import { log } from './src/server/log.ts';
+import {
+  DEFAULT_TIME_ZONE,
+  effectiveTimeZone,
+  isValidTimeZone,
+  isWorkDate,
+  workDateIn,
+  minutesIn,
+  addDays,
+  nextResetDate,
+} from './src/lib/workday.ts';
 import { mountStaticFiles } from './src/server/static-files.ts';
 import { consistencyRoute } from './src/server/consistency-route.js';
 
@@ -168,6 +178,16 @@ function verifyResetCode(code: string, stored: PasswordResetRequest): boolean {
  */
 function isTestMode(): boolean {
   return process.env.STAGE2_TEST_MODE === 'true' && !process.env.K_SERVICE;
+}
+
+/**
+ * Item 6 — the one clock every work-day decision uses (rollover tick, daily
+ * reset, overdue check, new-venue workday). Real time, except in test mode,
+ * where /api/__test__/clock can pin it (a fake clock for DST/rollover tests).
+ */
+let testNowOverrideMs: number | null = null;
+function serverNow(): Date {
+  return new Date(isTestMode() && testNowOverrideMs !== null ? testNowOverrideMs : Date.now());
 }
 
 /**
@@ -1017,6 +1037,8 @@ interface Agency {
   createdAt: string;
   /** Custom hostname for this agency's portal (e.g. app.hartfordkashrut.org). */
   customDomain?: string;
+  /** Item 6: IANA zone for the agency's venues (absent = America/New_York). */
+  timeZone?: string;
 }
 
 interface Venue {
@@ -1028,6 +1050,8 @@ interface Venue {
   certification: string;
   ownerEmail?: string;
   createdAt: string;
+  /** Item 6: IANA zone for this venue's work day (absent = the agency's zone). */
+  timeZone?: string;
 }
 
 interface TaskItem {
@@ -1109,6 +1133,13 @@ interface HistoryLog {
   }>;
   resetAt: string;
   resetBy: string;
+  /**
+   * Item 6: set only when a scheduled rollover closed a workday more than one
+   * day after it began (e.g. the server was down): the number of calendar
+   * days between the closed workday and the new one. One snapshot covers the
+   * whole gap; no empty days are synthesized.
+   */
+  catchUpDays?: number;
 }
 
 interface HandoffNote {
@@ -1780,6 +1811,9 @@ function getSafeUser(user: UserProfile) {
     agencyName: userAgency?.name || 'Kosher Supervision Agency',
     agencySeal: userAgency?.certificationSeal || 'Certified Kosher',
     agencyShortCode: userAgency?.shortCode || 'HKC',
+    // Item 6: the agency's IANA zone (absent = America/New_York) so the
+    // client resolves venue zone -> agency zone -> default for "today".
+    agencyTimeZone: isValidTimeZone(userAgency?.timeZone) ? userAgency?.timeZone : undefined,
   };
 }
 
@@ -2242,7 +2276,13 @@ let kioskPairings: { [pairingId: string]: KioskPairing } = {};
  * keys 'start|<ip>', 'caller|<userId>', 'pairip|<ip>' → attempt timestamps. */
 let kioskPairingLimits: { [key: string]: string[] } = {};
 let eventTaskTemplates: EventTaskTemplate[] = [];
-let currentWorkDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+// Legacy single work date (America/New_York). Item 6: it is now only the
+// migration bridge for venues without their own marker (and the marker for
+// tasks whose venue no longer exists); /api/health still shows it.
+let currentWorkDate = workDateIn(DEFAULT_TIME_ZONE, new Date());
+// Item 6: the workday each venue was last rolled to ("YYYY-MM-DD" in the
+// venue's own zone). The scheduler decides per venue from this map.
+let venueWorkDates: Record<string, string> = {};
 let isDemoCleared = false;
 
 const INITIAL_EVENTS: KosherEventItem[] = [];
@@ -2523,6 +2563,7 @@ function hydrateState(parsed: any) {
       }
 
       if (parsed.currentWorkDate) currentWorkDate = parsed.currentWorkDate;
+      venueWorkDates = sanitizeVenueWorkDates(parsed.venueWorkDates);
       if (typeof parsed._v === 'number' && parsed._v >= 0) {
         stateVersion = parsed._v;
       }
@@ -2566,6 +2607,7 @@ function stateSnapshot() {
     approvedIngredients,
     factoryReports,
     currentWorkDate,
+    venueWorkDates,
     isDemoCleared,
     pushSubscriptions,
     vapidKeys,
@@ -3858,26 +3900,41 @@ setTimeout(() => {
 }, 60000);
 
 // Check for overdue tasks and notify assigned users (runs every 15 min)
-// Tracks already-notified tasks to avoid spam
-const overdueNotified = new Set<string>();
-function checkOverdueTasks() {
-  const now = new Date();
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  const today = now.toISOString().split('T')[0];
+// Tracks already-notified tasks to avoid spam.
+// Item 6: "now" and "today" are the TASK'S VENUE's local time (its zone), not
+// the server's UTC clock. Dedupe key = `${taskId}:${venue-local date}`, kept
+// for 36 h and only removed when expired, so venues on different dates (New
+// York still on the 20th, Jerusalem already on the 21st) never clear each
+// other's keys, and the repeated 1 AM hour on a fall-back day is the same
+// local date (no repeat). The map is in memory: exactly-once across restarts
+// or several server instances is NOT claimed (pre-existing limitation).
+const OVERDUE_KEY_RETENTION_MS = 36 * 60 * 60 * 1000;
+const overdueNotified = new Map<string, number>();
+function checkOverdueTasks(now: Date = serverNow()): string[] {
+  const nowMs = now.getTime();
+  const sentKeys: string[] = [];
+  for (const [key, expiresAt] of overdueNotified) {
+    if (expiresAt <= nowMs) overdueNotified.delete(key);
+  }
 
   for (const task of tasks) {
     if (task.isCompleted) continue;
     if (!task.enableOverdueAlert) continue; // Only alert for tasks with alerts enabled
     if (!task.targetTime || task.targetTime === 'End of Day') continue;
 
+    const venue = venues.find((v) => v.id === task.venueId);
+    const tz = venueTimeZoneIn(venue || { agencyId: task.agencyId }, agencies);
+    const nowMinutes = minutesIn(tz, now);
+    const today = workDateIn(tz, now);
+
     const taskMinutes = taskSortMinutes(task);
     if (taskMinutes >= nowMinutes) continue; // Not overdue yet
 
     const notifyKey = `${task.id}:${today}`;
-    if (overdueNotified.has(notifyKey)) continue; // Already notified today
-    overdueNotified.add(notifyKey);
+    if (overdueNotified.has(notifyKey)) continue; // Already notified today (venue-local)
+    overdueNotified.set(notifyKey, nowMs + OVERDUE_KEY_RETENTION_MS);
+    sentKeys.push(notifyKey);
 
-    const venue = venues.find((v) => v.id === task.venueId);
     const venueName = venue?.name || 'your venue';
 
     // Notify assigned users, or all venue users if assigned to 'all'
@@ -3895,11 +3952,7 @@ function checkOverdueTasks() {
       );
     }
   }
-
-  // Clean up old notification keys (keep only today's)
-  for (const key of overdueNotified) {
-    if (!key.endsWith(`:${today}`)) overdueNotified.delete(key);
-  }
+  return sentKeys;
 }
 
 // Run overdue check every 15 minutes (skipped in maintenance mode /
@@ -4524,33 +4577,179 @@ wss.on('connection', (ws, req) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Item 6 — per-venue work days (time zones per agency/venue).
+//
+// Each venue runs on effectiveTimeZone(venue.timeZone, agency.timeZone):
+// its own IANA zone, else its agency's, else America/New_York — never the
+// server's UTC clock. doc.venueWorkDates[venueId] is the workday the venue
+// was last rolled to; that marker is the ONLY thing that decides whether the
+// venue's daily reset is due (today-in-its-zone > marker). The legacy NY
+// doc.currentWorkDate is just the migration bridge: a venue with no marker
+// yet runs on it, and the first committed reset or zone write materializes
+// the marker from it (never reinterpreting a NY date as another zone's).
+// ---------------------------------------------------------------------------
+
+/** Keep only well-formed { venueId: "YYYY-MM-DD" } entries. */
+function sanitizeVenueWorkDates(raw: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof k === 'string' && k && isWorkDate(v)) out[k] = v as string;
+  }
+  return out;
+}
+
+/** The later of two "YYYY-MM-DD" dates (string order is date order). */
+function laterWorkDate(a: string, b: string): string {
+  return a >= b ? a : b;
+}
+
+/** Whole calendar days from a to b ("YYYY-MM-DD"). */
+function workDaysBetween(a: string, b: string): number {
+  const ta = Date.parse(`${a}T00:00:00Z`);
+  const tb = Date.parse(`${b}T00:00:00Z`);
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return 0;
+  return Math.round((tb - ta) / 86400000);
+}
+
+/** The canonical IANA name the runtime reports for a valid zone. */
+function canonicalTimeZone(tz: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone || tz;
+  } catch {
+    return tz;
+  }
+}
+
+/**
+ * Parse a timeZone field from a request body. undefined = not being changed;
+ * null or '' = clear (follow the agency / the default); a string must be a
+ * known IANA zone (stored canonicalized). Returns { error } when invalid.
+ */
+function parseTimeZoneInput(raw: unknown): { value?: string | null; error?: string } {
+  if (raw === undefined) return {};
+  if (raw === null || raw === '') return { value: null };
+  if (typeof raw !== 'string') return { error: 'Unknown time zone.' };
+  const trimmed = raw.trim();
+  if (trimmed === '') return { value: null };
+  if (!isValidTimeZone(trimmed)) return { error: 'Unknown time zone.' };
+  return { value: canonicalTimeZone(trimmed) };
+}
+
+/** A venue's effective zone, given the agencies list it belongs to. */
+function venueTimeZoneIn(v: any, agencyList: any[]): string {
+  const aid = v?.agencyId || 'agency-hkc';
+  const agency = (agencyList || []).find((a: any) => a?.id === aid);
+  return effectiveTimeZone(v?.timeZone, agency?.timeZone);
+}
+
+/**
+ * Every venue's marker, with missing ones materialized from the legacy NY
+ * date as it stands in `doc` (the date that venue has actually been running
+ * on). A venue with neither falls back to its own today (never due).
+ */
+function materializedWorkDates(doc: any, venueList: any[], agencyList: any[], now: Date): Record<string, string> {
+  const markers = sanitizeVenueWorkDates(doc?.venueWorkDates);
+  const legacy = isWorkDate(doc?.currentWorkDate) ? (doc.currentWorkDate as string) : null;
+  for (const v of venueList || []) {
+    if (!v?.id || markers[v.id]) continue;
+    markers[v.id] = legacy || workDateIn(venueTimeZoneIn(v, agencyList), now);
+  }
+  return markers;
+}
+
+/**
+ * B3 — a zone change is a prospective boundary change: it never resets and
+ * never moves a marker backwards. For each venue whose EFFECTIVE zone
+ * changes, marker := max(marker, today in the new zone). Returns the new map
+ * (markers for every venue materialized, per B2).
+ */
+function workDatesAfterZoneChange(
+  doc: any,
+  venuesBefore: any[],
+  agenciesBefore: any[],
+  venuesAfter: any[],
+  agenciesAfter: any[],
+  now: Date
+): Record<string, string> {
+  const markers = materializedWorkDates(doc, venuesBefore, agenciesBefore, now);
+  for (const v of venuesAfter || []) {
+    const before = (venuesBefore || []).find((x: any) => x?.id === v?.id);
+    if (!before) continue;
+    const oldTz = venueTimeZoneIn(before, agenciesBefore);
+    const newTz = venueTimeZoneIn(v, agenciesAfter);
+    if (oldTz === newTz) continue;
+    markers[v.id] = laterWorkDate(markers[v.id], workDateIn(newTz, now));
+  }
+  return markers;
+}
+
+/**
+ * Which venues are due for their scheduled rollover at `now`, from the
+ * in-memory state (a cheap pre-check; executeDailyReset re-decides on the
+ * fresh document inside the transaction). legacyDue: the NY day has rolled
+ * past the legacy marker (tasks whose venue no longer exists still reset on
+ * it, as before).
+ */
+function venuesDueAt(now: Date): { due: string[]; legacyDue: boolean } {
+  const doc = { venueWorkDates, currentWorkDate };
+  const markers = materializedWorkDates(doc, venues, agencies, now);
+  const due = venues
+    .filter((v: any) => workDateIn(venueTimeZoneIn(v, agencies), now) > markers[v.id])
+    .map((v: any) => v.id);
+  const legacyDue = !isWorkDate(currentWorkDate) || workDateIn(DEFAULT_TIME_ZONE, now) > currentWorkDate;
+  return { due, legacyDue };
+}
+
 // Daily Reset Logic (supports resetting a specific venue or all)
 //
 // Returns a Promise that resolves ONLY after the transaction has committed
 // (or rejects on failure) — callers must await it before responding or
-// broadcasting. Scheduled resets skip when currentWorkDate is already today
-// (idempotency via the work-date guard inside the mutator); manual resets
-// pass { force: true } to ALWAYS run when explicitly requested, staying
-// transactional and idempotent via operationId. Archive/history creation
-// happens INSIDE the transaction (buildSnapshot runs in the mutator).
+// broadcasting. Archive/history creation happens INSIDE the transaction
+// (buildSnapshot runs in the mutator).
+//
+// Item 6 (folds in PR #27's archive-date fix, per venue):
+// - Scheduled (no force): the due set is computed on the FRESH document —
+//   venues whose today-in-their-zone > their marker. That one set drives the
+//   snapshots, the task resets, the marker advance and the broadcast. Each
+//   snapshot is dated with the workday being CLOSED (the venue's marker),
+//   never "today" and never the module-level date. An empty due set is a
+//   no-op (no snapshot, no task change, no version bump, no broadcast).
+//   A gap of more than one day (outage) closes in ONE snapshot carrying
+//   catchUpDays; no empty days are synthesized.
+// - Manual ({ force: true }, admin, own agency): resets the target venues
+//   now; marker := max(marker, today-in-zone) (never backwards), and the
+//   snapshot is dated with that same value. Idempotent via operationId.
 async function executeDailyReset(
   targetVenueId?: string,
   resetBy: string = 'system',
-  opts: { force?: boolean; operationId?: string; agencyId?: string } = {}
+  opts: { force?: boolean; operationId?: string; agencyId?: string; now?: Date } = {}
 ): Promise<{ result: any; version: number } | null> {
   // Agency scoping: manual resets pass agencyId (caller's agency only).
   // Scheduled resets pass no agencyId (system operation across all agencies).
   const scopeAgencyId = opts.agencyId || null;
-  // Use America/New_York for work dates (Don's timezone; all agencies are CT-based).
-  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const resetAt = new Date().toISOString();
+  // One instant for the whole reset (and every transaction retry).
+  const now = opts.now || serverNow();
+  const resetAt = now.toISOString();
   // Random ID base per reset invocation: stable across transaction retries
   // (the mutator closure captures it), unique across invocations so snapshot
   // IDs from different resets can never collide.
   const stamp = crypto.randomUUID();
+  // Agencies whose tasks changed without a snapshot (orphan tasks on the
+  // legacy NY rollover); recomputed on every mutator run.
+  let orphanAgencyIds = new Set<string>();
 
   // Build a single history snapshot from a venue + its tasks (pure function).
-  const buildSnapshot = (v: any, venueTasks: any[]): HistoryLog => {
+  // archiveDate is the workday being closed; tz formats check-in times in
+  // the venue's own zone (N7).
+  const buildSnapshot = (
+    v: any,
+    venueTasks: any[],
+    archiveDate: string,
+    tz: string,
+    catchUpDays?: number
+  ): HistoryLog => {
     const completedCount = venueTasks.filter((t) => t.isCompleted).length;
     const totalCount = venueTasks.length;
     const rate = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
@@ -4558,12 +4757,13 @@ async function executeDailyReset(
       id: `hist-${v.id}-${stamp}`,
       agencyId: v.agencyId || 'agency-hkc',
       venueId: v.id,
-      date: currentWorkDate,
+      date: archiveDate,
       totalTasks: totalCount,
       completedTasks: completedCount,
       completionRate: rate,
       resetAt,
       resetBy,
+      ...(catchUpDays && catchUpDays > 1 ? { catchUpDays } : {}),
       entries: venueTasks.map((t) => {
         const checkIns = t.checkIns || [];
         const checkInSummary =
@@ -4572,7 +4772,7 @@ async function executeDailyReset(
                 .map((c: any) => {
                   const when = (() => {
                     try {
-                      return new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                      return new Date(c.at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: tz });
                     } catch {
                       return '';
                     }
@@ -4600,11 +4800,7 @@ async function executeDailyReset(
     };
   };
 
-  const resetTask = (t: any, scopedVenueIds: Set<string> | null): any => {
-    // Agency scoping: only reset tasks whose venue is in the scoped set.
-    // When scopedVenueIds is null (scheduled system reset), all venues reset.
-    if (scopedVenueIds && !scopedVenueIds.has(t.venueId)) return t;
-    if (targetVenueId && t.venueId !== targetVenueId) return t;
+  const resetTask = (t: any): any => {
     let initialStatus = 'pending';
     if (t.inputType === 'yes_no') {
       initialStatus = 'no';
@@ -4627,48 +4823,75 @@ async function executeDailyReset(
     };
   };
 
-  // The whole reset (snapshots + task reset + work-date bump) commits atomically.
-  // currentWorkDate is bumped inside the mutator so a retry can't double-reset.
+  // The whole reset (snapshots + task reset + marker advance) commits
+  // atomically; the markers advance inside the mutator, so a retry or a
+  // second instance sees them and finds nothing due.
   // Await the CONFIRMED transaction before responding or broadcasting —
   // nothing may act on a reset that hasn't committed.
   let committed: { result: any; version: number };
   try {
     committed = await commitState(
       (freshDoc) => {
+        orphanAgencyIds = new Set<string>();
         const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+        const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
         const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
         const freshHistory: any[] = Array.isArray(freshDoc.historyLogs) ? freshDoc.historyLogs : [];
-        // Idempotency for scheduled resets: if the work date was already
-        // advanced, this reset already ran — the no-op detection in
-        // commitState() turns this into a version-neutral success. Manual
-        // (force) resets always run; their idempotency comes from operationId.
-        if (!opts.force && freshDoc.currentWorkDate === todayStr) {
-          return { doc: freshDoc, result: null };
-        }
+        // B2: markers for every venue, missing ones from the legacy date as
+        // it stands BEFORE this commit.
+        const markers = materializedWorkDates(freshDoc, freshVenues, freshAgencies, now);
         // Agency scoping: filter venues to the caller's agency when scoped.
-        // Without scoping (scheduled system reset), all venues are reset.
         const scopedVenues = scopeAgencyId
           ? freshVenues.filter((v) => (v.agencyId || 'agency-hkc') === scopeAgencyId)
           : freshVenues;
         const targetVenues = targetVenueId
           ? scopedVenues.filter((v) => v.id === targetVenueId)
           : scopedVenues;
-        const snapshots = targetVenues.map((v) =>
-          buildSnapshot(v, freshTasks.filter((t) => t.venueId === v.id))
+
+        // The due set: the single authority for snapshots, task resets,
+        // marker advance and broadcast.
+        const plan: Array<{ v: any; tz: string; archiveDate: string; newMarker: string; catchUpDays?: number }> = [];
+        for (const v of targetVenues) {
+          const tz = venueTimeZoneIn(v, freshAgencies);
+          const today = workDateIn(tz, now);
+          const marker = markers[v.id];
+          if (opts.force) {
+            const newMarker = laterWorkDate(marker, today);
+            plan.push({ v, tz, archiveDate: newMarker, newMarker });
+          } else if (today > marker) {
+            plan.push({ v, tz, archiveDate: marker, newMarker: today, catchUpDays: workDaysBetween(marker, today) });
+          }
+        }
+        // Legacy NY rollover (scheduled only): tasks whose venue no longer
+        // exists reset on it, exactly as before item 6.
+        const nyToday = workDateIn(DEFAULT_TIME_ZONE, now);
+        const legacyDue = !opts.force && (!isWorkDate(freshDoc.currentWorkDate) || nyToday > freshDoc.currentWorkDate);
+        const knownVenueIds = new Set(freshVenues.map((v) => v.id));
+        const orphanTasks = legacyDue ? freshTasks.filter((t) => !knownVenueIds.has(t.venueId)) : [];
+
+        if (plan.length === 0 && !legacyDue) {
+          // Nothing due: version-neutral no-op (commitState's no-op path).
+          return { doc: freshDoc, result: null };
+        }
+        const dueIds = new Set(plan.map((p) => p.v.id));
+        const snapshots = plan.map((p) =>
+          buildSnapshot(p.v, freshTasks.filter((t) => t.venueId === p.v.id), p.archiveDate, p.tz, p.catchUpDays)
         );
-        // Scoped venue IDs for task filtering (null = all venues, system reset).
-        const scopedVenueIds = scopeAgencyId ? new Set(targetVenues.map((v) => v.id)) : null;
+        const orphanIds = new Set(orphanTasks.map((t) => t.id));
+        for (const t of orphanTasks) orphanAgencyIds.add(t.agencyId || 'agency-hkc');
+        const newMarkers = { ...markers };
+        for (const p of plan) newMarkers[p.v.id] = p.newMarker;
         // CORE FIX (round 4): the transaction result carries ALL snapshots
         // (each tagged with its agencyId). The broadcast below selects the
         // snapshots for each agency — never send agency A's snapshot to
-        // agency B. Previously this returned only snapshots[0], which leaked
-        // the first agency's snapshot to every agency on scheduled resets.
+        // agency B.
         return {
           doc: {
             ...freshDoc,
-            historyLogs: [...snapshots, ...freshHistory],
-            tasks: freshTasks.map((t) => resetTask(t, scopedVenueIds)),
-            currentWorkDate: todayStr,
+            historyLogs: snapshots.length ? [...snapshots, ...freshHistory] : freshHistory,
+            tasks: freshTasks.map((t) => (dueIds.has(t.venueId) || orphanIds.has(t.id) ? resetTask(t) : t)),
+            venueWorkDates: newMarkers,
+            currentWorkDate: legacyDue ? nyToday : freshDoc.currentWorkDate,
           },
           result: snapshots,
         };
@@ -4681,13 +4904,19 @@ async function executeDailyReset(
   }
 
   // Broadcast per-agency ONLY after commit (in-memory cache is now fresh).
-  // AGENCY SCOPING: each agency receives ONLY its own snapshots.
-  // committed.result is the full snapshots array (each tagged with agencyId);
-  // filter per agency so agency B never receives agency A's history/notes.
+  // AGENCY SCOPING: each agency receives ONLY its own snapshots, and only
+  // agencies that had a due venue (or reset orphan tasks) hear anything.
+  // A no-op (nothing due) broadcasts nothing.
+  if (committed.result === null || committed.result === undefined) return committed;
   const allSnapshots: any[] = Array.isArray(committed.result) ? committed.result : [];
-  const broadcastAgencies = scopeAgencyId
+  const touched = new Set<string>([
+    ...allSnapshots.map((s: any) => s.agencyId || 'agency-hkc'),
+    ...orphanAgencyIds,
+  ]);
+  const broadcastAgencies = (scopeAgencyId
     ? agencies.filter((a: any) => a.id === scopeAgencyId)
-    : agencies;
+    : agencies
+  ).filter((a: any) => opts.force || touched.has(a.id));
   for (const a of broadcastAgencies) {
     const aid = a.id;
     const agencySnapshots = allSnapshots.filter((s: any) => (s.agencyId || 'agency-hkc') === aid);
@@ -4717,21 +4946,39 @@ async function executeDailyReset(
   return committed;
 }
 
-// Scheduled interval: check every 60s for midnight rollover.
-// Uses America/New_York consistently with executeDailyReset's todayStr.
-setInterval(() => {
-  // No background writes: maintenance mode (cutover window), FORCE_LOCAL_MODE,
-  // or staged revision (must not write pre-cutover). The daily reset is a write.
-  if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  if (today !== currentWorkDate) {
-    console.log(`[Scheduled Reset] Rollover detected from ${currentWorkDate} to ${today}`);
-    // Async: resolves only after the transaction commits. Log-and-continue on
-    // failure — the next 60s tick retries the rollover.
-    executeDailyReset(undefined, 'scheduled_midnight_cron').catch((err) =>
-      log.warn('[Scheduled Reset] Failed:', (err as any)?.message)
-    );
+/**
+ * Item 6 — one scheduled rollover pass at `now`: if any venue (or the legacy
+ * NY marker) is due, run the scheduled reset; otherwise nothing. One pass at
+ * a time (in-flight guard); the transaction itself is the cross-instance
+ * guard. No background writes in maintenance mode, FORCE_LOCAL_MODE or on a
+ * staged revision.
+ */
+let rolloverInFlight: Promise<{ reset: string[]; version: number | null }> | null = null;
+function runRolloverTick(now: Date = serverNow()): Promise<{ reset: string[]; version: number | null; skipped?: string }> {
+  if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) {
+    return Promise.resolve({ reset: [], version: null, skipped: 'no-background-writes' });
   }
+  if (rolloverInFlight) return rolloverInFlight;
+  const { due, legacyDue } = venuesDueAt(now);
+  if (due.length === 0 && !legacyDue) return Promise.resolve({ reset: [], version: null });
+  log.info(`[Scheduled Reset] Rollover due for ${due.length} venue(s)${legacyDue ? ' + legacy NY marker' : ''}`);
+  rolloverInFlight = executeDailyReset(undefined, 'scheduled_midnight_cron', { now })
+    .then((committed) => {
+      const snaps: any[] = committed && Array.isArray(committed.result) ? committed.result : [];
+      return { reset: snaps.map((s: any) => s.venueId), version: committed ? committed.version : null };
+    })
+    .finally(() => {
+      rolloverInFlight = null;
+    });
+  return rolloverInFlight;
+}
+
+// Scheduled interval: check every 60 s whether any venue reached its local
+// midnight. Log-and-continue on failure — the next tick retries. In test
+// mode, while the fake clock is pinned, tests drive ticks themselves.
+setInterval(() => {
+  if (isTestMode() && testNowOverrideMs !== null) return;
+  runRolloverTick().catch((err) => log.warn('[Scheduled Reset] Failed:', (err as any)?.message));
 }, 60000);
 
 // REST API Endpoints
@@ -6747,9 +6994,16 @@ app.put('/api/agencies/current', async (req, res) => {
   // requireAdmin already sent the 403 — returning here without sending again.
   // (Sending a second response crashes the process: ERR_HTTP_HEADERS_SENT.)
   if (!user) return;
-  const { name, shortCode, certificationSeal, region, contactPhone, customDomain } = req.body;
+  const { name, shortCode, certificationSeal, region, contactPhone, customDomain, timeZone } = req.body;
 
   const agencyId = user.agencyId || 'agency-hkc';
+  // Item 6: optional agency zone (undefined = unchanged, null/'' = clear ->
+  // America/New_York for every venue without its own zone).
+  const tzInput = parseTimeZoneInput(timeZone);
+  if (tzInput.error) {
+    return res.status(400).json({ error: tzInput.error });
+  }
+  const zoneNow = serverNow();
   const existing = agencies.find((a) => a.id === agencyId);
   if (!existing) {
     return res.status(404).json({ error: 'Agency record not found.' });
@@ -6788,8 +7042,19 @@ app.put('/api/agencies/current', async (req, res) => {
         contactPhone: contactPhone !== undefined ? contactPhone.trim() : freshAgency.contactPhone,
         customDomain: customDomain !== undefined ? newCustomDomain : freshAgency.customDomain,
       };
+      if (tzInput.value !== undefined) {
+        if (tzInput.value) (updated as any).timeZone = tzInput.value;
+        else delete (updated as any).timeZone;
+      }
       const newAgencies = freshAgencies.map((a) => (a.id === agencyId ? updated : a));
-      return { doc: { ...freshDoc, agencies: newAgencies }, result: updated };
+      if (tzInput.value === undefined) {
+        return { doc: { ...freshDoc, agencies: newAgencies }, result: updated };
+      }
+      // B3: venues that inherit the agency zone get the prospective rule
+      // (never a reset, never a backwards marker). Only this agency changes.
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const newMarkers = workDatesAfterZoneChange(freshDoc, freshVenues, freshAgencies, freshVenues, newAgencies, zoneNow);
+      return { doc: { ...freshDoc, agencies: newAgencies, venueWorkDates: newMarkers }, result: updated };
     },
     { label: 'update-agency', requireVersion: true }
   );
@@ -6967,20 +7232,78 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
   // Used by test-16 to verify per-agency broadcast scoping of scheduled resets.
   app.post('/api/__test__/scheduled-reset', async (req, res) => {
     try {
-      const yesterday = new Date(Date.now() - 86400000)
-        .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      // Item 6: rewind every venue's marker one day in its own zone (and the
+      // legacy NY marker), so every venue is due on the scheduled path.
+      const now = serverNow();
       await commitState(
-        (freshDoc) => ({
-          doc: { ...freshDoc, currentWorkDate: yesterday },
-          result: { success: true },
-        }),
+        (freshDoc) => {
+          const fv: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+          const fa: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+          const rewound: Record<string, string> = { ...sanitizeVenueWorkDates(freshDoc.venueWorkDates) };
+          for (const v of fv) rewound[v.id] = addDays(workDateIn(venueTimeZoneIn(v, fa), now), -1);
+          return {
+            doc: {
+              ...freshDoc,
+              venueWorkDates: rewound,
+              currentWorkDate: addDays(workDateIn(DEFAULT_TIME_ZONE, now), -1),
+            },
+            result: { success: true },
+          };
+        },
         { label: 'test-rewind-work-date' }
       );
-      const committed = await executeDailyReset(undefined, 'test-scheduled-reset');
+      const committed = await executeDailyReset(undefined, 'test-scheduled-reset', { now });
       res.json({ success: true, version: committed ? committed.version : null });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
+  });
+
+  // TEST ONLY (item 6): pin the server clock used by every work-day decision
+  // (body { iso: "2026-11-01T05:30:00Z" }), or clear it ({ iso: null }).
+  // While pinned, the 60-s interval skips; tests drive ticks themselves.
+  app.post('/api/__test__/clock', async (req, res) => {
+    const iso = (req.body || {}).iso;
+    if (iso === null || iso === undefined || iso === '') {
+      testNowOverrideMs = null;
+      return res.json({ now: serverNow().toISOString(), pinned: false });
+    }
+    const ms = Date.parse(String(iso));
+    if (!Number.isFinite(ms)) return res.status(400).json({ error: 'bad iso' });
+    testNowOverrideMs = ms;
+    res.json({ now: serverNow().toISOString(), pinned: true });
+  });
+
+  // TEST ONLY (item 6): run ONE scheduled rollover pass at the (fake) clock
+  // and await its commit. { parallel: N } instead runs N scheduled resets
+  // concurrently straight into the transaction (bypassing the in-flight
+  // guard) to prove the transaction alone prevents a double archive.
+  app.post('/api/__test__/rollover-tick', async (req, res) => {
+    try {
+      const parallel = Number((req.body || {}).parallel || 0);
+      if (parallel > 1) {
+        const now = serverNow();
+        const results = await Promise.all(
+          Array.from({ length: Math.min(parallel, 5) }, () =>
+            executeDailyReset(undefined, 'test-parallel-reset', { now })
+          )
+        );
+        const reset = results.flatMap((c) => (c && Array.isArray(c.result) ? c.result.map((s: any) => s.venueId) : []));
+        return res.json({ reset, version: stateVersion });
+      }
+      const out = await runRolloverTick(serverNow());
+      res.json(out);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // TEST ONLY (item 6): run the overdue check at the (fake) clock and return
+  // the venue-local dedupe keys it would alert for ({ clear: true } empties
+  // the dedupe map first). No push is sent in tests (no VAPID keys).
+  app.post('/api/__test__/overdue-check', async (req, res) => {
+    if ((req.body || {}).clear === true) overdueNotified.clear();
+    res.json({ notified: checkOverdueTasks(serverNow()) });
   });
 
   // TEST ONLY: injects venues/tasks/agencies/users directly into Firestore
@@ -6999,6 +7322,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
       events = [], incidents = [], handoffNotes = [], announcements = [],
       taskTemplates = [], eventTaskTemplates = [], approvedIngredients = [], factoryReports = [],
       kioskDevices: newKioskDevices = [], historyLogs = [],
+      venueWorkDates: newWorkDates, currentWorkDate: newLegacyWorkDate,
     } = req.body || {};
     try {
       await commitState(
@@ -7024,6 +7348,20 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
               factoryReports: [...(freshDoc.factoryReports || []), ...factoryReports],
               kioskDevices: [...(freshDoc.kioskDevices || []), ...newKioskDevices],
               historyLogs: [...(freshDoc.historyLogs || []), ...historyLogs],
+              // Item 6 (test-only): pin per-venue markers / the legacy date;
+              // a venueWorkDates value of null removes that venue's marker
+              // (to simulate pre-item-6 legacy data).
+              ...(newWorkDates && typeof newWorkDates === 'object'
+                ? {
+                    venueWorkDates: Object.fromEntries(
+                      Object.entries({ ...(freshDoc.venueWorkDates || {}), ...newWorkDates }).filter(
+                        ([, v]) => v !== null
+                      )
+                    ),
+                  }
+                : {}),
+              ...(newWorkDates === null ? { venueWorkDates: {} } : {}),
+              ...(isWorkDate(newLegacyWorkDate) ? { currentWorkDate: newLegacyWorkDate } : {}),
             },
             result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length + newKioskDevices.length },
           };
@@ -7250,6 +7588,7 @@ app.post('/api/venues', async (req, res) => {
     ownerEmail,
     ownerPassword,
     templateType,
+    timeZone,
   } = req.body;
 
   const caller = requireAdmin(req, res);
@@ -7262,6 +7601,11 @@ app.post('/api/venues', async (req, res) => {
 
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Venue Name is required.' });
+  }
+  // Item 6: optional IANA zone (absent/'' = follow the agency).
+  const tzInput = parseTimeZoneInput(timeZone);
+  if (tzInput.error) {
+    return res.status(400).json({ error: tzInput.error });
   }
 
   // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
@@ -7284,7 +7628,11 @@ app.post('/api/venues', async (req, res) => {
     certification: certification?.trim() || callerAgency?.certificationSeal || 'Certified Kosher',
     ownerEmail: cleanOwnerEmail,
     createdAt,
+    ...(tzInput.value ? { timeZone: tzInput.value } : {}),
   };
+  // Item 6: the new venue starts on today's date in its own zone, so its
+  // starter tasks are not reset by the next rollover tick.
+  const venueNow = serverNow();
 
   // Generate starter tasks (pure function of inputs — safe to pre-compute).
   const starterTasks = generateTemplateTasks(newVenueId, templateType || 'restaurant', callerAgencyId);
@@ -7338,6 +7686,13 @@ app.post('/api/venues', async (req, res) => {
           venues: [...freshVenues, newVenue],
           users: newUsers,
           tasks: [...freshTasks, ...tasksToAdd],
+          venueWorkDates: {
+            ...sanitizeVenueWorkDates(freshDoc.venueWorkDates),
+            [newVenueId]: workDateIn(
+              venueTimeZoneIn(newVenue, Array.isArray(freshDoc.agencies) ? freshDoc.agencies : []),
+              venueNow
+            ),
+          },
         },
         result: { venue: newVenue, tasks: tasksToAdd, owner: createdOwner },
       };
@@ -7365,7 +7720,7 @@ app.post('/api/venues', async (req, res) => {
 // Admin edits venue details
 app.put('/api/venues/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, category, address, certification, ownerEmail } = req.body;
+  const { name, category, address, certification, ownerEmail, timeZone } = req.body;
 
   const caller = requireAdmin(req, res);
   // requireAdmin already sent the 403 — see the note above; never double-send.
@@ -7379,8 +7734,20 @@ app.put('/api/venues/:id', async (req, res) => {
 
   if (!requireSameAgency(req, res, existing, 'venues')) return;
 
-  // Baseline for semantic conflict detection on name/category/address.
-  const baseline = { name: existing.name, category: existing.category, address: existing.address };
+  // Item 6: optional zone change (undefined = unchanged, null/'' = clear).
+  const tzInput = parseTimeZoneInput(timeZone);
+  if (tzInput.error) {
+    return res.status(400).json({ error: tzInput.error });
+  }
+  const zoneNow = serverNow();
+
+  // Baseline for semantic conflict detection on name/category/address/timeZone.
+  const baseline = {
+    name: existing.name,
+    category: existing.category,
+    address: existing.address,
+    timeZone: (existing as any).timeZone || null,
+  };
 
   const committed = await commitOrRespond(
     req, res,
@@ -7395,6 +7762,9 @@ app.put('/api/venues/:id', async (req, res) => {
           return { conflict: `Conflict: venue ${field} was changed by someone else. Please refresh and try again.` };
         }
       }
+      if (tzInput.value !== undefined && ((freshVenue as any).timeZone || null) !== baseline.timeZone) {
+        return { conflict: 'Conflict: venue time zone was changed by someone else. Please refresh and try again.' };
+      }
       const updated: Venue = {
         ...freshVenue,
         name: name !== undefined ? name.trim() : freshVenue.name,
@@ -7403,15 +7773,36 @@ app.put('/api/venues/:id', async (req, res) => {
         certification: certification !== undefined ? certification.trim() : freshVenue.certification,
         ownerEmail: ownerEmail !== undefined ? ownerEmail?.trim().toLowerCase() : freshVenue.ownerEmail,
       };
+      if (tzInput.value !== undefined) {
+        if (tzInput.value) (updated as any).timeZone = tzInput.value;
+        else delete (updated as any).timeZone;
+      }
       const newVenues = freshVenues.map((v) => (v.id === id ? updated : v));
-      return { doc: { ...freshDoc, venues: newVenues }, result: updated };
+      if (tzInput.value === undefined) {
+        return { doc: { ...freshDoc, venues: newVenues }, result: updated };
+      }
+      // B3: a zone change never resets and never moves a marker backwards.
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const newMarkers = workDatesAfterZoneChange(freshDoc, freshVenues, freshAgencies, newVenues, freshAgencies, zoneNow);
+      return { doc: { ...freshDoc, venues: newVenues, venueWorkDates: newMarkers }, result: updated };
     },
     { label: 'update-venue', requireVersion: true }
   );
   if (!committed) return;
   const updated = committed.result as Venue;
   broadcast('VENUE_UPDATED', { venue: updated, agencyId: callerAgencyId }, undefined, callerAgencyId);
-  res.json({ success: true, venue: updated });
+  // Item 6 (B3a): the venue's zone, its current workday marker and the date
+  // of the next local midnight at which it becomes due (computed, not
+  // promised from the zone alone).
+  const effTz = venueTimeZoneIn(updated, agencies);
+  const marker = venueWorkDates[updated.id] || (isWorkDate(currentWorkDate) ? currentWorkDate : null);
+  res.json({
+    success: true,
+    venue: updated,
+    effectiveTimeZone: effTz,
+    workDate: marker,
+    nextResetDate: nextResetDate(effTz, marker, zoneNow),
+  });
 });
 
 // Admin deletes a venue

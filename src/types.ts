@@ -40,6 +40,7 @@ export interface Venue {
   certification?: string;
   ownerEmail?: string;
   createdAt: string;
+  timeZone?: string; // Item 6: IANA zone for this venue's work day (absent = the agency's zone)
   totalTasksToday?: number;
   completedTasksToday?: number;
   completionRate?: number;
@@ -52,6 +53,7 @@ export interface User {
   agencyName?: string; // Display name of user's kosher agency
   agencySeal?: string; // Rabbinical seal / kashrut standard of the agency
   agencyShortCode?: string; // Short code e.g. HKC, cRc
+  agencyTimeZone?: string; // Item 6: the agency's IANA zone (absent = America/New_York)
   email: string;
   name: string;
   role: UserRole;

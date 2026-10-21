@@ -16,6 +16,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { KosherEvent, EventTask, User as UserType, Venue } from '../types';
+import { venueTimeZone, workDateIn } from '../lib/workday';
 
 interface EventsModalProps {
   isOpen: boolean;
@@ -66,7 +67,9 @@ export const EventsModal: React.FC<EventsModalProps> = ({
       );
     }
     if (filterMode === 'upcoming') {
-      const today = new Date().toISOString().split('T')[0];
+      // Item 6: "today" is the event venue's local date, not UTC.
+      const evVenue = allVenues.find((v) => v.id === e.venueId) || null;
+      const today = workDateIn(venueTimeZone(evVenue, currentUser), new Date());
       return e.date >= today;
     }
     return true;
