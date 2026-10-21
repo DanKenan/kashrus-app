@@ -2471,11 +2471,17 @@ function hydrateState(parsed: any) {
         approvedIngredients = Array.isArray(parsed.approvedIngredients) ? parsed.approvedIngredients : [];
         factoryReports = Array.isArray(parsed.factoryReports) ? parsed.factoryReports : [];
 
+        // Same normalisation and template load as the other branch (rule N):
+        // the in-transaction caller checks compare against NORMALIZED cache
+        // users, and event task templates must survive a reload here too.
         if (Array.isArray(parsed.users) && parsed.users.length > 0) {
-          users = parsed.users;
+          users = parsed.users.map((u: any) => normalizeStoredUser(u));
         } else {
-          users = [DEFAULT_USERS[0]];
+          users = [{ ...DEFAULT_USERS[0] }];
         }
+        eventTaskTemplates = Array.isArray(parsed.eventTaskTemplates)
+          ? parsed.eventTaskTemplates.filter((t: any) => t && t.id && t.title)
+          : [];
       } else {
         if (Array.isArray(parsed.venues)) {
           venues = parsed.venues.map((v: any) => ({

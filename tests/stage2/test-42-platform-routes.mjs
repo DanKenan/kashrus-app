@@ -185,6 +185,41 @@ export default {
     const loginJson = await login.json().catch(() => ({}));
     assert(!loginJson.token && loginJson.success !== true, `no session with the attacker password (got ${login.status} ${JSON.stringify(loginJson).slice(0, 80)})`);
 
-    return `platform routes: 4 non-operator callers ×${ROUTES.length} routes → 403 (kiosk token refused${kioskToken ? '' : ': not minted'}), no writes; operator passes the gate; demoted stored record refuses the same token, restore re-allows; restore-demo 410 for all, no write/user; public setup 403 for the passwordless admin and the seed admin, nothing changed`;
+    // 6. Clean-slate mode keeps working after restore-demo's retirement.
+    //    restore-demo used to be the only thing that turned the app-wide
+    //    isDemoCleared flag back off; any agency's clean-slate turns it on.
+    //    Hydration's clean-slate branch must still normalise users (the
+    //    in-transaction "access changed" check compares normalised records)
+    //    and load event task templates.
+    const vH = `venue-t42h-${ts}`;
+    const mashH = `user-t42-mashh-${ts}`;
+    const evtH = `evt-t42h-${ts}`;
+    const etplH = `etpl-t42h-${ts}`;
+    const cs = await fetch(`${baseUrl}/api/admin/clean-slate`, { method: 'POST', headers: callers['agency B admin'], body: JSON.stringify({}) });
+    assert(cs.status === 200, `agency B clean-slate: ${cs.status}`);
+    const inj6 = await ctx.api('POST', '/api/__test__/inject-fixture', {
+      venues: [{ id: vH, name: `T42 Venue H ${ts}`, agencyId: 'agency-hkc' }],
+      // A stored record without permissions (legacy shape) — hydration must normalise it.
+      users: [{ id: mashH, email: `mashh42-${ts}@hkc.test`, name: 'T42 HKC mash', role: 'mashgiach', agencyId: 'agency-hkc', venueId: vH }],
+      events: [{ id: evtH, agencyId: 'agency-hkc', venueId: vH, title: `T42 Event ${ts}`, location: 'Hall', date: '2026-11-02', tasks: [] }],
+      eventTaskTemplates: [{ id: etplH, agencyId: 'agency-hkc', title: `T42 ETpl ${ts}`, sortOrder: 0 }],
+    });
+    assert(inj6.status === 200, `inject-fixture (6): ${inj6.status}`);
+    assert((await ctx.getDoc()).isDemoCleared === true, 'precondition: clean-slate mode is on');
+    {
+      const r = await call(baseUrl, 'GET', '/api/event-task-templates', op);
+      assert(r.status === 200 && (r.json?.templates || []).some((t) => t.id === etplH), `clean-slate mode: own event task template must be listed (got ${r.status})`);
+    }
+    {
+      const tM = auth(await mintToken(baseUrl, mashH));
+      const er = await call(baseUrl, 'GET', '/api/events', tM);
+      const ev = (er.json?.events || []).find((e) => e.id === evtH);
+      assert(ev, 'clean-slate mode: the mashgiach can read the venue event');
+      const body = { ...ev, tasks: [...(ev.tasks || []), { id: `etask-t42h-${ts}`, title: `Added ${ts}`, isCompleted: false }], expectedVersion: await ctx.getVersion(), operationId: `op-t42h-${ts}` };
+      const pr = await call(baseUrl, 'PUT', `/api/events/${evtH}`, tM, body);
+      assert(pr.status === 200, `clean-slate mode: mashgiach tasks-only event save must be 200, got ${pr.status} ${JSON.stringify(pr.json).slice(0, 120)}`);
+    }
+
+    return `platform routes: 4 non-operator callers ×${ROUTES.length} routes → 403 (kiosk token refused${kioskToken ? '' : ': not minted'}), no writes; operator passes the gate; demoted stored record refuses the same token, restore re-allows; restore-demo 410 for all, no write/user; public setup 403 for the passwordless admin and the seed admin, nothing changed; clean-slate mode: templates listed, legacy-shape mashgiach event save 200`;
   },
 };
