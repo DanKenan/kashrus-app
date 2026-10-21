@@ -11,10 +11,15 @@ import {
   Building2, 
   CheckSquare, 
   PlusCircle,
+  KeyRound,
+  Phone,
+  CheckCircle2,
 } from 'lucide-react';
 import { User as UserType, UserRole, Task, Venue, UserPermissions } from '../types';
 import { getRoleLabel, canUserAssignTasks, canUserFillTasks, DEFAULT_ROLE_PERMISSIONS } from '../lib/permissions';
 import { ConfirmModal } from './ConfirmModal';
+import { KioskCodeDialog } from './KioskCodeDialog';
+import { normalizePhone } from '../lib/kioskCodeShare';
 
 interface TeamModalProps {
   isOpen: boolean;
@@ -30,61 +35,16 @@ interface TeamModalProps {
     password?: string; 
     venueId?: string;
     permissions?: UserPermissions;
+    phoneNumber?: string;
   }) => Promise<void>;
   onUpdateUser?: (userId: string, updates: { 
     role?: UserRole; 
     permissions?: UserPermissions;
     kioskPin?: string;
+    phoneNumber?: string;
   }) => Promise<void>;
   onDeleteUser: (userId: string) => Promise<void>;
 }
-
-/** Small inline editor for a user's kiosk PIN (4-6 digits, empty = none). */
-const KioskPinEditor: React.FC<{
-  userId: string;
-  onSave: (pin: string) => void;
-  isBusy: boolean;
-}> = ({ userId, onSave, isBusy }) => {
-  const [pin, setPin] = useState('');
-  const [touched, setTouched] = useState(false);
-  // Reset when switching to a different user row
-  React.useEffect(() => {
-    setPin('');
-    setTouched(false);
-  }, [userId]);
-  const valid = pin === '' || /^[0-9]{4,6}$/.test(pin);
-  return (
-    <span className="inline-flex items-center gap-1.5" title="Kiosk sign-in code for shared tablets (4-6 digits, empty to clear)">
-      <Lock className="w-3.5 h-3.5 text-ink-faint" />
-      <input
-        value={pin}
-        onChange={(e) => {
-          setPin(e.target.value.replace(/[^0-9]/g, '').slice(0, 6));
-          setTouched(true);
-        }}
-        onBlur={() => {
-          if (touched && valid) {
-            onSave(pin);
-            setTouched(false);
-          }
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && valid) {
-            onSave(pin);
-            setTouched(false);
-            (e.target as HTMLInputElement).blur();
-          }
-        }}
-        disabled={isBusy}
-        placeholder="Code"
-        inputMode="numeric"
-        className={`w-20 text-xs px-2 py-1 rounded-xl border bg-sunken text-ink text-center tracking-[0.2em] focus:outline-none ${
-          touched && !valid ? 'border-red-500' : 'border-line focus:border-gold'
-        }`}
-      />
-    </span>
-  );
-};
 
 export const TeamModal: React.FC<TeamModalProps> = ({
   isOpen,
@@ -100,6 +60,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [newPhone, setNewPhone] = useState('');
+  // K1: whose kiosk-code sheet is open (looked up fresh from `users`).
+  const [codeTargetId, setCodeTargetId] = useState<string | null>(null);
   const [role, setRole] = useState<UserRole>('mashgiach');
   const [canFill, setCanFill] = useState<boolean>(true);
   const [canAssign, setCanAssign] = useState<boolean>(false);
@@ -108,8 +71,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
   const [userToDelete, setUserToDelete] = useState<UserType | null>(null);
-  // Coordinator view: read-only team list; the ONLY control is the Kiosk PIN
-  // editor on mashgiach/worker rows (Don's decision 8:50 PM ET Oct 19).
+  // Coordinator view: read-only team list; the ONLY control is the kiosk
+  // code (+ optional phone) sheet on mashgiach/worker rows (Don's decision
+  // 8:50 PM ET Oct 19; phone added in K1, Oct 20).
   const isCoordinatorView = currentUser?.role === 'coordinator';
   const [actionAlert, setActionAlert] = useState<string | null>(null);
 
@@ -136,6 +100,12 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       return;
     }
 
+    const phoneClean = normalizePhone(newPhone);
+    if (phoneClean === null) {
+      setError("That phone number doesn't look right. Use digits, with + and the country code outside the US.");
+      return;
+    }
+
     const emailClean = email.trim().toLowerCase();
     if (users.some((u) => (u.email?.toLowerCase() || '') === emailClean)) {
       setError('A team member with this email already exists.');
@@ -154,10 +124,12 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           canFillTasks: canFill,
           canAssignTasks: canAssign,
         },
+        ...(phoneClean ? { phoneNumber: phoneClean } : {}),
       });
       setName('');
       setEmail('');
       setPassword('');
+      setNewPhone('');
       setRole('mashgiach');
       setCanFill(true);
       setCanAssign(false);
@@ -230,22 +202,22 @@ export const TeamModal: React.FC<TeamModalProps> = ({
     setUserToDelete(user);
   };
 
-  const handleSaveKioskPin = async (user: UserType, pin: string) => {
-    if (!onUpdateUser) return;
-    if (pin !== '' && !/^[0-9]{4,6}$/.test(pin)) {
-      setActionAlert('Kiosk code must be 4–6 digits.');
-      return;
-    }
-    try {
-      setUpdatingUserId(user.id);
-      await onUpdateUser(user.id, { kioskPin: pin });
-      setActionAlert(pin === '' ? `Kiosk code cleared for ${user.name}.` : `Kiosk code set for ${user.name}.`);
-    } catch (err: any) {
-      setActionAlert(err?.message || 'Failed to save kiosk code');
-    } finally {
-      setUpdatingUserId(null);
-    }
+  // K1: explicit kiosk-code actions (no save-on-blur). Errors are thrown
+  // back to the sheet, which shows them; success shows the code ONCE.
+  const saveKioskCode = async (user: UserType, code: string) => {
+    if (!onUpdateUser) throw new Error('Not allowed.');
+    await onUpdateUser(user.id, { kioskPin: code });
   };
+  const removeKioskCode = async (user: UserType) => {
+    if (!onUpdateUser) throw new Error('Not allowed.');
+    await onUpdateUser(user.id, { kioskPin: '' });
+    setActionAlert(`Kiosk code removed for ${user.name}.`);
+  };
+  const saveKioskPhone = async (user: UserType, phone: string) => {
+    if (!onUpdateUser) throw new Error('Not allowed.');
+    await onUpdateUser(user.id, { phoneNumber: phone });
+  };
+  const codeTarget = codeTargetId ? users.find((u) => u.id === codeTargetId) || null : null;
 
   // Coordinator view: own venue only (same agencyId AND venueId as the
   // coordinator; a venue-less coordinator sees an empty list).
@@ -393,6 +365,26 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                 </div>
               </div>
 
+              {/* K1: optional phone, so a kiosk code can be sent straight to them */}
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                <div className="sm:col-span-4">
+                  <label htmlFor="new-member-phone-input" className="block font-semibold text-ink-soft mb-1">
+                    Phone (optional)
+                  </label>
+                  <div className="relative">
+                    <Phone className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      id="new-member-phone-input"
+                      type="tel"
+                      placeholder="For sending the kiosk code"
+                      value={newPhone}
+                      onChange={(e) => setNewPhone(e.target.value)}
+                      className="w-full pl-8 pr-3 py-2 rounded-xl border border-line bg-sunken text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
               {/* Permission checkboxes for the new user */}
               <div className="pt-2 border-t border-line flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                 <div className="flex items-center gap-5">
@@ -536,6 +528,12 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         <p className="text-xs text-ink-soft truncate">
                           {user.email}
                         </p>
+                        {user.phoneNumber && (
+                          <p className="text-xs text-ink-faint truncate inline-flex items-center gap-1 tnum">
+                            <Phone className="w-3 h-3" />
+                            {user.phoneNumber}
+                          </p>
+                        )}
                       </div>
                     </div>
 
@@ -582,18 +580,37 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         {assignedCount} tasks
                       </span>
 
-                      {/* Kiosk PIN — 4-6 digit code for shared wall tablets.
-                          Coordinators: only on mashgiach/worker rows. */}
-                      {onUpdateUser && !isPrimaryAdmin && (
+                      {/* K1: kiosk code — explicit Set / Reset (no save-on-blur) and a
+                          "Code set ✓" marker from the server's hasKioskPin boolean.
+                          Admin view: every mashgiach/worker/coordinator/admin row (an
+                          admin's kiosk session is mashgiach-only on the server).
+                          Coordinator view: mashgiach/worker rows only. */}
+                      {onUpdateUser && (
                         isCoordinatorView
                           ? ['mashgiach', 'worker'].includes(user.role)
-                          : ['mashgiach', 'worker', 'coordinator'].includes(user.role)
+                          : ['mashgiach', 'worker', 'coordinator', 'admin'].includes(user.role)
                       ) && (
-                        <KioskPinEditor
-                          userId={user.id}
-                          onSave={(pin) => handleSaveKioskPin(user, pin)}
-                          isBusy={isBusy}
-                        />
+                        <span className="inline-flex items-center gap-1.5">
+                          {user.hasKioskPin && (
+                            <span
+                              data-testid="kiosk-code-set"
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-xl text-xs font-semibold bg-ok-bg border border-ok/40 text-ok"
+                              title="This person has a kiosk code. It can't be read back; Reset makes a new one."
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              Code set
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setCodeTargetId(user.id)}
+                            data-testid={user.hasKioskPin ? 'kiosk-code-reset' : 'kiosk-code-set-btn'}
+                            className="pressable inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border border-line bg-sunken hover:bg-gold-wash/60 text-ink cursor-pointer"
+                          >
+                            <KeyRound className="w-3.5 h-3.5 text-gold-deep" />
+                            {user.hasKioskPin ? 'Reset code' : 'Set code'}
+                          </button>
+                        </span>
                       )}
 
                       {/* Delete Member Button (admin only) */}
@@ -628,6 +645,19 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* K1: kiosk code sheet (set / reset / remove, phone, one-time display) */}
+      <KioskCodeDialog
+        isOpen={Boolean(codeTarget)}
+        personName={codeTarget?.name || ''}
+        hasCode={Boolean(codeTarget?.hasKioskPin)}
+        phoneNumber={codeTarget?.phoneNumber}
+        canEditPhone={Boolean(onUpdateUser)}
+        onClose={() => setCodeTargetId(null)}
+        onSaveCode={(code) => (codeTarget ? saveKioskCode(codeTarget, code) : Promise.reject(new Error('Not found.')))}
+        onRemoveCode={() => (codeTarget ? removeKioskCode(codeTarget) : Promise.reject(new Error('Not found.')))}
+        onSavePhone={(phone) => (codeTarget ? saveKioskPhone(codeTarget, phone) : Promise.reject(new Error('Not found.')))}
+      />
 
       {/* Delete User Confirm Modal */}
       <ConfirmModal
