@@ -222,12 +222,12 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 type="button"
                 onClick={onOpenAgencyHome}
-                aria-label="Agency home"
+                aria-label="Agency dashboard"
                 aria-current={isAgencyHome ? 'page' : undefined}
                 className="min-w-11 min-h-11 shrink-0 inline-flex items-center justify-center gap-2 px-2 rounded-xl bg-surface border border-line-control text-ink hover:bg-sunken pressable cursor-pointer"
               >
                 <Home aria-hidden="true" className="w-5 h-5" />
-                <span className="hidden sm:inline text-sm font-semibold">Home</span>
+                <span className="hidden sm:inline text-sm font-semibold">Dashboard</span>
               </button>
             )}
 
@@ -694,12 +694,12 @@ export const Header: React.FC<HeaderProps> = ({
                 <button
                   type="button"
                   onClick={() => { setMobileMenuOpen(false); onOpenAgencyHome(); }}
-                  aria-label="Agency home"
+                  aria-label="Agency dashboard"
                   aria-current={isAgencyHome ? 'page' : undefined}
                   className="w-full min-w-11 min-h-11 flex items-center gap-2 px-3 rounded-xl bg-surface border border-line-control text-ink hover:bg-sunken text-sm font-semibold pressable cursor-pointer"
                 >
                   <Home aria-hidden="true" className="w-5 h-5" />
-                  <span>Agency home</span>
+                  <span>Agency dashboard</span>
                 </button>
               )}
             </div>
