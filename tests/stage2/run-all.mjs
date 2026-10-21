@@ -123,6 +123,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-57-identity-invariants.mjs')).default,
     (await import('./test-58-membership-isolation.mjs')).default,
     (await import('./test-59-projections-deletion.mjs')).default,
+    (await import('./test-60-two-membership-matrix.mjs')).default,
   ];
 
   const results = [];
