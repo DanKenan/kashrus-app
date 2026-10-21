@@ -117,6 +117,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-51-reset-signout.mjs')).default,
     (await import('./test-52-clean-slate-removed.mjs')).default,
     (await import('./test-53-multi-venue.mjs')).default,
+    (await import('./test-55-dashboard-zone-phone.mjs')).default,
   ];
 
   const results = [];
