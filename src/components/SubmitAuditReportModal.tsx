@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   X, 
   FileText, 
@@ -43,8 +43,6 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (!isOpen) return null;
-
   const totalIngredients = ingredients.length;
   const verifiedPresentCount = ingredients.filter((i) => i.verificationStatus === 'verified_present').length;
   const discrepancyCount = discrepancies.length;
@@ -56,7 +54,13 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
       ? 'passed' 
       : 'passed_with_notes';
 
-  const [status, setStatus] = useState<'passed' | 'passed_with_notes' | 'critical_violation_found'>(defaultStatus);
+  const [status, setStatus] = useState<'passed' | 'passed_with_notes' | 'critical_violation_found'>(() => defaultStatus);
+
+  useEffect(() => {
+    if (isOpen) setStatus(defaultStatus);
+  }, [isOpen]);
+
+  if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
