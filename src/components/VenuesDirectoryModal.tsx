@@ -165,12 +165,12 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
         {/* Header */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 px-6 py-4.5 border-b border-line bg-sunken">
           <div className="flex items-center gap-3 w-full sm:w-auto flex-1 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-gold-wash text-gold-ink flex items-center justify-center e2 shrink-0">
+            <div className="w-10 h-10 rounded-xl bg-gold-wash text-gold-ink hidden sm:flex items-center justify-center e2 shrink-0">
               <Building2 className="w-5 h-5" />
             </div>
             <div className="flex-1 min-w-0">
               <h2 className="text-base font-bold text-ink flex flex-col items-start sm:flex-row sm:flex-wrap sm:items-center gap-2">
-                <span className="min-w-0 break-words">Kosher Venues & Restaurants Platform Hub</span>
+                <span className="min-w-0">Kosher Venues & Restaurants Platform Hub</span>
                 <span className="tnum text-xs font-semibold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 shrink-0">
                   {venues.length} Facilities
                 </span>
