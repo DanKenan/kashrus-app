@@ -28,7 +28,8 @@
  *     with the Tier-1 backup's secret-key rule (password, pin, pepper, secret,
  *     token, apiKey, privateKey, reset/pairing/verification codes, … and
  *     their …Hash forms), so a secret-looking field added later cannot
- *     silently enter an export.
+ *     silently enter an export. A Web Push key bundle's `auth` member
+ *     (`keys.auth`, as in the Tier-1 rule) is removed wherever it is nested.
  */
 
 export const EXPORT_COLLECTIONS = [
@@ -85,14 +86,22 @@ export function isExportSecretKey(key: string): boolean {
   return false;
 }
 
-export function scrubSecrets(value: any, depth = 0): any {
+/** A Web Push-style key bundle ({ p256dh, auth }) lives under a `keys` /
+ * `…Keys` field; its `auth` member is a secret (Tier-1 backup rule). */
+function isKeyBundleField(key: string): boolean {
+  return /^keys$/i.test(key) || /[a-z]Keys$/.test(key);
+}
+
+export function scrubSecrets(value: any, depth = 0, parentKey = ''): any {
   if (depth > 20) return undefined;
-  if (Array.isArray(value)) return value.map((v) => scrubSecrets(v, depth + 1));
+  if (Array.isArray(value)) return value.map((v) => scrubSecrets(v, depth + 1, parentKey));
   if (value && typeof value === 'object') {
+    const inKeyBundle = isKeyBundleField(parentKey);
     const out: Record<string, any> = {};
     for (const [k, v] of Object.entries(value)) {
       if (isExportSecretKey(k)) continue;
-      out[k] = scrubSecrets(v, depth + 1);
+      if (inKeyBundle && /^auth$/i.test(k)) continue; // keys.auth (Web Push auth secret)
+      out[k] = scrubSecrets(v, depth + 1, k);
     }
     return out;
   }

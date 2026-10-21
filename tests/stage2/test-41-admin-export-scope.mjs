@@ -99,7 +99,7 @@ export default {
       ],
       tasks: [
         { id: `task-t41xa-${ts}`, title: marks.aTask, venueId: vA, agencyId: A, status: 'pending' },
-        { id: `task-t41xb-${ts}`, title: marks.bTask, venueId: vB, agencyId: B, status: 'pending', extra: [{ clientSecret: `LEAK-NESTED-${ts}`, note: 'kept' }] },
+        { id: `task-t41xb-${ts}`, title: marks.bTask, venueId: vB, agencyId: B, status: 'pending', extra: [{ clientSecret: `LEAK-NESTED-${ts}`, note: 'kept' }], metadata: { keys: { p256dh: 'pub-kept', auth: `LEAK-NESTED-AUTH-${ts}` } } },
         // Orphan: no agencyId and a venue that does not exist. (A record with NO
         // owner fields at all is normalised to the home agency + its default venue
         // when the server hydrates from Firestore — the app-wide legacy rule — so
@@ -135,6 +135,7 @@ export default {
     assert((eB.json.tasks || []).some((t) => t.title === marks.bTask), "admin B export misses B's own task (positive twin)");
     const bTask = (eB.json.tasks || []).find((t) => t.title === marks.bTask);
     assert(Array.isArray(bTask.extra) && bTask.extra[0]?.note === 'kept' && !('clientSecret' in bTask.extra[0]), 'nested secret inside an array must be scrubbed, data kept');
+    assert(bTask.metadata?.keys?.p256dh === 'pub-kept' && !('auth' in (bTask.metadata?.keys || {})), 'nested Web Push keys.auth must be scrubbed, p256dh kept');
     for (const m of [`T41X-ORPHAN-${ts}`, `T41X-MISMATCH-${ts}`]) assert(!eB.text.includes(m), `ambiguous/inconsistent ownership must be omitted: "${m}"`);
     assert(eB.json.restorable === false && !('_v' in eB.json) && !('currentWorkDate' in eB.json) && !('isDemoCleared' in eB.json), 'agency export must not look like a whole app-state backup');
     for (const m of [marks.aTask, marks.aName, marks.aEmail, marks.hkcTask, 'kenan@hartfordkashrut.org', A, vA, vH, 'venue-crown-market']) {
@@ -158,7 +159,7 @@ export default {
     assert(reg.status === 201 && regJson.token, `register: ${reg.status}`);
     const eI = await exportAs(baseUrl, auth(regJson.token));
     assert(eI.status === 200 && eI.json?.exportScope === 'agency' && eI.json.exportAgencyId === regJson.agency?.id, 'intruder export must be agency-scoped');
-    for (const m of [marks.aTask, marks.aName, marks.aEmail, marks.bTask, marks.hkcTask, 'kenan@hartfordkashrut.org', A, B, vH, 'agency-hkc', 'venue-crown-market']) {
+    for (const m of [marks.aTask, marks.aName, marks.aEmail, marks.bTask, marks.hkcTask, 'kenan@hartfordkashrut.org', A, B, vH, 'agency-hkc', 'venue-crown-market', `T41X-ORPHAN-${ts}`, `T41X-MISMATCH-${ts}`]) {
       assert(!eI.text.includes(m), `self-registered agency export leaks "${m}"`);
     }
     checkNoSecrets('intruder', eI, apiKeyValue);
@@ -167,7 +168,7 @@ export default {
     const eH2 = await exportAs(baseUrl, auth(tok.hkc2));
     assert(eH2.status === 200 && eH2.json?.exportScope === 'agency' && eH2.json.exportAgencyId === 'agency-hkc', `second HKC admin scope: ${eH2.json?.exportScope}`);
     assert(eH2.text.includes(marks.hkcTask), 'second HKC admin sees HKC data (positive twin)');
-    for (const m of [marks.aTask, marks.bTask, A, B]) assert(!eH2.text.includes(m), `second HKC admin export leaks "${m}"`);
+    for (const m of [marks.aTask, marks.bTask, A, B, `T41X-ORPHAN-${ts}`, `T41X-MISMATCH-${ts}`]) assert(!eH2.text.includes(m), `second HKC admin export leaks "${m}"`);
     checkNoSecrets('hkc admin 2', eH2, apiKeyValue);
 
     // 4. NO cross-agency export for anyone: the home agency's primary admin
@@ -175,7 +176,7 @@ export default {
     const eOp = await exportAs(baseUrl, ctx.authHeaders);
     assert(eOp.status === 200 && eOp.json?.exportScope === 'agency' && eOp.json.exportAgencyId === 'agency-hkc', `home primary admin scope: ${eOp.json?.exportScope}`);
     assert(eOp.text.includes(marks.hkcTask), 'home primary admin sees home data (positive twin)');
-    for (const m of [marks.aTask, marks.bTask, marks.aEmail, A, B, `T41X-ORPHAN-${ts}`]) assert(!eOp.text.includes(m), `home primary admin export leaks "${m}"`);
+    for (const m of [marks.aTask, marks.bTask, marks.aEmail, A, B, `T41X-ORPHAN-${ts}`, `T41X-MISMATCH-${ts}`]) assert(!eOp.text.includes(m), `home primary admin export leaks "${m}"`);
     assert(!('_v' in eOp.json) && eOp.json.restorable === false, 'home export is not a whole-database backup');
     checkNoSecrets('home primary admin', eOp, apiKeyValue);
     // Airtable: the key holder (A) sees its config with hasApiKey and no key.
@@ -187,6 +188,8 @@ export default {
     // A's own admin: twin of 1 from the other side.
     const eA = await exportAs(baseUrl, auth(tok.adminA));
     assert(eA.json?.exportAgencyId === A && eA.text.includes(marks.aTask) && !eA.text.includes(marks.bTask), 'admin A export: own data yes, B no');
+    // The mismatched record (agencyId B on A's venue) and the unknown-venue orphan are in nobody's export.
+    for (const m of [marks.bTask, marks.hkcTask, B, vB, vH, `T41X-ORPHAN-${ts}`, `T41X-MISMATCH-${ts}`]) assert(!eA.text.includes(m), `admin A export leaks "${m}"`);
 
     return 'every admin (self-registered agency, non-primary and primary home admin, A, B) exports only their own agency; orphan/mismatched records omitted; no secret keys, hashes or Airtable key value in any export; coordinator/mashgiach 403';
   },

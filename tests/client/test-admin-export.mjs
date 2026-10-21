@@ -17,6 +17,8 @@ for (const k of ['id', 'name', 'email', 'shortCode', 'agencyId', 'venueId', 'tit
 
 check('nested scrub', scrubSecrets({ a: 1, list: [{ x: 1, apiKey: 'K', deep: { refreshToken: 'R', ok: 2 } }], meta: { passwordHash: 'H' } }), { a: 1, list: [{ x: 1, deep: { ok: 2 } }], meta: {} });
 
+check('keys.auth scrub (Web Push bundle, nested)', scrubSecrets({ metadata: { keys: { p256dh: 'pub', auth: 'AUTH-SECRET' } }, sub: [{ endpoint: 'e', keys: { auth: 'X' } }], pushKeys: { auth: 'Y', p256dh: 'q' }, auth: 'top-level auth word kept' }), { metadata: { keys: { p256dh: 'pub' } }, sub: [{ endpoint: 'e', keys: {} }], pushKeys: { p256dh: 'q' }, auth: 'top-level auth word kept' });
+
 const venueAgency = new Map([['vA', 'A'], ['vB', 'B']]);
 check('owned: agency match', ownedByAgency({ agencyId: 'A' }, 'A', venueAgency), true);
 check('owned: agency mismatch', ownedByAgency({ agencyId: 'B' }, 'A', venueAgency), false);
@@ -36,7 +38,7 @@ const snap = {
   users: [{ id: 'u1', agencyId: 'A', email: 'a@a', password: 'P', kioskPinHash: 'H', phoneNumber: '+1', newSecretToken: 'S' }, { id: 'u2', agencyId: 'B' }, { id: 'u3', email: 'legacy@h' }],
   airtableConfigs: [{ id: 'c1', agencyId: 'A', apiKey: 'PAT', baseId: 'app1' }, { id: 'c2', agencyId: 'B', apiKey: 'PAT2' }],
   kioskDevices: [{ id: 'd1', agencyId: 'A', venueId: 'vA', name: 'tab', secretHash: 'SH' }],
-  events: [{ id: 'e1', agencyId: 'A', venueId: 'vA', extra: { webhookSecret: 'W', note: 'n' } }],
+  events: [{ id: 'e1', agencyId: 'A', venueId: 'vA', extra: { webhookSecret: 'W', note: 'n' }, metadata: { keys: { p256dh: 'pub', auth: 'EVT-AUTH-SECRET' } } }],
 };
 const ea = buildAdminExport(snap, { role: 'admin', agencyId: 'A', email: 'a@a' });
 check('agency scope marker', [ea.exportScope, ea.exportAgencyId, ea.restorable, '_v' in ea, 'currentWorkDate' in ea, 'isDemoCleared' in ea], ['agency', 'A', false, false, false, false]);
@@ -51,7 +53,7 @@ check('agency: device', Object.keys(ea.kioskDevices[0]).sort(), ['agencyId', 'id
 check('agency: nested secret scrubbed', ea.events[0].extra, { note: 'n' });
 check('agency: work dates own venues only', ea.venueWorkDates, { vA: '2026-10-21' });
 const body = JSON.stringify(ea);
-for (const s of ['PAT', 'PEP', 'SH', 'DVT', 'futureSecretBlob', 'pushSubscriptions', 'jwtSecret', '"B"', 'u2', 't2', 'legacy@h']) check(`agency body lacks ${s}`, body.includes(s), false);
+for (const s of ['EVT-AUTH-SECRET', 'PAT', 'PEP', 'SH', 'DVT', 'futureSecretBlob', 'pushSubscriptions', 'jwtSecret', '"B"', 'u2', 't2', 'legacy@h']) check(`agency body lacks ${s}`, body.includes(s), false);
 
 // No cross-agency export for anyone: the home agency's primary admin gets the home agency only.
 const eh = buildAdminExport(snap, { role: 'admin', agencyId: 'agency-hkc', email: 'don@h.org' });
