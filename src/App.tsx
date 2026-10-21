@@ -704,17 +704,6 @@ export default function App() {
         setEvents((prev) => prev.map((e) => (e.id === updatedEvt.id ? updatedEvt : e)));
       } else if (msg.type === 'EVENT_DELETED' && msg.payload?.id) {
         setEvents((prev) => prev.filter((e) => e.id !== msg.payload.id));
-      } else if (msg.type === 'CLEAN_SLATE_RESET') {
-        setVenues([]);
-        setCurrentVenueId(null);
-        setTasks([]);
-        setEvents([]);
-        setHistoryLogs([]);
-        setIsDemoCleared(true);
-        if (Array.isArray(msg.payload?.users)) {
-          setKnownUsers(msg.payload.users);
-        }
-        showToast('All demo examples have been cleared. Platform is ready to start from scratch!');
       } else if (msg.type === 'DEMO_RESTORED') {
         if (Array.isArray(msg.payload?.venues)) {
           setVenues(msg.payload.venues);
@@ -1129,52 +1118,6 @@ export default function App() {
         if (data.tasks) setTasks(data.tasks);
         if (data.snapshot) setHistoryLogs((prev) => [data.snapshot, ...prev]);
         showToast(`Daily board for "${venueName}" has been reset and archived!`);
-      },
-    });
-  };
-
-  // Start From Scratch: Wipe all demo facilities and sample data (Admin Only)
-  const handleCleanSlate = async () => {
-    if (!currentUser || currentUser.role !== 'admin') {
-      showToast('Only administrators can clear demo data.');
-      return;
-    }
-    setConfirmModalConfig({
-      isOpen: true,
-      title: 'Start From Scratch (Clear Demo Data)?',
-      message:
-        'This will remove the demonstration facilities (Crown Market, Shalom Bakery, Simcha Caterers), example mashgichim, tasks, and shift logs.\n\n' +
-        'Your administrator account (kenan@hartfordkashrut.org) will remain active, providing you with a fresh platform to configure your real Hartford Kashrut Commission certified venues and mashgichim.\n\n' +
-        '(You can restore the demonstration templates at any time if needed.)',
-      confirmText: 'Yes, Clear Demo Data',
-      cancelText: 'Cancel',
-      variant: 'danger',
-      icon: 'trash',
-      onConfirm: async () => {
-        setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
-        const result = await apiWrite('/api/admin/clean-slate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userEmail: currentUser.email }),
-        });
-        if (!result.ok) {
-          console.error('Failed to clean slate:', result.error);
-          showToast(result.error || 'Failed to clear demo data.');
-          return;
-        }
-        const data = result.data;
-        if (data.success) {
-          setVenues([]);
-          setCurrentVenueId(null);
-          setTasks([]);
-          setEvents([]);
-          setHistoryLogs([]);
-          setIsDemoCleared(true);
-          if (Array.isArray(data.users)) setKnownUsers(data.users);
-          showToast('All demo examples cleared! Platform is ready to start from scratch.');
-        } else {
-          showToast(data.error || 'Failed to clear demo data.');
-        }
       },
     });
   };
@@ -1809,7 +1752,6 @@ export default function App() {
         onOpenVenuesDirectory={() => setIsVenuesDirectoryOpen(true)}
         onOpenCreateVenue={() => setIsCreateVenueOpen(true)}
         isDemoCleared={isDemoCleared}
-        onCleanSlate={handleCleanSlate}
         onRestoreDemo={handleRestoreDemo}
       />
       )}
