@@ -1,3 +1,5 @@
+import { venueTimeZone } from '../lib/workday';
+import { HeaderDateLine } from './HeaderDateLine';
 import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { ConfirmModal } from './ConfirmModal';
@@ -108,11 +110,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   const openVenuesModal = onOpenVenuesHub || onOpenVenuesDirectory || (() => {});
-  const today = new Date().toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  });
+  const venueTz = venueTimeZone(currentVenue, currentUser);
 
   // Enter kiosk mode: this device becomes a shared wall tablet.
   // K1: explain the pairing step FIRST (Don, Oct 20: it opened as himself and
@@ -566,6 +564,8 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           </div>
         </div>
+        {/* D5: living header, a slim line under the top row */}
+        {currentUser && <HeaderDateLine timeZone={venueTz} className="pb-1.5" />}
       </div>
 
       {/* Mobile Menu Dropdown */}
