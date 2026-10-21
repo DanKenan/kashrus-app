@@ -113,14 +113,13 @@ export function UpdatesSheet({
       aria-selected={activeTab === tab}
       onClick={() => onTabChange(tab)}
       className={`pressable flex-auto min-w-11 min-h-12 px-1.5 py-1 flex flex-col items-center justify-center gap-0.5 text-[15px] sm:text-base font-bold border-b-2 transition cursor-pointer ${
-        activeTab === tab ? 'border-gold text-ink' : 'border-transparent text-ink-faint'
+        activeTab === tab ? 'border-gold-deep text-ink' : 'border-transparent text-ink-soft'
       }`}
     >
       <span className="whitespace-nowrap leading-tight">{label}</span>
       {count > 0 && (
         <span
-          className={`min-w-5 h-5 px-1 rounded-full text-xs font-bold flex items-center justify-center ${alarm ? '' : 'bg-gold-deep text-paper'}`}
-          style={alarm ? { backgroundColor: 'var(--bad)', color: 'var(--bad-bg)' } : undefined}
+          className="min-w-5 h-5 px-1 rounded-full text-xs font-bold flex items-center justify-center bg-gold-deep text-paper"
           aria-label={`${count} unread`}
         >
           {count > 9 ? '9+' : count}
@@ -131,14 +130,14 @@ export function UpdatesSheet({
 
   return (
     <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Updates">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="absolute inset-0 bg-scrim" onClick={onClose} />
       <div
         ref={panelRef}
         tabIndex={-1}
-        className={`absolute bg-surface e3 flex flex-col outline-none
-          max-sm:inset-x-0 max-sm:bottom-0 max-sm:rounded-t-3xl max-sm:border-t max-sm:border-line
+        className={`absolute bg-surface border border-line text-ink e3 flex flex-col outline-none
+          max-sm:inset-x-0 max-sm:bottom-0 max-sm:rounded-t-2xl
           ${expanded ? 'max-sm:h-[100dvh]' : 'max-sm:h-[85dvh]'}
-          sm:top-0 sm:right-0 sm:h-full sm:w-[420px] sm:max-w-full sm:border-l sm:border-line
+          sm:top-0 sm:right-0 sm:h-full sm:w-[420px] sm:max-w-full sm:rounded-2xl
           motion-safe:transition-transform ${entered ? '' : 'max-sm:translate-y-full sm:translate-x-full'}`}
         style={{ transitionDuration: 'var(--dur-slow)' }}
       >
@@ -147,18 +146,18 @@ export function UpdatesSheet({
           type="button"
           aria-label={expanded ? 'Shrink panel' : 'Expand panel'}
           onClick={() => setExpanded((e) => !e)}
-          className="sm:hidden w-full h-11 flex items-center justify-center cursor-pointer shrink-0"
+          className="pressable sm:hidden self-center w-11 h-11 flex items-center justify-center rounded-lg bg-surface border border-line-control text-ink hover:bg-sunken cursor-pointer shrink-0"
         >
           <span className="w-10 h-1.5 rounded-full bg-line" />
         </button>
 
         <div className="flex items-center justify-between px-4 pt-1 pb-0 shrink-0">
-          <h2 className="text-xl font-black">Updates</h2>
+          <h2 className="text-xl font-bold">Updates</h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close updates"
-            className="pressable w-11 h-11 flex items-center justify-center rounded-lg hover:bg-sunken transition cursor-pointer"
+            className="pressable w-11 h-11 flex items-center justify-center rounded-lg bg-surface border border-line-control text-ink hover:bg-sunken transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>

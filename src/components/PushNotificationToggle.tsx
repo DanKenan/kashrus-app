@@ -53,7 +53,7 @@ export const PushNotificationToggle: React.FC<{ userEmail: string }> = ({ userEm
       <button
         onClick={toggle}
         disabled={busy || state === 'denied'}
-        className="w-full flex items-center justify-between px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer disabled:cursor-default"
+        className="pressable min-h-11 bg-surface border border-line-control text-ink w-full flex items-center justify-between px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer disabled:cursor-default"
       >
         <span className="flex items-center gap-2 text-ink-soft">
           {on ? (
@@ -64,16 +64,16 @@ export const PushNotificationToggle: React.FC<{ userEmail: string }> = ({ userEm
           <span>Phone notifications</span>
         </span>
         <span
-          className={`text-[11px] font-bold ${
-            on ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-faint font-normal'
+          className={`text-xs font-bold ${
+            on ? 'text-ok' : 'text-ink-soft font-normal'
           }`}
         >
           {busy ? '…' : on ? 'On' : state === 'denied' ? 'Blocked' : 'Off'}
         </span>
       </button>
-      {hint && <p className="px-2.5 pb-1 text-[10px] text-ink-faint leading-snug">{hint}</p>}
+      {hint && <p className="px-2.5 pb-1 text-xs text-ink-soft leading-snug">{hint}</p>}
       {!on && state !== 'denied' && (
-        <p className="px-2.5 pb-1 text-[10px] text-ink-faint leading-snug">
+        <p className="px-2.5 pb-1 text-xs text-ink-soft leading-snug">
           Get event & task assignments on this phone, even with the app closed.
         </p>
       )}

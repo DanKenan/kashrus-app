@@ -19,22 +19,20 @@ export function UrgentBanner({
   return (
     <div
       role="alert"
-      className="border-b"
-      style={{ backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}
+      className="bg-bad-bg border border-bad text-ink"
     >
       <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-2.5 flex items-center gap-3">
-        <span className="flex items-center gap-2 min-w-0 flex-1" style={{ color: 'var(--bad)' }}>
-          <AlertTriangle className="w-5 h-5 shrink-0" />
+        <span className="flex items-center gap-2 min-w-0 flex-1">
+          <AlertTriangle className="w-5 h-5 shrink-0 text-bad" />
           <span dir="auto" className="text-base font-bold truncate">
-            <span className="uppercase text-xs font-black tracking-wide mr-2">{kicker}</span>
+            <span className="uppercase text-xs font-bold tracking-wide mr-2">{kicker}</span>
             {item.title}
           </span>
         </span>
         <button
           type="button"
           onClick={() => onView(item.id)}
-          className="pressable shrink-0 px-3 h-11 flex items-center rounded-lg text-sm font-bold cursor-pointer"
-          style={{ backgroundColor: 'var(--bad)', color: 'var(--bad-bg)' }}
+          className="pressable shrink-0 px-3 h-11 flex items-center rounded-lg bg-surface border border-line-control text-ink hover:bg-sunken text-sm font-bold cursor-pointer"
         >
           View
         </button>
@@ -42,8 +40,7 @@ export function UrgentBanner({
           type="button"
           onClick={() => onDismiss(item.id)}
           aria-label="Dismiss and mark read"
-          className="pressable shrink-0 w-11 h-11 flex items-center justify-center rounded-lg cursor-pointer"
-          style={{ color: 'var(--bad)' }}
+          className="pressable shrink-0 w-11 h-11 flex items-center justify-center rounded-lg bg-surface border border-line-control text-ink hover:bg-sunken cursor-pointer"
         >
           <X className="w-5 h-5" />
         </button>
