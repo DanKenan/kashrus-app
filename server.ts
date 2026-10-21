@@ -28,6 +28,7 @@ import {
 import { classifySessionClaims, resolveSessionRow, sessionClaimsFor, type SessionClaims } from './src/server/session-token.ts';
 import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
+import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
@@ -460,6 +461,10 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'GET', path: '/__test__/firestore-doc' },
         { method: 'GET', path: '/__test__/last-reset-code' },
         { method: 'POST', path: '/__test__/expire-reset' },
+        { method: 'POST', path: '/__test__/logo-hooks' },
+        { method: 'GET', path: '/__test__/logo-docs' },
+        { method: 'POST', path: '/__test__/logo-doc-backdate' },
+        { method: 'POST', path: '/__test__/logo-cleanup' },
         { method: 'POST', path: '/__test__/inject-fixture' },
         { method: 'POST', path: '/__test__/staged' },
         { method: 'POST', path: '/__test__/revoke-user-silent' },
@@ -624,6 +629,8 @@ app.use('/api', async (req, res, next) => {
       (method === 'GET' && path === '/handoff-notes') ||
       (method === 'GET' && path === '/announcements') ||
       (method === 'GET' && path === '/venues') ||
+      // Item 12: the agency logo (own agency, revision-specific, read only).
+      (method === 'GET' && path === '/agency/logo') ||
       (method === 'GET' && path === '/users') ||
       (method === 'GET' && path === '/health');
     if (!allowed) {
@@ -1121,6 +1128,8 @@ interface Agency {
   slug?: string;
   brandName?: string;
   logoUrl?: string;
+  /** Item 12: current logo revision (bytes in agencyLogos/{agencyId}__{rev}); server-only write. */
+  logoRev?: string;
   /** Item 8a: SERVER-ONLY domain verification state (never accepted from a
    * request body; domainVerificationToken never leaves the server). */
   domainStatus?: 'none' | 'pending' | 'verified' | 'failed';
@@ -1925,6 +1934,9 @@ function getSafeUser(user: UserProfile) {
     // Item 6: the agency's IANA zone (absent = America/New_York) so the
     // client resolves venue zone -> agency zone -> default for "today".
     agencyTimeZone: isValidTimeZone(userAgency?.timeZone) ? userAgency?.timeZone : undefined,
+    // Item 12 (S4): the user's OWN agency's logo revision, always present
+    // (string or null) — the client's feature signal and cache key.
+    agencyLogoRev: (user.agencyId ? agencies.find((a) => a.id === user.agencyId) : userAgency)?.logoRev || null,
   };
 }
 
@@ -7709,6 +7721,188 @@ app.put('/api/agencies/current', async (req, res) => {
 });
 
 
+// ---------------------------------------------------------------------------
+// Item 12 ("Signed — item 12 logo plan v3", server contract S1–S7): the agency
+// logo. Bytes live OUTSIDE app-state/main in revision-addressed docs
+// agencyLogos/{agencyId}__{rev}; the agency record carries only logoRev.
+// Admin only, own agency from the session, fail closed.
+// ---------------------------------------------------------------------------
+const LOGO_COLLECTION = 'agencyLogos';
+const localLogoDocs = new Map<string, any>(); // no-Firestore (local file) mode
+const logoTestHooks = { cleanupDelayMs: 0, preCommitDelayMs: 0, inflightMaxMs: null as number | null };
+const logoSleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function putLogoDoc(id: string, doc: any): Promise<void> {
+  if (!firestoreDb) { localLogoDocs.set(id, JSON.parse(JSON.stringify(doc))); return; }
+  await firestoreDb.collection(LOGO_COLLECTION).doc(id).set(doc);
+}
+async function getLogoDoc(id: string): Promise<any | null> {
+  if (!firestoreDb) return localLogoDocs.get(id) || null;
+  const snap = await firestoreDb.collection(LOGO_COLLECTION).doc(id).get();
+  return snap.exists ? snap.data() : null;
+}
+/** Ids of this agency's logo docs (metadata only where the store allows). */
+async function listLogoDocIds(agencyId: string): Promise<string[]> {
+  const prefix = `${agencyId}__`;
+  if (!firestoreDb) return [...localLogoDocs.keys()].filter((k) => k.startsWith(prefix));
+  let q: any = firestoreDb.collection(LOGO_COLLECTION);
+  if (typeof q.where === 'function') q = q.where('agencyId', '==', agencyId);
+  if (typeof q.select === 'function') q = q.select('agencyId', 'rev', 'createdAt');
+  const snap = await q.get();
+  return (snap.docs || []).filter((d: any) => typeof d.id === 'string' && d.id.startsWith(prefix)).map((d: any) => d.id);
+}
+
+/**
+ * Revision-safe cleanup (plan v3): ONE transaction reads app-state/main (the
+ * agency's current logoRev) and each candidate doc, and deletes only docs
+ * whose rev is not the current one AND whose createdAt is older than the
+ * grace (15 min ≫ the 120 s in-flight bound). Best-effort: never throws.
+ */
+async function cleanupLogoDocs(agencyId: string): Promise<number> {
+  try {
+    if (isTestMode() && logoTestHooks.cleanupDelayMs > 0) await logoSleep(logoTestHooks.cleanupDelayMs);
+    const ids = await listLogoDocIds(agencyId);
+    if (ids.length === 0) return 0;
+    const nowMs = Date.now();
+    if (!firestoreDb) {
+      const current = agencies.find((a) => a.id === agencyId)?.logoRev || null;
+      let n = 0;
+      for (const id of ids) {
+        const d = localLogoDocs.get(id);
+        if (d && d.agencyId === agencyId && logoDocDeletable(d, current, nowMs)) { localLogoDocs.delete(id); n++; }
+      }
+      return n;
+    }
+    return await firestoreDb.runTransaction(async (tx: any) => {
+      const stateSnap = await tx.get(firestoreDb.doc(FIRESTORE_STATE_DOC));
+      const state = stateSnap.exists ? stateSnap.data() : null;
+      const fresh = (Array.isArray(state?.agencies) ? state.agencies : []).find((a: any) => a && a.id === agencyId);
+      const current = fresh && typeof fresh.logoRev === 'string' ? fresh.logoRev : null;
+      const refs = ids.map((id) => firestoreDb.collection(LOGO_COLLECTION).doc(id));
+      const snaps: any[] = [];
+      for (const ref of refs) snaps.push(await tx.get(ref));
+      let n = 0;
+      snaps.forEach((snap, i) => {
+        const d = snap.exists ? snap.data() : null;
+        if (d && d.agencyId === agencyId && logoDocDeletable(d, current, nowMs)) { tx.delete(refs[i]); n++; }
+      });
+      return n;
+    });
+  } catch (err: any) {
+    log.warn(`[agency-logo] cleanup failed for ${agencyId}: ${err?.message || err}`);
+    return 0;
+  }
+}
+
+function logoAdminGate(req: any, res: any): UserProfile | null {
+  if ((req as any).kiosk === true) {
+    res.status(403).json({ error: 'Only administrators can perform this action.' });
+    return null;
+  }
+  return requireAdmin(req, res);
+}
+
+/** Fresh-data re-check shared by PUT and DELETE (caller still this agency's admin). */
+function logoFreshAgency(freshDoc: any, userId: string, agencyId: string): { conflict: string; conflictStatus: number; conflictCode: string } | { agencies: any[]; agency: any } {
+  const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+  const freshCaller = freshUsers.find((u: any) => u && u.id === userId);
+  if (!freshCaller || freshCaller.role !== 'admin' || (freshCaller.agencyId || 'agency-hkc') !== agencyId) {
+    return { conflict: 'Only administrators can perform this action.', conflictStatus: 403, conflictCode: 'FORBIDDEN' };
+  }
+  const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+  const agency = freshAgencies.find((a: any) => a && a.id === agencyId);
+  if (!agency) return { conflict: 'Agency record not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+  return { agencies: freshAgencies, agency };
+}
+
+app.get('/api/agency/logo', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  const agencyId = user.agencyId || 'agency-hkc'; // ONLY from the session
+  const rev = typeof req.query.rev === 'string' ? req.query.rev : '';
+  const notFound = () => {
+    res.set('Cache-Control', 'no-store');
+    return res.status(404).json({ error: 'No logo at that revision.' });
+  };
+  const agency = agencies.find((a) => a.id === agencyId);
+  if (!rev || !LOGO_REV_RE.test(rev) || !agency || agency.logoRev !== rev) return notFound();
+  let doc: any = null;
+  try { doc = await getLogoDoc(logoDocId(agencyId, rev)); } catch { return notFound(); }
+  if (!doc || doc.agencyId !== agencyId || doc.rev !== rev || typeof doc.data !== 'string' ||
+      !['image/png', 'image/jpeg', 'image/webp'].includes(doc.mime)) return notFound();
+  res.set('Cache-Control', 'private, max-age=86400');
+  res.json({ rev, mime: doc.mime, data: doc.data });
+});
+
+app.put('/api/agency/logo', async (req, res) => {
+  const user = logoAdminGate(req, res);
+  if (!user) return;
+  const agencyId = user.agencyId || 'agency-hkc';
+  const parsed = decodeLogo((req.body || {}).data);
+  if (!parsed.ok) return res.status(400).json({ error: (parsed as { error: string }).error, code: 'LOGO_INVALID' });
+  if (!agencies.find((a) => a.id === agencyId)) return res.status(404).json({ error: 'Agency record not found.' });
+  const { bytes, mime, width, height } = parsed.logo;
+  const rev = newLogoRev(bytes);
+  // (1) the NEW revision's doc; the current one is never touched here.
+  const startedAt = Date.now();
+  try {
+    await putLogoDoc(logoDocId(agencyId, rev), {
+      agencyId, rev, mime, data: bytes.toString('base64'), width, height,
+      createdAt: new Date(startedAt).toISOString(), createdBy: user.id,
+    });
+  } catch (err: any) {
+    log.warn(`[agency-logo] doc write failed for ${agencyId}: ${err?.message || err}`);
+    return res.status(503).json({ error: 'Upload failed, try again' });
+  }
+  if (isTestMode() && logoTestHooks.preCommitDelayMs > 0) await logoSleep(logoTestHooks.preCommitDelayMs);
+  const inflightMax = isTestMode() && logoTestHooks.inflightMaxMs !== null ? logoTestHooks.inflightMaxMs : LOGO_INFLIGHT_MAX_MS;
+  // (2) point the agency at it (stale version → 409; the old logo keeps working).
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      if (Date.now() - startedAt > inflightMax) {
+        return { conflict: 'Upload took too long, try again', conflictStatus: 503, conflictCode: 'LOGO_UPLOAD_TIMEOUT' };
+      }
+      const f = logoFreshAgency(freshDoc, user.id, agencyId);
+      if ('conflict' in f) return f;
+      const updated = { ...f.agency, logoRev: rev };
+      return { doc: { ...freshDoc, agencies: f.agencies.map((a: any) => (a && a.id === agencyId ? updated : a)) }, result: updated };
+    },
+    { label: 'agency-logo-set', requireVersion: true }
+  );
+  if (!committed) return; // the uncommitted doc is removed by a later cleanup
+  log.info(`[audit] agency logo set: admin ${user.id} agency ${agencyId} rev ${rev} (${mime} ${width}x${height}, ${bytes.length} bytes)`);
+  const adminView = agencyAdminView(committed.result);
+  broadcast('AGENCY_UPDATED', { agency: adminView }, user.email, agencyId);
+  res.json({ logoRev: rev });
+  // (3) only after the commit: revision-safe cleanup (best-effort).
+  void cleanupLogoDocs(agencyId);
+});
+
+app.delete('/api/agency/logo', async (req, res) => {
+  const user = logoAdminGate(req, res);
+  if (!user) return;
+  const agencyId = user.agencyId || 'agency-hkc';
+  if (!agencies.find((a) => a.id === agencyId)) return res.status(404).json({ error: 'Agency record not found.' });
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const f = logoFreshAgency(freshDoc, user.id, agencyId);
+      if ('conflict' in f) return f;
+      const updated = { ...f.agency };
+      delete updated.logoRev;
+      return { doc: { ...freshDoc, agencies: f.agencies.map((a: any) => (a && a.id === agencyId ? updated : a)) }, result: updated };
+    },
+    { label: 'agency-logo-remove', requireVersion: true }
+  );
+  if (!committed) return;
+  log.info(`[audit] agency logo removed: admin ${user.id} agency ${agencyId}`);
+  const adminView = agencyAdminView(committed.result);
+  broadcast('AGENCY_UPDATED', { agency: adminView }, user.email, agencyId);
+  res.json({ logoRev: null });
+  void cleanupLogoDocs(agencyId);
+});
+
 /**
  * Item V1 ("V1 plan v2"): the agency's saved certification options.
  * Admin only; the agency comes from the session, never the body. Body:
@@ -7895,6 +8089,40 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     const hit = (global as any).__testLastResetCodes?.[email];
     if (!hit) return res.status(404).json({ error: 'no code recorded for email' });
     res.json({ code: hit.code });
+  });
+
+  // TEST ONLY (item 12): logo timing hooks — cleanup delay, pre-commit delay
+  // and the in-flight bound (null = the production 120 s).
+  app.post('/api/__test__/logo-hooks', (req, res) => {
+    const b = req.body || {};
+    if (b.cleanupDelayMs !== undefined) logoTestHooks.cleanupDelayMs = Math.max(0, Number(b.cleanupDelayMs) || 0);
+    if (b.preCommitDelayMs !== undefined) logoTestHooks.preCommitDelayMs = Math.max(0, Number(b.preCommitDelayMs) || 0);
+    if (b.inflightMaxMs !== undefined) logoTestHooks.inflightMaxMs = b.inflightMaxMs === null ? null : Math.max(0, Number(b.inflightMaxMs) || 0);
+    res.json({ ...logoTestHooks });
+  });
+  // TEST ONLY: an agency's logo docs (metadata + byte length, never the bytes).
+  app.get('/api/__test__/logo-docs', async (req, res) => {
+    const agencyId = String(req.query.agencyId || '');
+    const ids = await listLogoDocIds(agencyId);
+    const docs = [];
+    for (const id of ids) {
+      const d = await getLogoDoc(id);
+      if (d) docs.push({ id, agencyId: d.agencyId, rev: d.rev, mime: d.mime, width: d.width, height: d.height, createdAt: d.createdAt, createdBy: d.createdBy, dataLength: typeof d.data === 'string' ? d.data.length : 0 });
+    }
+    res.json({ docs });
+  });
+  // TEST ONLY: age a logo doc (so the 15-minute grace can be crossed).
+  app.post('/api/__test__/logo-doc-backdate', async (req, res) => {
+    const { agencyId, rev, minutes } = req.body || {};
+    const id = logoDocId(String(agencyId), String(rev));
+    const d = await getLogoDoc(id);
+    if (!d) return res.status(404).json({ error: 'no such logo doc' });
+    await putLogoDoc(id, { ...d, createdAt: new Date(Date.now() - Number(minutes || 0) * 60000).toISOString() });
+    res.json({ success: true });
+  });
+  // TEST ONLY: run the revision-safe cleanup now (awaited) and report the count.
+  app.post('/api/__test__/logo-cleanup', async (req, res) => {
+    res.json({ deleted: await cleanupLogoDocs(String((req.body || {}).agencyId || '')) });
   });
 
   // TEST ONLY: force-expires the reset request for an email (for expiry tests).
@@ -8584,6 +8812,7 @@ app.post('/api/venues', async (req, res) => {
     ownerPassword,
     templateType,
     timeZone,
+    certificationDetail,
   } = stripServerOnlyUserFields(req.body || {}); // 8b: no server-only identity field from a body
 
   const caller = requireAdmin(req, res);
@@ -8601,6 +8830,16 @@ app.post('/api/venues', async (req, res) => {
   const tzInput = parseTimeZoneInput(timeZone);
   if (tzInput.error) {
     return res.status(400).json({ error: tzInput.error });
+  }
+  // Item 12 (S6): optional certification detail, display metadata only —
+  // validated like one cert option; empty/absent = not stored. The label in
+  // `certification` is built and checked exactly as before.
+  let cleanCertDetail: string | undefined;
+  if (certificationDetail !== undefined && certificationDetail !== null &&
+      !(typeof certificationDetail === 'string' && certificationDetail.trim() === '')) {
+    const r = typeof certificationDetail === 'string' ? sanitizeCertOptions([certificationDetail]) : { ok: false as const, error: '' };
+    if (!r.ok) return res.status(400).json({ error: 'The certification detail must be plain text, 60 characters or fewer.', code: 'CERT_DETAIL_INVALID' });
+    cleanCertDetail = r.options[0];
   }
 
   // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
@@ -8649,6 +8888,7 @@ app.post('/api/venues', async (req, res) => {
     // Item V1: no text given → the agency NAME (read fresh inside the commit
     // below); the seal is no longer appended. Given text is stored as typed.
     certification: certification?.trim() || '',
+    ...(cleanCertDetail ? { certificationDetail: cleanCertDetail } : {}),
     ownerEmail: cleanOwnerEmail,
     createdAt,
     ...(tzInput.value ? { timeZone: tzInput.value } : {}),
