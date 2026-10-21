@@ -87,8 +87,11 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
           
           {/* Left: Date Snapshots List */}
           <div className="w-full md:w-64 border-r border-line p-3 overflow-y-auto shrink-0 bg-sunken/50">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-ink-faint block mb-2 px-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-ink-faint block px-2">
               Archived Board Days
+            </span>
+            <span className="text-[10px] text-ink-faint block mb-2 px-2" data-testid="history-retention-note">
+              Kept for 7 days
             </span>
             {historyLogs.length === 0 ? (
               <p className="text-xs text-ink-faint px-2 py-4">No archives recorded yet.</p>
