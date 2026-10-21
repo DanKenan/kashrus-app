@@ -3147,10 +3147,22 @@ const devIdempotencyFallback = new Map<string, { result: any; version: number; e
 
 // The shape a mutator returns. Either a successful mutation or a conflict.
 type MutatorOutcome =
-  | { doc: any; result: any }
+  | {
+      doc: any;
+      result: any;
+      /** 8c ONLY (identity migrator): legacy rows that gain personId = row.id in this commit. */
+      identityMigrateRowIds?: string[];
+    }
   | { conflict: string; conflictStatus?: number; conflictCode?: string };
 
 interface CommitOptions {
+  /**
+   * 8c: reads made INSIDE the transaction after the monolith read and before
+   * any write: (freshDoc copy, read(collection, id) → data | null) → value
+   * passed to the mutator as its third argument. The local file fallback
+   * (no Firestore) calls it with a reader that returns null.
+   */
+  preReads?: (freshDoc: any, read: (collection: string, id: string) => Promise<any>) => Promise<any>;
   /** Client-provided version for optimistic concurrency. If set and !== current _v → 409. */
   expectedVersion?: number;
   /** Client-generated UUID for idempotency. Retries with the same ID return the cached result. */
@@ -3265,13 +3277,14 @@ import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityE
  * migrated (personId = id); derived fields are recomputed. See
  * src/server/identity.ts.
  */
-function applyIdentityInvariant(identityBase: any, outDoc: any): any {
+function applyIdentityInvariant(identityBase: any, outDoc: any, migrateRowIds?: string[]): any {
   if (!outDoc || !Array.isArray(outDoc.users)) return outDoc;
   const beforeUsers = Array.isArray(identityBase?.users) ? identityBase.users : [];
   const agencies = Array.isArray(outDoc.agencies) ? outDoc.agencies : [];
   return {
     ...outDoc,
     users: enforceIdentityFields(beforeUsers, outDoc.users, agencies, {
+      migrateRowIds: migrateRowIds && migrateRowIds.length ? new Set(migrateRowIds) : undefined,
       onViolation: (rowId, field) =>
         log.warn(`[identity] reverted a mutator change to server-only field ${field} on user ${rowId}`),
     }),
@@ -3279,7 +3292,7 @@ function applyIdentityInvariant(identityBase: any, outDoc: any): any {
 }
 
 async function commitState(
-  mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
+  mutator: (freshDoc: any, currentVersion: number, preRead?: any) => MutatorOutcome,
   options: CommitOptions = {}
 ): Promise<CommitResult> {
   const label = options.label || 'unnamed';
@@ -3323,11 +3336,13 @@ async function commitState(
     // Pristine deep copy BEFORE the mutator runs: the no-op comparison below
     // must stay correct even if a mutator mutates its input in place.
     const pristineBefore = JSON.parse(JSON.stringify(beforeDoc));
-    const outcome = mutator(beforeDoc, stateVersion);
+    // 8c: no Firestore here, so preReads see no documents.
+    const preRead = options.preReads ? await options.preReads(pristineBefore, async () => null) : undefined;
+    const outcome = mutator(beforeDoc, stateVersion, preRead);
     if ('conflict' in outcome) {
       throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
     }
-    outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc);
+    outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc, outcome.identityMigrateRowIds);
     hydrateState(outcome.doc);
     // No-op detection (fallback path): skip the file write when nothing
     // changed. (The transactional path additionally skips the _v bump.)
@@ -3427,11 +3442,19 @@ async function commitState(
         // 8b: identity baseline = the stored doc, or (first boot) the seed
         // snapshot as it was before the mutator ran.
         const identityBase = pristineBefore || JSON.parse(JSON.stringify(baseDoc));
-        const outcome = mutator(baseDoc, currentVersion);
+        // 8c: in-transaction reads a caller needs to decide (e.g. the identity
+        // migrator's people/emails docs), on the same fresh doc, before any write.
+        const preRead = options.preReads
+          ? await options.preReads(JSON.parse(JSON.stringify(baseDoc)), async (collection: string, id: string) => {
+              const s = await tx.get(firestoreDb.collection(collection).doc(id));
+              return s.exists ? s.data() : null;
+            })
+          : undefined;
+        const outcome = mutator(baseDoc, currentVersion, preRead);
         if ('conflict' in outcome) {
           throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
         }
-        outcome.doc = applyIdentityInvariant(identityBase, outcome.doc);
+        outcome.doc = applyIdentityInvariant(identityBase, outcome.doc, outcome.identityMigrateRowIds);
 
         // No-op detection: the mutator changed nothing meaningful — skip the
         // Firestore write entirely, do NOT increment _v, return success with
@@ -7777,6 +7800,57 @@ if (isTestMode()) {
     lastRetentionSweepAt = null;
     res.json({ ok: true });
   });
+  // ---- Item 8c test hooks (identity migrator). isTestMode() only. ----
+  // The next apply call throws after `afterBatches` committed batches (once).
+  app.post('/api/__test__/identity-migration-interrupt', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const n = Number((req.body || {}).afterBatches);
+    identityMigrationInterruptAfter = Number.isInteger(n) && n > 0 ? n : null;
+    res.json({ ok: true, afterBatches: identityMigrationInterruptAfter });
+  });
+  // The next apply's batch N migrates one 'person-doc-exists' row anyway, so
+  // the dual-write final guard must refuse the whole batch (once).
+  app.post('/api/__test__/identity-migration-bypass-plan', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const n = Number((req.body || {}).atBatch);
+    identityMigrationBypassPlanAtBatch = Number.isInteger(n) && n > 0 ? n : null;
+    res.json({ ok: true, atBatch: identityMigrationBypassPlanAtBatch });
+  });
+  // The next migrator call stops after `maxBatches` batches ('batch-cap'), once.
+  app.post('/api/__test__/identity-migration-batch-cap', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const n = Number((req.body || {}).maxBatches);
+    identityMigrationMaxBatchesOverride = Number.isInteger(n) && n > 0 ? n : null;
+    res.json({ ok: true, maxBatches: identityMigrationMaxBatchesOverride });
+  });
+  // Write or delete one people/emails doc directly (simulates history,
+  // corruption and races in the emulator). data null = delete.
+  app.post('/api/__test__/identity-doc', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { collection, id, data } = req.body || {};
+    if ((collection !== 'people' && collection !== 'emails') || typeof id !== 'string' || !id) {
+      return res.status(400).json({ error: 'collection people|emails and id required' });
+    }
+    const ref = firestoreDb.collection(collection).doc(id);
+    if (data === null) await ref.delete();
+    else await ref.set(data);
+    res.json({ ok: true });
+  });
+  // Read many people/emails docs at once (test assertions).
+  app.post('/api/__test__/identity-docs-bulk', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { peopleIds = [], emails = [] } = req.body || {};
+    const out: any = { people: {}, emails: {} };
+    for (const id of peopleIds) {
+      const sn = await firestoreDb.collection('people').doc(String(id)).get();
+      out.people[id] = sn && sn.exists ? sn.data() : null;
+    }
+    for (const e of emails) {
+      const sn = await firestoreDb.collection('emails').doc(identityEmailKey(String(e))).get();
+      out.emails[e] = sn && sn.exists ? sn.data() : null;
+    }
+    res.json(out);
+  });
   // ---- Item 8b test hooks (identity projections). Registered ONLY under
   // isTestMode() — never under the broader FIRESTORE_MOCK block, never on
   // Cloud Run. ----
@@ -9257,6 +9331,271 @@ app.post('/api/admin/migrate-copy', async (req, res) => {
     log.error('[migration] copy error:', e);
     res.status(500).json({ error: 'Migration copy failed.', detail: e?.message });
   }
+});
+
+/**
+ * POST /api/admin/identity-migration — item 8c identity migrator.
+ * body { step: 'rows' | 'repair', apply?: boolean, cursor?: string }.
+ * Admin only (coordinator / mashgiach / kiosk → 403), CALLER'S AGENCY ONLY
+ * (there is no agency parameter). DRY-RUN unless apply === true (strict
+ * boolean). Bounded, resumable batches; see src/server/migrate-identity.ts
+ * and "8c plan v2". Response: counts, cursor, stopReason and conflicts as
+ * user ids + reason codes only (no emails, names, hashes or credentials).
+ * Live use is Don's step (dry-run per agency first, then apply on root's OK).
+ */
+let identityMigrationInterruptAfter: number | null = null; // test hook only (isTestMode)
+let identityMigrationBypassPlanAtBatch: number | null = null; // test hook only: exercises the final guard
+let identityMigrationMaxBatchesOverride: number | null = null; // test hook only: exercises 'batch-cap' (one call)
+app.post('/api/admin/identity-migration', async (req, res) => {
+  const caller = requireAdmin(req, res);
+  if (!caller) return;
+  if (!firestoreDb) {
+    res.status(503).json({ error: 'Firestore not available.' });
+    return;
+  }
+  const body = req.body || {};
+  const step = body.step;
+  if (step !== 'rows' && step !== 'repair') {
+    res.status(400).json({ error: "step must be 'rows' or 'repair'." });
+    return;
+  }
+  if (body.cursor !== undefined && body.cursor !== null && typeof body.cursor !== 'string') {
+    res.status(400).json({ error: 'cursor must be a string.' });
+    return;
+  }
+  const apply = body.apply === true;
+  const agencyId = callerAgencyId(req);
+  const mig = await import('./src/server/migrate-identity.js');
+  const af = await import('./src/server/agency-fields.js');
+  const readDoc = async (collection: string, id: string) => {
+    const s = await firestoreDb.collection(collection).doc(id).get();
+    return s && s.exists ? s.data() : null;
+  };
+  const readMonolith = async () => {
+    const s = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
+    return s && s.exists ? s.data() : {};
+  };
+  const readSetDocs = async (
+    rs: { peopleIds: string[]; emailKeys: string[] },
+    read: (c: string, id: string) => Promise<any>
+  ) => {
+    const people = new Map<string, any>();
+    const emails = new Map<string, any>();
+    for (const id of rs.peopleIds) people.set(id, await read('people', id));
+    for (const k of rs.emailKeys) emails.set(k, await read('emails', k));
+    return { people, emails };
+  };
+  const slugFor = (agencies: any[]): string | null => {
+    const ag = (agencies || []).find((a: any) => a && a.id === agencyId);
+    if (!ag || (typeof ag.slug === 'string' && ag.slug)) return null;
+    const candidate = af.uniqueSlug(af.slugBase(ag.shortCode, ag.name), agencies, agencyId);
+    if (af.validateSlug(candidate) || af.findSlugClash(agencies, agencyId, candidate)) return null;
+    return candidate;
+  };
+
+  const counts = { rowsMigrated: 0, rowsAlreadyMigrated: 0, projectionsRepaired: 0, projectionsOk: 0 };
+  let conflicts: Array<{ userId: string; reason: string }> = [];
+  let cursor: string | null = typeof body.cursor === 'string' && body.cursor ? body.cursor : null;
+  let batches = 0;
+  let stopReason: string | null = null;
+  let abortReason: string | undefined;
+  let slugBackfill: string | undefined;
+  let exhausted = false;
+  const startCursor = cursor;
+
+  try {
+    // Slug backfill (8a rules), rows step only, decided on fresh agencies.
+    if (step === 'rows') {
+      const doc0 = await readMonolith();
+      const ag0 = (doc0.agencies || []).find((a: any) => a && a.id === agencyId);
+      if (ag0 && typeof ag0.slug === 'string' && ag0.slug) slugBackfill = 'present';
+      else if (!slugFor(doc0.agencies || [])) slugBackfill = 'skipped-invalid';
+      else slugBackfill = apply ? 'pending' : 'would-set';
+    }
+
+    while (!exhausted) {
+      if (batches >= (isTestMode() && identityMigrationMaxBatchesOverride !== null ? identityMigrationMaxBatchesOverride : mig.MAX_BATCHES_PER_CALL)) {
+        stopReason = 'batch-cap';
+        break;
+      }
+      // Planning read (outside any transaction); never trusted on apply.
+      const doc = await readMonolith();
+      const cand = mig.nextCandidates(doc, agencyId, step, cursor);
+      if (cand.batch.length === 0 && !(apply && slugBackfill === 'pending')) {
+        exhausted = true;
+        break;
+      }
+      if (step === 'rows') {
+        const pre = await readSetDocs(mig.rowBatchReadSet(cand.batch), readDoc);
+        const plan = mig.planRowBatch(doc, cand.batch, pre.people, pre.emails);
+        if (!apply || (plan.migrate.length === 0 && slugBackfill !== 'pending')) {
+          // Dry run, or nothing to change: commitState is NOT called.
+          counts.rowsMigrated += apply ? 0 : plan.migrate.length;
+          conflicts.push(...plan.conflicts);
+        } else {
+          if (!mig.rowBatchWithinLimits(cand.batch.length)) {
+            stopReason = 'aborted';
+            abortReason = 'batch-over-limit';
+            break;
+          }
+          let txPlan: { migrate: string[]; conflicts: any[] } = { migrate: [], conflicts: [] };
+          let txLast: string | null = null;
+          let txMore = false;
+          let slugSet = false;
+          await commitState(
+            (freshDoc, _v, ctx) => {
+              // Re-decide everything on the FRESH doc + in-transaction reads.
+              txPlan = mig.planRowBatch(freshDoc, ctx.cand.batch, ctx.people, ctx.emails);
+              if (isTestMode() && identityMigrationBypassPlanAtBatch === batches + 1) {
+                // TEST ONLY: simulate a planner that missed a people-doc
+                // collision, so 8b's dual-write final guard must abort the batch.
+                const c = txPlan.conflicts.find((x: any) => x.reason === 'person-doc-exists');
+                if (c) txPlan = { migrate: [...txPlan.migrate, c.userId], conflicts: txPlan.conflicts.filter((x: any) => x !== c) };
+              }
+              txLast = ctx.cand.lastId;
+              txMore = ctx.cand.more;
+              const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+              const newSlug = slugBackfill === 'pending' ? slugFor(freshAgencies) : null;
+              slugSet = !!newSlug;
+              if (txPlan.migrate.length === 0 && !newSlug) return { doc: freshDoc, result: null };
+              return {
+                doc: {
+                  ...freshDoc,
+                  agencies: newSlug
+                    ? freshAgencies.map((a: any) => (a && a.id === agencyId ? { ...a, slug: newSlug } : a))
+                    : freshAgencies,
+                },
+                result: { migrated: txPlan.migrate.length },
+                identityMigrateRowIds: txPlan.migrate,
+              };
+            },
+            {
+              label: 'identity-migration',
+              preReads: async (freshDoc, read) => {
+                const c = mig.nextCandidates(freshDoc, agencyId, 'rows', cursor);
+                const docs = await readSetDocs(mig.rowBatchReadSet(c.batch), read);
+                return { cand: c, ...docs };
+              },
+            }
+          );
+          if (slugBackfill === 'pending') slugBackfill = slugSet ? 'set' : 'skipped-invalid';
+          counts.rowsMigrated += txPlan.migrate.length;
+          conflicts.push(...txPlan.conflicts);
+          batches++;
+          cursor = txLast ?? cursor;
+          if (!txMore) exhausted = true;
+          if (isTestMode() && identityMigrationInterruptAfter !== null && batches >= identityMigrationInterruptAfter) {
+            identityMigrationInterruptAfter = null;
+            throw Object.assign(new Error('test interrupt'), { testInterrupt: true });
+          }
+          continue;
+        }
+      } else {
+        const pre = await readSetDocs(mig.repairBatchReadSet(cand.batch), readDoc);
+        const plan = mig.planRepairBatch(doc, cand.batch, pre.people, pre.emails, new Date().toISOString());
+        if (!apply || plan.writes.length === 0) {
+          counts.projectionsRepaired += apply ? 0 : plan.repaired.length;
+          counts.projectionsOk += plan.ok;
+          conflicts.push(...plan.conflicts);
+        } else {
+          // ONE transaction: monolith + this batch's people/emails read first,
+          // re-planned on fresh data; writes ONLY people/emails (never the monolith).
+          const txRes = await firestoreDb.runTransaction(async (tx: any) => {
+            const ms = await tx.get(firestoreDb.doc(FIRESTORE_STATE_DOC));
+            const freshDoc = ms.exists ? ms.data() : {};
+            const c = mig.nextCandidates(freshDoc, agencyId, 'repair', cursor);
+            const docs = await readSetDocs(mig.repairBatchReadSet(c.batch), async (col, id) => {
+              const s = await tx.get(firestoreDb.collection(col).doc(id));
+              return s.exists ? s.data() : null;
+            });
+            const p = mig.planRepairBatch(freshDoc, c.batch, docs.people, docs.emails, new Date().toISOString());
+            for (const w of p.writes) tx.set(firestoreDb.collection(w.collection).doc(w.id), w.data);
+            return { p, last: c.lastId, more: c.more };
+          });
+          counts.projectionsRepaired += txRes.p.repaired.length;
+          counts.projectionsOk += txRes.p.ok;
+          conflicts.push(...txRes.p.conflicts);
+          batches++;
+          cursor = txRes.last ?? cursor;
+          if (!txRes.more) exhausted = true;
+          if (isTestMode() && identityMigrationInterruptAfter !== null && batches >= identityMigrationInterruptAfter) {
+            identityMigrationInterruptAfter = null;
+            throw Object.assign(new Error('test interrupt'), { testInterrupt: true });
+          }
+          continue;
+        }
+      }
+      // Dry-run / no-op batch: walk on.
+      batches++;
+      cursor = cand.lastId ?? cursor;
+      if (!cand.more) exhausted = true;
+    }
+  } catch (e: any) {
+    if (e?.testInterrupt) {
+      identityMigrationBypassPlanAtBatch = null;
+      identityMigrationMaxBatchesOverride = null;
+      res.status(500).json({ error: 'interrupted (test hook)', nextCursor: cursor, batches });
+      return;
+    }
+    log.warn(`[identity-migration] batch aborted for agency ${agencyId}: ${e?.message}`);
+    stopReason = 'aborted';
+    abortReason = /Identity conflict/.test(String(e?.message)) ? 'identity-guard' : 'transaction-failed';
+  }
+
+  // Final completeness read (whole agency, reads only) once the scan is done.
+  let blocked = 0;
+  let pending = 0;
+  if (exhausted && stopReason === null) {
+    const doc = await readMonolith();
+    const finalConflicts: any[] = [];
+    let c: string | null = null;
+    for (;;) {
+      const cand = mig.nextCandidates(doc, agencyId, step, c);
+      if (!cand.batch.length) break;
+      if (step === 'rows') {
+        const pre = await readSetDocs(mig.rowBatchReadSet(cand.batch), readDoc);
+        const plan = mig.planRowBatch(doc, cand.batch, pre.people, pre.emails);
+        pending += plan.migrate.length;
+        finalConflicts.push(...plan.conflicts);
+      } else {
+        const pre = await readSetDocs(mig.repairBatchReadSet(cand.batch), readDoc);
+        const plan = mig.planRepairBatch(doc, cand.batch, pre.people, pre.emails, new Date().toISOString());
+        pending += plan.repaired.length;
+        finalConflicts.push(...plan.conflicts);
+      }
+      c = cand.lastId;
+      if (!cand.more) break;
+    }
+    if (step === 'rows') {
+      const migratedNow = (doc.users || []).filter((u: any) => mig.inScope(u, agencyId) && u.personId).length;
+      counts.rowsAlreadyMigrated = Math.max(0, migratedNow - (apply ? counts.rowsMigrated : 0));
+    }
+    conflicts = finalConflicts;
+    blocked = mig.dedupeConflicts(finalConflicts).length;
+    // Signed four-state contract: done | batch-cap | blocked | aborted.
+    // stopReason says why the walk ended; complete is the only "nothing left"
+    // signal (dry-run results and late work are told apart by apply/pending).
+    stopReason = blocked > 0 ? 'blocked' : 'done';
+  }
+  if (isTestMode()) { identityMigrationBypassPlanAtBatch = null; identityMigrationMaxBatchesOverride = null; } // one call only
+  const deduped = mig.dedupeConflicts(conflicts as any);
+  res.json({
+    step,
+    apply,
+    // true only when the final read found no remaining work AND no conflicts
+    // (a dry-run with work to do is stopReason 'done', complete false, pending > 0).
+    complete: exhausted && stopReason === 'done' && pending === 0 && blocked === 0,
+    stopReason,
+    ...(abortReason ? { abortReason } : {}),
+    nextCursor: exhausted && stopReason !== 'aborted' ? null : cursor,
+    startCursor,
+    batches,
+    counts,
+    pending: exhausted ? pending : undefined,
+    blocked: exhausted ? blocked : deduped.length,
+    conflicts: deduped,
+    ...(slugBackfill ? { slugBackfill } : {}),
+  });
 });
 
 /**
