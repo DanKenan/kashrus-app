@@ -102,6 +102,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-36-kiosk-code-generator.mjs')).default,
     (await import('./test-37-venue-timezones.mjs')).default,
     (await import('./test-38-dst-rollover.mjs')).default,
+    (await import('./test-39-copy-event.mjs')).default,
   ];
 
   const results = [];

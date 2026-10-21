@@ -3434,22 +3434,11 @@ async function commitState(
 let stateVersion = 0;
 
 /**
- * Helper for Express handlers: runs commitState and maps errors to HTTP
- * responses. Returns the commit result on success, or sends the error
- * response and returns null.
- *
- * Usage:
- *   const committed = await commitOrRespond(req, res, mutator, { label: 'create-task' });
- *   if (!committed) return; // response already sent
- *   broadcast(...); // only after commit
- *   res.status(201).json(committed.result);
+ * The idempotency scope of a write request, derived ONE way for
+ * commitOrRespond and for replayCommittedOperation (item 7): caller-scoped
+ * key, payload fingerprint and target.
  */
-async function commitOrRespond(
-  req: any,
-  res: any,
-  mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
-  options: Omit<CommitOptions, 'expectedVersion' | 'operationId'> = {}
-): Promise<CommitResult | null> {
+function idempotencyScopeFor(req: any) {
   const body = req.body || {};
   const query = req.query || {};
   const expectedVersion =
@@ -3481,6 +3470,58 @@ async function commitOrRespond(
   const opTarget = req.params && (req.params as any).id
     ? `${req.path.split('/')[2] || 'unknown'}:${(req.params as any).id}`
     : undefined;
+
+  return { expectedVersion, operationId, idempotencyKey, authUserId, payloadHash, opTarget };
+}
+
+/**
+ * Item 7: answer a retry of an operation that ALREADY committed, before the
+ * route's own checks run against today's (possibly changed) data. Returns
+ * true after sending the stored result (or a 409 for the same operationId
+ * with a different payload); false when no live receipt matches — the route
+ * then runs its normal first-attempt checks. Writes nothing: on a miss the
+ * probe's mutator refuses, inside the same transaction that read the receipts.
+ */
+async function replayCommittedOperation(req: any, res: any, label: string): Promise<boolean> {
+  const scope = idempotencyScopeFor(req);
+  if (!scope.operationId || !scope.idempotencyKey) return false;
+  try {
+    await commitState(() => ({ conflict: 'receipt-probe' }), {
+      label, operationId: scope.operationId, idempotencyKey: scope.idempotencyKey,
+      idempotencyUserId: scope.authUserId, payloadHash: scope.payloadHash,
+      opType: label, opMethod: req.method, opTarget: scope.opTarget,
+    });
+  } catch (err: any) {
+    if (err instanceof DuplicateOperationError) {
+      res.json(err.cachedResult.result);
+      return true;
+    }
+    if (err instanceof PayloadMismatchError) {
+      res.status(409).json({ error: err.message, code: 'PAYLOAD_MISMATCH' });
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Helper for Express handlers: runs commitState and maps errors to HTTP
+ * responses. Returns the commit result on success, or sends the error
+ * response and returns null.
+ *
+ * Usage:
+ *   const committed = await commitOrRespond(req, res, mutator, { label: 'create-task' });
+ *   if (!committed) return; // response already sent
+ *   broadcast(...); // only after commit
+ *   res.status(201).json(committed.result);
+ */
+async function commitOrRespond(
+  req: any,
+  res: any,
+  mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
+  options: Omit<CommitOptions, 'expectedVersion' | 'operationId'> = {}
+): Promise<CommitResult | null> {
+  const { expectedVersion, operationId, idempotencyKey, authUserId, payloadHash, opTarget } = idempotencyScopeFor(req);
 
   // Version contract: updates to existing data MUST carry the version the
   // client rendered. A client that sends no version is too old (cached PWA)
@@ -9065,7 +9106,7 @@ app.post('/api/events', async (req, res) => {
       const arr: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
       // Idempotency: same event ID already created.
       const existing = arr.find((e) => e.id === eventId);
-      if (existing) return { doc: freshDoc, result: existing };
+      if (existing) return { doc: freshDoc, result: { event: existing } };
       return { doc: { ...freshDoc, events: [...arr, newEvent] }, result: newEvent };
     },
     { label: 'create-event' }
@@ -9090,6 +9131,188 @@ app.post('/api/events', async (req, res) => {
       { url: '/', eventId: event.id }
     );
   }
+
+  res.status(201).json({ event });
+});
+
+// Item 7: COPY EVENT — "task names only, never assignments."
+// An admin (own agency) or a coordinator (own venue, rule T) duplicates an
+// event into a NEW, independent event on a date they choose. The copy is
+// built from an explicit allowlist — never a spread of the source — so no
+// assignment (staff or external), completion, check, note, menu file or
+// history can ride along. Fail closed: every other role gets 403.
+const EVENT_COPY_TITLE_MAX = 200;
+
+/**
+ * Days between a source event's date and endDate: null when it has no
+ * endDate (one-day event), 'bad' when either date is malformed or the range
+ * is reversed — such a source is refused rather than copied into a corrupt
+ * event.
+ */
+function eventCopySpanDays(src: any): number | null | 'bad' {
+  const start = src?.date;
+  if (!isWorkDate(start) || addDays(start, 0) !== start) return 'bad';
+  const end = src?.endDate;
+  if (end === undefined || end === null || end === '') return null;
+  if (!isWorkDate(end) || addDays(end, 0) !== end) return 'bad';
+  const span = Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000);
+  return span >= 0 ? span : 'bad';
+}
+
+/**
+ * Rule T for copying, from ONE place for the pre-check and the in-transaction
+ * re-check: admin of the event's agency, or a coordinator whose venue is the
+ * event's venue. Everyone else (incl. kiosk sessions, whose acting user is
+ * never admin/coordinator) is refused.
+ */
+function mayCopyEvent(user: any, event: any): boolean {
+  if (!user || !event) return false;
+  if ((user.agencyId || 'agency-hkc') !== (event.agencyId || 'agency-hkc')) return false;
+  if (user.role === 'admin') return true;
+  return user.role === 'coordinator' && callerMaySeeVenue(user, event.venueId);
+}
+
+/** The event template the copy carries: definition fields + task names. */
+function buildEventCopy(
+  src: any,
+  opts: { eventId: string; stamp: string; date: string; title: string; venueName: string; caller: { email: string; name: string }; nowIso: string }
+): KosherEventItem {
+  const srcTasks: any[] = Array.isArray(src?.tasks) ? src.tasks : [];
+  const span = eventCopySpanDays(src);
+  const endDate = typeof span === 'number' ? addDays(opts.date, span) : undefined;
+  const copy: KosherEventItem = {
+    id: opts.eventId,
+    agencyId: src.agencyId || 'agency-hkc',
+    venueId: src.venueId,
+    venueName: opts.venueName,
+    title: opts.title,
+    location: typeof src.location === 'string' ? src.location : '',
+    date: opts.date,
+    ...(endDate ? { endDate } : {}),
+    ...(typeof src.startTime === 'string' && src.startTime ? { startTime: src.startTime } : {}),
+    ...(typeof src.endTime === 'string' && src.endTime ? { endTime: src.endTime } : {}),
+    mashgiachType: 'unassigned',
+    notes: '',
+    status: 'confirmed',
+    tasks: srcTasks.map((t: any, idx: number) => ({
+      id: `etask-${opts.stamp}-${idx}`,
+      title: typeof t?.title === 'string' && t.title.trim() ? t.title : 'Event Kosher Inspection Task',
+      description: typeof t?.description === 'string' ? t.description : '',
+      category: typeof t?.category === 'string' && t.category ? t.category : 'Inspection',
+      isCompleted: false,
+      notes: '',
+    })),
+    createdByEmail: opts.caller.email,
+    createdByName: opts.caller.name,
+    createdAt: opts.nowIso,
+  };
+  return copy;
+}
+
+app.post('/api/events/:id/copy', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  // A retry of a copy that already committed gets that copy back, even if the
+  // source, the venue, the caller's access or "today" changed since (plan v2).
+  if (await replayCommittedOperation(req, res, 'copy-event')) return;
+  const { id } = req.params;
+  const source = events.find((e) => e.id === id);
+  if (!source) {
+    return res.status(404).json({ error: 'Event not found.' });
+  }
+  if (!requireSameAgency(req, res, source, 'events')) return;
+  // Rule T, fail closed: admin = whole agency; coordinator = own venue(s).
+  if (caller.role !== 'admin' && caller.role !== 'coordinator') {
+    return res.status(403).json({ error: 'Only an admin or coordinator can copy events.' });
+  }
+  if (!mayCopyEvent(caller, source)) {
+    return res.status(403).json({ error: 'You can only work in your own venue.' });
+  }
+  // The copy stays at the source event's venue, which must EXIST (explicit:
+  // requireOwnVenue alone tolerates dangling references) and be this agency's.
+  const venue = venues.find((v) => v && v.id === source.venueId);
+  if (!venue) {
+    return res.status(409).json({ error: "This event's venue no longer exists, so it can't be copied." });
+  }
+  if (!requireOwnVenue(req, res, venue.id, venues)) return;
+  if (eventCopySpanDays(source) === 'bad') {
+    return res.status(409).json({ error: "This event's dates are not valid, so it can't be copied." });
+  }
+
+  const body = req.body || {};
+  const date = typeof body.date === 'string' ? body.date.trim() : '';
+  if (!isWorkDate(date) || addDays(date, 0) !== date) {
+    return res.status(400).json({ error: 'Pick a valid date for the copy.' });
+  }
+  // "Today" is the venue's local date (item 6), never the server's UTC day.
+  const venueToday = workDateIn(venueTimeZoneIn(venue, agencies), serverNow());
+  if (date < venueToday) {
+    return res.status(400).json({ error: 'Pick today or a later date.' });
+  }
+  let title = (typeof source.title === 'string' ? source.title : '').trim() || 'Kosher Event';
+  if (body.title !== undefined) {
+    if (typeof body.title !== 'string' || !body.title.trim()) {
+      return res.status(400).json({ error: 'The event name cannot be empty.' });
+    }
+    title = body.title.trim();
+    if (title.length > EVENT_COPY_TITLE_MAX) {
+      return res.status(400).json({ error: `Keep the event name under ${EVENT_COPY_TITLE_MAX} characters.` });
+    }
+  }
+
+  // Stable IDs BEFORE the transaction so a retry never duplicates.
+  const stamp = crypto.randomUUID();
+  const eventId = `evt-${stamp}`;
+  const nowIso = serverNow().toISOString();
+  const venueName = venue.name || source.venueName || 'Supervised Establishment';
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
+      const existing = arr.find((e) => e.id === eventId);
+      if (existing) return { doc: freshDoc, result: { event: existing } };
+      // Re-authorize against the COMMITTED document (rule T): the source,
+      // its venue and the caller's role/venue may have changed while this
+      // request was in flight. Fail closed; nothing is written.
+      const freshSource = arr.find((e) => e && e.id === id);
+      if (!freshSource) return { conflict: 'This event was deleted, so it was not copied.' };
+      const freshVenue = (Array.isArray(freshDoc.venues) ? freshDoc.venues : []).find(
+        (v: any) => v && v.id === freshSource.venueId
+      );
+      if (!freshVenue || (freshVenue.agencyId || 'agency-hkc') !== (freshSource.agencyId || 'agency-hkc')) {
+        return { conflict: "This event's venue no longer exists, so it was not copied." };
+      }
+      const freshCaller = (Array.isArray(freshDoc.users) ? freshDoc.users : []).find(
+        (u: any) => u && u.id === caller.id
+      );
+      if (!freshCaller || !mayCopyEvent(freshCaller, freshSource) || !mayCopyEvent(caller, freshSource)) {
+        return { conflict: 'Your access changed, so the event was not copied. Refresh and try again.' };
+      }
+      if (eventCopySpanDays(freshSource) === 'bad') {
+        return { conflict: "This event's dates are not valid, so it was not copied." };
+      }
+      const copy = buildEventCopy(freshSource, {
+        eventId, stamp, date, title, nowIso,
+        venueName: freshVenue.name || venueName,
+        caller: { email: caller.email, name: caller.name },
+      });
+      // Stored as { event } so a retry gets the same shape as the first 201.
+      return { doc: { ...freshDoc, events: [...arr, copy] }, result: { event: copy } };
+    },
+    { label: 'copy-event' }
+  );
+  if (!committed) return;
+  const event = (committed.result as { event: KosherEventItem }).event;
+
+  // Side effects ONLY after commit (rule BR). Nobody is assigned → no push.
+  // A retry with the same operationId never reaches here: commitOrRespond
+  // answers it with the stored result and no second broadcast.
+  broadcast('EVENT_CREATED', {
+    event,
+    agencyId: event.agencyId,
+    venueId: event.venueId,
+  }, undefined, event.agencyId);
 
   res.status(201).json({ event });
 });

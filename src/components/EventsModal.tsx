@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Calendar,
@@ -14,6 +14,7 @@ import {
   AlertCircle,
   ExternalLink,
   ShieldCheck,
+  Copy,
 } from 'lucide-react';
 import { KosherEvent, EventTask, User as UserType, Venue } from '../types';
 import { venueTimeZone, workDateIn } from '../lib/workday';
@@ -30,6 +31,10 @@ interface EventsModalProps {
   onToggleEventTask: (eventId: string, taskId: string, isCompleted: boolean, notes?: string) => Promise<void>;
   onUpdateEvent: (event: KosherEvent) => Promise<void>;
   onDeleteEvent?: (eventId: string) => Promise<void>;
+  /** Item 7: open the copy dialog for this event (admin / venue coordinator). */
+  onCopyEvent?: (event: KosherEvent) => void;
+  /** Item 7: select this event (e.g. the copy just created). */
+  focusEventId?: string | null;
 }
 
 export const EventsModal: React.FC<EventsModalProps> = ({
@@ -44,6 +49,8 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   onToggleEventTask,
   onUpdateEvent,
   onDeleteEvent,
+  onCopyEvent,
+  focusEventId,
 }) => {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(() => {
     return events[0]?.id || null;
@@ -51,6 +58,12 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   const [filterMode, setFilterMode] = useState<'all' | 'my_assigned' | 'upcoming'>('all');
   const [taskNotesInput, setTaskNotesInput] = useState<{ [taskId: string]: string }>({});
   const [newEventTaskTitle, setNewEventTaskTitle] = useState('');
+
+  useEffect(() => {
+    if (!focusEventId) return;
+    setSelectedEventId(focusEventId);
+    setFilterMode('all');
+  }, [focusEventId]);
 
   if (!isOpen) return null;
 
@@ -80,6 +93,16 @@ export const EventsModal: React.FC<EventsModalProps> = ({
     filteredEvents[0] ||
     events[0] ||
     null;
+
+  // Item 7: client mirror of the server's copy gate (rule T) — admin, or a
+  // coordinator at the event's own venue. The server is the authority.
+  const canCopyActive =
+    !!onCopyEvent &&
+    !!activeEvent &&
+    (isAdmin ||
+      (currentUser?.role === 'coordinator' &&
+        !!currentUser?.venueId &&
+        currentUser.venueId === activeEvent.venueId));
 
   const handleToggleTask = async (taskId: string, currentCompleted: boolean) => {
     if (!activeEvent) return;
@@ -301,13 +324,27 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                       </h3>
                     </div>
 
-                    {isAdmin && onDeleteEvent && (
-                      <button
-                        onClick={() => onDeleteEvent(activeEvent.id)}
-                        className="px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition self-start sm:self-auto cursor-pointer"
-                      >
-                        Delete Event
-                      </button>
+                    {(canCopyActive || (isAdmin && onDeleteEvent)) && (
+                      <div className="flex items-center gap-1.5 self-start sm:self-auto">
+                        {canCopyActive && (
+                          <button
+                            id="copy-event-btn"
+                            onClick={() => onCopyEvent!(activeEvent)}
+                            className="min-h-[44px] px-3 text-xs font-semibold text-gold-ink bg-gold-wash border border-gold/40 rounded-lg transition cursor-pointer pressable flex items-center gap-1.5"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                            Copy event
+                          </button>
+                        )}
+                        {isAdmin && onDeleteEvent && (
+                          <button
+                            onClick={() => onDeleteEvent(activeEvent.id)}
+                            className="px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition cursor-pointer"
+                          >
+                            Delete Event
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
 
