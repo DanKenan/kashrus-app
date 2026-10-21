@@ -17,6 +17,7 @@ import {
   Building2,
 } from 'lucide-react';
 import { KosherEvent, User as UserType, Venue } from '../types';
+import { addDays, venueTimeZone, workDateIn } from '../lib/workday';
 import { getRoleLabel } from '../lib/permissions';
 import { apiFetch, apiWrite } from '../lib/api';
 import { rosterDisplayHandle, rosterEmailLower } from '../lib/rosterDisplay';
@@ -47,10 +48,13 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
   const [title, setTitle] = useState('');
   const [venueId, setVenueId] = useState(currentVenue?.id || allVenues[0]?.id || '');
   const [location, setLocation] = useState(currentVenue?.address || '');
-  const [date, setDate] = useState(() => {
-    const tomorrow = new Date(Date.now() + 86400000);
-    return tomorrow.toISOString().split('T')[0];
-  });
+  // Item 6: default date = tomorrow in the selected venue's zone (calendar
+  // arithmetic, so DST days are right); follows the venue field until the
+  // date is edited by hand.
+  const tomorrowAt = (vid: string) =>
+    addDays(workDateIn(venueTimeZone(allVenues.find((v) => v.id === vid) || null, currentUser), new Date()), 1);
+  const [date, setDate] = useState(() => tomorrowAt(currentVenue?.id || allVenues[0]?.id || ''));
+  const dateTouched = useRef(false);
   const [startTime, setStartTime] = useState('11:00 AM');
   const [endTime, setEndTime] = useState('16:00 PM');
   
@@ -312,6 +316,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     value={venueId}
                     onChange={(e) => {
                       setVenueId(e.target.value);
+                      if (!dateTouched.current) setDate(tomorrowAt(e.target.value));
                       const selected = allVenues.find((v) => v.id === e.target.value);
                       if (selected?.address) setLocation(selected.address);
                     }}
@@ -371,7 +376,10 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     type="date"
                     required
                     value={date}
-                    onChange={(e) => setDate(e.target.value)}
+                    onChange={(e) => {
+                      dateTouched.current = true;
+                      setDate(e.target.value);
+                    }}
                     className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
                   />
                 </div>

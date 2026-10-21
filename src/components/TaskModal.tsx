@@ -3,6 +3,7 @@ import { X, Clock, Calendar, CheckSquare, Users, Plus, Trash2, CalendarDays, Che
 import { Task, TaskInputType } from '../types';
 import { captureEditBaseline } from '../lib/api';
 import { DAYS_MAP } from '../lib/utils';
+import { DEFAULT_TIME_ZONE, addDays, workDateIn } from '../lib/workday';
 import {
   categoryVars,
   categoryVarsForHue,
@@ -126,6 +127,8 @@ interface TaskModalProps {
   taskToEdit?: Task | null;
   knownWorkers: Array<{ email?: string; name: string; id?: string }>;
   currentUserEmail?: string | null;
+  /** Item 6: the task's venue zone — Today/Tomorrow are that venue's local dates. */
+  timeZone?: string;
 }
 
 const PRESET_STATUS_GROUPS = [
@@ -158,6 +161,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   taskToEdit,
   knownWorkers,
   currentUserEmail,
+  timeZone = DEFAULT_TIME_ZONE,
 }) => {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -265,7 +269,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   useEffect(() => {
     submitGuard.current = false;
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = workDateIn(timeZone, new Date());
 
     // Load this user's saved custom categories ("Other" entries).
     setCustomCats(loadCustomCategories(currentUserEmail));
@@ -423,16 +427,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   };
 
   const handleSelectToday = () => {
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = workDateIn(timeZone, new Date());
     if (!selectedDates.includes(todayStr)) {
       setSelectedDates([...selectedDates, todayStr].sort());
     }
   };
 
   const handleSelectTomorrow = () => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    const tomorrowStr = d.toISOString().split('T')[0];
+    const tomorrowStr = addDays(workDateIn(timeZone, new Date()), 1);
     if (!selectedDates.includes(tomorrowStr)) {
       setSelectedDates([...selectedDates, tomorrowStr].sort());
     }
@@ -449,7 +451,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     // Validate dates if specific_dates is chosen
     let finalDates = selectedDates;
     if (scheduleType === 'specific_dates' && finalDates.length === 0) {
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = workDateIn(timeZone, new Date());
       finalDates = [todayStr];
     }
 
@@ -994,6 +996,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                   onClearAll={() => setSelectedDates([])}
                   onSelectToday={handleSelectToday}
                   onSelectTomorrow={handleSelectTomorrow}
+                  timeZone={timeZone}
                 />
               </div>
             )}

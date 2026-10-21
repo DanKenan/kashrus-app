@@ -31,6 +31,7 @@ import { EventsModal } from './components/EventsModal';
 import { CreateEventModal } from './components/CreateEventModal';
 import { ConfirmModal } from './components/ConfirmModal';
 import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
+import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
 import { realtimeSocket } from './lib/socketClient';
@@ -339,6 +340,10 @@ export default function App() {
     return venues[0] || null;
   }, [venues, currentVenueId, currentUser]);
 
+  // Item 6: the active venue's IANA zone (venue -> agency -> America/New_York).
+  // "Today" in the app is the venue's local day, never the device zone or UTC.
+  const currentVenueTimeZone = venueTimeZone(currentVenue, currentUser);
+
   // 5a — Updates panel context. The generation bumps whenever the signed-in
   // context changes (user, agency, venue, kiosk session): the Updates center
   // then drops everything from the old context — lists, counts, banner,
@@ -559,6 +564,22 @@ export default function App() {
           setTasks(msg.payload.tasks.filter((t: Task) => canSeeTask(t, currentUser)));
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(msg.payload.historyLogs);
         showToast('Daily board has refreshed for the day! Previous records archived.');
+      } else if (msg.type === 'AGENCY_UPDATED' && msg.payload?.agency?.id) {
+        // Item 6: the agency zone decides "today" for venues without their own
+        // zone — apply the confirmed change for the signed-in user's own
+        // agency (no reload). Absent/invalid zone = America/New_York.
+        const ag = msg.payload.agency;
+        const nextTz = isValidTimeZone(ag.timeZone) ? ag.timeZone : undefined;
+        setCurrentUser((prev) =>
+          prev && (prev.agencyId || 'agency-hkc') === ag.id && prev.agencyTimeZone !== nextTz
+            ? { ...prev, agencyTimeZone: nextTz }
+            : prev
+        );
+      } else if (msg.type === 'VENUE_UPDATED' && msg.payload?.venue?.id) {
+        // Item 6: a venue edit (e.g. its time zone) — update only a venue this
+        // client already holds; never add one.
+        const upd = msg.payload.venue as Venue;
+        setVenues((prev) => (prev.some((v) => v.id === upd.id) ? prev.map((v) => (v.id === upd.id ? { ...v, ...upd } : v)) : prev));
       } else if (msg.type === 'USER_PRESENCE' && msg.payload) {
         if (msg.payload.activeWorkersCount !== undefined) {
           setActiveWorkersCount(msg.payload.activeWorkersCount);
@@ -1245,7 +1266,8 @@ export default function App() {
 
   // Filter tasks
   const filteredTasks = useMemo(() => {
-    const todayIndex = new Date().getDay();
+    const nowForToday = new Date();
+    const todayIndex = weekdayIn(currentVenueTimeZone, nowForToday);
 
     return tasks.filter((task) => {
       // Search query
@@ -1269,7 +1291,7 @@ export default function App() {
       // Schedule filter (today only)
       if (showOnlyTodaySchedule) {
         if (task.scheduleType === 'specific_dates') {
-          const todayIso = new Date().toISOString().split('T')[0];
+          const todayIso = workDateIn(currentVenueTimeZone, nowForToday);
           if (!task.specificDates || !task.specificDates.includes(todayIso)) {
             return false;
           }
@@ -1290,7 +1312,7 @@ export default function App() {
 
       return true;
     });
-  }, [tasks, searchQuery, selectedCategory, showOnlyTodaySchedule, activeTabFilter, currentUser?.email]);
+  }, [tasks, searchQuery, selectedCategory, showOnlyTodaySchedule, activeTabFilter, currentUser?.email, currentVenueTimeZone]);
 
   // Smart board order: urgent first, then the viewer's own assignments,
   // then the manual order (up/down arrows; initialized from target time).
@@ -1819,6 +1841,7 @@ export default function App() {
                 venueName={currentVenue?.name}
                 venueCategory={currentVenue?.category}
                 venueCertification={currentVenue?.certification}
+                timeZone={currentVenueTimeZone}
                 isRealtimeConnected={isRealtimeConnected}
                 activeWorkersCount={activeWorkersCount}
                 isAdmin={currentUser?.role === 'admin'}
@@ -1887,6 +1910,7 @@ export default function App() {
             tasks={sortedTasks}
             currentUser={currentUser}
             venueName={currentVenue?.name}
+            timeZone={currentVenueTimeZone}
             activeFilter={activeTabFilter}
             onSelectFilter={setActiveTabFilter}
             totalTasks={totalTasks}
@@ -2005,6 +2029,11 @@ export default function App() {
         taskToEdit={taskToEdit}
         knownWorkers={knownUsers}
         currentUserEmail={currentUser?.email}
+        timeZone={
+          taskToEdit?.venueId
+            ? venueTimeZone(venues.find((v) => v.id === taskToEdit.venueId) || currentVenue, currentUser)
+            : currentVenueTimeZone
+        }
       />
 
       <HistoryLogModal
@@ -2046,6 +2075,7 @@ export default function App() {
         adminEmail={currentUser.email}
         agencyName={currentUser.agencyName}
         agencySeal={currentUser.agencySeal}
+        agencyTimeZone={currentUser.agencyTimeZone}
       />
 
       <VenuesDirectoryModal
@@ -2060,6 +2090,8 @@ export default function App() {
         }}
         onDeleteVenue={handleDeleteVenue}
         isAdmin={currentUser.role === 'admin'}
+        agencyTimeZone={currentUser.agencyTimeZone}
+        onVenueUpdated={(v: Venue) => setVenues((prev) => prev.map((x) => (x.id === v.id ? v : x)))}
       />
 
       {/* Kosher Events & Banquets Hub Modal */}

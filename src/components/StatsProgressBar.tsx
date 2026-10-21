@@ -1,5 +1,6 @@
 import React from 'react';
 import { ProgressRing } from './ProgressRing';
+import { zoneCityLabel } from '../lib/workday';
 import {
   Clock,
   ListChecks,
@@ -26,6 +27,8 @@ interface StatsProgressBarProps {
   activeWorkersCount?: number;
   onDeleteVenue?: () => void;
   isAdmin?: boolean;
+  /** Item 6: the venue's IANA zone, named in the daily-reset line. */
+  timeZone?: string;
 }
 
 export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
@@ -44,6 +47,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
   activeWorkersCount,
   onDeleteVenue,
   isAdmin = false,
+  timeZone,
 }) => {
   const isAllDone = totalTasks > 0 && completedTasks === totalTasks;
   const remainingTasks = Math.max(0, totalTasks - completedTasks);
@@ -226,7 +230,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
       </div>
 
       <div className="flex items-center justify-between text-[11px] text-ink-faint mt-2.5 font-medium max-sm:order-4 max-sm:bg-surface max-sm:border max-sm:border-t-0 max-sm:border-line max-sm:rounded-b-lg max-sm:px-4 max-sm:pb-4 max-sm:mt-0 max-sm:mb-5 max-sm:flex-wrap max-sm:gap-2 max-sm:text-xs max-sm:text-ink-soft max-sm:tactile-1">
-        <span>Automatic daily cycle resets at midnight (00:00)</span>
+        <span>Automatic daily cycle resets at midnight{timeZone ? ` (${zoneCityLabel(timeZone)})` : ' (00:00)'}</span>
         <span className="font-semibold text-ink-soft">
           {agencyName}
         </span>
