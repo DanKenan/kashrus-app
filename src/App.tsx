@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { PhoneNav } from './components/PhoneNav';
+import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { Header } from './components/Header';
 import { StatsProgressBar } from './components/StatsProgressBar';
 import { OwnerAuditBanner } from './components/OwnerAuditBanner';
@@ -1554,8 +1554,10 @@ export default function App() {
         }
       : undefined;
 
+  const { showBar, showGold } = getPhoneNavState(isKiosk ? null : currentUser, venues.length > 0);
+
   return (
-    <div data-phone-layout={!isKiosk ? true : undefined} className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
+    <div data-phone-layout={!isKiosk ? true : undefined} className={`min-h-screen bg-paper text-ink flex flex-col transition-colors ${showBar || showGold ? 'max-sm:pb-[calc(144px+env(safe-area-inset-bottom))]' : ''}`}>
       {/* Stale-draft banner: changes preserved across the refresh that a
           428 STALE_CLIENT required. Re-apply sends them with a fresh version. */}
       {staleDrafts.length > 0 && (
@@ -1750,7 +1752,7 @@ export default function App() {
       />
 
       {/* Main Body */}
-      <main className={`flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-12 ${!isKiosk ? 'max-sm:pb-[calc(136px+env(safe-area-inset-bottom))]' : ''} ${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:flex max-sm:flex-col' : ''}`}>
+      <main className={`flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-12 ${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:flex max-sm:flex-col' : ''}`}>
         
         {/* Welcome Empty State for newly registered Kosher Agencies or when starting from scratch */}
         {venues.length === 0 ? (
