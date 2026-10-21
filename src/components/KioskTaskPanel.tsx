@@ -169,7 +169,8 @@ function ProgressRing({ done, total }: { done: number; total: number }) {
           />
         </svg>
         <span aria-hidden className="absolute inset-0 flex items-center justify-center tnum font-bold text-ink text-2xl sm:text-k-display lg:text-k-hero">
-          {done}/{total}
+          {done}
+          <span className="text-ink-soft font-semibold text-base sm:text-k-body lg:text-k-display">/{total}</span>
         </span>
       </span>
       <span data-kiosk-progress-words aria-hidden className="tnum text-k-body text-ink-soft">
@@ -390,22 +391,17 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
           aria-pressed={done}
           aria-label={busy ? `Saving: ${task.title}` : done ? `Undo: ${task.title}` : `Mark done: ${task.title}`}
           title={busy ? 'Saving…' : done ? 'Click to cancel verification' : 'Sign and mark as complete'}
-          className={`pressable relative shrink-0 min-w-11 h-11 sm:h-16 sm:min-w-16 sm:px-5 rounded-xl flex items-center justify-center gap-2 border-2 text-base sm:text-k-body font-semibold ${
-            done ? 'bg-gold-deep border-gold-deep text-paper e2' : 'bg-surface border-gold-deep text-ink'
+          className={`pressable relative shrink-0 min-w-11 h-11 sm:h-16 sm:min-w-16 sm:px-6 rounded-xl flex items-center justify-center gap-2 border-2 text-base sm:text-k-body font-semibold ${
+            done ? 'bg-surface border-line-strong text-ink' : busy ? 'bg-gold-deep/80 border-gold-deep text-paper' : 'bg-gold-deep border-gold-deep text-paper e2'
           }`}
           style={{ transition: 'background-color 120ms cubic-bezier(0.22,1,0.36,1), border-color 120ms cubic-bezier(0.22,1,0.36,1), transform 120ms cubic-bezier(0.22,1,0.36,1)' }}
         >
-          <span className="relative w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center shrink-0" aria-hidden>
-            <span
-              className="absolute inset-0 rounded-full border-2 border-line-strong dark:border-ink-faint"
-              style={{ opacity: done ? 0 : 1, transition: 'opacity 120ms cubic-bezier(0.22,1,0.36,1)' }}
-            />
-            <Check
-              className="w-6 h-6 sm:w-7 sm:h-7"
-              style={{ opacity: done ? 1 : 0, transition: 'opacity 120ms cubic-bezier(0.22,1,0.36,1)' }}
-              strokeWidth={3}
-            />
-          </span>
+          {/* D3c (mockup): a filled gold "Mark done"; the tick shows on phones (no label) and once done. */}
+          <Check
+            className={`w-6 h-6 sm:w-7 sm:h-7 shrink-0 ${done ? '' : 'sm:hidden'}`}
+            strokeWidth={3}
+            aria-hidden
+          />
           {/* D3c: the words carry the state (spec: never colour alone). */}
           <span data-kiosk-check-label className="hidden sm:inline whitespace-nowrap" aria-hidden>
             {busy ? 'Saving…' : done ? 'Done' : 'Mark done'}
@@ -473,6 +469,14 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
             {greetingFor(now)}, {firstName}
           </h1>
           <ProgressRing done={ringDone} total={ringTotal} />
+          {ringTotal > 0 && ringTotal <= 12 && (
+            // D3c (mockup): one dot per task, gold when done — only while the row of dots stays short.
+            <div data-kiosk-dots aria-hidden className="flex flex-wrap gap-2">
+              {Array.from({ length: ringTotal }, (_, i) => (
+                <span key={i} className={`w-3 h-3 rounded-full ${i < ringDone ? 'bg-gold-deep' : 'bg-line-strong'}`} />
+              ))}
+            </div>
+          )}
           {ringTotal > 0 && (
             <p data-kiosk-to-go className="tnum text-k-body text-ink">
               {ringRemaining > 0 ? `${ringRemaining} to go. Finish them all to close the shift.` : 'All done. Thank you.'}
@@ -694,12 +698,18 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                           // D3c: a done row carries the small seal (spec Q15: 40 on kiosk rows); its words stay in the status line.
                           <span data-kiosk-row-seal className="shrink-0 hidden sm:inline-flex" aria-hidden><Seal size={40} /></span>
                         ) : null}
-                        <span className={`w-3 h-3 sm:w-4 sm:h-4 rounded-full shrink-0 ${!phase && task.isCompleted ? 'sm:hidden ' : ''}${DOT[st.tone]}`} aria-hidden />
+                        <span
+                          data-kiosk-row-lead
+                          className={`shrink-0 flex items-center justify-center sm:w-10 sm:h-10 sm:rounded-full sm:border sm:border-line sm:bg-sunken ${!phase && task.isCompleted ? 'sm:hidden' : ''}`}
+                          aria-hidden
+                        >
+                          <span className={`w-3 h-3 sm:w-3.5 sm:h-3.5 rounded-full ${DOT[st.tone]}`} />
+                        </span>
                         <span className="min-w-0 flex-1">
                           <span
                             data-kiosk-row-title
                             dir="auto"
-                            className={`text-base sm:text-k-title font-semibold break-words ${isOpen ? 'block' : 'line-clamp-2'}`}
+                            className={`text-base sm:text-lg font-medium text-ink break-words ${isOpen ? 'block' : 'line-clamp-1'}`}
                           >
                             {task.title}
                           </span>
@@ -709,8 +719,10 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                                 <Clock className="w-4 h-4" aria-hidden /> Due {formatTaskTimes(task)}
                               </span>
                             )}
-                            <span data-kiosk-status dir="auto" className="min-w-0 text-base text-ink-soft truncate">
-                              {st.word}
+                            <span dir="auto" className="min-w-0 text-base text-ink-soft truncate">
+                              {/* D3c (mockup): a small grey subtitle — category · status words. */}
+                              {task.category ? <>{task.category} · </> : null}
+                              <span data-kiosk-status>{st.word}</span>
                             </span>
                           </span>
                         </span>
