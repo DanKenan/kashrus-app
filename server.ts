@@ -2004,6 +2004,36 @@ function recipientSeesRosterEmails(recipient?: { role?: string; permissions?: { 
   return recipient.permissions?.canAssignTasks === true;
 }
 
+/**
+ * Item 8s: resolve an event's assigned mashgiach ONLY inside the caller's own
+ * agency and rule-T roster (admin → whole agency; everyone else → own venue
+ * + the agency's admins), intersected with E1's assignable roles. Owners are
+ * never assignable. `usersList` is explicit: the cached roster for the fast
+ * pre-check, and freshDoc.users (with the caller re-read from it) inside the
+ * transaction. Returns the in-agency user or null — the caller answers the
+ * same generic 400 for "elsewhere" and "nobody" (no existence oracle).
+ */
+const EVENT_ASSIGNABLE_ROLES = new Set(['admin', 'coordinator', 'mashgiach', 'worker']);
+const EVENT_ASSIGNEE_REFUSAL = 'Choose someone from your team.';
+function resolveAssignableUser(callerUser: any, email: unknown, usersList: any[]): any | null {
+  if (!callerUser || typeof email !== 'string' || !email.trim()) return null;
+  const want = email.trim().toLowerCase();
+  const caller = normalizeStoredUser(callerUser);
+  const agencyId = caller.agencyId || 'agency-hkc';
+  const scope = venueScopeFor(caller as any);
+  if (scope !== 'agency' && (scope as string[]).length === 0) return null;
+  for (const raw of usersList || []) {
+    if (!raw || typeof raw.email !== 'string' || raw.email.trim().toLowerCase() !== want) continue;
+    const u = normalizeStoredUser(raw);
+    if ((u.agencyId || 'agency-hkc') !== agencyId) continue;
+    if (!EVENT_ASSIGNABLE_ROLES.has(raw.role) && !EVENT_ASSIGNABLE_ROLES.has(u.role)) continue;
+    if (raw.role === 'owner' || u.role === 'owner') continue;
+    if (scope !== 'agency' && !(u.role === 'admin' || (typeof u.venueId === 'string' && (scope as string[]).includes(u.venueId)))) continue;
+    return u;
+  }
+  return null;
+}
+
 function getSafeUsersForAgency(
   agencyId: string,
   recipient?: { role?: string; permissions?: { canAssignTasks?: boolean }; venueId?: string }
@@ -2934,9 +2964,13 @@ class VersionConflictError extends Error {
 
 class OperationConflictError extends Error {
   code = 'OPERATION_CONFLICT';
-  constructor(message: string) {
+  /** Item 8s: a mutator may name the HTTP status/code of its refusal (default 409). */
+  status = 409;
+  constructor(message: string, status?: number, code?: string) {
     super(message);
     this.name = 'OperationConflictError';
+    if (status) this.status = status;
+    if (code) this.code = code;
   }
 }
 
@@ -3097,7 +3131,7 @@ const devIdempotencyFallback = new Map<string, { result: any; version: number; e
 // The shape a mutator returns. Either a successful mutation or a conflict.
 type MutatorOutcome =
   | { doc: any; result: any }
-  | { conflict: string };
+  | { conflict: string; conflictStatus?: number; conflictCode?: string };
 
 interface CommitOptions {
   /** Client-provided version for optimistic concurrency. If set and !== current _v → 409. */
@@ -3250,7 +3284,7 @@ async function commitState(
     const pristineBefore = JSON.parse(JSON.stringify(beforeDoc));
     const outcome = mutator(beforeDoc, stateVersion);
     if ('conflict' in outcome) {
-      throw new OperationConflictError(outcome.conflict);
+      throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
     }
     hydrateState(outcome.doc);
     // No-op detection (fallback path): skip the file write when nothing
@@ -3350,7 +3384,7 @@ async function commitState(
         const pristineBefore = currentDoc ? JSON.parse(JSON.stringify(currentDoc)) : null;
         const outcome = mutator(baseDoc, currentVersion);
         if ('conflict' in outcome) {
-          throw new OperationConflictError(outcome.conflict);
+          throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
         }
 
         // No-op detection: the mutator changed nothing meaningful — skip the
@@ -3620,7 +3654,7 @@ async function commitOrRespond(
       return null;
     }
     if (err instanceof OperationConflictError) {
-      res.status(409).json({ error: err.message, code: 'OPERATION_CONFLICT' });
+      res.status(err.status || 409).json({ error: err.message, code: err.code || 'OPERATION_CONFLICT' });
       return null;
     }
     if (err instanceof RateLimitError) {
@@ -9088,15 +9122,22 @@ app.post('/api/events', async (req, res) => {
   }
   const targetVenue = venues.find((v) => v.id === targetVenueId);
 
-  // Resolve assigned mashgiach details
-  let resolvedMashgiachEmail = assignedMashgiachEmail;
-  let resolvedMashgiachName = assignedMashgiachName;
-
-  if (mashgiachType === 'assigned_user' && assignedMashgiachEmail) {
-    const matchedUser = users.find((u) => u.email.toLowerCase() === assignedMashgiachEmail.toLowerCase());
-    if (matchedUser) {
-      resolvedMashgiachName = matchedUser.name;
-    }
+  // Item 8s: an assigned mashgiach is resolved ONLY within the caller's
+  // agency + rule-T roster (resolveAssignableUser). Unknown and
+  // other-agency emails get the same 400; the stored name always comes from
+  // the resolved in-agency record (the client-supplied name is ignored).
+  const effectiveType = mashgiachType || (assignedMashgiachEmail ? 'assigned_user' : externalMashgiach ? 'external' : 'unassigned');
+  let resolvedMashgiachEmail: string | undefined = undefined;
+  let resolvedMashgiachName: string | undefined = undefined;
+  // Any non-empty assignee email is resolved, whatever the type (the client
+  // only sends one for assigned_user; an API caller cannot park a foreign
+  // email on an external/unassigned event either).
+  const assigneeRequested = typeof assignedMashgiachEmail === 'string' && assignedMashgiachEmail.trim() !== '';
+  if (assigneeRequested) {
+    const matchedUser = resolveAssignableUser(caller, assignedMashgiachEmail, users);
+    if (!matchedUser) return res.status(400).json({ error: EVENT_ASSIGNEE_REFUSAL, code: 'ASSIGNEE_NOT_IN_TEAM' });
+    resolvedMashgiachEmail = matchedUser.email;
+    resolvedMashgiachName = matchedUser.name;
   }
 
   // Pre-generate ALL stable IDs BEFORE the transaction so retries never duplicate.
@@ -9152,7 +9193,7 @@ app.post('/api/events', async (req, res) => {
     endDate,
     startTime: startTime || '12:00 PM',
     endTime: endTime || '16:00 PM',
-    mashgiachType: mashgiachType || (assignedMashgiachEmail ? 'assigned_user' : externalMashgiach ? 'external' : 'unassigned'),
+    mashgiachType: effectiveType,
     assignedMashgiachEmail: resolvedMashgiachEmail,
     assignedMashgiachName: resolvedMashgiachName,
     externalMashgiach: externalMashgiach && externalMashgiach.name ? {
@@ -9177,25 +9218,38 @@ app.post('/api/events', async (req, res) => {
       // Idempotency: same event ID already created.
       const existing = arr.find((e) => e.id === eventId);
       if (existing) return { doc: freshDoc, result: { event: existing } };
+      // Item 8s: re-resolve the assignee on FRESH data with the caller re-read
+      // from freshDoc.users (role/agency/venue may have changed).
+      if (assigneeRequested) {
+        const freshCaller = (freshDoc.users || []).find((u: any) => u && u.id === (caller as any).id);
+        const freshAssignee = resolveAssignableUser(freshCaller, assignedMashgiachEmail, freshDoc.users || []);
+        if (!freshAssignee) {
+          return { conflict: EVENT_ASSIGNEE_REFUSAL, conflictStatus: 400, conflictCode: 'ASSIGNEE_NOT_IN_TEAM' };
+        }
+        const withFresh = { ...newEvent, assignedMashgiachEmail: freshAssignee.email, assignedMashgiachName: freshAssignee.name };
+        return { doc: { ...freshDoc, events: [...arr, withFresh] }, result: withFresh };
+      }
       return { doc: { ...freshDoc, events: [...arr, newEvent] }, result: newEvent };
     },
     { label: 'create-event' }
   );
   if (!committed) return;
   const event = committed.result as KosherEventItem;
+  // Item 8s: the assignee as committed (re-resolved on fresh data).
+  const committedAssigneeEmail: string | undefined = (event as any)?.assignedMashgiachEmail;
 
   // Side effects ONLY after commit.
   broadcast('EVENT_CREATED', {
     event,
     agencyId: callerAgencyId,
     venueId: targetVenueId,
-    assignedMashgiachEmail: resolvedMashgiachEmail,
+    assignedMashgiachEmail: committedAssigneeEmail,
   }, undefined, callerAgencyId);
 
-  if (resolvedMashgiachEmail) {
+  if (committedAssigneeEmail) {
     const when = event.date ? ` — ${event.date}` : '';
     sendPushToUser(
-      resolvedMashgiachEmail,
+      committedAssigneeEmail,
       '⭐ New event assignment',
       `${event.title}${when} at ${event.location}`,
       { url: '/', eventId: event.id }
@@ -9448,15 +9502,29 @@ app.put('/api/events/:id', async (req, res) => {
   const baseline: Record<string, any> = {};
   for (const f of EVENT_DEFINITION_FIELDS) baseline[f] = (existing as any)[f];
 
-  let resolvedMashgiachEmail = assignedMashgiachEmail !== undefined ? assignedMashgiachEmail : existing.assignedMashgiachEmail;
-  let resolvedMashgiachName = assignedMashgiachName !== undefined ? assignedMashgiachName : existing.assignedMashgiachName;
-
-  if (assignedMashgiachEmail) {
-    const matchedUser = users.find((u) => u.email.toLowerCase() === assignedMashgiachEmail.toLowerCase());
-    if (matchedUser) {
-      resolvedMashgiachName = matchedUser.name;
-    }
+  // Item 8s: the assignee is looked up ONLY when the assignment is being
+  // introduced or changed (a non-empty email different from the stored one,
+  // or the type switching to assigned_user), and only within the caller's
+  // agency + rule-T roster; unknown and other-agency emails get the same
+  // 400. Task check-ins, notes, status and other definition edits never look
+  // up or refresh the stored assignment (a historical assignment stays as
+  // stored, taken from the FRESH event in the transaction).
+  const normEmail = (e: unknown) => (typeof e === 'string' ? e.trim().toLowerCase() : '');
+  const bodyEmailGiven = typeof assignedMashgiachEmail === 'string' && assignedMashgiachEmail.trim() !== '';
+  const nextType = mashgiachType !== undefined ? mashgiachType : existing.mashgiachType;
+  const switchingToAssigned = mashgiachType === 'assigned_user' && existing.mashgiachType !== 'assigned_user';
+  const assignmentChanging =
+    (bodyEmailGiven && normEmail(assignedMashgiachEmail) !== normEmail(existing.assignedMashgiachEmail)) ||
+    switchingToAssigned;
+  const assigneeEmailToResolve = bodyEmailGiven ? assignedMashgiachEmail : existing.assignedMashgiachEmail;
+  let resolvedAssignee: any = null;
+  if (assignmentChanging) {
+    resolvedAssignee = resolveAssignableUser(caller, assigneeEmailToResolve, users);
+    if (!resolvedAssignee) return res.status(400).json({ error: EVENT_ASSIGNEE_REFUSAL, code: 'ASSIGNEE_NOT_IN_TEAM' });
   }
+  // Explicit clear (unassigned/external with an empty or null email) keeps today's behaviour.
+  const clearingAssignee = !bodyEmailGiven && assignedMashgiachEmail !== undefined;
+  void nextType;
   const updatedAt = new Date().toISOString();
 
   const committed = await commitOrRespond(
@@ -9500,6 +9568,15 @@ app.put('/api/events/:id', async (req, res) => {
         return { conflict: 'You are no longer assigned to this event.' };
       }
       let updated: KosherEventItem;
+      // Item 8s: re-resolve a changing assignment on FRESH data, with the
+      // caller re-read from freshDoc.users (fresh role/agency/venue).
+      let freshAssigneeForSave: any = null;
+      if (freshPrivileged && assignmentChanging) {
+        freshAssigneeForSave = resolveAssignableUser(freshCallerRaw, assigneeEmailToResolve, freshDoc.users || []);
+        if (!freshAssigneeForSave) {
+          return { conflict: EVENT_ASSIGNEE_REFUSAL, conflictStatus: 400, conflictCode: 'ASSIGNEE_NOT_IN_TEAM' };
+        }
+      }
       if (freshPrivileged) {
         // Privileged save: conflict-check EVERY definition field the body
         // changes against the fresh event (MEDIUM).
@@ -9519,8 +9596,12 @@ app.put('/api/events/:id', async (req, res) => {
           startTime: startTime !== undefined ? startTime : freshEvent.startTime,
           endTime: endTime !== undefined ? endTime : freshEvent.endTime,
           mashgiachType: mashgiachType !== undefined ? mashgiachType : freshEvent.mashgiachType,
-          assignedMashgiachEmail: resolvedMashgiachEmail,
-          assignedMashgiachName: resolvedMashgiachName,
+          assignedMashgiachEmail: assignmentChanging
+            ? freshAssigneeForSave!.email
+            : clearingAssignee ? assignedMashgiachEmail : freshEvent.assignedMashgiachEmail,
+          assignedMashgiachName: assignmentChanging
+            ? freshAssigneeForSave!.name
+            : clearingAssignee ? (assignedMashgiachName !== undefined ? assignedMashgiachName : freshEvent.assignedMashgiachName) : freshEvent.assignedMashgiachName,
           externalMashgiach: externalMashgiach !== undefined ? externalMashgiach : freshEvent.externalMashgiach,
           menuAttachmentName: menuAttachmentName !== undefined ? menuAttachmentName : freshEvent.menuAttachmentName,
           menuAttachmentData: menuAttachmentData !== undefined ? menuAttachmentData : freshEvent.menuAttachmentData,
