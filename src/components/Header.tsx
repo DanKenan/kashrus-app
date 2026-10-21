@@ -175,7 +175,7 @@ export const Header: React.FC<HeaderProps> = ({
               agencyName={currentUser?.agencyName}
               agencyShortCode={currentUser?.agencyShortCode}
               compactBelow360
-              className="shrink-0"
+              className={agencyLogoSrc ? "min-w-0" : "shrink-0"}
             />
 
             {/* Active Venue Selector Button */}

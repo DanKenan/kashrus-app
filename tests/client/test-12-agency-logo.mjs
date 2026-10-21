@@ -5,7 +5,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { mount } from './lib/mini-render.mjs';
 import * as L from '../../src/lib/agencyLogo.ts';
 import { AgencyLogoSheet } from '../../src/components/AgencyLogoSheet.tsx';
-import { ShutfeyLogo, headerOverflows } from '../../src/components/ShutfeyLogo.tsx';
+import { ShutfeyLogo } from '../../src/components/ShutfeyLogo.tsx';
+import { Header } from '../../src/components/Header.tsx';
 import { CertificationBadge, NO_LOGO_WORDING } from '../../src/components/CertificationBadge.tsx';
 import { CreateVenueModal } from '../../src/components/CreateVenueModal.tsx';
 import { observeVersion } from '../../src/lib/api.ts';
@@ -14,16 +15,7 @@ let passed = 0;
 function check(name, value) { assert.ok(value, name); passed++; }
 const store = new Map();
 globalThis.localStorage = { getItem: k => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) };
-const frames = new Map();
-const resizeListeners = new Set();
-let frameId = 0;
-globalThis.window = {
-  requestAnimationFrame(fn) { frames.set(++frameId, fn); return frameId; },
-  cancelAnimationFrame(id) { frames.delete(id); },
-  addEventListener(type, fn) { if (type === 'resize') resizeListeners.add(fn); },
-  removeEventListener(type, fn) { if (type === 'resize') resizeListeners.delete(fn); },
-};
-function nextFrame() { const pending = [...frames.values()]; frames.clear(); for (const fn of pending) fn(); }
+globalThis.window = {};
 globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
 const calls = [];
 let handler;
@@ -88,37 +80,24 @@ const markup = p => renderToStaticMarkup(React.createElement(ShutfeyLogo, p));
 for (const baseline of baselines) check('omitted logo markup byte-identical to frozen baseline', markup(baseline.props) === baseline.markup);
 let logo = mount(ShutfeyLogo, { ...props, agencyLogoSrc: dataUrl }); await logo.render();
 check('logo, divider, mobile fallback', logo.html().includes('h-[32px] max-w-[120px]') && logo.html().includes('w-[1px] bg-line') && logo.html().includes('max-[389px]:hidden') && logo.html().includes('min-[390px]:hidden'));
+const logoWords = logo.find(e => e.type === 'span' && ['·', 'שותפי'].includes(e.props.children?.trim()));
+check('sm logo secondary wordmarks wait until 2xl', logoWords.length === 2 && logoWords.every(e => e.props.className.includes('hidden 2xl:inline') && !e.props.className.includes('hidden xl:inline')));
+for (const agencyLogoSrc of [undefined, null, dataUrl]) {
+  const header = mount(Header, { currentUser: null, currentVenue: null, allVenues: [], agencyLogoSrc }); await header.render();
+  function findLogo(node) {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) return node.map(findLogo).find(Boolean);
+    if (node.type === ShutfeyLogo) return node;
+    return findLogo(node.props?.children);
+  }
+  check('Header lets logo wordmark shrink only with a source', findLogo(header.tree())?.props.className === (agencyLogoSrc ? 'min-w-0' : 'shrink-0'));
+}
+
 await logo.find(e => e.type === 'img' && e.props.src === dataUrl)[0].props.onError(); await logo.render();
 check('error uses original shortcode at every width', logo.html() === markup(props));
 logo = mount(ShutfeyLogo, { ...props, agencyLogoSrc: dataUrl }); await logo.render();
 await logo.find(e => e.type === 'img' && e.props.src === dataUrl)[0].props.onLoad({ currentTarget: { naturalWidth: 1000, naturalHeight: 20 } }); await logo.render();
 check('wide image falls back', logo.html() === markup(props));
-frames.clear(); resizeListeners.clear();
-const header = { scrollWidth: 1287, clientWidth: 1280 };
-check('overflow helper allows one pixel rounding', headerOverflows(header) && !headerOverflows({ scrollWidth: 1281, clientWidth: 1280 }));
-const measured = mount(ShutfeyLogo, { ...props, agencyLogoSrc: dataUrl }); await measured.render();
-measured.tree().props.ref.current = { closest: selector => { check('measure nearest header', selector === 'header'); return header; } };
-nextFrame(); await measured.render();
-check('header overflow renders exact short-code fallback', measured.html() === markup(props));
-check('tight state does not schedule a measurement loop', frames.size === 0 && resizeListeners.size === 1);
-header.scrollWidth = 1280;
-for (const resize of resizeListeners) { resize(); resize(); }
-check('resize events are frame throttled', frames.size === 1);
-nextFrame(); await measured.render();
-check('resize clears tight to try logo again', measured.html().includes('src="' + dataUrl + '"'));
-nextFrame(); await measured.render();
-check('no overflow keeps logo after measurement', measured.html().includes('src="' + dataUrl + '"') && frames.size === 0);
-// mini-render does not run effect cleanups; isolate the next mounted instance.
-frames.clear(); resizeListeners.clear();
-document.documentElement = { scrollWidth: 1287, clientWidth: 1280 };
-const standalone = mount(ShutfeyLogo, { ...props, agencyLogoSrc: dataUrl }); await standalone.render();
-standalone.tree().props.ref.current = { closest: () => null };
-nextFrame(); await standalone.render();
-check('without header, document overflow also falls back', standalone.html() === markup(props));
-frames.clear(); resizeListeners.clear(); delete document.documentElement;
-const withoutLogo = mount(ShutfeyLogo, props); await withoutLogo.render();
-check('without logo, no layout measurement or listener', withoutLogo.html() === baselines[0].markup && frames.size === 0 && resizeListeners.size === 0);
-
 const badge = p => renderToStaticMarkup(React.createElement(CertificationBadge, { certification: 'Agency — Dairy', agencyName: 'Agency', agencyShortCode: 'AG', iconClassName: 'icon', ...p }));
 check('wording default shortCode', NO_LOGO_WORDING === 'shortCode');
 check('logo and explicit detail', badge({ logoSrc: dataUrl, certificationDetail: 'Dairy' }).includes('<img') && !badge({ logoSrc: dataUrl }).includes('Agency — Dairy'));
