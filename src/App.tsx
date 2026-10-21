@@ -2217,6 +2217,7 @@ export default function App() {
         isOpen={isTeamModalOpen}
         onClose={() => setIsTeamModalOpen(false)}
         users={knownUsers}
+        venues={venues}
         tasks={tasks}
         currentUser={currentUser}
         currentVenue={currentVenue}

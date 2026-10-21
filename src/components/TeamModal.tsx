@@ -19,6 +19,7 @@ import { User as UserType, UserRole, Task, Venue, UserPermissions } from '../typ
 import { getRoleLabel, canUserAssignTasks, canUserFillTasks, DEFAULT_ROLE_PERMISSIONS } from '../lib/permissions';
 import { ConfirmModal } from './ConfirmModal';
 import { KioskCodeDialog } from './KioskCodeDialog';
+import { VenueAccessSheet } from './VenueAccessSheet';
 import { normalizePhone } from '../lib/kioskCodeShare';
 
 interface TeamModalProps {
@@ -28,6 +29,7 @@ interface TeamModalProps {
   tasks: Task[];
   currentUser: UserType | null;
   currentVenue?: Venue | null;
+  venues: Venue[];
   onAddUser: (user: { 
     name: string; 
     email: string; 
@@ -53,10 +55,13 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   tasks,
   currentUser,
   currentVenue,
+  venues,
   onAddUser,
   onUpdateUser,
   onDeleteUser,
 }) => {
+  const [venueTarget, setVenueTarget] = useState<(UserType & { venueIds: string[] }) | null>(null);
+  const [venueNotice, setVenueNotice] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -450,6 +455,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
               />
             </div>
 
+            {venueNotice && <p role="status" className="mb-3 text-sm text-ink-soft">{venueNotice}</p>}
             <div className="divide-y divide-line border border-line rounded-2xl overflow-hidden bg-surface">
               {searchQuery && filteredUsers.length === 0 && (
                 <div data-empty-state className="p-6 text-center text-ink-soft">
@@ -535,6 +541,19 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         )}
                       </div>
                     </div>
+
+                    {currentUser?.role === 'admin' && user.role !== 'admin' && Array.isArray(user.venueIds) && (
+                      <button type="button"
+                        onClick={() => {
+                          setVenueNotice(null);
+                          setVenueTarget({ ...user, venueIds: [...user.venueIds!] });
+                        }}
+                        className="min-h-11 min-w-0 px-3 py-2 rounded-xl bg-surface border border-line-control text-base text-ink hover:bg-sunken pressable cursor-pointer break-words">
+                        Venues: {venues.find((venue) => venue.id === user.venueId)?.name || ''}
+                        {user.venueIds.filter((id) => id !== user.venueId && venues.some((venue) => venue.id === id)).length > 0 &&
+                          ` +${user.venueIds.filter((id) => id !== user.venueId && venues.some((venue) => venue.id === id)).length}`}
+                      </button>
+                    )}
 
                     {/* Permissions Toggles for Fill & Assign */}
                     <div className="flex flex-wrap items-center gap-3 shrink-0">
@@ -644,6 +663,12 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           </button>
         </div>
       </div>
+
+      {venueTarget && currentUser?.role === 'admin' && (
+        <VenueAccessSheet record={venueTarget} venues={venues}
+          onClose={() => setVenueTarget(null)}
+          onSaved={() => { setVenueNotice('Venues updated'); setVenueTarget(null); }} />
+      )}
 
       {/* K1: kiosk code sheet (set / reset / remove, phone, one-time display) */}
       <KioskCodeDialog
