@@ -93,6 +93,22 @@ for (const agencyLogoSrc of [undefined, null, dataUrl]) {
   check('Header keeps the brand mark from shrinking (never clipped)', findLogo(header.tree())?.props.className === 'shrink-0');
 }
 
+{
+  // venue name: fully hidden below sm while a logo shows (no one-glyph sliver); unchanged without a logo
+  const noop = () => {};
+  const V = { id: 'vA', name: 'Crown Market (Main)', createdAt: '' };
+  const adminU = { id: 'u9', name: 'Yossi A', email: 'a@t.l', role: 'admin', agencyId: 'a', venueId: 'vA', agencyName: 'Agency', agencyShortCode: 'AG' };
+  const staffU = { ...adminU, id: 'u1', role: 'mashgiach' };
+  const hp = { allVenues: [V], onOpenCreateVenue: noop, onSelectVenue: noop, onLogout: noop, onOpenTaskModal: noop, onOpenHistoryModal: noop, onOpenEventsModal: noop, onOpenCreateEvent: noop, onOpenTeamModal: noop, onResetDailyBoard: noop, isRealtimeConnected: true, activeWorkersCount: 1, totalWorkersCount: 3, darkMode: false, onToggleDarkMode: noop, completionRate: 50, currentVenue: V };
+  const nameSpan = (h) => (h.match(/<span class="([^"]*)">Crown Market \(Main\)<\/span>/) || [])[1] || '';
+  for (const u of [adminU, staffU]) {
+    const withLogo = nameSpan(renderToStaticMarkup(React.createElement(Header, { ...hp, currentUser: u, agencyLogoSrc: dataUrl })));
+    const noLogo = nameSpan(renderToStaticMarkup(React.createElement(Header, { ...hp, currentUser: u })));
+    check(`${u.role}: venue name hidden below sm with a logo`, withLogo.split(' ').includes('max-sm:hidden'), withLogo);
+    check(`${u.role}: venue name class unchanged without a logo`, noLogo !== '' && !noLogo.includes('max-sm:hidden'), noLogo);
+  }
+}
+
 await logo.find(e => e.type === 'img' && e.props.src === dataUrl)[0].props.onError(); await logo.render();
 check('error uses original shortcode at every width', logo.html() === markup(props));
 logo = mount(ShutfeyLogo, { ...props, agencyLogoSrc: dataUrl }); await logo.render();
