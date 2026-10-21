@@ -3373,7 +3373,7 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
  */
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
-import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, type IdentityOutcomeFields } from './src/server/identity.js';
+import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, type IdentityOutcomeFields } from './src/server/identity.js';
 import { venueScope as venueScopeOf, resolveTargetVenue, sharedVenues } from './src/server/venue-scope.js';
 
 /** 10b: the one text for a commit the identity checker refuses (names no agency, no person). */
@@ -4111,11 +4111,24 @@ function ensureVapidKeys() {
  * network send. Only written when isTestMode() (never on Cloud Run). */
 const testPushLog: Array<{ path: string; recipientUserId: string | null; email: string; endpoint: string; title: string }> = [];
 
-/** Send a push notification to every device a user subscribed. Fire-and-forget. */
-function sendPushToUser(userEmail: string, title: string, body: string, data?: any, onError?: (err: any) => void) {
-  const email = userEmail.trim().toLowerCase();
-  const subs = pushSubscriptions.filter((s) => s.userEmail.toLowerCase() === email);
-  deliverPush(subs, 'email', null, title, body, data, onError);
+/**
+ * Item 10c (A1): push to ONE membership row (replaces the email-keyed
+ * email-keyed push of 5b). Identity-bound subscriptions of that row (userId + agency,
+ * 8t) always; a legacy subscription with the row's email only when that
+ * email is unambiguous across all rows. Fire-and-forget.
+ */
+function sendPushToMember(row: any, title: string, body: string, data?: any, onError?: (err: any) => void) {
+  if (!row || !row.id || typeof row.email !== 'string') return;
+  const agencyId = normalizeStoredUser(row).agencyId || 'agency-hkc';
+  const bound = pushSubscriptions.filter((s) => s.userId === row.id && s.agencyId === agencyId);
+  deliverPush(bound, 'identity', row.id, title, body, data, onError);
+  if (legacyPushSubIsUnambiguous(row.email, users)) {
+    const email = row.email.trim().toLowerCase();
+    const legacy = pushSubscriptions.filter(
+      (s) => isLegacyPushSub(s) && typeof s.userEmail === 'string' && s.userEmail.trim().toLowerCase() === email
+    );
+    deliverPush(legacy, 'legacy-email', row.id, title, body, data, onError);
+  }
 }
 
 /**
@@ -4415,18 +4428,25 @@ app.post('/api/push/unsubscribe', async (req, res) => {
   const { endpoint } = req.body as any;
   // Only the caller's own subscription for that endpoint can be removed —
   // identity comes from the VERIFIED session user, never the request body.
+  // Item 10c (A2): "own" = bound to the caller's ROW (userId). A legacy
+  // record (no userId) with the caller's email is removed only when that
+  // email is unambiguous in the FRESH users; an ambiguous legacy record (two
+  // memberships share the email) is left untouched.
   const callerEmail = caller.email.trim().toLowerCase();
+  const callerId = caller.id;
   if (endpoint) {
     const committed = await commitOrRespond(
       req, res,
       (freshDoc) => {
         const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
+        const legacyOk = legacyPushSubIsUnambiguous(callerEmail, freshDoc.users || []);
+        const isOwn = (s: any) =>
+          (!!callerId && s.userId === callerId) ||
+          (legacyOk && isLegacyPushSub(s) && typeof s.userEmail === 'string' && s.userEmail.trim().toLowerCase() === callerEmail);
         return {
           doc: {
             ...freshDoc,
-            pushSubscriptions: arr.filter(
-              (s) => s.endpoint !== endpoint || (callerEmail && s.userEmail !== callerEmail)
-            ),
+            pushSubscriptions: arr.filter((s) => !(s && s.endpoint === endpoint && isOwn(s))),
           },
           result: { success: true },
         };
@@ -5985,8 +6005,8 @@ app.post('/api/incidents', async (req, res) => {
   for (const r of recipients) {
     const silent = muted.has(r.id);
     routing.push({ email: r.email, silent });
-    sendPushToUser(
-      r.email,
+    sendPushToMember(
+      r,
       `🚨 ${incident.severity.toUpperCase()}: ${incident.title}`,
       `${venueName} — reported by ${incident.reporterName}`,
       {
@@ -6692,8 +6712,8 @@ app.post('/api/announcements', async (req, res) => {
   const icon = announcement.category === 'urgent' ? '🚨' : announcement.category === 'assignment' ? '📋' : '📢';
   for (const target of targets) {
     if (target.email.toLowerCase() === author.email.toLowerCase()) continue; // Don't notify author
-    sendPushToUser(
-      target.email,
+    sendPushToMember(
+      target,
       `${icon} ${announcement.title}`,
       announcement.body.slice(0, 100),
       { announcementId: announcement.id, type: 'announcement' }
@@ -8249,11 +8269,16 @@ if (isTestMode()) {
   app.post('/api/__test__/seed-legacy-push-sub', async (req, res) => {
     if (!requireAdmin(req, res)) return;
     // (field is subEmail: a global guard rewrites any body userEmail to the caller's)
-    const { subEmail: userEmail, endpoint } = req.body || {};
+    const { subEmail: userEmail, endpoint, subUserId, subAgencyId } = req.body || {};
     if (typeof userEmail !== 'string' || typeof endpoint !== 'string') return res.status(400).json({ error: 'subEmail + endpoint required' });
+    // Item 10c: optional subUserId/subAgencyId seed a BOUND record whose email
+    // and identity disagree (a foreign membership's device), test mode only.
+    const bound = typeof subUserId === 'string' && subUserId
+      ? { userId: subUserId, agencyId: typeof subAgencyId === 'string' && subAgencyId ? subAgencyId : 'agency-hkc' }
+      : {};
     await commitState((freshDoc) => {
       const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
-      return { doc: { ...freshDoc, pushSubscriptions: [...arr.filter((s) => s.endpoint !== endpoint), { userEmail: userEmail.trim().toLowerCase(), endpoint, keys: { p256dh: 'x', auth: 'y' }, createdAt: new Date().toISOString() }] }, result: null };
+      return { doc: { ...freshDoc, pushSubscriptions: [...arr.filter((s) => s.endpoint !== endpoint), { userEmail: userEmail.trim().toLowerCase(), ...bound, endpoint, keys: { p256dh: 'x', auth: 'y' }, createdAt: new Date().toISOString() }] }, result: null };
     }, { label: 'test-seed-legacy-push-sub' });
     res.json({ ok: true });
   });
@@ -8532,9 +8557,22 @@ app.post('/api/venues', async (req, res) => {
   // mutator silently rewrote that user to { role: 'owner', agencyId: caller's }.
   const ownerEmailRefused = (u: any) =>
     !!u && (u.role !== 'owner' || (normalizeStoredUser(u).agencyId || 'agency-hkc') !== callerAgencyId);
+  // Item 10c (A5): the owner email is resolved INSIDE the caller's agency.
+  // A row with that email in another agency (another membership of the same
+  // person, or anyone else) is never reused and never moved; it only makes
+  // the generic refusal. Same rule on cached and fresh data.
+  const resolveVenueOwnerEmail = (list: any[]): { idx: number; refused: boolean } => {
+    let otherAgency = false;
+    for (let i = 0; i < (list || []).length; i++) {
+      const u = list[i];
+      if (!u || typeof u.email !== 'string' || u.email.trim().toLowerCase() !== cleanOwnerEmail) continue;
+      if ((normalizeStoredUser(u).agencyId || 'agency-hkc') !== callerAgencyId) { otherAgency = true; continue; }
+      return { idx: i, refused: ownerEmailRefused(u) };
+    }
+    return { idx: -1, refused: otherAgency };
+  };
   if (cleanOwnerEmail) {
-    const cachedOwner = users.find((u) => typeof u.email === 'string' && u.email.trim().toLowerCase() === cleanOwnerEmail);
-    if (ownerEmailRefused(cachedOwner)) {
+    if (resolveVenueOwnerEmail(users).refused) {
       return res.status(409).json({ error: VENUE_OWNER_EMAIL_REFUSAL, code: 'OWNER_EMAIL_UNAVAILABLE' });
     }
   }
@@ -8583,12 +8621,14 @@ app.post('/api/venues', async (req, res) => {
       let createdOwner: any = null;
       let newOwnerId: string | null = null; // 10b: a NEW owner row (admin chose its password)
       if (cleanOwnerEmail) {
-        const existingOwnerIdx = newUsers.findIndex((u) => typeof u.email === 'string' && u.email.trim().toLowerCase() === cleanOwnerEmail);
-        // Item 8v: the same rule on FRESH data (the user may have changed
-        // role/agency since the cached pre-check).
-        if (existingOwnerIdx !== -1 && ownerEmailRefused(newUsers[existingOwnerIdx])) {
+        // Item 8v + 10c (A5): the same rule on FRESH data (the user may have
+        // changed role/agency since the cached pre-check); only a row of the
+        // caller's agency can be reused.
+        const freshOwner = resolveVenueOwnerEmail(newUsers);
+        if (freshOwner.refused) {
           return { conflict: VENUE_OWNER_EMAIL_REFUSAL, conflictStatus: 409, conflictCode: 'OWNER_EMAIL_UNAVAILABLE' };
         }
+        const existingOwnerIdx = freshOwner.idx;
         if (existingOwnerIdx !== -1) {
           newUsers[existingOwnerIdx] = {
             ...newUsers[existingOwnerIdx],
@@ -10202,10 +10242,18 @@ app.post('/api/events', async (req, res) => {
     assignedMashgiachEmail: committedAssigneeEmail,
   }, undefined, callerAgencyId);
 
-  if (committedAssigneeEmail) {
+  // Item 10c (A1): the push goes to the assignee's row IN THE EVENT'S AGENCY
+  // (resolveAssignableUser only ever picks a row of the caller's agency).
+  const assigneeRow = committedAssigneeEmail
+    ? users.find((u) =>
+        typeof u.email === 'string' &&
+        u.email.trim().toLowerCase() === committedAssigneeEmail.trim().toLowerCase() &&
+        (normalizeStoredUser(u).agencyId || 'agency-hkc') === callerAgencyId)
+    : undefined;
+  if (committedAssigneeEmail && assigneeRow) {
     const when = event.date ? ` — ${event.date}` : '';
-    sendPushToUser(
-      committedAssigneeEmail,
+    sendPushToMember(
+      assigneeRow,
       '⭐ New event assignment',
       `${event.title}${when} at ${event.location}`,
       { url: '/', eventId: event.id }
@@ -11241,12 +11289,14 @@ app.delete('/api/users/:id', async (req, res) => {
         }
       }
       // Item 8t: the deleted user's push subscriptions go in the SAME commit
-      // (identity-bound by userId, plus legacy records under their email —
-      // emails are unique, so a legacy record under it is theirs).
+      // (identity-bound by userId). Item 10c (A4): a legacy record (no
+      // userId) under their email is theirs only when no OTHER fresh row
+      // holds that email; an ambiguous legacy record is kept.
       const targetEmail = typeof freshTarget.email === 'string' ? freshTarget.email.trim().toLowerCase() : '';
+      const legacyIsTargets = legacyPushSubIsUnambiguous(targetEmail, freshUsers);
       const freshSubs: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
       const keptSubs = freshSubs.filter(
-        (s) => !(s && (s.userId === id || (!s.userId && typeof s.userEmail === 'string' && s.userEmail.trim().toLowerCase() === targetEmail)))
+        (s) => !(s && (s.userId === id || (legacyIsTargets && isLegacyPushSub(s) && typeof s.userEmail === 'string' && s.userEmail.trim().toLowerCase() === targetEmail)))
       );
       return {
         doc: {
@@ -12317,8 +12367,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     (u.role === 'admin' || (u.role === 'coordinator' && sharedVenues(u as any, user as any, venues as any).length > 0))
   );
   for (const admin of admins) {
-    sendPushToUser(
-      admin.email,
+    sendPushToMember(
+      admin,
       `🔑 Password reset code for ${user.name}`,
       `Code: ${code} (expires in 15 min)`,
       { type: 'password-reset', email: normalizedEmail }
