@@ -11,8 +11,9 @@ import testIdentity from './test-identity.mjs';
 import testHistoryRetention from './test-history-retention.mjs';
 import testMigrateIdentity from './test-migrate-identity.mjs';
 import testSessionToken from './test-session-token.mjs';
+import testCleanSlate from './test-clean-slate.mjs';
 
-const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken];
+const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken, testCleanSlate];
 
 export async function runAll() {
   console.log(`\n=== Stage 4 PR A Tests (${tests.length} tests) ===\n`);
