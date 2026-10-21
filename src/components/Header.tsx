@@ -43,6 +43,7 @@ import { UpdateAppButton } from './UpdateAppButton';
 import { getRoleLabel, canUserAssignTasks } from '../lib/permissions';
 
 interface HeaderProps {
+  agencyLogoSrc?: string | null;
   isAgencyHome?: boolean;
   onOpenAgencyHome?: () => void;
   currentUser: User | null;
@@ -79,6 +80,7 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  agencyLogoSrc,
   isAgencyHome,
   onOpenAgencyHome,
   currentUser,
@@ -146,6 +148,10 @@ export const Header: React.FC<HeaderProps> = ({
   };
   const canEnterKiosk = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
 
+  // Item 12: with an agency logo the phone header has no room for the venue name;
+  // hide it fully below sm (icon + chevron only, as on main) instead of a one-glyph sliver.
+  const venueNameHide = agencyLogoSrc ? ' max-sm:hidden' : '';
+
   return (
     <header className="sticky top-0 z-30 bg-surface/95 backdrop-blur-md border-b border-line tactile-1 transition-colors">
       {/* Click-outside transparent overlay for open dropdowns */}
@@ -169,6 +175,7 @@ export const Header: React.FC<HeaderProps> = ({
             <ShutfeyLogo 
               size="sm" 
               showSubtitle={false}
+              agencyLogoSrc={agencyLogoSrc}
               agencyName={currentUser?.agencyName}
               agencyShortCode={currentUser?.agencyShortCode}
               compactBelow360
@@ -186,7 +193,7 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 {/* H1: fixed px so large text does not grow the target */}
                 <Building2 className="w-[14px] h-[14px] text-gold-deep shrink-0" />
-                <span className="text-xs font-bold text-ink truncate min-w-0 max-w-[130px] sm:max-w-[170px]">
+                <span className={`text-xs font-bold text-ink truncate min-w-0 max-w-[130px] sm:max-w-[170px]${venueNameHide}`}>
                   {currentVenue?.name || 'Select Venue'}
                 </span>
                 {/* H1: fixed px so large text does not grow the target */}
@@ -201,7 +208,7 @@ export const Header: React.FC<HeaderProps> = ({
                 className="flex items-center gap-2 px-3 py-1 rounded-xl bg-ok-bg border border-line-control text-ok tactile-1 min-w-11 min-h-11 pressable cursor-pointer"
               >
                 <Building2 className="w-4 h-4 shrink-0" />
-                <span className="text-xs font-bold truncate min-w-0 max-w-[130px] sm:max-w-[170px]">{currentVenue.name}</span>
+                <span className={`text-xs font-bold truncate min-w-0 max-w-[130px] sm:max-w-[170px]${venueNameHide}`}>{currentVenue.name}</span>
                 <ChevronDown className="w-4 h-4 shrink-0" />
               </button>
             ) : currentVenue ? (
@@ -209,7 +216,7 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="flex items-center gap-1.5 px-[10px] py-[4px] rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/40 text-emerald-900 dark:text-emerald-200 tactile-1 min-w-[36px]">
                 {/* H1: fixed px so large text does not grow the target */}
                 <Building2 className="w-[14px] h-[14px] text-emerald-600 dark:text-emerald-400 shrink-0" />
-                <span className="text-xs font-bold truncate min-w-0 max-w-[130px] sm:max-w-[170px]">
+                <span className={`text-xs font-bold truncate min-w-0 max-w-[130px] sm:max-w-[170px]${venueNameHide}`}>
                   {currentVenue.name}
                 </span>
               </div>
