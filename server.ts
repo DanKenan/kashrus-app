@@ -4052,8 +4052,10 @@ function initialStateForSocket(meta: SocketMeta | undefined): any | null {
   if (!meta.kiosk) return baseState;
   const kioskVenueId = meta.kioskVenueId;
   if (!kioskVenueId) return null;
+  // D3c (ChatGPT's #46 review): an explicit key allowlist, never a spread of
+  // the agency state — a key added to agencyStateFor later cannot reach a
+  // tablet unless it is listed here. Same keys as before (no client change).
   return {
-    ...baseState,
     tasks: (baseState.tasks || []).filter((t: any) => t.venueId === kioskVenueId),
     historyLogs: (baseState.historyLogs || []).filter((h: any) => h.venueId === kioskVenueId),
     venues: (baseState.venues || []).filter((v: any) => v.id === kioskVenueId),
@@ -4064,6 +4066,7 @@ function initialStateForSocket(meta: SocketMeta | undefined): any | null {
     airtableConfigs: [],
     approvedIngredients: [],
     factoryReports: [],
+    currentWorkDate: baseState.currentWorkDate,
   };
 }
 
@@ -4281,6 +4284,9 @@ function agencyStateFor(agencyId: string, recipient?: UserProfile) {
     factoryReports: factoryReports.filter((r) => norm(r.agencyId) === agencyId && inScopeVenue(r.venueId)),
     users: getSafeUsersForAgency(agencyId, recipient),
     currentWorkDate,
+    // D3c test 35: a test-mode-only probe key proving the kiosk allowlist
+    // excludes keys it does not list (isTestMode() is false on Cloud Run).
+    ...(isTestMode() ? { __stage2Probe: 'not-for-kiosk' } : {}),
   };
 }
 
@@ -6992,7 +6998,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
       venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [],
       events = [], incidents = [], handoffNotes = [], announcements = [],
       taskTemplates = [], eventTaskTemplates = [], approvedIngredients = [], factoryReports = [],
-      kioskDevices: newKioskDevices = [],
+      kioskDevices: newKioskDevices = [], historyLogs = [],
     } = req.body || {};
     try {
       await commitState(
@@ -7017,6 +7023,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
               approvedIngredients: [...(freshDoc.approvedIngredients || []), ...approvedIngredients],
               factoryReports: [...(freshDoc.factoryReports || []), ...factoryReports],
               kioskDevices: [...(freshDoc.kioskDevices || []), ...newKioskDevices],
+              historyLogs: [...(freshDoc.historyLogs || []), ...historyLogs],
             },
             result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length + newKioskDevices.length },
           };
