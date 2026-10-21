@@ -303,6 +303,7 @@ export interface ServerBroadcastMessage {
     | 'INGREDIENTS_SYNCED'
     | 'AUDIT_REPORT_SUBMITTED'
     | 'CLEAN_SLATE_RESET'
+    | 'HISTORY_PRUNED'
     | 'DEMO_RESTORED'
     | 'KIOSK_DEVICES_UPDATED';
   payload: any;

@@ -8,8 +8,9 @@ import testLogging from './test-logging.mjs';
 import testStaticCache from './test-static-cache.mjs';
 import testWorkday from './test-workday.mjs';
 import testIdentity from './test-identity.mjs';
+import testHistoryRetention from './test-history-retention.mjs';
 
-const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity];
+const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention];
 
 export async function runAll() {
   console.log(`\n=== Stage 4 PR A Tests (${tests.length} tests) ===\n`);
