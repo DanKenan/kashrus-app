@@ -178,6 +178,14 @@ export async function dualWriteChangedEntities(
     const a = afterPersons.get(pid);
     const existing = peopleSnaps.get(pid);
     const v = (existing?._v || 0) + 1;
+    if (a && !beforePersons.has(pid) && existing) {
+      // 8c final guard: a person who did not exist before this commit (a
+      // born-migrated row, or a legacy row the migrator is migrating) may
+      // only CREATE people/{id}. An existing doc of any status belongs to
+      // another (historical) identity: never overwritten, never revived.
+      // Updates of an already-bound person (b exists) are unaffected.
+      throw new Error('Identity conflict: person document already exists');
+    }
     if (a) {
       identityWrites.push({
         collection: 'people',
