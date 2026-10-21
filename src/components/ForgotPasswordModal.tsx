@@ -168,6 +168,9 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
               <p className="text-xs text-ink-faint">
                 Code verified. Set your new password.
               </p>
+              <p className="text-xs text-ink-faint" data-testid="reset-signout-note">
+                Setting a new password signs you out on your other devices.
+              </p>
               <div className="relative">
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-faint" />
                 <input
