@@ -57,7 +57,10 @@ export function mount(Component, initialProps) {
     buttons() { return find((e) => (e.type === 'button' || e.props.role === 'button' || e.props.role === 'tab') ).map((e) => ({ label: (textOf(e.props.children) || e.props['aria-label'] || e.props.title || '').replace(/\s+/g, ' ').trim(), title: e.props.title || '', aria: e.props['aria-label'] || '', el: e })); },
     async click(match, nth = 0) {
       const m = typeof match === 'function' ? match : (e) => { const t = (textOf(e.props.children) + ' ' + (e.props['aria-label'] || '') + ' ' + (e.props.title || '')).replace(/\s+/g, ' '); return match instanceof RegExp ? match.test(t) : t.includes(match); };
-      const hits = find((e) => typeof e.props.onClick === 'function' && m(e));
+      let hits = find((e) => typeof e.props.onClick === 'function' && m(e));
+      // prefer real controls over wrappers that also carry onClick (e.g. a dialog's stopPropagation div)
+      const ctl = hits.filter((e) => e.type === 'button' || e.type === 'a' || e.props.role === 'button' || e.props.role === 'tab');
+      if (ctl.length) hits = ctl;
       if (!hits[nth]) throw new Error('no clickable match for ' + match + ' (' + hits.length + ')');
       await hits[nth].props.onClick(ev()); await settle(); return hits.length;
     },

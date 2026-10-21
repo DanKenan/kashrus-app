@@ -79,19 +79,19 @@ export const CopyEventDialog: React.FC<CopyEventDialogProps> = ({
   return (
     <div
       id="copy-event-overlay"
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-scrim backdrop-blur-xs animate-fade-in"
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-scrim backdrop-blur-sm animate-fade-in"
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="copy-event-title"
-        className="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl bg-surface border border-line tactile-5 p-5 animate-slide-up"
+        className="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl bg-surface border border-line e3 p-5 animate-slide-up"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
-            <div className="p-2.5 rounded-xl shrink-0 bg-gold-wash">
-              <Copy className="w-5 h-5 text-gold-deep" />
+            <div className="p-2.5 rounded-xl shrink-0 bg-sunken">
+              <Copy className="w-5 h-5 text-ink-soft" />
             </div>
             <div className="min-w-0">
               <h3 id="copy-event-title" className="text-base font-bold text-ink leading-tight">
@@ -106,7 +106,7 @@ export const CopyEventDialog: React.FC<CopyEventDialogProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="w-11 h-11 -mr-2 -mt-2 flex items-center justify-center rounded-xl text-ink-faint hover:text-ink-soft hover:bg-sunken transition cursor-pointer shrink-0"
+            className="w-11 h-11 inline-flex items-center justify-center rounded-lg text-ink-soft hover:bg-sunken shrink-0 cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -121,7 +121,7 @@ export const CopyEventDialog: React.FC<CopyEventDialogProps> = ({
               value={title}
               maxLength={200}
               onChange={(e) => setTitle(e.target.value)}
-              className="w-full min-h-[44px] px-3 rounded-xl border border-line-control bg-surface text-base text-ink focus:outline-none focus:ring-2 focus:ring-gold"
+              className="w-full min-h-[44px] px-3 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
             />
           </label>
           <label className="block">
@@ -132,7 +132,7 @@ export const CopyEventDialog: React.FC<CopyEventDialogProps> = ({
               value={date}
               min={venueToday}
               onChange={(e) => setDate(e.target.value)}
-              className="w-full min-h-[44px] px-3 rounded-xl border border-line-control bg-surface text-base text-ink focus:outline-none focus:ring-2 focus:ring-gold"
+              className="w-full min-h-[44px] px-3 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
             />
             {date && !dateOk && (
               <span className="block mt-1 text-xs font-semibold text-bad">Pick today or a later date.</span>
@@ -152,9 +152,9 @@ export const CopyEventDialog: React.FC<CopyEventDialogProps> = ({
           <div id="copy-event-not-copied" className="rounded-xl bg-sunken p-3">
             <div className="text-xs font-bold text-ink mb-1.5">Not copied</div>
             <ul className="space-y-1 text-ink-soft">
-              <li className="flex gap-1.5"><Ban className="w-4 h-4 mt-0.5 shrink-0 text-ink-faint" />Who is assigned</li>
-              <li className="flex gap-1.5"><Ban className="w-4 h-4 mt-0.5 shrink-0 text-ink-faint" />Checkmarks and task notes</li>
-              <li className="flex gap-1.5"><Ban className="w-4 h-4 mt-0.5 shrink-0 text-ink-faint" />Event notes and menu file</li>
+              <li className="flex gap-1.5"><Ban className="w-4 h-4 mt-0.5 shrink-0 text-ink-soft" />Who is assigned</li>
+              <li className="flex gap-1.5"><Ban className="w-4 h-4 mt-0.5 shrink-0 text-ink-soft" />Checkmarks and task notes</li>
+              <li className="flex gap-1.5"><Ban className="w-4 h-4 mt-0.5 shrink-0 text-ink-soft" />Event notes and menu file</li>
             </ul>
           </div>
         </div>
@@ -170,7 +170,7 @@ export const CopyEventDialog: React.FC<CopyEventDialogProps> = ({
             type="button"
             onClick={onClose}
             disabled={saving}
-            className="min-h-[44px] px-4 rounded-xl text-sm font-semibold text-ink-soft bg-sunken hover:brightness-95 pressable cursor-pointer disabled:opacity-50"
+            className="min-h-[44px] px-4 rounded-xl text-sm font-semibold hover:brightness-95 pressable cursor-pointer disabled:opacity-50 bg-surface border border-line-control text-ink hover:bg-sunken"
           >
             Cancel
           </button>
@@ -179,7 +179,7 @@ export const CopyEventDialog: React.FC<CopyEventDialogProps> = ({
             type="button"
             onClick={handleSave}
             disabled={!canSave}
-            className="min-h-[44px] px-4 rounded-xl text-sm font-bold bg-gold-wash text-gold-ink border border-gold tactile-2 pressable cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+            className="min-h-[44px] px-4 rounded-xl text-sm font-bold e2 pressable cursor-pointer disabled:opacity-50 flex items-center gap-1.5 bg-gold-deep text-paper"
           >
             <Copy className="w-4 h-4" />
             <span>{saving ? 'Copying…' : 'Create copy'}</span>

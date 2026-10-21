@@ -112,7 +112,7 @@ const renderHistory = (h) => renderToStaticMarkup(React.createElement(HistoryLog
     ok(`P.history.dayDone ${sn.date}`, text.includes(`${sn.completedTasks}/${sn.totalTasks} completed`));
   }
   ok('P.history.dayOrder', inOrder(text, logs.map((l) => l.date)) === true);
-  ok('P.history.archive', text.includes(`Archive: ${snap1.date}`) && text.includes('(Reset by system)'));
+  ok('P.history.archive', text.includes(`Archive: ${snap1.date}`) && text.includes('(Reset by Automatic)'));
   ok('P.history.search', decode(html).includes('placeholder="Search logs..."'));
   ok('P.history.export', text.includes('Export CSV') && html.includes('id="export-csv-btn"'));
   for (const e of snap1.entries) {

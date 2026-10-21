@@ -380,27 +380,27 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
   return (
     <div
       id="create-event-modal-overlay"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-[#1a120a]/60 backdrop-blur-xs animate-fade-in overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-scrim backdrop-blur-sm animate-fade-in overflow-y-auto"
     >
-      <div className="bg-surface w-full max-w-2xl rounded-2xl tactile-5 border border-line overflow-hidden my-6 animate-slide-up">
+      <div className="bg-surface w-full max-w-2xl rounded-2xl e3 border border-line overflow-hidden my-6 animate-slide-up">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4.5 border-b border-line bg-sunken">
           <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-gold to-gold-deep text-white flex items-center justify-center tactile-2">
+            <div className="w-10 h-10 rounded-xl text-ink flex items-center justify-center e2">
               <Calendar className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base font-bold text-ink tracking-tight">
                 Notify & Register Kosher Event
               </h2>
-              <p className="text-xs text-ink-soft">
+              <p className="text-sm text-ink-soft">
                 Notify the Kashrut Admin & assign a Mashgiach with inspection tasks & menu.
               </p>
             </div>
           </div>
-          <button
+          <button aria-label="Close"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-ink-faint hover:text-ink-soft hover:bg-sunken transition cursor-pointer"
+            className="w-11 h-11 inline-flex items-center justify-center rounded-lg text-ink-soft hover:bg-sunken shrink-0 cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -408,7 +408,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
         {/* Error notification */}
         {errorMsg && (
-          <div className="mx-6 mt-4 p-3 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+          <div className="mx-6 mt-4 p-3 rounded-xl bg-bad-bg border border-bad text-xs text-bad flex items-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
             <span>{errorMsg}</span>
           </div>
@@ -424,7 +424,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   Originating Establishment / Caterer *
                 </label>
                 <div className="relative">
-                  <Building2 className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
+                  <Building2 className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-soft" />
                   <select
                     value={venueId}
                     onChange={(e) => {
@@ -439,7 +439,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                       }
                     }}
                     disabled={currentUser?.role === 'owner'}
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold disabled:opacity-70"
+                    className="w-full pl-8.5 pr-3 py-2 focus:outline-none disabled:opacity-70 min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   >
                     {allVenues.map((v) => (
                       <option key={v.id} value={v.id}>
@@ -459,8 +459,8 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   required
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
-                  placeholder="e.g. Miller Wedding, Community Shabbat Dinner"
-                  className="w-full px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder:text-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                  placeholder="Event name"
+                  className="w-full px-3 py-2 placeholder:text-ink-soft focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>
             </div>
@@ -470,7 +470,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 Event Location / Ballroom Address *
               </label>
               <div className="relative">
-                <MapPin className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
+                <MapPin className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-soft" />
                 <input
                   type="text"
                   required
@@ -479,8 +479,8 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     locationTouched.current = true;
                     setLocation(e.target.value);
                   }}
-                  placeholder="e.g. Beth El Synagogue Ballroom, 2626 Albany Ave"
-                  className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder:text-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                  placeholder="Venue or address"
+                  className="w-full pl-8.5 pr-3 py-2 placeholder:text-ink-soft focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>
             </div>
@@ -492,7 +492,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   Event Date *
                 </label>
                 <div className="relative">
-                  <Calendar className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
+                  <Calendar className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-soft" />
                   <input
                     type="date"
                     required
@@ -501,7 +501,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                       dateTouched.current = true;
                       setDate(e.target.value);
                     }}
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                    className="w-full pl-8.5 pr-3 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   />
                 </div>
               </div>
@@ -511,13 +511,13 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   Start Time
                 </label>
                 <div className="relative">
-                  <Clock className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
+                  <Clock className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-soft" />
                   <input
                     type="text"
                     value={startTime}
                     onChange={(e) => setStartTime(e.target.value)}
-                    placeholder="e.g. 11:30 AM"
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                    placeholder="Start time"
+                    className="w-full pl-8.5 pr-3 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   />
                 </div>
               </div>
@@ -527,13 +527,13 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   End Time
                 </label>
                 <div className="relative">
-                  <Clock className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-faint" />
+                  <Clock className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-soft" />
                   <input
                     type="text"
                     value={endTime}
                     onChange={(e) => setEndTime(e.target.value)}
-                    placeholder="e.g. 16:30 PM"
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                    placeholder="End time"
+                    className="w-full pl-8.5 pr-3 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   />
                 </div>
               </div>
@@ -544,22 +544,22 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
           <div className="pt-3 border-t border-line space-y-3">
             <div className="flex items-center justify-between">
               <label className="font-bold text-ink flex items-center gap-1.5">
-                <ShieldCheck className="w-4 h-4 text-gold-deep" />
+                <ShieldCheck className="w-4 h-4 text-ink-soft" />
                 <span>Mashgiach Assigned to Event</span>
               </label>
-              <span className="text-[11px] text-ink-faint">
+              <span className="text-xs text-ink-soft">
                 Supervisors receive real-time notification
               </span>
             </div>
 
             {/* Mode switcher: Registered vs Other/External vs Unassigned */}
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-3 gap-2 bg-sunken p-1 rounded-xl">
               <button
                 type="button"
                 onClick={() => setMashgiachMode('assigned_user')}
                 className={`py-2 px-2.5 rounded-xl border text-center transition cursor-pointer ${
                   mashgiachMode === 'assigned_user'
-                    ? 'border-gold bg-gold-wash text-gold-ink font-bold ring-1 ring-gold/30 pressable'
+                    ? 'border-line-control bg-surface text-ink font-semibold e1 pressable'
                     : 'border-line text-ink-soft hover:bg-sunken font-medium pressable'
                 }`}
               >
@@ -571,7 +571,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 onClick={() => setMashgiachMode('external')}
                 className={`py-2 px-2.5 rounded-xl border text-center transition cursor-pointer ${
                   mashgiachMode === 'external'
-                    ? 'border-gold bg-gold-wash text-gold-ink font-bold ring-1 ring-gold/30 pressable'
+                    ? 'border-line-control bg-surface text-ink font-semibold e1 pressable'
                     : 'border-line text-ink-soft hover:bg-sunken font-medium pressable'
                 }`}
               >
@@ -583,7 +583,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 onClick={() => setMashgiachMode('unassigned')}
                 className={`py-2 px-2.5 rounded-xl border text-center transition cursor-pointer ${
                   mashgiachMode === 'unassigned'
-                    ? 'border-line-strong bg-sunken text-ink font-bold ring-1 ring-line-strong pressable'
+                    ? 'border-line-control bg-surface text-ink font-semibold e1 pressable'
                     : 'border-line text-ink-soft hover:bg-sunken font-medium pressable'
                 }`}
               >
@@ -593,16 +593,16 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
             {/* If Known Mashgiach selected */}
             {mashgiachMode === 'assigned_user' && (
-              <div className="p-3 bg-gold-wash border border-gold/40 rounded-xl space-y-2">
+              <div className="p-3 bg-sunken border border-line-control rounded-xl space-y-2">
                 <label className="block text-xs font-semibold text-ink-soft">
                   Select Supervised Mashgiach:
                 </label>
                 <div className="relative">
-                  <User className="w-3.5 h-3.5 absolute left-3 top-2.5 text-gold-deep" />
+                  <User className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-soft" />
                   <select
                     value={selectedMashgiachEmail}
                     onChange={(e) => setPickedMashgiachEmail(e.target.value)}
-                    className="w-full pl-8.5 pr-3 py-2 text-xs rounded-lg bg-surface border border-gold/40 text-ink focus:outline-none focus:ring-2 focus:ring-gold/30"
+                    className="w-full pl-8.5 pr-3 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   >
                     {relevantMashgichim.length === 0 ? (
                       <option value="">No team members found - choose Other</option>
@@ -626,7 +626,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     )}
                   </select>
                 </div>
-                <p className="text-[11px] text-gold-ink font-medium">
+                <p className="text-sm text-ink-soft font-medium">
                   ✓ This mashgiach will receive an instant assignment badge and can access event checklists directly.
                 </p>
               </div>
@@ -634,14 +634,14 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
 
             {/* If Other / External mashgiach */}
             {mashgiachMode === 'external' && (
-              <div className="p-3 bg-gold-wash border border-gold/40 rounded-xl space-y-2.5 animate-fade-in">
-                <div className="text-xs font-bold text-gold-ink flex items-center gap-1.5">
-                  <AlertCircle className="w-3.5 h-3.5 text-gold-deep" />
+              <div className="p-3 bg-sunken border border-line-control rounded-xl space-y-2.5 animate-fade-in">
+                <div className="text-xs font-bold text-ink-soft flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 text-ink-soft" />
                   <span>External Mashgiach Contact Information</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                   <div>
-                    <label className="block text-[11px] font-semibold text-ink-soft mb-1">
+                    <label className="block text-xs font-semibold text-ink-soft mb-1">
                       Full Name *
                     </label>
                     <input
@@ -650,38 +650,38 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                       value={extName}
                       onChange={(e) => setExtName(e.target.value)}
                       placeholder="Rabbi / Mashgiach Name"
-                      className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-surface border border-gold/40 text-ink focus:outline-none focus:ring-2 focus:ring-gold"
+                      className="w-full px-2.5 py-1.5 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-semibold text-ink-soft mb-1">
+                    <label className="block text-xs font-semibold text-ink-soft mb-1">
                       Phone Number
                     </label>
                     <div className="relative">
-                      <Phone className="w-3 h-3 absolute left-2.5 top-2.5 text-ink-faint" />
+                      <Phone className="w-3 h-3 absolute left-2.5 top-2.5 text-ink-soft" />
                       <input
                         type="tel"
                         value={extPhone}
                         onChange={(e) => setExtPhone(e.target.value)}
                         placeholder="(860) 555-0192"
-                        className="w-full pl-7.5 pr-2.5 py-1.5 text-xs rounded-lg bg-surface border border-gold/40 text-ink focus:outline-none focus:ring-2 focus:ring-gold"
+                        className="w-full pl-7.5 pr-2.5 py-1.5 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-semibold text-ink-soft mb-1">
+                    <label className="block text-xs font-semibold text-ink-soft mb-1">
                       Email Address
                     </label>
                     <div className="relative">
-                      <Mail className="w-3 h-3 absolute left-2.5 top-2.5 text-ink-faint" />
+                      <Mail className="w-3 h-3 absolute left-2.5 top-2.5 text-ink-soft" />
                       <input
                         type="email"
                         value={extEmail}
                         onChange={(e) => setExtEmail(e.target.value)}
                         placeholder="mashgiach@email.com"
-                        className="w-full pl-7.5 pr-2.5 py-1.5 text-xs rounded-lg bg-surface border border-gold/40 text-ink focus:outline-none focus:ring-2 focus:ring-gold"
+                        className="w-full pl-7.5 pr-2.5 py-1.5 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                       />
                     </div>
                   </div>
@@ -707,14 +707,14 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="px-3 py-2 rounded-xl border border-gold/40 bg-gold-wash text-gold-ink hover:bg-gold/20 flex items-center gap-1.5 transition cursor-pointer font-medium tactile-1 pressable"
+                  className="px-3 py-2 rounded-xl flex items-center gap-1.5 transition cursor-pointer font-medium e1 pressable bg-surface border border-line-control text-ink hover:bg-sunken"
                 >
-                  <Paperclip className="w-3.5 h-3.5 text-gold-deep" />
+                  <Paperclip className="w-3.5 h-3.5 text-ink-soft" />
                   <span>{menuFileName ? 'Replace Menu File' : 'Upload Event Menu'}</span>
                 </button>
                 {menuFileName && (
-                  <span className="text-xs text-emerald-700 dark:text-emerald-400 flex items-center gap-1 font-medium truncate max-w-xs">
-                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600" />
+                  <span className="text-xs text-ok flex items-center gap-1 font-medium truncate max-w-xs">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-ok" />
                     {menuFileName}
                   </span>
                 )}
@@ -730,7 +730,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="Notes for the mashgiach (optional)"
-                className="w-full px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder:text-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                className="w-full px-3 py-2 placeholder:text-ink-soft focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
               />
             </div>
           </div>
@@ -741,7 +741,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
               <label className="font-bold text-ink">
                 Event Tasks ({customTasks.length})
               </label>
-              <span className="text-[11px] text-ink-faint">
+              <span className="text-xs text-ink-soft">
                 Defaults loaded — delete any that don't apply
               </span>
             </div>
@@ -753,13 +753,13 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   className="flex items-center justify-between p-2 rounded-lg bg-sunken border border-line/70"
                 >
                   <span className="text-xs text-ink flex items-center gap-2">
-                    <FileText className="w-3 h-3 text-gold-deep shrink-0" />
+                    <FileText className="w-3 h-3 text-ink-soft shrink-0" />
                     {t}
                   </span>
                   <button
                     type="button"
                     onClick={() => handleRemoveTask(idx)}
-                    className="p-1 text-ink-faint hover:text-rose-500 transition"
+                    className="p-1 transition bg-surface border border-line-control text-bad hover:bg-sunken"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -778,13 +778,13 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     handleAddTask();
                   }
                 }}
-                placeholder="Add task for this event only (e.g. Verify wine bottle seals)"
-                className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                placeholder="Add a task for this event only"
+                className="flex-1 px-3 py-1.5 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
               />
               <button
                 type="button"
                 onClick={handleAddTask}
-                className="px-3.5 py-1.5 rounded-lg bg-gold hover:bg-gold-deep text-white font-semibold flex items-center gap-1 transition tactile-1 pressable"
+                className="px-3.5 py-1.5 rounded-lg font-semibold flex items-center gap-1 transition e1 pressable bg-surface border border-line-control text-ink hover:bg-sunken"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Add</span>
@@ -797,13 +797,13 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowTemplateManager(!showTemplateManager)}
-                  className="text-xs font-bold text-gold-deep hover:underline"
+                  className="text-xs font-bold hover:underline bg-surface border border-line-control text-ink hover:bg-sunken"
                 >
                   {showTemplateManager ? '▾ Hide default tasks' : '▸ Edit default tasks for all events'}
                 </button>
                 {showTemplateManager && (
-                  <div className="mt-2 p-3 rounded-xl bg-gold-wash/40 border border-gold/30 space-y-1.5">
-                    <p className="text-[11px] text-ink-soft">
+                  <div className="mt-2 p-3 rounded-xl bg-sunken border border-line-control space-y-1.5">
+                    <p className="text-sm text-ink-soft">
                       These load automatically into every new event. Delete any that don't apply per event.
                     </p>
                     {templates.map((t) => (
@@ -815,7 +815,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                         <button
                           type="button"
                           onClick={() => handleDeleteTemplate(t.id)}
-                          className="p-1 text-ink-faint hover:text-rose-500 transition"
+                          className="p-1 transition bg-surface border border-line-control text-bad hover:bg-sunken"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -832,13 +832,13 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                             handleAddTemplate();
                           }
                         }}
-                        placeholder="New default task (e.g. Check oven pilots)"
-                        className="flex-1 px-3 py-1.5 text-xs rounded-lg bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
+                        placeholder="New default task"
+                        className="flex-1 px-3 py-1.5 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                       />
                       <button
                         type="button"
                         onClick={handleAddTemplate}
-                        className="px-3 py-1.5 rounded-lg border border-gold/50 text-gold-deep text-xs font-bold hover:bg-gold-wash transition"
+                        className="px-3 py-1.5 rounded-lg text-xs font-bold transition bg-surface border border-line-control text-ink hover:bg-sunken"
                       >
                         Save as default
                       </button>
@@ -854,18 +854,18 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 font-semibold text-ink-soft hover:bg-sunken rounded-xl transition cursor-pointer"
+              className="px-4 py-2 font-semibold rounded-xl transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={isLoading || !venueReady}
-              className="px-5 py-2 font-bold rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 flex items-center gap-1.5 transition disabled:opacity-50 cursor-pointer pressable"
+              className="px-5 py-2 font-bold rounded-xl e2 flex items-center gap-1.5 transition disabled:opacity-50 cursor-pointer pressable bg-gold-deep text-paper"
             >
               {isLoading ? (
                 <>
-                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <div className="w-3.5 h-3.5 border-2 border-paper border-t-transparent rounded-full animate-spin" />
                   <span>Submitting...</span>
                 </>
               ) : (

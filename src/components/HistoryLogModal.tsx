@@ -141,7 +141,7 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                       Archive: {activeSnapshot.date}
                     </span>
                     <span className="text-xs text-ink-faint">
-                      (Reset by {activeSnapshot.resetBy})
+                      (Reset by {activeSnapshot.resetBy === 'scheduled_midnight_cron' ? 'Automatic (midnight)' : activeSnapshot.resetBy === 'system' ? 'Automatic' : activeSnapshot.resetBy})
                     </span>
                   </div>
 
