@@ -140,6 +140,14 @@ export interface IdentityEnforceOptions {
    */
   newMembership?: ReadonlyMap<string, string>;
   /**
+   * 10d: destination row id → removed source owner row id of an owner
+   * transfer ALREADY validated and applied by applyOwnerTransfer. On the
+   * destination only, the credential fields come from the source's stored
+   * values (credentialOwner, recoveryCodeHashes, recoveryFailures,
+   * credentialOrigin); membership fields (joinedAt, tokenEpoch, …) stay its own.
+   */
+  ownerTransferIds?: ReadonlyMap<string, string>;
+  /**
    * Called (row id + field name only, never values) when a mutator's output
    * tried to set, change or remove a server-only identity field. The change
    * is reverted, and the caller logs it, so it is never silent.
@@ -160,8 +168,10 @@ export interface IdentityOutcomeFields {
   credentialOriginSetById?: Record<string, CredentialOrigin>;
   /** 10b: rows whose password change keeps the origin (see passwordKeepsOriginIds). */
   passwordKeepsOriginIds?: string[];
-  /** 10i only: new row id → existing personId (see newMembership). */
+  /** 10i only (and the 10d test-mode builder): new row id → existing personId (see newMembership). */
   newMembership?: Record<string, string>;
+  /** 10d: a declared owner transfer (validated + applied by applyOwnerTransfer). */
+  ownerTransfer?: OwnerTransfer;
 }
 
 export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership'> {
@@ -215,8 +225,14 @@ export function enforceIdentityFields(
         out.tokenEpoch = base + 1;
       }
       // 10b: credential fields with no writer yet are kept exactly as stored.
+      // 10d: on an owner-transfer destination they come from the removed
+      // source owner's stored row (joinedAt is a membership field: its own).
+      const transferSrcId = opts.ownerTransferIds?.get(row.id);
+      const transferSrc = transferSrcId !== undefined ? beforeById.get(transferSrcId) : undefined;
       for (const f of PRESERVED_CREDENTIAL_FIELDS) {
-        if (prev[f] !== undefined) out[f] = JSON.parse(JSON.stringify(prev[f]));
+        const from = transferSrc && f !== 'joinedAt' ? transferSrc : prev;
+        if (from[f] !== undefined) out[f] = JSON.parse(JSON.stringify(from[f]));
+        else delete out[f];
         if (opts.onViolation && JSON.stringify(row[f]) !== JSON.stringify(out[f])) opts.onViolation(row.id, f);
       }
       if (opts.newMembership?.has(row.id) && opts.onViolation) opts.onViolation(row.id, 'newMembership');
@@ -241,7 +257,11 @@ export function enforceIdentityFields(
       const before = prev && prev.credentialOrigin !== undefined ? prev.credentialOrigin : undefined;
       let origin: any = before;
       const setTo = opts.credentialOriginSetById?.get(row.id);
-      if (setTo !== undefined) {
+      const transferFrom = prev && opts.ownerTransferIds?.has(row.id) ? beforeById.get(opts.ownerTransferIds.get(row.id)!) : undefined;
+      if (transferFrom) {
+        // 10d: the credential moved with the owner transfer, origin included.
+        origin = transferFrom.credentialOrigin !== undefined ? transferFrom.credentialOrigin : undefined;
+      } else if (setTo !== undefined) {
         if (isCredentialOrigin(setTo)) origin = setTo;
         else if (opts.onViolation) opts.onViolation(row.id, 'credentialOrigin');
       } else if (prev) {
@@ -364,8 +384,8 @@ export function identityGroups(users: readonly any[]): string[][] {
   return [...groups.values()].map((g) => [...new Set(g)].sort());
 }
 
-/** The identity-relevant shape of a row, compared to decide "unchanged". */
-function identityShape(row: any): string {
+/** The identity-relevant shape of a row, compared to decide "unchanged" (10b checker AND 10d projections: one definition). */
+export function identityShape(row: any): string {
   return JSON.stringify([
     usableEmail(row),
     row?.personId ?? null,
@@ -483,4 +503,204 @@ export function legacyPushSubIsUnambiguous(email: unknown, usersList: any[]): bo
 }
 export function isLegacyPushSub(s: any): boolean {
   return !!s && !s.userId;
+}
+
+// ---------------------------------------------------------------------------
+// 10d — projections from whole person groups + owner transfer (plan v4 10d,
+// "Agreed — 10d design v2"). Pure: no I/O, no logging, never throws.
+// ---------------------------------------------------------------------------
+
+export type ProjectionProblemCode = 'no-valid-owner' | 'email-shared';
+export interface ProjectionProblem {
+  code: ProjectionProblemCode;
+  /** Sorted row ids of the group (never emails). */
+  rowIds: string[];
+  personId?: string;
+  /** normalized email (only inside the server; never put in a payload or log). */
+  email?: string;
+  issues?: InvariantCode[];
+}
+export interface PersonProjection {
+  personId: string;
+  ownerRowId: string;
+  name: string;
+  primaryEmail: string;
+  rowIds: string[];
+}
+export interface IdentityProjection {
+  /** personId → projection from the owner row (valid persons only). */
+  persons: Map<string, PersonProjection>;
+  /** every personId that has at least one row (valid or not). */
+  personIdsWithRows: Set<string>;
+  /** emailKey → personId (valid persons, unshared emails). */
+  emailPerson: Map<string, string>;
+  /** normalized email → the row id usersByEmail points at (owner row; legacy row = itself). */
+  lookup: Map<string, string>;
+  problems: ProjectionProblem[];
+}
+
+/**
+ * The ONE projection function (dualwrite before/after, consistency check,
+ * migration verify). A person = the rows sharing a personId. One row → that
+ * row is the owner. Two or more → the single credentialOwner row, ONLY when
+ * the group passes every invariant; otherwise 'no-valid-owner' and no
+ * projection (no smallest-id fallback). Rows without personId (legacy) map
+ * their own email → own id. An email used by two identities (two persons, or
+ * a person and a legacy row, or two legacy rows) → 'email-shared', unmapped.
+ */
+export function identityProjection(usersIn: readonly any[], agencies: readonly any[]): IdentityProjection {
+  const users = (Array.isArray(usersIn) ? usersIn : []).filter((u: any) => u && typeof u.id === 'string');
+  const persons = new Map<string, PersonProjection>();
+  const personIdsWithRows = new Set<string>();
+  const emailPerson = new Map<string, string>();
+  const lookup = new Map<string, string>();
+  const problems: ProjectionProblem[] = [];
+  const byPerson = new Map<string, any[]>();
+  for (const u of users) {
+    if (typeof u.personId === 'string' && u.personId) {
+      personIdsWithRows.add(u.personId);
+      if (!byPerson.has(u.personId)) byPerson.set(u.personId, []);
+      byPerson.get(u.personId)!.push(u);
+    }
+  }
+  // identity per normalized email: personId, or "legacy:<rowId>" for rows without one
+  const identitiesByEmail = new Map<string, Map<string, string[]>>();
+  for (const u of users) {
+    const e = usableEmail(u);
+    if (!e) continue;
+    const ident = typeof u.personId === 'string' && u.personId ? `p:${u.personId}` : `l:${u.id}`;
+    if (!identitiesByEmail.has(e)) identitiesByEmail.set(e, new Map());
+    const m = identitiesByEmail.get(e)!;
+    if (!m.has(ident)) m.set(ident, []);
+    m.get(ident)!.push(u.id);
+  }
+  const sharedEmails = new Set<string>();
+  for (const [e, m] of identitiesByEmail) {
+    if (m.size > 1) {
+      sharedEmails.add(e);
+      problems.push({ code: 'email-shared', email: e, rowIds: [...m.values()].flat().sort() });
+    }
+  }
+  for (const [pid, rows] of byPerson) {
+    const rowIds = rows.map((r) => r.id).sort();
+    let owner: any = null;
+    if (rows.length === 1) owner = rows[0];
+    else {
+      const issues = groupIssues(rows, agencies);
+      if (issues.length) {
+        problems.push({ code: 'no-valid-owner', personId: pid, rowIds, issues: [...new Set(issues.map((i) => i.code))].sort() as InvariantCode[] });
+        continue;
+      }
+      owner = rows.find((r) => r.credentialOwner === true) || null;
+      if (!owner) { problems.push({ code: 'no-valid-owner', personId: pid, rowIds, issues: ['owner-count'] }); continue; }
+    }
+    const primaryEmail = usableEmail(owner);
+    persons.set(pid, { personId: pid, ownerRowId: owner.id, name: typeof owner.name === 'string' ? owner.name : '', primaryEmail, rowIds });
+    if (primaryEmail && !sharedEmails.has(primaryEmail)) {
+      emailPerson.set(emailKey(primaryEmail), pid);
+      lookup.set(primaryEmail, owner.id);
+    }
+  }
+  for (const u of users) {
+    if (typeof u.personId === 'string' && u.personId) continue;
+    const e = usableEmail(u);
+    if (e && !sharedEmails.has(e)) lookup.set(e, u.id);
+  }
+  return { persons, personIdsWithRows, emailPerson, lookup, problems };
+}
+
+/** A stable signature of a projection problem's rows (ids + identity shapes). */
+export function problemSignature(p: ProjectionProblem, users: readonly any[]): string {
+  const byId = new Map<string, any>((Array.isArray(users) ? users : []).filter((u: any) => u && typeof u.id === 'string').map((u: any) => [u.id, u]));
+  return JSON.stringify([p.code, p.personId ?? null, p.email ?? null, p.rowIds, p.rowIds.map((id) => identityShape(byId.get(id)))]);
+}
+
+/**
+ * 10d B2: problems in `after` that were NOT present, identically, in `before`
+ * (same code, same rows, same identity shape of every row). Those must abort
+ * the commit; the rest are untouched stored problems (tolerated, not written).
+ */
+export function newProjectionProblems(before: IdentityProjection, beforeUsers: readonly any[], after: IdentityProjection, afterUsers: readonly any[]): { fresh: ProjectionProblem[]; tolerated: ProjectionProblem[] } {
+  const stored = new Set(before.problems.map((p) => problemSignature(p, beforeUsers)));
+  const fresh: ProjectionProblem[] = [];
+  const tolerated: ProjectionProblem[] = [];
+  for (const p of after.problems) (stored.has(problemSignature(p, afterUsers)) ? tolerated : fresh).push(p);
+  return { fresh, tolerated };
+}
+
+/** M4: the successor owner — earliest joinedAt (missing = earliest), tie → smallest id. */
+export function m4Successor(rows: readonly any[]): any | null {
+  const list = (Array.isArray(rows) ? rows : []).filter((r: any) => r && typeof r.id === 'string');
+  if (!list.length) return null;
+  const t = (r: any) => {
+    const ms = typeof r.joinedAt === 'string' ? Date.parse(r.joinedAt) : NaN;
+    return Number.isFinite(ms) ? ms : -Infinity;
+  };
+  return [...list].sort((a, b) => (t(a) - t(b)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
+}
+
+/** The credential fields that move with an owner transfer (membership fields never move). */
+export const OWNER_TRANSFER_FIELDS = ['password', 'credentialOwner', 'credentialOrigin', 'recoveryCodeHashes', 'recoveryFailures'] as const;
+
+export interface OwnerTransfer { fromId: string; toId: string }
+export type OwnerTransferResult = { ok: true; users: any[]; transferIds?: Map<string, string> } | { ok: false; reason: string };
+
+/**
+ * 10d B1: validate + apply an owner transfer, and refuse an owner removal
+ * that has none. Runs in commitState BEFORE enforceIdentityFields, on the
+ * fresh stored users (before) and the mutator's output (after). Aborts
+ * (ok:false) unless every condition of the agreed design holds. The
+ * credential fields are COPIED from the fresh source row; any destination
+ * value the mutator supplied is overwritten.
+ */
+export function applyOwnerTransfer(beforeUsersIn: readonly any[], afterUsersIn: readonly any[], agencies: readonly any[], transfer: OwnerTransfer | null | undefined): OwnerTransferResult {
+  const before = (Array.isArray(beforeUsersIn) ? beforeUsersIn : []).filter((u: any) => u && typeof u.id === 'string');
+  const afterArr = Array.isArray(afterUsersIn) ? afterUsersIn : [];
+  const beforeById = new Map<string, any>(before.map((u: any) => [u.id, u]));
+  const afterIds = new Set<string>(afterArr.filter((u: any) => u && typeof u.id === 'string').map((u: any) => u.id));
+  // Owners of multi-row persons removed in this commit.
+  const removedOwners: any[] = [];
+  const rowsOf = (pid: string) => before.filter((u: any) => u.personId === pid);
+  for (const u of before) {
+    if (u.credentialOwner !== true || afterIds.has(u.id) || typeof u.personId !== 'string' || !u.personId) continue;
+    const survivors = rowsOf(u.personId).filter((r: any) => r.id !== u.id && afterIds.has(r.id));
+    if (survivors.length) removedOwners.push(u);
+  }
+  const t = transfer && typeof transfer === 'object' && typeof transfer.fromId === 'string' && typeof transfer.toId === 'string' ? transfer : null;
+  if (!t) {
+    if (removedOwners.length) return { ok: false, reason: 'owner-removed-without-transfer' };
+    return { ok: true, users: afterArr as any[] };
+  }
+  if (removedOwners.length !== 1 || removedOwners[0].id !== t.fromId) return { ok: false, reason: 'transfer-source-mismatch' };
+  const src = beforeById.get(t.fromId);
+  const dst = beforeById.get(t.toId);
+  if (!src || afterIds.has(t.fromId)) return { ok: false, reason: 'transfer-source-not-removed' };
+  if (!dst || !afterIds.has(t.toId)) return { ok: false, reason: 'transfer-destination-missing' };
+  const pid = src.personId;
+  if (dst.personId !== pid || dst.credentialOwner === true) return { ok: false, reason: 'transfer-destination-invalid' };
+  const group = rowsOf(pid);
+  if (group.length < 2 || groupIssues(group, agencies).length) return { ok: false, reason: 'transfer-source-group-invalid' };
+  if (!isBcrypt(src.password)) return { ok: false, reason: 'transfer-source-no-password' };
+  const successor = m4Successor(group.filter((r: any) => r.id !== src.id && afterIds.has(r.id)));
+  if (!successor || successor.id !== dst.id) return { ok: false, reason: 'transfer-not-m4-successor' };
+  const users = afterArr.map((row: any) => {
+    if (!row || row.id !== dst.id) return row;
+    const out: any = { ...row };
+    for (const f of OWNER_TRANSFER_FIELDS) {
+      if (src[f] !== undefined) out[f] = JSON.parse(JSON.stringify(src[f]));
+      else delete out[f];
+    }
+    out.credentialOwner = true;
+    return out;
+  });
+  // The surviving rows of the person must be valid after the step (explicit
+  // for ONE survivor: the checker skips single-row groups).
+  const survivors = users.filter((r: any) => r && r.personId === pid);
+  if (survivors.length === 1) {
+    const s = survivors[0];
+    if (s.credentialOwner !== true || !isBcrypt(s.password)) return { ok: false, reason: 'transfer-survivor-invalid' };
+  } else if (groupIssues(survivors, agencies).length) {
+    return { ok: false, reason: 'transfer-survivors-invalid' };
+  }
+  return { ok: true, users, transferIds: new Map([[dst.id, src.id]]) };
 }

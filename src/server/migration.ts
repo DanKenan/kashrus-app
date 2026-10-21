@@ -12,7 +12,7 @@
  */
 
 import crypto from 'crypto';
-import { identityGroups, groupIssues } from './identity.ts';
+import { identityGroups, groupIssues, identityProjection } from './identity.ts';
 
 const FIRESTORE_STATE_DOC = 'app-state/main';
 
@@ -145,20 +145,19 @@ export async function migrateCopy(firestoreDb: any): Promise<{
     }
 
     // Verify/create usersByEmail for EVERY user in monolith (not just missing).
-    // Build the complete expected mapping first, detect duplicates.
-    const expectedLookups = new Map<string, { userId: string; email: string }>(); // key -> {userId, email}
-    for (const u of (monolith.users || [])) {
-      if (!u?.id || !u?.email) continue;
-      const norm = normalizeEmail(u.email);
-      const key = emailKey(norm);
-      const existing = expectedLookups.get(key);
-      if (existing && existing.userId !== u.id) {
-        throw new Error(
-          `Duplicate normalized email in monolith: "${u.email}" used by both ${existing.userId} and ${u.id}. Refusing to copy.`
-        );
+    // Item 10d: the expected mapping comes from identityProjection (the same
+    // function the dual-write uses): a person's email -> its credential OWNER
+    // row, a legacy row -> itself. An email shared by two identities, or a
+    // person group without a valid owner, refuses the copy (as before).
+    const proj = identityProjection(monolith.users || [], monolith.agencies || []);
+    for (const p of proj.problems) {
+      if (p.code === 'email-shared') {
+        throw new Error(`Duplicate normalized email in monolith: used by rows ${p.rowIds.join(', ')}. Refusing to copy.`);
       }
-      expectedLookups.set(key, { userId: u.id, email: norm });
+      throw new Error(`Identity group without a valid credential owner in monolith: rows ${p.rowIds.join(', ')}. Refusing to copy.`);
     }
+    const expectedLookups = new Map<string, { userId: string; email: string }>(); // key -> {userId, email}
+    for (const [norm, userId] of proj.lookup) expectedLookups.set(emailKey(norm), { userId, email: norm });
 
     // Check each expected lookup (read phase)
     const lookupsToCreate: Array<{ key: string; userId: string; email: string }> = [];
@@ -290,25 +289,25 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
   compareArrays('tasks', monolith.tasks, perEntityTasks);
 
   // Verify usersByEmail: every expected lookup exists with correct userId,
-  // and no extras point to wrong users.
-  const expectedLookups = new Map<string, string>(); // key -> userId
-  const seenEmails = new Map<string, string>(); // normalized email -> userId (dup detection)
-  for (const u of (monolith.users || [])) {
-    if (!u?.id || !u?.email) continue;
-    const norm = normalizeEmail(u.email);
-    const key = emailKey(norm);
-    const dup = seenEmails.get(norm);
-    if (dup && dup !== u.id) {
-      mismatches.push({
-        collection: 'usersByEmail',
-        id: u.id,
-        reason: 'Duplicate normalized email in monolith',
-      });
-      continue;
+  // and no extras point to wrong users. Item 10d: expected = identityProjection
+  // (the dual-write's own function): a person's email -> its credential owner
+  // row, a legacy row -> itself. An email shared by two identities is
+  // reported once and its key is not compared; a person group without a
+  // valid owner is reported by the invariant check below, its key skipped.
+  const idProj = identityProjection(monolith.users || [], monolith.agencies || []);
+  const skippedKeys = new Set<string>();
+  const problemPersons = new Set<string>();
+  for (const p of idProj.problems) {
+    if (p.code === 'email-shared' && p.email) {
+      skippedKeys.add(emailKey(p.email));
+      mismatches.push({ collection: 'usersByEmail', id: p.rowIds.slice(1).join(',') || p.rowIds[0], reason: 'Duplicate normalized email in monolith' });
+    } else if (p.personId) {
+      problemPersons.add(p.personId);
+      for (const u of (monolith.users || [])) if (u?.personId === p.personId && u?.email) skippedKeys.add(emailKey(normalizeEmail(u.email)));
     }
-    seenEmails.set(norm, u.id);
-    expectedLookups.set(key, u.id);
   }
+  const expectedLookups = new Map<string, string>(); // key -> userId
+  for (const [norm, userId] of idProj.lookup) expectedLookups.set(emailKey(norm), userId);
 
   const actualLookups = new Map<string, string>(); // key -> userId
   for (const d of lookupsSnap.docs) {
@@ -333,6 +332,7 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
   }
 
   for (const [key, actualUserId] of actualLookups) {
+    if (skippedKeys.has(key)) continue;
     if (!expectedLookups.has(key)) {
       mismatches.push({
         collection: 'usersByEmail',
@@ -350,29 +350,27 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
   // personId (not migrated yet) expect no projections; the counts show them.
   const peopleDocs = new Map<string, any>(peopleSnap.docs.map((d: any) => [d.id, d.data()] as [string, any]));
   const emailDocs = new Map<string, any>(emailsSnap.docs.map((d: any) => [d.id, d.data()] as [string, any]));
-  const rowPersons = new Map<string, any>();
   let migratedRows = 0;
   let unmigratedRows = 0;
   for (const u of (monolith.users || [])) {
     if (!u?.id) continue;
-    if (typeof u.personId === 'string' && u.personId) {
-      migratedRows++;
-      rowPersons.set(u.personId, u);
-    } else {
-      unmigratedRows++;
-    }
+    if (typeof u.personId === 'string' && u.personId) migratedRows++;
+    else unmigratedRows++;
   }
-  for (const [pid, u] of rowPersons) {
+  // Item 10d: expected people/emails come from identityProjection — people/{P}
+  // from the owner row, emails/{key} -> P. A person without a valid owner is
+  // reported by the invariant check below (not twice here).
+  for (const [pid, pp] of idProj.persons) {
     const p = peopleDocs.get(pid);
     if (!p || p.status !== 'active') {
-      mismatches.push({ collection: 'people', id: u.id, reason: 'identity projection missing' });
-    } else if (p.name !== (u.name || '') || p.primaryEmail !== normalizeEmail(u.email || '')) {
-      mismatches.push({ collection: 'people', id: u.id, reason: 'identity projection out of date' });
+      mismatches.push({ collection: 'people', id: pp.ownerRowId, reason: 'identity projection missing' });
+    } else if (p.name !== pp.name || p.primaryEmail !== pp.primaryEmail) {
+      mismatches.push({ collection: 'people', id: pp.ownerRowId, reason: 'identity projection out of date' });
     }
-    if (u.email) {
-      const e = emailDocs.get(emailKey(normalizeEmail(u.email)));
+    if (pp.primaryEmail && !skippedKeys.has(emailKey(pp.primaryEmail))) {
+      const e = emailDocs.get(emailKey(pp.primaryEmail));
       if (!e || e.status !== 'active' || e.personId !== pid) {
-        mismatches.push({ collection: 'emails', id: u.id, reason: 'identity projection missing' });
+        mismatches.push({ collection: 'emails', id: pp.ownerRowId, reason: 'identity projection missing' });
       }
     }
   }
@@ -381,7 +379,7 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
   for (const [pid, p] of peopleDocs) {
     if (p?.status === 'active') {
       peopleActive++;
-      if (!rowPersons.has(pid)) mismatches.push({ collection: 'people', id: pid, reason: 'active projection without row' });
+      if (!idProj.personIdsWithRows.has(pid)) mismatches.push({ collection: 'people', id: pid, reason: 'active projection without row' });
     } else {
       peopleRetired++;
     }
@@ -391,8 +389,9 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
   for (const [key, e] of emailDocs) {
     if (e?.status === 'active') {
       emailsActive++;
-      const owner = rowPersons.get(e.personId);
-      if (!owner || !owner.email || emailKey(normalizeEmail(owner.email)) !== key) {
+      if (problemPersons.has(e.personId) || skippedKeys.has(key)) continue;
+      const owner = idProj.persons.get(e.personId);
+      if (!owner || !owner.primaryEmail || emailKey(owner.primaryEmail) !== key) {
         mismatches.push({ collection: 'emails', id: e?.personId || key.slice(0, 12), reason: 'active projection without row' });
       }
     } else {
