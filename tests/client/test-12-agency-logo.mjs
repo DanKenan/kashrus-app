@@ -90,7 +90,7 @@ for (const agencyLogoSrc of [undefined, null, dataUrl]) {
     if (node.type === ShutfeyLogo) return node;
     return findLogo(node.props?.children);
   }
-  check('Header lets logo wordmark shrink only with a source', findLogo(header.tree())?.props.className === (agencyLogoSrc ? 'min-w-0' : 'shrink-0'));
+  check('Header keeps the brand mark from shrinking (never clipped)', findLogo(header.tree())?.props.className === 'shrink-0');
 }
 
 await logo.find(e => e.type === 'img' && e.props.src === dataUrl)[0].props.onError(); await logo.render();
