@@ -7787,6 +7787,8 @@ app.get('/api/venues', (req, res) => {
 });
 
 // Admin creates a brand new venue within their agency
+/** Item 8v: generic refusal when ownerEmail belongs to a user who may not become this venue's owner. */
+const VENUE_OWNER_EMAIL_REFUSAL = "This email can't be used for a new owner.";
 app.post('/api/venues', async (req, res) => {
   const {
     name,
@@ -7820,6 +7822,19 @@ app.post('/api/venues', async (req, res) => {
   // Pre-generate stable IDs/timestamps BEFORE the transaction so retries don't duplicate.
   const newVenueId = `venue-${crypto.randomUUID()}`;
   const cleanOwnerEmail = ownerEmail?.trim().toLowerCase() || undefined;
+  // Item 8v: an EXISTING user may become the new venue's owner only if they
+  // are already an owner in the caller's agency. Anyone else (another
+  // agency's user, any admin/coordinator/staff, the platform admin) is
+  // refused with one generic 409 and nothing is written — before 8v the
+  // mutator silently rewrote that user to { role: 'owner', agencyId: caller's }.
+  const ownerEmailRefused = (u: any) =>
+    !!u && (u.role !== 'owner' || (normalizeStoredUser(u).agencyId || 'agency-hkc') !== callerAgencyId);
+  if (cleanOwnerEmail) {
+    const cachedOwner = users.find((u) => typeof u.email === 'string' && u.email.trim().toLowerCase() === cleanOwnerEmail);
+    if (ownerEmailRefused(cachedOwner)) {
+      return res.status(409).json({ error: VENUE_OWNER_EMAIL_REFUSAL, code: 'OWNER_EMAIL_UNAVAILABLE' });
+    }
+  }
   const ownerUserId = `usr_owner_${crypto.randomUUID()}`;
   const createdAt = new Date().toISOString();
   // Hash the owner password once, outside the transaction (bcrypt is CPU-heavy;
@@ -7862,7 +7877,12 @@ app.post('/api/venues', async (req, res) => {
       let newUsers = [...freshUsers];
       let createdOwner: any = null;
       if (cleanOwnerEmail) {
-        const existingOwnerIdx = newUsers.findIndex((u) => u.email.toLowerCase() === cleanOwnerEmail);
+        const existingOwnerIdx = newUsers.findIndex((u) => typeof u.email === 'string' && u.email.trim().toLowerCase() === cleanOwnerEmail);
+        // Item 8v: the same rule on FRESH data (the user may have changed
+        // role/agency since the cached pre-check).
+        if (existingOwnerIdx !== -1 && ownerEmailRefused(newUsers[existingOwnerIdx])) {
+          return { conflict: VENUE_OWNER_EMAIL_REFUSAL, conflictStatus: 409, conflictCode: 'OWNER_EMAIL_UNAVAILABLE' };
+        }
         if (existingOwnerIdx !== -1) {
           newUsers[existingOwnerIdx] = {
             ...newUsers[existingOwnerIdx],
