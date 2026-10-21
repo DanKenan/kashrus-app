@@ -847,7 +847,11 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
               data-kiosk-undo
               aria-label={`Undo: ${bar.title}`}
               disabled={bar.phase === 'undoing'}
-              onClick={() => updateToggle(bar.taskId, bar.title, false, bar.op)}
+              onClick={() => {
+                // An expired bar (5 s passed, exit animation running) must not undo.
+                if (barOp.current !== bar.op) return;
+                updateToggle(bar.taskId, bar.title, false, bar.op);
+              }}
               className="pressable shrink-0 h-16 min-w-16 px-4 rounded-xl border-2 border-line-control bg-surface text-ink text-k-body font-semibold"
             >
               Undo
