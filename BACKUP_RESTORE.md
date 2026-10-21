@@ -29,6 +29,19 @@ producing backups, and passes a restore drill** (see the checklist at the end).
 The Option A/B procedure below applies to a whole-database file from before
 8h or from the Tier-1 path; for an agency export it stops at the guard.
 
+**Tier-1 job schema (item 8b).** New Tier-1 backups hold SEVEN per-entity
+collections: tasks, venues, users, usersByEmail, media, plus the identity
+projections people and emails. `restore-backup.ts` accepts exactly one of two
+schemas: that 7-collection set, or the legacy 5-collection set (backups taken
+before 8b). Anything else (for example 5 + people without emails, or an
+extra collection) is refused before any write, as before. A legacy restore
+writes no identity projections and says so ("identity projections not
+restored … rebuild them with the identity repair command", and
+"identity projections: absent" in the verification output); until they are
+rebuilt (the repair command arrives with 8c), the consistency check reports
+every migrated row as "identity projection missing", never as healthy. The
+target must still be a new, empty throwaway database.
+
 ### What's in the backup (verified against `stateSnapshot()` + export code)
 - ✅ Users (names, emails, roles, agency links, permissions) — **passwords,
   password hashes, and kiosk PINs are stripped** (keys absent, not null)

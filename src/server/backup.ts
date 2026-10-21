@@ -15,7 +15,8 @@
  * through its own identity.
  *
  * Tier 1 captures: monolith app-state/main (all fields), every per-entity
- * collection (tasks, venues, users, usersByEmail, media), and media metadata.
+ * collection (tasks, venues, users, usersByEmail, media, people, emails — the
+ * last two since item 8b), and media metadata.
  * Media BYTES are NOT copied (they live in GCS; the 30-day retention is
  * enforced by the sweeper, not by backup retention).
  */
@@ -33,6 +34,9 @@ const PER_ENTITY_COLLECTIONS = [
   'users',
   'usersByEmail',
   'media',
+  // Item 8b: identity projections (people/{personId}, emails/{emailKey}).
+  'people',
+  'emails',
 ];
 
 // Field names that are always scrubbed (case-insensitive exact match).

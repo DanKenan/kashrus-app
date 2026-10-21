@@ -119,8 +119,28 @@ async function assertTargetEmpty(db: any): Promise<void> {
   }
 }
 
-// The complete Tier 1 schema: exactly these collections, no more, no fewer.
-const TIER1_COLLECTIONS = ['tasks', 'venues', 'users', 'usersByEmail', 'media'];
+// The complete Tier 1 schema: exactly one of these two collection sets, no
+// more, no fewer. Item 8b added the identity projections (people, emails);
+// a backup taken before 8b is the legacy 5-collection set and is still
+// accepted. Anything else is refused.
+const TIER1_COLLECTIONS_LEGACY = ['tasks', 'venues', 'users', 'usersByEmail', 'media'];
+const IDENTITY_COLLECTIONS = ['people', 'emails'];
+const TIER1_COLLECTIONS_V2 = [...TIER1_COLLECTIONS_LEGACY, ...IDENTITY_COLLECTIONS];
+
+/**
+ * The schema a manifest claims: the 7-collection set when it names any
+ * identity collection, else the legacy 5-collection set. The exact-match
+ * checks below then refuse anything that is not exactly that set.
+ */
+export function tier1SchemaFor(manifestCollections: Record<string, unknown>): string[] {
+  const names = Object.keys(manifestCollections || {});
+  return names.some((n) => IDENTITY_COLLECTIONS.includes(n)) ? TIER1_COLLECTIONS_V2 : TIER1_COLLECTIONS_LEGACY;
+}
+
+/** True when the restore carries no identity projections (legacy 5-set). */
+export function isLegacyTier1(manifestCollections: Record<string, unknown>): boolean {
+  return tier1SchemaFor(manifestCollections) === TIER1_COLLECTIONS_LEGACY;
+}
 
 // Firestore document IDs: 1-1500 chars, no forward slashes.
 function isValidDocId(id: any): boolean {
@@ -130,7 +150,8 @@ function isValidDocId(id: any): boolean {
 /**
  * Validate manifest schema and payload structure BEFORE any write.
  * Requires the COMPLETE Tier 1 schema: tier='tier1', monolithPresent=true,
- * exactly the five expected collections with non-negative integer counts,
+ * exactly the 7-collection set or the legacy 5-collection set (item 8b),
+ * with non-negative integer counts,
  * valid Firestore document IDs, no unexpected collections.
  * Throws on any problem. Returns the parsed payload.
  */
@@ -158,7 +179,8 @@ function validateManifestAndPayload(manifest: any, dataJson: string): any {
     throw new Error('[restore] Manifest missing collections map.');
   }
 
-  // Complete schema: exactly the five expected collections
+  // Complete schema: exactly the 7-set or exactly the legacy 5-set
+  const TIER1_COLLECTIONS = tier1SchemaFor(manifest.collections);
   const manifestColls = Object.keys(manifest.collections).sort();
   const expectedColls = [...TIER1_COLLECTIONS].sort();
   const missing = expectedColls.filter(c => !manifestColls.includes(c));
@@ -254,7 +276,7 @@ async function verifyRestore(db: any, manifest: any, payload: any): Promise<Reco
   }
 
   // Per-entity collections: count + spot-check field values of first doc
-  for (const collName of TIER1_COLLECTIONS) {
+  for (const collName of tier1SchemaFor(manifest.collections)) {
     const snap = await db.collection(collName).get();
     actual[collName] = snap.size;
     const expected = manifest.collections[collName];
@@ -290,7 +312,7 @@ export async function runRestore(opts: {
   confirm: boolean;
   firestoreDb: any;
   storage: any;
-}): Promise<{ counts: Record<string, number> }> {
+}): Promise<{ counts: Record<string, number>; identityProjections?: 'absent' | 'restored' }> {
   const { source, targetDb, projectId, confirm, firestoreDb, storage } = opts;
 
   // 1. Target safety checks (run in dry-run too — this is a validated dry run)
@@ -319,6 +341,9 @@ export async function runRestore(opts: {
   const manifest = JSON.parse(manifestRaw.toString('utf8'));
   const payload = validateManifestAndPayload(manifest, dataRaw.toString('utf8'));
   console.log('[restore] Manifest + payload validated, checksum OK.');
+  const legacy = isLegacyTier1(manifest.collections);
+  console.log(`[restore] Schema: ${legacy ? 'legacy 5-collection set' : '7-collection set (with identity projections)'}.`);
+  if (legacy) console.log('[restore] NOTE: identity projections not restored (legacy 5-collection backup); rebuild them with the identity repair command.');
 
   if (!confirm) {
     console.log('[restore] Validated dry run complete (no --confirm, nothing written).');
@@ -347,7 +372,7 @@ export async function runRestore(opts: {
       batch.set(firestoreDb.doc(FIRESTORE_STATE_DOC), payload.monolith);
       batchCount++;
     }
-    for (const collName of TIER1_COLLECTIONS) {
+    for (const collName of tier1SchemaFor(manifest.collections)) {
       const docs = payload.collections?.[collName] || [];
       for (const doc of docs) {
         const { id, ...data } = doc;
@@ -374,8 +399,10 @@ export async function runRestore(opts: {
   for (const [name, count] of Object.entries(actual)) {
     console.log(`  ${name}: ${count} — OK`);
   }
+  console.log(`  identity projections: ${legacy ? 'absent (legacy backup)' : 'restored'}`);
+  if (legacy) console.log('[restore] NOTE: identity projections not restored (legacy 5-collection backup); rebuild them with the identity repair command; until then the consistency check reports every migrated row as "identity projection missing".');
   console.log(`[restore] SUCCESS: restored into ${targetDb}`);
-  return { counts: actual };
+  return { counts: actual, identityProjections: legacy ? 'absent' : 'restored' };
 }
 
 async function main() {

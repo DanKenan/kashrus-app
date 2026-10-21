@@ -216,7 +216,8 @@ export async function migrateCopy(firestoreDb: any): Promise<{
  */
 export async function perEntityStatus(firestoreDb: any): Promise<{
   monolith: { venues: number; users: number; tasks: number };
-  perEntity: { venues: number; users: number; tasks: number; usersByEmail: number };
+  perEntity: { venues: number; users: number; tasks: number; usersByEmail: number; people: number; emails: number };
+  identity: { migratedRows: number; unmigratedRows: number; peopleActive: number; peopleRetired: number; emailsActive: number; emailsRetired: number };
   match: boolean;
   mismatches: Array<{ collection: string; id: string; reason: string }>;
 }> {
@@ -227,11 +228,14 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
   const monolith = monolithSnap.exists ? monolithSnap.data() : { venues: [], users: [], tasks: [] };
 
   // Read per-entity collections
-  const [venuesSnap, usersSnap, tasksSnap, lookupsSnap] = await Promise.all([
+  const [venuesSnap, usersSnap, tasksSnap, lookupsSnap, peopleSnap, emailsSnap] = await Promise.all([
     firestoreDb.collection('venues').get(),
     firestoreDb.collection('users').get(),
     firestoreDb.collection('tasks').get(),
     firestoreDb.collection('usersByEmail').get(),
+    // Item 8b: identity projections.
+    firestoreDb.collection('people').get(),
+    firestoreDb.collection('emails').get(),
   ]);
 
   const perEntityVenues = new Map<string, any>(venuesSnap.docs.map((d: any) => [d.id, d.data()] as [string, any]));
@@ -337,6 +341,64 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
     }
   }
 
+
+  // Item 8b — identity projections, strict: every row WITH personId must have
+  // an active people doc (name/primaryEmail matching) and an active emails doc
+  // pointing at it; an ACTIVE projection whose person has no row is reported
+  // (never auto-repaired). Retired docs are history and fine. Rows without
+  // personId (not migrated yet) expect no projections; the counts show them.
+  const peopleDocs = new Map<string, any>(peopleSnap.docs.map((d: any) => [d.id, d.data()] as [string, any]));
+  const emailDocs = new Map<string, any>(emailsSnap.docs.map((d: any) => [d.id, d.data()] as [string, any]));
+  const rowPersons = new Map<string, any>();
+  let migratedRows = 0;
+  let unmigratedRows = 0;
+  for (const u of (monolith.users || [])) {
+    if (!u?.id) continue;
+    if (typeof u.personId === 'string' && u.personId) {
+      migratedRows++;
+      rowPersons.set(u.personId, u);
+    } else {
+      unmigratedRows++;
+    }
+  }
+  for (const [pid, u] of rowPersons) {
+    const p = peopleDocs.get(pid);
+    if (!p || p.status !== 'active') {
+      mismatches.push({ collection: 'people', id: u.id, reason: 'identity projection missing' });
+    } else if (p.name !== (u.name || '') || p.primaryEmail !== normalizeEmail(u.email || '')) {
+      mismatches.push({ collection: 'people', id: u.id, reason: 'identity projection out of date' });
+    }
+    if (u.email) {
+      const e = emailDocs.get(emailKey(normalizeEmail(u.email)));
+      if (!e || e.status !== 'active' || e.personId !== pid) {
+        mismatches.push({ collection: 'emails', id: u.id, reason: 'identity projection missing' });
+      }
+    }
+  }
+  let peopleActive = 0;
+  let peopleRetired = 0;
+  for (const [pid, p] of peopleDocs) {
+    if (p?.status === 'active') {
+      peopleActive++;
+      if (!rowPersons.has(pid)) mismatches.push({ collection: 'people', id: pid, reason: 'active projection without row' });
+    } else {
+      peopleRetired++;
+    }
+  }
+  let emailsActive = 0;
+  let emailsRetired = 0;
+  for (const [key, e] of emailDocs) {
+    if (e?.status === 'active') {
+      emailsActive++;
+      const owner = rowPersons.get(e.personId);
+      if (!owner || !owner.email || emailKey(normalizeEmail(owner.email)) !== key) {
+        mismatches.push({ collection: 'emails', id: e?.personId || key.slice(0, 12), reason: 'active projection without row' });
+      }
+    } else {
+      emailsRetired++;
+    }
+  }
+
   return {
     monolith: {
       venues: (monolith.venues || []).length,
@@ -348,7 +410,10 @@ export async function perEntityStatus(firestoreDb: any): Promise<{
       users: perEntityUsers.size,
       tasks: perEntityTasks.size,
       usersByEmail: lookupsSnap.size,
+      people: peopleSnap.size,
+      emails: emailsSnap.size,
     },
+    identity: { migratedRows, unmigratedRows, peopleActive, peopleRetired, emailsActive, emailsRetired },
     match: mismatches.length === 0,
     mismatches: mismatches.slice(0, 20),
   };

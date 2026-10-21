@@ -110,6 +110,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-44-event-assignee-scope.mjs')).default,
     (await import('./test-45-venue-owner-scope.mjs')).default,
     (await import('./test-46-push-recipients-scope.mjs')).default,
+    (await import('./test-47-identity-projections.mjs')).default,
   ];
 
   const results = [];

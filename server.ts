@@ -1444,6 +1444,13 @@ interface UserProfile {
   // this user (rule T). NOT named `phone` — /api/admin/dashboard reads
   // (u as any).phone into a wide list.
   phoneNumber?: string;
+  // Item 8b — server-only identity fields (src/server/identity.ts). Set only
+  // by commitState's enforcement point; never accepted from a request body;
+  // stripped by getSafeUser.
+  personId?: string;
+  venueAccess?: string[];
+  isPrimaryAdmin?: boolean;
+  tokenEpoch?: number;
 }
 
 // Test hook: DATA_DIR_OVERRIDE lets the Stage 2 test suite run the server
@@ -1852,7 +1859,9 @@ interface EventTaskTemplate {
 }
 
 function getSafeUser(user: UserProfile) {
-  const { password, kioskPin, kioskPinHash, kioskPinSetAt, phoneNumber, ...safe } = user;
+  const { password, kioskPin, kioskPinHash, kioskPinSetAt, phoneNumber, ...withIdentity } = user;
+  // Item 8b: server-only identity fields never leave the server.
+  const safe = stripServerOnlyUserFields(withIdentity as any) as typeof withIdentity;
   const userAgency = agencies.find((a) => a.id === user.agencyId) || agencies[0];
   return {
     ...safe,
@@ -3073,7 +3082,12 @@ const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const IDEMPOTENCY_MAX_RECORDS = 1000;
 
 /** Exact-match sensitive field names (case-insensitive) stripped from cached results. */
-const IDEMPOTENCY_SENSITIVE_FIELDS = new Set(['password', 'passwordhash', 'kioskpin', 'kioskpinhash', 'resettoken', 'apikey', 'secrethash', 'devicesecret', 'pairingcodehash', 'code']);
+const IDEMPOTENCY_SENSITIVE_FIELDS = new Set([
+  'password', 'passwordhash', 'kioskpin', 'kioskpinhash', 'resettoken', 'apikey', 'secrethash', 'devicesecret', 'pairingcodehash', 'code',
+  // Item 8b: server-only identity fields (a replayed result is sent to the
+  // client as-is, so it must never carry them; tokenEpoch is caught by 'token').
+  'personid', 'venueaccess', 'isprimaryadmin',
+]);
 
 /**
  * Deep-strip sensitive fields from a result before caching it as an
@@ -3239,6 +3253,29 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
  * this fallback never happens: a failed Firestore init refuses to start.
  */
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
+import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey } from './src/server/identity.js';
+
+/**
+ * Item 8b — the ONE enforcement point for server-only identity fields
+ * (personId, venueAccess, isPrimaryAdmin, tokenEpoch), applied to every
+ * mutator outcome in BOTH commitState paths (Firestore transaction and the
+ * local/mock file path) before the no-op check, hydrate and dual-write.
+ * Existing rows keep their personId/tokenEpoch exactly; new rows are born
+ * migrated (personId = id); derived fields are recomputed. See
+ * src/server/identity.ts.
+ */
+function applyIdentityInvariant(identityBase: any, outDoc: any): any {
+  if (!outDoc || !Array.isArray(outDoc.users)) return outDoc;
+  const beforeUsers = Array.isArray(identityBase?.users) ? identityBase.users : [];
+  const agencies = Array.isArray(outDoc.agencies) ? outDoc.agencies : [];
+  return {
+    ...outDoc,
+    users: enforceIdentityFields(beforeUsers, outDoc.users, agencies, {
+      onViolation: (rowId, field) =>
+        log.warn(`[identity] reverted a mutator change to server-only field ${field} on user ${rowId}`),
+    }),
+  };
+}
 
 async function commitState(
   mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
@@ -3289,6 +3326,7 @@ async function commitState(
     if ('conflict' in outcome) {
       throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
     }
+    outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc);
     hydrateState(outcome.doc);
     // No-op detection (fallback path): skip the file write when nothing
     // changed. (The transactional path additionally skips the _v bump.)
@@ -3385,10 +3423,14 @@ async function commitState(
         // (Skipped on first boot when the doc doesn't exist yet — that write
         // must always happen.)
         const pristineBefore = currentDoc ? JSON.parse(JSON.stringify(currentDoc)) : null;
+        // 8b: identity baseline = the stored doc, or (first boot) the seed
+        // snapshot as it was before the mutator ran.
+        const identityBase = pristineBefore || JSON.parse(JSON.stringify(baseDoc));
         const outcome = mutator(baseDoc, currentVersion);
         if ('conflict' in outcome) {
           throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
         }
+        outcome.doc = applyIdentityInvariant(identityBase, outcome.doc);
 
         // No-op detection: the mutator changed nothing meaningful — skip the
         // Firestore write entirely, do NOT increment _v, return success with
@@ -7014,7 +7056,7 @@ app.post('/api/agencies/register', async (req, res) => {
     initialVenueName,
     initialVenueCategory,
     includeStarterTemplates = false,
-  } = req.body;
+  } = stripServerOnlyUserFields(req.body || {}); // 8b: no server-only identity field from a body
 
   if (!agencyName || !agencyName.trim()) {
     return res.status(400).json({ error: 'Kosher Agency Name is required (e.g. "Chicago Rabbinical Council (cRc)").' });
@@ -7639,6 +7681,85 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 // dedicated block separate from the FIRESTORE_MOCK endpoints — they must
 // never exist outside test mode, even with FIRESTORE_MOCK=true.
 if (isTestMode()) {
+  // ---- Item 8b test hooks (identity projections). Registered ONLY under
+  // isTestMode() — never under the broader FIRESTORE_MOCK block, never on
+  // Cloud Run. ----
+  // Read one person's raw identity state: the monolith row's server-only
+  // fields plus the people and emails docs (by email when given).
+  app.get('/api/__test__/identity-docs', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const userId = typeof req.query.userId === 'string' ? req.query.userId : '';
+      const email = typeof req.query.email === 'string' ? req.query.email : '';
+      const personId = typeof req.query.personId === 'string' ? req.query.personId : '';
+      const snap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
+      const doc = snap && snap.exists ? snap.data() : null;
+      const row = userId ? ((doc?.users || []) as any[]).find((u: any) => u && u.id === userId) || null : null;
+      const pid = personId || row?.personId || '';
+      const pSnap = pid ? await firestoreDb.collection('people').doc(pid).get() : null;
+      const eSnap = email ? await firestoreDb.collection('emails').doc(identityEmailKey(email)).get() : null;
+      res.json({
+        version: doc?._v ?? null,
+        row: row
+          ? { exists: true, personId: row.personId ?? null, venueAccess: row.venueAccess ?? null, isPrimaryAdmin: row.isPrimaryAdmin ?? null, tokenEpoch: row.tokenEpoch ?? null }
+          : { exists: false },
+        people: pSnap && pSnap.exists ? pSnap.data() : null,
+        emails: eSnap && eSnap.exists ? eSnap.data() : null,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+  // Write an emails mapping directly (simulates a mapping owned by someone
+  // else, for the fail-closed reassignment test).
+  app.post('/api/__test__/identity-seed-email', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { email, personId, status } = req.body || {};
+    if (typeof email !== 'string' || typeof personId !== 'string') return res.status(400).json({ error: 'email and personId required' });
+    await firestoreDb.collection('emails').doc(identityEmailKey(email)).set({
+      personId, status: status === 'retired' ? 'retired' : 'active', verified: false, source: 'admin-entered', addedAt: new Date().toISOString(),
+    });
+    res.json({ ok: true });
+  });
+  // Internal controlled mutation: change one row's email inside commitState
+  // (there is no public email-change API; 8b adds none).
+  app.post('/api/__test__/identity-set-email', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { userId, email } = req.body || {};
+    try {
+      const committed = await commitState(
+        (freshDoc) => {
+          const list: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+          if (!list.some((u) => u && u.id === userId)) return { conflict: 'User not found', conflictStatus: 404 };
+          return { doc: { ...freshDoc, users: list.map((u) => (u && u.id === userId ? { ...u, email } : u)) }, result: { ok: true } };
+        },
+        { label: 'test-identity-set-email' }
+      );
+      res.json({ ok: true, version: committed.version });
+    } catch (err: any) {
+      res.status(err?.status || 500).json({ error: err?.message });
+    }
+  });
+  // Internal controlled mutation: ONE commit that removes user X and adds a
+  // new row Y (optionally carrying body-sent server-only fields, which the
+  // commitState enforcement must discard).
+  app.post('/api/__test__/identity-swap', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { removeUserId, newUser } = req.body || {};
+    try {
+      const committed = await commitState(
+        (freshDoc) => {
+          const list: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+          const kept = removeUserId ? list.filter((u) => u && u.id !== removeUserId) : list;
+          return { doc: { ...freshDoc, users: newUser ? [...kept, newUser] : kept }, result: { ok: true } };
+        },
+        { label: 'test-identity-swap' }
+      );
+      res.json({ ok: true, version: committed.version });
+    } catch (err: any) {
+      res.status(err?.status || 500).json({ error: err?.message });
+    }
+  });
   // TEST ONLY (item 8t): push targets attempted (recorded before any send).
   // Registered ONLY under isTestMode() — not under the broader FIRESTORE_MOCK
   // block — so mock-without-test-mode and production both get the 404 below.
@@ -7907,7 +8028,7 @@ app.post('/api/venues', async (req, res) => {
     ownerPassword,
     templateType,
     timeZone,
-  } = req.body;
+  } = stripServerOnlyUserFields(req.body || {}); // 8b: no server-only identity field from a body
 
   const caller = requireAdmin(req, res);
   // requireAdmin already sent the 403 — see the note above; never double-send.
@@ -9917,7 +10038,7 @@ app.post('/api/users', async (req, res) => {
   // New users are always created in the caller's own agency.
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
-  const { email, name, role, password, venueId, permissions, phoneNumber } = req.body;
+  const { email, name, role, password, venueId, permissions, phoneNumber } = stripServerOnlyUserFields(req.body || {}); // 8b: no server-only identity field from a body
   if (!email || !name) {
     return res.status(400).json({ error: 'Email and name are required' });
   }
@@ -10033,7 +10154,7 @@ app.put('/api/users/:id', async (req, res) => {
     return res.status(403).json({ error: 'You can only manage team members in your own agency.' });
   }
 
-  const { role, permissions, venueId, name, kioskPin, phoneNumber } = req.body;
+  const { role, permissions, venueId, name, kioskPin, phoneNumber } = stripServerOnlyUserFields(req.body || {}); // 8b: no server-only identity field from a body
 
   // Coordinator PIN-only path (Don 8:54 PM ET Oct 19 — own VENUE only):
   // body must be a NON-EMPTY subset of { kioskPin, phoneNumber } (K1, Don

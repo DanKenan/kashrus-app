@@ -209,7 +209,9 @@ export interface ConsistencyResult {
   backupLastAt: string | null;
   status: {
     monolith: { venues: number; users: number; tasks: number };
-    perEntity: { venues: number; users: number; tasks: number; usersByEmail: number };
+    perEntity: { venues: number; users: number; tasks: number; usersByEmail: number; people?: number; emails?: number };
+    // Item 8b: identity projection counts (migrated vs unmigrated rows).
+    identity?: { migratedRows: number; unmigratedRows: number; peopleActive: number; peopleRetired: number; emailsActive: number; emailsRetired: number };
     match: boolean;
     mismatches: Array<{ collection: string; id: string; reason: string }>;
   } | null;
