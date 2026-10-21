@@ -24,8 +24,31 @@
 
 import crypto from 'crypto';
 
-/** Fields on a users[] row that only the server may set; never sent to clients. */
-export const SERVER_ONLY_USER_FIELDS = ['personId', 'venueAccess', 'isPrimaryAdmin', 'tokenEpoch'] as const;
+/**
+ * Fields on a users[] row that only the server may set; never accepted from a
+ * request body, never sent to a client. 10b (item 10, Phase C) adds the
+ * credential fields: credentialOwner, credentialOrigin, recoveryCodeHashes,
+ * recoveryFailures, joinedAt. In 10b only credentialOrigin has a writer
+ * (register / add-member / owner creation / agency-assisted reset, through
+ * credentialOriginSetById); the others are preserved exactly as stored and
+ * get their writers in 10d/10e/10f/10i.
+ */
+export const SERVER_ONLY_USER_FIELDS = [
+  'personId', 'venueAccess', 'isPrimaryAdmin', 'tokenEpoch',
+  'credentialOwner', 'credentialOrigin', 'recoveryCodeHashes', 'recoveryFailures', 'joinedAt',
+] as const;
+
+/**
+ * 10b (plan v4 C1): where a row's password came from. Absent = legacy,
+ * unverified (every row that existed before 10b). Only 'self-registered'
+ * and (from 10i) 'invite-new' will ever be linkable; that decision lives in
+ * ONE helper in 10i, not here.
+ */
+export const CREDENTIAL_ORIGINS = ['self-registered', 'admin', 'invite-new', 'agency-reset'] as const;
+export type CredentialOrigin = (typeof CREDENTIAL_ORIGINS)[number];
+
+/** Server-only fields an existing row keeps exactly as stored (no 10b writer). */
+const PRESERVED_CREDENTIAL_FIELDS = ['credentialOwner', 'recoveryCodeHashes', 'recoveryFailures', 'joinedAt'] as const;
 
 export function normalizeEmail(email: string): string {
   return String(email).trim().toLowerCase();
@@ -96,11 +119,67 @@ export interface IdentityEnforceOptions {
    */
   venueAccessSetById?: ReadonlyMap<string, readonly string[]>;
   /**
+   * 10b: the ONLY way credentialOrigin is set or changed. Row id → origin.
+   * A value outside CREDENTIAL_ORIGINS is ignored (reported as a violation).
+   */
+  credentialOriginSetById?: ReadonlyMap<string, string>;
+  /**
+   * 10b: rows whose password changes in this commit WITHOUT changing its
+   * origin (the person's own change-password; the legacy plaintext→bcrypt
+   * upgrade at login). Any other password change on an existing row that is
+   * not in credentialOriginSetById DROPS the origin (fail closed: a new
+   * password-writing path can never inherit a linkable origin).
+   */
+  passwordKeepsOriginIds?: ReadonlySet<string>;
+  /**
+   * 10b (used from 10i only): NEW row id → the personId of an EXISTING person
+   * it joins. The only way a new row gets personId !== row.id. Honoured only
+   * when a row that already existed before this commit carries that personId
+   * AND the same normalized email; otherwise the new row keeps
+   * personId = row.id and a violation is reported.
+   */
+  newMembership?: ReadonlyMap<string, string>;
+  /**
    * Called (row id + field name only, never values) when a mutator's output
    * tried to set, change or remove a server-only identity field. The change
    * is reverted, and the caller logs it, so it is never silent.
    */
   onViolation?: (rowId: string, field: string) => void;
+  /** 10b: every credentialOrigin change (row id, old, new; never a value). */
+  onOriginChange?: (rowId: string, from: string | null, to: string | null) => void;
+}
+
+/**
+ * 10b: the identity options a mutator outcome may carry. commitState hands
+ * the whole outcome to identityOptionsFromOutcome(), so server.ts never names
+ * an option it does not use (the source test pins newMembership to the 10i
+ * accept handler).
+ */
+export interface IdentityOutcomeFields {
+  /** 10b: row id → credentialOrigin set in this commit (see credentialOriginSetById). */
+  credentialOriginSetById?: Record<string, CredentialOrigin>;
+  /** 10b: rows whose password change keeps the origin (see passwordKeepsOriginIds). */
+  passwordKeepsOriginIds?: string[];
+  /** 10i only: new row id → existing personId (see newMembership). */
+  newMembership?: Record<string, string>;
+}
+
+export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership'> {
+  const o: any = outcome || {};
+  const asMap = (r: any) => (r && typeof r === 'object' && !Array.isArray(r) && Object.keys(r).length ? new Map<string, string>(Object.entries(r).filter(([, v]) => typeof v === 'string') as [string, string][]) : undefined);
+  return {
+    credentialOriginSetById: asMap(o.credentialOriginSetById),
+    passwordKeepsOriginIds: Array.isArray(o.passwordKeepsOriginIds) && o.passwordKeepsOriginIds.length ? new Set<string>(o.passwordKeepsOriginIds) : undefined,
+    newMembership: asMap(o.newMembership),
+  };
+}
+
+function isCredentialOrigin(v: unknown): v is CredentialOrigin {
+  return typeof v === 'string' && (CREDENTIAL_ORIGINS as readonly string[]).includes(v);
+}
+
+function usableEmail(row: any): string {
+  return typeof row?.email === 'string' ? normalizeEmail(row.email) : '';
 }
 
 /**
@@ -135,8 +214,46 @@ export function enforceIdentityFields(
         const base = Number.isInteger(prev.tokenEpoch) && prev.tokenEpoch > 0 ? prev.tokenEpoch : 0;
         out.tokenEpoch = base + 1;
       }
+      // 10b: credential fields with no writer yet are kept exactly as stored.
+      for (const f of PRESERVED_CREDENTIAL_FIELDS) {
+        if (prev[f] !== undefined) out[f] = JSON.parse(JSON.stringify(prev[f]));
+        if (opts.onViolation && JSON.stringify(row[f]) !== JSON.stringify(out[f])) opts.onViolation(row.id, f);
+      }
+      if (opts.newMembership?.has(row.id) && opts.onViolation) opts.onViolation(row.id, 'newMembership');
     } else {
-      out.personId = row.id;
+      // 10b: a new row is its own person unless newMembership names an
+      // existing person with the same email (10i accept only).
+      const joinPid = opts.newMembership?.get(row.id);
+      const email = usableEmail(row);
+      const joinOk =
+        typeof joinPid === 'string' && joinPid !== '' && email !== '' &&
+        (Array.isArray(beforeUsers) ? beforeUsers : []).some(
+          (b: any) => b && typeof b.id === 'string' && b.personId === joinPid && usableEmail(b) === email
+        );
+      out.personId = joinOk ? joinPid : row.id;
+      if (joinPid !== undefined && !joinOk && opts.onViolation) opts.onViolation(row.id, 'newMembership');
+      if (opts.onViolation) for (const f of PRESERVED_CREDENTIAL_FIELDS) if (row[f] !== undefined) opts.onViolation(row.id, f);
+    }
+    // 10b: credentialOrigin — set only through credentialOriginSetById; an
+    // existing row keeps its stored value unless its password changed outside
+    // passwordKeepsOriginIds, which drops it (fail closed).
+    {
+      const before = prev && prev.credentialOrigin !== undefined ? prev.credentialOrigin : undefined;
+      let origin: any = before;
+      const setTo = opts.credentialOriginSetById?.get(row.id);
+      if (setTo !== undefined) {
+        if (isCredentialOrigin(setTo)) origin = setTo;
+        else if (opts.onViolation) opts.onViolation(row.id, 'credentialOrigin');
+      } else if (prev) {
+        const pwChanged = String(prev.password ?? '') !== String(row.password ?? '');
+        if (pwChanged && !opts.passwordKeepsOriginIds?.has(row.id)) origin = undefined;
+      }
+      if (origin !== undefined) out.credentialOrigin = origin;
+      else delete out.credentialOrigin;
+      if (opts.onViolation && row.credentialOrigin !== undefined && row.credentialOrigin !== before && row.credentialOrigin !== out.credentialOrigin)
+        opts.onViolation(row.id, 'credentialOrigin');
+      if (opts.onOriginChange && (before ?? null) !== (out.credentialOrigin ?? null))
+        opts.onOriginChange(row.id, before ?? null, out.credentialOrigin ?? null);
     }
     if (opts.onViolation) {
       if (row.personId !== undefined && row.personId !== out.personId) opts.onViolation(row.id, 'personId');
@@ -162,4 +279,187 @@ export function enforceIdentityFields(
     }
     return out;
   });
+}
+
+// ---------------------------------------------------------------------------
+// 10b — identity invariants (plan v4: 10b, C2, C6). Pure; commitState runs it
+// on every outcome doc right after enforceIdentityFields, inside the
+// transaction and before any write. A refusal aborts the whole commit.
+// ---------------------------------------------------------------------------
+
+export type InvariantCode =
+  | 'group-created'        // 10b–10h: a new or grown group of 2+ rows (no allowance)
+  | 'email-mismatch'       // rows of one person do not share one email
+  | 'person-mismatch'      // rows sharing an email do not all carry one personId
+  | 'agency-duplicate'     // two rows of one person in one agency
+  | 'owner-count'          // a multi person without exactly one credentialOwner row
+  | 'owner-no-password'    // the owner row holds no bcrypt password
+  | 'non-owner-credential' // a non-owner row holds password/credential fields
+  | 'agency-missing';      // a multi-person row whose agency does not exist
+
+export interface InvariantIssue {
+  code: InvariantCode;
+  /** Row ids only, sorted; never emails or other values. */
+  rowIds: string[];
+}
+
+export interface InvariantResult {
+  /** Issues that refuse this commit. */
+  refused: InvariantIssue[];
+  /** Issues in groups that were already invalid and unchanged: logged, not blocking. */
+  preexisting: InvariantIssue[];
+}
+
+export interface InvariantOptions {
+  /**
+   * 10i only: new row ids the accept transaction attaches to an existing
+   * person (the newMembership keys). A grown group is allowed only when every
+   * row it gained is in this set and is new in this commit; it must then pass
+   * every invariant. Absent (10b–10h) = every new group is refused.
+   */
+  allowGrowthRowIds?: ReadonlySet<string>;
+}
+
+const CREDENTIAL_ONLY_FIELDS = ['credentialOrigin', 'recoveryCodeHashes', 'recoveryFailures'] as const;
+
+function isBcrypt(v: unknown): boolean {
+  return typeof v === 'string' && /^\$2[aby]\$\d{2}\$.{53}$/.test(v);
+}
+
+function hasPassword(row: any): boolean {
+  return typeof row?.password === 'string' && row.password !== '';
+}
+
+/** Connected components of rows linked by a shared email or a shared personId. */
+export function identityGroups(users: readonly any[]): string[][] {
+  const rows = (Array.isArray(users) ? users : []).filter((u: any) => u && typeof u.id === 'string');
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r)!;
+    let c = x;
+    while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; }
+    return r;
+  };
+  const union = (a: string, b: string) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra < rb ? rb : ra, ra < rb ? ra : rb); };
+  for (const u of rows) parent.set(u.id, u.id);
+  const byKey = new Map<string, string>();
+  for (const u of rows) {
+    const keys: string[] = [];
+    const e = usableEmail(u);
+    if (e) keys.push('e:' + e);
+    if (typeof u.personId === 'string' && u.personId) keys.push('p:' + u.personId);
+    for (const k of keys) {
+      const first = byKey.get(k);
+      if (first === undefined) byKey.set(k, u.id);
+      else union(first, u.id);
+    }
+  }
+  const groups = new Map<string, string[]>();
+  for (const u of rows) {
+    const r = find(u.id);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r)!.push(u.id);
+  }
+  return [...groups.values()].map((g) => [...new Set(g)].sort());
+}
+
+/** The identity-relevant shape of a row, compared to decide "unchanged". */
+function identityShape(row: any): string {
+  return JSON.stringify([
+    usableEmail(row),
+    row?.personId ?? null,
+    row?.agencyId ?? null,
+    row?.credentialOwner ?? null,
+    row?.credentialOrigin ?? null,
+    row?.password ?? null,
+    row?.needsSetup ?? null,
+    row?.recoveryCodeHashes ?? null,
+  ]);
+}
+
+/** The invariants of one group of 2+ rows (pure). */
+export function groupIssues(group: readonly any[], agencies: readonly any[]): InvariantIssue[] {
+  const ids = group.map((r) => r.id).sort();
+  const issues: InvariantIssue[] = [];
+  const push = (code: InvariantCode, rowIds: string[] = ids) => issues.push({ code, rowIds: [...rowIds].sort() });
+  // (i) one email and one personId for the whole group
+  const emails = new Set(group.map((r) => usableEmail(r)));
+  if (emails.size !== 1 || emails.has('')) push('email-mismatch');
+  const pids = new Set(group.map((r) => (typeof r.personId === 'string' && r.personId ? r.personId : '')));
+  if (pids.size !== 1 || pids.has('')) push('person-mismatch');
+  // (ii) (personId, agencyId) unique
+  const seen = new Map<string, string>();
+  for (const r of group) {
+    const k = `${r.personId ?? ''}|${r.agencyId ?? ''}`;
+    const other = seen.get(k);
+    if (other !== undefined) push('agency-duplicate', [other, r.id]);
+    else seen.set(k, r.id);
+  }
+  // (iii) exactly one credentialOwner, with a bcrypt password; nobody else holds a credential
+  const owners = group.filter((r) => r.credentialOwner === true);
+  if (owners.length !== 1) push('owner-count');
+  for (const o of owners) if (!isBcrypt(o.password)) push('owner-no-password', [o.id]);
+  for (const r of group) {
+    if (r.credentialOwner === true) continue;
+    if (hasPassword(r) || CREDENTIAL_ONLY_FIELDS.some((f) => r[f] !== undefined)) push('non-owner-credential', [r.id]);
+  }
+  // (iv) every row's agency exists
+  const agencyIds = new Set((Array.isArray(agencies) ? agencies : []).filter((a: any) => a && typeof a.id === 'string').map((a: any) => a.id));
+  const missing = group.filter((r) => !agencyIds.has(r.agencyId || 'agency-hkc')).map((r) => r.id);
+  if (missing.length) push('agency-missing', missing);
+  return issues;
+}
+
+/**
+ * The checker (plan v4 C2). Groups = rows linked by a shared email or a
+ * shared personId; a group of one row is never evaluated.
+ * - A group that is NEW or GREW (not contained in one group of the stored
+ *   doc) is refused ('group-created') unless options.allowGrowthRowIds covers
+ *   every row it gained AND it passes every invariant (10i only).
+ * - A group contained in a stored group (unchanged or shrunk) is evaluated
+ *   only when at least one of its rows carries personId (legacy rows without
+ *   personId are never evaluated). Invalid + identical to a stored group with
+ *   the same identity fields = preexisting (logged, never blocking); any
+ *   other invalid result is refused.
+ * Returns row ids and codes only.
+ */
+export function checkMembershipInvariants(
+  beforeUsers: readonly any[],
+  afterUsers: readonly any[],
+  afterAgencies: readonly any[],
+  options: InvariantOptions = {}
+): InvariantResult {
+  const before = (Array.isArray(beforeUsers) ? beforeUsers : []).filter((u: any) => u && typeof u.id === 'string');
+  const after = (Array.isArray(afterUsers) ? afterUsers : []).filter((u: any) => u && typeof u.id === 'string');
+  const beforeById = new Map<string, any>(before.map((u: any) => [u.id, u]));
+  const afterById = new Map<string, any>(after.map((u: any) => [u.id, u]));
+  const beforeGroupOf = new Map<string, string[]>();
+  for (const g of identityGroups(before)) for (const id of g) beforeGroupOf.set(id, g);
+  const refused: InvariantIssue[] = [];
+  const preexisting: InvariantIssue[] = [];
+  for (const g of identityGroups(after)) {
+    if (g.length < 2) continue;
+    const rows = g.map((id) => afterById.get(id));
+    // The stored group that contains every stored member of g (if one does).
+    const stored = g.filter((id) => beforeGroupOf.has(id));
+    const homes = new Set(stored.map((id) => beforeGroupOf.get(id)!.join('\u0000')));
+    const home = homes.size === 1 ? beforeGroupOf.get(stored[0])! : null;
+    const gained = home ? g.filter((id) => !home.includes(id)) : g;
+    if (gained.length > 0) {
+      const allow = options.allowGrowthRowIds;
+      const allowed = !!allow && home !== null && gained.every((id) => allow.has(id) && !beforeById.has(id));
+      if (!allowed) { refused.push({ code: 'group-created', rowIds: g }); continue; }
+      refused.push(...groupIssues(rows, afterAgencies));
+      continue;
+    }
+    if (!rows.some((r) => typeof r.personId === 'string' && r.personId)) continue;
+    const issues = groupIssues(rows, afterAgencies);
+    if (!issues.length) continue;
+    const unchanged =
+      home !== null && home.length === g.length &&
+      g.every((id) => identityShape(beforeById.get(id)) === identityShape(afterById.get(id)));
+    (unchanged ? preexisting : refused).push(...issues);
+  }
+  return { refused, preexisting };
 }

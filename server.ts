@@ -3259,7 +3259,7 @@ type MutatorOutcome =
        * (admin venue grant, venue deletion prune). The ONLY way venueAccess
        * changes beyond the home venue; see src/server/identity.ts. */
       venueAccessSetById?: Record<string, string[]>;
-    }
+    } & IdentityOutcomeFields /* 10b: credentialOriginSetById, passwordKeepsOriginIds (src/server/identity.ts) */
   | { conflict: string; conflictStatus?: number; conflictCode?: string };
 
 interface CommitOptions {
@@ -3373,32 +3373,62 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
  */
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
-import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey } from './src/server/identity.js';
+import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, type IdentityOutcomeFields } from './src/server/identity.js';
 import { venueScope as venueScopeOf, resolveTargetVenue, sharedVenues } from './src/server/venue-scope.js';
+
+/** 10b: the one text for a commit the identity checker refuses (names no agency, no person). */
+const IDENTITY_CONFLICT_TEXT = "This email can't be used here.";
+
+/** 10b: preexisting invalid groups are logged once per process per signature (never blocking). */
+const identityPreexistingLogged = new Set<string>();
 
 /**
  * Item 8b — the ONE enforcement point for server-only identity fields
- * (personId, venueAccess, isPrimaryAdmin, tokenEpoch), applied to every
- * mutator outcome in BOTH commitState paths (Firestore transaction and the
- * local/mock file path) before the no-op check, hydrate and dual-write.
- * Existing rows keep their personId/tokenEpoch exactly; new rows are born
- * migrated (personId = id); derived fields are recomputed. See
+ * (personId, venueAccess, isPrimaryAdmin, tokenEpoch; 10b: credentialOwner,
+ * credentialOrigin, recoveryCodeHashes, recoveryFailures, joinedAt), applied
+ * to every mutator outcome in BOTH commitState paths (Firestore transaction
+ * and the local/mock file path) before the no-op check, hydrate and
+ * dual-write. Existing rows keep their personId/tokenEpoch exactly; new rows
+ * are born migrated (personId = id); derived fields are recomputed. See
  * src/server/identity.ts.
+ *
+ * 10b — then the identity invariant checker runs on the enforced doc (plan v4
+ * C2): a commit that creates a group of 2+ rows sharing an email or a
+ * personId, or changes a group so it ends invalid, is refused with a 409
+ * BEFORE anything is written (inside the Firestore transaction, so the
+ * monolith and the projections are both untouched). Logs carry row ids and
+ * codes only.
  */
-function applyIdentityInvariant(identityBase: any, outDoc: any, migrateRowIds?: string[], tokenEpochBumpIds?: string[], venueAccessSetById?: Record<string, string[]>): any {
+function applyIdentityInvariant(identityBase: any, outDoc: any, outcome: any, label: string): any {
   if (!outDoc || !Array.isArray(outDoc.users)) return outDoc;
   const beforeUsers = Array.isArray(identityBase?.users) ? identityBase.users : [];
   const agencies = Array.isArray(outDoc.agencies) ? outDoc.agencies : [];
-  return {
-    ...outDoc,
-    users: enforceIdentityFields(beforeUsers, outDoc.users, agencies, {
-      migrateRowIds: migrateRowIds && migrateRowIds.length ? new Set(migrateRowIds) : undefined,
-      bumpTokenEpochIds: tokenEpochBumpIds && tokenEpochBumpIds.length ? new Set(tokenEpochBumpIds) : undefined,
-      venueAccessSetById: venueAccessSetById && Object.keys(venueAccessSetById).length ? new Map(Object.entries(venueAccessSetById)) : undefined,
-      onViolation: (rowId, field) =>
-        log.warn(`[identity] reverted a mutator change to server-only field ${field} on user ${rowId}`),
-    }),
-  };
+  const migrateRowIds: string[] | undefined = outcome?.identityMigrateRowIds;
+  const tokenEpochBumpIds: string[] | undefined = outcome?.tokenEpochBumpIds;
+  const venueAccessSetById: Record<string, string[]> | undefined = outcome?.venueAccessSetById;
+  const extra = identityOptionsFromOutcome(outcome);
+  const users = enforceIdentityFields(beforeUsers, outDoc.users, agencies, {
+    migrateRowIds: migrateRowIds && migrateRowIds.length ? new Set(migrateRowIds) : undefined,
+    bumpTokenEpochIds: tokenEpochBumpIds && tokenEpochBumpIds.length ? new Set(tokenEpochBumpIds) : undefined,
+    venueAccessSetById: venueAccessSetById && Object.keys(venueAccessSetById).length ? new Map(Object.entries(venueAccessSetById)) : undefined,
+    ...extra,
+    onViolation: (rowId, field) =>
+      log.warn(`[identity] reverted a mutator change to server-only field ${field} on user ${rowId}`),
+    onOriginChange: (rowId, from, to) =>
+      log.info(`[identity] credentialOrigin user ${rowId}: ${from ?? 'none'} -> ${to ?? 'none'} (cause ${label})`),
+  });
+  const check = checkMembershipInvariants(beforeUsers, users, agencies);
+  for (const issue of check.preexisting) {
+    const sig = `${issue.code}:${issue.rowIds.join(',')}`;
+    if (identityPreexistingLogged.has(sig)) continue;
+    if (identityPreexistingLogged.size < 500) identityPreexistingLogged.add(sig); // bounded memory; past the cap it logs every time
+    log.warn(`[identity] PREEXISTING invariant issue ${issue.code} on users ${issue.rowIds.join(',')} (not blocking; run the read-only consistency check)`);
+  }
+  if (check.refused.length) {
+    log.warn(`[identity] commit ${label} REFUSED by the identity invariant checker: ${check.refused.map((i) => `${i.code}[${i.rowIds.join(',')}]`).join(' ')}`);
+    throw new OperationConflictError(IDENTITY_CONFLICT_TEXT, 409, 'IDENTITY_CONFLICT');
+  }
+  return { ...outDoc, users };
 }
 
 async function commitState(
@@ -3452,7 +3482,7 @@ async function commitState(
     if ('conflict' in outcome) {
       throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
     }
-    outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc, outcome.identityMigrateRowIds, outcome.tokenEpochBumpIds, outcome.venueAccessSetById);
+    outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc, outcome, label);
     hydrateState(outcome.doc);
     // No-op detection (fallback path): skip the file write when nothing
     // changed. (The transactional path additionally skips the _v bump.)
@@ -3564,7 +3594,7 @@ async function commitState(
         if ('conflict' in outcome) {
           throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
         }
-        outcome.doc = applyIdentityInvariant(identityBase, outcome.doc, outcome.identityMigrateRowIds, outcome.tokenEpochBumpIds, outcome.venueAccessSetById);
+        outcome.doc = applyIdentityInvariant(identityBase, outcome.doc, outcome, label);
 
         // No-op detection: the mutator changed nothing meaningful — skip the
         // Firestore write entirely, do NOT increment _v, return success with
@@ -7448,6 +7478,9 @@ app.post('/api/agencies/register', async (req, res) => {
           tasks: [...freshTasks, ...tasksToAdd],
         },
         result: { agency: agencyWithSlug, user: adminUser, venue: starterVenue, tasks: tasksToAdd },
+        // 10b (plan v4 C1): the registrant typed this password and no admin
+        // existed — the ONLY writer of 'self-registered'.
+        credentialOriginSetById: { [adminUserId]: 'self-registered' },
       };
     },
     { label: 'register-agency' }
@@ -8548,6 +8581,7 @@ app.post('/api/venues', async (req, res) => {
 
       let newUsers = [...freshUsers];
       let createdOwner: any = null;
+      let newOwnerId: string | null = null; // 10b: a NEW owner row (admin chose its password)
       if (cleanOwnerEmail) {
         const existingOwnerIdx = newUsers.findIndex((u) => typeof u.email === 'string' && u.email.trim().toLowerCase() === cleanOwnerEmail);
         // Item 8v: the same rule on FRESH data (the user may have changed
@@ -8576,6 +8610,7 @@ app.post('/api/venues', async (req, res) => {
           };
           newUsers.push(ownerUser);
           createdOwner = ownerUser;
+          newOwnerId = ownerUserId;
         }
       }
 
@@ -8609,6 +8644,7 @@ app.post('/api/venues', async (req, res) => {
           },
         },
         result: { venue: venueToAdd, tasks: tasksToAdd, owner: createdOwner },
+        ...(newOwnerId ? { credentialOriginSetById: { [newOwnerId]: 'admin' as const } } : {}),
       };
     },
     { label: 'create-venue' }
@@ -10796,7 +10832,8 @@ app.post('/api/users', async (req, res) => {
       // Idempotency: our own user ID already created by a previous attempt.
       const selfExisting = freshUsers.find((u) => u.id === newUserId);
       if (selfExisting) return { doc: freshDoc, result: selfExisting };
-      return { doc: { ...freshDoc, users: [...freshUsers, newUser] }, result: newUser };
+      // 10b (plan v4 C1): the admin chose this password.
+      return { doc: { ...freshDoc, users: [...freshUsers, newUser] }, result: newUser, credentialOriginSetById: { [newUserId]: 'admin' } };
     },
     { label: 'create-user' }
   );
@@ -12191,7 +12228,8 @@ app.post('/api/auth/login', async (req, res) => {
             return { doc: freshDoc, result: { upgraded: false } };
           }
           const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
-          return { doc: { ...freshDoc, users: newUsers }, result: { upgraded: true } };
+          // 10b: same password, new hash format — the origin is kept.
+          return { doc: { ...freshDoc, users: newUsers }, result: { upgraded: true }, passwordKeepsOriginIds: [user.id] };
         },
         { label: 'login-password-upgrade' }
       );
@@ -12446,6 +12484,9 @@ app.post('/api/auth/reset-password', async (req, res) => {
         doc: { ...freshDoc, users: newUsers, passwordResets: newResets },
         result: { userId: user.id, signedOutOthers: signOutOthers },
         ...(signOutOthers ? { tokenEpochBumpIds: [user.id] } : {}),
+        // 10b (plan v4 C1): the code went to the agency's admins, so an admin
+        // could know this password — a downgrade, never linkable.
+        credentialOriginSetById: { [user.id]: 'agency-reset' },
       };
     },
     { label: 'reset-password' }
@@ -12516,7 +12557,8 @@ app.post('/api/auth/change-password', async (req, res) => {
         return { conflict: 'Your password was changed by another session. Please sign in again.' };
       }
       const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
-      return { doc: { ...freshDoc, users: newUsers }, result: { success: true } };
+      // 10b (plan v4 C1): the person's own change keeps the origin.
+      return { doc: { ...freshDoc, users: newUsers }, result: { success: true }, passwordKeepsOriginIds: [user.id] };
     },
     { label: 'change-password' }
   );
