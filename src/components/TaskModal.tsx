@@ -1,3 +1,4 @@
+import { ANY_TIME_LABEL, isAnyTimeTask, isAnyTimeText } from '../lib/anyTime';
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Clock, Calendar, CheckSquare, Users, Plus, Trash2, CalendarDays, CheckCircle2, ListFilter } from 'lucide-react';
 import { Task, TaskInputType } from '../types';
@@ -169,6 +170,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [inputType, setInputType] = useState<TaskInputType>('yes_no');
   // Structured times — the app can reliably sort and process these.
   const [time1, setTime1] = useState<PickerTime>({ hour: 9, minute: 0, ampm: 'AM' });
+  const [anyTime, setAnyTime] = useState(false);
   const [time2, setTime2] = useState<PickerTime | null>(null);
   // Free-text fallback for non-clock times like "End of Shift".
   const [customTimeText, setCustomTimeText] = useState<string | null>(null);
@@ -292,18 +294,20 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       );
       setInputType(taskToEdit.inputType || 'yes_no');
       // Load times: structured when parseable, free-text otherwise.
-      const t1 = parseTimeText(taskToEdit.targetTime);
+      const editingAnyTime = isAnyTimeTask(taskToEdit);
+      setAnyTime(editingAnyTime);
+      const t1 = editingAnyTime ? null : parseTimeText(taskToEdit.targetTime);
       if (t1) {
         setTime1(t1);
         setCustomTimeText(null);
       } else {
         setTime1({ hour: 9, minute: 0, ampm: 'AM' });
-        setCustomTimeText(taskToEdit.targetTime || null);
+        setCustomTimeText(editingAnyTime ? null : taskToEdit.targetTime || null);
       }
       const t2 = parseTimeText(taskToEdit.targetTime2);
-      setTime2(t2);
+      setTime2(editingAnyTime ? null : t2);
       setPriority(taskToEdit.priority || 'medium');
-      setEnableOverdueAlert(taskToEdit.enableOverdueAlert === true);
+      setEnableOverdueAlert(!editingAnyTime && taskToEdit.enableOverdueAlert === true);
       if (taskToEdit.assignedTo.includes('all')) {
         setAssignType('all');
         setSelectedWorkers([]);
@@ -335,6 +339,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
         setCompletedStatusValues(['Completed']);
       }
     } else {
+      setAnyTime(false);
       baselineRef.current = undefined; // create — no baseline needed
       setTitle('');
       setDescription('');
@@ -356,6 +361,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setNewOptionInput('');
     }
   }, [taskToEdit, isOpen]);
+
+  const isAny = anyTime || (customTimeText !== null && isAnyTimeText(customTimeText));
+  useEffect(() => {
+    if (isAny) setEnableOverdueAlert(false);
+  }, [isAny]);
 
   if (!isOpen) return null;
 
@@ -466,12 +476,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
       // Structured times when set via picker; custom text clears the minutes.
-      targetTime: customTimeText !== null ? customTimeText.trim() : formatPickerTime(time1),
-      targetTimeMinutes: customTimeText !== null ? null : pickerTimeToMinutes(time1),
-      targetTime2: time2 ? formatPickerTime(time2) : '',
-      targetTime2Minutes: time2 ? pickerTimeToMinutes(time2) : null,
+      targetTime: isAny ? ANY_TIME_LABEL : customTimeText !== null ? customTimeText.trim() : formatPickerTime(time1),
+      targetTimeMinutes: isAny || customTimeText !== null ? null : pickerTimeToMinutes(time1),
+      targetTime2: !isAny && time2 ? formatPickerTime(time2) : '',
+      targetTime2Minutes: !isAny && time2 ? pickerTimeToMinutes(time2) : null,
       priority,
-      enableOverdueAlert,
+      enableOverdueAlert: isAny ? false : enableOverdueAlert,
       assignedTo,
       scheduleType,
       daysOfWeek: selectedDays,
@@ -824,7 +834,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               <label className="block font-semibold text-ink-soft mb-1 flex items-center gap-1">
                 <Clock className="w-3.5 h-3.5 text-ink-faint" /> Target Time
               </label>
-              {customTimeText !== null ? (
+              {anyTime ? (
+                <div className="flex flex-wrap items-center gap-2 text-ink-soft">
+                  <span>Any time · no target time</span>
+                  <button type="button" onClick={() => { setAnyTime(false); setTime1({ hour: 9, minute: 0, ampm: 'AM' }); }} className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold">Set a time</button>
+                </div>
+              ) : customTimeText !== null ? (
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
@@ -844,42 +859,49 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               ) : (
                 <div className="flex flex-col gap-2">
                   <TimePickerRow value={time1} onChange={setTime1} />
-                  {time2 ? (
-                    <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />
-                  ) : (
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <button
-                        type="button"
-                        onClick={() => setTime1({ hour: 9, minute: 0, ampm: 'AM' })}
-                        className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold"
-                      >
-                        ☀️ Morning
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTime1({ hour: 3, minute: 0, ampm: 'PM' })}
-                        className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold"
-                      >
-                        🌤️ Afternoon
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTime2({ hour: 3, minute: 0, ampm: 'PM' })}
-                        className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-dashed border-gold/60 text-gold-deep"
-                      >
-                        + Second time
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setCustomTimeText('')}
-                        className="text-xs text-ink-faint underline"
-                      >
-                        Custom text
-                      </button>
-                    </div>
-                  )}
+                  {time2 && <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />}
                 </div>
               )}
+              <div className="flex items-center gap-2 flex-wrap mt-2">
+                <button
+                  type="button"
+                  onClick={() => { setAnyTime(false); setCustomTimeText(null); setTime1({ hour: 9, minute: 0, ampm: 'AM' }); }}
+                  className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold"
+                >
+                  ☀️ Morning
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setAnyTime(false); setCustomTimeText(null); setTime1({ hour: 3, minute: 0, ampm: 'PM' }); }}
+                  className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold"
+                >
+                  🌤️ Afternoon
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={anyTime}
+                  onClick={() => { setAnyTime(true); setTime2(null); setCustomTimeText(null); setEnableOverdueAlert(false); }}
+                  className={`text-xs font-bold px-2.5 py-1.5 rounded-xl border ${anyTime ? 'border-gold' : 'border-line'} bg-sunken text-ink hover:border-gold`}
+                >
+                  Any time
+                </button>
+                {!anyTime && customTimeText === null && !time2 && <>
+                  <button
+                    type="button"
+                    onClick={() => setTime2({ hour: 3, minute: 0, ampm: 'PM' })}
+                    className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-dashed border-gold/60 text-gold-deep"
+                  >
+                    + Second time
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCustomTimeText('')}
+                    className="text-xs text-ink-faint underline"
+                  >
+                    Custom text
+                  </button>
+                </>}
+              </div>
             </div>
 
             <div>
@@ -900,17 +922,18 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </div>
 
           {/* Overdue Alert Toggle */}
-          <label className="flex items-center gap-2.5 p-3 rounded-xl border border-line bg-sunken cursor-pointer">
+          <label className={`flex items-center gap-2.5 p-3 rounded-xl border border-line bg-sunken ${isAny ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}>
             <input
               type="checkbox"
-              checked={enableOverdueAlert}
+              checked={!isAny && enableOverdueAlert}
+              disabled={isAny}
               onChange={(e) => setEnableOverdueAlert(e.target.checked)}
               className="w-4 h-4 rounded accent-gold"
             />
             <div>
               <div className="text-xs font-bold">Overdue push alert</div>
               <div className="text-[11px] text-ink-faint">
-                Notify assigned mashgichim if this task passes its target time
+                {isAny ? "Off for any-time tasks: there's no target time to pass." : 'Notify assigned mashgichim if this task passes its target time'}
               </div>
             </div>
           </label>

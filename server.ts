@@ -20,6 +20,8 @@ import {
   addDays,
   nextResetDate,
 } from './src/lib/workday.ts';
+// 6c: shared any-time recognition and write normalization.
+import { isAnyTimeTask, normalizeAnyTimeTask } from './src/lib/anyTime.ts';
 import { mountStaticFiles } from './src/server/static-files.ts';
 import { consistencyRoute } from './src/server/consistency-route.js';
 
@@ -3960,6 +3962,8 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
 
   for (const task of tasks) {
     if (task.isCompleted) continue;
+    // 6c: no target time can become overdue.
+    if (isAnyTimeTask(task)) continue;
     if (!task.enableOverdueAlert) continue; // Only alert for tasks with alerts enabled
     if (!task.targetTime || task.targetTime === 'End of Day') continue;
 
@@ -5227,7 +5231,8 @@ app.post('/api/task-templates/:id/apply', async (req, res) => {
   const agencyId = callerAgencyId(req);
   const now = new Date().toISOString();
   // Pre-generate stable IDs so transaction retries don't duplicate tasks.
-  const created: TaskItem[] = template.tasks.map((td, i) => ({
+  // 6c: normalize each applied template task.
+  const created: TaskItem[] = template.tasks.map((td, i) => normalizeAnyTimeTask({
     id: `task-${crypto.randomUUID()}`,
     agencyId,
     venueId,
@@ -6296,6 +6301,8 @@ app.get('/api/admin/dashboard', (req, res) => {
     const total = venueTasks.length;
     const overdueList = venueTasks.filter((t) => {
       if (t.isCompleted) return false;
+      // 6c: exclude any-time tasks before time maths.
+      if (isAnyTimeTask(t)) return false;
       // Overdue if target time has passed today
       if (!t.targetTime || t.targetTime === 'End of Day') return false;
       const now = new Date();
@@ -8048,7 +8055,8 @@ app.post('/api/tasks', async (req, res) => {
   const nowIso = new Date().toISOString();
   const newTimeKey = targetTimeMinutes(targetTime);
 
-  const newTask: TaskItem = {
+  // 6c: canonical any-time tasks have no clock fields or overdue alert.
+  const newTask: TaskItem = normalizeAnyTimeTask({
     id: newTaskId,
     agencyId: callerAgencyId,
     venueId: targetVenueId,
@@ -8079,7 +8087,7 @@ app.post('/api/tasks', async (req, res) => {
     updatedAt: null,
     checkIns: [],
     createdAt: nowIso,
-  };
+  });
 
   // STAGE 2: transactional commit. The mutator runs against FRESH Firestore
   // data (not in-memory). Sort-order slotting is recomputed inside so
@@ -8330,7 +8338,8 @@ app.put('/api/tasks/:id', async (req, res) => {
       const updatedByName = finalIsCompleted ? (caller.name || freshTask.updatedByName || null) : null;
       const updatedAt = finalIsCompleted ? (hasStatusChange ? new Date().toISOString() : freshTask.updatedAt) : null;
 
-      const updated: TaskItem = {
+      // 6c: normalize the effective merged time, including partial edits.
+      const updated: TaskItem = normalizeAnyTimeTask({
         ...freshTask,
         title: title !== undefined ? title : freshTask.title,
         description: description !== undefined ? description : freshTask.description,
@@ -8357,7 +8366,7 @@ app.put('/api/tasks/:id', async (req, res) => {
         updatedByEmail,
         updatedByName,
         updatedAt,
-      };
+      });
 
       const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
       return { doc: { ...freshDoc, tasks: newTasks }, result: updated };

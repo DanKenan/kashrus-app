@@ -1,3 +1,5 @@
+import { ANY_TIME_LABEL, isAnyTimeTask } from './anyTime';
+
 export function cn(...classes: (string | boolean | undefined | null)[]) {
   return classes.filter(Boolean).join(' ');
 }
@@ -83,6 +85,7 @@ export function sortTasksForBoard<T extends BoardSortableTask>(
 
 /** Display both scheduled times, e.g. "9:00 AM · 3:00 PM". */
 export function formatTaskTimes(task: { targetTime?: string; targetTime2?: string }): string {
+  if (isAnyTimeTask(task)) return ANY_TIME_LABEL;
   const t1 = task.targetTime || 'End of Shift';
   return task.targetTime2 ? `${t1} · ${task.targetTime2}` : t1;
 }
