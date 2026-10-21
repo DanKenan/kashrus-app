@@ -7560,29 +7560,6 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
   // TEST ONLY (item 6): run the overdue check at the (fake) clock and return
   // the venue-local dedupe keys it would alert for ({ clear: true } empties
   // the dedupe map first). No push is sent in tests (no VAPID keys).
-  // TEST ONLY (item 8t): push targets attempted (recorded before any send).
-  app.get('/api/__test__/push-log', (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    res.json({ log: testPushLog });
-  });
-  app.post('/api/__test__/push-log/clear', (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    testPushLog.length = 0;
-    res.json({ ok: true });
-  });
-  // TEST ONLY (item 8t): seed a LEGACY push subscription (no userId/agencyId),
-  // the shape every subscription had before 8t.
-  app.post('/api/__test__/seed-legacy-push-sub', async (req, res) => {
-    if (!requireAdmin(req, res)) return;
-    // (field is subEmail: a global guard rewrites any body userEmail to the caller's)
-    const { subEmail: userEmail, endpoint } = req.body || {};
-    if (typeof userEmail !== 'string' || typeof endpoint !== 'string') return res.status(400).json({ error: 'subEmail + endpoint required' });
-    await commitState((freshDoc) => {
-      const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
-      return { doc: { ...freshDoc, pushSubscriptions: [...arr.filter((s) => s.endpoint !== endpoint), { userEmail: userEmail.trim().toLowerCase(), endpoint, keys: { p256dh: 'x', auth: 'y' }, createdAt: new Date().toISOString() }] }, result: null };
-    }, { label: 'test-seed-legacy-push-sub' });
-    res.json({ ok: true });
-  });
   app.post('/api/__test__/overdue-check', async (req, res) => {
     if ((req.body || {}).clear === true) overdueNotified.clear();
     res.json({ notified: checkOverdueTasks(serverNow()) });
@@ -7662,6 +7639,31 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 // dedicated block separate from the FIRESTORE_MOCK endpoints — they must
 // never exist outside test mode, even with FIRESTORE_MOCK=true.
 if (isTestMode()) {
+  // TEST ONLY (item 8t): push targets attempted (recorded before any send).
+  // Registered ONLY under isTestMode() — not under the broader FIRESTORE_MOCK
+  // block — so mock-without-test-mode and production both get the 404 below.
+  app.get('/api/__test__/push-log', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    res.json({ log: testPushLog });
+  });
+  app.post('/api/__test__/push-log/clear', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    testPushLog.length = 0;
+    res.json({ ok: true });
+  });
+  // TEST ONLY (item 8t): seed a LEGACY push subscription (no userId/agencyId),
+  // the shape every subscription had before 8t.
+  app.post('/api/__test__/seed-legacy-push-sub', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    // (field is subEmail: a global guard rewrites any body userEmail to the caller's)
+    const { subEmail: userEmail, endpoint } = req.body || {};
+    if (typeof userEmail !== 'string' || typeof endpoint !== 'string') return res.status(400).json({ error: 'subEmail + endpoint required' });
+    await commitState((freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
+      return { doc: { ...freshDoc, pushSubscriptions: [...arr.filter((s) => s.endpoint !== endpoint), { userEmail: userEmail.trim().toLowerCase(), endpoint, keys: { p256dh: 'x', auth: 'y' }, createdAt: new Date().toISOString() }] }, result: null };
+    }, { label: 'test-seed-legacy-push-sub' });
+    res.json({ ok: true });
+  });
   // TEST ONLY: silently revokes a user (removes from the in-memory users array
   // and persists) WITHOUT broadcasting. Lets tests verify broadcast
   // authorization independently of the revocation broadcast (which would
