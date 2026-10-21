@@ -239,7 +239,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                   <p className="text-sm text-ink-soft mt-2">Create an event to plan its tasks and team.</p>
                   <button
                     onClick={onOpenCreateEvent}
-                    className="mt-3 text-xs font-bold hover:underline cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
+                    className="mt-3 inline-flex items-center px-4 py-2 min-h-11 rounded-xl text-sm font-semibold bg-surface border border-line-control text-ink hover:bg-sunken cursor-pointer"
                   >
                     + Register the first event
                   </button>
@@ -256,10 +256,11 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                   return (
                     <button
                       key={evt.id}
+                      aria-current={isSelected ? 'true' : undefined}
                       onClick={() => setSelectedEventId(evt.id)}
                       className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer lift ${
                         isSelected
-                          ? 'border-line-control bg-surface e1 ring-1 ring-line-control'
+                          ? 'border-ink-soft bg-sunken e1 ring-1 ring-ink-soft'
                           : 'border-line bg-surface/70 hover:bg-surface'
                       }`}
                     >
