@@ -3253,6 +3253,7 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
  * this fallback never happens: a failed Firestore init refuses to start.
  */
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
+import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
 import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey } from './src/server/identity.js';
 
 /**
@@ -4330,6 +4331,7 @@ function kioskMaySee(meta: SocketMeta, type: string, payload: any): boolean {
     case 'DAILY_RESET':
     case 'DEMO_RESTORED':
     case 'CLEAN_SLATE_RESET':
+    case 'HISTORY_PRUNED': // 8r: history list only, venue-filtered below
       // Allowed; the payload is venue-filtered by kioskFilterPayload below.
       return true;
     default:
@@ -4389,6 +4391,9 @@ function kioskFilterPayload(meta: SocketMeta, type: string, payload: any): any {
   switch (type) {
     case 'USERS_UPDATED':
       return { ...p, users: roster(p.users) };
+    case 'HISTORY_PRUNED':
+      // 8r: an explicit key allowlist — the tablet's venue history only.
+      return { historyLogs: (p.historyLogs || []).filter((h: any) => h?.venueId === venueId) };
     case 'DAILY_RESET':
     case 'DEMO_RESTORED':
     case 'CLEAN_SLATE_RESET':
@@ -4552,6 +4557,9 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
       return Array.isArray(p.users)
         ? { ...p, users: getSafeUsersForAgency(meta.agencyId, recipient) }
         : payload;
+    case 'HISTORY_PRUNED':
+      // 8r: history list only, filtered to the recipient's venue scope.
+      return { historyLogs: (p.historyLogs || []).filter((h: any) => inScope(h?.venueId)) };
     default:
       if (!staffWsUnknownWarned.has(type)) {
         staffWsUnknownWarned.add(type);
@@ -4988,6 +4996,9 @@ async function executeDailyReset(
   // Agencies whose tasks changed without a snapshot (orphan tasks on the
   // legacy NY rollover); recomputed on every mutator run.
   let orphanAgencyIds = new Set<string>();
+  // 8r: history retention counts from the committed mutator run (logged after commit).
+  let resetHistoryRemoved = 0;
+  let resetHistoryUndated = 0;
 
   // Build a single history snapshot from a venue + its tasks (pure function).
   // archiveDate is the workday being closed; tz formats check-in times in
@@ -5126,6 +5137,17 @@ async function executeDailyReset(
         const snapshots = plan.map((p) =>
           buildSnapshot(p.v, freshTasks.filter((t) => t.venueId === p.v.id), p.archiveDate, p.tz, p.catchUpDays)
         );
+        // 8r: keep 7 days of history — only for this reset's due venues, in
+        // this same commit (a scoped reset never touches other venues).
+        const pruned = pruneHistory(
+          snapshots.length ? [...snapshots, ...freshHistory] : freshHistory,
+          freshVenues,
+          freshAgencies,
+          now,
+          { venueIds: dueIds }
+        );
+        resetHistoryRemoved = pruned.removedCount;
+        resetHistoryUndated = pruned.undatedKept;
         const orphanIds = new Set(orphanTasks.map((t) => t.id));
         for (const t of orphanTasks) orphanAgencyIds.add(t.agencyId || 'agency-hkc');
         const newMarkers = { ...markers };
@@ -5137,7 +5159,7 @@ async function executeDailyReset(
         return {
           doc: {
             ...freshDoc,
-            historyLogs: snapshots.length ? [...snapshots, ...freshHistory] : freshHistory,
+            historyLogs: pruned.kept,
             tasks: freshTasks.map((t) => (dueIds.has(t.venueId) || orphanIds.has(t.id) ? resetTask(t) : t)),
             venueWorkDates: newMarkers,
             currentWorkDate: legacyDue ? nyToday : freshDoc.currentWorkDate,
@@ -5152,6 +5174,9 @@ async function executeDailyReset(
     throw err;
   }
 
+  if (committed && committed.result && resetHistoryRemoved > 0) {
+    log.info(`[history-retention] reset removed ${resetHistoryRemoved} snapshot(s) older than ${HISTORY_RETENTION_DAYS} days (undated kept: ${resetHistoryUndated})`);
+  }
   // Broadcast per-agency ONLY after commit (in-memory cache is now fresh).
   // AGENCY SCOPING: each agency receives ONLY its own snapshots, and only
   // agencies that had a due venue (or reset orphan tasks) hear anything.
@@ -5202,23 +5227,89 @@ async function executeDailyReset(
  * guard. No background writes in maintenance mode, FORCE_LOCAL_MODE or on a
  * staged revision.
  */
-let rolloverInFlight: Promise<{ reset: string[]; version: number | null }> | null = null;
-function runRolloverTick(now: Date = serverNow()): Promise<{ reset: string[]; version: number | null; skipped?: string }> {
+/**
+ * Item 8r — the retention sweep: ONE commitState over every venue's history
+ * (each venue by its own zone; src/server/history-retention.ts). Nothing to
+ * remove → version-neutral no-op (no write, no broadcast). After a commit
+ * that removed something, each affected agency gets HISTORY_PRUNED built
+ * from the COMMITTED, hydrated state, filtered per recipient exactly like
+ * DAILY_RESET's history list. Logs counts only. Throws on failure (the
+ * caller then leaves the hourly gate open so the next tick retries).
+ */
+async function runHistoryRetentionSweep(now: Date): Promise<{ removed: number; version: number | null }> {
+  let removed = 0;
+  let undated = 0;
+  let agencyIds: string[] = [];
+  const committed = await commitState(
+    (freshDoc) => {
+      const freshHistory: any[] = Array.isArray(freshDoc.historyLogs) ? freshDoc.historyLogs : [];
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const pr = pruneHistory(freshHistory, freshVenues, freshAgencies, now);
+      removed = pr.removedCount;
+      undated = pr.undatedKept;
+      if (pr.removedCount === 0) {
+        agencyIds = [];
+        return { doc: freshDoc, result: null };
+      }
+      // Affected agencies resolved venue-first (a legacy snapshot without
+      // agencyId belongs to its venue's agency), same rule as the helper.
+      agencyIds = pr.removedAgencyIds;
+      return { doc: { ...freshDoc, historyLogs: pr.kept }, result: { removed: pr.removedCount } };
+    },
+    { label: 'history-retention' }
+  );
+  if (removed === 0) return { removed: 0, version: committed ? committed.version : null };
+  log.info(`[history-retention] sweep removed ${removed} snapshot(s) older than ${HISTORY_RETENTION_DAYS} days across ${agencyIds.length} agency(ies) (undated kept: ${undated})`);
+  for (const aid of agencyIds) {
+    broadcast(
+      'HISTORY_PRUNED',
+      { historyLogs: historyLogs.filter((h) => (h.agencyId || 'agency-hkc') === aid) },
+      undefined,
+      aid,
+      (meta, base) => ({ ...base, historyLogs: historyLogsForRecipient(aid, recipientForMeta(meta)) })
+    );
+  }
+  return { removed, version: committed ? committed.version : null };
+}
+
+let lastRetentionSweepAt: number | null = null;
+let rolloverInFlight: Promise<{ reset: string[]; version: number | null; historyRemoved?: number }> | null = null;
+function runRolloverTick(
+  now: Date = serverNow()
+): Promise<{ reset: string[]; version: number | null; skipped?: string; historyRemoved?: number }> {
   if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) {
     return Promise.resolve({ reset: [], version: null, skipped: 'no-background-writes' });
   }
   if (rolloverInFlight) return rolloverInFlight;
   const { due, legacyDue } = venuesDueAt(now);
-  if (due.length === 0 && !legacyDue) return Promise.resolve({ reset: [], version: null });
-  log.info(`[Scheduled Reset] Rollover due for ${due.length} venue(s)${legacyDue ? ' + legacy NY marker' : ''}`);
-  rolloverInFlight = executeDailyReset(undefined, 'scheduled_midnight_cron', { now })
-    .then((committed) => {
+  // 8r: the hourly retention sweep rides the same serialized tick (never
+  // overlaps a reset; runs only after durable state loaded, as resets do).
+  const sweepDue = durableStateLoaded && shouldSweep(lastRetentionSweepAt, now.getTime());
+  if (due.length === 0 && !legacyDue && !sweepDue) return Promise.resolve({ reset: [], version: null });
+  rolloverInFlight = (async () => {
+    let out: { reset: string[]; version: number | null; historyRemoved?: number } = { reset: [], version: null };
+    if (due.length > 0 || legacyDue) {
+      log.info(`[Scheduled Reset] Rollover due for ${due.length} venue(s)${legacyDue ? ' + legacy NY marker' : ''}`);
+      const committed = await executeDailyReset(undefined, 'scheduled_midnight_cron', { now });
       const snaps: any[] = committed && Array.isArray(committed.result) ? committed.result : [];
-      return { reset: snaps.map((s: any) => s.venueId), version: committed ? committed.version : null };
-    })
-    .finally(() => {
-      rolloverInFlight = null;
-    });
+      out = { reset: snaps.map((s: any) => s.venueId), version: committed ? committed.version : null };
+    }
+    if (sweepDue) {
+      try {
+        const sw = await runHistoryRetentionSweep(now);
+        lastRetentionSweepAt = now.getTime(); // only after a successful sweep
+        out.historyRemoved = sw.removed;
+        if (sw.removed > 0) out.version = sw.version;
+      } catch (err) {
+        // Gate stays open: the next tick retries.
+        log.warn('[history-retention] sweep failed (will retry):', (err as any)?.message);
+      }
+    }
+    return out;
+  })().finally(() => {
+    rolloverInFlight = null;
+  });
   return rolloverInFlight;
 }
 
@@ -7681,6 +7772,11 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 // dedicated block separate from the FIRESTORE_MOCK endpoints — they must
 // never exist outside test mode, even with FIRESTORE_MOCK=true.
 if (isTestMode()) {
+  // TEST ONLY (8r; isTestMode() only, never under FIRESTORE_MOCK alone): reopen the hourly retention-sweep gate (next tick sweeps).
+  app.post('/api/__test__/history-retention-gate', (req, res) => {
+    lastRetentionSweepAt = null;
+    res.json({ ok: true });
+  });
   // ---- Item 8b test hooks (identity projections). Registered ONLY under
   // isTestMode() — never under the broader FIRESTORE_MOCK block, never on
   // Cloud Run. ----
