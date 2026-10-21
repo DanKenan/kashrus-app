@@ -125,6 +125,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-59-projections-deletion.mjs')).default,
     (await import('./test-60-two-membership-matrix.mjs')).default,
     (await import('./test-61-agency-logo.mjs')).default,
+    (await import('./test-62-credential-owner-auth.mjs')).default,
   ];
 
   const results = [];

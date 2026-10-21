@@ -66,7 +66,8 @@ export default {
     assert(JSON.stringify(S({ id: 'u1', personId: 'u1' })) === JSON.stringify({ v: 2, sub: 'u1', mem: 'u1', ep: 0 }), 'issue v2 migrated');
     assert(JSON.stringify(S({ id: 'u2', personId: 'u2', tokenEpoch: 2 })) === JSON.stringify({ v: 2, sub: 'u2', mem: 'u2', ep: 2 }), 'issue v2 with epoch');
     assert(JSON.stringify(S({ id: 'u3' })) === JSON.stringify({ sub: 'u3' }), 'issue v1 unmigrated');
-    assert(JSON.stringify(S({ id: 'u9', personId: 'other' })) === JSON.stringify({ sub: 'u9' }), 'personId ≠ id → v1');
+    assert(JSON.stringify(S({ id: 'u9', personId: 'other', tokenEpoch: 1 })) === JSON.stringify({ v: 2, sub: 'other', mem: 'u9', ep: 1 }), '10e: membership row (personId ≠ id) → v2');
+    assert(JSON.stringify(S({ id: 'u8', personId: '' })) === JSON.stringify({ sub: 'u8' }), 'empty personId → v1');
     console.log('  ✓ issuing: v2 only when personId === id');
   },
 };

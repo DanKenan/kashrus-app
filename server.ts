@@ -341,8 +341,8 @@ function signClaims(claims: Record<string, unknown>): string {
 }
 
 /** Item 8d: the session token login / reset-password / register issue.
- * v2 { v:2, sub: personId, mem: row id, ep: tokenEpoch||0 } for a migrated
- * row (personId === id); the legacy v1 { sub } for any other row. */
+ * v2 { v:2, sub: personId, mem: row id, ep: tokenEpoch||0 } for any row with
+ * a personId (10e: membership rows too); the legacy v1 { sub } otherwise. */
 function signSessionToken(row: { id: string; personId?: string; tokenEpoch?: unknown }): string {
   return signClaims(sessionClaimsFor(row));
 }
@@ -1320,6 +1320,12 @@ interface PasswordResetRequest {
   resetToken?: string;
   /** Failed verification attempts (5 → request invalidated). */
   attempts?: number;
+  /**
+   * 10e (R7, [10E-DS1] B1): the credential row this request was created for,
+   * set by the server at creation (never from a body). Absent on requests
+   * written before 10e (accepted only for a non-multi email = today).
+   */
+  rowId?: string;
   lastAttemptAt?: string;
 }
 
@@ -3385,7 +3391,7 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
  */
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
-import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, applyOwnerTransfer, m4Successor, type IdentityOutcomeFields } from './src/server/identity.js';
+import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, applyOwnerTransfer, m4Successor, identityProjection, type IdentityOutcomeFields } from './src/server/identity.js';
 import { venueScope as venueScopeOf, resolveTargetVenue, sharedVenues } from './src/server/venue-scope.js';
 
 /** 10b: the one text for a commit the identity checker refuses (names no agency, no person). */
@@ -8310,6 +8316,32 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 // dedicated block separate from the FIRESTORE_MOCK endpoints — they must
 // never exist outside test mode, even with FIRESTORE_MOCK=true.
 if (isTestMode()) {
+  // TEST ONLY (isTestMode only, 404 otherwise: Test 62 H) (10e B1, test 62 D3/D4): re-bind (rowId string) or unbind
+  // (rowId null = a pre-10e request) the stored reset request for an email.
+  app.post('/api/__test__/reset-rebind', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const email = String((req.body || {}).email || '').trim().toLowerCase();
+    const rowId = (req.body || {}).rowId;
+    if (rowId !== null && typeof rowId !== 'string') return res.status(400).json({ error: 'rowId string or null required' });
+    try {
+      await commitState(
+        (freshDoc) => {
+          const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+          const newResets = freshResets.map((r: any) => {
+            if (r.email !== email) return r;
+            const { rowId: _old, ...rest } = r;
+            return rowId === null ? rest : { ...rest, rowId };
+          });
+          return { doc: { ...freshDoc, passwordResets: newResets }, result: { success: true } };
+        },
+        { label: 'test-reset-rebind' }
+      );
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
   // Item 8k (TEST ONLY; isTestMode() only, never under FIRESTORE_MOCK alone): merge a few top-level fields straight into the
   // stored doc (no route writes them this way); the next commit's hydrate
   // picks them up. 8x: only the legacy app-wide isDemoCleared (test-42 §6
@@ -12551,6 +12583,66 @@ app.post('/api/kiosk/login', async (req, res) => {
 // say whether an email exists on the platform or in which agency.
 const LOGIN_FAILED_TEXT = 'Email or password is incorrect.';
 
+// ---------------------------------------------------------------------------
+// 10e (plan v4: credential owner in auth + R7 boundary). A person's ONE
+// credential lives on its owner row (a single-row person's row is its own
+// owner; a legacy row without personId is its own). Login, change-password
+// and reset resolve that row through the SAME projection the identity
+// dual-write uses — an ambiguous email or a person without a valid owner
+// resolves to nobody (fail closed).
+// ---------------------------------------------------------------------------
+/** A row's email as today's lookups compare it (lower-cased, not trimmed). */
+function normEmail10e(e: unknown): string {
+  return typeof e === 'string' ? e.toLowerCase() : '';
+}
+/** Rows of the row's person (a legacy row: itself). */
+function personRowsIn(rows: readonly any[], row: any): any[] {
+  const pid = row && typeof row.personId === 'string' && row.personId ? row.personId : null;
+  return pid ? rows.filter((u: any) => u && u.personId === pid) : rows.filter((u: any) => u && u.id === row?.id);
+}
+/** M2: the row belongs to a MULTI person (its personId is held by 2+ rows). */
+function isMultiPersonRow(rows: readonly any[], row: any): boolean {
+  const pid = row && typeof row.personId === 'string' && row.personId ? row.personId : null;
+  if (!pid) return false;
+  let n = 0;
+  for (const u of rows) if (u && u.personId === pid && ++n > 1) return true;
+  return false;
+}
+/** M2: some row with this email belongs to a multi person. */
+function multiPersonForEmail(rows: readonly any[], normalizedEmail: string): boolean {
+  if (!normalizedEmail) return false;
+  return rows.some((u: any) => u && normEmail10e(u.email) === normalizedEmail && isMultiPersonRow(rows, u));
+}
+/**
+ * The credential row for an email. No multi person involved → exactly
+ * today's users.find (first row with the email, same order; B3). A multi
+ * person involved → the projection's owner row, or null when the email is
+ * shared or the group has no valid owner (fail closed).
+ */
+function credentialRowForEmailIn(rows: readonly any[], agencyList: readonly any[], normalizedEmail: string): any | null {
+  if (!normalizedEmail) return null;
+  if (!multiPersonForEmail(rows, normalizedEmail)) {
+    return rows.find((u: any) => u && normEmail10e(u.email) === normalizedEmail) || null;
+  }
+  const id = identityProjection(rows as any[], agencyList as any[]).lookup.get(normalizedEmail);
+  return id ? rows.find((u: any) => u && u.id === id) || null : null;
+}
+/** The credential row for a row: itself unless it is a multi person's row → the owner row, or null. */
+function credentialRowForRowIn(rows: readonly any[], agencyList: readonly any[], row: any): any | null {
+  if (!row) return null;
+  if (!isMultiPersonRow(rows, row)) return rows.find((u: any) => u && u.id === row.id) || null;
+  const p = identityProjection(rows as any[], agencyList as any[]).persons.get(row.personId);
+  return p ? rows.find((u: any) => u && u.id === p.ownerRowId) || null : null;
+}
+/**
+ * R7 boundary (B11): agency-assisted recovery is refused for a multi person —
+ * the code would go to ONE agency's admins for a credential that opens
+ * memberships in others. Single-row and legacy emails: as today.
+ */
+function agencyRecoveryRefusedFor(rows: readonly any[], _agencyList: readonly any[], normalizedEmail: string): boolean {
+  return multiPersonForEmail(rows, normalizedEmail);
+}
+
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
@@ -12558,7 +12650,9 @@ app.post('/api/auth/login', async (req, res) => {
   }
 
   const normalizedEmail = String(email).trim().toLowerCase();
-  const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  // 10e: the credential lives on the person's OWNER row (not whichever row
+  // with this email comes first); ambiguous → nobody (fail closed).
+  const user = credentialRowForEmailIn(users, agencies, normalizedEmail) as UserProfile | null;
 
   // 10a: one answer for an unknown email and a wrong password, so login
   // never tells anyone whether an email has a Shutfey account.
@@ -12621,7 +12715,13 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     return res.status(400).json({ error: 'Email is required.' });
   }
 
-  const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  // 10e (R7): a multi-membership person (or an ambiguous email) gets the SAME
+  // answer as an unknown email: no code is created, nothing is pushed to any
+  // agency, nothing is written.
+  if (agencyRecoveryRefusedFor(users, agencies, normalizedEmail)) {
+    return res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
+  }
+  const user = credentialRowForEmailIn(users, agencies, normalizedEmail) as UserProfile | null;
   // Always return success (don't reveal if email exists)
   if (!user) {
     return res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
@@ -12653,18 +12753,34 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       // 5 requests/hour per email, 10/hour per IP. Throws RateLimitError → 429.
       const afterEmail = checkRateLimit(limits, 'emailRequests', normalizedEmail, 5, nowMs);
       const afterIp = checkRateLimit(afterEmail, 'ipRequests', clientIp, 10, nowMs);
+      // 10e: re-checked on FRESH rows — a person that became multi meanwhile
+      // gets no code (same answer, rate limits still counted).
+      const freshUsersF: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshAgenciesF: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      if (agencyRecoveryRefusedFor(freshUsersF, freshAgenciesF, normalizedEmail)) {
+        return {
+          doc: { ...freshDoc, passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail), passwordResetRateLimits: afterIp },
+          result: { created: false },
+        };
+      }
       const newResets = [
         ...freshResets.filter((r: any) => r.email !== normalizedEmail),
-        { email: normalizedEmail, codeHash, expiresAt, verified: false, attempts: 0 },
+        // 10e B1: bound to the credential row it was created for.
+        { email: normalizedEmail, codeHash, expiresAt, verified: false, attempts: 0, rowId: user.id },
       ];
       return {
         doc: { ...freshDoc, passwordResets: newResets, passwordResetRateLimits: afterIp },
-        result: { success: true },
+        result: { success: true, created: true },
       };
     },
     { label: 'forgot-password' }
   );
   if (!committed) return;
+  // 10e B3: the code is cached (test mode) and pushed ONLY when this commit
+  // actually created a request; any other outcome is the generic answer.
+  if ((committed as any).result?.created !== true) {
+    return res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
+  }
 
   // TEST ONLY: stash the plaintext code so test-8 can retrieve it.
   // Gated by STAGE2_TEST_MODE — never populated in production.
@@ -12726,6 +12842,18 @@ app.post('/api/auth/verify-reset-code', async (req, res) => {
       if (!freshRequest) {
         return {
           doc: { ...freshDoc, passwordResetRateLimits: afterIpVerify },
+          result: { notFound: true },
+        };
+      }
+      // 10e (R7): a request for a person that is now multi-membership, or a
+      // bound request whose row is no longer the email's credential row, is
+      // dropped and answered as "no request".
+      const vUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const vAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      if (agencyRecoveryRefusedFor(vUsers, vAgencies, normalizedEmail) ||
+          (typeof freshRequest.rowId === 'string' && credentialRowForEmailIn(vUsers, vAgencies, normalizedEmail)?.id !== freshRequest.rowId)) {
+        return {
+          doc: { ...freshDoc, passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail), passwordResetRateLimits: afterIpVerify },
           result: { notFound: true },
         };
       }
@@ -12827,8 +12955,17 @@ app.post('/api/auth/reset-password', async (req, res) => {
     return res.status(400).json({ error: 'Invalid or expired reset token.' });
   }
 
-  const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  // 10e (R7): agency-assisted reset never completes for a multi-membership
+  // person or an ambiguous email; the credential row is the owner row.
+  if (agencyRecoveryRefusedFor(users, agencies, normalizedEmail)) {
+    return res.status(400).json({ error: 'Invalid or expired reset token.' });
+  }
+  const user = credentialRowForEmailIn(users, agencies, normalizedEmail) as UserProfile | null;
   if (!user) return res.status(404).json({ error: 'Account not found.' });
+  // 10e B1: a bound request completes only for the row it was created for.
+  if (typeof request.rowId === 'string' && request.rowId !== user.id) {
+    return res.status(400).json({ error: 'Invalid or expired reset token.' });
+  }
 
   // Hash BEFORE the transaction (CPU-heavy); the hash is deterministic input.
   const newHash = await hashPassword(String(newPassword));
@@ -12846,6 +12983,14 @@ app.post('/api/auth/reset-password', async (req, res) => {
         (r) => r.email === normalizedEmail && r.verified && r.resetToken === resetToken
       );
       if (!freshRequest || resetRequestExpired(freshRequest, Date.now())) {
+        return { conflict: 'Invalid or expired reset token.', conflictStatus: 400 };
+      }
+      // 10e: re-checked on FRESH rows (the person may have become multi, or the
+      // owner may have moved, since the pre-check).
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      if (agencyRecoveryRefusedFor(freshUsers, freshAgencies, normalizedEmail) ||
+          credentialRowForEmailIn(freshUsers, freshAgencies, normalizedEmail)?.id !== user.id ||
+          (typeof freshRequest.rowId === 'string' && freshRequest.rowId !== user.id)) {
         return { conflict: 'Invalid or expired reset token.', conflictStatus: 400 };
       }
       const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
@@ -12903,12 +13048,18 @@ app.post('/api/auth/change-password', async (req, res) => {
   }
 
   const authUser = (req as any).authUser;
-  const user = users.find((u) => u.id === authUser.id);
-  if (!user) {
+  const caller = users.find((u) => u.id === authUser.id);
+  if (!caller) {
     return res.status(404).json({ error: 'User account not found.' });
   }
+  // 10e: verify and write the person's ONE credential, on its owner row —
+  // whichever membership's session asks.
+  const owner = credentialRowForRowIn(users, agencies, caller) as UserProfile | null;
+  if (!owner) {
+    return res.status(409).json({ error: 'Your password cannot be changed right now. Please sign in again.' });
+  }
 
-  const result = await checkPassword(String(currentPassword), user.password);
+  const result = await checkPassword(String(currentPassword), owner.password);
   if (result === 'invalid') {
     return res.status(401).json({ error: 'Current password is incorrect.' });
   }
@@ -12920,27 +13071,55 @@ app.post('/api/auth/change-password', async (req, res) => {
     req, res,
     (freshDoc) => {
       const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
-      const freshUser = freshUsers.find((u) => u.id === user.id);
-      if (!freshUser) return { conflict: 'User account not found.' };
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const freshCaller = freshUsers.find((u) => u.id === caller.id);
+      if (!freshCaller) return { conflict: 'User account not found.' };
+      // The owner must still be the same row in FRESH data (no transfer meanwhile).
+      const freshOwner = credentialRowForRowIn(freshUsers, freshAgencies, freshCaller);
+      if (!freshOwner || freshOwner.id !== owner.id) {
+        return { conflict: 'Your password was changed by another session. Please sign in again.' };
+      }
       // Re-verify the current password against FRESH data — if someone changed
       // it concurrently, the old password no longer proves ownership.
       // (Synchronous check: the mutator must stay pure and re-runnable.)
-      const freshStored = freshUser.password;
+      const freshStored = freshOwner.password;
       const freshValid = isBcryptHash(freshStored)
         ? bcrypt.compareSync(String(currentPassword), freshStored)
         : freshStored === String(currentPassword);
       if (!freshValid) {
         return { conflict: 'Your password was changed by another session. Please sign in again.' };
       }
-      const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
+      const newUsers = freshUsers.map((u) => (u.id === owner.id ? { ...u, password: newHash } : u));
+      // 10e E1 (person-wide, multi persons only): bump tokenEpoch on EVERY row
+      // of the person in this commit, so every older session of every
+      // membership dies.
+      // Single-row / legacy person: no bump, exactly as today (M2/B3).
+      const bumpIds = isMultiPersonRow(freshUsers, freshOwner)
+        ? personRowsIn(freshUsers, freshOwner).map((u: any) => u.id)
+        : [];
       // 10b (plan v4 C1): the person's own change keeps the origin.
-      return { doc: { ...freshDoc, users: newUsers }, result: { success: true }, passwordKeepsOriginIds: [user.id] };
+      return {
+        doc: { ...freshDoc, users: newUsers },
+        result: { success: true, bumpIds },
+        passwordKeepsOriginIds: [owner.id],
+        ...(bumpIds.length ? { tokenEpochBumpIds: bumpIds } : {}),
+      };
     },
     { label: 'change-password' }
   );
   if (!committed) return;
 
-  res.json({ success: true, message: 'Password updated successfully.' });
+  // E1: close every phone socket of the person (kiosk sockets are PIN + device
+  // sessions and are left alone), then hand the caller a fresh token for its
+  // own membership so this device stays signed in.
+  const bumped: string[] = Array.isArray((committed as any)?.result?.bumpIds) ? (committed as any).result.bumpIds : [];
+  for (const id of bumped) revokeUserPhoneSockets(id);
+  if (!bumped.length) {
+    // Single-row / legacy person: byte-identical to today ([10E-DS1] N1).
+    return res.json({ success: true, message: 'Password updated successfully.' });
+  }
+  const freshCallerRow = users.find((u) => u.id === caller.id) || caller;
+  res.json({ success: true, message: 'Password updated successfully.', token: signSessionToken(freshCallerRow) });
 });
 
 // ==========================================

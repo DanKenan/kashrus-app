@@ -77,10 +77,15 @@ export function resolveSessionRow<T extends { id: string; personId?: string; tok
   return row.personId === claims.personId && epoch === claims.ep ? row : undefined;
 }
 
-/** v2 only for a migrated row (personId === id); otherwise the legacy v1 claims. */
+/** v2 for any row with a personId (10e: membership rows too); otherwise the legacy v1 claims. */
 export function sessionClaimsFor(row: { id: string; personId?: string; tokenEpoch?: unknown }): Record<string, unknown> {
   // An invalid stored epoch issues ep 0, which resolveSessionRow then refuses.
   const epoch = tokenEpochOf(row) ?? 0;
-  if (row.personId && row.personId === row.id) return { v: 2, sub: row.personId, mem: row.id, ep: epoch };
+  // 10e: every row that carries a personId gets v2 — the person's first row
+  // (personId === id) as since 8d, and a further membership row (personId
+  // !== id, created only through newMembership) too: after an E1 bump its
+  // epoch is > 0, which a v1 token can never match. Rows without personId
+  // (legacy) keep v1.
+  if (typeof row.personId === 'string' && row.personId) return { v: 2, sub: row.personId, mem: row.id, ep: epoch };
   return { sub: row.id };
 }
