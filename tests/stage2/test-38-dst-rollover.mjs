@@ -94,7 +94,15 @@ function snapsFor(doc, venueId) {
 /** Save the work-date state so the test can put it back (other tests stay unaffected). */
 async function saveWorkDates(ctx) {
   const doc = await ctx.getDoc();
-  return { venueWorkDates: { ...(doc.venueWorkDates || {}) }, currentWorkDate: doc.currentWorkDate };
+  const saved = { venueWorkDates: { ...(doc.venueWorkDates || {}) }, currentWorkDate: doc.currentWorkDate };
+  // Park every venue that already exists (other tests' fixtures) on a far
+  // future workday so the fake-clock ticks only roll THIS test's venues —
+  // otherwise each simulated day snapshots every venue in the suite's
+  // document and the shared doc hits its 900 KiB guard. Restored at the end.
+  const park = {};
+  for (const v of doc.venues || []) if (v && v.id) park[v.id] = '2099-12-31';
+  await ctx.api('POST', '/api/__test__/inject-fixture', { venueWorkDates: park });
+  return saved;
 }
 async function restoreWorkDates(ctx, saved) {
   try {

@@ -102,7 +102,15 @@ function snapsFor(doc, venueId) {
 /** Save the work-date state so the test can put it back (other tests stay unaffected). */
 async function saveWorkDates(ctx) {
   const doc = await ctx.getDoc();
-  return { venueWorkDates: { ...(doc.venueWorkDates || {}) }, currentWorkDate: doc.currentWorkDate };
+  const saved = { venueWorkDates: { ...(doc.venueWorkDates || {}) }, currentWorkDate: doc.currentWorkDate };
+  // Park every venue that already exists (other tests' fixtures) on a far
+  // future workday so the fake-clock ticks only roll THIS test's venues —
+  // otherwise each simulated day snapshots every venue in the suite's
+  // document and the shared doc hits its 900 KiB guard. Restored at the end.
+  const park = {};
+  for (const v of doc.venues || []) if (v && v.id) park[v.id] = '2099-12-31';
+  await ctx.api('POST', '/api/__test__/inject-fixture', { venueWorkDates: park });
+  return saved;
 }
 async function restoreWorkDates(ctx, saved) {
   try {
@@ -244,10 +252,13 @@ export default {
 
       // ---------- d) legacy (pre-item-6) shape ----------
       await setClock(ctx, '2026-10-22T21:30:00Z'); // 17:30 EDT Oct 22, 00:30 IDT Oct 23
-      const inj = await ctx.api('POST', '/api/__test__/inject-fixture', { venueWorkDates: null, currentWorkDate: '2026-10-22' });
+      // Legacy shape for this test's two venues: no marker, only the old NY date
+      // (other venues stay parked; the whole-map null path is covered by the
+      // inject route itself).
+      const inj = await ctx.api('POST', '/api/__test__/inject-fixture', { venueWorkDates: { [ny.id]: null, [jlm.id]: null }, currentWorkDate: '2026-10-22' });
       assert(inj.status === 200, 'inject legacy shape failed');
       doc = await ctx.getDoc();
-      assert(!doc.venueWorkDates || Object.keys(doc.venueWorkDates).length === 0, 'markers not cleared for the legacy shape');
+      assert(!(ny.id in (doc.venueWorkDates || {})) && !(jlm.id in (doc.venueWorkDates || {})), 'markers not cleared for the legacy shape');
       r = await tick(ctx);
       assert(r.reset.includes(jlm.id) && !r.reset.includes(ny.id), `legacy: only JLM should roll at 00:30 IDT: ${JSON.stringify(r.reset)}`);
       doc = await ctx.getDoc();
