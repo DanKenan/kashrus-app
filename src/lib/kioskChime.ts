@@ -22,6 +22,7 @@ export function playChime() {
     envelope.gain.linearRampToValueAtTime(0.12, now + 0.008);
     envelope.gain.exponentialRampToValueAtTime(0.001, now + 0.368);
     envelope.connect(filter);
+    let ended = 0;
     [880, 1320].forEach((frequency, i) => {
       const oscillator = context!.createOscillator();
       const partial = context!.createGain();
@@ -33,7 +34,7 @@ export function playChime() {
       oscillator.onended = () => {
         oscillator.disconnect();
         partial.disconnect();
-        if (i === 1) { envelope.disconnect(); filter.disconnect(); }
+        if (++ended === 2) { envelope.disconnect(); filter.disconnect(); }
       };
       oscillator.start(now);
       oscillator.stop(now + 0.38);

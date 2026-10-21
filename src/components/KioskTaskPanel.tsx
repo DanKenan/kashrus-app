@@ -242,8 +242,8 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
 
   const updateToggle = async (taskId: string, title: string, toDone: boolean, undoBarOp?: number) => {
     if (savingRef.current[taskId]) return;
-    // The exiting bar can still be drawn for 200ms after its five-second window closes.
-    if (undoBarOp !== undefined && barOp.current !== undoBarOp) return;
+    // A tap during the expired bar’s exit remains the normal row toggle.
+    const isBarUndo = undoBarOp !== undefined && barOp.current === undoBarOp;
     const op = ++opSeq.current;
     const firstName = currentUser.name.split(' ')[0];
     savingRef.current = { ...savingRef.current, [taskId]: { op, toDone } };
@@ -251,7 +251,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
     savingMine.current[taskId] = !!task && (task.assignedTo.includes('all') || task.assignedTo.includes(currentUser.email));
     setSaving(savingRef.current);
     if (toDone) primeChime();
-    if (undoBarOp !== undefined) {
+    if (isBarUndo) {
       clearTimer();
       setBar((current) => current?.op === undoBarOp ? { ...current, phase: 'undoing' } : current);
     }
@@ -276,7 +276,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
         if (barOp.current === op) barOp.current = null;
         if (mounted.current) setBar((current) => current?.op === op ? null : current);
       }, 5000);
-    } else if (undoBarOp !== undefined) {
+    } else if (isBarUndo) {
       // An older undo must not dismiss a newer row's confirmation.
       if (barOp.current === undoBarOp) barOp.current = null;
       setBar((current) => current?.op === undoBarOp ? null : current);
