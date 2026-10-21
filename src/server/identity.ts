@@ -68,6 +68,12 @@ export interface IdentityEnforceOptions {
    */
   migrateRowIds?: ReadonlySet<string>;
   /**
+   * 8d: ids of EXISTING rows whose tokenEpoch goes up by exactly 1 in this
+   * commit (revokes that row's v1 and v2 session tokens). Counted from the
+   * before row, never from the mutator's output. A new row is never bumped.
+   */
+  bumpTokenEpochIds?: ReadonlySet<string>;
+  /**
    * Called (row id + field name only, never values) when a mutator's output
    * tried to set, change or remove a server-only identity field. The change
    * is reverted, and the caller logs it, so it is never silent.
@@ -103,12 +109,17 @@ export function enforceIdentityFields(
       if (typeof prev.personId === 'string' && prev.personId) out.personId = prev.personId;
       else if (opts.migrateRowIds?.has(row.id)) out.personId = row.id;
       if (prev.tokenEpoch !== undefined) out.tokenEpoch = prev.tokenEpoch;
+      if (opts.bumpTokenEpochIds?.has(row.id)) {
+        const base = Number.isInteger(prev.tokenEpoch) && prev.tokenEpoch > 0 ? prev.tokenEpoch : 0;
+        out.tokenEpoch = base + 1;
+      }
     } else {
       out.personId = row.id;
     }
     if (opts.onViolation) {
       if (row.personId !== undefined && row.personId !== out.personId) opts.onViolation(row.id, 'personId');
-      if (row.tokenEpoch !== undefined && row.tokenEpoch !== out.tokenEpoch) opts.onViolation(row.id, 'tokenEpoch');
+      const bumped = !!(prev && opts.bumpTokenEpochIds?.has(row.id));
+      if (!bumped && row.tokenEpoch !== undefined && row.tokenEpoch !== out.tokenEpoch) opts.onViolation(row.id, 'tokenEpoch');
       if (prev && prev.personId && row.personId === undefined) opts.onViolation(row.id, 'personId');
       if (prev && prev.tokenEpoch !== undefined && row.tokenEpoch === undefined) opts.onViolation(row.id, 'tokenEpoch');
     }
