@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ProgressRing } from './ProgressRing';
 import { 
   X, 
   Building2, 
@@ -250,23 +251,24 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
 
               return (
                 <div
+                  data-desk-venue-card
                   key={venue.id}
                   onClick={() => {
                     onSelectVenue(venue.id);
                     onClose();
                   }}
-                  className={`p-4.5 rounded-2xl border transition text-left relative flex flex-col justify-between cursor-pointer group ${
+                  className={`p-4 sm:p-6 min-w-0 rounded-2xl border transition text-left relative flex flex-col justify-between cursor-pointer group ${
                     isCurrent
-                      ? 'border-gold/60 bg-gold-wash/60 ring-1 ring-gold/40 tactile-2'
+                      ? 'border-gold/60 bg-gold-wash/60 ring-1 ring-gold/40 tactile-1'
                       : 'border-line bg-surface tactile-1 lift hover:border-line-strong'
                   }`}
                 >
                   {/* Top line: Name, Category, Active badge */}
                   <div>
                     <div className="flex items-start justify-between gap-2 mb-1.5">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h3 className="text-sm font-bold text-ink group-hover:text-gold-deep transition">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 dir="auto" className="min-w-0 break-words text-sm font-bold text-ink group-hover:text-gold-deep transition">
                             {venue.name}
                           </h3>
                           {isCurrent && (
@@ -284,7 +286,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                         <button
                           title="Delete Venue Platform"
                           onClick={(e) => handleDelete(e, venue)}
-                          className="pressable flex items-center gap-1 text-xs text-rose-600 dark:text-rose-400 p-1.5 rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition cursor-pointer shrink-0"
+                          className="pressable flex items-center gap-1 text-xs text-bad p-1.5 rounded-lg border border-bad bg-bad-bg hover:bg-sunken transition cursor-pointer shrink-0"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                           <span className="text-[11px] font-semibold hidden sm:inline">Delete</span>
@@ -295,15 +297,15 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                     {/* Address & Certification */}
                     <div className="space-y-1 text-[11px] text-ink-soft mb-3.5">
                       {venue.address && (
-                        <div className="flex items-center gap-1.5 text-ink-soft">
-                          <MapPin className="w-3 h-3 text-ink-faint shrink-0" />
-                          <span className="truncate">{venue.address}</span>
+                        <div className="flex items-start gap-1.5 text-ink-soft">
+                          <MapPin className="w-3 h-3 mt-0.5 text-ink-faint shrink-0" />
+                          <span dir="auto" className="min-w-0 break-words">{venue.address}</span>
                         </div>
                       )}
                       {venue.certification && (
-                        <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
-                          <ShieldCheck className="w-3 h-3 text-emerald-500 shrink-0" />
-                          <span className="truncate">{venue.certification}</span>
+                        <div className="flex items-start gap-1.5 text-ok">
+                          <ShieldCheck className="w-3 h-3 mt-0.5 text-ok shrink-0" />
+                          <span dir="auto" className="min-w-0 break-words">{venue.certification}</span>
                         </div>
                       )}
                       <VenueTimeZoneRow
@@ -317,8 +319,9 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
 
                   {/* Metrics & Action */}
                   <div className="pt-3 border-t border-line">
-                    <div className="flex items-center justify-between text-xs mb-1.5">
-                      <span className="text-[11px] text-ink-soft tnum">
+                    <div className="flex items-center gap-3 text-xs mb-3">
+                      <span data-desk-ring className="shrink-0"><ProgressRing done={completedTasks} total={totalTasks} size={40} /></span>
+                      <span className="min-w-0 flex-1 text-[11px] text-ink-soft tnum">
                         Shift Completion: <strong>{completedTasks}/{totalTasks}</strong>
                       </span>
                       <span className="text-xs font-bold text-ink tnum">
@@ -326,20 +329,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                       </span>
                     </div>
 
-                    <div className="w-full h-1.5 bg-sunken rounded-full overflow-hidden mb-3">
-                      <div
-                        className={`h-full transition-all duration-500 ${
-                          rate === 100
-                            ? 'bg-emerald-500'
-                            : rate > 50
-                            ? 'bg-gold'
-                            : 'bg-gold-deep'
-                        }`}
-                        style={{ width: `${rate}%` }}
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between pt-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                       <span className="text-[11px] text-ink-faint flex items-center gap-1">
                         <Users className="w-3 h-3" />
                         {venue.workerCount ?? 0} staff members

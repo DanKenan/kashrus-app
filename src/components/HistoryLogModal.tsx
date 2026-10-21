@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ProgressRing } from './ProgressRing';
 import { X, Calendar, Download, Search } from 'lucide-react';
 import { DailySnapshot } from '../types';
 import { formatExactTime } from '../lib/utils';
@@ -15,14 +16,13 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
   onClose,
   historyLogs,
 }) => {
-  const [selectedSnapshot, setSelectedSnapshot] = useState<DailySnapshot | null>(
-    historyLogs.length > 0 ? historyLogs[0] : null
-  );
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const activeSnapshot = historyLogs.find((s) => s.id === selectedId) ?? historyLogs[0] ?? null;
   const [searchTerm, setSearchTerm] = useState('');
 
   if (!isOpen) return null;
 
-  const currentEntries = selectedSnapshot?.entries.filter((entry) => {
+  const currentEntries = activeSnapshot?.entries.filter((entry) => {
     if (!searchTerm) return true;
     const q = searchTerm.toLowerCase();
     return (
@@ -35,10 +35,10 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
   }) || [];
 
   const handleExportCSV = () => {
-    if (!selectedSnapshot) return;
+    if (!activeSnapshot) return;
     const headers = ['Date', 'Task Title', 'Category', 'Status', 'Completed', 'Completed By Name', 'Completed By Email', 'Time', 'Notes'];
-    const rows = selectedSnapshot.entries.map((e) => [
-      selectedSnapshot.date,
+    const rows = activeSnapshot.entries.map((e) => [
+      activeSnapshot.date,
       `"${e.taskTitle.replace(/"/g, '""')}"`,
       `"${e.category}"`,
       e.status,
@@ -53,7 +53,7 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `daily_tasks_archive_${selectedSnapshot.date}.csv`);
+    link.setAttribute('download', `daily_tasks_archive_${activeSnapshot.date}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -95,22 +95,23 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
             ) : (
               <div className="space-y-1">
                 {historyLogs.map((snap) => {
-                  const isSelected = selectedSnapshot?.id === snap.id;
+                  const isSelected = activeSnapshot?.id === snap.id;
                   return (
                     <button
                       key={snap.id}
-                      onClick={() => setSelectedSnapshot(snap)}
+                      onClick={() => setSelectedId(snap.id)}
                       className={`w-full text-left p-2.5 rounded-xl text-xs transition flex flex-col gap-1 ${
                         isSelected
                           ? 'bg-surface tactile-1 border border-line text-ink'
                           : 'text-ink-soft hover:bg-surface/60'
                       }`}
                     >
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold tnum">{snap.date}</span>
+                      <div className="flex flex-wrap items-center gap-2 w-full">
+                        <span data-ledger-day-ring className="shrink-0"><ProgressRing done={snap.completedTasks} total={snap.totalTasks} size={24} /></span>
+                        <span className="font-bold tnum min-w-0 break-words flex-1">{snap.date}</span>
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold tnum ${
                           snap.completionRate === 100 
-                            ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300' 
+                            ? 'bg-ok-bg text-ok'
                             : 'bg-gold-wash text-gold-ink'
                         }`}>
                           {snap.completionRate}%
@@ -127,30 +128,30 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
           </div>
 
           {/* Right: Selected Date Audit Trail */}
-          <div className="flex-1 flex flex-col overflow-hidden p-4">
-            {selectedSnapshot ? (
+          <div className="min-w-0 flex-1 flex flex-col overflow-hidden p-4">
+            {activeSnapshot ? (
               <>
                 {/* Actions Toolbar */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-line shrink-0">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-col sm:flex-row sm:items-center flex-wrap justify-between gap-3 pb-3 border-b border-line shrink-0">
+                  <div className="flex flex-wrap min-w-0 break-words items-center gap-2">
                     <span className="text-sm font-bold text-ink">
-                      Archive: {selectedSnapshot.date}
+                      Archive: {activeSnapshot.date}
                     </span>
                     <span className="text-xs text-ink-faint">
-                      (Reset by {selectedSnapshot.resetBy})
+                      (Reset by {activeSnapshot.resetBy})
                     </span>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap min-w-0 items-center gap-2">
                     {/* Search */}
-                    <div className="relative">
+                    <div className="relative min-w-0 max-w-full">
                       <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint" />
                       <input
                         type="text"
                         placeholder="Search logs..."
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
-                        className="pl-8 pr-3 py-1.5 text-xs rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
+                        className="w-full min-w-0 pl-8 pr-3 py-1.5 text-base rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none"
                       />
                     </div>
 
@@ -158,7 +159,7 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                     <button
                       id="export-csv-btn"
                       onClick={handleExportCSV}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl pressable bg-emerald-600 hover:bg-emerald-700 text-white tactile-1 transition"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl pressable bg-surface border border-line-control text-ink hover:bg-sunken tactile-1 transition"
                     >
                       <Download className="w-3.5 h-3.5" />
                       <span>Export CSV</span>
@@ -173,55 +174,54 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                       No log entries found.
                     </p>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="min-w-0">
+                      <div className="hidden sm:grid sm:grid-cols-[96px_160px_minmax(0,1fr)_minmax(0,1fr)] gap-3 border-b border-line py-2 text-xs font-semibold uppercase tracking-wider text-ink-soft">
+                        <span className="min-w-0 break-words">Time</span><span className="min-w-0 break-words">Person</span><span className="min-w-0 break-words">What happened</span><span className="min-w-0 break-words">Notes</span>
+                      </div>
                       {currentEntries.map((entry) => {
                         const statusLower = entry.status.toLowerCase();
                         const isRemoved = /remov|delet|cancel/.test(statusLower);
                         const dotClass = entry.isCompleted
-                          ? 'bg-emerald-500'
+                          ? 'bg-ok'
                           : isRemoved
-                            ? 'bg-rose-500'
+                            ? 'bg-bad'
                             : 'bg-gold';
                         return (
                           <div
                             key={entry.id}
-                            className="bg-surface tactile-1 border border-line rounded-xl p-3 flex flex-col sm:flex-row sm:items-start gap-2.5"
+                            data-ledger-row
+                            className="min-w-0 border-b border-line py-3 grid grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[96px_160px_minmax(0,1fr)_minmax(0,1fr)] gap-x-3 gap-y-2 text-base"
                           >
-                            {/* Task + Category */}
-                            <div className="flex-1 min-w-0">
-                              <div className="font-semibold text-ink text-xs">
-                                {entry.taskTitle}
-                              </div>
-                              <span
-                                className="cat-chip border text-[10px] font-bold px-1.5 py-0.5 rounded-full inline-flex mt-1"
-                                style={categoryVars(entry.category)}
-                              >
-                                {entry.category}
-                              </span>
+                            <div className="min-w-0 tnum text-ink-soft break-words">
+                              {entry.completedAt && <>{formatExactTime(entry.completedAt)}<span className="sm:hidden"> ·</span></>}
                             </div>
-
-                            {/* Status */}
-                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-sunken border border-line text-[10px] font-bold uppercase text-ink-soft whitespace-nowrap self-start">
-                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`} />
-                              {entry.status}
-                            </span>
-
-                            {/* Attributed Mashgiach / User */}
-                            <div className="sm:w-40 shrink-0 text-xs text-ink-soft">
+                            <div dir="auto" className="min-w-0 break-words text-ink-soft">
                               {entry.completedByName || entry.completedByEmail ? (
-                                <div>
-                                  <p className="font-medium text-ink truncate">{entry.completedByName || entry.completedByEmail}</p>
-                                  <p className="text-[10px] text-ink-faint tnum">{formatExactTime(entry.completedAt)}</p>
-                                </div>
+                                <span className="font-medium text-ink">{entry.completedByName || entry.completedByEmail}</span>
                               ) : (
                                 <span className="text-ink-faint italic">Unassigned</span>
                               )}
                             </div>
-
-                            {/* Notes & Remarks */}
-                            <div className="flex-1 min-w-0 text-xs text-ink-soft">
+                            <div className="col-span-2 sm:col-span-1 min-w-0">
+                              <div dir="auto" className="font-semibold text-ink break-words">
+                                {entry.taskTitle}
+                              </div>
+                              <div className="flex flex-wrap items-start gap-2 mt-1">
+                                <span
+                                  className="cat-chip border text-[10px] font-bold px-1.5 py-0.5 rounded-full inline-flex min-w-0 break-words"
+                                  style={categoryVars(entry.category)}
+                                >
+                                  {entry.category}
+                                </span>
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-sunken border border-line text-[10px] font-bold uppercase text-ink-soft min-w-0 break-words">
+                                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`} />
+                                  <span className="min-w-0 break-words">{entry.status}</span>
+                                </span>
+                              </div>
+                            </div>
+                            <div className="col-span-2 sm:col-span-1 min-w-0 text-ink-soft break-words">
                               {entry.notes ? (
-                                <p className="whitespace-pre-wrap">{entry.notes}</p>
+                                <p dir="auto" className="whitespace-pre-wrap break-words">{entry.notes}</p>
                               ) : (
                                 <span className="text-ink-faint italic">No notes</span>
                               )}
