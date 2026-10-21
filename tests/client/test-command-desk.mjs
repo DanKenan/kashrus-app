@@ -96,6 +96,7 @@ const snap1 = { id: 's1', date: '2026-10-20', totalTasks: 5, completedTasks: 3, 
   E('e3', 'בדיקת ירקות — חסה ופטרוזיליה', 'Produce', 'completed', true, 'יוסף חיים', null, '2026-10-20T15:30:00Z', 'נבדק, נקי. Checked under the light box.'),
   E('e4', 'Check produce for insects', 'Produce', 'pending', false, null, null, null, ''),
   E('e5', 'Old task that was deleted', 'Opening', 'removed', false, null, 'eli@test.local', '2026-10-20T18:02:00Z', ''),
+  E('e6', 'Walk-in temperature logged by the sensor', 'Opening', 'completed', true, null, null, '2026-10-20T19:17:00Z', ''),
 ] };
 const snap2 = { id: 's2', date: '2026-10-19', totalTasks: 0, completedTasks: 0, completionRate: 0, resetAt: '', resetBy: 'admin@test.local', entries: [] };
 const snap3 = { id: 's3', date: '2026-10-18', totalTasks: 2, completedTasks: 2, completionRate: 100, resetAt: '', resetBy: 'system', entries: [] };
@@ -133,6 +134,16 @@ const renderHistory = (h) => renderToStaticMarkup(React.createElement(HistoryLog
   ok('D.history.header', hdr === true && text.includes('What happened'), String(hdr));
   ok('D.history.dayRings', count(html, 'data-ledger-day-ring') === logs.length, `${count(html, 'data-ledger-day-ring')}`);
   ok('D.history.dirAuto', count(html, 'dir="auto"') >= snap1.entries.length);
+  // D (review r1): Time comes from completedAt even with no person; reading text 16 px; Export CSV is a secondary action
+  {
+    const e6 = snap1.entries.find((e) => e.id === 'e6');
+    const rowE6 = (html.split('data-ledger-row').find((chunk) => chunk.includes(e6.taskTitle)) || '');
+    ok('D.history.timeNoPerson', textOf('<x ' + rowE6).includes(formatExactTime(e6.completedAt)) && textOf('<x ' + rowE6).includes('Unassigned'), formatExactTime(e6.completedAt));
+    const rows = html.split('data-ledger-row').slice(1);
+    ok('D.history.text16', rows.length === snap1.entries.length && rows.every((r) => /text-base/.test(r.split('data-ledger-row')[0])), 'ledger rows carry text-base reading text');
+    const exp = (html.match(/<button[^>]*id="export-csv-btn"[^>]*>/) || [''])[0];
+    ok('D.history.exportSecondary', /bg-surface/.test(exp) && /\bborder\b/.test(exp) && /text-ink\b/.test(exp) && !/bg-ok|text-ok|emerald/.test(exp), exp.slice(0, 160));
+  }
   ok('D.history.noCards', !/data-ledger-row[^>]*class="[^"]*\brounded-xl\b/.test(html), 'rows are ruled lines, not cards');
 }
 {
