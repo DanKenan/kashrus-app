@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Moon, Sun, WifiOff } from 'lucide-react';
+import { LogOut, Moon, Sun, WifiOff } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import { clockText, weekdayText, hebrewDateText, initialsOf } from '../lib/kioskClock';
 
@@ -129,9 +129,11 @@ export const KioskTopBar: React.FC<KioskTopBarProps> = ({
         <button
           data-kiosk-end-shift
           onClick={onEndShift}
-          className={`pressable shrink-0 max-w-[16rem] ${btn64} px-4 sm:px-6 rounded-xl bg-red-700 text-white text-base sm:text-k-body font-semibold e2`}
+          className={`pressable shrink-0 ${btn64} px-4 sm:px-5 rounded-xl border border-line-strong bg-paper text-ink text-base sm:text-k-body font-semibold inline-flex items-center gap-2`}
         >
-          <span dir="auto" className="block truncate">End shift — {firstName}</span>
+          {/* D3c (mockup): a quiet outlined End shift; the person's name already sits beside it. */}
+          <LogOut className="w-5 h-5 shrink-0" aria-hidden />
+          <span className="whitespace-nowrap">End shift</span>
         </button>
       </div>
     </div>

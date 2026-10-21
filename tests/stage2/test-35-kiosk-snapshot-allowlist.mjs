@@ -88,6 +88,8 @@ export default {
     const mashAEmail = `masha35-${ts}@test.local`;
     const tA = `task-t35-A-${ts}`;
     const tB = `task-t35-B-${ts}`;
+    const hA = `hist-t35-A-${ts}`;
+    const hB = `hist-t35-B-${ts}`;
     const PIN = '3916';
     const task = (id, venueId) => ({
       id, agencyId: AG, venueId, title: `T35 ${id}`, category: 'General', categories: ['General'],
@@ -101,10 +103,15 @@ export default {
         { id: vB, name: `T35 B ${ts}`, agencyId: AG },
       ],
       users: [
-        { id: adminId, email: `admin35-${ts}@test.local`, name: 'T35 Admin', role: 'admin', agencyId: AG },
-        { id: mashA, email: mashAEmail, name: 'T35 Mash A', role: 'mashgiach', agencyId: AG, venueId: vA, kioskPin: PIN, phoneNumber: '+18605550135' },
+        { id: adminId, email: `admin35-${ts}@test.local`, name: 'T35 Admin', role: 'admin', agencyId: AG, avatarColor: 'bg-gold' },
+        { id: mashA, email: mashAEmail, name: 'T35 Mash A', role: 'mashgiach', agencyId: AG, venueId: vA, kioskPin: PIN, phoneNumber: '+18605550135', avatarColor: 'bg-gold' },
       ],
       tasks: [task(tA, vA), task(tB, vB)],
+      // Positive + negative history fixtures: venue A's entry must arrive, venue B's never.
+      historyLogs: [
+        { id: hA, agencyId: AG, venueId: vA, date: '2026-01-02', tasks: [] },
+        { id: hB, agencyId: AG, venueId: vB, date: '2026-01-02', tasks: [] },
+      ],
     });
     if (inj.status !== 200) throw new Error(`inject-fixture: ${inj.status}`);
 
@@ -139,12 +146,16 @@ export default {
       if (missing.length) throw new Error(`${label}: allowlisted keys missing (the client would silently lose them): ${missing.join(',')}`);
       for (const u of p.users || []) {
         const ks = Object.keys(u).sort().join(',');
-        if (ks !== 'avatarColor,id,name,role' && ks !== 'id,name,role') throw new Error(`${label}: roster entry fields ${ks}`);
+        if (ks !== 'avatarColor,id,name,role') throw new Error(`${label}: roster entry fields ${ks}`);
       }
       const tids = (p.tasks || []).map((t) => t.id);
       if (!tids.includes(tA)) throw new Error(`${label}: venue-A task missing`);
       if (tids.includes(tB) || (p.tasks || []).some((t) => t.venueId !== vA)) throw new Error(`${label}: a task from another venue`);
       if ((p.historyLogs || []).some((h) => h.venueId !== vA)) throw new Error(`${label}: history from another venue`);
+      const hids = (p.historyLogs || []).map((h) => h.id);
+      if (!hids.includes(hA)) throw new Error(`${label}: venue-A history entry missing (an empty history would pass silently)`);
+      if (hids.includes(hB)) throw new Error(`${label}: venue-B history entry reached the kiosk`);
+      if (!(p.users || []).some((u) => u.id === mashA)) throw new Error(`${label}: the signed-in user is missing from the roster`);
       if ((p.venues || []).length !== 1 || p.venues[0].id !== vA) throw new Error(`${label}: venues ${JSON.stringify((p.venues || []).map((v) => v.id))}`);
       for (const k of ['events', 'airtableConfigs', 'approvedIngredients', 'factoryReports']) {
         if (!Array.isArray(p[k]) || p[k].length) throw new Error(`${label}: ${k} must be an empty array`);

@@ -1860,7 +1860,7 @@ export default function App() {
         )}
 
         {/* Compact Kosher Events Alert (Only shown when active events exist) */}
-        {events.length > 0 && (
+        {!isKiosk && events.length > 0 && (
           <div className={`${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:order-2' : ''} mb-4 px-4 py-2.5 rounded-2xl bg-gold-wash border border-gold/40 tactile-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-fade-in`}>
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="p-1.5 rounded-lg bg-gold/15 text-gold-deep shrink-0 border border-gold/30">

@@ -6998,7 +6998,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
       venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [],
       events = [], incidents = [], handoffNotes = [], announcements = [],
       taskTemplates = [], eventTaskTemplates = [], approvedIngredients = [], factoryReports = [],
-      kioskDevices: newKioskDevices = [],
+      kioskDevices: newKioskDevices = [], historyLogs = [],
     } = req.body || {};
     try {
       await commitState(
@@ -7023,6 +7023,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
               approvedIngredients: [...(freshDoc.approvedIngredients || []), ...approvedIngredients],
               factoryReports: [...(freshDoc.factoryReports || []), ...factoryReports],
               kioskDevices: [...(freshDoc.kioskDevices || []), ...newKioskDevices],
+              historyLogs: [...(freshDoc.historyLogs || []), ...historyLogs],
             },
             result: { injected: venues.length + tasks.length + newAgencies.length + newUsers.length + newKioskDevices.length },
           };

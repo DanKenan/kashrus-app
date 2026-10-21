@@ -243,6 +243,8 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   const barOp = useRef<number | null>(null);
   const mounted = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // D3c: the last place each row was seen, so a saving row App's Pending/Done filter drops stays put (below).
+  const lastSeen = useRef<Record<string, { task: Task; at: number }>>({});
   const reducedMotion = useReducedMotion();
 
   const clearTimer = () => {
@@ -314,8 +316,22 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
     const sv = saving[task.id];
     return sv ? !sv.toDone : task.isCompleted;
   };
-  const todoTasks = tasks.filter((t) => !shownDone(t));
-  const doneTasks = tasks.filter((t) => shownDone(t));
+  // App's Pending/Done filter drops a row as soon as its optimistic state flips; a row that is
+  // still saving keeps its last place (and its half) until the server answers.
+  tasks.forEach((t, i) => { lastSeen.current[t.id] = { task: t, at: i }; });
+  const listed = (() => {
+    const ids = new Set(tasks.map((t) => t.id));
+    const held = Object.keys(saving).filter((id) => !ids.has(id) && lastSeen.current[id]);
+    if (held.length === 0) return tasks;
+    const out = [...tasks];
+    held
+      .map((id) => lastSeen.current[id])
+      .sort((a, b) => a.at - b.at)
+      .forEach(({ task, at }) => out.splice(Math.min(at, out.length), 0, task));
+    return out;
+  })();
+  const todoTasks = listed.filter((t) => !shownDone(t));
+  const doneTasks = listed.filter((t) => shownDone(t));
   const shown = half === 'todo' ? todoTasks : doneTasks;
   // Anything the closed "Find a task" block is narrowing, so nothing is hidden silently.
   const isFiltered =
@@ -398,12 +414,12 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
         >
           {/* D3c (mockup): a filled gold "Mark done"; the tick shows on phones (no label) and once done. */}
           <Check
-            className={`w-6 h-6 sm:w-7 sm:h-7 shrink-0 ${done ? '' : 'sm:hidden'}`}
+            className={`w-6 h-6 sm:w-7 sm:h-7 shrink-0 ${done ? '' : 'hidden'}`}
             strokeWidth={3}
             aria-hidden
           />
           {/* D3c: the words carry the state (spec: never colour alone). */}
-          <span data-kiosk-check-label className="hidden sm:inline whitespace-nowrap" aria-hidden>
+          <span data-kiosk-check-label className="whitespace-nowrap" aria-hidden>
             {busy ? 'Saving…' : done ? 'Done' : 'Mark done'}
           </span>
         </button>
@@ -659,7 +675,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
               </p>
             </div>
           ) : (
-            <ul className="flex flex-col gap-2">
+            <ul className="flex flex-col gap-2.5">
               {shown.map((task) => {
                 const phase = saving[task.id];
                 const st = phase ? { word: 'Saving…', tone: 'open' as const } : rowStatus(task);
@@ -669,7 +685,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                 // Reorder limits read the full list (the halves are presentation only).
                 const at = tasks.indexOf(task);
                 const upBlocked = at <= 0 || boardTier(tasks[at - 1], currentUser?.email) !== tier;
-                const downBlocked = at === tasks.length - 1 || boardTier(tasks[at + 1], currentUser?.email) !== tier;
+                const downBlocked = at < 0 || at === tasks.length - 1 || boardTier(tasks[at + 1], currentUser?.email) !== tier;
                 const currentNote = notesState[task.id] !== undefined ? notesState[task.id] : task.notes;
                 const control = rowControl(task);
                 const rowId = `kiosk-row-${task.id}`;
@@ -686,7 +702,6 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                       !phase && task.isCompleted ? 'bg-done-tint border-line' : 'bg-surface border-line e1'
                     }`}
                   >
-                    <div className="cat-spine absolute start-0 top-0 bottom-0 w-[5px]" aria-hidden />
                     <div className="flex items-center gap-2 sm:gap-4 ps-3 sm:ps-5 pe-2 sm:pe-3">
                       <button
                         onClick={() => toggleRow(task.id)}
@@ -700,7 +715,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                         ) : null}
                         <span
                           data-kiosk-row-lead
-                          className={`shrink-0 flex items-center justify-center sm:w-10 sm:h-10 sm:rounded-full sm:border sm:border-line sm:bg-sunken ${!phase && task.isCompleted ? 'sm:hidden' : ''}`}
+                          className={`cat-wash cat-ring shrink-0 flex items-center justify-center rounded-full sm:w-10 sm:h-10 sm:ring-2 sm:ring-inset ${!phase && task.isCompleted ? 'sm:hidden' : ''}`}
                           aria-hidden
                         >
                           <span className={`w-3 h-3 sm:w-3.5 sm:h-3.5 rounded-full ${DOT[st.tone]}`} />
@@ -714,7 +729,8 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                             {task.title}
                           </span>
                           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                            {task.targetTime && (
+                            {/* Only a real clock time ("End of Shift" and other words stay in the expanded schedule). */}
+                            {task.targetTime && /\d{1,2}:\d{2}/.test(task.targetTime) && (
                               <span data-kiosk-due className="tnum inline-flex items-center gap-1 rounded-full bg-sunken border border-line px-2 text-base text-ink font-medium shrink-0">
                                 <Clock className="w-4 h-4" aria-hidden /> Due {formatTaskTimes(task)}
                               </span>
