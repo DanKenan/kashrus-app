@@ -6746,15 +6746,16 @@ app.get('/api/admin/dashboard', (req, res) => {
     // D8s: `phone` is the real stored phoneNumber (K1), only through
     // managerViewOf (Rule N: admin of the agency, or a coordinator for a
     // mashgiach/worker in a shared venue); '' otherwise. Same key and shape.
+    // D8s: a venue card lists the NON-ADMIN people of this agency whose 9a
+    // venue scope (home or granted, venueScopeFor) includes this venue. Admins
+    // are never listed, and a task assigned to 'all' (or to anyone) no longer
+    // pulls people onto a card they do not work at.
     const venueUsers = users
       .filter((u) => (u.agencyId || 'agency-hkc') === agencyId)
+      .filter((u) => u.role !== 'admin')
       .filter((u) => {
-        // User is assigned if they have venueId match or are assigned to venue tasks
-        if ((u as any).venueId === venue.id) return true;
-        return venueTasks.some((t) =>
-          Array.isArray(t.assignedTo) &&
-          (t.assignedTo.includes('all') || t.assignedTo.includes(u.email))
-        );
+        const scope = venueScopeFor(u);
+        return Array.isArray(scope) && scope.includes(venue.id);
       })
       .map((u) => ({
         email: u.email,
