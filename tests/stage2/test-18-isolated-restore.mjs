@@ -19,7 +19,7 @@
 export default {
   name: 'Test 18: Isolated backup/restore cycle',
   whatItProves:
-    'The admin export is a complete restorable snapshot, and the restore procedure (explicit database ID) round-trips it with identical counts and version.',
+    "The admin export is the caller agency's secret-free data, marked non-restorable over the whole document, and it round-trips (explicit database ID) into an isolated fixture document with identical counts while app-state/main is untouched.",
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
@@ -65,22 +65,28 @@ export default {
     const expRes = await fetch(`${baseUrl}/api/admin/export`, { headers: ctx.authHeaders });
     if (expRes.status !== 200) throw new Error(`export failed: ${expRes.status}`);
     const backup = await expRes.json();
-    // Structure validation: restorable snapshot must have these.
-    for (const k of ['_v', 'tasks', 'venues', 'users', 'currentWorkDate']) {
-      if (!(k in backup)) throw new Error(`export missing required field: ${k}`);
+    // Structure validation (8h): an AGENCY export, never a whole-doc snapshot.
+    if (backup.exportScope !== 'agency' || backup.exportAgencyId !== 'agency-hkc' || backup.restorable !== false) {
+      throw new Error(`export is not marked as the caller's agency export: ${JSON.stringify({ s: backup.exportScope, a: backup.exportAgencyId, r: backup.restorable })}`);
     }
-    if (typeof backup._v !== 'number') throw new Error('export _v not a number');
+    for (const k of ['_v', 'currentWorkDate', 'isDemoCleared']) {
+      if (k in backup) throw new Error(`agency export must not carry whole-document field ${k}`);
+    }
+    for (const k of ['tasks', 'venues', 'users', 'agencies']) {
+      if (!Array.isArray(backup[k])) throw new Error(`export missing required collection: ${k}`);
+    }
+    if (backup.agencies.some((a) => a.id !== 'agency-hkc')) throw new Error('export carries another agency');
     // Passwords must be stripped (by design — restores require password resets).
     for (const u of backup.users || []) {
-      if (u.password !== undefined || u.passwordHash !== undefined || u.kioskPin !== undefined) {
+      if (u.password !== undefined || u.passwordHash !== undefined || u.kioskPin !== undefined || u.kioskPinHash !== undefined) {
         throw new Error(`export leaked credentials for user ${u.id}`);
       }
     }
+    if (!(backup.users || []).some((u) => u.id === pinUserId)) throw new Error('PIN test user missing from export (strip check would be vacuous)');
     const counts = {
       tasks: (backup.tasks || []).length,
       venues: (backup.venues || []).length,
       users: (backup.users || []).length,
-      version: backup._v,
     };
     if (!(backup.tasks || []).some((t) => t.id === canaryId)) {
       throw new Error('canary task missing from export');
@@ -88,7 +94,7 @@ export default {
 
     if (!useEmulator) {
       // Mock mode: no Admin SDK surface — structural validation is the test.
-      return `export validated (mock mode): ${counts.tasks} tasks, ${counts.venues} venues, ${counts.users} users, v${counts.version}; passwords AND kiosk PINs stripped (verified with populated-PIN user); full wipe/restore cycle runs in CI (emulator)`;
+      return `agency export validated (mock mode): ${counts.tasks} tasks, ${counts.venues} venues, ${counts.users} users; marked non-restorable over the whole doc; passwords AND kiosk PINs stripped (verified with populated-PIN user); isolated round trip runs in CI (emulator)`;
     }
 
     // --- 3. Full cycle against the emulator, explicit database ID ---
@@ -100,31 +106,22 @@ export default {
     // THE critical line from BACKUP_RESTORE.md: explicit database ID, never
     // the silent (default) fallback.
     const db = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
-    const docRef = db.doc('app-state/main');
-
-    // Sanity: we are talking to the same database the server uses.
-    const before = (await docRef.get()).data();
-    if (!before || before._v !== counts.version) {
-      throw new Error(`database mismatch: doc _v=${before?._v}, expected ${counts.version}`);
+    const mainRef = db.doc('app-state/main');
+    const mainBefore = (await mainRef.get()).data();
+    if (!mainBefore || !(mainBefore.tasks || []).some((t) => t.id === canaryId)) {
+      throw new Error('database mismatch: canary not found in app-state/main of the target database');
     }
 
-    // Disaster: wipe the document.
-    await docRef.set({ _wipedByTest18: true });
-    const wiped = (await docRef.get()).data();
-    if (wiped.tasks || wiped._v) throw new Error('wipe did not clear the document');
-
-    // Restore: write the export back (strip export metadata like the script).
+    // Round trip into an ISOLATED fixture document (never app-state/main).
+    const isoRef = db.doc(`app-state/test18-agency-${ts}`);
     const toRestore = { ...backup };
     delete toRestore.exportedAt;
-    await docRef.set(JSON.parse(JSON.stringify(toRestore)));
-
-    // Verify: counts, version, and canary match the backup exactly.
-    const restored = (await docRef.get()).data();
+    await isoRef.set(JSON.parse(JSON.stringify(toRestore)));
+    const restored = (await isoRef.get()).data();
     const rCounts = {
       tasks: (restored.tasks || []).length,
       venues: (restored.venues || []).length,
       users: (restored.users || []).length,
-      version: restored._v,
     };
     for (const k of Object.keys(counts)) {
       if (rCounts[k] !== counts[k]) {
@@ -134,12 +131,19 @@ export default {
     if (!(restored.tasks || []).some((t) => t.id === canaryId && t.title === `Test18 Canary ${ts}`)) {
       throw new Error('canary task not intact after restore');
     }
+    if (restored.exportScope !== 'agency' || restored.restorable !== false) throw new Error('scope markers lost in round trip');
+    await isoRef.delete();
 
-    // The restored doc must be writable (not corrupted).
-    const vW = await ctx.getVersion();
+    // app-state/main untouched by the round trip.
+    const mainAfter = (await mainRef.get()).data();
+    if (mainAfter._v !== mainBefore._v || (mainAfter.tasks || []).length !== (mainBefore.tasks || []).length) {
+      throw new Error('app-state/main changed during the isolated round trip');
+    }
+
+    // The live doc is still writable.
     const wr = await ctx.api('POST', '/api/tasks', {
       venueId: 'venue-crown-market',
-      title: `Test18 Post-Restore ${ts}`,
+      title: `Test18 Post-Roundtrip ${ts}`,
       createdByEmail: 'kenan@hartfordkashrut.org',
     });
     if (wr.status !== 201 && wr.status !== 200) {
@@ -158,6 +162,6 @@ export default {
     }
 
     try { await app.delete(); } catch {}
-    return `restore cycle OK (db: ${databaseId || '(default)'}): ${rCounts.tasks} tasks, ${rCounts.venues} venues, ${rCounts.users} users, v${rCounts.version} — identical to backup; post-restore write OK`;
+    return `agency export round trip OK into an isolated doc (db: ${databaseId || '(default)'}): ${rCounts.tasks} tasks, ${rCounts.venues} venues, ${rCounts.users} users; app-state/main untouched; live doc still writable`;
   },
 };

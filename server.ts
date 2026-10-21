@@ -9,6 +9,7 @@ import webpush from 'web-push';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import * as media from './src/server/media.js';
+import { buildAdminExport } from './src/server/admin-export.js';
 import { log } from './src/server/log.ts';
 import {
   DEFAULT_TIME_ZONE,
@@ -5107,32 +5108,17 @@ app.get('/api/admin/storage', (req, res) => {
 
 // Admin data export — download full state as JSON backup (admin only)
 app.get('/api/admin/export', (req, res) => {
-  // SECURITY: admin-only. Previously any authenticated user could download
-  // the full database. Fixed 2026-10-18 (matches hotfix/admin-export-auth).
-  if (!requireAdmin(req, res)) return;
-  const snapshot = stateSnapshot();
-  // Strip sensitive fields from export. Passwords AND kiosk PINs are stripped
-  // from ALL exports (round 5 fix — the docs claimed PINs were stripped but
-  // the code only removed password). Ordinary admin exports must never carry
-  // credential material; the separate full-fidelity DR backup (BACKUP_RESTORE.md)
-  // is the only place credential material lives, stored encrypted.
-  const safe = {
-    ...snapshot,
-    // 2b: device records export WITHOUT their secret hashes, and pairings
-    // (which include code hashes + IPs) are omitted entirely.
-    kioskDevices: (snapshot.kioskDevices || []).map((d: any) => ({ ...d, secretHash: undefined })),
-    kioskPairings: undefined,
-    kioskPairingLimits: undefined,
-    users: (snapshot.users || []).map((u: any) => ({
-      ...u,
-      password: undefined,
-      passwordHash: undefined,
-      kioskPin: undefined,
-      kioskPinHash: undefined,
-    })),
-    jwtSecret: undefined,
-    vapidKeys: undefined,
-  };
+  // SECURITY: admin-only (2026-10-18). Since 8h: ALWAYS scoped to the
+  // caller's own agency by verified ownership, built by explicit projection,
+  // secret-free — no cross-agency export for anyone (whole-database DR is the
+  // Tier-1 backup job). See src/server/admin-export.ts.
+  const caller = requireAdmin(req, res);
+  if (!caller) return;
+  // The caller's agency comes from the verified session record (a legacy
+  // account without agencyId belongs to the home agency, as everywhere else).
+  const safe = buildAdminExport(stateSnapshot(), {
+    id: caller.id, role: caller.role, email: caller.email, agencyId: caller.agencyId || 'agency-hkc',
+  });
   const filename = `shutfey-backup-${new Date().toISOString().slice(0, 10)}.json`;
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Type', 'application/json');
