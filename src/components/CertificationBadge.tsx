@@ -2,10 +2,11 @@ import React from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { certificationLabel, normalizeOption } from '../lib/certOptions';
 
-// Don is choosing between the full agency name (stored text, default) and
-// "<short code> — <detail>"; switching this one line to 'shortCode' shows the
-// short code in the no-logo case when the label is consistent.
-export const NO_LOGO_WORDING: 'stored' | 'shortCode' = 'stored';
+// Don (Oct 21): with no logo, show '<short code> — <detail>' (e.g. 'HKC — Glatt meat').
+// Use the stored label (full name) when the agency has no short code or the stored
+// label doesn't match the current agency name + detail. Display only; stored venue
+// text is never rewritten.
+export const NO_LOGO_WORDING: 'stored' | 'shortCode' = 'shortCode';
 interface CertificationBadgeProps {
   certification: string;
   certificationDetail?: string;

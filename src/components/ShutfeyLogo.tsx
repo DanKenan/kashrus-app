@@ -1,4 +1,8 @@
-import React, { useState } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
+
+export function headerOverflows(el: Pick<HTMLElement, 'scrollWidth' | 'clientWidth'>): boolean {
+  return el.scrollWidth > el.clientWidth + 1;
+}
 
 interface LogoProps {
   agencyLogoSrc?: string | null;
@@ -22,7 +26,40 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
   compactBelow360 = false,
 }) => {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  const showAgencyLogo = !!agencyLogoSrc && failedSrc !== agencyLogoSrc;
+  const [tightSrc, setTightSrc] = useState<string | null>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const showAgencyLogo = !!agencyLogoSrc && failedSrc !== agencyLogoSrc && tightSrc !== agencyLogoSrc;
+  const shown = useRef(showAgencyLogo);
+  shown.current = showAgencyLogo;
+  const scheduleMeasure = useRef<(() => void) | null>(null);
+  useLayoutEffect(() => {
+    if (!agencyLogoSrc || failedSrc === agencyLogoSrc) return;
+    let frame: number | undefined;
+    const cancel = () => { if (frame !== undefined) window.cancelAnimationFrame(frame); };
+    const measure = () => {
+      frame = undefined;
+      if (!shown.current) return;
+      const header = root.current?.closest('header') || document.documentElement;
+      if (header && headerOverflows(header)) setTightSrc(agencyLogoSrc);
+    };
+    const schedule = () => { cancel(); frame = window.requestAnimationFrame(measure); };
+    const resize = () => {
+      cancel();
+      frame = window.requestAnimationFrame(() => {
+        setTightSrc(null);
+        frame = window.requestAnimationFrame(measure);
+      });
+    };
+    setTightSrc(null);
+    scheduleMeasure.current = schedule;
+    schedule();
+    window.addEventListener('resize', resize);
+    return () => {
+      cancel();
+      scheduleMeasure.current = null;
+      window.removeEventListener('resize', resize);
+    };
+  }, [agencyLogoSrc, failedSrc]);
   // Heights are the box sizes the component has always used; the mark is 1.28:1,
   // so the width follows the height (width = height x 1.28). At size sm the
   // 640-1279 px band uses a 25 px height (32 px wide — the old tile's width):
@@ -49,11 +86,11 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
   };
 
   return (
-    <div className={`flex items-center gap-2 sm:gap-2.5 min-w-0 ${className}`}>
+    <div ref={root} className={`flex items-center gap-2 sm:gap-2.5 min-w-0 ${className}`}>
       {showAgencyLogo && <>
         <img src={agencyLogoSrc} alt={agencyName} className="h-[32px] max-w-[120px] w-auto object-contain shrink-0 max-[389px]:hidden"
           onError={() => setFailedSrc(agencyLogoSrc)}
-          onLoad={(event) => { const image = event.currentTarget; if (image.naturalWidth / image.naturalHeight > 120 / 32) setFailedSrc(agencyLogoSrc); }} />
+          onLoad={(event) => { const image = event.currentTarget; if (image.naturalWidth / image.naturalHeight > 120 / 32) setFailedSrc(agencyLogoSrc); else scheduleMeasure.current?.(); }} />
         <span aria-hidden="true" className="h-[32px] w-[1px] bg-line shrink-0 max-[389px]:hidden" />
       </>}
       {/* Shutfey brand mark — Don's drawing (Oct 14, 2026): three partners above the pot,
