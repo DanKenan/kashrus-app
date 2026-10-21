@@ -7,7 +7,6 @@ import {
   UserCheck,
   ShieldCheck,
   Building2,
-  Activity,
   Trash2
 } from 'lucide-react';
 
@@ -49,28 +48,16 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
   isAdmin = false,
   timeZone,
 }) => {
-  const isAllDone = totalTasks > 0 && completedTasks === totalTasks;
   const remainingTasks = Math.max(0, totalTasks - completedTasks);
-
-  const getReadinessStatus = () => {
-    if (totalTasks === 0) return { label: 'Awaiting Daily Roster', color: 'text-ink-soft bg-sunken border border-line' };
-    if (isAllDone) return { label: 'Full Kashrut Compliance Verified', color: 'text-emerald-800 dark:text-emerald-300 bg-emerald-100/80 dark:bg-emerald-950/60 border border-emerald-300 dark:border-emerald-800' };
-    if (completionRate >= 75) return { label: 'Advanced Inspection Phase', color: 'text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800' };
-    if (completionRate >= 35) return { label: 'Active Service Supervision', color: 'text-gold-ink bg-gold-wash border border-gold/40' };
-    return { label: 'Morning Open & Setup Phase', color: 'text-gold-ink bg-gold-wash border border-gold/50' };
-  };
-
-  const status = getReadinessStatus();
 
   return (
     <div className="max-sm:contents bg-surface rounded-3xl p-4 sm:p-5 border border-line tactile-3 mb-5 transition-all relative overflow-hidden animate-fade-in">
       {/* Subtle warm ambient glow */}
       <div className="max-sm:hidden absolute -top-24 -right-24 w-72 h-72 bg-gradient-to-br from-gold/10 via-gold/5 to-transparent rounded-full blur-3xl pointer-events-none" />
 
-      {/* Top Administrative Masthead */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 mb-3.5 border-b border-line/70 relative max-sm:order-3 max-sm:bg-surface max-sm:border max-sm:border-b-0 max-sm:border-line max-sm:rounded-t-lg max-sm:p-4 max-sm:mb-0 max-sm:tactile-1">
-        <div className="max-sm:min-w-0 max-sm:flex-wrap flex items-center gap-3">
-          <h2 className="sm:hidden w-full text-base font-semibold text-ink">Venue details</h2>
+      {/* Top Administrative Masthead (D4b: not on phones; venue info, zone and delete live in the Venues directory) */}
+      <div className="max-sm:hidden flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 mb-3.5 border-b border-line/70 relative">
+        <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2 shrink-0">
             <ShieldCheck className="w-5 h-5" />
           </div>
@@ -107,7 +94,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
           </div>
         </div>
 
-        {/* Live Status Badge & Admin Delete Action */}
+        {/* Admin Delete Action (D4b: the phase chip is gone; the done count says it) */}
         <div className="flex items-center gap-2 self-start sm:self-center flex-wrap">
           {isAdmin && onDeleteVenue && (
             <button
@@ -120,10 +107,6 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
               <span>Delete Venue</span>
             </button>
           )}
-          <span className={`px-3 py-1 rounded-xl text-xs font-bold tracking-tight inline-flex items-center gap-1.5 tactile-1 ${status.color}`}>
-            <Activity className="w-3.5 h-3.5 animate-pulse" />
-            <span>{status.label}</span>
-          </span>
         </div>
       </div>
 
@@ -134,7 +117,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
           <ProgressRing done={completedTasks} total={totalTasks} size={40} />
           <div className="text-base text-ink">
             <h2 className="font-semibold">Today</h2>
-            <p className="tnum">{totalTasks > 0 ? `${completedTasks} of ${totalTasks} done` : 'Awaiting Daily Roster'}</p>
+            <p className="tnum">{`${completedTasks} of ${totalTasks} done`}</p>
           </div>
         </div>
 
@@ -229,7 +212,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
         />
       </div>
 
-      <div className="flex items-center justify-between text-[11px] text-ink-faint mt-2.5 font-medium max-sm:order-4 max-sm:bg-surface max-sm:border max-sm:border-t-0 max-sm:border-line max-sm:rounded-b-lg max-sm:px-4 max-sm:pb-4 max-sm:mt-0 max-sm:mb-5 max-sm:flex-wrap max-sm:gap-2 max-sm:text-xs max-sm:text-ink-soft max-sm:tactile-1">
+      <div className="max-sm:hidden flex items-center justify-between text-[11px] text-ink-faint mt-2.5 font-medium">
         <span>Automatic daily cycle resets at midnight{timeZone ? ` (${zoneCityLabel(timeZone)})` : ' (00:00)'}</span>
         <span className="font-semibold text-ink-soft">
           {agencyName}
