@@ -116,5 +116,19 @@ if (VS) {
   ok('U13 filterToVenue keeps only that venue', filterToVenue([{ id: 1, venueId: 'vA' }, { id: 2, venueId: 'vB' }, { id: 3 }], 'vA').map((x) => x.id).join() === '1');
 }
 
+
+// ---- task visibility across granted venues (canSeeTask) ----
+{
+  const { canSeeTask } = await import('../../src/lib/permissions.ts');
+  const multi = { ...staff1, myVenueIds: ['vA', 'vB'] };
+  ok('P1 multi-venue person sees a task at a granted venue', canSeeTask({ venueId: 'vB' }, multi) === true);
+  ok('P2 ... and at home', canSeeTask({ venueId: 'vA' }, multi) === true);
+  ok('P3 ... never at a venue outside the grant', canSeeTask({ venueId: 'vC' }, multi) === false);
+  ok('P4 single-venue rule unchanged (home only)', canSeeTask({ venueId: 'vA' }, staff1) === true && canSeeTask({ venueId: 'vB' }, staff1) === false);
+  ok('P5 private task still needs assignment', canSeeTask({ venueId: 'vB', isPrivate: true, assignedTo: ['x@y'] }, multi) === false && canSeeTask({ venueId: 'vB', isPrivate: true, assignedTo: ['MOSHE@test.local'] }, multi) === true);
+  ok('P6 admin sees everything', canSeeTask({ venueId: 'vZ', isPrivate: true }, admin) === true);
+  ok('P7 empty myVenueIds falls back to the home rule', canSeeTask({ venueId: 'vB' }, { ...staff1, myVenueIds: [] }) === false);
+}
+
 console.log(`${passed} passed, ${failures} failed.`);
 process.exit(failures ? 1 : 0);
