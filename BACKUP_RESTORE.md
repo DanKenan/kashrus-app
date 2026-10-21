@@ -4,25 +4,42 @@
 
 ### Via API (recommended)
 ```bash
-# As an admin user, download the full state
+# As an admin user, download YOUR AGENCY's data (since 8h — not the whole database)
 curl -s "https://workers-collaborative-dashboard-1080260390009.us-east1.run.app/api/admin/export" \
   -H "Authorization: Bearer <ADMIN_SESSION_TOKEN>" \
   -o "backup-$(date +%Y-%m-%d).json"
 ```
 
 The export endpoint (`GET /api/admin/export`) is **admin-only** (fixed 2026-10-18).
-It returns the full Firestore document as JSON.
+
+**Since 8h (Oct 21, 2026) this is an AGENCY export, for every admin including Don:**
+only the caller's own agency's records (verified ownership — a record must
+belong to the agency explicitly; orphaned or mismatched records are omitted),
+marked `exportScope: "agency"`, `exportAgencyId`, `restorable: false`, with no
+`_v`, `currentWorkDate` or `isDemoCleared`. It is built by explicit projection
+and carries **no secret material** (list below). Before 8h any agency's admin —
+and agency registration is public — received every agency's data and secrets.
+
+**It is NOT a whole-database disaster-recovery backup.** Never restore an
+agency export over `app-state/main` — that would wipe every other agency; the
+restore script below refuses it. Whole-system DR is the Tier-1 backup job
+(`src/server/backup.ts` → private bucket, restored with `restore-backup.ts`).
+**DR is only covered once Don has verified that job is deployed, scheduled,
+producing backups, and passes a restore drill** (see the checklist at the end).
+The Option A/B procedure below applies to a whole-database file from before
+8h or from the Tier-1 path; for an agency export it stops at the guard.
 
 ### What's in the backup (verified against `stateSnapshot()` + export code)
 - ✅ Users (names, emails, roles, agency links, permissions) — **passwords,
   password hashes, and kiosk PINs are stripped** (keys absent, not null)
 - ✅ Venues, tasks, history logs, handoff notes, announcements, incidents
 - ✅ Task templates, events, event task templates, approved ingredients, factory reports
-- ✅ Agency configs — **Airtable API keys ARE included** (store securely)
-- ✅ Agency list, push subscriptions, `currentWorkDate`, document `_v`
-- ✅ `resetPepper` (needed for pepper stability across restores)
-- ✅ `passwordResets` + rate-limit state (outstanding codes expire in 15 min anyway)
-- ✅ Idempotency records (harmless; expire in 24h)
+- ✅ Agency configs — Airtable configs WITHOUT their API key (`hasApiKey: true`; re-enter the key after a restore) — since 8h
+- ✅ The caller's own agency record and `venueWorkDates` for its venues (no `_v` / `currentWorkDate` — not a whole-document backup)
+- ❌ **Push subscriptions** — not exported since 8h (clients re-subscribe on next app open)
+- ❌ **`resetPepper`, `passwordResets` + rate-limit state** — not exported since 8h (outstanding reset codes expire in 15 min anyway; a new pepper is generated)
+- ❌ **Kiosk lockouts, pairings, device secret hashes** — not exported (tablets re-pair after a restore)
+- ❌ Any field whose name marks it as secret (…Password, …Token, …Secret, …Key, …Pin, …Hash of those), at any depth
 - ❌ **Passwords / password hashes / kiosk PINs** — stripped by design
 - ❌ **`jwtSecret`** — stripped by design (sessions invalidate on restore; users re-login)
 - ❌ **`vapidKeys`** — stripped by design (push must be re-keyed after restore — see below)
@@ -164,8 +181,15 @@ const app = initializeApp({
 const db = getFirestore(app, DATABASE_ID);
 
 const backup = JSON.parse(readFileSync(process.argv[2], 'utf-8'));
+// 8h: refuse an AGENCY export — it holds one agency only and would wipe
+// every other agency if written over app-state/main.
+if (backup.exportScope === 'agency' || backup.restorable === false || typeof backup._v !== 'number') {
+  console.error('REFUSED: this is an agency export, not a whole-database backup.');
+  process.exit(1);
+}
 // Remove export metadata, keep the document fields.
 delete backup.exportedAt;
+delete backup.exportScope;
 console.log(`Restoring ${Object.keys(backup).length} top-level fields, _v=${backup._v}, ` +
   `${(backup.tasks || []).length} tasks, ${(backup.venues || []).length} venues, ` +
   `${(backup.users || []).length} users → ${DATABASE_ID}/app-state/main`);
@@ -199,7 +223,13 @@ process.exit(0);
 
 ## Restore Testing
 
-**Test 18 (automated, 2026-10-18):** full export → wipe → restore cycle
+**Test 18 since 8h (Oct 21):** the export is an agency export; test 18 now
+checks its scope markers and secret stripping and round-trips it into an
+ISOLATED emulator document (never `app-state/main`), with the explicit
+database ID. Whole-database restore testing belongs to the Tier-1 job
+(`tests/stage4/test-restore.mjs`) and a production restore drill.
+
+**Test 18 (historical, 2026-10-18 – before 8h):** full export → wipe → restore cycle
 against the Firestore emulator, using the Admin SDK with an **explicit
 database ID** (`getFirestore(app, databaseId)` — the exact pattern from the
 restore script above):
