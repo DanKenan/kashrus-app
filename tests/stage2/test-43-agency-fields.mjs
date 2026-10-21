@@ -96,6 +96,7 @@ export default {
     const adminB = `user-t41-adminb-${ts}`;
     const legacyAgency = `agency-test43-legacy-${ts}`;
     const legacyDomain = `Legacy-T41-${ts}.Example.COM.`;
+    const legacySlugNorm = `legacy-t43-${ts}`;
     const verifiedAgency = `agency-test43-verified-${ts}`;
     const verifiedDomain = `verified-t41-${ts}.example.org`;
     const dupeDomain = `dupe-t41-${ts}.example.org`;
@@ -105,7 +106,7 @@ export default {
       agencies: [
         { id: A, name: 'Test41 A', shortCode: 'T41A', adminEmail: `admina41-${ts}@test.local`, certificationSeal: 'T41 Seal', region: 'R', createdAt: new Date().toISOString() },
         { id: B, name: 'Test41 B', shortCode: 'T41B', adminEmail: `adminb41-${ts}@test.local`, certificationSeal: 'T41 B Seal', region: 'R', createdAt: new Date().toISOString() },
-        { id: legacyAgency, name: 'Test41 Legacy', shortCode: 'T41L', customDomain: legacyDomain },
+        { id: legacyAgency, name: 'Test41 Legacy', shortCode: 'T41L', customDomain: legacyDomain, slug: `  ${legacySlugNorm.toUpperCase()}  ` },
         { id: verifiedAgency, name: 'Test41 Verified', shortCode: 'T41V', adminEmail: `v41-${ts}@test.local`, customDomain: verifiedDomain, domainStatus: 'verified', domainVerificationToken: 'f'.repeat(64) },
         { id: `agency-test43-dupe1-${ts}`, name: 'Dupe 1', shortCode: 'D1', customDomain: dupeDomain, domainStatus: 'verified' },
         { id: `agency-test43-dupe2-${ts}`, name: 'Dupe 2', shortCode: 'D2', customDomain: dupeDomain.toUpperCase() + '.', domainStatus: 'verified' },
@@ -215,6 +216,8 @@ export default {
     assert(takenDom.status === 409, `B taking A's domain (case/dot variant) must be 409, got ${takenDom.status}`);
     const takenLegacy = await put('adminB', { customDomain: legacyDomain.toLowerCase().replace(/\.$/, '') });
     assert(takenLegacy.status === 409, `B taking a LEGACY unnormalised domain must be 409, got ${takenLegacy.status}`);
+    const takenLegacySlug = await put('adminB', { slug: legacySlugNorm });
+    assert(takenLegacySlug.status === 409, `B taking a LEGACY unnormalised slug (spaces + uppercase) must be 409, got ${takenLegacySlug.status}`);
     const freeSlugB = `t41b-${ts}`;
     const vAtomic = await ctx.getVersion();
     const atomic = await put('adminB', { slug: freeSlugB, customDomain: domA });

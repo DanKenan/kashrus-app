@@ -27,6 +27,9 @@ const ags = [{ id: 'a', slug: 'hkc' }, { id: 'b', slug: 'hkc-2' }];
 check('uniqueSlug suffix', uniqueSlug('hkc', ags), 'hkc-3');
 check('uniqueSlug self ok', uniqueSlug('hkc', ags, 'a'), 'hkc');
 check('slug clash case-insensitive', !!findSlugClash([{ id: 'a', slug: 'HKC' }], 'b', 'hkc'), true);
+check('slug clash legacy spaces+case', !!findSlugClash([{ id: 'a', slug: '  My-Agency  ' }], 'b', 'my-agency'), true);
+check('slug clash request normalised', !!findSlugClash([{ id: 'a', slug: 'my-agency' }], 'b', ' MY-AGENCY '), true);
+check('slug clash empty never', findSlugClash([{ id: 'a', slug: '' }], 'b', ''), null);
 check('slug clash self ignored', findSlugClash([{ id: 'a', slug: 'hkc' }], 'a', 'hkc'), null);
 
 // domains

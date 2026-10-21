@@ -122,14 +122,17 @@ export function validateLogoUrl(input: unknown): { value?: string; error?: strin
 }
 
 export function findSlugClash(agencies: any[], selfId: string, slug: string): any | null {
+  // Both sides normalised (a legacy stored "  My-Agency " clashes with "my-agency").
+  const want = normalizeSlug(slug);
   return (agencies || []).find(
-    (a: any) => a && a.id !== selfId && typeof a.slug === 'string' && a.slug.toLowerCase() === slug
+    (a: any) => a && a.id !== selfId && typeof a.slug === 'string' && want !== '' && normalizeSlug(a.slug) === want
   ) || null;
 }
 
 export function findDomainClash(agencies: any[], selfId: string, domain: string): any | null {
+  const want = normalizeDomain(domain);
   return (agencies || []).find(
-    (a: any) => a && a.id !== selfId && typeof a.customDomain === 'string' && normalizeDomain(a.customDomain) === domain
+    (a: any) => a && a.id !== selfId && typeof a.customDomain === 'string' && want !== '' && normalizeDomain(a.customDomain) === want
   ) || null;
 }
 
