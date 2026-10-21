@@ -1,0 +1,312 @@
+{
+ "team": {
+  "inv": [
+   "Mashgiach Team & Access Permissions",
+   "Beth El Social Hall — Main Ballroom (upstairs)",
+   "4 members",
+   "Manage Mashgichim, Coordinators, and Venue Owners. Toggle permissions to fill tasks and/or assign new tasks.",
+   "Add New Team Member",
+   "Full Name",
+   "Email",
+   "Password",
+   "Role",
+   "Mashgiach (Field Inspector)",
+   "Coordinator (Can Add Tasks)",
+   "Restaurant / Venue Owner",
+   "Administrator (Full Control)",
+   "Phone (optional)",
+   "Permissions:",
+   "Can Fill Up Tasks & Notes",
+   "Can Assign / Add New Tasks",
+   "Add Team Member",
+   "Active Team Roster & Permissions (4)",
+   "Admins can toggle task filling and task assignment permissions directly for any Mashgiach or Owner.",
+   "Y",
+   "Yossi Abramowitz-Goldberger",
+   "You",
+   "Mashgiach",
+   "Coordinator",
+   "Owner",
+   "Admin",
+   "admin@test.local",
+   "Fill Tasks: Allowed",
+   "Assign Tasks: Allowed",
+   "0 tasks",
+   "Set code",
+   "M",
+   "Moshe Klein",
+   "moshe@test.local",
+   "+18605550101",
+   "Assign Tasks: Disabled",
+   "2 tasks",
+   "Code set",
+   "Reset code",
+   "S",
+   "Sara Levi-Rosenblatt (nights)",
+   "sara.levi.rosenblatt@verylongdomain.example.org",
+   "Fill Tasks: Disabled",
+   "D",
+   "Dov Owner",
+   "owner@test.local",
+   "Changes to roles and permissions apply immediately across all live connected sessions.",
+   "Close",
+   "placeholder=e.g. Rabbi David Cohen",
+   "placeholder=e.g. dcohen@hartfordkashrut.org",
+   "placeholder=Min 6 characters",
+   "placeholder=For sending the kiosk code",
+   "placeholder=Search by name, email, or role...",
+   "title=Permission to complete checklist items and save notes",
+   "title=Permission to create new assignments and edit task definitions",
+   "title=Tasks assigned to this user",
+   "title=Delete Yossi Abramowitz-Goldberger",
+   "title=This person has a kiosk code. It can't be read back; Reset makes a new one.",
+   "title=Delete Moshe Klein",
+   "title=Delete Sara Levi-Rosenblatt (nights)",
+   "title=Delete Dov Owner",
+   "option=mashgiach",
+   "option=coordinator",
+   "option=owner",
+   "option=admin"
+  ]
+ },
+ "teamActions": {
+  "calls": [
+   [
+    "add",
+    {
+     "name": "Chaya Mushka Weiss",
+     "email": "chaya@test.local",
+     "role": "mashgiach",
+     "password": "secret123",
+     "venueId": "v1",
+     "permissions": {
+      "canFillTasks": true,
+      "canAssignTasks": false
+     }
+    }
+   ],
+   [
+    "update",
+    "u2",
+    {
+     "role": "coordinator",
+     "permissions": {
+      "canFillTasks": true,
+      "canAssignTasks": false
+     }
+    }
+   ],
+   [
+    "update",
+    "u2",
+    {
+     "permissions": {
+      "canFillTasks": false,
+      "canAssignTasks": false
+     }
+    }
+   ],
+   [
+    "update",
+    "u2",
+    {
+     "permissions": {
+      "canFillTasks": true,
+      "canAssignTasks": true
+     }
+    }
+   ]
+  ]
+ },
+ "teamCoord": {
+  "inv": [
+   "Mashgiach Team & Access Permissions",
+   "Riverside Kitchen",
+   "4 members",
+   "Manage Mashgichim, Coordinators, and Venue Owners. Toggle permissions to fill tasks and/or assign new tasks.",
+   "Active Team Roster & Permissions (1)",
+   "Admins can toggle task filling and task assignment permissions directly for any Mashgiach or Owner.",
+   "S",
+   "Sara Levi-Rosenblatt (nights)",
+   "You",
+   "Coordinator",
+   "sara.levi.rosenblatt@verylongdomain.example.org",
+   "0 tasks",
+   "Changes to roles and permissions apply immediately across all live connected sessions.",
+   "Close",
+   "placeholder=Search by name, email, or role...",
+   "title=Tasks assigned to this user"
+  ]
+ },
+ "venues": {
+  "inv": [
+   "Kosher Venues & Restaurants Platform Hub",
+   "3 Facilities",
+   "Switch between venues or establish a new certified kosher restaurant, bakery, or caterer platform.",
+   "New Venue",
+   "All Establishments",
+   "Catering",
+   "Restaurant",
+   "Bakery",
+   "Beth El Social Hall — Main Ballroom (upstairs)",
+   "Active Platform",
+   "Delete",
+   "2626 Albany Ave, West Hartford",
+   "Agency default (New York (Eastern) (America/New_York))",
+   "New York (Eastern) (America/New_York)",
+   "Toronto (Eastern) (America/Toronto)",
+   "Chicago (Central) (America/Chicago)",
+   "Denver (Mountain) (America/Denver)",
+   "Phoenix (Arizona) (America/Phoenix)",
+   "Los Angeles (Pacific) (America/Los_Angeles)",
+   "Anchorage (Alaska) (America/Anchorage)",
+   "Honolulu (Hawaii) (Pacific/Honolulu)",
+   "Mexico City (America/Mexico_City)",
+   "Buenos Aires (America/Argentina/Buenos_Aires)",
+   "London (Europe/London)",
+   "Paris (Europe/Paris)",
+   "Jerusalem (Asia/Jerusalem)",
+   "Johannesburg (Africa/Johannesburg)",
+   "Sydney (Australia/Sydney)",
+   "UTC (UTC)",
+   "Shift Completion:",
+   "0 staff members",
+   "Viewing Now",
+   "Riverside Kitchen",
+   "1 River Rd",
+   "Switch to Platform",
+   "מטבח הקהילה — Community Kitchen",
+   "All establishments are isolated with dedicated tasks, mashgichim, and history.",
+   "Close Hub",
+   "placeholder=Search by venue, address, or hashgacha...",
+   "title=Delete Venue Platform",
+   "aria-label=Time zone for Beth El Social Hall — Main Ballroom (upstairs)",
+   "aria-label=Time zone for Riverside Kitchen",
+   "aria-label=Time zone for מטבח הקהילה — Community Kitchen",
+   "option=",
+   "option=America/New_York",
+   "option=America/Toronto",
+   "option=America/Chicago",
+   "option=America/Denver",
+   "option=America/Phoenix",
+   "option=America/Los_Angeles",
+   "option=America/Anchorage",
+   "option=Pacific/Honolulu",
+   "option=America/Mexico_City",
+   "option=America/Argentina/Buenos_Aires",
+   "option=Europe/London",
+   "option=Europe/Paris",
+   "option=Asia/Jerusalem",
+   "option=Africa/Johannesburg",
+   "option=Australia/Sydney",
+   "option=UTC"
+  ]
+ },
+ "venuesActions": {
+  "calls": [
+   [
+    "select",
+    "v2"
+   ],
+   "close"
+  ]
+ },
+ "createVenue": {
+  "inv": [
+   "Set Up New Kosher Venue Platform",
+   "Create an isolated operational platform with mashgichim, owner audit portal, and compliance logs.",
+   "1. Kosher Establishment Profile",
+   "Establishment Name *",
+   "Establishment Type",
+   "Industrial / Factory Plant (Airtable & Audits)",
+   "Food Service",
+   "Restaurant",
+   "Catering",
+   "Bakery",
+   "Other (Create your own category...)",
+   "Address",
+   "Time zone",
+   "Same as agency (New York (Eastern) (America/New_York))",
+   "New York (Eastern) (America/New_York)",
+   "Toronto (Eastern) (America/Toronto)",
+   "Chicago (Central) (America/Chicago)",
+   "Denver (Mountain) (America/Denver)",
+   "Phoenix (Arizona) (America/Phoenix)",
+   "Los Angeles (Pacific) (America/Los_Angeles)",
+   "Anchorage (Alaska) (America/Anchorage)",
+   "Honolulu (Hawaii) (Pacific/Honolulu)",
+   "Mexico City (America/Mexico_City)",
+   "Buenos Aires (America/Argentina/Buenos_Aires)",
+   "London (Europe/London)",
+   "Paris (Europe/Paris)",
+   "Jerusalem (Asia/Jerusalem)",
+   "Johannesburg (Africa/Johannesburg)",
+   "Sydney (Australia/Sydney)",
+   "UTC (UTC)",
+   "The venue's day, \"today\" and the daily reset at midnight follow this zone.",
+   "Certification",
+   "3. Establish Venue Owner Account (Optional)",
+   "The owner logs into their isolated platform in read-only audit mode to review shift progress and history logs.",
+   "Owner Full Name",
+   "Owner Email",
+   "Password",
+   "Cancel",
+   "Create Venue Platform",
+   "placeholder=Establishment Name",
+   "placeholder=Address",
+   "placeholder=Certification Standard",
+   "placeholder=Full Name",
+   "placeholder=Email",
+   "placeholder=Password",
+   "option=Industrial",
+   "option=Food Service",
+   "option=Restaurant",
+   "option=Catering",
+   "option=Bakery",
+   "option=Other",
+   "option=",
+   "option=America/New_York",
+   "option=America/Toronto",
+   "option=America/Chicago",
+   "option=America/Denver",
+   "option=America/Phoenix",
+   "option=America/Los_Angeles",
+   "option=America/Anchorage",
+   "option=Pacific/Honolulu",
+   "option=America/Mexico_City",
+   "option=America/Argentina/Buenos_Aires",
+   "option=Europe/London",
+   "option=Europe/Paris",
+   "option=Asia/Jerusalem",
+   "option=Africa/Johannesburg",
+   "option=Australia/Sydney",
+   "option=UTC"
+  ]
+ },
+ "createVenueSubmit": {
+  "fetch": [
+   [
+    "POST",
+    "/api/venues",
+    {
+     "name": "Crown Market — Deli Counter",
+     "category": "Industrial",
+     "address": "2471 Albany Ave",
+     "certification": "Hartford Kashrus Council - Supervised Kosher",
+     "ownerName": "Moshe Klein",
+     "ownerEmail": "moshe2@test.local",
+     "ownerPassword": "pw123456",
+     "templateType": "blank",
+     "userEmail": "admin@test.local"
+    }
+   ]
+  ],
+  "calls": [
+   [
+    "created",
+    "nv1"
+   ],
+   "close"
+  ]
+ }
+}

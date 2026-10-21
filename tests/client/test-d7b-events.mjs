@@ -44,6 +44,9 @@ const SWAP = {
   'placeholder=Add task for this event only (e.g. Verify wine bottle seals)': 'placeholder=Add a task for this event only',
   'placeholder=New default task (e.g. Check oven pilots)': 'placeholder=New default task',
   'placeholder=Add an event task (e.g. Verify sealed Cambro temperatures)...': 'placeholder=Add an event task',
+  // Don 7:39 AM (D7c): the mashgiach picker shows "Name — Role"; the email handle stays only for duplicate names.
+  'Moshe Klein — Mashgiach (moshe)': 'Moshe Klein — Mashgiach',
+  'Sara Levi — Mashgiach (sara) · Riverside Kitchen': 'Sara Levi — Mashgiach · Riverside Kitchen',
 };
 const RAW_CODES = ['scheduled_midnight_cron'];
 
