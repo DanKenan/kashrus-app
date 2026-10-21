@@ -6,9 +6,12 @@ import { Bell } from 'lucide-react';
 export function UpdatesBell({
   count,
   onClick,
+  sizeClass = 'w-11 h-11',
 }: {
   count: number | null;
   onClick: () => void;
+  // D3c: the kiosk top bar passes a 64 px tablet size (kiosk targets are 64 px).
+  sizeClass?: string;
 }) {
   const label =
     count === null ? 'Updates' : count > 0 ? `Updates, ${count} unread` : 'Updates';
@@ -18,7 +21,7 @@ export function UpdatesBell({
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="pressable relative flex items-center justify-center w-11 h-11 rounded-xl border border-line bg-sunken hover:bg-line/40 text-ink transition cursor-pointer shrink-0"
+      className={`pressable relative flex items-center justify-center ${sizeClass} rounded-xl border border-line bg-sunken hover:bg-line/40 text-ink transition cursor-pointer shrink-0`}
     >
       <Bell className="w-5 h-5" />
       {count !== null && count > 0 && (

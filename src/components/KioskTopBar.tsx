@@ -112,14 +112,16 @@ export const KioskTopBar: React.FC<KioskTopBarProps> = ({
             {firstName}
           </span>
         </div>
-        {updatesBell}
+        {React.isValidElement(updatesBell)
+          ? React.cloneElement(updatesBell as React.ReactElement<{ sizeClass?: string }>, { sizeClass: 'w-11 h-11 sm:w-16 sm:h-16' })
+          : updatesBell}
         {onToggleDarkMode && (
           <button
             type="button"
             onClick={onToggleDarkMode}
             aria-label={darkMode ? 'Switch to day colours' : 'Switch to night colours'}
             title={darkMode ? 'Day colours' : 'Night colours'}
-            className="pressable w-11 h-11 rounded-xl border border-line bg-sunken text-ink flex items-center justify-center shrink-0"
+            className="pressable w-11 h-11 sm:w-16 sm:h-16 rounded-xl border border-line bg-sunken text-ink flex items-center justify-center shrink-0"
           >
             {darkMode ? <Sun className="w-5 h-5" aria-hidden /> : <Moon className="w-5 h-5" aria-hidden />}
           </button>
