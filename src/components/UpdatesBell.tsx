@@ -28,7 +28,7 @@ export function UpdatesBell({
       <Bell className="w-[20px] h-[20px]" />
       {/* H1: fixed px so large text does not grow the target */}
       {count !== null && count > 0 && (
-        <span className="absolute top-[2px] right-[2px] min-w-[1.55em] h-[1.55em] px-[0.3em] leading-none rounded-full bg-gold text-white text-[length:clamp(11px,0.75rem,16px)] font-bold flex items-center justify-center">
+        <span className="absolute top-[-4px] right-[-4px] min-w-[max(20px,1.5em)] h-[max(20px,1.5em)] px-[0.3em] leading-none rounded-full bg-gold text-white text-[length:clamp(11px,0.75rem,14px)] font-bold flex items-center justify-center">
           {count > 9 ? '9+' : count}
         </span>
       )}
