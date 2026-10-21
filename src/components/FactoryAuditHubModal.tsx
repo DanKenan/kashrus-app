@@ -402,11 +402,11 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                 />
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
                 <select
                   value={kosherStatusFilter}
                   onChange={(e) => setKosherStatusFilter(e.target.value)}
-                  className="px-3 py-2 border font-semibold cursor-pointer outline-none bg-surface border-line-control rounded-lg text-base focus:ring-2 focus:ring-gold/40 focus:border-gold"
+                  className="w-full sm:w-auto min-w-0 px-3 py-2 border font-semibold cursor-pointer outline-none bg-surface border-line-control rounded-lg text-base focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 >
                   <option value="all">All Kosher Types</option>
                   <option value="parve">Parve</option>
@@ -419,7 +419,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                 <select
                   value={verificationFilter}
                   onChange={(e) => setVerificationFilter(e.target.value as any)}
-                  className="px-3 py-2 border font-semibold cursor-pointer outline-none bg-surface border-line-control rounded-lg text-base focus:ring-2 focus:ring-gold/40 focus:border-gold"
+                  className="w-full sm:w-auto min-w-0 px-3 py-2 border font-semibold cursor-pointer outline-none bg-surface border-line-control rounded-lg text-base focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 >
                   <option value="all">All Verification States</option>
                   <option value="verified_present">✓ Verified Present</option>
