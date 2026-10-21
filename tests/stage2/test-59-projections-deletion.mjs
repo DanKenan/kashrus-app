@@ -69,10 +69,25 @@ export default {
       return { people: r.json.people[pid], emails: r.json.emails[email] };
     };
     const opTok = await mintToken(baseUrl, 'usr_admin');
+    // The mismatch list is capped at 20 (migration.ts), and earlier suite tests
+    // leave their own mismatches, so the uncapped identity.invalidGroups count
+    // from per-entity-status is the full-suite-safe signal for identity groups.
+    let lastMismatchCount = 0;
+    const invalidGroups = async () => {
+      const r = await ctx.api('GET', '/api/admin/per-entity-status');
+      assert(r.status === 200 && r.json, `per-entity-status ${r.status}`);
+      const st = r.json.status || r.json;
+      assert(typeof st.identity?.invalidGroups === 'number', `identity.invalidGroups missing ${J(st.identity)}`);
+      lastMismatchCount = (st.mismatches || []).length;
+      return st.identity.invalidGroups;
+    };
+    const baseInvalid = await invalidGroups();
     const consistency = async (label) => {
       const r = await call('POST', '/api/internal/consistency-check', auth(opTok), {});
       const ours = (r.json?.issues || []).filter((i) => J(i).includes(String(ts)));
       assert(ours.length === 0, `${label}: consistency must report nothing for this test's rows, got ${J(ours).slice(0, 400)}`);
+      const ig = await invalidGroups();
+      assert(ig === baseInvalid, `${label}: identity.invalidGroups must stay ${baseInvalid}, got ${ig}`);
       return r;
     };
 
@@ -203,9 +218,13 @@ export default {
         r = await hook('set-password', { userId: U('q2'), password: 'stage2-t59-q2pass' });
         assert(r.status !== 200, `a credential change inside the invalid group must be refused: ${r.status} ${J(r.json)}`);
         await unchanged(lv, 'T credential change');
+        const ig = await invalidGroups();
+        assert(ig === baseInvalid + 1, `the read-only check counts the planted group: identity.invalidGroups ${ig}, expected ${baseInvalid + 1}`);
         const c = await call('POST', '/api/internal/consistency-check', auth(opTok), {});
         const ours = (c.json?.issues || []).filter((i) => J(i).includes(String(ts)));
-        assert(ours.some((i) => /identity/.test(J(i))), `the read-only check reports the group: ${J(ours).slice(0, 300)}`);
+        const capped = lastMismatchCount >= 20;
+        // below the 20-item cap the group itself must be listed; at the cap the count above is the proof
+        if (!capped) assert(ours.some((i) => /identity/.test(J(i))), `the read-only check reports the group: ${J(ours).slice(0, 300)}`);
       } finally {
         const after = await ctx.getDoc();
         const c = await hook('doc-set-users', { users: (after.users || []).filter((u) => u.id !== U('q1') && u.id !== U('q2')) });
