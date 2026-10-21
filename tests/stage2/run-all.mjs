@@ -114,6 +114,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-48-history-retention.mjs')).default,
     (await import('./test-49-identity-migration.mjs')).default,
     (await import('./test-50-session-tokens.mjs')).default,
+    (await import('./test-51-reset-signout.mjs')).default,
   ];
 
   const results = [];
