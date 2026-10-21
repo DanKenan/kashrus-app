@@ -80,6 +80,10 @@ export default {
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
+    // The server's test clock (unpinned here; nothing in this test pins it).
+    const clk = await ctx.api('POST', '/api/__test__/clock', { iso: null });
+    if (clk.status !== 200 || !clk.json?.now) throw new Error(`test clock ${clk.status}`);
+    const histDate = new Date(Date.parse(clk.json.now) - 24 * 3600 * 1000).toISOString().slice(0, 10);
     const AG = 'agency-test35';
     const vA = `venue-t35a-${ts}`;
     const vB = `venue-t35b-${ts}`;
@@ -108,9 +112,11 @@ export default {
       ],
       tasks: [task(tA, vA), task(tB, vB)],
       // Positive + negative history fixtures: venue A's entry must arrive, venue B's never.
+      // Dated yesterday from the test clock: a fixed old date (was '2026-01-02')
+      // is past the 7-day history retention, so a sweep could prune it mid-test.
       historyLogs: [
-        { id: hA, agencyId: AG, venueId: vA, date: '2026-01-02', tasks: [] },
-        { id: hB, agencyId: AG, venueId: vB, date: '2026-01-02', tasks: [] },
+        { id: hA, agencyId: AG, venueId: vA, date: histDate, tasks: [] },
+        { id: hB, agencyId: AG, venueId: vB, date: histDate, tasks: [] },
       ],
     });
     if (inj.status !== 200) throw new Error(`inject-fixture: ${inj.status}`);
