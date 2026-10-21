@@ -109,6 +109,41 @@ export async function dualWriteChangedEntities(
     }
   }
 
+
+  // ---- Item 8b: identity projections (people/{personId}, emails/{key}) ----
+  // Derived ONLY from rows that carry personId (commitState has already run
+  // enforceIdentityFields on `after`). Computed from complete before/after
+  // maps so there is exactly one write per people/emails doc. See
+  // src/server/identity.ts for the contract (verified is always false; a
+  // retired or reassigned mapping never resolves to a previous identity).
+  const nowIso = new Date().toISOString();
+  const beforePersons = new Map<string, any>(); // personId -> row
+  for (const u of (before.users || [])) {
+    if (u && typeof u.personId === 'string' && u.personId) beforePersons.set(u.personId, u);
+  }
+  const afterPersons = new Map<string, any>();
+  for (const u of (after.users || [])) {
+    if (u && typeof u.personId === 'string' && u.personId) afterPersons.set(u.personId, u);
+  }
+  // emails: key -> personId, before and after (migrated rows only)
+  const beforeEmailPerson = new Map<string, string>();
+  for (const [pid, u] of beforePersons) if (u.email) beforeEmailPerson.set(emailKey(u.email), pid);
+  const afterEmailPerson = new Map<string, string>();
+  for (const [pid, u] of afterPersons) if (u.email) afterEmailPerson.set(emailKey(u.email), pid);
+
+  const peopleIds: string[] = [];
+  for (const pid of new Set([...beforePersons.keys(), ...afterPersons.keys()])) {
+    const b = beforePersons.get(pid);
+    const a = afterPersons.get(pid);
+    if (a && b && a.name === b.name && a.email === b.email) continue; // projection unchanged
+    peopleIds.push(pid);
+  }
+  const emailKeys: string[] = [];
+  for (const key of new Set([...beforeEmailPerson.keys(), ...afterEmailPerson.keys()])) {
+    if (beforeEmailPerson.get(key) === afterEmailPerson.get(key)) continue;
+    emailKeys.push(key);
+  }
+
   const readResults = new Map<string, number>(); // "collection/id" -> current _v (0 if not exists)
   // Phase 2: ALL READS — fetch current per-entity docs to get their _v values.
   // Must complete before any writes.
@@ -121,6 +156,85 @@ export async function dualWriteChangedEntities(
         const snap = await tx.get(ref);
         readResults.set(key, snap.exists ? (snap.data()?._v || 0) : 0);
       }
+    }
+  }
+
+
+  // 8b reads (still Phase 2: before any write).
+  const peopleSnaps = new Map<string, any>();
+  for (const pid of peopleIds) {
+    const snap = await tx.get(firestoreDb.collection('people').doc(pid));
+    peopleSnaps.set(pid, snap.exists ? snap.data() : null);
+  }
+  const emailSnaps = new Map<string, any>();
+  for (const key of emailKeys) {
+    const snap = await tx.get(firestoreDb.collection('emails').doc(key));
+    emailSnaps.set(key, snap.exists ? snap.data() : null);
+  }
+  // Decide every identity write before writing anything (a throw here
+  // aborts the whole commit, monolith included).
+  const identityWrites: Array<{ collection: string; id: string; data: any }> = [];
+  for (const pid of peopleIds) {
+    const a = afterPersons.get(pid);
+    const existing = peopleSnaps.get(pid);
+    const v = (existing?._v || 0) + 1;
+    if (a) {
+      identityWrites.push({
+        collection: 'people',
+        id: pid,
+        data: {
+          id: pid,
+          name: typeof a.name === 'string' ? a.name : '',
+          primaryEmail: typeof a.email === 'string' ? normalizeEmail(a.email) : '',
+          status: 'active',
+          createdAt: existing?.createdAt || nowIso,
+          _v: v,
+        },
+      });
+    } else if (existing && existing.status !== 'retired') {
+      // Row removed: retire, keep the record (no hard delete of identity data).
+      identityWrites.push({
+        collection: 'people',
+        id: pid,
+        data: { ...existing, status: 'retired', retiredAt: nowIso, _v: v },
+      });
+    }
+  }
+  for (const key of emailKeys) {
+    const newPid = afterEmailPerson.get(key) || null;
+    const oldPid = beforeEmailPerson.get(key) || null;
+    const existing = emailSnaps.get(key);
+    if (newPid) {
+      if (existing && existing.personId === newPid) {
+        if (existing.status === 'active') continue;
+      }
+      if (existing && existing.status === 'active' && existing.personId !== newPid) {
+        // Active for another person: only allowed when that person's row is
+        // removed in this same commit (retired and reassigned in one step).
+        // (The owner had a row before this commit and has none after it.)
+        if (afterPersons.has(existing.personId) || !beforePersons.has(existing.personId)) {
+          throw new Error('Identity conflict: email mapping is active for another person');
+        }
+      }
+      const base: any = {
+        personId: newPid,
+        status: 'active',
+        verified: false,
+        source: 'admin-entered',
+        addedAt: nowIso,
+      };
+      if (existing && existing.personId && existing.personId !== newPid) {
+        const prev: string[] = Array.isArray(existing.previousPersonIds) ? existing.previousPersonIds : [];
+        base.previousPersonIds = [...prev, existing.personId];
+        base.reassignedAt = nowIso;
+      } else if (existing && Array.isArray(existing.previousPersonIds)) {
+        base.previousPersonIds = existing.previousPersonIds;
+        if (existing.reassignedAt) base.reassignedAt = existing.reassignedAt;
+      }
+      identityWrites.push({ collection: 'emails', id: key, data: base });
+    } else if (existing && existing.status === 'active' && existing.personId === oldPid) {
+      // Email no longer used by its person (row removed or email changed): retire.
+      identityWrites.push({ collection: 'emails', id: key, data: { ...existing, status: 'retired', retiredAt: nowIso } });
     }
   }
 
@@ -145,5 +259,10 @@ export async function dualWriteChangedEntities(
     } else {
       tx.delete(ref);
     }
+  }
+
+  // 8b identity projection writes.
+  for (const iw of identityWrites) {
+    tx.set(firestoreDb.collection(iw.collection).doc(iw.id), JSON.parse(JSON.stringify(iw.data)));
   }
 }
