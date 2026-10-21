@@ -463,3 +463,24 @@ export function checkMembershipInvariants(
   }
   return { refused, preexisting };
 }
+
+/**
+ * Item 10c (A1/A2/A4): may a LEGACY subscription (no userId, keyed by email
+ * alone) be attributed to the one row holding that email? Only when EXACTLY
+ * ONE row in the complete users list (all agencies) has it. With two
+ * memberships of one person the legacy record is ambiguous and is ignored
+ * (never delivered to, never removed) — it can never cross agencies.
+ */
+export function legacyPushSubIsUnambiguous(email: unknown, usersList: any[]): boolean {
+  if (typeof email !== 'string' || !email.trim()) return false;
+  const want = email.trim().toLowerCase();
+  let n = 0;
+  for (const u of usersList || []) {
+    if (u && typeof u.email === 'string' && u.email.trim().toLowerCase() === want) n++;
+    if (n > 1) return false;
+  }
+  return n === 1;
+}
+export function isLegacyPushSub(s: any): boolean {
+  return !!s && !s.userId;
+}

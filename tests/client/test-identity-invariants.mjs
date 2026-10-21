@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import {
   enforceIdentityFields, checkMembershipInvariants, identityGroups, groupIssues,
   identityOptionsFromOutcome, stripServerOnlyUserFields, SERVER_ONLY_USER_FIELDS, CREDENTIAL_ORIGINS,
+  legacyPushSubIsUnambiguous, isLegacyPushSub,
 } from '../../src/server/identity.ts';
 
 let failures = 0, passed = 0;
@@ -210,6 +211,33 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   check(`passwordKeepsOriginIds used only by change-password and the login hash upgrade (found ${keepers})`, keepers === 2);
   check('commitState runs the checker in applyIdentityInvariant', /checkMembershipInvariants\(beforeUsers, users, agencies\)/.test(src));
   check('both commit paths call applyIdentityInvariant', (src.match(/outcome\.doc = applyIdentityInvariant\(/g) || []).length === 2);
+}
+
+// ---- 10c (A1/A2/A4): a legacy push subscription is attributable only to a unique email
+{
+  const one = [row('x', 'P@x.com'), row('z', 'z@x.com')];
+  const two = [row('x', 'p@x.com'), row('y', ' P@X.com ', { agencyId: 'ag-y' }), row('z', 'z@x.com')];
+  check('10c legacy: exactly one row with the email → attributable (case/space-insensitive)', legacyPushSubIsUnambiguous(' p@X.COM', one) === true);
+  check('10c legacy: two rows (two memberships) share the email → ambiguous', legacyPushSubIsUnambiguous('p@x.com', two) === false);
+  check('10c legacy: no row with the email → not attributable', legacyPushSubIsUnambiguous('nobody@x.com', one) === false);
+  check('10c legacy: empty / non-string email → not attributable', legacyPushSubIsUnambiguous('', one) === false && legacyPushSubIsUnambiguous(undefined, one) === false);
+  check('10c legacy: tolerates holes in the list', legacyPushSubIsUnambiguous('z@x.com', [null, undefined, { id: 'q' }, ...one]) === true);
+  check('10c legacy: a record with no userId is legacy', isLegacyPushSub({ userEmail: 'p@x.com', endpoint: 'e' }) === true);
+  check('10c legacy: a bound record is not legacy', isLegacyPushSub({ userEmail: 'p@x.com', userId: 'x', agencyId: 'ag-x', endpoint: 'e' }) === false);
+}
+
+// ---- 10c source contract (server.ts): no email-keyed push, membership-aware cleanup, agency-scoped owner lookup
+{
+  const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
+  check('10c A1: the email-keyed sendPushToUser is gone', !/sendPushToUser/.test(src));
+  const members = (src.match(/sendPushToMember\(\s*\n?\s*(r|target|admin|assigneeRow),/g) || []).length;
+  check(`10c A1: alert, announcement, reset-code and event-assignment pushes go to a row (found ${members})`, members === 4);
+  check('10c A1: legacy delivery checks uniqueness across ALL rows', /legacyPushSubIsUnambiguous\(row\.email, users\)/.test(src));
+  check('10c A2: unsubscribe evaluates legacy ambiguity on FRESH users', /legacyPushSubIsUnambiguous\(callerEmail, freshDoc\.users \|\| \[\]\)/.test(src));
+  check('10c A2: unsubscribe no longer matches by email alone', !/s\.endpoint !== endpoint \|\| \(callerEmail && s\.userEmail !== callerEmail\)/.test(src));
+  check('10c A4: delete evaluates legacy ambiguity on FRESH users', /legacyPushSubIsUnambiguous\(targetEmail, freshUsers\)/.test(src));
+  check('10c A5: venue-owner email resolved by one agency-scoped resolver, cached and fresh', (src.match(/resolveVenueOwnerEmail\((users|newUsers)\)/g) || []).length === 2);
+  check('10c A5: no global first-match owner lookup remains', !/users\.find\(\(u\) => typeof u\.email === 'string' && u\.email\.trim\(\)\.toLowerCase\(\) === cleanOwnerEmail\)/.test(src) && !/newUsers\.findIndex\(\(u\) => typeof u\.email === 'string' && u\.email\.trim\(\)\.toLowerCase\(\) === cleanOwnerEmail\)/.test(src));
 }
 
 console.log(`${passed} passed, ${failures} failed`);

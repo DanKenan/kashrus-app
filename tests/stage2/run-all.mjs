@@ -121,6 +121,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-54-certification-options.mjs')).default,
     (await import('./test-56-uniform-auth.mjs')).default,
     (await import('./test-57-identity-invariants.mjs')).default,
+    (await import('./test-58-membership-isolation.mjs')).default,
   ];
 
   const results = [];
