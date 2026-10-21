@@ -9,6 +9,22 @@ import webpush from 'web-push';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import * as media from './src/server/media.js';
+import {
+  agencyPublicProfile,
+  agencyAdminView,
+  agencyIdForVerifiedHost,
+  normalizeSlug,
+  validateSlug,
+  slugBase,
+  uniqueSlug,
+  normalizeDomain,
+  validateDomain,
+  validateBrandName,
+  validateLogoUrl,
+  findSlugClash,
+  findDomainClash,
+  withCustomDomain,
+} from './src/server/agency-fields.js';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
@@ -451,13 +467,11 @@ function isPublicApiRoute(method: string, path: string): boolean {
 }
 
 // Custom domains: agencyId -> hostname (e.g. app.hartfordkashrut.org).
-// Agencies map in state; entries added via agency settings.
+// Item 8a: only a VERIFIED domain held by exactly one agency matches (fail
+// closed). Nothing in this release can verify a domain, so an admin-typed,
+// unverified customDomain never influences a request or the public lookup.
 function agencyIdForHostname(hostname: string): string | null {
-  const host = hostname.split(':')[0].toLowerCase();
-  for (const a of agencies as Array<{ id: string; customDomain?: string }>) {
-    if (a.customDomain && a.customDomain.toLowerCase() === host) return a.id;
-  }
-  return null;
+  return agencyIdForVerifiedHost(agencies as any[], hostname);
 }
 
 app.use('/api', async (req, res, next) => {
@@ -1063,6 +1077,16 @@ interface Agency {
   customDomain?: string;
   /** Item 6: IANA zone for the agency's venues (absent = America/New_York). */
   timeZone?: string;
+  /** Item 8a (data only, for #12): unique short address, branding. */
+  slug?: string;
+  brandName?: string;
+  logoUrl?: string;
+  /** Item 8a: SERVER-ONLY domain verification state (never accepted from a
+   * request body; domainVerificationToken never leaves the server). */
+  domainStatus?: 'none' | 'pending' | 'verified' | 'failed';
+  domainVerificationToken?: string;
+  domainVerifiedAt?: string;
+  domainLastCheckedAt?: string;
 }
 
 interface Venue {
@@ -4281,15 +4305,11 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
       // (fix round 1) These pass, but the payload is reduced to the agency's
       // PUBLIC profile for non-admin sockets. The full agency object also
       // carries adminEmail and createdAt, which are not public.
-      const a = p.agency || {};
-      const pub = {
-        id: a.id, name: a.name, shortCode: a.shortCode,
-        certificationSeal: a.certificationSeal, region: a.region,
-        contactPhone: a.contactPhone, customDomain: a.customDomain,
-        // Item 6: the agency zone decides "today" for inherited venues on
-        // every client (not sensitive).
-        timeZone: a.timeZone,
-      };
+      // Item 8a: one explicit allowlist (agencyPublicProfile) — id, name,
+      // shortCode, seal, region, phone, zone (item 6: decides "today" on
+      // every client), slug, brand, logo. No adminEmail, createdAt or domain
+      // field (customDomain was here before 8a; no client reads it).
+      const pub = agencyPublicProfile(p.agency || {});
       const { adminEmail: _drop, ...rest } = p;
       return { ...rest, agency: pub };
     }
@@ -6990,15 +7010,22 @@ app.post('/api/agencies/register', async (req, res) => {
       }
 
       const tasksToAdd = starterTasks.filter((t) => !freshTasks.some((ft) => ft.id === t.id));
+      // Item 8a: every new agency gets a unique short address, chosen against
+      // FRESH data in this transaction (suffix -2, -3 … on a clash), so two
+      // concurrent registrations with one short code get different slugs.
+      const agencyWithSlug: Agency = {
+        ...newAgency,
+        slug: uniqueSlug(slugBase(derivedShortCode, cleanAgencyName), freshAgencies, agencyId),
+      };
       return {
         doc: {
           ...freshDoc,
-          agencies: [...freshAgencies, newAgency],
+          agencies: [...freshAgencies, agencyWithSlug],
           users: [...freshUsers, adminUser],
           venues: [...freshVenues, starterVenue],
           tasks: [...freshTasks, ...tasksToAdd],
         },
-        result: { agency: newAgency, user: adminUser, venue: starterVenue, tasks: tasksToAdd },
+        result: { agency: agencyWithSlug, user: adminUser, venue: starterVenue, tasks: tasksToAdd },
       };
     },
     { label: 'register-agency' }
@@ -7006,15 +7033,18 @@ app.post('/api/agencies/register', async (req, res) => {
   if (!committed) return;
   const { agency, user, venue, tasks: createdTasks } = committed.result as any;
 
+  // Item 8a: allowlisted views only (admin view to the new admin; the
+  // broadcast is reduced to the public profile for non-admin sockets).
+  const agencyView = agencyAdminView(agency);
   broadcast('AGENCY_REGISTERED', {
-    agency,
+    agency: agencyView,
     adminEmail: cleanAdminEmail,
   }, undefined, agency.id);
 
   res.status(201).json({
     success: true,
     message: `Welcome to Shutfey! Agency ${cleanAgencyName} has been established.`,
-    agency,
+    agency: agencyView,
     user: getSafeUser(user),
     token: signToken(user.id),
     venue,
@@ -7043,9 +7073,12 @@ app.get('/api/agencies/current', (req, res) => {
   const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === agencyId);
   const agencyUsers = users.filter((u) => (u.agencyId || 'agency-hkc') === agencyId);
 
+  // Item 8a: explicit allowlists. The agency's own admin gets the settings
+  // view; everyone else the public profile. The DNS proof value is in neither.
+  const view = caller.role === 'admin' ? agencyAdminView(agency) : agencyPublicProfile(agency);
   res.json({
     agency: {
-      ...agency,
+      ...view,
       venuesCount: agencyVenues.length,
       workersCount: agencyUsers.length,
     },
@@ -7059,7 +7092,10 @@ app.put('/api/agencies/current', async (req, res) => {
   // requireAdmin already sent the 403 — returning here without sending again.
   // (Sending a second response crashes the process: ERR_HTTP_HEADERS_SENT.)
   if (!user) return;
-  const { name, shortCode, certificationSeal, region, contactPhone, customDomain, timeZone } = req.body;
+  // Item 8a: domainStatus / domainVerificationToken / domainVerifiedAt /
+  // domainLastCheckedAt are SERVER-ONLY — never destructured from the body,
+  // so a client can never set them.
+  const { name, shortCode, certificationSeal, region, contactPhone, customDomain, timeZone, slug, brandName, logoUrl } = req.body;
 
   const agencyId = user.agencyId || 'agency-hkc';
   // Item 6: optional agency zone (undefined = unchanged, null/'' = clear ->
@@ -7067,6 +7103,39 @@ app.put('/api/agencies/current', async (req, res) => {
   const tzInput = parseTimeZoneInput(timeZone);
   if (tzInput.error) {
     return res.status(400).json({ error: tzInput.error });
+  }
+  // Item 8a: validate EVERY branded-address field before any write (400,
+  // nothing written). undefined = not being changed.
+  let newSlug: string | undefined;
+  if (slug !== undefined) {
+    newSlug = normalizeSlug(slug);
+    const err = typeof slug === 'string' ? validateSlug(newSlug) : 'The short address must be text.';
+    if (err) return res.status(400).json({ error: err, code: 'INVALID_SLUG' });
+  }
+  let newBrandName: string | undefined;
+  if (brandName !== undefined) {
+    const r = validateBrandName(brandName);
+    if (r.error) return res.status(400).json({ error: r.error, code: 'INVALID_BRAND' });
+    newBrandName = r.value;
+  }
+  let newLogoUrl: string | undefined;
+  if (logoUrl !== undefined) {
+    const r = validateLogoUrl(logoUrl);
+    if (r.error) return res.status(400).json({ error: r.error, code: 'INVALID_LOGO' });
+    newLogoUrl = r.value;
+  }
+  let newCustomDomain: string | undefined; // undefined = not being changed; '' = clear
+  if (customDomain !== undefined && customDomain !== null) {
+    if (typeof customDomain !== 'string') {
+      return res.status(400).json({ error: 'Enter a web address like app.youragency.org.', code: 'INVALID_DOMAIN' });
+    }
+    newCustomDomain = normalizeDomain(customDomain);
+    if (newCustomDomain) {
+      const err = validateDomain(newCustomDomain);
+      if (err) return res.status(400).json({ error: err, code: 'INVALID_DOMAIN' });
+    }
+  } else if (customDomain === null) {
+    newCustomDomain = '';
   }
   const zoneNow = serverNow();
   const existing = agencies.find((a) => a.id === agencyId);
@@ -7077,36 +7146,45 @@ app.put('/api/agencies/current', async (req, res) => {
   // Baseline for semantic conflict detection.
   const baseline = { name: existing.name, shortCode: existing.shortCode };
 
-  const newCustomDomain = customDomain !== undefined
-    ? customDomain.trim().toLowerCase() || undefined
-    : undefined; // undefined = not being changed
-
   const committed = await commitOrRespond(
     req, res,
     (freshDoc) => {
       const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
       const freshAgency = freshAgencies.find((a) => a.id === agencyId);
       if (!freshAgency) return { conflict: 'Agency record not found.' };
-      // Custom domain uniqueness must be checked against FRESH data.
-      if (newCustomDomain) {
-        const clash = freshAgencies.find(
-          (a) => a.id !== agencyId && a.customDomain && a.customDomain.toLowerCase() === newCustomDomain
-        );
-        if (clash) return { conflict: 'That domain is already assigned to another agency.' };
+      // Item 8a: slug + domain uniqueness against FRESH data, normalised on
+      // both sides, in the same transaction as the write. Any clash refuses
+      // the WHOLE update (all fields commit together or none do).
+      if (newSlug !== undefined && findSlugClash(freshAgencies, agencyId, newSlug)) {
+        return { conflict: 'That short address is already taken by another agency.' };
+      }
+      if (newCustomDomain && findDomainClash(freshAgencies, agencyId, newCustomDomain)) {
+        return { conflict: 'That domain is already assigned to another agency.' };
       }
       // Conflict if someone else changed a field this request is editing.
       if (name !== undefined && freshAgency.name !== baseline.name) {
         return { conflict: 'Conflict: the agency name was changed by someone else. Please refresh and try again.' };
       }
-      const updated: Agency = {
+      let updated: Agency = {
         ...freshAgency,
         name: name !== undefined ? name.trim() : freshAgency.name,
         shortCode: shortCode !== undefined ? shortCode.trim() : freshAgency.shortCode,
         certificationSeal: certificationSeal !== undefined ? certificationSeal.trim() : freshAgency.certificationSeal,
         region: region !== undefined ? region.trim() : freshAgency.region,
         contactPhone: contactPhone !== undefined ? contactPhone.trim() : freshAgency.contactPhone,
-        customDomain: customDomain !== undefined ? newCustomDomain : freshAgency.customDomain,
       };
+      if (newSlug !== undefined) updated.slug = newSlug;
+      if (newBrandName !== undefined) {
+        if (newBrandName) updated.brandName = newBrandName;
+        else delete updated.brandName;
+      }
+      if (newLogoUrl !== undefined) {
+        if (newLogoUrl) updated.logoUrl = newLogoUrl;
+        else delete updated.logoUrl;
+      }
+      // Domain lifecycle (server-only fields): new domain -> pending + fresh
+      // token; same domain -> unchanged; '' -> every domain field removed.
+      if (newCustomDomain !== undefined) updated = withCustomDomain(updated, newCustomDomain);
       if (tzInput.value !== undefined) {
         if (tzInput.value) (updated as any).timeZone = tzInput.value;
         else delete (updated as any).timeZone;
@@ -7126,22 +7204,28 @@ app.put('/api/agencies/current', async (req, res) => {
   if (!committed) return;
   const updated = committed.result as Agency;
 
-  broadcast('AGENCY_UPDATED', { agency: updated }, user.email, agencyId);
-  res.json({ success: true, agency: updated });
+  // Item 8a: the broadcast carries the ADMIN view (never the DNS proof value);
+  // staffVenueFilterPayload reduces it to the public profile for non-admins.
+  const adminView = agencyAdminView(updated);
+  broadcast('AGENCY_UPDATED', { agency: adminView }, user.email, agencyId);
+  res.json({ success: true, agency: adminView });
 });
+
 
 // Resolve the agency for the current hostname (custom-domain portals).
 // Public: the login page uses this to show the agency's name on their domain.
 app.get('/api/agencies/by-domain', (req, res) => {
-  const host = String(req.hostname || '').split(':')[0].toLowerCase();
-  const agency = agencies.find((a) => a.customDomain && a.customDomain.toLowerCase() === host);
+  // Item 8a: verified-only, unambiguous match; public profile only.
+  const agencyId = agencyIdForHostname(String(req.hostname || ''));
+  const agency = agencyId ? agencies.find((a) => a.id === agencyId) : undefined;
   if (!agency) return res.json({ agency: null });
+  const pub = agencyPublicProfile(agency);
   res.json({
     agency: {
-      id: agency.id,
-      name: agency.name,
-      shortCode: agency.shortCode,
-      certificationSeal: agency.certificationSeal,
+      id: pub.id,
+      name: pub.name,
+      shortCode: pub.shortCode,
+      certificationSeal: pub.certificationSeal,
     },
   });
 });

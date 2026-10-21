@@ -106,6 +106,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-40-any-time-tasks.mjs')).default,
     (await import('./test-41-admin-export-scope.mjs')).default,
     (await import('./test-42-platform-routes.mjs')).default,
+    (await import('./test-43-agency-fields.mjs')).default,
   ];
 
   const results = [];
