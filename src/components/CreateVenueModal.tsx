@@ -1,16 +1,16 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Building2,
-  ShieldCheck,
   MapPin,
   User,
   CheckCircle2,
-  Truck,
   PenLine,
 } from 'lucide-react';
-import { Venue } from '../types';
-import { apiFetch } from '../lib/api';
+import { KosherAgency, Venue } from '../types';
+import { apiFetch, apiWrite, versionFromResponse } from '../lib/api';
+import { certificationLabel, normalizeOption, validateOptions } from '../lib/certOptions';
+import { CertificationOptionsSheet } from './CertificationOptionsSheet';
 import { COMMON_TIME_ZONES, DEFAULT_TIME_ZONE, timeZoneLabel } from '../lib/workday';
 
 interface CreateVenueModalProps {
@@ -30,7 +30,6 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   onVenueCreated,
   adminEmail,
   agencyName,
-  agencySeal,
   agencyTimeZone,
 }) => {
   const [name, setName] = useState('');
@@ -39,11 +38,19 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   const [category, setCategory] = useState('Industrial');
   const [customCategory, setCustomCategory] = useState('');
   const [address, setAddress] = useState('');
-  const [certification, setCertification] = useState(
-    agencyName 
-      ? `${agencyName}${agencySeal ? ` - ${agencySeal}` : ' - Supervised Kosher'}`
-      : 'Hartford Kashrut Commission (HKC) - Glatt Meat & Parve'
-  );
+  const [shownList, setShownList] = useState<string[]>([]);
+  const [optionsVersion, setOptionsVersion] = useState<number | undefined>();
+  const [currentAgencyName, setCurrentAgencyName] = useState(agencyName || '');
+  const [selected, setSelected] = useState<number | 'other' | null>(null);
+  const [other, setOther] = useState('');
+  const [saveForNextTime, setSaveForNextTime] = useState(false);
+  const [choicesLoading, setChoicesLoading] = useState(true);
+  const [choicesError, setChoicesError] = useState<string | null>(null);
+  const [editingChoices, setEditingChoices] = useState(false);
+  const [venueCreated, setVenueCreated] = useState(false);
+  const [saveChoiceError, setSaveChoiceError] = useState<string | null>(null);
+  const detail = selected === 'other' ? other : selected === null ? '' : shownList[selected] || '';
+  const certification = certificationLabel(currentAgencyName, detail);
   const templateType = 'blank' as const;
 
   // Venue Owner credentials
@@ -54,11 +61,71 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    setShownList([]);
+    setOptionsVersion(undefined);
+    setCurrentAgencyName(agencyName || '');
+    setSelected(null);
+    setOther('');
+    setSaveForNextTime(false);
+    setVenueCreated(false);
+    setSaveChoiceError(null);
+    setErrorMessage(null);
+    setEditingChoices(false);
+    setChoicesLoading(true);
+    setChoicesError(null);
+    const load = async () => {
+      try {
+        const res = await apiFetch('/api/agencies/current');
+        const version = versionFromResponse(res);
+        const data: { agency: KosherAgency; error?: string } = await res.json();
+        if (!res.ok) throw new Error(data.error || "Couldn't load certification choices.");
+        if (!active) return;
+        setShownList(data.agency.certificationOptions || ['Glatt meat', 'Dairy', 'DE', 'Parve']);
+        setOptionsVersion(version);
+        setCurrentAgencyName(data.agency.name || agencyName || '');
+      } catch (error) {
+        if (active) setChoicesError(error instanceof Error ? error.message : "Couldn't load certification choices.");
+      } finally {
+        if (active) setChoicesLoading(false);
+      }
+    };
+    void load();
+    return () => { active = false; };
+  }, [isOpen, agencyName]);
+
   if (!isOpen) return null;
+
+  const openChoices = async () => {
+    setChoicesLoading(true);
+    setChoicesError(null);
+    try {
+      const res = await apiFetch('/api/agencies/current');
+      const version = versionFromResponse(res);
+      const data: { agency: KosherAgency; error?: string } = await res.json();
+      if (!res.ok) throw new Error(data.error || "Couldn't load certification choices.");
+      setShownList(data.agency.certificationOptions || ['Glatt meat', 'Dairy', 'DE', 'Parve']);
+      setOptionsVersion(version);
+      setCurrentAgencyName(data.agency.name || agencyName || '');
+      setSelected(null);
+      setEditingChoices(true);
+    } catch (error) {
+      setChoicesError(error instanceof Error ? error.message : "Couldn't load certification choices.");
+    } finally {
+      setChoicesLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoading || venueCreated || choicesLoading || choicesError) return;
     setErrorMessage(null);
+    if (selected === 'other') {
+      const validation = validateOptions([other]);
+      if (validation) { setErrorMessage(validation); return; }
+    }
 
     if (!name.trim()) {
       setErrorMessage('Please enter a name for the kosher venue.');
@@ -88,7 +155,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
           name: name.trim(),
           category: finalCategory,
           address: address.trim(),
-          certification: certification.trim(),
+          certification,
           ownerName: ownerName.trim() || undefined,
           ownerEmail: ownerEmail.trim() || undefined,
           ownerPassword: ownerPassword.trim() || undefined,
@@ -103,7 +170,23 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
         throw new Error(data.error || 'Failed to create new venue platform.');
       }
 
+      setVenueCreated(true);
       onVenueCreated(data.venue);
+      if (selected === 'other' && saveForNextTime) {
+        try {
+          const version = versionFromResponse(res);
+          if (version === undefined) throw new Error('The venue response did not include a version.');
+          const result = await apiWrite('/api/agency/certification-options', {
+            method: 'PUT',
+            expectedVersion: version,
+            body: JSON.stringify({ options: [...shownList, normalizeOption(other)], expectedOptions: shownList }),
+          });
+          if (!result.ok) throw new Error(result.error || "Couldn't save the new choice.");
+        } catch (error) {
+          setSaveChoiceError(error instanceof Error ? error.message : "Couldn't save the new choice.");
+          return;
+        }
+      }
       onClose();
     } catch (err: any) {
       setErrorMessage(err.message || 'Error occurred while creating venue platform.');
@@ -151,7 +234,16 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
         )}
 
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
+        {venueCreated ? (
+          <div className="p-6 space-y-4">
+            <h3 className="text-base font-semibold text-ink">Venue created</h3>
+            <p role="status" className="text-sm text-ink-soft">
+              {saveChoiceError ? `Venue created. The new choice wasn't saved for next time: ${saveChoiceError}` : 'Saving the new choice…'}
+            </p>
+            {saveChoiceError && <button type="button" onClick={onClose}
+              className="pressable min-h-11 rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper">Done</button>}
+          </div>
+        ) : <form onSubmit={handleSubmit} className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
           
           {/* Section 1: Venue Details */}
           <div className="space-y-3.5">
@@ -257,20 +349,41 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                 <p className="mt-1 text-sm text-ink-soft">The venue's day, "today" and the daily reset at midnight follow this zone.</p>
               </div>
 
-              <div className="sm:col-span-2">
-                <label className="block text-xs font-semibold text-ink-soft mb-1">
-                  Certification
-                </label>
-                <div className="relative">
-                  <ShieldCheck className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ok" />
-                  <input
-                    type="text"
-                    value={certification}
-                    onChange={(e) => setCertification(e.target.value)}
-                    placeholder="Certification Standard"
-                    className="w-full pl-8.5 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
-                  />
+              <div className="sm:col-span-2 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span id="certification-details-label" className="text-xs font-semibold text-ink-soft">Certification details</span>
+                  <button type="button" disabled={choicesLoading || !!choicesError || isLoading}
+                    onClick={openChoices}
+                    className="pressable min-h-11 rounded-lg border border-line-control bg-surface px-3 text-sm text-ink disabled:opacity-50">Edit choices</button>
                 </div>
+                {choicesLoading && <p role="status" className="text-sm text-ink-soft">Loading certification choices…</p>}
+                {choicesError && <p role="alert" className="text-sm text-ink">{choicesError}</p>}
+                <div role="radiogroup" aria-labelledby="certification-details-label" className="space-y-2">
+                  {shownList.map((option, index) => (
+                    <label key={index} className="flex min-h-11 items-center gap-3 rounded-lg border border-line-control bg-surface px-3 text-base text-ink">
+                      <input type="radio" name="certification-detail" checked={selected === index} disabled={isLoading}
+                        onChange={() => setSelected(index)} />
+                      {option}
+                    </label>
+                  ))}
+                  <label className="flex min-h-11 items-center gap-3 rounded-lg border border-line-control bg-surface px-3 text-base text-ink">
+                    <input type="radio" name="certification-detail" checked={selected === 'other'} disabled={choicesLoading || !!choicesError || isLoading}
+                      onChange={() => setSelected('other')} />
+                    Other
+                  </label>
+                </div>
+                {selected === 'other' && (
+                  <div className="space-y-2">
+                    <label htmlFor="other-certification" className="block text-sm text-ink-soft">Other certification</label>
+                    <input id="other-certification" value={other} disabled={isLoading} onChange={(event) => setOther(event.target.value)}
+                      className="min-h-11 w-full rounded-lg border border-line-control bg-sunken px-3 text-base text-ink focus:outline-none focus:ring-2 focus:ring-gold" />
+                    <label className="flex min-h-11 items-center gap-3 text-sm text-ink">
+                      <input type="checkbox" checked={saveForNextTime} disabled={isLoading} onChange={(event) => setSaveForNextTime(event.target.checked)} />
+                      Save for next time
+                    </label>
+                  </div>
+                )}
+                <p aria-live="polite" className="text-sm text-ink-soft">Venue will show: {certification}</p>
               </div>
             </div>
           </div>
@@ -337,7 +450,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={isLoading}
+              disabled={isLoading || choicesLoading || !!choicesError}
               className="pressable px-5 py-2 text-xs font-bold rounded-xl hover:brightness-105 e2 flex items-center gap-1.5 disabled:opacity-50 cursor-pointer bg-gold-deep text-paper"
             >
               {isLoading ? (
@@ -354,7 +467,9 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
             </button>
           </div>
 
-        </form>
+        </form>}
+        {editingChoices && <CertificationOptionsSheet options={shownList} versionAtOpen={optionsVersion}
+          onClose={() => setEditingChoices(false)} onSaved={(options) => { setShownList(options); setSelected(null); }} />}
       </div>
     </div>
   );

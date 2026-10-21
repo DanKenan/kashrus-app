@@ -85,7 +85,7 @@ async function scenario() {
   out.venuesEmpty = { inv: inventory(vd.html()), html: vd.html() };
   // 4. Create venue — fill and submit
   const created = [];
-  const calls = recordFetch({ 'POST /api/venues': (p, b) => ({ venue: { ...b, id: 'nv1' } }), '/api/': {} });
+  const calls = recordFetch({ 'GET /api/agencies/current': { agency: { id: 'a', name: 'Hartford Kashrus Council' } }, 'POST /api/venues': (p, b) => ({ venue: { ...b, id: 'nv1' } }), '/api/': {} }); // V1: the modal loads the agency's certification choices
   const cv = mount(CreateVenueModal, { isOpen: true, onClose: () => created.push('close'), onVenueCreated: (v) => created.push(['created', v && v.id]), adminEmail: 'admin@test.local', agencyName: 'Hartford Kashrus Council', agencyTimeZone: 'America/New_York' });
   await cv.render(); out.createVenue = { inv: inventory(cv.html()), html: cv.html() };
   await cv.type(/Establishment Name/, 'Crown Market — Deli Counter');
@@ -113,13 +113,17 @@ if (cur && DUMP) {
   const base = Object.fromEntries(Object.entries(cur).filter(([k]) => !/Empty$/.test(k)).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([kk]) => kk !== 'html'))]));
   fs.writeFileSync(BASE, JSON.stringify(base, null, 1)); console.log('baseline written'); process.exit(0);
 }
+// Item V1 (Don, Oct 21): the free-text "Certification" field became the "Certification details" picker.
+// Its label/placeholder are gone on purpose, and with no detail picked the venue's certification is the agency name alone.
+const V1_GONE = new Set(['Certification', 'placeholder=Certification Standard']);
+const v1Fetch = (f) => f.map(([m, p, b]) => [m, p, m === 'POST' && p === '/api/venues' && b ? { ...b, certification: 'Hartford Kashrus Council' } : b]);
 if (cur) {
   const base = JSON.parse(fs.readFileSync(BASE, 'utf8'));
   for (const [k, v] of Object.entries(base)) {
     const c = cur[k];
     if (!c) { ok(`P ${k}: present`, false); continue; }
-    if (v.inv) { const have = new Set(c.inv); const miss = v.inv.filter((s) => !have.has(s) && !(SWAP[s] && have.has(SWAP[s]))); ok(`P ${k}: every text/label/placeholder kept (1 Don swap allowed)`, miss.length === 0, `${miss.length} missing: ${JSON.stringify(miss.slice(0, 8))}`); }
-    for (const f of ['fetch', 'calls']) if (f in v) ok(`P ${k}: same ${f}`, JSON.stringify(c[f]) === JSON.stringify(v[f]), `now ${JSON.stringify(c[f]).slice(0, 300)} was ${JSON.stringify(v[f]).slice(0, 300)}`);
+    if (v.inv) { const have = new Set(c.inv); const miss = v.inv.filter((s) => !have.has(s) && !(SWAP[s] && have.has(SWAP[s])) && !(k === 'createVenue' && V1_GONE.has(s))); ok(`P ${k}: every text/label/placeholder kept (1 Don swap allowed)`, miss.length === 0, `${miss.length} missing: ${JSON.stringify(miss.slice(0, 8))}`); }
+    for (const f of ['fetch', 'calls']) if (f in v) ok(`P ${k}: same ${f}`, JSON.stringify(c[f]) === JSON.stringify(k === 'createVenueSubmit' && f === 'fetch' ? v1Fetch(v[f]) : v[f]), `now ${JSON.stringify(c[f]).slice(0, 300)} was ${JSON.stringify(v[f]).slice(0, 300)}`);
   }
   const files = ['TeamModal', 'VenuesDirectoryModal', 'CreateVenueModal'];
   const PAL = /\b(?:bg|text|border|ring|from|to|via|fill|stroke|divide|outline|placeholder|accent|shadow)-(?:emerald|rose|amber|red|green|blue|slate|gray|zinc|white|black|yellow|orange|indigo|purple|sky|teal|lime|pink|violet|cyan|stone|neutral)(?:-\d{2,3})?(?:\/\d+)?\b/g;
