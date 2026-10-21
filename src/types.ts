@@ -58,6 +58,8 @@ export interface User {
   avatarColor?: string;
   venueId?: string; // Workers & Owners belong to a specific venue; Admins have access to all in their agency
   kioskPin?: string; // 4-6 digit PIN for shared kiosk tablets (never sent to clients)
+  hasKioskPin?: boolean; // K1: server-set marker for managers (never the digits or hash)
+  phoneNumber?: string; // K1: optional E.164 number, sent only to admins/coordinator-in-scope
   permissions?: UserPermissions;
 }
 

@@ -96,6 +96,8 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-29-updates-panel.mjs')).default,
     (await import('./test-30-alerts.mjs')).default,
     (await import('./test-31-kiosk-device-seen-version.mjs')).default,
+    (await import('./test-32-admin-kiosk-scope.mjs')).default,
+    (await import('./test-33-kiosk-code-phone.mjs')).default,
   ];
 
   const results = [];

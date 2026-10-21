@@ -1,4 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { ConfirmModal } from './ConfirmModal';
+import { clearSession } from '../lib/api';
 import { 
   CheckCircle2, 
   Wifi, 
@@ -112,14 +115,28 @@ export const Header: React.FC<HeaderProps> = ({
   });
 
   // Enter kiosk mode: this device becomes a shared wall tablet.
-  // The pairing screen (or the PIN screen, once paired) takes over on reload.
+  // K1: explain the pairing step FIRST (Don, Oct 20: it opened as himself and
+  // only showed "Pair this tablet" after End shift). Continue goes through the
+  // existing clean-slate entry (/?kiosk=1 in App.tsx), which signs this device
+  // out, so no admin session is ever left on a wall tablet; the pairing
+  // screen (or the PIN screen, once paired) takes over.
+  const [kioskExplainOpen, setKioskExplainOpen] = useState(false);
   const enterKioskMode = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('kiosk_mode', '1');
-    }
     setUserMenuOpen(false);
     setMobileMenuOpen(false);
-    window.location.reload();
+    setKioskExplainOpen(true);
+  };
+  const confirmEnterKioskMode = () => {
+    setKioskExplainOpen(false);
+    if (typeof window !== 'undefined') {
+      // Sign this device out first with the app's own clearSession() (ChatGPT
+      // plan review): the restored-session key current_user is not cleared by
+      // /?kiosk=1. Kiosk pairing
+      // credentials and offline data are left alone.
+      clearSession();
+      try { localStorage.removeItem('shutfey_user'); } catch {}
+      window.location.assign('/?kiosk=1');
+    }
   };
   const canEnterKiosk = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
 
@@ -763,6 +780,28 @@ export const Header: React.FC<HeaderProps> = ({
             )}
           </div>
         </div>
+      )}
+      {/* K1: what "Enter kiosk mode" will do, before it does it. Portalled to
+          <body>: the header's backdrop blur would otherwise trap a fixed modal. */}
+      {kioskExplainOpen && typeof document !== 'undefined' && createPortal(
+        <ConfirmModal
+          isOpen={kioskExplainOpen}
+          onClose={() => setKioskExplainOpen(false)}
+          onConfirm={confirmEnterKioskMode}
+          title="Turn this device into a kiosk?"
+          message={
+            <ol className="list-decimal pl-5 space-y-1.5" data-testid="kiosk-explain-steps">
+              <li>You'll be signed out on this device, and it will show a pairing code.</li>
+              <li>On another phone or computer, an admin or coordinator opens Menu → Kiosk tablets and types that code.</li>
+              <li>Staff then tap their name on this screen and enter their kiosk code.</li>
+            </ol>
+          }
+          confirmText="Continue"
+          cancelText="Cancel"
+          variant="primary"
+          icon="shield"
+        />,
+        document.body
       )}
     </header>
   );

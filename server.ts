@@ -530,22 +530,13 @@ app.use('/api', async (req, res, next) => {
     // also carry X-Kiosk-Device, and the device it resolves to (hash
     // compare, timing-safe) must be the token's own device. A valid token
     // with no header, or with ANOTHER tablet's credential, is a 401.
-    const device = typeof tokenDev === 'string' ? liveKioskDevice(tokenDev) : null;
+    // K1: one shared re-validation (kioskSessionStillValid) for HTTP and WS.
     const provedDevice = resolveKioskDevice(req);
     const stillValid =
-      !!tokenAgencyId &&
-      !!tokenVenueId &&
-      !!tokenPv &&
-      !!device &&
-      device.agencyId === tokenAgencyId &&
-      device.venueId === tokenVenueId &&
+      typeof tokenDev === 'string' &&
       !!provedDevice &&
       provedDevice.id === tokenDev &&
-      user.kioskPinHash &&
-      pinRevOf(user) !== undefined &&
-      String(pinRevOf(user)) === tokenPv &&
-      (user.agencyId || 'agency-hkc') === tokenAgencyId &&
-      (user as any).venueId === tokenVenueId;
+      kioskSessionStillValid(user, { agencyId: tokenAgencyId, venueId: tokenVenueId, pv: tokenPv, deviceId: tokenDev });
     if (!stillValid) {
       return res.status(401).json({ error: 'Sign in required. Please log in again.' });
     }
@@ -556,7 +547,9 @@ app.use('/api', async (req, res, next) => {
 
   // Force the verified identity: endpoints keying off userEmail now see the
   // authenticated user, never a client-supplied impersonation.
-  (req as any).authUser = user;
+  // K1: on a kiosk token the identity is the ACTING user — an admin on a
+  // kiosk is a mashgiach at the tablet's venue (kioskActingUser).
+  (req as any).authUser = (req as any).kiosk === true ? kioskActingUser(user, (req as any).kioskVenueId) : user;
   if (req.query && typeof req.query === 'object') {
     (req.query as any).userEmail = user.email;
   }
@@ -1366,6 +1359,12 @@ interface UserProfile {
   kioskPinRev?: number; // PIN revision counter (2b): kiosk tokens carry String(kioskPinRev) as pv; any PIN set/clear/legacy-upgrade increments it, revoking old tokens
   venueId?: string; // Mashgichim, Coordinators and Owners belong to a specific venue; Admins have access to all in their agency
   permissions?: UserPermissions;
+  // K1: optional mobile number (E.164) so an admin/coordinator can send a
+  // kiosk code from their own phone. Personal data: stripped from every
+  // safe user; only managerViewOf() adds it back for a recipient who manages
+  // this user (rule T). NOT named `phone` — /api/admin/dashboard reads
+  // (u as any).phone into a wide list.
+  phoneNumber?: string;
 }
 
 // Test hook: DATA_DIR_OVERRIDE lets the Stage 2 test suite run the server
@@ -1774,7 +1773,7 @@ interface EventTaskTemplate {
 }
 
 function getSafeUser(user: UserProfile) {
-  const { password, kioskPin, kioskPinHash, kioskPinSetAt, ...safe } = user;
+  const { password, kioskPin, kioskPinHash, kioskPinSetAt, phoneNumber, ...safe } = user;
   const userAgency = agencies.find((a) => a.id === user.agencyId) || agencies[0];
   return {
     ...safe,
@@ -1782,6 +1781,134 @@ function getSafeUser(user: UserProfile) {
     agencySeal: userAgency?.certificationSeal || 'Certified Kosher',
     agencyShortCode: userAgency?.shortCode || 'HKC',
   };
+}
+
+/**
+ * K1 — does `recipient` manage `target` (rule T, fail closed)? Admin: every
+ * user of the own agency. Coordinator: mashgiach/worker users at a venue in
+ * the coordinator's own scope (never admins, never coordinators). Everyone
+ * else, any kiosk session (acting user is never admin/coordinator-for-this)
+ * and any missing value: no.
+ */
+function recipientManages(recipient: any, target: any): boolean {
+  if (!recipient || !target || typeof recipient.role !== 'string') return false;
+  if ((recipient.agencyId || 'agency-hkc') !== (target.agencyId || 'agency-hkc')) return false;
+  if (recipient.role === 'admin') return true;
+  if (recipient.role === 'coordinator') {
+    if (target.role !== 'mashgiach' && target.role !== 'worker') return false;
+    const scope = venueScopeFor(recipient);
+    return Array.isArray(scope) && typeof target.venueId === 'string' && scope.includes(target.venueId);
+  }
+  return false;
+}
+
+/**
+ * K1 — the safe user as a MANAGER sees it: getSafeUser() plus hasKioskPin
+ * (a boolean — never the hash or digits) and the optional phoneNumber, only
+ * when the recipient manages the target. Otherwise exactly getSafeUser().
+ * Rule N: the one place these two fields are added to any payload.
+ */
+function managerViewOf(user: UserProfile, recipient: any) {
+  const safe: any = getSafeUser(user);
+  if (!recipientManages(recipient, user)) return safe;
+  safe.hasKioskPin = !!(user.kioskPinHash || user.kioskPin);
+  if (typeof user.phoneNumber === 'string' && user.phoneNumber) safe.phoneNumber = user.phoneNumber;
+  return safe;
+}
+
+/**
+ * K1 — normalize an optional phone number to E.164. Returns
+ * { ok: true, value: undefined } for "" (clear), { ok: true, value } for a
+ * valid number, { ok: false } otherwise. US default for 10-digit numbers.
+ */
+function normalizePhoneNumber(raw: unknown): { ok: boolean; value?: string } {
+  if (raw === null || raw === undefined) return { ok: true, value: undefined };
+  if (typeof raw !== 'string' && typeof raw !== 'number') return { ok: false };
+  let p = String(raw).trim();
+  if (p === '') return { ok: true, value: undefined };
+  if (p.length > 32) return { ok: false };
+  p = p.replace(/[\s\-().]/g, '');
+  if (p.startsWith('00')) p = '+' + p.slice(2);
+  if (/^\d{10}$/.test(p)) p = '+1' + p;
+  else if (/^1\d{10}$/.test(p)) p = '+' + p;
+  if (!/^\+[1-9]\d{6,14}$/.test(p)) return { ok: false };
+  return { ok: true, value: p };
+}
+const PHONE_NUMBER_ERROR = "That phone number doesn't look right. Use digits, with + and the country code outside the US.";
+
+/**
+ * K1 — an admin on a kiosk IS a mashgiach (Don, Oct 20 7:29 PM). The acting
+ * identity for every kiosk request/socket: an admin becomes a mashgiach at
+ * the TABLET's venue with mashgiach permissions; every other role is
+ * returned unchanged. Applied at the identity boundary (HTTP middleware,
+ * WS handshake, recipientForMeta, kiosk login response) so no handler ever
+ * sees admin powers on a kiosk token. Full admin powers need a phone
+ * session (email + password).
+ */
+function kioskActingUser<T extends UserProfile>(user: T, tabletVenueId: string): T {
+  if (!user || (user as any).role !== 'admin') return user;
+  return {
+    ...user,
+    role: 'mashgiach',
+    venueId: tabletVenueId,
+    permissions: { canFillTasks: true, canAssignTasks: false },
+  } as T;
+}
+
+/**
+ * K1 — may this user hold a kiosk session at a tablet of (agencyId,
+ * venueId)? Same agency always required. Admin (rule T: whole agency): any
+ * tablet of the own agency — the session is still scoped to THAT tablet's
+ * venue. Everyone else: only their own assigned venue (unchanged rule).
+ * Re-read on every request, so a demoted admin at another venue fails.
+ */
+function kioskUserFitsVenue(user: any, agencyId: string | undefined, venueId: string | undefined): boolean {
+  if (!user || !agencyId || !venueId) return false;
+  if ((user.agencyId || 'agency-hkc') !== agencyId) return false;
+  if (user.role === 'admin') {
+    // The tablet's venue must still exist in the admin's own agency (an
+    // admin has no venueId of their own; never fall back to agency scope).
+    return venues.some((v: any) => v && v.id === venueId && (v.agencyId || 'agency-hkc') === agencyId);
+  }
+  return user.venueId === venueId;
+}
+
+/**
+ * K1 — ONE kiosk session re-validation (rule N), used by the HTTP
+ * middleware, the WS handshake, authorizeSocket (every delivery) and
+ * recipientForMeta: the user still has a PIN hash at the token's PIN
+ * revision, the bound device still exists at the token's agency + venue,
+ * and the user still fits that venue (kioskUserFitsVenue, which re-reads the
+ * role). The HTTP path additionally checks the request's device proof.
+ */
+function kioskSessionStillValid(
+  user: any,
+  sess: { agencyId?: string; venueId?: string; pv?: string; deviceId?: string }
+): boolean {
+  if (!user || !sess || !sess.agencyId || !sess.venueId || !sess.pv || !sess.deviceId) return false;
+  const device = liveKioskDevice(sess.deviceId);
+  return (
+    !!user.kioskPinHash &&
+    !!device &&
+    device.agencyId === sess.agencyId &&
+    device.venueId === sess.venueId &&
+    pinRevOf(user) !== undefined &&
+    String(pinRevOf(user)) === sess.pv &&
+    kioskUserFitsVenue(user, sess.agencyId, sess.venueId)
+  );
+}
+
+/**
+ * K1 — may a kiosk session act on this task? Same venue as the tablet AND
+ * visible to the acting user (canSeeTaskServer: a private task assigned to
+ * someone else is neither visible nor writable from a tablet). Phone
+ * sessions: always true here (their own rules apply).
+ */
+function kioskMayTouchTask(req: any, task: any): boolean {
+  if ((req as any).kiosk !== true) return true;
+  const kioskVenueId = (req as any).kioskVenueId;
+  if (!kioskVenueId || !task || task.venueId !== kioskVenueId) return false;
+  return canSeeTaskServer(task, getAuthUser(req));
 }
 
 /** Whether a roster recipient may see contact emails. Mirrors the client's
@@ -1821,7 +1948,7 @@ function getSafeUsersForAgency(
       return u.role === 'admin' || (typeof u.venueId === 'string' && scope.includes(u.venueId));
     })
     .map((u) => {
-      const safe = getSafeUser(u);
+      const safe = managerViewOf(u, recipient);
       if (showEmails) return safe;
       const { email, ...rest } = safe;
       return rest;
@@ -1834,11 +1961,18 @@ function getSafeUsersForAgency(
  * exists AND belongs to the socket's authenticated agency. A permission
  * lookup must never cross an agency boundary. Returns undefined when the
  * recipient is gone or moved (fail closed). */
-function recipientForMeta(meta: { userId: string; agencyId: string }) {
+function recipientForMeta(meta: { userId: string; agencyId: string; kiosk?: boolean; kioskVenueId?: string; kioskAgencyId?: string; kioskPv?: string; kioskDeviceId?: string }) {
   const u = users.find((x) => x.id === meta.userId);
   if (!u) return undefined;
   const norm = (v?: string) => v || 'agency-hkc';
   if (norm(u.agencyId) !== meta.agencyId) return undefined;
+  // K1: a kiosk socket's recipient is the ACTING user (an admin on a kiosk
+  // is a mashgiach at the tablet's venue). No tablet venue → fail closed.
+  if (meta.kiosk === true) {
+    if (!meta.kioskVenueId) return undefined;
+    if (!kioskSessionStillValid(u, { agencyId: (meta as any).kioskAgencyId, venueId: meta.kioskVenueId, pv: (meta as any).kioskPv, deviceId: (meta as any).kioskDeviceId })) return undefined;
+    return kioskActingUser(u, meta.kioskVenueId);
+  }
   return u;
 }
 
@@ -2028,19 +2162,10 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
     // No 'agency-hkc' fallback: a kiosk meta without kioskAgencyId/pv is invalid.
     // C1: the bound device must still exist and match the socket's
     // agency/venue; pv is the PIN revision (2b).
-    const device = meta.kioskDeviceId ? liveKioskDevice(meta.kioskDeviceId) : null;
-    const stillValid =
-      user &&
-      user.kioskPinHash &&
-      meta.kioskAgencyId &&
-      meta.kioskPv &&
-      device &&
-      device.agencyId === meta.kioskAgencyId &&
-      device.venueId === meta.kioskVenueId &&
-      pinRevOf(user) !== undefined &&
-      String(pinRevOf(user)) === meta.kioskPv &&
-      (user.agencyId || 'agency-hkc') === meta.kioskAgencyId &&
-      (user as any).venueId === meta.kioskVenueId;
+    // K1: the same shared re-validation as the HTTP middleware.
+    const stillValid = kioskSessionStillValid(user, {
+      agencyId: meta.kioskAgencyId, venueId: meta.kioskVenueId, pv: meta.kioskPv, deviceId: meta.kioskDeviceId,
+    });
     if (!stillValid) {
       try {
         client.close(4401, 'Unauthorized');
@@ -3911,6 +4036,38 @@ function kioskMaySee(meta: SocketMeta, type: string, payload: any): boolean {
 }
 
 /**
+ * K1 — the INITIAL_STATE payload for ONE socket, built from its verified
+ * effective identity (recipientForMeta: an admin on a kiosk is a mashgiach
+ * at the tablet's venue; a kiosk meta that no longer re-validates → null).
+ * Kiosk sockets get the per-type allowlist: their venue's tasks/history, the
+ * venue roster (no emails/phones), the single venue — nothing else. Used by
+ * the WS handshake and by every manual INITIAL_STATE send (rule N), so no
+ * user-scoped snapshot is ever reused across sockets of different modes.
+ */
+function initialStateForSocket(meta: SocketMeta | undefined): any | null {
+  if (!meta) return null;
+  const recipient = recipientForMeta(meta);
+  if (!recipient) return null;
+  const baseState = agencyStateFor(meta.agencyId, recipient);
+  if (!meta.kiosk) return baseState;
+  const kioskVenueId = meta.kioskVenueId;
+  if (!kioskVenueId) return null;
+  return {
+    ...baseState,
+    tasks: (baseState.tasks || []).filter((t: any) => t.venueId === kioskVenueId),
+    historyLogs: (baseState.historyLogs || []).filter((h: any) => h.venueId === kioskVenueId),
+    venues: (baseState.venues || []).filter((v: any) => v.id === kioskVenueId),
+    users: (baseState.users || [])
+      .filter((u: any) => u.venueId === kioskVenueId)
+      .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role })),
+    events: [],
+    airtableConfigs: [],
+    approvedIngredients: [],
+    factoryReports: [],
+  };
+}
+
+/**
  * Venue-filter a broadcast payload for a kiosk socket. Runs on the
  * varyByRecipient OUTPUT (the base payload may be just { agencyId } — the
  * user/venue lists are produced by the transform). Returns the filtered
@@ -4246,20 +4403,18 @@ wss.on('connection', (ws, req) => {
   // Kiosk token: re-validate the user AND the bound device (same revocation
   // rule as the middleware; pv is the PIN revision).
   if (isKiosk) {
-    const device = liveKioskDevice(kioskDeviceId);
-    const stillValid =
-      authedUser.kioskPinHash &&
-      device &&
-      device.agencyId === kioskAgencyId &&
-      device.venueId === kioskVenueId &&
-      pinRevOf(authedUser) !== undefined &&
-      String(pinRevOf(authedUser)) === kioskPv &&
-      (authedUser.agencyId || 'agency-hkc') === (kioskAgencyId || 'agency-hkc') &&
-      authedUser.venueId === kioskVenueId;
+    // K1: the same shared re-validation as the HTTP middleware.
+    const stillValid = kioskSessionStillValid(authedUser, {
+      agencyId: kioskAgencyId, venueId: kioskVenueId, pv: kioskPv, deviceId: kioskDeviceId,
+    });
     if (!stillValid) {
       ws.close(4401, 'Unauthorized');
       return;
     }
+    // K1: from here on the socket's identity is the ACTING user (an admin on
+    // a kiosk is a mashgiach at this tablet's venue): meta.role and the
+    // INITIAL_STATE base below are built from it.
+    authedUser = kioskActingUser(authedUser, kioskVenueId as string);
   }
 
   const agencyId = authedUser.agencyId || 'agency-hkc';
@@ -4284,24 +4439,15 @@ wss.on('connection', (ws, req) => {
     });
 
     // Initial state: ONLY this user's agency. Never the whole platform.
-    // Kiosk sockets get the per-type allowlist: their venue's tasks/history,
-    // the venue roster (no emails), and the single venue — nothing else.
-    const baseState = agencyStateFor(agencyId, authedUser);
-    const kioskState = kioskVenueId
-      ? {
-          ...baseState,
-          tasks: (baseState.tasks || []).filter((t: any) => t.venueId === kioskVenueId),
-          historyLogs: (baseState.historyLogs || []).filter((h: any) => h.venueId === kioskVenueId),
-          venues: (baseState.venues || []).filter((v: any) => v.id === kioskVenueId),
-          users: (baseState.users || [])
-            .filter((u: any) => u.venueId === kioskVenueId)
-            .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role })),
-          events: [],
-          airtableConfigs: [],
-          approvedIngredients: [],
-          factoryReports: [],
-        }
-      : baseState;
+    // K1: one builder (initialStateForSocket) for the handshake AND every
+    // later manual INITIAL_STATE send, from the socket's verified effective
+    // identity; kiosk sockets get the tablet-venue allowlist.
+    const kioskState = initialStateForSocket(activeSockets.get(ws) as SocketMeta);
+    if (!kioskState) {
+      try { ws.close(4401, 'Unauthorized'); } catch {}
+      activeSockets.delete(ws);
+      return;
+    }
     ws.send(
       JSON.stringify({
         type: 'INITIAL_STATE',
@@ -7572,8 +7718,10 @@ app.put('/api/tasks/:id', async (req, res) => {
   // completion/status fields may change (title, notes, assignment, venue,
   // private flag, schedule… → 403 KIOSK_SCOPE).
   if ((req as any).kiosk === true) {
-    const kioskVenueId = (req as any).kioskVenueId;
-    if (existing.venueId !== kioskVenueId) {
+    // K1 (ChatGPT plan review): same venue as the tablet AND visible to the
+    // acting user — a private task assigned to someone else is not writable
+    // from a tablet even with its id (re-checked on fresh data below).
+    if (!kioskMayTouchTask(req, existing)) {
       return res.status(403).json({
         error: 'This kiosk session can only clock in and out.',
         code: 'KIOSK_SCOPE',
@@ -7702,6 +7850,10 @@ app.put('/api/tasks/:id', async (req, res) => {
       if (!freshTask) {
         return { conflict: 'Task not found (it may have been deleted).' };
       }
+      // K1: a kiosk write re-checks venue + private visibility on FRESH data.
+      if (!kioskMayTouchTask(req, freshTask)) {
+        return { conflict: 'This task changed. Please refresh and try again.' };
+      }
 
       // Semantic conflict check for definition edits: if the caller is
       // changing a field that someone else already changed, refuse rather
@@ -7780,11 +7932,11 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
   if (!requireSameAgency(req, res, existing, 'tasks')) return;
-  // Kiosk: task must belong to the token's venue, and only the caller's OWN
-  // check-in may be deleted (clock-out); anyone else's → 403.
+  // Kiosk: task must belong to the token's venue (and be visible to the
+  // acting user — K1), and only the caller's OWN check-in may be deleted
+  // (clock-out); anyone else's → 403.
   if ((req as any).kiosk === true) {
-    const kioskVenueId = (req as any).kioskVenueId;
-    if (existing.venueId !== kioskVenueId) {
+    if (!kioskMayTouchTask(req, existing)) {
       return res.status(403).json({
         error: 'This kiosk session can only clock in and out.',
         code: 'KIOSK_SCOPE',
@@ -7829,6 +7981,8 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
       const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
       const freshTask = freshTasks.find((t) => t.id === id);
       if (!freshTask) return { conflict: 'Task not found.' };
+      // K1: a kiosk write re-checks venue + private visibility on FRESH data.
+      if (!kioskMayTouchTask(req, freshTask)) return { conflict: 'This task changed. Please refresh and try again.' };
       const freshCheckIns: any[] = Array.isArray(freshTask.checkIns) ? freshTask.checkIns : [];
       // Idempotent: check-in already removed → success.
       if (!freshCheckIns.some((c: any) => c.id === checkInId)) {
@@ -7863,10 +8017,10 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
   if (!requireSameAgency(req, res, existing, 'tasks')) return;
-  // Kiosk: task must belong to the token's venue.
+  // Kiosk: task must belong to the token's venue and be visible to the
+  // acting user (K1: no check-in on someone else's private task).
   if ((req as any).kiosk === true) {
-    const kioskVenueId = (req as any).kioskVenueId;
-    if (existing.venueId !== kioskVenueId) {
+    if (!kioskMayTouchTask(req, existing)) {
       return res.status(403).json({
         error: 'This kiosk session can only clock in and out.',
         code: 'KIOSK_SCOPE',
@@ -7911,6 +8065,10 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
       const freshTask = freshTasks.find((t) => t.id === id);
       if (!freshTask) {
         return { conflict: 'Task not found (it may have been deleted).' };
+      }
+      // K1: a kiosk write re-checks venue + private visibility on FRESH data.
+      if (!kioskMayTouchTask(req, freshTask)) {
+        return { conflict: 'This task changed. Please refresh and try again.' };
       }
       // Idempotency: if this check-in ID already exists, return the task as-is.
       const alreadyLogged = (freshTask.checkIns || []).some((c: any) => c.id === checkInId);
@@ -8850,9 +9008,14 @@ app.post('/api/users', async (req, res) => {
   // New users are always created in the caller's own agency.
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
-  const { email, name, role, password, venueId, permissions } = req.body;
+  const { email, name, role, password, venueId, permissions, phoneNumber } = req.body;
   if (!email || !name) {
     return res.status(400).json({ error: 'Email and name are required' });
+  }
+  // K1: optional phone number (E.164), validated before anything is written.
+  const phoneNorm = normalizePhoneNumber(phoneNumber);
+  if (!phoneNorm.ok) {
+    return res.status(400).json({ error: PHONE_NUMBER_ERROR });
   }
 
   // Pre-generate stable ID + hash the password BEFORE the transaction so retries
@@ -8904,6 +9067,7 @@ app.post('/api/users', async (req, res) => {
     permissions: defaultPermissions,
     avatarColor: colors[Math.floor(Math.random() * colors.length)],
     password: passwordHash,
+    ...(phoneNorm.value ? { phoneNumber: phoneNorm.value } : {}),
   };
 
   const committed = await commitOrRespond(
@@ -8928,7 +9092,7 @@ app.post('/api/users', async (req, res) => {
     ...base,
     users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
   }));
-  res.status(201).json({ user: getSafeUser(created) });
+  res.status(201).json({ user: managerViewOf(created, caller) });
 });
 
 // Update user permissions or role
@@ -8960,11 +9124,13 @@ app.put('/api/users/:id', async (req, res) => {
     return res.status(403).json({ error: 'You can only manage team members in your own agency.' });
   }
 
-  const { role, permissions, venueId, name, kioskPin } = req.body;
+  const { role, permissions, venueId, name, kioskPin, phoneNumber } = req.body;
 
   // Coordinator PIN-only path (Don 8:54 PM ET Oct 19 — own VENUE only):
-  // body must be EXACTLY { kioskPin }; target must be in the caller's agency
-  // AND at the caller's venue; target role mashgiach/worker only.
+  // body must be a NON-EMPTY subset of { kioskPin, phoneNumber } (K1, Don
+  // 7:35 PM Oct 20: the coordinator may also save the phone number for
+  // their venue's people); target must be in the caller's agency AND at the
+  // caller's venue; target role mashgiach/worker only.
   // A coordinator with no venueId fails closed before any lookup.
   if (callerIsCoordinator) {
     const callerVenueId = (caller as any).venueId;
@@ -8976,7 +9142,8 @@ app.put('/api/users/:id', async (req, res) => {
     // operationId (apiWrite). Anything else → not a PIN-only body.
     const TRANSPORT_FIELDS = ['userEmail', 'adminEmail', 'expectedVersion', 'operationId'];
     const bodyKeys = Object.keys(req.body || {}).filter((k) => !TRANSPORT_FIELDS.includes(k));
-    const onlyPin = bodyKeys.length === 1 && bodyKeys[0] === 'kioskPin';
+    const COORDINATOR_FIELDS = ['kioskPin', 'phoneNumber'];
+    const onlyPin = bodyKeys.length >= 1 && bodyKeys.every((k) => COORDINATOR_FIELDS.includes(k));
     const targetOk =
       (existingUser.role === 'mashgiach' || existingUser.role === 'worker') &&
       (existingUser as any).venueId === callerVenueId;
@@ -8994,6 +9161,13 @@ app.put('/api/users/:id', async (req, res) => {
       return res.status(400).json({ error: 'Kiosk PIN must be 4-6 digits or empty.' });
     }
     pinHashUpdate = pin === '' ? undefined : await hashPassword(pin);
+  }
+  // K1: optional phone number — undefined in the body = no change; "" or
+  // null clears it; anything else must normalize to E.164.
+  const phoneProvided = Object.prototype.hasOwnProperty.call(req.body || {}, 'phoneNumber');
+  const phoneNorm = phoneProvided ? normalizePhoneNumber(phoneNumber) : { ok: true, value: undefined };
+  if (!phoneNorm.ok) {
+    return res.status(400).json({ error: PHONE_NUMBER_ERROR });
   }
 
   const baseline = { name: existingUser.name, role: existingUser.role, venueId: existingUser.venueId };
@@ -9077,6 +9251,10 @@ app.put('/api/users/:id', async (req, res) => {
         updated.kioskPinRev = (pinRevOf(freshUser) ?? 0) + 1;
       }
       if (venueId !== undefined) updated.venueId = venueId;
+      if (phoneProvided) {
+        if (phoneNorm.value) updated.phoneNumber = phoneNorm.value;
+        else delete (updated as any).phoneNumber;
+      }
       if (role !== undefined) {
         updated.role = newRole;
       }
@@ -9138,24 +9316,25 @@ app.put('/api/users/:id', async (req, res) => {
         );
       }
       // Fresh filtered INITIAL_STATE to the affected user's sockets only.
-      const freshState = JSON.stringify({
-        type: 'INITIAL_STATE',
-        payload: {
-          ...agencyStateFor(updated.agencyId || 'agency-hkc', updated),
-          activeWorkersCount: activeSockets.size,
-        },
-        timestamp: new Date().toISOString(),
-        version: typeof stateVersion === 'number' ? stateVersion : undefined,
-      });
+      // K1 (ChatGPT plan review): built PER SOCKET from that socket's
+      // verified effective identity — a kiosk socket of this user gets the
+      // kiosk-filtered, acting-user snapshot, never the stored admin's.
       for (const client of wss.clients) {
         if (client.readyState !== WebSocket.OPEN) continue;
         const meta = authorizeSocket(client);
         if (!meta || meta.userId !== updated.id) continue;
-        client.send(freshState);
+        const st = initialStateForSocket(meta);
+        if (!st) continue;
+        client.send(JSON.stringify({
+          type: 'INITIAL_STATE',
+          payload: { ...st, activeWorkersCount: activeSockets.size },
+          timestamp: new Date().toISOString(),
+          version: typeof stateVersion === 'number' ? stateVersion : undefined,
+        }));
       }
     }
   }
-  res.json({ user: getSafeUser(updated) });
+  res.json({ user: managerViewOf(updated, caller) });
 });
 
 app.delete('/api/users/:id', async (req, res) => {
@@ -9348,7 +9527,9 @@ app.get('/api/kiosk/device', async (req, res) => {
     return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
   }
   const staff = users
-    .filter((u) => u.venueId === device.venueId && (u.agencyId || 'agency-hkc') === device.agencyId && (u.kioskPin || u.kioskPinHash) && ['mashgiach', 'worker', 'coordinator'].includes(u.role))
+    // K1: admins with a code are listed on every tablet of their own agency
+    // (kioskUserFitsVenue); everyone else only at their own venue.
+    .filter((u) => kioskUserFitsVenue(u, device.agencyId, device.venueId) && (u.kioskPin || u.kioskPinHash) && ['mashgiach', 'worker', 'coordinator', 'admin'].includes(u.role))
     .map((u) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
   const safe = safeKioskDevice(device);
   // Touch lastSeenAt at most once per 10 minutes — best-effort, never
@@ -9916,17 +10097,13 @@ app.post('/api/kiosk/login', async (req, res) => {
     return res.status(401).json({ error: 'Wrong code. Try again.' });
   }
 
-  // 2b venue binding: the user must belong to the DEVICE's venue and
-  // agency — and must not be an admin. EVERY other case (other venue,
-  // other agency, admin) is answered exactly like a wrong PIN, counted by
-  // the reservation below: an admin id must be indistinguishable from a
-  // nonexistent one, or a tablet holder could enumerate admin accounts.
-  // Admins still never get a session — the success commit re-checks
-  // `role !== 'admin'` against the fresh doc.
-  const userMatchesDevice =
-    user.role !== 'admin' &&
-    (user as any).venueId === device.venueId &&
-    (user.agencyId || 'agency-hkc') === device.agencyId;
+  // 2b venue binding (K1: one helper): the user must fit the DEVICE's
+  // agency and venue — an admin fits any tablet of the own agency, everyone
+  // else only their own venue. EVERY other case (other venue, other agency)
+  // is answered exactly like a wrong PIN, counted by the reservation below.
+  // K1: an admin who signs in here gets a kiosk session whose identity is a
+  // MASHGIACH at this tablet's venue (kioskActingUser) — never admin powers.
+  const userMatchesDevice = kioskUserFitsVenue(user, device.agencyId, device.venueId);
 
   const tabletKey = `${venueId}|${clientIp}`;
   const ipKey = `ip|${clientIp}`;
@@ -10052,9 +10229,7 @@ app.post('/api/kiosk/login', async (req, res) => {
           : (freshUser as any).kioskPinHash === user.kioskPinHash;
         const freshOk =
           hashMatches &&
-          (freshUser.agencyId || 'agency-hkc') === agencyId &&
-          (freshUser as any).venueId === venueId &&
-          freshUser.role !== 'admin';
+          kioskUserFitsVenue(freshUser, agencyId, venueId);
         if (!freshOk) return { conflict: 'User changed during login. Please try again.' };
         const freshLocks = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
           ? freshDoc.kioskPinLockouts
@@ -10134,7 +10309,9 @@ app.post('/api/kiosk/login', async (req, res) => {
     log.warn('[kiosk] login success write failed:', (err as any)?.message);
     return res.status(503).json({ error: 'Please try again in a moment.' });
   }
-  res.json({ user: getSafeUser(user), token: kioskToken });
+  // K1: the tablet receives the ACTING user — an admin arrives as a
+  // mashgiach at this venue, so the kiosk client renders no admin UI.
+  res.json({ user: getSafeUser(kioskActingUser(user, venueId)), token: kioskToken });
 });
 
 // Formal Login Endpoint — bcrypt passwords, signed session token on success.
