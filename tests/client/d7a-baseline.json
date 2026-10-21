@@ -1,0 +1,600 @@
+{
+ "hubIngredients": {
+  "inv": [
+   "Factory Kashrut & Airtable Ingredients Audit",
+   "Industrial Plant",
+   "Northeast Ingredients Plant",
+   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
+   "Airtable Database",
+   "Approved Materials:",
+   "5 items",
+   "Floor Verified:",
+   "Flag Unapproved Raw Material",
+   "Submit Inspection Report",
+   "Approved Ingredients Matrix",
+   "Unapproved Materials Log",
+   "Official Factory Reports",
+   "All Kosher Types",
+   "Parve",
+   "Dairy",
+   "Meat",
+   "Cholov Yisroel",
+   "Pas Yisroel",
+   "All Verification States",
+   "✓ Verified Present",
+   "⏳ Unverified / Pending",
+   "⚠ Flagged Discrepancy",
+   "Raw Material / Ingredient",
+   "Manufacturer / Supplier",
+   "Kosher Agency",
+   "Designation",
+   "Lot / Batch",
+   "Floor Audit Status",
+   "Mashgiach Action",
+   "Sugar, granulated",
+   "Supplier i1",
+   "OU",
+   "LOT-i1",
+   "Present on Floor",
+   "by Moshe",
+   "Undo",
+   "Liquid whole eggs, pasteurised, refrigerated, 20 kg bag-in-box — for bakery line 2 only (not for the meat kitchen)",
+   "Supplier i2",
+   "LOT-i2",
+   "Pending Check",
+   "Check",
+   "Verify",
+   "Cocoa powder 22/24 alkalised",
+   "Supplier i3",
+   "LOT-i3",
+   "Discrepancy",
+   "קמח מלא — Whole wheat flour",
+   "Supplier i4",
+   "LOT-i4",
+   "Beef base",
+   "Supplier i5",
+   "LOT-i5",
+   "Hartford Kashrut Commission (HKC) • Industrial Manufacturing Compliance Engine",
+   "Done",
+   "title=Configure or sync Airtable database",
+   "placeholder=Search raw material name, supplier, lot #, or kosher agency...",
+   "title=Reset check state",
+   "title=Photograph label & check hechsher",
+   "title=Mark present & verified in factory",
+   "title=Flag discrepancy",
+   "option=all",
+   "option=parve",
+   "option=dairy",
+   "option=meat",
+   "option=cholov yisroel",
+   "option=pas yisroel",
+   "option=verified_present",
+   "option=unverified",
+   "option=flagged"
+  ]
+ },
+ "hubRowActions": {
+  "fetch": [
+   [
+    "PUT",
+    "/api/ingredients/i2/verify",
+    {
+     "verificationStatus": "verified_present",
+     "userEmail": "y@test.local"
+    }
+   ],
+   [
+    "PUT",
+    "/api/ingredients/i1/verify",
+    {
+     "verificationStatus": "unverified",
+     "userEmail": "y@test.local"
+    }
+   ],
+   [
+    "PUT",
+    "/api/ingredients/i1/verify",
+    {
+     "verificationStatus": "flagged_discrepancy",
+     "userEmail": "y@test.local"
+    }
+   ]
+  ]
+ },
+ "hubDiscEmpty": {
+  "inv": [
+   "Factory Kashrut & Airtable Ingredients Audit",
+   "Industrial Plant",
+   "Northeast Ingredients Plant",
+   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
+   "Airtable Database",
+   "Flagged discrepancy on raw material!",
+   "Approved Materials:",
+   "5 items",
+   "Floor Verified:",
+   "Flag Unapproved Raw Material",
+   "Submit Inspection Report",
+   "Approved Ingredients Matrix",
+   "Unapproved Materials Log",
+   "Official Factory Reports",
+   "Physical Plant Unauthorized Materials Log",
+   "Ingredients, processing aids, or flavorings found in the factory that are NOT on the agency-approved list.",
+   "Log Unapproved Material",
+   "Clean Slate: No Unauthorized Materials Reported",
+   "Mashgiach inspections have not found unapproved chemicals, raw materials, or non-kosher products on this facility's floor.",
+   "Hartford Kashrut Commission (HKC) • Industrial Manufacturing Compliance Engine",
+   "Done",
+   "title=Configure or sync Airtable database"
+  ]
+ },
+ "hubReports": {
+  "inv": [
+   "Factory Kashrut & Airtable Ingredients Audit",
+   "Industrial Plant",
+   "Northeast Ingredients Plant",
+   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
+   "Airtable Database",
+   "Flagged discrepancy on raw material!",
+   "Approved Materials:",
+   "5 items",
+   "Floor Verified:",
+   "Flag Unapproved Raw Material",
+   "Submit Inspection Report",
+   "Approved Ingredients Matrix",
+   "Unapproved Materials Log",
+   "Official Factory Reports",
+   "Factory Audit Reports Archive",
+   "Transmitted inspection summaries, signed Mashgiach logs, and Rabbinic conclusions.",
+   "File New Inspection Report",
+   "critical violation found",
+   "Audit on 2026-10-21 (07:30 – 10:15)",
+   "Report #r1",
+   "Approved Checked:",
+   "Verified Present:",
+   "3 items",
+   "Unapproved Found:",
+   "Plant QA Escort:",
+   "Linda Martinez-O’Connor, QA Manager",
+   "\"Two issues found; line 2 paused. הכל נבדק.\"",
+   "Mashgiach Signoff: Yossi Abramowitz-Goldberger",
+   "passed",
+   "Report #r2",
+   "Hartford Kashrut Commission (HKC) • Industrial Manufacturing Compliance Engine",
+   "Done",
+   "title=Configure or sync Airtable database"
+  ]
+ },
+ "hubDiscOne": {
+  "inv": [
+   "Factory Kashrut & Airtable Ingredients Audit",
+   "Industrial Plant",
+   "Northeast Ingredients Plant",
+   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
+   "Airtable Database",
+   "Logged unapproved item: Unmarked drum of glycerin",
+   "Approved Materials:",
+   "5 items",
+   "Floor Verified:",
+   "1 Unapproved Item(s) Flagged",
+   "Flag Unapproved Raw Material",
+   "Submit Inspection Report",
+   "Approved Ingredients Matrix",
+   "Unapproved Materials Log",
+   "Official Factory Reports",
+   "Physical Plant Unauthorized Materials Log",
+   "Ingredients, processing aids, or flavorings found in the factory that are NOT on the agency-approved list.",
+   "Log Unapproved Material",
+   "critical Violation",
+   "Unmarked drum of glycerin",
+   "Supplier:",
+   "Unknown",
+   "Location:",
+   "Receiving dock, bay 3",
+   "Action:",
+   "Quarantined",
+   "Found on the receiving dock with no hechsher and no paperwork. Quarantined with red tape, waiting for the rav.",
+   "Reported by Mashgiach: Yossi Abramowitz-Goldberger",
+   "Hartford Kashrut Commission (HKC) • Industrial Manufacturing Compliance Engine",
+   "Done",
+   "title=Configure or sync Airtable database"
+  ]
+ },
+ "hubHechsherWiring": {
+  "present": true,
+  "ingredient": "i1"
+ },
+ "hubHechsherConfirm": {
+  "fetch": [
+   [
+    "PUT",
+    "/api/ingredients/i1/verify",
+    {
+     "verificationStatus": "verified_present",
+     "userEmail": "y@test.local"
+    }
+   ]
+  ]
+ },
+ "hubAirtable": {
+  "fetch": [
+   [
+    "POST",
+    "/api/airtable/config",
+    [
+     "baseId",
+     "tableName",
+     "userEmail",
+     "venueId",
+     "viewName"
+    ]
+   ],
+   [
+    "POST",
+    "/api/airtable/sync",
+    [
+     "userEmail",
+     "venueId"
+    ]
+   ]
+  ]
+ },
+ "hubEmpty": {
+  "inv": [
+   "Factory Kashrut & Airtable Ingredients Audit",
+   "Industrial Plant",
+   "Northeast Ingredients Plant",
+   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
+   "Airtable Database",
+   "Approved Materials:",
+   "0 items",
+   "Floor Verified:",
+   "Flag Unapproved Raw Material",
+   "Submit Inspection Report",
+   "Approved Ingredients Matrix",
+   "Unapproved Materials Log",
+   "Official Factory Reports",
+   "All Kosher Types",
+   "Parve",
+   "Dairy",
+   "Meat",
+   "Cholov Yisroel",
+   "Pas Yisroel",
+   "All Verification States",
+   "✓ Verified Present",
+   "⏳ Unverified / Pending",
+   "⚠ Flagged Discrepancy",
+   "No matching approved raw materials found.",
+   "Try adjusting search terms or click \"Airtable Database\" to pull the latest ingredients.",
+   "Hartford Kashrut Commission (HKC) • Industrial Manufacturing Compliance Engine",
+   "Done",
+   "title=Configure or sync Airtable database",
+   "placeholder=Search raw material name, supplier, lot #, or kosher agency...",
+   "option=all",
+   "option=parve",
+   "option=dairy",
+   "option=meat",
+   "option=cholov yisroel",
+   "option=pas yisroel",
+   "option=verified_present",
+   "option=unverified",
+   "option=flagged"
+  ]
+ },
+ "hubReportsEmpty": {
+  "inv": [
+   "Factory Kashrut & Airtable Ingredients Audit",
+   "Industrial Plant",
+   "Northeast Ingredients Plant",
+   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
+   "Airtable Database",
+   "Approved Materials:",
+   "0 items",
+   "Floor Verified:",
+   "Flag Unapproved Raw Material",
+   "Submit Inspection Report",
+   "Approved Ingredients Matrix",
+   "Unapproved Materials Log",
+   "Official Factory Reports",
+   "Factory Audit Reports Archive",
+   "Transmitted inspection summaries, signed Mashgiach logs, and Rabbinic conclusions.",
+   "File New Inspection Report",
+   "No Audit Reports Filed Yet",
+   "Once the Mashgiach verifies floor ingredients, click \"Submit Inspection Report\" to archive official findings.",
+   "Hartford Kashrut Commission (HKC) • Industrial Manufacturing Compliance Engine",
+   "Done",
+   "title=Configure or sync Airtable database"
+  ]
+ },
+ "hubLoading": {},
+ "hechCapture": {
+  "inv": [
+   "Check Hechsher",
+   "Liquid whole eggs, pasteurised, refrigerated, 20 kg bag-in-box — for bakery line 2 only (not for the meat kitchen)",
+   "Supplier i2",
+   "Photograph the label",
+   "Aim at the hechsher symbol and product name",
+   "aria-label=Close"
+  ]
+ },
+ "hechCompare": {
+  "inv": [
+   "Check Hechsher",
+   "Liquid whole eggs, pasteurised, refrigerated, 20 kg bag-in-box — for bakery line 2 only (not for the meat kitchen)",
+   "Supplier i2",
+   "Label photo",
+   "Approved record",
+   "OU",
+   "Parve",
+   "Lot: LOT-i2",
+   "Does the symbol on the label match the approved agency above?",
+   "Match — verify",
+   "Flag mismatch",
+   "Retake photo",
+   "aria-label=Close",
+   "alt=Product label"
+  ]
+ },
+ "hechCallbacks": {
+  "calls": [
+   "confirm:i2",
+   "flag:i2",
+   "close"
+  ]
+ },
+ "addForm": {
+  "inv": [
+   "Flag Unapproved Raw Material on Factory Floor",
+   "Discrepancy discovered during physical plant inspection",
+   "Unapproved Raw Material / Ingredient Name *",
+   "Manufacturer / Supplier",
+   "Kashrut Seal Visible on Packaging",
+   "Lot / Batch Number",
+   "Location in Factory Plant",
+   "Severity Level",
+   "Critical (Treif / Non-Kosher on Active Line)",
+   "Warning (Unapproved Item on Staging Racks)",
+   "Inquiry (Document Missing / LoC Expired)",
+   "Immediate Action Taken by Mashgiach",
+   "Mashgiach Discovery Notes & Details",
+   "Cancel",
+   "Log Discrepancy & Quarantine",
+   "placeholder=e.g. Artificial Strawberry Flavoring #409, Gelatin Binder, Non-kosher Lecithin",
+   "placeholder=Vendor label on barrel/box",
+   "placeholder=e.g. None, Unrecognized Hechsher, 'K'",
+   "placeholder=LOT-XXXXXX",
+   "placeholder=e.g. Blending line 2 staging, Dry storage bay D",
+   "placeholder=Describe where the barrel was discovered, quantity (e.g. three 55-gallon drums), explanation provided by plant manager, and steps taken to halt addition into kosher batch...",
+   "option=critical",
+   "option=warning",
+   "option=inquiry"
+  ]
+ },
+ "addCallbacks": {
+  "calls": [
+   {
+    "id": "ID",
+    "name": "Unmarked drum of glycerin",
+    "brandOrSupplier": "Unknown",
+    "kashrutSymbolFound": "None / No Symbol Visible",
+    "locationInFactory": "Staging Racks Near Blending Line",
+    "severity": "warning",
+    "actionTaken": "Quarantined with red Mashgiach tamper tape",
+    "notes": "No hechsher; quarantined.",
+    "reportedAt": "T",
+    "reportedByName": "Yossi Abramowitz-Goldberger",
+    "reportedByEmail": "y@test.local"
+   },
+   "close"
+  ]
+ },
+ "reportForm": {
+  "inv": [
+   "Submit Official Factory Kashrut Audit Report",
+   "Northeast Ingredients Plant • Hartford Kashrut Commission (HKC)",
+   "Approved Raw Materials",
+   "Verified Compliant",
+   "Unapproved Discrepancies",
+   "Inspection Shift Start",
+   "Inspection Shift End",
+   "Factory Escort / QA Contact",
+   "Final Kashrut Determination",
+   "100% Passed",
+   "All floor materials strictly adhere to approved list.",
+   "Passed with Notes",
+   "Minor inquiry or missing document resolved with QA.",
+   "Violation / Quarantined",
+   "Unapproved raw material found and removed from line.",
+   "Mashgiach Observations & Rabbinic Report",
+   "I hereby certify this report accurately reflects the physical state of the factory",
+   "Yossi Abramowitz-Goldberger",
+   "Cancel",
+   "File Official Report to Agency",
+   "placeholder=08:30 AM",
+   "placeholder=14:30 PM",
+   "placeholder=QA Director / Escort",
+   "placeholder=Detail your walk-through observations: storage bay conditions, bulk railcar unloading, CIP sanitization temperatures, packaging lines, and any items questioned or confirmed with plant management..."
+  ]
+ },
+ "reportSubmit": {
+  "fetch": [
+   [
+    "POST",
+    "/api/factory-reports",
+    {
+     "venueId": "v1",
+     "startTime": "08:30 AM",
+     "endTime": "14:30 PM",
+     "factoryRepresentative": "QA Plant Manager",
+     "auditedIngredients": [
+      {
+       "ingredientId": "i1",
+       "name": "Sugar, granulated",
+       "brandOrSupplier": "Supplier i1",
+       "status": "verified_present"
+      },
+      {
+       "ingredientId": "i2",
+       "name": "Liquid whole eggs, pasteurised, refrigerated, 20 kg bag-in-box — for bakery line 2 only (not for the meat kitchen)",
+       "brandOrSupplier": "Supplier i2",
+       "status": "unverified"
+      },
+      {
+       "ingredientId": "i3",
+       "name": "Cocoa powder 22/24 alkalised",
+       "brandOrSupplier": "Supplier i3",
+       "status": "flagged_discrepancy"
+      },
+      {
+       "ingredientId": "i4",
+       "name": "קמח מלא — Whole wheat flour",
+       "brandOrSupplier": "Supplier i4",
+       "status": "unverified"
+      },
+      {
+       "ingredientId": "i5",
+       "name": "Beef base",
+       "brandOrSupplier": "Supplier i5",
+       "status": "unverified"
+      }
+     ],
+     "discrepancies": [
+      {
+       "id": "d1",
+       "name": "Unmarked drum of glycerin",
+       "brandOrSupplier": "Unknown",
+       "kashrutSymbolFound": "None / No Symbol Visible",
+       "lotOrBatch": "???",
+       "locationInFactory": "Receiving dock, bay 3",
+       "severity": "critical",
+       "notes": "Found on the receiving dock with no hechsher and no paperwork. Quarantined with red tape, waiting for the rav.",
+       "actionTaken": "Quarantined",
+       "reportedAt": "2026-10-21T08:00:00.000Z",
+       "reportedByName": "Yossi Abramowitz-Goldberger",
+       "reportedByEmail": "y@test.local"
+      }
+     ],
+     "summaryNotes": "Comprehensive plant raw materials walkthrough completed.",
+     "status": "passed_with_notes",
+     "mashgiachSigned": true,
+     "userEmail": "y@test.local"
+    }
+   ]
+  ],
+  "done": [
+   "r9",
+   "close"
+  ]
+ },
+ "airtable": {
+  "inv": [
+   "Airtable Ingredients Integration",
+   "Live Sync",
+   "Linked to factory: Northeast Ingredients Plant",
+   "How Mashgichim Use Your Airtable Database:",
+   "When a factory submits raw materials and ingredients to your kosher agency, your approved Airtable table syncs directly into the assigned Mashgiach's dashboard. On-site at the factory, the Mashgiach verifies physical sacks/drums against these records, flags unauthorized ingredients, and submits compliance reports.",
+   "Airtable Base ID *",
+   "Found in your Airtable URL: airtable.com/",
+   "app...",
+   "Table Name *",
+   "Exact name of the table tab in Airtable",
+   "Airtable View Name (Optional)",
+   "Personal Access Token (PAT)",
+   "Generated in Airtable Developer Hub with",
+   "data.records:read",
+   "scope",
+   "Customize Column / Field Names (Match your Airtable Header)",
+   "Customize Columns",
+   "Last synchronized with Airtable:",
+   "10/20/2026, 12:00:00 PM",
+   "Sync From Airtable Now",
+   "Close",
+   "Save Configuration",
+   "placeholder=appXXXXXXXXXXXXXX",
+   "placeholder=Approved Ingredients",
+   "placeholder=Grid view",
+   "placeholder=patXXXXXXXX.XXXXXX"
+  ]
+ },
+ "airtableAdvanced": {
+  "inv": [
+   "Airtable Ingredients Integration",
+   "Live Sync",
+   "Linked to factory: Northeast Ingredients Plant",
+   "How Mashgichim Use Your Airtable Database:",
+   "When a factory submits raw materials and ingredients to your kosher agency, your approved Airtable table syncs directly into the assigned Mashgiach's dashboard. On-site at the factory, the Mashgiach verifies physical sacks/drums against these records, flags unauthorized ingredients, and submits compliance reports.",
+   "Airtable Base ID *",
+   "Found in your Airtable URL: airtable.com/",
+   "app...",
+   "Table Name *",
+   "Exact name of the table tab in Airtable",
+   "Airtable View Name (Optional)",
+   "Personal Access Token (PAT)",
+   "Generated in Airtable Developer Hub with",
+   "data.records:read",
+   "scope",
+   "Customize Column / Field Names (Match your Airtable Header)",
+   "Hide Columns",
+   "Specify the exact column names from your Airtable base so the application can map them accurately:",
+   "Ingredient Name Column",
+   "Supplier / Manufacturer Column",
+   "Kosher Certification Body Column",
+   "Kosher Designation (Parve / Dairy / Meat)",
+   "Lot / Batch Number Column",
+   "Notes / Instructions Column",
+   "Last synchronized with Airtable:",
+   "10/20/2026, 12:00:00 PM",
+   "Sync From Airtable Now",
+   "Close",
+   "Save Configuration",
+   "placeholder=appXXXXXXXXXXXXXX",
+   "placeholder=Approved Ingredients",
+   "placeholder=Grid view",
+   "placeholder=patXXXXXXXX.XXXXXX"
+  ]
+ },
+ "airtableCallbacks": {
+  "calls": [
+   [
+    "save",
+    [
+     "apiKey",
+     "baseId",
+     "fieldNameMapping",
+     "tableName",
+     "viewName"
+    ]
+   ],
+   "sync"
+  ]
+ },
+ "airtableNonAdmin": {
+  "inv": [
+   "Airtable Ingredients Integration",
+   "Live Sync",
+   "Linked to factory: Northeast Ingredients Plant",
+   "How Mashgichim Use Your Airtable Database:",
+   "When a factory submits raw materials and ingredients to your kosher agency, your approved Airtable table syncs directly into the assigned Mashgiach's dashboard. On-site at the factory, the Mashgiach verifies physical sacks/drums against these records, flags unauthorized ingredients, and submits compliance reports.",
+   "Airtable Base ID *",
+   "Found in your Airtable URL: airtable.com/",
+   "app...",
+   "Table Name *",
+   "Exact name of the table tab in Airtable",
+   "Airtable View Name (Optional)",
+   "Personal Access Token (PAT)",
+   "Generated in Airtable Developer Hub with",
+   "data.records:read",
+   "scope",
+   "Customize Column / Field Names (Match your Airtable Header)",
+   "Customize Columns",
+   "Last synchronized with Airtable:",
+   "10/20/2026, 12:00:00 PM",
+   "Sync From Airtable Now",
+   "Close",
+   "Save Configuration",
+   "placeholder=appXXXXXXXXXXXXXX",
+   "placeholder=Approved Ingredients",
+   "placeholder=Grid view",
+   "placeholder=patXXXXXXXX.XXXXXX"
+  ]
+ }
+}
