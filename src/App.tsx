@@ -152,6 +152,10 @@ export default function App() {
   const isKiosk = kioskMode;
   const [adminHome, setAdminHome] = useState(() => !isKiosk && currentUser?.role === 'admin');
   const [adminHomeReloadKey, setAdminHomeReloadKey] = useState(0);
+  const leaveHomeThen = (fn: () => void) => () => {
+    if (adminHome) setAdminHome(false);
+    fn();
+  };
   const openAgencyHome = () => {
     setAdminHome(true);
     setAdminHomeReloadKey((key) => key + 1);
@@ -956,6 +960,7 @@ export default function App() {
   };
 
   const handleVenueCreated = (newVenue: Venue) => {
+    if (adminHome) setAdminHomeReloadKey((key) => key + 1);
     // Dedupe by id: guards against a VENUE_CREATED broadcast (or double
     // submit) landing before/after this local append.
     setVenues((prev) => (prev.some((v) => v.id === newVenue.id) ? prev : [...prev, newVenue]));
@@ -1770,8 +1775,8 @@ export default function App() {
         currentUser={currentUser}
         onLogout={handleLogout}
         onOpenChangePassword={() => setIsChangePasswordOpen(true)}
-        onOpenTaskModal={handleOpenCreateTask}
-        onOpenHistoryModal={() => setIsHistoryModalOpen(true)}
+        onOpenTaskModal={leaveHomeThen(handleOpenCreateTask)}
+        onOpenHistoryModal={leaveHomeThen(() => setIsHistoryModalOpen(true))}
         onOpenEventsModal={() => setIsEventsModalOpen(true)}
         onOpenCreateEvent={() => setIsCreateEventModalOpen(true)}
         onOpenFactoryAudit={() => setIsFactoryAuditOpen(true)}
@@ -1788,7 +1793,7 @@ export default function App() {
         currentVenue={currentVenue}
         updatesBell={
           currentUser ? (
-            <UpdatesBell count={updates.bellCount} onClick={() => updates.setSheetOpen(true)} />
+            <UpdatesBell count={updates.bellCount} onClick={leaveHomeThen(() => updates.setSheetOpen(true))} />
           ) : undefined
         }
         allVenues={venues}
@@ -2129,12 +2134,12 @@ export default function App() {
         <PhoneNav
           user={currentUser}
           hasVenues={venues.length > 0}
-          onOpenTaskModal={handleOpenCreateTask}
-          onOpenShiftNote={() => updates.setSheetOpen(true, 'notes')}
+          onOpenTaskModal={leaveHomeThen(handleOpenCreateTask)}
+          onOpenShiftNote={leaveHomeThen(() => updates.setSheetOpen(true, 'notes'))}
           onOpenVenues={() => setIsVenuesDirectoryOpen(true)}
           onOpenTeam={() => setIsTeamModalOpen(true)}
           onOpenEvents={() => setIsEventsModalOpen(true)}
-          onOpenHistory={() => setIsHistoryModalOpen(true)}
+          onOpenHistory={leaveHomeThen(() => setIsHistoryModalOpen(true))}
         />
       )}
 
