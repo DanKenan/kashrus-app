@@ -6718,20 +6718,22 @@ app.get('/api/admin/dashboard', (req, res) => {
     .filter((v) => (v.agencyId || 'agency-hkc') === agencyId)
     .filter((v) => dashboardScope === 'agency' || dashboardScope.includes(v.id));
 
+  const dashNow = serverNow();
   const venueStats = agencyVenues.map((venue) => {
     const venueTasks = tasks.filter((t) => t.venueId === venue.id);
+    const venueNowMinutes = minutesIn(venueTimeZoneIn(venue, agencies), dashNow);
     const completed = venueTasks.filter((t) => t.isCompleted).length;
     const total = venueTasks.length;
     const overdueList = venueTasks.filter((t) => {
       if (t.isCompleted) return false;
       // 6c: exclude any-time tasks before time maths.
       if (isAnyTimeTask(t)) return false;
-      // Overdue if target time has passed today
+      // Overdue if target time has passed today — in the VENUE's own zone
+      // (D8s: the same helper as the board/rollover/checkOverdueTasks; the
+      // server clock zone is UTC on Cloud Run and never decided "today").
       if (!t.targetTime || t.targetTime === 'End of Day') return false;
-      const now = new Date();
       const minutes = taskSortMinutes(t);
-      const nowMinutes = now.getHours() * 60 + now.getMinutes();
-      return minutes < nowMinutes;
+      return minutes < venueNowMinutes;
     });
 
     // Recent handoff notes (last 3)
@@ -6740,7 +6742,10 @@ app.get('/api/admin/dashboard', (req, res) => {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, 3);
 
-    // Mashgichim assigned to this venue (with phone numbers for tap-to-call)
+    // Mashgichim assigned to this venue (with phone numbers for tap-to-call).
+    // D8s: `phone` is the real stored phoneNumber (K1), only through
+    // managerViewOf (Rule N: admin of the agency, or a coordinator for a
+    // mashgiach/worker in a shared venue); '' otherwise. Same key and shape.
     const venueUsers = users
       .filter((u) => (u.agencyId || 'agency-hkc') === agencyId)
       .filter((u) => {
@@ -6754,7 +6759,7 @@ app.get('/api/admin/dashboard', (req, res) => {
       .map((u) => ({
         email: u.email,
         name: u.name,
-        phone: (u as any).phone || '',
+        phone: managerViewOf(u, caller).phoneNumber || '',
         role: u.role,
       }));
 
