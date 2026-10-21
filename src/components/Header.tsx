@@ -170,21 +170,26 @@ export const Header: React.FC<HeaderProps> = ({
 
             {/* Active Venue Selector Button */}
             {currentUser?.role === 'admin' ? (
+              // H1: fixed px so large text does not grow the target
               <button
                 id="admin-venue-switcher-btn"
                 onClick={openVenuesModal}
-                className="group flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-sunken hover:bg-line/40 border border-line transition cursor-pointer tactile-1 min-w-11 min-h-11"
+                className="group flex items-center gap-1.5 px-[10px] py-[6px] rounded-xl bg-sunken hover:bg-line/40 border border-line transition cursor-pointer tactile-1 min-w-[44px] min-h-[44px]"
                 title="Switch to another kosher venue"
               >
-                <Building2 className="w-3.5 h-3.5 text-gold-deep shrink-0" />
+                {/* H1: fixed px so large text does not grow the target */}
+                <Building2 className="w-[14px] h-[14px] text-gold-deep shrink-0" />
                 <span className="text-xs font-bold text-ink truncate min-w-0 max-w-[130px] sm:max-w-[170px]">
                   {currentVenue?.name || 'Select Venue'}
                 </span>
-                <ChevronDown className="w-3 h-3 text-ink-faint group-hover:text-ink-soft transition shrink-0" />
+                {/* H1: fixed px so large text does not grow the target */}
+                <ChevronDown className="w-[12px] h-[12px] text-ink-faint group-hover:text-ink-soft transition shrink-0" />
               </button>
             ) : currentVenue ? (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/40 text-emerald-900 dark:text-emerald-200 tactile-1 min-w-9">
-                <Building2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              // H1: fixed px so large text does not grow the target
+              <div className="flex items-center gap-1.5 px-[10px] py-[4px] rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/40 text-emerald-900 dark:text-emerald-200 tactile-1 min-w-[36px]">
+                {/* H1: fixed px so large text does not grow the target */}
+                <Building2 className="w-[14px] h-[14px] text-emerald-600 dark:text-emerald-400 shrink-0" />
                 <span className="text-xs font-bold truncate min-w-0 max-w-[130px] sm:max-w-[170px]">
                   {currentVenue.name}
                 </span>
@@ -369,10 +374,11 @@ export const Header: React.FC<HeaderProps> = ({
             {/* User Profile & Settings Menu */}
             {currentUser ? (
               <div className="relative pl-1 border-l border-line">
+                {/* H1: fixed px so large text does not grow the target */}
                 <button
                   id="header-user-menu-btn"
                   onClick={() => { setUserMenuOpen(!userMenuOpen); setToolsMenuOpen(false); }}
-                  className="flex items-center gap-1.5 p-1 rounded-full hover:bg-sunken transition cursor-pointer"
+                  className="flex items-center gap-1.5 p-1 rounded-full hover:bg-sunken transition cursor-pointer min-w-[44px] min-h-[44px]"
                   title={`${currentUser.name} (${getRoleLabel(currentUser.role)})`}
                 >
                   <div
@@ -545,13 +551,18 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
+            {/* H1: fixed px so large text does not grow the target */}
             <button
               id="mobile-header-menu-toggle"
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="p-1.5 rounded-xl text-ink-soft hover:bg-sunken cursor-pointer shrink-0"
+              className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] rounded-xl text-ink-soft hover:bg-sunken cursor-pointer shrink-0"
               aria-label="Toggle mobile menu"
             >
-              {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+              {/* H1: fixed px so large text does not grow the target */}
+              {mobileMenuOpen ? <X className="w-[20px] h-[20px]" /> : (
+                // H1: fixed px so large text does not grow the target
+                <Menu className="w-[20px] h-[20px]" />
+              )}
             </button>
           </div>
         </div>
