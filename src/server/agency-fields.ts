@@ -13,6 +13,7 @@
  */
 
 import crypto from 'crypto';
+import { effectiveCertOptions } from './cert-options.ts';
 
 export type DomainStatus = 'none' | 'pending' | 'verified' | 'failed';
 
@@ -191,12 +192,18 @@ function pick(src: any, keys: readonly string[]): Record<string, any> {
 
 /** What any signed-in user (or a public page) may see of an agency: explicit allowlist. */
 export function agencyPublicProfile(agency: any): Record<string, any> {
-  return pick(agency, AGENCY_PUBLIC_FIELDS);
+  const out = pick(agency, AGENCY_PUBLIC_FIELDS);
+  // Item V1: the agency's certification options, classified PUBLIC (labels
+  // only). Computed (stored valid list, else defaults), never the raw value.
+  if (agency && typeof agency === 'object') out.certificationOptions = effectiveCertOptions(agency);
+  return out;
 }
 
 /** What the agency's own admin sees: public profile + settings. Never the DNS proof value. */
 export function agencyAdminView(agency: any): Record<string, any> {
-  return pick(agency, [...AGENCY_PUBLIC_FIELDS, ...AGENCY_ADMIN_EXTRA_FIELDS]);
+  const out = pick(agency, [...AGENCY_PUBLIC_FIELDS, ...AGENCY_ADMIN_EXTRA_FIELDS]);
+  if (agency && typeof agency === 'object') out.certificationOptions = effectiveCertOptions(agency);
+  return out;
 }
 
 /** Remove every server-only domain field from a client-supplied object (copy). */

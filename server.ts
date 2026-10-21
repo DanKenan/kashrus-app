@@ -27,6 +27,7 @@ import {
 } from './src/server/agency-fields.js';
 import { classifySessionClaims, resolveSessionRow, sessionClaimsFor, type SessionClaims } from './src/server/session-token.ts';
 import { agencyIsCleared } from './src/server/agency-flags.ts';
+import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
@@ -1107,6 +1108,7 @@ interface Agency {
   shortCode: string;
   adminEmail: string;
   certificationSeal: string;
+  certificationOptions?: string[]; // Item V1: saved certification choices (sanitized; see src/server/cert-options.ts)
   region: string;
   contactPhone?: string;
   createdAt: string;
@@ -1503,7 +1505,9 @@ const DEFAULT_AGENCIES: Agency[] = [
     name: 'Hartford Kashrut Commission (HKC)',
     shortCode: 'HKC',
     adminEmail: 'kenan@hartfordkashrut.org',
-    certificationSeal: 'Hartford Kashrut Commission (HKC) - Glatt Meat & Mehadrin',
+    // Item V1: the code default is the agency name (no seal text appended).
+    // Only used when the agency is MISSING; a stored seal is never replaced.
+    certificationSeal: 'Hartford Kashrut Commission (HKC)',
     region: 'Hartford, CT & New England',
     contactPhone: '(860) 236-1241',
     createdAt: new Date(Date.now() - 90 * 86400000).toISOString(),
@@ -7332,7 +7336,8 @@ app.post('/api/agencies/register', async (req, res) => {
       .slice(0, 6) ||
     'KOSHER';
 
-  const cleanSeal = (certificationSeal && certificationSeal.trim()) || `${cleanAgencyName} - Kosher Supervision`;
+  // Item V1: default seal = the agency name (no "- Kosher Supervision").
+  const cleanSeal = (certificationSeal && certificationSeal.trim()) || cleanAgencyName;
   const cleanRegion = (region && region.trim()) || 'Regional Kashrut Authority';
 
   // Pre-generate stable IDs + hash password BEFORE the transaction.
@@ -7457,7 +7462,8 @@ app.get('/api/agencies', (req, res) => {
   const a = agencies.find((x: any) => x.id === agencyId) as any;
   if (!a) return res.status(404).json({ error: 'Agency not found.' });
   const { id, name, certificationSeal, shortCode } = a;
-  res.json({ agencies: [{ id, name, certificationSeal, shortCode }] });
+  // Item V1: + the effective certification options (public labels).
+  res.json({ agencies: [{ id, name, certificationSeal, shortCode, certificationOptions: effectiveCertOptions(a) }] });
 });
 
 // Get current agency details for logged in user
@@ -7605,6 +7611,62 @@ app.put('/api/agencies/current', async (req, res) => {
   const adminView = agencyAdminView(updated);
   broadcast('AGENCY_UPDATED', { agency: adminView }, user.email, agencyId);
   res.json({ success: true, agency: adminView });
+});
+
+
+/**
+ * Item V1 ("V1 plan v2"): the agency's saved certification options.
+ * Admin only; the agency comes from the session, never the body. Body:
+ * { options: string[], expectedOptions?: string[] }. The whole list is
+ * replaced (add "Other" for next time, rename, remove = the edited list).
+ * Malformed → 400, nothing written. Re-checked on FRESH data: the caller must
+ * still be an admin of that agency; expectedOptions must equal the fresh
+ * effective list (409 otherwise). Writes ONLY agencies[A].certificationOptions.
+ */
+app.put('/api/agency/certification-options', async (req, res) => {
+  const user = requireAdmin(req, res);
+  if (!user) return; // requireAdmin already responded
+  const agencyId = user.agencyId || 'agency-hkc';
+  const body = req.body || {};
+  const parsed = sanitizeCertOptions(body.options);
+  if (!parsed.ok) return res.status(400).json({ error: (parsed as { error: string }).error, code: 'CERT_OPTIONS_INVALID' });
+  let expected: string[] | undefined;
+  if (body.expectedOptions !== undefined) {
+    if (!Array.isArray(body.expectedOptions) || body.expectedOptions.some((x: unknown) => typeof x !== 'string')) {
+      return res.status(400).json({ error: 'expectedOptions must be a list of text labels.', code: 'CERT_OPTIONS_INVALID' });
+    }
+    expected = body.expectedOptions as string[];
+  }
+  const options = (parsed as { options: string[] }).options;
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshCaller = freshUsers.find((u: any) => u && u.id === user.id);
+      if (!freshCaller || freshCaller.role !== 'admin' || (freshCaller.agencyId || 'agency-hkc') !== agencyId) {
+        return { conflict: 'Only an administrator of this agency can change the certification options.', conflictStatus: 403, conflictCode: 'FORBIDDEN' };
+      }
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const freshAgency = freshAgencies.find((a: any) => a && a.id === agencyId);
+      if (!freshAgency) return { conflict: 'Agency record not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+      const before = effectiveCertOptions(freshAgency);
+      if (expected && !sameCertOptions(before, expected)) {
+        return { conflict: 'The certification options were changed by someone else. Please refresh and try again.', conflictStatus: 409, conflictCode: 'CERT_OPTIONS_STALE' };
+      }
+      const updated = { ...freshAgency, certificationOptions: options };
+      return {
+        doc: { ...freshDoc, agencies: freshAgencies.map((a: any) => (a && a.id === agencyId ? updated : a)) },
+        result: { before, updated },
+      };
+    },
+    { label: 'agency-cert-options', requireVersion: true }
+  );
+  if (!committed) return;
+  const { before, updated } = committed.result as any;
+  log.info(`[audit] certification options changed: admin ${user.id} agency ${agencyId} ${JSON.stringify(before)} -> ${JSON.stringify(options)}`);
+  const adminView = agencyAdminView(updated);
+  broadcast('AGENCY_UPDATED', { agency: adminView }, user.email, agencyId);
+  res.json({ success: true, certificationOptions: effectiveCertOptions(updated), agency: adminView });
 });
 
 
@@ -8436,7 +8498,9 @@ app.post('/api/venues', async (req, res) => {
     name: name.trim(),
     category: category?.trim() || 'Food Service',
     address: address?.trim() || callerAgency?.region || 'West Hartford, CT',
-    certification: certification?.trim() || callerAgency?.certificationSeal || 'Certified Kosher',
+    // Item V1: no text given → the agency NAME (read fresh inside the commit
+    // below); the seal is no longer appended. Given text is stored as typed.
+    certification: certification?.trim() || '',
     ownerEmail: cleanOwnerEmail,
     createdAt,
     ...(tzInput.value ? { timeZone: tzInput.value } : {}),
@@ -8494,12 +8558,18 @@ app.post('/api/venues', async (req, res) => {
         }
       }
 
+      // Item V1: the default certification is the agency's CURRENT name.
+      const freshAgencyForCert: any = (Array.isArray(freshDoc.agencies) ? freshDoc.agencies : []).find((a: any) => a && a.id === callerAgencyId);
+      const venueToAdd: Venue = newVenue.certification
+        ? newVenue
+        : { ...newVenue, certification: (typeof freshAgencyForCert?.name === 'string' && freshAgencyForCert.name.trim()) || 'Certified Kosher' };
+
       // Atomic: venue + owner + starter tasks all commit together.
       const tasksToAdd = starterTasks.filter((t) => !freshTasks.some((ft) => ft.id === t.id));
       return {
         doc: {
           ...freshDoc,
-          venues: [...freshVenues, newVenue],
+          venues: [...freshVenues, venueToAdd],
           users: newUsers,
           tasks: [...freshTasks, ...tasksToAdd],
           // B2: existing venues' markers are materialized from the legacy
@@ -8512,12 +8582,12 @@ app.post('/api/venues', async (req, res) => {
               venueNow
             ),
             [newVenueId]: workDateIn(
-              venueTimeZoneIn(newVenue, Array.isArray(freshDoc.agencies) ? freshDoc.agencies : []),
+              venueTimeZoneIn(venueToAdd, Array.isArray(freshDoc.agencies) ? freshDoc.agencies : []),
               venueNow
             ),
           },
         },
-        result: { venue: newVenue, tasks: tasksToAdd, owner: createdOwner },
+        result: { venue: venueToAdd, tasks: tasksToAdd, owner: createdOwner },
       };
     },
     { label: 'create-venue' }
