@@ -61,6 +61,8 @@ export interface User {
   venueId?: string; // Workers & Owners belong to a specific venue; Admins have access to all in their agency
   /** 9a: ONLY on the signed-in person's own payload (login/reset): every venue they may work in, home first. Never on roster records. */
   myVenueIds?: string[];
+  /** 9a2: ONLY on team records sent to an ADMIN of the same agency: that person's venue scope (home first; sanitized, current venues of the agency). Absent for admin targets (agency-wide) and for every other recipient. */
+  venueIds?: string[];
   kioskPin?: string; // 4-6 digit PIN for shared kiosk tablets (never sent to clients)
   hasKioskPin?: boolean; // K1: server-set marker for managers (never the digits or hash)
   phoneNumber?: string; // K1: optional E.164 number, sent only to admins/coordinator-in-scope
