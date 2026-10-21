@@ -26,6 +26,84 @@ import { rosterDisplayHandle, rosterEmailLower } from '../lib/rosterDisplay';
 // team except venue owners. ('worker' is the app's Mashgiach role.)
 const ASSIGNABLE_ROLES = ['admin', 'coordinator', 'mashgiach', 'worker'];
 
+const normAgency = (a?: string | null) => a || 'agency-hkc';
+
+export interface MashgiachGroups {
+  thisVenue: UserType[];
+  agencyWide: UserType[];
+  otherVenues: UserType[];
+}
+
+/**
+ * E1 (Don, 12:39 AM Oct 21): the Known Mashgiach list shows every assignable
+ * person of the agency, the chosen venue's people first. Rule T, fail closed:
+ * - no signed-in user -> nobody;
+ * - same agency only (the roster payload is already agency-scoped by the
+ *   server; this is defence in depth);
+ * - admin -> the whole agency; anyone else (coordinator) -> own venue people
+ *   plus the agency's admins, exactly what the server sends them
+ *   (getSafeUsersForAgency); a non-admin with no venue -> nobody;
+ * - venue owners are never assignable.
+ */
+export function groupAssignableMashgichim(
+  users: UserType[] | null | undefined,
+  currentUser: UserType | null | undefined,
+  venueId: string
+): MashgiachGroups {
+  const groups: MashgiachGroups = { thisVenue: [], agencyWide: [], otherVenues: [] };
+  if (!currentUser || typeof currentUser.role !== 'string') return groups;
+  const isAdmin = currentUser.role === 'admin';
+  const ownVenue = currentUser.venueId || '';
+  if (!isAdmin && !ownVenue) return groups;
+  const agency = normAgency(currentUser.agencyId);
+  const byName = (a: UserType, b: UserType) => (a.name || '').localeCompare(b.name || '');
+  const pool = (users || [])
+    .filter((u) => !!u && normAgency(u.agencyId) === agency && ASSIGNABLE_ROLES.includes(u.role))
+    .filter((u) => isAdmin || u.role === 'admin' || u.venueId === ownVenue)
+    .sort(byName);
+  for (const u of pool) {
+    if (venueId && u.venueId === venueId) groups.thisVenue.push(u);
+    else if (!u.venueId) groups.agencyWide.push(u);
+    else groups.otherVenues.push(u);
+  }
+  return groups;
+}
+
+/** The ordered dropdown list: this venue, then agency-wide, then other venues. */
+export function orderedMashgichim(groups: MashgiachGroups): UserType[] {
+  return [...groups.thisVenue, ...groups.agencyWide, ...groups.otherVenues];
+}
+
+/**
+ * The venue the dialog is really working on. A deliberate pick wins while it
+ * is a real venue; otherwise the current venue, else the first venue, else ''
+ * (venues still loading). Never a stale/empty id that the list cannot show.
+ */
+export function resolveEventVenueId(
+  picked: string,
+  currentVenueId: string | null | undefined,
+  allVenues: { id: string }[]
+): string {
+  const has = (id?: string | null) => !!id && allVenues.some((v) => v.id === id);
+  if (has(picked)) return picked;
+  if (has(currentVenueId)) return currentVenueId as string;
+  return allVenues[0]?.id || '';
+}
+
+/**
+ * The mashgiach the dialog will submit: the manual pick while it is still in
+ * the list (by email, case-insensitive); otherwise the first listed person
+ * with an email; otherwise ''. Never an email that is not in the dropdown.
+ */
+export function resolveMashgiachEmail(picked: string, ordered: UserType[]): string {
+  const p = (picked || '').toLowerCase();
+  if (p) {
+    const hit = ordered.find((m) => rosterEmailLower(m) === p);
+    if (hit) return hit.email as string;
+  }
+  return ordered.find((m) => !!rosterEmailLower(m))?.email || '';
+}
+
 interface CreateEventModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -46,27 +124,29 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
   availableMashgichim,
 }) => {
   const [title, setTitle] = useState('');
-  const [venueId, setVenueId] = useState(currentVenue?.id || allVenues[0]?.id || '');
-  const [location, setLocation] = useState(currentVenue?.address || '');
+  // E1: the dialog stays mounted while closed, so nothing here may be
+  // computed once at mount (App's venues/roster arrive after sign-in).
+  // pickedVenueId is only the person's deliberate pick; the venue actually
+  // used is derived on every render (resolveEventVenueId).
+  const [pickedVenueId, setPickedVenueId] = useState('');
+  const venueId = resolveEventVenueId(pickedVenueId, currentVenue?.id, allVenues);
+  const venueReady = !!venueId && allVenues.some((v) => v.id === venueId);
+  const [location, setLocation] = useState('');
+  const locationTouched = useRef(false);
   // Item 6: default date = tomorrow in the selected venue's zone (calendar
   // arithmetic, so DST days are right); follows the venue field until the
   // date is edited by hand.
   const tomorrowAt = (vid: string) =>
     addDays(workDateIn(venueTimeZone(allVenues.find((v) => v.id === vid) || null, currentUser), new Date()), 1);
-  const [date, setDate] = useState(() => tomorrowAt(currentVenue?.id || allVenues[0]?.id || ''));
+  const [date, setDate] = useState(() => tomorrowAt(venueId));
   const dateTouched = useRef(false);
   const [startTime, setStartTime] = useState('11:00 AM');
   const [endTime, setEndTime] = useState('16:00 PM');
   
   // Mashgiach Selection: 'assigned_user' | 'external' | 'unassigned'
   const [mashgiachMode, setMashgiachMode] = useState<'assigned_user' | 'external' | 'unassigned'>('assigned_user');
-  const [selectedMashgiachEmail, setSelectedMashgiachEmail] = useState<string>(() => {
-    // Default to first mashgiach in list if available
-    const mashgiachList = availableMashgichim.filter((m) =>
-      ASSIGNABLE_ROLES.includes(m.role)
-    );
-    return mashgiachList[0]?.email || '';
-  });
+  // The manual pick only ('' = none); the submitted email is derived below.
+  const [pickedMashgiachEmail, setPickedMashgiachEmail] = useState('');
   
   // External mashgiach fields if "Other"
   const [extName, setExtName] = useState('');
@@ -114,15 +194,37 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
       });
   }, [isOpen]);
 
+  // E1: every time the dialog opens, venue, address, date and the default
+  // mashgiach start fresh from the current data (drafts of title, notes and
+  // tasks are kept).
+  useEffect(() => {
+    if (!isOpen) return;
+    setPickedVenueId('');
+    setPickedMashgiachEmail('');
+    locationTouched.current = false;
+    dateTouched.current = false;
+  }, [isOpen]);
+
+  // Fill the address and the default date for the venue in use — when the
+  // dialog opens, when the venue list arrives, or when the venue changes —
+  // unless the person typed them by hand.
+  const venueAddress = allVenues.find((v) => v.id === venueId)?.address || '';
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!locationTouched.current) setLocation(venueAddress);
+    if (!dateTouched.current) setDate(tomorrowAt(venueId));
+  }, [isOpen, venueId, venueAddress]);
+
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
-  // Filter mashgichim belonging to chosen venue or agency
-  const relevantMashgichim = availableMashgichim.filter(
-    (u) => ASSIGNABLE_ROLES.includes(u.role) && (!u.venueId || u.venueId === venueId)
-  );
+  // E1: every assignable person of the agency (rule T), this venue first.
+  const mashgiachGroups = groupAssignableMashgichim(availableMashgichim, currentUser, venueId);
+  const relevantMashgichim = orderedMashgichim(mashgiachGroups);
+  const selectedMashgiachEmail = resolveMashgiachEmail(pickedMashgiachEmail, relevantMashgichim);
+  const venueNameOf = (id?: string) => allVenues.find((v) => v.id === id)?.name || '';
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -199,6 +301,17 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
     }
     if (!date) {
       setErrorMsg('Event Date is required.');
+      return;
+    }
+
+    // E1: the venue shown must be the venue submitted.
+    if (!venueReady) {
+      setErrorMsg('Venues are still loading. Try again in a moment.');
+      return;
+    }
+
+    if (mashgiachMode === 'assigned_user' && !selectedMashgiachEmail) {
+      setErrorMsg('Choose a mashgiach from the list, or choose Other.');
       return;
     }
 
@@ -315,10 +428,15 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   <select
                     value={venueId}
                     onChange={(e) => {
-                      setVenueId(e.target.value);
+                      setPickedVenueId(e.target.value);
+                      // A deliberate venue change brings that venue's default mashgiach.
+                      setPickedMashgiachEmail('');
                       if (!dateTouched.current) setDate(tomorrowAt(e.target.value));
                       const selected = allVenues.find((v) => v.id === e.target.value);
-                      if (selected?.address) setLocation(selected.address);
+                      if (selected?.address) {
+                        setLocation(selected.address);
+                        locationTouched.current = false;
+                      }
                     }}
                     disabled={currentUser?.role === 'owner'}
                     className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold disabled:opacity-70"
@@ -357,7 +475,10 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   type="text"
                   required
                   value={location}
-                  onChange={(e) => setLocation(e.target.value)}
+                  onChange={(e) => {
+                    locationTouched.current = true;
+                    setLocation(e.target.value);
+                  }}
                   placeholder="e.g. Beth El Synagogue Ballroom, 2626 Albany Ave"
                   className="w-full pl-8.5 pr-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder:text-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
                 />
@@ -480,17 +601,28 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   <User className="w-3.5 h-3.5 absolute left-3 top-2.5 text-gold-deep" />
                   <select
                     value={selectedMashgiachEmail}
-                    onChange={(e) => setSelectedMashgiachEmail(e.target.value)}
+                    onChange={(e) => setPickedMashgiachEmail(e.target.value)}
                     className="w-full pl-8.5 pr-3 py-2 text-xs rounded-lg bg-surface border border-gold/40 text-ink focus:outline-none focus:ring-2 focus:ring-gold/30"
                   >
                     {relevantMashgichim.length === 0 ? (
-                      <option value="">No venue mashgichim found - select Other</option>
+                      <option value="">No team members found - choose Other</option>
                     ) : (
-                      relevantMashgichim.map((m) => (
-                        <option key={m.id} value={m.email || ''}>
-                          {m.name} — {getRoleLabel(m.role)}{m.email ? ` (${rosterDisplayHandle(m)})` : ''}
-                        </option>
-                      ))
+                      ([
+                        ['This venue', mashgiachGroups.thisVenue, false],
+                        ['Agency-wide', mashgiachGroups.agencyWide, false],
+                        ['Other venues', mashgiachGroups.otherVenues, true],
+                      ] as [string, UserType[], boolean][])
+                        .filter(([, list]) => list.length > 0)
+                        .map(([label, list, showVenue]) => (
+                          <optgroup key={label} label={label}>
+                            {list.map((m) => (
+                              <option key={m.id} value={m.email || ''}>
+                                {m.name} — {getRoleLabel(m.role)}{m.email ? ` (${rosterDisplayHandle(m)})` : ''}
+                                {showVenue && venueNameOf(m.venueId) ? ` · ${venueNameOf(m.venueId)}` : ''}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))
                     )}
                   </select>
                 </div>
@@ -597,7 +729,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 rows={2}
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
-                placeholder="e.g. Glatt Meat buffet; all pastries Parve; require unbroken Cambro delivery seals upon arrival."
+                placeholder="Notes for the mashgiach (optional)"
                 className="w-full px-3 py-2 text-xs rounded-xl bg-sunken border border-line text-ink placeholder:text-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/30 focus:border-gold"
               />
             </div>
@@ -728,7 +860,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={isLoading}
+              disabled={isLoading || !venueReady}
               className="px-5 py-2 font-bold rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 flex items-center gap-1.5 transition disabled:opacity-50 cursor-pointer pressable"
             >
               {isLoading ? (
