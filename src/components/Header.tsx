@@ -156,11 +156,12 @@ export const Header: React.FC<HeaderProps> = ({
         />
       )}
 
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+      <div className="@container max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between min-h-[56px] sm:min-h-[64px] py-1 sm:py-0 gap-3 [[data-phone-layout]_&]:max-sm:min-h-[55px] [[data-phone-layout]_&]:max-sm:py-0 [[data-phone-layout]_&]:max-sm:box-border">
           
           {/* Brand, Venue Switcher & Status */}
-          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          {/* Rem-based container query wraps with large text; 20rem = 320px at 100%, so 360px+ phones at normal size are unchanged. */}
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0 @max-[20rem]:flex-wrap @max-[20rem]:flex-1 @max-[20rem]:basis-0 @max-[20rem]:py-1">
             {/* The agency tag beside "Shutfey" must never be covered: the logo
                 never shrinks; the venue button gives up width first (its name
                 truncates with …). Below 360 px the word "Shutfey" steps aside
@@ -217,14 +218,15 @@ export const Header: React.FC<HeaderProps> = ({
             {/* 5a: Updates bell — always-visible row, beside the venue pill */}
             {updatesBell}
             {currentUser?.role === 'admin' && onOpenAgencyHome && (
+              // H1: fixed px so large text does not grow the target
               <button
                 type="button"
                 onClick={onOpenAgencyHome}
                 aria-label="Agency dashboard"
                 aria-current={isAgencyHome ? 'page' : undefined}
-                className="min-w-11 min-h-11 shrink-0 inline-flex items-center justify-center gap-2 px-2 rounded-xl bg-surface border border-line-control text-ink hover:bg-sunken pressable cursor-pointer"
+                className="min-w-[44px] min-h-[44px] shrink-0 inline-flex items-center justify-center gap-[8px] px-[8px] rounded-xl bg-surface border border-line-control text-ink hover:bg-sunken pressable cursor-pointer"
               >
-                <Home aria-hidden="true" className="w-5 h-5" />
+                <Home aria-hidden="true" className="w-[20px] h-[20px]" />
                 <span className="hidden sm:inline text-sm font-semibold">Dashboard</span>
               </button>
             )}
