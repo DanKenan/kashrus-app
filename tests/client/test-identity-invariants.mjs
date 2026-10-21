@@ -200,8 +200,14 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
 // ---- 10. source tests (C6): no 10b route may use newMembership; origin writers are exactly the C1 ones
 {
   const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
-  const nm = (src.match(/newMembership/g) || []).length;
-  check(`newMembership is referenced 0 times in server.ts until the 10i accept handler (found ${nm})`, nm === 0);
+  // 10d (B3): the ONLY producer of an outcome newMembership before 10i is the
+  // isTestMode-only builder hook; the allowance is derived from accepted joins.
+  const producers = [...src.matchAll(/newMembership:\s*\{/g)].map((m) => m.index);
+  const hookAt = src.indexOf("app.post('/api/__test__/identity-build-person'");
+  const hookEnd = hookAt >= 0 ? src.indexOf('\n  app.', hookAt + 10) : -1;
+  check(`newMembership is produced exactly once in server.ts (found ${producers.length})`, producers.length === 1);
+  check('…and only inside the test-mode identity-build-person hook', producers.length === 1 && hookAt >= 0 && producers[0] > hookAt && producers[0] < hookEnd);
+  check('the growth allowance is derived from the joins the enforcement accepted', /allowGrowthRowIds: acceptedJoins/.test(src) && !/allowGrowthRowIds:\s*(req|body|new Set\(\s*req)/.test(src));
   const setters = [...src.matchAll(/credentialOriginSetById:\s*\{\s*\[([A-Za-z.]+)\]:\s*'([a-z-]+)'/g)].map((m) => m[2]).sort();
   check(`origin writers in server.ts are register, add-member, owner creation, agency reset (found ${setters.join(',')})`,
     setters.join(',') === 'admin,admin,agency-reset,self-registered');
@@ -209,7 +215,7 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   check("'invite-new' has no writer before 10i", !/\]:\s*'invite-new'/.test(src));
   const keepers = (src.match(/passwordKeepsOriginIds:/g) || []).length;
   check(`passwordKeepsOriginIds used only by change-password and the login hash upgrade (found ${keepers})`, keepers === 2);
-  check('commitState runs the checker in applyIdentityInvariant', /checkMembershipInvariants\(beforeUsers, users, agencies\)/.test(src));
+  check('commitState runs the checker in applyIdentityInvariant', /checkMembershipInvariants\(beforeUsers, users, agencies, acceptedJoins\.size/.test(src));
   check('both commit paths call applyIdentityInvariant', (src.match(/outcome\.doc = applyIdentityInvariant\(/g) || []).length === 2);
 }
 
