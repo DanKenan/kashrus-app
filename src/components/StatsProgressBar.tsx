@@ -1,4 +1,5 @@
 import React from 'react';
+import { ProgressRing } from './ProgressRing';
 import {
   Clock,
   ListChecks,
@@ -58,13 +59,14 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
   const status = getReadinessStatus();
 
   return (
-    <div className="bg-surface rounded-3xl p-4 sm:p-5 border border-line tactile-3 mb-5 transition-all relative overflow-hidden animate-fade-in">
+    <div className="max-sm:contents bg-surface rounded-3xl p-4 sm:p-5 border border-line tactile-3 mb-5 transition-all relative overflow-hidden animate-fade-in">
       {/* Subtle warm ambient glow */}
-      <div className="absolute -top-24 -right-24 w-72 h-72 bg-gradient-to-br from-gold/10 via-gold/5 to-transparent rounded-full blur-3xl pointer-events-none" />
+      <div className="max-sm:hidden absolute -top-24 -right-24 w-72 h-72 bg-gradient-to-br from-gold/10 via-gold/5 to-transparent rounded-full blur-3xl pointer-events-none" />
 
       {/* Top Administrative Masthead */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 mb-3.5 border-b border-line/70 relative">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 mb-3.5 border-b border-line/70 relative max-sm:order-3 max-sm:bg-surface max-sm:border max-sm:border-b-0 max-sm:border-line max-sm:rounded-t-lg max-sm:p-4 max-sm:mb-0 max-sm:tactile-1">
+        <div className="max-sm:min-w-0 max-sm:flex-wrap flex items-center gap-3">
+          <h2 className="sm:hidden w-full text-base font-semibold text-ink">Venue details</h2>
           <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2 shrink-0">
             <ShieldCheck className="w-5 h-5" />
           </div>
@@ -122,10 +124,18 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
       </div>
 
       {/* Main Readiness & Stats Section */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5 mb-5">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5 mb-5 max-sm:-order-2 max-sm:bg-surface max-sm:border max-sm:border-line max-sm:rounded-lg max-sm:tactile-1 max-sm:p-4 max-sm:gap-4">
+
+        <div className="sm:hidden flex items-center gap-4">
+          <ProgressRing done={completedTasks} total={totalTasks} size={40} />
+          <div className="text-base text-ink">
+            <h2 className="font-semibold">Today</h2>
+            <p className="tnum">{totalTasks > 0 ? `${completedTasks} of ${totalTasks} done` : 'Awaiting Daily Roster'}</p>
+          </div>
+        </div>
 
         {/* Left: Completion Numbers */}
-        <div className="flex items-center gap-4">
+        <div className="hidden sm:flex items-center gap-4">
           <div className="relative flex items-center justify-center">
             {/* Circular Gauge Ring */}
             <div className="w-16 h-16 sm:w-[4.5rem] sm:h-[4.5rem] rounded-2xl bg-sunken border border-line flex flex-col items-center justify-center p-2 tactile-1">
@@ -162,7 +172,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
           <button
             id="filter-all-btn"
             onClick={() => onSelectFilter('all')}
-            className={`pressable inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
+            className={`max-sm:min-h-11 max-sm:max-w-full max-sm:whitespace-normal pressable inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
               activeFilter === 'all'
                 ? 'bg-ink text-paper tactile-2'
                 : 'bg-sunken text-ink-soft border border-line hover:border-line-strong'
@@ -175,7 +185,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
           <button
             id="filter-mine-btn"
             onClick={() => onSelectFilter('mine')}
-            className={`pressable inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
+            className={`max-sm:min-h-11 max-sm:max-w-full max-sm:whitespace-normal pressable inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
               activeFilter === 'mine'
                 ? 'bg-gradient-to-b from-gold to-gold-deep text-white tactile-2'
                 : 'bg-gold-wash text-gold-ink border border-gold/40 hover:border-gold'
@@ -189,7 +199,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
           <button
             id="filter-pending-btn"
             onClick={() => onSelectFilter('pending')}
-            className={`pressable inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
+            className={`max-sm:min-h-11 max-sm:max-w-full max-sm:whitespace-normal pressable inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
               activeFilter === 'pending'
                 ? 'bg-ink text-paper tactile-2'
                 : 'bg-sunken text-ink-soft border border-line hover:border-line-strong'
@@ -202,7 +212,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
       </div>
 
       {/* Visual Progress Bar with Glow */}
-      <div className="w-full bg-sunken rounded-full h-3 overflow-hidden p-0.5 border border-line/70">
+      <div className="max-sm:hidden w-full bg-sunken rounded-full h-3 overflow-hidden p-0.5 border border-line/70">
         <div
           className={`h-full rounded-full transition-all duration-700 ease-out ${
             completionRate === 100
@@ -215,7 +225,7 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
         />
       </div>
 
-      <div className="flex items-center justify-between text-[11px] text-ink-faint mt-2.5 font-medium">
+      <div className="flex items-center justify-between text-[11px] text-ink-faint mt-2.5 font-medium max-sm:order-4 max-sm:bg-surface max-sm:border max-sm:border-t-0 max-sm:border-line max-sm:rounded-b-lg max-sm:px-4 max-sm:pb-4 max-sm:mt-0 max-sm:mb-5 max-sm:flex-wrap max-sm:gap-2 max-sm:text-xs max-sm:text-ink-soft max-sm:tactile-1">
         <span>Automatic daily cycle resets at midnight (00:00)</span>
         <span className="font-semibold text-ink-soft">
           {agencyName}

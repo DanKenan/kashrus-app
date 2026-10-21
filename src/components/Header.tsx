@@ -151,7 +151,7 @@ export const Header: React.FC<HeaderProps> = ({
       )}
 
       <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between min-h-[56px] sm:min-h-[64px] py-1 sm:py-0 gap-3">
+        <div className="flex items-center justify-between min-h-[56px] sm:min-h-[64px] py-1 sm:py-0 gap-3 [[data-phone-layout]_&]:max-sm:min-h-[55px] [[data-phone-layout]_&]:max-sm:py-0 [[data-phone-layout]_&]:max-sm:box-border">
           
           {/* Brand, Venue Switcher & Status */}
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
@@ -535,7 +535,7 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="mobile-header-new-task-btn"
                 onClick={onOpenTaskModal}
-                className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 min-w-11 min-h-11 rounded-xl bg-gradient-to-r from-gold to-gold-deep active:scale-95 text-white text-xs font-bold shadow-xs cursor-pointer shrink-0"
+                className="[[data-phone-layout]_&]:max-sm:hidden inline-flex items-center justify-center gap-1 px-2.5 py-1.5 min-w-11 min-h-11 rounded-xl bg-gradient-to-r from-gold to-gold-deep active:scale-95 text-white text-xs font-bold shadow-xs cursor-pointer shrink-0"
                 title="Add New Assignment"
                 aria-label="Add new assignment"
               >
