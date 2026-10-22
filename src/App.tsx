@@ -340,10 +340,13 @@ export default function App() {
   // Item 10i: Phase C (invite-only adds) for the admin's own agency, as the
   // server reports it. Read at sign-in and again each time Add member or New
   // venue opens; null (not known) keeps today's forms.
+  // INVITES CLIENT C1: bumped after "Turn on invites" (or a 404 from Send invite) so the flag is asked again.
+  const [inviteRev, setInviteRev] = useState(0);
   const inviteFlag = useInviteFlag(
     !isKiosk && currentUser?.role === 'admin' ? `${currentUser.id}|${currentUser.agencyId || ''}` : null,
     isTeamModalOpen,
     isCreateVenueOpen,
+    inviteRev,
   );
   // Item 10i: the public invite page (/invite#t=…), read once when the app opens.
   const [invitePage, setInvitePage] = useState(() => typeof window !== 'undefined' && isInvitePath(window.location.pathname));
@@ -2226,6 +2229,9 @@ export default function App() {
         currentVenue={currentVenue}
         onAddUser={handleAddUser}
         inviteMode={inviteFlag === true}
+        inviteFlag={isKiosk ? null : inviteFlag}
+        agencyName={currentUser.agencyName}
+        onInviteFlagStale={() => setInviteRev((n) => n + 1)}
         onUpdateUser={handleUpdateUser}
         onDeleteUser={handleDeleteUser}
       />
