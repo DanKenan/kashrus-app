@@ -148,9 +148,10 @@ export const Header: React.FC<HeaderProps> = ({
   };
   const canEnterKiosk = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
 
-  // Item 12: with an agency logo the phone header has no room for the venue name;
-  // hide it fully below sm (icon + chevron only, as on main) instead of a one-glyph sliver.
-  const venueNameHide = agencyLogoSrc ? ' max-sm:hidden' : '';
+  // QA2 #10: the venue name always shows (it truncates with …). With an agency
+  // logo the phone header makes room by hiding the word "Shutfey" and keeping
+  // the logo small, instead of hiding the venue name.
+  const venueNameHide = agencyLogoSrc ? ' max-sm:min-w-[4.5ch]' : '';
 
   return (
     <header className="sticky top-0 z-30 bg-surface/95 backdrop-blur-md border-b border-line tactile-1 transition-colors">
@@ -179,7 +180,7 @@ export const Header: React.FC<HeaderProps> = ({
               agencyName={currentUser?.agencyName}
               agencyShortCode={currentUser?.agencyShortCode}
               compactBelow360
-              compactOnPhone={currentUser?.role === 'admin' && !agencyLogoSrc}
+              compactOnPhone={currentUser?.role === 'admin' || !!agencyLogoSrc}
               className="shrink-0"
             />
 

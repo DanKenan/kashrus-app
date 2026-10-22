@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, 
   FileText, 
@@ -14,7 +14,18 @@ import {
   Calendar
 } from 'lucide-react';
 import { ApprovedIngredient, UnapprovedDiscrepancy, FactoryAuditReport, Venue, User as UserType } from '../types';
+import { formatClockTime } from '../lib/clockTime';
 import { apiFetch } from '../lib/api';
+
+/** QA2 #6: a plain reason when filing the report fails (never a silent no-op). */
+export function reportFailText(status: number, serverText?: unknown): string {
+  if (status === 403) {
+    return "Your account can't file this report. Ask your agency admin.";
+  }
+  if (typeof serverText === 'string' && serverText.trim()) return serverText.trim();
+  if (status === 0) return "The report wasn't sent. Check your connection and try again.";
+  return 'The report could not be filed. Please try again.';
+}
 
 interface SubmitAuditReportModalProps {
   isOpen: boolean;
@@ -35,13 +46,17 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
   discrepancies,
   onSubmitSuccess,
 }) => {
-  const [startTime, setStartTime] = useState('08:30 AM');
-  const [endTime, setEndTime] = useState('14:30 PM');
+  const [startTime, setStartTime] = useState('8:30 AM');
+  const [endTime, setEndTime] = useState('2:30 PM');
   const [factoryRepresentative, setFactoryRepresentative] = useState('QA Plant Manager');
   const [summaryNotes, setSummaryNotes] = useState('');
   const [mashgiachSigned, setMashgiachSigned] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [error]);
 
   const totalIngredients = ingredients.length;
   const verifiedPresentCount = ingredients.filter((i) => i.verificationStatus === 'verified_present').length;
@@ -84,8 +99,8 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
         body: JSON.stringify({
           venueId: venue.id,
           auditDate: new Date().toISOString().split('T')[0],
-          startTime,
-          endTime,
+          startTime: formatClockTime(startTime),
+          endTime: formatClockTime(endTime),
           factoryRepresentative,
           auditedIngredients,
           discrepancies,
@@ -96,15 +111,15 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to submit factory audit report.');
+        throw new Error(reportFailText(res.status, data?.error));
       }
 
       onSubmitSuccess(data.report);
       onClose();
     } catch (err: any) {
-      setError(err.message || 'Error submitting report.');
+      setError(err?.message || reportFailText(0));
     } finally {
       setIsSubmitting(false);
     }
@@ -140,13 +155,6 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 overflow-y-auto space-y-5">
-          {error && (
-            <div className="p-3.5 rounded-xl text-xs bg-bad-bg text-bad border border-bad flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-bad shrink-0" />
-              <span>{error}</span>
-            </div>
-          )}
-
           {/* Audit Metrics Overview */}
           <div className="grid grid-cols-3 gap-3">
             <div className="p-3.5 rounded-2xl bg-sunken border border-line text-center e2">
@@ -193,7 +201,8 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
                   type="text"
                   value={startTime}
                   onChange={(e) => setStartTime(e.target.value)}
-                  placeholder="08:30 AM"
+                  onBlur={() => setStartTime((t) => formatClockTime(t))}
+                  placeholder="8:30 AM"
                   className="w-full pl-8.5 pr-3 py-2 border text-ink placeholder:text-ink-soft focus:outline-none bg-surface border-line-control rounded-lg text-base focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>
@@ -209,7 +218,8 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
                   type="text"
                   value={endTime}
                   onChange={(e) => setEndTime(e.target.value)}
-                  placeholder="14:30 PM"
+                  onBlur={() => setEndTime((t) => formatClockTime(t))}
+                  placeholder="2:30 PM"
                   className="w-full pl-8.5 pr-3 py-2 border text-ink placeholder:text-ink-soft focus:outline-none bg-surface border-line-control rounded-lg text-base focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>
@@ -324,6 +334,15 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
               {currentUser?.name || 'Assigned Mashgiach'}
             </span>
           </div>
+
+          {/* QA2 #6: the error shows right above the button that was tapped
+              (it used to sit at the top of this long, scrolled form). */}
+          {error && (
+            <div ref={errorRef} role="alert" className="p-3.5 rounded-xl text-xs bg-bad-bg text-bad border border-bad flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-bad shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
 
           {/* Actions */}
           <div className="flex items-center justify-between pt-3 border-t border-line/70">
