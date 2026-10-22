@@ -105,12 +105,14 @@ export default {
         assert(m.status === 404, `doc-merge must be 404 (${mode}), got ${m.status}`);
         const rt = await call('GET', '/api/__test__/route-table', auth(tAdminB));
         assert(rt.status === 404, `route-table must be 404 (${mode}), got ${rt.status}`);
+        const pc = await call('POST', '/api/__test__/phase-c', auth(tAdminB), { agencyId: 'agency-hkc', enabled: true });
+        assert(pc.status === 404, `phase-c must be 404 (${mode}), got ${pc.status}`);
       } finally {
         await ctx.restartServer();
       }
       const vb = await call('GET', '/api/venues', auth(tAdminB));
       assert((vb.json?.venues || []).some((v) => v.id === VB) && vb.json?.isDemoCleared === false, 'B changed by the test-mode-off requests');
     }
-    return 'clean-slate route gone (admin + coordinator 404, no write, no broadcast, data untouched); stored per-agency cleared flag still read (A true, B false); outside test mode clean-slate 404, doc-merge 404 and route-table 404 with a valid admin session';
+    return 'clean-slate route gone (admin + coordinator 404, no write, no broadcast, data untouched); stored per-agency cleared flag still read (A true, B false); outside test mode clean-slate 404, doc-merge 404, route-table 404 and phase-c 404 with a valid admin session';
   },
 };
