@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, CheckCircle2, AlertCircle, KeyRound, Eye, EyeOff } from 'lucide-react';
 import { User as UserType } from '../types';
-import { apiFetch } from '../lib/api';
+import { apiFetch, WRONG_CURRENT_PASSWORD_TEXT } from '../lib/api';
 
 interface ChangePasswordModalProps {
   isOpen: boolean;
@@ -57,8 +57,12 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        // QA2 Q2: a wrong current password keeps the person signed in.
+        if (res.status === 401 && (data.code === 'CURRENT_PASSWORD_WRONG' || data.error === WRONG_CURRENT_PASSWORD_TEXT)) {
+          throw new Error('Current password is wrong. Please try again.');
+        }
         throw new Error(data.error || 'Failed to update password.');
       }
 

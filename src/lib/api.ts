@@ -76,6 +76,25 @@ export function clearSession(): void {
 }
 
 /** Drop-in fetch replacement for /api calls — adds Authorization automatically. */
+/**
+ * QA2 Q2: Change password answers a wrong current password with 401. That is
+ * not a session problem. Recognised by the code CURRENT_PASSWORD_WRONG, or by
+ * today's exact server words on that one endpoint (the session-expired 401 on
+ * the same endpoint says "Sign in required…" and still signs out).
+ */
+export const WRONG_CURRENT_PASSWORD_TEXT = 'Current password is incorrect.';
+async function isWrongCurrentPassword401(input: string, res: Response): Promise<boolean> {
+  try {
+    const body = await res.clone().json();
+    if (!body || typeof body !== 'object') return false;
+    if (body.code === 'CURRENT_PASSWORD_WRONG') return true;
+    const path = String(input).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+    return path === '/api/auth/change-password' && body.error === WRONG_CURRENT_PASSWORD_TEXT;
+  } catch {
+    return false;
+  }
+}
+
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const token = getSessionToken();
   const headers = new Headers(init.headers || {});
@@ -108,7 +127,9 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
         // ignore
       }
     }
-    if (token) {
+    // QA2 Q2: a wrong CURRENT password on Change password is the person's
+    // typo, not an expired session — keep them signed in (the form says so).
+    if (token && !(await isWrongCurrentPassword401(input, res))) {
       // Token expired or revoked — clear it and tell the app to show login.
       clearSession();
       try {
