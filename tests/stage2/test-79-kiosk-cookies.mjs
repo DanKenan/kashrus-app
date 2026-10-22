@@ -244,6 +244,8 @@ export default {
       const uTok = await call(baseUrl, 'POST', '/api/__test__/mint-token', { body: { userId: adminId, session: true } });
       const bothUK = await board({ cookies: [`${U}=${uTok.json.token}`, KC, DC], optIn: true, origin: ORIGIN });
       assert(bothUK.status === 401, `B U + K together: ${bothUK.status}`);
+      const uTwoK = await call(baseUrl, 'GET', '/api/agencies/current', { cookies: [`${U}=${uTok.json.token}`, KC, `${K}=${l2.json.token}`], optIn: true, origin: ORIGIN });
+      assert(uTwoK.status === 401, `B U + two K: refused, U is not used (${uTwoK.status})`);
       const userInK = await board({ cookies: [`${K}=${uTok.json.token}`, DC], optIn: true, origin: ORIGIN });
       assert(userInK.status === 401, `B a user token in K: ${userInK.status}`);
       const legacy2 = await call(baseUrl, 'POST', '/api/__test__/mint-kiosk-token', { body: { userId: mashId, agencyId: AGENCY, venueId, pv: c2.pv, dev: t2.id } });
@@ -264,6 +266,9 @@ export default {
       const wsKother = await connectWs(baseUrl, { query: '?auth=cookie', cookies: [KC, `${D}=${t3.cred}`], origin: ORIGIN });
       opened.push(wsKother);
       assert(!wsKother.initial && (await wsKother.waitClose(7000)) === 4401, 'B socket on K with another tablet\'s D closes 4401');
+      const wsTwoD = await connectWs(baseUrl, { query: '?auth=cookie', cookies: [KC, `${D}=${t3.cred}`, DC], origin: ORIGIN });
+      opened.push(wsTwoD);
+      assert(!wsTwoD.initial && (await wsTwoD.waitClose(7000)) === 4401, 'B socket on K with two D cookies: they prove nothing (4401 without the frame)');
       const wsEvil = await connectWs(baseUrl, { query: '?auth=cookie', cookies: [KC, DC], origin: EVIL });
       opened.push(wsEvil);
       assert(!wsEvil.initial && wsEvil.closeCode === 4403, `B socket on K from a foreign Origin: ${wsEvil.closeCode}`);
@@ -374,7 +379,15 @@ export default {
       opened.push(wsA);
       wsA.close();
       assert((await ws9.waitClose(5000)) === 4401, `D the open kiosk socket closes 4401 after the next delivery (got ${ws9.closeCode})`);
-      details.push('D an ended kiosk record: HTTP 401, socket 4401; a store-only revoke closes an open kiosk socket');
+      // a K + D cookie socket also reads the record before it is registered (another instance's revoke)
+      const l10 = await kioskLogin({ device: t1.cred });
+      const c10 = claimsOf(l10.json.token);
+      assert((await hook({ action: 'revoke-silent', sid: c10.sid })).json?.ok === true, 'D store-only revoke (cookie socket)');
+      assert((await hook({ action: 'cache-age', sid: c10.sid, ageMs: 15001 })).json?.ok === true, 'D age the entry (cookie socket)');
+      const ws10 = await connectWs(baseUrl, { query: '?auth=cookie', cookies: [`${K}=${l10.json.token}`, `${D}=${t1.cred}`], origin: ORIGIN });
+      opened.push(ws10);
+      assert(!ws10.initial && ws10.closeCode === 4401, `D a K + D socket on a record revoked elsewhere -> 4401 (got ${ws10.closeCode})`);
+      details.push('D an ended kiosk record: HTTP 401, socket 4401; a store-only revoke closes an open kiosk socket and refuses a new cookie socket');
 
       // ---- E: session store outage
       const l7 = await kioskLogin({ device: t1.cred });

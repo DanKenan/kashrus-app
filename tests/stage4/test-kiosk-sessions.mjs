@@ -32,6 +32,11 @@ export default {
     for (const k of ['agencyId', 'venueId', 'kioskDeviceId', 'pvAtIssue']) {
       assert(!OK({ ...d, [k]: undefined }, kc, now) && !OK({ ...d, [k]: '' }, kc, now), `record without ${k} -> refused`);
     }
+    // a field missing on BOTH sides is still a refusal (never "undefined === undefined")
+    for (const [rk, tk] of [['agencyId', 'agencyId'], ['venueId', 'venueId'], ['kioskDeviceId', 'dev'], ['pvAtIssue', 'pv']]) {
+      const c3 = C({ sub: 'k1', kiosk: true, agencyId: 'ag1', venueId: 'v1', pv: '3', dev: 'kdev-1', sid, [tk]: undefined });
+      assert(!OK({ ...d, [rk]: undefined }, c3, now), `${rk} missing on the record and the token -> refused`);
+    }
     for (const k of ['agencyId', 'venueId', 'pv', 'dev']) {
       const c2 = C({ sub: 'k1', kiosk: true, agencyId: 'ag1', venueId: 'v1', pv: '3', dev: 'kdev-1', sid, [k]: undefined });
       assert(!OK(d, c2, now), `token without ${k} -> refused`);
