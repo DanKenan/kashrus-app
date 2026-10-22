@@ -30,8 +30,8 @@ import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
-import { buildUserSession, sessionBacksClaims, cachePut, cacheFresh, isSid, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
-import { userCookieConfig, cookieValues, setCookieHeader, clearCookieHeader, trustedOrigins, originTrusted, CSRF_ORIGIN_BODY } from './src/server/session-cookie.ts';
+import { buildUserSession, buildKioskSession, sessionBacksClaims, cachePut, cacheFresh, isSid, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
+import { userCookieConfig, kioskCookieConfig, deviceCookieConfig, cookieValues, setCookieHeader, setDeviceCookieHeader, isDeviceCredentialShape, clearCookieHeader, trustedOrigins, originTrusted, CSRF_ORIGIN_BODY } from './src/server/session-cookie.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
 import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetToken, resetLinkForToken, credentialStampHash, stampsEqual, isLiveResetLink, resetLinkAdminView, pruneResetLinks, makeRoomForResetLink, mayMakeResetLink, resetSuspensionRecord } from './src/server/reset-links.ts';
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
@@ -370,11 +370,16 @@ function signChooseToken(ownerRow: { id: string; personId?: string; tokenEpoch?:
  * kioskPinSetAt timestamp as pv simply fail re-validation).
  * dev = the DEVICE id this session is bound to (2b): the token is valid
  * only while that device exists and still points at the same agency/venue. */
-function signKioskToken(userId: string, agencyId: string, venueId: string, pv: string, dev: string): string {
+function signKioskToken(userId: string, agencyId: string, venueId: string, pv: string, dev: string, sid?: string, times?: { iat: number; exp: number }): string {
   const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const now = Math.floor(Date.now() / 1000);
+  // 11a-s3: sid binds the token to its kiosk session record. times (kiosk
+  // adopt only) keeps the adopted token's own iat/exp, so a moved session
+  // never ends later than the token it replaces (the 3 h cap counts from iat).
+  const iat = times ? times.iat : now;
+  const exp = times ? times.exp : now + KIOSK_TOKEN_TTL_SECONDS;
   const payload = base64url(
-    JSON.stringify({ sub: userId, kiosk: true, agencyId, venueId, pv, dev, iat: now, exp: now + KIOSK_TOKEN_TTL_SECONDS })
+    JSON.stringify({ sub: userId, kiosk: true, agencyId, venueId, pv, dev, ...(sid !== undefined ? { sid } : {}), iat, exp })
   );
   const sig = base64url(
     crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest()
@@ -384,9 +389,13 @@ function signKioskToken(userId: string, agencyId: string, venueId: string, pv: s
 
 /** 11a-s2: the exp (seconds) of a token that verifyToken already accepted; null when unreadable. */
 function tokenExpSeconds(token: string): number | null {
+  return tokenNumericClaim(token, 'exp');
+}
+/** 11a-s3: a numeric claim (iat / exp, seconds) of a token that verifyToken already accepted; null when unreadable. */
+function tokenNumericClaim(token: string, name: 'iat' | 'exp'): number | null {
   try {
     const data = JSON.parse(Buffer.from(String(token).split('.')[1] || '', 'base64').toString('utf8'));
-    return typeof data?.exp === 'number' && Number.isFinite(data.exp) ? data.exp : null;
+    return typeof data?.[name] === 'number' && Number.isFinite(data[name]) ? data[name] : null;
   } catch {
     return null;
   }
@@ -472,6 +481,30 @@ function setUserCookie(res: any, token: string, absoluteExpMs: number): boolean 
 function clearUserCookie(res: any): void {
   res.append('Set-Cookie', clearCookieHeader(USER_COOKIE));
 }
+// 11a-s3 (plan 9.2): K = the kiosk session cookie, D = the kiosk device
+// cookie. Same opt-in and trusted-Origin rules as U: without
+// X-Shutfey-Auth: cookie neither is set nor read, so today's tablets (Bearer
+// kiosk token + X-Kiosk-Device header) see no change.
+const KIOSK_COOKIE = kioskCookieConfig(isTestMode());
+const DEVICE_COOKIE = deviceCookieConfig(isTestMode());
+function setKioskCookie(res: any, token: string, absoluteExpMs: number): boolean {
+  const maxAge = Math.floor((absoluteExpMs - Date.now()) / 1000);
+  if (!(maxAge > 0)) return false;
+  res.append('Set-Cookie', setCookieHeader(KIOSK_COOKIE, token, maxAge));
+  return true;
+}
+function clearKioskCookie(res: any): void {
+  res.append('Set-Cookie', clearCookieHeader(KIOSK_COOKIE));
+}
+function setDeviceCookie(res: any, credential: string): boolean {
+  if (!isDeviceCredentialShape(credential)) return false;
+  res.append('Set-Cookie', setDeviceCookieHeader(DEVICE_COOKIE, credential));
+  return true;
+}
+function clearDeviceCookie(res: any): void {
+  res.append('Set-Cookie', clearCookieHeader(DEVICE_COOKIE));
+}
+const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
 /**
  * Every sign-in route answers res.json({ ..., token }) with the token
  * issueSessionToken just minted. That 2xx answer also sets U, so every route
@@ -488,7 +521,17 @@ app.use('/api', (req, res, next) => {
       m && body && typeof body === 'object' && typeof body.token === 'string' && body.token === m.token &&
       res.statusCode >= 200 && res.statusCode < 300 && !res.headersSent && cookieAuthRequested(req) && requestOriginTrusted(req)
     ) {
-      setUserCookie(res, m.token, m.absoluteExpMs);
+      // 11a-s3 (plan 9.2 transitions): an ordinary sign-in sets U and deletes
+      // K (never D: the tablet stays paired); a kiosk sign-in sets K, deletes
+      // U on that tablet, and sets D again from the device it just proved.
+      if (m.kind === 'kiosk') {
+        if (setKioskCookie(res, m.token, m.absoluteExpMs)) {
+          clearUserCookie(res);
+          if (typeof m.deviceCredential === 'string') setDeviceCookie(res, m.deviceCredential);
+        }
+      } else if (setUserCookie(res, m.token, m.absoluteExpMs)) {
+        clearKioskCookie(res);
+      }
     }
     return json(body);
   };
@@ -665,23 +708,35 @@ app.use('/api', async (req, res, next) => {
   let token = bearer;
   let authVia: 'bearer' | 'cookie' | null = bearer ? 'bearer' : null;
   // Any Authorization header at all (even an empty one) means the cookie is not read.
+  // 11a-s3: the cookie is U (user) or K (kiosk); a browser holding both, or
+  // two of either, is refused (plan 9.2: sign-ins replace one with the other).
+  let cookieKind: 'user' | 'kiosk' | null = null;
   if (req.headers.authorization === undefined && cookieAuthRequested(req)) {
     const values = cookieValues(req.headers.cookie, USER_COOKIE.name);
-    if (values.length > 1) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
-    if (values.length === 1 && values[0]) {
-      token = values[0];
+    const kioskValues = cookieValues(req.headers.cookie, KIOSK_COOKIE.name);
+    if (values.length > 1 || kioskValues.length > 1) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    const u = values.length === 1 ? values[0] : '';
+    const k = kioskValues.length === 1 ? kioskValues[0] : '';
+    if (u && k) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    if (u || k) {
+      token = u || k;
       authVia = 'cookie';
+      cookieKind = u ? 'user' : 'kiosk';
       // Plan 9.3: a cookie is ambient, so a cookie-authenticated mutation must come from a trusted Origin.
-      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !requestOriginTrusted(req)) {
+      if (!SAFE_METHODS.includes(req.method) && !requestOriginTrusted(req)) {
         return res.status(403).json(CSRF_ORIGIN_BODY);
       }
     }
   }
   const payload = token ? verifyToken(token) : null;
   // 11a-s2 (plan 9.2): only a user token backed by a server session may ride
-  // U. A kiosk, choose or pre-11 (no sid) token in the cookie is refused by
-  // its claims, whatever the cookie is called.
-  if (authVia === 'cookie' && !sessionBackedClaims(payload)) {
+  // U, and (11a-s3) only a kiosk token backed by a kiosk session may ride K.
+  // Anything else in either cookie (choose, pre-11 / pre-11a-s3 without sid,
+  // the other kind) is refused by its claims, whatever the cookie is called.
+  if (cookieKind === 'user' && !sessionBackedClaims(payload)) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+  if (cookieKind === 'kiosk' && !kioskSessionClaims(payload)) {
     return res.status(401).json({ error: 'Sign in required. Please log in again.' });
   }
   (req as any).authVia = authVia;
@@ -705,7 +760,8 @@ app.use('/api', async (req, res, next) => {
   // error is 503 (never 401: an outage signs nobody out). Tokens without sid
   // (issued before this release) skip this and keep today's rules.
   // Runs BEFORE the row is resolved, so the row below is read after the await.
-  const sessionClaims = sessionBackedClaims(payload);
+  // 11a-s3: kiosk tokens carrying sid are checked the same way (kiosk session record).
+  const sessionClaims = anySessionClaims(payload);
   if (sessionClaims) {
     const authoritative = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
     const verdict = await checkSession(sessionClaims, authoritative);
@@ -787,7 +843,11 @@ app.use('/api', async (req, res, next) => {
       // Item 12: the agency logo (own agency, revision-specific, read only).
       (method === 'GET' && path === '/agency/logo') ||
       (method === 'GET' && path === '/users') ||
-      (method === 'GET' && path === '/health');
+      (method === 'GET' && path === '/health') ||
+      // 11a-s3: a tablet ends its own session, asks who is signed in, and moves to the kiosk cookie.
+      (method === 'POST' && path === '/auth/logout') ||
+      (method === 'GET' && path === '/auth/me') ||
+      (method === 'POST' && path === '/kiosk/session/adopt');
     if (!allowed) {
       return res.status(403).json({
         error: 'This kiosk session can only clock in and out.',
@@ -1032,7 +1092,40 @@ async function issueSessionToken(row: any, req: any, via: SessionVia, opts: { ca
   const token = signSessionToken(fresh, sid);
   // 11a-s2: the response that hands this token out also sets it as the user
   // cookie (sessionCookieOnJson below), from a trusted Origin only.
-  if (req && typeof req === 'object') req.mintedSession = { token, sid, absoluteExpMs: doc.absoluteExpMs };
+  if (req && typeof req === 'object') req.mintedSession = { kind: 'user', token, sid, absoluteExpMs: doc.absoluteExpMs };
+  return { token, sid, absoluteExpMs: doc.absoluteExpMs };
+}
+/**
+ * 11a-s3 (plan 9.1, 15.1): a kiosk token backed by a kiosk session record
+ * (record first; a store error is { down } and no token). The record ends 3 h
+ * after the sign-in, never moved; kiosk adopt passes the adopted token's own
+ * iat/exp so the moved session ends no later. Eligibility is not re-checked
+ * here: every kiosk request and socket re-validates (kioskSessionStillValid).
+ */
+async function issueKioskSessionToken(
+  row: any,
+  req: any,
+  k: { agencyId: string; venueId: string; deviceId: string; pv: string; via: SessionVia; deviceCredential?: string; times?: { iat: number; exp: number } }
+): Promise<{ token: string; sid: string; absoluteExpMs: number } | { down: true }> {
+  const sid = base64url(crypto.randomBytes(16));
+  const nowMs = Date.now();
+  const doc = buildKioskSession({
+    sid, row, epoch: tokenEpochOf(row) ?? 0, agencyId: k.agencyId, venueId: k.venueId, deviceId: k.deviceId, pv: k.pv,
+    via: k.via, userAgent: req?.headers?.['user-agent'], nowMs, capExpMs: k.times ? k.times.exp * 1000 : undefined,
+  });
+  let stored = false;
+  for (let attempt = 0; attempt < 2 && !stored; attempt++) {
+    try {
+      await sessionStorePut(doc);
+      stored = true;
+    } catch (err: any) {
+      log.warn(`[session] kiosk create failed (attempt ${attempt + 1}): ${err?.message || err}`);
+    }
+  }
+  if (!stored) return { down: true };
+  cachePut(sessionCache, sid, { doc, readAtMs: Date.now() });
+  const token = signKioskToken(String(row.id), k.agencyId, k.venueId, k.pv, k.deviceId, sid, k.times);
+  if (req && typeof req === 'object') req.mintedSession = { kind: 'kiosk', token, sid, absoluteExpMs: doc.absoluteExpMs, deviceCredential: k.deviceCredential };
   return { token, sid, absoluteExpMs: doc.absoluteExpMs };
 }
 
@@ -1040,6 +1133,15 @@ async function issueSessionToken(row: any, req: any, via: SessionVia, opts: { ca
 function sessionBackedClaims(claims: any): (SessionBackedClaims & { sid: string }) | null {
   if (!claims || (claims.kind !== 'v1' && claims.kind !== 'v2') || !isSid(claims.sid)) return null;
   return claims;
+}
+/** 11a-s3: a kiosk token carrying sid (backed by a kiosk session record); anything else null. */
+function kioskSessionClaims(claims: any): (SessionBackedClaims & { sid: string }) | null {
+  if (!claims || claims.kind !== 'kiosk' || !isSid(claims.sid)) return null;
+  return claims;
+}
+/** Any token that a session record must back (user or kiosk). */
+function anySessionClaims(claims: any): (SessionBackedClaims & { sid: string }) | null {
+  return sessionBackedClaims(claims) || kioskSessionClaims(claims);
 }
 
 /**
@@ -2899,8 +3001,9 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
   // is backed in the map (revocation on this instance updates the map and
   // closes the socket at once). An entry older than 15 s is re-read in the
   // background (a revision overlapping a deploy); a refusal closes it 4401.
-  if (!meta.kiosk) {
-    const sc = sessionBackedClaims(meta.tokenClaims);
+  // 11a-s3: kiosk sockets carrying a sid too (kiosk session record).
+  {
+    const sc = anySessionClaims(meta.tokenClaims);
     if (sc) {
       const nowMs = Date.now();
       const entry = sessionCache.get(sc.sid);
@@ -5509,6 +5612,7 @@ wss.on('connection', (ws, req) => {
   let kioskPv: string | undefined;
   let kioskDeviceId: string | undefined;
   let isKiosk = false;
+  let cookieDeviceCredential: string | null = null;
   try {
     const url = new URL(req.url || '/ws', 'http://localhost');
     let token = url.searchParams.get('token') || '';
@@ -5518,17 +5622,29 @@ wss.on('connection', (ws, req) => {
     // close 4403) and a user token backed by a server session (else 4401).
     if (!url.searchParams.has('token') && url.searchParams.get('auth') === 'cookie') {
       const values = cookieValues(req.headers.cookie, USER_COOKIE.name);
-      if (values.length >= 1) {
+      // 11a-s3: or the kiosk cookie K (never both; plan 9.2).
+      const kioskValues = cookieValues(req.headers.cookie, KIOSK_COOKIE.name);
+      if (values.length >= 1 || kioskValues.length >= 1) {
         if (!originTrusted(req.headers.origin, TRUSTED_ORIGINS)) {
           ws.close(4403, 'Forbidden');
           return;
         }
-        const cookieClaims = values.length === 1 ? verifyToken(values[0]) : null;
-        if (!sessionBackedClaims(cookieClaims)) {
+        const both = values.length >= 1 && kioskValues.length >= 1;
+        const isUserCookie = values.length >= 1;
+        const one = isUserCookie ? values : kioskValues;
+        const cookieClaims = !both && one.length === 1 ? verifyToken(one[0]) : null;
+        if (isUserCookie ? !sessionBackedClaims(cookieClaims) : !kioskSessionClaims(cookieClaims)) {
           ws.close(4401, 'Unauthorized');
           return;
         }
-        token = values[0];
+        token = one[0];
+        // 11a-s3: a kiosk cookie socket may prove its tablet with the device
+        // cookie D sent on the upgrade itself (checked below against the
+        // token's device); otherwise it sends the KIOSK_DEVICE frame as today.
+        if (!isUserCookie) {
+          const dv = cookieValues(req.headers.cookie, DEVICE_COOKIE.name);
+          if (dv.length === 1 && isDeviceCredentialShape(dv[0])) cookieDeviceCredential = dv[0];
+        }
       }
     }
     const payload = token ? verifyToken(token) : null;
@@ -5594,6 +5710,8 @@ wss.on('connection', (ws, req) => {
   // unexpected one is ignored — rule X: meta is never rebuilt from a
   // client message).
   let connected = false;
+  // 11a-s3: a kiosk socket waits for its device proof (frame or D cookie), then for its session read.
+  let devicePending = isKiosk;
   let proofTimer: ReturnType<typeof setTimeout> | null = null;
 
   const finishConnect = () => {
@@ -5606,7 +5724,7 @@ wss.on('connection', (ws, req) => {
     // (a revocation that landed during the store read is caught here).
     const sessionOk = !wsSession || sessionBacksClaims(sessionCache.get(wsSession.sid)?.doc, wsSession, Date.now());
     const stillOk = isKiosk
-      ? !!current && kioskSessionStillValid(current, { agencyId: kioskAgencyId, venueId: kioskVenueId, pv: kioskPv, deviceId: kioskDeviceId })
+      ? !!current && kioskSessionStillValid(current, { agencyId: kioskAgencyId, venueId: kioskVenueId, pv: kioskPv, deviceId: kioskDeviceId }) && sessionOk
       : !!current && current.id === authedUser.id && sessionOk;
     if (!stillOk) {
       try { ws.close(4401, 'Unauthorized'); } catch {}
@@ -5647,17 +5765,14 @@ wss.on('connection', (ws, req) => {
 
   // 11a-s1: a phone token carrying sid needs its server session (an
   // authoritative store read, plan 10.1) before the socket is registered;
-  // a store error closes 1013 (try again), never 4401.
-  const wsSession = isKiosk ? null : sessionBackedClaims(socketClaims);
-  if (isKiosk) {
-    proofTimer = setTimeout(() => {
-      try {
-        ws.close(4401, 'Unauthorized');
-      } catch {}
-    }, 5000);
-  } else if (!wsSession) {
-    finishConnect();
-  } else {
+  // a store error closes 1013 (try again), never 4401. 11a-s3: a kiosk token
+  // carrying sid too, after its device proof.
+  const wsSession = anySessionClaims(socketClaims);
+  let sessionCheckStarted = false;
+  const connectAfterSession = () => {
+    if (sessionCheckStarted) return;
+    sessionCheckStarted = true;
+    if (!wsSession) return finishConnect();
     sessionPendingSockets.add(ws);
     checkSession(wsSession, true)
       .then((verdict) => {
@@ -5667,12 +5782,28 @@ wss.on('connection', (ws, req) => {
         try { ws.close(verdict === 'down' ? 1013 : 4401, verdict === 'down' ? 'Try again later' : 'Unauthorized'); } catch {}
       })
       .catch(() => { sessionPendingSockets.delete(ws); try { ws.close(1011, 'Server error'); } catch {} });
+  };
+  // 11a-s3: the device cookie sent on the upgrade proves the tablet (same check as the frame).
+  const cookieProved = isKiosk && cookieDeviceCredential
+    ? verifyKioskDeviceCredential(cookieDeviceCredential, kioskDeviceId)
+    : null;
+  if (isKiosk && cookieProved && cookieProved.agencyId === kioskAgencyId && cookieProved.venueId === kioskVenueId) {
+    devicePending = false;
+    connectAfterSession();
+  } else if (isKiosk) {
+    proofTimer = setTimeout(() => {
+      try {
+        ws.close(4401, 'Unauthorized');
+      } catch {}
+    }, 5000);
+  } else {
+    connectAfterSession();
   }
 
   ws.on('message', (data) => {
     try {
       const parsed = JSON.parse(data.toString());
-      if (isKiosk && !connected) {
+      if (isKiosk && devicePending) {
         // The FIRST frame on a kiosk socket must be the device proof:
         // the credential must resolve (hash compare) to the token's own
         // device, at the token's agency and venue.
@@ -5687,7 +5818,8 @@ wss.on('connection', (ws, req) => {
           return;
         }
         if (proofTimer) clearTimeout(proofTimer);
-        finishConnect();
+        devicePending = false;
+        connectAfterSession();
         return;
       }
       if (parsed.type === 'KIOSK_DEVICE') {
@@ -13865,6 +13997,12 @@ app.get('/api/kiosk/pairing/status', async (req, res) => {
   const device = kioskDevices.find((d) => d.id === pairing.deviceId);
   if (!device) return notFound();
   const safe = safeKioskDevice(device);
+  // 11a-s3 (plan 9.2): with the opt-in from a trusted Origin the approved
+  // tablet also gets its device cookie D. The pairing secret IS the device
+  // secret (the device stores the same hash), checked again here.
+  if (cookieAuthRequested(req) && requestOriginTrusted(req) && liveKioskDevice(device.id) && timingSafeStrEq(sha256Hex(parsed.secret), device.secretHash)) {
+    setDeviceCookie(res, `${device.id}.${parsed.secret}`);
+  }
   return res.json({ status: 'approved', device: { id: safe.id, name: safe.name, venueId: safe.venueId, venueName: safe.venueName, agencyId: safe.agencyId } });
 });
 
@@ -13933,6 +14071,9 @@ app.post('/api/kiosk/device/unpair', async (req, res) => {
   }
   closeKioskSocketsForDevice(device.id);
   broadcast('KIOSK_DEVICES_UPDATED', { agencyId: device.agencyId, venueId: device.venueId }, undefined, device.agencyId);
+  // 11a-s3 (plan 9.2): unpair deletes the device cookie D and the kiosk session cookie K.
+  clearDeviceCookie(res);
+  clearKioskCookie(res);
   return res.json({ ok: true });
 });
 
@@ -14253,12 +14394,37 @@ function liveKioskDevice(id: string | undefined): KioskDevice | null {
  * callers answer all of them identically.
  */
 function resolveKioskDevice(req: any): KioskDevice | null {
-  const parsed = parseKioskSecretHeader(req, 'x-kiosk-device');
+  return resolveKioskDeviceProof(req)?.device || null;
+}
+
+/**
+ * 11a-s3 (plan 9.2): the device credential comes from the X-Kiosk-Device
+ * header when that header is sent at all (the transition path; it wins, and
+ * a bad header never falls back to the cookie), else from the device cookie
+ * D, read only with X-Shutfey-Auth: cookie and, on a mutating request, only
+ * from a trusted Origin (a cross-site POST never proves a tablet). Two D
+ * cookies prove nothing. credential is what was proved, for setting D again.
+ */
+function resolveKioskDeviceProof(req: any): { device: KioskDevice; credential: string; via: 'header' | 'cookie' } | null {
+  let parsed: { id: string; secret: string } | null = null;
+  let via: 'header' | 'cookie';
+  if (req?.headers?.['x-kiosk-device'] !== undefined) {
+    parsed = parseKioskSecretHeader(req, 'x-kiosk-device');
+    via = 'header';
+  } else {
+    if (!cookieAuthRequested(req)) return null;
+    if (!SAFE_METHODS.includes(req.method) && !requestOriginTrusted(req)) return null;
+    const values = cookieValues(req.headers.cookie, DEVICE_COOKIE.name);
+    if (values.length !== 1 || !isDeviceCredentialShape(values[0])) return null;
+    const dot = values[0].indexOf('.');
+    parsed = { id: values[0].slice(0, dot), secret: values[0].slice(dot + 1) };
+    via = 'cookie';
+  }
   if (!parsed) return null;
   const device = liveKioskDevice(parsed.id);
   if (!device) return null;
   if (!timingSafeStrEq(sha256Hex(parsed.secret), device.secretHash)) return null;
-  return device;
+  return { device, credential: `${parsed.id}.${parsed.secret}`, via };
 }
 
 /**
@@ -14384,8 +14550,10 @@ app.post('/api/kiosk/login', async (req, res) => {
   // 2b: the tablet must be PAIRED. A missing/invalid device header → 401
   // KIOSK_UNPAIRED and NOTHING is counted (no lockout writes at all). The
   // venue is the DEVICE's venue — any body venueId is ignored entirely.
-  const device = resolveKioskDevice(req);
-  if (!device) {
+  // 11a-s3: the device is proved by X-Kiosk-Device or (opt-in) the device cookie D.
+  const deviceProof = resolveKioskDeviceProof(req);
+  const device = deviceProof?.device || null;
+  if (!device || !deviceProof) {
     return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
   }
   const venueId = device.venueId;
@@ -14675,7 +14843,14 @@ app.post('/api/kiosk/login', async (req, res) => {
       // The commit didn't record a PIN revision — fail closed, no token.
       return res.status(503).json({ error: 'Please try again in a moment.' });
     }
-    kioskToken = signKioskToken(user.id, agencyId, venueId, String(pv), device.id);
+    // 11a-s3 (plan 9.1, 15.1): the token is backed by a kiosk session record
+    // (3 h, never refreshed). A store error is 503 SESSION_STORE_UNAVAILABLE
+    // and no token: the tablet tries again, as for any 503 here.
+    const kioskMint = await issueKioskSessionToken(user, req, {
+      agencyId, venueId, deviceId: device.id, pv: String(pv), via: 'kiosk-login', deviceCredential: deviceProof.credential,
+    });
+    if ('down' in kioskMint) return res.status(503).json(SESSION_STORE_DOWN_BODY);
+    kioskToken = kioskMint.token;
   } catch (err) {
     // Success requires the committed transition (counter reset / rehash).
     // If it didn't land, no token — the tablet must try again.
@@ -15555,8 +15730,9 @@ function chooserPersonOf(req: any): { personId: string; currentRowId: string | n
  * token carrying sid has its record revoked (store first, then this
  * instance's map, then its open sockets): the same token is refused from
  * then on. A token from before this release has no record to revoke
- * (revoked:false); the client forgets it as today. Kiosk tokens never get
- * here (kiosk allowlist -> 403 KIOSK_SCOPE); choose tokens get 401.
+ * (revoked:false); the client forgets it as today. 11a-s3: a kiosk token
+ * gets here too (kiosk allowlist) and its kiosk session record is revoked
+ * the same way; choose tokens get 401.
  */
 app.post('/api/auth/logout', async (req, res) => {
   res.set('Cache-Control', 'no-store');
@@ -15571,6 +15747,10 @@ app.post('/api/auth/logout', async (req, res) => {
     const values = cookieValues(req.headers.cookie, USER_COOKIE.name);
     const cookieClaims = values.length === 1 ? sessionBackedClaims(verifyToken(values[0])) : null;
     if (cookieClaims) sids.add(cookieClaims.sid);
+    // 11a-s3: and the kiosk cookie's session, when this browser holds one.
+    const kioskValues = cookieValues(req.headers.cookie, KIOSK_COOKIE.name);
+    const kioskCookieClaims = kioskValues.length === 1 ? kioskSessionClaims(verifyToken(kioskValues[0])) : null;
+    if (kioskCookieClaims) sids.add(kioskCookieClaims.sid);
   }
   try {
     // One transaction for all of them: a store error revokes none, so the same request can be retried.
@@ -15580,6 +15760,8 @@ app.post('/api/auth/logout', async (req, res) => {
     return res.status(503).json(SESSION_STORE_DOWN_BODY);
   }
   clearUserCookie(res);
+  // 11a-s3: K too (never D: signing out of the tablet keeps it paired).
+  clearKioskCookie(res);
   res.json({ ok: true, revoked: isSid(own) });
 });
 
@@ -15619,13 +15801,66 @@ app.post('/api/auth/session/adopt', async (req, res) => {
   res.json({ ok: true, adopted: true });
 });
 
-/** 11a-s2: who this browser is signed in as, and by which credential ('cookie' | 'bearer'). Kiosk sessions get 403 KIOSK_SCOPE. */
+/**
+ * 11a-s2: who this browser is signed in as, and by which credential ('cookie' | 'bearer').
+ * 11a-s3: a kiosk session answers the same user the kiosk sign-in answered
+ * (the ACTING user, K1) plus kiosk: { venueId, deviceId }.
+ */
 app.get('/api/auth/me', (req, res) => {
   res.set('Cache-Control', 'no-store');
   const me = (req as any).authUser;
   const row = me ? (users as any[]).find((u) => u && u.id === me.id) : undefined;
   if (!row) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  if ((req as any).kiosk === true) {
+    const venueId = (req as any).kioskVenueId;
+    return res.json({ user: getSafeUser(kioskActingUser(row as UserProfile, venueId)), auth: (req as any).authVia, kiosk: { venueId, deviceId: (req as any).kioskDeviceId } });
+  }
   res.json({ user: getSelfUser(row as UserProfile), auth: (req as any).authVia });
+});
+
+/**
+ * 11a-s3 (plan 9.2 adopt-kiosk, 11a-c): move a tablet from its Bearer kiosk
+ * token + X-Kiosk-Device header to the kiosk cookie K and the device cookie
+ * D. The token and the device have already passed the full kiosk check in
+ * the auth middleware. A kiosk token with a session record becomes K as it
+ * is; a kiosk token from before 11a-s3 gets a new record and token that keep
+ * its own iat and exp (the session never ends later than the token it
+ * replaces). D is set from the header the request proved. U is deleted on the
+ * tablet. Opt-in + trusted Origin only (403 CSRF_ORIGIN, nothing set). Already
+ * on K: 200, nothing set. Neither token nor secret appears in the answer.
+ */
+app.post('/api/kiosk/session/adopt', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!cookieAuthRequested(req) || !requestOriginTrusted(req)) return res.status(403).json(CSRF_ORIGIN_BODY);
+  const refused = () => res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  const claims = (req as any).tokenClaims as SessionClaims | null;
+  if ((req as any).kiosk !== true || !claims || claims.kind !== 'kiosk') return refused();
+  if ((req as any).authVia === 'cookie') return res.json({ ok: true, adopted: true });
+  if ((req as any).authVia !== 'bearer') return refused();
+  const proof = resolveKioskDeviceProof(req);
+  if (!proof || proof.device.id !== claims.dev) return refused();
+  const backed = kioskSessionClaims(claims);
+  if (backed) {
+    const doc = sessionCache.get(backed.sid)?.doc;
+    if (!doc || !sessionBacksClaims(doc, backed, Date.now())) return refused();
+    if (!setKioskCookie(res, (req as any).authToken, doc.absoluteExpMs)) return refused();
+  } else {
+    const iat = tokenNumericClaim((req as any).authToken, 'iat');
+    const endsAtMs = claims.endsAtMs;
+    // A token in its last second is not worth moving (and a record must end in the future).
+    if (iat === null || typeof endsAtMs !== 'number' || endsAtMs - Date.now() < 1000 || !claims.agencyId || !claims.venueId || !claims.pv || !claims.dev) return refused();
+    const row = (users as any[]).find((u) => u && u.id === claims.userId);
+    if (!row) return refused();
+    const minted = await issueKioskSessionToken(row, null, {
+      agencyId: claims.agencyId, venueId: claims.venueId, deviceId: claims.dev, pv: claims.pv, via: 'kiosk-adopt',
+      times: { iat, exp: Math.floor(endsAtMs / 1000) },
+    });
+    if ('down' in minted) return res.status(503).json(SESSION_STORE_DOWN_BODY);
+    if (!setKioskCookie(res, minted.token, minted.absoluteExpMs)) return refused();
+  }
+  clearUserCookie(res);
+  setDeviceCookie(res, proof.credential);
+  res.json({ ok: true, adopted: true });
 });
 
 app.get('/api/auth/memberships', (req, res) => {

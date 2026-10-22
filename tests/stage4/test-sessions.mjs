@@ -9,7 +9,7 @@ const J = (o) => JSON.stringify(o);
 
 export default {
   name: 'Item 11 (11a-s1): server session records + sid claims (unit)',
-  whatItProves: 'A sid token is backed only by a matching, unrevoked, unexpired record (row, person, epoch, kind); sid is accepted only well-formed and only on v1/v2; the 30-day end never moves; the cache freshness bound is 15 s.',
+  whatItProves: 'A sid token is backed only by a matching, unrevoked, unexpired record (row, person, epoch, kind); sid is accepted only well-formed and only on v1/v2/kiosk (never choose); the 30-day end never moves; the cache freshness bound is 15 s.',
   async run() {
     const sid = 'AAAAAAAAAAAAAAAAAAAAAA';
     const sid2 = 'BBBBBBBBBBBBBBBBBBBBB_';
@@ -24,9 +24,13 @@ export default {
       [{ v: 2, sub: 'p1', mem: 'u1', ep: 0, sid: 12345 }, 'numeric sid'],
       [{ v: 2, sub: 'p1', mem: 'u1', ep: 0, sid: '' }, 'empty sid'],
       [{ sub: 'u1', sid: null }, 'null sid on v1'],
-      [{ sub: 'k1', kiosk: true, agencyId: 'a', venueId: 'v', pv: '1', dev: 'd', sid }, 'kiosk + sid'],
+      [{ sub: 'k1', kiosk: true, agencyId: 'a', venueId: 'v', pv: '1', dev: 'd', sid: 'short' }, 'kiosk + malformed sid'],
+      [{ sub: 'k1', kiosk: true, agencyId: 'a', venueId: 'v', pv: '1', dev: 'd', sid: 12345 }, 'kiosk + numeric sid'],
       [{ v: 3, sub: 'p1', cr: 'u1', ep: 0, sid }, 'choose + sid'],
     ]) assert(C(o) === null, `${label} -> null`);
+    // 11a-s3: a kiosk token may carry a well-formed sid (its kiosk session record); without one it is unchanged.
+    assert(J(C({ sub: 'k1', kiosk: true, agencyId: 'a', venueId: 'v', pv: '1', dev: 'd', sid })) === J({ kind: 'kiosk', userId: 'k1', agencyId: 'a', venueId: 'v', pv: '1', dev: 'd', sid }), 'kiosk + sid (11a-s3)');
+    assert(!('sid' in C({ sub: 'k1', kiosk: true, agencyId: 'a', venueId: 'v', pv: '1', dev: 'd' })), 'kiosk without sid unchanged (no sid key)');
     assert(J(S({ id: 'u1', personId: 'p1', tokenEpoch: 2 }, sid)) === J({ v: 2, sub: 'p1', mem: 'u1', ep: 2, sid }), 'sessionClaimsFor v2 + sid');
     assert(J(S({ id: 'u1' }, sid)) === J({ sub: 'u1', sid }), 'sessionClaimsFor v1 + sid');
     assert(J(S({ id: 'u1', personId: 'p1' })) === J({ v: 2, sub: 'p1', mem: 'u1', ep: 0 }), 'sessionClaimsFor without sid unchanged');

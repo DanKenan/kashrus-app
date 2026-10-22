@@ -22,6 +22,36 @@ export function userCookieConfig(testMode: boolean): CookieConfig {
   return testMode ? { name: USER_COOKIE_TEST, secure: false } : { name: USER_COOKIE_PROD, secure: true };
 }
 
+/**
+ * 11a-s3 (plan 9.2): K = the kiosk session cookie (a kiosk token backed by a
+ * kiosk session record), D = the kiosk device cookie (the paired tablet's
+ * credential '<deviceId>.<secret>'). Same attributes and test-mode rule as U.
+ */
+export const KIOSK_COOKIE_PROD = '__Host-shutfey_ks';
+export const KIOSK_COOKIE_TEST = 'shutfey_ks';
+export const DEVICE_COOKIE_PROD = '__Host-shutfey_kd';
+export const DEVICE_COOKIE_TEST = 'shutfey_kd';
+/** D lives as long as browsers allow (400 days); it is set again on every kiosk sign-in. Unpairing deletes it. */
+export const DEVICE_COOKIE_MAX_AGE_SEC = 400 * 24 * 3600;
+
+export function kioskCookieConfig(testMode: boolean): CookieConfig {
+  return testMode ? { name: KIOSK_COOKIE_TEST, secure: false } : { name: KIOSK_COOKIE_PROD, secure: true };
+}
+export function deviceCookieConfig(testMode: boolean): CookieConfig {
+  return testMode ? { name: DEVICE_COOKIE_TEST, secure: false } : { name: DEVICE_COOKIE_PROD, secure: true };
+}
+
+/** A device credential is '<id>.<secret>', both base64url-ish, as the X-Kiosk-Device header carries it. */
+const DEVICE_CREDENTIAL_SHAPE = /^[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{1,128}$/;
+export function isDeviceCredentialShape(x: unknown): x is string {
+  return typeof x === 'string' && DEVICE_CREDENTIAL_SHAPE.test(x);
+}
+export function setDeviceCookieHeader(cfg: CookieConfig, credential: string, maxAgeSec: number = DEVICE_COOKIE_MAX_AGE_SEC): string {
+  if (!isDeviceCredentialShape(credential)) throw new Error('setDeviceCookieHeader: bad value');
+  const age = Math.max(0, Math.floor(maxAgeSec));
+  return `${cfg.name}=${credential}; Path=/; Max-Age=${age}; HttpOnly; SameSite=Lax${cfg.secure ? '; Secure' : ''}`;
+}
+
 /** Every value the Cookie header carries for this name, in order (a duplicate is the caller's to refuse). */
 export function cookieValues(header: unknown, name: string): string[] {
   const out: string[] = [];
