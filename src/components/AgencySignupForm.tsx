@@ -19,11 +19,21 @@ import { registerIntoExistingAccount } from '../lib/registerExisting';
 interface AgencySignupFormProps {
   onSuccess: (user: UserType) => void;
   onSwitchToLogin: () => void;
+  /**
+   * Item 11: the agency was created but the server could not start a session
+   * (register answered 201 with token null). The person signs in with the
+   * email and password they just chose; never a half-signed-in app.
+   */
+  onRegisteredWithoutSession?: (email: string) => void;
 }
+
+/** Plain words when the agency exists but no session came back (shown on the sign-in form). */
+export const REGISTERED_SIGN_IN_TEXT = 'Your agency is ready. Please sign in with your email and password.';
 
 export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
   onSuccess,
   onSwitchToLogin,
+  onRegisteredWithoutSession,
 }) => {
   // Agency Information
   const [agencyName, setAgencyName] = useState('');
@@ -63,6 +73,11 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
         if (acronym.length >= 2) setShortCode(acronym);
       }
     }
+  };
+
+  const registeredWithoutSession = () => {
+    if (onRegisteredWithoutSession) onRegisteredWithoutSession(adminEmail.trim().toLowerCase());
+    else setErrorMessage(REGISTERED_SIGN_IN_TEXT);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -121,7 +136,8 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
           operationId: operationIdRef.current,
         });
         if (!r.ok) throw new Error(r.data.error || 'Could not add the agency. Please try again.');
-        if (typeof r.data.token === 'string' && r.data.token) setSessionToken(r.data.token);
+        if (!(typeof r.data.token === 'string' && r.data.token)) { registeredWithoutSession(); return; }
+        setSessionToken(r.data.token);
         if (r.data.user) onSuccess(r.data.user);
         else throw new Error('Agency added, but your profile could not be loaded. Please sign in.');
         return;
@@ -148,7 +164,10 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
         throw new Error(data.error || 'Registration failed. Please verify your details.');
       }
 
-      if (data.token) setSessionToken(data.token);
+      // Item 11: 201 with token null = the agency exists, but no session could
+      // be started right now. Never continue signed in without a token.
+      if (!(typeof data.token === 'string' && data.token)) { registeredWithoutSession(); return; }
+      setSessionToken(data.token);
       if (data.user) {
         onSuccess(data.user);
       } else {

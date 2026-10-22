@@ -3,6 +3,9 @@ import { X, CheckCircle2, AlertCircle, KeyRound, Eye, EyeOff } from 'lucide-reac
 import { User as UserType } from '../types';
 import { apiFetch, setSessionToken, WRONG_CURRENT_PASSWORD_TEXT } from '../lib/api';
 
+/** Item 11: shown when the password changed but no fresh session came back (503 passwordChanged). */
+export const PASSWORD_CHANGED_NO_SESSION_TEXT = 'Your password was changed. If you are asked to sign in, use your new password.';
+
 interface ChangePasswordModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -62,6 +65,12 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
         // QA2 Q2: a wrong current password keeps the person signed in.
         if (res.status === 401 && (data.code === 'CURRENT_PASSWORD_WRONG' || data.error === WRONG_CURRENT_PASSWORD_TEXT)) {
           throw new Error('Current password is wrong. Please try again.');
+        }
+        // Item 11: 503 + passwordChanged = the new password IS saved; only this
+        // phone's fresh session could not be started. Do not invite a retry
+        // (the old password no longer works); say what happened.
+        if (res.status === 503 && data.passwordChanged === true) {
+          throw new Error(PASSWORD_CHANGED_NO_SESSION_TEXT);
         }
         throw new Error(data.error || 'Failed to update password.');
       }
