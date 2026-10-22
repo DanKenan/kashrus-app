@@ -673,15 +673,6 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Mobile Admin Venue Switcher */}
           {currentUser?.role === 'admin' && (
             <div className="p-2.5 rounded-2xl bg-sunken border border-line space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-ink-soft flex items-center gap-1.5">
-                  <Building2 className="w-3.5 h-3.5 text-gold-deep" />
-                  Active Venue:
-                </span>
-                <span className="font-bold text-gold-deep">
-                  {currentVenue?.name}
-                </span>
-              </div>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => { setMobileMenuOpen(false); openVenuesModal(); }}

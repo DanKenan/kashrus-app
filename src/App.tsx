@@ -1,5 +1,5 @@
 import { AgencyLogoSheet } from './components/AgencyLogoSheet';
-import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev } from './lib/agencyLogo';
+import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgencyFields } from './lib/agencyLogo';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue, filterToVenue } from './lib/venueSelection';
@@ -609,6 +609,9 @@ export default function App() {
       }
 
       if (msg.type === 'INITIAL_STATE' && msg.payload) {
+        // A session restored from before #97 has no agencyLogoRev: take the fresh
+        // agency fields from the user's own roster row (runs before any early return).
+        if (Array.isArray(msg.payload.users)) setCurrentUser((prev) => withFreshAgencyFields(prev, msg.payload.users));
         if (currentUser.role !== 'admin') {
           if (Array.isArray(msg.payload.venues)) setVenues(msg.payload.venues);
           const saved = typeof window !== 'undefined'
@@ -688,6 +691,7 @@ export default function App() {
       } else if (msg.type === 'USERS_UPDATED' && msg.payload) {
         if (Array.isArray(msg.payload.users)) {
           setKnownUsers(msg.payload.users);
+          setCurrentUser((prev) => withFreshAgencyFields(prev, msg.payload.users));
         }
       } else if (msg.type === 'EVENT_CREATED' && msg.payload?.event) {
         const newEvt = msg.payload.event as KosherEvent;
