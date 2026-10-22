@@ -46,6 +46,8 @@ import { getRoleLabel, canUserAssignTasks } from '../lib/permissions';
 interface HeaderProps {
   /** 10g: shown only when the login has more than one agency (not on a kiosk). */
   onOpenAgencySwitcher?: () => void;
+  /** 10M part 2: "Merge accounts" (phone sessions only; App never passes it on a kiosk). */
+  onOpenMergeAccounts?: () => void;
   agencyLogoSrc?: string | null;
   isAgencyHome?: boolean;
   onOpenAgencyHome?: () => void;
@@ -86,6 +88,7 @@ export const Header: React.FC<HeaderProps> = ({
   agencyLogoSrc,
   isAgencyHome,
   onOpenAgencySwitcher,
+  onOpenMergeAccounts,
   onOpenAgencyHome,
   currentUser,
   currentVenue,
@@ -547,6 +550,17 @@ export const Header: React.FC<HeaderProps> = ({
                         </button>
                       )}
 
+                      {onOpenMergeAccounts && (
+                        <button
+                          onClick={() => { setUserMenuOpen(false); onOpenMergeAccounts(); }}
+                          aria-haspopup="dialog"
+                          className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
+                        >
+                          <Users className="w-4 h-4 text-ink-faint" />
+                          <span>Merge accounts</span>
+                        </button>
+                      )}
+
                       {/* Download Backup */}
                       <button
                         onClick={async () => {
@@ -789,6 +803,18 @@ export const Header: React.FC<HeaderProps> = ({
                 </>
               )}
             </div>
+          )}
+
+          {currentUser && onOpenMergeAccounts && (
+            <button
+              type="button"
+              onClick={() => { setMobileMenuOpen(false); onOpenMergeAccounts(); }}
+              aria-haspopup="dialog"
+              className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
+            >
+              <Users className="w-4 h-4 text-ink-faint" />
+              <span>Merge accounts</span>
+            </button>
           )}
 
           <div className="pt-2 border-t border-line/70 flex justify-between items-center">

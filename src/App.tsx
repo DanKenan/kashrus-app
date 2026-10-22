@@ -6,6 +6,7 @@ import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue, filterToVenue } from './lib/venueSelection';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
 import { AgencySwitcherSheet } from './components/AgencySwitcherSheet';
+import { MergeAccountsSheet } from './components/MergeAccountsSheet';
 import { fetchMemberships, Membership } from './lib/memberships';
 import { AgencyDashboard } from './components/AgencyDashboard';
 import { Header } from './components/Header';
@@ -352,9 +353,11 @@ export default function App() {
   // Read for the signed-in phone session, including a restored one; never on a kiosk.
   const [memberships, setMemberships] = useState<Membership[]>([]);
   const [isAgencySwitcherOpen, setIsAgencySwitcherOpen] = useState(false);
+  // 10M part 2: merge two accounts (phone session only; the Header is not on a kiosk).
+  const [isMergeAccountsOpen, setIsMergeAccountsOpen] = useState(false);
   const currentUserRowId = currentUser?.id || null;
   useEffect(() => {
-    if (isKiosk || !currentUserRowId) { setMemberships([]); setIsAgencySwitcherOpen(false); return; }
+    if (isKiosk || !currentUserRowId) { setMemberships([]); setIsAgencySwitcherOpen(false); setIsMergeAccountsOpen(false); return; }
     let active = true;
     void fetchMemberships(getSessionToken()).then((list) => {
       if (active) setMemberships(list || []);
@@ -1862,6 +1865,7 @@ export default function App() {
         onLogout={handleLogout}
         onOpenChangePassword={() => setIsChangePasswordOpen(true)}
         onOpenAgencySwitcher={memberships.length > 1 ? () => setIsAgencySwitcherOpen(true) : undefined}
+        onOpenMergeAccounts={() => setIsMergeAccountsOpen(true)}
         onOpenTaskModal={leaveHomeThen(handleOpenCreateTask)}
         onOpenHistoryModal={leaveHomeThen(() => setIsHistoryModalOpen(true))}
         onOpenEventsModal={() => setIsEventsModalOpen(true)}
@@ -2351,6 +2355,20 @@ export default function App() {
         agencyName={currentUser.agencyName}
         onUpdateUser={handleUpdateUser}
         onDeleteUser={handleDeleteUser}
+      />
+
+      <MergeAccountsSheet
+        isOpen={isMergeAccountsOpen && !isKiosk}
+        onClose={() => setIsMergeAccountsOpen(false)}
+        signedInEmail={currentUser.email}
+        onMerged={(token, user, list) => {
+          // The answer signs this device in as the main account (same as #127 keeps
+          // the change-password token); every agency now shows in Switch agency.
+          setSessionToken(token);
+          setMemberships(list);
+          handleLoginSuccess(user);
+        }}
+        onSignInAgain={() => { setIsMergeAccountsOpen(false); handleLogout(); }}
       />
 
       <AgencySwitcherSheet
