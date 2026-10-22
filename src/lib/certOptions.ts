@@ -37,3 +37,54 @@ export function certificationLabel(agencyName: string, detail: string): string {
   const option = normalizeOption(detail);
   return option ? `${agencyName} — ${option}` : agencyName;
 }
+
+/** The picker's built-in choices (the server's defaults when an agency saved none). */
+export const DEFAULT_CERT_OPTIONS: readonly string[] = ['Glatt meat', 'Dairy', 'DE', 'Parve'];
+
+const sameText = (a: string, b: string) => normalizeOption(a).toLocaleLowerCase('en-US') === normalizeOption(b).toLocaleLowerCase('en-US');
+
+/** What follows the agency name in legacy stored text, split at the joining dash (null = no such form). */
+function legacyTail(stored: string, agencyName: string, sep: RegExp): string | null {
+  const text = normalizeOption(stored);
+  const name = normalizeOption(agencyName);
+  if (!name || text.length <= name.length || !sameText(text.slice(0, name.length), name)) return null;
+  const m = sep.exec(text.slice(name.length));
+  return m ? normalizeOption(m[1]) : null;
+}
+
+/**
+ * Display only: how a venue's stored certification text reads against its agency.
+ * Returns the certification detail ('' = no type picked) when the stored text is
+ * consistent with the agency, or null when it is not (show the stored text as is).
+ *  (a) legacy: the agency name twice, joined by ' - ', ' – ', ' — ' or '-' (trim,
+ *      ignore case) -> no type picked;
+ *  today's forms (exactly as before): '<agency name>' and '<agency name> — <detail>';
+ *  (b) legacy: '<agency name> <hyphen, en dash or em dash> <detail>' where the detail
+ *      is one of the agency's options (spacing and case ignored) -> that option.
+ * Stored venue data is never rewritten.
+ */
+export function readCertification(
+  certification: string,
+  agencyName: string | undefined,
+  certificationDetail?: string,
+  options: readonly string[] = DEFAULT_CERT_OPTIONS,
+): string | null {
+  if (!agencyName) return null;
+  const stored = typeof certification === 'string' ? certification : '';
+  const given = certificationDetail?.trim() ? normalizeOption(certificationDetail) : '';
+  // (a) the agency name twice (spaced hyphen / en dash / em dash, or a bare hyphen).
+  const doubled = legacyTail(stored, agencyName, /^(?: [-\u2013\u2014] | ?- ?)(.+)$/);
+  if (!given && doubled !== null && sameText(doubled, agencyName)) return '';
+  // Today's forms (unchanged).
+  const prefix = `${agencyName} — `;
+  const derived = given || (stored.startsWith(prefix) ? normalizeOption(stored.slice(prefix.length)) : '');
+  if (derived && stored === certificationLabel(agencyName, derived)) return derived;
+  if (!given && stored === certificationLabel(agencyName, '')) return '';
+  // (b) '<agency name> <spaced dash> <one of the agency's options>'.
+  const tail = legacyTail(stored, agencyName, /^ [-\u2013\u2014] (.+)$/);
+  if (tail === null) return null;
+  const option = options.find((o) => typeof o === 'string' && !!normalizeOption(o) && sameText(o, tail));
+  if (!option) return null;
+  if (given) return sameText(given, option) ? given : null;
+  return normalizeOption(option);
+}
