@@ -217,9 +217,9 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   check('the growth allowance is derived from the joins the enforcement accepted', /allowGrowthRowIds: acceptedJoins/.test(src) && !/allowGrowthRowIds:\s*(req|body|new Set\(\s*req)/.test(src));
   const setters = [...src.matchAll(/credentialOriginSetById:\s*\{\s*\[([A-Za-z.]+)\]:\s*'([a-z-]+)'/g)].map((m) => m[2]).sort();
   check(`origin writers in server.ts are register, add-member, owner creation, agency reset, 10i accept (found ${setters.join(',')})`,
-    setters.join(',') === 'admin,admin,agency-reset,invite-new,self-registered');
+    setters.join(',') === 'admin,admin,agency-reset,invite-new,invite-new,self-registered');
   check("'self-registered' appears in exactly one writer", (src.match(/\]:\s*'self-registered'/g) || []).length === 1);
-  check("'invite-new' has exactly one writer (10i accept, new person)", (src.match(/\]:\s*'invite-new'/g) || []).length === 1);
+  check("'invite-new' writers: 10i accept (new person) + 10k setup accept", (src.match(/\]:\s*'invite-new'/g) || []).length === 2);
   const keepers = (src.match(/passwordKeepsOriginIds:/g) || []).length;
   check(`passwordKeepsOriginIds used only by change-password, the login hash upgrade and 10f recovery (found ${keepers})`, keepers === 3);
   check('commitState runs the checker in applyIdentityInvariant', /checkMembershipInvariants\(beforeUsers, users, agencies, acceptedJoins\.size/.test(src));
@@ -251,6 +251,19 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   check('10c A4: delete evaluates legacy ambiguity on FRESH users', /legacyPushSubIsUnambiguous\(targetEmail, freshUsers\)/.test(src));
   check('10c A5: venue-owner email resolved by one agency-scoped resolver, cached and fresh', (src.match(/resolveVenueOwnerEmail\((users|newUsers)\)/g) || []).length === 2);
   check('10c A5: no global first-match owner lookup remains', !/users\.find\(\(u\) => typeof u\.email === 'string' && u\.email\.trim\(\)\.toLowerCase\(\) === cleanOwnerEmail\)/.test(src) && !/newUsers\.findIndex\(\(u\) => typeof u\.email === 'string' && u\.email\.trim\(\)\.toLowerCase\(\) === cleanOwnerEmail\)/.test(src));
+}
+
+// ---- 10k (K1): credentialPending has exactly two producers: Send invite ('set') and setup accept ('clear')
+{
+  const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
+  const sets = (src.match(/credentialPendingWriteById:\s*\{\s*\[targetId\]:\s*'set'/g) || []).length;
+  const clears = (src.match(/credentialPendingWriteById:\s*\{\s*\[memberId\]:\s*'clear'/g) || []).length;
+  const all = (src.match(/credentialPendingWriteById:/g) || []).length;
+  check(`10k credentialPending writers: one set, one clear, nothing else (found ${sets}/${clears}/${all})`, sets === 1 && clears === 1 && all === 2);
+  const sendAt = src.indexOf("app.post('/api/users/:id/invite'");
+  const acceptAt = src.indexOf('async function acceptSetupInvite(');
+  check('10k set lives in POST /api/users/:id/invite, clear in acceptSetupInvite', sendAt > 0 && acceptAt > 0 && src.indexOf("[targetId]: 'set'") > sendAt && src.indexOf("[memberId]: 'clear'") > acceptAt);
+  check("10k 'invite-new' writers: the 10i accept and the setup accept", (src.match(/\]:\s*'invite-new'/g) || []).length === 2);
 }
 
 // ---- 10i ([10I-RV1] B1): flag-ON venue creation never hashes ownerPassword
