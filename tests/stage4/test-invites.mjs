@@ -4,8 +4,9 @@
 import crypto from 'node:crypto';
 import {
   newInviteToken, hashInviteToken, phaseCEnabled, parseInviteInput, isLiveInvite, inviteListView, pruneInvites,
-  INVITE_ROLES, INVITE_TTL_MS, INVITE_RETENTION_MS,
+  INVITE_ROLES, INVITE_TTL_MS, INVITE_RETENTION_MS, parseMemberInvite, defaultPermissionsFor, inviteHashMatches, inviteDisplayName,
 } from '../../src/server/invites.ts';
+import { enforceIdentityFields } from '../../src/server/identity.ts';
 import { scrubSecrets } from '../../src/server/backup.ts';
 import { stripServerOnlyAgencyFields, agencyAdminView } from '../../src/server/agency-fields.ts';
 
@@ -48,7 +49,7 @@ export default {
     const live = { id: 'i1', status: 'pending', expiresAt: iso(now + 1000), inviteTokenHash: 'h'.repeat(64), email: 'a@b.co', role: 'mashgiach', venueIds: ['v1'], invitedBy: 'u', createdAt: iso(now - 1000), agencyId: 'A' };
     assert(isLiveInvite(live, now) && !isLiveInvite({ ...live, expiresAt: iso(now - 1) }, now) && !isLiveInvite({ ...live, status: 'revoked' }, now) && !isLiveInvite({ ...live, expiresAt: 'garbage' }, now), 'live/expired');
     const view = inviteListView(live);
-    assert(J(Object.keys(view).sort()) === J(['createdAt', 'email', 'expiresAt', 'id', 'invitedBy', 'role', 'venueIds']) && !J(view).includes('hhhh'), 'list view without hash/status/agency');
+    assert(J(Object.keys(view).sort()) === J(['createdAt', 'email', 'expiresAt', 'id', 'invitedBy', 'kind', 'name', 'role', 'venueIds']) && !J(view).includes('hhhh'), 'list view without hash/status/agency');
     assert(INVITE_TTL_MS === 7 * 864e5 && INVITE_RETENTION_MS === 30 * 864e5, 'ttl/retention');
     const D = 864e5;
     const list = [
@@ -66,6 +67,37 @@ export default {
     const kept = pruneInvites(list, now).map((i) => i.id);
     assert(J(kept) === J(['i1', 'r-new', 'e-new', 'a-new', 'r-bad', 'a-missing']), `retention ${J(kept)}`);
 
+
+    // ---- 10i: parseMemberInvite / defaults / hash compare / first-multi owner writer ----
+    const phone = (raw) => (raw === undefined || raw === null || raw === '' ? { ok: true } : /^\+\d{8,15}$/.test(String(raw)) ? { ok: true, value: String(raw) } : { ok: false });
+    const pm = (b, o = {}) => parseMemberInvite(b, V, { normalizePhone: phone, phoneError: 'bad phone', ...o });
+    const m1 = pm({ email: 'a@b.co', role: 'coordinator', venueIds: ['v1'], name: '  Ann  ', phoneNumber: '+12025550123' });
+    assert(m1.ok && m1.value.name === 'Ann' && m1.value.phoneNumber === '+12025550123' && J(m1.value.permissions) === J({ canFillTasks: true, canAssignTasks: true }), `member parse ${J(m1)}`);
+    const pcode = (b, o) => { const r = pm(b, o); return r.ok ? 'OK' : r.code; };
+    assert(pcode({ email: 'a@b.co', role: 'mashgiach', venueIds: ['v1'] }) === 'INVITE_NAME_INVALID', 'name required');
+    assert(pcode({ email: 'a@b.co', role: 'mashgiach', venueIds: ['v1'], name: 'x'.repeat(101) }) === 'INVITE_NAME_INVALID', 'name max 100');
+    assert(pcode({ email: 'a@b.co', role: 'mashgiach', venueIds: ['v1'], name: 'N', phoneNumber: '12' }) === 'INVITE_PHONE_INVALID', 'phone checked');
+    assert(pcode({ email: 'a@b.co', role: 'owner', venueIds: ['v1'], name: 'N' }) === 'INVITE_ROLE_INVALID', 'owner refused without the server flag');
+    const ow = pm({ email: 'a@b.co', role: 'owner', venueIds: ['v1'], name: 'N' }, { allowOwner: true });
+    assert(ow.ok && ow.value.role === 'owner' && J(ow.value.venueIds) === J(['v1']), 'owner allowed only with allowOwner');
+    for (const [role, f, a] of [['admin', true, true], ['coordinator', true, true], ['mashgiach', true, false], ['owner', false, false], ['worker', false, false]]) {
+      const d = defaultPermissionsFor(role);
+      assert(d.canFillTasks === f && d.canAssignTasks === a, `defaults ${role} ${J(d)}`);
+    }
+    assert(J(defaultPermissionsFor('mashgiach', { canAssignTasks: 1 })) === J({ canFillTasks: true, canAssignTasks: true }), 'explicit permissions win');
+    const tk = newInviteToken();
+    assert(inviteHashMatches(tk.hash, tk.raw) && !inviteHashMatches(tk.hash, tk.raw.slice(0, -1) + (tk.raw.endsWith('A') ? 'B' : 'A')) && !inviteHashMatches(undefined, tk.raw) && !inviteHashMatches(tk.hash, ''), 'hash compare');
+    assert(inviteDisplayName({ email: 'sam@x.co' }) === 'sam' && inviteDisplayName({ name: ' Sam ', email: 'q@x.co' }) === 'Sam', 'display name fallback');
+    const BC = '$2b$10$' + 'a'.repeat(53);
+    const before = [{ id: 'p', personId: 'p', email: 'p@x.co', agencyId: 'A', password: BC, credentialOrigin: 'self-registered' }];
+    const grown = [...before, { id: 'n', email: 'p@x.co', agencyId: 'B' }];
+    const ok1 = enforceIdentityFields(before, grown, [], { newMembership: new Map([['n', 'p']]), firstMultiOwnerIds: new Set(['p']) });
+    assert(ok1[0].credentialOwner === true && ok1[1].personId === 'p' && ok1[1].credentialOwner === undefined, 'first-multi owner set with a join');
+    const viol = [];
+    const noJoin = enforceIdentityFields(before, before, [], { firstMultiOwnerIds: new Set(['p']), onViolation: (r, f) => viol.push(`${r}:${f}`) });
+    assert(noJoin[0].credentialOwner === undefined && viol.includes('p:firstMultiOwner'), 'no join -> refused + reported');
+    const forged = enforceIdentityFields(before, [{ ...before[0], credentialOwner: true }], [], {});
+    assert(forged[0].credentialOwner === undefined, 'a mutator cannot set credentialOwner itself');
     const scrubbed = J(scrubSecrets({ invites: [live] }));
     assert(!scrubbed.includes('h'.repeat(64)) && scrubbed.includes('[REDACTED]'), `backup scrubs inviteTokenHash ${scrubbed.slice(0, 200)}`);
   },

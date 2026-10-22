@@ -60,7 +60,7 @@ export default {
     const invitesOf = async () => ((await doc()).invites || []);
     const rehydrate = async (k) => assert((await hook('inject-fixture', { venues: [{ id: `venue-t67-h${k}-${Date.now()}`, name: 'T67 hydrate', agencyId: B }] })).status === 200, `rehydrate ${k}`);
     const unchanged = async (v, label) => assert((await ctx.getVersion()) === v, `${label}: nothing may be written`);
-    const create = async (t, body) => call('POST', '/api/agency/invites', auth(t), { ...body, expectedVersion: await ctx.getVersion() });
+    const create = async (t, body) => call('POST', '/api/agency/invites', auth(t), { name: 'T67 Person', ...body, expectedVersion: await ctx.getVersion() }); // 10i: name required
     const list = (t) => call('GET', '/api/agency/invites', auth(t));
     const revoke = async (t, id) => call('DELETE', `/api/agency/invites/${id}`, auth(t), { expectedVersion: await ctx.getVersion() });
     const flag = async (agencyId, enabled) => assert((await hook('phase-c', { agencyId, enabled })).status === 200, `phase-c ${agencyId} ${enabled}`);
@@ -108,7 +108,7 @@ export default {
       assert(m, `B relative link with a 43-char token: ${r.json.link}`);
       raw1 = m[1];
       inv1 = r.json.invite;
-      assert(J(Object.keys(inv1).sort()) === J(['email', 'expiresAt', 'id', 'role', 'venueIds']) && inv1.email === E('new1') && J(inv1.venueIds) === J([A1, A2]), `B invite view ${J(inv1)}`);
+      assert(J(Object.keys(inv1).sort()) === J(['email', 'expiresAt', 'id', 'name', 'role', 'venueIds']) && inv1.email === E('new1') && J(inv1.venueIds) === J([A1, A2]), `B invite view ${J(inv1)}`);
       const exp = Date.parse(inv1.expiresAt) - Date.now();
       assert(exp > 6.9 * 864e5 && exp <= 7 * 864e5, `B 7-day expiry (${exp})`);
       const stored = (await invitesOf()).find((i) => i.id === inv1.id);

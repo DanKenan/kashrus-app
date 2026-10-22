@@ -79,9 +79,11 @@ export function isLiveInvite(inv: any, nowMs: number): boolean {
 }
 
 /** What GET returns: never the hash, never internals. */
-export function inviteListView(inv: any): { id: string; email: string; role: string; venueIds: string[]; invitedBy: string; createdAt: string; expiresAt: string } {
+export function inviteListView(inv: any): { id: string; kind: string; email: string; name: string; phoneNumber?: string; role: string; venueIds: string[]; invitedBy: string; createdAt: string; expiresAt: string } {
   return {
-    id: String(inv.id), email: String(inv.email), role: String(inv.role),
+    id: String(inv.id), kind: inv.kind === 'setup' ? 'setup' : 'member', email: String(inv.email), name: inviteDisplayName(inv),
+    ...(typeof inv.phoneNumber === 'string' && inv.phoneNumber ? { phoneNumber: inv.phoneNumber } : {}),
+    role: String(inv.role),
     venueIds: Array.isArray(inv.venueIds) ? inv.venueIds.map(String) : [],
     invitedBy: String(inv.invitedBy || ''), createdAt: String(inv.createdAt || ''), expiresAt: String(inv.expiresAt || ''),
   };
@@ -104,3 +106,76 @@ export function pruneInvites(list: any[], nowMs: number): any[] {
     return nowMs - at < INVITE_RETENTION_MS;
   });
 }
+
+// ---------------------------------------------------------------------------
+// Item 10i (design v3, [10I-DS3] agreed; v3.1: no recovery codes): the ONE
+// profile parser for every invite-creating path (POST /api/agency/invites,
+// POST /api/users when the flag is ON, POST /api/venues owner invites).
+// ---------------------------------------------------------------------------
+export type MemberPermissions = { canFillTasks: boolean; canAssignTasks: boolean };
+
+/** POST /api/users' role-based permission defaults (shared, W3). */
+export function defaultPermissionsFor(role: string, permissions?: any): MemberPermissions {
+  return {
+    canFillTasks:
+      permissions?.canFillTasks !== undefined
+        ? Boolean(permissions.canFillTasks)
+        : role === 'admin' || role === 'coordinator' || role === 'mashgiach',
+    canAssignTasks:
+      permissions?.canAssignTasks !== undefined
+        ? Boolean(permissions.canAssignTasks)
+        : role === 'admin' || role === 'coordinator',
+  };
+}
+
+export type MemberInviteInput = Omit<InviteInput, 'role'> & { role: InviteRole | 'owner'; name: string; phoneNumber?: string; permissions: MemberPermissions };
+
+/**
+ * parseInviteInput + name (required, 1..100), phoneNumber (optional, through
+ * the caller's normalizer), permissions (role defaults). Role 'owner' only
+ * when the SERVER says so (allowOwner: the venue-owner path); a body can
+ * never authorise it.
+ */
+export function parseMemberInvite(
+  body: any,
+  agencyVenueIds: readonly string[],
+  opts: { allowOwner?: boolean; normalizePhone: (raw: unknown) => { ok: boolean; value?: string }; phoneError: string }
+): { ok: true; value: MemberInviteInput } | { ok: false; error: string; code: string } {
+  const isOwner = body?.role === 'owner';
+  if (isOwner && !opts.allowOwner) return { ok: false, error: 'Choose a valid role.', code: 'INVITE_ROLE_INVALID' };
+  const base = parseInviteInput(isOwner ? { ...body, role: 'mashgiach' } : body, agencyVenueIds);
+  if (base.ok === false) return base;
+  const name = typeof body?.name === 'string' ? body.name.trim() : '';
+  if (!name || name.length > 100) return { ok: false, error: 'Enter a name (up to 100 characters).', code: 'INVITE_NAME_INVALID' };
+  const phone = opts.normalizePhone(body?.phoneNumber);
+  if (!phone.ok) return { ok: false, error: opts.phoneError, code: 'INVITE_PHONE_INVALID' };
+  const role = isOwner ? 'owner' : base.value.role;
+  return {
+    ok: true,
+    value: {
+      ...base.value, role, name,
+      ...(phone.value ? { phoneNumber: phone.value } : {}),
+      permissions: defaultPermissionsFor(role, body?.permissions),
+    },
+  };
+}
+
+/** The invitee's display name (records from before 10i carry none: the email's local part). */
+export function inviteDisplayName(inv: any): string {
+  if (typeof inv?.name === 'string' && inv.name.trim()) return inv.name.trim();
+  const e = typeof inv?.email === 'string' ? inv.email : '';
+  return e.split('@')[0] || 'Team member';
+}
+
+/** Constant-time compare of a stored invite hash with sha256(raw). */
+export function inviteHashMatches(storedHash: unknown, raw: unknown): boolean {
+  if (typeof storedHash !== 'string' || typeof raw !== 'string' || !raw) return false;
+  const a = Buffer.from(storedHash, 'utf8');
+  const b = Buffer.from(hashInviteToken(raw), 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+export const INVITE_ACCEPT_FAILED_TEXT = "We couldn't accept the invite with these details. If you already use Shutfey, sign in with that password.";
+export const INVITE_LINK_INVALID_TEXT = 'This invite link is not valid anymore.';
+export const INVITE_NOT_LINKABLE_TEXT = "This account can't be connected to another agency yet.";
+export const INVITE_MAX_FAILED_ATTEMPTS = 5;
