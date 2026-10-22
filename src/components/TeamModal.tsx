@@ -22,6 +22,8 @@ import { KioskCodeDialog } from './KioskCodeDialog';
 import { VenueAccessSheet } from './VenueAccessSheet';
 import { normalizePhone } from '../lib/kioskCodeShare';
 import { InviteLinkCard } from './InviteLinkCard';
+import { enableInvites, sendMemberInvite, loadMemberForInvite, inviteChip, SEND_CHANGED_TEXT } from '../lib/inviteActions';
+import type { InviteFlag } from '../lib/invites';
 
 /** Item 10i: what Add member returns when the agency's Phase C is ON (the server made an invite, not a user). */
 export interface AddMemberInvite {
@@ -49,6 +51,11 @@ interface TeamModalProps {
   }) => Promise<void | AddMemberInvite>;
   /** Item 10i: true when the server reports Phase C ON for this agency — the form adds by invite link (no password). */
   inviteMode?: boolean;
+  /** INVITES CLIENT: the raw flag (true ON, false OFF, null not known). "Turn on invites" shows only on false. */
+  inviteFlag?: InviteFlag;
+  agencyName?: string;
+  /** INVITES CLIENT: ask the flag again (after turning invites on, or a 404 from Send invite). */
+  onInviteFlagStale?: () => void;
   onUpdateUser?: (userId: string, updates: { 
     role?: UserRole; 
     permissions?: UserPermissions;
@@ -68,6 +75,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   venues,
   onAddUser,
   inviteMode = false,
+  inviteFlag = null,
+  agencyName,
+  onInviteFlagStale,
   onUpdateUser,
   onDeleteUser,
 }) => {
@@ -94,11 +104,97 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const [actionAlert, setActionAlert] = useState<string | null>(null);
   // Item 10i: the invite link just made (shown once, never stored).
   const [inviteResult, setInviteResult] = useState<{ link: string; forWhom: string } | null>(null);
+  // INVITES CLIENT C2: "Turn on invites" (admin, flag OFF only).
+  const [enableConfirm, setEnableConfirm] = useState(false);
+  const [enableBusy, setEnableBusy] = useState(false);
+  const [enableError, setEnableError] = useState<string | null>(null);
+  const [inviteNotice, setInviteNotice] = useState<string | null>(null);
+  // INVITES CLIENT C3: Send invite for one member (confirm first; the link is shown once).
+  // B1 ([INVC-DS3]): the record the admin reviews and the version of the response it came from.
+  const [sendReview, setSendReview] = useState<{ user: UserType; version: number; changed: boolean } | null>(null);
+  const sendTarget = sendReview?.user || null;
+  // The row whose fresh record is loading (Send invite tap, or a refresh after a version conflict).
+  const [sendLoadingId, setSendLoadingId] = useState<string | null>(null);
+  const [sendBusyId, setSendBusyId] = useState<string | null>(null);
+  const [sentLink, setSentLink] = useState<{ userId: string; link: string; firstName: string } | null>(null);
+  const [sentIds, setSentIds] = useState<string[]>([]);
+  const [sendError, setSendError] = useState<{ userId: string; message: string; retry?: boolean } | null>(null);
   useEffect(() => {
-    if (!isOpen) setInviteResult(null);
+    if (!isOpen) {
+      setInviteResult(null);
+      setEnableConfirm(false);
+      setEnableError(null);
+      setSendReview(null);
+      setSentLink(null);
+      setSendError(null);
+    }
   }, [isOpen]);
 
   if (!isOpen) return null;
+
+  const isAdminView = currentUser?.role === 'admin';
+  const firstName = (n: string) => (n || '').trim().split(/\s+/)[0] || n;
+
+  const confirmEnableInvites = async () => {
+    if (enableBusy) return;
+    setEnableBusy(true);
+    setEnableError(null);
+    const r = await enableInvites();
+    setEnableBusy(false);
+    setEnableConfirm(false);
+    if (r.ok) {
+      setInviteNotice('Invites are on. New people get a link and choose their own password.');
+      onInviteFlagStale?.();
+    } else {
+      setEnableError(r.message || "Couldn't turn on invites. Please try again.");
+    }
+  };
+
+  /** Load the person's fresh record and its version, then open (or re-open) the confirm. */
+  const openSendReview = async (userId: string, changed: boolean) => {
+    setSendLoadingId(userId);
+    const r = await loadMemberForInvite(userId);
+    setSendLoadingId(null);
+    if (!r.ok || !r.user || r.version === undefined) {
+      setSendReview(null);
+      // A load that failed can be retried; a person who is gone cannot.
+      setSendError({ userId, message: r.message || "Couldn't load their details. Please try again.", retry: !r.gone });
+      return;
+    }
+    setSendReview({ user: r.user, version: r.version, changed });
+  };
+
+  const startSendInvite = (user: UserType) => {
+    if (sendBusyId || sendLoadingId) return;
+    setSendError(null);
+    setSentLink(null);
+    void openSendReview(user.id, false);
+  };
+
+  const confirmSendInvite = async () => {
+    const review = sendReview;
+    if (!review || sendBusyId || sendLoadingId) return;
+    const target = review.user;
+    setSendBusyId(target.id);
+    setSendError(null);
+    const r = await sendMemberInvite(target.id, review.version);
+    setSendBusyId(null);
+    if (r.conflict) {
+      // Keep the admin's intent: nothing is sent until the fresh record and its version are back
+      // and the admin confirms again. A failed refresh closes the sheet with a retry in the row.
+      setSendReview(null);
+      await openSendReview(target.id, true);
+      return;
+    }
+    setSendReview(null);
+    if (r.ok) {
+      setSentLink({ userId: target.id, link: r.link || '', firstName: firstName(target.name) });
+      setSentIds((prev) => (prev.includes(target.id) ? prev : [...prev, target.id]));
+    } else {
+      setSendError({ userId: target.id, message: r.message || "Couldn't make the invite. Please try again." });
+      if (r.flagOff) onInviteFlagStale?.();
+    }
+  };
 
   // When role changes in the creation form, sync default permissions
   const handleRoleChange = (newRole: UserRole) => {
@@ -307,6 +403,32 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           
+          {isAdminView && inviteNotice && (
+            <p role="status" data-invites-on-notice className="p-3 rounded-xl bg-ok-bg border border-ok text-sm text-ink">{inviteNotice}</p>
+          )}
+
+          {/* INVITES CLIENT C2: invite links are OFF for this agency (admin only; never on "not known"). */}
+          {isAdminView && inviteFlag === false && (
+            <div data-invites-off className="p-4 rounded-2xl bg-surface border border-line-control e1 space-y-3">
+              <p className="text-sm font-bold text-ink">Invite links are off</p>
+              <p className="text-sm text-ink-soft">
+                Today you set a first password for each new person. With invites on, you send them a link instead and they choose their own password.
+              </p>
+              {enableError && (
+                <p role="alert" data-invites-error className="p-2.5 rounded-xl bg-bad-bg border border-bad text-sm text-bad">{enableError}</p>
+              )}
+              <button
+                type="button"
+                data-invites-turn-on
+                disabled={enableBusy}
+                onClick={() => { setEnableError(null); setEnableConfirm(true); }}
+                className="pressable min-h-11 px-4 rounded-xl font-bold text-sm bg-gold-deep text-paper e1 cursor-pointer disabled:opacity-50"
+              >
+                Turn on invites
+              </button>
+            </div>
+          )}
+
           {/* Section 1: Add New Member Form (admin only) */}
           {!isCoordinatorView && (
           <div className="p-4 rounded-2xl bg-sunken border border-line e1">
@@ -518,9 +640,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   (t) => t.assignedTo.includes('all') || t.assignedTo.includes(user.email)
                 ).length;
 
+                const canSendInvite = isAdminView && inviteFlag === true && !isCurrent && !isPrimaryAdmin;
+                const wasSent = sentIds.includes(user.id) || user.invitePending === true;
                 return (
+                  <div key={user.id} data-member-row>
                   <div
-                    key={user.id}
                     className={`p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-surface e1 lift hover:bg-sunken/50 transition ${
                       isBusy ? 'opacity-50 pointer-events-none' : ''
                     }`}
@@ -543,6 +667,14 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                               You
                             </span>
                           )}
+                          {isAdminView && (() => {
+                            const chip = sentIds.includes(user.id) ? 'Invite sent' : inviteChip(user);
+                            return chip ? (
+                              <span data-invite-chip className={`text-xs px-2 py-0.5 rounded-md font-semibold border ${chip === 'Invite sent' ? 'bg-ok-bg text-ok border-ok/40' : 'bg-warn-bg text-warn border-warn/40'}`}>
+                                {chip}
+                              </span>
+                            ) : null;
+                          })()}
 
                           {/* Role Selector / Badge (coordinators: badge only) */}
                           {onUpdateUser && !isPrimaryAdmin && !isCoordinatorView ? (
@@ -673,6 +805,20 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         </span>
                       )}
 
+                      {/* INVITES CLIENT C3: Send invite (confirm first) */}
+                      {canSendInvite && (
+                        <button
+                          type="button"
+                          data-send-invite
+                          disabled={sendBusyId !== null || sendLoadingId !== null}
+                          onClick={() => startSendInvite(user)}
+                          className="pressable min-h-11 inline-flex items-center gap-1.5 px-3 rounded-xl text-xs font-semibold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken disabled:opacity-50"
+                        >
+                          <Mail className="w-3.5 h-3.5 text-gold-deep" aria-hidden="true" />
+                          {sendBusyId === user.id ? 'Making link…' : sendLoadingId === user.id ? 'Loading…' : (sendError && sendError.userId === user.id && sendError.retry) ? 'Try again' : wasSent ? 'Send new invite' : 'Send invite'}
+                        </button>
+                      )}
+
                       {/* Delete Member Button (admin only) */}
                       {!isPrimaryAdmin && !isCoordinatorView && (
                         <button
@@ -684,6 +830,21 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         </button>
                       )}
                     </div>
+                  </div>
+                  {sentLink && sentLink.userId === user.id && (
+                    <div className="px-4 pb-4">
+                      <InviteLinkCard
+                        link={sentLink.link}
+                        forWhom={`${user.name} (${user.email})`}
+                        hint={`Send this link to ${sentLink.firstName}.`}
+                        onDone={() => setSentLink(null)}
+                        doneLabel="Done"
+                      />
+                    </div>
+                  )}
+                  {sendError && sendError.userId === user.id && (
+                    <p role="alert" data-send-invite-error className="mx-4 mb-4 p-2.5 rounded-xl bg-bad-bg border border-bad text-sm text-bad">{sendError.message}</p>
+                  )}
                   </div>
                 );
               })}
@@ -745,6 +906,34 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         cancelText="Cancel"
         variant="danger"
         icon="trash"
+      />
+
+      {/* INVITES CLIENT C2: confirm before turning invites on (one-way). */}
+      <ConfirmModal
+        isOpen={enableConfirm}
+        onClose={() => { if (!enableBusy) setEnableConfirm(false); }}
+        onConfirm={confirmEnableInvites}
+        title={agencyName ? `Turn on invites for ${agencyName}?` : 'Turn on invites?'}
+        message="New people get a link and choose their own password, and you won't set passwords for them anymore. Invites stay on: this can't be turned off from the app."
+        confirmText="Turn on"
+        cancelText="Not now"
+        variant="primary"
+        icon="shield"
+        isLoading={enableBusy}
+      />
+
+      {/* INVITES CLIENT C3: confirm before Send invite (it revokes the current password). */}
+      <ConfirmModal
+        isOpen={Boolean(sendTarget)}
+        onClose={() => { if (!sendBusyId) setSendReview(null); }}
+        onConfirm={confirmSendInvite}
+        title={`Send ${sendTarget?.name || ''} an invite link?`}
+        message={`${sendReview?.changed ? `${SEND_CHANGED_TEXT} ` : ''}${sendTarget ? `${sendTarget.name} (${sendTarget.email}). ` : ''}Their current password stops working right away, and they're signed out on their phones. They choose a new password from the link, which works once, for 7 days. Their kiosk code keeps working.${sendTarget && (sentIds.includes(sendTarget.id) || sendTarget.invitePending === true) ? ' The earlier link stops working.' : ''}`}
+        confirmText="Send invite"
+        cancelText="Cancel"
+        variant="warning"
+        icon="alert"
+        isLoading={sendBusyId !== null || sendLoadingId !== null}
       />
 
       {/* Alert Notice Modal */}

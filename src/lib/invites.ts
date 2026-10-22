@@ -51,8 +51,9 @@ export function isInvitePath(pathname: string | null | undefined): boolean {
  * tied to the probe's key: when the admin changes or a form opens (a new key),
  * this returns null in that same render, before the new probe answers.
  */
-export function useInviteFlag(adminKey: string | null, teamOpen: boolean, venueOpen: boolean): InviteFlag {
-  const key = adminKey ? `${adminKey}|${teamOpen ? 1 : 0}|${venueOpen ? 1 : 0}` : null;
+export function useInviteFlag(adminKey: string | null, teamOpen: boolean, venueOpen: boolean, rev = 0): InviteFlag {
+  // `rev` (INVITES CLIENT C1): bumped after "Turn on invites" or a 404 from Send invite, so the flag is asked again.
+  const key = adminKey ? `${adminKey}|${teamOpen ? 1 : 0}|${venueOpen ? 1 : 0}|${rev}` : null;
   const [state, setState] = useState<{ key: string | null; flag: InviteFlag }>({ key: null, flag: null });
   useEffect(() => {
     setState({ key, flag: null });

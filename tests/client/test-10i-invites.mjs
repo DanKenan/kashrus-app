@@ -343,7 +343,7 @@ const PREVIEW = { 'GET /api/invites/preview': { status: 200, body: { kind: 'memb
   const iInvite = app.indexOf('if (invitePage && !isKiosk)'); const iAuth = app.indexOf('if (!currentUser) {\n    // Kiosk tablets');
   ok('A invite page before the sign-in screens', iInvite > 0 && iAuth > iInvite);
   ok('A flag passed to both forms', (app.match(/inviteMode=\{inviteFlag === true\}/g) || []).length === 2);
-  ok('A flag read only for an admin (user + agency key), not on a kiosk, refreshed when a form opens', /useInviteFlag\(\s*!isKiosk && currentUser\?\.role === 'admin' \? `\$\{currentUser\.id\}\|\$\{currentUser\.agencyId \|\| ''\}` : null,\s*isTeamModalOpen,\s*isCreateVenueOpen,?\s*\)/.test(app));
+  ok('A flag read only for an admin (user + agency key), not on a kiosk, refreshed when a form opens', /useInviteFlag\(\s*!isKiosk && currentUser\?\.role === 'admin' \? `\$\{currentUser\.id\}\|\$\{currentUser\.agencyId \|\| ''\}` : null,\s*isTeamModalOpen,\s*isCreateVenueOpen,\s*(inviteRev,?\s*)?\)/.test(app));
 }
 
 console.log(`\n${passed} passed, ${failures} failed.`);

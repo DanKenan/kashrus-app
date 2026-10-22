@@ -72,6 +72,10 @@ export interface User {
   hasKioskPin?: boolean; // K1: server-set marker for managers (never the digits or hash)
   phoneNumber?: string; // K1: optional E.164 number, sent only to admins/coordinator-in-scope
   permissions?: UserPermissions;
+  /** 10k: ONLY on team records sent to an ADMIN of the same agency: a live setup invite exists for this person. */
+  invitePending?: boolean;
+  /** 10k: ONLY for an ADMIN of the same agency: the person's password was revoked and no live invite exists (they can't sign in). */
+  needsInvite?: boolean;
 }
 
 export interface Task {
