@@ -39,13 +39,15 @@ interface DashboardData {
 
 interface AgencyDashboardProps {
   logo?: { agencyName: string; agencyShortCode: string; logoSrc: string | null; onOpen: () => void };
+  /** QA2 #27: admin-only agency settings (name, phone, time zone). */
+  settings?: { onOpen: () => void };
   reloadKey?: number;
   onSelectVenue: (venueId: string) => void;
   /** Don 2026-10-22: opens the agency-wide Events screen. */
   onOpenEvents?: () => void;
 }
 
-export function AgencyDashboard({ onSelectVenue, reloadKey, logo, onOpenEvents }: AgencyDashboardProps) {
+export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOpenEvents }: AgencyDashboardProps) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -111,6 +113,10 @@ export function AgencyDashboard({ onSelectVenue, reloadKey, logo, onOpenEvents }
         {logo.logoSrc ? <img src={logo.logoSrc} alt={logo.agencyName} className="h-[32px] max-w-[120px] w-auto object-contain" /> : <span className="rounded-lg border border-line bg-sunken px-2 text-xs text-ink">{logo.agencyShortCode}</span>}
         <span className="flex-1 min-w-0 text-sm font-semibold">Agency logo</span>
         <button type="button" onClick={logo.onOpen} className="min-h-11 rounded-lg border border-line-control bg-surface px-3 text-sm font-semibold text-ink hover:bg-sunken focus:outline-none focus:ring-2 focus:ring-gold pressable">Change</button>
+      </div>}
+      {settings && <div data-agency-settings-row className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface p-4">
+        <span className="flex-1 min-w-0 text-sm font-semibold">Agency settings<span className="block text-sm font-normal text-ink-soft">Name, phone and time zone</span></span>
+        <button type="button" data-open-agency-settings onClick={settings.onOpen} className="min-h-11 rounded-lg border border-line-control bg-surface px-3 text-sm font-semibold text-ink hover:bg-sunken focus:outline-none focus:ring-2 focus:ring-gold pressable">Edit</button>
       </div>}
       {loading ? <p className="text-base text-ink-soft">Loading dashboard...</p> : failed ? (
         <div className="space-y-4">

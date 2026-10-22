@@ -1,4 +1,5 @@
 import { AgencyLogoSheet } from './components/AgencyLogoSheet';
+import { AgencySettingsSheet } from './components/AgencySettingsSheet';
 import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgencyFields } from './lib/agencyLogo';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
@@ -306,6 +307,8 @@ export default function App() {
   });
   const agencyLogoSrc = useAgencyLogo({ userId: currentUser?.id, agencyId: currentUser?.agencyId || 'agency-hkc', rev: currentUser?.agencyLogoRev });
   const [isAgencyLogoOpen, setIsAgencyLogoOpen] = useState(false);
+  // QA2 #27: admin agency settings sheet (name, phone, time zone).
+  const [isAgencySettingsOpen, setIsAgencySettingsOpen] = useState(false);
   const [isVenueSwitcherOpen, setIsVenueSwitcherOpen] = useState(false);
   const [isVenuesDirectoryOpen, setIsVenuesDirectoryOpen] = useState(false);
   const [isCreateVenueOpen, setIsCreateVenueOpen] = useState(false);
@@ -699,9 +702,11 @@ export default function App() {
         setCurrentUser((prev) => {
           if (!prev || (prev.agencyId || 'agency-hkc') !== ag.id) return prev;
           const hasLogo = Object.prototype.hasOwnProperty.call(ag, 'logoRev');
+          // QA2 #27: a renamed agency shows its new name without a reload.
+          const nextName = typeof ag.name === 'string' && ag.name.trim() ? ag.name : prev.agencyName;
           const nextRev = validRev(ag.logoRev) ? ag.logoRev : null;
-          if (prev.agencyTimeZone === nextTz && (!hasLogo || (Object.prototype.hasOwnProperty.call(prev, 'agencyLogoRev') && prev.agencyLogoRev === nextRev))) return prev;
-          return { ...prev, agencyTimeZone: nextTz, ...(hasLogo ? { agencyLogoRev: nextRev } : {}) };
+          if (prev.agencyName === nextName && prev.agencyTimeZone === nextTz && (!hasLogo || (Object.prototype.hasOwnProperty.call(prev, 'agencyLogoRev') && prev.agencyLogoRev === nextRev))) return prev;
+          return { ...prev, agencyName: nextName, agencyTimeZone: nextTz, ...(hasLogo ? { agencyLogoRev: nextRev } : {}) };
         });
       } else if (msg.type === 'VENUE_UPDATED' && msg.payload?.venue?.id) {
         // Item 6: a venue edit (e.g. its time zone) — update only a venue this
@@ -2050,6 +2055,7 @@ export default function App() {
               agencyName: currentUser.agencyName || '', agencyShortCode: currentUser.agencyShortCode || '',
               logoSrc: agencyLogoSrc, onOpen: () => setIsAgencyLogoOpen(true),
             } : undefined}
+            settings={{ onOpen: () => setIsAgencySettingsOpen(true) }}
             reloadKey={adminHomeReloadKey}
             onSelectVenue={(id) => { setAdminHome(false); handleSelectVenue(id); }}
             onOpenEvents={() => setIsAgencyEventsOpen(true)}
@@ -2350,6 +2356,10 @@ export default function App() {
         agencyTimeZone={currentUser.agencyTimeZone}
       />
 
+      {!isKiosk && currentUser.role === 'admin' && <AgencySettingsSheet
+        isOpen={isAgencySettingsOpen} onClose={() => setIsAgencySettingsOpen(false)}
+        onSaved={(a) => setCurrentUser((prev) => prev ? { ...prev, agencyName: a.name || prev.agencyName, agencyTimeZone: isValidTimeZone(a.timeZone) ? a.timeZone : undefined } : prev)}
+      />}
       {!isKiosk && currentUser.role === 'admin' && isLogoFeatureOn(currentUser) && <AgencyLogoSheet
         isOpen={isAgencyLogoOpen} onClose={() => setIsAgencyLogoOpen(false)}
         agencyName={currentUser.agencyName || ''} agencyShortCode={currentUser.agencyShortCode || ''}

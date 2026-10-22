@@ -16,12 +16,15 @@ import {
   ShieldCheck,
   Copy,
   Trash2,
+  Bell,
   ChevronLeft,
 } from 'lucide-react';
 import { KosherEvent, EventTask, User as UserType, Venue } from '../types';
 import { venueTimeZone, workDateIn } from '../lib/workday';
 import { formatClockTime, formatTimeRange } from '../lib/clockTime';
 import { formatWorkDate } from '../lib/dateText';
+import { mayCreateEvents, mayManageEventAt } from '../lib/eventPermissions';
+import { notifyEventAssignee } from '../lib/eventNotify';
 
 interface EventsModalProps {
   isOpen: boolean;
@@ -68,6 +71,9 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   // scroll and details had no room). Tapping an event opens its details;
   // "All events" goes back. From md up, both panels show as before.
   const [phoneDetail, setPhoneDetail] = useState(false);
+  // QA2 #31: Notify again (one at a time; the note belongs to the event it was sent for).
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  const [notifyNote, setNotifyNote] = useState<{ eventId: string; ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (!focusEventId) return;
@@ -84,8 +90,6 @@ export const EventsModal: React.FC<EventsModalProps> = ({
 
   // Filter events according to user role and current filter
   const isMashgiach = currentUser?.role === 'mashgiach';
-  const isAdmin = currentUser?.role === 'admin';
-  const isOwner = currentUser?.role === 'owner';
 
   const filteredEvents = events.filter((e) => {
     if (filterMode === 'my_assigned') {
@@ -109,15 +113,22 @@ export const EventsModal: React.FC<EventsModalProps> = ({
     events[0] ||
     null;
 
-  // Item 7: client mirror of the server's copy gate (rule T) — admin, or a
-  // coordinator at the event's own venue. The server is the authority.
-  const canCopyActive =
-    !!onCopyEvent &&
-    !!activeEvent &&
-    (isAdmin ||
-      (currentUser?.role === 'coordinator' &&
-        !!currentUser?.venueId &&
-        currentUser.venueId === activeEvent.venueId));
+  // QA2 #9: create / edit / copy / delete only for admin, coordinator (own venues)
+  // and owner (own venue) — the client mirror of the server's rule; the server decides.
+  const canCreate = mayCreateEvents(currentUser, allVenues);
+  const canManageActive = !!activeEvent && mayManageEventAt(currentUser, activeEvent.venueId, allVenues);
+  const canCopyActive = !!onCopyEvent && canManageActive;
+  const canDeleteActive = !!onDeleteEvent && canManageActive;
+
+  const handleNotifyAgain = async () => {
+    if (!activeEvent || notifyBusy) return;
+    const eventId = activeEvent.id;
+    setNotifyBusy(true);
+    setNotifyNote(null);
+    const r = await notifyEventAssignee(eventId, activeEvent.assignedMashgiachName || activeEvent.assignedMashgiachEmail);
+    setNotifyBusy(false);
+    setNotifyNote({ eventId, ok: r.ok, text: r.message });
+  };
 
   const handleToggleTask = async (taskId: string, currentCompleted: boolean) => {
     if (!activeEvent) return;
@@ -188,6 +199,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
 
           <div className="flex items-center gap-2 @max-[36rem]:contents">
             {/* Action button to schedule / notify new event */}
+            {canCreate && (
             <button
               id="open-create-event-btn"
               onClick={onOpenCreateEvent}
@@ -196,6 +208,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
               <Plus className="w-3.5 h-3.5" />
               <span>Create event</span>
             </button>
+            )}
 
             <button aria-label="Close"
               onClick={onClose}
@@ -255,12 +268,14 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                   <Calendar className="w-8 h-8 mx-auto mb-2 opacity-30 text-ink-soft" />
                   <p className="text-sm font-medium">No events found in this category.</p>
                   <p className="text-sm text-ink-soft mt-2">Create an event to plan its tasks and team.</p>
+                  {canCreate && (
                   <button
                     onClick={onOpenCreateEvent}
                     className="mt-3 inline-flex items-center px-4 py-2 min-h-11 rounded-xl text-sm font-semibold bg-surface border border-line-control text-ink hover:bg-sunken cursor-pointer"
                   >
                     + Register the first event
                   </button>
+                  )}
                 </div>
               ) : (
                 filteredEvents.map((evt) => {
@@ -356,7 +371,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                       </h3>
                     </div>
 
-                    {(canCopyActive || (isAdmin && onDeleteEvent)) && (
+                    {(canCopyActive || canDeleteActive) && (
                       <div className="flex items-center gap-1.5 self-start sm:self-auto">
                         {canCopyActive && (
                           <button
@@ -368,9 +383,9 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                             Copy event
                           </button>
                         )}
-                        {isAdmin && onDeleteEvent && (
+                        {canDeleteActive && (
                           <button
-                            onClick={() => onDeleteEvent(activeEvent.id)}
+                            onClick={() => onDeleteEvent!(activeEvent.id)}
                             className="px-2.5 py-1 text-xs font-semibold rounded-lg transition cursor-pointer bg-surface border border-line-control text-bad hover:bg-sunken"
                           >
                             <Trash2 className="w-3.5 h-3.5 text-bad" />
@@ -408,7 +423,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                       <div>
                         <div className="text-xs text-ink-soft font-semibold uppercase">Supervising Mashgiach</div>
                         <div className="font-semibold text-ink">
-                          {isAdmin ? (
+                          {canManageActive ? (
                             <select
                               value={
                                 activeEvent.mashgiachType === 'assigned_user'
@@ -470,6 +485,30 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                             )
                           )}
                         </div>
+                        {/* QA2 #31: Notify again — the assignee only; same people as editing the event. */}
+                        {canManageActive && activeEvent.mashgiachType === 'assigned_user' && !!activeEvent.assignedMashgiachEmail && (
+                          <div className="mt-2 space-y-1.5">
+                            <button
+                              type="button"
+                              data-notify-again
+                              disabled={notifyBusy}
+                              onClick={() => void handleNotifyAgain()}
+                              className="min-h-11 px-3 text-xs font-semibold rounded-lg transition cursor-pointer pressable flex items-center gap-1.5 bg-surface border border-line-control text-ink hover:bg-sunken disabled:opacity-50"
+                            >
+                              <Bell className="w-3.5 h-3.5" />
+                              {notifyBusy ? 'Sending…' : 'Notify again'}
+                            </button>
+                            {notifyNote && notifyNote.eventId === activeEvent.id && (
+                              <p
+                                role={notifyNote.ok ? 'status' : 'alert'}
+                                data-notify-note
+                                className={notifyNote.ok ? 'text-sm text-ink-soft font-normal' : 'text-sm text-bad font-normal'}
+                              >
+                                {notifyNote.text}
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -664,12 +703,14 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                 <p className="text-sm text-ink-soft mt-1 max-w-sm">
                   Select an event from the left panel or tap "Create event" to add a catered dinner or banquet.
                 </p>
+                {canCreate && (
                 <button
                   onClick={onOpenCreateEvent}
                   className="mt-4 px-4 py-2 text-xs font-bold rounded-xl e2 transition cursor-pointer pressable bg-surface border border-line-control text-ink hover:bg-sunken"
                 >
                   + Create event
                 </button>
+                )}
               </div>
             )}
           </div>
