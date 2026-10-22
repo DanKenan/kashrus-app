@@ -128,6 +128,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-62-credential-owner-auth.mjs')).default,
     (await import('./test-63-recovery-codes.mjs')).default,
     (await import('./test-65-kiosk-agency-updated.mjs')).default,
+    (await import('./test-66-venue-cert-edit.mjs')).default,
   ];
 
   const results = [];
