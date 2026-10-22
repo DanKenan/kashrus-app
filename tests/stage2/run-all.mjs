@@ -153,6 +153,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-68-invite-accept.mjs')).default,
     (await import('./test-69-send-invite.mjs')).default,
     (await import('./test-70-kiosk-session-3h.mjs')).default,
+    (await import('./test-71-qa2-server.mjs')).default,
     (await import('./test-72-invites-enable.mjs')).default,
   ];
 

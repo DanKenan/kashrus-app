@@ -769,6 +769,32 @@ function venueScopeFor(user: UserProfile | null | undefined): 'agency' | string[
   return venueScopeOf(user as any, venues as any);
 }
 
+/** QA2 #5(b): a task status that is a real answer (not unanswered / 'pending'). */
+function isAnsweredStatus(s: unknown): boolean {
+  return typeof s === 'string' && s.trim() !== '' && s.trim().toLowerCase() !== 'pending';
+}
+
+/**
+ * QA2 #8: a non-admin membership whose home venue was deleted and that has
+ * no other existing venue left. Such a membership cannot sign in or be
+ * chosen (403 VENUE_REMOVED, a clear message) until an admin gives it a
+ * venue again. A row that never had a venue is unchanged (RULE T).
+ */
+function venueRemovedFor(row: any): boolean {
+  if (!row || row.role === 'admin') return false;
+  const home = typeof row.venueId === 'string' ? row.venueId : '';
+  if (!home) return false;
+  // Only a home venue that was really DELETED through the venue route counts
+  // (a legacy default id that never existed is left alone).
+  if (!deletedVenueIds.includes(home)) return false;
+  if ((venues as any[]).some((v) => v && v.id === home)) return false;
+  // venueScope keeps a dangling home id (it grants nothing); only venues
+  // that exist now count.
+  const scope = venueScopeFor(row as UserProfile);
+  return Array.isArray(scope) && !scope.some((x) => (venues as any[]).some((v) => v && v.id === x));
+}
+const VENUE_REMOVED = { error: 'Your venue was removed. Ask your agency admin to add you to a venue.', code: 'VENUE_REMOVED' };
+
 /** A7/B6: field-write gate for ingredients/factory-reports — admin, or a
  * coordinator at the venue, or a canFill mashgiach/worker (or owner with
  * canFillTasks) at the venue. The venue check is separate from the role
@@ -1591,7 +1617,7 @@ function generateTemplateTasks(venueId: string, templateType: string = 'restaura
         daysOfWeek: [0, 1, 2, 3, 4, 5],
         targetTime: '06:00 AM',
         priority: 'high',
-        currentStatus: 'no',
+        currentStatus: 'pending',
         isCompleted: false,
         notes: '',
         updatedByEmail: null,
@@ -1650,7 +1676,7 @@ function generateTemplateTasks(venueId: string, templateType: string = 'restaura
         daysOfWeek: [0, 1, 2, 3, 4, 5],
         targetTime: '11:00 AM',
         priority: 'medium',
-        currentStatus: 'no',
+        currentStatus: 'pending',
         isCompleted: false,
         notes: '',
         updatedByEmail: null,
@@ -1691,7 +1717,7 @@ function generateTemplateTasks(venueId: string, templateType: string = 'restaura
         daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
         targetTime: '08:00 AM',
         priority: 'high',
-        currentStatus: 'no',
+        currentStatus: 'pending',
         isCompleted: false,
         notes: '',
         updatedByEmail: null,
@@ -1793,7 +1819,7 @@ function generateTemplateTasks(venueId: string, templateType: string = 'restaura
         daysOfWeek: [0, 1, 2, 3, 4, 5],
         targetTime: '10:30 AM',
         priority: 'high',
-        currentStatus: 'no',
+        currentStatus: 'pending',
         isCompleted: false,
         notes: '',
         updatedByEmail: null,
@@ -1858,7 +1884,7 @@ function generateTemplateTasks(venueId: string, templateType: string = 'restaura
         daysOfWeek: [0, 1, 2, 3, 4, 5],
         targetTime: '09:00 AM',
         priority: 'high',
-        currentStatus: 'no',
+        currentStatus: 'pending',
         isCompleted: false,
         notes: '',
         updatedByEmail: null,
@@ -1917,7 +1943,7 @@ function generateTemplateTasks(venueId: string, templateType: string = 'restaura
         daysOfWeek: [1, 3, 5],
         targetTime: '14:30 PM',
         priority: 'medium',
-        currentStatus: 'no',
+        currentStatus: 'pending',
         isCompleted: false,
         notes: '',
         updatedByEmail: null,
@@ -2470,6 +2496,8 @@ let announcements: Announcement[] = [];
 let passwordResets: PasswordResetRequest[] = [];
 // Item 10h: invites (server-only; never in INITIAL_STATE, broadcasts or exports; only the token's sha256 is stored).
 let invites: any[] = [];
+// QA2 #8: ids of venues deleted through DELETE /api/venues/:id (newest last, capped).
+let deletedVenueIds: string[] = [];
 let passwordResetRateLimits: PasswordResetRateLimits = emptyRateLimits();
 
 /** Kiosk PIN lockout state (persisted in the state doc, survives restarts). */
@@ -2601,6 +2629,7 @@ function hydrateState(parsed: any) {
 
       // Item 10h: invites (records with no id are dropped defensively).
       invites = Array.isArray(parsed.invites) ? parsed.invites.filter((i: any) => i && typeof i === 'object' && typeof i.id === 'string') : [];
+      deletedVenueIds = Array.isArray(parsed.deletedVenueIds) ? parsed.deletedVenueIds.filter((x: any) => typeof x === 'string' && x).slice(-1000) : [];
 
       // Rate-limit state is persisted so limits survive restarts and work
       // across instances. Malformed entries are dropped defensively.
@@ -2721,7 +2750,9 @@ function hydrateState(parsed: any) {
         }
 
         if (Array.isArray(parsed.tasks)) {
-          // Sanitize: any task that is not completed should not retain completion attribution logs
+          // Sanitize: a task that is neither completed nor answered carries no
+          // attribution. QA2 #5(b): a real answer that is not "done" (a
+          // Yes/No "No") keeps who answered and when across reloads.
           tasks = parsed.tasks.map((t: any) => {
             const matchingVenue = venues.find((v) => v.id === t.venueId);
             const assignedAgencyId = t.agencyId || matchingVenue?.agencyId || 'agency-hkc';
@@ -2729,7 +2760,7 @@ function hydrateState(parsed: any) {
               ...t,
               agencyId: assignedAgencyId,
               venueId: t.venueId || 'venue-crown-market',
-              ...(!t.isCompleted
+              ...(!t.isCompleted && !isAnsweredStatus(t.currentStatus)
                 ? { updatedByEmail: null, updatedByName: null, updatedAt: null }
                 : {}),
             };
@@ -2874,6 +2905,7 @@ function stateSnapshot() {
     passwordResets,
     passwordResetRateLimits,
     invites,
+    deletedVenueIds,
     kioskPinLockouts,
     kioskDevices,
     kioskPairings,
@@ -5377,7 +5409,8 @@ async function executeDailyReset(
   const resetTask = (t: any): any => {
     let initialStatus = 'pending';
     if (t.inputType === 'yes_no') {
-      initialStatus = 'no';
+      // QA2 #5: unanswered is 'pending' (neutral), never a red 'No'.
+      initialStatus = 'pending';
     } else if (
       t.inputType === 'status_select' &&
       Array.isArray(t.customStatusOptions) &&
@@ -9904,17 +9937,32 @@ app.delete('/api/venues/:id', async (req, res) => {
           venueAccessSetById[u.id] = u.venueAccess.filter((x: any) => x !== id);
         }
       }
+      // QA2 #8: non-admin rows homed at this venue with no other venue of
+      // their agency left lose their sessions in the SAME commit (tokenEpoch
+      // +1, the sanctioned revoke); sign-in then answers VENUE_REMOVED.
+      // Same scope rule as reads (venueScope), on the venues left after this delete.
+      const remainingVenues = freshVenues.filter((v) => v && v.id !== id);
+      const orphanIds: string[] = [];
+      for (const u of Array.isArray(freshDoc.users) ? freshDoc.users : []) {
+        if (!u || typeof u.id !== 'string' || u.role === 'admin' || u.venueId !== id) continue;
+        const scopeAfter = venueScopeOf(u, remainingVenues);
+        const left = Array.isArray(scopeAfter) ? scopeAfter.filter((x) => remainingVenues.some((v) => v.id === x)) : [];
+        if (left.length === 0) orphanIds.push(u.id);
+      }
       // Atomic cascade: venue + its tasks + its history all removed together.
       return {
         venueAccessSetById,
+        ...(orphanIds.length ? { tokenEpochBumpIds: orphanIds } : {}),
         doc: {
           ...freshDoc,
           venues: freshVenues.filter((v) => v.id !== id),
           tasks: freshTasks.filter((t) => t.venueId !== id),
           historyLogs: freshHistory.filter((h) => h.venueId !== id),
           kioskDevices: freshDevices.filter((d) => d && d.venueId !== id),
+          // QA2 #8: remember the deleted id (VENUE_REMOVED applies only to these).
+          deletedVenueIds: [...(Array.isArray(freshDoc.deletedVenueIds) ? freshDoc.deletedVenueIds : []).filter((x: any) => typeof x === 'string' && x !== id), id].slice(-1000),
         },
-        result: { success: true, deletedVenueId: id, removedDeviceIds },
+        result: { success: true, deletedVenueId: id, removedDeviceIds, orphanIds },
       };
     },
     { label: 'delete-venue', requireVersion: true }
@@ -9927,6 +9975,8 @@ app.delete('/api/venues/:id', async (req, res) => {
   for (const deviceId of removedDeviceIds) {
     closeKioskSocketsForDevice(deviceId);
   }
+  // QA2 #8: their phone sockets close now (the epoch bump already revoked the tokens).
+  for (const uid of ((committed as any)?.result?.orphanIds || []) as string[]) revokeUserPhoneSockets(uid);
   broadcast('VENUE_DELETED', { deletedVenueId: id, agencyId: callerAgencyId }, undefined, callerAgencyId);
   res.json({ success: true, deletedVenueId: id });
 });
@@ -9970,7 +10020,14 @@ app.get('/api/tasks', (req, res) => {
     // above) is honoured; no venue requested → the home venue, as before.
     targetVenueId = (venueId ? String(venueId) : callerVenueId) || agencyVenues[0]?.id || 'venue-crown-market';
   } else {
-    // If admin requested a venueId, ensure it belongs to their agency
+    // QA2 #17: an explicitly requested venue that belongs to ANOTHER agency
+    // is refused (like /api/history and /api/events), never silently swapped
+    // for the home venue. An unknown id keeps today's behaviour.
+    if (venueId && !agencyVenues.some((v) => v.id === targetVenueId)
+        && venues.some((v) => v.id === targetVenueId && (v.agencyId || 'agency-hkc') !== callerAgencyId)) {
+      return res.status(403).json({ error: 'That venue is not in your agency.', code: 'VENUE_NOT_IN_AGENCY' });
+    }
+    // No venue requested: the agency's first venue, as before.
     if (!agencyVenues.some((v) => v.id === targetVenueId) && agencyVenues.length > 0) {
       targetVenueId = agencyVenues[0].id;
     }
@@ -10055,7 +10112,8 @@ app.post('/api/tasks', async (req, res) => {
 
   let defaultStatus = 'pending';
   if (inputType === 'yes_no') {
-    defaultStatus = 'no';
+    // QA2 #5: a new Yes/No task has no answer until someone answers.
+    defaultStatus = 'pending';
   } else if (inputType === 'status_select' && Array.isArray(customStatusOptions) && customStatusOptions.length > 0) {
     defaultStatus = customStatusOptions[0];
   }
@@ -10344,9 +10402,22 @@ app.put('/api/tasks/:id', async (req, res) => {
         return { doc: freshDoc, result: freshTask };
       }
 
-      const updatedByEmail = finalIsCompleted ? (caller.email || freshTask.updatedByEmail || null) : null;
-      const updatedByName = finalIsCompleted ? (caller.name || freshTask.updatedByName || null) : null;
-      const updatedAt = finalIsCompleted ? (hasStatusChange ? new Date().toISOString() : freshTask.updatedAt) : null;
+      // QA2 #5(b): a real answer that does not complete the task (a Yes/No
+      // "No", a non-final status) keeps WHO answered and WHEN, so a real "No"
+      // is told apart from unanswered. Unanswered ('pending') carries nothing.
+      // Completed: unchanged. The scheduled reset still clears all of it.
+      const finalStatus = currentStatus !== undefined ? currentStatus : (finalIsCompleted ? freshTask.currentStatus : 'pending');
+      const answeredNotDone = !finalIsCompleted && isAnsweredStatus(finalStatus);
+      const answeredNow = answeredNotDone && currentStatus !== undefined;
+      const updatedByEmail = finalIsCompleted
+        ? (caller.email || freshTask.updatedByEmail || null)
+        : answeredNotDone ? (answeredNow ? (caller.email || null) : (freshTask.updatedByEmail ?? null)) : null;
+      const updatedByName = finalIsCompleted
+        ? (caller.name || freshTask.updatedByName || null)
+        : answeredNotDone ? (answeredNow ? (caller.name || null) : (freshTask.updatedByName ?? null)) : null;
+      const updatedAt = finalIsCompleted
+        ? (hasStatusChange ? new Date().toISOString() : freshTask.updatedAt)
+        : answeredNotDone ? (answeredNow ? new Date().toISOString() : (freshTask.updatedAt ?? null)) : null;
 
       // 6c: normalize the effective merged time, including partial edits.
       const updated: TaskItem = normalizeAnyTimeTask({
@@ -13235,6 +13306,13 @@ app.post('/api/kiosk/login', async (req, res) => {
     // Already counted by the reservation; nothing more to write.
     return res.status(401).json({ error: 'Wrong code. Try again.' });
   }
+  // QA2 #32: a person who could not fill a single task here (a venue owner
+  // without the fill permission, or anyone whose fill permission was
+  // revoked) is refused up front with a clear message, AFTER the PIN proved
+  // who they are, instead of getting a session where every tap fails.
+  if (!canFillTasks(kioskActingUser(user, venueId))) {
+    return res.status(403).json({ error: "Your account can't fill tasks on the tablet. Ask your agency admin.", code: 'KIOSK_ROLE_CANNOT_FILL' });
+  }
 
   // Success: clear the user's fail counter, upgrade a legacy plain PIN to
   // bcrypt in the same transaction, and mint the venue-scoped kiosk token.
@@ -13487,6 +13565,8 @@ app.post('/api/auth/login', async (req, res) => {
   // only a choose token for the credential row (single-row: as today).
   const freshCred = users.find((u) => u.id === user.id) || user;
   if (isMultiPersonRow(users, freshCred)) {
+    // QA2 #8: memberships whose venue was deleted are not offered; none left → the clear refusal.
+    if (membershipsOfPerson(String((freshCred as any).personId)).length === 0) return res.status(403).json(VENUE_REMOVED);
     return res.json({
       success: true,
       chooseMembership: true,
@@ -13494,6 +13574,8 @@ app.post('/api/auth/login', async (req, res) => {
       token: signChooseToken(freshCred),
     });
   }
+  // QA2 #8: the person's venue was deleted and no other venue is left.
+  if (venueRemovedFor(freshCred)) return res.status(403).json(VENUE_REMOVED);
   const token = signSessionToken(freshCred);
   res.json({
     success: true,
@@ -13851,8 +13933,9 @@ app.post('/api/auth/change-password', async (req, res) => {
     return res.status(400).json({ error: 'Current password and new password are both required.' });
   }
 
-  if (String(newPassword).trim().length < 6) {
-    return res.status(400).json({ error: 'New password must be at least 6 characters long.' });
+  // QA2 #14: one minimum everywhere (8), the same as reset and invite setup.
+  if (String(newPassword).trim().length < 8) {
+    return res.status(400).json({ error: 'New password must be at least 8 characters long.', code: 'PASSWORD_TOO_SHORT' });
   }
 
   const authUser = (req as any).authUser;
@@ -13869,7 +13952,9 @@ app.post('/api/auth/change-password', async (req, res) => {
 
   const result = await checkPassword(String(currentPassword), owner.password);
   if (result === 'invalid') {
-    return res.status(401).json({ error: 'Current password is incorrect.' });
+    // QA2 #2: a wrong current password is not a session problem; the code lets
+    // the client keep the person signed in (the words stay the same).
+    return res.status(401).json({ error: 'Current password is incorrect.', code: 'CURRENT_PASSWORD_WRONG' });
   }
 
   // Hash BEFORE the transaction (CPU-heavy).
@@ -13945,6 +14030,7 @@ function membershipsOfPerson(personId: string): Array<{ membershipId: string; ag
   for (const u of rows) {
     const agency = (agencies as any[]).find((a) => a && typeof u.agencyId === 'string' && a.id === u.agencyId);
     if (!agency) continue;
+    if (venueRemovedFor(u)) continue; // QA2 #8: its venue was deleted
     out.push({ membershipId: String(u.id), agencyId: String(agency.id), agencyName: String(agency.name ?? ''), role: String(u.role ?? ''), joinedAt: typeof u.joinedAt === 'string' ? u.joinedAt : '' });
   }
   out.sort((a, b) => (a.joinedAt === b.joinedAt ? (a.membershipId < b.membershipId ? -1 : a.membershipId > b.membershipId ? 1 : 0) : a.joinedAt < b.joinedAt ? -1 : 1));
@@ -13979,6 +14065,7 @@ app.post('/api/auth/activate', (req, res) => {
   const row = membershipId ? (users as any[]).find((u) => u && u.id === membershipId) : undefined;
   const agencyOk = !!row && typeof row.agencyId === 'string' && (agencies as any[]).some((a) => a && a.id === row.agencyId);
   if (!row || row.personId !== who.personId || !agencyOk) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
+  if (venueRemovedFor(row)) return res.status(403).json(VENUE_REMOVED); // QA2 #8
   res.json({ token: signSessionToken(row), user: getSelfUser(row as UserProfile) });
 });
 
@@ -14565,7 +14652,10 @@ app.post('/api/factory-reports', async (req, res) => {
   // RULE T + A7: the venue must be the caller's own AND the role must be one
   // that does field writes (admin, coordinator, canFill mashgiach/worker).
   if (!requireVenueAccess(req, res, venueId)) return;
-  if (!mayDoFieldWrite(caller, venueId)) {
+  // QA2 #6 (rule T: owner = own venue): a venue owner may file the official
+  // report for their OWN venue, whatever their fill permission.
+  const ownerAtOwnVenue = (caller as any).role === 'owner' && callerMaySeeVenue(caller, venueId);
+  if (!mayDoFieldWrite(caller, venueId) && !ownerAtOwnVenue) {
     return res.status(403).json({ error: 'You can only submit factory reports at your own venue.' });
   }
   const callerAgencyId = venue?.agencyId || caller.agencyId || 'agency-hkc';

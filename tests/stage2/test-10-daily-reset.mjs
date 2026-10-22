@@ -165,8 +165,8 @@ export default {
     if (t.notes !== '') throw new Error(`task notes not cleared: "${t.notes}"`);
     if (t.updatedAt !== null) throw new Error('task updatedAt not cleared');
     if (!Array.isArray(t.checkIns) || t.checkIns.length !== 0) throw new Error('task checkIns not cleared');
-    // yes_no tasks reset to their initial status ('no').
-    if (t.currentStatus !== 'no') {
+    // yes_no tasks reset to their initial status: unanswered ('pending', QA2 #5).
+    if (t.currentStatus !== 'pending') {
       throw new Error(`task status not reset to initial: "${t.currentStatus}"`);
     }
     const snaps = doc.historyLogs.filter((h) => h.venueId === venueId);
