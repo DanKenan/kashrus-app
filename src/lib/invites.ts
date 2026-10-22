@@ -5,6 +5,7 @@
 // is OFF (it is admin-only, so it is only asked for an admin). Anything else
 // (offline, 5xx, 403) is "not known", and the screens keep today's forms.
 
+import { useEffect, useState } from 'react';
 import { apiFetch } from './api';
 
 export type InviteFlag = boolean | null;
@@ -40,4 +41,25 @@ export function fullInviteLink(path: unknown, origin?: string): string | null {
 /** Is this page the invite page? */
 export function isInvitePath(pathname: string | null | undefined): boolean {
   return String(pathname || '').replace(/\/+$/, '') === '/invite';
+}
+
+/**
+ * The flag for the signed-in admin ([10IC-RV1] B1). `adminKey` = user id +
+ * agency id (null when not an admin or on a kiosk). Every probe starts from
+ * "not known" and applies its own answer, whatever it is (true, false or
+ * null), so a stale ON never outlives a failed or OFF answer. The answer is
+ * tied to the probe's key: when the admin changes or a form opens (a new key),
+ * this returns null in that same render, before the new probe answers.
+ */
+export function useInviteFlag(adminKey: string | null, teamOpen: boolean, venueOpen: boolean): InviteFlag {
+  const key = adminKey ? `${adminKey}|${teamOpen ? 1 : 0}|${venueOpen ? 1 : 0}` : null;
+  const [state, setState] = useState<{ key: string | null; flag: InviteFlag }>({ key: null, flag: null });
+  useEffect(() => {
+    setState({ key, flag: null });
+    if (!key) return;
+    let active = true;
+    void fetchInviteFlag().then((flag) => { if (active) setState({ key, flag }); });
+    return () => { active = false; };
+  }, [key]);
+  return key && state.key === key ? state.flag : null;
 }

@@ -12,7 +12,7 @@ import React from 'react';
 import fs from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { mount } from './lib/mini-render.mjs';
-import { readInviteToken, fullInviteLink, isInvitePath, fetchInviteFlag } from '../../src/lib/invites.ts';
+import { readInviteToken, fullInviteLink, isInvitePath, fetchInviteFlag, useInviteFlag } from '../../src/lib/invites.ts';
 import { TeamModal } from '../../src/components/TeamModal.tsx';
 import { CreateVenueModal } from '../../src/components/CreateVenueModal.tsx';
 import { InvitePage, INVITE_INVALID_TITLE } from '../../src/components/InvitePage.tsx';
@@ -61,6 +61,47 @@ for (const [status, want] of [[200, true], [404, false], [403, null], [500, null
 }
 stubFetch({ 'GET /api/agency/invites': 'THROW' });
 ok('L flag: offline -> unknown', (await fetchInviteFlag()) === null);
+
+// ---- F: useInviteFlag ([10IC-RV1] B1): every probe applies its own answer; a new key is "not known" at once ----
+{
+  let answer = { status: 200, body: {} }; let pending = false;
+  let probes = 0;
+  globalThis.fetch = async (url) => {
+    if (!String(url).includes('/api/agency/invites')) return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}) };
+    probes++;
+    if (pending) return new Promise(() => {});
+    if (answer === 'THROW') throw new TypeError('network');
+    return { ok: answer.status === 200, status: answer.status, headers: { get: () => null }, clone() { return this; }, json: async () => ({}) };
+  };
+  const Probe = (p) => React.createElement('i', null, String(useInviteFlag(p.k, p.team, p.venue)));
+  const m = mount(Probe, { k: 'u1|agency-a', team: false, venue: false });
+  await m.render();
+  ok('F admin sign-in: probe -> ON', m.text() === 'true' && probes === 1, m.text());
+  answer = { status: 500, body: {} };
+  await m.render({ team: true });
+  ok('F ON then a failed refresh -> not known (today\'s form)', m.text() === 'null' && probes === 2, m.text());
+  answer = { status: 200, body: {} };
+  await m.render({ team: false });
+  ok('F back ON', m.text() === 'true');
+  answer = 'THROW';
+  await m.render({ venue: true });
+  ok('F ON then offline -> not known', m.text() === 'null', m.text());
+  answer = { status: 200, body: {} }; await m.render({ venue: false });
+  answer = { status: 404, body: {} };
+  await m.render({ team: true });
+  ok('F ON then OFF -> OFF', m.text() === 'false', m.text());
+  answer = { status: 200, body: {} }; await m.render({ team: false });
+  ok('F ON again before the switch', m.text() === 'true');
+  // Another admin / agency: null in the same render, before its probe answers.
+  pending = true;
+  await m.render({ k: 'u2|agency-b' });
+  ok('F another admin/agency: not known while its probe runs (no carry-over)', m.text() === 'null', m.text());
+  pending = false; answer = { status: 404, body: {} };
+  await m.render({ team: true });
+  ok('F other agency OFF -> OFF', m.text() === 'false', m.text());
+  await m.render({ k: null });
+  ok('F not an admin -> not known, no probe', m.text() === 'null');
+}
 
 // ---- T: Add member ----
 const admin = { id: 'u1', name: 'Ada Admin', email: 'ada@hkc.test', role: 'admin', agencyId: 'agency-hkc' };
@@ -302,7 +343,7 @@ const PREVIEW = { 'GET /api/invites/preview': { status: 200, body: { kind: 'memb
   const iInvite = app.indexOf('if (invitePage && !isKiosk)'); const iAuth = app.indexOf('if (!currentUser) {\n    // Kiosk tablets');
   ok('A invite page before the sign-in screens', iInvite > 0 && iAuth > iInvite);
   ok('A flag passed to both forms', (app.match(/inviteMode=\{inviteFlag === true\}/g) || []).length === 2);
-  ok('A flag read only for an admin, not on a kiosk', app.includes("!isKiosk && currentUser?.role === 'admin' ? currentUser.id : null"));
+  ok('A flag read only for an admin (user + agency key), not on a kiosk, refreshed when a form opens', /useInviteFlag\(\s*!isKiosk && currentUser\?\.role === 'admin' \? `\$\{currentUser\.id\}\|\$\{currentUser\.agencyId \|\| ''\}` : null,\s*isTeamModalOpen,\s*isCreateVenueOpen,?\s*\)/.test(app));
 }
 
 console.log(`\n${passed} passed, ${failures} failed.`);

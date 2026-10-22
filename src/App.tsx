@@ -42,7 +42,7 @@ import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/wor
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { InvitePage } from './components/InvitePage';
 import type { AddMemberInvite } from './components/TeamModal';
-import { fetchInviteFlag, fullInviteLink, InviteFlag, isInvitePath, readInviteToken } from './lib/invites';
+import { fullInviteLink, isInvitePath, readInviteToken, useInviteFlag } from './lib/invites';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
 import { realtimeSocket } from './lib/socketClient';
 import { testFirestoreConnection } from './lib/firebaseClient';
@@ -340,14 +340,11 @@ export default function App() {
   // Item 10i: Phase C (invite-only adds) for the admin's own agency, as the
   // server reports it. Read at sign-in and again each time Add member or New
   // venue opens; null (not known) keeps today's forms.
-  const [inviteFlag, setInviteFlag] = useState<InviteFlag>(null);
-  const inviteFlagAdmin = !isKiosk && currentUser?.role === 'admin' ? currentUser.id : null;
-  useEffect(() => {
-    if (!inviteFlagAdmin) { setInviteFlag(null); return; }
-    let active = true;
-    void fetchInviteFlag().then((flag) => { if (active && flag !== null) setInviteFlag(flag); });
-    return () => { active = false; };
-  }, [inviteFlagAdmin, isTeamModalOpen, isCreateVenueOpen]);
+  const inviteFlag = useInviteFlag(
+    !isKiosk && currentUser?.role === 'admin' ? `${currentUser.id}|${currentUser.agencyId || ''}` : null,
+    isTeamModalOpen,
+    isCreateVenueOpen,
+  );
   // Item 10i: the public invite page (/invite#t=…), read once when the app opens.
   const [invitePage, setInvitePage] = useState(() => typeof window !== 'undefined' && isInvitePath(window.location.pathname));
   const [inviteToken] = useState(() => (typeof window !== 'undefined' ? readInviteToken(window.location.hash) : null));
