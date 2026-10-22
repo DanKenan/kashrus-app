@@ -81,9 +81,11 @@ export function generateRecoveryCodes(nowIso: string): { codes: string[]; set: R
 
 export function isRecoveryCodeSet(x: unknown): x is RecoveryCodeSet {
   const s = x as any;
-  return !!s && typeof s === 'object' && s.v === 1 && typeof s.salt === 'string' && s.salt.length > 0 &&
-    Array.isArray(s.hashes) && s.hashes.every((h: unknown) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h)) &&
-    typeof s.createdAt === 'string';
+  // RV1 N1: exact salt shape, at most one set's worth of hashes, a real timestamp.
+  return !!s && typeof s === 'object' && s.v === 1 && typeof s.salt === 'string' && /^[0-9a-f]{32}$/.test(s.salt) &&
+    Array.isArray(s.hashes) && s.hashes.length <= RECOVERY_CODE_COUNT &&
+    s.hashes.every((h: unknown) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h)) &&
+    typeof s.createdAt === 'string' && Number.isFinite(Date.parse(s.createdAt));
 }
 
 /** Index of the matching stored hash, or -1. Every hash is compared (constant work per set). */

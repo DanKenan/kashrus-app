@@ -44,6 +44,11 @@ export default {
     assert(matchRecoveryCode(set, 'ZZZZZ-ZZZZZ') === -1 || codes.includes('ZZZZZ-ZZZZZ'), 'wrong code -1');
     assert(matchRecoveryCode(set, 'nope') === -1, 'malformed -1');
     assert(matchRecoveryCode({ ...set, v: 2 }, codes[0]) === -1 && matchRecoveryCode(null, codes[0]) === -1, 'bad set -1');
+    // RV1 N1: malformed stored sets are refused
+    assert(!isRecoveryCodeSet({ ...set, salt: 'abc' }) && !isRecoveryCodeSet({ ...set, salt: set.salt.toUpperCase() }), 'bad salt refused');
+    assert(!isRecoveryCodeSet({ ...set, hashes: [...set.hashes, set.hashes[0]] }), 'more than 10 hashes refused');
+    assert(!isRecoveryCodeSet({ ...set, createdAt: 'not-a-date' }) && !isRecoveryCodeSet({ ...set, hashes: ['x'] }), 'bad timestamp / hash refused');
+    assert(isRecoveryCodeSet({ ...set, hashes: [] }), 'an exhausted set is still a valid set');
     const burned = burnRecoveryCode(set, 2);
     assert(burned.hashes.length === 9 && matchRecoveryCode(burned, codes[2]) === -1 && matchRecoveryCode(burned, codes[5]) === 4, 'burn removes exactly one');
     assert(hashRecoveryCode(set.salt, raw) === set.hashes[3], 'hash = sha256(salt:code)');

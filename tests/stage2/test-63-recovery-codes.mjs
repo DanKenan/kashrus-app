@@ -146,7 +146,7 @@ export default {
       const wsX = openWs(baseUrl, tX);
       assert((await wsX.waitOpen()) === 'open', 'B X socket');
       const x0 = await rowOf(X);
-      const r = await recover(XE, codes[0].toLowerCase().replace('-', ' '), 'stage2-t63-new1');
+      const r = await recover(XE, codes[4].toLowerCase().replace('-', ' '), 'stage2-t63-new1');
       assert(r.status === 200 && r.json?.user?.id === X && typeof r.json?.token === 'string', `B recover: ${r.status} ${r.text.slice(0, 160)}`);
       assert(/no-store/.test(r.headers.get('cache-control') || ''), 'B no-store');
       const x1 = await rowOf(X);
@@ -157,7 +157,7 @@ export default {
       assert((await alive(tX)) === 401, 'B old token 401');
       assert((await wsX.waitClose()) === 4401, `B open socket 4401 (${wsX.code})`);
       assert((await alive(r.json.token)) === 200, 'B new token works');
-      const again = await recover(XE, codes[0], 'stage2-t63-new2');
+      const again = await recover(XE, codes[4], 'stage2-t63-new2');
       assert(again.status === 401 && again.text === wrongBody, `B reuse refused: ${again.status}`);
       assert((await login(XE, 'stage2-t63-new1')).status === 200, 'B new password logs in');
       tX = r.json.token;
@@ -175,14 +175,14 @@ export default {
       const f = (await rowOf(X)).recoveryFailures;
       assert(f && typeof f.lockedUntil === 'string', `C locked after 5 failures ${J(f)}`);
       const v0 = await ctx.getVersion();
-      let r = await recover(XE, codes[1], 'stage2-t63-new3');
+      let r = await recover(XE, codes[7], 'stage2-t63-new3');
       assert(r.status === 401 && r.text === wrongBody, `C right code refused while locked: ${r.status}`);
       await unchanged(v0, 'C nothing counted while locked');
       assert((await rowOf(X)).tokenEpoch === e0, 'C failures change no epoch');
       assert((await alive(tX)) === 200, 'C failures revoke nothing');
       assert((await hook('clock', { iso: new Date(Date.now() + 61 * 60 * 1000).toISOString() })).status === 200, 'C clock +61 min');
       try {
-        r = await recover(XE, codes[1], 'stage2-t63-new3');
+        r = await recover(XE, codes[7], 'stage2-t63-new3');
         assert(r.status === 200 && r.json?.user?.id === X, `C after the lock expired: ${r.status} ${r.text.slice(0, 120)}`);
         assert((await rowOf(X)).recoveryFailures === undefined, 'C success clears the failure record');
         tX = r.json.token;
@@ -199,7 +199,7 @@ export default {
       const codes2 = r.json.codes;
       const old = await recover(XE, codes[2], 'stage2-t63-new4');
       assert(old.status === 401, `D old code dead: ${old.status}`);
-      const ok = await recover(XE, codes2[0], 'stage2-t63-new4');
+      const ok = await recover(XE, codes2[9], 'stage2-t63-new4');
       assert(ok.status === 200, `D new code works: ${ok.status}`);
       tX = ok.json.token;
       console.log('  ✓ D a new set replaces every old code');
@@ -222,7 +222,7 @@ export default {
       const codes3 = r.json.codes;
       assert((await rowOf(X)).recoveryCodeHashes?.hashes?.length === 10 && (await rowOf(Y)).recoveryCodeHashes === undefined, 'E codes on the owner row only');
       const x0 = await rowOf(X), y0 = await rowOf(Y);
-      r = await recover(XE, codes3[0], 'stage2-t63-new5');
+      r = await recover(XE, codes3[5], 'stage2-t63-new5');
       assert(r.status === 200 && r.json?.user?.id === X, `E recover -> X: ${r.status}`);
       const x1 = await rowOf(X), y1 = await rowOf(Y);
       assert(x1.tokenEpoch === (x0.tokenEpoch ?? 0) + 1 && y1.tokenEpoch === (y0.tokenEpoch ?? 0) + 1, `E every row bumped ${J([x0.tokenEpoch, x1.tokenEpoch, y0.tokenEpoch, y1.tokenEpoch])}`);
@@ -232,7 +232,7 @@ export default {
       assert(d.status === 200, `E delete owner X: ${d.status} ${d.text.slice(0, 120)}`);
       const y2 = await rowOf(Y);
       assert(y2.credentialOwner === true && y2.recoveryCodeHashes?.hashes?.length === 9, 'E codes moved with the credential to Y');
-      r = await recover(XE, codes3[1], 'stage2-t63-new6');
+      r = await recover(XE, codes3[2], 'stage2-t63-new6');
       assert(r.status === 200 && r.json?.user?.id === Y, `E recover after transfer -> Y: ${r.status} ${r.text.slice(0, 120)}`);
       console.log('  ✓ E codes live on the owner row, recover bumps every row, and follow an owner transfer');
     }
