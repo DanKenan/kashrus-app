@@ -44,13 +44,21 @@ export const SESSION_VIA = [
   'recover',
   /** 11a-s2: a pre-11 Bearer token moved to the cookie (its record ends no later than that token). */
   'adopt',
+  /** 11a-s3: a kiosk PIN sign-in on a paired tablet (kind 'kiosk'). */
+  'kiosk-login',
+  /** 11a-s3: a kiosk token from before 11a-s3 moved to the kiosk cookie (its record ends no later than that token). */
+  'kiosk-adopt',
   'test',
 ] as const;
 export type SessionVia = (typeof SESSION_VIA)[number];
 
+/** Plan 15.1 (Don): a kiosk session lives 3 hours from the PIN sign-in, hard. Never refreshed. */
+export const KIOSK_SESSION_TTL_MS = 3 * 3600 * 1000;
+
 export type SessionDoc = {
   sid: string;
-  kind: 'user';
+  /** 'kiosk' (11a-s3): a tablet session; it also carries the kiosk fields below. */
+  kind: 'user' | 'kiosk';
   /** The person (v2 tokens); null for a legacy row without personId (v1 tokens). */
   personId: string | null;
   /** The membership row the token acts as (claims.userId). */
@@ -67,12 +75,17 @@ export type SessionDoc = {
   userAgentHint: string;
   revokedAt: string | null;
   revokeReason: string | null;
+  /** 11a-s3, kind 'kiosk' only: the tablet (kiosk device id), its venue and the PIN revision the token carries (pv). */
+  kioskDeviceId?: string;
+  venueId?: string;
+  pvAtIssue?: string;
 };
 
 /** The claim shapes a session can back (see session-token.ts SessionClaims). */
 export type SessionBackedClaims =
   | { kind: 'v1'; userId: string; sid?: string }
-  | { kind: 'v2'; userId: string; personId: string; ep: number; sid?: string };
+  | { kind: 'v2'; userId: string; personId: string; ep: number; sid?: string }
+  | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string; sid?: string };
 
 export function buildUserSession(input: {
   sid: string;
@@ -111,6 +124,54 @@ export function buildUserSession(input: {
 }
 
 /**
+ * 11a-s3 (plan 9.1, 15.1): the record of a kiosk PIN sign-in. absoluteExpMs =
+ * createdAt + 3 h, never moved; capExpMs (kiosk adopt) only shortens it.
+ */
+export function buildKioskSession(input: {
+  sid: string;
+  row: { id: string; personId?: unknown };
+  epoch: number;
+  agencyId: string;
+  venueId: string;
+  deviceId: string;
+  pv: string;
+  via: SessionVia;
+  userAgent?: unknown;
+  nowMs: number;
+  capExpMs?: number;
+}): SessionDoc {
+  const { sid, row, epoch, nowMs } = input;
+  if (!isSid(sid)) throw new Error('buildKioskSession: bad sid');
+  if (!Number.isInteger(epoch) || epoch < 0) throw new Error('buildKioskSession: bad epoch');
+  for (const k of ['agencyId', 'venueId', 'deviceId', 'pv'] as const) {
+    if (typeof input[k] !== 'string' || !input[k]) throw new Error(`buildKioskSession: bad ${k}`);
+  }
+  let absoluteExpMs = nowMs + KIOSK_SESSION_TTL_MS;
+  if (input.capExpMs !== undefined) {
+    if (typeof input.capExpMs !== 'number' || !Number.isFinite(input.capExpMs) || input.capExpMs <= nowMs) throw new Error('buildKioskSession: bad cap');
+    absoluteExpMs = Math.min(absoluteExpMs, input.capExpMs);
+  }
+  return {
+    sid,
+    kind: 'kiosk',
+    personId: typeof row.personId === 'string' && row.personId ? row.personId : null,
+    rowId: String(row.id),
+    agencyId: input.agencyId,
+    epochAtIssue: epoch,
+    via: input.via,
+    createdAt: new Date(nowMs).toISOString(),
+    createdAtMs: nowMs,
+    absoluteExpMs,
+    userAgentHint: String(input.userAgent ?? '').slice(0, 60),
+    revokedAt: null,
+    revokeReason: null,
+    kioskDeviceId: input.deviceId,
+    venueId: input.venueId,
+    pvAtIssue: input.pv,
+  };
+}
+
+/**
  * The one rule: does this stored session back these claims right now?
  * Fails closed on anything missing or malformed.
  */
@@ -118,9 +179,17 @@ export function sessionBacksClaims(doc: unknown, claims: SessionBackedClaims | n
   if (!doc || typeof doc !== 'object' || !claims) return false;
   const d = doc as Partial<SessionDoc>;
   if (!isSid(claims.sid) || d.sid !== claims.sid) return false;
-  if (d.kind !== 'user') return false;
   if (d.rowId !== claims.userId) return false;
-  if (claims.kind === 'v2') {
+  if (claims.kind === 'kiosk') {
+    // 11a-s3: a kiosk record backs only a kiosk token of the same row, agency,
+    // venue, tablet and PIN revision (each present on both sides).
+    if (d.kind !== 'kiosk') return false;
+    for (const [rec, tok] of [[d.agencyId, claims.agencyId], [d.venueId, claims.venueId], [d.kioskDeviceId, claims.dev], [d.pvAtIssue, claims.pv]] as const) {
+      if (typeof rec !== 'string' || !rec || rec !== tok) return false;
+    }
+  } else if (d.kind !== 'user') {
+    return false;
+  } else if (claims.kind === 'v2') {
     if (d.personId !== claims.personId) return false;
     if (d.epochAtIssue !== claims.ep) return false;
   } else if (claims.kind === 'v1') {

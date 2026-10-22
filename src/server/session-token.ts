@@ -28,7 +28,7 @@ export type SessionClaims =
   | { kind: 'v1'; userId: string; sid?: string }
   | { kind: 'v2'; userId: string; personId: string; ep: number; sid?: string }
   /** endsAtMs: set by server.ts verifyToken only (the kiosk 3 h cap); never by the classifier. */
-  | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string; endsAtMs?: number }
+  | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string; sid?: string; endsAtMs?: number }
   /** 10g: proves a person's credential, grants NO membership (never authUser). */
   | { kind: 'choose'; personId: string; ownerRowId: string; ep: number };
 
@@ -39,13 +39,13 @@ const nonEmpty = (x: unknown): x is string => typeof x === 'string' && x.length 
 
 export function classifySessionClaims(data: any): SessionClaims | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-  // 11a-s1: sid is allowed only on v1/v2 session tokens, and only well-formed.
-  // A kiosk or choose token carrying sid, or a malformed sid, is no token.
+  // 11a-s1: sid is allowed only on session tokens, and only well-formed.
+  // 11a-s3: kiosk tokens may carry sid too (the kiosk session record).
+  // A choose token carrying sid, or a malformed sid, is no token.
   const hasSid = has(data, 'sid');
   if (hasSid && !isSid(data.sid)) return null;
   const sidPart = hasSid ? { sid: data.sid as string } : {};
   if (data.kiosk === true) {
-    if (hasSid) return null;
     if (V2_CLAIMS.some((k) => has(data, k))) return null;
     if (!nonEmpty(data.sub)) return null;
     return {
@@ -55,6 +55,7 @@ export function classifySessionClaims(data: any): SessionClaims | null {
       venueId: typeof data.venueId === 'string' ? data.venueId : undefined,
       pv: typeof data.pv === 'string' ? data.pv : undefined,
       dev: typeof data.dev === 'string' ? data.dev : undefined,
+      ...sidPart,
     };
   }
   if (KIOSK_CLAIMS.some((k) => has(data, k))) return null;
