@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, CheckCircle2, AlertCircle, KeyRound, Eye, EyeOff } from 'lucide-react';
 import { User as UserType } from '../types';
-import { apiFetch, WRONG_CURRENT_PASSWORD_TEXT } from '../lib/api';
+import { apiFetch, setSessionToken, WRONG_CURRENT_PASSWORD_TEXT } from '../lib/api';
 
 interface ChangePasswordModalProps {
   isOpen: boolean;
@@ -65,6 +65,9 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
         }
         throw new Error(data.error || 'Failed to update password.');
       }
+      // QA2 #15: changing the password signs out the person's other sessions; the
+      // answer carries a fresh token for this one, so keep it (this phone stays signed in).
+      if (typeof data.token === 'string' && data.token) setSessionToken(data.token);
 
       setSuccess(true);
       if (onSuccessToast) {
