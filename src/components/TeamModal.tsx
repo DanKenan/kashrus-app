@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   X, 
   Users, 
@@ -21,6 +21,14 @@ import { ConfirmModal } from './ConfirmModal';
 import { KioskCodeDialog } from './KioskCodeDialog';
 import { VenueAccessSheet } from './VenueAccessSheet';
 import { normalizePhone } from '../lib/kioskCodeShare';
+import { InviteLinkCard } from './InviteLinkCard';
+
+/** Item 10i: what Add member returns when the agency's Phase C is ON (the server made an invite, not a user). */
+export interface AddMemberInvite {
+  link: string;
+  name: string;
+  email: string;
+}
 
 interface TeamModalProps {
   isOpen: boolean;
@@ -38,7 +46,9 @@ interface TeamModalProps {
     venueId?: string;
     permissions?: UserPermissions;
     phoneNumber?: string;
-  }) => Promise<void>;
+  }) => Promise<void | AddMemberInvite>;
+  /** Item 10i: true when the server reports Phase C ON for this agency — the form adds by invite link (no password). */
+  inviteMode?: boolean;
   onUpdateUser?: (userId: string, updates: { 
     role?: UserRole; 
     permissions?: UserPermissions;
@@ -57,6 +67,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   currentVenue,
   venues,
   onAddUser,
+  inviteMode = false,
   onUpdateUser,
   onDeleteUser,
 }) => {
@@ -81,6 +92,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   // 8:50 PM ET Oct 19; phone added in K1, Oct 20).
   const isCoordinatorView = currentUser?.role === 'coordinator';
   const [actionAlert, setActionAlert] = useState<string | null>(null);
+  // Item 10i: the invite link just made (shown once, never stored).
+  const [inviteResult, setInviteResult] = useState<{ link: string; forWhom: string } | null>(null);
+  useEffect(() => {
+    if (!isOpen) setInviteResult(null);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -95,6 +111,12 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (inviteMode) {
+      if (!name.trim() || !email.trim()) {
+        setError('Please provide a name and an email.');
+        return;
+      }
+    } else {
     if (!name.trim() || !email.trim() || !password.trim()) {
       setError('Please provide name, email, and an initial password.');
       return;
@@ -103,6 +125,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
     if (password.trim().length < 6) {
       setError('Initial password must be at least 6 characters.');
       return;
+    }
     }
 
     const phoneClean = normalizePhone(newPhone);
@@ -119,11 +142,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 
     try {
       setIsSubmitting(true);
-      await onAddUser({
+      const added = await onAddUser({
         name: name.trim(),
         email: emailClean,
-        role,
-        password: password.trim(),
+        role: inviteMode && role !== 'coordinator' ? 'mashgiach' : role,
+        ...(inviteMode ? {} : { password: password.trim() }),
         venueId: currentVenue?.id,
         permissions: {
           canFillTasks: canFill,
@@ -131,6 +154,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         },
         ...(phoneClean ? { phoneNumber: phoneClean } : {}),
       });
+      if (added && typeof added.link === 'string') {
+        setInviteResult({ link: added.link, forWhom: `${added.name} (${added.email})` });
+      }
       setName('');
       setEmail('');
       setPassword('');
@@ -296,9 +322,22 @@ export const TeamModal: React.FC<TeamModalProps> = ({
               </div>
             )}
 
+            {inviteResult ? (
+              <InviteLinkCard
+                link={inviteResult.link}
+                forWhom={inviteResult.forWhom}
+                onDone={() => setInviteResult(null)}
+                doneLabel="Add another person"
+              />
+            ) : (
             <form onSubmit={handleAddSubmit} className="space-y-3 text-xs">
+              {inviteMode && (
+                <p data-invite-mode-note className="text-sm text-ink-soft">
+                  No password needed. You'll get a link to send them, and they choose their own password.
+                </p>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                <div className="sm:col-span-3">
+                <div className={inviteMode ? 'sm:col-span-4' : 'sm:col-span-3'}>
                   <label className="block font-semibold text-ink-soft mb-1">
                     Full Name
                   </label>
@@ -316,7 +355,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   </div>
                 </div>
 
-                <div className="sm:col-span-3">
+                <div className={inviteMode ? 'sm:col-span-4' : 'sm:col-span-3'}>
                   <label className="block font-semibold text-ink-soft mb-1">
                     Email
                   </label>
@@ -334,7 +373,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   </div>
                 </div>
 
-                <div className="sm:col-span-3">
+                {!inviteMode && (
+                <div className={inviteMode ? 'sm:col-span-4' : 'sm:col-span-3'}>
                   <label className="block font-semibold text-ink-soft mb-1">
                     Password
                   </label>
@@ -351,21 +391,22 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                     />
                   </div>
                 </div>
+                )}
 
-                <div className="sm:col-span-3">
+                <div className={inviteMode ? 'sm:col-span-4' : 'sm:col-span-3'}>
                   <label className="block font-semibold text-ink-soft mb-1">
                     Role
                   </label>
                   <select
                     id="new-member-role-select"
-                    value={role}
+                    value={inviteMode && role !== 'coordinator' ? 'mashgiach' : role}
                     onChange={(e) => handleRoleChange(e.target.value as UserRole)}
                     className="w-full py-2 px-3 font-medium focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   >
                     <option value="mashgiach">Mashgiach (Field Inspector)</option>
                     <option value="coordinator">Coordinator (Can Add Tasks)</option>
-                    <option value="owner">Restaurant / Venue Owner</option>
-                    <option value="admin">Administrator (Full Control)</option>
+                    {!inviteMode && <option value="owner">Restaurant / Venue Owner</option>}
+                    {!inviteMode && <option value="admin">Administrator (Full Control)</option>}
                   </select>
                 </div>
               </div>
@@ -427,10 +468,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   className="pressable py-2 px-4 rounded-xl hover:brightness-105 disabled:opacity-50 font-bold flex items-center justify-center gap-1.5 e1 cursor-pointer shrink-0 bg-gold-deep text-paper"
                 >
                   <UserPlus className="w-4 h-4" />
-                  <span>{isSubmitting ? 'Adding...' : 'Add Team Member'}</span>
+                  <span>{inviteMode ? (isSubmitting ? 'Creating link…' : 'Create invite link') : (isSubmitting ? 'Adding...' : 'Add Team Member')}</span>
                 </button>
               </div>
             </form>
+            )}
           </div>
 
           )} {/* end admin-only Add Member form */}

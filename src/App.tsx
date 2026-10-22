@@ -40,6 +40,9 @@ import { ConfirmModal } from './components/ConfirmModal';
 import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
+import { InvitePage } from './components/InvitePage';
+import type { AddMemberInvite } from './components/TeamModal';
+import { fullInviteLink, isInvitePath, readInviteToken, useInviteFlag } from './lib/invites';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
 import { realtimeSocket } from './lib/socketClient';
 import { testFirestoreConnection } from './lib/firebaseClient';
@@ -334,6 +337,17 @@ export default function App() {
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
+  // Item 10i: Phase C (invite-only adds) for the admin's own agency, as the
+  // server reports it. Read at sign-in and again each time Add member or New
+  // venue opens; null (not known) keeps today's forms.
+  const inviteFlag = useInviteFlag(
+    !isKiosk && currentUser?.role === 'admin' ? `${currentUser.id}|${currentUser.agencyId || ''}` : null,
+    isTeamModalOpen,
+    isCreateVenueOpen,
+  );
+  // Item 10i: the public invite page (/invite#t=…), read once when the app opens.
+  const [invitePage, setInvitePage] = useState(() => typeof window !== 'undefined' && isInvitePath(window.location.pathname));
+  const [inviteToken] = useState(() => (typeof window !== 'undefined' ? readInviteToken(window.location.hash) : null));
   const [isKioskDevicesOpen, setIsKioskDevicesOpen] = useState(false);
   const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
   const [isCreateEventModalOpen, setIsCreateEventModalOpen] = useState(false);
@@ -1162,7 +1176,7 @@ export default function App() {
   };
 
   // Add new user to team roster
-  const handleAddUser = async (userData: { name: string; email: string; role: UserRole; password?: string; venueId?: string; permissions?: { canFillTasks?: boolean; canAssignTasks?: boolean } }) => {
+  const handleAddUser = async (userData: { name: string; email: string; role: UserRole; password?: string; venueId?: string; permissions?: { canFillTasks?: boolean; canAssignTasks?: boolean } }): Promise<void | AddMemberInvite> => {
     const result = await apiWrite('/api/users', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1176,6 +1190,12 @@ export default function App() {
       throw new Error(result.error || 'Failed to add team member');
     }
     const data = result.data;
+    // Item 10i: Phase C ON — the server made an invite (no user yet).
+    if (data && data.pending === true) {
+      const link = fullInviteLink(data.link);
+      if (!link) throw new Error('The invite was made, but its link is missing. Please try again.');
+      return { link, name: String(data.invite?.name || userData.name), email: String(data.invite?.email || userData.email) };
+    }
     // Dedupe by id: the USERS_UPDATED broadcast can arrive before the
     // POST resolves, in which case the member is already in state.
     setKnownUsers((prev) => (prev.some((u) => u.id === data.user.id) ? prev : [...prev, data.user]));
@@ -1529,6 +1549,26 @@ export default function App() {
     }
     showToast(`Welcome to ${user.agencyName || 'Shutfey'}, ${user.name}!`);
   };
+
+  // Item 10i: the invite page comes first, signed in or not (not on a kiosk tablet).
+  if (invitePage && !isKiosk) {
+    const leaveInvitePage = () => {
+      try { window.history.replaceState(null, '', '/'); } catch { /* ignore */ }
+      setInvitePage(false);
+    };
+    return (
+      <InvitePage
+        token={inviteToken}
+        onLoginSuccess={(user) => { leaveInvitePage(); handleLoginSuccess(user); }}
+        onLeave={() => {
+          leaveInvitePage();
+          if (!currentUser) { setAuthInitialMode('login'); setAuthView('auth'); }
+        }}
+        darkMode={darkMode}
+        onToggleDarkMode={() => setDarkMode(!darkMode)}
+      />
+    );
+  }
 
   // Public screens: the landing home page opens first; auth form on demand.
   // Require authentication to view tasks and shift operations
@@ -2185,6 +2225,7 @@ export default function App() {
         currentUser={currentUser}
         currentVenue={currentVenue}
         onAddUser={handleAddUser}
+        inviteMode={inviteFlag === true}
         onUpdateUser={handleUpdateUser}
         onDeleteUser={handleDeleteUser}
       />
@@ -2206,6 +2247,7 @@ export default function App() {
         agencyName={currentUser.agencyName}
         agencySeal={currentUser.agencySeal}
         agencyTimeZone={currentUser.agencyTimeZone}
+        inviteMode={inviteFlag === true}
       />
 
       {!isKiosk && currentUser.role === 'admin' && isLogoFeatureOn(currentUser) && <AgencyLogoSheet

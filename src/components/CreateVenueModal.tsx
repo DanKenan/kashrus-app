@@ -12,6 +12,8 @@ import { apiFetch, apiWrite, versionFromResponse } from '../lib/api';
 import { certificationLabel, normalizeOption, validateOptions } from '../lib/certOptions';
 import { CertificationOptionsSheet } from './CertificationOptionsSheet';
 import { COMMON_TIME_ZONES, DEFAULT_TIME_ZONE, timeZoneLabel } from '../lib/workday';
+import { fullInviteLink } from '../lib/invites';
+import { InviteLinkCard } from './InviteLinkCard';
 
 interface CreateVenueModalProps {
   isOpen: boolean;
@@ -22,6 +24,8 @@ interface CreateVenueModalProps {
   agencySeal?: string;
   /** Item 6: the agency's zone (absent = America/New_York), shown as the default. */
   agencyTimeZone?: string;
+  /** Item 10i: true when the server reports Phase C ON — a new owner gets an invite link (no password). */
+  inviteMode?: boolean;
 }
 
 export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
@@ -31,6 +35,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   adminEmail,
   agencyName,
   agencyTimeZone,
+  inviteMode = false,
 }) => {
   const [name, setName] = useState('');
   // Item 6: '' = same as the agency (no own zone stored).
@@ -60,6 +65,9 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
 
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Item 10i: the new owner's invite link (shown once, never stored).
+  const [ownerInvite, setOwnerInvite] = useState<{ link: string; forWhom: string } | null>(null);
+  const [choicePending, setChoicePending] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -73,6 +81,8 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
     setVenueCreated(false);
     setSaveChoiceError(null);
     setErrorMessage(null);
+    setOwnerInvite(null);
+    setChoicePending(false);
     setEditingChoices(false);
     setChoicesLoading(true);
     setChoicesError(null);
@@ -141,7 +151,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
       ? customCategory.trim()
       : category.trim();
 
-    if (ownerEmail.trim() && !ownerPassword.trim()) {
+    if (!inviteMode && ownerEmail.trim() && !ownerPassword.trim()) {
       setErrorMessage('Please specify an initial password for the venue owner.');
       return;
     }
@@ -159,7 +169,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
           ...(normalizeOption(detail) ? { certificationDetail: normalizeOption(detail) } : {}),
           ownerName: ownerName.trim() || undefined,
           ownerEmail: ownerEmail.trim() || undefined,
-          ownerPassword: ownerPassword.trim() || undefined,
+          ownerPassword: inviteMode ? undefined : ownerPassword.trim() || undefined,
           templateType,
           userEmail: adminEmail,
           ...(timeZone ? { timeZone } : {}),
@@ -171,9 +181,16 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
         throw new Error(data.error || 'Failed to create new venue platform.');
       }
 
+      // Item 10i: with Phase C ON a new owner email comes back as an invite link.
+      const ownerLink = fullInviteLink(data.ownerInviteLink);
+      if (ownerLink) {
+        const who = data.ownerInvite && typeof data.ownerInvite === 'object' ? data.ownerInvite : {};
+        setOwnerInvite({ link: ownerLink, forWhom: who.name && who.email ? `${who.name} (${who.email})` : String(who.email || ownerEmail.trim()) });
+      }
       setVenueCreated(true);
       onVenueCreated(data.venue);
       if (selected === 'other' && saveForNextTime) {
+        setChoicePending(true);
         try {
           const version = versionFromResponse(res);
           if (version === undefined) throw new Error('The venue response did not include a version.');
@@ -186,8 +203,11 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
         } catch (error) {
           setSaveChoiceError(error instanceof Error ? error.message : "Couldn't save the new choice.");
           return;
+        } finally {
+          setChoicePending(false);
         }
       }
+      if (ownerLink) return; // stay open: the admin copies the owner's link first
       onClose();
     } catch (err: any) {
       setErrorMessage(err.message || 'Error occurred while creating venue platform.');
@@ -235,7 +255,22 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
         )}
 
         {/* Form Body */}
-        {venueCreated ? (
+        {venueCreated && ownerInvite ? (
+          <div className="p-6 space-y-4">
+            <h3 className="text-base font-semibold text-ink">Venue created</h3>
+            <InviteLinkCard
+              link={ownerInvite.link}
+              forWhom={ownerInvite.forWhom}
+              hint="Send this link to the venue owner."
+              onDone={choicePending ? undefined : onClose}
+            />
+            {(choicePending || saveChoiceError) && (
+              <p role="status" className="text-sm text-ink-soft">
+                {saveChoiceError ? `The new choice wasn't saved for next time: ${saveChoiceError}` : 'Saving the new choice…'}
+              </p>
+            )}
+          </div>
+        ) : venueCreated ? (
           <div className="p-6 space-y-4">
             <h3 className="text-base font-semibold text-ink">Venue created</h3>
             <p role="status" className="text-sm text-ink-soft">
@@ -398,7 +433,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
               The owner logs into their isolated platform in read-only audit mode to review shift progress and history logs.
             </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className={inviteMode ? 'grid grid-cols-1 sm:grid-cols-2 gap-3' : 'grid grid-cols-1 sm:grid-cols-3 gap-3'}>
               <div>
                 <label className="block text-xs font-semibold text-ink-soft mb-1">
                   Owner Full Name
@@ -425,6 +460,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                 />
               </div>
 
+              {!inviteMode && (
               <div>
                 <label className="block text-xs font-semibold text-ink-soft mb-1">
                   Password
@@ -437,7 +473,13 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   className="w-full px-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>
+              )}
             </div>
+            {inviteMode && (
+              <p data-invite-mode-note className="text-sm text-ink-soft">
+                No password needed. For a new owner you'll get a link to send them, and they choose their own password.
+              </p>
+            )}
           </div>
 
           {/* Footer Actions */}
