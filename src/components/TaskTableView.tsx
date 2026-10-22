@@ -1,3 +1,5 @@
+import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
+import { minutesIn } from '../lib/workday';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ChevronDown,
@@ -24,6 +26,8 @@ import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
 interface TaskTableViewProps {
+  /** QA2 #25: the venue's time zone, for the Overdue chip. */
+  timeZone?: string;
   tasks: Task[];
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
@@ -59,7 +63,10 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   onOpenTaskModal,
   onMoveTask,
   canReorder,
+  timeZone,
 }) => {
+  // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
+  const nowMinutes = timeZone ? minutesIn(timeZone) : null;
   const [expandedDescriptions, setExpandedDescriptions] = useState<Record<string, boolean>>({});
   const [editingNotes, setEditingNotes] = useState<Record<string, string>>({});
   // ROUND 5 — write baseline per task, captured when the user FOCUSES the
@@ -259,6 +266,11 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                         <Clock className="w-3.5 h-3.5 text-ink-faint shrink-0" />
                         <span>{formatTaskTimes(task)}</span>
                       </div>
+                  {isTaskOverdue(task, nowMinutes) && (
+                    <span data-overdue className={OVERDUE_CHIP_CLASS} style={{ color: 'var(--bad)', backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}>
+                      Overdue
+                    </span>
+                  )}
                       <div className="text-[11px] text-ink-faint flex items-center gap-1 font-medium">
                         {task.scheduleType === 'specific_dates' && (
                           <CalendarDays className="w-3 h-3 text-gold-deep shrink-0" />
@@ -358,7 +370,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                                   ? 'bg-emerald-600 text-white tactile-1'
                                   : 'text-ink-soft hover:text-emerald-700 dark:hover:text-emerald-400'
                               }`}
-                              title={task.currentStatus === 'yes' ? 'Click to cancel verification' : 'Mark as Yes (Verified)'}
+                              title={task.currentStatus === 'yes' ? 'Tap to undo the sign-off' : 'Mark as Yes (Verified)'}
                             >
                               Yes
                             </button>
@@ -376,7 +388,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                                   ? 'bg-rose-600 text-white tactile-1'
                                   : 'text-ink-soft hover:text-rose-700 dark:hover:text-rose-400'
                               }`}
-                              title={task.currentStatus === 'no' ? 'Click to cancel choice' : 'Mark as No (Pending)'}
+                              title={task.currentStatus === 'no' ? 'Tap to clear the answer' : 'Mark as No (Pending)'}
                             >
                               No
                             </button>
@@ -426,7 +438,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                                 ? 'bg-emerald-600 border-emerald-600 text-white'
                                 : 'bg-surface border-line-strong hover:border-gold'
                             }`}
-                            title={task.isCompleted ? 'Click to cancel verification' : 'Sign and mark as complete'}
+                            title={task.isCompleted ? 'Tap to undo the sign-off' : 'Sign and mark as complete'}
                           >
                             {task.isCompleted && <Check className="w-3.5 h-3.5 stroke-[3]" />}
                           </button>

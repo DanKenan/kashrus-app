@@ -387,14 +387,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
             <div className="flex-1 min-w-0">
               <h2 className="text-base font-bold text-ink flex flex-wrap items-center gap-2">
                 <span className="basis-full sm:basis-auto min-w-0">Mashgiach Team & Access Permissions</span>
-                {currentVenue && (
-                  <span className="text-xs px-2.5 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 font-semibold flex items-center gap-1 min-w-0 max-w-full break-words">
-                    <Building2 className="w-3 h-3" />
-                    {currentVenue.name}
-                  </span>
-                )}
+                {/* QA2 #22: the list is the whole agency, not one venue: say so (no venue chip). */}
                 <span className="text-xs px-2 py-0.5 rounded-full bg-sunken text-ink-soft font-semibold shrink-0">
-                  {users.length} members
+                  All team · {users.length}
                 </span>
               </h2>
               <p className="text-sm text-ink-soft">
@@ -733,7 +728,10 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                           setVenueTarget({ ...user, venueIds: [...user.venueIds!] });
                         }}
                         className="min-h-11 min-w-0 px-3 py-2 rounded-xl bg-surface border border-line-control text-base text-ink hover:bg-sunken pressable cursor-pointer break-words">
-                        Venues: {venues.find((venue) => venue.id === user.venueId)?.name || ''}
+                        {/* QA2 #22: a person with no venue left is flagged, not shown "Venues:" blank. */}
+                        {venues.some((venue) => user.venueIds!.includes(venue.id))
+                          ? <>Venues: {venues.find((venue) => venue.id === user.venueId)?.name || venues.find((venue) => user.venueIds!.includes(venue.id))?.name}</>
+                          : <span style={{ color: 'var(--bad)' }} className="font-semibold">No venue — tap to set</span>}
                         {user.venueIds.filter((id) => id !== user.venueId && venues.some((venue) => venue.id === id)).length > 0 &&
                           ` +${user.venueIds.filter((id) => id !== user.venueId && venues.some((venue) => venue.id === id)).length}`}
                       </button>

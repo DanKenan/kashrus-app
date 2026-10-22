@@ -1,3 +1,5 @@
+import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
+import { minutesIn } from '../lib/workday';
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import {
@@ -25,6 +27,8 @@ import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 
 interface TaskCardViewProps {
+  /** QA2 #25: the venue's time zone, for the Overdue chip. */
+  timeZone?: string;
   tasks: Task[];
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
@@ -60,7 +64,10 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   onOpenTaskModal,
   onMoveTask,
   canReorder,
+  timeZone,
 }) => {
+  // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
+  const nowMinutes = timeZone ? minutesIn(timeZone) : null;
   const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
   const [notesState, setNotesState] = useState<Record<string, string>>({});
@@ -167,6 +174,11 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                     <Clock className="w-3 h-3" />
                     {formatTaskTimes(task)}
                   </span>
+                  {isTaskOverdue(task, nowMinutes) && (
+                    <span data-overdue className={OVERDUE_CHIP_CLASS} style={{ color: 'var(--bad)', backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}>
+                      Overdue
+                    </span>
+                  )}
                 </div>
 
                 {canAssign && (
@@ -367,7 +379,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                               ? 'bg-gradient-to-b from-emerald-600 to-emerald-700 text-white'
                               : 'bg-sunken text-ink-soft hover:text-emerald-800 dark:hover:text-emerald-300 border border-line'
                           }`}
-                          title={task.currentStatus === 'yes' ? 'Click to cancel verification' : 'Mark as Yes (Verified)'}
+                          title={task.currentStatus === 'yes' ? 'Tap to undo the sign-off' : 'Mark as Yes (Verified)'}
                         >
                           <Check className="w-4 h-4" /> Yes (Verified)
                         </button>
@@ -385,7 +397,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                               ? 'bg-gradient-to-b from-rose-600 to-rose-700 text-white'
                               : 'bg-sunken text-ink-soft hover:text-rose-800 dark:hover:text-rose-300 border border-line'
                           }`}
-                          title={task.currentStatus === 'no' ? 'Click to cancel choice' : 'Mark as No (Pending)'}
+                          title={task.currentStatus === 'no' ? 'Tap to clear the answer' : 'Mark as No (Pending)'}
                         >
                           <X className="w-4 h-4" /> No (Pending)
                         </button>
@@ -433,10 +445,10 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                             ? 'bg-gradient-to-b from-emerald-600 to-emerald-700 border-emerald-600 text-white'
                             : 'bg-sunken border-line text-ink-soft hover:border-gold/60'
                         }`}
-                        title={task.isCompleted ? 'Click to cancel verification' : 'Sign and mark as complete'}
+                        title={task.isCompleted ? 'Tap to undo the sign-off' : 'Sign and mark as complete'}
                       >
                         <CheckCircle2 className="w-4 h-4" />
-                        <span>{task.isCompleted ? '✓ Signed & Verified (Click to cancel)' : 'Sign & Complete Inspection'}</span>
+                        <span>{task.isCompleted ? '✓ Signed & Verified (tap to undo)' : 'Sign & Complete Inspection'}</span>
                       </button>
                     )}
 
