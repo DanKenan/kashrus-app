@@ -51,8 +51,8 @@ const SWAP = {
 const RAW_CODES = ['scheduled_midnight_cron'];
 
 // ---------------- messy data ----------------
-const venue = { id: 'v1', name: 'Beth El Social Hall — Main Ballroom (upstairs)', category: 'Catering', createdAt: '', timeZone: 'America/New_York' };
-const venue2 = { id: 'v2', name: 'Riverside Kitchen', category: 'Restaurant', createdAt: '' };
+const venue = { id: 'v1', agencyId: 'a', name: 'Beth El Social Hall — Main Ballroom (upstairs)', category: 'Catering', createdAt: '', timeZone: 'America/New_York' };
+const venue2 = { id: 'v2', agencyId: 'a', name: 'Riverside Kitchen', category: 'Restaurant', createdAt: '' };
 const admin = { id: 'u1', name: 'Yossi Abramowitz-Goldberger', email: 'admin@test.local', role: 'admin', agencyId: 'a', venueId: 'v1' };
 const mash = [{ id: 'm1', name: 'Moshe Klein', email: 'moshe@test.local', role: 'mashgiach', agencyId: 'a', venueId: 'v1' }, { id: 'm2', name: 'Sara Levi', email: 'sara@test.local', role: 'mashgiach', agencyId: 'a', venueId: 'v2' }];
 const task = (id, title, done, extra = {}) => ({ id, title, isCompleted: done, ...extra });
