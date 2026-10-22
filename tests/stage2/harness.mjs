@@ -22,7 +22,7 @@
 
 import { spawn, execSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { unlinkSync, rmSync, mkdirSync } from 'node:fs';
+import { unlinkSync, rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -105,12 +105,28 @@ async function main() {
     // Never set in production.
     STAGE2_TEST_MODE: 'true',
   };
+  // Fresh-state target (S2F-RV1 B1): resolved ONCE with server.ts
+  // getFirestoreConfig()'s precedence (env FIREBASE_PROJECT_ID, else the
+  // config file's projectId; an explicitly set FIRESTORE_DATABASE_ID, even
+  // empty, else the file's firestoreDatabaseId), then PINNED in the server env,
+  // so the server and the emulator wipe always use the same project and db.
+  let emuTarget = null;
   if (useRealEmulator) {
     serverEnv.FIRESTORE_ENABLED = 'true';
     // FIRESTORE_EMULATOR_HOST is inherited from process.env.
     // firebase-admin SDK connects to the emulator automatically.
     // Use a demo project ID — the emulator doesn't validate it.
     serverEnv.GCLOUD_PROJECT = process.env.GCLOUD_PROJECT || 'demo-test';
+    let fileConfig = {};
+    try { fileConfig = JSON.parse(readFileSync(join(REPO, 'firebase-applet-config.json'), 'utf8')); } catch {}
+    const projectId = process.env.FIREBASE_PROJECT_ID || fileConfig.projectId || '';
+    const databaseId = process.env.FIRESTORE_DATABASE_ID !== undefined
+      ? (process.env.FIRESTORE_DATABASE_ID || '')
+      : (fileConfig.firestoreDatabaseId || '');
+    emuTarget = { host: process.env.FIRESTORE_EMULATOR_HOST, projectId, databaseId };
+    serverEnv.FIREBASE_PROJECT_ID = projectId;
+    serverEnv.FIRESTORE_DATABASE_ID = databaseId;
+    console.log(`Emulator target (server + fresh-state wipe): project ${projectId || '(none)'}, db ${databaseId || '(default)'}`);
   } else {
     serverEnv.FIRESTORE_MOCK = 'true';
     serverEnv.FIRESTORE_MOCK_FILE = mockFile;
@@ -159,7 +175,47 @@ async function main() {
     console.log('[harness] Server restarted.');
   };
 
-  const results = await runAll(`http://127.0.0.1:${SERVER_PORT}`, { restartServer });
+  // Fresh state (stage2 doc-size fix): every test shares ONE app-state doc,
+  // and the whole suite's fixtures together outgrew the server's 900 KiB
+  // guard (CI, Oct 22 2026: Test 68 got 503 "Document too large"). run-all
+  // calls this at its FRESH_STATE markers: stop the server, wipe ALL stored
+  // state (emulator: every document of the project; mock: its persistence
+  // file; plus the server data dir), and boot a fresh server, exactly like the
+  // suite's own start. The server's 900 KiB guard itself is untouched.
+  const freshState = async () => {
+    console.log('[harness] Fresh state: wiping stored state and restarting the server...');
+    // Stop the old server for good BEFORE the wipe (npx can orphan the real
+    // node process, so kill whatever listens on the port and wait for it).
+    serverChild.kill('SIGKILL');
+    try { execSync(`lsof -ti:${SERVER_PORT} -sTCP:LISTEN | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {}
+    const stopDeadline = Date.now() + 15000;
+    for (;;) {
+      try { execSync(`lsof -ti:${SERVER_PORT} -sTCP:LISTEN`, { stdio: 'ignore' }); } catch { break; }
+      if (Date.now() > stopDeadline) throw new Error(`port ${SERVER_PORT} did not release within 15s (fresh state)`);
+      await sleep(250);
+    }
+    if (useRealEmulator) {
+      // Fail closed (S2F-RV1 N1): only a loopback emulator and a Firebase
+      // demo-* project (emulator-only by definition) may be wiped.
+      const { host, projectId, databaseId } = emuTarget;
+      if (!/^(127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(String(host || ''))) throw new Error(`fresh state refused: emulator host ${host} is not loopback`);
+      if (!/^demo-[a-z0-9-]+$/.test(projectId)) throw new Error(`fresh state refused: project ${projectId || '(none)'} is not a demo-* emulator project`);
+      const db = databaseId || '(default)';
+      // Preflight: the server's state doc must exist in this exact target.
+      const probe = await fetch(`http://${host}/v1/projects/${projectId}/databases/${db}/documents/app-state/main`, { headers: { Authorization: 'Bearer owner' } }); // emulator admin read
+      if (probe.status !== 200) throw new Error(`fresh state refused: app-state/main not found in ${projectId}/${db} (${probe.status}), so the wipe target is not the server's db`);
+      const r = await fetch(`http://${host}/emulator/v1/projects/${projectId}/databases/${db}/documents`, { method: 'DELETE' });
+      if (!r.ok) throw new Error(`emulator wipe failed: ${r.status} ${await r.text()}`);
+    } else {
+      try { unlinkSync(mockFile); } catch {}
+    }
+    try { rmSync(dataDir, { recursive: true, force: true }); } catch {}
+    mkdirSync(dataDir, { recursive: true });
+    await restartServer({});
+    console.log('[harness] Fresh state ready.');
+  };
+
+  const results = await runAll(`http://127.0.0.1:${SERVER_PORT}`, { restartServer, freshState });
 
   const failed = results.filter((r) => !r.pass);
   console.log('\n=== Summary ===');
