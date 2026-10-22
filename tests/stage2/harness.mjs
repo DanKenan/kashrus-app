@@ -159,7 +159,42 @@ async function main() {
     console.log('[harness] Server restarted.');
   };
 
-  const results = await runAll(`http://127.0.0.1:${SERVER_PORT}`, { restartServer });
+  // Fresh state (stage2 doc-size fix): every test shares ONE app-state doc,
+  // and the whole suite's fixtures together outgrew the server's 900 KiB
+  // guard (CI, Oct 22 2026: Test 68 got 503 "Document too large"). run-all
+  // calls this at its FRESH_STATE markers: stop the server, wipe ALL stored
+  // state (emulator: every document of the project; mock: its persistence
+  // file; plus the server data dir), and boot a fresh server, exactly like the
+  // suite's own start. The server's 900 KiB guard itself is untouched.
+  const freshState = async () => {
+    console.log('[harness] Fresh state: wiping stored state and restarting the server...');
+    // Stop the old server for good BEFORE the wipe (npx can orphan the real
+    // node process, so kill whatever listens on the port and wait for it).
+    serverChild.kill('SIGKILL');
+    try { execSync(`lsof -ti:${SERVER_PORT} -sTCP:LISTEN | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {}
+    const stopDeadline = Date.now() + 15000;
+    for (;;) {
+      try { execSync(`lsof -ti:${SERVER_PORT} -sTCP:LISTEN`, { stdio: 'ignore' }); } catch { break; }
+      if (Date.now() > stopDeadline) throw new Error(`port ${SERVER_PORT} did not release within 15s (fresh state)`);
+      await sleep(250);
+    }
+    if (useRealEmulator) {
+      // The same project/database the server opens (getFirestoreConfig).
+      const project = process.env.FIREBASE_PROJECT_ID || serverEnv.GCLOUD_PROJECT;
+      const database = process.env.FIRESTORE_DATABASE_ID || '(default)';
+      const url = `http://${process.env.FIRESTORE_EMULATOR_HOST}/emulator/v1/projects/${project}/databases/${database}/documents`;
+      const r = await fetch(url, { method: 'DELETE' });
+      if (!r.ok) throw new Error(`emulator wipe failed: ${r.status} ${await r.text()}`);
+    } else {
+      try { unlinkSync(mockFile); } catch {}
+    }
+    try { rmSync(dataDir, { recursive: true, force: true }); } catch {}
+    mkdirSync(dataDir, { recursive: true });
+    await restartServer({});
+    console.log('[harness] Fresh state ready.');
+  };
+
+  const results = await runAll(`http://127.0.0.1:${SERVER_PORT}`, { restartServer, freshState });
 
   const failed = results.filter((r) => !r.pass);
   console.log('\n=== Summary ===');

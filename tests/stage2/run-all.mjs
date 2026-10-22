@@ -17,26 +17,31 @@ export async function runAll(baseUrl, extraCtx = {}) {
   // The seed admin (kenan@hartfordkashrut.org, usr_admin) starts with no
   // password. Public first-run setup is closed since 8i, so the harness sets
   // it through the test-only endpoint (test mode only).
-  const setupRes = await fetch(`${baseUrl}/api/__test__/set-password`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userId: 'usr_admin', password: 'stage2-test-password' }),
-  });
-  if (setupRes.status !== 200) {
-    const t = await setupRes.text();
-    throw new Error(`test password set failed: ${setupRes.status} ${t}`);
-  }
-  const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'kenan@hartfordkashrut.org', password: 'stage2-test-password' }),
-  });
-  const loginJson = await loginRes.json();
-  if (!loginJson.token) {
-    throw new Error(`login failed: ${loginRes.status} ${JSON.stringify(loginJson)}`);
-  }
-  const token = loginJson.token;
-  const authHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` };
+  // Admin bootstrap; run again after every fresh state (a wiped doc means a
+  // new seed admin with no password and a new signing secret).
+  const adminLogin = async () => {
+    const setupRes = await fetch(`${baseUrl}/api/__test__/set-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: 'usr_admin', password: 'stage2-test-password' }),
+    });
+    if (setupRes.status !== 200) {
+      const t = await setupRes.text();
+      throw new Error(`test password set failed: ${setupRes.status} ${t}`);
+    }
+    const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'kenan@hartfordkashrut.org', password: 'stage2-test-password' }),
+    });
+    const loginJson = await loginRes.json();
+    if (!loginJson.token) {
+      throw new Error(`login failed: ${loginRes.status} ${JSON.stringify(loginJson)}`);
+    }
+    const token = loginJson.token;
+    return token;
+  };
+  const authHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await adminLogin()}` };
 
   const ctx = {
     baseUrl,
@@ -64,6 +69,15 @@ export async function runAll(baseUrl, extraCtx = {}) {
     },
   };
 
+  // FRESH_STATE: the harness wipes ALL stored state and boots a fresh server
+  // before the next test (see freshState in harness.mjs). Every stage2 test
+  // shares one app-state doc, and the whole suite outgrew the server's
+  // 900 KiB guard (local mock, main f662efb: 881 KiB before Test 68, which
+  // then fails). Groups keep each stretch far below the cap; the biggest
+  // writers are Test 30 (~250 KiB of incidents) and Test 49 (~130 KiB of
+  // users). Tests are self-contained (their own ts-suffixed fixtures), so a
+  // marker only goes BETWEEN tests. Add one when a group grows.
+  const FRESH_STATE = { freshState: true };
   const tests = [
     (await import('./test-1-stale-write-blocked.mjs')).default,
     (await import('./test-2-concurrent-different-tasks.mjs')).default,
@@ -88,6 +102,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-21-staged-boot-no-writes.mjs')).default,
     (await import('./test-22-roster-privacy.mjs')).default,
     (await import('./test-23-private-tasks.mjs')).default,
+    FRESH_STATE,
     (await import('./test-24-auth-sweep.mjs')).default,
     (await import('./test-25-kiosk-hardening.mjs')).default,
     (await import('./test-26-coordinator-venue-scope.mjs')).default,
@@ -95,6 +110,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-28-alert-grouping.mjs')).default,
     (await import('./test-29-updates-panel.mjs')).default,
     (await import('./test-30-alerts.mjs')).default,
+    FRESH_STATE,
     (await import('./test-31-kiosk-device-seen-version.mjs')).default,
     (await import('./test-32-admin-kiosk-scope.mjs')).default,
     (await import('./test-33-kiosk-code-phone.mjs')).default,
@@ -104,6 +120,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-38-dst-rollover.mjs')).default,
     (await import('./test-39-copy-event.mjs')).default,
     (await import('./test-40-any-time-tasks.mjs')).default,
+    FRESH_STATE,
     (await import('./test-41-admin-export-scope.mjs')).default,
     (await import('./test-42-platform-routes.mjs')).default,
     (await import('./test-43-agency-fields.mjs')).default,
@@ -113,6 +130,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-47-identity-projections.mjs')).default,
     (await import('./test-48-history-retention.mjs')).default,
     (await import('./test-49-identity-migration.mjs')).default,
+    FRESH_STATE,
     (await import('./test-50-session-tokens.mjs')).default,
     (await import('./test-51-reset-signout.mjs')).default,
     (await import('./test-52-clean-slate-removed.mjs')).default,
@@ -124,6 +142,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-58-membership-isolation.mjs')).default,
     (await import('./test-59-projections-deletion.mjs')).default,
     (await import('./test-60-two-membership-matrix.mjs')).default,
+    FRESH_STATE,
     (await import('./test-61-agency-logo.mjs')).default,
     (await import('./test-62-credential-owner-auth.mjs')).default,
     (await import('./test-63-recovery-codes.mjs')).default,
@@ -134,8 +153,20 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-68-invite-accept.mjs')).default,
   ];
 
+  const docKiB = async () => Math.round(JSON.stringify(await ctx.getDoc()).length / 1024);
+  const WARN_KIB = 700;
   const results = [];
   for (const t of tests) {
+    if (t === FRESH_STATE) {
+      if (!extraCtx.freshState) throw new Error('FRESH_STATE marker but the harness gave no freshState hook');
+      console.log(`\n[state] ${await docKiB()} KiB before the fresh state`);
+      await extraCtx.freshState();
+      authHeaders.Authorization = `Bearer ${await adminLogin()}`;
+      continue;
+    }
+    const kib = await docKiB();
+    console.log(`\n[state] ${kib} KiB before ${t.name.split(':')[0]}`);
+    if (kib > WARN_KIB) console.log(`[state] WARNING: ${kib} KiB > ${WARN_KIB} KiB (cap 900): add a FRESH_STATE marker in tests/stage2/run-all.mjs`);
     console.log(`\n--- ${t.name} ---`);
     console.log(`Proves: ${t.whatItProves}`);
     try {
