@@ -6,6 +6,10 @@
 //
 // These calls use plain fetch, never apiFetch: a 401/403 here means "can't list
 // or open that agency", and must not sign out a session that is already working.
+// 11a-c: a null token means this device's own sign-in: the cookie when the
+// device is on it (sessionAuthHeaders), else nothing to send.
+
+import { hasSessionCredential, sessionAuthHeaders } from './api';
 
 export interface Membership {
   membershipId: string;
@@ -46,10 +50,11 @@ export function isChooseAnswer(data: any): data is { chooseMembership: true; tok
 
 /** Lists the person's agencies. null = can't tell (signed out, kiosk, offline). */
 export async function fetchMemberships(token: string | null): Promise<Membership[] | null> {
-  if (!token) return null;
+  if (!hasSessionCredential(token)) return null;
   try {
     const res = await fetch('/api/auth/memberships', {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: sessionAuthHeaders(token),
+      credentials: 'same-origin',
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -64,11 +69,12 @@ export interface ActivateResult { ok: boolean; token?: string; user?: any; error
 
 /** Opens one agency. On success the caller stores the token and signs in with the user. */
 export async function activateMembership(token: string | null, membershipId: string): Promise<ActivateResult> {
-  if (!token || !membershipId) return { ok: false, error: MEMBERSHIP_ERROR_TEXT };
+  if (!hasSessionCredential(token) || !membershipId) return { ok: false, error: MEMBERSHIP_ERROR_TEXT };
   try {
     const res = await fetch('/api/auth/activate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json', ...sessionAuthHeaders(token) },
+      credentials: 'same-origin',
       cache: 'no-store',
       body: JSON.stringify({ membershipId }),
     });
