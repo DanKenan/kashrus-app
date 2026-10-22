@@ -98,6 +98,35 @@ export default {
     assert(noJoin[0].credentialOwner === undefined && viol.includes('p:firstMultiOwner'), 'no join -> refused + reported');
     const forged = enforceIdentityFields(before, [{ ...before[0], credentialOwner: true }], [], {});
     assert(forged[0].credentialOwner === undefined, 'a mutator cannot set credentialOwner itself');
+
+    // ---- 10k: credentialPending sanctioned writer ----
+    {
+      const BC2 = '$2b$10$' + 'b'.repeat(53);
+      const m0 = { id: 'm', personId: 'm', email: 'm@x.co', agencyId: 'A', password: BC2, credentialOrigin: 'admin' };
+      const v10k = [];
+      const onV = (r, f) => v10k.push(`${r}:${f}`);
+      const { password: _p, ...noPw } = m0;
+      const set1 = enforceIdentityFields([m0], [noPw], [], { credentialPendingWriteById: new Map([['m', 'set']]), onViolation: onV });
+      assert(set1[0].credentialPending === 'invite' && set1[0].password === undefined, `10k set ${J(set1[0])}`);
+      const setPw = enforceIdentityFields([m0], [m0], [], { credentialPendingWriteById: new Map([['m', 'set']]), onViolation: onV });
+      assert(setPw[0].credentialPending === undefined && v10k.includes('m:credentialPending'), '10k set refused while a password remains');
+      const multiBefore = [m0, { id: 'm2', personId: 'm', email: 'm@x.co', agencyId: 'B' }];
+      const setMulti = enforceIdentityFields(multiBefore, [noPw, multiBefore[1]], [], { credentialPendingWriteById: new Map([['m', 'set']]) });
+      assert(setMulti[0].credentialPending === undefined, '10k set refused on a multi person');
+      const pend = { ...noPw, credentialPending: 'invite' };
+      const forgedClear = enforceIdentityFields([pend], [{ ...pend, credentialPending: null, name: 'x' }], [], {});
+      assert(forgedClear[0].credentialPending === 'invite', '10k a body/forged change cannot clear the marker');
+      const unrelated = enforceIdentityFields([pend], [{ ...pend, name: 'New Name', phoneNumber: '+12025550123' }], [], {});
+      assert(unrelated[0].credentialPending === 'invite' && unrelated[0].name === 'New Name', '10k marker survives an unrelated update');
+      const pwNoClear = enforceIdentityFields([pend], [{ ...pend, password: BC2 }], [], { credentialOriginSetById: new Map([['m', 'agency-reset']]) });
+      assert(pwNoClear[0].credentialPending === 'invite' && pwNoClear[0].password === undefined, '10k a password written without clear is reverted');
+      const clearNoOrigin = enforceIdentityFields([pend], [{ ...pend, password: BC2 }], [], { credentialPendingWriteById: new Map([['m', 'clear']]) });
+      assert(clearNoOrigin[0].credentialPending === 'invite' && clearNoOrigin[0].password === undefined, '10k clear needs origin invite-new');
+      const clearOk = enforceIdentityFields([pend], [{ ...pend, password: BC2 }], [], { credentialPendingWriteById: new Map([['m', 'clear']]), credentialOriginSetById: new Map([['m', 'invite-new']]) });
+      assert(clearOk[0].credentialPending === undefined && clearOk[0].password === BC2 && clearOk[0].credentialOrigin === 'invite-new', '10k clear with password + invite-new');
+      const newRow = enforceIdentityFields([], [{ id: 'z', email: 'z@x.co', credentialPending: 'invite' }], [], {});
+      assert(newRow[0].credentialPending === undefined, '10k a new row cannot carry the marker');
+    }
     const scrubbed = J(scrubSecrets({ invites: [live] }));
     assert(!scrubbed.includes('h'.repeat(64)) && scrubbed.includes('[REDACTED]'), `backup scrubs inviteTokenHash ${scrubbed.slice(0, 200)}`);
   },

@@ -33,7 +33,7 @@ import { createWindowLimiter } from './src/server/window-limiter.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
-import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
+import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN, PLATFORM_OPERATOR_USER_ID } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
 import {
   DEFAULT_TIME_ZONE,
@@ -8067,10 +8067,10 @@ function inviteForToken(list: readonly any[], raw: string): any | null {
   return cand && inviteHashMatches(cand.inviteTokenHash, raw) ? cand : null;
 }
 
-/** Live 'member' invite of a Phase C agency (the given doc's lists), else null. */
+/** Live invite ('member', or 'setup' from 10k) of a Phase C agency (the given doc's lists), else null. */
 function acceptableInvite(list: readonly any[], agencyList: readonly any[], raw: string, nowMs: number): any | null {
   const inv = inviteForToken(list, raw);
-  if (!inv || inv.kind === 'setup' || !isLiveInvite(inv, nowMs)) return null;
+  if (!inv || !isLiveInvite(inv, nowMs)) return null;
   const agency = (Array.isArray(agencyList) ? agencyList : []).find((a: any) => a && a.id === inv.agencyId);
   return phaseCEnabled(agency) ? inv : null;
 }
@@ -8082,6 +8082,11 @@ app.get('/api/invites/preview', (req, res) => {
   const inv = INVITE_TOKEN_RE.test(raw) ? acceptableInvite(invites, agencies, raw, Date.now()) : null;
   if (!inv) return res.status(404).json({ error: INVITE_LINK_INVALID_TEXT });
   const agency = agencies.find((a) => a && a.id === inv.agencyId);
+  if (inv.kind === 'setup') {
+    const member: any = users.find((u) => u.id === inv.memberId);
+    if (!member) return res.status(404).json({ error: INVITE_LINK_INVALID_TEXT });
+    return res.json({ kind: 'setup', agencyName: String(agency?.name || ''), role: String(member.role || ''), name: String(member.name || '') });
+  }
   res.json({ kind: 'member', agencyName: String(agency?.name || ''), role: String(inv.role), name: inviteDisplayName(inv) });
 });
 
@@ -8092,11 +8097,12 @@ app.post('/api/invites/accept', async (req, res) => {
   const raw = typeof token === 'string' ? token : '';
   const invalidLink = () => res.status(404).json({ error: INVITE_LINK_INVALID_TEXT });
   if (!INVITE_TOKEN_RE.test(raw)) return invalidLink();
-  if (mode !== 'new' && mode !== 'existing') return res.status(400).json({ error: 'Choose how to continue.', code: 'INVITE_MODE_INVALID' });
-  if (typeof password !== 'string' || !password) return res.status(400).json({ error: 'Please enter a password.', code: 'PASSWORD_REQUIRED' });
-  if (mode === 'new' && password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.', code: 'PASSWORD_TOO_SHORT' });
   const cachedInv = acceptableInvite(invites, agencies, raw, Date.now());
   if (!cachedInv) return invalidLink();
+  if (typeof password !== 'string' || !password) return res.status(400).json({ error: 'Please enter a password.', code: 'PASSWORD_REQUIRED' });
+  if (cachedInv.kind === 'setup') return acceptSetupInvite(req, res, raw, cachedInv, password);
+  if (mode !== 'new' && mode !== 'existing') return res.status(400).json({ error: 'Choose how to continue.', code: 'INVITE_MODE_INVALID' });
+  if (mode === 'new' && password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.', code: 'PASSWORD_TOO_SHORT' });
   const inviteId = String(cachedInv.id);
   const email = String(cachedInv.email);
 
@@ -8127,7 +8133,7 @@ app.post('/api/invites/accept', async (req, res) => {
       const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
       // a) fresh: the same live invite, its agency exists with the flag ON.
       const inv = acceptableInvite(freshInvites, freshAgencies, raw, nowMs);
-      if (!inv || inv.id !== inviteId) return { conflict: INVITE_LINK_INVALID_TEXT, conflictStatus: 404, conflictCode: 'INVITE_INVALID' };
+      if (!inv || inv.id !== inviteId || inv.kind === 'setup') return { conflict: INVITE_LINK_INVALID_TEXT, conflictStatus: 404, conflictCode: 'INVITE_INVALID' };
       // f) generic failure: ONLY the counter (or the 5th-failure revocation) is written.
       const fail = () => {
         const n = (Number.isInteger(inv.failedAttempts) ? inv.failedAttempts : 0) + 1;
@@ -8217,6 +8223,134 @@ app.post('/api/invites/accept', async (req, res) => {
   }
   res.json({ success: true, user: getSelfUser(row), token: signSessionToken(row) });
 });
+
+
+// ---------------------------------------------------------------------------
+// Item 10k: "Send invite" for an existing member (design v2, [10K-DS2]).
+// Per person, on the admin's tap only. Revokes the admin-set password and the
+// person's phone sessions and returns a setup link; the person chooses their
+// own password through the same public accept route (origin 'invite-new').
+// No bulk route, no migration. The kiosk PIN is untouched (Q-K2).
+// ---------------------------------------------------------------------------
+const SEND_INVITE_UNAVAILABLE = { error: 'An invite link is not available for this person.', code: 'INVITE_NOT_AVAILABLE' };
+
+/** null = eligible; else the refusal (fresh data; K2). */
+function sendInviteRefusal(rows: readonly any[], target: any, callerId: string): boolean {
+  if (!target) return true;
+  if (target.id === callerId) return true;
+  if (target.id === PLATFORM_OPERATOR_USER_ID) return true;
+  if (target.isPrimaryAdmin === true) return true;
+  if (credentialMayLink(target.credentialOrigin)) return true;
+  if (isMultiPersonRow(rows as any[], target)) return true;
+  return false;
+}
+
+app.post('/api/users/:id/invite', async (req, res) => {
+  const gate = inviteGate(req, res);
+  if (!gate) return;
+  const { caller, agencyId } = gate;
+  const targetId = String(req.params.id || '');
+  const cached: any = users.find((u) => u.id === targetId && (u.agencyId || 'agency-hkc') === agencyId);
+  if (!cached) return res.status(404).json(INVITE_NOT_FOUND);
+  if (sendInviteRefusal(users, cached, caller.id)) return res.status(409).json(SEND_INVITE_UNAVAILABLE);
+  const pre = newInvitePre();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const denied = inviteFreshGate(freshDoc, caller.id, agencyId);
+      if (denied) return denied;
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const t = freshUsers.find((u: any) => u && u.id === targetId && (u.agencyId || 'agency-hkc') === agencyId);
+      if (!t) return { conflict: 'Not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+      if (sendInviteRefusal(freshUsers, t, caller.id)) return { conflict: SEND_INVITE_UNAVAILABLE.error, conflictStatus: 409, conflictCode: SEND_INVITE_UNAVAILABLE.code };
+      const existing: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
+      const mine = existing.find((i: any) => i && i.id === pre.inviteId);
+      if (mine) return { doc: freshDoc, result: { invite: mine, replaced: [] } };
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const replaced: string[] = [];
+      const kept = existing.map((i: any) => {
+        if (i && i.kind === 'setup' && i.memberId === targetId && isLiveInvite(i, nowMs)) {
+          replaced.push(String(i.id));
+          return { ...i, status: 'revoked', revokedAt: nowIso, revokedBy: caller.id, revokeReason: 'replaced' };
+        }
+        return i;
+      });
+      const email = normalizeInviteEmail(t.email);
+      const record = {
+        id: pre.inviteId, kind: 'setup', agencyId, memberId: targetId, email, role: String(t.role || ''), venueIds: [],
+        invitedBy: caller.id, createdAt: pre.createdAt, expiresAt: pre.expiresAt,
+        inviteTokenHash: pre.token.hash, status: 'pending', failedAttempts: 0,
+      };
+      const { password: _pw, ...withoutPassword } = t;
+      const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      const onlyRow = freshUsers.filter((u: any) => u && normalizeInviteEmail(u.email) === email).length === 1;
+      return {
+        doc: {
+          ...freshDoc,
+          users: freshUsers.map((u: any) => (u && u.id === targetId ? withoutPassword : u)),
+          invites: [...pruneInvites(kept, nowMs), record],
+          // K3: every reset request for this row (and for its email when only this row has it), verified or not.
+          passwordResets: freshResets.filter((r: any) => !r || (r.rowId !== targetId && !(onlyRow && normalizeInviteEmail(r.email) === email))),
+        },
+        result: { invite: record, replaced },
+        credentialPendingWriteById: { [targetId]: 'set' as const },
+        // K5: through the sanctioned recovery writer (absent in practice: linkable origins are refused).
+        ...(t.recoveryCodeHashes !== undefined || t.recoveryFailures !== undefined ? { recoveryWriteById: { [targetId]: { codes: null, failures: null } } } : {}),
+        tokenEpochBumpIds: [targetId],
+      };
+    },
+    { label: 'send-invite', requireVersion: true }
+  );
+  if (!committed) return;
+  const { invite: rec, replaced } = committed.result as any;
+  revokeUserPhoneSockets(targetId); // N3: phone sessions end; kiosk sockets are untouched
+  for (const rid of (replaced || []) as string[]) console.log(`[audit] setup invite replaced: admin ${caller.id} agency ${agencyId} invite ${rid}`);
+  console.log(`[audit] setup invite: admin ${caller.id} agency ${agencyId} member ${targetId} invite ${rec.id}`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(201).json({ invite: { id: String(rec.id), kind: 'setup', memberId: targetId, email: String(rec.email), expiresAt: String(rec.expiresAt) }, link: `/invite#t=${pre.token.raw}` });
+});
+
+/** 10k: accept a 'setup' invite — the member chooses their own password (N2: one commit). */
+async function acceptSetupInvite(req: any, res: any, raw: string, cachedInv: any, password: string): Promise<any> {
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.', code: 'PASSWORD_TOO_SHORT' });
+  const inviteId = String(cachedInv.id);
+  const memberId = String(cachedInv.memberId || '');
+  const newHash = await hashPassword(password);
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const freshInvites: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const inv = acceptableInvite(freshInvites, Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [], raw, nowMs);
+      const m = freshUsers.find((u: any) => u && u.id === memberId);
+      const ok = !!inv && inv.id === inviteId && inv.kind === 'setup' && !!m &&
+        (m.agencyId || 'agency-hkc') === inv.agencyId && m.credentialPending === 'invite' &&
+        normalizeInviteEmail(m.email) === inv.email && !isMultiPersonRow(freshUsers, m);
+      if (!ok) return { conflict: INVITE_LINK_INVALID_TEXT, conflictStatus: 404, conflictCode: 'INVITE_INVALID' };
+      return {
+        doc: {
+          ...freshDoc,
+          users: freshUsers.map((u: any) => (u && u.id === memberId ? { ...u, password: newHash } : u)),
+          invites: freshInvites.map((i: any) => (i && i.id === inviteId ? { ...i, status: 'accepted', acceptedAt: nowIso, acceptedRowId: memberId } : i)),
+        },
+        result: { rowId: memberId },
+        credentialOriginSetById: { [memberId]: 'invite-new' as const },
+        credentialPendingWriteById: { [memberId]: 'clear' as const },
+        tokenEpochBumpIds: [memberId],
+      };
+    },
+    { label: 'setup-invite-accept' }
+  );
+  if (!committed) return;
+  revokeUserPhoneSockets(memberId);
+  console.log(`[audit] setup invite accepted: invite ${inviteId} member ${memberId}`);
+  const row: any = users.find((u) => u.id === memberId);
+  if (!row) return res.status(500).json({ error: 'Accepted, but the account could not be loaded. Please sign in.' });
+  return res.json({ success: true, user: getSelfUser(row), token: signSessionToken(row) });
+}
 
 app.get('/api/agency/logo', async (req, res) => {
   const user = getAuthUser(req);
@@ -11613,6 +11747,18 @@ app.get('/api/users', (req, res) => {
     agencyUsers = agencyUsers.filter((u: any) => u.role === 'admin' || personAtVenue(u, targetVenueId));
   }
 
+  // 10k (K6): admins of this agency see two derived booleans for a member
+  // whose password was revoked by "Send invite" (never the raw marker).
+  if (caller && caller.role === 'admin') {
+    const nowMs = Date.now();
+    agencyUsers = agencyUsers.map((u: any) => {
+      const row: any = users.find((x) => x.id === u.id);
+      if (!row || row.credentialPending !== 'invite' || (row.agencyId || 'agency-hkc') !== agencyId) return u;
+      const live = invites.some((i) => i && i.kind === 'setup' && i.memberId === u.id && isLiveInvite(i, nowMs));
+      return { ...u, invitePending: live, needsInvite: !live };
+    });
+  }
+
   res.json({ users: agencyUsers });
 });
 
@@ -13179,6 +13325,12 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: LOGIN_FAILED_TEXT });
   }
 
+  // 10k (Q-K1): a member whose password was revoked by "Send invite" gets the
+  // uniform failure, never the setup screen (even an admin row).
+  if ((user as any).credentialPending === 'invite') {
+    return res.status(401).json({ error: LOGIN_FAILED_TEXT });
+  }
+
   // First-run setup: admin account with no password yet → client shows the
   // "create your password" screen instead of an error.
   if (!user.password && user.role === 'admin') {
@@ -13258,8 +13410,9 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     return res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
   }
   const user = credentialRowForEmailIn(users, agencies, normalizedEmail) as UserProfile | null;
-  // Always return success (don't reveal if email exists)
-  if (!user) {
+  // Always return success (don't reveal if email exists).
+  // 10k (K3): a member pending a setup invite gets no reset code either.
+  if (!user || (user as any).credentialPending === 'invite') {
     return res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
   }
 

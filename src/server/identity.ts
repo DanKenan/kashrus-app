@@ -36,6 +36,7 @@ import crypto from 'crypto';
 export const SERVER_ONLY_USER_FIELDS = [
   'personId', 'venueAccess', 'isPrimaryAdmin', 'tokenEpoch',
   'credentialOwner', 'credentialOrigin', 'recoveryCodeHashes', 'recoveryFailures', 'joinedAt',
+  'credentialPending', // 10k: 'invite' while a member's admin-set password is revoked (Send invite)
 ] as const;
 
 /**
@@ -166,6 +167,17 @@ export interface IdentityEnforceOptions {
    */
   firstMultiOwnerIds?: ReadonlySet<string>;
   /**
+   * 10k (design v2 K1): the ONLY writer of credentialPending. 'set' is
+   * honoured on an EXISTING row that is not multi in the BEFORE users and
+   * whose password is absent after the commit with agencyId / email /
+   * personId unchanged ('invite'); a row already pending stays pending.
+   * 'clear' is honoured only on a pending row that carries a bcrypt
+   * password after the commit with credentialOrigin set to 'invite-new' in
+   * the same commit. Any other change is reverted and reported, and a
+   * pending row never keeps a password written without 'clear'.
+   */
+  credentialPendingWriteById?: ReadonlyMap<string, 'set' | 'clear'>;
+  /**
    * Called (row id + field name only, never values) when a mutator's output
    * tried to set, change or remove a server-only identity field. The change
    * is reverted, and the caller logs it, so it is never silent.
@@ -200,9 +212,11 @@ export interface IdentityOutcomeFields {
   recoveryWriteById?: Record<string, RecoveryWrite>;
   /** 10i: rows that become their person's credentialOwner at the first multi join (see firstMultiOwnerIds). */
   firstMultiOwnerIds?: string[];
+  /** 10k: row id → 'set' | 'clear' of credentialPending (see credentialPendingWriteById). */
+  credentialPendingWriteById?: Record<string, 'set' | 'clear'>;
 }
 
-export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById' | 'firstMultiOwnerIds'> {
+export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById' | 'firstMultiOwnerIds' | 'credentialPendingWriteById'> {
   const o: any = outcome || {};
   const asMap = (r: any) => (r && typeof r === 'object' && !Array.isArray(r) && Object.keys(r).length ? new Map<string, string>(Object.entries(r).filter(([, v]) => typeof v === 'string') as [string, string][]) : undefined);
   return {
@@ -214,6 +228,10 @@ export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null
         ? new Map<string, RecoveryWrite>(Object.entries(o.recoveryWriteById).filter(([, v]) => v && typeof v === 'object') as [string, RecoveryWrite][])
         : undefined,
     firstMultiOwnerIds: Array.isArray(o.firstMultiOwnerIds) && o.firstMultiOwnerIds.length ? new Set<string>(o.firstMultiOwnerIds.filter((x: any) => typeof x === 'string')) : undefined,
+    credentialPendingWriteById:
+      o.credentialPendingWriteById && typeof o.credentialPendingWriteById === 'object' && !Array.isArray(o.credentialPendingWriteById) && Object.keys(o.credentialPendingWriteById).length
+        ? new Map<string, 'set' | 'clear'>(Object.entries(o.credentialPendingWriteById).filter(([, v]) => v === 'set' || v === 'clear') as [string, 'set' | 'clear'][])
+        : undefined,
   };
 }
 
@@ -295,6 +313,32 @@ export function enforceIdentityFields(
         const joined = pid !== '' && !!opts.newMembership && Array.from(opts.newMembership.values()).includes(pid);
         if (alone && joined && prev.credentialOwner !== true && isBcrypt(prev.password) && isBcrypt(out.password) && !transferSrc) out.credentialOwner = true;
         else if (opts.onViolation) opts.onViolation(row.id, 'firstMultiOwner');
+      }
+      // 10k (K1): credentialPending — kept as stored unless its one writer says otherwise.
+      {
+        const was = prev.credentialPending === 'invite';
+        const w = opts.credentialPendingWriteById?.get(row.id);
+        let pending = was;
+        if (w === 'set') {
+          const pid = typeof prev.personId === 'string' ? prev.personId : '';
+          const multi = pid !== '' && (Array.isArray(beforeUsers) ? beforeUsers : []).some((b: any) => b && b.id !== row.id && b.personId === pid);
+          const same = (prev.agencyId || 'agency-hkc') === (out.agencyId || 'agency-hkc') && usableEmail(prev) === usableEmail(out) && (out.personId ?? '') === (prev.personId ?? '');
+          if (!multi && same && !hasPassword(out)) pending = true;
+          else if (opts.onViolation) opts.onViolation(row.id, 'credentialPending');
+        } else if (w === 'clear') {
+          if (was && isBcrypt(out.password) && opts.credentialOriginSetById?.get(row.id) === 'invite-new') pending = false;
+          else if (opts.onViolation) opts.onViolation(row.id, 'credentialPending');
+        }
+        if (pending) {
+          out.credentialPending = 'invite';
+          // a pending row never keeps a password written without 'clear'
+          if (hasPassword(out)) {
+            delete out.password;
+            if (opts.onViolation) opts.onViolation(row.id, 'password');
+          }
+        } else delete out.credentialPending;
+        if (opts.onViolation && row.credentialPending !== undefined && row.credentialPending !== out.credentialPending && w === undefined)
+          opts.onViolation(row.id, 'credentialPending');
       }
     } else {
       // 10b: a new row is its own person unless newMembership names an
