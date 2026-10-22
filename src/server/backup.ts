@@ -45,6 +45,9 @@ const PER_ENTITY_COLLECTIONS = [
 // by checking camelCase boundaries.
 const SECRET_WORDS = [
   'password',
+  // 10f: recovery-code hashes and the per-person failure record (owner row)
+  'recoverycodehashes',
+  'recoveryfailures',
   'kioskpin',
   'pairingcode',
   'devicesecret',
