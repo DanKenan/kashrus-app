@@ -96,9 +96,9 @@ export function AgencyDashboard({ onSelectVenue, reloadKey, logo }: AgencyDashbo
   return (
     <section className="space-y-4 text-ink">
       <h2 className="text-2xl font-semibold">Agency Dashboard</h2>
-      {logo && <div className="flex items-center gap-3 rounded-xl border border-line bg-surface p-4">
+      {logo && <div className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface p-4">
         {logo.logoSrc ? <img src={logo.logoSrc} alt={logo.agencyName} className="h-[32px] max-w-[120px] w-auto object-contain" /> : <span className="rounded-lg border border-line bg-sunken px-2 text-xs text-ink">{logo.agencyShortCode}</span>}
-        <span className="flex-1 text-sm font-semibold">Agency logo</span>
+        <span className="flex-1 min-w-0 text-sm font-semibold">Agency logo</span>
         <button type="button" onClick={logo.onOpen} className="min-h-11 rounded-lg border border-line-control bg-surface px-3 text-sm font-semibold text-ink hover:bg-sunken focus:outline-none focus:ring-2 focus:ring-gold pressable">Change</button>
       </div>}
       {loading ? <p className="text-base text-ink-soft">Loading dashboard...</p> : failed ? (

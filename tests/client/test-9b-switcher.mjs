@@ -40,7 +40,9 @@ const headerHtml = (p) => renderToStaticMarkup(React.createElement(Header, { ...
 // the header date line carries the live clock and today's dates; normalise them
 // D9 (design only): the header's rem container query, which wraps the top row only with large text, is not part of the 9b markup contract
 const d9 = (h) => h.replace('class="@container ', 'class="').replace(' @max-[20rem]:flex-wrap @max-[20rem]:flex-1 @max-[20rem]:basis-0 @max-[20rem]:py-1', '');
-const strip = (h) => d9(h).replace(/:r[0-9a-z]+:/g, ':r:').replace(/\d{1,2}:\d{2}\s?[AP]M( [A-Z]{2,5})?/g, 'TIME').replace(/(<span dir="rtl"[^>]*>)[^<]*/g, '$1HEB').replace(/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,? [A-Z][a-z]+ \d{1,2}(, \d{4})?/g, 'DATE');
+// QA1 (layout only): the desktop bar's rem container query (was lg:) and the admin phone wordmark rule are not part of the 9b markup contract
+const qa1 = (h) => h.replace('hidden @min-[72rem]:flex', 'hidden lg:flex').replace('flex @min-[72rem]:hidden', 'flex lg:hidden').replace(' whitespace-nowrap max-sm:hidden">Shutfey', ' whitespace-nowrap max-[359px]:hidden">Shutfey');
+const strip = (h) => qa1(d9(h)).replace(/:r[0-9a-z]+:/g, ':r:').replace(/\d{1,2}:\d{2}\s?[AP]M( [A-Z]{2,5})?/g, 'TIME').replace(/(<span dir="rtl"[^>]*>)[^<]*/g, '$1HEB').replace(/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,? [A-Z][a-z]+ \d{1,2}(, \d{4})?/g, 'DATE');
 
 // ---- baseline (main) ----
 const cur = {

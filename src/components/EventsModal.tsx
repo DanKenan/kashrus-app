@@ -149,13 +149,16 @@ export const EventsModal: React.FC<EventsModalProps> = ({
       <div className="bg-surface w-full max-w-5xl h-[88vh] rounded-2xl e3 border border-line flex flex-col overflow-hidden my-auto animate-slide-up">
         
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-line bg-sunken">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl text-ink flex items-center justify-center e2">
+        {/* QA1: on a narrow sheet (rem-based, so large text counts) the title keeps the row with
+            Close, and "Notify New Event" moves to its own line instead of running off the edge. */}
+        <div className="@container">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-line bg-sunken @max-[36rem]:flex-wrap @max-[36rem]:gap-x-3 @max-[36rem]:gap-y-3">
+          <div className="flex items-center gap-3 @max-[36rem]:flex-1 @max-[36rem]:min-w-[50%]">
+            <div className="w-10 h-10 rounded-xl text-ink flex items-center justify-center e2 @max-[36rem]:hidden">
               <Calendar className="w-5 h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
+            <div className="@max-[36rem]:min-w-0">
+              <div className="flex items-center gap-2 @max-[36rem]:flex-wrap">
                 <h2 className="text-base font-bold text-ink">
                   Kosher Events & Banquets Hub
                 </h2>
@@ -169,12 +172,12 @@ export const EventsModal: React.FC<EventsModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 @max-[36rem]:contents">
             {/* Action button to schedule / notify new event */}
             <button
               id="open-create-event-btn"
               onClick={onOpenCreateEvent}
-              className="px-3 py-1.5 text-xs font-bold rounded-xl e1 flex items-center gap-1.5 transition cursor-pointer pressable bg-surface border border-line-control text-ink hover:bg-sunken"
+              className="px-3 py-1.5 text-xs font-bold rounded-xl e1 flex items-center gap-1.5 transition cursor-pointer pressable bg-surface border border-line-control text-ink hover:bg-sunken whitespace-nowrap shrink-0 @max-[36rem]:order-last"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Notify New Event</span>
@@ -187,6 +190,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
               <X className="w-5 h-5" />
             </button>
           </div>
+        </div>
         </div>
 
         {/* Modal Main Body (2 Columns on large screens) */}

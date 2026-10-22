@@ -10,6 +10,9 @@ interface LogoProps {
   agencyShortCode?: string;
   /** Header only: below 360 px hide the word "Shutfey" (mark + agency tag stay). */
   compactBelow360?: boolean;
+  /** Header only (QA1): on phones (below 640 px) hide the word "Shutfey" too, so a crowded
+      admin header still leaves the venue button room for its name. Mark + agency tag stay. */
+  compactOnPhone?: boolean;
 }
 
 export const ShutfeyLogo: React.FC<LogoProps> = ({
@@ -20,6 +23,7 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
   agencyLogoSrc,
   agencyShortCode,
   compactBelow360 = false,
+  compactOnPhone = false,
 }) => {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const showAgencyLogo = !!agencyLogoSrc && failedSrc !== agencyLogoSrc;
@@ -79,7 +83,7 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
       {/* Brand wordmark */}
       <div className="flex flex-col justify-center min-w-0 overflow-hidden">
         <div className="flex items-center gap-1 sm:gap-1.5 flex-nowrap">
-          <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap ${compactBelow360 ? 'max-[359px]:hidden' : ''}`}>
+          <span className={`${titleSizes[size]} text-ink leading-tight font-sans whitespace-nowrap ${compactOnPhone ? 'max-sm:hidden' : compactBelow360 ? 'max-[359px]:hidden' : ''}`}>
             Shutfey
           </span>
           <span className={`${titleSizes[size]} text-gold leading-tight font-sans whitespace-nowrap ${size === 'sm' ? (showAgencyLogo ? 'hidden 2xl:inline' : 'hidden xl:inline') : ''}`} aria-hidden="true">·</span>
