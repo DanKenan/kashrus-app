@@ -24,8 +24,6 @@ interface CreateVenueModalProps {
   agencySeal?: string;
   /** Item 6: the agency's zone (absent = America/New_York), shown as the default. */
   agencyTimeZone?: string;
-  /** Item 10i: true when the server reports Phase C ON — a new owner gets an invite link (no password). */
-  inviteMode?: boolean;
 }
 
 export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
@@ -35,7 +33,6 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   adminEmail,
   agencyName,
   agencyTimeZone,
-  inviteMode = false,
 }) => {
   const [name, setName] = useState('');
   // Item 6: '' = same as the agency (no own zone stored).
@@ -61,7 +58,6 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   // Venue Owner credentials
   const [ownerName, setOwnerName] = useState('');
   const [ownerEmail, setOwnerEmail] = useState('');
-  const [ownerPassword, setOwnerPassword] = useState('');
 
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -151,11 +147,6 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
       ? customCategory.trim()
       : category.trim();
 
-    if (!inviteMode && ownerEmail.trim() && !ownerPassword.trim()) {
-      setErrorMessage('Please specify an initial password for the venue owner.');
-      return;
-    }
-
     try {
       setIsLoading(true);
       const res = await apiFetch('/api/venues', {
@@ -169,7 +160,6 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
           ...(normalizeOption(detail) ? { certificationDetail: normalizeOption(detail) } : {}),
           ownerName: ownerName.trim() || undefined,
           ownerEmail: ownerEmail.trim() || undefined,
-          ownerPassword: inviteMode ? undefined : ownerPassword.trim() || undefined,
           templateType,
           userEmail: adminEmail,
           ...(timeZone ? { timeZone } : {}),
@@ -433,7 +423,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
               The owner can sign in to see this venue's tasks and history (read only).
             </p>
 
-            <div className={inviteMode ? 'grid grid-cols-1 sm:grid-cols-2 gap-3' : 'grid grid-cols-1 sm:grid-cols-3 gap-3'}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-semibold text-ink-soft mb-1">
                   Owner Full Name
@@ -460,26 +450,10 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                 />
               </div>
 
-              {!inviteMode && (
-              <div>
-                <label className="block text-xs font-semibold text-ink-soft mb-1">
-                  Password
-                </label>
-                <input
-                  type="password"
-                  value={ownerPassword}
-                  onChange={(e) => setOwnerPassword(e.target.value)}
-                  placeholder="Password"
-                  className="w-full px-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
-                />
-              </div>
-              )}
             </div>
-            {inviteMode && (
-              <p data-invite-mode-note className="text-sm text-ink-soft">
-                No password needed. For a new owner you'll get a link to send them, and they choose their own password.
-              </p>
-            )}
+            <p data-invite-mode-note className="text-sm text-ink-soft">
+              No password needed. For a new owner you'll get a link to send them, and they choose their own password.
+            </p>
           </div>
 
           {/* Footer Actions */}

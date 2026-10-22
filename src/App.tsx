@@ -48,7 +48,7 @@ import { InvitePage } from './components/InvitePage';
 import { ResetPage } from './components/ResetPage';
 import { isResetPath, readResetToken } from './lib/resetLinks';
 import type { AddMemberInvite } from './components/TeamModal';
-import { fullInviteLink, isInvitePath, readInviteToken, useInviteFlag } from './lib/invites';
+import { fullInviteLink, isInvitePath, readInviteToken } from './lib/invites';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
 import { realtimeSocket } from './lib/socketClient';
 import { testFirestoreConnection } from './lib/firebaseClient';
@@ -347,14 +347,7 @@ export default function App() {
   // Item 10i: Phase C (invite-only adds) for the admin's own agency, as the
   // server reports it. Read at sign-in and again each time Add member or New
   // venue opens; null (not known) keeps today's forms.
-  // INVITES CLIENT C1: bumped after "Turn on invites" (or a 404 from Send invite) so the flag is asked again.
-  const [inviteRev, setInviteRev] = useState(0);
-  const inviteFlag = useInviteFlag(
-    !isKiosk && currentUser?.role === 'admin' ? `${currentUser.id}|${currentUser.agencyId || ''}` : null,
-    isTeamModalOpen,
-    isCreateVenueOpen,
-    inviteRev,
-  );
+
   // Item 10i: the public invite page (/invite#t=…), read once when the app opens.
   const [invitePage, setInvitePage] = useState(() => typeof window !== 'undefined' && isInvitePath(window.location.pathname));
   const [inviteToken] = useState(() => (typeof window !== 'undefined' ? readInviteToken(window.location.hash) : null));
@@ -2333,10 +2326,7 @@ export default function App() {
         currentUser={currentUser}
         currentVenue={currentVenue}
         onAddUser={handleAddUser}
-        inviteMode={inviteFlag === true}
-        inviteFlag={isKiosk ? null : inviteFlag}
         agencyName={currentUser.agencyName}
-        onInviteFlagStale={() => setInviteRev((n) => n + 1)}
         onUpdateUser={handleUpdateUser}
         onDeleteUser={handleDeleteUser}
       />
@@ -2358,7 +2348,6 @@ export default function App() {
         agencyName={currentUser.agencyName}
         agencySeal={currentUser.agencySeal}
         agencyTimeZone={currentUser.agencyTimeZone}
-        inviteMode={inviteFlag === true}
       />
 
       {!isKiosk && currentUser.role === 'admin' && isLogoFeatureOn(currentUser) && <AgencyLogoSheet

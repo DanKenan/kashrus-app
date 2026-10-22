@@ -216,8 +216,9 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   check(`firstMultiOwnerIds is produced only by the accept handler (found ${owners.length})`, owners.length === 1 && owners[0] > acceptAt && owners[0] < acceptEnd);
   check('the growth allowance is derived from the joins the enforcement accepted', /allowGrowthRowIds: acceptedJoins/.test(src) && !/allowGrowthRowIds:\s*(req|body|new Set\(\s*req)/.test(src));
   const setters = [...src.matchAll(/credentialOriginSetById:\s*\{\s*\[([A-Za-z.]+)\]:\s*'([a-z-]+)'/g)].map((m) => m[2]).sort();
-  check(`origin writers in server.ts are register, add-member, owner creation, agency reset, 10i accept (found ${setters.join(',')})`,
-    setters.join(',') === 'admin,admin,agency-reset,invite-new,invite-new,self-registered');
+  // Invites always on (#122): add-member and owner creation no longer set a password, so no 'admin' writer is left.
+  check(`origin writers in server.ts are register, agency reset, 10i accept, 10k setup accept (found ${setters.join(',')})`,
+    setters.join(',') === 'agency-reset,invite-new,invite-new,self-registered');
   check("'self-registered' appears in exactly one writer", (src.match(/\]:\s*'self-registered'/g) || []).length === 1);
   check("'invite-new' writers: 10i accept (new person) + 10k setup accept", (src.match(/\]:\s*'invite-new'/g) || []).length === 2);
   const keepers = (src.match(/passwordKeepsOriginIds:/g) || []).length;
@@ -269,9 +270,9 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
 // ---- 10i ([10I-RV1] B1): flag-ON venue creation never hashes ownerPassword
 {
   const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
-  check('10i venue owner: the hash is computed only off the invite path', /const ownerPasswordHash: string \| null = ownerInviteMode\s*\?\s*null\s*:/.test(src));
-  check('10i venue owner: ownerPasswordHash is the only owner-password hash site', (src.match(/bcrypt\.hashSync\(ownerPassword/g) || []).length === 1);
-  check('10i venue owner: a missing hash refuses instead of creating a passwordless owner', /if \(!ownerPasswordHash\) return \{ conflict:/.test(src));
+  // Invites always on (#122): a new owner always gets an invite; no owner password is ever hashed.
+  check('venue owner: ownerPassword is never hashed', (src.match(/bcrypt\.hashSync\(ownerPassword/g) || []).length === 0 && !/ownerPasswordHash/.test(src));
+  check('venue owner: no admin-set owner credential writer', !/credentialOriginSetById:\s*\{\s*\[newOwnerId\]/.test(src));
 }
 
 console.log(`${passed} passed, ${failures} failed`);

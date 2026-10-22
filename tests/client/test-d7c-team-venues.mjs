@@ -61,7 +61,7 @@ async function scenario() {
   await tm.render(); out.team = { inv: inventory(tm.html()), html: tm.html() };
   await tm.type(/Rabbi David Cohen|Full name/, 'Chaya Mushka Weiss');
   await tm.type(/dcohen@/, 'Chaya@Test.Local ');
-  await tm.type(/Min 6 characters/, 'secret123');
+  // Invites always on: no password field.
   await tm.submit().catch(() => {});
   const roleSel = tm.find((e) => e.type === 'select' && e.props.value === 'mashgiach' && typeof e.props.onChange === 'function');
   if (roleSel.length) {
@@ -96,7 +96,7 @@ async function scenario() {
   await cv.render(); out.createVenue = { inv: inventory(cv.html()), html: cv.html() };
   await cv.type(/Establishment Name/, 'Crown Market — Deli Counter');
   await cv.type(/^Address$|Address/, '2471 Albany Ave');
-  await cv.type(/Full Name/, 'Moshe Klein'); await cv.type(/^Email$|Email/, 'moshe2@test.local'); await cv.type(/^Password$|Password/, 'pw123456');
+  await cv.type(/Full Name/, 'Moshe Klein'); await cv.type(/^Email$|Email/, 'moshe2@test.local');
   await cv.submit().catch(() => {});
   out.createVenueSubmit = { fetch: calls.filter(([m]) => m !== 'GET').map(([m, p, b]) => [m, p, b]), calls: created };
   // 5. Create Event mashgiach picker (Don 7:39 AM): "Name — Role"; email handle only for duplicate names

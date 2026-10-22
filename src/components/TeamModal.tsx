@@ -7,7 +7,6 @@ import {
   User, 
   Mail, 
   AlertTriangle, 
-  Lock, 
   Building2, 
   CheckSquare, 
   PlusCircle,
@@ -22,8 +21,7 @@ import { KioskCodeDialog } from './KioskCodeDialog';
 import { VenueAccessSheet } from './VenueAccessSheet';
 import { normalizePhone } from '../lib/kioskCodeShare';
 import { InviteLinkCard } from './InviteLinkCard';
-import { enableInvites, sendMemberInvite, loadMemberForInvite, inviteChip, SEND_CHANGED_TEXT } from '../lib/inviteActions';
-import type { InviteFlag } from '../lib/invites';
+import { sendMemberInvite, loadMemberForInvite, inviteChip, SEND_CHANGED_TEXT } from '../lib/inviteActions';
 import { canMakeResetLink, makeResetLink, loadResetRequests, confirmPausedMember, type ResetRequest } from '../lib/resetLinks';
 
 /** Item 10i: what Add member returns when the agency's Phase C is ON (the server made an invite, not a user). */
@@ -50,13 +48,7 @@ interface TeamModalProps {
     permissions?: UserPermissions;
     phoneNumber?: string;
   }) => Promise<void | AddMemberInvite>;
-  /** Item 10i: true when the server reports Phase C ON for this agency — the form adds by invite link (no password). */
-  inviteMode?: boolean;
-  /** INVITES CLIENT: the raw flag (true ON, false OFF, null not known). "Turn on invites" shows only on false. */
-  inviteFlag?: InviteFlag;
   agencyName?: string;
-  /** INVITES CLIENT: ask the flag again (after turning invites on, or a 404 from Send invite). */
-  onInviteFlagStale?: () => void;
   onUpdateUser?: (userId: string, updates: { 
     role?: UserRole; 
     permissions?: UserPermissions;
@@ -75,10 +67,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   currentVenue,
   venues,
   onAddUser,
-  inviteMode = false,
-  inviteFlag = null,
   agencyName,
-  onInviteFlagStale,
   onUpdateUser,
   onDeleteUser,
 }) => {
@@ -86,7 +75,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const [venueNotice, setVenueNotice] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
   const [newPhone, setNewPhone] = useState('');
   // K1: whose kiosk-code sheet is open (looked up fresh from `users`).
   const [codeTargetId, setCodeTargetId] = useState<string | null>(null);
@@ -107,11 +95,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const [actionAlert, setActionAlert] = useState<string | null>(null);
   // Item 10i: the invite link just made (shown once, never stored).
   const [inviteResult, setInviteResult] = useState<{ link: string; forWhom: string } | null>(null);
-  // INVITES CLIENT C2: "Turn on invites" (admin, flag OFF only).
-  const [enableConfirm, setEnableConfirm] = useState(false);
-  const [enableBusy, setEnableBusy] = useState(false);
-  const [enableError, setEnableError] = useState<string | null>(null);
-  const [inviteNotice, setInviteNotice] = useState<string | null>(null);
   // INVITES CLIENT C3: Send invite for one member (confirm first; the link is shown once).
   // B1 ([INVC-DS3]): the record the admin reviews and the version of the response it came from.
   const [sendReview, setSendReview] = useState<{ user: UserType; version: number; changed: boolean } | null>(null);
@@ -143,8 +126,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   useEffect(() => {
     if (!isOpen) {
       setInviteResult(null);
-      setEnableConfirm(false);
-      setEnableError(null);
       setSendReview(null);
       setSentLink(null);
       setSendError(null);
@@ -159,21 +140,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 
   const isAdminView = currentUser?.role === 'admin';
   const firstName = (n: string) => (n || '').trim().split(/\s+/)[0] || n;
-
-  const confirmEnableInvites = async () => {
-    if (enableBusy) return;
-    setEnableBusy(true);
-    setEnableError(null);
-    const r = await enableInvites();
-    setEnableBusy(false);
-    setEnableConfirm(false);
-    if (r.ok) {
-      setInviteNotice('Invites are on. New people get a link and choose their own password.');
-      onInviteFlagStale?.();
-    } else {
-      setEnableError(r.message || "Couldn't turn on invites. Please try again.");
-    }
-  };
 
   /** Load the person's fresh record and its version, then open (or re-open) the confirm. */
   const openSendReview = async (userId: string, changed: boolean) => {
@@ -217,7 +183,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       setSentIds((prev) => (prev.includes(target.id) ? prev : [...prev, target.id]));
     } else {
       setSendError({ userId: target.id, message: r.message || "Couldn't make the invite. Please try again." });
-      if (r.flagOff) onInviteFlagStale?.();
     }
   };
 
@@ -260,21 +225,10 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (inviteMode) {
-      if (!name.trim() || !email.trim()) {
-        setError('Please provide a name and an email.');
-        return;
-      }
-    } else {
-    if (!name.trim() || !email.trim() || !password.trim()) {
-      setError('Please provide name, email, and an initial password.');
+    // Invites are always on (Don 2026-10-22): a new person gets a link and chooses their own password.
+    if (!name.trim() || !email.trim()) {
+      setError('Please provide a name and an email.');
       return;
-    }
-
-    if (password.trim().length < 6) {
-      setError('Initial password must be at least 6 characters.');
-      return;
-    }
     }
 
     const phoneClean = normalizePhone(newPhone);
@@ -294,8 +248,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       const added = await onAddUser({
         name: name.trim(),
         email: emailClean,
-        role: inviteMode && role !== 'coordinator' ? 'mashgiach' : role,
-        ...(inviteMode ? {} : { password: password.trim() }),
+        role: role !== 'coordinator' ? 'mashgiach' : role,
         venueId: currentVenue?.id,
         permissions: {
           canFillTasks: canFill,
@@ -308,7 +261,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       }
       setName('');
       setEmail('');
-      setPassword('');
       setNewPhone('');
       setRole('mashgiach');
       setCanFill(true);
@@ -459,31 +411,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           
-          {isAdminView && inviteNotice && (
-            <p role="status" data-invites-on-notice className="p-3 rounded-xl bg-ok-bg border border-ok text-sm text-ink">{inviteNotice}</p>
-          )}
-
-          {/* INVITES CLIENT C2: invite links are OFF for this agency (admin only; never on "not known"). */}
-          {isAdminView && inviteFlag === false && (
-            <div data-invites-off className="p-4 rounded-2xl bg-surface border border-line-control e1 space-y-3">
-              <p className="text-sm font-bold text-ink">Invite links are off</p>
-              <p className="text-sm text-ink-soft">
-                Today you set a first password for each new person. With invites on, you send them a link instead and they choose their own password.
-              </p>
-              {enableError && (
-                <p role="alert" data-invites-error className="p-2.5 rounded-xl bg-bad-bg border border-bad text-sm text-bad">{enableError}</p>
-              )}
-              <button
-                type="button"
-                data-invites-turn-on
-                disabled={enableBusy}
-                onClick={() => { setEnableError(null); setEnableConfirm(true); }}
-                className="pressable min-h-11 px-4 rounded-xl font-bold text-sm bg-gold-deep text-paper e1 cursor-pointer disabled:opacity-50"
-              >
-                Turn on invites
-              </button>
-            </div>
-          )}
 
           {/* Section 1: Add New Member Form (admin only) */}
           {!isCoordinatorView && (
@@ -509,13 +436,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
               />
             ) : (
             <form onSubmit={handleAddSubmit} className="space-y-3 text-xs">
-              {inviteMode && (
-                <p data-invite-mode-note className="text-sm text-ink-soft">
-                  No password needed. You'll get a link to send them, and they choose their own password.
-                </p>
-              )}
+              <p data-invite-mode-note className="text-sm text-ink-soft">
+                No password needed. You'll get a link to send them, and they choose their own password.
+              </p>
               <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                <div className={inviteMode ? 'sm:col-span-4' : 'sm:col-span-3'}>
+                <div className="sm:col-span-4">
                   <label className="block font-semibold text-ink-soft mb-1">
                     Full Name
                   </label>
@@ -533,7 +458,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   </div>
                 </div>
 
-                <div className={inviteMode ? 'sm:col-span-4' : 'sm:col-span-3'}>
+                <div className="sm:col-span-4">
                   <label className="block font-semibold text-ink-soft mb-1">
                     Email
                   </label>
@@ -551,40 +476,19 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   </div>
                 </div>
 
-                {!inviteMode && (
-                <div className={inviteMode ? 'sm:col-span-4' : 'sm:col-span-3'}>
-                  <label className="block font-semibold text-ink-soft mb-1">
-                    Password
-                  </label>
-                  <div className="relative">
-                    <Lock className="w-3.5 h-3.5 text-ink-soft absolute left-3 top-1/2 -translate-y-1/2" />
-                    <input
-                      id="new-member-password-input"
-                      type="password"
-                      required
-                      placeholder="Min 6 characters"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 placeholder-ink-faint font-mono focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
-                    />
-                  </div>
-                </div>
-                )}
 
-                <div className={inviteMode ? 'sm:col-span-4' : 'sm:col-span-3'}>
+                <div className="sm:col-span-4">
                   <label className="block font-semibold text-ink-soft mb-1">
                     Role
                   </label>
                   <select
                     id="new-member-role-select"
-                    value={inviteMode && role !== 'coordinator' ? 'mashgiach' : role}
+                    value={role !== 'coordinator' ? 'mashgiach' : role}
                     onChange={(e) => handleRoleChange(e.target.value as UserRole)}
                     className="w-full py-2 px-3 font-medium focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   >
                     <option value="mashgiach">Mashgiach (Field Inspector)</option>
                     <option value="coordinator">Coordinator (Can Add Tasks)</option>
-                    {!inviteMode && <option value="owner">Restaurant / Venue Owner</option>}
-                    {!inviteMode && <option value="admin">Administrator (Full Control)</option>}
                   </select>
                 </div>
               </div>
@@ -646,7 +550,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   className="pressable py-2 px-4 rounded-xl hover:brightness-105 disabled:opacity-50 font-bold flex items-center justify-center gap-1.5 e1 cursor-pointer shrink-0 bg-gold-deep text-paper"
                 >
                   <UserPlus className="w-4 h-4" />
-                  <span>{inviteMode ? (isSubmitting ? 'Creating link…' : 'Create invite link') : (isSubmitting ? 'Adding...' : 'Add Team Member')}</span>
+                  <span>{isSubmitting ? 'Creating link…' : 'Create invite link'}</span>
                 </button>
               </div>
             </form>
@@ -721,7 +625,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   (t) => t.assignedTo.includes('all') || t.assignedTo.includes(user.email)
                 ).length;
 
-                const canSendInvite = isAdminView && inviteFlag === true && !isCurrent && !isPrimaryAdmin;
+                const canSendInvite = isAdminView && !isCurrent && !isPrimaryAdmin;
                 const wasSent = sentIds.includes(user.id) || user.invitePending === true;
                 const canResetLink = canMakeResetLink(currentUser as any, { ...(user as any), isPrimaryAdmin }) && user.needsInvite !== true && user.invitePending !== true;
                 const isPaused = (user as any).resetConfirmNeeded === true && !confirmedIds.includes(user.id);
@@ -1076,19 +980,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         icon="shield"
       />
 
-      {/* INVITES CLIENT C2: confirm before turning invites on (one-way). */}
-      <ConfirmModal
-        isOpen={enableConfirm}
-        onClose={() => { if (!enableBusy) setEnableConfirm(false); }}
-        onConfirm={confirmEnableInvites}
-        title={agencyName ? `Turn on invites for ${agencyName}?` : 'Turn on invites?'}
-        message="New people get a link and choose their own password, and you won't set passwords for them anymore. Invites stay on: this can't be turned off from the app."
-        confirmText="Turn on"
-        cancelText="Not now"
-        variant="primary"
-        icon="shield"
-        isLoading={enableBusy}
-      />
 
       {/* INVITES CLIENT C3: confirm before Send invite (it revokes the current password). */}
       <ConfirmModal
