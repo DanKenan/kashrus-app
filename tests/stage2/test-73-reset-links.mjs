@@ -391,6 +391,16 @@ export default {
       assert(J(lg2.json.memberships.map((m) => m.agencyId).sort()) === J([A, B].sort()), `P login lists A + B ${lg2.text.slice(0, 200)}`);
       assert((await call('POST', '/api/auth/activate', auth(lg2.json.token), { membershipId: U('pB') })).status === 200, 'P activate B 200');
       assert((await call('POST', '/api/kiosk/login', kHeaders, { userId: U('pB'), pin: PIN })).status === 200, 'P B kiosk works again');
+      {
+        // A pause written to the STORE only (the cache still says active): the
+        // kiosk PIN sign-in's in-commit re-check refuses it.
+        const stored = await rows();
+        const pausedInStore = stored.map((u) => (u.id === U('pB') ? { ...u, resetSuspended: { ...pBbefore.resetSuspended } } : u));
+        assert((await hook('doc-set-users', { users: pausedInStore })).status === 200, 'P plant store-only pause');
+        const ks = await call('POST', '/api/kiosk/login', kHeaders, { userId: U('pB'), pin: PIN });
+        assert(ks.status === 403 && ks.json?.code === 'RESET_CONFIRM_NEEDED', `P store-only pause -> PIN 403 from the fresh re-check (${ks.status} ${ks.text.slice(0, 100)})`);
+        assert((await hook('doc-set-users', { users: stored })).status === 200, 'P restore store');
+      }
 
       // C resets the PAUSED C row (Option A)
       const preC = tokenOf((await make(tA, U('pA'))).json.link); // made before C's reset: dies by the stamp
@@ -496,6 +506,16 @@ export default {
         assert((await preview(raw)).status === 404, 'V the reset link is dead after Send invite');
         assert((await linksOf(U('m2'))).some((l) => l.status === 'revoked' && l.revokeReason === 'member-changed'), 'V revoked member-changed');
         assert((await make(tA, U('m2'))).status === 409, 'V a pending (Send invite) member gets no new link (409)');
+        // A member turned credentialPending in the STORE only (no Send invite
+        // commit, link left live): the accept re-check refuses and kills it.
+        const ro = await make(tA, U('o'));
+        assert(ro.status === 201, `V make o ${ro.status}`);
+        const stored = await rows();
+        assert((await hook('doc-set-users', { users: stored.map((u) => (u.id === U('o') ? { ...u, credentialPending: 'invite' } : u)) })).status === 200, 'V plant store-only pending');
+        assert((await accept(tokenOf(ro.json.link), 'v-new-password-73')).status === 404, 'V pending in the store -> accept 404');
+        assert((await linksOf(U('o'))).some((l) => l.status === 'revoked' && l.revokeReason === 'member-changed'), 'V link revoked member-changed');
+        const after = await rows();
+        assert((await hook('doc-set-users', { users: after.map((u) => (u.id === U('o') ? stored.find((x) => x.id === U('o')) : u)) })).status === 200, 'V restore o');
       } finally {
         await hook('phase-c', { agencyId: A, enabled: false });
       }
