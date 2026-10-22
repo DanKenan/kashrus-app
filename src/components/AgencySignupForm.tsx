@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { 
   ShieldCheck, 
   Mail, 
@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { User as UserType } from '../types';
 import { apiFetch, setSessionToken } from '../lib/api';
+import { registerIntoExistingAccount } from '../lib/registerExisting';
 
 interface AgencySignupFormProps {
   onSuccess: (user: UserType) => void;
@@ -41,6 +42,12 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
   const [initialVenueCategory, setInitialVenueCategory] = useState('Food Service');
   const [customVenueCategory, setCustomVenueCategory] = useState('');
   const [initialVenueAddress, setInitialVenueAddress] = useState('');
+  // 10M part 1: "I already have a Shutfey account" adds the new agency to that account.
+  const [hasAccount, setHasAccount] = useState(false);
+  // One id per form, kept across retries, so a repeated tap never makes a second agency.
+  const operationIdRef = useRef<string>(
+    `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+  );
   // (seedTemplateTasks removed — the generated tasks were generic/random)
 
   const [isLoading, setIsLoading] = useState(false);
@@ -72,11 +79,16 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
       setErrorMessage('Please enter your Kosher Agency or Vaad name.');
       return;
     }
-    if (!cleanAdminEmail || !cleanAdminName || !cleanAdminPassword) {
+    if (hasAccount) {
+      if (!cleanAdminEmail || !cleanAdminPassword) {
+        setErrorMessage('Please enter the email and password you already sign in with.');
+        return;
+      }
+    } else if (!cleanAdminEmail || !cleanAdminName || !cleanAdminPassword) {
       setErrorMessage('Please provide administrator name, work email, and a secure password.');
       return;
     }
-    if (cleanAdminPassword.length < 6) {
+    if (!hasAccount && cleanAdminPassword.length < 6) {
       setErrorMessage('Administrator password must be at least 6 characters.');
       return;
     }
@@ -96,6 +108,24 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
 
     try {
       setIsLoading(true);
+      if (hasAccount) {
+        const r = await registerIntoExistingAccount({
+          agencyName: cleanAgencyName,
+          shortCode: shortCode.trim() || undefined,
+          region: region.trim() || undefined,
+          contactPhone: phone.trim() || undefined,
+          initialVenueName: cleanVenueName,
+          initialVenueCategory: finalCategory,
+          email: cleanAdminEmail,
+          password: cleanAdminPassword, // trimmed, exactly as the sign-in page sends it
+          operationId: operationIdRef.current,
+        });
+        if (!r.ok) throw new Error(r.data.error || 'Could not add the agency. Please try again.');
+        if (typeof r.data.token === 'string' && r.data.token) setSessionToken(r.data.token);
+        if (r.data.user) onSuccess(r.data.user);
+        else throw new Error('Agency added, but your profile could not be loaded. Please sign in.');
+        return;
+      }
       const res = await apiFetch('/api/agencies/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -139,6 +169,28 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
           <span>{errorMessage}</span>
         </div>
       )}
+
+      {/* 10M part 1: new account, or add this agency to an account you already have */}
+      <div data-signup-mode={hasAccount ? 'existing' : 'new'} className="p-1 rounded-2xl bg-sunken border border-line grid grid-cols-2 gap-1">
+        <button
+          type="button"
+          data-signup-mode-new
+          aria-pressed={!hasAccount}
+          onClick={() => { setHasAccount(false); setErrorMessage(null); }}
+          className={`py-2 px-2 rounded-xl text-[11px] sm:text-xs font-bold transition ${!hasAccount ? 'bg-surface text-gold-deep tactile-1' : 'text-ink-faint hover:text-ink'}`}
+        >
+          New Shutfey account
+        </button>
+        <button
+          type="button"
+          data-signup-mode-existing
+          aria-pressed={hasAccount}
+          onClick={() => { setHasAccount(true); setErrorMessage(null); }}
+          className={`py-2 px-2 rounded-xl text-[11px] sm:text-xs font-bold transition ${hasAccount ? 'bg-surface text-gold-deep tactile-1' : 'text-ink-faint hover:text-ink'}`}
+        >
+          I already have a Shutfey account
+        </button>
+      </div>
 
       {/* Step 1: Kosher Agency Organization Details */}
       <div className="p-4 rounded-2xl bg-surface tactile-3 border border-line space-y-3.5 animate-fade-in">
@@ -208,11 +260,17 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
             2
           </div>
           <h3 className="text-xs font-bold uppercase tracking-wider text-ink-soft">
-            Agency Administrator
+            {hasAccount ? 'Your Shutfey account' : 'Agency Administrator'}
           </h3>
         </div>
+        {hasAccount && (
+          <p data-existing-account-note className="text-[11px] text-ink-soft leading-relaxed">
+            Use the email and password you already sign in with. This agency is added to that same account, with you as its admin. You keep one sign-in, and the app asks which agency to open.
+          </p>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {!hasAccount && (
           <div>
             <label className="block text-[11px] font-bold text-ink-soft mb-1">
               Full Name *
@@ -229,10 +287,11 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
               />
             </div>
           </div>
+          )}
 
           <div>
             <label className="block text-[11px] font-bold text-ink-soft mb-1">
-              Email *
+              {hasAccount ? 'Your email *' : 'Email *'}
             </label>
             <div className="relative">
               <Mail className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -250,7 +309,7 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
 
         <div>
           <label className="block text-[11px] font-bold text-ink-soft mb-1">
-            Password *
+            {hasAccount ? 'Your password *' : 'Password *'}
           </label>
           <div className="relative">
             <Lock className="w-3.5 h-3.5 text-ink-faint absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -346,6 +405,7 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
           </div>
         )}
 
+        {!hasAccount && (
         <div>
           <label className="block text-[11px] font-bold text-ink-soft mb-1">
             Address (Optional)
@@ -358,6 +418,7 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
             className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl bg-sunken border border-line text-ink placeholder-ink-faint focus:border-gold focus:outline-none transition"
           />
         </div>
+        )}
 
         {/* Seed Template Checkbox — removed: the generated tasks were generic/random */}
       </div>
@@ -384,7 +445,7 @@ export const AgencySignupForm: React.FC<AgencySignupFormProps> = ({
             </>
           ) : (
             <>
-              <span>Create Agency Account & Launch Portal</span>
+              <span>{hasAccount ? 'Add Agency to My Account' : 'Create Agency Account & Launch Portal'}</span>
               <ArrowRight className="w-4 h-4" />
             </>
           )}
