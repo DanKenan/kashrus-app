@@ -1,6 +1,6 @@
 /** Item 9a unit tests: src/server/venue-scope.ts (fail closed, agency-bound, home default). */
 import { enforceIdentityFields, mergeVenueAccess } from '../../src/server/identity.ts';
-import { sanitizeVenueAccess, venueScope, resolveTargetVenue, sharedVenues, agencyVenueIds } from '../../src/server/venue-scope.ts';
+import { sanitizeVenueAccess, venueScope, resolveTargetVenue, sharedVenues, agencyVenueIds, mayManageEventAt } from '../../src/server/venue-scope.ts';
 let n = 0; const ok = (c, m) => { if (!c) throw new Error(m); n++; };
 const V = [{ id: 'v1', agencyId: 'A' }, { id: 'v2', agencyId: 'A' }, { id: 'v3', agencyId: 'A' }, { id: 'vb', agencyId: 'B' }, { id: 'vh' }];
 const J = JSON.stringify;
@@ -69,6 +69,42 @@ const run = async function () {
   ok(J(mergeVenueAccess(undefined, ['v2', '', null, 'v2'])) === J(['v2']), 'merge without home');
   let g9 = enforceIdentityFields([{ id: 'u9', personId: 'u9', role: 'coordinator', agencyId: 'A', venueId: 'v2', venueAccess: ['v1'] }], [{ id: 'u9', personId: 'u9', role: 'coordinator', agencyId: 'A', venueId: 'v2', venueAccess: ['v1'] }], ag, opt());
   ok(J(g9[0].venueAccess) === J(['v2']), 'a stale stored list headed by another venue resets to [home]');
+  // QA2S2 #9: mayManageEventAt (rule T, fail closed; owners = home venue only).
+  const who = (role, o = {}) => ({ role, agencyId: 'A', venueId: 'v1', personId: 'p', venueAccess: ['v1', 'v2'], ...o });
+  ok(mayManageEventAt(who('admin', { venueId: undefined }), 'v3', V), 'admin: any venue of own agency');
+  ok(!mayManageEventAt(who('admin'), 'vb', V), 'admin: never another agency venue');
+  ok(!mayManageEventAt(who('admin'), 'gone', V), 'admin: a venue that does not exist');
+  ok(mayManageEventAt(who('coordinator'), 'v2', V) && mayManageEventAt(who('coordinator'), 'v1', V), 'coordinator: home + granted');
+  ok(!mayManageEventAt(who('coordinator'), 'v3', V), 'coordinator: not an ungranted venue');
+  ok(!mayManageEventAt(who('coordinator', { venueAccess: ['v1', 'vb'] }), 'vb', V), 'coordinator: a foreign grant never authorizes');
+  ok(mayManageEventAt(who('owner'), 'v1', V), 'owner: own home venue');
+  ok(!mayManageEventAt(who('owner'), 'v2', V), 'owner: venueAccess never widens it');
+  ok(!mayManageEventAt(who('owner', { venueId: 'vb' }), 'vb', V), 'owner: home in another agency');
+  for (const r of ['mashgiach', 'worker', 'viewer', '', undefined]) ok(!mayManageEventAt(who(r), 'v1', V), `role ${r} refused`);
+  ok(!mayManageEventAt(null, 'v1', V) && !mayManageEventAt(who('admin'), '', V) && !mayManageEventAt(who('admin'), 7, V), 'bad inputs refused');
+  ok(!mayManageEventAt(who('admin'), 'v2', Vmoved), 'venue moved to another agency: refused');
+
+  // QA2S2 #15 ([DS2] B2): kioskPinRev is a guarded field.
+  const kv = [];
+  const ko = (o = {}) => ({ onViolation: (id, f) => kv.push(`${id}:${f}`), ...o });
+  const k0 = [{ id: 'k1', personId: 'k1', role: 'mashgiach', agencyId: 'A', venueId: 'v1', kioskPinHash: '$2b$h1', kioskPinRev: 3 }];
+  let k1 = enforceIdentityFields(k0, [{ ...k0[0], kioskPinRev: 9 }], ag, ko());
+  ok(k1[0].kioskPinRev === 3 && kv.includes('k1:kioskPinRev'), 'forged rev change restored + reported');
+  kv.length = 0;
+  k1 = enforceIdentityFields(k0, [{ ...k0[0], kioskPinRev: undefined }], ag, ko());
+  ok(k1[0].kioskPinRev === 3 && kv.includes('k1:kioskPinRev'), 'dropping the rev is restored');
+  k1 = enforceIdentityFields(k0, [{ ...k0[0], kioskPinRev: 1 }], ag, ko({ kioskRevBumpIds: new Set(['k1']) }));
+  ok(k1[0].kioskPinRev === 4, 'bump = before + 1 exactly, whatever the mutator wrote');
+  k1 = enforceIdentityFields(k0, [{ ...k0[0], kioskPinHash: '$2b$h2', kioskPinRev: 4 }], ag, ko());
+  ok(k1[0].kioskPinRev === 4, 'PIN change path still writes the rev');
+  const k2 = [{ id: 'k2', personId: 'k2', role: 'mashgiach', agencyId: 'A', venueId: 'v1', kioskPinHash: '$2b$h' }];
+  ok(enforceIdentityFields(k2, [{ ...k2[0], kioskPinRev: 1 }], ag, ko())[0].kioskPinRev === 1, 'login materialisation undefined -> 1 with a hash');
+  kv.length = 0;
+  ok(enforceIdentityFields(k2, [{ ...k2[0], kioskPinRev: 5 }], ag, ko())[0].kioskPinRev === undefined && kv.length === 1, 'materialisation only to 1');
+  const k3 = [{ id: 'k3', personId: 'k3', role: 'mashgiach', agencyId: 'A', venueId: 'v1' }];
+  ok(enforceIdentityFields(k3, [{ ...k3[0], kioskPinRev: 1 }], ag, ko())[0].kioskPinRev === undefined, 'no PIN hash: no materialisation');
+  ok(enforceIdentityFields(k3, [{ ...k3[0] }], ag, ko({ kioskRevBumpIds: new Set(['k3']) }))[0].kioskPinRev === 1, 'bump from missing counts from 0');
+  ok(enforceIdentityFields([], [{ id: 'n9', role: 'mashgiach', agencyId: 'A', kioskPinRev: 2 }], ag, ko({ kioskRevBumpIds: new Set(['n9']) }))[0].kioskPinRev === 2, 'a new row is never bumped');
   console.log(`venue-scope: ${n}/${n} passed`);
 };
 export default { name: 'venue-scope (9a)', whatItProves: 'Multi-venue scope fails closed: home venue as before; extra venues only server-granted, current-agency; defaults to home; admins never cross agencies; coordinators share only real venues.', run };

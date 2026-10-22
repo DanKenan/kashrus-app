@@ -3540,7 +3540,16 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
 import { enforceIdentityFields, identityGroups, groupIssues, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, applyOwnerTransfer, m4Successor, identityProjection, type IdentityOutcomeFields } from './src/server/identity.js';
-import { venueScope as venueScopeOf, resolveTargetVenue, sharedVenues } from './src/server/venue-scope.js';
+import { venueScope as venueScopeOf, resolveTargetVenue, sharedVenues, mayManageEventAt } from './src/server/venue-scope.js';
+/** QA2S2 #9: the one refusal of an event write by someone who may not manage events there. */
+const EVENT_FORBIDDEN_BODY = { code: 'EVENT_FORBIDDEN', error: 'Only admins, venue owners and coordinators can create events.' } as const;
+/** QA2S2 #9 (E5): the fresh caller row of a commit, or null when it is gone or left the agency. */
+function freshEventManager(freshDoc: any, callerId: string, agencyId: string): any | null {
+  const row = (Array.isArray(freshDoc?.users) ? freshDoc.users : []).find((u: any) => u && u.id === callerId);
+  if (!row) return null;
+  const n = normalizeStoredUser(row);
+  return (n.agencyId || 'agency-hkc') === agencyId ? n : null;
+}
 
 /** 10b: the one text for a commit the identity checker refuses (names no agency, no person). */
 const IDENTITY_CONFLICT_TEXT = "This email can't be used here.";
@@ -4309,18 +4318,22 @@ const testPushLog: Array<{ path: string; recipientUserId: string | null; email: 
  * 8t) always; a legacy subscription with the row's email only when that
  * email is unambiguous across all rows. Fire-and-forget.
  */
-function sendPushToMember(row: any, title: string, body: string, data?: any, onError?: (err: any) => void) {
-  if (!row || !row.id || typeof row.email !== 'string') return;
+/** QA2S2 #31 ([DS2] B3): returns how many subscriptions it handed to deliverPush (attempted, not delivered). */
+function sendPushToMember(row: any, title: string, body: string, data?: any, onError?: (err: any) => void): number {
+  if (!row || !row.id || typeof row.email !== 'string') return 0;
   const agencyId = normalizeStoredUser(row).agencyId || 'agency-hkc';
   const bound = pushSubscriptions.filter((s) => s.userId === row.id && s.agencyId === agencyId);
   deliverPush(bound, 'identity', row.id, title, body, data, onError);
+  let attempted = bound.length;
   if (legacyPushSubIsUnambiguous(row.email, users)) {
     const email = row.email.trim().toLowerCase();
     const legacy = pushSubscriptions.filter(
       (s) => isLegacyPushSub(s) && typeof s.userEmail === 'string' && s.userEmail.trim().toLowerCase() === email
     );
     deliverPush(legacy, 'legacy-email', row.id, title, body, data, onError);
+    attempted += legacy.length;
   }
+  return attempted;
 }
 
 /**
@@ -7851,6 +7864,9 @@ app.put('/api/agencies/current', async (req, res) => {
   // domainLastCheckedAt are SERVER-ONLY — never destructured from the body,
   // so a client can never set them.
   const { name, shortCode, certificationSeal, region, contactPhone, customDomain, timeZone, slug, brandName, logoUrl } = req.body;
+  // QA2S2 #27 (A5): type checks (400 instead of a crash on a non-string).
+  if (name !== undefined && typeof name !== 'string') return res.status(400).json({ error: 'The agency name must be text.', code: 'SETTINGS_INVALID' });
+  if (contactPhone !== undefined && typeof contactPhone !== 'string') return res.status(400).json({ error: 'The phone number must be text.', code: 'SETTINGS_INVALID' });
 
   const agencyId = user.agencyId || 'agency-hkc';
   // Item 6: optional agency zone (undefined = unchanged, null/'' = clear ->
@@ -7964,6 +7980,100 @@ app.put('/api/agencies/current', async (req, res) => {
   const adminView = agencyAdminView(updated);
   broadcast('AGENCY_UPDATED', { agency: adminView }, user.email, agencyId);
   res.json({ success: true, agency: adminView });
+});
+
+
+// ---------------------------------------------------------------------------
+// QA2S2 #27 (Don 2026-10-22): the agency settings an admin edits — name,
+// phone, time zone. Admin only, own agency from the session (never the
+// body), kiosk 403; validated before any write; ONE commit on fresh data.
+// ---------------------------------------------------------------------------
+const AGENCY_SETTINGS_KEYS = new Set(['name', 'contactPhone', 'timeZone', 'expectedVersion', 'operationId', 'userEmail']);
+const AGENCY_NAME_MAX = 100;
+const AGENCY_PHONE_MAX = 30;
+
+/** QA2S2 #27 (A2): validate the body; returns the fields to write or a 400 body. */
+function parseAgencySettings(body: any):
+  | { ok: true; name?: string; contactPhone?: string; timeZone?: string | null }
+  | { ok: false; code: 'SETTINGS_INVALID' | 'SETTINGS_FIELD_UNKNOWN'; error: string } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, code: 'SETTINGS_INVALID', error: 'Nothing to save.' };
+  const unknown = Object.keys(body).filter((k) => !AGENCY_SETTINGS_KEYS.has(k));
+  if (unknown.length) return { ok: false, code: 'SETTINGS_FIELD_UNKNOWN', error: 'Only the name, phone and time zone can be changed here.' };
+  const out: { ok: true; name?: string; contactPhone?: string; timeZone?: string | null } = { ok: true };
+  if (body.name === undefined && body.contactPhone === undefined && body.timeZone === undefined) {
+    return { ok: false, code: 'SETTINGS_INVALID', error: 'Nothing to save.' };
+  }
+  if (body.name !== undefined) {
+    if (typeof body.name !== 'string') return { ok: false, code: 'SETTINGS_INVALID', error: 'The agency name must be text.' };
+    const n = body.name.trim();
+    // eslint-disable-next-line no-control-regex
+    if (!n || n.length > AGENCY_NAME_MAX || /[\u0000-\u001f\u007f]/.test(n)) {
+      return { ok: false, code: 'SETTINGS_INVALID', error: `Enter an agency name of 1 to ${AGENCY_NAME_MAX} characters.` };
+    }
+    out.name = n;
+  }
+  if (body.contactPhone !== undefined) {
+    if (typeof body.contactPhone !== 'string') return { ok: false, code: 'SETTINGS_INVALID', error: 'Enter a valid phone number.' };
+    if (body.contactPhone.trim() === '') out.contactPhone = '';
+    else {
+      const p = normalizePhoneNumber(body.contactPhone);
+      if (!p.ok || !p.value || p.value.length > AGENCY_PHONE_MAX) return { ok: false, code: 'SETTINGS_INVALID', error: 'Enter a valid phone number.' };
+      out.contactPhone = p.value;
+    }
+  }
+  if (body.timeZone !== undefined) {
+    const tz = parseTimeZoneInput(body.timeZone);
+    if (tz.error) return { ok: false, code: 'SETTINGS_INVALID', error: tz.error };
+    out.timeZone = tz.value ?? null;
+  }
+  return out;
+}
+
+app.put('/api/agency/settings', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if ((req as any).kiosk === true) return res.status(403).json({ error: 'Admin access required.' });
+  const user = requireAdmin(req, res);
+  if (!user) return;
+  const parsed = parseAgencySettings(req.body);
+  if (parsed.ok !== true) { const bad = parsed as { code: string; error: string }; return res.status(400).json({ error: bad.error, code: bad.code }); }
+  const agencyId = user.agencyId || 'agency-hkc';
+  if (!agencies.find((a) => a && a.id === agencyId)) return res.status(404).json({ error: 'Agency record not found.' });
+  const zoneNow = serverNow();
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      // A3: the fresh caller row still exists, is admin, same agency.
+      const fc = freshUsers.find((u) => u && u.id === user.id);
+      const fcn = fc ? normalizeStoredUser(fc) : null;
+      if (!fcn || fcn.role !== 'admin' || (fcn.agencyId || 'agency-hkc') !== agencyId) {
+        return { conflict: 'Admin access required.', conflictStatus: 403, conflictCode: 'FORBIDDEN' };
+      }
+      const freshAgency = freshAgencies.find((a) => a && a.id === agencyId);
+      if (!freshAgency) return { conflict: 'Agency record not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+      const updated: any = { ...freshAgency };
+      if (parsed.name !== undefined) updated.name = parsed.name;
+      if (parsed.contactPhone !== undefined) updated.contactPhone = parsed.contactPhone;
+      if (parsed.timeZone !== undefined) {
+        if (parsed.timeZone) updated.timeZone = parsed.timeZone;
+        else delete updated.timeZone;
+      }
+      const newAgencies = freshAgencies.map((a) => (a && a.id === agencyId ? updated : a));
+      if (parsed.timeZone === undefined) return { doc: { ...freshDoc, agencies: newAgencies }, result: updated };
+      // Same prospective step as PUT /api/agencies/current (never a reset,
+      // never a backwards marker). Only this agency changes.
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const newMarkers = workDatesAfterZoneChange(freshDoc, freshVenues, freshAgencies, freshVenues, newAgencies, zoneNow);
+      return { doc: { ...freshDoc, agencies: newAgencies, venueWorkDates: newMarkers }, result: updated };
+    },
+    { label: 'agency-settings', requireVersion: true }
+  );
+  if (!committed) return;
+  const adminView = agencyAdminView(committed.result as any);
+  broadcast('AGENCY_UPDATED', { agency: adminView }, user.email, agencyId);
+  res.json({ agency: adminView });
 });
 
 
@@ -11655,7 +11765,16 @@ app.post('/api/events', async (req, res) => {
       return res.status(403).json({ error: 'You can only work in your own venue.' });
     }
     targetVenueId = String(venueId);
+    // QA2S2 #9 (E1): only admins (own agency), coordinators (own venues) and
+    // owners (own venue) create events; mashgichim, workers, kiosk sessions
+    // and out-of-scope callers are refused (fail closed).
+    if ((req as any).kiosk === true || !mayManageEventAt(caller as any, targetVenueId, venues as any)) {
+      return res.status(403).json(EVENT_FORBIDDEN_BODY);
+    }
     if (!requireVenueAccess(req, res, targetVenueId)) return;
+  }
+  if ((req as any).kiosk === true || !mayManageEventAt(caller as any, targetVenueId, venues as any)) {
+    return res.status(403).json(EVENT_FORBIDDEN_BODY);
   }
   const targetVenue = venues.find((v) => v.id === targetVenueId);
 
@@ -11683,7 +11802,13 @@ app.post('/api/events', async (req, res) => {
   const eventId = `evt-${stamp}`;
   const nowIso = new Date().toISOString();
 
-  const starterTasks: EventTaskItem[] = Array.isArray(initialTasks) && initialTasks.length > 0
+  // QA2S2 #26: the starter tasks are added only when `tasks` is MISSING; an
+  // explicit empty list creates an event with no tasks; any other supplied
+  // value (null, an object, a string) is refused (RV1 N1), nothing written.
+  if (initialTasks !== undefined && !Array.isArray(initialTasks)) {
+    return res.status(400).json({ error: 'Event tasks must be a list.', code: 'EVENT_TASKS_INVALID' });
+  }
+  const starterTasks: EventTaskItem[] = Array.isArray(initialTasks)
     ? initialTasks.map((t: any, idx: number) => ({
         id: t.id || `etask-${stamp}-${idx}`,
         title: t.title || 'Event Kosher Inspection Task',
@@ -11755,6 +11880,12 @@ app.post('/api/events', async (req, res) => {
       // Idempotency: same event ID already created.
       const existing = arr.find((e) => e.id === eventId);
       if (existing) return { doc: freshDoc, result: { event: existing } };
+      // QA2S2 #9 (E5): re-authorize on FRESH data — the caller's stored role,
+      // agency and venues and the target venue. Nothing is written on refusal.
+      const freshMgr = freshEventManager(freshDoc, (caller as any).id, callerAgencyId);
+      if (!freshMgr || !mayManageEventAt(freshMgr, targetVenueId, Array.isArray(freshDoc.venues) ? freshDoc.venues : [])) {
+        return { conflict: EVENT_FORBIDDEN_BODY.error, conflictStatus: 403, conflictCode: EVENT_FORBIDDEN_BODY.code };
+      }
       // Item 8s: re-resolve the assignee on FRESH data with the caller re-read
       // from freshDoc.users (role/agency/venue may have changed).
       if (assigneeRequested) {
@@ -11834,11 +11965,12 @@ function eventCopySpanDays(src: any): number | null | 'bad' {
  * event's venue. Everyone else (incl. kiosk sessions, whose acting user is
  * never admin/coordinator) is refused.
  */
-function mayCopyEvent(user: any, event: any): boolean {
+function mayCopyEvent(user: any, event: any, venueList: readonly any[] = venues): boolean {
   if (!user || !event) return false;
   if ((user.agencyId || 'agency-hkc') !== (event.agencyId || 'agency-hkc')) return false;
-  if (user.role === 'admin') return true;
-  return user.role === 'coordinator' && callerMaySeeVenue(user, event.venueId);
+  // QA2S2 #9 (E2): the same rule as every event write — admin (own agency),
+  // coordinator (own venues), owner (own venue); everyone else refused.
+  return mayManageEventAt(user, event.venueId, venueList as any);
 }
 
 /** The event template the copy carries: definition fields + task names. */
@@ -11890,18 +12022,19 @@ app.post('/api/events/:id/copy', async (req, res) => {
     return res.status(404).json({ error: 'Event not found.' });
   }
   if (!requireSameAgency(req, res, source, 'events')) return;
-  // Rule T, fail closed: admin = whole agency; coordinator = own venue(s).
-  if (caller.role !== 'admin' && caller.role !== 'coordinator') {
-    return res.status(403).json({ error: 'Only an admin or coordinator can copy events.' });
-  }
-  if (!mayCopyEvent(caller, source)) {
-    return res.status(403).json({ error: 'You can only work in your own venue.' });
+  // QA2S2 #9 (E2), fail closed: admin = whole agency; coordinator = own
+  // venue(s); owner = own venue. Mashgichim, workers and kiosk sessions: 403.
+  if ((req as any).kiosk === true || !['admin', 'coordinator', 'owner'].includes(String(caller.role))) {
+    return res.status(403).json(EVENT_FORBIDDEN_BODY);
   }
   // The copy stays at the source event's venue, which must EXIST (explicit:
   // requireOwnVenue alone tolerates dangling references) and be this agency's.
   const venue = venues.find((v) => v && v.id === source.venueId);
   if (!venue) {
     return res.status(409).json({ error: "This event's venue no longer exists, so it can't be copied." });
+  }
+  if (!mayCopyEvent(caller, source)) {
+    return res.status(403).json(EVENT_FORBIDDEN_BODY);
   }
   if (!requireOwnVenue(req, res, venue.id, venues)) return;
   if (eventCopySpanDays(source) === 'bad') {
@@ -11952,11 +12085,10 @@ app.post('/api/events/:id/copy', async (req, res) => {
       if (!freshVenue || (freshVenue.agencyId || 'agency-hkc') !== (freshSource.agencyId || 'agency-hkc')) {
         return { conflict: "This event's venue no longer exists, so it was not copied." };
       }
-      const freshCaller = (Array.isArray(freshDoc.users) ? freshDoc.users : []).find(
-        (u: any) => u && u.id === caller.id
-      );
-      if (!freshCaller || !mayCopyEvent(freshCaller, freshSource) || !mayCopyEvent(caller, freshSource)) {
-        return { conflict: 'Your access changed, so the event was not copied. Refresh and try again.' };
+      const freshCaller = freshEventManager(freshDoc, caller.id, caller.agencyId || 'agency-hkc');
+      const freshVenues = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      if (!freshCaller || !mayCopyEvent(freshCaller, freshSource, freshVenues)) {
+        return { conflict: EVENT_FORBIDDEN_BODY.error, conflictStatus: 403, conflictCode: EVENT_FORBIDDEN_BODY.code };
       }
       if (eventCopySpanDays(freshSource) === 'bad') {
         return { conflict: "This event's dates are not valid, so it was not copied." };
@@ -12015,9 +12147,10 @@ app.put('/api/events/:id', async (req, res) => {
       JSON.stringify((req.body as any)[f]) !== JSON.stringify((existing as any)[f])
   );
   if (changesDefinition) {
-    if (caller.role !== 'admin' &&
-        !(caller.role === 'coordinator' && callerMaySeeVenue(caller, existing.venueId))) {
-      return res.status(403).json({ error: 'You can only edit event details at your own venue.' });
+    // QA2S2 #9 (E3): definition changes need mayManageEventAt at the event's
+    // venue (admin own agency, coordinator own venues, owner own venue).
+    if ((req as any).kiosk === true || !mayManageEventAt(caller as any, existing.venueId, venues as any)) {
+      return res.status(403).json(EVENT_FORBIDDEN_BODY);
     }
   } else if (!mayFillEventTasks(caller, existing)) {
     return res.status(403).json({ error: 'You can only check event tasks at your own venue.' });
@@ -12078,6 +12211,12 @@ app.put('/api/events/:id', async (req, res) => {
       const freshEvents: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
       const freshEvent = freshEvents.find((e) => e.id === id);
       if (!freshEvent) return { conflict: 'Event not found (it may have been deleted).' };
+      // QA2S2-RV1 B1 (E5): the FRESH event must still belong to the caller's
+      // agency before ANY edit (definition or tasks-only); a foreign-agency
+      // event fails closed, nothing written.
+      if ((freshEvent.agencyId || 'agency-hkc') !== ((caller as any).agencyId || 'agency-hkc')) {
+        return { conflict: EVENT_FORBIDDEN_BODY.error, conflictStatus: 403, conflictCode: EVENT_FORBIDDEN_BODY.code };
+      }
       // Fix round 2 HIGH (rule AB): authorization inside the transaction
       // re-resolves the caller AND the target from the FRESH doc. The
       // pre-commit gate ran against the cached event; an admin reassignment
@@ -12089,6 +12228,15 @@ app.put('/api/events/:id', async (req, res) => {
       // otherwise false-fire as "access changed" on every event save.
       const freshCallerRaw: any = (freshDoc.users || []).find((u: any) => u.id === (caller as any).id);
       const freshCaller: any = freshCallerRaw ? normalizeStoredUser(freshCallerRaw) : freshCallerRaw;
+      // QA2S2 #9 (E5): a definition change re-checks mayManageEventAt on the
+      // FRESH caller row, venues and event; refused -> 403, nothing written.
+      const freshVenuesForEvent: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const freshMayManage = !!freshCaller &&
+        (freshCaller.agencyId || 'agency-hkc') === ((caller as any).agencyId || 'agency-hkc') &&
+        mayManageEventAt(freshCaller, freshEvent.venueId, freshVenuesForEvent);
+      if (changesDefinition && !freshMayManage) {
+        return { conflict: EVENT_FORBIDDEN_BODY.error, conflictStatus: 403, conflictCode: EVENT_FORBIDDEN_BODY.code };
+      }
       // Compare the authorization-relevant signature — role, venue,
       // agency, permissions — on two NORMALIZED records (the cache caller
       // is already normalized by hydration; freshCaller is normalized
@@ -12107,8 +12255,7 @@ app.put('/api/events/:id', async (req, res) => {
       // is tasks/status/notes only, and stale definition fields in the body
       // are silently dropped — the caller may still work the fresh event's
       // tasks when they remain allowed on the fresh record.
-      const freshPrivileged = freshCaller.role === 'admin' ||
-        (freshCaller.role === 'coordinator' && callerMaySeeVenue(freshCaller, freshEvent.venueId));
+      const freshPrivileged = freshMayManage;
       const freshTaskWorker = mayFillEventTasks(freshCaller, freshEvent);
       if (!freshPrivileged && !freshTaskWorker) {
         return { conflict: 'You are no longer assigned to this event.' };
@@ -12198,20 +12345,111 @@ app.delete('/api/events/:id', async (req, res) => {
   if (!delCaller) {
     return res.status(401).json({ error: 'Sign in required. Please log in again.' });
   }
-  if (delCaller.role !== 'admin' &&
-      !(delCaller.role === 'coordinator' && callerMaySeeVenue(delCaller, deletedEvent.venueId))) {
-    return res.status(403).json({ error: 'You can only delete events at your own venue.' });
+  // QA2S2 #9 (E4): admin (own agency), coordinator (own venues), owner (own
+  // venue); everyone else (mashgiach, worker, kiosk) 403 EVENT_FORBIDDEN.
+  if ((req as any).kiosk === true || !mayManageEventAt(delCaller as any, deletedEvent.venueId, venues as any)) {
+    return res.status(403).json(EVENT_FORBIDDEN_BODY);
   }
-  const agencyId = deletedEvent.agencyId;
-  const venueId = deletedEvent.venueId;
+  const callerAgencyId = delCaller.agencyId || 'agency-hkc';
 
-  const ok = await crudDelete(req, res, 'events', id, {
-    label: 'delete-event',
-    broadcastType: 'EVENT_DELETED',
-    getDeletePayload: () => ({ id, agencyId, venueId, assignedMashgiachEmail: deletedEvent.assignedMashgiachEmail }),
-    getAgencyId: () => agencyId || 'agency-hkc',
-  });
-  return;
+  // [QA2S2-DS2] B1: a dedicated commit that authorizes on FRESH data — the
+  // caller's stored row, the stored event and the current venues — and
+  // removes exactly the event it checked. An already-deleted event stays an
+  // idempotent 200 (as crudDelete answered).
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const arr: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
+      const freshEvent = arr.find((e) => e && e.id === id);
+      if (!freshEvent) return { doc: freshDoc, result: { success: true, deletedId: id, alreadyDeleted: true } };
+      if ((freshEvent.agencyId || 'agency-hkc') !== callerAgencyId) {
+        return { conflict: 'Event not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+      }
+      const freshMgr = freshEventManager(freshDoc, delCaller.id, callerAgencyId);
+      if (!freshMgr || !mayManageEventAt(freshMgr, freshEvent.venueId, Array.isArray(freshDoc.venues) ? freshDoc.venues : [])) {
+        return { conflict: EVENT_FORBIDDEN_BODY.error, conflictStatus: 403, conflictCode: EVENT_FORBIDDEN_BODY.code };
+      }
+      return { doc: { ...freshDoc, events: arr.filter((e) => e !== freshEvent) }, result: { success: true, deletedId: id, deleted: freshEvent } };
+    },
+    { label: 'delete-event', requireVersion: true }
+  );
+  if (!committed) return;
+  const deleted: any = (committed.result as any)?.deleted;
+  if (deleted) {
+    broadcast('EVENT_DELETED', {
+      id,
+      agencyId: deleted.agencyId,
+      venueId: deleted.venueId,
+      assignedMashgiachEmail: deleted.assignedMashgiachEmail,
+    }, undefined, deleted.agencyId || 'agency-hkc');
+  } else {
+    broadcast('EVENT_DELETED', { id, deletedId: id }, undefined, undefined);
+  }
+  res.json({ success: true, deletedId: id });
+});
+
+// ---------------------------------------------------------------------------
+// QA2S2 #31: "Notify again" — push the event's CURRENT assignee once more.
+// Who: mayManageEventAt (admin own agency, coordinator own venues, owner own
+// venue); kiosk 403. Recipient: only the assignee's row IN THE EVENT'S
+// AGENCY (same lookup as the create push; no cross-agency email fallback).
+// Writes nothing to app-state and broadcasts nothing.
+// Cooldown: one notify per event per 60 s, claimed synchronously (check-and-
+// set before any await) and released when the request fails before dispatch.
+// Per server instance, like every other limiter here (one Cloud Run instance).
+// ---------------------------------------------------------------------------
+const EVENT_NOTIFY_COOLDOWN_MS = 60 * 1000;
+const eventNotifyClaims = new Map<string, number>(); // event id -> claim time (serverNow ms)
+const eventNotifyCallerLimiter = createWindowLimiter({ max: 20, windowMs: 15 * 60 * 1000, maxKeys: 10000 });
+
+app.post('/api/events/:id/notify', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if ((req as any).kiosk === true) return res.status(403).json(EVENT_FORBIDDEN_BODY);
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  const id = String(req.params.id || '');
+  const ev: any = events.find((e: any) => e && e.id === id);
+  if (!ev || (ev.agencyId || 'agency-hkc') !== callerAgencyId) return res.status(404).json({ error: 'Event not found.' });
+  if (!mayManageEventAt(caller as any, ev.venueId, venues as any)) return res.status(403).json(EVENT_FORBIDDEN_BODY);
+  const hit = eventNotifyCallerLimiter.hit(String(caller.id), Date.now());
+  if (!hit.allowed) {
+    res.setHeader('Retry-After', String(hit.retryAfterSec));
+    return res.status(429).json({ error: `Too many requests. Please try again in ${Math.ceil(hit.retryAfterSec / 60)} minute(s).`, code: 'RATE_LIMITED' });
+  }
+  // [DS2] B3: synchronous claim — no await between this check and the set.
+  const nowMs = serverNow().getTime();
+  const last = eventNotifyClaims.get(id);
+  if (last !== undefined && nowMs >= last && nowMs - last < EVENT_NOTIFY_COOLDOWN_MS) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((last + EVENT_NOTIFY_COOLDOWN_MS - nowMs) / 1000));
+    res.setHeader('Retry-After', String(retryAfterSeconds));
+    return res.status(429).json({ error: 'Please wait a minute before notifying again.', code: 'NOTIFY_TOO_SOON', retryAfterSeconds });
+  }
+  eventNotifyClaims.set(id, nowMs);
+  if (eventNotifyClaims.size > 10000) {
+    for (const [k, t] of eventNotifyClaims) if (!(nowMs >= t && nowMs - t < EVENT_NOTIFY_COOLDOWN_MS)) eventNotifyClaims.delete(k);
+  }
+  const release = () => { if (eventNotifyClaims.get(id) === nowMs) eventNotifyClaims.delete(id); };
+  const assigneeEmail = ev.mashgiachType === 'assigned_user' && typeof ev.assignedMashgiachEmail === 'string'
+    ? ev.assignedMashgiachEmail.trim().toLowerCase()
+    : '';
+  const row = assigneeEmail
+    ? users.find((u: any) =>
+        u && typeof u.email === 'string' &&
+        u.email.trim().toLowerCase() === assigneeEmail &&
+        (normalizeStoredUser(u).agencyId || 'agency-hkc') === callerAgencyId)
+    : undefined;
+  if (!row) {
+    release();
+    return res.status(409).json({ error: 'This event has no assigned mashgiach to notify.', code: 'EVENT_NO_ASSIGNEE' });
+  }
+  if (sessionIneligibleCode(row)) {
+    release();
+    return res.status(409).json({ error: "The assigned mashgiach can't be notified right now.", code: 'EVENT_ASSIGNEE_UNAVAILABLE' });
+  }
+  const when = ev.date ? ` — ${ev.date}` : '';
+  const attempted = sendPushToMember(row, '⭐ New event assignment', `${ev.title}${when} at ${ev.location}`, { url: '/', eventId: ev.id });
+  res.json({ notified: true, attempted });
 });
 
 // Event Task Toggle / Status Endpoint
@@ -14327,34 +14565,39 @@ app.post('/api/auth/change-password', async (req, res) => {
         return { conflict: 'Your password was changed by another session. Please sign in again.' };
       }
       const newUsers = freshUsers.map((u) => (u.id === owner.id ? { ...u, password: newHash } : u));
-      // 10e E1 (person-wide, multi persons only): bump tokenEpoch on EVERY row
-      // of the person in this commit, so every older session of every
-      // membership dies.
-      // Single-row / legacy person: no bump, exactly as today (M2/B3).
-      const bumpIds = isMultiPersonRow(freshUsers, freshOwner)
-        ? personRowsIn(freshUsers, freshOwner).map((u: any) => u.id)
-        : [];
+      // QA2S2 #15 (S1): bump tokenEpoch on EVERY row of the person in this
+      // commit (single-row included), so every other session dies. A legacy
+      // row with no personId (v1 tokens only, which need epoch 0) is migrated
+      // in the same commit (personId = row.id) and then bumped.
+      const personRows = personRowsIn(freshUsers, freshOwner);
+      const rowsById = new Map<string, any>();
+      for (const u of [...personRows, freshOwner, freshCaller]) if (u && typeof u.id === 'string') rowsById.set(u.id, u);
+      const bumpIds = [...rowsById.keys()];
+      const migrateIds = [...rowsById.values()].filter((u: any) => !(typeof u.personId === 'string' && u.personId)).map((u: any) => u.id);
+      // S3 ([DS2] B2): every row of the person with a kiosk PIN gets
+      // kioskPinRev +1 (PIN unchanged): every kiosk token of the person dies.
+      const kioskRevIds = [...rowsById.values()].filter((u: any) => !!(u.kioskPinHash || u.kioskPin)).map((u: any) => u.id);
       // 10b (plan v4 C1): the person's own change keeps the origin.
       return {
         doc: { ...freshDoc, users: newUsers },
-        result: { success: true, bumpIds },
+        result: { success: true, bumpIds, kioskRevIds },
         passwordKeepsOriginIds: [owner.id],
-        ...(bumpIds.length ? { tokenEpochBumpIds: bumpIds } : {}),
+        tokenEpochBumpIds: bumpIds,
+        ...(migrateIds.length ? { identityMigrateRowIds: migrateIds } : {}),
+        ...(kioskRevIds.length ? { kioskRevBumpIds: kioskRevIds } : {}),
       };
     },
     { label: 'change-password' }
   );
   if (!committed) return;
 
-  // E1: close every phone socket of the person (kiosk sockets are PIN + device
-  // sessions and are left alone), then hand the caller a fresh token for its
-  // own membership so this device stays signed in.
+  // QA2S2 #15 (S2/S3/S4): close every phone socket of the person and the
+  // kiosk sockets of every row whose kiosk revision went up, then hand the
+  // caller a fresh token for its own membership so this device stays signed in.
   const bumped: string[] = Array.isArray((committed as any)?.result?.bumpIds) ? (committed as any).result.bumpIds : [];
+  const kioskRevved: string[] = Array.isArray((committed as any)?.result?.kioskRevIds) ? (committed as any).result.kioskRevIds : [];
   for (const id of bumped) revokeUserPhoneSockets(id);
-  if (!bumped.length) {
-    // Single-row / legacy person: byte-identical to today ([10E-DS1] N1).
-    return res.json({ success: true, message: 'Password updated successfully.' });
-  }
+  for (const id of kioskRevved) revokeUserKioskSockets(id);
   const freshCallerRow = users.find((u) => u.id === caller.id) || caller;
   const changedToken = issueSessionToken(freshCallerRow);
   if (!changedToken) return res.status(403).json(ineligibleBody(freshCallerRow, true)); // QA2 #8 / 10L

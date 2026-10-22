@@ -113,6 +113,17 @@ export interface IdentityEnforceOptions {
    */
   bumpTokenEpochIds?: ReadonlySet<string>;
   /**
+   * QA2S2 #15 ([DS2] B2): ids of EXISTING rows whose kioskPinRev goes up by
+   * exactly 1 in this commit (revokes that row's kiosk tokens; the PIN is
+   * unchanged). Counted from the before row (a non-integer or missing value
+   * counts as 0). kioskPinRev is a guarded field: without this option it may
+   * change only together with the row's kioskPinHash / kioskPin (PIN set,
+   * clear, legacy upgrade) or as the kiosk login's materialisation
+   * (missing -> 1 on a row with a PIN hash); any other change is restored to
+   * the before value and reported through onViolation.
+   */
+  kioskRevBumpIds?: ReadonlySet<string>;
+  /**
    * 9a: the ONLY way venueAccess changes beyond the home venue. Row id → the
    * full list the server validated in this commit (admin venue grant, venue
    * deletion). The home venue is always kept. Rows not in the map
@@ -237,9 +248,11 @@ export interface IdentityOutcomeFields {
   resetSuspension?: { linkId: string; set: string[]; clear: string[] };
   /** 10L: an admin's confirm of a paused membership (see resetConfirm). */
   resetConfirm?: { rowId: string; adminId: string };
+  /** QA2S2 #15 ([DS2] B2): rows whose kioskPinRev goes up by exactly 1 (see kioskRevBumpIds). */
+  kioskRevBumpIds?: string[];
 }
 
-export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById' | 'firstMultiOwnerIds' | 'credentialPendingWriteById' | 'resetSuspension' | 'resetConfirm'> {
+export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById' | 'firstMultiOwnerIds' | 'credentialPendingWriteById' | 'resetSuspension' | 'resetConfirm' | 'kioskRevBumpIds'> {
   const o: any = outcome || {};
   const asMap = (r: any) => (r && typeof r === 'object' && !Array.isArray(r) && Object.keys(r).length ? new Map<string, string>(Object.entries(r).filter(([, v]) => typeof v === 'string') as [string, string][]) : undefined);
   return {
@@ -267,6 +280,7 @@ export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null
       o.resetConfirm && typeof o.resetConfirm === 'object' && typeof o.resetConfirm.rowId === 'string' && typeof o.resetConfirm.adminId === 'string'
         ? { rowId: o.resetConfirm.rowId, adminId: o.resetConfirm.adminId }
         : undefined,
+    kioskRevBumpIds: Array.isArray(o.kioskRevBumpIds) && o.kioskRevBumpIds.length ? new Set<string>(o.kioskRevBumpIds.filter((x: any) => typeof x === 'string')) : undefined,
   };
 }
 
@@ -468,6 +482,22 @@ export function enforceIdentityFields(
         opts.onViolation(row.id, 'credentialOrigin');
       if (opts.onOriginChange && (before ?? null) !== (out.credentialOrigin ?? null))
         opts.onOriginChange(row.id, before ?? null, out.credentialOrigin ?? null);
+    }
+    if (prev) {
+      // QA2S2 #15 ([DS2] B2): kioskPinRev is guarded (see kioskRevBumpIds).
+      const revOf = (x: any): number | undefined => (Number.isInteger(x?.kioskPinRev) && x.kioskPinRev >= 0 ? x.kioskPinRev : undefined);
+      if (opts.kioskRevBumpIds?.has(row.id)) {
+        out.kioskPinRev = (revOf(prev) ?? 0) + 1;
+      } else if (row.kioskPinRev !== prev.kioskPinRev) {
+        const pinChanged =
+          String(row.kioskPinHash ?? '') !== String(prev.kioskPinHash ?? '') || String(row.kioskPin ?? '') !== String(prev.kioskPin ?? '');
+        const materialise = revOf(prev) === undefined && row.kioskPinRev === 1 && !!row.kioskPinHash;
+        if (!pinChanged && !materialise) {
+          if (prev.kioskPinRev === undefined) delete out.kioskPinRev;
+          else out.kioskPinRev = prev.kioskPinRev;
+          if (opts.onViolation) opts.onViolation(row.id, 'kioskPinRev');
+        }
+      }
     }
     if (opts.onViolation) {
       if (row.personId !== undefined && row.personId !== out.personId) opts.onViolation(row.id, 'personId');

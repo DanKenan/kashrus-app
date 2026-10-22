@@ -492,12 +492,13 @@ export default {
         body: JSON.stringify(await apiWriteBody({ isCompleted: true })),
       });
       if (togNotAssigned.status !== 403) throw new Error(`fix5 non-assigned toggle: ${togNotAssigned.status} (expected 403)`);
-      // POST events: mashgiach creates at own venue → 200; at A2 → 403
+      // QA2S2 #9: a mashgiach can no longer create events, at their own venue or anywhere else (403 EVENT_FORBIDDEN)
       const postOwn = await fetch(`${baseUrl}/api/events`, {
         method: 'POST', headers: auth(tMashA1),
         body: JSON.stringify(await apiWriteBody({ venueId: vA1, title: `Mash event ${ts}`, location: 'Hall', date: '2026-11-03' })),
       });
-      if (postOwn.status !== 200 && postOwn.status !== 201) throw new Error(`mash POST event own venue: ${postOwn.status}`);
+      const postOwnBody = await postOwn.json().catch(() => ({}));
+      if (postOwn.status !== 403 || postOwnBody.code !== 'EVENT_FORBIDDEN') throw new Error(`mash POST event own venue: ${postOwn.status} (expected 403 EVENT_FORBIDDEN, QA2S2 #9)`);
       const postBad = await fetch(`${baseUrl}/api/events`, {
         method: 'POST', headers: auth(tMashA1),
         body: JSON.stringify(await apiWriteBody({ venueId: vA2, title: `Mash event bad ${ts}`, location: 'Hall', date: '2026-11-03' })),

@@ -56,6 +56,28 @@ export function venueScope(user: ScopeUser | null | undefined, venues: readonly 
 }
 
 /**
+ * QA2S2 #9 (Don 2026-10-22): who may create, copy, edit the definition of,
+ * delete or notify an event at `venueId` (rule T, fail closed). The venue must
+ * be an EXISTING venue of the person's own agency; then
+ *   admin       -> any such venue;
+ *   coordinator -> a venue in their scope (home + server-granted venueAccess);
+ *   owner       -> their own home venue only (venueAccess never widens it);
+ *   anyone else (mashgiach, worker, unknown or missing role) -> false.
+ * Callers pass the CURRENT venues (fresh venues inside a commit).
+ */
+export function mayManageEventAt(user: ScopeUser | null | undefined, venueId: unknown, venues: readonly VenueLite[]): boolean {
+  if (!user || typeof user.role !== 'string' || typeof venueId !== 'string' || !venueId) return false;
+  if (!agencyVenueIds(venues, agencyOf(user)).has(venueId)) return false;
+  if (user.role === 'admin') return true;
+  if (user.role === 'coordinator') {
+    const scope = venueScope(user, venues);
+    return scope !== 'agency' && scope.includes(venueId);
+  }
+  if (user.role === 'owner') return typeof user.venueId === 'string' && user.venueId === venueId;
+  return false;
+}
+
+/**
  * Which venue a venue-taking request targets.
  * requested in scope -> it; requested outside -> forbidden; none -> home (if valid) else null.
  */
