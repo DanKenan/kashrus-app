@@ -14,7 +14,17 @@
  *  G a real 'No' answer keeps who answered and when across a server restart; un-answering clears it
  *    (the daily reset clearing it is Test 10).
  *  F a venue owner may file the official factory report for their own venue (rule T), not another.
+ *  [QA2S-RV1] B2 (in C): a mashgiach whose fill permission is revoked in the STORED doc only
+ *    (cache still allows) -> 403 KIOSK_ROLE_CANNOT_FILL from the fresh in-transaction re-check, no token.
+ *  [QA2S-RV1] B1 (in E): after the delete, no route hands the removed owner a session:
+ *    a token minted for the row anyway -> 401 (the shared session resolver); password reset
+ *    and recovery codes change the password but answer 403 VENUE_REMOVED with no token;
+ *    a two-membership person whose agency-A venue was deleted is offered only the agency-B
+ *    membership, activating A answers 403 VENUE_REMOVED, B gives a session.
+ *  S source pin: in server.ts only issueSessionToken and the test-mode mint hook call
+ *    signSessionToken, and only liveSessionRow calls resolveSessionRow.
  */
+import fs from 'node:fs';
 const auth = (token) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' });
 
 async function mintToken(baseUrl, userId) {
@@ -68,10 +78,13 @@ export default {
         { id: U('od'), email: E('od'), name: 'T71 Owner Del', role: 'owner', agencyId: A, venueId: vDel, avatarColor: 'bg-gold' },
         { id: U('md'), email: E('md'), name: 'T71 Mash Del+A2', role: 'mashgiach', agencyId: A, venueId: vDel, avatarColor: 'bg-gold' },
         { id: U('bt'), email: E('bt'), name: 'T71 B task owner', role: 'admin', agencyId: B, avatarColor: 'bg-gold' },
+        { id: U('kr'), email: E('kr'), name: 'T71 Mash Revoked', role: 'mashgiach', agencyId: A, venueId: vA, kioskPin: PIN, avatarColor: 'bg-gold' },
+        { id: U('od2'), email: E('od2'), name: 'T71 Owner Del 2', role: 'owner', agencyId: A, venueId: vDel, avatarColor: 'bg-gold' },
+        { id: U('px'), email: E('px'), name: 'T71 PX', role: 'mashgiach', agencyId: A, venueId: vDel, avatarColor: 'bg-gold' },
       ],
     });
     if (inj.status !== 200) throw new Error(`inject-fixture: ${inj.status}`);
-    for (const k of ['m', 'od', 'md', 'adm']) {
+    for (const k of ['m', 'od', 'md', 'adm', 'od2', 'px']) {
       const r = await ctx.api('POST', '/api/__test__/set-password', { userId: U(k), password: PW });
       if (r.status !== 200) throw new Error(`set-password ${k}: ${r.status}`);
     }
@@ -119,7 +132,22 @@ export default {
       if (ownerFill.status !== 200 || !ownerFill.json?.token) throw new Error(`C owner with canFillTasks: ${ownerFill.status}`);
       const mash = await kl(U('m'), PIN);
       if (mash.status !== 200 || !mash.json?.token) throw new Error(`C mashgiach: ${mash.status}`);
-      details.push('C owner 403 after correct PIN (wrong PIN 401), owner+fill 200, mashgiach 200');
+      // B2: revoke kr's fill permission in the STORED doc only; the cached check still passes.
+      const stored = (await ctx.getDoc()).users;
+      const revoked = stored.map((u) => (u.id === U('kr') ? { ...u, permissions: { ...(u.permissions || {}), canFillTasks: false } } : u));
+      if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: revoked })).status !== 200) throw new Error('C plant revoke');
+      const krRow = async () => { const r = (await ctx.getDoc()).users.find((u) => u.id === U('kr')) || {}; return JSON.stringify(Object.keys(r).sort().map((k) => [k, r[k]])); };
+      const kr0 = await krRow();
+      const kr = await kl(U('kr'), PIN);
+      if (kr.status !== 403 || kr.json?.code !== 'KIOSK_ROLE_CANNOT_FILL' || kr.json?.token) throw new Error(`C revoked in store only: ${kr.status} ${JSON.stringify(kr.json)}`);
+      // Only the attempt reservation may have been written; the success commit (row stamps) never ran.
+      if ((await krRow()) !== kr0) throw new Error(`C revoked: the refused login changed the user row: ${kr0} -> ${await krRow()}`);
+      if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: stored })).status !== 200) throw new Error('C restore');
+      // The attempt reservation re-hydrated the cache from the store; re-hydrate after the restore too.
+      if ((await ctx.api('POST', '/api/__test__/inject-fixture', { venues: [{ id: `venue-t71-hc-${ts}`, name: 'T71 hydrate C', agencyId: B }] })).status !== 200) throw new Error('C rehydrate');
+      const krOk = await kl(U('kr'), PIN);
+      if (krOk.status !== 200 || !krOk.json?.token) throw new Error(`C kr restored: ${krOk.status}`);
+      details.push('C owner 403 after correct PIN (wrong PIN 401), owner+fill 200, mashgiach 200; fill revoked in store only 403 (fresh re-check), row unchanged');
     }
 
     // ---- D: Yes/No unanswered ----
@@ -157,13 +185,25 @@ export default {
       if (un.status !== 200) throw new Error(`G un-answer: ${un.status}`);
       stored = (await ctx.getDoc()).tasks.find((t) => t.id === taskId);
       if (stored.currentStatus !== 'pending' || stored.updatedByEmail !== null || stored.updatedAt !== null) throw new Error(`G un-answer clears: ${JSON.stringify({ s: stored.currentStatus, e: stored.updatedByEmail, a: stored.updatedAt })}`);
-      details.push("G a real 'No' keeps who/when across a restart; back to unanswered clears it");
+      // N1: a real 'No' from today does not survive the daily reset into the next workday.
+      const tMash3 = await mintToken(baseUrl, U('m'));
+      const no2 = await call(baseUrl, 'PUT', `/api/tasks/${taskId}`, tMash3, { currentStatus: 'no', isCompleted: false, expectedVersion: await ctx.getVersion() });
+      if (no2.status !== 200) throw new Error(`G answer No again: ${no2.status}`);
+      const rd = await call(baseUrl, 'POST', '/api/reset-daily', await mintToken(baseUrl, U('adm')), { force: true });
+      if (rd.status !== 200) throw new Error(`G reset-daily: ${rd.status} ${JSON.stringify(rd.json).slice(0, 160)}`);
+      stored = (await ctx.getDoc()).tasks.find((t) => t.id === taskId);
+      if (stored.currentStatus !== 'pending' || stored.updatedByEmail !== null || stored.updatedByName !== null || stored.updatedAt !== null) {
+        throw new Error(`G daily reset clears the No and who/when: ${JSON.stringify({ s: stored.currentStatus, e: stored.updatedByEmail, n: stored.updatedByName, a: stored.updatedAt })}`);
+      }
+      details.push("G a real 'No' keeps who/when across a restart; back to unanswered clears it; the daily reset clears it too");
     }
     // ---- E: venue removed ----
     {
       // md also works at vA2 (a sanctioned venueAccess write through the admin route is not needed: plant it).
       const users = (await ctx.getDoc()).users;
-      const planted = users.map((u) => (u.id === U('md') ? { ...u, venueAccess: [vDel, vA2] } : u));
+      const planted = users.map((u) => (u.id === U('md') ? { ...u, venueAccess: [vDel, vA2] }
+        : u.id === U('od2') ? { ...u, credentialOrigin: 'self-registered' }
+        : u.id === U('px') ? { ...u, credentialOwner: true } : u));
       const ps = await ctx.api('POST', '/api/__test__/doc-set-users', { users: planted });
       if (ps.status !== 200) throw new Error(`E plant venueAccess: ${ps.status}`);
       // Re-hydrate the server cache from the stored doc (a no-op fixture commit in agency B).
@@ -171,6 +211,13 @@ export default {
       if (rh.status !== 200) throw new Error(`E rehydrate: ${rh.status}`);
       const md0 = (await ctx.getDoc()).users.find((u) => u.id === U('md'));
       if (!md0?.personId || !(md0.venueAccess || []).includes(vA2)) throw new Error(`E md fixture: ${JSON.stringify({ p: md0?.personId, va: md0?.venueAccess })}`);
+      // px becomes a two-membership person: PX (agency A, the deleted venue) + PY (agency B).
+      const built = await ctx.api('POST', '/api/__test__/identity-build-person', { ownerUserId: U('px'), agencyId: B, role: 'mashgiach', venueId: vB, name: 'T71 PY' });
+      if (built.status !== 200 || !built.json?.id) throw new Error(`E build PY: ${built.status} ${JSON.stringify(built.json)}`);
+      const PY = built.json.id;
+      // od2 gets recovery codes while it can still sign in.
+      const codes = await call(baseUrl, 'POST', '/api/auth/recovery-codes', await mintToken(baseUrl, U('od2')), { currentPassword: PW });
+      if (codes.status !== 200 || !Array.isArray(codes.json?.codes) || !codes.json.codes.length) throw new Error(`E od2 recovery codes: ${codes.status} ${JSON.stringify(codes.json).slice(0, 160)}`);
       const tOd = await mintToken(baseUrl, U('od'));
       const before = await call(baseUrl, 'GET', '/api/tasks', tOd);
       if (before.status !== 200) throw new Error(`E owner session before delete: ${before.status}`);
@@ -189,7 +236,38 @@ export default {
       if (md.status !== 200 || !md.json?.token) throw new Error(`E mashgiach with another venue: ${md.status} ${JSON.stringify(md.json)}`);
       const adm = await call(baseUrl, 'POST', '/api/auth/login', null, { email: E('adm'), password: PW });
       if (adm.status !== 200) throw new Error(`E admin: ${adm.status}`);
-      details.push('E owner of deleted venue: session 401, login 403 VENUE_REMOVED; mashgiach with A2 200; admin 200');
+      // B1: a token signed for the removed row anyway is refused by the shared resolver.
+      const raw = await call(baseUrl, 'GET', '/api/tasks', await mintToken(baseUrl, U('od')));
+      if (raw.status !== 401) throw new Error(`E a token minted after the delete must be refused: ${raw.status}`);
+      // B1: password reset completes the credential change but hands out no session.
+      const ip = { 'Content-Type': 'application/json', 'X-Forwarded-For': `10.71.${ts % 200}.9` };
+      const fg = await call(baseUrl, 'POST', '/api/auth/forgot-password', null, { email: E('od') }, ip);
+      if (fg.status !== 200) throw new Error(`E forgot: ${fg.status}`);
+      const rc = (await (await fetch(`${baseUrl}/api/__test__/last-reset-code?email=${encodeURIComponent(E('od'))}`)).json()).code;
+      const vr = await call(baseUrl, 'POST', '/api/auth/verify-reset-code', null, { email: E('od'), code: rc }, ip);
+      if (vr.status !== 200 || !vr.json?.resetToken) throw new Error(`E verify reset: ${vr.status} ${JSON.stringify(vr.json)}`);
+      const NEWPW = 'Reset-after-delete-71';
+      const rs = await call(baseUrl, 'POST', '/api/auth/reset-password', null, { email: E('od'), resetToken: vr.json.resetToken, newPassword: NEWPW });
+      if (rs.status !== 403 || rs.json?.code !== 'VENUE_REMOVED' || rs.json?.token) throw new Error(`E reset after delete: ${rs.status} ${JSON.stringify(rs.json)}`);
+      const lgNew = await call(baseUrl, 'POST', '/api/auth/login', null, { email: E('od'), password: NEWPW });
+      if (lgNew.status !== 403 || lgNew.json?.code !== 'VENUE_REMOVED') throw new Error(`E new password took, still VENUE_REMOVED: ${lgNew.status}`);
+      // B1: recovery codes likewise.
+      const RECPW = 'Recover-after-delete-71';
+      const rv = await call(baseUrl, 'POST', '/api/auth/recover', null, { email: E('od2'), code: codes.json.codes[0], newPassword: RECPW }, { 'X-Forwarded-For': `10.71.${ts % 200}.10` });
+      if (rv.status !== 403 || rv.json?.code !== 'VENUE_REMOVED' || rv.json?.token) throw new Error(`E recover after delete: ${rv.status} ${JSON.stringify(rv.json)}`);
+      const lgRec = await call(baseUrl, 'POST', '/api/auth/login', null, { email: E('od2'), password: RECPW });
+      if (lgRec.status !== 403 || lgRec.json?.code !== 'VENUE_REMOVED') throw new Error(`E recovered password took, still VENUE_REMOVED: ${lgRec.status}`);
+      // B1: the two-membership person: only PY is offered; PX refused; PY works.
+      const lgP = await call(baseUrl, 'POST', '/api/auth/login', null, { email: E('px'), password: PW });
+      const offered = (lgP.json?.memberships || []).map((m) => m.membershipId);
+      if (lgP.status !== 200 || lgP.json?.chooseMembership !== true || offered.length !== 1 || offered[0] !== PY) throw new Error(`E multi login: ${lgP.status} ${JSON.stringify(lgP.json).slice(0, 200)}`);
+      const actX = await call(baseUrl, 'POST', '/api/auth/activate', lgP.json.token, { membershipId: U('px') });
+      if (actX.status !== 403 || actX.json?.code !== 'VENUE_REMOVED' || actX.json?.token) throw new Error(`E activate removed PX: ${actX.status} ${JSON.stringify(actX.json)}`);
+      const actY = await call(baseUrl, 'POST', '/api/auth/activate', lgP.json.token, { membershipId: PY });
+      if (actY.status !== 200 || !actY.json?.token) throw new Error(`E activate PY: ${actY.status}`);
+      const useY = await call(baseUrl, 'GET', '/api/tasks', actY.json.token);
+      if (useY.status !== 200) throw new Error(`E PY session: ${useY.status}`);
+      details.push('E owner of deleted venue: session 401, login 403 VENUE_REMOVED; mashgiach with A2 200; admin 200; a fresh token 401; reset and recover change the password but 403 VENUE_REMOVED, no token; two-membership person offered only PY, PX 403, PY 200');
     }
     // ---- F: owner files the factory report for their own venue ----
     {
@@ -200,6 +278,16 @@ export default {
       const other = await call(baseUrl, 'POST', '/api/factory-reports', tO, body(vA2));
       if (other.status !== 403) throw new Error(`F owner other venue: ${other.status}`);
       details.push('F owner report own venue 2xx, other venue 403');
+    }
+    // ---- S: source pin (one eligibility rule, no drift) ----
+    {
+      const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
+      const signs = src.split('\n').filter((l) => l.includes('signSessionToken(') && !/^\s*(\/\/|\*|\/\*)/.test(l));
+      const okSign = signs.every((l) => /function signSessionToken\(|return signSessionToken\(row\);|signToken\(userId\) : signSessionToken\(user as any\)/.test(l));
+      if (signs.length !== 3 || !okSign) throw new Error(`S signSessionToken callers: ${signs.length}\n${signs.join('\n')}`);
+      const resolves = src.split('\n').filter((l) => l.includes('resolveSessionRow(') && !/^\s*(\/\/|\*|\/\*)/.test(l));
+      if (resolves.length !== 1 || !resolves[0].includes('const row: any = resolveSessionRow(claims')) throw new Error(`S resolveSessionRow callers: ${resolves.length}`);
+      details.push('S only issueSessionToken (+ test mint) signs, only liveSessionRow resolves');
     }
     return details.join('; ');
   },

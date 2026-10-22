@@ -598,7 +598,7 @@ app.use('/api', async (req, res, next) => {
     (req as any).chooseClaims = { personId: payload.personId, ownerRowId: payload.ownerRowId };
     return next();
   }
-  const user = resolveSessionRow(payload, users as any[], agencies as any[]) as UserProfile | undefined;
+  const user = liveSessionRow(payload) as UserProfile | undefined;
 
   if (!user) {
     return res.status(401).json({ error: 'Sign in required. Please log in again.' });
@@ -794,6 +794,25 @@ function venueRemovedFor(row: any): boolean {
   return Array.isArray(scope) && !scope.some((x) => (venues as any[]).some((v) => v && v.id === x));
 }
 const VENUE_REMOVED = { error: 'Your venue was removed. Ask your agency admin to add you to a venue.', code: 'VENUE_REMOVED' };
+const VENUE_REMOVED_AFTER_PASSWORD = { error: 'Your password was changed, but your venue was removed. Ask your agency admin to add you to a venue.', code: 'VENUE_REMOVED' };
+
+/**
+ * QA2 #8 ([QA2S-RV1] B1): the ONE eligibility rule for a membership session.
+ * Every production route that hands out a session token goes through
+ * issueSessionToken (null = not eligible: answer VENUE_REMOVED, no token),
+ * and every HTTP request and phone socket resolves its session through
+ * liveSessionRow, so a token for a removed membership is refused wherever it
+ * came from. (Only the test-mode mint hook signs directly; Test 71 pins this.)
+ */
+function issueSessionToken(row: any): string | null {
+  if (!row || venueRemovedFor(row)) return null;
+  return signSessionToken(row);
+}
+function liveSessionRow(claims: any): any {
+  const row: any = resolveSessionRow(claims, users as any[], agencies as any[]);
+  if (row && venueRemovedFor(row)) return undefined;
+  return row;
+}
 
 /** A7/B6: field-write gate for ingredients/factory-reports — admin, or a
  * coordinator at the venue, or a canFill mashgiach/worker (or owner with
@@ -2450,7 +2469,7 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
   }
   // SO: a phone socket's token must still resolve (same resolver as HTTP):
   // a bumped tokenEpoch (password reset) or a deleted row fails closed.
-  if (!meta.kiosk && !(meta.tokenClaims && resolveSessionRow(meta.tokenClaims, users as any[], agencies as any[]))) {
+  if (!meta.kiosk && !(meta.tokenClaims && liveSessionRow(meta.tokenClaims))) {
     try {
       client.close(4401, 'Unauthorized');
     } catch {}
@@ -5017,7 +5036,7 @@ wss.on('connection', (ws, req) => {
     const payload = token ? verifyToken(token) : null;
     socketClaims = payload;
     // Item 8d: the same resolver as the HTTP middleware.
-    authedUser = resolveSessionRow(payload, users as any[], agencies as any[]) || null;
+    authedUser = liveSessionRow(payload) || null;
     isKiosk = payload?.kind === 'kiosk';
     if (payload && payload.kind === 'kiosk') {
       // Branch on the kiosk CLAIM, not on the presence of a venue id — a
@@ -5084,7 +5103,7 @@ wss.on('connection', (ws, req) => {
     // immediately before registration, so a connection authenticated before
     // a revocation (epoch bump, deletion, kiosk PIN/device change) but
     // registered after it is closed and never registered.
-    const current = resolveSessionRow(socketClaims, users as any[], agencies as any[]);
+    const current = liveSessionRow(socketClaims);
     const stillOk = isKiosk
       ? !!current && kioskSessionStillValid(current, { agencyId: kioskAgencyId, venueId: kioskVenueId, pv: kioskPv, deviceId: kioskDeviceId })
       : !!current && current.id === authedUser.id;
@@ -7666,7 +7685,7 @@ app.post('/api/agencies/register', async (req, res) => {
     message: `Welcome to Shutfey! Agency ${cleanAgencyName} has been established.`,
     agency: agencyView,
     user: getSafeUser(user),
-    token: signSessionToken(users.find((u) => u.id === user.id) || user),
+    token: issueSessionToken(users.find((u) => u.id === user.id) || user),
     venue,
     tasks: createdTasks,
   });
@@ -8348,6 +8367,8 @@ app.post('/api/invites/accept', async (req, res) => {
   if (!row) return res.status(500).json({ error: 'Accepted, but the account could not be loaded. Please sign in.' });
   const credRow: any = r.credId ? users.find((u) => u.id === r.credId) : row;
   if (credRow && isMultiPersonRow(users, credRow)) {
+    // QA2 #8: no membership left to choose (all venues deleted) -> the clear refusal.
+    if (membershipsOfPerson(String(credRow.personId)).length === 0) return res.status(403).json(VENUE_REMOVED);
     return res.json({
       success: true,
       chooseMembership: true,
@@ -8355,7 +8376,9 @@ app.post('/api/invites/accept', async (req, res) => {
       token: signChooseToken(credRow),
     });
   }
-  res.json({ success: true, user: getSelfUser(row), token: signSessionToken(row) });
+  const acceptToken = issueSessionToken(row);
+  if (!acceptToken) return res.status(403).json(VENUE_REMOVED); // QA2 #8
+  res.json({ success: true, user: getSelfUser(row), token: acceptToken });
 });
 
 
@@ -8483,7 +8506,9 @@ async function acceptSetupInvite(req: any, res: any, raw: string, cachedInv: any
   console.log(`[audit] setup invite accepted: invite ${inviteId} member ${memberId}`);
   const row: any = users.find((u) => u.id === memberId);
   if (!row) return res.status(500).json({ error: 'Accepted, but the account could not be loaded. Please sign in.' });
-  return res.json({ success: true, user: getSelfUser(row), token: signSessionToken(row) });
+  const setupToken = issueSessionToken(row);
+  if (!setupToken) return res.status(403).json(VENUE_REMOVED); // QA2 #8
+  return res.json({ success: true, user: getSelfUser(row), token: setupToken });
 }
 
 app.get('/api/agency/logo', async (req, res) => {
@@ -13320,6 +13345,7 @@ app.post('/api/kiosk/login', async (req, res) => {
   // carrying the fresh PIN version (pv) so a later PIN change revokes it.
   const agencyId = user.agencyId || 'agency-hkc';
   let kioskToken: string | null = null;
+  let freshCannotFill = false;
   try {
     const newHash = needsUpgrade ? await hashPassword(pinStr) : null;
     const committed = await commitState(
@@ -13345,6 +13371,11 @@ app.post('/api/kiosk/login', async (req, res) => {
           hashMatches &&
           kioskUserFitsVenue(freshUser, agencyId, venueId);
         if (!freshOk) return { conflict: 'User changed during login. Please try again.' };
+        // QA2 #32 ([QA2S-RV1] B2): the fill permission is re-checked on the
+        // FRESH record, so a revoke between the cached check and this commit
+        // mints no token.
+        freshCannotFill = !canFillTasks(kioskActingUser(freshUser, venueId));
+        if (freshCannotFill) return { conflict: 'KIOSK_ROLE_CANNOT_FILL' };
         const freshLocks = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
           ? freshDoc.kioskPinLockouts
           : { users: {}, tablets: {} }) as KioskPinLockouts;
@@ -13420,6 +13451,9 @@ app.post('/api/kiosk/login', async (req, res) => {
   } catch (err) {
     // Success requires the committed transition (counter reset / rehash).
     // If it didn't land, no token — the tablet must try again.
+    if (freshCannotFill) {
+      return res.status(403).json({ error: "Your account can't fill tasks on the tablet. Ask your agency admin.", code: 'KIOSK_ROLE_CANNOT_FILL' });
+    }
     log.warn('[kiosk] login success write failed:', (err as any)?.message);
     return res.status(503).json({ error: 'Please try again in a moment.' });
   }
@@ -13575,8 +13609,8 @@ app.post('/api/auth/login', async (req, res) => {
     });
   }
   // QA2 #8: the person's venue was deleted and no other venue is left.
-  if (venueRemovedFor(freshCred)) return res.status(403).json(VENUE_REMOVED);
-  const token = signSessionToken(freshCred);
+  const token = issueSessionToken(freshCred);
+  if (!token) return res.status(403).json(VENUE_REMOVED);
   res.json({
     success: true,
     user: getSelfUser(user),
@@ -13911,7 +13945,9 @@ app.post('/api/auth/reset-password', async (req, res) => {
   const signedOutOthers = (committed as any)?.result?.signedOutOthers === true;
   if (signedOutOthers) revokeUserPhoneSockets(user.id);
 
-  const token = signSessionToken(users.find((u) => u.id === user.id) || user);
+  // QA2 #8: the password change stands; a membership whose venue was deleted gets no session.
+  const token = issueSessionToken(users.find((u) => u.id === user.id) || user);
+  if (!token) return res.status(403).json(VENUE_REMOVED_AFTER_PASSWORD);
   res.json({ success: true, user: getSelfUser(users.find((u) => u.id === user.id)!), token });
 });
 
@@ -14012,7 +14048,9 @@ app.post('/api/auth/change-password', async (req, res) => {
     return res.json({ success: true, message: 'Password updated successfully.' });
   }
   const freshCallerRow = users.find((u) => u.id === caller.id) || caller;
-  res.json({ success: true, message: 'Password updated successfully.', token: signSessionToken(freshCallerRow) });
+  const changedToken = issueSessionToken(freshCallerRow);
+  if (!changedToken) return res.status(403).json(VENUE_REMOVED_AFTER_PASSWORD); // QA2 #8
+  res.json({ success: true, message: 'Password updated successfully.', token: changedToken });
 });
 
 // ---------------------------------------------------------------------------
@@ -14065,8 +14103,9 @@ app.post('/api/auth/activate', (req, res) => {
   const row = membershipId ? (users as any[]).find((u) => u && u.id === membershipId) : undefined;
   const agencyOk = !!row && typeof row.agencyId === 'string' && (agencies as any[]).some((a) => a && a.id === row.agencyId);
   if (!row || row.personId !== who.personId || !agencyOk) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
-  if (venueRemovedFor(row)) return res.status(403).json(VENUE_REMOVED); // QA2 #8
-  res.json({ token: signSessionToken(row), user: getSelfUser(row as UserProfile) });
+  const activeToken = issueSessionToken(row);
+  if (!activeToken) return res.status(403).json(VENUE_REMOVED); // QA2 #8
+  res.json({ token: activeToken, user: getSelfUser(row as UserProfile) });
 });
 
 // ---------------------------------------------------------------------------
@@ -14196,7 +14235,10 @@ app.post('/api/auth/recover', async (req, res) => {
   for (const id of bumped) revokeUserPhoneSockets(id);
   const fresh = users.find((u) => u.id === cred.id) || cred;
   log.info(`[recovery] recovered user ${cred.id} (sessions revoked: ${bumped.length})`);
-  res.json({ success: true, user: getSelfUser(fresh), token: signSessionToken(fresh) });
+  // QA2 #8: the recovery stands; a membership whose venue was deleted gets no session.
+  const recoveredToken = issueSessionToken(fresh);
+  if (!recoveredToken) return res.status(403).json(VENUE_REMOVED_AFTER_PASSWORD);
+  res.json({ success: true, user: getSelfUser(fresh), token: recoveredToken });
 });
 
 // ==========================================
