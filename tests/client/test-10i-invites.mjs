@@ -108,13 +108,9 @@ const admin = { id: 'u1', name: 'Ada Admin', email: 'ada@hkc.test', role: 'admin
 const teamBase = { isOpen: true, onClose() {}, users: [admin], tasks: [], currentUser: admin, currentVenue: { id: 'v1', name: 'Crown Market' }, venues: [{ id: 'v1', name: 'Crown Market' }], onUpdateUser: async () => {}, onDeleteUser: async () => {} };
 const teamHtml = (p) => decode(renderToStaticMarkup(React.createElement(TeamModal, { ...teamBase, onAddUser: async () => {}, ...p })));
 {
-  const off = teamHtml({});
-  ok('T OFF: identical markup with inviteMode={false}', off === teamHtml({ inviteMode: false }));
-  ok('T OFF: password field kept', off.includes('id="new-member-password-input"') && off.includes('Min 6 characters'));
-  ok('T OFF: 4 roles kept', ['Mashgiach (Field Inspector)', 'Coordinator (Can Add Tasks)', 'Restaurant / Venue Owner', 'Administrator (Full Control)'].every((t) => off.includes(t)));
-  ok('T OFF: button "Add Team Member", no invite note', off.includes('Add Team Member') && !off.includes('data-invite-mode-note') && !off.includes('Create invite link'));
-  ok('T OFF: 3-column fields as today', (off.match(/sm:col-span-3/g) || []).length === 4 && (off.match(/sm:col-span-4/g) || []).length === 1);
-  const on = teamHtml({ inviteMode: true });
+  // Invites always on (Don 2026-10-22): no password field, whatever the props.
+  const on = teamHtml({});
+  ok('T always on: same markup if an old inviteMode={false} is passed', on === teamHtml({ inviteMode: false }));
   ok('T ON: no password field', !on.includes('new-member-password-input') && !on.includes('type="password"'));
   ok('T ON: roles = mashgiach, coordinator only', on.includes('Mashgiach (Field Inspector)') && on.includes('Coordinator (Can Add Tasks)') && !on.includes('Restaurant / Venue Owner') && !on.includes('Administrator (Full Control)'));
   ok('T ON: name, email, phone kept', on.includes('new-member-name-input') && on.includes('new-member-email-input') && on.includes('new-member-phone-input'));
@@ -131,18 +127,14 @@ async function team(p) {
   return { m, adds };
 }
 {
-  // OFF: password still required; the same request as today.
+  // Always on: name + email are enough; no password is ever sent.
   const { m, adds } = await team({ props: {} });
   await m.submit();
-  ok('T OFF: password required (today\'s message)', adds.length === 0 && m.text().includes('Please provide name, email, and an initial password.'), m.text().slice(0, 200));
-  await m.type('Min 6 characters', 'secret1');
-  await m.submit();
-  ok('T OFF: request carries the password, role, venue, permissions', adds.length === 1 && adds[0].password === 'secret1' && adds[0].role === 'mashgiach' && adds[0].venueId === 'v1' && adds[0].email === 'dana@example.org' && JSON.stringify(adds[0].permissions) === '{"canFillTasks":true,"canAssignTasks":false}', JSON.stringify(adds));
-  ok('T OFF: no link card after a normal add', !m.html().includes('data-invite-link-card'));
+  ok('T always on: one add without a password', adds.length === 1 && !('password' in adds[0]) && adds[0].role === 'mashgiach' && adds[0].venueId === 'v1', JSON.stringify(adds));
 }
 {
   const answer = { link: `https://app.example${LINK}`, name: 'Dana Cohen', email: 'dana@example.org' };
-  const { m, adds } = await team({ props: { inviteMode: true }, answer });
+  const { m, adds } = await team({ props: {}, answer });
   const role = m.find((e) => e.type === 'select' && e.props.id === 'new-member-role-select')[0];
   await role.props.onChange({ target: { value: 'coordinator' } }); await m.render();
   await m.type('For sending the kiosk code', '(860) 555-0101');
@@ -170,18 +162,22 @@ async function team(p) {
   ok('T: closing clears a shown link', !m.html().includes('data-invite-link-card'));
 }
 {
-  const { m, adds } = await team({ props: { inviteMode: true }, answer: undefined });
+  const { m, adds } = await team({ props: {}, answer: undefined });
   await m.type('Full name', ' ');
   await m.submit();
   ok('T ON: name required, plain words', adds.length === 0 && m.text().includes('Please provide a name and an email.'), m.text().slice(0, 200));
 }
+
 {
-  // Flag not yet known (OFF form) but the server answers with an invite: the link is still shown.
-  const answer = { link: `https://app.example${LINK}`, name: 'Dana Cohen', email: 'dana@example.org' };
-  const { m } = await team({ props: {}, answer });
-  await m.type('Min 6 characters', 'secret1');
+  // 409 INVITE_PERSON_NEEDS_CHECK: App throws the server's words; the form shows them as they are.
+  const msg = "This person's account needs a check before they can be invited. Please contact Shutfey support.";
+  const m = mount(TeamModal, { ...teamBase, onAddUser: async () => { throw new Error(msg); } });
+  await m.render();
+  await m.type('Full name', 'Dana Cohen');
+  await m.type('dcohen@', 'dana@example.org');
   await m.submit();
-  ok('T: an invite answer to the OFF form still shows the link', m.html().includes('data-invite-link-card'));
+  const h = decode(m.html());
+  ok('T 409 needs-check: the server words, plain, form kept, no link card', h.includes(msg) && !h.includes('data-invite-link-card') && h.includes('new-member-name-input'), h.slice(0, 300));
 }
 
 // ---- V: New venue ----
@@ -190,10 +186,9 @@ const agencyRoute = { 'GET /api/agencies/current': { status: 200, body: { agency
 {
   stubFetch(agencyRoute);
   const mk = async (p) => { const m = mount(CreateVenueModal, { ...venueBase, ...p }); await m.render(); return decode(m.html()); };
-  const off = await mk({});
-  ok('V OFF: identical markup with inviteMode={false}', off === (await mk({ inviteMode: false })));
-  ok('V OFF: owner password field kept', off.includes('type="password"') && off.includes('sm:grid-cols-3'));
-  const on = await mk({ inviteMode: true });
+  // Invites always on: a new owner never gets a password field.
+  const on = await mk({});
+  ok('V always on: same markup if an old inviteMode={false} is passed', on === (await mk({ inviteMode: false })));
   ok('V ON: no owner password, note shown', !on.includes('type="password"') && on.includes('data-invite-mode-note') && on.includes('sm:grid-cols-2'));
 }
 async function venue(p, answer) {
@@ -206,16 +201,7 @@ async function venue(p, answer) {
   return { m, calls, closed, created };
 }
 {
-  const s = await venue({}, { status: 201, body: { venue: { id: 'v9', name: 'Rosen Deli' } } });
-  await s.m.submit();
-  ok('V OFF: owner password still required (today\'s message)', !s.calls.some(([m]) => m === 'POST') && s.m.text().includes('Please specify an initial password for the venue owner.'), s.m.text().slice(0, 300));
-  await s.m.type('Password', 'ownerpw1');
-  await s.m.submit();
-  const post = s.calls.find(([m]) => m === 'POST');
-  ok('V OFF: request carries ownerPassword; modal closes', !!post && post[3].ownerPassword === 'ownerpw1' && post[3].ownerEmail === 'owner@rosen.test' && s.closed.length === 1, JSON.stringify(post?.[3]));
-}
-{
-  const s = await venue({ inviteMode: true }, { status: 201, body: { success: true, venue: { id: 'v9', name: 'Rosen Deli' }, owner: null, ownerInvite: { id: 'inv_1', email: 'owner@rosen.test', name: 'Rosen Deli Owner', role: 'owner', venueIds: ['v9'], expiresAt: 'x' }, ownerInviteLink: LINK } });
+  const s = await venue({}, { status: 201, body: { success: true, venue: { id: 'v9', name: 'Rosen Deli' }, owner: null, ownerInvite: { id: 'inv_1', email: 'owner@rosen.test', name: 'Rosen Deli Owner', role: 'owner', venueIds: ['v9'], expiresAt: 'x' }, ownerInviteLink: LINK } });
   await s.m.submit();
   const post = s.calls.find(([m]) => m === 'POST');
   ok('V ON: no ownerPassword sent', !!post && !('ownerPassword' in post[3]) && post[3].ownerEmail === 'owner@rosen.test', JSON.stringify(post?.[3]));
@@ -227,7 +213,7 @@ async function venue(p, answer) {
 }
 {
   // ON, but the email is already an owner in this agency: no invite, closes as today.
-  const s = await venue({ inviteMode: true }, { status: 201, body: { success: true, venue: { id: 'v9', name: 'Rosen Deli' }, owner: { id: 'o1' } } });
+  const s = await venue({}, { status: 201, body: { success: true, venue: { id: 'v9', name: 'Rosen Deli' }, owner: { id: 'o1' } } });
   await s.m.submit();
   ok('V ON: no invite in the answer -> closes as today', s.closed.length === 1 && !s.m.html().includes('data-invite-link-card'));
 }
@@ -342,8 +328,7 @@ const PREVIEW = { 'GET /api/invites/preview': { status: 200, body: { kind: 'memb
   ok('A today\'s add path unchanged after it', app.includes("setKnownUsers((prev) => (prev.some((u) => u.id === data.user.id) ? prev : [...prev, data.user]));"));
   const iInvite = app.indexOf('if (invitePage && !isKiosk)'); const iAuth = app.indexOf('if (!currentUser) {\n    // Kiosk tablets');
   ok('A invite page before the sign-in screens', iInvite > 0 && iAuth > iInvite);
-  ok('A flag passed to both forms', (app.match(/inviteMode=\{inviteFlag === true\}/g) || []).length === 2);
-  ok('A flag read only for an admin (user + agency key), not on a kiosk, refreshed when a form opens', /useInviteFlag\(\s*!isKiosk && currentUser\?\.role === 'admin' \? `\$\{currentUser\.id\}\|\$\{currentUser\.agencyId \|\| ''\}` : null,\s*isTeamModalOpen,\s*isCreateVenueOpen,\s*(inviteRev,?\s*)?\)/.test(app));
+  ok('A invites always on: no flag passed to the forms, no flag read', !app.includes('inviteMode=') && !app.includes('inviteFlag') && !app.includes('useInviteFlag('));
 }
 
 console.log(`\n${passed} passed, ${failures} failed.`);

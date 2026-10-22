@@ -1,45 +1,25 @@
-// INVITES CLIENT (design [INVC-DS1]): the two admin actions on the merged
-// server routes. #114 (10j): POST /api/agency/invites/enable turns invite links
-// ON for the admin's own agency (one-way). #112 (10k): POST /api/users/:id/invite
-// revokes a member's admin-set password and returns a setup link.
+// INVITES CLIENT (design [INVC-DS1]): the admin action on the merged server
+// route #112 (10k): POST /api/users/:id/invite revokes a member's admin-set
+// password and returns a setup link. Invites are always on (Don 2026-10-22), so
+// there is no switch to turn them on any more.
 // Nothing here is stored; the link is shown once by the caller.
 
 import { apiFetch, apiWrite, versionFromResponse } from './api';
 import { fullInviteLink } from './invites';
 
-/** ok, or the words to show (message). */
-export interface EnableInvitesResult { ok: boolean; message?: string }
-
-export const ENABLE_FALLBACK_TEXT = "Couldn't turn on invites. Please try again.";
-
-/** POST /api/agency/invites/enable with an empty body. The server's own words on any refusal. */
-export async function enableInvites(): Promise<EnableInvitesResult> {
-  try {
-    const r = await apiWrite('/api/agency/invites/enable', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-    if (r.ok) return { ok: true };
-    return { ok: false, message: serverText(r.data, r.error) || ENABLE_FALLBACK_TEXT };
-  } catch {
-    return { ok: false, message: ENABLE_FALLBACK_TEXT };
-  }
-}
-
-/** ok with the full link, or the words to show (message); flagOff = the server answered 404 (invites are off). */
-export interface SendInviteResult { ok: boolean; link?: string; expiresAt?: string | null; message?: string; flagOff?: boolean; conflict?: boolean }
+/** ok with the full link, or the words to show (message). */
+export interface SendInviteResult { ok: boolean; link?: string; expiresAt?: string | null; message?: string; conflict?: boolean }
 
 export const SEND_FALLBACK_TEXT = "Couldn't make the invite. Please try again.";
 export const SEND_LINK_MISSING_TEXT = 'The invite was made, but its link is missing. Please try again.';
-export const INVITES_OFF_TEXT = 'Invites are off for your agency.';
+export const INVITE_GONE_TEXT = 'This person is no longer on the team.';
 
 export const SEND_CHANGED_TEXT = 'Their details changed since you opened this. Check them and confirm again.';
 
 /**
  * POST /api/users/:id/invite (requireVersion). `expectedVersion` is the version of
  * the response the reviewed record came from (loadMemberForInvite), never the
- * latest one seen at send time. 404 = invites are OFF (or the person is gone);
+ * latest one seen at send time. 404 = the person is gone;
  * 409 VERSION_CONFLICT = something changed: the caller shows the fresh record again.
  */
 export async function sendMemberInvite(userId: string, expectedVersion: number | undefined): Promise<SendInviteResult> {
@@ -55,7 +35,7 @@ export async function sendMemberInvite(userId: string, expectedVersion: number |
       if (!link) return { ok: false, message: SEND_LINK_MISSING_TEXT };
       return { ok: true, link, expiresAt: typeof r.data?.invite?.expiresAt === 'string' ? r.data.invite.expiresAt : null };
     }
-    if (r.status === 404) return { ok: false, message: INVITES_OFF_TEXT, flagOff: true };
+    if (r.status === 404) return { ok: false, message: INVITE_GONE_TEXT };
     if (r.code === 'VERSION_CONFLICT') return { ok: false, message: SEND_CHANGED_TEXT, conflict: true };
     return { ok: false, message: serverText(r.data, r.error) || SEND_FALLBACK_TEXT };
   } catch {

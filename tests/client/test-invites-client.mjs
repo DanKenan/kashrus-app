@@ -63,54 +63,18 @@ const users = [admin, primary, moshe, admin2];
 const base = { isOpen: true, onClose() {}, users, tasks: [], currentUser: admin, currentVenue: { id: 'v1', name: 'Crown Market' }, venues: [{ id: 'v1', name: 'Crown Market' }], onAddUser: async () => {}, onUpdateUser: async () => {}, onDeleteUser: async () => {}, agencyName: 'Hartford Kashrut' };
 const html = (p) => decode(renderToStaticMarkup(React.createElement(TeamModal, { ...base, ...p })));
 
-// ---- S: the switch ----
-for (const [flag, want] of [[false, true], [null, false], [true, false], [undefined, false]]) {
-  ok(`S switch shown only on flag false (flag=${flag})`, html({ inviteFlag: flag }).includes('data-invites-turn-on') === want);
+// ---- S: invites are always on (Don 2026-10-22): no switch, for any flag value ----
+for (const flag of [false, null, true, undefined]) {
+  const h = html({ inviteFlag: flag });
+  ok(`S no Turn on invites card (flag=${flag})`, !h.includes('data-invites-turn-on') && !h.includes('Invite links are off') && !h.includes('Turn on invites'));
 }
-ok('S switch hidden for a coordinator', !html({ inviteFlag: false, currentUser: coord }).includes('data-invites-turn-on'));
-{
-  const h = html({ inviteFlag: false });
-  ok('S card wording', h.includes('Invite links are off') && h.includes('With invites on, you send them a link instead and they choose their own password.') && h.includes('Turn on invites'));
-}
-{
-  let stale = 0;
-  const calls = stubFetch({ 'POST /api/agency/invites/enable': { status: 200, body: { ok: true, invitesEnabled: true, alreadyOn: false } } });
-  const m = mount(TeamModal, { ...base, inviteFlag: false, onInviteFlagStale: () => { stale++; } });
-  await m.render();
-  await m.click('Turn on invites');
-  const c = confirms(m)[0];
-  ok('S confirm before any request', !!c && writes(calls).length === 0);
-  ok('S confirm wording', c && c.props.title === 'Turn on invites for Hartford Kashrut?' && c.props.message.includes("you won't set passwords for them anymore") && c.props.message.includes("can't be turned off from the app") && c.props.confirmText === 'Turn on' && c.props.cancelText === 'Not now', c && JSON.stringify([c.props.title, c.props.message]));
-  await c.props.onConfirm(); await m.render();
-  const w = writes(calls);
-  ok('S POST /api/agency/invites/enable with an empty body', w.length === 1 && w[0][1] === '/api/agency/invites/enable' && Object.keys(w[0][2] || {}).filter((k) => k !== 'operationId' && k !== 'expectedVersion').length === 0, JSON.stringify(w));
-  ok('S ON -> flag asked again, notice shown, no confirm left', stale === 1 && m.html().includes('data-invites-on-notice') && confirms(m).length === 0);
-}
-{
-  const msg = "Invites can't be turned on yet: the team records need a check first. Please contact Shutfey support.";
-  let stale = 0;
-  stubFetch({ 'POST /api/agency/invites/enable': { status: 409, body: { error: msg, code: 'INVITES_PRECHECK_FAILED' } } });
-  const m = mount(TeamModal, { ...base, inviteFlag: false, onInviteFlagStale: () => { stale++; } });
-  await m.render();
-  await m.click('Turn on invites');
-  await confirms(m)[0].props.onConfirm(); await m.render();
-  const h = decode(m.html());
-  ok('S 409: the server words, verbatim, as an alert; flag not re-asked', h.includes('role="alert"') && h.includes(msg) && stale === 0, h.slice(0, 300));
-}
-{
-  stubFetch({ 'POST /api/agency/invites/enable': 'THROW' });
-  const m = mount(TeamModal, { ...base, inviteFlag: false });
-  await m.render();
-  await m.click('Turn on invites');
-  await confirms(m)[0].props.onConfirm(); await m.render();
-  ok('S network error: plain fallback', decode(m.html()).includes("Couldn't turn on invites. Please try again.") || decode(m.html()).includes('connect'), decode(m.html()).slice(0, 300));
-}
+
 
 // ---- I: Send invite ----
 {
-  const off = html({ inviteFlag: false });
-  ok('I hidden while invites are OFF / unknown', !off.includes('data-send-invite') && !html({ inviteFlag: null }).includes('data-send-invite'));
-  const on = html({ inviteFlag: true });
+  // Always on: Send invite does not depend on any flag.
+  const on = html({});
+  ok('I same buttons whatever an old inviteFlag says', on === html({ inviteFlag: false }) && on === html({ inviteFlag: null }));
   const count = (on.match(/data-send-invite="true"/g) || []).length;
   ok('I shown on Moshe and the other admin only (not self, not primary admin)', count === 2, String(count));
   ok('I hidden for a coordinator view', !html({ inviteFlag: true, currentUser: coord }).includes('data-send-invite'));
@@ -214,11 +178,11 @@ const roster = (version, list = users) => ({ status: 200, body: { users: list },
 {
   let stale = 0;
   stubFetch({ 'GET /api/users': roster(91), 'POST /api/users/u-moshe/invite': { status: 404, body: { error: 'Not found.' } } });
-  const m = mount(TeamModal, { ...base, inviteFlag: true, onInviteFlagStale: () => { stale++; } });
+  const m = mount(TeamModal, { ...base });
   await m.render();
   await m.click('Send invite', 0);
   await confirms(m)[0].props.onConfirm(); await m.render();
-  ok('I 404: "Invites are off for your agency." and the flag asked again', decode(m.html()).includes('Invites are off for your agency.') && stale === 1);
+  ok('I 404: "This person is no longer on the team." (invites are always on)', decode(m.html()).includes('This person is no longer on the team.') && !decode(m.html()).includes('Invites are off'));
 }
 {
   stubFetch({ 'POST /api/users/u-moshe/invite': { status: 201, body: { link: 'https://evil.example/x', invite: {} } } });
@@ -248,7 +212,7 @@ const roster = (version, list = users) => ({ status: 200, body: { users: list },
 // ---- A: App wiring ----
 {
   const app = fs.readFileSync(new URL('../../src/App.tsx', import.meta.url), 'utf8');
-  ok('A App passes rev, the raw flag (null on kiosk), the agency name and a re-probe callback', app.includes('inviteRev,') && app.includes('inviteFlag={isKiosk ? null : inviteFlag}') && app.includes('agencyName={currentUser.agencyName}') && app.includes('onInviteFlagStale={() => setInviteRev((n) => n + 1)}'));
+  ok('A App: no invite flag wiring (always on); agency name still passed', !app.includes('inviteRev') && !app.includes('inviteFlag') && app.includes('agencyName={currentUser.agencyName}'));
   const team = fs.readFileSync(new URL('../../src/components/TeamModal.tsx', import.meta.url), 'utf8');
   ok('A TeamModal never reads the global version; inviteActions takes it from the roster response', !team.includes('getLastKnownVersion') && !fs.readFileSync(new URL('../../src/lib/inviteActions.ts', import.meta.url), 'utf8').includes('getLastKnownVersion') && fs.readFileSync(new URL('../../src/lib/inviteActions.ts', import.meta.url), 'utf8').includes('versionFromResponse(res)'));
 }
