@@ -162,6 +162,10 @@ export async function runAll(baseUrl, extraCtx = {}) {
       console.log(`\n[state] ${await docKiB()} KiB before the fresh state`);
       await extraCtx.freshState();
       authHeaders.Authorization = `Bearer ${await adminLogin()}`;
+      // Proof the wipe hit the server's own storage: the doc is back to the seed.
+      const after = await docKiB();
+      if (after > 8) throw new Error(`fresh state did not take: the state doc is still ${after} KiB`);
+      console.log(`[state] ${after} KiB after the fresh state`);
       continue;
     }
     const kib = await docKiB();
