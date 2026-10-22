@@ -59,7 +59,7 @@ import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
-import { apiFetch, apiWrite, clearSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice } from './lib/api';
+import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice } from './lib/api';
 import { noVenueMessage } from './lib/venueRemoved';
 
 const DEFAULT_USERS: User[] = [
@@ -1540,6 +1540,11 @@ export default function App() {
 
   // Sign Out Handler
   const handleLogout = () => {
+    // Item 11: end this session on the server first (POST /api/auth/logout with
+    // the token), then forget the token below. Best effort: offline or any
+    // error still signs out on this device. After a 401 the token is already
+    // gone and nothing is sent.
+    void endServerSession(getSessionToken());
     clearLogoCache();
     setIsAgencyLogoOpen(false);
     userRequestContext.current.generation += 1;

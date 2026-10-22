@@ -4,7 +4,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useMinWidth } from '../lib/useMinWidth';
 import { ConfirmModal } from './ConfirmModal';
-import { clearSession } from '../lib/api';
+import { clearSession, endServerSession } from '../lib/api';
 import { 
   CheckCircle2, 
   Wifi, 
@@ -148,6 +148,8 @@ export const Header: React.FC<HeaderProps> = ({
       // plan review): the restored-session key current_user is not cleared by
       // /?kiosk=1. Kiosk pairing
       // credentials and offline data are left alone.
+      // Item 11: end the phone session on the server first (best effort).
+      void endServerSession();
       clearSession();
       try { localStorage.removeItem('shutfey_user'); } catch {}
       window.location.assign('/?kiosk=1');

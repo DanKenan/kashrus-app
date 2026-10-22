@@ -18,7 +18,7 @@ import {
 import { ShutfeyLogo } from './ShutfeyLogo';
 import { LandingBackButton } from './LandingPage';
 import { User as UserType } from '../types';
-import { AgencySignupForm } from './AgencySignupForm';
+import { AgencySignupForm, REGISTERED_SIGN_IN_TEXT } from './AgencySignupForm';
 import { PWAInstallButton } from './PWAInstallButton';
 import { ForgotPasswordModal } from './ForgotPasswordModal';
 import { apiFetch, setSessionToken } from '../lib/api';
@@ -49,6 +49,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Item 11: a neutral note on the sign-in form (the agency was created but no session came back).
+  const [notice, setNotice] = useState<string | null>(null);
   // First-run admin setup: no password exists yet → show the create-password form.
   const [needsSetup, setNeedsSetup] = useState(false);
   const [setupPassword, setSetupPassword] = useState('');
@@ -60,6 +62,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+    setNotice(null);
 
     const trimmedEmail = email.trim();
     const trimmedPassword = password.trim();
@@ -263,6 +266,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   setAuthMode('login');
                   setErrorMessage(null);
                 }}
+                onRegisteredWithoutSession={(registeredEmail) => {
+                  setAuthMode('login');
+                  setEmail(registeredEmail);
+                  setPassword('');
+                  setErrorMessage(null);
+                  setNotice(REGISTERED_SIGN_IN_TEXT);
+                }}
               />
             ) : chooser ? (
               /* 10g: pick which agency to open */
@@ -350,6 +360,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             ) : (
               /* Standard Staff Sign In Flow */
               <>
+                {notice && !errorMessage && (
+                  <div role="status" data-login-notice className="mb-5 p-3.5 rounded-2xl bg-sunken border border-line text-xs text-ink flex items-start gap-2.5">
+                    <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5 text-gold-deep" aria-hidden="true" />
+                    <span>{notice}</span>
+                  </div>
+                )}
                 {/* Error Message */}
                 {errorMessage && (
                   <div className="mb-5 p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900/60 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2.5 animate-shake">
