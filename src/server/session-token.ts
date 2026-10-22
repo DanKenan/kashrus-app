@@ -9,6 +9,8 @@
  *           integer, and no kiosk claim.
  *  - v1:    legacy { sub, iat, exp }: no v, mem or ep key at all, sub a
  *           non-empty string, and no kiosk claim.
+ *  - choose (10g): v === 3, sub and cr non-empty strings, ep a non-negative
+ *           integer, no mem and no kiosk claim. Never resolves to a row.
  * Anything else → null (401 / WS 4401).
  *
  * resolveSessionRow() is the ONE row lookup for HTTP and WS:
@@ -21,7 +23,9 @@
 export type SessionClaims =
   | { kind: 'v1'; userId: string }
   | { kind: 'v2'; userId: string; personId: string; ep: number }
-  | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string };
+  | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string }
+  /** 10g: proves a person's credential, grants NO membership (never authUser). */
+  | { kind: 'choose'; personId: string; ownerRowId: string; ep: number };
 
 const KIOSK_CLAIMS = ['kiosk', 'agencyId', 'venueId', 'pv', 'dev'];
 const V2_CLAIMS = ['v', 'mem', 'ep'];
@@ -44,12 +48,19 @@ export function classifySessionClaims(data: any): SessionClaims | null {
   }
   if (KIOSK_CLAIMS.some((k) => has(data, k))) return null;
   if (has(data, 'v')) {
+    if (data.v === 3) {
+      // 10g choose token: exactly sub (person), cr (owner row), ep; no mem.
+      if (has(data, 'mem')) return null;
+      if (!nonEmpty(data.sub) || !nonEmpty(data.cr)) return null;
+      if (typeof data.ep !== 'number' || !Number.isInteger(data.ep) || data.ep < 0) return null;
+      return { kind: 'choose', personId: data.sub, ownerRowId: data.cr, ep: data.ep };
+    }
     if (data.v !== 2) return null;
     if (!nonEmpty(data.sub) || !nonEmpty(data.mem)) return null;
     if (typeof data.ep !== 'number' || !Number.isInteger(data.ep) || data.ep < 0) return null;
     return { kind: 'v2', userId: data.mem, personId: data.sub, ep: data.ep };
   }
-  if (has(data, 'mem') || has(data, 'ep')) return null;
+  if (has(data, 'mem') || has(data, 'ep') || has(data, 'cr')) return null;
   if (!nonEmpty(data.sub)) return null;
   return { kind: 'v1', userId: data.sub };
 }
@@ -63,18 +74,54 @@ export function tokenEpochOf(row: { tokenEpoch?: unknown }): number | null {
   return typeof e === 'number' && Number.isInteger(e) && e >= 0 ? e : null;
 }
 
-export function resolveSessionRow<T extends { id: string; personId?: string; tokenEpoch?: unknown }>(
+export function resolveSessionRow<T extends { id: string; personId?: string; tokenEpoch?: unknown; agencyId?: unknown }>(
   claims: SessionClaims | null,
-  users: readonly T[]
+  users: readonly T[],
+  agencies?: readonly { id?: unknown }[]
 ): T | undefined {
   if (!claims) return undefined;
+  // 10g: a choose token NEVER resolves to a row (no authUser, no socket).
+  if (claims.kind === 'choose') return undefined;
   const row = users.find((u) => u && u.id === claims.userId);
   if (!row) return undefined;
   if (claims.kind === 'kiosk') return row;
   const epoch = tokenEpochOf(row);
   if (epoch === null) return undefined;
   if (claims.kind === 'v1') return epoch === 0 ? row : undefined;
-  return row.personId === claims.personId && epoch === claims.ep ? row : undefined;
+  if (row.personId !== claims.personId || epoch !== claims.ep) return undefined;
+  // 10g (matrix): a v2 token's membership must still have its agency.
+  if (agencies && typeof row.agencyId === 'string' && row.agencyId && !agencies.some((a) => a && a.id === row.agencyId)) return undefined;
+  return row;
+}
+
+/** 10g: the person's credential row in `users` (single-row person: its only row; multi: the credentialOwner). */
+export function credentialRowOfPerson<T extends { id: string; personId?: string; credentialOwner?: unknown }>(users: readonly T[], personId: string): T | undefined {
+  const rows = users.filter((u) => u && u.personId === personId);
+  if (rows.length === 1) return rows[0];
+  const owners = rows.filter((u) => u.credentialOwner === true);
+  return owners.length === 1 ? owners[0] : undefined;
+}
+
+/**
+ * 10g: a choose token is valid iff row cr exists, cr.personId === sub, cr is
+ * the person's credential row NOW and its epoch === ep. So E1 (all rows
+ * bumped), E3 (owner moved or removed) and E2 on the owner all kill it.
+ */
+export function resolveChooseOwner<T extends { id: string; personId?: string; tokenEpoch?: unknown; credentialOwner?: unknown }>(
+  claims: SessionClaims | null,
+  users: readonly T[]
+): T | undefined {
+  if (!claims || claims.kind !== 'choose') return undefined;
+  const cr = users.find((u) => u && u.id === claims.ownerRowId);
+  if (!cr || cr.personId !== claims.personId) return undefined;
+  if (credentialRowOfPerson(users, claims.personId)?.id !== cr.id) return undefined;
+  const epoch = tokenEpochOf(cr);
+  return epoch !== null && epoch === claims.ep ? cr : undefined;
+}
+
+/** 10g: the choose claims for a person's credential row (signed with a 10-minute exp by the server). */
+export function chooseClaimsFor(ownerRow: { id: string; personId?: string; tokenEpoch?: unknown }): Record<string, unknown> {
+  return { v: 3, sub: ownerRow.personId, cr: ownerRow.id, ep: tokenEpochOf(ownerRow) ?? 0 };
 }
 
 /** v2 for any row with a personId (10e: membership rows too); otherwise the legacy v1 claims. */

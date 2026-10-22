@@ -25,7 +25,7 @@ import {
   findDomainClash,
   withCustomDomain,
 } from './src/server/agency-fields.js';
-import { classifySessionClaims, resolveSessionRow, sessionClaimsFor, type SessionClaims } from './src/server/session-token.ts';
+import { classifySessionClaims, resolveSessionRow, resolveChooseOwner, chooseClaimsFor, sessionClaimsFor, type SessionClaims } from './src/server/session-token.ts';
 import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
@@ -333,10 +333,10 @@ function signToken(userId: string): string {
   return signClaims({ sub: userId });
 }
 
-function signClaims(claims: Record<string, unknown>): string {
+function signClaims(claims: Record<string, unknown>, ttlSeconds: number = TOKEN_TTL_SECONDS): string {
   const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const now = Math.floor(Date.now() / 1000);
-  const payload = base64url(JSON.stringify({ ...claims, iat: now, exp: now + TOKEN_TTL_SECONDS }));
+  const payload = base64url(JSON.stringify({ ...claims, iat: now, exp: now + ttlSeconds }));
   const sig = base64url(
     crypto.createHmac('sha256', getJwtSecret()).update(`${header}.${payload}`).digest()
   );
@@ -348,6 +348,12 @@ function signClaims(claims: Record<string, unknown>): string {
  * a personId (10e: membership rows too); the legacy v1 { sub } otherwise. */
 function signSessionToken(row: { id: string; personId?: string; tokenEpoch?: unknown }): string {
   return signClaims(sessionClaimsFor(row));
+}
+
+/** 10g: a choose token for a multi person's credential row (10 minutes; accepted ONLY on GET /api/auth/memberships and POST /api/auth/activate). */
+const CHOOSE_TOKEN_TTL_SECONDS = 10 * 60;
+function signChooseToken(ownerRow: { id: string; personId?: string; tokenEpoch?: unknown }): string {
+  return signClaims(chooseClaimsFor(ownerRow), CHOOSE_TOKEN_TTL_SECONDS);
 }
 
 /** Kiosk session token: venue-scoped, 12h expiry, kiosk:true claim.
@@ -477,6 +483,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/set-password' },
         { method: 'POST', path: '/__test__/mint-kiosk-token' },
         { method: 'GET', path: '/__test__/alert-routing' },
+        { method: 'GET', path: '/__test__/route-table' },
       ]
     : []),
 ];
@@ -562,7 +569,18 @@ app.use('/api', async (req, res, next) => {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   const payload = token ? verifyToken(token) : null;
   // Item 8d: ONE row resolver for HTTP and WS (v2 binding + epoch, v1 epoch 0, kiosk by id).
-  const user = resolveSessionRow(payload, users as any[]) as UserProfile | undefined;
+  // 10g (B6, one place): a choose token proves the person's credential and
+  // grants NO membership. It passes ONLY on the two chooser routes, and only
+  // while its owner row is still the person's credential row at its epoch;
+  // it never sets authUser. Every other route: 401.
+  if (payload?.kind === 'choose') {
+    const chooserRoute = (req.method === 'GET' && req.path === '/auth/memberships') || (req.method === 'POST' && req.path === '/auth/activate');
+    const owner = chooserRoute ? resolveChooseOwner(payload, users as any[]) : undefined;
+    if (!owner) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    (req as any).chooseClaims = { personId: payload.personId, ownerRowId: payload.ownerRowId };
+    return next();
+  }
+  const user = resolveSessionRow(payload, users as any[], agencies as any[]) as UserProfile | undefined;
 
   if (!user) {
     return res.status(401).json({ error: 'Sign in required. Please log in again.' });
@@ -2388,7 +2406,7 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
   }
   // SO: a phone socket's token must still resolve (same resolver as HTTP):
   // a bumped tokenEpoch (password reset) or a deleted row fails closed.
-  if (!meta.kiosk && !(meta.tokenClaims && resolveSessionRow(meta.tokenClaims, users as any[]))) {
+  if (!meta.kiosk && !(meta.tokenClaims && resolveSessionRow(meta.tokenClaims, users as any[], agencies as any[]))) {
     try {
       client.close(4401, 'Unauthorized');
     } catch {}
@@ -4943,7 +4961,7 @@ wss.on('connection', (ws, req) => {
     const payload = token ? verifyToken(token) : null;
     socketClaims = payload;
     // Item 8d: the same resolver as the HTTP middleware.
-    authedUser = resolveSessionRow(payload, users as any[]) || null;
+    authedUser = resolveSessionRow(payload, users as any[], agencies as any[]) || null;
     isKiosk = payload?.kind === 'kiosk';
     if (payload && payload.kind === 'kiosk') {
       // Branch on the kiosk CLAIM, not on the presence of a venue id — a
@@ -5001,7 +5019,7 @@ wss.on('connection', (ws, req) => {
     // immediately before registration, so a connection authenticated before
     // a revocation (epoch bump, deletion, kiosk PIN/device change) but
     // registered after it is closed and never registered.
-    const current = resolveSessionRow(socketClaims, users as any[]);
+    const current = resolveSessionRow(socketClaims, users as any[], agencies as any[]);
     const stillOk = isKiosk
       ? !!current && kioskSessionStillValid(current, { agencyId: kioskAgencyId, venueId: kioskVenueId, pv: kioskPv, deviceId: kioskDeviceId })
       : !!current && current.id === authedUser.id;
@@ -8058,12 +8076,13 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     if (!requireAdmin(req, res)) return;
     const db = firestoreDb;
     if (!db) return res.status(503).json({ error: 'db unavailable' });
-    const { users } = req.body || {};
+    const { users, agencies: newAgencies } = req.body || {};
     if (!Array.isArray(users)) return res.status(400).json({ error: 'users array required' });
     const docRef = db.collection('app-state').doc('main');
     const snap = await docRef.get();
     const doc = (snap && snap.data && snap.data()) || {};
-    await docRef.set({ ...doc, users });
+    // 10g (Test 64 F): optionally replace agencies too (to remove one under a live v2 token).
+    await docRef.set({ ...doc, users, ...(Array.isArray(newAgencies) ? { agencies: newAgencies } : {}) });
     res.json({ ok: true });
   });
   // TEST ONLY: seed a media doc directly into the `media` collection so the
@@ -8674,6 +8693,23 @@ if (isTestMode()) {
   // getJwtSecret(). Lets tests obtain valid sessions without reading the
   // signing secret from the doc (Test 18's restore cycle strips jwtSecret by
   // design). Test mode only — never a production credential.
+  // TEST ONLY (10g, isTestMode()): the Express route table (method + path), so
+  // Test 64 can walk EVERY route with a choose token (B6 central enforcement).
+  app.get('/api/__test__/route-table', (_req, res) => {
+    const out: Array<{ method: string; path: string; public: boolean }> = [];
+    const stack: any[] = ((app as any)._router?.stack || (app as any).router?.stack || []) as any[];
+    for (const layer of stack) {
+      const route = layer?.route;
+      if (!route || typeof route.path !== 'string') continue;
+      for (const m of Object.keys(route.methods || {})) {
+        if (!route.methods[m]) continue;
+        const method = m.toUpperCase();
+        const apiPath = route.path.startsWith('/api/') ? route.path.slice(4) : null;
+        out.push({ method, path: route.path, public: apiPath !== null && isPublicApiRoute(method, apiPath) });
+      }
+    }
+    res.json({ routes: out });
+  });
   app.post('/api/__test__/mint-token', async (req, res) => {
     const { userId } = req.body || {};
     try {
@@ -12759,7 +12795,18 @@ app.post('/api/auth/login', async (req, res) => {
     }
   }
 
-  const token = signSessionToken(users.find((u) => u.id === user.id) || user);
+  // 10g: a multi person chooses a membership first — no user, no v2 token,
+  // only a choose token for the credential row (single-row: as today).
+  const freshCred = users.find((u) => u.id === user.id) || user;
+  if (isMultiPersonRow(users, freshCred)) {
+    return res.json({
+      success: true,
+      chooseMembership: true,
+      memberships: membershipsOfPerson(String((freshCred as any).personId)).map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role })),
+      token: signChooseToken(freshCred),
+    });
+  }
+  const token = signSessionToken(freshCred);
   res.json({
     success: true,
     user: getSelfUser(user),
@@ -13192,6 +13239,58 @@ app.post('/api/auth/change-password', async (req, res) => {
   }
   const freshCallerRow = users.find((u) => u.id === caller.id) || caller;
   res.json({ success: true, message: 'Password updated successfully.', token: signSessionToken(freshCallerRow) });
+});
+
+// ---------------------------------------------------------------------------
+// 10g (plan v4): sign-in with several memberships + switch (server side).
+// A choose token (login of a multi person) or a valid v2 token lists the
+// person's OWN memberships and activates one; activation is read-only.
+// ---------------------------------------------------------------------------
+const MEMBERSHIP_UNAVAILABLE_TEXT = 'This membership is not available.';
+
+/** 10g: P's rows whose agency exists, ordered by joinedAt (absent first) then id. Only these four fields leave. */
+function membershipsOfPerson(personId: string): Array<{ membershipId: string; agencyId: string; agencyName: string; role: string }> {
+  if (!personId) return [];
+  const rows = (users as any[]).filter((u) => u && u.personId === personId);
+  const out: Array<{ membershipId: string; agencyId: string; agencyName: string; role: string; joinedAt: string }> = [];
+  for (const u of rows) {
+    const agency = (agencies as any[]).find((a) => a && typeof u.agencyId === 'string' && a.id === u.agencyId);
+    if (!agency) continue;
+    out.push({ membershipId: String(u.id), agencyId: String(agency.id), agencyName: String(agency.name ?? ''), role: String(u.role ?? ''), joinedAt: typeof u.joinedAt === 'string' ? u.joinedAt : '' });
+  }
+  out.sort((a, b) => (a.joinedAt === b.joinedAt ? (a.membershipId < b.membershipId ? -1 : a.membershipId > b.membershipId ? 1 : 0) : a.joinedAt < b.joinedAt ? -1 : 1));
+  return out.map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role }));
+}
+
+/** 10g: the person a chooser request acts for: choose claims, or a v2 session's personId (never kiosk / v1). */
+function chooserPersonOf(req: any): { personId: string; currentRowId: string | null } | null {
+  if (req.chooseClaims && typeof req.chooseClaims.personId === 'string') return { personId: req.chooseClaims.personId, currentRowId: null };
+  if (req.kiosk === true) return null;
+  const authHeader = String(req.headers?.authorization || '');
+  const claims = authHeader.startsWith('Bearer ') ? verifyToken(authHeader.slice(7).trim()) : null;
+  if (!claims || claims.kind !== 'v2') return null;
+  const me = req.authUser;
+  if (!me || typeof me.personId !== 'string' || !me.personId || me.personId !== claims.personId) return null;
+  return { personId: me.personId, currentRowId: String(me.id) };
+}
+
+app.get('/api/auth/memberships', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const who = chooserPersonOf(req);
+  if (!who) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
+  res.json({ memberships: membershipsOfPerson(who.personId).map((m) => ({ ...m, isCurrent: m.membershipId === who.currentRowId })) });
+});
+
+app.post('/api/auth/activate', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const who = chooserPersonOf(req);
+  if (!who) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
+  const membershipId = typeof req.body?.membershipId === 'string' ? req.body.membershipId : '';
+  // N6: read-only — no commit, no epoch change, the calling token stays valid.
+  const row = membershipId ? (users as any[]).find((u) => u && u.id === membershipId) : undefined;
+  const agencyOk = !!row && typeof row.agencyId === 'string' && (agencies as any[]).some((a) => a && a.id === row.agencyId);
+  if (!row || row.personId !== who.personId || !agencyOk) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
+  res.json({ token: signSessionToken(row), user: getSelfUser(row as UserProfile) });
 });
 
 // ---------------------------------------------------------------------------
