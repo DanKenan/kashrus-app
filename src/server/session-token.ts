@@ -23,7 +23,8 @@
 export type SessionClaims =
   | { kind: 'v1'; userId: string }
   | { kind: 'v2'; userId: string; personId: string; ep: number }
-  | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string }
+  /** endsAtMs: set by server.ts verifyToken only (the kiosk 3 h cap); never by the classifier. */
+  | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string; endsAtMs?: number }
   /** 10g: proves a person's credential, grants NO membership (never authUser). */
   | { kind: 'choose'; personId: string; ownerRowId: string; ep: number };
 
