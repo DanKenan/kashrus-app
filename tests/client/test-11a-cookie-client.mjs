@@ -54,7 +54,8 @@ function stubFetch(routes) {
     if (r === 'THROW') throw new TypeError('network');
     r = r || { status: 200, body: {} };
     const hdr = r.headers || {};
-    return { ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: (k) => hdr[k] ?? null }, clone() { return this; }, json: async () => r.body, text: async () => JSON.stringify(r.body) };
+    const call = calls[calls.length - 1];
+    return { ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: (k) => hdr[k] ?? null }, clone() { return this; }, json: async () => { call.read = true; return r.body; }, text: async () => { call.read = true; return JSON.stringify(r.body); } };
   };
   return calls;
 }
@@ -143,6 +144,16 @@ function userRoutes(id = 'u1', cookieMe = null, adopt = { status: 200, body: { o
   release8(); await p8;
   ok('B8 a 401 that went out before the sign-in changed is stale (no sign-out)', isCookieSession() && !events.includes('shutfey:unauthorized'));
 
+  // B9: another tab of this browser signed in again on the cookie while this request was out.
+  reset(); localStorage.setItem('shutfey_cookie_session', 'id-old');
+  let release9; const gate9 = new Promise((r) => { release9 = r; });
+  stubFetch({ 'GET /api/tasks': { ...R401, gate: gate9 } });
+  const p9 = apiFetch('/api/tasks');
+  await tick(5);
+  store.set('shutfey_cookie_session', 'id-new-from-other-tab');
+  release9(); await p9;
+  ok('B9 a 401 for the old cookie sign-in never ends the one another tab just made', localStorage.getItem('shutfey_cookie_session') === 'id-new-from-other-tab' && !events.includes('shutfey:unauthorized'));
+
   reset();
   stubFetch({ 'GET /api/tasks': R401 });
   await apiFetch('/api/tasks');
@@ -158,6 +169,9 @@ function userRoutes(id = 'u1', cookieMe = null, adopt = { status: 200, body: { o
   ok('C1 adopt sent with the token + opt-in + same-origin', calls[1].h.authorization === 'Bearer tok-C1' && calls[1].h['x-shutfey-auth'] === 'cookie' && calls[1].opts.credentials === 'same-origin');
   ok('C1 the proof is sent WITHOUT the token', !('authorization' in calls[2].h) && calls[2].h['x-shutfey-auth'] === 'cookie');
   ok('C1 moved: token deleted, on the cookie', getSessionToken() === null && isCookieSession());
+  const firstId = localStorage.getItem('shutfey_cookie_session');
+  ok('C1 the cookie sign-in gets a random id (shared by the tabs)', typeof firstId === 'string' && firstId.length >= 8 && firstId !== '1');
+  ok('C1 every answer of the move is read (no request left open; a browser keeps an unread one pending)', calls.every((c) => c.read === true), JSON.stringify(calls.map((c) => c.read)));
   ok('C1 no sign-out on the way', !events.includes('shutfey:unauthorized'));
   // A second sync on the cookie is only the start check.
   const calls2 = stubFetch(userRoutes());
@@ -184,6 +198,7 @@ for (const [label, routes, unsupported] of [
   const calls = stubFetch(routes);
   await syncCookieSession();
   ok(`C2 ${label}: token kept, not on the cookie, no sign-out`, getSessionToken() === 'tok-C2' && !isCookieSession() && !events.includes('shutfey:unauthorized'), paths(calls));
+  ok(`C2 ${label}: every me answer read (none left open)`, calls.filter((c) => c.path === '/api/auth/me').every((c) => c.read === true));
   const again = stubFetch(userRoutes());
   await syncCookieSession();
   if (unsupported) ok(`C2 ${label}: not tried again this page load`, again.length === 0 && getSessionToken() === 'tok-C2', paths(again));
@@ -219,6 +234,152 @@ for (const [label, routes, unsupported] of [
   const calls = stubFetch(userRoutes());
   await Promise.all([syncCookieSession(), syncCookieSession()]);
   ok('C5 one move for two requests (then the start check)', paths(calls) === 'GET /api/auth/me, POST /api/auth/session/adopt, GET /api/auth/me, GET /api/auth/me', paths(calls));
+}
+
+{
+  // C6: each move gets a new id.
+  reset(); setSessionToken('tok-C6a');
+  stubFetch(userRoutes());
+  await syncCookieSession();
+  const id1 = localStorage.getItem('shutfey_cookie_session');
+  setSessionToken('tok-C6b');
+  await syncCookieSession();
+  const id2 = localStorage.getItem('shutfey_cookie_session');
+  ok('C6 a new cookie sign-in gets a new id', !!id1 && !!id2 && id1 !== id2 && getSessionToken() === null);
+}
+{
+  // C7: a sign-out still on its way: its answer deletes this browser's cookie, so the move of a
+  // sign-in made meanwhile waits for it (the token is kept until then).
+  reset(); localStorage.setItem('shutfey_cookie_session', 'id-c7');
+  let releaseLo; const loGate = new Promise((r) => { releaseLo = r; });
+  const calls = stubFetch({ ...userRoutes(), 'POST /api/auth/logout': { status: 200, body: { ok: true }, gate: loGate } });
+  const lo = endServerSession(); api.clearSession();
+  await tick(5);
+  setSessionToken('tok-C7');
+  const mv = syncCookieSession();
+  await tick(40);
+  ok('C7 no move while the sign-out is on its way (token kept)', !calls.some((c) => c.path === '/api/auth/me') && getSessionToken() === 'tok-C7', paths(calls));
+  releaseLo(); await lo; await mv;
+  ok('C7 after the sign-out answered, the move runs and finishes', getSessionToken() === null && isCookieSession(), paths(calls));
+}
+{
+  // C7b: a newer token stored while the move waited: the older one is not sent at all.
+  reset(); localStorage.setItem('shutfey_cookie_session', 'id-c7b');
+  let releaseLo; const loGate = new Promise((r) => { releaseLo = r; });
+  const calls = stubFetch({ ...userRoutes(), 'POST /api/auth/logout': { status: 200, body: { ok: true }, gate: loGate } });
+  const lo = endServerSession(); api.clearSession();
+  store.set('shutfey_session_token', 'tok-C7b-old');
+  const mv = syncCookieSession();
+  await tick(20);
+  setSessionToken('tok-C7b-new');
+  releaseLo(); await lo; await mv; await syncCookieSession();
+  ok('C7b the older token is never sent after the wait', !calls.some((c) => c.h.authorization === 'Bearer tok-C7b-old'), JSON.stringify(calls.map((c) => c.h.authorization || '-')));
+  ok('C7b the newer one is moved', getSessionToken() === null && isCookieSession());
+}
+{
+  // C8: a token sign-out on its way counts too.
+  reset(); setSessionToken('tok-C8-old');
+  let releaseLo; const loGate = new Promise((r) => { releaseLo = r; });
+  const calls = stubFetch({ ...userRoutes(), 'POST /api/auth/logout': { status: 200, body: { ok: true }, gate: loGate } });
+  const lo = endServerSession(getSessionToken()); api.clearSession();
+  setSessionToken('tok-C8-new');
+  const mv = syncCookieSession();
+  await tick(40);
+  ok('C8 token sign-out on its way: the move waits', !calls.some((c) => c.path === '/api/auth/me') && getSessionToken() === 'tok-C8-new');
+  releaseLo(); await lo; await mv;
+  ok('C8 then it moves', getSessionToken() === null && isCookieSession());
+}
+{
+  // C9: a sign-out that never answers: the move gives up for now (token kept), no hang.
+  reset();
+  sessionTiming.logoutSettleMaxMs = 30;
+  stubFetch({ ...userRoutes(), 'POST /api/auth/logout': { status: 200, body: {}, gate: new Promise(() => {}) } });
+  setSessionToken('tok-C9-old');
+  void endServerSession(getSessionToken()); api.clearSession();
+  setSessionToken('tok-C9');
+  await syncCookieSession();
+  sessionTiming.logoutSettleMaxMs = 15000;
+  ok('C9 a sign-out that never answers: token kept, move tried later', getSessionToken() === 'tok-C9' && !isCookieSession());
+}
+
+// ------------------------------------------------- T: two tabs of one browser
+// A second module instance = a second tab: its own memory, the same localStorage.
+const apiB = await import('../../src/lib/api.ts?tab=b');
+apiB.sessionTiming.storeRetryDelaysMs = [5, 5];
+apiB.sessionTiming.authSettleGraceMs = 5;
+function resetBoth() { reset(); apiB.resetCookieSessionForTests(); }
+{
+  // T1 (RV1 P1-2): tab A's old-cookie 401 arrives after tab B signed in again and moved.
+  resetBoth(); setSessionToken('tok-T1a');
+  stubFetch(userRoutes());
+  await syncCookieSession();
+  let release; const gate = new Promise((r) => { release = r; });
+  stubFetch({ ...userRoutes(), 'GET /api/tasks': { ...R401, gate } });
+  const pA = apiFetch('/api/tasks');
+  await tick(5);
+  apiB.setSessionToken('tok-T1b');
+  await apiB.syncCookieSession();
+  const idB = localStorage.getItem('shutfey_cookie_session');
+  release(); await pA;
+  ok('T1 tab B moved its new sign-in', apiB.getSessionToken() === null && !!idB);
+  ok("T1 tab A's stale 401 does not end tab B's newer sign-in", localStorage.getItem('shutfey_cookie_session') === idB && !events.includes('shutfey:unauthorized'));
+}
+{
+  // T2 (RV1 P1-1): tab A's sign-out on its way; tab B signs in: B's move waits for A's answer.
+  resetBoth(); localStorage.setItem('shutfey_cookie_session', 'id-T2');
+  let release; const gate = new Promise((r) => { release = r; });
+  const calls = stubFetch({ ...userRoutes(), 'POST /api/auth/logout': { status: 200, body: { ok: true }, gate } });
+  const lo = endServerSession(); api.clearSession();
+  apiB.setSessionToken('tok-T2b');
+  const mv = apiB.syncCookieSession();
+  await tick(60);
+  ok("T2 tab B's move waits for tab A's sign-out answer (token kept)", !calls.some((c) => c.path === '/api/auth/me') && apiB.getSessionToken() === 'tok-T2b', paths(calls));
+  release(); await lo; await mv;
+  ok('T2 then tab B moves', apiB.getSessionToken() === null && apiB.isCookieSession() && localStorage.getItem('shutfey_logout_in_flight') === null);
+}
+const navDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator') || { configurable: true, writable: true, value: undefined };
+for (const mode of ['lease', 'web-locks']) {
+  // T3 (RV1 P1-3): tab A's adopt is on its way; tab B stores a newer token: B's adopt is sent only
+  // after A's move is over, so a late answer of A's can never overwrite B's newer cookie.
+  resetBoth();
+  if (mode === 'web-locks') {
+    let tail = Promise.resolve();
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: { locks: { request: (name, opts, cb) => { const run = tail.then(() => cb()); tail = run.catch(() => {}); return run; } } } });
+  }
+  setSessionToken('tok-T3a');
+  let releaseA; const gateA = new Promise((r) => { releaseA = r; });
+  const order = [];
+  const calls = stubFetch({
+    'GET /api/auth/me': (b, h) => (h.authorization ? meUser('u1', 'bearer') : meUser('u1', 'cookie')),
+    'POST /api/auth/session/adopt': (b, h) => { order.push(h.authorization); return h.authorization === 'Bearer tok-T3a' ? { status: 200, body: { ok: true }, gate: gateA } : { status: 200, body: { ok: true } }; },
+  });
+  const mvA = syncCookieSession();
+  await tick(60);
+  apiB.setSessionToken('tok-T3b');
+  const mvB = apiB.syncCookieSession();
+  await tick(80);
+  ok(`T3 ${mode}: tab B's adopt waits while tab A's is on its way`, order.length === 1 && order[0] === 'Bearer tok-T3a', JSON.stringify(order));
+  releaseA(); await mvA; await mvB;
+  ok(`T3 ${mode}: then B adopts the newest token last`, order.length === 2 && order[1] === 'Bearer tok-T3b', JSON.stringify(order));
+  ok(`T3 ${mode}: A did not delete B's token; B moved it`, getSessionToken() === null && isCookieSession() && calls.filter((c) => c.path === '/api/auth/session/adopt').length === 2);
+  if (mode === 'web-locks') Object.defineProperty(globalThis, 'navigator', navDescriptor);
+}
+{
+  // T4: a lease left by a closed tab does not block once it has run out.
+  resetBoth(); localStorage.setItem('shutfey_cookie_move', `dead-tab|${Date.now() - 1}`);
+  setSessionToken('tok-T4');
+  stubFetch(userRoutes());
+  await syncCookieSession();
+  ok('T4 an expired lease of a closed tab is taken over', getSessionToken() === null && isCookieSession() && localStorage.getItem('shutfey_cookie_move') === null);
+  // a live lease of another tab: the move gives up after moveLockMaxMs and keeps the token
+  resetBoth(); localStorage.setItem('shutfey_cookie_move', `other-tab|${Date.now() + 60000}`);
+  sessionTiming.moveLockMaxMs = 80;
+  setSessionToken('tok-T4b');
+  const c = stubFetch(userRoutes());
+  await syncCookieSession();
+  sessionTiming.moveLockMaxMs = 30000;
+  ok('T4 another live tab moving: wait, then keep the token for later', getSessionToken() === 'tok-T4b' && c.length === 0, paths(c));
+  store.delete('shutfey_cookie_move');
 }
 
 // ------------------------------------------------------------------ K: tablet
@@ -264,6 +425,7 @@ for (const [label, ans] of [['404', { status: 404, body: {} }], ['403', { status
   const calls = stubFetch({ 'GET /api/auth/me': meUser('u1', 'cookie') });
   const stop = api.startCookieSession(); await tick(20);
   ok('S1 start on the cookie: GET /api/auth/me on the cookie', paths(calls) === 'GET /api/auth/me' && !('authorization' in calls[0].h));
+  ok('S1 its answer is read (the page settles)', calls[0].read === true);
   stubFetch(userRoutes('u9'));
   setSessionToken('tok-S'); // a new sign-in after start
   await tick(40);
@@ -299,6 +461,7 @@ for (const [label, ans] of [['404', { status: 404, body: {} }], ['403', { status
   const p = endServerSession(getSessionToken()); api.clearSession(); await p;
   ok('L1 cookie sign-out: one POST /api/auth/logout on the cookie', calls.length === 1 && !('authorization' in calls[0].h) && calls[0].h['x-shutfey-auth'] === 'cookie' && calls[0].opts.credentials === 'same-origin');
   ok('L1 keepalive', calls[0].opts.keepalive === true);
+  ok('L1 the answer is read', calls[0].read === true);
   ok('L1 signed out locally, nothing pending', !isCookieSession() && localStorage.getItem('shutfey_logout_pending') === null);
 }
 {
