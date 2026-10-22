@@ -8842,15 +8842,21 @@ app.post('/api/reset-links/accept', async (req, res) => {
           }
           return nu;
         });
-        // E1: every older session of every row of the person dies. Legacy rows
-        // (no personId) hold only v1 tokens, which need epoch 0 (as today's reset).
-        const bumpIds = personRows.filter((u: any) => typeof u.personId === 'string' && u.personId).map((u: any) => String(u.id));
+        // E1: every older session of every row of the person dies. [10L-RV1 B1]
+        // A legacy row (no personId) holds only v1 tokens, which live while
+        // its epoch is 0: it is migrated in this same commit (personId =
+        // row.id, the migrator's sanctioned writer; dual-write's final guard
+        // aborts the commit on a stale people doc) and bumped, so every v1
+        // token dies and the new session below is a v2 token.
+        const legacyIds = personRows.filter((u: any) => !(typeof u.personId === 'string' && u.personId)).map((u: any) => String(u.id));
+        const bumpIds = personRows.map((u: any) => String(u.id));
         const linkEmail = String(link.email || '');
         const newResets = docList(freshDoc, 'passwordResets').filter((r: any) => !r || !(personIds.has(String(r.rowId || '')) || (linkEmail && normalizeInviteEmail(r.email) === linkEmail)));
         return {
           doc: { ...freshDoc, users: newUsers, passwordResets: newResets, resetLinks: freshLinks.map((l: any) => (l === link ? usedLink : l)) },
           result: { kind: 'ok', rowId: String(row.id), personRowIds: Array.from(personIds), pausedIds: setIds },
-          ...(bumpIds.length ? { tokenEpochBumpIds: bumpIds } : {}),
+          ...(legacyIds.length ? { identityMigrateRowIds: legacyIds } : {}),
+          tokenEpochBumpIds: bumpIds,
           // An admin held the link: the credential is not provably personal (same downgrade as today's agency reset).
           credentialOriginSetById: { [String(cred.id)]: 'agency-reset' },
           // Q-L3: the person's recovery codes are cleared (through the sanctioned writer).

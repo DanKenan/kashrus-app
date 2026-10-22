@@ -29,6 +29,8 @@
  *  L  no raw token, hash, stamp or resetSuspended in GET payloads, the admin
  *     export or WS frames; preview carries only firstName, agencyName, expiresAt.
  *  C  capacity: 1000 live links -> 503, nothing dropped; a used record is dropped first.
+ *  V  Send invite (10k) revokes a live reset link (member-changed); the member then gets 409.
+ *  G  a legacy row (no personId): its v1 tokens die; migrated + bumped in the accept commit.
  *  R  public routes: one 404 body; per-IP 429 on preview.
  *  X  source pins: one eligibility rule; resetSuspended writers.
  */
@@ -143,8 +145,12 @@ export default {
       });
       planted.push({ id: U('pB'), email: pA.email, name: 'Pat T73 in B', role: 'mashgiach', agencyId: B, venueId: B1, personId: pA.personId, avatarColor: '#64748b', kioskPin: PIN, permissions: { canFillTasks: true, canAssignTasks: false } });
       planted.push({ id: U('pC'), email: pA.email, name: 'Pat T73 in C', role: 'mashgiach', agencyId: C, venueId: C1, personId: pA.personId, avatarColor: '#64748b' });
+      // [10L-RV1 B1]: a genuine legacy row (no personId), as before the 8c migration.
+      planted.push({ id: U('lg'), email: E('lg'), name: 'T73 Legacy', role: 'mashgiach', agencyId: A, venueId: A1, avatarColor: '#64748b', permissions: { canFillTasks: true, canAssignTasks: false } });
       assert((await hook('doc-set-users', { users: planted })).status === 200, 'plant multi person + markers');
       await rehydrate();
+      assert((await hook('set-password', { userId: U('lg'), password: PW })).status === 200, 'set-password lg');
+      assert(!(await rowOf(U('lg'))).personId, 'lg is a legacy row');
     }
     const tA = await mintToken(baseUrl, U('adA'));
     const tCo = await mintToken(baseUrl, U('coA'));
@@ -478,6 +484,41 @@ export default {
       console.log('  ✓ C 1000 live links -> 503 and nothing dropped; with a used record it is dropped first and the link is made');
     }
 
+    // ---- V: Send invite (10k) revokes a live reset link ----
+    {
+      assert((await hook('phase-c', { agencyId: A, enabled: true })).status === 200, 'V flag on');
+      try {
+        const r = await make(tA, U('m2'));
+        assert(r.status === 201, `V make ${r.status}`);
+        const raw = tokenOf(r.json.link);
+        const si = await call('POST', `/api/users/${U('m2')}/invite`, auth(tA), { expectedVersion: await ctx.getVersion() });
+        assert(si.status === 201, `V send invite ${si.status} ${si.text.slice(0, 100)}`);
+        assert((await preview(raw)).status === 404, 'V the reset link is dead after Send invite');
+        assert((await linksOf(U('m2'))).some((l) => l.status === 'revoked' && l.revokeReason === 'member-changed'), 'V revoked member-changed');
+        assert((await make(tA, U('m2'))).status === 409, 'V a pending (Send invite) member gets no new link (409)');
+      } finally {
+        await hook('phase-c', { agencyId: A, enabled: false });
+      }
+      console.log('  ✓ V Send invite revokes the live reset link in its own commit (member-changed); the pending member gets 409');
+    }
+
+    // ---- G: [10L-RV1 B1] a legacy row's v1 sessions die too ----
+    {
+      const v1 = (await hook('mint-token', { userId: U('lg'), legacy: true })).json?.token;
+      assert(typeof v1 === 'string' && v1, 'G v1 token minted');
+      assert((await call('GET', '/api/tasks', auth(v1))).status === 200, 'G the v1 token works before');
+      const r = await make(tA, U('lg'));
+      assert(r.status === 201, `G make ${r.status} ${r.text.slice(0, 120)}`);
+      const acc = await accept(tokenOf(r.json.link), 'g-new-password-73');
+      assert(acc.status === 200 && typeof acc.json?.token === 'string', `G accept ${acc.status} ${acc.text.slice(0, 160)}`);
+      assert((await call('GET', '/api/tasks', auth(v1))).status === 401, 'G the old v1 token is 401 after the reset');
+      assert((await call('GET', '/api/tasks', auth(acc.json.token))).status === 200, 'G the replacement session works');
+      const lg = await rowOf(U('lg'));
+      assert(lg.personId === U('lg') && lg.tokenEpoch === 1, `G migrated + bumped in the same commit (${lg.personId}, ${lg.tokenEpoch})`);
+      assert((await login(E('lg'), PW)).status === 401 && (await login(E('lg'), 'g-new-password-73')).status === 200, 'G old password 401, new 200');
+      console.log('  ✓ G legacy row: a pre-reset v1 token is 401 after the reset; the row is migrated + bumped in the accept commit; the replacement session works');
+    }
+
     // ---- R: public routes ----
     {
       const unknown = await preview('A'.repeat(43));
@@ -504,6 +545,6 @@ export default {
       assert(susp.length === 1 && conf.length === 1, `X one producer each (${susp.length}/${conf.length})`);
       console.log('  ✓ X one eligibility rule (issuer, resolver, kiosk, membership list); one producer per resetSuspended writer');
     }
-    return 'W N Q A E M S P F L C R X';
+    return 'W N Q A E M S P F L C V G R X';
   },
 };
