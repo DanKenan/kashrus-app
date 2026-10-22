@@ -35,6 +35,7 @@ import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetTok
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN, PLATFORM_OPERATOR_USER_ID } from './src/server/platform-auth.js';
+import { rewriteEmailRefs } from './src/server/account-merge.js';
 import { log } from './src/server/log.ts';
 import {
   DEFAULT_TIME_ZONE,
@@ -3622,7 +3623,9 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, outcome: any, la
       if (row && row.personId === pid && pid !== rowId) acceptedJoins.add(rowId);
     }
   }
-  const check = checkMembershipInvariants(beforeUsers, users, agencies, acceptedJoins.size ? { allowGrowthRowIds: acceptedJoins } : {});
+  // 10M part 2: a sanctioned person merge lets exactly two stored groups join.
+  const mergeOpt = extra.personMerge ? { mergePersons: { fromPersonId: extra.personMerge.fromPersonId, toPersonId: extra.personMerge.toPersonId } } : {};
+  const check = checkMembershipInvariants(beforeUsers, users, agencies, { ...(acceptedJoins.size ? { allowGrowthRowIds: acceptedJoins } : {}), ...mergeOpt });
   for (const issue of check.preexisting) {
     const sig = `${issue.code}:${issue.rowIds.join(',')}`;
     if (identityPreexistingLogged.has(sig)) continue;
@@ -7791,6 +7794,7 @@ app.post('/api/agencies/register', async (req, res) => {
 // the password is the proof (P1.4); kiosk tokens are refused.
 // ---------------------------------------------------------------------------
 const REGISTER_EXISTING_FAIL_LIMIT = { max: 5, windowMs: 15 * 60 * 1000 };
+// Shared with the 10M part 2 account merge (typed-email password proofs).
 const registerExistingFailLimiter = createWindowLimiter({ ...REGISTER_EXISTING_FAIL_LIMIT, maxKeys: 10000 });
 const REGISTER_EXISTING_MAX_PER_DAY = 3;
 const ACCOUNT_NOT_LINKABLE = { error: "This account can't add an agency here. Please contact support.", code: 'ACCOUNT_NOT_LINKABLE' } as const;
@@ -14792,6 +14796,225 @@ app.post('/api/auth/change-password', async (req, res) => {
   if (!changedToken) return res.status(403).json(ineligibleBody(freshCallerRow, true)); // QA2 #8 / 10L
   res.json({ success: true, message: 'Password updated successfully.', token: changedToken });
 });
+
+// ---------------------------------------------------------------------------
+// 10M part 2 ("Agreed — 10M part 2", design v4 in files/shutfey-10M-design.txt):
+// merge two accounts. Don's rule: A = the main account survives (email +
+// password stay); B's memberships move under A and B's login stops working.
+// Two entry points, one outcome:
+//   POST /api/account/merge-into — signed in as B; types A's email+password
+//                                  and B's own currentPassword (step-up).
+//   POST /api/account/bring-in   — signed in as A; types B's email+password.
+// One commit: identity personMerge + every session of A and B ends + B's
+// kiosk sessions end + B's email references inside B's agencies become A's +
+// B's invites / reset links / reset requests / push subscriptions end. The
+// calling device gets a fresh token for its own row (now one of A's).
+// ---------------------------------------------------------------------------
+const MERGE_FAIL_LIMIT = { max: 5, windowMs: 15 * 60 * 1000 };
+const mergeIpLimiter = createWindowLimiter({ max: 10, windowMs: 60 * 60 * 1000, maxKeys: 10000 });
+const mergePersonLimiter = createWindowLimiter({ max: 10, windowMs: 60 * 60 * 1000, maxKeys: 10000 });
+const mergeFailLimiter = createWindowLimiter({ ...MERGE_FAIL_LIMIT, maxKeys: 10000 });
+const MERGE_OPERATION_RE = /^[A-Za-z0-9_-]{8,100}$/;
+const MERGE_LOGIN_FAILED = { error: LOGIN_FAILED_TEXT, code: 'MERGE_LOGIN_FAILED' } as const;
+const MERGE_CURRENT_PASSWORD_WRONG = { error: 'Your password is incorrect.', code: 'MERGE_CURRENT_PASSWORD_WRONG' } as const;
+const MERGE_SAME_ACCOUNT = { error: "That's the account you're signed in with.", code: 'MERGE_SAME_ACCOUNT' } as const;
+const MERGE_SHARED_AGENCY = { error: "Both accounts are in the same agency, so they can't be merged. Ask that agency's admin to remove one of them first.", code: 'MERGE_SHARED_AGENCY' } as const;
+const MERGE_STALE = { error: 'Your accounts changed. Please sign in again.', code: 'MERGE_STALE' } as const;
+const MERGE_NEEDS_CHECK = { error: 'Some older records need a check before these accounts can be merged. Please contact Shutfey support.', code: 'MERGE_NEEDS_CHECK' } as const;
+const MERGE_NOT_LINKABLE = { error: "These accounts can't be merged here. Please contact support.", code: 'ACCOUNT_NOT_LINKABLE' } as const;
+
+type MergeVia = 'merge-into' | 'bring-in';
+type MergeRefusal = { status: number; body: { error: string; code: string } };
+
+/** M5: the refusals after proof (same function on cached and on FRESH data). */
+function mergeRefusal(rows: any[], agencyList: any[], survivorCred: any, retiredCred: any): MergeRefusal | null {
+  const sp = typeof survivorCred?.personId === 'string' ? survivorCred.personId : '';
+  const rp = typeof retiredCred?.personId === 'string' ? retiredCred.personId : '';
+  if (!sp || !rp) return { status: 403, body: { ...MERGE_NOT_LINKABLE } };
+  if (sp === rp) return { status: 409, body: { ...MERGE_SAME_ACCOUNT } };
+  if (!credentialMayLink(survivorCred.credentialOrigin) || !credentialMayLink(retiredCred.credentialOrigin)) return { status: 403, body: { ...MERGE_NOT_LINKABLE } };
+  const sRows = rows.filter((u: any) => u && u.personId === sp);
+  const rRows = rows.filter((u: any) => u && u.personId === rp);
+  if (!sRows.length || !rRows.length) return { status: 409, body: { ...MERGE_STALE } };
+  const all = [...sRows, ...rRows];
+  if (all.some((u: any) => isPlatformOperator(u.id, false, rows as any))) return { status: 403, body: { ...MERGE_NOT_LINKABLE } };
+  if (all.some((u: any) => u.credentialPending)) return { status: 403, body: { ...MERGE_NOT_LINKABLE } };
+  if (all.some((u: any) => u.resetSuspended)) return { status: 403, body: { ...RESET_CONFIRM_NEEDED } };
+  if (invitePersonNeedsCheck(rows, agencyList, String(survivorCred.email || '')) || invitePersonNeedsCheck(rows, agencyList, String(retiredCred.email || ''))) {
+    return { status: 409, body: { ...INVITE_PERSON_NEEDS_CHECK } };
+  }
+  const sAgencies = new Set<string>(sRows.map((u: any) => u.agencyId || 'agency-hkc'));
+  if (rRows.some((u: any) => sAgencies.has(u.agencyId || 'agency-hkc'))) return { status: 409, body: { ...MERGE_SHARED_AGENCY } };
+  return null;
+}
+
+async function accountMergeRoute(req: any, res: any, via: MergeVia) {
+  res.set('Cache-Control', 'no-store');
+  if ((req as any).kiosk === true) return res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
+  const authUser = requireAuthUser(req, res);
+  if (!authUser) return;
+  const body = req.body || {};
+  const { email, password, currentPassword, confirm, operationId } = body;
+  if (typeof email !== 'string' || !email.trim() || typeof password !== 'string' || !password ||
+      (via === 'merge-into' && (typeof currentPassword !== 'string' || !currentPassword)) ||
+      confirm !== true || typeof operationId !== 'string' || !MERGE_OPERATION_RE.test(operationId)) {
+    return res.status(400).json({
+      error: via === 'merge-into'
+        ? 'Main account email, password, your own password, confirm and operationId are required.'
+        : 'Email, password, confirm and operationId are required.',
+      code: 'MERGE_INVALID',
+    });
+  }
+  const typedEmail = email.trim().toLowerCase();
+  const caller: any = users.find((u) => u.id === authUser.id);
+  if (!caller) return res.status(409).json({ ...MERGE_STALE });
+  const callerPid = typeof caller.personId === 'string' && caller.personId ? caller.personId : '';
+  // M3: per-IP and per-person budgets, counted BEFORE any password is looked at.
+  const tooMany = (retryAfterSec: number, what = 'requests') => {
+    res.setHeader('Retry-After', String(retryAfterSec));
+    return res.status(429).json({ error: `Too many ${what}. Please try again in ${Math.ceil(retryAfterSec / 60)} minute(s).`, code: 'RATE_LIMITED' });
+  };
+  const ipHit = mergeIpLimiter.hit(`account-merge|${getClientIp(req)}`, Date.now());
+  if (!ipHit.allowed) return tooMany(ipHit.retryAfterSec);
+  const personHit = mergePersonLimiter.hit(`account-merge|person|${callerPid || caller.id}`, Date.now());
+  if (!personHit.allowed) return tooMany(personHit.retryAfterSec);
+  // M3: failed password checks on the typed email share ONE budget with
+  // 10M part 1 (POST /api/agencies/register-existing): same limiter, same key.
+  const typedFailKey = `register-existing|${typedEmail}`;
+  const currentFailKey = `account-merge|current|${callerPid || caller.id}`;
+  const tb = registerExistingFailLimiter.blocked(typedFailKey, Date.now());
+  if (tb.blocked) return tooMany(tb.retryAfterSec, 'attempts');
+  if (via === 'merge-into') {
+    const cb = mergeFailLimiter.blocked(currentFailKey, Date.now());
+    if (cb.blocked) return tooMany(cb.retryAfterSec, 'attempts');
+  }
+  // M4: proofs, bcrypt OUTSIDE the transaction.
+  const callerCred: any = credentialRowForRowIn(users, agencies, caller);
+  if (!callerCred) return res.status(409).json({ ...MERGE_STALE });
+  if (via === 'merge-into') {
+    const ok = isBcryptHash(callerCred.password) && !callerCred.credentialPending && (await checkPassword(String(currentPassword), callerCred.password)) === 'valid';
+    if (!ok) {
+      mergeFailLimiter.hit(currentFailKey, Date.now());
+      return res.status(403).json({ ...MERGE_CURRENT_PASSWORD_WRONG });
+    }
+  }
+  const typedCred: any = credentialRowForEmailIn(users, agencies, typedEmail);
+  const typedOk = !!typedCred && isBcryptHash(typedCred.password) && !typedCred.credentialPending && (await checkPassword(password, typedCred.password)) === 'valid';
+  if (!typedOk) {
+    registerExistingFailLimiter.hit(typedFailKey, Date.now());
+    return res.status(403).json({ ...MERGE_LOGIN_FAILED });
+  }
+  const survivorCred: any = via === 'merge-into' ? typedCred : callerCred;
+  const retiredCred: any = via === 'merge-into' ? callerCred : typedCred;
+  const pre = mergeRefusal(users as any[], agencies as any[], survivorCred, retiredCred);
+  if (pre) return res.status(pre.status).json(pre.body);
+  const verified = {
+    callerId: String(caller.id), callerPid,
+    survivorCredId: String(survivorCred.id), survivorHash: String(survivorCred.password), survivorPid: String(survivorCred.personId),
+    retiredCredId: String(retiredCred.id), retiredHash: String(retiredCred.password), retiredPid: String(retiredCred.personId),
+  };
+  // The key is scoped to the calling row; the payload hash never includes a password.
+  const payloadHash = crypto.createHash('sha256').update(JSON.stringify({ via, email: typedEmail })).digest('hex').slice(0, 16);
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const fu: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const fa: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      // M5 fresh-only: same caller person, same credential rows, same hashes as verified.
+      const fCaller = fu.find((u: any) => u && u.id === verified.callerId);
+      if (!fCaller || (typeof fCaller.personId === 'string' ? fCaller.personId : '') !== verified.callerPid) return { conflict: MERGE_STALE.error, conflictStatus: 409, conflictCode: MERGE_STALE.code };
+      const fCallerCred = credentialRowForRowIn(fu, fa, fCaller);
+      const fTyped = credentialRowForEmailIn(fu, fa, typedEmail);
+      const fSurvivor = via === 'merge-into' ? fTyped : fCallerCred;
+      const fRetired = via === 'merge-into' ? fCallerCred : fTyped;
+      if (!fSurvivor || !fRetired || String(fSurvivor.id) !== verified.survivorCredId || String(fRetired.id) !== verified.retiredCredId ||
+          String(fSurvivor.password) !== verified.survivorHash || String(fRetired.password) !== verified.retiredHash ||
+          String(fSurvivor.personId) !== verified.survivorPid || String(fRetired.personId) !== verified.retiredPid) {
+        return { conflict: MERGE_STALE.error, conflictStatus: 409, conflictCode: MERGE_STALE.code };
+      }
+      const refusal = mergeRefusal(fu, fa, fSurvivor, fRetired);
+      if (refusal) return { conflict: refusal.body.error, conflictStatus: refusal.status, conflictCode: refusal.body.code };
+      const A = verified.survivorPid;
+      const B = verified.retiredPid;
+      const survivorEmail = normalizeInviteEmail(fSurvivor.email);
+      const retiredEmail = normalizeInviteEmail(fRetired.email);
+      if (!survivorEmail || !retiredEmail || survivorEmail === retiredEmail) return { conflict: MERGE_STALE.error, conflictStatus: 409, conflictCode: MERGE_STALE.code };
+      const aRows = fu.filter((u: any) => u && u.personId === A);
+      const bRows = fu.filter((u: any) => u && u.personId === B);
+      const bIds = new Set<string>(bRows.map((u: any) => String(u.id)));
+      const bAgencyIds = new Set<string>(bRows.map((u: any) => u.agencyId || 'agency-hkc'));
+      // M6a: B rows take A's personId + email (the identity writer strips their credential fields).
+      const newUsers = fu.map((u: any) => (u && bIds.has(String(u.id)) ? { ...u, personId: A, email: survivorEmail } : u));
+      // M6c: B's email references inside B's agencies become A's.
+      const rw = rewriteEmailRefs(freshDoc, bAgencyIds, retiredEmail, survivorEmail);
+      if (rw.ok !== true) {
+        const bad: any = rw;
+        log.warn(`[account-merge] refused: an ambiguous legacy record holds the retired email (${bad.collection} ${bad.recordId})`);
+        return { conflict: MERGE_NEEDS_CHECK.error, conflictStatus: 409, conflictCode: MERGE_NEEDS_CHECK.code };
+      }
+      const { patch, replaced } = rw as { patch: Record<string, any[]>; replaced: number };
+      // M6d: B's invites, reset links, reset requests and push subscriptions end.
+      const fInv: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
+      const invites = fInv.map((i: any) =>
+        i && i.status === 'pending' && normalizeInviteEmail(i.email) === retiredEmail
+          ? { ...i, status: 'revoked', revokedAt: nowIso, revokedBy: verified.callerId, revokeReason: 'account-merged' } : i);
+      const fLinks: any[] = Array.isArray(freshDoc.resetLinks) ? freshDoc.resetLinks : [];
+      const resetLinks = fLinks.map((l: any) =>
+        l && isLiveResetLink(l, resetNowMs()) && (bIds.has(String(l.memberId)) || l.personId === B)
+          ? { ...l, status: 'revoked', revokedAt: nowIso, revokedBy: verified.callerId, revokeReason: 'account-merged' } : l);
+      const fResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      const passwordResets = fResets.filter((r: any) => !(r && normalizeInviteEmail(r.email) === retiredEmail));
+      const fSubs: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
+      const pushSubscriptions = fSubs.filter((s: any) => !(s && ((typeof s.userId === 'string' && bIds.has(s.userId)) || (isLegacyPushSub(s) && normalizeInviteEmail(s.userEmail) === retiredEmail))));
+      // M6b: every session of A and B ends; B's kiosk sessions end (PINs stay).
+      const bumpIds = [...aRows, ...bRows].map((u: any) => String(u.id));
+      const kioskRevIds = bRows.filter((u: any) => !!(u.kioskPinHash || u.kioskPin)).map((u: any) => String(u.id));
+      const survivorSingle = aRows.length === 1;
+      return {
+        doc: { ...freshDoc, ...patch, users: newUsers, invites, resetLinks, passwordResets, pushSubscriptions },
+        result: {
+          survivorPersonId: A, retiredPersonId: B, callerRowId: verified.callerId,
+          movedRowIds: [...bIds], bumpIds, kioskRevIds,
+          agencyIds: [...new Set<string>([...aRows, ...bRows].map((u: any) => u.agencyId || 'agency-hkc'))],
+          retiredAgencyIds: [...bAgencyIds], replaced,
+        },
+        personMerge: { fromPersonId: B, toPersonId: A, email: survivorEmail },
+        tokenEpochBumpIds: bumpIds,
+        ...(kioskRevIds.length ? { kioskRevBumpIds: kioskRevIds } : {}),
+        ...(survivorSingle ? { firstMultiOwnerIds: [String(fSurvivor.id)] } : {}),
+      };
+    },
+    { label: 'account-merge', idempotencyKey: `account-merge|${verified.callerId}|${operationId}`, payloadHash, returnDuplicate: true }
+  );
+  if (!committed) return;
+  const r: any = (committed as any).result || {};
+  const replay = (committed as any).duplicate === true;
+  const row: any = users.find((u) => u.id === verified.callerId);
+  if (!row || typeof r.survivorPersonId !== 'string' || row.personId !== r.survivorPersonId) return res.status(409).json({ ...MERGE_STALE });
+  if (!replay) {
+    for (const id of (Array.isArray(r.bumpIds) ? r.bumpIds : [])) revokeUserPhoneSockets(String(id));
+    for (const id of (Array.isArray(r.kioskRevIds) ? r.kioskRevIds : [])) revokeUserKioskSockets(String(id));
+    for (const agencyId of (Array.isArray(r.agencyIds) ? r.agencyIds : [])) {
+      broadcast('USERS_UPDATED', { agencyId }, undefined, agencyId, (meta, base) => ({
+        ...base,
+        users: getSafeUsersForAgency(agencyId, recipientForMeta(meta)),
+      }));
+    }
+    // M6g: the audit line — ids only, never an email or a password.
+    const opTag = crypto.createHash('sha256').update(String(operationId)).digest('hex').slice(0, 8);
+    log.info(`[audit] account-merge via=${via} survivor=${r.survivorPersonId} retired=${r.retiredPersonId} rows=${(r.movedRowIds || []).join(',')} agencies=${(r.retiredAgencyIds || []).join(',')} refs=${Number(r.replaced) || 0} op=${opTag}`);
+  }
+  const token = issueSessionToken(row);
+  if (!token) return res.status(403).json(ineligibleBody(row));
+  const memberships = membershipsOfPerson(String(row.personId)).map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role }));
+  res.json({ success: true, merged: true, token, email: normEmail10e(row.email), user: getSelfUser(row), memberships });
+}
+
+app.post('/api/account/merge-into', (req, res) => accountMergeRoute(req, res, 'merge-into'));
+app.post('/api/account/bring-in', (req, res) => accountMergeRoute(req, res, 'bring-in'));
 
 // ---------------------------------------------------------------------------
 // 10g (plan v4): sign-in with several memberships + switch (server side).

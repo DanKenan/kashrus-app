@@ -100,6 +100,18 @@ export function deriveIdentityFields(
   return { venueAccess, isPrimaryAdmin };
 }
 
+/** 10M part 2: fromPersonId (retired) is merged into toPersonId (survivor), whose stored email is email. */
+export interface PersonMerge { fromPersonId: string; toPersonId: string; email: string }
+
+/** 10M part 2: a well-formed merge record (two different non-empty personIds and an email), else null. */
+export function personMergeOf(v: any): PersonMerge | null {
+  if (!v || typeof v !== 'object') return null;
+  const { fromPersonId, toPersonId, email } = v;
+  if (typeof fromPersonId !== 'string' || !fromPersonId || typeof toPersonId !== 'string' || !toPersonId || fromPersonId === toPersonId) return null;
+  if (typeof email !== 'string' || !normalizeEmail(email)) return null;
+  return { fromPersonId, toPersonId, email: normalizeEmail(email) };
+}
+
 export interface IdentityEnforceOptions {
   /**
    * 8c only: ids of legacy rows the identity migrator is migrating in this
@@ -123,6 +135,15 @@ export interface IdentityEnforceOptions {
    * the before value and reported through onViolation.
    */
   kioskRevBumpIds?: ReadonlySet<string>;
+  /**
+   * 10M part 2: the ONE sanctioned merge of two persons. Every EXISTING row
+   * whose stored personId is fromPersonId gets personId toPersonId and the
+   * survivor's email, and loses every credential field (password,
+   * credentialOwner, credentialOrigin, credentialPending, recoveryCodeHashes,
+   * recoveryFailures). Rows of other persons are untouched by it. The checker
+   * accepts the merged group only through InvariantOptions.mergePersons.
+   */
+  personMerge?: PersonMerge;
   /**
    * 9a: the ONLY way venueAccess changes beyond the home venue. Row id → the
    * full list the server validated in this commit (admin venue grant, venue
@@ -250,9 +271,11 @@ export interface IdentityOutcomeFields {
   resetConfirm?: { rowId: string; adminId: string };
   /** QA2S2 #15 ([DS2] B2): rows whose kioskPinRev goes up by exactly 1 (see kioskRevBumpIds). */
   kioskRevBumpIds?: string[];
+  /** 10M part 2: the person merge of this commit (see personMerge). */
+  personMerge?: PersonMerge;
 }
 
-export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById' | 'firstMultiOwnerIds' | 'credentialPendingWriteById' | 'resetSuspension' | 'resetConfirm' | 'kioskRevBumpIds'> {
+export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById' | 'firstMultiOwnerIds' | 'credentialPendingWriteById' | 'resetSuspension' | 'resetConfirm' | 'kioskRevBumpIds' | 'personMerge'> {
   const o: any = outcome || {};
   const asMap = (r: any) => (r && typeof r === 'object' && !Array.isArray(r) && Object.keys(r).length ? new Map<string, string>(Object.entries(r).filter(([, v]) => typeof v === 'string') as [string, string][]) : undefined);
   return {
@@ -281,6 +304,7 @@ export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null
         ? { rowId: o.resetConfirm.rowId, adminId: o.resetConfirm.adminId }
         : undefined,
     kioskRevBumpIds: Array.isArray(o.kioskRevBumpIds) && o.kioskRevBumpIds.length ? new Set<string>(o.kioskRevBumpIds.filter((x: any) => typeof x === 'string')) : undefined,
+    personMerge: personMergeOf(o.personMerge) ?? undefined,
   };
 }
 
@@ -379,7 +403,8 @@ export function enforceIdentityFields(
       if (opts.firstMultiOwnerIds?.has(row.id)) {
         const pid = typeof prev.personId === 'string' ? prev.personId : '';
         const alone = pid !== '' && !(Array.isArray(beforeUsers) ? beforeUsers : []).some((b: any) => b && b.id !== row.id && b.personId === pid);
-        const joined = pid !== '' && !!opts.newMembership && Array.from(opts.newMembership.values()).includes(pid);
+        // 10M part 2: a person merge into this (single-row) person is also its first multi join.
+        const joined = pid !== '' && ((!!opts.newMembership && Array.from(opts.newMembership.values()).includes(pid)) || opts.personMerge?.toPersonId === pid);
         if (alone && joined && prev.credentialOwner !== true && isBcrypt(prev.password) && isBcrypt(out.password) && !transferSrc) out.credentialOwner = true;
         else if (opts.onViolation) opts.onViolation(row.id, 'firstMultiOwner');
       }
@@ -483,6 +508,16 @@ export function enforceIdentityFields(
       if (opts.onOriginChange && (before ?? null) !== (out.credentialOrigin ?? null))
         opts.onOriginChange(row.id, before ?? null, out.credentialOrigin ?? null);
     }
+    // 10M part 2: the person merge (see personMerge). Applied after the
+    // preserve/pending/origin blocks so a merged row ends with NO credential
+    // field whatever they restored; the survivor's rows are never touched here.
+    if (prev && opts.personMerge && typeof prev.personId === 'string' && prev.personId !== '' && prev.personId === opts.personMerge.fromPersonId) {
+      out.personId = opts.personMerge.toPersonId;
+      out.email = opts.personMerge.email;
+      const originBefore = out.credentialOrigin;
+      for (const f of ['password', 'credentialOwner', 'credentialOrigin', 'credentialPending', 'recoveryCodeHashes', 'recoveryFailures']) delete out[f];
+      if (opts.onOriginChange && originBefore !== undefined) opts.onOriginChange(row.id, originBefore, null);
+    }
     if (prev) {
       // QA2S2 #15 ([DS2] B2): kioskPinRev is guarded (see kioskRevBumpIds).
       const revOf = (x: any): number | undefined => (Number.isInteger(x?.kioskPinRev) && x.kioskPinRev >= 0 ? x.kioskPinRev : undefined);
@@ -562,6 +597,13 @@ export interface InvariantOptions {
    * every invariant. Absent (10b–10h) = every new group is refused.
    */
   allowGrowthRowIds?: ReadonlySet<string>;
+  /**
+   * 10M part 2: the person merge of this commit. A group that joins two
+   * stored groups is accepted (then fully evaluated) only when it is EXACTLY
+   * the stored group of fromPersonId plus the stored group of toPersonId,
+   * with no new row.
+   */
+  mergePersons?: { fromPersonId: string; toPersonId: string };
 }
 
 const CREDENTIAL_ONLY_FIELDS = ['credentialOrigin', 'recoveryCodeHashes', 'recoveryFailures'] as const;
@@ -691,6 +733,20 @@ export function checkMembershipInvariants(
     const home = homes.size === 1 ? beforeGroupOf.get(stored[0])! : null;
     const gained = home ? g.filter((id) => !home.includes(id)) : g;
     if (gained.length > 0) {
+      const mp = options.mergePersons;
+      if (mp && home === null && homes.size === 2 && g.every((id) => beforeById.has(id))) {
+        const groupOfPerson = (pid: string): string[] | null => {
+          const r = before.find((u: any) => u.personId === pid);
+          return r ? beforeGroupOf.get(r.id) ?? null : null;
+        };
+        const fromG = groupOfPerson(mp.fromPersonId);
+        const toG = groupOfPerson(mp.toPersonId);
+        const union = fromG && toG && fromG !== toG ? new Set<string>([...fromG, ...toG]) : null;
+        if (union && union.size === g.length && g.every((id) => union.has(id))) {
+          refused.push(...groupIssues(rows, afterAgencies));
+          continue;
+        }
+      }
       const allow = options.allowGrowthRowIds;
       const allowed = !!allow && home !== null && gained.every((id) => allow.has(id) && !beforeById.has(id));
       if (!allowed) { refused.push({ code: 'group-created', rowIds: g }); continue; }
