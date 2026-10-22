@@ -77,6 +77,8 @@ const hdr = src('src/components/Header.tsx');
 ok('S header: venue name is no longer hidden on phones with a logo', !hdr.includes("agencyLogoSrc ? ' max-sm:hidden'"));
 const vdm = src('src/components/VenuesDirectoryModal.tsx');
 ok('S venues: Edit venue opens the sheet (admin only)', vdm.includes('data-edit-venue') && vdm.includes('<EditVenueSheet'));
+{ const btn = (vdm.match(/<button[^]*?data-edit-venue[^]*?className="([^"]*)"/) || [])[1] || '';
+  ok('S venues: Edit venue is a 44px target on phones (min-h-11 min-w-11)', btn.split(' ').includes('min-h-11') && btn.split(' ').includes('min-w-11'), btn); }
 
 console.log(`${passed} passed, ${failures} failed.`);
 process.exit(failures ? 1 : 0);

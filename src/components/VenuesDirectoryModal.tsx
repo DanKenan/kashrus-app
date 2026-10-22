@@ -306,7 +306,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                             aria-labelledby={`${nameId}-editv ${nameId}`}
                             title="Edit venue name, address and type"
                             onClick={(e) => { e.stopPropagation(); setVenueToEdit(venue); }}
-                            className="pressable flex items-center gap-1 text-xs p-1.5 rounded-lg transition cursor-pointer shrink-0 bg-surface border border-line-control text-ink hover:bg-sunken"
+                            className="pressable min-h-11 min-w-11 flex items-center justify-center gap-1 text-xs px-2 rounded-lg transition cursor-pointer shrink-0 bg-surface border border-line-control text-ink hover:bg-sunken"
                           >
                             <Pencil className="w-3.5 h-3.5" />
                             <span id={`${nameId}-editv`} className="text-xs font-semibold"><span className="sr-only sm:not-sr-only">Edit venue</span></span>
