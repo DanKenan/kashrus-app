@@ -13,8 +13,9 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { VenuesDirectoryModal } from '../../src/components/VenuesDirectoryModal.tsx';
-import { HistoryLogModal } from '../../src/components/HistoryLogModal.tsx';
+import { HistoryLogModal, resetByText } from '../../src/components/HistoryLogModal.tsx';
 import { formatExactTime } from '../../src/lib/utils.ts';
+import { formatWorkDate } from '../../src/lib/dateText.ts';
 
 let passed = 0;
 let failures = 0;
@@ -50,7 +51,7 @@ for (const isAdmin of [true, false]) {
   const html = renderVenues(venues, isAdmin);
   const text = textOf(html);
   // P: page-level labels kept
-  for (const s of ['Kosher Venues & Restaurants Platform Hub', `${venues.length} Facilities`, 'Switch between venues or establish a new certified kosher restaurant, bakery, or caterer platform.', 'All Establishments', 'Supermarket', 'Catering hall', 'Bakery', 'Restaurant', 'Close Hub',
+  for (const s of ['Venues', `${venues.length} Facilities`, 'Switch between venues or establish a new certified kosher restaurant, bakery, or caterer platform.', 'All Establishments', 'Supermarket', 'Catering hall', 'Bakery', 'Restaurant', 'Close Hub',
     isAdmin ? 'All establishments are isolated with dedicated tasks, mashgichim, and history.' : 'You have access to this certified venue platform.']) ok(`P.venues.label ${who}: ${s}`, text.includes(s));
   ok(`P.venues.search ${who}`, decode(html).includes('placeholder="Search by venue, address, or hashgacha..."'));
   ok(`P.venues.newVenue ${who}`, text.includes('New Venue') === isAdmin || (!isAdmin && !/New Venue(?! \(no)/.test(text)));
@@ -62,9 +63,9 @@ for (const isAdmin of [true, false]) {
     ok(`P.venues.staff ${who} ${v.id}`, text.includes(`${v.workerCount} staff members`));
   }
   ok(`P.venues.shiftLabel ${who}`, count(text, 'Shift Completion') === venues.length, `${count(text, 'Shift Completion')}`);
-  ok(`P.venues.current ${who}`, count(text, 'Active Platform') === 1 && count(text, 'Viewing Now') === 1);
-  ok(`P.venues.switch ${who}`, count(text, 'Switch to Platform') === venues.length - 1);
-  ok(`P.venues.delete ${who}`, count(html, 'title="Delete Venue Platform"') === (isAdmin ? venues.length : 0));
+  ok(`P.venues.current ${who}`, count(text, 'Current venue') === 1 && count(text, 'Open now') === 1);
+  ok(`P.venues.switch ${who}`, count(text, 'Open venue') === venues.length - 1);
+  ok(`P.venues.delete ${who}`, count(html, 'title="Delete venue"') === (isAdmin ? venues.length : 0));
   ok(`P.venues.tzRow ${who}`, count(html, 'data-venue-timezone-row') === venues.length);
   // P: the existing order (no new sort)
   const ord = inOrder(text, venues.map((v) => v.name));
@@ -107,12 +108,12 @@ const renderHistory = (h) => renderToStaticMarkup(React.createElement(HistoryLog
   const text = textOf(html);
   for (const s of ['Daily Task History & Audit Log', 'Review retained past daily board records, mashgiach sign-offs, and compliance notes.', 'Archived Board Days', 'Close']) ok(`P.history.label: ${s}`, text.includes(s));
   for (const sn of logs) {
-    ok(`P.history.day ${sn.date}`, text.includes(sn.date));
+    ok(`P.history.day ${sn.date}`, text.includes(formatWorkDate(sn.date))); // QA2 #18/#19: dates read "Tue, Oct 20"
     ok(`P.history.dayRate ${sn.date}`, text.includes(`${sn.completionRate}%`));
     ok(`P.history.dayDone ${sn.date}`, text.includes(`${sn.completedTasks}/${sn.totalTasks} completed`));
   }
-  ok('P.history.dayOrder', inOrder(text, logs.map((l) => l.date)) === true);
-  ok('P.history.archive', text.includes(`Archive: ${snap1.date}`) && text.includes('(Reset by Automatic)'));
+  ok('P.history.dayOrder', inOrder(text, logs.map((l) => formatWorkDate(l.date))) === true);
+  ok('P.history.archive', text.includes(`Archive: ${formatWorkDate(snap1.date)}`) && text.includes('(Reset by Automatic)'));
   ok('P.history.search', decode(html).includes('placeholder="Search logs..."'));
   ok('P.history.export', text.includes('Export CSV') && html.includes('id="export-csv-btn"'));
   for (const e of snap1.entries) {
@@ -125,7 +126,8 @@ const renderHistory = (h) => renderToStaticMarkup(React.createElement(HistoryLog
     }
     if (e.notes) for (const line of e.notes.split('\n')) ok(`P.history.notes ${e.id}`, text.includes(line));
   }
-  ok('P.history.unassigned', count(text, 'Unassigned') === snap1.entries.filter((e) => !e.completedByName && !e.completedByEmail).length);
+  // QA2 #19: a task nobody did reads "Not done"; "Unassigned" stays only for a completed task with no name.
+  ok('P.history.unassigned', count(text, 'Unassigned') + count(text, 'Not done') === snap1.entries.filter((e) => !e.completedByName && !e.completedByEmail).length && count(text, 'Unassigned') === snap1.entries.filter((e) => e.isCompleted && !e.completedByName && !e.completedByEmail).length);
   ok('P.history.noNotes', count(text, 'No notes') === snap1.entries.filter((e) => !e.notes).length);
   ok('P.history.entryOrder', inOrder(text, snap1.entries.map((e) => e.taskTitle)) === true, 'array order kept (no sort by time)');
   // D: ledger shape
@@ -150,7 +152,7 @@ const renderHistory = (h) => renderToStaticMarkup(React.createElement(HistoryLog
   const empty = textOf(renderHistory([]));
   ok('P.history.emptyList', empty.includes('No archives recorded yet.') && empty.includes('Select a date archive to view details.'));
   const emptyDay = textOf(renderHistory([snap2]));
-  ok('P.history.emptyDay', emptyDay.includes('No log entries found.') && emptyDay.includes(`Archive: ${snap2.date}`) && emptyDay.includes(`(Reset by ${snap2.resetBy})`));
+  ok('P.history.emptyDay', emptyDay.includes('No log entries found.') && emptyDay.includes(`Archive: ${formatWorkDate(snap2.date)}`) && emptyDay.includes(`(${resetByText(snap2.resetBy)})`));
 }
 
 console.log(`\n${passed} passed, ${failures} failed.`);

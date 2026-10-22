@@ -104,7 +104,7 @@ async function scenario() {
   const snap = (id, by) => ({ id, date: '2099-06-0' + id.slice(1), totalTasks: 10, completedTasks: 7, completionRate: 70, entries: [], resetAt: '2099-06-01T04:00:00.000Z', resetBy: by });
   const hl = mount(HistoryLogModal, { isOpen: true, onClose: noop, historyLogs: [snap('s1', 'scheduled_midnight_cron'), snap('s2', 'system'), snap('s3', 'rabbi.cohen@test.local')] });
   await hl.render(); const histHtml = [hl.html()];
-  for (const n of [1, 2]) { await hl.click((e) => e.type === 'button' && typeof e.props.onClick === 'function' && JSON.stringify(e.props.children ?? '').includes('2099-06-0' + (n + 1)), 0).catch(() => {}); histHtml.push(hl.html()); }
+  for (const n of [1, 2]) { await hl.click((e) => e.type === 'button' && typeof e.props.onClick === 'function' && /Jun (\d+),/.exec(JSON.stringify(e.props.children ?? ''))?.[1] === String(n + 1), 0).catch(() => {}); histHtml.push(hl.html()); }
   out.history = { html: histHtml.join('\n') };
   return out;
 }

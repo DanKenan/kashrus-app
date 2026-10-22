@@ -64,7 +64,13 @@ async function scenario() {
   await tm.type(/Min 6 characters/, 'secret123');
   await tm.submit().catch(() => {});
   const roleSel = tm.find((e) => e.type === 'select' && e.props.value === 'mashgiach' && typeof e.props.onChange === 'function');
-  if (roleSel.length) { await roleSel[roleSel.length - 1].props.onChange({ target: { value: 'coordinator' } }); await tm.render(); }
+  if (roleSel.length) {
+    await roleSel[roleSel.length - 1].props.onChange({ target: { value: 'coordinator' } }); await tm.render();
+    // QA2 #23: the role change waits for its confirm.
+    const walkAll = function* (n) { if (!n || typeof n !== 'object') return; if (Array.isArray(n)) { for (const c of n) yield* walkAll(c); return; } if (!React.isValidElement(n)) return; yield n; yield* walkAll(n.props?.children); };
+    const rc = [...walkAll(tm.tree())].find((e) => e.props && e.props.isOpen && e.props.confirmText === 'Change role');
+    if (rc) { rc.props.onConfirm(); await tm.render(); }
+  }
   await tm.click(/Fill Tasks: Allowed/, 1).catch(() => {});
   await tm.click(/Assign Tasks: Disabled/).catch(() => {});
   out.teamActions = { calls: JSON.parse(JSON.stringify(cb)) };

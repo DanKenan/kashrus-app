@@ -1,10 +1,9 @@
 {
  "hubIngredients": {
   "inv": [
-   "Factory Kashrut & Airtable Ingredients Audit",
+   "Ingredients audit",
    "Industrial Plant",
    "Northeast Ingredients Plant",
-   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
    "Airtable Database",
    "Approved Materials:",
    "5 items",
@@ -103,10 +102,9 @@
  },
  "hubDiscEmpty": {
   "inv": [
-   "Factory Kashrut & Airtable Ingredients Audit",
+   "Ingredients audit",
    "Industrial Plant",
    "Northeast Ingredients Plant",
-   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
    "Airtable Database",
    "Flagged discrepancy on raw material!",
    "Approved Materials:",
@@ -129,10 +127,9 @@
  },
  "hubReports": {
   "inv": [
-   "Factory Kashrut & Airtable Ingredients Audit",
+   "Ingredients audit",
    "Industrial Plant",
    "Northeast Ingredients Plant",
-   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
    "Airtable Database",
    "Flagged discrepancy on raw material!",
    "Approved Materials:",
@@ -166,10 +163,9 @@
  },
  "hubDiscOne": {
   "inv": [
-   "Factory Kashrut & Airtable Ingredients Audit",
+   "Ingredients audit",
    "Industrial Plant",
    "Northeast Ingredients Plant",
-   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
    "Airtable Database",
    "Logged unapproved item: Unmarked drum of glycerin",
    "Approved Materials:",
@@ -240,10 +236,9 @@
  },
  "hubEmpty": {
   "inv": [
-   "Factory Kashrut & Airtable Ingredients Audit",
+   "Ingredients audit",
    "Industrial Plant",
    "Northeast Ingredients Plant",
-   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
    "Airtable Database",
    "Approved Materials:",
    "0 items",
@@ -282,10 +277,9 @@
  },
  "hubReportsEmpty": {
   "inv": [
-   "Factory Kashrut & Airtable Ingredients Audit",
+   "Ingredients audit",
    "Industrial Plant",
    "Northeast Ingredients Plant",
-   "Assigned Mashgiach: Yossi Abramowitz-Goldberger",
    "Airtable Database",
    "Approved Materials:",
    "0 items",
@@ -396,7 +390,7 @@
    "Unapproved Discrepancies",
    "Inspection Shift Start",
    "Inspection Shift End",
-   "Factory Escort / QA Contact",
+   "Plant contact (optional)",
    "Final Kashrut Determination",
    "100% Passed",
    "All floor materials strictly adhere to approved list.",
@@ -411,7 +405,7 @@
    "File Official Report to Agency",
    "placeholder=8:30 AM",
    "placeholder=2:30 PM",
-   "placeholder=QA Director / Escort",
+   "placeholder=Name",
    "placeholder=Detail your walk-through observations: storage bay conditions, bulk railcar unloading, CIP sanitization temperatures, packaging lines, and any items questioned or confirmed with plant management..."
   ]
  },
@@ -424,7 +418,7 @@
      "venueId": "v1",
      "startTime": "8:30 AM",
      "endTime": "2:30 PM",
-     "factoryRepresentative": "QA Plant Manager",
+     "factoryRepresentative": "",
      "auditedIngredients": [
       {
        "ingredientId": "i1",
@@ -475,7 +469,7 @@
      ],
      "summaryNotes": "Comprehensive plant raw materials walkthrough completed.",
      "status": "passed_with_notes",
-     "mashgiachSigned": true,
+     "mashgiachSigned": false,
      "userEmail": "y@test.local"
     }
    ]

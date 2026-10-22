@@ -97,6 +97,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
   const [userToDelete, setUserToDelete] = useState<UserType | null>(null);
+  // QA2 #23: a role change waits for a confirm (one mis-tap must not make someone an Administrator).
+  const [roleChange, setRoleChange] = useState<{ user: UserType; newRole: UserRole } | null>(null);
   // Coordinator view: read-only team list; the ONLY control is the kiosk
   // code (+ optional phone) sheet on mashgiach/worker rows (Don's decision
   // 8:50 PM ET Oct 19; phone added in K1, Oct 20).
@@ -300,11 +302,19 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       return;
     }
 
+    if (newRole === user.role) return;
+    setRoleChange({ user, newRole });
+  };
+
+  const applyRoleChange = async (user: UserType, newRole: UserRole) => {
+    if (!onUpdateUser) return;
+    // QA2 #23: a new role starts from that role's own permissions (a coordinator can add tasks),
+    // so the chips match what the role can really do. They can still be switched afterwards.
     const defaults = DEFAULT_ROLE_PERMISSIONS[newRole] || { canFillTasks: true, canAssignTasks: false };
     const newPermissions: UserPermissions = {
       ...user.permissions,
-      canFillTasks: user.permissions?.canFillTasks !== undefined ? user.permissions.canFillTasks : defaults.canFillTasks,
-      canAssignTasks: user.permissions?.canAssignTasks !== undefined ? user.permissions.canAssignTasks : defaults.canAssignTasks,
+      canFillTasks: defaults.canFillTasks,
+      canAssignTasks: defaults.canAssignTasks,
     };
 
     try {
@@ -906,6 +916,25 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         cancelText="Cancel"
         variant="danger"
         icon="trash"
+      />
+
+      {/* QA2 #23: confirm a role change */}
+      <ConfirmModal
+        isOpen={Boolean(roleChange)}
+        onClose={() => setRoleChange(null)}
+        onConfirm={() => {
+          const rc = roleChange;
+          setRoleChange(null);
+          if (rc) void applyRoleChange(rc.user, rc.newRole);
+        }}
+        title={roleChange ? `Make ${roleChange.user.name} ${roleChange.newRole === 'admin' ? 'an Administrator' : `a ${getRoleLabel(roleChange.newRole).replace(/\s*\(.*\)\s*$/, '')}`}?` : ''}
+        message={roleChange?.newRole === 'admin'
+          ? 'Administrators can see and change everything in your agency: every venue, the team, and the settings.'
+          : 'Their role changes right away, and their permissions reset to what this role can do.'}
+        confirmText="Change role"
+        cancelText="Cancel"
+        variant={roleChange?.newRole === 'admin' ? 'danger' : 'warning'}
+        icon="shield"
       />
 
       {/* INVITES CLIENT C2: confirm before turning invites on (one-way). */}

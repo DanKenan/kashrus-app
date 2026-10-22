@@ -40,7 +40,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
   const [name, setName] = useState('');
   // Item 6: '' = same as the agency (no own zone stored).
   const [timeZone, setTimeZone] = useState('');
-  const [category, setCategory] = useState('Industrial');
+  const [category, setCategory] = useState('Restaurant');
   const [customCategory, setCustomCategory] = useState('');
   const [address, setAddress] = useState('');
   const [shownList, setShownList] = useState<string[]>([]);
@@ -178,7 +178,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
 
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to create new venue platform.');
+        throw new Error(data.error || "Couldn't create the venue.");
       }
 
       // Item 10i: with Phase C ON a new owner email comes back as an invite link.
@@ -210,7 +210,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
       if (ownerLink) return; // stay open: the admin copies the owner's link first
       onClose();
     } catch (err: any) {
-      setErrorMessage(err.message || 'Error occurred while creating venue platform.');
+      setErrorMessage(err.message || "Couldn't create the venue. Please try again.");
     } finally {
       setIsLoading(false);
     }
@@ -231,10 +231,10 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-ink">
-                Set Up New Kosher Venue Platform
+                New venue
               </h2>
               <p className="text-sm text-ink-soft">
-                Create an isolated operational platform with mashgichim, owner audit portal, and compliance logs.
+                Each venue has its own tasks, team and history.
               </p>
             </div>
           </div>
@@ -285,7 +285,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
           <div className="space-y-3.5">
             <h3 className="text-xs font-bold uppercase tracking-wider text-ink-soft flex items-center gap-1.5">
               <Building2 className="w-3.5 h-3.5 text-gold-deep" />
-              <span>1. Kosher Establishment Profile</span>
+              <span>1. Venue details</span>
             </h3>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
@@ -315,7 +315,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
                   }}
                   className="w-full px-3.5 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 >
-                  <option value="Industrial">Industrial / Factory Plant (Airtable & Audits)</option>
+                  <option value="Industrial">Factory / plant</option>
                   <option value="Food Service">Food Service</option>
                   <option value="Restaurant">Restaurant</option>
                   <option value="Catering">Catering</option>
@@ -427,10 +427,10 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
           <div className="space-y-3 pt-2 border-t border-line">
             <h3 className="text-xs font-bold uppercase tracking-wider text-ink-soft flex items-center gap-1.5">
               <User className="w-3.5 h-3.5 text-gold-deep" />
-              <span>3. Establish Venue Owner Account (Optional)</span>
+              <span>2. Venue owner account (optional)</span>
             </h3>
             <p className="text-sm text-ink-soft">
-              The owner logs into their isolated platform in read-only audit mode to review shift progress and history logs.
+              The owner can sign in to see this venue's tasks and history (read only).
             </p>
 
             <div className={inviteMode ? 'grid grid-cols-1 sm:grid-cols-2 gap-3' : 'grid grid-cols-1 sm:grid-cols-3 gap-3'}>
@@ -504,7 +504,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
               ) : (
                 <>
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>Create Venue Platform</span>
+                  <span>Create venue</span>
                 </>
               )}
             </button>

@@ -1,9 +1,19 @@
+import { formatWorkDate } from '../lib/dateText';
 import React, { useState } from 'react';
 import { ProgressRing } from './ProgressRing';
 import { X, Calendar, Download, Search } from 'lucide-react';
 import { DailySnapshot } from '../types';
 import { formatExactTime } from '../lib/utils';
 import { categoryVars } from '../lib/categoryStyle';
+
+/** QA2 #19: who reset the day, in plain words. Server codes keep their words; the default 'Admin Manual' (no name sent) reads "by hand". */
+export function resetByText(v: unknown): string {
+  const s = typeof v === 'string' ? v.trim() : '';
+  if (s === 'scheduled_midnight_cron') return 'Reset by Automatic (midnight)';
+  if (s === 'system') return 'Reset by Automatic';
+  if (!s || s === 'Admin Manual') return 'Reset by hand';
+  return `Reset by hand by ${s}`;
+}
 
 interface HistoryLogModalProps {
   isOpen: boolean;
@@ -111,7 +121,7 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                     >
                       <div className="flex flex-wrap items-center gap-2 w-full">
                         <span data-ledger-day-ring className="shrink-0"><ProgressRing done={snap.completedTasks} total={snap.totalTasks} size={24} /></span>
-                        <span className="font-bold tnum min-w-0 break-words flex-1">{snap.date}</span>
+                        <span className="font-bold tnum min-w-0 break-words flex-1">{formatWorkDate(snap.date)}</span>
                         <span className={`px-1.5 py-0.5 rounded text-xs font-bold tnum ${
                           snap.completionRate === 100 
                             ? 'bg-ok-bg text-ok'
@@ -138,10 +148,10 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                 <div className="flex flex-col sm:flex-row sm:items-center flex-wrap justify-between gap-3 pb-3 border-b border-line shrink-0">
                   <div className="flex flex-wrap min-w-0 break-words items-center gap-2">
                     <span className="text-sm font-bold text-ink">
-                      Archive: {activeSnapshot.date}
+                      Archive: {formatWorkDate(activeSnapshot.date)}
                     </span>
                     <span className="text-xs text-ink-faint">
-                      (Reset by {activeSnapshot.resetBy === 'scheduled_midnight_cron' ? 'Automatic (midnight)' : activeSnapshot.resetBy === 'system' ? 'Automatic' : activeSnapshot.resetBy})
+                      ({resetByText(activeSnapshot.resetBy)})
                     </span>
                   </div>
 
@@ -202,7 +212,7 @@ export const HistoryLogModal: React.FC<HistoryLogModalProps> = ({
                               {entry.completedByName || entry.completedByEmail ? (
                                 <span className="font-medium text-ink">{entry.completedByName || entry.completedByEmail}</span>
                               ) : (
-                                <span className="text-ink-faint italic">Unassigned</span>
+                                <span className="text-ink-faint italic">{entry.isCompleted ? 'Unassigned' : 'Not done'}</span>
                               )}
                             </div>
                             <div className="col-span-2 sm:col-span-1 min-w-0">

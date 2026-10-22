@@ -156,7 +156,7 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
               </button>
               <button
                 onClick={() => setStep(1)}
-                className="w-full text-center text-xs transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
+                className="w-full min-h-11 rounded-xl text-center text-sm font-semibold transition cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
               >
                 ← Back
               </button>

@@ -181,9 +181,9 @@
  "changePw": {
   "inv": [
    "Change Password",
-   "Update credentials for Yossi Abramowitz-Goldberger",
+   "Choose a new password for Yossi Abramowitz-Goldberger",
    "Current Password",
-   "New Password (min 6 characters)",
+   "New Password (min 8 characters)",
    "Confirm New Password",
    "Show passwords",
    "Cancel",
@@ -212,7 +212,7 @@
  "changePwDone": {
   "inv": [
    "Change Password",
-   "Update credentials for Yossi Abramowitz-Goldberger",
+   "Choose a new password for Yossi Abramowitz-Goldberger",
    "Password Updated",
    "Your password has been changed successfully."
   ]

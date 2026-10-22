@@ -92,7 +92,7 @@
      "role": "coordinator",
      "permissions": {
       "canFillTasks": true,
-      "canAssignTasks": false
+      "canAssignTasks": true
      }
     }
    ],
@@ -140,7 +140,7 @@
  },
  "venues": {
   "inv": [
-   "Kosher Venues & Restaurants Platform Hub",
+   "Venues",
    "3 Facilities",
    "Switch between venues or establish a new certified kosher restaurant, bakery, or caterer platform.",
    "New Venue",
@@ -149,7 +149,7 @@
    "Restaurant",
    "Bakery",
    "Beth El Social Hall — Main Ballroom (upstairs)",
-   "Active Platform",
+   "Current venue",
    "Delete",
    "2626 Albany Ave, West Hartford",
    "Agency default (New York (Eastern) (America/New_York))",
@@ -171,15 +171,15 @@
    "UTC (UTC)",
    "Shift Completion:",
    "0 staff members",
-   "Viewing Now",
+   "Open now",
    "Riverside Kitchen",
    "1 River Rd",
-   "Switch to Platform",
+   "Open venue",
    "מטבח הקהילה — Community Kitchen",
    "All establishments are isolated with dedicated tasks, mashgichim, and history.",
    "Close Hub",
    "placeholder=Search by venue, address, or hashgacha...",
-   "title=Delete Venue Platform",
+   "title=Delete venue",
    "aria-label=Time zone for Beth El Social Hall — Main Ballroom (upstairs)",
    "aria-label=Time zone for Riverside Kitchen",
    "aria-label=Time zone for מטבח הקהילה — Community Kitchen",
@@ -213,12 +213,12 @@
  },
  "createVenue": {
   "inv": [
-   "Set Up New Kosher Venue Platform",
-   "Create an isolated operational platform with mashgichim, owner audit portal, and compliance logs.",
-   "1. Kosher Establishment Profile",
+   "New venue",
+   "Each venue has its own tasks, team and history.",
+   "1. Venue details",
    "Establishment Name *",
    "Establishment Type",
-   "Industrial / Factory Plant (Airtable & Audits)",
+   "Factory / plant",
    "Food Service",
    "Restaurant",
    "Catering",
@@ -245,13 +245,13 @@
    "UTC (UTC)",
    "The venue's day, \"today\" and the daily reset at midnight follow this zone.",
    "Certification",
-   "3. Establish Venue Owner Account (Optional)",
-   "The owner logs into their isolated platform in read-only audit mode to review shift progress and history logs.",
+   "2. Venue owner account (optional)",
+   "The owner can sign in to see this venue's tasks and history (read only).",
    "Owner Full Name",
    "Owner Email",
    "Password",
    "Cancel",
-   "Create Venue Platform",
+   "Create venue",
    "placeholder=Establishment Name",
    "placeholder=Address",
    "placeholder=Certification Standard",
@@ -290,7 +290,7 @@
     "/api/venues",
     {
      "name": "Crown Market — Deli Counter",
-     "category": "Industrial",
+     "category": "Restaurant",
      "address": "2471 Albany Ave",
      "certification": "Hartford Kashrus Council - Supervised Kosher",
      "ownerName": "Moshe Klein",

@@ -21,6 +21,7 @@ import {
 import { KosherEvent, EventTask, User as UserType, Venue } from '../types';
 import { venueTimeZone, workDateIn } from '../lib/workday';
 import { formatClockTime, formatTimeRange } from '../lib/clockTime';
+import { formatWorkDate } from '../lib/dateText';
 
 interface EventsModalProps {
   isOpen: boolean;
@@ -163,7 +164,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
         
         {/* Header */}
         {/* QA1: on a narrow sheet (rem-based, so large text counts) the title keeps the row with
-            Close, and "Notify New Event" moves to its own line instead of running off the edge. */}
+            Close, and "Create event" moves to its own line instead of running off the edge. */}
         <div className="@container">
         <div className="flex items-center justify-between px-6 py-4 border-b border-line bg-sunken @max-[36rem]:flex-wrap @max-[36rem]:gap-x-3 @max-[36rem]:gap-y-3">
           <div className="flex items-center gap-3 @max-[36rem]:flex-1 @max-[36rem]:min-w-[50%]">
@@ -193,7 +194,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
               className="px-3 py-1.5 text-xs font-bold rounded-xl e1 flex items-center gap-1.5 transition cursor-pointer pressable bg-surface border border-line-control text-ink hover:bg-sunken whitespace-nowrap shrink-0 @max-[36rem]:order-last"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>Notify New Event</span>
+              <span>Create event</span>
             </button>
 
             <button aria-label="Close"
@@ -297,7 +298,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
 
                       <div className="flex items-center gap-1.5 text-xs text-ink-soft font-semibold mb-1">
                         <Calendar className="w-3 h-3 shrink-0" />
-                        <span className="tnum">{evt.date}</span>
+                        <span className="tnum">{formatWorkDate(evt.date)}</span>
                         {formatClockTime(evt.startTime) && <span>• {formatClockTime(evt.startTime)}</span>}
                       </div>
 
@@ -387,7 +388,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                       <div>
                         <div className="text-xs text-ink-soft font-semibold uppercase">Date & Time</div>
                         <div className="font-semibold text-ink">
-                          {activeEvent.date} {formatTimeRange(activeEvent.startTime, activeEvent.endTime) && `(${formatTimeRange(activeEvent.startTime, activeEvent.endTime)})`}
+                          {formatWorkDate(activeEvent.date)} {formatTimeRange(activeEvent.startTime, activeEvent.endTime) && `(${formatTimeRange(activeEvent.startTime, activeEvent.endTime)})`}
                         </div>
                       </div>
                     </div>
@@ -661,13 +662,13 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                   No Event Selected
                 </h4>
                 <p className="text-sm text-ink-soft mt-1 max-w-sm">
-                  Select an event from the left panel or click "Notify New Event" to register a catered dinner or banquet.
+                  Select an event from the left panel or tap "Create event" to add a catered dinner or banquet.
                 </p>
                 <button
                   onClick={onOpenCreateEvent}
                   className="mt-4 px-4 py-2 text-xs font-bold rounded-xl e2 transition cursor-pointer pressable bg-surface border border-line-control text-ink hover:bg-sunken"
                 >
-                  + Notify New Event
+                  + Create event
                 </button>
               </div>
             )}
