@@ -1,6 +1,6 @@
 import React, { useId, useState } from 'react';
 import { CertificationBadge } from './CertificationBadge';
-import { EditCertificationSheet } from './EditCertificationSheet';
+import { EditCertificationSheet, withLiveStats } from './EditCertificationSheet';
 import { ProgressRing } from './ProgressRing';
 import { 
   X, 
@@ -32,7 +32,7 @@ import {
  * The new zone shows only after the server confirms (never optimistic); on
  * failure the old value stays and the reason is shown.
  */
-const VenueTimeZoneRow: React.FC<{
+export const VenueTimeZoneRow: React.FC<{
   venue: Venue;
   agencyTimeZone?: string;
   isAdmin: boolean;
@@ -60,7 +60,8 @@ const VenueTimeZoneRow: React.FC<{
       setError(result.error || 'Could not save the time zone.');
       return;
     }
-    onVenueUpdated?.(result.data.venue as Venue);
+    // The PUT answer has no live counts; keep the card's (shift completion, staff) as on Edit certification.
+    onVenueUpdated?.(withLiveStats(result.data.venue as Venue, venue));
     const tz = result.data.effectiveTimeZone || eff;
     const next = result.data.nextResetDate as string | undefined;
     setNote(next ? `Saved. Next daily reset: ${next}, 12:00 AM (${zoneCityLabel(tz)}).` : 'Saved.');

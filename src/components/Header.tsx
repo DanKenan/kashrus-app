@@ -179,6 +179,7 @@ export const Header: React.FC<HeaderProps> = ({
               agencyName={currentUser?.agencyName}
               agencyShortCode={currentUser?.agencyShortCode}
               compactBelow360
+              compactOnPhone={currentUser?.role === 'admin' && !agencyLogoSrc}
               className="shrink-0"
             />
 
@@ -253,7 +254,10 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Desktop Actions Bar (Clean, Un-crowded) */}
-          <div className="hidden lg:flex items-center gap-2">
+          {/* QA1: shown only when the header row really has room for it (rem-based, so large text
+              switches to the compact bar too). A 1024 px tablet uses the compact bar + menu,
+              so the page no longer scrolls sideways. 72rem = 1152 px at 100 % text. */}
+          <div className="hidden @min-[72rem]:flex items-center gap-2">
             
             {/* Factory & Airtable Ingredients Audit Shortcut */}
             {onOpenFactoryAudit && (
@@ -575,7 +579,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Mobile Right Bar: New Assignment + Menu Trigger */}
-          <div className="flex lg:hidden items-center gap-1.5 shrink-0">
+          <div className="flex @min-[72rem]:hidden items-center gap-1.5 shrink-0">
             {canUserAssignTasks(currentUser) && (
               <button
                 id="mobile-header-new-task-btn"
@@ -611,7 +615,7 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Mobile Menu Dropdown */}
       {mobileMenuOpen && (
-        <div className="lg:hidden border-t border-line bg-surface px-4 py-3 space-y-2 max-h-[85vh] overflow-y-auto">
+        <div className="border-t border-line bg-surface px-4 py-3 space-y-2 max-h-[85vh] overflow-y-auto">
           {/* Mobile Install App Banner */}
           <PWAInstallButton variant="banner" />
 
