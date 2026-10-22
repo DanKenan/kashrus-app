@@ -79,10 +79,11 @@ export function isLiveInvite(inv: any, nowMs: number): boolean {
 }
 
 /** What GET returns: never the hash, never internals. */
-export function inviteListView(inv: any): { id: string; kind: string; email: string; name: string; phoneNumber?: string; role: string; venueIds: string[]; invitedBy: string; createdAt: string; expiresAt: string } {
+export function inviteListView(inv: any): { id: string; kind: string; email: string; name: string; phoneNumber?: string; memberId?: string; role: string; venueIds: string[]; invitedBy: string; createdAt: string; expiresAt: string } {
   return {
     id: String(inv.id), kind: inv.kind === 'setup' ? 'setup' : 'member', email: String(inv.email), name: inviteDisplayName(inv),
     ...(typeof inv.phoneNumber === 'string' && inv.phoneNumber ? { phoneNumber: inv.phoneNumber } : {}),
+    ...(inv.kind === 'setup' && typeof inv.memberId === 'string' ? { memberId: inv.memberId } : {}),
     role: String(inv.role),
     venueIds: Array.isArray(inv.venueIds) ? inv.venueIds.map(String) : [],
     invitedBy: String(inv.invitedBy || ''), createdAt: String(inv.createdAt || ''), expiresAt: String(inv.expiresAt || ''),
