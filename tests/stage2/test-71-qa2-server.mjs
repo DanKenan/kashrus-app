@@ -21,7 +21,8 @@
  *    and recovery codes change the password but answer 403 VENUE_REMOVED with no token;
  *    a two-membership person whose agency-A venue was deleted is offered only the agency-B
  *    membership, activating A answers 403 VENUE_REMOVED, B gives a session.
- *  S source pin: in server.ts only issueSessionToken and the test-mode mint hook call
+ *  S source pin: in server.ts only issueSessionToken (async since 11a-s1: writes the
+ *    session record, then signs) and the test-mode mint hook call
  *    signSessionToken, and only liveSessionRow calls resolveSessionRow.
  */
 import fs from 'node:fs';
@@ -283,7 +284,7 @@ export default {
     {
       const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
       const signs = src.split('\n').filter((l) => l.includes('signSessionToken(') && !/^\s*(\/\/|\*|\/\*)/.test(l));
-      const okSign = signs.every((l) => /function signSessionToken\(|return signSessionToken\(row\);|signToken\(userId\) : signSessionToken\(user as any\)/.test(l));
+      const okSign = signs.every((l) => /function signSessionToken\(|return \{ token: signSessionToken\(fresh, sid\), sid \};|signToken\(userId\) : signSessionToken\(user as any\)/.test(l));
       if (signs.length !== 3 || !okSign) throw new Error(`S signSessionToken callers: ${signs.length}\n${signs.join('\n')}`);
       const resolves = src.split('\n').filter((l) => l.includes('resolveSessionRow(') && !/^\s*(\/\/|\*|\/\*)/.test(l));
       if (resolves.length !== 1 || !resolves[0].includes('const row: any = resolveSessionRow(claims')) throw new Error(`S resolveSessionRow callers: ${resolves.length}`);

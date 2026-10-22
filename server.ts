@@ -25,11 +25,12 @@ import {
   findDomainClash,
   withCustomDomain,
 } from './src/server/agency-fields.js';
-import { classifySessionClaims, resolveSessionRow, resolveChooseOwner, chooseClaimsFor, sessionClaimsFor, type SessionClaims } from './src/server/session-token.ts';
+import { classifySessionClaims, resolveSessionRow, resolveChooseOwner, chooseClaimsFor, sessionClaimsFor, tokenEpochOf, type SessionClaims } from './src/server/session-token.ts';
 import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
+import { buildUserSession, sessionBacksClaims, cachePut, cacheFresh, isSid, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
 import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetToken, resetLinkForToken, credentialStampHash, stampsEqual, isLiveResetLink, resetLinkAdminView, pruneResetLinks, makeRoomForResetLink, mayMakeResetLink, resetSuspensionRecord } from './src/server/reset-links.ts';
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
@@ -352,8 +353,8 @@ function signClaims(claims: Record<string, unknown>, ttlSeconds: number = TOKEN_
 /** Item 8d: the session token login / reset-password / register issue.
  * v2 { v:2, sub: personId, mem: row id, ep: tokenEpoch||0 } for any row with
  * a personId (10e: membership rows too); the legacy v1 { sub } otherwise. */
-function signSessionToken(row: { id: string; personId?: string; tokenEpoch?: unknown }): string {
-  return signClaims(sessionClaimsFor(row));
+function signSessionToken(row: { id: string; personId?: string; tokenEpoch?: unknown }, sid?: string): string {
+  return signClaims(sessionClaimsFor(row, sid));
 }
 
 /** 10g: a choose token for a multi person's credential row (10 minutes; accepted ONLY on GET /api/auth/memberships and POST /api/auth/activate). */
@@ -502,6 +503,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/revoke-user-silent' },
         { method: 'POST', path: '/__test__/drop-socket-meta' },
         { method: 'POST', path: '/__test__/mint-token' },
+        { method: 'POST', path: '/__test__/session-hooks' },
         { method: 'POST', path: '/__test__/set-password' },
         { method: 'POST', path: '/__test__/mint-kiosk-token' },
         { method: 'GET', path: '/__test__/alert-routing' },
@@ -603,6 +605,20 @@ app.use('/api', async (req, res, next) => {
     if (!owner) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
     (req as any).chooseClaims = { personId: payload.personId, ownerRowId: payload.ownerRowId };
     return next();
+  }
+  // 11a-s1 (plan 9.1 / 10.1): a token carrying sid is valid only while its
+  // server session record backs it. Mutating requests read the record from the
+  // store (no cache); GET/HEAD may use an entry read in the last 15 s. A store
+  // error is 503 (never 401: an outage signs nobody out). Tokens without sid
+  // (issued before this release) skip this and keep today's rules.
+  // Runs BEFORE the row is resolved, so the row below is read after the await.
+  const sessionClaims = sessionBackedClaims(payload);
+  if (sessionClaims) {
+    const authoritative = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    const verdict = await checkSession(sessionClaims, authoritative);
+    if (verdict === 'down') return res.status(503).json(SESSION_STORE_DOWN_BODY);
+    if (verdict !== 'ok') return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    (req as any).sessionId = sessionClaims.sid;
   }
   const user = liveSessionRow(payload) as UserProfile | undefined;
 
@@ -814,10 +830,221 @@ const VENUE_REMOVED_AFTER_PASSWORD = { error: 'Your password was changed, but yo
  * liveSessionRow, so a token for a removed membership is refused wherever it
  * came from. (Only the test-mode mint hook signs directly; Test 71 pins this.)
  */
-function issueSessionToken(row: any): string | null {
-  if (!row || sessionIneligibleCode(row)) return null;
-  return signSessionToken(row);
+/**
+ * Item 11, 11a-s1 (plan v8 9.1 / 10.1 / 15.1): every session token a route
+ * issues is backed by a server record sessions/{sid}. The record is written
+ * FIRST (rule Y: no token unless the write landed); a store failure answers
+ * 503 SESSION_STORE_UNAVAILABLE and never a token. The ineligibility rule
+ * (sessionIneligibleCode) is unchanged and runs before anything is written.
+ */
+type MintResult = { token: string; sid: string } | { ineligible: true } | { down: true };
+const SESSION_STORE_DOWN_BODY = {
+  error: 'Could not check your sign-in right now. Please try again in a moment.',
+  code: 'SESSION_STORE_UNAVAILABLE',
+};
+/** In-process store used when Firestore is off (local dev without Firestore). */
+const localSessions = new Map<string, SessionDoc>();
+/** Plan 10.1: the per-instance map; authoritative on the single production instance (revocation updates it synchronously). */
+const sessionCache = new Map<string, SessionCacheEntry>();
+/** Test mode only: make the session store fail (proves 503, never a sign-out). */
+let sessionStoreFaultForTests = false;
+/** Test mode only: the NEXT store read / write returns this many ms late (forced interleavings). */
+let sessionReadDelayOnceForTests = 0;
+let sessionWriteDelayOnceForTests = 0;
+async function sessionTestDelay(kind: 'read' | 'write'): Promise<void> {
+  if (!isTestMode()) return;
+  const ms = kind === 'read' ? sessionReadDelayOnceForTests : sessionWriteDelayOnceForTests;
+  if (!ms) return;
+  if (kind === 'read') sessionReadDelayOnceForTests = 0; else sessionWriteDelayOnceForTests = 0;
+  await new Promise((r) => setTimeout(r, ms));
 }
+
+async function sessionStoreGet(sid: string): Promise<SessionDoc | null> {
+  if (isTestMode() && sessionStoreFaultForTests) throw new Error('session store fault (test)');
+  let out: SessionDoc | null;
+  if (!firestoreDb) out = localSessions.has(sid) ? { ...localSessions.get(sid)! } : null;
+  else {
+    const snap = await firestoreDb.collection('sessions').doc(sid).get();
+    out = snap.exists ? (snap.data() as SessionDoc) : null;
+  }
+  await sessionTestDelay('read');
+  return out;
+}
+/** Writes a session record in a transaction. create=true refuses an existing sid (never overwrite another session). */
+async function sessionStorePut(doc: SessionDoc, create = true): Promise<void> {
+  if (isTestMode() && sessionStoreFaultForTests) throw new Error('session store fault (test)');
+  if (!firestoreDb) {
+    if (create && localSessions.has(doc.sid)) throw new Error('session id already exists');
+    localSessions.set(doc.sid, { ...doc });
+    await sessionTestDelay('write');
+    return;
+  }
+  const ref = firestoreDb.collection('sessions').doc(doc.sid);
+  await firestoreDb.runTransaction(async (tx: any) => {
+    if (create) {
+      const snap = await tx.get(ref);
+      if (snap.exists) throw new Error('session id already exists');
+    }
+    tx.set(ref, JSON.parse(JSON.stringify(doc)));
+  });
+  await sessionTestDelay('write');
+}
+/** Marks a session revoked in the store (read-modify-write in a transaction); returns the stored record or null when there is none. */
+async function sessionStoreRevoke(sid: string, reason: string, nowIso: string): Promise<SessionDoc | null> {
+  if (isTestMode() && sessionStoreFaultForTests) throw new Error('session store fault (test)');
+  if (!firestoreDb) {
+    const cur = localSessions.get(sid);
+    if (!cur) return null;
+    const next = cur.revokedAt ? cur : { ...cur, revokedAt: nowIso, revokeReason: reason };
+    localSessions.set(sid, next);
+    return { ...next };
+  }
+  const ref = firestoreDb.collection('sessions').doc(sid);
+  let out: SessionDoc | null = null;
+  await firestoreDb.runTransaction(async (tx: any) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) { out = null; return; }
+    const cur = snap.data() as SessionDoc;
+    if (cur.revokedAt) { out = cur; return; }
+    out = { ...cur, revokedAt: nowIso, revokeReason: reason };
+    tx.set(ref, JSON.parse(JSON.stringify(out)));
+  });
+  return out;
+}
+
+async function issueSessionToken(row: any, req: any, via: SessionVia): Promise<MintResult> {
+  if (!row || sessionIneligibleCode(row)) return { ineligible: true };
+  const sid = base64url(crypto.randomBytes(16));
+  const epoch = tokenEpochOf(row) ?? 0;
+  const nowMs = Date.now();
+  const doc = buildUserSession({ sid, row, epoch, via, userAgent: req?.headers?.['user-agent'], nowMs });
+  let stored = false;
+  for (let attempt = 0; attempt < 2 && !stored; attempt++) {
+    try {
+      await sessionStorePut(doc);
+      stored = true;
+    } catch (err: any) {
+      log.warn(`[session] create failed (attempt ${attempt + 1}): ${err?.message || err}`);
+    }
+  }
+  if (!stored) return { down: true };
+  cachePut(sessionCache, sid, { doc, readAtMs: Date.now() });
+  // Re-check eligibility against the CURRENT row after the await (a commit may have landed meanwhile).
+  const fresh: any = users.find((u) => u.id === row.id);
+  if (!fresh || sessionIneligibleCode(fresh)) return { ineligible: true };
+  // The row's epoch or person moved while the record was being written: no token (the caller retries).
+  if ((tokenEpochOf(fresh) ?? 0) !== epoch || (fresh.personId || null) !== doc.personId) return { down: true };
+  return { token: signSessionToken(fresh, sid), sid };
+}
+
+/** The claims a session record can back (v1/v2 carrying sid); anything else null. */
+function sessionBackedClaims(claims: any): (SessionBackedClaims & { sid: string }) | null {
+  if (!claims || (claims.kind !== 'v1' && claims.kind !== 'v2') || !isSid(claims.sid)) return null;
+  return claims;
+}
+
+/**
+ * Plan 10.1. authoritative=true (every mutating request, WS upgrade): a direct
+ * store read, no cache. authoritative=false (GET/HEAD): the cached entry when
+ * it was read less than 15 s ago, else a store read. A store error is 'down'
+ * (the caller answers 503 — never a 401, so nobody is signed out by an outage).
+ */
+async function checkSession(claims: SessionBackedClaims & { sid: string }, authoritative: boolean): Promise<'ok' | 'refused' | 'down'> {
+  const nowMs = Date.now();
+  const cached = sessionCache.get(claims.sid);
+  if (!authoritative && cacheFresh(cached, nowMs)) {
+    return sessionBacksClaims(cached.doc, claims, nowMs) ? 'ok' : 'refused';
+  }
+  let doc: SessionDoc | null;
+  try {
+    doc = await sessionStoreGet(claims.sid);
+  } catch (err: any) {
+    log.warn(`[session] read failed: ${err?.message || err}`);
+    return 'down';
+  }
+  // A local revocation that landed while this read was in flight wins.
+  const during = sessionCache.get(claims.sid);
+  if (during && during.doc && during.doc.revokedAt && !(doc && doc.revokedAt)) doc = during.doc;
+  cachePut(sessionCache, claims.sid, { doc, readAtMs: Date.now() });
+  return sessionBacksClaims(doc, claims, Date.now()) ? 'ok' : 'refused';
+}
+
+/** Closes (4401 unless told otherwise) every open socket whose token carries this sid. */
+function closeSocketsOfSid(sid: string, code = 4401, reason = 'Unauthorized'): number {
+  let n = 0;
+  for (const [client, meta] of Array.from(activeSockets.entries())) {
+    const c: any = meta?.tokenClaims;
+    if (!c || c.sid !== sid) continue;
+    try { client.close(code, reason); } catch {}
+    activeSockets.delete(client);
+    n++;
+  }
+  return n;
+}
+
+/** Revocation order (plan 10.1): store first, then the in-memory map, then that sid's sockets. Throws when the store write fails. */
+async function revokeSession(sid: string, reason: string): Promise<boolean> {
+  const nowIso = new Date().toISOString();
+  const stored = await sessionStoreRevoke(sid, reason, nowIso);
+  if (stored) cachePut(sessionCache, sid, { doc: stored, readAtMs: Date.now() });
+  else cachePut(sessionCache, sid, { doc: null, readAtMs: Date.now() });
+  closeSocketsOfSid(sid);
+  return !!stored;
+}
+
+/**
+ * WS deliveries (plan 10.1): a sid socket whose entry is older than 15 s gets
+ * nothing until the record is re-read (authorizeSocket holds its deliveries).
+ * ok -> each held socket is re-authorized and gets a fresh INITIAL_STATE;
+ * refused -> its sockets close 4401; store down -> they close 1013.
+ */
+const sessionRefreshInFlight = new Set<string>();
+/** Sid sockets whose connect-time session read is still pending (not registered yet). */
+const sessionPendingSockets = new WeakSet<WebSocket>();
+function refreshSessionInBackground(claims: SessionBackedClaims & { sid: string }): void {
+  if (sessionRefreshInFlight.has(claims.sid)) return;
+  sessionRefreshInFlight.add(claims.sid);
+  checkSession(claims, true)
+    .catch(() => 'down' as const)
+    .then((r) => {
+      sessionRefreshInFlight.delete(claims.sid);
+      if (r === 'refused') { closeSocketsOfSid(claims.sid); return; }
+      if (r === 'down') { closeSocketsOfSid(claims.sid, 1013, 'Try again later'); return; }
+      resyncHeldSockets(claims.sid);
+    });
+}
+/** Sends a fresh INITIAL_STATE to every socket of this sid whose deliveries were held during a re-read. */
+function resyncHeldSockets(sid: string): void {
+  for (const [client, meta] of Array.from(activeSockets.entries())) {
+    const c: any = meta?.tokenClaims;
+    if (!c || c.sid !== sid || !meta.sessionResyncPending) continue;
+    if (client.readyState !== WebSocket.OPEN) continue;
+    const m = authorizeSocket(client); // the entry is fresh now: the full delivery check runs
+    if (!m) continue;
+    m.sessionResyncPending = false;
+    const st = initialStateForSocket(m);
+    if (!st) continue;
+    client.send(JSON.stringify({
+      type: 'INITIAL_STATE',
+      payload: { ...st, activeWorkersCount: activeSockets.size },
+      timestamp: new Date().toISOString(),
+      version: typeof stateVersion === 'number' ? stateVersion : undefined,
+    }));
+  }
+}
+
+/** Sends the right answer for a mint that produced no token; returns true when it did. */
+function sendMintFailure(res: any, minted: MintResult, row: any, passwordChanged = false): boolean {
+  if ('token' in minted) return false;
+  if ('down' in minted) {
+    res.status(503).json(passwordChanged ? { ...SESSION_STORE_DOWN_BODY, passwordChanged: true } : SESSION_STORE_DOWN_BODY);
+    return true;
+  }
+  res.status(403).json(passwordChanged ? ineligibleBody(row, true) : ineligibleBody(row));
+  return true;
+}
+
+
 function liveSessionRow(claims: any): any {
   const row: any = resolveSessionRow(claims, users as any[], agencies as any[]);
   if (row && sessionIneligibleCode(row)) return undefined;
@@ -2508,6 +2735,9 @@ function revokeUserKioskSockets(userId: string): number {
 
 function authorizeSocket(client: WebSocket): SocketMeta | null {
   const meta = activeSockets.get(client);
+  // 11a-s1: a sid socket still waiting for its connect-time session read is
+  // not registered yet: it gets nothing, and is not closed as unauthorized.
+  if (!meta && sessionPendingSockets.has(client)) return null;
   if (!meta || !recipientForMeta(meta)) {
     try {
       client.close(4401, 'Unauthorized');
@@ -2523,6 +2753,31 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
     } catch {}
     activeSockets.delete(client);
     return null;
+  }
+  // 11a-s1 (plan 10.1): a sid socket is delivered to only while its session
+  // is backed in the map (revocation on this instance updates the map and
+  // closes the socket at once). An entry older than 15 s is re-read in the
+  // background (a revision overlapping a deploy); a refusal closes it 4401.
+  if (!meta.kiosk) {
+    const sc = sessionBackedClaims(meta.tokenClaims);
+    if (sc) {
+      const nowMs = Date.now();
+      const entry = sessionCache.get(sc.sid);
+      if (entry && !sessionBacksClaims(entry.doc, sc, nowMs)) {
+        try { client.close(4401, 'Unauthorized'); } catch {}
+        activeSockets.delete(client);
+        return null;
+      }
+      if (!cacheFresh(entry, nowMs)) {
+        // Re-read BEFORE this socket gets anything more: this delivery is
+        // held back, and when the store answers ok the socket gets a fresh
+        // INITIAL_STATE (nothing is lost); refused -> 4401; store down ->
+        // 1013 (the client reconnects, and a connect reads the store).
+        meta.sessionResyncPending = true;
+        refreshSessionInBackground(sc);
+        return null;
+      }
+    }
   }
   // Kiosk sockets are re-validated on every delivery (same revocation rule
   // as the HTTP middleware): the user must still exist, still have a
@@ -4683,6 +4938,8 @@ type SocketMeta = {
    * Re-resolved on every delivery for phone sockets, so a bumped tokenEpoch
    * or a deleted row stops data even if a path forgets to close the socket. */
   tokenClaims?: SessionClaims;
+  /** 11a-s1: deliveries were held while this sid socket's session was re-read; send a fresh INITIAL_STATE when it answers ok. */
+  sessionResyncPending?: boolean;
 };
 const activeSockets = new Map<WebSocket, SocketMeta>();
 
@@ -5185,9 +5442,12 @@ wss.on('connection', (ws, req) => {
     // a revocation (epoch bump, deletion, kiosk PIN/device change) but
     // registered after it is closed and never registered.
     const current = liveSessionRow(socketClaims);
+    // 11a-s1: a sid socket also needs its session still backed in the map
+    // (a revocation that landed during the store read is caught here).
+    const sessionOk = !wsSession || sessionBacksClaims(sessionCache.get(wsSession.sid)?.doc, wsSession, Date.now());
     const stillOk = isKiosk
       ? !!current && kioskSessionStillValid(current, { agencyId: kioskAgencyId, venueId: kioskVenueId, pv: kioskPv, deviceId: kioskDeviceId })
-      : !!current && current.id === authedUser.id;
+      : !!current && current.id === authedUser.id && sessionOk;
     if (!stillOk) {
       try { ws.close(4401, 'Unauthorized'); } catch {}
       return;
@@ -5225,14 +5485,28 @@ wss.on('connection', (ws, req) => {
     broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
   };
 
+  // 11a-s1: a phone token carrying sid needs its server session (an
+  // authoritative store read, plan 10.1) before the socket is registered;
+  // a store error closes 1013 (try again), never 4401.
+  const wsSession = isKiosk ? null : sessionBackedClaims(socketClaims);
   if (isKiosk) {
     proofTimer = setTimeout(() => {
       try {
         ws.close(4401, 'Unauthorized');
       } catch {}
     }, 5000);
-  } else {
+  } else if (!wsSession) {
     finishConnect();
+  } else {
+    sessionPendingSockets.add(ws);
+    checkSession(wsSession, true)
+      .then((verdict) => {
+        sessionPendingSockets.delete(ws);
+        if (ws.readyState !== WebSocket.OPEN) return;
+        if (verdict === 'ok') return finishConnect();
+        try { ws.close(verdict === 'down' ? 1013 : 4401, verdict === 'down' ? 'Try again later' : 'Unauthorized'); } catch {}
+      })
+      .catch(() => { sessionPendingSockets.delete(ws); try { ws.close(1011, 'Server error'); } catch {} });
   }
 
   ws.on('message', (data) => {
@@ -5261,6 +5535,9 @@ wss.on('connection', (ws, req) => {
         // from a client message (rule X).
         return;
       }
+      // 11a-s1: nothing is accepted from a socket that is not registered yet
+      // (a sid socket waits for its session read).
+      if (!connected) return;
       if (parsed.type === 'USER_PRESENCE' && parsed.payload) {
         // Rule X: never rebuild security meta from a client message.
         // Presence changes nothing security-relevant — keep the meta as is.
@@ -7776,12 +8053,16 @@ app.post('/api/agencies/register', async (req, res) => {
     adminEmail: cleanAdminEmail,
   }, undefined, agency.id);
 
+  // 11a-s1: the agency is created either way; the token needs its session record
+  // (token null + sessionCode when the record could not be written: sign in with the password).
+  const registerMint = await issueSessionToken(users.find((u) => u.id === user.id) || user, req, 'register');
   res.status(201).json({
     success: true,
     message: `Welcome to Shutfey! Agency ${cleanAgencyName} has been established.`,
     agency: agencyView,
     user: getSafeUser(user),
-    token: issueSessionToken(users.find((u) => u.id === user.id) || user),
+    token: 'token' in registerMint ? registerMint.token : null,
+    ...('down' in registerMint ? { sessionCode: SESSION_STORE_DOWN_BODY.code } : {}),
     venue,
     tasks: createdTasks,
   });
@@ -7940,8 +8221,9 @@ app.post('/api/agencies/register-existing', async (req, res) => {
   // [10M-RV1] B1: the same broadcast as /api/agencies/register, scoped to the
   // NEW agency only (nobody else is in it); not repeated on a replay.
   if (!replay) broadcast('AGENCY_REGISTERED', { agency: agencyAdminView(agency), adminEmail: normalizedEmail }, undefined, agency.id);
-  const token = issueSessionToken(row);
-  if (!token) return res.status(403).json(ineligibleBody(row));
+  const minted = await issueSessionToken(row, req, 'register-existing');
+  if (sendMintFailure(res, minted, row)) return;
+  const token = (minted as { token: string }).token;
   const memberships = membershipsOfPerson(String(row.personId)).map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role }));
   res.status(201).json({
     success: true,
@@ -8741,8 +9023,9 @@ app.post('/api/invites/accept', async (req, res) => {
       token: signChooseToken(credRow),
     });
   }
-  const acceptToken = issueSessionToken(row);
-  if (!acceptToken) return res.status(403).json(ineligibleBody(row)); // QA2 #8 / 10L
+  const acceptMint = await issueSessionToken(row, req, 'invite-accept');
+  if (sendMintFailure(res, acceptMint, row)) return; // QA2 #8 / 10L; 11a-s1: 503 when the session record could not be written
+  const acceptToken = (acceptMint as { token: string }).token;
   res.json({ success: true, user: getSelfUser(row), token: acceptToken });
 });
 
@@ -8876,8 +9159,9 @@ async function acceptSetupInvite(req: any, res: any, raw: string, cachedInv: any
   console.log(`[audit] setup invite accepted: invite ${inviteId} member ${memberId}`);
   const row: any = users.find((u) => u.id === memberId);
   if (!row) return res.status(500).json({ error: 'Accepted, but the account could not be loaded. Please sign in.' });
-  const setupToken = issueSessionToken(row);
-  if (!setupToken) return res.status(403).json(ineligibleBody(row)); // QA2 #8 / 10L
+  const setupMint = await issueSessionToken(row, req, 'setup-accept');
+  if (sendMintFailure(res, setupMint, row)) return; // QA2 #8 / 10L; 11a-s1: 503 when the session record could not be written
+  const setupToken = (setupMint as { token: string }).token;
   return res.json({ success: true, user: getSelfUser(row), token: setupToken });
 }
 
@@ -9196,9 +9480,12 @@ app.post('/api/reset-links/accept', async (req, res) => {
   }
   log.info(`[audit] reset link used: link ${linkId} member ${r.rowId} paused ${(r.pausedIds || []).length}`);
   const row: any = users.find((u) => u.id === r.rowId);
-  const token = row ? issueSessionToken(row) : null;
   // [DS1 N5]: the password changed either way; no token for an ineligible row.
-  if (!row || !token) return res.status(403).json({ ...ineligibleBody(row, true), passwordChanged: true });
+  if (!row) return res.status(403).json({ ...ineligibleBody(row, true), passwordChanged: true });
+  const linkMint = await issueSessionToken(row, req, 'reset-link');
+  if ('down' in linkMint) return res.status(503).json({ ...SESSION_STORE_DOWN_BODY, passwordChanged: true });
+  if (!('token' in linkMint)) return res.status(403).json({ ...ineligibleBody(row, true), passwordChanged: true });
+  const token = linkMint.token;
   res.json({ success: true, user: getSelfUser(row as UserProfile), token });
 });
 
@@ -10092,6 +10379,41 @@ if (isTestMode()) {
     }
     res.json({ routes: out });
   });
+  // 11a-s1 test hooks (test mode only; 404 outside it — Test 77 H):
+  //  get {sid}: the stored record (no cache); revoke-silent {sid}: revoke in the
+  //  STORE only (what another app instance's logout looks like to this one);
+  //  cache-age {sid, ageMs}: age this instance's cached entry; expire {sid}:
+  //  move absoluteExp into the past everywhere (time passing); fault {on}:
+  //  make every session store read/write fail; read-delay-once / write-delay-once
+  //  {ms}: the next store read / write answers ms late (forced interleavings).
+  app.post('/api/__test__/session-hooks', async (req, res) => {
+    const { action, sid } = req.body || {};
+    try {
+      if (action === 'fault') { sessionStoreFaultForTests = req.body?.on === true; return res.json({ ok: true, fault: sessionStoreFaultForTests }); }
+      if (action === 'read-delay-once') { sessionReadDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
+      if (action === 'write-delay-once') { sessionWriteDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
+      if (!isSid(sid)) return res.status(400).json({ error: 'sid required' });
+      if (action === 'get') return res.json({ doc: await sessionStoreGet(sid) });
+      if (action === 'revoke-silent') return res.json({ ok: !!(await sessionStoreRevoke(sid, 'test-other-instance', new Date().toISOString())) });
+      if (action === 'cache-age') {
+        const e = sessionCache.get(sid);
+        if (!e) return res.json({ ok: false });
+        sessionCache.set(sid, { ...e, readAtMs: Date.now() - Number(req.body?.ageMs || 0) });
+        return res.json({ ok: true });
+      }
+      if (action === 'expire') {
+        const cur = await sessionStoreGet(sid);
+        if (!cur) return res.json({ ok: false });
+        const next = { ...cur, absoluteExpMs: Date.now() - 1 };
+        await sessionStorePut(next, false);
+        if (sessionCache.has(sid)) sessionCache.set(sid, { doc: next, readAtMs: sessionCache.get(sid)!.readAtMs });
+        return res.json({ ok: true });
+      }
+      res.status(400).json({ error: 'unknown action' });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
   app.post('/api/__test__/mint-token', async (req, res) => {
     const { userId } = req.body || {};
     try {
@@ -10100,7 +10422,14 @@ if (isTestMode()) {
       }
       const user = users.find((u) => u.id === userId);
       if (!user) return res.status(404).json({ error: 'User not found' });
-      // Item 8d: the same token login would issue; { legacy: true } forces v1.
+      // 11a-s1: { session: true } = the token a sign-in issues now (server session + sid).
+      if (req.body?.session === true) {
+        const m = await issueSessionToken(user, req, 'test');
+        if ('down' in m) return res.status(503).json(SESSION_STORE_DOWN_BODY);
+        if (!('token' in m)) return res.status(403).json(ineligibleBody(user));
+        return res.json({ token: m.token, sid: m.sid });
+      }
+      // Item 8d: a pre-11 token (no sid, no server session) — what phones hold from before this release; { legacy: true } forces v1.
       res.json({ token: req.body?.legacy === true ? signToken(userId) : signSessionToken(user as any) });
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
@@ -14348,8 +14677,9 @@ app.post('/api/auth/login', async (req, res) => {
     });
   }
   // QA2 #8: the person's venue was deleted and no other venue is left.
-  const token = issueSessionToken(freshCred);
-  if (!token) return res.status(403).json(ineligibleBody(freshCred));
+  const loginMint = await issueSessionToken(freshCred, req, 'login');
+  if (sendMintFailure(res, loginMint, freshCred)) return;
+  const token = (loginMint as { token: string }).token;
   res.json({
     success: true,
     user: getSelfUser(user),
@@ -14685,8 +15015,9 @@ app.post('/api/auth/reset-password', async (req, res) => {
   if (signedOutOthers) revokeUserPhoneSockets(user.id);
 
   // QA2 #8: the password change stands; a membership whose venue was deleted gets no session.
-  const token = issueSessionToken(users.find((u) => u.id === user.id) || user);
-  if (!token) return res.status(403).json(ineligibleBody(users.find((u) => u.id === user.id) || user, true));
+  const resetMint = await issueSessionToken(users.find((u) => u.id === user.id) || user, req, 'reset-password');
+  if (sendMintFailure(res, resetMint, users.find((u) => u.id === user.id) || user, true)) return;
+  const token = (resetMint as { token: string }).token;
   res.json({ success: true, user: getSelfUser(users.find((u) => u.id === user.id)!), token });
 });
 
@@ -14792,8 +15123,9 @@ app.post('/api/auth/change-password', async (req, res) => {
   for (const id of bumped) revokeUserPhoneSockets(id);
   for (const id of kioskRevved) revokeUserKioskSockets(id);
   const freshCallerRow = users.find((u) => u.id === caller.id) || caller;
-  const changedToken = issueSessionToken(freshCallerRow);
-  if (!changedToken) return res.status(403).json(ineligibleBody(freshCallerRow, true)); // QA2 #8 / 10L
+  const changedMint = await issueSessionToken(freshCallerRow, req, 'change-password');
+  if (sendMintFailure(res, changedMint, freshCallerRow, true)) return; // QA2 #8 / 10L; 11a-s1: 503 + passwordChanged when the record could not be written
+  const changedToken = (changedMint as { token: string }).token;
   res.json({ success: true, message: 'Password updated successfully.', token: changedToken });
 });
 
@@ -15007,8 +15339,9 @@ async function accountMergeRoute(req: any, res: any, via: MergeVia) {
     const opTag = crypto.createHash('sha256').update(String(operationId)).digest('hex').slice(0, 8);
     log.info(`[audit] account-merge via=${via} survivor=${r.survivorPersonId} retired=${r.retiredPersonId} rows=${(r.movedRowIds || []).join(',')} agencies=${(r.retiredAgencyIds || []).join(',')} refs=${Number(r.replaced) || 0} op=${opTag}`);
   }
-  const token = issueSessionToken(row);
-  if (!token) return res.status(403).json(ineligibleBody(row));
+  const mergeMint = await issueSessionToken(row, req, 'account-merge');
+  if (sendMintFailure(res, mergeMint, row)) return;
+  const token = (mergeMint as { token: string }).token;
   const memberships = membershipsOfPerson(String(row.personId)).map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role }));
   res.json({ success: true, merged: true, token, email: normEmail10e(row.email), user: getSelfUser(row), memberships });
 }
@@ -15056,6 +15389,27 @@ function chooserPersonOf(req: any): { personId: string; currentRowId: string | n
   return { personId: me.personId, currentRowId: String(me.id) };
 }
 
+/**
+ * 11a-s1 (plan 9.1, Don B15): sign-out ends the session on the server. A
+ * token carrying sid has its record revoked (store first, then this
+ * instance's map, then its open sockets): the same token is refused from
+ * then on. A token from before this release has no record to revoke
+ * (revoked:false); the client forgets it as today. Kiosk tokens never get
+ * here (kiosk allowlist -> 403 KIOSK_SCOPE); choose tokens get 401.
+ */
+app.post('/api/auth/logout', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const sid = (req as any).sessionId;
+  if (!isSid(sid)) return res.json({ ok: true, revoked: false });
+  try {
+    await revokeSession(sid, 'logout');
+  } catch (err: any) {
+    log.warn(`[session] logout revoke failed: ${err?.message || err}`);
+    return res.status(503).json(SESSION_STORE_DOWN_BODY);
+  }
+  res.json({ ok: true, revoked: true });
+});
+
 app.get('/api/auth/memberships', (req, res) => {
   res.set('Cache-Control', 'no-store');
   const who = chooserPersonOf(req);
@@ -15063,7 +15417,7 @@ app.get('/api/auth/memberships', (req, res) => {
   res.json({ memberships: membershipsOfPerson(who.personId).map((m) => ({ ...m, isCurrent: m.membershipId === who.currentRowId })) });
 });
 
-app.post('/api/auth/activate', (req, res) => {
+app.post('/api/auth/activate', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   const who = chooserPersonOf(req);
   if (!who) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
@@ -15072,8 +15426,9 @@ app.post('/api/auth/activate', (req, res) => {
   const row = membershipId ? (users as any[]).find((u) => u && u.id === membershipId) : undefined;
   const agencyOk = !!row && typeof row.agencyId === 'string' && (agencies as any[]).some((a) => a && a.id === row.agencyId);
   if (!row || row.personId !== who.personId || !agencyOk) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
-  const activeToken = issueSessionToken(row);
-  if (!activeToken) return res.status(403).json(ineligibleBody(row)); // QA2 #8 / 10L
+  const activeMint = await issueSessionToken(row, req, 'activate');
+  if (sendMintFailure(res, activeMint, row)) return; // QA2 #8 / 10L; 11a-s1: 503 when the session record could not be written
+  const activeToken = (activeMint as { token: string }).token;
   res.json({ token: activeToken, user: getSelfUser(row as UserProfile) });
 });
 
@@ -15205,8 +15560,9 @@ app.post('/api/auth/recover', async (req, res) => {
   const fresh = users.find((u) => u.id === cred.id) || cred;
   log.info(`[recovery] recovered user ${cred.id} (sessions revoked: ${bumped.length})`);
   // QA2 #8: the recovery stands; a membership whose venue was deleted gets no session.
-  const recoveredToken = issueSessionToken(fresh);
-  if (!recoveredToken) return res.status(403).json(ineligibleBody(fresh, true));
+  const recoverMint = await issueSessionToken(fresh, req, 'recover');
+  if (sendMintFailure(res, recoverMint, fresh, true)) return;
+  const recoveredToken = (recoverMint as { token: string }).token;
   res.json({ success: true, user: getSelfUser(fresh), token: recoveredToken });
 });
 

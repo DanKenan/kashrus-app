@@ -215,7 +215,34 @@ async function main() {
     console.log('[harness] Fresh state ready.');
   };
 
-  const results = await runAll(`http://127.0.0.1:${SERVER_PORT}`, { restartServer, freshState });
+  // 11a-s1 (item 11 plan 10.1): a SECOND app instance on the same Firestore,
+  // for the two-instance revocation test (Test 77 E6). Real emulator only:
+  // the mock's store lives inside each process, so in mock mode this is null.
+  // Own port (SERVER_PORT + 2) and own data dir; stop() kills it by port.
+  const startSecondServer = async () => {
+    if (!useRealEmulator) return null;
+    const port2 = SERVER_PORT + 2;
+    const dataDir2 = join(tmpdir(), 'stage2-server-data-2');
+    try { rmSync(dataDir2, { recursive: true, force: true }); } catch {}
+    mkdirSync(dataDir2, { recursive: true });
+    const killPort2 = () => { try { execSync(`lsof -ti:${port2} -sTCP:LISTEN | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {} };
+    killPort2();
+    const child = spawnLogged('npx', ['tsx', 'server.ts'], { cwd: REPO, env: { ...serverEnv, PORT: String(port2), DATA_DIR_OVERRIDE: dataDir2 } }, 'server2');
+    await waitFor(`http://127.0.0.1:${port2}/api/venues`, { label: 'second server', timeoutMs: 120000 });
+    return {
+      url: `http://127.0.0.1:${port2}`,
+      stop: async () => {
+        try { child.kill('SIGKILL'); } catch {}
+        killPort2();
+        for (let i = 0; i < 60; i++) {
+          try { execSync(`lsof -ti:${port2} -sTCP:LISTEN`, { stdio: 'ignore' }); } catch { return; }
+          await sleep(250);
+        }
+      },
+    };
+  };
+
+  const results = await runAll(`http://127.0.0.1:${SERVER_PORT}`, { restartServer, freshState, startSecondServer });
 
   const failed = results.filter((r) => !r.pass);
   console.log('\n=== Summary ===');
