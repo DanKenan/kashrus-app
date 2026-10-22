@@ -31,6 +31,7 @@ import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './sr
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
 import { buildUserSession, sessionBacksClaims, cachePut, cacheFresh, isSid, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
+import { userCookieConfig, cookieValues, setCookieHeader, clearCookieHeader, trustedOrigins, originTrusted, CSRF_ORIGIN_BODY } from './src/server/session-cookie.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
 import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetToken, resetLinkForToken, credentialStampHash, stampsEqual, isLiveResetLink, resetLinkAdminView, pruneResetLinks, makeRoomForResetLink, mayMakeResetLink, resetSuspensionRecord } from './src/server/reset-links.ts';
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
@@ -381,6 +382,16 @@ function signKioskToken(userId: string, agencyId: string, venueId: string, pv: s
   return `${header}.${payload}.${sig}`;
 }
 
+/** 11a-s2: the exp (seconds) of a token that verifyToken already accepted; null when unreadable. */
+function tokenExpSeconds(token: string): number | null {
+  try {
+    const data = JSON.parse(Buffer.from(String(token).split('.')[1] || '', 'base64').toString('utf8'));
+    return typeof data?.exp === 'number' && Number.isFinite(data.exp) ? data.exp : null;
+  } catch {
+    return null;
+  }
+}
+
 function verifyToken(token: string): SessionClaims | null {
   try {
     const parts = token.split('.');
@@ -427,6 +438,62 @@ const server = http.createServer(app);
 app.set('trust proxy', 1);
 
 app.use(express.json({ limit: '2mb' }));
+
+// ---------------------------------------------------------------------------
+// Item 11, 11a-s2 (plan v8 9.2, 9.3, 10.6, 11a-s): the user session cookie U.
+// Bearer (and ?token= on the socket) stay accepted unchanged during the
+// transition and, when present, are the request's credential; the cookie is
+// read only when no Authorization header is sent and the client opted in
+// (X-Shutfey-Auth: cookie, see cookieAuthRequested). A cookie-authenticated
+// mutation needs an Origin from the configured list (403 CSRF_ORIGIN).
+// ---------------------------------------------------------------------------
+const USER_COOKIE = userCookieConfig(isTestMode());
+const TRUSTED_ORIGINS = trustedOrigins({ appOrigins: process.env.APP_ORIGINS, testMode: isTestMode(), port: PORT });
+/**
+ * Transition opt-in: a client that moved to cookies (11a-c) says so on every
+ * request with X-Shutfey-Auth: cookie (and /ws?auth=cookie on the socket).
+ * Without it the cookie is neither set nor read, so today's clients see no
+ * change at all: a phone that signs out by forgetting its token is fully
+ * signed out, as before. A custom header also cannot be sent cross-site
+ * without a CORS preflight this server never grants.
+ */
+function cookieAuthRequested(req: any): boolean {
+  return req?.headers?.['x-shutfey-auth'] === 'cookie';
+}
+function requestOriginTrusted(req: any): boolean {
+  return originTrusted(req?.headers?.origin, TRUSTED_ORIGINS);
+}
+function setUserCookie(res: any, token: string, absoluteExpMs: number): boolean {
+  const maxAge = Math.floor((absoluteExpMs - Date.now()) / 1000);
+  if (!(maxAge > 0)) return false;
+  res.append('Set-Cookie', setCookieHeader(USER_COOKIE, token, maxAge));
+  return true;
+}
+function clearUserCookie(res: any): void {
+  res.append('Set-Cookie', clearCookieHeader(USER_COOKIE));
+}
+/**
+ * Every sign-in route answers res.json({ ..., token }) with the token
+ * issueSessionToken just minted. That 2xx answer also sets U, so every route
+ * that signs someone in (today's and later ones) sets the cookie in one place.
+ * Only from a trusted Origin: from anywhere else the answer is exactly today's
+ * (token in JSON, no cookie), so signing in never breaks on an unlisted host,
+ * and a cross-site form can never plant a session cookie (login CSRF).
+ */
+app.use('/api', (req, res, next) => {
+  const json = res.json.bind(res);
+  (res as any).json = (body: any) => {
+    const m = (req as any).mintedSession;
+    if (
+      m && body && typeof body === 'object' && typeof body.token === 'string' && body.token === m.token &&
+      res.statusCode >= 200 && res.statusCode < 300 && !res.headersSent && cookieAuthRequested(req) && requestOriginTrusted(req)
+    ) {
+      setUserCookie(res, m.token, m.absoluteExpMs);
+    }
+    return json(body);
+  };
+  next();
+});
 
 // Stage 2 version contract: every /api response carries the current document
 // version in the X-State-Version header. Clients track it (see
@@ -592,8 +659,34 @@ app.use('/api', async (req, res, next) => {
   }
 
   const authHeader = String(req.headers.authorization || '');
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  // 11a-s2: the credential is the Bearer token when an Authorization header is
+  // sent (the transition path, unchanged); otherwise the user cookie U.
+  let token = bearer;
+  let authVia: 'bearer' | 'cookie' | null = bearer ? 'bearer' : null;
+  // Any Authorization header at all (even an empty one) means the cookie is not read.
+  if (req.headers.authorization === undefined && cookieAuthRequested(req)) {
+    const values = cookieValues(req.headers.cookie, USER_COOKIE.name);
+    if (values.length > 1) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    if (values.length === 1 && values[0]) {
+      token = values[0];
+      authVia = 'cookie';
+      // Plan 9.3: a cookie is ambient, so a cookie-authenticated mutation must come from a trusted Origin.
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !requestOriginTrusted(req)) {
+        return res.status(403).json(CSRF_ORIGIN_BODY);
+      }
+    }
+  }
   const payload = token ? verifyToken(token) : null;
+  // 11a-s2 (plan 9.2): only a user token backed by a server session may ride
+  // U. A kiosk, choose or pre-11 (no sid) token in the cookie is refused by
+  // its claims, whatever the cookie is called.
+  if (authVia === 'cookie' && !sessionBackedClaims(payload)) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+  (req as any).authVia = authVia;
+  (req as any).tokenClaims = payload;
+  (req as any).authToken = token;
   // Item 8d: ONE row resolver for HTTP and WS (v2 binding + epoch, v1 epoch 0, kiosk by id).
   // 10g (B6, one place): a choose token proves the person's credential and
   // grants NO membership. It passes ONLY on the two chooser routes, and only
@@ -837,7 +930,7 @@ const VENUE_REMOVED_AFTER_PASSWORD = { error: 'Your password was changed, but yo
  * 503 SESSION_STORE_UNAVAILABLE and never a token. The ineligibility rule
  * (sessionIneligibleCode) is unchanged and runs before anything is written.
  */
-type MintResult = { token: string; sid: string } | { ineligible: true } | { down: true };
+type MintResult = { token: string; sid: string; absoluteExpMs: number } | { ineligible: true } | { down: true };
 const SESSION_STORE_DOWN_BODY = {
   error: 'Could not check your sign-in right now. Please try again in a moment.',
   code: 'SESSION_STORE_UNAVAILABLE',
@@ -848,6 +941,8 @@ const localSessions = new Map<string, SessionDoc>();
 const sessionCache = new Map<string, SessionCacheEntry>();
 /** Test mode only: make the session store fail (proves 503, never a sign-out). */
 let sessionStoreFaultForTests = false;
+/** Test mode only: make only the sign-out revoke write fail (the request has already passed the auth check). */
+let sessionRevokeFaultForTests = false;
 /** Test mode only: the NEXT store read / write returns this many ms late (forced interleavings). */
 let sessionReadDelayOnceForTests = 0;
 let sessionWriteDelayOnceForTests = 0;
@@ -912,12 +1007,12 @@ async function sessionStoreRevoke(sid: string, reason: string, nowIso: string): 
   return out;
 }
 
-async function issueSessionToken(row: any, req: any, via: SessionVia): Promise<MintResult> {
+async function issueSessionToken(row: any, req: any, via: SessionVia, opts: { capExpMs?: number } = {}): Promise<MintResult> {
   if (!row || sessionIneligibleCode(row)) return { ineligible: true };
   const sid = base64url(crypto.randomBytes(16));
   const epoch = tokenEpochOf(row) ?? 0;
   const nowMs = Date.now();
-  const doc = buildUserSession({ sid, row, epoch, via, userAgent: req?.headers?.['user-agent'], nowMs });
+  const doc = buildUserSession({ sid, row, epoch, via, userAgent: req?.headers?.['user-agent'], nowMs, capExpMs: opts.capExpMs });
   let stored = false;
   for (let attempt = 0; attempt < 2 && !stored; attempt++) {
     try {
@@ -934,7 +1029,11 @@ async function issueSessionToken(row: any, req: any, via: SessionVia): Promise<M
   if (!fresh || sessionIneligibleCode(fresh)) return { ineligible: true };
   // The row's epoch or person moved while the record was being written: no token (the caller retries).
   if ((tokenEpochOf(fresh) ?? 0) !== epoch || (fresh.personId || null) !== doc.personId) return { down: true };
-  return { token: signSessionToken(fresh, sid), sid };
+  const token = signSessionToken(fresh, sid);
+  // 11a-s2: the response that hands this token out also sets it as the user
+  // cookie (sessionCookieOnJson below), from a trusted Origin only.
+  if (req && typeof req === 'object') req.mintedSession = { token, sid, absoluteExpMs: doc.absoluteExpMs };
+  return { token, sid, absoluteExpMs: doc.absoluteExpMs };
 }
 
 /** The claims a session record can back (v1/v2 carrying sid); anything else null. */
@@ -980,6 +1079,48 @@ function closeSocketsOfSid(sid: string, code = 4401, reason = 'Unauthorized'): n
     n++;
   }
   return n;
+}
+
+/**
+ * 11a-s2: revokes several sessions in ONE store transaction (all or none),
+ * then the in-memory map, then their sockets (plan 10.1 order). Throws when
+ * the store write fails, with nothing revoked. Returns the sids that had a record.
+ */
+async function revokeSessionsAtomic(sids: string[], reason: string): Promise<Set<string>> {
+  const list = Array.from(new Set(sids.filter((x) => isSid(x))));
+  const nowIso = new Date().toISOString();
+  if (isTestMode() && (sessionStoreFaultForTests || sessionRevokeFaultForTests)) throw new Error('session store fault (test)');
+  const stored = new Map<string, SessionDoc | null>();
+  if (!firestoreDb) {
+    for (const sid of list) {
+      const cur = localSessions.get(sid);
+      if (!cur) { stored.set(sid, null); continue; }
+      stored.set(sid, cur.revokedAt ? { ...cur } : { ...cur, revokedAt: nowIso, revokeReason: reason });
+    }
+    for (const [sid, doc] of stored) if (doc) localSessions.set(sid, { ...doc });
+  } else {
+    const refs = list.map((sid) => firestoreDb.collection('sessions').doc(sid));
+    await firestoreDb.runTransaction(async (tx: any) => {
+      stored.clear();
+      const snaps = [];
+      for (const ref of refs) snaps.push(await tx.get(ref)); // every read before any write
+      snaps.forEach((snap: any, i: number) => {
+        if (!snap.exists) { stored.set(list[i], null); return; }
+        const cur = snap.data() as SessionDoc;
+        const next = cur.revokedAt ? cur : { ...cur, revokedAt: nowIso, revokeReason: reason };
+        stored.set(list[i], next);
+        if (!cur.revokedAt) tx.set(refs[i], JSON.parse(JSON.stringify(next)));
+      });
+    });
+  }
+  const had = new Set<string>();
+  for (const sid of list) {
+    const doc = stored.get(sid) ?? null;
+    cachePut(sessionCache, sid, { doc, readAtMs: Date.now() });
+    closeSocketsOfSid(sid);
+    if (doc) had.add(sid);
+  }
+  return had;
 }
 
 /** Revocation order (plan 10.1): store first, then the in-memory map, then that sid's sockets. Throws when the store write fails. */
@@ -5370,7 +5511,26 @@ wss.on('connection', (ws, req) => {
   let isKiosk = false;
   try {
     const url = new URL(req.url || '/ws', 'http://localhost');
-    const token = url.searchParams.get('token') || '';
+    let token = url.searchParams.get('token') || '';
+    // 11a-s2 (plan 9.2, 10.6): without ?token= (the transition path, which
+    // wins when present), the socket authenticates by the user cookie U. A
+    // cookie socket needs a trusted Origin (cross-site WebSocket hijacking:
+    // close 4403) and a user token backed by a server session (else 4401).
+    if (!url.searchParams.has('token') && url.searchParams.get('auth') === 'cookie') {
+      const values = cookieValues(req.headers.cookie, USER_COOKIE.name);
+      if (values.length >= 1) {
+        if (!originTrusted(req.headers.origin, TRUSTED_ORIGINS)) {
+          ws.close(4403, 'Forbidden');
+          return;
+        }
+        const cookieClaims = values.length === 1 ? verifyToken(values[0]) : null;
+        if (!sessionBackedClaims(cookieClaims)) {
+          ws.close(4401, 'Unauthorized');
+          return;
+        }
+        token = values[0];
+      }
+    }
     const payload = token ? verifyToken(token) : null;
     socketClaims = payload;
     // Item 8d: the same resolver as the HTTP middleware.
@@ -10390,6 +10550,7 @@ if (isTestMode()) {
     const { action, sid } = req.body || {};
     try {
       if (action === 'fault') { sessionStoreFaultForTests = req.body?.on === true; return res.json({ ok: true, fault: sessionStoreFaultForTests }); }
+      if (action === 'revokeFault') { sessionRevokeFaultForTests = req.body?.on === true; return res.json({ ok: true, revokeFault: sessionRevokeFaultForTests }); }
       if (action === 'read-delay-once') { sessionReadDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
       if (action === 'write-delay-once') { sessionWriteDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
       if (!isSid(sid)) return res.status(400).json({ error: 'sid required' });
@@ -15381,8 +15542,8 @@ function noMembershipBody(personId: string): { error: string; code: string } {
 function chooserPersonOf(req: any): { personId: string; currentRowId: string | null } | null {
   if (req.chooseClaims && typeof req.chooseClaims.personId === 'string') return { personId: req.chooseClaims.personId, currentRowId: null };
   if (req.kiosk === true) return null;
-  const authHeader = String(req.headers?.authorization || '');
-  const claims = authHeader.startsWith('Bearer ') ? verifyToken(authHeader.slice(7).trim()) : null;
+  // 11a-s2: the claims the auth middleware resolved (Bearer or the user cookie).
+  const claims = req.tokenClaims as SessionClaims | null | undefined;
   if (!claims || claims.kind !== 'v2') return null;
   const me = req.authUser;
   if (!me || typeof me.personId !== 'string' || !me.personId || me.personId !== claims.personId) return null;
@@ -15399,15 +15560,72 @@ function chooserPersonOf(req: any): { personId: string; currentRowId: string | n
  */
 app.post('/api/auth/logout', async (req, res) => {
   res.set('Cache-Control', 'no-store');
-  const sid = (req as any).sessionId;
-  if (!isSid(sid)) return res.json({ ok: true, revoked: false });
+  // 11a-s2: sign-out ends every session this browser holds: the request's own
+  // (Bearer or cookie) and, on a Bearer request, the user cookie's session
+  // too; then the cookie is deleted. A store error is 503 and the cookie is
+  // kept, so the client can retry (never a half sign-out).
+  const sids = new Set<string>();
+  const own = (req as any).sessionId;
+  if (isSid(own)) sids.add(own);
+  if ((req as any).authVia === 'bearer') {
+    const values = cookieValues(req.headers.cookie, USER_COOKIE.name);
+    const cookieClaims = values.length === 1 ? sessionBackedClaims(verifyToken(values[0])) : null;
+    if (cookieClaims) sids.add(cookieClaims.sid);
+  }
   try {
-    await revokeSession(sid, 'logout');
+    // One transaction for all of them: a store error revokes none, so the same request can be retried.
+    await revokeSessionsAtomic(Array.from(sids), 'logout');
   } catch (err: any) {
     log.warn(`[session] logout revoke failed: ${err?.message || err}`);
     return res.status(503).json(SESSION_STORE_DOWN_BODY);
   }
-  res.json({ ok: true, revoked: true });
+  clearUserCookie(res);
+  res.json({ ok: true, revoked: isSid(own) });
+});
+
+/**
+ * 11a-s2 (plan 9.2 adopt, 11a-c): move this browser from its Bearer token to
+ * the user cookie. The Bearer token has already passed the full check in the
+ * auth middleware. A token with a server session becomes the cookie as it is
+ * (same session, same end). A token from before 11a-s1 (no session) gets a
+ * new session record that ends no later than that token would. Trusted
+ * Origin only (403 CSRF_ORIGIN, nothing set). Idempotent: a request already
+ * on the cookie answers adopted:true and sets nothing. The token never
+ * appears in the answer. A client that gets 404 or 403 keeps Bearer.
+ */
+app.post('/api/auth/session/adopt', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!cookieAuthRequested(req) || !requestOriginTrusted(req)) return res.status(403).json(CSRF_ORIGIN_BODY);
+  if ((req as any).authVia === 'cookie') return res.json({ ok: true, adopted: true });
+  const claims = (req as any).tokenClaims as SessionClaims | null;
+  const me = (req as any).authUser;
+  if ((req as any).authVia !== 'bearer' || !claims || (claims.kind !== 'v1' && claims.kind !== 'v2') || !me) {
+    return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+  const backed = sessionBackedClaims(claims);
+  if (backed) {
+    const doc = sessionCache.get(backed.sid)?.doc;
+    if (!doc || !sessionBacksClaims(doc, backed, Date.now())) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    if (!setUserCookie(res, (req as any).authToken, doc.absoluteExpMs)) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    return res.json({ ok: true, adopted: true });
+  }
+  const expSec = tokenExpSeconds((req as any).authToken);
+  if (!expSec) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  const row = (users as any[]).find((u) => u && u.id === me.id);
+  const minted = await issueSessionToken(row, req, 'adopt', { capExpMs: expSec * 1000 });
+  if (sendMintFailure(res, minted, row)) return;
+  const m = minted as { token: string; absoluteExpMs: number };
+  if (!setUserCookie(res, m.token, m.absoluteExpMs)) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  res.json({ ok: true, adopted: true });
+});
+
+/** 11a-s2: who this browser is signed in as, and by which credential ('cookie' | 'bearer'). Kiosk sessions get 403 KIOSK_SCOPE. */
+app.get('/api/auth/me', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const me = (req as any).authUser;
+  const row = me ? (users as any[]).find((u) => u && u.id === me.id) : undefined;
+  if (!row) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  res.json({ user: getSelfUser(row as UserProfile), auth: (req as any).authVia });
 });
 
 app.get('/api/auth/memberships', (req, res) => {
@@ -15447,8 +15665,8 @@ const recoverLimiter = createWindowLimiter({ max: 20, windowMs: 60 * 60 * 1000, 
 app.post('/api/auth/recovery-codes', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   if ((req as any).kiosk === true) return res.status(403).json({ error: RECOVERY_CODES_UNAVAILABLE_TEXT });
-  const authHeader = String(req.headers.authorization || '');
-  const claims = authHeader.startsWith('Bearer ') ? verifyToken(authHeader.slice(7).trim()) : null;
+  // 11a-s2: the claims the auth middleware resolved (Bearer or the user cookie).
+  const claims = (req as any).tokenClaims as SessionClaims | null | undefined;
   if (!claims || (claims as any).kind !== 'v2') return res.status(403).json({ error: RECOVERY_CODES_UNAVAILABLE_TEXT });
   const { currentPassword } = req.body || {};
   if (!currentPassword) return res.status(400).json({ error: 'Current password is required.' });

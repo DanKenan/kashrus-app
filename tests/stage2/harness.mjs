@@ -25,6 +25,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { unlinkSync, rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:net';
 
 const SERVER_PORT = Number(process.env.SERVER_PORT || 3100);
 const REPO = new URL('../..', import.meta.url).pathname;
@@ -38,6 +39,37 @@ function spawnLogged(cmd, args, opts, label) {
   child.stderr.on('data', (d) => process.stderr.write(`[${label}] ${d}`));
   children.push(child);
   return child;
+}
+
+/** True when nothing listens on 127.0.0.1:port (probe by binding it; nothing is killed). */
+function portIsFree(port) {
+  return new Promise((resolve) => {
+    const srv = createServer();
+    srv.once('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+  });
+}
+
+/** 11a-s2: SECOND_SERVER_PORT when set (must be free, else fail), otherwise a port the OS hands out. */
+async function pickSecondServerPort() {
+  const fixed = Number(process.env.SECOND_SERVER_PORT || 0);
+  if (fixed) {
+    if (!(await portIsFree(fixed))) throw new Error(`second server: port ${fixed} is in use; refusing to touch it`);
+    return fixed;
+  }
+  return await new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+/** Stops every child this harness started (Node does not signal a child that already exited). */
+function killChildren() {
+  for (const c of children) { try { c.kill(); } catch {} }
 }
 
 async function waitFor(url, { timeoutMs = 60000, label = 'service' } = {}) {
@@ -218,24 +250,39 @@ async function main() {
   // 11a-s1 (item 11 plan 10.1): a SECOND app instance on the same Firestore,
   // for the two-instance revocation test (Test 77 E6). Real emulator only:
   // the mock's store lives inside each process, so in mock mode this is null.
-  // Own port (SERVER_PORT + 2) and own data dir; stop() kills it by port.
+  // 11a-s2: on a shared machine the second server NEVER kills anything it did
+  // not start. It takes a port the OS reports free (or SECOND_SERVER_PORT when
+  // set, and fails if that port is busy) and runs as ONE node process (tsx as
+  // an --import loader, no npx/tsx wrapper children), so stopping it is
+  // child.kill() on that process alone, and Node never signals a child that
+  // has already exited (no stale or recycled pid is ever signalled).
   const startSecondServer = async () => {
     if (!useRealEmulator) return null;
-    const port2 = SERVER_PORT + 2;
-    const dataDir2 = join(tmpdir(), 'stage2-server-data-2');
+    const port2 = await pickSecondServerPort();
+    const dataDir2 = join(tmpdir(), `stage2-server-data-2-${port2}`);
     try { rmSync(dataDir2, { recursive: true, force: true }); } catch {}
     mkdirSync(dataDir2, { recursive: true });
-    const killPort2 = () => { try { execSync(`lsof -ti:${port2} -sTCP:LISTEN | xargs kill -9 2>/dev/null`, { stdio: 'ignore' }); } catch {} };
-    killPort2();
-    const child = spawnLogged('npx', ['tsx', 'server.ts'], { cwd: REPO, env: { ...serverEnv, PORT: String(port2), DATA_DIR_OVERRIDE: dataDir2 } }, 'server2');
-    await waitFor(`http://127.0.0.1:${port2}/api/venues`, { label: 'second server', timeoutMs: 120000 });
+    const child = spawnLogged(process.execPath, ['--import', 'tsx', 'server.ts'], { cwd: REPO, env: { ...serverEnv, PORT: String(port2), DATA_DIR_OVERRIDE: dataDir2 } }, 'server2');
+    const exited = new Promise((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      child.once('exit', () => resolve());
+    });
+    const stopChild = async () => {
+      if (child.exitCode === null && child.signalCode === null) { try { child.kill('SIGKILL'); } catch {} }
+      await Promise.race([exited, sleep(15000)]);
+    };
+    try {
+      await waitFor(`http://127.0.0.1:${port2}/api/venues`, { label: 'second server', timeoutMs: 120000 });
+    } catch (err) {
+      await stopChild();
+      throw err;
+    }
     return {
       url: `http://127.0.0.1:${port2}`,
       stop: async () => {
-        try { child.kill('SIGKILL'); } catch {}
-        killPort2();
+        await stopChild();
         for (let i = 0; i < 60; i++) {
-          try { execSync(`lsof -ti:${port2} -sTCP:LISTEN`, { stdio: 'ignore' }); } catch { return; }
+          if (await portIsFree(port2)) return;
           await sleep(250);
         }
       },
@@ -257,17 +304,17 @@ async function main() {
     await new Promise(() => {});
   }
 
-  for (const c of children) c.kill();
+  killChildren();
   process.exit(failed.length ? 1 : 0);
 }
 
 process.on('SIGINT', () => {
-  for (const c of children) c.kill();
+  killChildren();
   process.exit(130);
 });
 
 main().catch((err) => {
   console.error('Harness failed:', err);
-  for (const c of children) c.kill();
+  killChildren();
   process.exit(2);
 });

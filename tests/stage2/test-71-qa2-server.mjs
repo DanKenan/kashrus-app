@@ -284,7 +284,7 @@ export default {
     {
       const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
       const signs = src.split('\n').filter((l) => l.includes('signSessionToken(') && !/^\s*(\/\/|\*|\/\*)/.test(l));
-      const okSign = signs.every((l) => /function signSessionToken\(|return \{ token: signSessionToken\(fresh, sid\), sid \};|signToken\(userId\) : signSessionToken\(user as any\)/.test(l));
+      const okSign = signs.every((l) => /function signSessionToken\(|const token = signSessionToken\(fresh, sid\);|signToken\(userId\) : signSessionToken\(user as any\)/.test(l));
       if (signs.length !== 3 || !okSign) throw new Error(`S signSessionToken callers: ${signs.length}\n${signs.join('\n')}`);
       const resolves = src.split('\n').filter((l) => l.includes('resolveSessionRow(') && !/^\s*(\/\/|\*|\/\*)/.test(l));
       if (resolves.length !== 1 || !resolves[0].includes('const row: any = resolveSessionRow(claims')) throw new Error(`S resolveSessionRow callers: ${resolves.length}`);

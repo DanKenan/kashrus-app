@@ -42,6 +42,8 @@ export const SESSION_VIA = [
   'activate',
   'account-merge',
   'recover',
+  /** 11a-s2: a pre-11 Bearer token moved to the cookie (its record ends no later than that token). */
+  'adopt',
   'test',
 ] as const;
 export type SessionVia = (typeof SESSION_VIA)[number];
@@ -79,11 +81,18 @@ export function buildUserSession(input: {
   via: SessionVia;
   userAgent?: unknown;
   nowMs: number;
+  /** 11a-s2 adopt: the record never outlives this moment (the adopted token's own expiry). */
+  capExpMs?: number;
 }): SessionDoc {
   const { sid, row, epoch, via, nowMs } = input;
   if (!isSid(sid)) throw new Error('buildUserSession: bad sid');
   if (!Number.isInteger(epoch) || epoch < 0) throw new Error('buildUserSession: bad epoch');
   const personId = typeof row.personId === 'string' && row.personId ? row.personId : null;
+  let absoluteExpMs = nowMs + USER_SESSION_TTL_MS;
+  if (input.capExpMs !== undefined) {
+    if (typeof input.capExpMs !== 'number' || !Number.isFinite(input.capExpMs) || input.capExpMs <= nowMs) throw new Error('buildUserSession: bad cap');
+    absoluteExpMs = Math.min(absoluteExpMs, input.capExpMs);
+  }
   return {
     sid,
     kind: 'user',
@@ -94,7 +103,7 @@ export function buildUserSession(input: {
     via,
     createdAt: new Date(nowMs).toISOString(),
     createdAtMs: nowMs,
-    absoluteExpMs: nowMs + USER_SESSION_TTL_MS,
+    absoluteExpMs,
     userAgentHint: String(input.userAgent ?? '').slice(0, 60),
     revokedAt: null,
     revokeReason: null,

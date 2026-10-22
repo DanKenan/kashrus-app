@@ -12,6 +12,7 @@ import testHistoryRetention from './test-history-retention.mjs';
 import testMigrateIdentity from './test-migrate-identity.mjs';
 import testSessionToken from './test-session-token.mjs';
 import testSessions from './test-sessions.mjs';
+import testSessionCookie from './test-session-cookie.mjs';
 import testVenueScope from './test-venue-scope.mjs';
 import testCertOptions from './test-cert-options.mjs';
 import testIdentityInvariants from './test-identity-invariants.mjs';
@@ -22,7 +23,7 @@ import testInvites from './test-invites.mjs';
 import testResetLinks from './test-reset-links.mjs';
 import testAccountMerge from './test-account-merge.mjs';
 
-const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken, testVenueScope, testCertOptions, testIdentityInvariants, testIdentityProjection, testAgencyLogo, testRecoveryCodes, testInvites, testResetLinks, testAccountMerge, testSessions];
+const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken, testVenueScope, testCertOptions, testIdentityInvariants, testIdentityProjection, testAgencyLogo, testRecoveryCodes, testInvites, testResetLinks, testAccountMerge, testSessions, testSessionCookie];
 
 export async function runAll() {
   console.log(`\n=== Stage 4 PR A Tests (${tests.length} tests) ===\n`);
