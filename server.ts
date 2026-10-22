@@ -16240,16 +16240,29 @@ app.post('/api/passkeys/register/options', async (req, res) => {
   res.json({ challengeId: ch.id, options });
 });
 
+/** 11b-s (RV1): a verify that fails before its transaction still uses up the challenge it names (single use, also on failure). */
+async function burnChallenge(challengeId: string): Promise<void> {
+  if (!CHALLENGE_ID_RE.test(challengeId)) return;
+  await pkTransaction<void>(async (tx) => {
+    const ch = await tx.get('webauthnChallenges', challengeId);
+    if (ch && !ch.consumedAt) tx.set('webauthnChallenges', challengeId, { ...ch, consumedAt: new Date().toISOString() });
+  });
+}
+
 app.post('/api/passkeys/register/verify', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   if (!requestOriginTrusted(req)) return res.status(403).json(CSRF_ORIGIN_BODY);
-  const who = passkeyUser(req);
-  if (!who || !personMayEnroll(who.personId)) return res.status(403).json(PASSKEY_UNAVAILABLE);
-  const origin = normalizeOrigin(req.headers.origin)!;
   const challengeId = typeof req.body?.challengeId === 'string' ? req.body.challengeId : '';
   const response = req.body?.response;
+  const early = async (status: number, body: any) => {
+    try { await burnChallenge(challengeId); } catch (err) { return storeDown(res, err, 'register/verify-early'); }
+    return res.status(status).json(body);
+  };
+  const who = passkeyUser(req);
+  if (!who || !personMayEnroll(who.personId)) return early(403, PASSKEY_UNAVAILABLE);
+  const origin = normalizeOrigin(req.headers.origin)!;
   if (!CHALLENGE_ID_RE.test(challengeId) || !response || typeof response !== 'object' || typeof response.id !== 'string' || !CREDENTIAL_ID_RE.test(response.id)) {
-    return res.status(400).json(PASSKEY_ADD_FAILED);
+    return early(400, PASSKEY_ADD_FAILED);
   }
   const credentialId: string = response.id;
   const idx = credentialIdHash(credentialId);
@@ -16425,6 +16438,7 @@ app.post('/api/auth/passkey/verify', async (req, res) => {
   const challengeId = typeof req.body?.challengeId === 'string' ? req.body.challengeId : '';
   const response = req.body?.response;
   if (!CHALLENGE_ID_RE.test(challengeId) || !response || typeof response !== 'object' || typeof response.id !== 'string' || !CREDENTIAL_ID_RE.test(response.id)) {
+    try { await burnChallenge(challengeId); } catch (err) { return storeDown(res, err, 'login/verify-early'); }
     return res.status(401).json(PASSKEY_LOGIN_FAILED);
   }
   const credentialId: string = response.id;

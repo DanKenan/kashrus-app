@@ -250,6 +250,12 @@ export default {
       const right = await recentAuth(s0.token, a.pw);
       assert(right.status === 200 && right.json?.ok === true, `A right password re-entry: ${right.status}`);
       assert((await regOptions(s0.token)).status === 200, 'A options open again after the re-entry');
+      // the proof is checked again at verify (it may run out between options and verify)
+      const opK = await regOptions(s0.token);
+      await hook({ action: 'age-recent-auth', sid: s0.sid, ageMs: 5 * 60 * 1000 + 1000 });
+      const vK = await regVerify(s0.token, { challengeId: opK.json.challengeId, response: new SoftPasskey().register(opK.json.options, ORIGIN) });
+      assert(vK.status === 403 && vK.json?.code === 'RECENT_AUTH_REQUIRED', `A proof ran out before verify: ${vK.status}`);
+      assert((await recentAuth(s0.token, a.pw)).status === 200, 'A re-entry again');
       // the proof is per session: s0b's proof is its own; a pre-item-11 token and a kiosk token cannot add
       const old = await call(baseUrl, 'POST', '/api/__test__/mint-token', { body: { userId: a.id } });
       const oldOp = await regOptions(old.json.token);
@@ -266,6 +272,15 @@ export default {
       const pkC = new SoftPasskey();
       assert((await regVerify(s0.token, { challengeId: opc.json.challengeId, response: pkC.register(opc.json.options, ORIGIN, { origin: EVIL }) })).status === 400, 'A bad response');
       assert((await regVerify(s0.token, { challengeId: opc.json.challengeId, response: pkC.register(opc.json.options, ORIGIN) })).status === 400, 'A the challenge of a failed verify is used up');
+      // ...also when the response is malformed (refused before the ceremony runs)
+      for (const junk of [undefined, { id: '!!' }, { id: 'x'.repeat(2000) }]) {
+        const opj = await regOptions(s0.token);
+        const pkJ = new SoftPasskey();
+        assert((await regVerify(s0.token, { challengeId: opj.json.challengeId, response: junk })).status === 400, 'A malformed response');
+        const after = await regVerify(s0.token, { challengeId: opj.json.challengeId, response: pkJ.register(opj.json.options, ORIGIN) });
+        assert(after.status === 400, `A the challenge of a malformed verify is used up: ${after.status}`);
+        assert((await hook({ action: 'get-challenge', challengeId: opj.json.challengeId })).json?.doc?.consumedAt, 'A consumed');
+      }
       // at most 10 (also when two challenges were fetched at 9)
       for (let i = 2; i <= 9; i++) await addPasskey(s0.token, new SoftPasskey('zero'), `A #${i}`);
       const opL1 = await regOptions(s0.token);
@@ -290,6 +305,14 @@ export default {
         if (origin === 'invite-new') assert(r.status === 200, `B invite-new may add: ${r.status}`);
         else assert(r.status === 403 && r.json?.code === 'PASSKEY_UNAVAILABLE', `B ${origin ?? 'absent'} may not add: ${r.status}`);
       }
+      // the origin is checked again at verify (it may change between options and verify)
+      const sbv = await signIn(b);
+      const opB = await regOptions(sbv.token);
+      assert(opB.status === 200, 'B options while invite-new');
+      await plantOrigin(b.id, 'agency-reset');
+      const vB = await regVerify(sbv.token, { challengeId: opB.json.challengeId, response: new SoftPasskey().register(opB.json.options, ORIGIN) });
+      assert(vB.status === 403 && vB.json?.code === 'PASSKEY_UNAVAILABLE', `B origin changed before verify: ${vB.status}`);
+      await plantOrigin(b.id, 'invite-new');
       details.push('B origins: self-registered + invite-new add; admin, agency-reset, absent refused');
 
       // ---- C: sign in with a passkey
@@ -345,6 +368,19 @@ export default {
       const pkZ = new SoftPasskey('zero');
       await addPasskey(sz.token, pkZ, 'C synced');
       assert((await pkSignIn(pkZ)).status === 200 && (await pkSignIn(pkZ)).status === 200, 'C synced passkey (counter 0) twice');
+      // a malformed sign-in response uses the challenge up too
+      for (const junk of [undefined, { id: '!!' }]) {
+        const opJ = await pkOptions();
+        assert((await pkVerify({ challengeId: opJ.json.challengeId, response: junk })).status === 401, 'C malformed response');
+        const afterJ = await pkVerify({ challengeId: opJ.json.challengeId, response: pkZ.assertion(opJ.json.options, ORIGIN) });
+        assert(afterJ.status === 401 && !afterJ.json?.token, `C the challenge of a malformed verify is used up: ${afterJ.status}`);
+      }
+      // single use does not lean on the counter: a synced passkey's assertion replayed is refused
+      const opZ = await pkOptions();
+      const respZ = pkZ.assertion(opZ.json.options, ORIGIN);
+      assert((await pkVerify({ challengeId: opZ.json.challengeId, response: respZ })).status === 200, 'C synced sign-in');
+      const repZ = await pkVerify({ challengeId: opZ.json.challengeId, response: respZ });
+      assert(repZ.status === 401, `C a replayed counter-0 assertion: ${repZ.status}`);
       // per-IP limits on the public routes and on password re-entry
       const FIX = `10.80.250.${(ts % 200) + 1}`;
       let lastO = null;
@@ -446,6 +482,17 @@ export default {
       assert((await personDoc(f.personId))?.passkeys?.length === 1, 'F the credential doc is still there');
       const fz = await pkSignIn(pkF);
       assert(fz.status === 401, `F no membership -> refused: ${fz.status}`);
+      // the agency is gone: the row is no active membership
+      const f2 = await register('f2');
+      const sf2 = await signIn(f2);
+      const pkF2 = new SoftPasskey();
+      await addPasskey(sf2.token, pkF2, 'F2');
+      const docA = await ctx.getDoc();
+      assert((await ctx.api('POST', '/api/__test__/doc-set-users', { users: docA.users, agencies: (docA.agencies || []).filter((x) => x.id !== f2.agencyId) })).status === 200, 'F2 remove the agency');
+      await reloadCommit();
+      const f2p = await pkSignIn(pkF2);
+      assert(f2p.status === 401 || f2p.status === 403, `F2 agency gone -> refused: ${f2p.status}`);
+      assert(!f2p.json?.token, 'F2 no token');
       // paused membership: the same 403 a password sign-in gives (single and multi); a pending-invite credential: refused
       await plantFields({ [z.id]: { resetSuspended: PAUSE() } });
       const zp = await pkSignIn(pkZ);
