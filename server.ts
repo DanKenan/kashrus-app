@@ -31,6 +31,7 @@ import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './sr
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
+import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetToken, resetLinkForToken, credentialStampHash, stampsEqual, isLiveResetLink, resetLinkAdminView, pruneResetLinks, makeRoomForResetLink, mayMakeResetLink, resetSuspensionRecord } from './src/server/reset-links.ts';
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN, PLATFORM_OPERATOR_USER_ID } from './src/server/platform-auth.js';
@@ -467,6 +468,8 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'POST', path: '/auth/recover' }, // 10f: public, generic 401, per-IP + per-person limits
   { method: 'GET', path: '/invites/preview' }, // 10i: bearer = the invite token (header), per-IP limit
   { method: 'POST', path: '/invites/accept' }, // 10i: bearer = the invite token, per-IP + per-invite limits
+  { method: 'GET', path: '/reset-links/preview' }, // 10L: bearer = the reset-link token (header), per-IP limit
+  { method: 'POST', path: '/reset-links/accept' }, // 10L: bearer = the reset-link token (header), per-IP limit
   { method: 'POST', path: '/agencies/register' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
@@ -781,17 +784,21 @@ function isAnsweredStatus(s: unknown): boolean {
  * venue again. A row that never had a venue is unchanged (RULE T).
  */
 function venueRemovedFor(row: any): boolean {
+  return venueRemovedForIn(row, venues as any[], deletedVenueIds);
+}
+/** venueRemovedFor on explicit lists (10L: the FRESH venues / deletedVenueIds inside a transaction). */
+function venueRemovedForIn(row: any, venueList: readonly any[], deletedIds: readonly string[]): boolean {
   if (!row || row.role === 'admin') return false;
   const home = typeof row.venueId === 'string' ? row.venueId : '';
   if (!home) return false;
   // Only a home venue that was really DELETED through the venue route counts
   // (a legacy default id that never existed is left alone).
-  if (!deletedVenueIds.includes(home)) return false;
-  if ((venues as any[]).some((v) => v && v.id === home)) return false;
+  if (!(Array.isArray(deletedIds) ? deletedIds : []).includes(home)) return false;
+  if ((venueList as any[]).some((v) => v && v.id === home)) return false;
   // venueScope keeps a dangling home id (it grants nothing); only venues
   // that exist now count.
-  const scope = venueScopeFor(row as UserProfile);
-  return Array.isArray(scope) && !scope.some((x) => (venues as any[]).some((v) => v && v.id === x));
+  const scope = venueScopeOf(row as any, venueList as any);
+  return Array.isArray(scope) && !scope.some((x) => (venueList as any[]).some((v) => v && v.id === x));
 }
 const VENUE_REMOVED = { error: 'Your venue was removed. Ask your agency admin to add you to a venue.', code: 'VENUE_REMOVED' };
 const VENUE_REMOVED_AFTER_PASSWORD = { error: 'Your password was changed, but your venue was removed. Ask your agency admin to add you to a venue.', code: 'VENUE_REMOVED' };
@@ -805,13 +812,34 @@ const VENUE_REMOVED_AFTER_PASSWORD = { error: 'Your password was changed, but yo
  * came from. (Only the test-mode mint hook signs directly; Test 71 pins this.)
  */
 function issueSessionToken(row: any): string | null {
-  if (!row || venueRemovedFor(row)) return null;
+  if (!row || sessionIneligibleCode(row)) return null;
   return signSessionToken(row);
 }
 function liveSessionRow(claims: any): any {
   const row: any = resolveSessionRow(claims, users as any[], agencies as any[]);
-  if (row && venueRemovedFor(row)) return undefined;
+  if (row && sessionIneligibleCode(row)) return undefined;
   return row;
+}
+
+/**
+ * 10L ([DS1 B1], design section 4): the ONE eligibility rule for a membership,
+ * shared by every session mint (issueSessionToken), every session resolve
+ * (liveSessionRow), the membership list, and the kiosk re-validation.
+ * 'VENUE_REMOVED' (QA2 #8) or 'RESET_CONFIRM_NEEDED' (paused after another
+ * agency's reset link until this agency's admin confirms) or null.
+ */
+function sessionIneligibleCode(row: any): 'VENUE_REMOVED' | 'RESET_CONFIRM_NEEDED' | null {
+  if (!row) return null;
+  if (venueRemovedFor(row)) return 'VENUE_REMOVED';
+  if (row.resetSuspended) return 'RESET_CONFIRM_NEEDED';
+  return null;
+}
+const RESET_CONFIRM_NEEDED = { error: "Your access to this agency is paused after a password reset. Ask that agency's admin to confirm it.", code: 'RESET_CONFIRM_NEEDED' };
+const RESET_CONFIRM_NEEDED_AFTER_PASSWORD = { error: "Your password was changed, but your access to this agency is paused after a password reset. Ask that agency's admin to confirm it.", code: 'RESET_CONFIRM_NEEDED' };
+/** The 403 body for a membership that may not get a session (fail closed: unknown -> VENUE_REMOVED wording). */
+function ineligibleBody(row: any, afterPassword = false): { error: string; code: string } {
+  if (sessionIneligibleCode(row) === 'RESET_CONFIRM_NEEDED') return afterPassword ? RESET_CONFIRM_NEEDED_AFTER_PASSWORD : RESET_CONFIRM_NEEDED;
+  return afterPassword ? VENUE_REMOVED_AFTER_PASSWORD : VENUE_REMOVED;
 }
 
 /** A7/B6: field-write gate for ingredients/factory-reports — admin, or a
@@ -2161,7 +2189,9 @@ function kioskSessionStillValid(
     device.venueId === sess.venueId &&
     pinRevOf(user) !== undefined &&
     String(pinRevOf(user)) === sess.pv &&
-    kioskUserFitsVenue(user, sess.agencyId, sess.venueId)
+    kioskUserFitsVenue(user, sess.agencyId, sess.venueId) &&
+    // 10L ([DS1 B1]): the one eligibility rule (a paused membership has no kiosk session either).
+    !sessionIneligibleCode(user)
   );
 }
 
@@ -2458,6 +2488,21 @@ function revokeUserPhoneSockets(userId: string): number {
   return n;
 }
 
+/** 10L ([DS1 B1], [DS2 N2]): close (4401) and unregister every open KIOSK socket of one row (a paused membership). */
+function revokeUserKioskSockets(userId: string): number {
+  let n = 0;
+  for (const [client, meta] of Array.from(activeSockets.entries())) {
+    if (!meta || !meta.kiosk || meta.userId !== userId) continue;
+    try {
+      client.close(4401, 'Unauthorized');
+    } catch {}
+    activeSockets.delete(client);
+    n++;
+  }
+  if (n) log.info(`[auth] closed ${n} open kiosk socket(s) of a paused membership`);
+  return n;
+}
+
 function authorizeSocket(client: WebSocket): SocketMeta | null {
   const meta = activeSockets.get(client);
   if (!meta || !recipientForMeta(meta)) {
@@ -2515,6 +2560,8 @@ let announcements: Announcement[] = [];
 let passwordResets: PasswordResetRequest[] = [];
 // Item 10h: invites (server-only; never in INITIAL_STATE, broadcasts or exports; only the token's sha256 is stored).
 let invites: any[] = [];
+// Item 10L: reset links (server-only; never in INITIAL_STATE, broadcasts or exports; only the token's sha256 and a credential stamp are stored).
+let resetLinks: any[] = [];
 // QA2 #8: ids of venues deleted through DELETE /api/venues/:id (newest last, capped).
 let deletedVenueIds: string[] = [];
 let passwordResetRateLimits: PasswordResetRateLimits = emptyRateLimits();
@@ -2642,12 +2689,15 @@ function hydrateState(parsed: any) {
       if (Array.isArray(parsed.passwordResets)) {
         const now = Date.now();
         passwordResets = parsed.passwordResets.filter(
-          (r: any) => r && r.email && (r.codeHash || r.code) && new Date(r.expiresAt).getTime() > now - 3600000
+          // 10L (3c): kept for 25 h so admins see who asked in the last 24 h (an expired code never verifies: checked at use).
+          (r: any) => r && r.email && (r.codeHash || r.code) && new Date(r.expiresAt).getTime() > now - 25 * 3600000
         );
       }
 
       // Item 10h: invites (records with no id are dropped defensively).
       invites = Array.isArray(parsed.invites) ? parsed.invites.filter((i: any) => i && typeof i === 'object' && typeof i.id === 'string') : [];
+      // Item 10L: reset links (records with no id are dropped defensively).
+      resetLinks = Array.isArray(parsed.resetLinks) ? parsed.resetLinks.filter((l: any) => l && typeof l === 'object' && typeof l.id === 'string') : [];
       deletedVenueIds = Array.isArray(parsed.deletedVenueIds) ? parsed.deletedVenueIds.filter((x: any) => typeof x === 'string' && x).slice(-1000) : [];
 
       // Rate-limit state is persisted so limits survive restarts and work
@@ -2924,6 +2974,7 @@ function stateSnapshot() {
     passwordResets,
     passwordResetRateLimits,
     invites,
+    resetLinks,
     deletedVenueIds,
     kioskPinLockouts,
     kioskDevices,
@@ -3522,6 +3573,9 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, outcome: any, la
   const tokenEpochBumpIds: string[] | undefined = outcome?.tokenEpochBumpIds;
   const venueAccessSetById: Record<string, string[]> | undefined = outcome?.venueAccessSetById;
   const extra = identityOptionsFromOutcome(outcome);
+  // 10L ([DS2 N1]): the authoritative BEFORE / AFTER resetLinks of this commit.
+  const resetLinksBefore: any[] = Array.isArray(identityBase?.resetLinks) ? identityBase.resetLinks : [];
+  const resetLinksAfter: any[] = Array.isArray(outDoc.resetLinks) ? outDoc.resetLinks : [];
   // 10d (B1): an owner transfer is validated and applied BEFORE the field
   // enforcement, on the fresh stored rows; an invalid transfer, or an owner
   // of a multi-row person removed without one, aborts the whole commit.
@@ -3536,6 +3590,8 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, outcome: any, la
     bumpTokenEpochIds: tokenEpochBumpIds && tokenEpochBumpIds.length ? new Set(tokenEpochBumpIds) : undefined,
     venueAccessSetById: venueAccessSetById && Object.keys(venueAccessSetById).length ? new Map(Object.entries(venueAccessSetById)) : undefined,
     ...extra,
+    resetLinksBefore,
+    resetLinksAfter,
     onViolation: (rowId, field) =>
       log.warn(`[identity] reverted a mutator change to server-only field ${field} on user ${rowId}`),
     onOriginChange: (rowId, from, to) =>
@@ -8368,7 +8424,7 @@ app.post('/api/invites/accept', async (req, res) => {
   const credRow: any = r.credId ? users.find((u) => u.id === r.credId) : row;
   if (credRow && isMultiPersonRow(users, credRow)) {
     // QA2 #8: no membership left to choose (all venues deleted) -> the clear refusal.
-    if (membershipsOfPerson(String(credRow.personId)).length === 0) return res.status(403).json(VENUE_REMOVED);
+    if (membershipsOfPerson(String(credRow.personId)).length === 0) return res.status(403).json(noMembershipBody(String(credRow.personId)));
     return res.json({
       success: true,
       chooseMembership: true,
@@ -8377,7 +8433,7 @@ app.post('/api/invites/accept', async (req, res) => {
     });
   }
   const acceptToken = issueSessionToken(row);
-  if (!acceptToken) return res.status(403).json(VENUE_REMOVED); // QA2 #8
+  if (!acceptToken) return res.status(403).json(ineligibleBody(row)); // QA2 #8 / 10L
   res.json({ success: true, user: getSelfUser(row), token: acceptToken });
 });
 
@@ -8447,6 +8503,9 @@ app.post('/api/users/:id/invite', async (req, res) => {
           ...freshDoc,
           users: freshUsers.map((u: any) => (u && u.id === targetId ? withoutPassword : u)),
           invites: [...pruneInvites(kept, nowMs), record],
+          // 10L (design section 5): a live reset link of this row dies in the same commit.
+          resetLinks: (Array.isArray(freshDoc.resetLinks) ? freshDoc.resetLinks : []).map((l: any) =>
+            l && l.memberId === targetId && isLiveResetLink(l, resetNowMs()) ? { ...l, status: 'revoked', revokedAt: nowIso, revokedBy: caller.id, revokeReason: 'member-changed' } : l),
           // K3: every reset request for this row (and for its email when only this row has it), verified or not.
           passwordResets: freshResets.filter((r: any) => !r || (r.rowId !== targetId && !(onlyRow && normalizeInviteEmail(r.email) === email))),
         },
@@ -8507,9 +8566,363 @@ async function acceptSetupInvite(req: any, res: any, raw: string, cachedInv: any
   const row: any = users.find((u) => u.id === memberId);
   if (!row) return res.status(500).json({ error: 'Accepted, but the account could not be loaded. Please sign in.' });
   const setupToken = issueSessionToken(row);
-  if (!setupToken) return res.status(403).json(VENUE_REMOVED); // QA2 #8
+  if (!setupToken) return res.status(403).json(ineligibleBody(row)); // QA2 #8 / 10L
   return res.json({ success: true, user: getSelfUser(row), token: setupToken });
 }
+
+// ---------------------------------------------------------------------------
+// Item 10L: reset links (design v3, [10L-DS3] agreed; Don 2026-10-22: no
+// admin-to-admin links; coordinators for the people of their own venues,
+// never admins or other coordinators). An admin or coordinator makes a
+// one-time 24 h link for a member and sends it themselves; the member picks
+// a new password on the public /reset page. Works whether or not invites
+// (Phase C) are ON. Only the token's sha256 and a credential stamp are stored.
+// ---------------------------------------------------------------------------
+const RESET_LINK_UNAVAILABLE = { error: 'A reset link is not available for this person.', code: 'RESET_LINK_UNAVAILABLE' };
+const RESET_LINK_FORBIDDEN = { error: "You can't make a reset link for this person.", code: 'FORBIDDEN' };
+const RESET_LINK_NOT_FOUND = { error: 'Not found.' };
+const RESET_LINKS_FULL_TEXT = 'Please try again later.';
+const resetPreviewLimiter = createWindowLimiter({ max: 60, windowMs: 60 * 60 * 1000, maxKeys: 10000 });
+const resetAcceptLimiter = createWindowLimiter({ max: 20, windowMs: 15 * 60 * 1000, maxKeys: 10000 });
+const RESET_CODE_TTL_MS = 15 * 60 * 1000; // forgot-password requests: requestedAt = expiresAt - 15 min
+
+/** The reset-link clock (the test clock when pinned; Date.now() otherwise). */
+function resetNowMs(): number {
+  return serverNow().getTime();
+}
+const docList = (doc: any, key: string): any[] => (Array.isArray(doc?.[key]) ? doc[key] : []);
+const agencyOfRow = (u: any): string => (u && typeof u.agencyId === 'string' && u.agencyId) || 'agency-hkc';
+
+/**
+ * 3a refusals (409, nothing written) on the given data: credentialPending
+ * (they need "Send invite"), no stored password on the credential row, or a
+ * removed venue. A paused row is NOT refused ([DS2 Option A]).
+ */
+function resetLinkRefused(rows: readonly any[], agencyList: readonly any[], venueList: readonly any[], deletedIds: readonly string[], target: any): boolean {
+  if (!target) return true;
+  if (target.credentialPending === 'invite') return true;
+  if (venueRemovedForIn(target, venueList, deletedIds)) return true;
+  const cred = credentialRowForRowIn(rows as any[], agencyList as any[], target);
+  return !cred || !credentialStampHash(cred.id, cred.password);
+}
+
+/**
+ * 3d/3e: the link's member still matches what the link was made for (same
+ * agency, person and email; no credentialPending; venue not removed; still a
+ * non-admin role) and the credential is the one stamped at creation.
+ */
+function resetLinkMatch(
+  rows: readonly any[], agencyList: readonly any[], venueList: readonly any[], deletedIds: readonly string[], link: any
+): { ok: true; row: any; cred: any } | { ok: false; reason: 'member-changed' | 'credential-changed' } {
+  const row: any = (rows as any[]).find((u) => u && u.id === link.memberId);
+  if (!row) return { ok: false, reason: 'member-changed' };
+  if (agencyOfRow(row) !== link.agencyId) return { ok: false, reason: 'member-changed' };
+  if ((typeof row.personId === 'string' ? row.personId : '') !== String(link.personId ?? '')) return { ok: false, reason: 'member-changed' };
+  if (normalizeInviteEmail(row.email) !== link.email) return { ok: false, reason: 'member-changed' };
+  if (row.credentialPending === 'invite') return { ok: false, reason: 'member-changed' };
+  if (venueRemovedForIn(row, venueList, deletedIds)) return { ok: false, reason: 'member-changed' };
+  // [DS1 B2]: still a role a link may be made for (a row promoted to admin -> dead).
+  if (!mayMakeResetLink({ id: '__reset-link-role-check__', role: 'admin', agencyId: link.agencyId }, row, venueList as any[], { platformOperatorId: PLATFORM_OPERATOR_USER_ID })) {
+    return { ok: false, reason: 'member-changed' };
+  }
+  const cred = credentialRowForRowIn(rows as any[], agencyList as any[], row);
+  const stamp = cred ? credentialStampHash(cred.id, cred.password) : null;
+  if (!cred || cred.id !== link.credentialOwnerId || !stampsEqual(stamp, link.credentialStampHash)) return { ok: false, reason: 'credential-changed' };
+  return { ok: true, row, cred };
+}
+
+/** Session caller for the member routes (kiosk 403). */
+function resetLinkCaller(req: any, res: any): UserProfile | null {
+  if ((req as any).kiosk === true) {
+    res.status(403).json(RESET_LINK_FORBIDDEN);
+    return null;
+  }
+  return requireAuthUser(req, res);
+}
+
+/** The fresh-data authority for 3a/3b: caller still in the agency and allowed; target still there. */
+function resetLinkFreshGate(freshDoc: any, callerId: string, agencyId: string, targetId: string): { conflict: string; conflictStatus: number; conflictCode: string } | { caller: any; target: any } {
+  const freshUsers = docList(freshDoc, 'users');
+  const fc = freshUsers.find((u: any) => u && u.id === callerId);
+  if (!fc || agencyOfRow(fc) !== agencyId) return { conflict: RESET_LINK_FORBIDDEN.error, conflictStatus: 403, conflictCode: 'FORBIDDEN' };
+  const ft = freshUsers.find((u: any) => u && u.id === targetId && agencyOfRow(u) === agencyId);
+  if (!ft) return { conflict: RESET_LINK_NOT_FOUND.error, conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+  if (!mayMakeResetLink(fc, ft, docList(freshDoc, 'venues'), { platformOperatorId: PLATFORM_OPERATOR_USER_ID })) {
+    return { conflict: RESET_LINK_FORBIDDEN.error, conflictStatus: 403, conflictCode: 'FORBIDDEN' };
+  }
+  return { caller: fc, target: ft };
+}
+
+// 3a: make (or replace) the member's reset link.
+app.post('/api/users/:id/reset-link', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const caller = resetLinkCaller(req, res);
+  if (!caller) return;
+  const agencyId = agencyOfRow(caller);
+  const targetId = String(req.params.id || '');
+  const cached: any = users.find((u) => u.id === targetId && agencyOfRow(u) === agencyId);
+  if (!cached) return res.status(404).json(RESET_LINK_NOT_FOUND);
+  if (!mayMakeResetLink(caller, cached, venues as any[], { platformOperatorId: PLATFORM_OPERATOR_USER_ID })) return res.status(403).json(RESET_LINK_FORBIDDEN);
+  if (resetLinkRefused(users, agencies, venues, deletedVenueIds, cached)) return res.status(409).json(RESET_LINK_UNAVAILABLE);
+  // [DS1 N6]: generated once BEFORE the transaction; a retry re-runs every check.
+  const pre = { id: `rst_${crypto.randomUUID()}`, token: newResetToken() };
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const gate = resetLinkFreshGate(freshDoc, caller.id, agencyId, targetId);
+      if ('conflict' in gate) return gate;
+      const { caller: fc, target: ft } = gate;
+      const freshUsers = docList(freshDoc, 'users');
+      const freshAgencies = docList(freshDoc, 'agencies');
+      if (resetLinkRefused(freshUsers, freshAgencies, docList(freshDoc, 'venues'), docList(freshDoc, 'deletedVenueIds'), ft)) {
+        return { conflict: RESET_LINK_UNAVAILABLE.error, conflictStatus: 409, conflictCode: RESET_LINK_UNAVAILABLE.code };
+      }
+      const existing = docList(freshDoc, 'resetLinks');
+      const mine = existing.find((l: any) => l && l.id === pre.id);
+      if (mine) return { doc: freshDoc, result: { resetLink: resetLinkAdminView(mine), replaced: [] } };
+      const nowMs = resetNowMs();
+      const nowIso = new Date(nowMs).toISOString();
+      const cred = credentialRowForRowIn(freshUsers, freshAgencies, ft);
+      const stamp = cred ? credentialStampHash(cred.id, cred.password) : null;
+      if (!cred || !stamp) return { conflict: RESET_LINK_UNAVAILABLE.error, conflictStatus: 409, conflictCode: RESET_LINK_UNAVAILABLE.code };
+      const replaced: string[] = [];
+      const kept = existing.map((l: any) => {
+        if (l && l.memberId === targetId && isLiveResetLink(l, nowMs)) {
+          replaced.push(String(l.id));
+          return { ...l, status: 'revoked', revokedAt: nowIso, revokedBy: fc.id, revokeReason: 'replaced' };
+        }
+        return l;
+      });
+      const room = makeRoomForResetLink(kept, nowMs);
+      if (!room.ok) return { conflict: RESET_LINKS_FULL_TEXT, conflictStatus: 503, conflictCode: 'RESET_LINKS_FULL' };
+      const record = {
+        id: pre.id, agencyId, memberId: targetId, personId: typeof ft.personId === 'string' ? ft.personId : '',
+        email: normalizeInviteEmail(ft.email), createdBy: fc.id, createdAt: nowIso,
+        expiresAt: new Date(nowMs + RESET_LINK_TTL_MS).toISOString(),
+        resetTokenHash: pre.token.hash, credentialOwnerId: String(cred.id), credentialStampHash: stamp, status: 'pending',
+      };
+      return { doc: { ...freshDoc, resetLinks: [...room.list, record] }, result: { resetLink: resetLinkAdminView(record), replaced } };
+    },
+    { label: 'reset-link-create', requireVersion: true }
+  );
+  if (!committed) return;
+  const { resetLink, replaced } = committed.result as any;
+  for (const rid of (replaced || []) as string[]) log.info(`[audit] reset link replaced: by ${caller.id} agency ${agencyId} member ${targetId} link ${rid}`);
+  log.info(`[audit] reset link created: by ${caller.id} agency ${agencyId} member ${targetId} link ${resetLink.id}`);
+  res.status(201).json({ resetLink, link: `/reset#t=${pre.token.raw}` });
+});
+
+// 3b: revoke the member's live reset link (none -> 200, nothing written).
+app.delete('/api/users/:id/reset-link', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const caller = resetLinkCaller(req, res);
+  if (!caller) return;
+  const agencyId = agencyOfRow(caller);
+  const targetId = String(req.params.id || '');
+  const cached: any = users.find((u) => u.id === targetId && agencyOfRow(u) === agencyId);
+  if (!cached) return res.status(404).json(RESET_LINK_NOT_FOUND);
+  if (!mayMakeResetLink(caller, cached, venues as any[], { platformOperatorId: PLATFORM_OPERATOR_USER_ID })) return res.status(403).json(RESET_LINK_FORBIDDEN);
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const gate = resetLinkFreshGate(freshDoc, caller.id, agencyId, targetId);
+      if ('conflict' in gate) return gate;
+      const existing = docList(freshDoc, 'resetLinks');
+      const nowMs = resetNowMs();
+      const live = existing.filter((l: any) => l && l.memberId === targetId && isLiveResetLink(l, nowMs));
+      if (!live.length) return { doc: freshDoc, result: { revoked: false } };
+      const nowIso = new Date(nowMs).toISOString();
+      const next = existing.map((l: any) => (live.includes(l) ? { ...l, status: 'revoked', revokedAt: nowIso, revokedBy: gate.caller.id, revokeReason: 'revoked' } : l));
+      return { doc: { ...freshDoc, resetLinks: pruneResetLinks(next, nowMs) }, result: { revoked: true, ids: live.map((l: any) => String(l.id)) } };
+    },
+    { label: 'reset-link-revoke', requireVersion: true }
+  );
+  if (!committed) return;
+  const r: any = committed.result;
+  if (r?.revoked) for (const id of r.ids || []) log.info(`[audit] reset link revoked: by ${caller.id} agency ${agencyId} member ${targetId} link ${id}`);
+  res.json({ ok: true, revoked: r?.revoked === true });
+});
+
+// 3c: who asked for a reset in the last 24 hours (no code, no email).
+app.get('/api/agency/reset-requests', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const caller = resetLinkCaller(req, res);
+  if (!caller) return;
+  if (caller.role !== 'admin' && caller.role !== 'coordinator') return res.status(403).json(RESET_LINK_FORBIDDEN);
+  const agencyId = agencyOfRow(caller);
+  const nowMs = resetNowMs();
+  const byMember = new Map<string, { memberId: string; name: string; requestedAt: string; linkLive: boolean }>();
+  for (const r of passwordResets as any[]) {
+    if (!r || typeof r.rowId !== 'string' || !r.rowId) continue; // [DS1 N2]: never inferred from the email
+    const exp = Date.parse(String(r.expiresAt || ''));
+    if (!Number.isFinite(exp)) continue;
+    const requestedMs = exp - RESET_CODE_TTL_MS;
+    if (nowMs - requestedMs > 24 * 60 * 60 * 1000 || requestedMs > nowMs + 60 * 1000) continue;
+    const row: any = users.find((u) => u.id === r.rowId);
+    if (!row || agencyOfRow(row) !== agencyId) continue;
+    const email = normalizeInviteEmail(row.email);
+    if (!email || email !== normalizeInviteEmail(r.email)) continue;
+    if ((users as any[]).filter((u) => u && normalizeInviteEmail(u.email) === email).length !== 1) continue;
+    if (!mayMakeResetLink(caller, row, venues as any[], { platformOperatorId: PLATFORM_OPERATOR_USER_ID })) continue;
+    const requestedAt = new Date(requestedMs).toISOString();
+    const prev = byMember.get(row.id);
+    if (prev && prev.requestedAt >= requestedAt) continue;
+    byMember.set(row.id, {
+      memberId: String(row.id), name: String(row.name || ''), requestedAt,
+      linkLive: resetLinks.some((l) => l && l.memberId === row.id && isLiveResetLink(l, nowMs)),
+    });
+  }
+  res.json({ requests: Array.from(byMember.values()).sort((a, b) => (a.requestedAt < b.requestedAt ? 1 : -1)) });
+});
+
+// 3d: public preview (first name + agency name only; one 404 body for every failure).
+app.get('/api/reset-links/preview', (req, res) => {
+  if (inviteRateLimited(resetPreviewLimiter, 'reset-preview', req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  const invalid = () => res.status(404).json({ error: RESET_LINK_INVALID_TEXT });
+  const raw = String(req.get('x-reset-token') || '');
+  const link = RESET_TOKEN_RE.test(raw) ? resetLinkForToken(resetLinks, raw) : null;
+  if (!link || !isLiveResetLink(link, resetNowMs())) return invalid();
+  const m = resetLinkMatch(users, agencies, venues, deletedVenueIds, link);
+  if (m.ok === false) return invalid();
+  const agency = agencies.find((a) => a && a.id === link.agencyId);
+  const firstName = String(m.row.name || '').trim().split(/\s+/)[0] || '';
+  res.json({ firstName, agencyName: String(agency?.name || ''), expiresAt: String(link.expiresAt) });
+});
+
+// 3e: public accept — the member chooses a new password.
+app.post('/api/reset-links/accept', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const newPassword = req.body?.newPassword;
+  if (typeof newPassword !== 'string' || newPassword.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.', code: 'PASSWORD_TOO_SHORT' });
+  }
+  if (inviteRateLimited(resetAcceptLimiter, 'reset-accept', req, res)) return;
+  const invalid = () => res.status(404).json({ error: RESET_LINK_INVALID_TEXT });
+  const raw = String(req.get('x-reset-token') || '');
+  const cachedLink = RESET_TOKEN_RE.test(raw) ? resetLinkForToken(resetLinks, raw) : null;
+  if (!cachedLink || !isLiveResetLink(cachedLink, resetNowMs())) return invalid();
+  const linkId = String(cachedLink.id);
+  // bcrypt BEFORE the transaction (CPU-heavy); deterministic input to the mutator.
+  const newHash = await hashPassword(newPassword);
+  let committed: any;
+  try {
+    committed = await commitState(
+      (freshDoc) => {
+        const freshLinks = docList(freshDoc, 'resetLinks');
+        const link = freshLinks.find((l: any) => l && l.id === linkId);
+        const nowMs = resetNowMs();
+        if (!link || !resetTokenMatchesLink(link, raw) || !isLiveResetLink(link, nowMs)) return { doc: freshDoc, result: { kind: 'invalid' } };
+        const freshUsers = docList(freshDoc, 'users');
+        const freshAgencies = docList(freshDoc, 'agencies');
+        const nowIso = new Date(nowMs).toISOString();
+        const m = resetLinkMatch(freshUsers, freshAgencies, docList(freshDoc, 'venues'), docList(freshDoc, 'deletedVenueIds'), link);
+        if (m.ok === false) {
+          // member-changed / credential-changed: the link dies in this commit; nothing else is written.
+          const dead = { ...link, status: 'revoked', revokedAt: nowIso, revokeReason: m.reason };
+          return { doc: { ...freshDoc, resetLinks: freshLinks.map((l: any) => (l === link ? dead : l)) }, result: { kind: 'invalid', reason: m.reason } };
+        }
+        const { row, cred } = m;
+        const personRows = personRowsIn(freshUsers, row);
+        const personIds = new Set<string>(personRows.map((u: any) => String(u.id)));
+        const usedLink = { ...link, status: 'used', usedAt: nowIso };
+        const pause = resetSuspensionRecord(usedLink);
+        const setIds: string[] = [];
+        const clearIds: string[] = [];
+        const newUsers = freshUsers.map((u: any) => {
+          if (!u || !personIds.has(String(u.id))) return u;
+          let nu: any = u;
+          if (u.id === cred.id) nu = { ...nu, password: newHash };
+          if (u.id === link.memberId) {
+            if (nu.resetSuspended) { const { resetSuspended: _rs, ...rest } = nu; nu = rest; clearIds.push(String(u.id)); }
+          } else if (personRows.length > 1 && agencyOfRow(u) !== link.agencyId && !u.resetSuspended) {
+            // [DS1 B5]: a row that already carries a record keeps it unchanged.
+            nu = { ...nu, resetSuspended: { ...pause } };
+            setIds.push(String(u.id));
+          }
+          return nu;
+        });
+        // E1: every older session of every row of the person dies. Legacy rows
+        // (no personId) hold only v1 tokens, which need epoch 0 (as today's reset).
+        const bumpIds = personRows.filter((u: any) => typeof u.personId === 'string' && u.personId).map((u: any) => String(u.id));
+        const linkEmail = String(link.email || '');
+        const newResets = docList(freshDoc, 'passwordResets').filter((r: any) => !r || !(personIds.has(String(r.rowId || '')) || (linkEmail && normalizeInviteEmail(r.email) === linkEmail)));
+        return {
+          doc: { ...freshDoc, users: newUsers, passwordResets: newResets, resetLinks: freshLinks.map((l: any) => (l === link ? usedLink : l)) },
+          result: { kind: 'ok', rowId: String(row.id), personRowIds: Array.from(personIds), pausedIds: setIds },
+          ...(bumpIds.length ? { tokenEpochBumpIds: bumpIds } : {}),
+          // An admin held the link: the credential is not provably personal (same downgrade as today's agency reset).
+          credentialOriginSetById: { [String(cred.id)]: 'agency-reset' },
+          // Q-L3: the person's recovery codes are cleared (through the sanctioned writer).
+          ...(cred.recoveryCodeHashes !== undefined || cred.recoveryFailures !== undefined ? { recoveryWriteById: { [String(cred.id)]: { codes: null, failures: null } } } : {}),
+          resetSuspension: { linkId: String(link.id), set: setIds, clear: clearIds },
+        };
+      },
+      { label: 'reset-link-accept' }
+    );
+  } catch (err: any) {
+    if (err instanceof OperationConflictError) return res.status(err.status || 409).json({ error: err.message, code: err.code || 'OPERATION_CONFLICT' });
+    log.warn('[reset-link] accept write failed:', err?.message);
+    return res.status(503).json({ error: 'Please try again in a moment.' });
+  }
+  const r: any = committed?.result;
+  if (!r || r.kind !== 'ok') {
+    if (r?.reason) log.info(`[audit] reset link refused at use: link ${linkId} (${r.reason})`);
+    return invalid();
+  }
+  for (const id of r.personRowIds || []) revokeUserPhoneSockets(id);
+  // [DS1 B1]: kiosk sockets of every paused row of the person end now.
+  for (const id of r.personRowIds || []) {
+    if (id === r.rowId) continue;
+    const u: any = users.find((x) => x.id === id);
+    if (u && u.resetSuspended) revokeUserKioskSockets(id);
+  }
+  log.info(`[audit] reset link used: link ${linkId} member ${r.rowId} paused ${(r.pausedIds || []).length}`);
+  const row: any = users.find((u) => u.id === r.rowId);
+  const token = row ? issueSessionToken(row) : null;
+  // [DS1 N5]: the password changed either way; no token for an ineligible row.
+  if (!row || !token) return res.status(403).json({ ...ineligibleBody(row, true), passwordChanged: true });
+  res.json({ success: true, user: getSelfUser(row as UserProfile), token });
+});
+
+/** The fresh record still carries the hash of this raw token (constant-time). */
+function resetTokenMatchesLink(link: any, raw: string): boolean {
+  return !!resetLinkForToken([link], raw);
+}
+
+// 3f: an admin of that row's agency confirms a paused membership.
+app.post('/api/users/:id/confirm-reset', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if ((req as any).kiosk === true) return res.status(403).json({ error: 'Only administrators can perform this action.' });
+  const caller = requireAdmin(req, res);
+  if (!caller) return;
+  const agencyId = agencyOfRow(caller);
+  const targetId = String(req.params.id || '');
+  const cached: any = users.find((u) => u.id === targetId && agencyOfRow(u) === agencyId);
+  if (!cached) return res.status(404).json(RESET_LINK_NOT_FOUND);
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers = docList(freshDoc, 'users');
+      const fc = freshUsers.find((u: any) => u && u.id === caller.id);
+      if (!fc || fc.role !== 'admin' || agencyOfRow(fc) !== agencyId) return { conflict: 'Only administrators can perform this action.', conflictStatus: 403, conflictCode: 'FORBIDDEN' };
+      const ft = freshUsers.find((u: any) => u && u.id === targetId && agencyOfRow(u) === agencyId);
+      if (!ft) return { conflict: RESET_LINK_NOT_FOUND.error, conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+      if (!ft.resetSuspended) return { doc: freshDoc, result: { confirmed: false } };
+      const { resetSuspended: _rs, ...cleared } = ft;
+      return {
+        doc: { ...freshDoc, users: freshUsers.map((u: any) => (u === ft ? cleared : u)) },
+        result: { confirmed: true },
+        resetConfirm: { rowId: targetId, adminId: String(fc.id) },
+      };
+    },
+    { label: 'confirm-reset', requireVersion: true }
+  );
+  if (!committed) return;
+  const confirmed = (committed.result as any)?.confirmed === true;
+  if (confirmed) log.info(`[audit] paused membership confirmed: admin ${caller.id} agency ${agencyId} member ${targetId}`);
+  res.json({ ok: true, confirmed });
+});
 
 app.get('/api/agency/logo', async (req, res) => {
   const user = getAuthUser(req);
@@ -8726,14 +9139,14 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     if (!requireAdmin(req, res)) return;
     const db = firestoreDb;
     if (!db) return res.status(503).json({ error: 'db unavailable' });
-    const { users, agencies: newAgencies, venues: newVenues, invites: newInvites } = req.body || {};
+    const { users, agencies: newAgencies, venues: newVenues, invites: newInvites, resetLinks: newResetLinks } = req.body || {};
     if (!Array.isArray(users)) return res.status(400).json({ error: 'users array required' });
     const docRef = db.collection('app-state').doc('main');
     const snap = await docRef.get();
     const doc = (snap && snap.data && snap.data()) || {};
     // 10g (Test 64 F): optionally replace agencies too (to remove one under a live v2 token).
     // 10h (Test 67 G/I/J): optionally replace venues / invites too (stored doc only; the cache keeps the old lists).
-    await docRef.set({ ...doc, users, ...(Array.isArray(newAgencies) ? { agencies: newAgencies } : {}), ...(Array.isArray(newVenues) ? { venues: newVenues } : {}), ...(Array.isArray(newInvites) ? { invites: newInvites } : {}) });
+    await docRef.set({ ...doc, users, ...(Array.isArray(newAgencies) ? { agencies: newAgencies } : {}), ...(Array.isArray(newVenues) ? { venues: newVenues } : {}), ...(Array.isArray(newInvites) ? { invites: newInvites } : {}), ...(Array.isArray(newResetLinks) ? { resetLinks: newResetLinks } : {}) });
     res.json({ ok: true });
   });
   // TEST ONLY: seed a media doc directly into the `media` collection so the
@@ -11957,9 +12370,15 @@ app.get('/api/users', (req, res) => {
     const nowMs = Date.now();
     agencyUsers = agencyUsers.map((u: any) => {
       const row: any = users.find((x) => x.id === u.id);
-      if (!row || row.credentialPending !== 'invite' || (row.agencyId || 'agency-hkc') !== agencyId) return u;
-      const live = invites.some((i) => i && i.kind === 'setup' && i.memberId === u.id && isLiveInvite(i, nowMs));
-      return { ...u, invitePending: live, needsInvite: !live };
+      if (!row || (row.agencyId || 'agency-hkc') !== agencyId) return u;
+      let out: any = u;
+      if (row.credentialPending === 'invite') {
+        const live = invites.some((i) => i && i.kind === 'setup' && i.memberId === u.id && isLiveInvite(i, nowMs));
+        out = { ...out, invitePending: live, needsInvite: !live };
+      }
+      // 10L: a paused membership (only the derived boolean; the raw record never leaves).
+      if (row.resetSuspended) out = { ...out, resetConfirmNeeded: true };
+      return out;
     });
   }
 
@@ -13338,6 +13757,9 @@ app.post('/api/kiosk/login', async (req, res) => {
   if (!canFillTasks(kioskActingUser(user, venueId))) {
     return res.status(403).json({ error: "Your account can't fill tasks on the tablet. Ask your agency admin.", code: 'KIOSK_ROLE_CANNOT_FILL' });
   }
+  // 10L ([DS1 B1]): a paused membership (or a removed venue) gets no kiosk
+  // session either — after a correct PIN only (a wrong PIN stays the 401).
+  if (sessionIneligibleCode(user)) return res.status(403).json(ineligibleBody(user));
 
   // Success: clear the user's fail counter, upgrade a legacy plain PIN to
   // bcrypt in the same transaction, and mint the venue-scoped kiosk token.
@@ -13346,6 +13768,7 @@ app.post('/api/kiosk/login', async (req, res) => {
   const agencyId = user.agencyId || 'agency-hkc';
   let kioskToken: string | null = null;
   let freshCannotFill = false;
+  let freshPaused = false;
   try {
     const newHash = needsUpgrade ? await hashPassword(pinStr) : null;
     const committed = await commitState(
@@ -13376,6 +13799,9 @@ app.post('/api/kiosk/login', async (req, res) => {
         // mints no token.
         freshCannotFill = !canFillTasks(kioskActingUser(freshUser, venueId));
         if (freshCannotFill) return { conflict: 'KIOSK_ROLE_CANNOT_FILL' };
+        // 10L ([DS1 B1]): re-checked on the FRESH row inside the minting commit.
+        freshPaused = !!(freshUser as any).resetSuspended;
+        if (freshPaused) return { conflict: 'RESET_CONFIRM_NEEDED' };
         const freshLocks = (freshDoc.kioskPinLockouts && typeof freshDoc.kioskPinLockouts === 'object'
           ? freshDoc.kioskPinLockouts
           : { users: {}, tablets: {} }) as KioskPinLockouts;
@@ -13454,6 +13880,7 @@ app.post('/api/kiosk/login', async (req, res) => {
     if (freshCannotFill) {
       return res.status(403).json({ error: "Your account can't fill tasks on the tablet. Ask your agency admin.", code: 'KIOSK_ROLE_CANNOT_FILL' });
     }
+    if (freshPaused) return res.status(403).json(RESET_CONFIRM_NEEDED);
     log.warn('[kiosk] login success write failed:', (err as any)?.message);
     return res.status(503).json({ error: 'Please try again in a moment.' });
   }
@@ -13600,7 +14027,7 @@ app.post('/api/auth/login', async (req, res) => {
   const freshCred = users.find((u) => u.id === user.id) || user;
   if (isMultiPersonRow(users, freshCred)) {
     // QA2 #8: memberships whose venue was deleted are not offered; none left → the clear refusal.
-    if (membershipsOfPerson(String((freshCred as any).personId)).length === 0) return res.status(403).json(VENUE_REMOVED);
+    if (membershipsOfPerson(String((freshCred as any).personId)).length === 0) return res.status(403).json(noMembershipBody(String((freshCred as any).personId)));
     return res.json({
       success: true,
       chooseMembership: true,
@@ -13610,7 +14037,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
   // QA2 #8: the person's venue was deleted and no other venue is left.
   const token = issueSessionToken(freshCred);
-  if (!token) return res.status(403).json(VENUE_REMOVED);
+  if (!token) return res.status(403).json(ineligibleBody(freshCred));
   res.json({
     success: true,
     user: getSelfUser(user),
@@ -13947,7 +14374,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 
   // QA2 #8: the password change stands; a membership whose venue was deleted gets no session.
   const token = issueSessionToken(users.find((u) => u.id === user.id) || user);
-  if (!token) return res.status(403).json(VENUE_REMOVED_AFTER_PASSWORD);
+  if (!token) return res.status(403).json(ineligibleBody(users.find((u) => u.id === user.id) || user, true));
   res.json({ success: true, user: getSelfUser(users.find((u) => u.id === user.id)!), token });
 });
 
@@ -14049,7 +14476,7 @@ app.post('/api/auth/change-password', async (req, res) => {
   }
   const freshCallerRow = users.find((u) => u.id === caller.id) || caller;
   const changedToken = issueSessionToken(freshCallerRow);
-  if (!changedToken) return res.status(403).json(VENUE_REMOVED_AFTER_PASSWORD); // QA2 #8
+  if (!changedToken) return res.status(403).json(ineligibleBody(freshCallerRow, true)); // QA2 #8 / 10L
   res.json({ success: true, message: 'Password updated successfully.', token: changedToken });
 });
 
@@ -14068,11 +14495,17 @@ function membershipsOfPerson(personId: string): Array<{ membershipId: string; ag
   for (const u of rows) {
     const agency = (agencies as any[]).find((a) => a && typeof u.agencyId === 'string' && a.id === u.agencyId);
     if (!agency) continue;
-    if (venueRemovedFor(u)) continue; // QA2 #8: its venue was deleted
+    if (sessionIneligibleCode(u)) continue; // QA2 #8: its venue was deleted; 10L: paused after another agency's reset link
     out.push({ membershipId: String(u.id), agencyId: String(agency.id), agencyName: String(agency.name ?? ''), role: String(u.role ?? ''), joinedAt: typeof u.joinedAt === 'string' ? u.joinedAt : '' });
   }
   out.sort((a, b) => (a.joinedAt === b.joinedAt ? (a.membershipId < b.membershipId ? -1 : a.membershipId > b.membershipId ? 1 : 0) : a.joinedAt < b.joinedAt ? -1 : 1));
   return out.map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role }));
+}
+
+/** QA2 #8 / 10L: why a multi person has no membership left to choose (paused wins: it names what to do). */
+function noMembershipBody(personId: string): { error: string; code: string } {
+  const paused = (users as any[]).some((u) => u && u.personId === personId && sessionIneligibleCode(u) === 'RESET_CONFIRM_NEEDED');
+  return paused ? RESET_CONFIRM_NEEDED : VENUE_REMOVED;
 }
 
 /** 10g: the person a chooser request acts for: choose claims, or a v2 session's personId (never kiosk / v1). */
@@ -14104,7 +14537,7 @@ app.post('/api/auth/activate', (req, res) => {
   const agencyOk = !!row && typeof row.agencyId === 'string' && (agencies as any[]).some((a) => a && a.id === row.agencyId);
   if (!row || row.personId !== who.personId || !agencyOk) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
   const activeToken = issueSessionToken(row);
-  if (!activeToken) return res.status(403).json(VENUE_REMOVED); // QA2 #8
+  if (!activeToken) return res.status(403).json(ineligibleBody(row)); // QA2 #8 / 10L
   res.json({ token: activeToken, user: getSelfUser(row as UserProfile) });
 });
 
@@ -14237,7 +14670,7 @@ app.post('/api/auth/recover', async (req, res) => {
   log.info(`[recovery] recovered user ${cred.id} (sessions revoked: ${bumped.length})`);
   // QA2 #8: the recovery stands; a membership whose venue was deleted gets no session.
   const recoveredToken = issueSessionToken(fresh);
-  if (!recoveredToken) return res.status(403).json(VENUE_REMOVED_AFTER_PASSWORD);
+  if (!recoveredToken) return res.status(403).json(ineligibleBody(fresh, true));
   res.json({ success: true, user: getSelfUser(fresh), token: recoveredToken });
 });
 
