@@ -20,9 +20,13 @@
  *  - kiosk → row.id === sub (the caller then runs kioskSessionStillValid).
  */
 
+import { isSid } from './sessions.ts';
+
 export type SessionClaims =
-  | { kind: 'v1'; userId: string }
-  | { kind: 'v2'; userId: string; personId: string; ep: number }
+  /** sid (item 11, 11a-s1): present on tokens issued with a server session; such a token
+   * is valid only while sessions/{sid} backs it (server.ts). Absent on older tokens. */
+  | { kind: 'v1'; userId: string; sid?: string }
+  | { kind: 'v2'; userId: string; personId: string; ep: number; sid?: string }
   /** endsAtMs: set by server.ts verifyToken only (the kiosk 3 h cap); never by the classifier. */
   | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string; endsAtMs?: number }
   /** 10g: proves a person's credential, grants NO membership (never authUser). */
@@ -35,7 +39,13 @@ const nonEmpty = (x: unknown): x is string => typeof x === 'string' && x.length 
 
 export function classifySessionClaims(data: any): SessionClaims | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  // 11a-s1: sid is allowed only on v1/v2 session tokens, and only well-formed.
+  // A kiosk or choose token carrying sid, or a malformed sid, is no token.
+  const hasSid = has(data, 'sid');
+  if (hasSid && !isSid(data.sid)) return null;
+  const sidPart = hasSid ? { sid: data.sid as string } : {};
   if (data.kiosk === true) {
+    if (hasSid) return null;
     if (V2_CLAIMS.some((k) => has(data, k))) return null;
     if (!nonEmpty(data.sub)) return null;
     return {
@@ -51,7 +61,7 @@ export function classifySessionClaims(data: any): SessionClaims | null {
   if (has(data, 'v')) {
     if (data.v === 3) {
       // 10g choose token: exactly sub (person), cr (owner row), ep; no mem.
-      if (has(data, 'mem')) return null;
+      if (has(data, 'mem') || hasSid) return null;
       if (!nonEmpty(data.sub) || !nonEmpty(data.cr)) return null;
       if (typeof data.ep !== 'number' || !Number.isInteger(data.ep) || data.ep < 0) return null;
       return { kind: 'choose', personId: data.sub, ownerRowId: data.cr, ep: data.ep };
@@ -59,11 +69,11 @@ export function classifySessionClaims(data: any): SessionClaims | null {
     if (data.v !== 2) return null;
     if (!nonEmpty(data.sub) || !nonEmpty(data.mem)) return null;
     if (typeof data.ep !== 'number' || !Number.isInteger(data.ep) || data.ep < 0) return null;
-    return { kind: 'v2', userId: data.mem, personId: data.sub, ep: data.ep };
+    return { kind: 'v2', userId: data.mem, personId: data.sub, ep: data.ep, ...sidPart };
   }
   if (has(data, 'mem') || has(data, 'ep') || has(data, 'cr')) return null;
   if (!nonEmpty(data.sub)) return null;
-  return { kind: 'v1', userId: data.sub };
+  return { kind: 'v1', userId: data.sub, ...sidPart };
 }
 
 /** A row's epoch: absent → 0; a non-negative integer → itself; anything
@@ -126,7 +136,10 @@ export function chooseClaimsFor(ownerRow: { id: string; personId?: string; token
 }
 
 /** v2 for any row with a personId (10e: membership rows too); otherwise the legacy v1 claims. */
-export function sessionClaimsFor(row: { id: string; personId?: string; tokenEpoch?: unknown }): Record<string, unknown> {
+export function sessionClaimsFor(row: { id: string; personId?: string; tokenEpoch?: unknown }, sid?: string): Record<string, unknown> {
+  // 11a-s1: sid (when given) binds the token to its server session record.
+  if (sid !== undefined && !isSid(sid)) throw new Error('sessionClaimsFor: bad sid');
+  const sidPart = sid !== undefined ? { sid } : {};
   // An invalid stored epoch issues ep 0, which resolveSessionRow then refuses.
   const epoch = tokenEpochOf(row) ?? 0;
   // 10e: every row that carries a personId gets v2 — the person's first row
@@ -134,6 +147,6 @@ export function sessionClaimsFor(row: { id: string; personId?: string; tokenEpoc
   // !== id, created only through newMembership) too: after an E1 bump its
   // epoch is > 0, which a v1 token can never match. Rows without personId
   // (legacy) keep v1.
-  if (typeof row.personId === 'string' && row.personId) return { v: 2, sub: row.personId, mem: row.id, ep: epoch };
-  return { sub: row.id };
+  if (typeof row.personId === 'string' && row.personId) return { v: 2, sub: row.personId, mem: row.id, ep: epoch, ...sidPart };
+  return { sub: row.id, ...sidPart };
 }
