@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   Copy,
   Trash2,
+  ChevronLeft,
 } from 'lucide-react';
 import { KosherEvent, EventTask, User as UserType, Venue } from '../types';
 import { venueTimeZone, workDateIn } from '../lib/workday';
@@ -61,11 +62,22 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   const [taskNotesInput, setTaskNotesInput] = useState<{ [taskId: string]: string }>({});
   const [newEventTaskTitle, setNewEventTaskTitle] = useState('');
 
+  // QA2 Q1: on a phone (below md) the sheet shows the list OR one event's
+  // details (the two side-by-side panels did not fit: the list could not
+  // scroll and details had no room). Tapping an event opens its details;
+  // "All events" goes back. From md up, both panels show as before.
+  const [phoneDetail, setPhoneDetail] = useState(false);
+
   useEffect(() => {
     if (!focusEventId) return;
     setSelectedEventId(focusEventId);
     setFilterMode('all');
+    setPhoneDetail(true);
   }, [focusEventId]);
+
+  useEffect(() => {
+    if (!isOpen) setPhoneDetail(false);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -198,7 +210,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
         <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
           
           {/* Left Panel: Events List with Filter */}
-          <div className="w-full md:w-80 lg:w-96 border-b md:border-b-0 md:border-r border-line flex flex-col bg-sunken/50">
+          <div className={`w-full md:w-80 lg:w-96 border-b md:border-b-0 md:border-r border-line flex flex-col bg-sunken/50 min-h-0 flex-1 md:flex-initial ${phoneDetail ? 'max-md:hidden' : ''}`}>
             {/* Filter Pills */}
             <div className="p-3 border-b border-line flex flex-wrap gap-1.5 bg-sunken">
               <button
@@ -262,7 +274,10 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                     <button
                       key={evt.id}
                       aria-current={isSelected ? 'true' : undefined}
-                      onClick={() => setSelectedEventId(evt.id)}
+                      onClick={() => {
+                        setSelectedEventId(evt.id);
+                        setPhoneDetail(true);
+                      }}
                       className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer lift ${
                         isSelected
                           ? 'border-ink-soft bg-sunken e1 ring-1 ring-ink-soft'
@@ -312,7 +327,15 @@ export const EventsModal: React.FC<EventsModalProps> = ({
           </div>
 
           {/* Right Panel: Selected Event Details & Tasks */}
-          <div className="min-w-0 flex-1 flex flex-col overflow-y-auto bg-surface p-6">
+          <div className={`min-w-0 flex-1 min-h-0 flex flex-col overflow-y-auto bg-surface p-6 max-md:p-4 ${phoneDetail ? '' : 'max-md:hidden'}`}>
+            <button
+              type="button"
+              onClick={() => setPhoneDetail(false)}
+              className="md:hidden self-start mb-3 min-h-11 px-3 -ml-1 inline-flex items-center gap-1.5 rounded-lg text-sm font-semibold text-ink hover:bg-sunken cursor-pointer pressable"
+            >
+              <ChevronLeft className="w-4 h-4" aria-hidden="true" />
+              All events
+            </button>
             {activeEvent ? (
               <div className="space-y-6">
                 {/* Event Top Banner */}
