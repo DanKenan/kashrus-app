@@ -23,7 +23,8 @@
  */
 globalThis.document ??= { activeElement: null, addEventListener() {}, removeEventListener() {} };
 const store = new Map();
-globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
+globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k), get length() { return store.size; }, key: (i) => Array.from(store.keys())[i] ?? null };
+const logoutMarks = () => Array.from(store.keys()).filter((k) => k.startsWith('shutfey_logout_in_flight:'));
 const events = [];
 globalThis.window ??= { location: { origin: 'https://app.example', pathname: '/', hash: '', protocol: 'https:', host: 'app.example' }, addEventListener() {}, removeEventListener() {} };
 globalThis.window.dispatchEvent = (e) => { events.push(e.type); return true; };
@@ -46,11 +47,21 @@ function stubFetch(routes) {
     const method = (opts.method || 'GET').toUpperCase();
     let body = opts.body; try { body = JSON.parse(opts.body); } catch {}
     const h = opts.headers instanceof Headers ? Object.fromEntries(opts.headers.entries()) : Object.fromEntries(Object.entries(opts.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
-    calls.push({ method, path, body: body ?? null, h, opts, tokenInStore: getSessionToken() });
+    const call0 = { method, path, body: body ?? null, h, opts, tokenInStore: getSessionToken() };
+    calls.push(call0);
     let r = routes[`${method} ${path}`];
     if (Array.isArray(r)) r = r.length > 1 ? r.shift() : r[0];
     if (typeof r === 'function') r = r(body, h);
-    if (r && r.gate) await r.gate;
+    if (r && r.gate) {
+      const sig = opts.signal;
+      await new Promise((resolve, reject) => {
+        r.gate.then(resolve, reject);
+        if (sig) {
+          if (sig.aborted) reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          sig.addEventListener?.('abort', () => { call0.aborted = true; reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); });
+        }
+      });
+    }
     if (r === 'THROW') throw new TypeError('network');
     r = r || { status: 200, body: {} };
     const hdr = r.headers || {};
@@ -292,13 +303,13 @@ for (const [label, routes, unsupported] of [
 {
   // C9: a sign-out that never answers: the move gives up for now (token kept), no hang.
   reset();
-  sessionTiming.logoutSettleMaxMs = 30;
+  sessionTiming.logoutSettleMaxMs = 30; sessionTiming.logoutAbortMarginMs = -100000; // (the cut-off is E1's)
   stubFetch({ ...userRoutes(), 'POST /api/auth/logout': { status: 200, body: {}, gate: new Promise(() => {}) } });
   setSessionToken('tok-C9-old');
   void endServerSession(getSessionToken()); api.clearSession();
   setSessionToken('tok-C9');
   await syncCookieSession();
-  sessionTiming.logoutSettleMaxMs = 15000;
+  sessionTiming.logoutSettleMaxMs = 15000; sessionTiming.logoutAbortMarginMs = 2000;
   ok('C9 a sign-out that never answers: token kept, move tried later', getSessionToken() === 'tok-C9' && !isCookieSession());
 }
 
@@ -380,6 +391,100 @@ for (const mode of ['lease', 'web-locks']) {
   sessionTiming.moveLockMaxMs = 30000;
   ok('T4 another live tab moving: wait, then keep the token for later', getSessionToken() === 'tok-T4b' && c.length === 0, paths(c));
   store.delete('shutfey_cookie_move');
+}
+
+{
+  // E1 (RV2 P1-1): tab A's sign-out answer is late (past every wait): it is never cut off, so tab B
+  // keeps its token (move postponed, tried again) until A's answer is in; then B moves.
+  resetBoth();
+  sessionTiming.logoutSettleMaxMs = 60; apiB.sessionTiming.logoutSettleMaxMs = 60;
+  apiB.sessionTiming.movePostponedRetryMs = 40;
+  localStorage.setItem('shutfey_cookie_session', 'id-E1');
+  let release; const gate = new Promise((r) => { release = r; });
+  const calls = stubFetch({ ...userRoutes(), 'POST /api/auth/logout': { status: 200, body: { ok: true }, gate } });
+  const lo = endServerSession(); api.clearSession();
+  ok('E1 the sign-out request is not cut off (no abort signal)', !calls[0].opts.signal);
+  apiB.setSessionToken('tok-E1b');
+  await apiB.syncCookieSession();
+  await tick(200);
+  ok("E1 past the wait, tab B still keeps its token while A's sign-out may land", apiB.getSessionToken() === 'tok-E1b' && !calls.some((c) => c.path === '/api/auth/session/adopt'), paths(calls));
+  release(); await lo;
+  for (let i = 0; i < 40 && apiB.getSessionToken(); i++) await tick(20);
+  ok("E1 once A's answer is in, B's postponed move runs by itself", apiB.getSessionToken() === null && apiB.isCookieSession() && logoutMarks().length === 0, paths(calls));
+  sessionTiming.logoutSettleMaxMs = 15000; apiB.sessionTiming.logoutSettleMaxMs = 15000; apiB.sessionTiming.movePostponedRetryMs = 10000;
+}
+{
+  // E1b (RV2 P1-2): two sign-outs at the same moment each have their own mark; the first answer
+  // removes only its own, so the second still holds the moves back.
+  resetBoth(); setSessionToken('tok-E1b-a'); apiB.resetCookieSessionForTests();
+  sessionTiming.logoutSettleMaxMs = 40;
+  let r1, r2; const g1 = new Promise((r) => { r1 = r; }); const g2 = new Promise((r) => { r2 = r; });
+  const realNow = Date.now; const frozen = realNow(); Date.now = () => frozen;
+  stubFetch({ ...userRoutes(), 'POST /api/auth/logout': [{ status: 200, body: {}, gate: g1 }, { status: 200, body: {}, gate: g2 }] });
+  const lo1 = endServerSession('tok-x1');
+  const lo2 = apiB.endServerSession('tok-x2');
+  Date.now = realNow;
+  ok('E1b two marks for two sign-outs sent at the same moment', logoutMarks().length === 2, JSON.stringify(logoutMarks()));
+  r1(); await lo1;
+  ok('E1b the first answer removes only its own mark', logoutMarks().length === 1);
+  const c = stubFetch(userRoutes());
+  await syncCookieSession();
+  ok('E1b the second sign-out still on its way: no move (token kept)', getSessionToken() === 'tok-E1b-a' && c.length === 0, paths(c));
+  r2(); await lo2;
+  await syncCookieSession();
+  ok('E1b after both answers: the move runs', getSessionToken() === null && isCookieSession());
+  sessionTiming.logoutSettleMaxMs = 15000;
+}
+{
+  // E1c: a mark left by a closed tab counts for logoutUnknownMaxMs, then it is dropped.
+  resetBoth(); sessionTiming.logoutSettleMaxMs = 30;
+  store.set('shutfey_logout_in_flight:closedtab', String(Date.now() - 1000));
+  setSessionToken('tok-E1c');
+  let c = stubFetch(userRoutes());
+  await syncCookieSession();
+  ok('E1c a recent mark of a closed tab: token kept (it may still land)', getSessionToken() === 'tok-E1c' && c.length === 0);
+  store.set('shutfey_logout_in_flight:closedtab', String(Date.now() - sessionTiming.logoutUnknownMaxMs - 1));
+  await syncCookieSession();
+  ok('E1c past logoutUnknownMaxMs it is dropped and the move runs', getSessionToken() === null && isCookieSession() && logoutMarks().length === 0);
+  sessionTiming.logoutSettleMaxMs = 15000;
+}
+{
+  // E2 (RV2): a hung adopt is cut off (no late Set-Cookie after the move ends); token kept.
+  resetBoth(); sessionTiming.adoptMaxMs = 50; sessionTiming.adoptAbortGraceMs = 60;
+  setSessionToken('tok-E2');
+  const calls = stubFetch({ ...userRoutes(), 'POST /api/auth/session/adopt': { status: 200, body: {}, gate: new Promise(() => {}) } });
+  const t0 = Date.now();
+  let leaseDuringGrace = null;
+  setTimeout(() => { leaseDuringGrace = localStorage.getItem('shutfey_cookie_move'); }, 80);
+  await syncCookieSession();
+  const took = Date.now() - t0;
+  sessionTiming.adoptMaxMs = 20000; sessionTiming.adoptAbortGraceMs = 5000;
+  ok('E2 after the cut-off the lock is held a little longer (a late answer lands first)', took >= 100 && !!leaseDuringGrace, `took=${took} lease=${leaseDuringGrace}`);
+  const ad = calls.find((c) => c.path === '/api/auth/session/adopt');
+  ok('E2 a hung adopt is aborted, token kept, not on the cookie', ad && ad.aborted === true && getSessionToken() === 'tok-E2' && !isCookieSession());
+  ok('E2 and the lease is released', localStorage.getItem('shutfey_cookie_move') === null);
+}
+{
+  // E3 (RV2): the lease is renewed while a long move runs, so another tab never starts its move
+  // (and its adopt) under it.
+  resetBoth(); sessionTiming.moveLockMaxMs = 60; sessionTiming.moveLeaseMs = 60; apiB.sessionTiming.moveLockMaxMs = 60; apiB.sessionTiming.moveLeaseMs = 60;
+  setSessionToken('tok-E3a');
+  let release; const gate = new Promise((r) => { release = r; });
+  const order = [];
+  stubFetch({
+    'GET /api/auth/me': (b, h) => (h.authorization ? meUser('u1', 'bearer') : meUser('u1', 'cookie')),
+    'POST /api/auth/session/adopt': (b, h) => { order.push(h.authorization); return h.authorization === 'Bearer tok-E3a' ? { status: 200, body: { ok: true }, gate } : { status: 200, body: { ok: true } }; },
+  });
+  const mvA = syncCookieSession();
+  await tick(150);
+  apiB.setSessionToken('tok-E3b');
+  const mvB = apiB.syncCookieSession();
+  await tick(150);
+  ok('E3 a long move keeps its lease: the other tab did not adopt under it', order.length === 1, JSON.stringify(order));
+  release(); await mvA; await mvB;
+  sessionTiming.moveLockMaxMs = 30000; sessionTiming.moveLeaseMs = 120000; apiB.sessionTiming.moveLockMaxMs = 30000; apiB.sessionTiming.moveLeaseMs = 120000;
+  await syncCookieSession();
+  ok('E3 afterwards the newest token is moved', getSessionToken() === null && isCookieSession() && order[order.length - 1] === 'Bearer tok-E3b', JSON.stringify(order));
 }
 
 // ------------------------------------------------------------------ K: tablet

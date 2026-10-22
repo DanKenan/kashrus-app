@@ -57,13 +57,7 @@ export function isCookieSession(): boolean {
 }
 
 function newCookieSessionId(): string {
-  try {
-    const bytes = new Uint8Array(8);
-    globalThis.crypto.getRandomValues(bytes);
-    return Array.from(bytes, (x) => x.toString(16).padStart(2, '0')).join('');
-  } catch {
-    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
-  }
+  return randomId();
 }
 
 /**
@@ -211,8 +205,12 @@ async function isWrongCurrentPassword401(input: string, res: Response): Promise<
  *   (change password, merge accounts) is stored before the session is judged.
  * - logoutSettleMaxMs / moveLockMaxMs (11a-c): how long the move to the cookie
  *   waits for a sign-out on its way / for another tab's move before trying later.
+ *   logoutUnknownMaxMs: a sign-out mark left by a closed tab counts this long.
+ *   An adopt request is cut off after adoptMaxMs and the move's lock is then
+ *   kept adoptAbortGraceMs more. A postponed move is tried again after
+ *   movePostponedRetryMs. moveLeaseMs: the lease (no Web Locks) of a closed tab.
  */
-export const sessionTiming = { storeRetryDelaysMs: [1000, 3000], authSettleGraceMs: 1500, authSettleMaxMs: 60000, logoutSettleMaxMs: 15000, moveLockMaxMs: 30000 };
+export const sessionTiming = { storeRetryDelaysMs: [1000, 3000], authSettleGraceMs: 1500, authSettleMaxMs: 60000, logoutSettleMaxMs: 15000, logoutUnknownMaxMs: 600000, moveLockMaxMs: 30000, moveLeaseMs: 120000, adoptMaxMs: 20000, adoptAbortGraceMs: 5000, movePostponedRetryMs: 10000 };
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -392,7 +390,7 @@ export function endServerSession(token: string | null = getSessionToken()): Prom
   if (kioskDevice) headers['X-Kiosk-Device'] = kioskDevice;
   if (!onCookie) {
     try {
-      return trackLogout(fetch('/api/auth/logout', { method: 'POST', headers, credentials: 'same-origin', keepalive: true })).then(
+      return sendLogoutRequest(headers).then(
         (res) => res.text().then(() => undefined, () => undefined),
         () => undefined
       );
@@ -405,36 +403,75 @@ export function endServerSession(token: string | null = getSessionToken()): Prom
 }
 
 /**
- * 11a-c: sign-out requests still on their way, in this tab (the set) or in any
- * tab of this browser (LOGOUT_IN_FLIGHT_KEY = until when, ms). Their answer
- * deletes this browser's sign-in cookies, whichever they are by then, so a
- * sign-in made meanwhile could lose its new cookie: the move to the cookie
- * waits for them and keeps the token until then. A sign-out is still sent at
- * once (never queued), so it leaves even if the page navigates right after.
+ * 11a-c: sign-out requests still on their way. Their answer deletes this
+ * browser's sign-in cookies, whichever they are by then, so a sign-in made
+ * meanwhile (in any tab) could lose its new cookie: the move to the cookie
+ * waits while any is on its way and otherwise keeps the token and tries later.
+ * - In this tab: the set (exact).
+ * - For the other tabs: one localStorage key per request
+ *   (shutfey_logout_in_flight:<random id> = when it was sent), removed by the
+ *   tab that sent it once its answer (or a network error) is in. Requests are
+ *   never cut off, so "removed" always means "it can no longer land".
+ * - A key left by a tab that closed or navigated away (its request may still
+ *   be on its way, e.g. keepalive) counts as "maybe still on its way" for
+ *   logoutUnknownMaxMs (10 min, longer than any request can live at the
+ *   server and proxies), and only then is it dropped.
+ * A sign-out is still sent at once (never queued), so it leaves even if the
+ * page navigates right after.
  */
-const LOGOUT_IN_FLIGHT_KEY = 'shutfey_logout_in_flight';
+const LOGOUT_IN_FLIGHT_PREFIX = 'shutfey_logout_in_flight:';
 const logoutsInFlight = new Set<Promise<unknown>>();
+function randomId(): string {
+  try {
+    const bytes = new Uint8Array(8);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (x) => x.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  }
+}
 function trackLogout<T>(p: Promise<T>): Promise<T> {
   logoutsInFlight.add(p);
-  const until = Date.now() + sessionTiming.logoutSettleMaxMs;
-  const before = Number(readKey(LOGOUT_IN_FLIGHT_KEY));
-  const mark = String(Number.isFinite(before) && before > until ? before : until);
-  writeKey(LOGOUT_IN_FLIGHT_KEY, mark);
+  const key = `${LOGOUT_IN_FLIGHT_PREFIX}${randomId()}`;
+  writeKey(key, String(Date.now()));
   const done = () => {
     logoutsInFlight.delete(p);
-    if (readKey(LOGOUT_IN_FLIGHT_KEY) === mark) writeKey(LOGOUT_IN_FLIGHT_KEY, null);
+    writeKey(key, null);
   };
   p.then(done, done);
   return p;
 }
 
-function logoutInFlightAnywhere(): boolean {
-  if (logoutsInFlight.size > 0) return true;
-  const until = Number(readKey(LOGOUT_IN_FLIGHT_KEY));
-  return Number.isFinite(until) && until > Date.now();
+function sendLogoutRequest(headers: Record<string, string>): Promise<Response> {
+  return trackLogout(fetch('/api/auth/logout', { method: 'POST', headers, credentials: 'same-origin', keepalive: true }));
 }
 
-/** Resolves true once no sign-out request is on its way in any tab (false after maxMs: try the move later). */
+/** The other tabs' sign-out keys; drops the ones past logoutUnknownMaxMs. */
+function otherTabsLogoutInFlight(): boolean {
+  let any = false;
+  try {
+    const ls = globalThis.localStorage;
+    const keys: string[] = [];
+    for (let i = 0; i < ls.length; i++) {
+      const k = ls.key(i);
+      if (k && k.startsWith(LOGOUT_IN_FLIGHT_PREFIX)) keys.push(k);
+    }
+    for (const k of keys) {
+      const sentAt = Number(ls.getItem(k));
+      if (Number.isFinite(sentAt) && Date.now() - sentAt < sessionTiming.logoutUnknownMaxMs) any = true;
+      else ls.removeItem(k);
+    }
+  } catch {
+    // no storage: only this tab's own requests are known
+  }
+  return any;
+}
+
+function logoutInFlightAnywhere(): boolean {
+  return logoutsInFlight.size > 0 || otherTabsLogoutInFlight();
+}
+
+/** Resolves true once no sign-out request is on its way in any tab (false after maxMs: keep the token, try later). */
 async function waitForLogoutsToSettle(maxMs = sessionTiming.logoutSettleMaxMs): Promise<boolean> {
   const started = Date.now();
   while (logoutInFlightAnywhere()) {
@@ -452,25 +489,29 @@ async function waitForLogoutsToSettle(maxMs = sessionTiming.logoutSettleMaxMs): 
  */
 const MOVE_LEASE_KEY = 'shutfey_cookie_move';
 const tabId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-async function withCrossTabMoveLock(fn: () => Promise<void>): Promise<void> {
+async function withCrossTabMoveLock(fn: () => Promise<void>): Promise<boolean> {
   const locks = (globalThis as any).navigator?.locks;
   if (locks && typeof locks.request === 'function') {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), sessionTiming.moveLockMaxMs);
+    let acquired = false;
     try {
       await locks.request('shutfey-cookie-move', { signal: ctrl.signal }, async () => {
+        acquired = true;
         clearTimeout(timer);
         await fn();
       });
     } catch {
-      // not acquired in time (or the move failed): tried again later
+      // not acquired in time (or the move failed)
     } finally {
       clearTimeout(timer);
     }
-    return;
+    return acquired;
   }
   const started = Date.now();
-  const leaseMs = sessionTiming.moveLockMaxMs;
+  // The lease outlives the wait of the other tabs by far, and is renewed while
+  // the move runs (a background tab's timers can be slowed to once a minute).
+  const leaseMs = sessionTiming.moveLeaseMs;
   for (;;) {
     const [owner, until] = String(readKey(MOVE_LEASE_KEY) || '').split('|');
     if (!owner || owner === tabId || !(Number(until) > Date.now())) {
@@ -478,15 +519,21 @@ async function withCrossTabMoveLock(fn: () => Promise<void>): Promise<void> {
       writeKey(MOVE_LEASE_KEY, mine);
       await sleep(30);
       if (readKey(MOVE_LEASE_KEY) === mine) {
+        // Keep the lease while the move runs (it can wait on sign-in changes),
+        // so it never runs out under a move that is still going.
+        const renew = setInterval(() => {
+          if (String(readKey(MOVE_LEASE_KEY) || '').startsWith(`${tabId}|`)) writeKey(MOVE_LEASE_KEY, `${tabId}|${Date.now() + leaseMs}`);
+        }, Math.max(10, Math.floor(sessionTiming.moveLockMaxMs / 3)));
         try {
           await fn();
         } finally {
+          clearInterval(renew);
           if (String(readKey(MOVE_LEASE_KEY) || '').startsWith(`${tabId}|`)) writeKey(MOVE_LEASE_KEY, null);
         }
-        return;
+        return true;
       }
     }
-    if (Date.now() - started >= leaseMs) return;
+    if (Date.now() - started >= sessionTiming.moveLockMaxMs) return false;
     await sleep(100);
   }
 }
@@ -494,7 +541,7 @@ async function withCrossTabMoveLock(fn: () => Promise<void>): Promise<void> {
 /** 11a-c: true when the server has confirmed the cookie sign-out (2xx), or there was nothing to end (401). */
 async function postLogoutOnCookie(headers: Record<string, string>): Promise<boolean> {
   try {
-    const res = await trackLogout(fetch('/api/auth/logout', { method: 'POST', headers, credentials: 'same-origin', keepalive: true }));
+    const res = await sendLogoutRequest(headers);
     await res.text().catch(() => '');
     return res.ok || res.status === 401;
   } catch {
@@ -594,7 +641,10 @@ async function readMe(headers: Record<string, string>): Promise<MeAnswer> {
  */
 async function moveTokenToCookie(token: string): Promise<void> {
   // A sign-out still on its way would delete the cookie this sign-in is about to use.
-  if (!(await waitForLogoutsToSettle())) return;
+  if (!(await waitForLogoutsToSettle())) {
+    movePostponed = true;
+    return;
+  }
   if (getSessionToken() !== token) return;
   const deviceSecret = getKioskDeviceSecret();
   const bearer: Record<string, string> = sessionAuthHeaders(token);
@@ -609,15 +659,27 @@ async function moveTokenToCookie(token: string): Promise<void> {
   if (onTablet && (!before.kiosk?.deviceId || !before.kiosk?.venueId)) return;
   let adopted: Response;
   try {
-    adopted = await fetch(onTablet ? '/api/kiosk/session/adopt' : '/api/auth/session/adopt', {
-      method: 'POST',
-      headers: bearer,
-      credentials: 'same-origin',
-      cache: 'no-store',
-    });
-    // Read the (small) answer so the request is finished, never left open.
-    await adopted.text().catch(() => '');
+    // Cut off if it hangs, so no late answer (which sets the cookie) can land
+    // after this move is over and another tab's move has started.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), sessionTiming.adoptMaxMs);
+    try {
+      adopted = await fetch(onTablet ? '/api/kiosk/session/adopt' : '/api/auth/session/adopt', {
+        method: 'POST',
+        headers: bearer,
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: ctrl.signal,
+      });
+      // Read the (small) answer so the request is finished, never left open.
+      await adopted.text().catch(() => '');
+    } finally {
+      clearTimeout(timer);
+    }
   } catch {
+    // Cut off (or offline): its answer may still be landing; hold the lock a
+    // little longer so no other tab's adopt is answered before it. Token kept.
+    await sleep(sessionTiming.adoptAbortGraceMs);
     return;
   }
   if (adopted.status === 404 || adopted.status === 403) {
@@ -648,7 +710,11 @@ function setSessionTokenQuietly(token: string | null): void {
 async function syncOnce(): Promise<void> {
   const token = getSessionToken();
   if (token) {
-    if (!cookieMoveUnsupported) await withCrossTabMoveLock(() => moveTokenToCookie(token));
+    if (cookieMoveUnsupported) return;
+    movePostponed = false;
+    const acquired = await withCrossTabMoveLock(() => moveTokenToCookie(token));
+    // Another tab's move or a sign-out on its way: the token is kept, try again later.
+    if (!acquired || movePostponed) scheduleMoveRetry();
     return;
   }
   if (isCookieSession()) {
@@ -669,6 +735,16 @@ async function syncOnce(): Promise<void> {
     if (kioskDevice) headers['X-Kiosk-Device'] = kioskDevice;
     await sendPendingLogout(headers);
   }
+}
+
+let movePostponed = false;
+let moveRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleMoveRetry(): void {
+  if (moveRetryTimer) return;
+  moveRetryTimer = setTimeout(() => {
+    moveRetryTimer = null;
+    if (getSessionToken()) void syncCookieSession();
+  }, sessionTiming.movePostponedRetryMs);
 }
 
 /** Runs the move / start check once at a time; a request meanwhile runs it once more afterwards. */
@@ -724,6 +800,9 @@ export function resetCookieSessionForTests(): void {
   cookieMoveUnsupported = false;
   syncAgain = false;
   logoutsInFlight.clear();
+  movePostponed = false;
+  if (moveRetryTimer) clearTimeout(moveRetryTimer);
+  moveRetryTimer = null;
 }
 
 // ---------------------------------------------------------------------------
