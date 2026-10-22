@@ -45,6 +45,8 @@ import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { InvitePage } from './components/InvitePage';
+import { ResetPage } from './components/ResetPage';
+import { isResetPath, readResetToken } from './lib/resetLinks';
 import type { AddMemberInvite } from './components/TeamModal';
 import { fullInviteLink, isInvitePath, readInviteToken, useInviteFlag } from './lib/invites';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
@@ -356,6 +358,9 @@ export default function App() {
   // Item 10i: the public invite page (/invite#t=…), read once when the app opens.
   const [invitePage, setInvitePage] = useState(() => typeof window !== 'undefined' && isInvitePath(window.location.pathname));
   const [inviteToken] = useState(() => (typeof window !== 'undefined' ? readInviteToken(window.location.hash) : null));
+  // 10L: the public reset page (/reset#t=…), read once when the app opens.
+  const [resetPage, setResetPage] = useState(() => typeof window !== 'undefined' && isResetPath(window.location.pathname));
+  const [resetToken] = useState(() => (typeof window !== 'undefined' ? readResetToken(window.location.hash) : null));
   const [isKioskDevicesOpen, setIsKioskDevicesOpen] = useState(false);
   const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
   const [isCreateEventModalOpen, setIsCreateEventModalOpen] = useState(false);
@@ -1585,6 +1590,26 @@ export default function App() {
         onLoginSuccess={(user) => { leaveInvitePage(); handleLoginSuccess(user); }}
         onLeave={() => {
           leaveInvitePage();
+          if (!currentUser) { setAuthInitialMode('login'); setAuthView('auth'); }
+        }}
+        darkMode={darkMode}
+        onToggleDarkMode={() => setDarkMode(!darkMode)}
+      />
+    );
+  }
+
+  // 10L: the reset page comes first too, signed in or not (not on a kiosk tablet).
+  if (resetPage && !isKiosk) {
+    const leaveResetPage = () => {
+      try { window.history.replaceState(null, '', '/'); } catch { /* ignore */ }
+      setResetPage(false);
+    };
+    return (
+      <ResetPage
+        token={resetToken}
+        onLoginSuccess={(user) => { leaveResetPage(); handleLoginSuccess(user); }}
+        onLeave={() => {
+          leaveResetPage();
           if (!currentUser) { setAuthInitialMode('login'); setAuthView('auth'); }
         }}
         darkMode={darkMode}

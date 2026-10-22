@@ -111,7 +111,7 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
           {step === 1 && (
             <>
               <p className="text-xs text-ink-soft">
-                Enter your email. Your agency admin will receive a reset code and pass it to you.
+                Enter your email. Your agency admin will see that you asked and can send you a reset link.
               </p>
               <div className="relative">
                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-soft" />

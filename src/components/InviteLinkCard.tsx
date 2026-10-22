@@ -12,9 +12,13 @@ interface InviteLinkCardProps {
   hint?: string;
   onDone?: () => void;
   doneLabel?: string;
+  /** 10L: the same card for a reset link. Defaults keep the invite wording. */
+  title?: string;
+  note?: string;
+  expiryText?: string;
 }
 
-export const InviteLinkCard: React.FC<InviteLinkCardProps> = ({ link, forWhom, hint, onDone, doneLabel }) => {
+export const InviteLinkCard: React.FC<InviteLinkCardProps> = ({ link, forWhom, hint, onDone, doneLabel, title, note, expiryText }) => {
   const [copied, setCopied] = useState<'yes' | 'no' | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -35,11 +39,11 @@ export const InviteLinkCard: React.FC<InviteLinkCardProps> = ({ link, forWhom, h
       <div className="flex items-start gap-2">
         <Link2 className="w-4 h-4 shrink-0 mt-0.5 text-ok" aria-hidden="true" />
         <div className="min-w-0">
-          <p className="font-bold text-ink">Invite link ready</p>
+          <p className="font-bold text-ink">{title || 'Invite link ready'}</p>
           {forWhom && <p className="text-ink-soft break-words">For {forWhom}</p>}
         </div>
       </div>
-      <p className="text-ink">{hint || 'Send this link to the person.'} They open it and choose their own password.</p>
+      <p className="text-ink">{hint || 'Send this link to the person.'} {note || 'They open it and choose their own password.'}</p>
       <div className="flex flex-col sm:flex-row gap-2">
         <label htmlFor="invite-link-input" className="sr-only">Invite link</label>
         <input
@@ -62,7 +66,7 @@ export const InviteLinkCard: React.FC<InviteLinkCardProps> = ({ link, forWhom, h
         </button>
       </div>
       <p role="status" className="text-ink-soft">
-        {copied === 'yes' ? 'Link copied.' : copied === 'no' ? "Couldn't copy here. The link is selected; copy it by hand." : 'The link works once, for 7 days.'}
+        {copied === 'yes' ? 'Link copied.' : copied === 'no' ? "Couldn't copy here. The link is selected; copy it by hand." : (expiryText || 'The link works once, for 7 days.')}
       </p>
       {onDone && (
         <button

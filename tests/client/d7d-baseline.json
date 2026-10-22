@@ -220,7 +220,7 @@
  "forgot1": {
   "inv": [
    "Reset Password",
-   "Enter your email. Your agency admin will receive a reset code and pass it to you.",
+   "Enter your email. Your agency admin will see that you asked and can send you a reset link.",
    "Send Reset Code",
    "placeholder=you@example.com"
   ]

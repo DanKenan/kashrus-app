@@ -24,6 +24,7 @@ import { normalizePhone } from '../lib/kioskCodeShare';
 import { InviteLinkCard } from './InviteLinkCard';
 import { enableInvites, sendMemberInvite, loadMemberForInvite, inviteChip, SEND_CHANGED_TEXT } from '../lib/inviteActions';
 import type { InviteFlag } from '../lib/invites';
+import { canMakeResetLink, makeResetLink, loadResetRequests, confirmPausedMember, type ResetRequest } from '../lib/resetLinks';
 
 /** Item 10i: what Add member returns when the agency's Phase C is ON (the server made an invite, not a user). */
 export interface AddMemberInvite {
@@ -121,6 +122,24 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const [sentLink, setSentLink] = useState<{ userId: string; link: string; firstName: string } | null>(null);
   const [sentIds, setSentIds] = useState<string[]>([]);
   const [sendError, setSendError] = useState<{ userId: string; message: string; retry?: boolean } | null>(null);
+  // 10L: reset-password links (admin; coordinator for people at their venues). Making one changes
+  // nothing on the person's account, so there is no confirm; the link is shown once.
+  const [resetBusyId, setResetBusyId] = useState<string | null>(null);
+  const [resetLink, setResetLink] = useState<{ userId: string; link: string; firstName: string } | null>(null);
+  const [resetError, setResetError] = useState<{ userId: string; message: string } | null>(null);
+  const [resetRequests, setResetRequests] = useState<ResetRequest[]>([]);
+  // 10L: an admin confirms a membership paused by another agency's reset link.
+  const [confirmTarget, setConfirmTarget] = useState<UserType | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [confirmError, setConfirmError] = useState<{ userId: string; message: string } | null>(null);
+  const [confirmedIds, setConfirmedIds] = useState<string[]>([]);
+  const mayAskResetRequests = !!currentUser && (currentUser.role === 'admin' || currentUser.role === 'coordinator');
+  useEffect(() => {
+    if (!isOpen || !mayAskResetRequests) { setResetRequests([]); return; }
+    let active = true;
+    void loadResetRequests().then((list) => { if (active) setResetRequests(list); });
+    return () => { active = false; };
+  }, [isOpen, mayAskResetRequests, currentUser?.id]);
   useEffect(() => {
     if (!isOpen) {
       setInviteResult(null);
@@ -129,6 +148,10 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       setSendReview(null);
       setSentLink(null);
       setSendError(null);
+      setResetLink(null);
+      setResetError(null);
+      setConfirmTarget(null);
+      setConfirmError(null);
     }
   }, [isOpen]);
 
@@ -196,6 +219,34 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       setSendError({ userId: target.id, message: r.message || "Couldn't make the invite. Please try again." });
       if (r.flagOff) onInviteFlagStale?.();
     }
+  };
+
+  /** 10L: make a reset-password link for one person (shown once in their row). */
+  const startResetLink = async (user: UserType) => {
+    if (resetBusyId) return;
+    setResetBusyId(user.id);
+    setResetError(null);
+    setResetLink(null);
+    const r = await makeResetLink(user.id);
+    setResetBusyId(null);
+    if (r.ok && r.link) {
+      setResetLink({ userId: user.id, link: r.link, firstName: firstName(user.name) });
+      setResetRequests((prev) => prev.map((q) => (q.memberId === user.id ? { ...q, linkLive: true } : q)));
+    } else {
+      setResetError({ userId: user.id, message: r.message || "Couldn't make the reset link. Please try again." });
+    }
+  };
+
+  const confirmPaused = async () => {
+    const target = confirmTarget;
+    if (!target || confirmBusy) return;
+    setConfirmBusy(true);
+    setConfirmError(null);
+    const r = await confirmPausedMember(target.id);
+    setConfirmBusy(false);
+    setConfirmTarget(null);
+    if (r.ok) setConfirmedIds((prev) => (prev.includes(target.id) ? prev : [...prev, target.id]));
+    else setConfirmError({ userId: target.id, message: r.message || "Couldn't confirm. Please try again." });
   };
 
   // When role changes in the creation form, sync default permissions
@@ -625,6 +676,31 @@ export const TeamModal: React.FC<TeamModalProps> = ({
             </div>
 
             {venueNotice && <p role="status" className="mb-3 text-sm text-ink-soft">{venueNotice}</p>}
+            {/* 10L: people who asked for a password reset in the last 24 hours (Forgot password). */}
+            {(() => {
+              const asked = resetRequests.filter((q) => venueScopedUsers.some((u) => u.id === q.memberId));
+              if (asked.length === 0) return null;
+              return (
+                <div data-reset-requests className="mb-3 p-3 rounded-2xl bg-warn-bg border border-warn/40 space-y-2">
+                  <p className="text-sm font-bold text-ink">Asked for a password reset</p>
+                  <p className="text-sm text-ink-soft">Make a reset link in their row below and send it to them.</p>
+                  <ul className="space-y-1">
+                    {asked.map((q) => {
+                      const u = venueScopedUsers.find((x) => x.id === q.memberId);
+                      const when = new Date(q.requestedAt);
+                      const whenText = Number.isFinite(when.getTime()) ? when.toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '';
+                      return (
+                        <li key={q.memberId} data-reset-request className="text-sm text-ink break-words">
+                          <span className="font-semibold">{u?.name || q.name}</span>
+                          {whenText ? <span className="text-ink-soft"> · {whenText}</span> : null}
+                          {q.linkLive ? <span className="text-ink-soft"> · link made</span> : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              );
+            })()}
             <div className="divide-y divide-line border border-line rounded-2xl overflow-hidden bg-surface">
               {searchQuery && filteredUsers.length === 0 && (
                 <div data-empty-state className="p-6 text-center text-ink-soft">
@@ -647,6 +723,9 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 
                 const canSendInvite = isAdminView && inviteFlag === true && !isCurrent && !isPrimaryAdmin;
                 const wasSent = sentIds.includes(user.id) || user.invitePending === true;
+                const canResetLink = canMakeResetLink(currentUser as any, { ...(user as any), isPrimaryAdmin }) && user.needsInvite !== true && user.invitePending !== true;
+                const isPaused = (user as any).resetConfirmNeeded === true && !confirmedIds.includes(user.id);
+                const askedReset = resetRequests.some((q) => q.memberId === user.id);
                 return (
                   <div key={user.id} data-member-row>
                   <div
@@ -680,6 +759,16 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                               </span>
                             ) : null;
                           })()}
+                          {isPaused && (
+                            <span data-reset-paused className="text-xs px-2 py-0.5 rounded-md font-semibold border bg-warn-bg text-warn border-warn/40">
+                              Paused
+                            </span>
+                          )}
+                          {askedReset && !isPaused && (
+                            <span data-reset-asked className="text-xs px-2 py-0.5 rounded-md font-semibold border bg-warn-bg text-warn border-warn/40">
+                              Asked for reset
+                            </span>
+                          )}
 
                           {/* Role Selector / Badge (coordinators: badge only) */}
                           {onUpdateUser && !isPrimaryAdmin && !isCoordinatorView ? (
@@ -827,6 +916,33 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         </button>
                       )}
 
+                      {/* 10L: reset-password link (no confirm: it changes nothing until the person uses it) */}
+                      {canResetLink && (
+                        <button
+                          type="button"
+                          data-reset-link
+                          disabled={resetBusyId !== null}
+                          onClick={() => startResetLink(user)}
+                          className="pressable min-h-11 inline-flex items-center gap-1.5 px-3 rounded-xl text-xs font-semibold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken disabled:opacity-50"
+                        >
+                          <KeyRound className="w-3.5 h-3.5 text-gold-deep" aria-hidden="true" />
+                          {resetBusyId === user.id ? 'Making link…' : 'Reset password link'}
+                        </button>
+                      )}
+                      {/* 10L: confirm a membership paused after another agency's reset (admin only) */}
+                      {isPaused && isAdminView && (
+                        <button
+                          type="button"
+                          data-reset-confirm
+                          disabled={confirmBusy}
+                          onClick={() => { setConfirmError(null); setConfirmTarget(user); }}
+                          className="pressable min-h-11 inline-flex items-center gap-1.5 px-3 rounded-xl text-xs font-semibold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken disabled:opacity-50"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 text-ok" aria-hidden="true" />
+                          Confirm
+                        </button>
+                      )}
+
                       {/* Delete Member Button (admin only) */}
                       {!isPrimaryAdmin && !isCoordinatorView && (
                         <button
@@ -849,6 +965,31 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                         doneLabel="Done"
                       />
                     </div>
+                  )}
+                  {isPaused && (
+                    <p data-reset-paused-note className="mx-4 mb-4 text-sm text-ink-soft">
+                      {firstName(user.name)} used a reset link from another agency, so access here is paused.{isAdminView ? ' Check it was really them, then tap Confirm.' : ' An admin needs to confirm it.'}
+                    </p>
+                  )}
+                  {resetLink && resetLink.userId === user.id && (
+                    <div className="px-4 pb-4">
+                      <InviteLinkCard
+                        title="Reset link ready"
+                        link={resetLink.link}
+                        forWhom={`${user.name} (${user.email})`}
+                        hint={`Send this link to ${resetLink.firstName}.`}
+                        note="They open it and choose a new password. Until then, nothing changes."
+                        expiryText="The link works once, for 24 hours."
+                        onDone={() => setResetLink(null)}
+                        doneLabel="Done"
+                      />
+                    </div>
+                  )}
+                  {resetError && resetError.userId === user.id && (
+                    <p role="alert" data-reset-link-error className="mx-4 mb-4 p-2.5 rounded-xl bg-bad-bg border border-bad text-sm text-bad">{resetError.message}</p>
+                  )}
+                  {confirmError && confirmError.userId === user.id && (
+                    <p role="alert" data-reset-confirm-error className="mx-4 mb-4 p-2.5 rounded-xl bg-bad-bg border border-bad text-sm text-bad">{confirmError.message}</p>
                   )}
                   {sendError && sendError.userId === user.id && (
                     <p role="alert" data-send-invite-error className="mx-4 mb-4 p-2.5 rounded-xl bg-bad-bg border border-bad text-sm text-bad">{sendError.message}</p>
@@ -961,6 +1102,20 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         variant="warning"
         icon="alert"
         isLoading={sendBusyId !== null || sendLoadingId !== null}
+      />
+
+      {/* 10L: confirm a membership paused after another agency's reset link. */}
+      <ConfirmModal
+        isOpen={Boolean(confirmTarget)}
+        onClose={() => { if (!confirmBusy) setConfirmTarget(null); }}
+        onConfirm={confirmPaused}
+        title={`Confirm ${confirmTarget?.name || ''}?`}
+        message={`${confirmTarget ? `${confirmTarget.name} (${confirmTarget.email}) ` : 'This person '}changed their password with a reset link from another agency. Check with them that it was really them. After you confirm, they can use this agency again.`}
+        confirmText="Confirm"
+        cancelText="Cancel"
+        variant="warning"
+        icon="alert"
+        isLoading={confirmBusy}
       />
 
       {/* Alert Notice Modal */}
