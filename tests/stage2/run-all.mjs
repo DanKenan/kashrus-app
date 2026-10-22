@@ -152,6 +152,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-67-invites.mjs')).default,
     (await import('./test-68-invite-accept.mjs')).default,
     (await import('./test-69-send-invite.mjs')).default,
+    (await import('./test-70-kiosk-session-3h.mjs')).default,
   ];
 
   const docKiB = async () => Math.round(JSON.stringify(await ctx.getDoc()).length / 1024);

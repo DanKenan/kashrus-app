@@ -325,7 +325,11 @@ function base64url(input: Buffer | string): string {
 }
 
 const TOKEN_TTL_SECONDS = 30 * 24 * 3600; // 30 days
-const KIOSK_TOKEN_TTL_SECONDS = 12 * 3600; // 12 hours
+/** Kiosk session lifetime (Don, Oct 21 2026): 3 hours from the PIN sign-in,
+ * hard, no idle timeout. verifyToken enforces it from iat, so tokens minted
+ * before this cap (exp = iat + 12 h) also stop at 3 h; an open kiosk socket
+ * is closed (4401) when its session reaches 3 h. Phone sessions keep 30 days. */
+const KIOSK_TOKEN_TTL_SECONDS = 3 * 3600; // 3 hours
 
 /** Legacy v1 token { sub, iat, exp }. Item 8d: only signSessionToken calls
  * this shape now (for rows without personId) and the compatibility tests. */
@@ -356,7 +360,7 @@ function signChooseToken(ownerRow: { id: string; personId?: string; tokenEpoch?:
   return signClaims(chooseClaimsFor(ownerRow), CHOOSE_TOKEN_TTL_SECONDS);
 }
 
-/** Kiosk session token: venue-scoped, 12h expiry, kiosk:true claim.
+/** Kiosk session token: venue-scoped, 3h expiry (KIOSK_TOKEN_TTL_SECONDS), kiosk:true claim.
  * pv = the kiosk PIN version (String(kioskPinRev), 2b — a PIN change
  * increments the revision and revokes old tokens; pre-2b tokens carrying a
  * kioskPinSetAt timestamp as pv simply fail re-validation).
@@ -391,7 +395,17 @@ function verifyToken(token: string): SessionClaims | null {
     const data = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
     if (typeof data.exp !== 'number' || data.exp < Math.floor(Date.now() / 1000)) return null;
     // Item 8d: strict classification (kiosk | v1 | v2, anything else null).
-    return classifySessionClaims(data);
+    const claims = classifySessionClaims(data);
+    if (claims && claims.kind === 'kiosk') {
+      // Kiosk 3 h cap, counted from iat (not exp): a kiosk token with no
+      // numeric iat, or issued KIOSK_TOKEN_TTL_SECONDS or more ago, is refused.
+      const iat = data.iat;
+      if (typeof iat !== 'number' || !Number.isFinite(iat)) return null;
+      const endsAtSec = iat + KIOSK_TOKEN_TTL_SECONDS;
+      if (Math.floor(Date.now() / 1000) >= endsAtSec) return null; // ends AT iat + 3 h (the socket timer fires then too)
+      return { ...claims, endsAtMs: Math.min(endsAtSec, data.exp) * 1000 };
+    }
+    return claims;
   } catch {
     return null;
   }
@@ -5008,6 +5022,15 @@ wss.on('connection', (ws, req) => {
     // a kiosk is a mashgiach at this tablet's venue): meta.role and the
     // INITIAL_STATE base below are built from it.
     authedUser = kioskActingUser(authedUser, kioskVenueId as string);
+    // Kiosk 3 h cap: an open kiosk socket closes (4401) when its session
+    // ends, so a tablet left on never keeps the live board past 3 h.
+    const endsAtMs = socketClaims?.kind === 'kiosk' ? socketClaims.endsAtMs : undefined;
+    if (typeof endsAtMs !== 'number') {
+      ws.close(4401, 'Unauthorized');
+      return;
+    }
+    const kioskEndTimer = setTimeout(() => { try { ws.close(4401, 'Unauthorized'); } catch {} }, Math.max(0, endsAtMs - Date.now()));
+    ws.on('close', () => clearTimeout(kioskEndTimer));
   }
 
   const agencyId = authedUser.agencyId || 'agency-hkc';

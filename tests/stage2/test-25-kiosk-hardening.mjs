@@ -208,7 +208,7 @@ export default {
       if (payload.dev !== deviceA.deviceId) throw new Error(`kiosk token dev ${payload.dev} !== paired device ${deviceA.deviceId}`);
       if (!/^\d+$/.test(String(payload.pv || ''))) throw new Error(`kiosk token pv is not the PIN revision: ${payload.pv}`);
       const ttlHrs = (payload.exp - payload.iat) / 3600;
-      if (Math.abs(ttlHrs - 12) > 0.1) throw new Error(`kiosk token TTL ${ttlHrs}h, expected 12h`);
+      if (Math.abs(ttlHrs - 3) > 0.1) throw new Error(`kiosk token TTL ${ttlHrs}h, expected 3h (Don, Oct 21)`);
     }
 
     /* ---- Part 1b: legacy plain PIN upgraded to bcrypt on login ---- */
