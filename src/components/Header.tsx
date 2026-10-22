@@ -158,6 +158,7 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Click-outside transparent overlay for open dropdowns */}
       {(toolsMenuOpen || userMenuOpen) && (
         <div 
+          data-menu-backdrop=""
           className="fixed inset-0 z-40 bg-transparent" 
           onClick={() => { setToolsMenuOpen(false); setUserMenuOpen(false); }} 
         />

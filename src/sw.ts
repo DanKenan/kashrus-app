@@ -39,8 +39,9 @@ registerRoute(
 );
 
 // A new version waits until the page tells it to take over
-// (lib/swUpdate.ts posts { type: 'SKIP_WAITING' }: from the "Update app"
-// button, or when the app is opened). It never takes over on its own.
+// (lib/swUpdate.ts posts { type: 'SKIP_WAITING' }: only from a tap on the
+// "Tap to update" bar or the "Update app" button). It never takes over on its
+// own; with no tap it activates only when every window of the app is closed.
 self.addEventListener('message', (event: ExtendableMessageEvent) => {
   const data = event.data as { type?: string } | undefined;
   if (data && data.type === 'SKIP_WAITING') {
