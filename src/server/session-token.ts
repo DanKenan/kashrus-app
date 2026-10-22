@@ -30,7 +30,7 @@ export type SessionClaims =
   /** endsAtMs: set by server.ts verifyToken only (the kiosk 3 h cap); never by the classifier. */
   | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string; sid?: string; endsAtMs?: number }
   /** 10g: proves a person's credential, grants NO membership (never authUser). */
-  | { kind: 'choose'; personId: string; ownerRowId: string; ep: number };
+  | { kind: 'choose'; personId: string; ownerRowId: string; ep: number; passkeyCredentialId?: string };
 
 const KIOSK_CLAIMS = ['kiosk', 'agencyId', 'venueId', 'pv', 'dev'];
 const V2_CLAIMS = ['v', 'mem', 'ep'];
@@ -65,6 +65,11 @@ export function classifySessionClaims(data: any): SessionClaims | null {
       if (has(data, 'mem') || hasSid) return null;
       if (!nonEmpty(data.sub) || !nonEmpty(data.cr)) return null;
       if (typeof data.ep !== 'number' || !Number.isInteger(data.ep) || data.ep < 0) return null;
+      // 11b-s: pk = the passkey this choice comes from (the chosen session carries it); optional, well-formed only.
+      if (has(data, 'pk')) {
+        if (typeof data.pk !== 'string' || !/^[A-Za-z0-9_-]{16,1364}$/.test(data.pk)) return null;
+        return { kind: 'choose', personId: data.sub, ownerRowId: data.cr, ep: data.ep, passkeyCredentialId: data.pk };
+      }
       return { kind: 'choose', personId: data.sub, ownerRowId: data.cr, ep: data.ep };
     }
     if (data.v !== 2) return null;
@@ -132,8 +137,8 @@ export function resolveChooseOwner<T extends { id: string; personId?: string; to
 }
 
 /** 10g: the choose claims for a person's credential row (signed with a 10-minute exp by the server). */
-export function chooseClaimsFor(ownerRow: { id: string; personId?: string; tokenEpoch?: unknown }): Record<string, unknown> {
-  return { v: 3, sub: ownerRow.personId, cr: ownerRow.id, ep: tokenEpochOf(ownerRow) ?? 0 };
+export function chooseClaimsFor(ownerRow: { id: string; personId?: string; tokenEpoch?: unknown }, passkeyCredentialId?: string): Record<string, unknown> {
+  return { v: 3, sub: ownerRow.personId, cr: ownerRow.id, ep: tokenEpochOf(ownerRow) ?? 0, ...(passkeyCredentialId ? { pk: passkeyCredentialId } : {}) };
 }
 
 /** v2 for any row with a personId (10e: membership rows too); otherwise the legacy v1 claims. */
