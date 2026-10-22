@@ -1540,12 +1540,12 @@ export default function App() {
 
   // Sign Out Handler
   const handleLogout = () => {
+    clearLogoCache();
     // Item 11: end this session on the server first (POST /api/auth/logout with
     // the token), then forget the token below. Best effort: offline or any
     // error still signs out on this device. After a 401 the token is already
     // gone and nothing is sent.
     void endServerSession(getSessionToken());
-    clearLogoCache();
     setIsAgencyLogoOpen(false);
     userRequestContext.current.generation += 1;
     requestContext.current.generation += 1;

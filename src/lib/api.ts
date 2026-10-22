@@ -124,27 +124,46 @@ export async function isSessionStoreUnavailable(res: Response): Promise<boolean>
 }
 
 // Requests that can replace this device's token (change password, merge, activate…).
+// Counted from the request until its whole answer has arrived; lastSignInChangeAt
+// is when the last one finished (its caller stores the new token right after).
 let authChangesInFlight = 0;
+let lastSignInChangeAt = 0;
 function canChangeSignIn(input: string, method: string): boolean {
   return method !== 'GET' && method !== 'HEAD' && /^\/api\/(auth|account)\//.test(apiPath(input));
 }
 
-/** Resolves once no sign-in-changing request is in flight, plus a short grace for its answer to be stored. */
-export async function waitForSignInChangesToSettle(): Promise<void> {
-  const started = Date.now();
-  while (authChangesInFlight > 0 && Date.now() - started < sessionTiming.authSettleMaxMs) await sleep(100);
-  await sleep(sessionTiming.authSettleGraceMs);
+/** True while a sign-in-changing request is on its way, or finished less than the grace ago. */
+export function signInChangePending(): boolean {
+  return authChangesInFlight > 0 || Date.now() - lastSignInChangeAt < sessionTiming.authSettleGraceMs;
 }
 
-/** The app's one "this session is over" path for a 401 (also used after a refused socket). */
-async function applyUnauthorized(res: Response): Promise<void> {
-  let responseCode: string | undefined;
+/**
+ * Resolves true once no sign-in-changing request has been in flight for a full
+ * grace period (re-checked after the grace, so one started meanwhile is waited
+ * for too); false when that did not happen within authSettleMaxMs — the caller
+ * then treats the session as unknown and tries again later, never signs out.
+ */
+export async function waitForSignInChangesToSettle(): Promise<boolean> {
+  const started = Date.now();
+  while (signInChangePending()) {
+    if (Date.now() - started >= sessionTiming.authSettleMaxMs) return false;
+    await sleep(Math.min(100, sessionTiming.authSettleGraceMs));
+  }
+  return true;
+}
+
+/** The code of a 401 answer, if it carries one. */
+async function unauthorizedCode(res: Response): Promise<string | undefined> {
   try {
     const body = await res.clone().json();
-    if (body && typeof body.code === 'string') responseCode = body.code;
+    if (body && typeof body.code === 'string') return body.code;
   } catch {
     // ignore — not every 401 carries a JSON body
   }
+  return undefined;
+}
+
+function applyKioskUnpaired(responseCode: string | undefined): void {
   if (responseCode === 'KIOSK_UNPAIRED') {
     // The tablet is no longer paired: drop the stored device credential so
     // the tablet returns to the pairing screen.
@@ -168,21 +187,27 @@ function signOutLocally(): void {
 }
 
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const token = getSessionToken();
-  const headers = new Headers(init.headers || {});
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
-  const kioskDevice = getKioskDevice();
-  if (kioskDevice && !headers.has('X-Kiosk-Device')) {
-    headers.set('X-Kiosk-Device', kioskDevice);
-  }
+  const callerHeaders = new Headers(init.headers || {});
+  const callerSetAuth = callerHeaders.has('Authorization');
+  // Headers for one attempt, built from the token stored NOW (a retry after a
+  // wait must not carry a token that was replaced meanwhile).
+  const attemptHeaders = (): { headers: Headers; token: string | null } => {
+    const headers = new Headers(callerHeaders);
+    const token = getSessionToken();
+    if (token && !callerSetAuth) headers.set('Authorization', `Bearer ${token}`);
+    const kioskDevice = getKioskDevice();
+    if (kioskDevice && !headers.has('X-Kiosk-Device')) headers.set('X-Kiosk-Device', kioskDevice);
+    return { headers, token };
+  };
   const method = (init.method || 'GET').toUpperCase();
   const signInChange = canChangeSignIn(input, method);
   if (signInChange) authChangesInFlight++;
   let res: Response;
+  let usedToken: string | null;
   try {
-    res = await fetch(input, { ...init, headers });
+    let attempt = attemptHeaders();
+    usedToken = attempt.token;
+    res = await fetch(input, { ...init, headers: attempt.headers });
     // Item 11: the server could not check the sign-in (session store down).
     // A read is simply tried again a little later; a write is handed back to
     // its caller as a failed save ("try again"). Never a sign-out.
@@ -191,20 +216,38 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
         if (!(await isSessionStoreUnavailable(res)) || init.signal?.aborted) break;
         await sleep(waitMs);
         if (init.signal?.aborted) break;
-        res = await fetch(input, { ...init, headers });
+        attempt = attemptHeaders();
+        usedToken = attempt.token;
+        res = await fetch(input, { ...init, headers: attempt.headers });
+      }
+    }
+    // A sign-in-changing answer counts until its whole body has arrived (the
+    // caller's json() then resolves at once and it stores the new token).
+    if (signInChange) {
+      try {
+        await res.clone().text();
+      } catch {
+        // ignore — the caller reads (or fails to read) the body itself
       }
     }
   } finally {
-    if (signInChange) authChangesInFlight--;
+    if (signInChange) {
+      authChangesInFlight--;
+      lastSignInChangeAt = Date.now();
+    }
   }
   // Track the server's document version from every API response so writes
   // can send back the version this client last saw (version contract).
   trackVersionHeader(res);
   if (res.status === 401) {
-    await applyUnauthorized(res);
+    applyKioskUnpaired(await unauthorizedCode(res));
     // QA2 Q2: a wrong CURRENT password on Change password is the person's
     // typo, not an expired session — keep them signed in (the form says so).
-    if (token && !(await isWrongCurrentPassword401(input, res))) signOutLocally();
+    const wrongCurrentPassword = await isWrongCurrentPassword401(input, res);
+    // Item 11: only the session this request was sent with is over; a token
+    // stored while it was on its way (a fresh sign-in, a changed password) is
+    // kept. Checked after the last await, right before clearing.
+    if (usedToken && !wrongCurrentPassword && getSessionToken() === usedToken) signOutLocally();
   }
   return res;
 }
@@ -238,9 +281,12 @@ export function endServerSession(token: string | null = getSessionToken()): Prom
  * while handing this device a fresh token (change password, merge) never signs
  * the person out. 'ended' = a 401 for the token this device still holds (signed
  * out here, the same way as any 401); 'valid' = the session works; 'unknown' =
- * no answer, 503, or a newer token replaced it meanwhile (reconnect later).
+ * no answer, 503, a newer token or a sign-in change meanwhile (reconnect later).
  */
-export async function confirmSessionAfterSocketRefusal(token: string): Promise<'ended' | 'valid' | 'unknown'> {
+export async function confirmSessionAfterSocketRefusal(
+  token: string,
+  stillWanted: () => boolean = () => true
+): Promise<'ended' | 'valid' | 'unknown'> {
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   const kioskDevice = getKioskDevice();
   if (kioskDevice) headers['X-Kiosk-Device'] = kioskDevice;
@@ -251,8 +297,12 @@ export async function confirmSessionAfterSocketRefusal(token: string): Promise<'
     return 'unknown';
   }
   if (res.status === 401) {
-    if (getSessionToken() !== token) return 'unknown';
-    await applyUnauthorized(res);
+    const code = await unauthorizedCode(res);
+    // After the last await: a token stored meanwhile is a newer session, a
+    // sign-in change on its way may store one, and a socket the client dropped
+    // or replaced no longer speaks for this device — in each case keep it.
+    if (getSessionToken() !== token || signInChangePending() || !stillWanted()) return 'unknown';
+    applyKioskUnpaired(code);
     signOutLocally();
     return 'ended';
   }

@@ -130,14 +130,16 @@ class RealtimeSocket {
 
   /**
    * Item 11: a 4401 close. No token: no session to keep (as before, no retry).
-   * Otherwise wait until no sign-in-changing request is in flight, then: a newer
-   * token -> reconnect with it at once; the same token -> ask the server over
-   * HTTP (a 401 signs out there, the app's one sign-out path); a working or
-   * unanswered check -> reconnect with backoff.
+   * Otherwise wait until no sign-in-changing request has been in flight for a
+   * full grace period, then: a newer token -> reconnect with it at once; still
+   * changing after the longest wait -> reconnect with backoff; the same token ->
+   * ask the server over HTTP (a 401 signs out there, the app's one sign-out
+   * path, unless anything changed meanwhile); a working or unanswered check ->
+   * reconnect with backoff.
    */
   private async afterSessionRefused(token: string | null, generation: number) {
     if (!token) return;
-    await waitForSignInChangesToSettle();
+    const settled = await waitForSignInChangesToSettle();
     if (generation !== this.generation || this.socket) return;
     const current = getSessionToken();
     if (!current) return;
@@ -145,7 +147,15 @@ class RealtimeSocket {
       this.connect(this.currentUserEmail, this.currentUserName);
       return;
     }
-    const verdict = await confirmSessionAfterSocketRefusal(token);
+    // Still changing after the longest wait: unknown, try again later (never a sign-out).
+    if (!settled) {
+      this.scheduleReconnect();
+      return;
+    }
+    const verdict = await confirmSessionAfterSocketRefusal(
+      token,
+      () => generation === this.generation && !this.socket
+    );
     if (generation !== this.generation || this.socket) return;
     if (verdict === 'ended') return;
     this.scheduleReconnect();

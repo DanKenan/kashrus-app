@@ -7,8 +7,10 @@
  *  R  apiFetch: GET 503 SESSION_STORE_UNAVAILABLE is retried and never signs out;
  *     a write 503 is handed back once (no retry, no sign-out); 401 still signs out.
  *  W  WebSocket: 1013 and other closes reconnect with backoff (3 s, doubling, 30 s
- *     cap); 4401 signs out only after an HTTP 401 for the SAME token; a newer
- *     token reconnects; no token -> no retry; a dropped socket's late close is ignored.
+ *     cap); 4401 signs out only after an HTTP 401 for the SAME token with no sign-in
+ *     change pending (in flight, slow body, started during the grace, or never
+ *     finishing -> retry later); a newer token reconnects; no token -> no retry; a
+ *     dropped socket's late close is ignored; kiosk checks carry the device proof.
  *  G  register 201 {token:null}: no token stored, onSuccess NOT called, the sign-in
  *     form opens with the email filled and plain words.
  *  P  change password 503 + passwordChanged: says the password changed (no "try again").
@@ -51,7 +53,7 @@ function stubFetch(routes) {
     if (r === 'THROW') throw new TypeError('network');
     r = r || { status: 200, body: {} };
     const hdr = r.headers || {};
-    return { ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: (k) => hdr[k] ?? null }, clone() { return this; }, json: async () => r.body, text: async () => JSON.stringify(r.body) };
+    return { ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: (k) => hdr[k] ?? null }, clone() { return this; }, json: async () => { if (r.bodyGate) await r.bodyGate; if (r.onJson) r.onJson(); return r.body; }, text: async () => { if (r.bodyGate) await r.bodyGate; return JSON.stringify(r.body); } };
   };
   return calls;
 }
@@ -133,6 +135,24 @@ for (const [label, answer] of [['offline', 'THROW'], ['401', { status: 401, body
   stubFetch({ 'GET /api/tasks': { status: 401, body: { error: 'Sign in required. Please log in again.' } } });
   await apiFetch('/api/tasks');
   ok('R5 a 401 still signs out', getSessionToken() === null && events.includes('shutfey:unauthorized'));
+}
+{
+  // R6: a retry after a wait is sent with the token stored NOW, and a 401 for an
+  // older token never clears a newer one (e.g. a fresh sign-in meanwhile).
+  setSessionToken('tok-R6-old'); events.length = 0;
+  const calls = stubFetch({ 'GET /api/tasks': [{ ...STORE_DOWN, onJson: () => setSessionToken('tok-R6-new') }, { status: 200, body: {} }] });
+  await apiFetch('/api/tasks');
+  ok('R6 the retry carries the newer token', calls.length === 2 && calls[1].h.authorization === 'Bearer tok-R6-new', JSON.stringify(calls.map((c) => c.h.authorization)));
+  setSessionToken('tok-R6-old'); events.length = 0;
+  stubFetch({ 'GET /api/tasks': { status: 401, body: {}, onJson: () => setSessionToken('tok-R6-new') } });
+  await apiFetch('/api/tasks');
+  ok('R6 a 401 for the old token keeps the newer session', getSessionToken() === 'tok-R6-new' && !events.includes('shutfey:unauthorized'), String(getSessionToken()));
+}
+{
+  setSessionToken('tok-R7'); events.length = 0;
+  const calls = stubFetch({ 'HEAD /api/tasks': [STORE_DOWN, { status: 200, body: {} }] });
+  const res = await apiFetch('/api/tasks', { method: 'HEAD' });
+  ok('R7 HEAD is retried like GET', res.status === 200 && calls.length === 2 && getSessionToken() === 'tok-R7');
 }
 
 // ---------------------------------------------------------------- W: WebSocket
@@ -269,6 +289,100 @@ const last = () => FakeWS.all[FakeWS.all.length - 1];
   ok('W8 a newer token is kept (no sign-out), reconnect scheduled', getSessionToken() === 'tok-W8-new' && !events.includes('shutfey:unauthorized') && timers.length === 1);
   timers.length = 0; rs.disconnect(); releaseTimers();
 }
+{
+  // W9: a token stored while the check's 401 body is being read is kept
+  setSessionToken('tok-W9'); events.length = 0; timers.length = 0; captureTimers();
+  stubFetch({ 'GET /api/agencies/current': { status: 401, body: {}, onJson: () => setSessionToken('tok-W9-new') } });
+  rs.connect('a@x.test', 'A');
+  const s = last(); s.open(); s.serverClose(4401);
+  await tick(60);
+  ok('W9 token replaced during the 401 read: kept, no sign-out', getSessionToken() === 'tok-W9-new' && !events.includes('shutfey:unauthorized'));
+  timers.length = 0; rs.disconnect(); releaseTimers();
+}
+{
+  // W10: kiosk tablet: the HTTP check carries the device proof; a 401 sends the tablet back (sign-out path)
+  store.set('kiosk_device', 'dev9.secret');
+  setSessionToken('tok-W10'); events.length = 0; timers.length = 0; captureTimers();
+  const calls = stubFetch({ 'GET /api/agencies/current': { status: 401, body: {} } });
+  rs.connect('k@x.test', 'K');
+  const s = last(); s.open(); s.serverClose(4401);
+  await tick(60);
+  ok('W10 kiosk: check sent with X-Kiosk-Device', calls[0]?.h['x-kiosk-device'] === 'dev9.secret');
+  ok('W10 kiosk: 4401 + 401 -> signed out (the app returns the tablet to the PIN screen)', getSessionToken() === null && events.includes('shutfey:unauthorized'));
+  store.delete('kiosk_device'); timers.length = 0; rs.disconnect(); releaseTimers();
+}
+{
+  // W11: change password whose answer BODY is slow (headers already in): nothing is judged until the body is in and the token stored
+  setSessionToken('tok-W11'); events.length = 0; timers.length = 0; captureTimers();
+  let release; const gate = new Promise((r) => { release = r; });
+  const calls = stubFetch({ 'POST /api/auth/change-password': { status: 200, body: { success: true, token: 'tok-W11-new' }, bodyGate: gate }, 'GET /api/agencies/current': { status: 401, body: {} } });
+  rs.connect('a@x.test', 'A');
+  const s = last(); s.open();
+  const pending = apiFetch('/api/auth/change-password', { method: 'POST', body: '{}' }).then(async (res) => { const d = await res.json(); setSessionToken(d.token); });
+  await tick(5);
+  s.serverClose(4401);
+  await tick(80);
+  ok('W11 body still on its way: no check, no sign-out', calls.filter((c) => c.path === '/api/agencies/current').length === 0 && getSessionToken() === 'tok-W11');
+  release(); await pending; await tick(80);
+  ok('W11 then reconnected with the fresh token', last() !== s && last().url.includes('token=tok-W11-new') && !events.includes('shutfey:unauthorized') && calls.filter((c) => c.path === '/api/agencies/current').length === 0);
+  rs.disconnect(); releaseTimers(); timers.length = 0;
+}
+{
+  // W12: a sign-in change that STARTS during the grace is waited for too
+  sessionTiming.authSettleGraceMs = 120;
+  setSessionToken('tok-W12'); events.length = 0; timers.length = 0; captureTimers();
+  let release; const gate = new Promise((r) => { release = r; });
+  const calls = stubFetch({ 'POST /api/auth/change-password': { status: 200, body: { success: true, token: 'tok-W12-new' }, bodyGate: gate }, 'GET /api/agencies/current': { status: 401, body: {} } });
+  rs.connect('a@x.test', 'A');
+  const s = last(); s.open(); s.serverClose(4401);
+  await tick(40);
+  const pending = apiFetch('/api/auth/change-password', { method: 'POST', body: '{}' }).then(async (res) => { const d = await res.json(); setSessionToken(d.token); });
+  await tick(250);
+  ok('W12 change started during the grace: no check, no sign-out', calls.filter((c) => c.path === '/api/agencies/current').length === 0 && getSessionToken() === 'tok-W12');
+  release(); await pending; await tick(300);
+  ok('W12 then reconnected with the fresh token', last().url.includes('token=tok-W12-new') && !events.includes('shutfey:unauthorized'));
+  sessionTiming.authSettleGraceMs = 5;
+  rs.disconnect(); releaseTimers(); timers.length = 0;
+}
+{
+  // W13: a sign-in change that never finishes: after the longest wait -> unknown, reconnect later, never a sign-out
+  sessionTiming.authSettleMaxMs = 100;
+  setSessionToken('tok-W13'); events.length = 0; timers.length = 0; captureTimers();
+  let finish; const never = new Promise((r) => { finish = r; });
+  const calls = stubFetch({ 'POST /api/auth/change-password': { status: 200, body: {}, bodyGate: never }, 'GET /api/agencies/current': { status: 401, body: {} } });
+  rs.connect('a@x.test', 'A');
+  const s = last(); s.open();
+  void apiFetch('/api/auth/change-password', { method: 'POST', body: '{}' });
+  await tick(5);
+  s.serverClose(4401);
+  await tick(250);
+  ok('W13 still changing after the longest wait: no check, no sign-out, a reconnect scheduled', calls.filter((c) => c.path === '/api/agencies/current').length === 0 && getSessionToken() === 'tok-W13' && !events.includes('shutfey:unauthorized') && timers.length === 1, JSON.stringify(timers.map((x) => x.ms)));
+  sessionTiming.authSettleMaxMs = 60000;
+  timers.length = 0; rs.disconnect(); releaseTimers();
+  finish(); await tick(40);
+}
+{
+  // W14: a sign-in change that starts WHILE the HTTP check is on its way: its 401 is not acted on
+  setSessionToken('tok-W14'); events.length = 0; timers.length = 0; captureTimers();
+  let finish; const never = new Promise((r) => { finish = r; });
+  stubFetch({ 'POST /api/auth/change-password': { status: 200, body: {}, bodyGate: never }, 'GET /api/agencies/current': () => { void apiFetch('/api/auth/change-password', { method: 'POST', body: '{}' }); return { status: 401, body: {} }; } });
+  rs.connect('a@x.test', 'A');
+  const s = last(); s.open(); s.serverClose(4401);
+  await tick(80);
+  ok('W14 change started during the check: no sign-out, reconnect scheduled', getSessionToken() === 'tok-W14' && !events.includes('shutfey:unauthorized') && timers.length === 1);
+  timers.length = 0; rs.disconnect(); releaseTimers();
+  finish(); await tick(40);
+}
+{
+  // W15: the socket was dropped (disconnect) while the check was on its way: the check speaks for nobody
+  setSessionToken('tok-W15'); events.length = 0; timers.length = 0; captureTimers();
+  const calls = stubFetch({ 'GET /api/agencies/current': () => { rs.disconnect(); return { status: 401, body: {} }; } });
+  rs.connect('a@x.test', 'A');
+  const s = last(); s.open(); s.serverClose(4401);
+  await tick(80);
+  ok('W15 dropped socket: the check ran, but does not sign out', calls.length === 1 && getSessionToken() === 'tok-W15' && !events.includes('shutfey:unauthorized') && timers.length === 0);
+  releaseTimers();
+}
 
 // ---------------------------------------------------------------- G: register token:null
 const { AgencySignupForm, REGISTERED_SIGN_IN_TEXT } = await import('../../src/components/AgencySignupForm.tsx');
@@ -320,6 +434,21 @@ async function fillSignup(m) {
   const h = decode(m.html());
   ok('G4 LoginPage: back on the sign-in form with the note', h.includes('data-login-notice') && h.includes(REGISTERED_SIGN_IN_TEXT), h.slice(0, 200));
   ok('G4 LoginPage: email filled in, not signed in', h.includes('value="rivka@vaad.test"') && signedIn === 0);
+}
+{
+  // G5: "I already have a Shutfey account" (register-existing) without a token: same sign-in path
+  api.clearSession();
+  stubFetch({ 'POST /api/agencies/register-existing': { status: 201, body: { success: true, user: { id: 'u2', email: 'rivka@vaad.test' } } } });
+  let succeeded = 0; let without = null;
+  const m = mount(AgencySignupForm, { onSuccess() { succeeded++; }, onSwitchToLogin() {}, onRegisteredWithoutSession(e) { without = e; } });
+  await m.render();
+  await m.click('I already have a Shutfey account');
+  await m.type('Agency Name', 'Second Vaad');
+  await m.type('Email', 'Rivka@Vaad.test');
+  await m.type('Password', 'secret123');
+  await m.type('Venue Name', 'Second Kitchen');
+  await m.submit();
+  ok('G5 register-existing without a token: not signed in, sign-in path with the email', succeeded === 0 && getSessionToken() === null && without === 'rivka@vaad.test', `${succeeded} ${without}`);
 }
 
 // ---------------------------------------------------------------- P: change password 503 + passwordChanged
