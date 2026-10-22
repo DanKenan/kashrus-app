@@ -146,7 +146,7 @@ export function UpdatesSheet({
           type="button"
           aria-label={expanded ? 'Shrink panel' : 'Expand panel'}
           onClick={() => setExpanded((e) => !e)}
-          className="pressable sm:hidden self-center w-11 h-11 flex items-center justify-center rounded-lg bg-surface border border-line-control text-ink hover:bg-sunken cursor-pointer shrink-0"
+          className="pressable sm:hidden self-center w-11 h-11 flex items-center justify-center rounded-lg text-ink cursor-pointer shrink-0" /* QA2 #30: the handle is just the bar, no box */
         >
           <span className="w-10 h-1.5 rounded-full bg-line" />
         </button>

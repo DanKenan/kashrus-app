@@ -752,9 +752,22 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
               <label className="font-bold text-ink">
                 Event Tasks ({customTasks.length})
               </label>
-              <span className="text-xs text-ink-soft">
-                Defaults loaded — delete any that don't apply
-              </span>
+              {/* QA2 #26: say "defaults loaded" only when there are some. */}
+              {customTasks.length > 0 ? (
+                <span className="text-xs text-ink-soft">
+                  Defaults loaded — delete any that don't apply
+                </span>
+              ) : canManageTemplates ? (
+                <button
+                  type="button"
+                  onClick={() => setShowTemplateManager(true)}
+                  className="min-h-11 px-2 text-xs font-semibold text-gold-deep underline underline-offset-2 cursor-pointer"
+                >
+                  No default tasks yet — set them up
+                </button>
+              ) : (
+                <span className="text-xs text-ink-soft">No default tasks yet</span>
+              )}
             </div>
 
             <div className="space-y-1.5">

@@ -1,3 +1,4 @@
+import { formatNoteTime, shiftForHour } from '../lib/dateText';
 import React, { useEffect, useRef, useState } from 'react';
 import { MessageSquare, Trash2, Mic, Square, Play, Send, X } from 'lucide-react';
 import { apiWrite } from '../lib/api';
@@ -47,7 +48,7 @@ export function HandoffNotes({
   onDeleted,
 }: HandoffNotesProps) {
   const [content, setContent] = useState('');
-  const [shift, setShift] = useState('Morning');
+  const [shift, setShift] = useState<string>(() => shiftForHour(new Date().getHours())); // QA2 #30: from the clock, not always Morning
   const [recordState, setRecordState] = useState<RecordState>('idle');
   const [elapsed, setElapsed] = useState(0);
   const [voiceNoteData, setVoiceNoteData] = useState('');
@@ -248,7 +249,7 @@ export function HandoffNotes({
                   )}
                 </div>
                 <p className="text-xs text-ink-faint mt-0.5">
-                  {new Date(note.createdAt).toLocaleString()}
+                  {formatNoteTime(note.createdAt)}
                 </p>
                 {confirmId === note.id && (
                   <div className="flex items-center gap-2 mt-2 p-2 rounded-lg" style={{ backgroundColor: 'var(--bad-bg)' }}>

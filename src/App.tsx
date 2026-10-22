@@ -40,6 +40,7 @@ import { ConfirmModal } from './components/ConfirmModal';
 import { VenueTabs } from './components/VenueTabs';
 import { AgencyEventsScreen } from './components/AgencyEventsScreen';
 import { SHOW_FACTORY_AUDIT } from './lib/features';
+import { signoffUndoBy, signoffUndoTitle, SIGNOFF_UNDO_TEXT } from './lib/signoffUndo';
 import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
@@ -1676,11 +1677,32 @@ export default function App() {
     );
   }
 
+  // QA2 #29: on the board, undoing somebody else's sign-off asks first (your own stays one tap).
+  const handleBoardUpdateStatus = async (taskId: string, status: TaskStatus, isCompleted: boolean): Promise<boolean> => {
+    const who = signoffUndoBy(tasks.find((t) => t.id === taskId), currentUser, isCompleted);
+    if (!who) return handleUpdateStatus(taskId, status, isCompleted);
+    setConfirmModalConfig({
+      isOpen: true,
+      title: signoffUndoTitle(who),
+      message: SIGNOFF_UNDO_TEXT,
+      confirmText: 'Undo sign-off',
+      cancelText: 'Keep it',
+      variant: 'warning',
+      icon: 'rotate',
+      onConfirm: async () => {
+        setConfirmModalConfig((prev) => ({ ...prev, isOpen: false }));
+        await handleUpdateStatus(taskId, status, isCompleted);
+      },
+    });
+    return false;
+  };
+
   const taskTableView = (
     <TaskTableView
       tasks={sortedTasks}
       currentUser={currentUser}
-      onUpdateStatus={handleUpdateStatus}
+      onUpdateStatus={handleBoardUpdateStatus}
+      timeZone={currentVenueTimeZone}
       onUpdateNotes={handleUpdateNotes}
       onEditTask={(task) => {
         if (!canUserAssignTasks(currentUser)) {
@@ -1702,7 +1724,8 @@ export default function App() {
     <TaskCardView
       tasks={sortedTasks}
       currentUser={currentUser}
-      onUpdateStatus={handleUpdateStatus}
+      onUpdateStatus={handleBoardUpdateStatus}
+      timeZone={currentVenueTimeZone}
       onUpdateNotes={handleUpdateNotes}
       onCheckIn={handleCheckIn}
       onRemoveCheckIn={handleRemoveCheckIn}
