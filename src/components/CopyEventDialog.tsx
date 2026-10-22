@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, X, Check, Ban } from 'lucide-react';
 import { KosherEvent, User as UserType, Venue } from '../types';
 import { venueTimeZone, workDateIn } from '../lib/workday';
+import { formatClockTime, formatTimeRange } from '../lib/clockTime';
 
 /**
  * Item 7: copy an event into a new, independent one. The server decides what
@@ -58,9 +59,7 @@ export const CopyEventDialog: React.FC<CopyEventDialogProps> = ({
   if (!isOpen || !event) return null;
 
   const taskCount = event.tasks?.length || 0;
-  const timeText = event.startTime
-    ? `${event.startTime}${event.endTime ? ` – ${event.endTime}` : ''}`
-    : '';
+  const timeText = formatClockTime(event.startTime) ? formatTimeRange(event.startTime, event.endTime) : '';
   const trimmed = title.trim();
   const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(date) && date >= venueToday;
   const canSave = !saving && trimmed.length > 0 && trimmed.length <= 200 && dateOk;

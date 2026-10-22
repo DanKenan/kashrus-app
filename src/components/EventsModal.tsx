@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { KosherEvent, EventTask, User as UserType, Venue } from '../types';
 import { venueTimeZone, workDateIn } from '../lib/workday';
+import { formatClockTime, formatTimeRange } from '../lib/clockTime';
 
 interface EventsModalProps {
   isOpen: boolean;
@@ -297,7 +298,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                       <div className="flex items-center gap-1.5 text-xs text-ink-soft font-semibold mb-1">
                         <Calendar className="w-3 h-3 shrink-0" />
                         <span className="tnum">{evt.date}</span>
-                        {evt.startTime && <span>• {evt.startTime}</span>}
+                        {formatClockTime(evt.startTime) && <span>• {formatClockTime(evt.startTime)}</span>}
                       </div>
 
                       <div className="flex items-center gap-1.5 text-xs text-ink-soft truncate mb-2">
@@ -386,7 +387,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                       <div>
                         <div className="text-xs text-ink-soft font-semibold uppercase">Date & Time</div>
                         <div className="font-semibold text-ink">
-                          {activeEvent.date} {activeEvent.startTime && `(${activeEvent.startTime} - ${activeEvent.endTime || ''})`}
+                          {activeEvent.date} {formatTimeRange(activeEvent.startTime, activeEvent.endTime) && `(${formatTimeRange(activeEvent.startTime, activeEvent.endTime)})`}
                         </div>
                       </div>
                     </div>

@@ -104,7 +104,8 @@ for (const agencyLogoSrc of [undefined, null, dataUrl]) {
   for (const u of [adminU, staffU]) {
     const withLogo = nameSpan(renderToStaticMarkup(React.createElement(Header, { ...hp, currentUser: u, agencyLogoSrc: dataUrl })));
     const noLogo = nameSpan(renderToStaticMarkup(React.createElement(Header, { ...hp, currentUser: u })));
-    check(`${u.role}: venue name hidden below sm with a logo`, withLogo.split(' ').includes('max-sm:hidden'), withLogo);
+    // QA2 #10: with a logo the venue name stays visible on phones (it truncates), never hidden.
+    check(`${u.role}: venue name stays visible below sm with a logo`, withLogo !== '' && !withLogo.split(' ').includes('max-sm:hidden') && withLogo.split(' ').includes('max-sm:min-w-[4.5ch]'), withLogo);
     check(`${u.role}: venue name class unchanged without a logo`, noLogo !== '' && !noLogo.includes('max-sm:hidden'), noLogo);
   }
 }

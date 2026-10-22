@@ -39,6 +39,7 @@ import { AddDiscrepancyModal } from './AddDiscrepancyModal';
 import { SubmitAuditReportModal } from './SubmitAuditReportModal';
 import { HechsherCheckModal } from './HechsherCheckModal';
 import { apiFetch, apiWrite, getLastKnownVersion } from '../lib/api';
+import { formatTimeRange } from '../lib/clockTime';
 
 interface FactoryAuditHubModalProps {
   isOpen: boolean;
@@ -706,7 +707,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
                           {rpt.status.replace(/_/g, ' ')}
                         </span>
                         <h4 className="text-sm font-bold text-ink">
-                          Audit on {rpt.auditDate} ({rpt.startTime} – {rpt.endTime})
+                          Audit on {rpt.auditDate}{formatTimeRange(rpt.startTime, rpt.endTime) ? ` (${formatTimeRange(rpt.startTime, rpt.endTime)})` : ''}
                         </h4>
                       </div>
 

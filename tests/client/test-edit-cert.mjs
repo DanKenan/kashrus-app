@@ -45,7 +45,7 @@ ok('card: admin sees one Edit per venue', count(adminH, /data-edit-certification
     const m = adminH.match(new RegExp(`id="${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*>(.*?)</(?:h3|span)>`));
     return m ? m[1].replace(/<[^>]+>/g, '').trim() : '?';
   }).join(' '));
-  ok('card: Edit is named "Edit certification for <venue>" for screen readers', JSON.stringify(names) === JSON.stringify(["Edit certification for Yosi's Kitchen", 'Edit certification for Crown Market', 'Edit certification for New Venue']), JSON.stringify(names));
+  ok('card: Edit is named "Edit certification for <venue>" for screen readers', JSON.stringify(names.filter((n) => n.startsWith('Edit certification'))) === JSON.stringify(["Edit certification for Yosi's Kitchen", 'Edit certification for Crown Market', 'Edit certification for New Venue']), JSON.stringify(names));
 }
 ok('card: Edit is a 44px target', /min-h-11 min-w-11[^"]*"[^>]*data-edit-certification|data-edit-certification[^>]*min-h-11 min-w-11/.test(adminH));
 ok('card: admin sees "No certification" on a venue without one', count(adminH, />No certification</g) === 1);

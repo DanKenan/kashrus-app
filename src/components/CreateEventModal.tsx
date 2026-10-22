@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { KosherEvent, User as UserType, Venue } from '../types';
 import { addDays, venueTimeZone, workDateIn } from '../lib/workday';
+import { formatClockTime } from '../lib/clockTime';
 import { getRoleLabel } from '../lib/permissions';
 import { apiFetch, apiWrite } from '../lib/api';
 import { rosterDisplayHandle, rosterEmailLower } from '../lib/rosterDisplay';
@@ -141,7 +142,8 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
   const [date, setDate] = useState(() => tomorrowAt(venueId));
   const dateTouched = useRef(false);
   const [startTime, setStartTime] = useState('11:00 AM');
-  const [endTime, setEndTime] = useState('16:00 PM');
+  // QA2 #4: 12-hour defaults (the old end default read 16:00 PM); typed times are tidied on blur.
+  const [endTime, setEndTime] = useState('4:00 PM');
   
   // Mashgiach Selection: 'assigned_user' | 'external' | 'unassigned'
   const [mashgiachMode, setMashgiachMode] = useState<'assigned_user' | 'external' | 'unassigned'>('assigned_user');
@@ -339,8 +341,8 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
         title: title.trim(),
         location: location.trim(),
         date,
-        startTime,
-        endTime,
+        startTime: formatClockTime(startTime),
+        endTime: formatClockTime(endTime),
         mashgiachType: mashgiachMode,
         assignedMashgiachEmail: mashgiachMode === 'assigned_user' ? selectedMashgiachEmail : undefined,
         assignedMashgiachName: mashgiachMode === 'assigned_user' ? selectedMashgiachObj?.name : undefined,
@@ -523,6 +525,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     type="text"
                     value={startTime}
                     onChange={(e) => setStartTime(e.target.value)}
+                    onBlur={() => setStartTime((t) => formatClockTime(t))}
                     placeholder="Start time"
                     className="w-full pl-8.5 pr-3 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   />
@@ -539,6 +542,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                     type="text"
                     value={endTime}
                     onChange={(e) => setEndTime(e.target.value)}
+                    onBlur={() => setEndTime((t) => formatClockTime(t))}
                     placeholder="End time"
                     className="w-full pl-8.5 pr-3 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   />
