@@ -489,6 +489,13 @@ async function waitForLogoutsToSettle(maxMs = sessionTiming.logoutSettleMaxMs): 
  */
 const MOVE_LEASE_KEY = 'shutfey_cookie_move';
 const tabId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+/**
+ * True while this tab holds the move lock: always under a Web Lock (the
+ * browser holds it for the tab), and under the lease only while the lease in
+ * storage is still this tab's and has not run out (then it is renewed).
+ */
+let holdsMoveLock: () => boolean = () => false;
+
 async function withCrossTabMoveLock(fn: () => Promise<void>): Promise<boolean> {
   const locks = (globalThis as any).navigator?.locks;
   if (locks && typeof locks.request === 'function') {
@@ -499,7 +506,12 @@ async function withCrossTabMoveLock(fn: () => Promise<void>): Promise<boolean> {
       await locks.request('shutfey-cookie-move', { signal: ctrl.signal }, async () => {
         acquired = true;
         clearTimeout(timer);
-        await fn();
+        holdsMoveLock = () => true;
+        try {
+          await fn();
+        } finally {
+          holdsMoveLock = () => false;
+        }
       });
     } catch {
       // not acquired in time (or the move failed)
@@ -521,12 +533,22 @@ async function withCrossTabMoveLock(fn: () => Promise<void>): Promise<boolean> {
       if (readKey(MOVE_LEASE_KEY) === mine) {
         // Keep the lease while the move runs (it can wait on sign-in changes),
         // so it never runs out under a move that is still going.
+        // Renewed only while still ours and not run out: a tab that was
+        // suspended past its lease has lost it for good (another tab may own it).
+        const stillMine = (): boolean => {
+          const [o, u] = String(readKey(MOVE_LEASE_KEY) || '').split('|');
+          if (o !== tabId || !(Number(u) > Date.now())) return false;
+          writeKey(MOVE_LEASE_KEY, `${tabId}|${Date.now() + leaseMs}`);
+          return true;
+        };
         const renew = setInterval(() => {
-          if (String(readKey(MOVE_LEASE_KEY) || '').startsWith(`${tabId}|`)) writeKey(MOVE_LEASE_KEY, `${tabId}|${Date.now() + leaseMs}`);
+          stillMine();
         }, Math.max(10, Math.floor(sessionTiming.moveLockMaxMs / 3)));
+        holdsMoveLock = stillMine;
         try {
           await fn();
         } finally {
+          holdsMoveLock = () => false;
           clearInterval(renew);
           if (String(readKey(MOVE_LEASE_KEY) || '').startsWith(`${tabId}|`)) writeKey(MOVE_LEASE_KEY, null);
         }
@@ -657,6 +679,14 @@ async function moveTokenToCookie(token: string): Promise<void> {
   if (before.status !== 200 || !before.userId) return;
   const onTablet = !!before.kiosk;
   if (onTablet && (!before.kiosk?.deviceId || !before.kiosk?.venueId)) return;
+  // Right before the adopt (the one step that sets the cookie): the token is
+  // still the stored one and this tab still holds the move lock (a tab that
+  // was suspended may have lost its lease meanwhile). Else: keep the token.
+  if (getSessionToken() !== token || getKioskDeviceSecret() !== deviceSecret) return;
+  if (!holdsMoveLock()) {
+    movePostponed = true;
+    return;
+  }
   let adopted: Response;
   try {
     // Cut off if it hangs, so no late answer (which sets the cookie) can land
@@ -693,8 +723,14 @@ async function moveTokenToCookie(token: string): Promise<void> {
   if (onTablet && (after.kiosk?.deviceId !== before.kiosk?.deviceId || after.kiosk?.venueId !== before.kiosk?.venueId)) return;
   // A sign-in change (change password, merge, switch agency) may still store a newer token.
   if (!(await waitForSignInChangesToSettle())) return;
-  // After the last await: only the token that was moved is deleted.
+  // After the last await: only the token that was moved is deleted, and only
+  // while this tab still holds the move lock (else the cookie may be another
+  // tab's by now: keep the token).
   if (getSessionToken() !== token || getKioskDeviceSecret() !== deviceSecret) return;
+  if (!holdsMoveLock()) {
+    movePostponed = true;
+    return;
+  }
   writeKey(COOKIE_SESSION_KEY, newCookieSessionId());
   writeKey(LOGOUT_PENDING_KEY, null);
   if (onTablet && deviceSecret) setKioskDevice(`${KIOSK_DEVICE_COOKIE_PREFIX}${before.kiosk?.deviceId}`);

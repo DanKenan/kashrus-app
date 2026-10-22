@@ -487,6 +487,61 @@ for (const mode of ['lease', 'web-locks']) {
   ok('E3 afterwards the newest token is moved', getSessionToken() === null && isCookieSession() && order[order.length - 1] === 'Bearer tok-E3b', JSON.stringify(order));
 }
 
+for (const variant of ['taken-and-moved', 'taken', 'ran-out']) {
+  // E4 (RV3): tab A is suspended while its first me is out (its lease renewal stops); on resume it
+  // must not adopt if it lost the lease or its token, and must keep the token.
+  resetBoth();
+  setSessionToken('tok-E4a');
+  let release; const gate = new Promise((r) => { release = r; });
+  const calls = stubFetch({
+    'GET /api/auth/me': (b, h) => (h.authorization === 'Bearer tok-E4a' && !release.done ? { ...meUser('u1', 'bearer'), gate } : meUser('u1', h.authorization ? 'bearer' : 'cookie')),
+    'POST /api/auth/session/adopt': { status: 200, body: { ok: true } },
+  });
+  const mvA = syncCookieSession();
+  await tick(60);
+  const [ownerA] = String(localStorage.getItem('shutfey_cookie_move')).split('|');
+  if (variant === 'ran-out') {
+    localStorage.setItem('shutfey_cookie_move', `${ownerA}|${Date.now() - 1}`);
+  } else {
+    localStorage.setItem('shutfey_cookie_move', `tab-b|${Date.now() + 60000}`);
+    if (variant === 'taken-and-moved') { store.delete('shutfey_session_token'); localStorage.setItem('shutfey_cookie_session', 'id-of-tab-b'); }
+  }
+  release.done = true; release(); await mvA;
+  ok(`E4 ${variant}: no adopt after resuming`, !calls.some((c) => c.path === '/api/auth/session/adopt'), paths(calls));
+  if (variant === 'taken-and-moved') ok("E4 taken-and-moved: tab B's sign-in left as it is", localStorage.getItem('shutfey_cookie_session') === 'id-of-tab-b' && localStorage.getItem('shutfey_cookie_move').startsWith('tab-b|'));
+  else ok(`E4 ${variant}: token kept for a later move`, getSessionToken() === 'tok-E4a');
+  store.delete('shutfey_cookie_move');
+}
+{
+  // E6 (RV3): another tab stored a newer token while A's first me was out (A still holds the lease):
+  // A must not adopt its older token.
+  resetBoth();
+  setSessionToken('tok-E6a');
+  let release; const gate = new Promise((r) => { release = r; });
+  const calls = stubFetch({
+    'GET /api/auth/me': (b, h) => (h.authorization === 'Bearer tok-E6a' ? { ...meUser('u1', 'bearer'), gate } : meUser('u1', h.authorization ? 'bearer' : 'cookie')),
+    'POST /api/auth/session/adopt': { status: 200, body: { ok: true } },
+  });
+  const mvA = syncCookieSession();
+  await tick(40);
+  store.set('shutfey_session_token', 'tok-E6b');
+  release(); await mvA;
+  ok('E6 the older token is not adopted after a newer one was stored', !calls.some((c) => c.path === '/api/auth/session/adopt' && c.h.authorization === 'Bearer tok-E6a'), paths(calls));
+  store.delete('shutfey_cookie_move');
+}
+{
+  // E5 (RV3): the lease is lost after the adopt but before the token is deleted: keep the token.
+  resetBoth();
+  setSessionToken('tok-E5');
+  stubFetch({
+    'GET /api/auth/me': (b, h) => meUser('u1', h.authorization ? 'bearer' : 'cookie'),
+    'POST /api/auth/session/adopt': () => { localStorage.setItem('shutfey_cookie_move', `tab-b|${Date.now() + 60000}`); return { status: 200, body: { ok: true } }; },
+  });
+  await syncCookieSession();
+  ok('E5 lease lost during the move: token not deleted', getSessionToken() === 'tok-E5' && !isCookieSession());
+  store.delete('shutfey_cookie_move');
+}
+
 // ------------------------------------------------------------------ K: tablet
 {
   reset(); setKioskDevice('dev1.sec1'); setSessionToken('ktok-1');
