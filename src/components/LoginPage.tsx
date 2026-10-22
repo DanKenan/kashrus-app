@@ -23,6 +23,8 @@ import { PWAInstallButton } from './PWAInstallButton';
 import { ForgotPasswordModal } from './ForgotPasswordModal';
 import { apiFetch, setSessionToken } from '../lib/api';
 import { signInErrorText } from '../lib/venueRemoved';
+import { activateMembership, cleanMemberships, isChooseAnswer, Membership } from '../lib/memberships';
+import { getRoleLabel } from '../lib/permissions';
 
 interface LoginPageProps {
   onLoginSuccess: (user: UserType) => void;
@@ -52,6 +54,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [setupPassword, setSetupPassword] = useState('');
   const [setupConfirm, setSetupConfirm] = useState('');
   const [showForgot, setShowForgot] = useState(false);
+  // 10g: an email with several agencies signs in, then picks which one to open.
+  const [chooser, setChooser] = useState<{ token: string; memberships: Membership[] } | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,6 +90,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         return;
       }
 
+      // 10g: several agencies under this login -> the person picks one. The
+      // choose token is NOT a session; it is kept only in this screen.
+      if (isChooseAnswer(data)) {
+        const list = cleanMemberships(data.memberships);
+        if (list.length > 0) {
+          setChooser({ token: data.token, memberships: list });
+          setPassword('');
+          return;
+        }
+        throw new Error('User profile could not be verified.');
+      }
+
       if (data.token) {
         setSessionToken(data.token);
       }
@@ -99,6 +115,21 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const openMembership = async (membershipId: string) => {
+    if (!chooser || isLoading) return;
+    setErrorMessage(null);
+    setIsLoading(true);
+    const r = await activateMembership(chooser.token, membershipId);
+    setIsLoading(false);
+    if (r.ok && r.token && r.user) {
+      setSessionToken(r.token);
+      setChooser(null);
+      onLoginSuccess(r.user);
+      return;
+    }
+    setErrorMessage(r.error || 'Please sign in again.');
   };
 
   const handleSetupSubmit = async (e: React.FormEvent) => {
@@ -233,6 +264,45 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   setErrorMessage(null);
                 }}
               />
+            ) : chooser ? (
+              /* 10g: pick which agency to open */
+              <div data-login-chooser className="space-y-4">
+                <div className="text-center">
+                  <h2 className="text-lg font-black text-ink">Which agency?</h2>
+                  <p className="text-sm text-ink-soft mt-1">{email.trim()} is in more than one agency. You can switch any time from the menu.</p>
+                </div>
+                {errorMessage && (
+                  <div role="alert" className="p-3 rounded-2xl bg-bad-bg border border-bad text-sm text-bad flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+                    <span>{errorMessage}</span>
+                  </div>
+                )}
+                <div className="space-y-2">
+                  {chooser.memberships.map((m) => (
+                    <button
+                      key={m.membershipId}
+                      type="button"
+                      data-membership={m.membershipId}
+                      disabled={isLoading}
+                      onClick={() => { void openMembership(m.membershipId); }}
+                      className="w-full min-h-11 py-3 px-4 rounded-xl bg-surface border border-line text-left flex items-center gap-3 hover:bg-sunken disabled:opacity-50 cursor-pointer"
+                    >
+                      <Building2 className="w-5 h-5 shrink-0 text-gold-ink" aria-hidden="true" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-bold text-ink break-words">{m.agencyName}</span>
+                        {m.role && <span className="block text-sm text-ink-soft">{getRoleLabel(m.role)}</span>}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setChooser(null); setErrorMessage(null); }}
+                  className="w-full min-h-11 py-3 px-4 rounded-xl bg-surface border border-line text-ink text-sm font-bold hover:bg-sunken cursor-pointer"
+                >
+                  Back to sign in
+                </button>
+              </div>
             ) : needsSetup ? (
               /* First-run admin setup: create the admin password */
               <>

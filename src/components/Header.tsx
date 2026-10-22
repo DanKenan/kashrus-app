@@ -44,6 +44,8 @@ import { UpdateAppButton } from './UpdateAppButton';
 import { getRoleLabel, canUserAssignTasks } from '../lib/permissions';
 
 interface HeaderProps {
+  /** 10g: shown only when the login has more than one agency (not on a kiosk). */
+  onOpenAgencySwitcher?: () => void;
   agencyLogoSrc?: string | null;
   isAgencyHome?: boolean;
   onOpenAgencyHome?: () => void;
@@ -83,6 +85,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   agencyLogoSrc,
   isAgencyHome,
+  onOpenAgencySwitcher,
   onOpenAgencyHome,
   currentUser,
   currentVenue,
@@ -464,6 +467,19 @@ export const Header: React.FC<HeaderProps> = ({
                       )}
                     </div>
 
+                    {onOpenAgencySwitcher && (
+                      <button
+                        type="button"
+                        onClick={() => { setUserMenuOpen(false); onOpenAgencySwitcher(); }}
+                        aria-haspopup="dialog"
+                        className="w-full mb-2 min-h-11 flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl bg-sunken border border-line-control text-ink hover:bg-surface pressable cursor-pointer"
+                      >
+                        <ShieldCheck className="w-4 h-4 shrink-0 text-gold-deep" />
+                        <span>Switch agency</span>
+                        <ChevronDown className="w-4 h-4 shrink-0 ml-auto" />
+                      </button>
+                    )}
+
                     <div className="space-y-1">
                       {/* Theme Toggle in Menu */}
                       <button
@@ -662,6 +678,21 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <UserIcon className="w-4 h-4" />
               <span>Sign In to Your Account</span>
+            </button>
+          )}
+
+          {currentUser && onOpenAgencySwitcher && (
+            <button
+              type="button"
+              onClick={() => { setMobileMenuOpen(false); onOpenAgencySwitcher(); }}
+              aria-haspopup="dialog"
+              aria-label={`Switch agency, current: ${currentUser.agencyName || 'agency'}`}
+              className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl bg-sunken border border-line-control text-ink pressable cursor-pointer"
+            >
+              <ShieldCheck className="w-4 h-4 shrink-0 text-gold-deep" />
+              <span>Switch agency</span>
+              <span className="truncate min-w-0 ml-auto">{currentUser.agencyName}</span>
+              <ChevronDown className="w-4 h-4 shrink-0" />
             </button>
           )}
 
