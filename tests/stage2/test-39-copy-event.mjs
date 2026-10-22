@@ -180,7 +180,8 @@ export default {
       const before = (await storedEvents()).length;
       const noTok = await copy(null, srcId, { date: '2027-04-01' });
       assert(noTok.status === 401, `no token: expected 401, got ${noTok.status}`);
-      for (const who of ['mashNY', 'workerNY', 'ownerNY', 'coordOther', 'adminY']) {
+      // QA2S2 #9: an owner may copy at their OWN venue (Test 74 B); every other role stays refused.
+      for (const who of ['mashNY', 'workerNY', 'coordOther', 'adminY']) {
         const r = await copy(who, srcId, { date: '2027-04-01' });
         assert(r.status === 403, `${who}: expected 403, got ${r.status} ${JSON.stringify(r.json)}`);
       }
@@ -190,7 +191,7 @@ export default {
       // Coordinator at another venue cannot copy THAT venue's events either way round.
       const r2 = await copy('coordNY', srcJlmId, { date: '2027-04-01' });
       assert(r2.status === 403, `coordNY copying a JLM event: expected 403, got ${r2.status}`);
-      checks.push('rule T: 401 no token; 403 mashgiach/worker/owner/other-venue coordinator/other-agency admin; nothing written');
+      checks.push('rule T: 401 no token; 403 mashgiach/worker/other-venue coordinator/other-agency admin; nothing written');
     }
 
     /* ---- 2. Coordinator at the venue copies; BR + allowlist ---- */
@@ -361,7 +362,8 @@ export default {
         const s1 = await tapi('POST', '/api/__test__/doc-set-users', { users: moved });
         assert(s1.status === 200, `doc-set-users: ${s1.status}`);
         const r = await copy('coordNY', srcId, { date: '2027-07-03', title: `T39 Race user ${ts}` });
-        assert(r.status === 409, `coordinator moved mid-flight: expected 409, got ${r.status} ${JSON.stringify(r.json)}`);
+        // QA2S2 #9 (E5): the fresh re-check refuses with 403 EVENT_FORBIDDEN (was a generic 409).
+        assert(r.status === 403 && r.json?.code === 'EVENT_FORBIDDEN', `coordinator moved mid-flight: expected 403 EVENT_FORBIDDEN, got ${r.status} ${JSON.stringify(r.json)}`);
       } finally {
         await tapi('POST', '/api/__test__/doc-set-users', { users: usersOrig });
       }

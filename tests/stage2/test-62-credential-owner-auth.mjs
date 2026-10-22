@@ -5,8 +5,8 @@
  * credential), built by the test-only hook identity-build-person. Z is a
  * single-row (migrated) person in A.
  *
- *  A  single-row Z: change-password works, origin kept, NO epoch bump, old
- *     token still valid, response byte-identical (no token)
+ *  A  single-row Z: change-password works, origin kept; QA2S2 #15: epoch +1,
+ *     the old token is signed out, the response carries a fresh token that works
  *  B  multi P: login with P's email -> X's session, never Y's
  *  C  forgot for P: same 200 body as an unknown email; no reset record, no
  *     cached code, no reset-code push to any endpoint
@@ -122,15 +122,17 @@ export default {
       const z0 = await rowOf(Z);
       const tz = await mintToken(baseUrl, Z);
       const r = await changePw(tz, ZPW, 'stage2-t62-znew1');
-      assert(r.status === 200 && J(r.json) === J({ success: true, message: 'Password updated successfully.' }), `A response byte-identical: ${r.status} ${r.text}`);
+      assert(r.status === 200 && r.json?.success === true && typeof r.json?.token === 'string' && r.json.token, `A response carries a fresh token: ${r.status} ${r.text}`);
       const z1 = await rowOf(Z);
       assert(z1.password !== z0.password, 'A password changed');
-      assert((z1.tokenEpoch ?? 0) === (z0.tokenEpoch ?? 0), `A no epoch bump ${z0.tokenEpoch} -> ${z1.tokenEpoch}`);
+      assert((z1.tokenEpoch ?? 0) === (z0.tokenEpoch ?? 0) + 1, `A epoch +1 ${z0.tokenEpoch} -> ${z1.tokenEpoch}`);
       assert((z1.credentialOrigin ?? null) === (z0.credentialOrigin ?? null), 'A origin kept');
       const me = await call('GET', '/api/agencies/current', auth(tz));
-      assert(me.status === 200, `A old token still valid (as today): ${me.status}`);
+      assert(me.status === 401, `A old token signed out (QA2S2 #15): ${me.status}`);
+      const me2 = await call('GET', '/api/agencies/current', auth(r.json.token));
+      assert(me2.status === 200, `A the response token works: ${me2.status}`);
       assert((await login(ZE, 'stage2-t62-znew1')).status === 200, 'A new password logs in');
-      console.log('  ✓ A single-row change-password unchanged (no bump, origin kept, same response)');
+      console.log('  ✓ A single-row change-password (QA2S2 #15: epoch +1, old token out, fresh token, origin kept)');
     }
 
     // ---- D1 / D2: requests made while X was single ----
