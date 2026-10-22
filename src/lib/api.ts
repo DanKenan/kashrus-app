@@ -208,9 +208,9 @@ async function isWrongCurrentPassword401(input: string, res: Response): Promise<
  *   logoutUnknownMaxMs: a sign-out mark left by a closed tab counts this long.
  *   An adopt request is cut off after adoptMaxMs and the move's lock is then
  *   kept adoptAbortGraceMs more. A postponed move is tried again after
- *   movePostponedRetryMs. moveLeaseMs: the lease (no Web Locks) of a closed tab.
+ *   movePostponedRetryMs.
  */
-export const sessionTiming = { storeRetryDelaysMs: [1000, 3000], authSettleGraceMs: 1500, authSettleMaxMs: 60000, logoutSettleMaxMs: 15000, logoutUnknownMaxMs: 600000, moveLockMaxMs: 30000, moveLeaseMs: 120000, adoptMaxMs: 20000, adoptAbortGraceMs: 5000, movePostponedRetryMs: 10000 };
+export const sessionTiming = { storeRetryDelaysMs: [1000, 3000], authSettleGraceMs: 1500, authSettleMaxMs: 60000, logoutSettleMaxMs: 15000, logoutUnknownMaxMs: 600000, moveLockMaxMs: 30000, adoptMaxMs: 20000, adoptAbortGraceMs: 5000, movePostponedRetryMs: 10000 };
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -482,82 +482,44 @@ async function waitForLogoutsToSettle(maxMs = sessionTiming.logoutSettleMaxMs): 
 }
 
 /**
- * 11a-c: one move to the cookie at a time across all tabs of this browser
- * (an adopt answer sets the cookie, so two tabs' adopts must not interleave).
- * Web Locks where the browser has them, else a short lease in localStorage.
+ * 11a-c: one move to the cookie at a time across all tabs of this browser (an
+ * adopt answer sets the cookie, so two tabs' adopts must not interleave), with
+ * the browser's Web Locks: the lock is held by the browser for the tab for the
+ * whole move, even while the tab is suspended, so no other tab can adopt while
+ * an earlier adopt could still land. A browser without Web Locks does not move
+ * at all: it keeps the token (today's way), which is always safe.
  * Not acquired within moveLockMaxMs = the move is tried again later.
- */
-const MOVE_LEASE_KEY = 'shutfey_cookie_move';
-const tabId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-/**
- * True while this tab holds the move lock: always under a Web Lock (the
- * browser holds it for the tab), and under the lease only while the lease in
- * storage is still this tab's and has not run out (then it is renewed).
  */
 let holdsMoveLock: () => boolean = () => false;
 
-async function withCrossTabMoveLock(fn: () => Promise<void>): Promise<boolean> {
+function webLocks(): { request: (...args: any[]) => Promise<unknown> } | null {
   const locks = (globalThis as any).navigator?.locks;
-  if (locks && typeof locks.request === 'function') {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), sessionTiming.moveLockMaxMs);
-    let acquired = false;
-    try {
-      await locks.request('shutfey-cookie-move', { signal: ctrl.signal }, async () => {
-        acquired = true;
-        clearTimeout(timer);
-        holdsMoveLock = () => true;
-        try {
-          await fn();
-        } finally {
-          holdsMoveLock = () => false;
-        }
-      });
-    } catch {
-      // not acquired in time (or the move failed)
-    } finally {
+  return locks && typeof locks.request === 'function' ? locks : null;
+}
+
+async function withCrossTabMoveLock(fn: () => Promise<void>): Promise<boolean> {
+  const locks = webLocks();
+  if (!locks) return false;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), sessionTiming.moveLockMaxMs);
+  let acquired = false;
+  try {
+    await locks.request('shutfey-cookie-move', { signal: ctrl.signal }, async () => {
+      acquired = true;
       clearTimeout(timer);
-    }
-    return acquired;
-  }
-  const started = Date.now();
-  // The lease outlives the wait of the other tabs by far, and is renewed while
-  // the move runs (a background tab's timers can be slowed to once a minute).
-  const leaseMs = sessionTiming.moveLeaseMs;
-  for (;;) {
-    const [owner, until] = String(readKey(MOVE_LEASE_KEY) || '').split('|');
-    if (!owner || owner === tabId || !(Number(until) > Date.now())) {
-      const mine = `${tabId}|${Date.now() + leaseMs}`;
-      writeKey(MOVE_LEASE_KEY, mine);
-      await sleep(30);
-      if (readKey(MOVE_LEASE_KEY) === mine) {
-        // Keep the lease while the move runs (it can wait on sign-in changes),
-        // so it never runs out under a move that is still going.
-        // Renewed only while still ours and not run out: a tab that was
-        // suspended past its lease has lost it for good (another tab may own it).
-        const stillMine = (): boolean => {
-          const [o, u] = String(readKey(MOVE_LEASE_KEY) || '').split('|');
-          if (o !== tabId || !(Number(u) > Date.now())) return false;
-          writeKey(MOVE_LEASE_KEY, `${tabId}|${Date.now() + leaseMs}`);
-          return true;
-        };
-        const renew = setInterval(() => {
-          stillMine();
-        }, Math.max(10, Math.floor(sessionTiming.moveLockMaxMs / 3)));
-        holdsMoveLock = stillMine;
-        try {
-          await fn();
-        } finally {
-          holdsMoveLock = () => false;
-          clearInterval(renew);
-          if (String(readKey(MOVE_LEASE_KEY) || '').startsWith(`${tabId}|`)) writeKey(MOVE_LEASE_KEY, null);
-        }
-        return true;
+      holdsMoveLock = () => true;
+      try {
+        await fn();
+      } finally {
+        holdsMoveLock = () => false;
       }
-    }
-    if (Date.now() - started >= sessionTiming.moveLockMaxMs) return false;
-    await sleep(100);
+    });
+  } catch {
+    // not acquired in time (or the move failed)
+  } finally {
+    clearTimeout(timer);
   }
+  return acquired;
 }
 
 /** 11a-c: true when the server has confirmed the cookie sign-out (2xx), or there was nothing to end (401). */
@@ -680,8 +642,7 @@ async function moveTokenToCookie(token: string): Promise<void> {
   const onTablet = !!before.kiosk;
   if (onTablet && (!before.kiosk?.deviceId || !before.kiosk?.venueId)) return;
   // Right before the adopt (the one step that sets the cookie): the token is
-  // still the stored one and this tab still holds the move lock (a tab that
-  // was suspended may have lost its lease meanwhile). Else: keep the token.
+  // still the stored one and this tab holds the move lock. Else: keep the token.
   if (getSessionToken() !== token || getKioskDeviceSecret() !== deviceSecret) return;
   if (!holdsMoveLock()) {
     movePostponed = true;
@@ -724,8 +685,7 @@ async function moveTokenToCookie(token: string): Promise<void> {
   // A sign-in change (change password, merge, switch agency) may still store a newer token.
   if (!(await waitForSignInChangesToSettle())) return;
   // After the last await: only the token that was moved is deleted, and only
-  // while this tab still holds the move lock (else the cookie may be another
-  // tab's by now: keep the token).
+  // while this tab holds the move lock.
   if (getSessionToken() !== token || getKioskDeviceSecret() !== deviceSecret) return;
   if (!holdsMoveLock()) {
     movePostponed = true;
@@ -746,7 +706,8 @@ function setSessionTokenQuietly(token: string | null): void {
 async function syncOnce(): Promise<void> {
   const token = getSessionToken();
   if (token) {
-    if (cookieMoveUnsupported) return;
+    // No Web Locks (an old browser): stay on the token, today's way.
+    if (cookieMoveUnsupported || !webLocks()) return;
     movePostponed = false;
     const acquired = await withCrossTabMoveLock(() => moveTokenToCookie(token));
     // Another tab's move or a sign-out on its way: the token is kept, try again later.

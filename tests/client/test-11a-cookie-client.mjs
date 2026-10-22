@@ -24,6 +24,24 @@
 globalThis.document ??= { activeElement: null, addEventListener() {}, removeEventListener() {} };
 const store = new Map();
 globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k), get length() { return store.size; }, key: (i) => Array.from(store.keys())[i] ?? null };
+// The browser's Web Locks, shared by every "tab" (module instance) of this test: FIFO, one holder,
+// a waiter can give up through its AbortSignal. lockHeld() tells whether a move holds it now.
+const webLocksFake = (() => {
+  let holder = null; const queue = [];
+  const next = () => { if (holder || !queue.length) return; const w = queue.shift(); holder = w; Promise.resolve().then(() => w.cb()).then(w.resolve, w.reject).finally(() => { holder = null; next(); }); };
+  return {
+    request(name, opts, cb) {
+      return new Promise((resolve, reject) => {
+        const w = { cb, resolve, reject };
+        const sig = opts && opts.signal;
+        if (sig) sig.addEventListener?.('abort', () => { const i = queue.indexOf(w); if (i >= 0) { queue.splice(i, 1); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); } });
+        queue.push(w); next();
+      });
+    },
+    held: () => !!holder,
+  };
+})();
+Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: { locks: webLocksFake } });
 const logoutMarks = () => Array.from(store.keys()).filter((k) => k.startsWith('shutfey_logout_in_flight:'));
 const events = [];
 globalThis.window ??= { location: { origin: 'https://app.example', pathname: '/', hash: '', protocol: 'https:', host: 'app.example' }, addEventListener() {}, removeEventListener() {} };
@@ -348,15 +366,10 @@ function resetBoth() { reset(); apiB.resetCookieSessionForTests(); }
   release(); await lo; await mv;
   ok('T2 then tab B moves', apiB.getSessionToken() === null && apiB.isCookieSession() && localStorage.getItem('shutfey_logout_in_flight') === null);
 }
-const navDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator') || { configurable: true, writable: true, value: undefined };
-for (const mode of ['lease', 'web-locks']) {
+{
   // T3 (RV1 P1-3): tab A's adopt is on its way; tab B stores a newer token: B's adopt is sent only
-  // after A's move is over, so a late answer of A's can never overwrite B's newer cookie.
+  // after A's move is over (Web Lock), so a late answer of A's can never overwrite B's newer cookie.
   resetBoth();
-  if (mode === 'web-locks') {
-    let tail = Promise.resolve();
-    Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: { locks: { request: (name, opts, cb) => { const run = tail.then(() => cb()); tail = run.catch(() => {}); return run; } } } });
-  }
   setSessionToken('tok-T3a');
   let releaseA; const gateA = new Promise((r) => { releaseA = r; });
   const order = [];
@@ -369,28 +382,37 @@ for (const mode of ['lease', 'web-locks']) {
   apiB.setSessionToken('tok-T3b');
   const mvB = apiB.syncCookieSession();
   await tick(80);
-  ok(`T3 ${mode}: tab B's adopt waits while tab A's is on its way`, order.length === 1 && order[0] === 'Bearer tok-T3a', JSON.stringify(order));
+  ok("T3 tab B's adopt waits while tab A's is on its way (A holds the lock)", order.length === 1 && order[0] === 'Bearer tok-T3a' && webLocksFake.held(), JSON.stringify(order));
   releaseA(); await mvA; await mvB;
-  ok(`T3 ${mode}: then B adopts the newest token last`, order.length === 2 && order[1] === 'Bearer tok-T3b', JSON.stringify(order));
-  ok(`T3 ${mode}: A did not delete B's token; B moved it`, getSessionToken() === null && isCookieSession() && calls.filter((c) => c.path === '/api/auth/session/adopt').length === 2);
-  if (mode === 'web-locks') Object.defineProperty(globalThis, 'navigator', navDescriptor);
+  ok('T3 then B adopts the newest token last', order.length === 2 && order[1] === 'Bearer tok-T3b', JSON.stringify(order));
+  ok("T3 A did not delete B's token; B moved it", getSessionToken() === null && isCookieSession() && calls.filter((c) => c.path === '/api/auth/session/adopt').length === 2);
 }
 {
-  // T4: a lease left by a closed tab does not block once it has run out.
-  resetBoth(); localStorage.setItem('shutfey_cookie_move', `dead-tab|${Date.now() - 1}`);
+  // T4 (RV4): a browser without Web Locks never moves: it keeps the token (today's way), no request, no retry.
+  resetBoth();
+  const nav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: {} });
+  sessionTiming.movePostponedRetryMs = 30;
   setSessionToken('tok-T4');
-  stubFetch(userRoutes());
-  await syncCookieSession();
-  ok('T4 an expired lease of a closed tab is taken over', getSessionToken() === null && isCookieSession() && localStorage.getItem('shutfey_cookie_move') === null);
-  // a live lease of another tab: the move gives up after moveLockMaxMs and keeps the token
-  resetBoth(); localStorage.setItem('shutfey_cookie_move', `other-tab|${Date.now() + 60000}`);
-  sessionTiming.moveLockMaxMs = 80;
-  setSessionToken('tok-T4b');
   const c = stubFetch(userRoutes());
   await syncCookieSession();
-  sessionTiming.moveLockMaxMs = 30000;
-  ok('T4 another live tab moving: wait, then keep the token for later', getSessionToken() === 'tok-T4b' && c.length === 0, paths(c));
-  store.delete('shutfey_cookie_move');
+  Object.defineProperty(globalThis, 'navigator', nav);
+  await tick(120);
+  sessionTiming.movePostponedRetryMs = 10000;
+  ok('T4 no Web Locks: token kept, nothing sent, no retry loop', getSessionToken() === 'tok-T4' && !isCookieSession() && c.length === 0, paths(c));
+  // another tab holds the lock (its move is running): wait, then keep the token and try later
+  resetBoth();
+  let releaseHold; const hold = new Promise((r) => { releaseHold = r; });
+  const holding = webLocksFake.request('shutfey-cookie-move', {}, () => hold);
+  sessionTiming.moveLockMaxMs = 80; sessionTiming.movePostponedRetryMs = 60;
+  setSessionToken('tok-T4b');
+  const c2 = stubFetch(userRoutes());
+  await syncCookieSession();
+  ok('T4 another tab moving: wait, then keep the token for later', getSessionToken() === 'tok-T4b' && c2.length === 0, paths(c2));
+  releaseHold(); await holding;
+  for (let i = 0; i < 30 && getSessionToken(); i++) await tick(20);
+  sessionTiming.moveLockMaxMs = 30000; sessionTiming.movePostponedRetryMs = 10000;
+  ok('T4 the postponed move runs by itself once the lock is free', getSessionToken() === null && isCookieSession());
 }
 
 {
@@ -454,66 +476,18 @@ for (const mode of ['lease', 'web-locks']) {
   setSessionToken('tok-E2');
   const calls = stubFetch({ ...userRoutes(), 'POST /api/auth/session/adopt': { status: 200, body: {}, gate: new Promise(() => {}) } });
   const t0 = Date.now();
-  let leaseDuringGrace = null;
-  setTimeout(() => { leaseDuringGrace = localStorage.getItem('shutfey_cookie_move'); }, 80);
+  let heldDuringGrace = null;
+  setTimeout(() => { heldDuringGrace = webLocksFake.held(); }, 80);
   await syncCookieSession();
   const took = Date.now() - t0;
   sessionTiming.adoptMaxMs = 20000; sessionTiming.adoptAbortGraceMs = 5000;
-  ok('E2 after the cut-off the lock is held a little longer (a late answer lands first)', took >= 100 && !!leaseDuringGrace, `took=${took} lease=${leaseDuringGrace}`);
+  ok('E2 after the cut-off the lock is held a little longer (a late answer lands first)', took >= 100 && heldDuringGrace === true, `took=${took} held=${heldDuringGrace}`);
   const ad = calls.find((c) => c.path === '/api/auth/session/adopt');
   ok('E2 a hung adopt is aborted, token kept, not on the cookie', ad && ad.aborted === true && getSessionToken() === 'tok-E2' && !isCookieSession());
-  ok('E2 and the lease is released', localStorage.getItem('shutfey_cookie_move') === null);
+  ok('E2 and the lock is released', !webLocksFake.held());
 }
 {
-  // E3 (RV2): the lease is renewed while a long move runs, so another tab never starts its move
-  // (and its adopt) under it.
-  resetBoth(); sessionTiming.moveLockMaxMs = 60; sessionTiming.moveLeaseMs = 60; apiB.sessionTiming.moveLockMaxMs = 60; apiB.sessionTiming.moveLeaseMs = 60;
-  setSessionToken('tok-E3a');
-  let release; const gate = new Promise((r) => { release = r; });
-  const order = [];
-  stubFetch({
-    'GET /api/auth/me': (b, h) => (h.authorization ? meUser('u1', 'bearer') : meUser('u1', 'cookie')),
-    'POST /api/auth/session/adopt': (b, h) => { order.push(h.authorization); return h.authorization === 'Bearer tok-E3a' ? { status: 200, body: { ok: true }, gate } : { status: 200, body: { ok: true } }; },
-  });
-  const mvA = syncCookieSession();
-  await tick(150);
-  apiB.setSessionToken('tok-E3b');
-  const mvB = apiB.syncCookieSession();
-  await tick(150);
-  ok('E3 a long move keeps its lease: the other tab did not adopt under it', order.length === 1, JSON.stringify(order));
-  release(); await mvA; await mvB;
-  sessionTiming.moveLockMaxMs = 30000; sessionTiming.moveLeaseMs = 120000; apiB.sessionTiming.moveLockMaxMs = 30000; apiB.sessionTiming.moveLeaseMs = 120000;
-  await syncCookieSession();
-  ok('E3 afterwards the newest token is moved', getSessionToken() === null && isCookieSession() && order[order.length - 1] === 'Bearer tok-E3b', JSON.stringify(order));
-}
-
-for (const variant of ['taken-and-moved', 'taken', 'ran-out']) {
-  // E4 (RV3): tab A is suspended while its first me is out (its lease renewal stops); on resume it
-  // must not adopt if it lost the lease or its token, and must keep the token.
-  resetBoth();
-  setSessionToken('tok-E4a');
-  let release; const gate = new Promise((r) => { release = r; });
-  const calls = stubFetch({
-    'GET /api/auth/me': (b, h) => (h.authorization === 'Bearer tok-E4a' && !release.done ? { ...meUser('u1', 'bearer'), gate } : meUser('u1', h.authorization ? 'bearer' : 'cookie')),
-    'POST /api/auth/session/adopt': { status: 200, body: { ok: true } },
-  });
-  const mvA = syncCookieSession();
-  await tick(60);
-  const [ownerA] = String(localStorage.getItem('shutfey_cookie_move')).split('|');
-  if (variant === 'ran-out') {
-    localStorage.setItem('shutfey_cookie_move', `${ownerA}|${Date.now() - 1}`);
-  } else {
-    localStorage.setItem('shutfey_cookie_move', `tab-b|${Date.now() + 60000}`);
-    if (variant === 'taken-and-moved') { store.delete('shutfey_session_token'); localStorage.setItem('shutfey_cookie_session', 'id-of-tab-b'); }
-  }
-  release.done = true; release(); await mvA;
-  ok(`E4 ${variant}: no adopt after resuming`, !calls.some((c) => c.path === '/api/auth/session/adopt'), paths(calls));
-  if (variant === 'taken-and-moved') ok("E4 taken-and-moved: tab B's sign-in left as it is", localStorage.getItem('shutfey_cookie_session') === 'id-of-tab-b' && localStorage.getItem('shutfey_cookie_move').startsWith('tab-b|'));
-  else ok(`E4 ${variant}: token kept for a later move`, getSessionToken() === 'tok-E4a');
-  store.delete('shutfey_cookie_move');
-}
-{
-  // E6 (RV3): another tab stored a newer token while A's first me was out (A still holds the lease):
+  // E6 (RV3): another tab stored a newer token while A's first me was out (A holds the lock):
   // A must not adopt its older token.
   resetBoth();
   setSessionToken('tok-E6a');
@@ -527,21 +501,7 @@ for (const variant of ['taken-and-moved', 'taken', 'ran-out']) {
   store.set('shutfey_session_token', 'tok-E6b');
   release(); await mvA;
   ok('E6 the older token is not adopted after a newer one was stored', !calls.some((c) => c.path === '/api/auth/session/adopt' && c.h.authorization === 'Bearer tok-E6a'), paths(calls));
-  store.delete('shutfey_cookie_move');
 }
-{
-  // E5 (RV3): the lease is lost after the adopt but before the token is deleted: keep the token.
-  resetBoth();
-  setSessionToken('tok-E5');
-  stubFetch({
-    'GET /api/auth/me': (b, h) => meUser('u1', h.authorization ? 'bearer' : 'cookie'),
-    'POST /api/auth/session/adopt': () => { localStorage.setItem('shutfey_cookie_move', `tab-b|${Date.now() + 60000}`); return { status: 200, body: { ok: true } }; },
-  });
-  await syncCookieSession();
-  ok('E5 lease lost during the move: token not deleted', getSessionToken() === 'tok-E5' && !isCookieSession());
-  store.delete('shutfey_cookie_move');
-}
-
 // ------------------------------------------------------------------ K: tablet
 {
   reset(); setKioskDevice('dev1.sec1'); setSessionToken('ktok-1');
