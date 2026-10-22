@@ -31,7 +31,7 @@ import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './sr
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
-import { credentialMayLink, newInviteToken, phaseCEnabled, parseInviteInput, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail } from './src/server/invites.ts';
+import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
@@ -451,6 +451,8 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'POST', path: '/auth/verify-reset-code' },
   { method: 'POST', path: '/auth/reset-password' },
   { method: 'POST', path: '/auth/recover' }, // 10f: public, generic 401, per-IP + per-person limits
+  { method: 'GET', path: '/invites/preview' }, // 10i: bearer = the invite token (header), per-IP limit
+  { method: 'POST', path: '/invites/accept' }, // 10i: bearer = the invite token, per-IP + per-invite limits
   { method: 'POST', path: '/agencies/register' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
@@ -7911,61 +7913,87 @@ function inviteFreshGate(freshDoc: any, userId: string, agencyId: string): { con
   return null;
 }
 
+type InvitePre = { inviteId: string; token: { raw: string; hash: string }; createdAt: string; expiresAt: string };
+/** Generated once BEFORE a transaction, so a retried mutator stores the same id and hash. */
+function newInvitePre(): InvitePre {
+  const createdAt = new Date().toISOString();
+  return { inviteId: `inv_${crypto.randomUUID()}`, token: newInviteToken(), createdAt, expiresAt: new Date(Date.parse(createdAt) + INVITE_TTL_MS).toISOString() };
+}
+
+/**
+ * 10i (design v3 V1/W1): the ONE invite builder, used inside the transaction
+ * by POST /api/agency/invites, POST /api/users (flag ON) and POST /api/venues
+ * (flag ON owner invite). `docAfter` is the doc the transaction is about to
+ * commit (for a venue create: freshDoc + the server-built venue), so its
+ * venues are the only venue list that can validate venueIds. Fresh B1 gate,
+ * same-agency 409, per-agency replacement, pruning, hash-only record.
+ */
+function createMemberInviteInTx(
+  docAfter: any, callerId: string, agencyId: string, body: any, pre: InvitePre,
+  opts: { allowOwner?: boolean; ownTeamText?: string } = {}
+): { conflict: string; conflictStatus: number; conflictCode: string } | { doc: any; invite: any; replaced: string[] } {
+  const denied = inviteFreshGate(docAfter, callerId, agencyId);
+  if (denied) return denied;
+  const agencyVenueIds = (Array.isArray(docAfter.venues) ? docAfter.venues : [])
+    .filter((v: any) => v && (v.agencyId || 'agency-hkc') === agencyId).map((v: any) => v.id);
+  const parsed = parseMemberInvite(body, agencyVenueIds, { allowOwner: opts.allowOwner === true, normalizePhone: normalizePhoneNumber, phoneError: PHONE_NUMBER_ERROR });
+  if (parsed.ok === false) return { conflict: parsed.error, conflictStatus: 400, conflictCode: parsed.code };
+  const input = parsed.value;
+  const users: any[] = Array.isArray(docAfter.users) ? docAfter.users : [];
+  if (users.some((u: any) => u && normalizeInviteEmail(u.email) === input.email && (u.agencyId || 'agency-hkc') === agencyId)) {
+    return { conflict: opts.ownTeamText || 'This person is already on your team.', conflictStatus: 409, conflictCode: 'ALREADY_ON_TEAM' };
+  }
+  const existing: any[] = Array.isArray(docAfter.invites) ? docAfter.invites : [];
+  const mine = existing.find((i: any) => i && i.id === pre.inviteId);
+  if (mine) return { doc: docAfter, invite: mine, replaced: [] }; // idempotent retry
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const replaced: string[] = [];
+  const kept = existing.map((i: any) => {
+    if (i && i.kind !== 'setup' && i.agencyId === agencyId && i.email === input.email && isLiveInvite(i, nowMs)) {
+      replaced.push(String(i.id));
+      return { ...i, status: 'revoked', revokedAt: nowIso, revokedBy: callerId, revokeReason: 'replaced' };
+    }
+    return i;
+  });
+  const record = {
+    id: pre.inviteId, kind: 'member', agencyId, email: input.email, name: input.name,
+    ...(input.phoneNumber ? { phoneNumber: input.phoneNumber } : {}),
+    role: input.role, venueIds: input.venueIds, permissions: input.permissions,
+    invitedBy: callerId, createdAt: pre.createdAt, expiresAt: pre.expiresAt,
+    inviteTokenHash: pre.token.hash, status: 'pending', failedAttempts: 0,
+  };
+  return { doc: { ...docAfter, invites: [...pruneInvites(kept, nowMs), record] }, invite: record, replaced };
+}
+
+function inviteCreatedView(rec: any): { id: string; email: string; name: string; role: string; venueIds: string[]; expiresAt: string } {
+  return { id: String(rec.id), email: String(rec.email), name: inviteDisplayName(rec), role: String(rec.role), venueIds: Array.isArray(rec.venueIds) ? rec.venueIds.map(String) : [], expiresAt: String(rec.expiresAt) };
+}
+
+function auditInviteCreated(callerId: string, agencyId: string, rec: any, replaced: string[]): void {
+  for (const rid of replaced) console.log(`[audit] invite replaced: admin ${callerId} agency ${agencyId} invite ${rid}`);
+  console.log(`[audit] invite created: admin ${callerId} agency ${agencyId} invite ${rec.id}`);
+}
+
 app.post('/api/agency/invites', async (req, res) => {
   const gate = inviteGate(req, res);
   if (!gate) return;
   const { caller, agencyId } = gate;
-  const cachedVenueIds = venues.filter((v) => (v.agencyId || 'agency-hkc') === agencyId).map((v) => v.id);
-  const parsed = parseInviteInput(req.body || {}, cachedVenueIds);
-  if (parsed.ok === false) return res.status(400).json({ error: parsed.error, code: parsed.code });
-  const input = parsed.value;
-  // Generated once, before the transaction, so a retried mutator stores the same hash.
-  const token = newInviteToken();
-  const inviteId = `inv_${crypto.randomUUID()}`;
-  const createdAt = new Date().toISOString();
-  const expiresAt = new Date(Date.parse(createdAt) + INVITE_TTL_MS).toISOString();
+  const pre = newInvitePre();
   const committed = await commitOrRespond(
     req, res,
     (freshDoc) => {
-      const denied = inviteFreshGate(freshDoc, caller.id, agencyId);
-      if (denied) return denied;
-      const freshVenueIds = (Array.isArray(freshDoc.venues) ? freshDoc.venues : [])
-        .filter((v: any) => v && (v.agencyId || 'agency-hkc') === agencyId).map((v: any) => v.id);
-      const again = parseInviteInput({ email: input.email, role: input.role, venueIds: input.role === 'admin' ? undefined : input.venueIds }, freshVenueIds);
-      if (again.ok === false) return { conflict: again.error, conflictStatus: 400, conflictCode: again.code };
-      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
-      const onTeam = freshUsers.some((u: any) => u && normalizeInviteEmail(u.email) === input.email && (u.agencyId || 'agency-hkc') === agencyId);
-      if (onTeam) return { conflict: 'This person is already on your team.', conflictStatus: 409, conflictCode: 'ALREADY_ON_TEAM' };
-      const nowMs = Date.now();
-      const nowIso = new Date(nowMs).toISOString();
-      const existing: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
-      // Idempotent retry of this same request.
-      if (existing.some((i: any) => i && i.id === inviteId)) return { doc: freshDoc, result: { replaced: [] as string[] } };
-      const replaced: string[] = [];
-      const kept = existing.map((i: any) => {
-        if (i && i.agencyId === agencyId && i.email === input.email && isLiveInvite(i, nowMs)) {
-          replaced.push(String(i.id));
-          return { ...i, status: 'revoked', revokedAt: nowIso, revokedBy: caller.id, revokeReason: 'replaced' };
-        }
-        return i;
-      });
-      const record = {
-        id: inviteId, agencyId, email: input.email, role: input.role, venueIds: again.value.venueIds,
-        invitedBy: caller.id, createdAt, expiresAt, inviteTokenHash: token.hash, status: 'pending',
-      };
-      return { doc: { ...freshDoc, invites: [...pruneInvites(kept, nowMs), record] }, result: { replaced } };
+      const built = createMemberInviteInTx(freshDoc, caller.id, agencyId, req.body || {}, pre);
+      if ('conflict' in built) return built;
+      return { doc: built.doc, result: { invite: built.invite, replaced: built.replaced } };
     },
     { label: 'invite-create', requireVersion: true }
   );
   if (!committed) return;
-  const replaced: string[] = (committed.result as any)?.replaced || [];
-  for (const rid of replaced) console.log(`[audit] invite replaced: admin ${caller.id} agency ${agencyId} invite ${rid}`);
-  console.log(`[audit] invite created: admin ${caller.id} agency ${agencyId} invite ${inviteId}`);
+  const { invite: rec, replaced } = committed.result as any;
+  auditInviteCreated(caller.id, agencyId, rec, replaced || []);
   res.setHeader('Cache-Control', 'no-store');
-  res.status(201).json({
-    invite: { id: inviteId, email: input.email, role: input.role, venueIds: input.role === 'admin' ? [] : input.venueIds, expiresAt },
-    link: `/invite#t=${token.raw}`,
-  });
+  res.status(201).json({ invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}` });
 });
 
 app.get('/api/agency/invites', (req, res) => {
@@ -8011,6 +8039,183 @@ app.delete('/api/agency/invites/:id', async (req, res) => {
   if (!committed) return;
   if ((committed.result as any)?.changed) console.log(`[audit] invite revoked: admin ${caller.id} agency ${agencyId} invite ${id}`);
   res.json({ success: true });
+});
+
+
+// ---------------------------------------------------------------------------
+// Item 10i: public invite preview + accept (design v3, [10I-DS3]; v3.1: NO
+// recovery codes). The bearer is the invite token; the page shows two paths
+// (new password / existing sign-in) and the server never tells the link
+// holder whether the email already has a Shutfey credential.
+// ---------------------------------------------------------------------------
+const invitePreviewLimiter = createWindowLimiter({ max: 60, windowMs: 60 * 60 * 1000, maxKeys: 10000 });
+const inviteAcceptLimiter = createWindowLimiter({ max: 20, windowMs: 15 * 60 * 1000, maxKeys: 10000 });
+const INVITE_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+
+function inviteRateLimited(limiter: ReturnType<typeof createWindowLimiter>, key: string, req: any, res: any): boolean {
+  const hit = limiter.hit(`${key}|${getClientIp(req)}`, Date.now());
+  if (hit.allowed) return false;
+  res.setHeader('Retry-After', String(hit.retryAfterSec));
+  res.status(429).json({ error: `Too many requests. Please try again in ${Math.ceil(hit.retryAfterSec / 60)} minute(s).`, code: 'RATE_LIMITED' });
+  return true;
+}
+
+/** The record whose stored hash matches sha256(raw) (constant-time confirm), or null. */
+function inviteForToken(list: readonly any[], raw: string): any | null {
+  const h = hashInviteToken(raw);
+  const cand = (Array.isArray(list) ? list : []).find((i: any) => i && i.inviteTokenHash === h);
+  return cand && inviteHashMatches(cand.inviteTokenHash, raw) ? cand : null;
+}
+
+/** Live 'member' invite of a Phase C agency (the given doc's lists), else null. */
+function acceptableInvite(list: readonly any[], agencyList: readonly any[], raw: string, nowMs: number): any | null {
+  const inv = inviteForToken(list, raw);
+  if (!inv || inv.kind === 'setup' || !isLiveInvite(inv, nowMs)) return null;
+  const agency = (Array.isArray(agencyList) ? agencyList : []).find((a: any) => a && a.id === inv.agencyId);
+  return phaseCEnabled(agency) ? inv : null;
+}
+
+app.get('/api/invites/preview', (req, res) => {
+  if (inviteRateLimited(invitePreviewLimiter, 'invite-preview', req, res)) return;
+  const raw = String(req.get('x-invite-token') || '');
+  res.setHeader('Cache-Control', 'no-store');
+  const inv = INVITE_TOKEN_RE.test(raw) ? acceptableInvite(invites, agencies, raw, Date.now()) : null;
+  if (!inv) return res.status(404).json({ error: INVITE_LINK_INVALID_TEXT });
+  const agency = agencies.find((a) => a && a.id === inv.agencyId);
+  res.json({ kind: 'member', agencyName: String(agency?.name || ''), role: String(inv.role), name: inviteDisplayName(inv) });
+});
+
+app.post('/api/invites/accept', async (req, res) => {
+  if (inviteRateLimited(inviteAcceptLimiter, 'invite-accept', req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  const { token, mode, password } = req.body || {};
+  const raw = typeof token === 'string' ? token : '';
+  const invalidLink = () => res.status(404).json({ error: INVITE_LINK_INVALID_TEXT });
+  if (!INVITE_TOKEN_RE.test(raw)) return invalidLink();
+  if (mode !== 'new' && mode !== 'existing') return res.status(400).json({ error: 'Choose how to continue.', code: 'INVITE_MODE_INVALID' });
+  if (typeof password !== 'string' || !password) return res.status(400).json({ error: 'Please enter a password.', code: 'PASSWORD_REQUIRED' });
+  if (mode === 'new' && password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.', code: 'PASSWORD_TOO_SHORT' });
+  const cachedInv = acceptableInvite(invites, agencies, raw, Date.now());
+  if (!cachedInv) return invalidLink();
+  const inviteId = String(cachedInv.id);
+  const email = String(cachedInv.email);
+
+  // Work that must not run inside the transaction (bcrypt).
+  let newHash: string | null = null;
+  let verifiedCredId: string | null = null;
+  let verifiedCredHash: string | null = null;
+  if (mode === 'new') {
+    newHash = await hashPassword(password);
+  } else {
+    const cred: any = credentialRowForEmailIn(users, agencies, email);
+    if (cred && typeof cred.password === 'string' && cred.password) {
+      const r = await checkPassword(password, cred.password);
+      if (r !== 'invalid') { verifiedCredId = String(cred.id); verifiedCredHash = String(cred.password); }
+    }
+  }
+  const newRowId = `usr_${crypto.randomUUID()}`;
+  const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f97316'];
+  const avatarColor = colors[Math.floor(Math.random() * colors.length)];
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const freshInvites: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      // a) fresh: the same live invite, its agency exists with the flag ON.
+      const inv = acceptableInvite(freshInvites, freshAgencies, raw, nowMs);
+      if (!inv || inv.id !== inviteId) return { conflict: INVITE_LINK_INVALID_TEXT, conflictStatus: 404, conflictCode: 'INVITE_INVALID' };
+      // f) generic failure: ONLY the counter (or the 5th-failure revocation) is written.
+      const fail = () => {
+        const n = (Number.isInteger(inv.failedAttempts) ? inv.failedAttempts : 0) + 1;
+        const upd = n >= INVITE_MAX_FAILED_ATTEMPTS
+          ? { ...inv, failedAttempts: n, status: 'revoked', revokedAt: nowIso, revokedBy: 'system', revokeReason: 'too-many-attempts' }
+          : { ...inv, failedAttempts: n };
+        return { doc: { ...freshDoc, invites: freshInvites.map((i: any) => (i && i.id === inv.id ? upd : i)) }, result: { failed: true, revoked: n >= INVITE_MAX_FAILED_ATTEMPTS } };
+      };
+      const accepted = (rowId: string) => freshInvites.map((i: any) => (i && i.id === inv.id ? { ...i, status: 'accepted', acceptedAt: nowIso, acceptedRowId: rowId } : i));
+      const role = String(inv.role);
+      const venueIds: string[] = role === 'admin' ? [] : (Array.isArray(inv.venueIds) ? inv.venueIds.map(String) : []);
+      const profile: any = {
+        agencyId: inv.agencyId, name: inviteDisplayName(inv), role,
+        ...(venueIds[0] ? { venueId: venueIds[0] } : {}),
+        permissions: inv.permissions && typeof inv.permissions === 'object' ? defaultPermissionsFor(role, inv.permissions) : defaultPermissionsFor(role),
+        avatarColor,
+        ...(typeof inv.phoneNumber === 'string' && inv.phoneNumber ? { phoneNumber: inv.phoneNumber } : {}),
+      };
+      const venueAccessSetById = venueIds.length > 1 ? { [newRowId]: venueIds } : undefined;
+
+      if (mode === 'new') {
+        // b) nobody may hold the email anywhere; otherwise the generic failure.
+        if (freshUsers.some((u: any) => u && normalizeInviteEmail(u.email) === inv.email)) return fail();
+        const row = { id: newRowId, email: inv.email, ...profile, password: newHash };
+        return {
+          doc: { ...freshDoc, users: [...freshUsers, row], invites: accepted(newRowId) },
+          result: { kind: 'new', rowId: newRowId },
+          credentialOriginSetById: { [newRowId]: 'invite-new' as const },
+          ...(venueAccessSetById ? { venueAccessSetById } : {}),
+        };
+      }
+
+      // c) existing: the FRESH credential row must be the one whose password
+      // verified, with the same hash (V6); else the generic failure.
+      const cred: any = credentialRowForEmailIn(freshUsers, freshAgencies, inv.email);
+      if (!verifiedCredId || !cred || cred.id !== verifiedCredId || cred.password !== verifiedCredHash) return fail();
+      const pid = typeof cred.personId === 'string' ? cred.personId : '';
+      if (!credentialMayLink(cred.credentialOrigin) || !pid) {
+        return { conflict: INVITE_NOT_LINKABLE_TEXT, conflictStatus: 403, conflictCode: 'INVITE_ACCOUNT_NOT_LINKABLE' };
+      }
+      const personRows = freshUsers.filter((u: any) => u && u.personId === pid);
+      // d) P already has a membership in that agency: accepted, nothing created.
+      const already = personRows.find((u: any) => (u.agencyId || 'agency-hkc') === inv.agencyId);
+      if (already) {
+        return { doc: { ...freshDoc, invites: accepted(String(already.id)) }, result: { kind: 'already', rowId: String(already.id), credId: String(cred.id) } };
+      }
+      // e) a credential-free membership row through the ONE newMembership path.
+      const firstMulti = personRows.length === 1;
+      const row = { id: newRowId, email: cred.email, ...profile };
+      const bumpIds = firstMulti ? personRows.map((u: any) => String(u.id)) : [];
+      const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      return {
+        doc: {
+          ...freshDoc,
+          users: [...freshUsers, row],
+          invites: accepted(newRowId),
+          ...(firstMulti ? { passwordResets: freshResets.filter((r: any) => !r || normalizeInviteEmail(r.email) !== inv.email) } : {}),
+        },
+        result: { kind: 'joined', rowId: newRowId, credId: String(cred.id), bumpIds },
+        newMembership: { [newRowId]: pid },
+        ...(firstMulti ? { firstMultiOwnerIds: [String(cred.id)], tokenEpochBumpIds: bumpIds } : {}),
+        ...(venueAccessSetById ? { venueAccessSetById } : {}),
+      };
+    },
+    { label: 'invite-accept' }
+  );
+  if (!committed) return;
+  const r: any = committed.result;
+  if (r?.failed) {
+    if (r.revoked) console.log(`[audit] invite revoked: too many failed accepts, invite ${inviteId}`);
+    return res.status(401).json({ error: INVITE_ACCEPT_FAILED_TEXT, code: 'INVITE_ACCEPT_FAILED' });
+  }
+  console.log(`[audit] invite accepted: invite ${inviteId} agency ${cachedInv.agencyId} row ${r.rowId} (${r.kind})`);
+  // E1 at the first multi join: every old session of the person ends now.
+  for (const id of (r.bumpIds || []) as string[]) revokeUserPhoneSockets(id);
+  // Response = the 10g login response (choose token when the person is multi).
+  const row: any = users.find((u) => u.id === r.rowId);
+  if (!row) return res.status(500).json({ error: 'Accepted, but the account could not be loaded. Please sign in.' });
+  const credRow: any = r.credId ? users.find((u) => u.id === r.credId) : row;
+  if (credRow && isMultiPersonRow(users, credRow)) {
+    return res.json({
+      success: true,
+      chooseMembership: true,
+      memberships: membershipsOfPerson(String(credRow.personId)).map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role })),
+      token: signChooseToken(credRow),
+    });
+  }
+  res.json({ success: true, user: getSelfUser(row), token: signSessionToken(row) });
 });
 
 app.get('/api/agency/logo', async (req, res) => {
@@ -9109,6 +9314,12 @@ app.post('/api/venues', async (req, res) => {
   // mutator silently rewrote that user to { role: 'owner', agencyId: caller's }.
   const ownerEmailRefused = (u: any) =>
     !!u && (u.role !== 'owner' || (normalizeStoredUser(u).agencyId || 'agency-hkc') !== callerAgencyId);
+  // 10i (design v3 V2/W1): with Phase C ON for the caller's agency an owner
+  // email that is not a row of the caller's agency becomes an owner INVITE
+  // (no row, no admin-set password), so an email used in another agency gets
+  // the same answer as an unknown one. Read from the cache for the pre-check
+  // and re-read from FRESH data inside the transaction.
+  let ownerInviteMode = phaseCEnabled(callerAgency);
   // Item 10c (A5): the owner email is resolved INSIDE the caller's agency.
   // A row with that email in another agency (another membership of the same
   // person, or anyone else) is never reused and never moved; it only makes
@@ -9121,7 +9332,7 @@ app.post('/api/venues', async (req, res) => {
       if ((normalizeStoredUser(u).agencyId || 'agency-hkc') !== callerAgencyId) { otherAgency = true; continue; }
       return { idx: i, refused: ownerEmailRefused(u) };
     }
-    return { idx: -1, refused: otherAgency };
+    return { idx: -1, refused: otherAgency && !ownerInviteMode };
   };
   if (cleanOwnerEmail) {
     if (resolveVenueOwnerEmail(users).refused) {
@@ -9132,9 +9343,13 @@ app.post('/api/venues', async (req, res) => {
   const createdAt = new Date().toISOString();
   // Hash the owner password once, outside the transaction (bcrypt is CPU-heavy;
   // the hash is deterministic input to the mutator).
-  const ownerPasswordHash = ownerPassword?.trim()
-    ? bcrypt.hashSync(ownerPassword.trim(), 10)
-    : bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10);
+  // 10i ([10I-RV1] B1): with Phase C ON (cached) the owner gets an invite, so
+  // ownerPassword is never read or hashed and no fallback password is made.
+  const ownerPasswordHash: string | null = ownerInviteMode
+    ? null
+    : ownerPassword?.trim()
+      ? bcrypt.hashSync(ownerPassword.trim(), 10)
+      : bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10);
 
   const newVenue: Venue = {
     id: newVenueId,
@@ -9157,6 +9372,7 @@ app.post('/api/venues', async (req, res) => {
   // Generate starter tasks (pure function of inputs — safe to pre-compute).
   const starterTasks = generateTemplateTasks(newVenueId, templateType || 'restaurant', callerAgencyId);
 
+  const ownerInvitePre = newInvitePre(); // 10i: used only when an owner invite is written
   const committed = await commitOrRespond(
     req, res,
     (freshDoc) => {
@@ -9167,12 +9383,15 @@ app.post('/api/venues', async (req, res) => {
       // Idempotency: venue already created by a previous attempt.
       const existingVenue = freshVenues.find((v) => v.id === newVenueId);
       if (existingVenue) {
-        return { doc: freshDoc, result: { venue: existingVenue, tasks: [], owner: null } };
+        const priorInvite = (Array.isArray(freshDoc.invites) ? freshDoc.invites : []).find((i: any) => i && i.id === ownerInvitePre.inviteId);
+        return { doc: freshDoc, result: { venue: existingVenue, tasks: [], owner: null, ...(priorInvite ? { ownerInvite: priorInvite, ownerInviteReplaced: [] } : {}) } };
       }
 
       let newUsers = [...freshUsers];
       let createdOwner: any = null;
       let newOwnerId: string | null = null; // 10b: a NEW owner row (admin chose its password)
+      let inviteOwner = false; // 10i: an owner invite is written instead of a row
+      ownerInviteMode = phaseCEnabled((Array.isArray(freshDoc.agencies) ? freshDoc.agencies : []).find((a: any) => a && a.id === callerAgencyId));
       if (cleanOwnerEmail) {
         // Item 8v + 10c (A5): the same rule on FRESH data (the user may have
         // changed role/agency since the cached pre-check); only a row of the
@@ -9182,7 +9401,9 @@ app.post('/api/venues', async (req, res) => {
           return { conflict: VENUE_OWNER_EMAIL_REFUSAL, conflictStatus: 409, conflictCode: 'OWNER_EMAIL_UNAVAILABLE' };
         }
         const existingOwnerIdx = freshOwner.idx;
-        if (existingOwnerIdx !== -1) {
+        if (existingOwnerIdx === -1 && ownerInviteMode) {
+          inviteOwner = true;
+        } else if (existingOwnerIdx !== -1) {
           newUsers[existingOwnerIdx] = {
             ...newUsers[existingOwnerIdx],
             venueId: newVenueId,
@@ -9191,6 +9412,10 @@ app.post('/api/venues', async (req, res) => {
           };
           createdOwner = newUsers[existingOwnerIdx];
         } else {
+          // The cache said Phase C ON (no hash made) but the fresh flag is OFF:
+          // refuse rather than create an owner without a password; a retry
+          // takes the flag-OFF path.
+          if (!ownerPasswordHash) return { conflict: 'Something changed while saving. Please try again.', conflictStatus: 409, conflictCode: 'PHASE_C_CHANGED' };
           const ownerUser: UserProfile = {
             id: ownerUserId,
             agencyId: callerAgencyId,
@@ -9215,7 +9440,7 @@ app.post('/api/venues', async (req, res) => {
 
       // Atomic: venue + owner + starter tasks all commit together.
       const tasksToAdd = starterTasks.filter((t) => !freshTasks.some((ft) => ft.id === t.id));
-      return {
+      const proposed = {
         doc: {
           ...freshDoc,
           venues: [...freshVenues, venueToAdd],
@@ -9239,11 +9464,23 @@ app.post('/api/venues', async (req, res) => {
         result: { venue: venueToAdd, tasks: tasksToAdd, owner: createdOwner },
         ...(newOwnerId ? { credentialOriginSetById: { [newOwnerId]: 'admin' as const } } : {}),
       };
+      if (!inviteOwner) return proposed;
+      // 10i (W1): the owner invite is built ON the proposed doc (which already
+      // holds the server-built venue), so the new venue is the one venue list
+      // that validates it; any refusal discards venue and invite together.
+      // Role 'owner' is authorised here by the server (allowOwner), never by a body.
+      const built = createMemberInviteInTx(proposed.doc, caller.id, callerAgencyId, {
+        email: cleanOwnerEmail, role: 'owner', venueIds: [newVenueId],
+        name: (ownerName?.trim() || `${name.trim()} Owner`).slice(0, 100),
+      }, ownerInvitePre, { allowOwner: true });
+      if ('conflict' in built) return built;
+      return { doc: built.doc, result: { ...proposed.result, ownerInvite: built.invite, ownerInviteReplaced: built.replaced } };
     },
     { label: 'create-venue' }
   );
   if (!committed) return;
-  const { venue, tasks: createdTasks, owner } = committed.result as any;
+  const { venue, tasks: createdTasks, owner, ownerInvite, ownerInviteReplaced } = committed.result as any;
+  if (ownerInvite) auditInviteCreated(caller.id, callerAgencyId, ownerInvite, ownerInviteReplaced || []);
 
   broadcast('VENUE_CREATED', {
     venue,
@@ -9252,11 +9489,13 @@ app.post('/api/venues', async (req, res) => {
     owner: owner ? getSafeUser(owner) : null,
   }, undefined, callerAgencyId);
 
+  if (ownerInvite) res.setHeader('Cache-Control', 'no-store');
   res.status(201).json({
     success: true,
     venue,
     tasks: createdTasks,
     owner: owner ? getSafeUser(owner) : null,
+    ...(ownerInvite ? { ownerInvite: inviteCreatedView(ownerInvite), ownerInviteLink: `/invite#t=${ownerInvitePre.token.raw}` } : {}),
   });
 });
 
@@ -11384,6 +11623,36 @@ app.post('/api/users', async (req, res) => {
   // New users are always created in the caller's own agency.
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
+  // 10i (design v3 B, [10I-DS3]): when the caller's agency has Phase C ON,
+  // "Add team member" creates a pending INVITE (no row, no password; any
+  // `password` in the body is ignored). Every email that is not already on
+  // the caller's own team gets the same 201. Flag OFF: unchanged below.
+  if (phaseCEnabled(agencies.find((a) => a && a.id === callerAgencyId))) {
+    if ((req as any).kiosk === true) return res.status(403).json({ error: 'Only administrators can perform this action.' });
+    const body = stripServerOnlyUserFields(req.body || {});
+    const rawRole = body.role;
+    const role = rawRole === 'admin' || rawRole === 'coordinator' || rawRole === 'owner' ? rawRole : 'mashgiach';
+    const pre = newInvitePre();
+    const committed = await commitOrRespond(
+      req, res,
+      (freshDoc) => {
+        const agencyVenues = (Array.isArray(freshDoc.venues) ? freshDoc.venues : []).filter((v: any) => v && (v.agencyId || 'agency-hkc') === callerAgencyId);
+        const venueIds = role === 'admin' ? [] : [typeof body.venueId === 'string' && body.venueId ? body.venueId : (agencyVenues[0]?.id || '')];
+        const built = createMemberInviteInTx(freshDoc, caller.id, callerAgencyId,
+          { email: body.email, name: body.name, phoneNumber: body.phoneNumber, permissions: body.permissions, role, venueIds },
+          pre, { ownTeamText: 'A team member with this email already exists' });
+        if ('conflict' in built) return built;
+        return { doc: built.doc, result: { invite: built.invite, replaced: built.replaced } };
+      },
+      { label: 'create-user-invite' }
+    );
+    if (!committed) return;
+    const { invite: rec, replaced } = committed.result as any;
+    auditInviteCreated(caller.id, callerAgencyId, rec, replaced || []);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(201).json({ pending: true, invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}` });
+  }
+
   const { email, name, role, password, venueId, permissions, phoneNumber } = stripServerOnlyUserFields(req.body || {}); // 8b: no server-only identity field from a body
   if (!email || !name) {
     return res.status(400).json({ error: 'Email and name are required' });
@@ -11422,16 +11691,8 @@ app.post('/api/users', async (req, res) => {
     targetVenueId = chosen.id;
   }
 
-  const defaultPermissions: UserPermissions = {
-    canFillTasks:
-      permissions?.canFillTasks !== undefined
-        ? Boolean(permissions.canFillTasks)
-        : validRole === 'admin' || validRole === 'coordinator' || validRole === 'mashgiach',
-    canAssignTasks:
-      permissions?.canAssignTasks !== undefined
-        ? Boolean(permissions.canAssignTasks)
-        : validRole === 'admin' || validRole === 'coordinator',
-  };
+  // 10i (W3): the same role defaults as an invite's profile (one helper).
+  const defaultPermissions: UserPermissions = defaultPermissionsFor(validRole, permissions);
 
   const newUser: UserProfile = {
     id: newUserId,

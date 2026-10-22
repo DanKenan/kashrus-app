@@ -202,19 +202,26 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
   // 10d (B3): the ONLY producer of an outcome newMembership before 10i is the
   // isTestMode-only builder hook; the allowance is derived from accepted joins.
+  // 10i: exactly two producers — the isTestMode-only builder hook and the
+  // public accept handler (design v3 C2(e)).
   const producers = [...src.matchAll(/newMembership:\s*\{/g)].map((m) => m.index);
   const hookAt = src.indexOf("app.post('/api/__test__/identity-build-person'");
   const hookEnd = hookAt >= 0 ? src.indexOf('\n  app.', hookAt + 10) : -1;
-  check(`newMembership is produced exactly once in server.ts (found ${producers.length})`, producers.length === 1);
-  check('…and only inside the test-mode identity-build-person hook', producers.length === 1 && hookAt >= 0 && producers[0] > hookAt && producers[0] < hookEnd);
+  const acceptAt = src.indexOf("app.post('/api/invites/accept'");
+  const acceptEnd = acceptAt >= 0 ? src.indexOf('\napp.', acceptAt + 10) : -1;
+  check(`newMembership is produced exactly twice in server.ts (found ${producers.length})`, producers.length === 2);
+  check('…once inside the test-mode identity-build-person hook', producers.some((p) => hookAt >= 0 && p > hookAt && p < hookEnd));
+  check('…and once inside the 10i accept handler', producers.some((p) => acceptAt >= 0 && p > acceptAt && p < acceptEnd));
+  const owners = [...src.matchAll(/firstMultiOwnerIds:\s*\[/g)].map((m) => m.index);
+  check(`firstMultiOwnerIds is produced only by the accept handler (found ${owners.length})`, owners.length === 1 && owners[0] > acceptAt && owners[0] < acceptEnd);
   check('the growth allowance is derived from the joins the enforcement accepted', /allowGrowthRowIds: acceptedJoins/.test(src) && !/allowGrowthRowIds:\s*(req|body|new Set\(\s*req)/.test(src));
   const setters = [...src.matchAll(/credentialOriginSetById:\s*\{\s*\[([A-Za-z.]+)\]:\s*'([a-z-]+)'/g)].map((m) => m[2]).sort();
-  check(`origin writers in server.ts are register, add-member, owner creation, agency reset (found ${setters.join(',')})`,
-    setters.join(',') === 'admin,admin,agency-reset,self-registered');
+  check(`origin writers in server.ts are register, add-member, owner creation, agency reset, 10i accept (found ${setters.join(',')})`,
+    setters.join(',') === 'admin,admin,agency-reset,invite-new,self-registered');
   check("'self-registered' appears in exactly one writer", (src.match(/\]:\s*'self-registered'/g) || []).length === 1);
-  check("'invite-new' has no writer before 10i", !/\]:\s*'invite-new'/.test(src));
+  check("'invite-new' has exactly one writer (10i accept, new person)", (src.match(/\]:\s*'invite-new'/g) || []).length === 1);
   const keepers = (src.match(/passwordKeepsOriginIds:/g) || []).length;
-  check(`passwordKeepsOriginIds used only by change-password and the login hash upgrade (found ${keepers})`, keepers === 2);
+  check(`passwordKeepsOriginIds used only by change-password, the login hash upgrade and 10f recovery (found ${keepers})`, keepers === 3);
   check('commitState runs the checker in applyIdentityInvariant', /checkMembershipInvariants\(beforeUsers, users, agencies, acceptedJoins\.size/.test(src));
   check('both commit paths call applyIdentityInvariant', (src.match(/outcome\.doc = applyIdentityInvariant\(/g) || []).length === 2);
 }
@@ -244,6 +251,14 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   check('10c A4: delete evaluates legacy ambiguity on FRESH users', /legacyPushSubIsUnambiguous\(targetEmail, freshUsers\)/.test(src));
   check('10c A5: venue-owner email resolved by one agency-scoped resolver, cached and fresh', (src.match(/resolveVenueOwnerEmail\((users|newUsers)\)/g) || []).length === 2);
   check('10c A5: no global first-match owner lookup remains', !/users\.find\(\(u\) => typeof u\.email === 'string' && u\.email\.trim\(\)\.toLowerCase\(\) === cleanOwnerEmail\)/.test(src) && !/newUsers\.findIndex\(\(u\) => typeof u\.email === 'string' && u\.email\.trim\(\)\.toLowerCase\(\) === cleanOwnerEmail\)/.test(src));
+}
+
+// ---- 10i ([10I-RV1] B1): flag-ON venue creation never hashes ownerPassword
+{
+  const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
+  check('10i venue owner: the hash is computed only off the invite path', /const ownerPasswordHash: string \| null = ownerInviteMode\s*\?\s*null\s*:/.test(src));
+  check('10i venue owner: ownerPasswordHash is the only owner-password hash site', (src.match(/bcrypt\.hashSync\(ownerPassword/g) || []).length === 1);
+  check('10i venue owner: a missing hash refuses instead of creating a passwordless owner', /if \(!ownerPasswordHash\) return \{ conflict:/.test(src));
 }
 
 console.log(`${passed} passed, ${failures} failed`);

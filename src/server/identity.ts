@@ -157,6 +157,15 @@ export interface IdentityEnforceOptions {
    */
   recoveryWriteById?: ReadonlyMap<string, RecoveryWrite>;
   /**
+   * 10i: the ONLY writer that marks a row credentialOwner when its person
+   * first becomes multi (the accept transaction). Honoured only on an
+   * EXISTING row that, in the BEFORE users, is a single-row person (no other
+   * row carries its personId), holds a bcrypt password, is not already an
+   * owner, AND whose personId is the target of a newMembership join in the
+   * same commit. Anything else is reverted (preserved field) and reported.
+   */
+  firstMultiOwnerIds?: ReadonlySet<string>;
+  /**
    * Called (row id + field name only, never values) when a mutator's output
    * tried to set, change or remove a server-only identity field. The change
    * is reverted, and the caller logs it, so it is never silent.
@@ -189,9 +198,11 @@ export interface IdentityOutcomeFields {
   ownerTransfer?: OwnerTransfer;
   /** 10f: row id → recovery-field write (see recoveryWriteById). */
   recoveryWriteById?: Record<string, RecoveryWrite>;
+  /** 10i: rows that become their person's credentialOwner at the first multi join (see firstMultiOwnerIds). */
+  firstMultiOwnerIds?: string[];
 }
 
-export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById'> {
+export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById' | 'firstMultiOwnerIds'> {
   const o: any = outcome || {};
   const asMap = (r: any) => (r && typeof r === 'object' && !Array.isArray(r) && Object.keys(r).length ? new Map<string, string>(Object.entries(r).filter(([, v]) => typeof v === 'string') as [string, string][]) : undefined);
   return {
@@ -202,6 +213,7 @@ export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null
       o.recoveryWriteById && typeof o.recoveryWriteById === 'object' && !Array.isArray(o.recoveryWriteById) && Object.keys(o.recoveryWriteById).length
         ? new Map<string, RecoveryWrite>(Object.entries(o.recoveryWriteById).filter(([, v]) => v && typeof v === 'object') as [string, RecoveryWrite][])
         : undefined,
+    firstMultiOwnerIds: Array.isArray(o.firstMultiOwnerIds) && o.firstMultiOwnerIds.length ? new Set<string>(o.firstMultiOwnerIds.filter((x: any) => typeof x === 'string')) : undefined,
   };
 }
 
@@ -276,6 +288,14 @@ export function enforceIdentityFields(
       if (opts.onViolation && opts.recoveryWriteById?.has(row.id) && (transferSrc || !isCredentialRowIn(beforeUsers, prev)))
         opts.onViolation(row.id, 'recoveryWrite');
       if (opts.newMembership?.has(row.id) && opts.onViolation) opts.onViolation(row.id, 'newMembership');
+      // 10i: the first-multi owner marker (see firstMultiOwnerIds).
+      if (opts.firstMultiOwnerIds?.has(row.id)) {
+        const pid = typeof prev.personId === 'string' ? prev.personId : '';
+        const alone = pid !== '' && !(Array.isArray(beforeUsers) ? beforeUsers : []).some((b: any) => b && b.id !== row.id && b.personId === pid);
+        const joined = pid !== '' && !!opts.newMembership && Array.from(opts.newMembership.values()).includes(pid);
+        if (alone && joined && prev.credentialOwner !== true && isBcrypt(prev.password) && isBcrypt(out.password) && !transferSrc) out.credentialOwner = true;
+        else if (opts.onViolation) opts.onViolation(row.id, 'firstMultiOwner');
+      }
     } else {
       // 10b: a new row is its own person unless newMembership names an
       // existing person with the same email (10i accept only).

@@ -131,6 +131,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-65-kiosk-agency-updated.mjs')).default,
     (await import('./test-66-venue-cert-edit.mjs')).default,
     (await import('./test-67-invites.mjs')).default,
+    (await import('./test-68-invite-accept.mjs')).default,
   ];
 
   const results = [];
