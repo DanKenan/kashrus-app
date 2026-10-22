@@ -127,6 +127,30 @@ export default {
       const newRow = enforceIdentityFields([], [{ id: 'z', email: 'z@x.co', credentialPending: 'invite' }], [], {});
       assert(newRow[0].credentialPending === undefined, '10k a new row cannot carry the marker');
     }
+    // 10j ([10J-DS2] B1, N4): source contracts.
+    {
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+      const server = fs.readFileSync(path.join(root, 'server.ts'), 'utf8');
+      // N4: exactly two writers of phaseC — the test hook and the 10j route.
+      const writers = server.split('\n').filter((l) => /phaseC:\s*\{/.test(l));
+      assert(writers.length === 2, `10j phaseC writers: ${writers.length} ${J(writers.map((l) => l.trim().slice(0, 80)))}`);
+      assert(writers.some((l) => l.includes("setBy: 'test-hook'")) && writers.some((l) => l.includes('setBy: caller.id')), '10j the two writers are the test hook and the enable route');
+      assert(server.includes("app.post('/api/agency/invites/enable'") && !/app\.(post|put|delete)\('\/api\/agency\/invites\/disable'/.test(server), '10j one-way: an enable route and no disable route');
+      // B1: the route ships only with the invite-aware client in the same tree.
+      const appTsx = fs.readFileSync(path.join(root, 'src', 'App.tsx'), 'utf8');
+      assert(/data\.pending === true/.test(appTsx) && appTsx.includes('fullInviteLink('), '10j B1: App.tsx handles the pending-invite answer');
+      assert(fs.existsSync(path.join(root, 'src', 'components', 'InviteLinkCard.tsx')), '10j B1: InviteLinkCard exists');
+      for (const f of ['TeamModal.tsx', 'CreateVenueModal.tsx']) {
+        const src = fs.readFileSync(path.join(root, 'src', 'components', f), 'utf8');
+        assert(src.includes("import { InviteLinkCard } from './InviteLinkCard'"), `10j B1: ${f} shows the invite link`);
+      }
+      // N2/N5: invitesEnabled is never part of a reusable (broadcast) projection.
+      const af = fs.readFileSync(path.join(root, 'src', 'server', 'agency-fields.ts'), 'utf8');
+      assert(!af.includes('invitesEnabled'), '10j invitesEnabled is not in agency-fields projections');
+      assert(!J(agencyAdminView({ id: 'a', name: 'A', phaseC: { enabled: true, setAt: 'x', setBy: 'y' } })).includes('phaseC'), '10j agencyAdminView never carries phaseC');
+    }
     const scrubbed = J(scrubSecrets({ invites: [live] }));
     assert(!scrubbed.includes('h'.repeat(64)) && scrubbed.includes('[REDACTED]'), `backup scrubs inviteTokenHash ${scrubbed.slice(0, 200)}`);
   },

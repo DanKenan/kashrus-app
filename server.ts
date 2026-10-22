@@ -501,6 +501,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'GET', path: '/__test__/alert-routing' },
         { method: 'GET', path: '/__test__/route-table' },
         { method: 'POST', path: '/__test__/phase-c' },
+        { method: 'POST', path: '/__test__/invites-client-ready' },
       ]
     : []),
 ];
@@ -3436,7 +3437,7 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
  */
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
-import { enforceIdentityFields, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, applyOwnerTransfer, m4Successor, identityProjection, type IdentityOutcomeFields } from './src/server/identity.js';
+import { enforceIdentityFields, identityGroups, groupIssues, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, applyOwnerTransfer, m4Successor, identityProjection, type IdentityOutcomeFields } from './src/server/identity.js';
 import { venueScope as venueScopeOf, resolveTargetVenue, sharedVenues } from './src/server/venue-scope.js';
 
 /** 10b: the one text for a commit the identity checker refuses (names no agency, no person). */
@@ -7651,6 +7652,81 @@ app.get('/api/agencies', (req, res) => {
   res.json({ agencies: [{ id, name, certificationSeal, shortCode, certificationOptions: effectiveCertOptions(a) }] });
 });
 
+// ---------------------------------------------------------------------------
+// Item 10j ([10J-DS2]): the agency's own admin turns invites (Phase C) ON for
+// their own agency. One-way (there is no OFF route). No secret, no operator
+// token. Fail closed: the fresh caller must still be an admin of the agency,
+// the bundled client must be the invite-aware one, and the identity invariant
+// precheck (the same helpers as perEntityStatus and the commit checker) must
+// find no invalid group in the whole store and no unmigrated row in this
+// agency. Writes agencies[i].phaseC only; nothing is broadcast.
+// ---------------------------------------------------------------------------
+const INVITES_PRECHECK_FAILED = { error: "Invites can't be turned on yet: the team records need a check first. Please contact Shutfey support.", code: 'INVITES_PRECHECK_FAILED' };
+const INVITES_CLIENT_NOT_READY = { error: "Invites can't be turned on from here yet. Please update the app and try again.", code: 'INVITES_CLIENT_NOT_READY' };
+let invitesClientReadyTestOverride: boolean | null = null;
+/** B1: is this server serving the invite-aware client? Production: the built client (dist/index.html) is in this image. */
+function invitesClientReady(): boolean {
+  if (isTestMode() && invitesClientReadyTestOverride !== null) return invitesClientReadyTestOverride;
+  if (process.env.NODE_ENV !== 'production') return true; // dev: vite serves this tree's own client
+  try {
+    return fs.existsSync(path.join(process.cwd(), 'dist', 'index.html'));
+  } catch {
+    return false;
+  }
+}
+/** Identity precheck on a fresh doc: null = ok, else a log reason (ids and codes only). */
+function invitesPrecheck(freshUsers: any[], freshAgencies: any[], agencyId: string): string | null {
+  const unmigrated = freshUsers.filter((u) => u && (u.agencyId || 'agency-hkc') === agencyId && !(typeof u.personId === 'string' && u.personId));
+  if (unmigrated.length) return `unmigrated rows in agency: ${unmigrated.length} (${unmigrated.slice(0, 5).map((u) => u.id).join(',')})`;
+  const byId = new Map<string, any>(freshUsers.filter((u) => u && typeof u.id === 'string').map((u) => [u.id, u] as [string, any]));
+  for (const g of identityGroups(freshUsers)) {
+    if (g.length < 2) continue;
+    const rows = g.map((id) => byId.get(id));
+    if (!rows.some((r: any) => typeof r?.personId === 'string' && r.personId)) continue;
+    const issues = groupIssues(rows, freshAgencies);
+    if (issues.length) return `invalid identity group: ${issues.map((i: any) => `${i.code}[${(i.rowIds || []).join(',')}]`).join('; ')}`;
+  }
+  return null;
+}
+app.post('/api/agency/invites/enable', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if ((req as any).kiosk === true) return res.status(403).json({ error: 'Admin access required.' });
+  const caller = requireAdmin(req, res);
+  if (!caller) return;
+  const agencyId = caller.agencyId || 'agency-hkc'; // rule T: the caller's own agency only (any body agencyId is ignored)
+  // B1 / N3: the bundled client must be the invite-aware one; checked before the transaction, nothing written.
+  if (!invitesClientReady()) return res.status(409).json(INVITES_CLIENT_NOT_READY);
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const freshCaller = freshUsers.find((u) => u && u.id === caller.id);
+      if (!freshCaller || freshCaller.role !== 'admin' || (freshCaller.agencyId || 'agency-hkc') !== agencyId) {
+        return { conflict: 'Admin access required.', conflictStatus: 403, conflictCode: 'FORBIDDEN' };
+      }
+      const agency = freshAgencies.find((a) => a && a.id === agencyId);
+      if (!agency) return { conflict: 'Not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+      if (phaseCEnabled(agency)) return { doc: freshDoc, result: { alreadyOn: true } }; // N1: after the fresh re-check
+      const why = invitesPrecheck(freshUsers, freshAgencies, agencyId);
+      if (why) {
+        log.warn(`[invites] enable refused for agency ${agencyId} by ${caller.id}: ${why}`);
+        return { conflict: INVITES_PRECHECK_FAILED.error, conflictStatus: 409, conflictCode: INVITES_PRECHECK_FAILED.code };
+      }
+      const nowIso = new Date().toISOString();
+      return {
+        doc: { ...freshDoc, agencies: freshAgencies.map((a: any) => (a && a.id === agencyId ? { ...a, phaseC: { enabled: true, setAt: nowIso, setBy: caller.id } } : a)) },
+        result: { alreadyOn: false },
+      };
+    },
+    { label: 'agency-invites-enable' }
+  );
+  if (!committed) return;
+  const alreadyOn = (committed as any)?.result?.alreadyOn === true;
+  if (!alreadyOn) log.info(`[audit] invites turned ON: agency ${agencyId} by admin ${caller.id}`);
+  res.json({ ok: true, invitesEnabled: true, alreadyOn });
+});
+
 // Get current agency details for logged in user
 app.get('/api/agencies/current', (req, res) => {
   const caller = requireAuthUser(req, res);
@@ -7666,6 +7742,8 @@ app.get('/api/agencies/current', (req, res) => {
   res.json({
     agency: {
       ...view,
+      // 10j: admins only (HTTP), never broadcast; the raw phaseC object never leaves.
+      ...(caller.role === 'admin' ? { invitesEnabled: phaseCEnabled(agency) } : {}),
       venuesCount: agencyVenues.length,
       workersCount: agencyUsers.length,
     },
@@ -9210,6 +9288,13 @@ if (isTestMode()) {
   // design). Test mode only — never a production credential.
   // TEST ONLY (10h, isTestMode()): set an agency's Phase C flag (C4: item 10
   // has NO production writer; 10j is the operator route, NEEDS DON 1).
+  // TEST ONLY (10j, isTestMode()): force the client-readiness answer (null = the real check).
+  app.post('/api/__test__/invites-client-ready', (req, res) => {
+    const v = (req.body || {}).ready;
+    if (v !== null && typeof v !== 'boolean') return res.status(400).json({ error: 'ready (boolean or null) required' });
+    invitesClientReadyTestOverride = v;
+    res.json({ ok: true });
+  });
   app.post('/api/__test__/phase-c', async (req, res) => {
     const { agencyId, enabled } = req.body || {};
     if (typeof agencyId !== 'string' || typeof enabled !== 'boolean') return res.status(400).json({ error: 'agencyId (string) and enabled (boolean) required' });

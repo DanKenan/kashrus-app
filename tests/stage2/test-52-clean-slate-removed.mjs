@@ -107,6 +107,8 @@ export default {
         assert(rt.status === 404, `route-table must be 404 (${mode}), got ${rt.status}`);
         const pc = await call('POST', '/api/__test__/phase-c', auth(tAdminB), { agencyId: 'agency-hkc', enabled: true });
         assert(pc.status === 404, `phase-c must be 404 (${mode}), got ${pc.status}`);
+        const icr = await call('POST', '/api/__test__/invites-client-ready', auth(tAdminB), { ready: true });
+        assert(icr.status === 404, `invites-client-ready must be 404 (${mode}), got ${icr.status}`);
       } finally {
         await ctx.restartServer();
       }
