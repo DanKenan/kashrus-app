@@ -3,7 +3,7 @@
  *  R  refusals (409, nothing written): self, primary admin, a person who set
  *     their own password (self-registered / invite-new), a multi person
  *     (both agencies byte-for-byte unchanged); other agency's member 404;
- *     coordinator 403; flag OFF 404.
+ *     coordinator 403 (invites always on: a stored phaseC false is ignored).
  *  S  success: password removed, marker set, epoch +1 (REST 401, WS 4401),
  *     reset requests for the row cleared, login = the uniform failure (even
  *     for an admin row), forgot = uniform text with no new request; admins
@@ -61,7 +61,12 @@ export default {
     const rowOf = async (id) => (await rows()).find((u) => u.id === id);
     const rehydrate = async (k) => assert((await hook('inject-fixture', { venues: [{ id: `venue-t69-h${k}-${Date.now()}`, name: 'T69 hydrate', agencyId: B }] })).status === 200, `rehydrate ${k}`);
     const unchanged = async (v, label) => assert((await ctx.getVersion()) === v, `${label}: nothing may be written`);
-    const flag = async (agencyId, enabled) => assert((await hook('phase-c', { agencyId, enabled })).status === 200, `phase-c ${agencyId} ${enabled}`);
+    // Invites always on: there is no flag. `flag` only PLANTS a stored phaseC
+    // value (as old data or the retired 10j route left it) to prove it is ignored.
+    const flag = async (agencyId, enabled) => {
+      const d = await doc();
+      assert((await hook('doc-set-users', { users: d.users, agencies: (d.agencies || []).map((a) => (a.id === agencyId ? { ...a, phaseC: { enabled } } : a)) })).status === 200, `plant phaseC ${agencyId} ${enabled}`);
+    };
     const send = async (t, id) => call('POST', `/api/users/${id}/invite`, auth(t), { expectedVersion: await ctx.getVersion() });
     const tokenOf = (link) => { const m = /^\/invite#t=([A-Za-z0-9_-]{43})$/.exec(link || ''); assert(m, `link shape ${link}`); return m[1]; };
     const login = (email, password) => call('POST', '/api/auth/login', jsonH, { email, password });
@@ -100,10 +105,10 @@ export default {
     // ---- R: refusals ----
     {
       let v0 = await ctx.getVersion();
-      assert((await send(tA, U('t'))).status === 404, 'R flag OFF 404');
-      await unchanged(v0, 'R flag OFF');
-      await flag(A, true);
+      // Always on: planted phaseC false (A) / true (B) are ignored; the refusals below are the person rules.
+      await flag(A, false);
       await flag(B, true);
+      v0 = await ctx.getVersion();
       v0 = await ctx.getVersion();
       const before = J(await doc());
       for (const [k, label] of [['adA', 'self'], ['prim', 'primary admin'], ['self', 'own password (self-registered)'], ['m', 'multi person'], ['ma', 'multi person (admin-set password)']]) {
@@ -116,7 +121,7 @@ export default {
       assert(co.status === 403, `R coordinator 403 (${co.status})`);
       await unchanged(v0, 'R refusals');
       assert(J(await doc()) === before, 'R both agencies byte-for-byte unchanged (incl. the multi person)');
-      console.log('  ✓ R flag OFF 404; self / primary admin / own password / multi person 409; other agency 404; coordinator 403; nothing written anywhere');
+      console.log('  ✓ R self / primary admin / own password / multi person 409; other agency 404; coordinator 403; nothing written anywhere');
     }
 
     // ---- S: success ----

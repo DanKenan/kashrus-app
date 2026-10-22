@@ -37,6 +37,8 @@ function noServerOnly(obj, where) {
   for (const f of SERVER_ONLY) assert(!s.includes(`"${f}"`), `${where}: server-only field ${f} sent to a client`);
 }
 
+import { inviteAndAccept, inviteMember, acceptNew } from './invite-helpers.mjs';
+
 export default {
   name: 'Test 47: identity projections (people/emails), born-migrated rows, server-only fields (8b)',
   whatItProves:
@@ -90,16 +92,23 @@ export default {
     // ---- 2/3/4. create via API with forged fields; replay ----
     const opId = `op-t47-create-${ts}`;
     const createBody = { email: em('m1'), name: 'T47 M1', role: 'mashgiach', venueId: vA1, operationId: opId, ...FORGED };
-    const c1 = await call('POST', '/api/users', tokA, createBody);
-    assert(c1.status === 201, `create ${c1.status} ${c1.text}`);
-    noServerOnly(c1.json, 'create-user response');
-    const m1 = c1.json.user.id;
+    // Invites always on: "Add team member" is a pending invite; the row is
+    // born when the invitee accepts. Forged fields ride the invite body and
+    // must not reach the row.
+    const c1 = await inviteMember(baseUrl, tokA, createBody);
+    assert(c1.status === 201 && c1.token, `create (invite) ${c1.status} ${c1.text}`);
+    noServerOnly(c1.json, 'create-user (invite) response');
+    const a1 = await acceptNew(baseUrl, c1.token, 'stage2-t47-m1-pw');
+    assert(a1.status === 200, `accept ${a1.status} ${a1.text}`);
+    noServerOnly(a1.json, 'invite accept response');
+    const m1 = (((await ctx.getDoc()).users || []).find((u) => (u.email || '').toLowerCase() === em('m1')) || {}).id;
+    assert(m1, 'accepted row exists');
     d = await docs({ userId: m1, email: em('m1') });
     assert(d.row.personId === m1 && d.row.isPrimaryAdmin === false && JSON.stringify(d.row.venueAccess) === `["${vA1}"]` && d.row.tokenEpoch === null, `forged fields not discarded: ${JSON.stringify(d.row)}`);
     assert(d.people?.status === 'active' && d.emails?.personId === m1, 'm1 projections');
     const peopleV = d.people._v;
     const usersBefore = ((await ctx.getDoc()).users || []).length;
-    const c2 = await call('POST', '/api/users', tokA, createBody);
+    const c2 = await inviteMember(baseUrl, tokA, createBody);
     assert(c2.status === 200 || c2.status === 201, `replay ${c2.status} ${c2.text}`);
     noServerOnly(c2.json, 'idempotent replay response');
     assert(((await ctx.getDoc()).users || []).length === usersBefore, 'replay created a second row');
@@ -135,7 +144,7 @@ export default {
     d = await docs({ personId: m1, email: em('m1b') });
     assert(d.people.status === 'retired' && d.people.retiredAt && d.people.name === 'T47 M1' && d.people.primaryEmail === em('m1b'), `retired people ${JSON.stringify(d.people)}`);
     assert(d.emails.status === 'retired' && d.emails.personId === m1, `retired emails ${JSON.stringify(d.emails)}`);
-    const c3 = await call('POST', '/api/users', tokA, { email: em('m1b'), name: 'T47 M1 again', role: 'mashgiach', venueId: vA1, operationId: `op-t47-recreate-${ts}` });
+    const c3 = await inviteAndAccept(baseUrl, tokA, { email: em('m1b'), name: 'T47 M1 again', role: 'mashgiach', venueId: vA1, operationId: `op-t47-recreate-${ts}` });
     assert(c3.status === 201, `re-create ${c3.status} ${c3.text}`);
     const m1b = c3.json.user.id;
     assert(m1b !== m1, 'new person id');
@@ -148,8 +157,11 @@ export default {
     const ghost = `ghost-t47-${ts}`;
     const seeded = await ctx.api('POST', '/api/__test__/identity-seed-email', { email: em('taken'), personId: ghost });
     assert(seeded.status === 200, `seed ${seeded.status}`);
+    // The invite itself writes no row; the accept is where a row would be
+    // born, and it must fail closed over a mapping owned by another person.
+    const i4 = await inviteMember(baseUrl, tokA, { email: em('taken'), name: 'T47 Taken', role: 'mashgiach', venueId: vA1, operationId: `op-t47-taken-${ts}` });
     const v0 = await ctx.getVersion();
-    const c4 = await call('POST', '/api/users', tokA, { email: em('taken'), name: 'T47 Taken', role: 'mashgiach', venueId: vA1, operationId: `op-t47-taken-${ts}` });
+    const c4 = i4.token ? await acceptNew(baseUrl, i4.token, 'stage2-t47-taken-pw') : i4;
     assert(c4.status >= 400, `create over an owned mapping must fail, got ${c4.status}`);
     assert((await ctx.getVersion()) === v0, 'monolith version changed on a refused create');
     assert(!((await ctx.getDoc()).users || []).some((u) => (u.email || '').toLowerCase() === em('taken')), 'row written despite refusal');
@@ -197,7 +209,12 @@ export default {
     assert(d.people?.status === 'active' && d.emails?.personId === reg.json.user.id, 'register projections');
     const ven = await call('POST', '/api/venues', tokA, { name: `T47 Owner Venue ${ts}`, ownerEmail: em('owner'), ownerName: 'T47 Owner', operationId: `op-t47-venue-${ts}`, ...FORGED });
     assert(ven.status === 201, `venue create ${ven.status} ${ven.text}`);
-    noServerOnly(ven.json.owner, 'venue owner response');
+    noServerOnly(ven.json, 'venue owner (invite) response');
+    // Invites always on: the owner row is born when the owner invite is accepted.
+    assert(ven.json.owner === null && ven.json.ownerInvite, `owner invite ${ven.text.slice(0, 160)}`);
+    const oacc = await acceptNew(baseUrl, /#t=([A-Za-z0-9_-]+)/.exec(ven.json.ownerInviteLink || '')?.[1], 'stage2-t47-owner-pw');
+    assert(oacc.status === 200, `owner invite accept ${oacc.status} ${oacc.text.slice(0, 160)}`);
+    noServerOnly(oacc.json, 'owner invite accept response');
     const ownerRow = ((await ctx.getDoc()).users || []).find((u) => (u.email || '').toLowerCase() === em('owner'));
     assert(ownerRow, 'owner row created');
     d = await docs({ userId: ownerRow.id, email: em('owner') });

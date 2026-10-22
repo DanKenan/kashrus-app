@@ -1,14 +1,21 @@
 /**
- * Test 72 (10j, [10J-DS2] Agreed): an agency's own admin turns invites (Phase C) ON for their own agency.
- *  R  coordinator / mashgiach / owner / kiosk tokens -> 403, nothing written.
- *  F  an admin demoted in the stored doc (cache still admin) -> 403 by the fresh in-transaction re-check.
- *  S  admin of A with a body naming B: only A turns ON; B stays OFF; setBy = the admin id.
- *  P1 a planted invalid identity group (same person, two credential owners, two agencies) -> 409 INVITES_PRECHECK_FAILED, nothing written.
- *  P2 an unmigrated row (no personId) in A -> 409; an unmigrated row only in another agency does not block A.
- *  C  client not ready (test override) -> 409 INVITES_CLIENT_NOT_READY, nothing written.
- *  I  a second call -> 200 alreadyOn, doc version unchanged.
- *  V  GET /api/agencies/current: admin sees invitesEnabled false -> true; staff never see it; no socket message carries invitesEnabled or phaseC.
- *  G  after ON the flag-gated invite list answers for A (200) and stays 404 for B.
+ * Test 72 (invites always on, Don 2026-10-22, "Agreed — invites-always-on"):
+ * every agency uses invites; there is no toggle and no agency-wide precheck.
+ *  V  GET /api/agencies/current: an admin of an agency with NO stored phaseC sees
+ *     invitesEnabled true; staff never see the key; phaseC never leaves the server.
+ *  R  enable: coordinator / mashgiach / owner / kiosk -> 403, nothing written.
+ *  F  enable by an admin demoted in the stored doc only (cache still admin) -> 403 (fresh re-check), nothing written.
+ *  E  enable by an admin -> 200 { ok, invitesEnabled: true, alreadyOn: true } and
+ *     writes NOTHING (version unchanged, stored doc byte-identical) — also with a
+ *     body naming another agency and with a planted phaseC { enabled: false }.
+ *  G  the invite routes answer for agencies with no / false / true stored phaseC.
+ *  P1 invite create: a person whose identity group has issues AND touches the
+ *     caller's agency -> 409 INVITE_PERSON_NEEDS_CHECK, nothing written; the same
+ *     email from an agency the group does not touch -> 201 (other agencies' rows
+ *     are not looked at, 10i V2/W1).
+ *  P2 invite accept 'existing' for that person -> 409 INVITE_PERSON_NEEDS_CHECK,
+ *     nothing written, not counted as a failed attempt.
+ *  P3 Send invite on an unmigrated row (no personId) -> 409, nothing written.
  */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const auth = (token) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' });
@@ -32,9 +39,9 @@ function openWs(baseUrl, token) {
 }
 
 export default {
-  name: 'Test 72: 10j an agency admin turns invites ON for their own agency (one-way, prechecked)',
+  name: 'Test 72: invites always on (no toggle; enable is a no-write 200; per-person fail-closed)',
   whatItProves:
-    'Only a fresh admin of the agency can turn invites on, only for their own agency; the identity precheck (invalid group anywhere, unmigrated row in the agency) and the client-readiness check refuse with nothing written; a repeat is a no-op; invitesEnabled reaches the admin over HTTP only, never a socket.',
+    'Every agency gets the invite routes whatever its stored phaseC; the retired enable route is admin-only and writes nothing; a person whose identity group has issues is refused per person (create in an agency the group touches, accept existing, Send invite on an unmigrated row) with a plain 409 and nothing written.',
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
@@ -48,28 +55,35 @@ export default {
       users: [
         { id: U('adA'), email: E('ada'), name: 'T72 Admin A', role: 'admin', agencyId: A, avatarColor: 'bg-gold' },
         { id: U('adB'), email: E('adb'), name: 'T72 Admin B', role: 'admin', agencyId: B, avatarColor: 'bg-gold' },
+        { id: U('adC'), email: E('adc'), name: 'T72 Admin C', role: 'admin', agencyId: C, avatarColor: 'bg-gold' },
         { id: U('co'), email: E('co'), name: 'T72 Coord', role: 'coordinator', agencyId: A, venueId: vA, avatarColor: 'bg-gold' },
         { id: U('m'), email: E('m'), name: 'T72 Mash', role: 'mashgiach', agencyId: A, venueId: vA, avatarColor: 'bg-gold' },
         { id: U('o'), email: E('o'), name: 'T72 Owner', role: 'owner', agencyId: A, venueId: vA, avatarColor: 'bg-gold' },
         { id: U('x1'), email: E('x'), name: 'T72 X in A', role: 'mashgiach', agencyId: A, venueId: vA, avatarColor: 'bg-gold' },
-        { id: U('c1'), email: E('c1'), name: 'T72 C member', role: 'mashgiach', agencyId: C, venueId: vC, avatarColor: 'bg-gold' },
-        { id: U('adC'), email: E('adc'), name: 'T72 Admin C', role: 'admin', agencyId: C, avatarColor: 'bg-gold' },
       ],
     });
     if (inj.status !== 200) throw new Error(`inject-fixture: ${inj.status}`);
     const tA = await mintToken(baseUrl, U('adA'));
+    const tB = await mintToken(baseUrl, U('adB'));
+    const tC = await mintToken(baseUrl, U('adC'));
     const doc = () => ctx.getDoc();
-    const agencyOf = async (id) => (await doc()).agencies.find((a) => a.id === id);
     const enable = (token, body = {}) => call(baseUrl, 'POST', '/api/agency/invites/enable', token, body);
     const unchanged = async (v0, label) => { const v = await ctx.getVersion(); if (v !== v0) throw new Error(`${label}: version moved ${v0} -> ${v}`); };
+    const plantPhaseC = async (agencyId, enabled) => {
+      const d = await doc();
+      const r = await ctx.api('POST', '/api/__test__/doc-set-users', { users: d.users, agencies: d.agencies.map((a) => (a.id === agencyId ? { ...a, phaseC: { enabled } } : a)) });
+      if (r.status !== 200) throw new Error(`plant phaseC ${agencyId}: ${r.status}`);
+    };
+    const addMember = async (t, email) => call(baseUrl, 'POST', '/api/users', t, { email, name: 'T72 Person', role: 'mashgiach', venueId: t === tA ? vA : (t === tB ? vB : vC), expectedVersion: await ctx.getVersion() });
     const details = [];
 
-    // V (before): admin sees false, staff never see the key.
+    // V: an agency with no stored phaseC is ON for its admin; staff never see the key.
     {
       const ga = await call(baseUrl, 'GET', '/api/agencies/current', tA);
-      if (ga.status !== 200 || ga.json?.agency?.invitesEnabled !== false || 'phaseC' in (ga.json?.agency || {})) throw new Error(`V admin before: ${ga.status} ${JSON.stringify(ga.json?.agency).slice(0, 200)}`);
+      if (ga.status !== 200 || ga.json?.agency?.invitesEnabled !== true || 'phaseC' in (ga.json?.agency || {})) throw new Error(`V admin: ${ga.status} ${JSON.stringify(ga.json?.agency).slice(0, 200)}`);
       const gm = await call(baseUrl, 'GET', '/api/agencies/current', await mintToken(baseUrl, U('m')));
       if (gm.status !== 200 || 'invitesEnabled' in (gm.json?.agency || {}) || 'phaseC' in (gm.json?.agency || {})) throw new Error(`V staff: ${JSON.stringify(gm.json?.agency).slice(0, 200)}`);
+      details.push('V invitesEnabled true for an admin with no stored phaseC; staff never see it');
     }
 
     // R: non-admins (and a kiosk token) are refused, nothing written.
@@ -80,125 +94,123 @@ export default {
         if (r.status !== 403) throw new Error(`R ${k}: ${r.status}`);
       }
       const kt = await fetch(`${baseUrl}/api/__test__/mint-kiosk-token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: U('adA'), agencyId: A, venueId: vA }) });
-      if (kt.status === 200) {
-        const { token } = await kt.json();
-        const r = await enable(token);
-        if (r.status !== 403 && r.status !== 401) throw new Error(`R kiosk token: ${r.status}`);
-      }
+      if (kt.status !== 200) throw new Error(`R kiosk token mint: ${kt.status}`);
+      const { token } = await kt.json();
+      const rk = await enable(token);
+      if (rk.status !== 403 && rk.status !== 401) throw new Error(`R kiosk token: ${rk.status}`);
       await unchanged(v0, 'R');
-      if ((await agencyOf(A)).phaseC) throw new Error('R wrote phaseC');
       details.push('R coordinator/mashgiach/owner/kiosk refused, nothing written');
     }
 
-    // F: the fresh re-check — an admin demoted in the STORED doc while the server cache still says admin -> 403, nothing written.
+    // F ([IAO-RV1] B1): the fresh re-check — an admin demoted in the STORED doc
+    // while the server cache still says admin -> 403, nothing written.
     {
-      const tC = await mintToken(baseUrl, U('adC'));
       const stored = (await doc()).users;
       const demoted = stored.map((u) => (u.id === U('adC') ? { ...u, role: 'mashgiach', venueId: vC } : u));
       if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: demoted })).status !== 200) throw new Error('F plant');
+      const before = JSON.stringify(await doc());
       const v0 = await ctx.getVersion();
       const r = await enable(tC);
       if (r.status !== 403) throw new Error(`F demoted-in-store admin: ${r.status} ${JSON.stringify(r.json)}`);
       await unchanged(v0, 'F');
-      if ((await agencyOf(C)).phaseC) throw new Error('F wrote phaseC');
+      if (JSON.stringify(await doc()) !== before) throw new Error('F: the stored doc changed');
       if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: stored })).status !== 200) throw new Error('F restore');
-      details.push('F fresh re-check refuses an admin demoted in the store');
+      details.push('F fresh re-check: an admin demoted in the store gets 403, nothing written');
     }
 
-    // C: client not ready.
+    // E: the retired enable route answers "already on" and writes nothing.
     {
-      const set = await call(baseUrl, 'POST', '/api/__test__/invites-client-ready', null, { ready: false });
-      if (set.status !== 200) throw new Error(`C override: ${set.status}`);
-      try {
+      await plantPhaseC(B, false);
+      for (const [label, t, body] of [['admin A', tA, {}], ['admin A naming B', tA, { agencyId: B }], ['admin B (planted false)', tB, {}]]) {
+        const before = JSON.stringify(await doc());
         const v0 = await ctx.getVersion();
-        const r = await enable(tA);
-        if (r.status !== 409 || r.json?.code !== 'INVITES_CLIENT_NOT_READY') throw new Error(`C: ${r.status} ${JSON.stringify(r.json)}`);
-        await unchanged(v0, 'C');
-      } finally {
-        await call(baseUrl, 'POST', '/api/__test__/invites-client-ready', null, { ready: null });
+        const r = await enable(t, body);
+        if (r.status !== 200 || r.json?.ok !== true || r.json?.invitesEnabled !== true || r.json?.alreadyOn !== true) throw new Error(`E ${label}: ${r.status} ${JSON.stringify(r.json)}`);
+        await unchanged(v0, `E ${label}`);
+        if (JSON.stringify(await doc()) !== before) throw new Error(`E ${label}: the stored doc changed`);
       }
-      details.push('C client not ready 409, nothing written');
+      if ((await doc()).agencies.find((a) => a.id === A).phaseC !== undefined) throw new Error('E wrote phaseC on A');
+      details.push('E enable 200 alreadyOn, no write (doc byte-identical), also naming B and with a planted false');
     }
 
-    // P1: an invalid identity group (one person, two credential owners) anywhere in the store.
+    // G: the invite routes answer whatever the stored phaseC (A none, B false, C true).
+    {
+      await plantPhaseC(C, true);
+      for (const [label, t] of [['A none', tA], ['B false', tB], ['C true', tC]]) {
+        const r = await call(baseUrl, 'GET', '/api/agency/invites', t);
+        if (r.status !== 200 || !Array.isArray(r.json?.invites)) throw new Error(`G ${label}: ${r.status}`);
+      }
+      details.push('G invite list 200 for no / false / true stored phaseC');
+    }
+
+    // P1/P2: one person (x) with rows in A (email x, the credential) and B
+    // (same personId, ANOTHER email: email-mismatch) — an invalid identity group
+    // that touches B but has no row with email x in B.
     const users0 = (await doc()).users;
     const x1 = users0.find((u) => u.id === U('x1'));
     if (!x1?.personId) throw new Error('fixture x1 has no personId');
+    const PW = 'stage2-t72-x-password';
+    if ((await ctx.api('POST', '/api/__test__/set-password', { userId: U('x1'), password: PW })).status !== 200) throw new Error('set-password x1');
     {
-      const planted = users0.map((u) => (u.id === U('x1') ? { ...u, credentialOwner: true } : u));
-      planted.push({ ...x1, id: U('x2'), agencyId: B, venueId: vB, name: 'T72 X in B', credentialOwner: true });
+      const base = (await doc()).users;
+      const x1p = base.find((u) => u.id === U('x1'));
+      const planted = base.map((u) => (u.id === U('x1') ? { ...u, credentialOwner: true, credentialOrigin: 'self-registered' } : u));
+      planted.push({ id: U('x2'), email: E('x-other'), personId: x1p.personId, name: 'T72 X in B', role: 'mashgiach', agencyId: B, venueId: vB, avatarColor: 'bg-gold' });
       const ps = await ctx.api('POST', '/api/__test__/doc-set-users', { users: planted });
-      if (ps.status !== 200) throw new Error(`P1 plant: ${ps.status}`);
-      const v0 = await ctx.getVersion();
-      const r = await enable(tA);
-      if (r.status !== 409 || r.json?.code !== 'INVITES_PRECHECK_FAILED') throw new Error(`P1: ${r.status} ${JSON.stringify(r.json)}`);
-      if (JSON.stringify(r.json).includes(U('x2'))) throw new Error('P1 answer leaks row ids');
-      await unchanged(v0, 'P1');
-      // repair: back to the original rows
-      const rs = await ctx.api('POST', '/api/__test__/doc-set-users', { users: users0 });
-      if (rs.status !== 200) throw new Error(`P1 repair: ${rs.status}`);
-      details.push('P1 invalid identity group 409, nothing written');
+      if (ps.status !== 200) throw new Error(`P plant: ${ps.status}`);
     }
-
-    // P2: an unmigrated row in A blocks A; one only in C does not.
+    // A C invite for x made BEFORE anything else (C is not in the group: 201).
+    const invC = await addMember(tC, E('x'));
+    if (invC.status !== 201 || invC.json?.pending !== true) throw new Error(`P1 C (group does not touch C): ${invC.status} ${JSON.stringify(invC.json)}`);
     {
-      const planted = users0.map((u) => (u.id === U('m') ? (({ personId, ...rest }) => rest)(u) : u));
-      if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: planted })).status !== 200) throw new Error('P2 plant');
-      const v0 = await ctx.getVersion();
-      const r = await enable(tA);
-      if (r.status !== 409 || r.json?.code !== 'INVITES_PRECHECK_FAILED') throw new Error(`P2 unmigrated in A: ${r.status} ${JSON.stringify(r.json)}`);
-      await unchanged(v0, 'P2');
-      const plantedC = users0.map((u) => (u.id === U('c1') ? (({ personId, ...rest }) => rest)(u) : u));
-      if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: plantedC })).status !== 200) throw new Error('P2 plant C');
-      details.push('P2 unmigrated row in A 409');
-    }
-
-    // S + V(after) + sockets: admin of A naming B -> only A ON.
-    const wsAdmin = openWs(baseUrl, tA);
-    const wsStaff = openWs(baseUrl, await mintToken(baseUrl, U('m')));
-    await sleep(500);
-    {
-      const r = await enable(tA, { agencyId: B });
-      if (r.status !== 200 || r.json?.invitesEnabled !== true || r.json?.alreadyOn !== false) throw new Error(`S: ${r.status} ${JSON.stringify(r.json)}`);
-      const a = await agencyOf(A);
-      const b = await agencyOf(B);
-      if (a?.phaseC?.enabled !== true || a.phaseC.setBy !== U('adA') || typeof a.phaseC.setAt !== 'string') throw new Error(`S A: ${JSON.stringify(a?.phaseC)}`);
-      if (b?.phaseC) throw new Error(`S B changed: ${JSON.stringify(b.phaseC)}`);
-      details.push('S only the caller\'s agency turns ON (unmigrated row in another agency does not block)');
-    }
-    {
-      const v0 = await ctx.getVersion();
-      const r = await enable(tA);
-      if (r.status !== 200 || r.json?.alreadyOn !== true) throw new Error(`I: ${r.status} ${JSON.stringify(r.json)}`);
-      await unchanged(v0, 'I');
-      const rCo = await enable(await mintToken(baseUrl, U('co')));
-      if (rCo.status !== 403) throw new Error(`I coordinator on an ON agency: ${rCo.status}`);
-      details.push('I repeat alreadyOn, no write; non-admin still 403');
-    }
-    {
-      const ga = await call(baseUrl, 'GET', '/api/agencies/current', tA);
-      if (ga.json?.agency?.invitesEnabled !== true || 'phaseC' in (ga.json?.agency || {})) throw new Error(`V admin after: ${JSON.stringify(ga.json?.agency).slice(0, 200)}`);
-      const gb = await call(baseUrl, 'GET', '/api/agencies/current', await mintToken(baseUrl, U('adB')));
-      if (gb.json?.agency?.invitesEnabled !== false) throw new Error(`V admin B: ${gb.json?.agency?.invitesEnabled}`);
-      await sleep(700);
-      for (const [label, c] of [['admin', wsAdmin], ['staff', wsStaff]]) {
-        if (!c.raw.length) throw new Error(`V ${label} socket got nothing`);
-        if (c.raw.some((m) => m.includes('invitesEnabled') || m.includes('"phaseC"'))) throw new Error(`V ${label} socket carried invitesEnabled/phaseC`);
+      for (const [label, t] of [['B', tB]]) {
+        const v0 = await ctx.getVersion();
+        const before = JSON.stringify((await doc()).invites || []);
+        const r = await addMember(t, ` ${E('x').toUpperCase()}`);
+        if (r.status !== 409 || r.json?.code !== 'INVITE_PERSON_NEEDS_CHECK' || r.json?.error !== "This person's account needs a check before they can be invited. Please contact Shutfey support.") throw new Error(`P1 ${label}: ${r.status} ${JSON.stringify(r.json)}`);
+        if (JSON.stringify(r.json).includes(U('x2')) || JSON.stringify(r.json).includes(B)) throw new Error(`P1 ${label}: the answer leaks ids`);
+        await unchanged(v0, `P1 ${label}`);
+        if (JSON.stringify((await doc()).invites || []) !== before) throw new Error(`P1 ${label}: invites changed`);
       }
-      details.push('V invitesEnabled HTTP admin only; no socket carries it');
+      details.push('P1 create: 409 INVITE_PERSON_NEEDS_CHECK where the group touches the agency (B, no row with that email there), nothing written; C (untouched) 201');
     }
-    wsAdmin.close(); wsStaff.close();
-
-    // G: the flag-gated invite list answers for A only.
+    // P2 fixture: x stays a one-row person in A (the linkable credential); a
+    // LEGACY row (no personId) with the same email sits in B. The email group
+    // {x1, legacy} is invalid (person-mismatch), the credential still resolves.
     {
-      const la = await call(baseUrl, 'GET', '/api/agency/invites', tA);
-      if (la.status !== 200) throw new Error(`G A invites list: ${la.status}`);
-      const lb = await call(baseUrl, 'GET', '/api/agency/invites', await mintToken(baseUrl, U('adB')));
-      if (lb.status !== 404) throw new Error(`G B invites list: ${lb.status}`);
-      details.push('G invites list A 200, B 404');
+      const base = (await doc()).users.filter((u) => u.id !== U('x2'));
+      base.push({ id: U('xl'), email: E('x'), name: 'T72 X legacy in B', role: 'mashgiach', agencyId: B, venueId: vB, avatarColor: 'bg-gold' });
+      if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: base })).status !== 200) throw new Error('P2 plant');
+      // one harmless commit so the server cache matches the planted store (the
+      // P1 rows went into the cache with the C invite's commit)
+      if ((await ctx.api('POST', '/api/__test__/inject-fixture', { venues: [{ id: `venue-t72-sync-${ts}`, name: 'T72 sync', agencyId: C }] })).status !== 200) throw new Error('P2 rehydrate');
+      if ((await doc()).users.some((u) => u.id === U('x2')) || !(await doc()).users.some((u) => u.id === U('xl'))) throw new Error('P2 plant did not hold');
     }
-    // restore C's row (other tests do not read it, but keep the store clean)
-    await ctx.api('POST', '/api/__test__/doc-set-users', { users: (await doc()).users.map((u) => (u.id === U('c1') ? { ...u, personId: users0.find((x) => x.id === U('c1')).personId } : u)) });
+    {
+      const raw = /#t=([A-Za-z0-9_-]+)/.exec(invC.json.link || '')?.[1];
+      const v0 = await ctx.getVersion();
+      const invBefore = JSON.stringify(((await doc()).invites || []).find((i) => i.id === invC.json.invite.id));
+      const r = await fetch(`${baseUrl}/api/invites/accept`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `10.72.${ts % 200}.9` }, body: JSON.stringify({ token: raw, mode: 'existing', password: PW }) });
+      const j = await r.json().catch(() => null);
+      if (r.status !== 409 || j?.code !== 'INVITE_PERSON_NEEDS_CHECK') throw new Error(`P2 accept existing: ${r.status} ${JSON.stringify(j)}`);
+      await unchanged(v0, 'P2');
+      if (JSON.stringify(((await doc()).invites || []).find((i) => i.id === invC.json.invite.id)) !== invBefore) throw new Error('P2: the invite changed (counted or consumed)');
+      details.push('P2 accept existing: 409 INVITE_PERSON_NEEDS_CHECK, nothing written, not counted');
+    }
+    // repair the group
+    if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: (await doc()).users.filter((u) => u.id !== U('x2') && u.id !== U('xl')) })).status !== 200) throw new Error('P repair');
+
+    // P3: Send invite on an unmigrated row (no personId) -> 409, nothing written.
+    {
+      const base = (await doc()).users;
+      const planted = base.map((u) => (u.id === U('m') ? (({ personId, ...rest }) => rest)(u) : u));
+      if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: planted })).status !== 200) throw new Error('P3 plant');
+      const v0 = await ctx.getVersion();
+      const r = await call(baseUrl, 'POST', `/api/users/${U('m')}/invite`, tA, { expectedVersion: v0 });
+      if (r.status !== 409 || r.json?.code !== 'INVITE_NOT_AVAILABLE') throw new Error(`P3: ${r.status} ${JSON.stringify(r.json)}`);
+      await unchanged(v0, 'P3');
+      details.push('P3 Send invite on an unmigrated row 409, nothing written');
+    }
     return details.join('; ');
   },
 };

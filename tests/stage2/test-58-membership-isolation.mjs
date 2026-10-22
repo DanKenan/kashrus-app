@@ -17,8 +17,8 @@
  *     endpoint are untouched
  *  A4 deleting a user removes their bound + legacy records in the same commit and
  *     keeps a foreign bound record that carries their email
- *  A5 a new venue's owner email that exists only in ANOTHER agency → the generic
- *     409, nothing written, that row not moved; an owner of the caller's agency
+ *  A5 a new venue's owner email that exists only in ANOTHER agency → an owner
+ *     invite (invites always on: the unknown-email answer), no row written, that row not moved; an owner of the caller's agency
  *     is still reused
  *  D  kiosk: X's PIN typed on Y's tile at Y's tablet (other agency) is a counted
  *     wrong PIN on Y's row only; X's lockout untouched; generic text, no hint of X
@@ -208,10 +208,16 @@ export default {
     // ---- A5: venue-owner email resolved inside the caller's agency ------------
     {
       const before = J(((await ctx.getDoc()).users || []).find((u) => u.id === id('ownerB')));
-      const v0 = await ctx.getVersion();
+      // Invites always on: an email that is not a row of the caller's agency
+      // gets an owner INVITE (the unknown-email answer, 10i V2/W1): no row is
+      // written, moved or reused, and the answer names nothing of agency B.
+      const u0 = ((await ctx.getDoc()).users || []).length;
       const r = await call('POST', '/api/venues', auth(T('adminA')), { name: `T58 V ${ts}`, ownerEmail: em('ownerB').toUpperCase(), ownerName: 'Nope' });
-      assert(r.status === 409 && r.json?.code === 'OWNER_EMAIL_UNAVAILABLE' && r.json?.error === "This email can't be used for a new owner.", `A5: other-agency owner email → generic 409, got ${r.status} ${r.text.slice(0, 160)}`);
-      assert((await ctx.getVersion()) === v0, 'A5: nothing written');
+      assert(r.status === 201 && r.json?.owner === null && r.json?.ownerInvite, `A5: other-agency owner email → an owner invite, no row, got ${r.status} ${r.text.slice(0, 160)}`);
+      assert(!r.text.includes(id('ownerB')) && !r.text.includes(B), 'A5: the answer names nothing of agency B');
+      assert(((await ctx.getDoc()).users || []).length === u0, 'A5: no user row written');
+      const nv = ((await ctx.getDoc()).venues || []).find((x) => x.id === r.json.venue?.id);
+      assert(nv && nv.agencyId === A && !nv.ownerId, 'A5: the new venue has no owner yet (not the agency-B row)');
       const after = J(((await ctx.getDoc()).users || []).find((u) => u.id === id('ownerB')));
       assert(after === before, 'A5: the other agency\'s row is not moved or changed');
       const ok = await call('POST', '/api/venues', auth(T('adminA')), { name: `T58 V2 ${ts}`, ownerEmail: em('ownerA') });

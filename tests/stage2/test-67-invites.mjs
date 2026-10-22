@@ -1,6 +1,6 @@
 /**
  * Test 67 (10h): invites — create / list / revoke (design v2, [10H-DS2]).
- *  A flag OFF: POST/GET/DELETE 404, nothing written.
+ *  A invites always on: an agency with no stored phaseC gets the routes (GET 200, a bad body 400), nothing written.
  *  B flag ON: 201 + relative link '/invite#t=<43-char token>'; only sha256 stored;
  *    raw token and hash never in the doc text (raw), WS, GET, admin export; no-store.
  *  C same-agency email (case/space) 409 ALREADY_ON_TEAM, nothing written;
@@ -9,8 +9,8 @@
  *  E validation 400s, nothing written.
  *  F coordinator / mashgiach / kiosk 403; agency B's admin never sees or revokes A's.
  *  G revoke 200 + idempotent (no version bump); an expired invite is not listed.
- *  H flag OFF again -> 404; records untouched.
- *  I (B1) stored-doc-only role/agency change -> 403, flag OFF -> 404, nothing written
+ *  H a stored phaseC { enabled: false } is ignored: create 201, list 200, revoke 200.
+ *  I (B1) stored-doc-only role/agency change -> 403, nothing written
  *    (the cached pre-check passed: proven by the 403/404 coming from the commit).
  *  J (N3) a venue moved away in the stored doc only -> 400, nothing written.
  *  K (N4) A and B invite the same email; A re-invites -> only A's old one replaced.
@@ -63,7 +63,12 @@ export default {
     const create = async (t, body) => call('POST', '/api/agency/invites', auth(t), { name: 'T67 Person', ...body, expectedVersion: await ctx.getVersion() }); // 10i: name required
     const list = (t) => call('GET', '/api/agency/invites', auth(t));
     const revoke = async (t, id) => call('DELETE', `/api/agency/invites/${id}`, auth(t), { expectedVersion: await ctx.getVersion() });
-    const flag = async (agencyId, enabled) => assert((await hook('phase-c', { agencyId, enabled })).status === 200, `phase-c ${agencyId} ${enabled}`);
+    // Invites always on: there is no flag. `flag` only PLANTS a stored phaseC
+    // value (as old data or the retired 10j route left it) to prove it is ignored.
+    const flag = async (agencyId, enabled) => {
+      const d = await doc();
+      assert((await hook('doc-set-users', { users: d.users, agencies: (d.agencies || []).map((a) => (a.id === agencyId ? { ...a, phaseC: { enabled } } : a)) })).status === 200, `plant phaseC ${agencyId} ${enabled}`);
+    };
 
     const inj = await ctx.api('POST', '/api/__test__/inject-fixture', {
       agencies: [{ id: A, name: `T67 A ${ts}`, timeZone: 'America/New_York' }, { id: B, name: `T67 B ${ts}`, timeZone: 'America/New_York' }],
@@ -81,19 +86,18 @@ export default {
     const tA = await mintToken(baseUrl, U('adA'));
     const tB = await mintToken(baseUrl, U('adB'));
 
-    // ---- A: flag OFF -> 404 everywhere, nothing written ----
+    // ---- A: always on — agency A has NO stored phaseC and gets the routes ----
     {
       const v0 = await ctx.getVersion();
-      const r1 = await create(tA, { email: E('new1'), role: 'mashgiach', venueIds: [A1] });
+      const r1 = await create(tA, { email: '', role: 'mashgiach', venueIds: [A1] });
       const r2 = await list(tA);
-      const r3 = await revoke(tA, 'inv_whatever');
-      assert([r1, r2, r3].every((r) => r.status === 404), `A flag OFF 404: ${r1.status} ${r2.status} ${r3.status}`);
-      assert(r1.text === r2.text && r2.text === r3.text, 'A one 404 body');
-      await unchanged(v0, 'A flag OFF');
-      console.log('  ✓ A flag OFF: POST/GET/DELETE 404, one body, nothing written');
+      assert(r1.status === 400 && r2.status === 200 && Array.isArray(r2.json?.invites), `A always on: a bad body 400 (the route runs), GET 200: ${r1.status} ${r2.status} ${r2.text.slice(0, 120)}`);
+      await unchanged(v0, 'A always on');
+      console.log('  ✓ A always on: no stored phaseC -> GET 200, a bad body 400, nothing written');
     }
 
-    await flag(A, true);
+    // A planted phaseC false (A) and true (B): both are ignored for the rest of the test.
+    await flag(A, false);
     await flag(B, true);
     assert(!J(await call('GET', '/api/agencies/current', auth(tA))).includes('phaseC'), 'phaseC never in an agency payload');
 
@@ -242,7 +246,6 @@ export default {
       const cases = [
         ['coordinator', users0.map((u) => (u.id === U('adA') ? { ...u, role: 'coordinator', venueId: A1 } : u)), undefined, 403],
         ['moved to B', users0.map((u) => (u.id === U('adA') ? { ...u, agencyId: B } : u)), undefined, 403],
-        ['flag OFF', users0, agencies0.map((a) => (a.id === A ? { ...a, phaseC: { enabled: false } } : a)), 404],
       ];
       for (const [label, users, agencies, want] of cases) {
         assert((await list(tA)).status === 200, `I ${label}: the cached gate still passes`);
@@ -258,7 +261,7 @@ export default {
         assert((await hook('doc-set-users', { users: users0, agencies: agencies0 })).status === 200, `I restore ${label}`);
       }
       await rehydrate('i');
-      console.log('  ✓ I (B1) role lost / moved agency -> 403, flag OFF -> 404 from the commit (cached gate passed); nothing written');
+      console.log('  ✓ I (B1) role lost / moved agency -> 403 from the commit (cached gate passed); nothing written');
 
       // ---- J (N3): venue moved away between validation and commit ----
       const venues0 = (await doc()).venues;
@@ -285,18 +288,16 @@ export default {
       console.log('  ✓ K (N4) replacement is per agency: B\'s invite for the same email stays live');
     }
 
-    // ---- H: flag OFF again ----
+    // ---- H: a stored phaseC false is ignored (always on) ----
     {
-      const before = J(await invitesOf());
       await flag(A, false);
-      const v0 = await ctx.getVersion();
-      const rs = [await create(tA, { email: E('h1'), role: 'mashgiach', venueIds: [A1] }), await list(tA), await revoke(tA, inv1.id)];
-      assert(rs.every((r) => r.status === 404), `H flag OFF again 404: ${rs.map((r) => r.status)}`);
-      await unchanged(v0, 'H');
-      assert(J(await invitesOf()) === before, 'H records untouched');
-      await flag(B, false);
-      console.log('  ✓ H flag OFF again: 404, records untouched');
+      const c = await create(tA, { email: E('h1'), role: 'mashgiach', venueIds: [A1] });
+      const l = await list(tA);
+      const d = await revoke(tA, inv1.id);
+      assert(c.status === 201 && l.status === 200 && d.status === 200, `H stored phaseC false ignored: ${c.status} ${l.status} ${d.status}`);
+      assert((await invitesOf()).some((x) => x.id === c.json.invite.id), 'H the invite was written');
+      console.log('  ✓ H stored phaseC false is ignored: create 201, list 200, revoke 200');
     }
-    return 'Phase C agency only (404 otherwise); create (hash-only, relative one-time link, no-store), list, revoke (idempotent); same team 409; other agencies indistinguishable; fresh authority/flag/venue re-checks; per-agency replacement; no token or hash in doc text, GET, export or sockets';
+    return 'Invites always on (a stored phaseC is ignored); create (hash-only, relative one-time link, no-store), list, revoke (idempotent); same team 409; other agencies indistinguishable; fresh authority/flag/venue re-checks; per-agency replacement; no token or hash in doc text, GET, export or sockets';
   },
 };

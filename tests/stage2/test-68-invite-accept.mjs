@@ -1,13 +1,13 @@
 /**
  * Test 68 (10i): invite-only adds, venue-owner invites, public preview/accept
  * (design v3 [10I-DS3]; v3.1: NO recovery codes anywhere).
- *  U  POST /api/users: flag OFF = a row as today; flag ON = an invite (no row,
+ *  U  POST /api/users (always on, any stored phaseC) = an invite (no row,
  *     password ignored), the same 201 for an unknown and another agency's
  *     email, own team 409, role 'owner' 400.
  *  V  POST /api/venues flag ON: venue + owner invite in ONE commit (the invite
  *     names the new venue); an email of another agency gets the same shape;
  *     a fresh refusal (caller demoted in the stored doc) writes neither.
- *  P  preview: header only, 404 for unknown / revoked / flag OFF; never a
+ *  P  preview: header only, 404 for unknown / revoked; never a
  *     hint whether the email has an account.
  *  N  accept 'new': row with origin invite-new, login works; email taken ->
  *     generic 401 that writes only the counter; used link 404.
@@ -17,7 +17,7 @@
  *     E1 (old tokens 401), choose response, no recovery codes; retry 404.
  *  F  5 failed accepts revoke the invite.
  *  H  an invite made through POST /api/agency/invites is accepted end to end;
- *     flag OFF (fresh) -> 404, nothing created; after a link, flag OFF keeps
+ *     a stored phaseC false (fresh) is ignored -> accepted; after a link, a stored false keeps
  *     the person's writes working (N2).
  *  S  no token or hash in the stored doc (raw), GET lists, admin export, WS.
  */
@@ -60,7 +60,12 @@ export default {
     const invitesOf = async () => ((await doc()).invites || []);
     const rehydrate = async (k) => assert((await hook('inject-fixture', { venues: [{ id: `venue-t68-h${k}-${Date.now()}`, name: 'T68 hydrate', agencyId: B }] })).status === 200, `rehydrate ${k}`);
     const unchanged = async (v, label) => assert((await ctx.getVersion()) === v, `${label}: nothing may be written`);
-    const flag = async (agencyId, enabled) => assert((await hook('phase-c', { agencyId, enabled })).status === 200, `phase-c ${agencyId} ${enabled}`);
+    // Invites always on: there is no flag. `flag` only PLANTS a stored phaseC
+    // value (as old data or the retired 10j route left it) to prove it is ignored.
+    const flag = async (agencyId, enabled) => {
+      const d = await doc();
+      assert((await hook('doc-set-users', { users: d.users, agencies: (d.agencies || []).map((a) => (a.id === agencyId ? { ...a, phaseC: { enabled } } : a)) })).status === 200, `plant phaseC ${agencyId} ${enabled}`);
+    };
     const addMember = (t, body) => call('POST', '/api/users', auth(t), body);
     const preview = (token, extra = {}) => call('GET', '/api/invites/preview', { ...ipH(), ...(token === undefined ? {} : { 'X-Invite-Token': token }), ...extra });
     const accept = (token, mode, password) => call('POST', '/api/invites/accept', ipH(), { token, mode, password });
@@ -90,10 +95,12 @@ export default {
 
     // ---- U: POST /api/users ----
     {
+      // Always on: agency A has NO stored phaseC and still gets an invite (no row, password ignored).
       const off = await addMember(tA, { email: E('off1'), name: 'Off One', role: 'mashgiach', venueId: A1, password: 'stage2-t68-off' });
-      assert((off.status === 200 || off.status === 201) && off.json?.id || off.json?.user, `U flag OFF creates a row as today: ${off.status} ${off.text.slice(0, 120)}`);
-      assert((await rows()).some((u) => u.email === E('off1')), 'U flag OFF row exists');
-      await flag(A, true);
+      assert(off.status === 201 && off.json?.pending === true, `U no stored phaseC: an invite: ${off.status} ${off.text.slice(0, 120)}`);
+      assert(!(await rows()).some((u) => u.email === E('off1')), 'U no stored phaseC: no row');
+      // Planted values (false for A, true for B) are ignored from here on.
+      await flag(A, false);
       await flag(B, true);
       const n0 = (await rows()).length;
       const unknown = await addMember(tA, { email: E('new1'), name: 'New One', role: 'mashgiach', venueId: A1, phoneNumber: '+12025550123', password: 'admin-chosen-secret' });
@@ -114,7 +121,7 @@ export default {
       const ownerInv = await call('POST', '/api/agency/invites', auth(tA), { email: E('own2'), name: 'Owner Body', role: 'owner', venueIds: [A1], expectedVersion: await ctx.getVersion() });
       assert(ownerInv.status === 400 && ownerInv.json?.code === 'INVITE_ROLE_INVALID', `U invites route role owner 400: ${ownerInv.status}`);
       await unchanged(v0, 'U refusals');
-      console.log('  ✓ U flag OFF creates a row; flag ON: invite only (no row, password ignored), same 201 for unknown/other-agency email, own team 409, owner role 400');
+      console.log('  ✓ U always on (no / false / true stored phaseC): invite only (no row, password ignored), same 201 for unknown/other-agency email, own team 409, owner role 400');
     }
 
     // ---- V: venue + owner invite atomically ----
@@ -228,7 +235,7 @@ export default {
       console.log('  ✓ F 5 failed accepts revoke the invite');
     }
 
-    // ---- H: 10h route invite accepted; flag OFF fresh -> 404; N2 ----
+    // ---- H: 10h route invite accepted; a fresh stored phaseC false is ignored; N2 ----
     {
       const c = await call('POST', '/api/agency/invites', auth(tA), { email: E('h1'), name: 'Hana', role: 'mashgiach', venueIds: [A1, A2], expectedVersion: await ctx.getVersion() });
       assert(c.status === 201, `H 10h route create ${c.status} ${c.text.slice(0, 120)}`);
@@ -236,7 +243,7 @@ export default {
       assert(r.status === 200, `H 10h-route invite accepted (${r.status} ${r.text.slice(0, 120)})`);
       const hana = (await rows()).find((u) => u.email === E('h1'));
       assert(hana && hana.venueId === A1 && J(hana.venueAccess || []) === J([A1, A2]), `H venues carried ${J(hana && hana.venueAccess)}`);
-      // flag OFF in the stored doc only: cached preview passes, the commit refuses
+      // phaseC false in the stored doc only: ignored by the cache AND the commit (always on)
       const c2 = await addMember(tA, { email: E('h2'), name: 'Hal', role: 'mashgiach', venueId: A1 });
       const t2 = tokenOf(c2.json.link);
       const users0 = await rows(); const agencies0 = (await doc()).agencies;
@@ -244,18 +251,16 @@ export default {
       assert((await hook('doc-set-users', { users: users0, agencies: agencies0.map((a) => (a.id === A ? { ...a, phaseC: { enabled: false } } : a)) })).status === 200, 'H plant flag OFF');
       const v0 = await ctx.getVersion();
       const off = await accept(t2, 'new', 'hal-own-password');
-      assert(off.status === 404, `H fresh flag OFF -> 404 (${off.status})`);
-      await unchanged(v0, 'H flag OFF');
-      assert(!(await rows()).some((u) => u.email === E('h2')), 'H nothing created');
+      assert(off.status === 200, `H fresh stored phaseC false is ignored -> accepted (${off.status} ${off.text.slice(0, 120)})`);
+      assert((await rows()).some((u) => u.email === E('h2')), 'H the row was created');
       assert((await hook('doc-set-users', { users: users0, agencies: agencies0 })).status === 200, 'H restore');
       await rehydrate('h');
       // N2: flag OFF after a link; the multi person's writes still succeed
       await flag(A, false);
       const tXA = await (async () => { const all = await rows(); const xa = all.find((u) => u.email === E('xb') && u.agencyId === A); return mintToken(baseUrl, xa.id); })();
       const w2 = await call('POST', '/api/auth/change-password', auth(tXA), { currentPassword: PW, newPassword: 'stage2-t68-pw2' });
-      assert(w2.status === 200, `H N2: a write by the multi person after flag OFF succeeds (${w2.status} ${w2.text.slice(0, 120)})`);
-      await flag(A, true);
-      console.log('  ✓ H 10h-route invite accepted with both venues; fresh flag OFF -> 404, nothing created; flag OFF after a link keeps writes working (N2)');
+      assert(w2.status === 200, `H N2: a write by the multi person with a stored phaseC false succeeds (${w2.status} ${w2.text.slice(0, 120)})`);
+      console.log('  ✓ H 10h-route invite accepted with both venues; a fresh stored phaseC false is ignored (accepted); writes keep working (N2)');
     }
 
     // ---- S: no secrets anywhere ----

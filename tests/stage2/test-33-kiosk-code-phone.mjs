@@ -49,6 +49,8 @@ function connectWs(baseUrl, token) {
   });
 }
 
+import { inviteAndAccept, inviteMember, acceptNew } from './invite-helpers.mjs';
+
 export default {
   name: 'Test 33: kiosk code marker + phone number privacy (K1)',
   whatItProves:
@@ -182,18 +184,18 @@ export default {
       wsM.close(); wsA.close();
     }
 
-    // --- 7. POST /users with a phone (admin), bad phone refused ---
+    // --- 7. Add team member (an invite) with a phone (admin), bad phone refused ---
+    // Invites always on: POST /api/users makes a pending invite; the phone rides
+    // the invite and lands on the row when the invitee accepts.
     const mk = async (phoneNumber, n) => {
-      const r = await fetch(`${baseUrl}/api/users`, {
-        method: 'POST', headers: auth(tAdmin),
-        body: JSON.stringify({ email: `new33-${n}-${ts}@test.local`, name: `New ${n}`, role: 'mashgiach', password: 'secret12', venueId: vA, phoneNumber, expectedVersion: await v(), operationId: crypto.randomUUID() }),
-      });
-      return { status: r.status, body: await r.json().catch(() => ({})) };
+      const r = await inviteAndAccept(baseUrl, auth(tAdmin), { email: `new33-${n}-${ts}@test.local`, name: `New ${n}`, role: 'mashgiach', password: 'secret12', venueId: vA, phoneNumber, expectedVersion: await v(), operationId: crypto.randomUUID() });
+      return { status: r.status, body: r.json || {} };
     };
     const nb = await mk('not a phone', 'bad');
     if (nb.status !== 400) throw new Error(`POST bad phone: ${nb.status}`);
     const doc2 = await ctx.getDoc();
     if (doc2.users.some((u) => u.email === `new33-bad-${ts}@test.local`)) throw new Error('user created despite a bad phone');
+    if ((doc2.invites || []).some((x) => x && x.email === `new33-bad-${ts}@test.local`)) throw new Error('invite created despite a bad phone');
     const ng = await mk('860.555.0199', 'good');
     if (ng.status !== 201 || ng.body.user?.phoneNumber !== '+18605550199' || ng.body.user?.hasKioskPin !== false) throw new Error(`POST with phone: ${ng.status} ${JSON.stringify(ng.body.user)}`);
     noSecrets(ng.body.user, 'POST response');

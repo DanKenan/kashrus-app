@@ -496,8 +496,7 @@ export default {
 
     // ---- V: Send invite (10k) revokes a live reset link ----
     {
-      assert((await hook('phase-c', { agencyId: A, enabled: true })).status === 200, 'V flag on');
-      try {
+      {
         const r = await make(tA, U('m2'));
         assert(r.status === 201, `V make ${r.status}`);
         const raw = tokenOf(r.json.link);
@@ -516,8 +515,6 @@ export default {
         assert((await linksOf(U('o'))).some((l) => l.status === 'revoked' && l.revokeReason === 'member-changed'), 'V link revoked member-changed');
         const after = await rows();
         assert((await hook('doc-set-users', { users: after.map((u) => (u.id === U('o') ? stored.find((x) => x.id === U('o')) : u)) })).status === 200, 'V restore o');
-      } finally {
-        await hook('phase-c', { agencyId: A, enabled: false });
       }
       console.log('  ✓ V Send invite revokes the live reset link in its own commit (member-changed); the pending member gets 409');
     }

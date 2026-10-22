@@ -37,7 +37,7 @@ export default {
 
     // Create test users.
     for (const [key, email] of Object.entries(emails)) {
-      const r = await ctx.api('POST', '/api/users', {
+      const r = await ctx.addMember({
         email,
         name: `PW Reset Test ${key}`,
         role: 'mashgiach',
