@@ -1,6 +1,7 @@
 /**
  * Test 72 (10j, [10J-DS2] Agreed): an agency's own admin turns invites (Phase C) ON for their own agency.
  *  R  coordinator / mashgiach / owner / kiosk tokens -> 403, nothing written.
+ *  F  an admin demoted in the stored doc (cache still admin) -> 403 by the fresh in-transaction re-check.
  *  S  admin of A with a body naming B: only A turns ON; B stays OFF; setBy = the admin id.
  *  P1 a planted invalid identity group (same person, two credential owners, two agencies) -> 409 INVITES_PRECHECK_FAILED, nothing written.
  *  P2 an unmigrated row (no personId) in A -> 409; an unmigrated row only in another agency does not block A.
@@ -52,6 +53,7 @@ export default {
         { id: U('o'), email: E('o'), name: 'T72 Owner', role: 'owner', agencyId: A, venueId: vA, avatarColor: 'bg-gold' },
         { id: U('x1'), email: E('x'), name: 'T72 X in A', role: 'mashgiach', agencyId: A, venueId: vA, avatarColor: 'bg-gold' },
         { id: U('c1'), email: E('c1'), name: 'T72 C member', role: 'mashgiach', agencyId: C, venueId: vC, avatarColor: 'bg-gold' },
+        { id: U('adC'), email: E('adc'), name: 'T72 Admin C', role: 'admin', agencyId: C, avatarColor: 'bg-gold' },
       ],
     });
     if (inj.status !== 200) throw new Error(`inject-fixture: ${inj.status}`);
@@ -86,6 +88,21 @@ export default {
       await unchanged(v0, 'R');
       if ((await agencyOf(A)).phaseC) throw new Error('R wrote phaseC');
       details.push('R coordinator/mashgiach/owner/kiosk refused, nothing written');
+    }
+
+    // F: the fresh re-check — an admin demoted in the STORED doc while the server cache still says admin -> 403, nothing written.
+    {
+      const tC = await mintToken(baseUrl, U('adC'));
+      const stored = (await doc()).users;
+      const demoted = stored.map((u) => (u.id === U('adC') ? { ...u, role: 'mashgiach', venueId: vC } : u));
+      if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: demoted })).status !== 200) throw new Error('F plant');
+      const v0 = await ctx.getVersion();
+      const r = await enable(tC);
+      if (r.status !== 403) throw new Error(`F demoted-in-store admin: ${r.status} ${JSON.stringify(r.json)}`);
+      await unchanged(v0, 'F');
+      if ((await agencyOf(C)).phaseC) throw new Error('F wrote phaseC');
+      if ((await ctx.api('POST', '/api/__test__/doc-set-users', { users: stored })).status !== 200) throw new Error('F restore');
+      details.push('F fresh re-check refuses an admin demoted in the store');
     }
 
     // C: client not ready.
