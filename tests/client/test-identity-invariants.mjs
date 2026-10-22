@@ -253,6 +253,14 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   check('10c A5: no global first-match owner lookup remains', !/users\.find\(\(u\) => typeof u\.email === 'string' && u\.email\.trim\(\)\.toLowerCase\(\) === cleanOwnerEmail\)/.test(src) && !/newUsers\.findIndex\(\(u\) => typeof u\.email === 'string' && u\.email\.trim\(\)\.toLowerCase\(\) === cleanOwnerEmail\)/.test(src));
 }
 
+// ---- 10i ([10I-RV1] B1): flag-ON venue creation never hashes ownerPassword
+{
+  const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
+  check('10i venue owner: the hash is computed only off the invite path', /const ownerPasswordHash: string \| null = ownerInviteMode\s*\?\s*null\s*:/.test(src));
+  check('10i venue owner: ownerPasswordHash is the only owner-password hash site', (src.match(/bcrypt\.hashSync\(ownerPassword/g) || []).length === 1);
+  check('10i venue owner: a missing hash refuses instead of creating a passwordless owner', /if \(!ownerPasswordHash\) return \{ conflict:/.test(src));
+}
+
 console.log(`${passed} passed, ${failures} failed`);
 if (failures) { console.error(`${failures} FAILED`); process.exit(1); }
 console.log(`ALL ${passed} passed`);

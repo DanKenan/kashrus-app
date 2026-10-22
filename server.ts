@@ -9343,9 +9343,13 @@ app.post('/api/venues', async (req, res) => {
   const createdAt = new Date().toISOString();
   // Hash the owner password once, outside the transaction (bcrypt is CPU-heavy;
   // the hash is deterministic input to the mutator).
-  const ownerPasswordHash = ownerPassword?.trim()
-    ? bcrypt.hashSync(ownerPassword.trim(), 10)
-    : bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10);
+  // 10i ([10I-RV1] B1): with Phase C ON (cached) the owner gets an invite, so
+  // ownerPassword is never read or hashed and no fallback password is made.
+  const ownerPasswordHash: string | null = ownerInviteMode
+    ? null
+    : ownerPassword?.trim()
+      ? bcrypt.hashSync(ownerPassword.trim(), 10)
+      : bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10);
 
   const newVenue: Venue = {
     id: newVenueId,
@@ -9408,6 +9412,10 @@ app.post('/api/venues', async (req, res) => {
           };
           createdOwner = newUsers[existingOwnerIdx];
         } else {
+          // The cache said Phase C ON (no hash made) but the fresh flag is OFF:
+          // refuse rather than create an owner without a password; a retry
+          // takes the flag-OFF path.
+          if (!ownerPasswordHash) return { conflict: 'Something changed while saving. Please try again.', conflictStatus: 409, conflictCode: 'PHASE_C_CHANGED' };
           const ownerUser: UserProfile = {
             id: ownerUserId,
             agencyId: callerAgencyId,
