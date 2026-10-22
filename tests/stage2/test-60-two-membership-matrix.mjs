@@ -458,10 +458,14 @@ export default {
 
     // ---- L1 / R1 / R2 (10e): login resolves the owner; agency-assisted reset is refused for P ----
     {
-      // L1: login resolves the credential owner X; never a Y session
+      // L1: login resolves the credential owner X; never a Y session.
+      // 10g: a multi person's login returns a choose token naming the owner X;
+      // activating X gives the same credential-owner session as before 10g.
       let lg = await call('POST', '/api/auth/login', jsonH, { email: PE, password: PW });
-      assert(lg.status === 200 && lg.json?.user?.id === X, `L1 login resolves X: ${lg.status} ${lg.text.slice(0, 160)}`);
-      const c = decode(lg.json.token);
+      assert(lg.status === 200 && lg.json?.chooseMembership === true && lg.json?.user === undefined && decode(lg.json.token).cr === X, `L1 login -> chooser for owner X: ${lg.status} ${lg.text.slice(0, 160)}`);
+      const act = await call('POST', '/api/auth/activate', auth(lg.json.token), { membershipId: X });
+      assert(act.status === 200 && act.json?.user?.id === X, `L1 activate X: ${act.status} ${act.text.slice(0, 160)}`);
+      const c = decode(act.json.token);
       assert(J(c).includes(X) && !J(c).includes(Y), `L1 the session is X's ${J(c)}`);
       // R2 (invalid): a made-up token changes nothing
       let v0 = await ctx.getVersion();
@@ -478,8 +482,8 @@ export default {
       assert(rr.status !== 200 && !rr.json?.resetToken, `R1 nothing verifies: ${rr.status}`);
       assert(J(await rowOf(X)) === xs && J(await rowOf(Y)) === ys, 'R1 X/Y unchanged');
       lg = await call('POST', '/api/auth/login', jsonH, { email: PE, password: PW });
-      assert(lg.status === 200 && lg.json?.user?.id === X, `R1 old password still logs in as X: ${lg.status}`);
-      console.log('  ✓ L1/R1/R2 (10e): login resolves X only; agency-assisted reset refused for P; bad tokens change nothing');
+      assert(lg.status === 200 && lg.json?.chooseMembership === true && decode(lg.json.token).cr === X, `R1 old password still logs in (chooser for owner X): ${lg.status}`);
+      console.log('  ✓ L1/R1/R2 (10e): login resolves X only (10g: chooser, then activate X); agency-assisted reset refused for P; bad tokens change nothing');
     }
     await projections('L/R', X, 'T60 X renamed');
 
