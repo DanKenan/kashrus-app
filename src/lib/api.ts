@@ -5,13 +5,65 @@ const TOKEN_KEY = 'shutfey_session_token';
 const KIOSK_DEVICE_KEY = 'kiosk_device';
 const KIOSK_VENUE_NAME_KEY = 'kiosk_venue_name';
 
-/** The paired-tablet credential ('<deviceId>.<deviceSecret>'), stored only on the tablet. */
-export function getKioskDevice(): string | null {
+// ---------------------------------------------------------------------------
+// Item 11a-c (servers #135 user cookie, #137 kiosk cookies): this device moves
+// from the stored token (Authorization: Bearer) to the server's HttpOnly
+// cookies. Every /api call opts in with X-Shutfey-Auth: cookie and same-origin
+// credentials. A stored token still wins (the server reads the cookie only when
+// no Authorization header is sent), so nothing changes until the move is
+// proved: adopt, then GET /api/auth/me WITH the cookie and WITHOUT the token
+// gives the same person (and tablet). Only then is the token deleted; on any
+// failure it is kept and the move is tried again later (plan 9.2).
+// ---------------------------------------------------------------------------
+export const COOKIE_AUTH_HEADER = 'X-Shutfey-Auth';
+export const COOKIE_AUTH_VALUE = 'cookie';
+/** '1' while this device is signed in by the cookie (no token stored). Not a secret. */
+const COOKIE_SESSION_KEY = 'shutfey_cookie_session';
+/** A sign-out on the cookie the server has not confirmed yet (sent again on the next start). */
+const LOGOUT_PENDING_KEY = 'shutfey_logout_pending';
+/** A paired tablet whose device secret now lives only in the device cookie D: 'cookie:<deviceId>'. */
+const KIOSK_DEVICE_COOKIE_PREFIX = 'cookie:';
+
+/** Bumped whenever this device's credential changes (token stored or cleared, cookie on or off). */
+let credentialGeneration = 0;
+/** Set by startCookieSession(): runs the move to the cookie after a token is stored. */
+let onTokenStored: (() => void) | null = null;
+
+function readKey(key: string): string | null {
   try {
-    return localStorage.getItem(KIOSK_DEVICE_KEY);
+    return localStorage.getItem(key);
   } catch {
     return null;
   }
+}
+
+function writeKey(key: string, value: string | null): void {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {
+    // storage unavailable
+  }
+}
+
+/** True while this device is signed in by the server's cookie rather than a stored token. */
+export function isCookieSession(): boolean {
+  return readKey(COOKIE_SESSION_KEY) === '1';
+}
+
+/**
+ * The paired-tablet marker: '<deviceId>.<deviceSecret>' (today), or
+ * 'cookie:<deviceId>' once the secret lives only in the device cookie D.
+ * Truthy = this tablet is paired. Stored only on the tablet.
+ */
+export function getKioskDevice(): string | null {
+  return readKey(KIOSK_DEVICE_KEY);
+}
+
+/** The device secret to send as X-Kiosk-Device (null when the device cookie D proves the tablet). */
+export function getKioskDeviceSecret(): string | null {
+  const device = getKioskDevice();
+  return device && !device.startsWith(KIOSK_DEVICE_COOKIE_PREFIX) ? device : null;
 }
 
 export function setKioskDevice(device: string | null): void {
@@ -58,21 +110,59 @@ export function getSessionToken(): string | null {
 }
 
 export function setSessionToken(token: string | null): void {
+  credentialGeneration++;
   try {
     if (token) localStorage.setItem(TOKEN_KEY, token);
     else localStorage.removeItem(TOKEN_KEY);
   } catch {
     // storage unavailable — requests will just be unauthenticated
   }
+  if (token) {
+    // A fresh sign-in: an older unconfirmed cookie sign-out must never end it.
+    writeKey(LOGOUT_PENDING_KEY, null);
+    // 11a-c: move the new sign-in to the cookie (no-op until the app started it).
+    if (onTokenStored) {
+      const run = onTokenStored;
+      setTimeout(() => run(), 0);
+    }
+  }
 }
 
 export function clearSession(): void {
   setSessionToken(null);
+  writeKey(COOKIE_SESSION_KEY, null);
   try {
     localStorage.removeItem('current_user');
   } catch {
     // ignore
   }
+}
+
+/**
+ * 11a-c: the sign-in headers for a request made with plain fetch: the given
+ * token as Bearer (today's way), else the cookie opt-in when this device is on
+ * the cookie. Send with credentials: 'same-origin'.
+ */
+export function sessionAuthHeaders(token: string | null = getSessionToken()): Record<string, string> {
+  const headers: Record<string, string> = { [COOKIE_AUTH_HEADER]: COOKIE_AUTH_VALUE };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+/** True when a request can be signed in at all: a token, or this device's cookie. */
+export function hasSessionCredential(token: string | null = getSessionToken()): boolean {
+  return !!token || isCookieSession();
+}
+
+/**
+ * What the current sign-in is, as one comparable value: the token, or
+ * 'cookie:<generation>' on the cookie; null = signed out. Changes whenever the
+ * sign-in changes, so a late answer for an older one is recognised.
+ */
+export function sessionCredentialKey(): string | null {
+  const token = getSessionToken();
+  if (token) return token;
+  return isCookieSession() ? `cookie:${credentialGeneration}` : null;
 }
 
 /** Drop-in fetch replacement for /api calls — adds Authorization automatically. */
@@ -189,25 +279,31 @@ function signOutLocally(): void {
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const callerHeaders = new Headers(init.headers || {});
   const callerSetAuth = callerHeaders.has('Authorization');
-  // Headers for one attempt, built from the token stored NOW (a retry after a
+  // Headers for one attempt, built from the sign-in stored NOW (a retry after a
   // wait must not carry a token that was replaced meanwhile).
-  const attemptHeaders = (): { headers: Headers; token: string | null } => {
+  // 11a-c: every call opts in to the cookie; a stored token still wins.
+  const attemptHeaders = (): { headers: Headers; token: string | null; cookieKey: string | null } => {
     const headers = new Headers(callerHeaders);
     const token = getSessionToken();
     if (token && !callerSetAuth) headers.set('Authorization', `Bearer ${token}`);
-    const kioskDevice = getKioskDevice();
+    if (!headers.has(COOKIE_AUTH_HEADER)) headers.set(COOKIE_AUTH_HEADER, COOKIE_AUTH_VALUE);
+    const kioskDevice = getKioskDeviceSecret();
     if (kioskDevice && !headers.has('X-Kiosk-Device')) headers.set('X-Kiosk-Device', kioskDevice);
-    return { headers, token };
+    // Signed in by the cookie on this attempt: no token and no caller credential.
+    const cookieKey = !token && !callerSetAuth ? sessionCredentialKey() : null;
+    return { headers, token, cookieKey };
   };
   const method = (init.method || 'GET').toUpperCase();
   const signInChange = canChangeSignIn(input, method);
   if (signInChange) authChangesInFlight++;
   let res: Response;
   let usedToken: string | null;
+  let usedCookieKey: string | null;
   try {
     let attempt = attemptHeaders();
     usedToken = attempt.token;
-    res = await fetch(input, { ...init, headers: attempt.headers });
+    usedCookieKey = attempt.cookieKey;
+    res = await fetch(input, { credentials: 'same-origin', ...init, headers: attempt.headers });
     // Item 11: the server could not check the sign-in (session store down).
     // A read is simply tried again a little later; a write is handed back to
     // its caller as a failed save ("try again"). Never a sign-out.
@@ -218,7 +314,8 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
         if (init.signal?.aborted) break;
         attempt = attemptHeaders();
         usedToken = attempt.token;
-        res = await fetch(input, { ...init, headers: attempt.headers });
+        usedCookieKey = attempt.cookieKey;
+        res = await fetch(input, { credentials: 'same-origin', ...init, headers: attempt.headers });
       }
     }
     // A sign-in-changing answer counts until its whole body has arrived (the
@@ -248,6 +345,9 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     // stored while it was on its way (a fresh sign-in, a changed password) is
     // kept. Checked after the last await, right before clearing.
     if (usedToken && !wrongCurrentPassword && getSessionToken() === usedToken) signOutLocally();
+    // 11a-c: the same rule on the cookie: only while the cookie sign-in this
+    // request was sent with is still this device's sign-in.
+    else if (!usedToken && usedCookieKey && !wrongCurrentPassword && sessionCredentialKey() === usedCookieKey) signOutLocally();
   }
   return res;
 }
@@ -259,19 +359,53 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
  * caller clears the token right after starting this). A plain fetch, not
  * apiFetch, so a 401 here (an already-ended session) never re-enters sign-out.
  * keepalive lets the request finish if the page navigates away (kiosk mode).
+ *
+ * 11a-c: on the cookie (no token stored) the same call is sent with the
+ * opt-in; the server revokes the session and deletes the cookie (never the
+ * tablet's device cookie). The cookie cannot be deleted from here, so a 503
+ * or a network error is sent again (sessionTiming.storeRetryDelaysMs) and, if
+ * still unconfirmed, again on the next start (until a new sign-in).
  */
 export function endServerSession(token: string | null = getSessionToken()): Promise<void> {
-  if (!token) return Promise.resolve();
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-  const kioskDevice = getKioskDevice();
+  const onCookie = !token && isCookieSession();
+  if (!token && !onCookie) return Promise.resolve();
+  const headers: Record<string, string> = sessionAuthHeaders(token);
+  const kioskDevice = getKioskDeviceSecret();
   if (kioskDevice) headers['X-Kiosk-Device'] = kioskDevice;
+  if (!onCookie) {
+    try {
+      return fetch('/api/auth/logout', { method: 'POST', headers, credentials: 'same-origin', keepalive: true }).then(
+        () => undefined,
+        () => undefined
+      );
+    } catch {
+      return Promise.resolve();
+    }
+  }
+  writeKey(LOGOUT_PENDING_KEY, '1');
+  return sendPendingLogout(headers);
+}
+
+/** 11a-c: true when the server has confirmed the cookie sign-out (2xx), or there was nothing to end (401). */
+async function postLogoutOnCookie(headers: Record<string, string>): Promise<boolean> {
   try {
-    return fetch('/api/auth/logout', { method: 'POST', headers, keepalive: true }).then(
-      () => undefined,
-      () => undefined
-    );
+    const res = await fetch('/api/auth/logout', { method: 'POST', headers, credentials: 'same-origin', keepalive: true });
+    return res.ok || res.status === 401;
   } catch {
-    return Promise.resolve();
+    return false;
+  }
+}
+
+async function sendPendingLogout(headers: Record<string, string>): Promise<void> {
+  const waits = [0, ...sessionTiming.storeRetryDelaysMs];
+  for (const waitMs of waits) {
+    if (waitMs) await sleep(waitMs);
+    // A new sign-in meanwhile cleared the mark: its cookie must not be ended.
+    if (readKey(LOGOUT_PENDING_KEY) !== '1') return;
+    if (await postLogoutOnCookie(headers)) {
+      if (readKey(LOGOUT_PENDING_KEY) === '1' && !getSessionToken() && !isCookieSession()) writeKey(LOGOUT_PENDING_KEY, null);
+      return;
+    }
   }
 }
 
@@ -282,17 +416,20 @@ export function endServerSession(token: string | null = getSessionToken()): Prom
  * the person out. 'ended' = a 401 for the token this device still holds (signed
  * out here, the same way as any 401); 'valid' = the session works; 'unknown' =
  * no answer, 503, a newer token or a sign-in change meanwhile (reconnect later).
+ * 11a-c: the socket's credential may be the cookie ('cookie:<n>' from
+ * sessionCredentialKey()); then the check is sent on the cookie, no token.
  */
 export async function confirmSessionAfterSocketRefusal(
   token: string,
   stillWanted: () => boolean = () => true
 ): Promise<'ended' | 'valid' | 'unknown'> {
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-  const kioskDevice = getKioskDevice();
+  const onCookie = token.startsWith('cookie:');
+  const headers: Record<string, string> = sessionAuthHeaders(onCookie ? null : token);
+  const kioskDevice = getKioskDeviceSecret();
   if (kioskDevice) headers['X-Kiosk-Device'] = kioskDevice;
   let res: Response;
   try {
-    res = await fetch('/api/agencies/current', { headers });
+    res = await fetch('/api/agencies/current', { headers, credentials: 'same-origin' });
   } catch {
     return 'unknown';
   }
@@ -301,12 +438,176 @@ export async function confirmSessionAfterSocketRefusal(
     // After the last await: a token stored meanwhile is a newer session, a
     // sign-in change on its way may store one, and a socket the client dropped
     // or replaced no longer speaks for this device — in each case keep it.
-    if (getSessionToken() !== token || signInChangePending() || !stillWanted()) return 'unknown';
+    if (sessionCredentialKey() !== token || signInChangePending() || !stillWanted()) return 'unknown';
     applyKioskUnpaired(code);
     signOutLocally();
     return 'ended';
   }
   return res.ok ? 'valid' : 'unknown';
+}
+
+// ---------------------------------------------------------------------------
+// 11a-c: the move from the stored token to the cookie, and the start check.
+// ---------------------------------------------------------------------------
+
+/** An endpoint the server does not have (an older server): today's way stays, for this page load. */
+let cookieMoveUnsupported = false;
+let syncRunning: Promise<void> | null = null;
+let syncAgain = false;
+
+interface MeAnswer { status: number; userId?: string; auth?: string; kiosk?: { venueId?: string; deviceId?: string } }
+
+async function readMe(headers: Record<string, string>): Promise<MeAnswer> {
+  try {
+    const res = await fetch('/api/auth/me', { headers, credentials: 'same-origin', cache: 'no-store' });
+    if (!res.ok) return { status: res.status };
+    const body = await res.json().catch(() => null);
+    const userId = body && body.user && typeof body.user.id === 'string' ? body.user.id : undefined;
+    const kiosk = body && body.kiosk && typeof body.kiosk === 'object' ? body.kiosk : undefined;
+    return { status: res.status, userId, auth: body ? body.auth : undefined, kiosk };
+  } catch {
+    return { status: 0 };
+  }
+}
+
+/**
+ * One try at moving the stored token to the cookie. Returns without changing
+ * anything unless every step answered as expected:
+ *  1. GET /api/auth/me with the token: who it is (and which tablet). 404 = older server.
+ *  2. POST /api/auth/session/adopt (or /api/kiosk/session/adopt on a tablet)
+ *     with the token: 200 sets the cookie. 404 or 403 = keep today's way.
+ *  3. GET /api/auth/me with the cookie only (no token, no device header): the
+ *     same person (and tablet), auth 'cookie'.
+ *  4. No sign-in change on its way and the same token still stored: switch to
+ *     the cookie and delete the token (a tablet keeps only 'cookie:<deviceId>').
+ * 401, 503, offline or anything else: keep the token; tried again on the next
+ * start or the next stored token. Never a sign-out (only apiFetch signs out).
+ */
+async function moveTokenToCookie(token: string): Promise<void> {
+  const deviceSecret = getKioskDeviceSecret();
+  const bearer: Record<string, string> = sessionAuthHeaders(token);
+  if (deviceSecret) bearer['X-Kiosk-Device'] = deviceSecret;
+  const before = await readMe(bearer);
+  if (before.status === 404) {
+    cookieMoveUnsupported = true;
+    return;
+  }
+  if (before.status !== 200 || !before.userId) return;
+  const onTablet = !!before.kiosk;
+  if (onTablet && (!before.kiosk?.deviceId || !before.kiosk?.venueId)) return;
+  let adopted: Response;
+  try {
+    adopted = await fetch(onTablet ? '/api/kiosk/session/adopt' : '/api/auth/session/adopt', {
+      method: 'POST',
+      headers: bearer,
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+  } catch {
+    return;
+  }
+  if (adopted.status === 404 || adopted.status === 403) {
+    cookieMoveUnsupported = true;
+    return;
+  }
+  if (!adopted.ok) return;
+  const after = await readMe(sessionAuthHeaders(null));
+  if (after.status !== 200 || after.auth !== 'cookie' || after.userId !== before.userId) return;
+  if (onTablet !== !!after.kiosk) return;
+  if (onTablet && (after.kiosk?.deviceId !== before.kiosk?.deviceId || after.kiosk?.venueId !== before.kiosk?.venueId)) return;
+  // A sign-in change (change password, merge, switch agency) may still store a newer token.
+  if (!(await waitForSignInChangesToSettle())) return;
+  // After the last await: only the token that was moved is deleted.
+  if (getSessionToken() !== token || getKioskDeviceSecret() !== deviceSecret) return;
+  writeKey(COOKIE_SESSION_KEY, '1');
+  writeKey(LOGOUT_PENDING_KEY, null);
+  if (onTablet && deviceSecret) setKioskDevice(`${KIOSK_DEVICE_COOKIE_PREFIX}${before.kiosk?.deviceId}`);
+  setSessionTokenQuietly(null);
+}
+
+/** Clears the stored token without starting another move (the cookie now carries the sign-in). */
+function setSessionTokenQuietly(token: string | null): void {
+  credentialGeneration++;
+  writeKey(TOKEN_KEY, token);
+}
+
+async function syncOnce(): Promise<void> {
+  const token = getSessionToken();
+  if (token) {
+    if (!cookieMoveUnsupported) await moveTokenToCookie(token);
+    return;
+  }
+  if (isCookieSession()) {
+    // Start check on the cookie: who is signed in. apiFetch's rules apply:
+    // a 401 signs out, a 503 is tried again and is never a sign-out.
+    try {
+      await apiFetch('/api/auth/me', { cache: 'no-store' });
+    } catch {
+      // offline: stay signed in, the next request will tell
+    }
+    return;
+  }
+  // Signed out with an unconfirmed cookie sign-out: send it again.
+  if (readKey(LOGOUT_PENDING_KEY) === '1') {
+    const headers = sessionAuthHeaders(null);
+    const kioskDevice = getKioskDeviceSecret();
+    if (kioskDevice) headers['X-Kiosk-Device'] = kioskDevice;
+    await sendPendingLogout(headers);
+  }
+}
+
+/** Runs the move / start check once at a time; a request meanwhile runs it once more afterwards. */
+export function syncCookieSession(): Promise<void> {
+  if (syncRunning) {
+    syncAgain = true;
+    return syncRunning;
+  }
+  syncRunning = (async () => {
+    try {
+      do {
+        syncAgain = false;
+        await syncOnce();
+      } while (syncAgain);
+    } finally {
+      syncRunning = null;
+    }
+  })();
+  return syncRunning;
+}
+
+/**
+ * Called once by the app at start: checks the sign-in now (GET /api/auth/me,
+ * or the move of a stored token to the cookie) and moves every token stored
+ * later (a new sign-in). Returns a function that stops the later moves.
+ */
+export function startCookieSession(): () => void {
+  const run = () => {
+    void syncCookieSession();
+  };
+  onTokenStored = run;
+  run();
+  return () => {
+    if (onTokenStored === run) onTokenStored = null;
+  };
+}
+
+/**
+ * 11a-c, kiosk clean slate (?kiosk=1): the stored token is forgotten as
+ * today; the server session behind it, and any sign-in cookie this browser
+ * holds (U, or a kiosk K), is ended too, so a cookie cannot carry the previous
+ * person into kiosk mode. The tablet's device cookie D is kept.
+ */
+export function endSessionForKioskEntry(): void {
+  const token = getSessionToken();
+  if (token || isCookieSession()) void endServerSession(token);
+  credentialGeneration++;
+  writeKey(COOKIE_SESSION_KEY, null);
+}
+
+/** Tests only: forget what this page load learned about the server. */
+export function resetCookieSessionForTests(): void {
+  cookieMoveUnsupported = false;
+  syncAgain = false;
 }
 
 // ---------------------------------------------------------------------------

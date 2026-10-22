@@ -4,7 +4,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useMinWidth } from '../lib/useMinWidth';
 import { ConfirmModal } from './ConfirmModal';
-import { clearSession, endServerSession } from '../lib/api';
+import { clearSession, endServerSession, sessionAuthHeaders } from '../lib/api';
 import { 
   CheckCircle2, 
   Wifi, 
@@ -568,8 +568,10 @@ export const Header: React.FC<HeaderProps> = ({
                         onClick={async () => {
                           setUserMenuOpen(false);
                           try {
+                            // 11a-c: the stored token, else this device's cookie.
                             const res = await fetch('/api/admin/export', {
-                              headers: { 'Authorization': `Bearer ${localStorage.getItem('shutfey_session_token')}` }
+                              headers: sessionAuthHeaders(),
+                              credentials: 'same-origin',
                             });
                             if (!res.ok) throw new Error('Export failed');
                             const blob = await res.blob();

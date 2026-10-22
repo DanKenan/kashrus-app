@@ -9,6 +9,8 @@
 // session of A and B ends, so a 401 here can mean "it went through". The screen
 // then says which email to sign in with instead of silently signing out.
 
+import { sessionAuthHeaders } from './api';
+
 export type MergeMode = 'merge-into' | 'bring-in';
 
 export interface MergeInput {
@@ -67,7 +69,9 @@ export async function mergeAccounts(mode: MergeMode, input: MergeInput, operatio
   try {
     const res = await fetch(MERGE_ROUTE[mode], {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}) },
+      // 11a-c: the token as Bearer, else this device's cookie (opt-in).
+      headers: { 'Content-Type': 'application/json', ...sessionAuthHeaders(sessionToken) },
+      credentials: 'same-origin',
       cache: 'no-store',
       body: JSON.stringify(mergeBody(mode, input, operationId)),
     });

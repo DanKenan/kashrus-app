@@ -1,5 +1,5 @@
 import { ServerBroadcastMessage } from '../types';
-import { getSessionToken, getKioskDevice, waitForSignInChangesToSettle, confirmSessionAfterSocketRefusal } from './api';
+import { getSessionToken, getKioskDeviceSecret, sessionCredentialKey, waitForSignInChangesToSettle, confirmSessionAfterSocketRefusal } from './api';
 
 /**
  * Item 11 client part 1: wait before reconnect attempt N (0-based). The first
@@ -47,8 +47,13 @@ class RealtimeSocket {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       // Session token authenticates the socket; the server scopes all
       // real-time data to the token owner's agency.
-      const token = getSessionToken();
-      const wsUrl = `${protocol}//${window.location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+      // 11a-c: the stored token as today (?token=), or the cookie (?auth=cookie,
+      // the browser sends it on the upgrade); token is this socket's credential
+      // key (the token, or 'cookie:<n>'), compared after a 4401.
+      const token = sessionCredentialKey();
+      const storedToken = getSessionToken();
+      const query = storedToken ? `?token=${encodeURIComponent(storedToken)}` : token ? '?auth=cookie' : '';
+      const wsUrl = `${protocol}//${window.location.host}/ws${query}`;
 
       const sock = new WebSocket(wsUrl);
       const generation = ++this.generation;
@@ -68,7 +73,7 @@ class RealtimeSocket {
         // The server sends nothing until this verifies. On a phone socket
         // (no device credential stored) nothing is sent, and the server
         // ignores an unexpected frame there anyway.
-        const deviceCredential = getKioskDevice();
+        const deviceCredential = getKioskDeviceSecret();
         if (deviceCredential) {
           try {
             sock.send(JSON.stringify({ type: 'KIOSK_DEVICE', credential: deviceCredential }));
@@ -141,7 +146,7 @@ class RealtimeSocket {
     if (!token) return;
     const settled = await waitForSignInChangesToSettle();
     if (generation !== this.generation || this.socket) return;
-    const current = getSessionToken();
+    const current = sessionCredentialKey();
     if (!current) return;
     if (current !== token) {
       this.connect(this.currentUserEmail, this.currentUserName);

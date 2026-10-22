@@ -59,7 +59,7 @@ import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
-import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice } from './lib/api';
+import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry } from './lib/api';
 import { noVenueMessage } from './lib/venueRemoved';
 
 const DEFAULT_USERS: User[] = [
@@ -143,6 +143,9 @@ export default function App() {
         localStorage.removeItem('kiosk_venue_id');
         // Kiosk is a clean slate — clear any existing user session so the
         // tablet doesn't leak the previous user's agency context.
+        // 11a-c: the session behind it is ended on the server too (token or
+        // cookie), so a sign-in cookie cannot carry the previous user in.
+        endSessionForKioskEntry();
         try {
           localStorage.removeItem('shutfey_session_token');
           localStorage.removeItem('shutfey_user');
@@ -219,6 +222,10 @@ export default function App() {
   // intentionally starts with currentUser === null, so this must NOT clear
   // the saved session — logout and "Use a different account" remove it
   // explicitly in their own handlers.
+
+  // 11a-c: check the sign-in at start (GET /api/auth/me on the cookie) and
+  // move a stored token, now and after every new sign-in, to the cookie.
+  useEffect(() => startCookieSession(), []);
 
   // Expired/revoked token: any API 401 drops back to the login screen.
   useEffect(() => {
