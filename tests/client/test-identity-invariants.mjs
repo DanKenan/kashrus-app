@@ -219,7 +219,13 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   check('…once inside the 10i accept handler', producers.filter(inAccept).length === 1);
   check('…and once inside the 10M register-existing handler', producers.filter(inReg).length === 1);
   const owners = [...src.matchAll(/firstMultiOwnerIds:\s*\[/g)].map((m) => m.index);
-  check(`firstMultiOwnerIds is produced only by the accept and register-existing handlers (found ${owners.length})`, owners.length === 2 && owners.filter(inAccept).length === 1 && owners.filter(inReg).length === 1);
+  // 10M part 2: the account merge (accountMergeRoute) is the third producer (a single-row survivor's first multi).
+  const mergeAt = src.indexOf('async function accountMergeRoute(');
+  const mergeEnd = mergeAt >= 0 ? src.indexOf("\napp.post('/api/account/merge-into'", mergeAt) : -1;
+  const inMerge = (p) => mergeAt >= 0 && p > mergeAt && p < mergeEnd;
+  check(`firstMultiOwnerIds is produced only by the accept, register-existing and account-merge handlers (found ${owners.length})`, owners.length === 3 && owners.filter(inAccept).length === 1 && owners.filter(inReg).length === 1 && owners.filter(inMerge).length === 1);
+  const merges = [...src.matchAll(/personMerge:\s*\{/g)].map((m) => m.index);
+  check(`personMerge is produced only by the account-merge handler (found ${merges.length})`, merges.length === 1 && merges.filter(inMerge).length === 1);
   check('the growth allowance is derived from the joins the enforcement accepted', /allowGrowthRowIds: acceptedJoins/.test(src) && !/allowGrowthRowIds:\s*(req|body|new Set\(\s*req)/.test(src));
   const setters = [...src.matchAll(/credentialOriginSetById:\s*\{\s*\[([A-Za-z.]+)\]:\s*'([a-z-]+)'/g)].map((m) => m[2]).sort();
   // Invites always on (#122): add-member and owner creation no longer set a password, so no 'admin' writer is left.
@@ -229,7 +235,8 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   check("'invite-new' writers: 10i accept (new person) + 10k setup accept", (src.match(/\]:\s*'invite-new'/g) || []).length === 2);
   const keepers = (src.match(/passwordKeepsOriginIds:/g) || []).length;
   check(`passwordKeepsOriginIds used only by change-password, the login hash upgrade and 10f recovery (found ${keepers})`, keepers === 3);
-  check('commitState runs the checker in applyIdentityInvariant', /checkMembershipInvariants\(beforeUsers, users, agencies, acceptedJoins\.size/.test(src));
+  check('commitState runs the checker in applyIdentityInvariant', /checkMembershipInvariants\(beforeUsers, users, agencies, \{ \.\.\.\(acceptedJoins\.size \? \{ allowGrowthRowIds: acceptedJoins \} : \{\}\), \.\.\.mergeOpt \}\)/.test(src));
+  check('…and mergePersons comes only from the outcome\'s personMerge', /const mergeOpt = extra\.personMerge \? \{ mergePersons: \{ fromPersonId: extra\.personMerge\.fromPersonId, toPersonId: extra\.personMerge\.toPersonId \} \} : \{\};/.test(src));
   check('both commit paths call applyIdentityInvariant', (src.match(/outcome\.doc = applyIdentityInvariant\(/g) || []).length === 2);
 }
 
