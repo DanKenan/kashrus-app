@@ -37,6 +37,7 @@ export const SERVER_ONLY_USER_FIELDS = [
   'personId', 'venueAccess', 'isPrimaryAdmin', 'tokenEpoch',
   'credentialOwner', 'credentialOrigin', 'recoveryCodeHashes', 'recoveryFailures', 'joinedAt',
   'credentialPending', // 10k: 'invite' while a member's admin-set password is revoked (Send invite)
+  'resetSuspended', // 10L: { linkId, at, byAgencyId } while a membership is paused after another agency's reset link
 ] as const;
 
 /**
@@ -178,6 +179,24 @@ export interface IdentityEnforceOptions {
    */
   credentialPendingWriteById?: ReadonlyMap<string, 'set' | 'clear'>;
   /**
+   * 10L ([DS1 B4], [DS2 N1]): the BEFORE and AFTER resetLinks of the same
+   * commit (commitState passes the authoritative arrays, never the outcome's
+   * claim), and the two writers of resetSuspended:
+   *  - resetSuspension (the reset-link accept): `set` rows get the pause
+   *    record, `clear` rows lose theirs; honoured only when linkId is
+   *    'pending' in BEFORE and 'used' in AFTER. set: a row of the link's
+   *    person in ANOTHER agency, with no record before, and the value is
+   *    exactly { linkId, at: link.usedAt, byAgencyId: link.agencyId }.
+   *    clear: only the link's own memberId.
+   *  - resetConfirm (an admin's confirm): clears rowId's record when the
+   *    AFTER users hold adminId as an admin of that row's agency.
+   * Any other difference is restored to the BEFORE value and reported.
+   */
+  resetLinksBefore?: readonly any[];
+  resetLinksAfter?: readonly any[];
+  resetSuspension?: { linkId: string; set: ReadonlySet<string>; clear: ReadonlySet<string> };
+  resetConfirm?: { rowId: string; adminId: string };
+  /**
    * Called (row id + field name only, never values) when a mutator's output
    * tried to set, change or remove a server-only identity field. The change
    * is reverted, and the caller logs it, so it is never silent.
@@ -214,9 +233,13 @@ export interface IdentityOutcomeFields {
   firstMultiOwnerIds?: string[];
   /** 10k: row id → 'set' | 'clear' of credentialPending (see credentialPendingWriteById). */
   credentialPendingWriteById?: Record<string, 'set' | 'clear'>;
+  /** 10L: the reset-link accept's pause writer (see resetSuspension). */
+  resetSuspension?: { linkId: string; set: string[]; clear: string[] };
+  /** 10L: an admin's confirm of a paused membership (see resetConfirm). */
+  resetConfirm?: { rowId: string; adminId: string };
 }
 
-export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById' | 'firstMultiOwnerIds' | 'credentialPendingWriteById'> {
+export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null | undefined): Pick<IdentityEnforceOptions, 'credentialOriginSetById' | 'passwordKeepsOriginIds' | 'newMembership' | 'recoveryWriteById' | 'firstMultiOwnerIds' | 'credentialPendingWriteById' | 'resetSuspension' | 'resetConfirm'> {
   const o: any = outcome || {};
   const asMap = (r: any) => (r && typeof r === 'object' && !Array.isArray(r) && Object.keys(r).length ? new Map<string, string>(Object.entries(r).filter(([, v]) => typeof v === 'string') as [string, string][]) : undefined);
   return {
@@ -232,8 +255,40 @@ export function identityOptionsFromOutcome(outcome: IdentityOutcomeFields | null
       o.credentialPendingWriteById && typeof o.credentialPendingWriteById === 'object' && !Array.isArray(o.credentialPendingWriteById) && Object.keys(o.credentialPendingWriteById).length
         ? new Map<string, 'set' | 'clear'>(Object.entries(o.credentialPendingWriteById).filter(([, v]) => v === 'set' || v === 'clear') as [string, 'set' | 'clear'][])
         : undefined,
+    resetSuspension:
+      o.resetSuspension && typeof o.resetSuspension === 'object' && typeof o.resetSuspension.linkId === 'string' && o.resetSuspension.linkId
+        ? {
+            linkId: o.resetSuspension.linkId,
+            set: new Set<string>((Array.isArray(o.resetSuspension.set) ? o.resetSuspension.set : []).filter((x: any) => typeof x === 'string')),
+            clear: new Set<string>((Array.isArray(o.resetSuspension.clear) ? o.resetSuspension.clear : []).filter((x: any) => typeof x === 'string')),
+          }
+        : undefined,
+    resetConfirm:
+      o.resetConfirm && typeof o.resetConfirm === 'object' && typeof o.resetConfirm.rowId === 'string' && typeof o.resetConfirm.adminId === 'string'
+        ? { rowId: o.resetConfirm.rowId, adminId: o.resetConfirm.adminId }
+        : undefined,
   };
 }
+
+/** 10L: the record shape a pause carries (anything else is not a record). */
+function isSuspensionRecord(v: any): boolean {
+  return !!v && typeof v === 'object' && !Array.isArray(v) && typeof v.linkId === 'string' && !!v.linkId && typeof v.at === 'string' && typeof v.byAgencyId === 'string' &&
+    Object.keys(v).length === 3;
+}
+
+/** 10L: the link consumed by THIS commit (pending in BEFORE, used in AFTER), else null. */
+function linkConsumedHere(opts: IdentityEnforceOptions): any | null {
+  const id = opts.resetSuspension?.linkId;
+  if (!id) return null;
+  const b = (Array.isArray(opts.resetLinksBefore) ? opts.resetLinksBefore : []).find((l: any) => l && l.id === id);
+  const a = (Array.isArray(opts.resetLinksAfter) ? opts.resetLinksAfter : []).find((l: any) => l && l.id === id);
+  if (!b || !a || b.status !== 'pending' || a.status !== 'used') return null;
+  // identity of the link must not change in the same commit
+  if (a.personId !== b.personId || a.agencyId !== b.agencyId || a.memberId !== b.memberId) return null;
+  if (typeof a.usedAt !== 'string' || !a.usedAt) return null;
+  return a;
+}
+
 
 /** 10f: the row is its person's credential row in `rows` (single-row person: itself; multi: the credentialOwner). */
 function isCredentialRowIn(rows: readonly any[], row: any): boolean {
@@ -340,6 +395,39 @@ export function enforceIdentityFields(
         if (opts.onViolation && row.credentialPending !== undefined && row.credentialPending !== out.credentialPending && w === undefined)
           opts.onViolation(row.id, 'credentialPending');
       }
+      // 10L ([DS1 B4/B5]): resetSuspended — kept as stored unless one of its two writers says otherwise.
+      {
+        const was = isSuspensionRecord(prev.resetSuspended) ? prev.resetSuspended : undefined;
+        let next: any = was;
+        let sanctioned = false;
+        const rs = opts.resetSuspension;
+        const wantsSet = !!rs && rs.set.has(row.id);
+        const wantsClear = !!rs && rs.clear.has(row.id);
+        const wantsConfirm = !!opts.resetConfirm && opts.resetConfirm.rowId === row.id;
+        if (wantsSet || wantsClear || wantsConfirm) {
+          const link = (wantsSet || wantsClear) ? linkConsumedHere(opts) : null;
+          if (wantsSet && !wantsClear && !wantsConfirm) {
+            const expected = link ? { linkId: String(link.id), at: String(link.usedAt), byAgencyId: String(link.agencyId) } : null;
+            const ok = !!link && !!expected &&
+              typeof prev.personId === 'string' && prev.personId !== '' && prev.personId === link.personId &&
+              (prev.agencyId || 'agency-hkc') !== link.agencyId && (out.agencyId || 'agency-hkc') === (prev.agencyId || 'agency-hkc') &&
+              was === undefined && JSON.stringify(row.resetSuspended) === JSON.stringify(expected);
+            if (ok) { next = expected; sanctioned = true; }
+          } else if (wantsClear && !wantsSet && !wantsConfirm) {
+            if (link && row.id === link.memberId) { next = undefined; sanctioned = true; }
+          } else if (wantsConfirm && !wantsSet && !wantsClear) {
+            const adminId = opts.resetConfirm!.adminId;
+            const agency = prev.agencyId || 'agency-hkc';
+            const admin = (Array.isArray(afterUsers) ? afterUsers : []).find((u: any) => u && u.id === adminId);
+            if (admin && admin.role === 'admin' && (admin.agencyId || 'agency-hkc') === agency && (out.agencyId || 'agency-hkc') === agency) { next = undefined; sanctioned = true; }
+          }
+          if (!sanctioned && opts.onViolation) opts.onViolation(row.id, 'resetSuspended');
+        }
+        if (next !== undefined) out.resetSuspended = JSON.parse(JSON.stringify(next));
+        else delete out.resetSuspended;
+        if (!sanctioned && opts.onViolation && row.resetSuspended !== undefined && JSON.stringify(row.resetSuspended) !== JSON.stringify(out.resetSuspended))
+          opts.onViolation(row.id, 'resetSuspended');
+      }
     } else {
       // 10b: a new row is its own person unless newMembership names an
       // existing person with the same email (10i accept only).
@@ -353,6 +441,8 @@ export function enforceIdentityFields(
       out.personId = joinOk ? joinPid : row.id;
       if (joinPid !== undefined && !joinOk && opts.onViolation) opts.onViolation(row.id, 'newMembership');
       if (opts.onViolation) for (const f of PRESERVED_CREDENTIAL_FIELDS) if (row[f] !== undefined) opts.onViolation(row.id, f);
+      // 10L: a new row is never born paused (the field was stripped above).
+      if (opts.onViolation && row.resetSuspended !== undefined) opts.onViolation(row.id, 'resetSuspended');
     }
     // 10b: credentialOrigin — set only through credentialOriginSetById; an
     // existing row keeps its stored value unless its password changed outside

@@ -48,6 +48,8 @@ const SECRET_WORDS = [
   // 10f: recovery-code hashes and the per-person failure record (owner row)
   'recoverycodehashes',
   'recoveryfailures',
+  // 10L: a reset link's credential stamp (resetTokenHash is caught by the Token stem)
+  'credentialstamp',
   'kioskpin',
   'pairingcode',
   'devicesecret',
@@ -62,7 +64,7 @@ const SECRET_WORDS = [
   'token',
 ];
 
-function isSecretKey(key: string): boolean {
+export function isSecretKey(key: string): boolean {
   const lower = key.toLowerCase();
   // Hash-suffixed secret names: "passwordHash" → stem "password" is secret,
   // "kioskPinHash" → stem "kioskPin" is secret. (Forward defence: PR 2a's PIN
