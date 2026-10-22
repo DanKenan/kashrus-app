@@ -344,7 +344,7 @@ export const KioskCodeDialog: React.FC<KioskCodeDialogProps> = ({
                   <button
                     type="button"
                     onClick={() => setConfirmRemove(true)}
-                    className="inline-flex items-center gap-1.5 text-xs font-semibold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
+                    className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold cursor-pointer bg-surface border border-line-control text-ink hover:bg-sunken"
                   >
                     <Trash2 className="w-3.5 h-3.5" /> Remove code
                   </button>

@@ -183,7 +183,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
             </div>
             <div className="flex-1 min-w-0">
               <h2 className="text-base font-bold text-ink flex flex-col items-start sm:flex-row sm:flex-wrap sm:items-center gap-2">
-                <span className="min-w-0">Kosher Venues & Restaurants Platform Hub</span>
+                <span className="min-w-0">Venues</span>
                 <span className="tnum text-xs font-semibold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink border border-gold/40 shrink-0">
                   {venues.length} Facilities
                 </span>
@@ -288,7 +288,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                           </h3>
                           {isCurrent && (
                             <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink shrink-0">
-                              Active Platform
+                              Current venue
                             </span>
                           )}
                         </div>
@@ -313,7 +313,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                           </button>
                         )}
                         <button
-                          title="Delete Venue Platform"
+                          title="Delete venue"
                           onClick={(e) => handleDelete(e, venue)}
                           className="pressable flex items-center gap-1 text-xs p-1.5 rounded-lg transition cursor-pointer shrink-0 bg-surface border border-line-control text-bad hover:bg-sunken"
                         >
@@ -389,7 +389,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                             : 'bg-surface border border-line-control text-ink hover:bg-sunken'
                         }`}
                       >
-                        <span>{isCurrent ? 'Viewing Now' : 'Switch to Platform'}</span>
+                        <span>{isCurrent ? 'Open now' : 'Open venue'}</span>
                         <ArrowRight className="w-3 h-3" />
                       </button>
                     </div>

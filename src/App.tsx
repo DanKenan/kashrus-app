@@ -991,7 +991,7 @@ export default function App() {
     if (typeof window !== 'undefined') {
       localStorage.setItem('selected_venue_id', newVenue.id);
     }
-    showToast(`Platform for "${newVenue.name}" successfully provisioned!`);
+    showToast(`${newVenue.name} is ready.`);
   };
 
   const handleDeleteVenue = async (venueId: string) => {
@@ -1224,7 +1224,15 @@ export default function App() {
     if (currentUser && currentUser.id === userId) {
       setCurrentUser(data.user);
     }
-    showToast(`Updated permissions for ${data.user.name}`);
+    // QA2 #28: say what was saved.
+    const who = (data.user.name || '').trim().split(/\s+/)[0] || data.user.name;
+    if (updates.kioskPin !== undefined) {
+      if (updates.kioskPin) showToast(`Kiosk code saved for ${who}`);
+    } else if ((updates as { phoneNumber?: string }).phoneNumber !== undefined && updates.role === undefined && updates.permissions === undefined) {
+      showToast(`Phone number saved for ${who}`);
+    } else {
+      showToast(`Updated ${data.user.name}`);
+    }
   };
 
   // Delete/Remove user from team roster

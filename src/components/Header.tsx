@@ -267,10 +267,10 @@ export const Header: React.FC<HeaderProps> = ({
                 id="header-factory-audit-btn"
                 onClick={onOpenFactoryAudit}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl text-gold-ink bg-gold-wash hover:bg-gold/15 border border-gold/40 transition cursor-pointer tactile-1 shrink-0"
-                title="Factory Floor & Airtable Ingredients Audit"
+                title="Ingredients audit"
               >
                 <Factory className="w-3.5 h-3.5 text-gold-deep" />
-                <span>Factory Ingredients Audit</span>
+                <span>Ingredients audit</span>
               </button>
             )}
 
@@ -353,10 +353,7 @@ export const Header: React.FC<HeaderProps> = ({
                     >
                       <span className="flex items-center gap-2">
                         <Factory className="w-4 h-4 text-gold-deep" />
-                        <span>Factory Ingredients Audit</span>
-                      </span>
-                      <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-gold/15 text-gold-deep border border-gold/30 font-bold uppercase">
-                        Airtable
+                        <span>Ingredients audit</span>
                       </span>
                     </button>
                   )}
@@ -727,10 +724,7 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <span className="flex items-center gap-2">
                 <Factory className="w-4 h-4 text-gold-deep" />
-                <span>Factory Ingredients Audit (Airtable)</span>
-              </span>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-gradient-to-b from-gold to-gold-deep text-white">
-                Live
+                <span>Ingredients audit</span>
               </span>
             </button>
           )}

@@ -35,8 +35,8 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
       return;
     }
 
-    if (newPassword.length < 6) {
-      setError('New password must be at least 6 characters long.');
+    if (newPassword.length < 8) { // QA2 #14: the server asks for 8 (same as reset)
+      setError('New password must be at least 8 characters long.');
       return;
     }
 
@@ -101,7 +101,7 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
             <div>
               <h2 className="text-sm font-bold text-ink">Change Password</h2>
               <p className="text-xs text-ink-soft">
-                Update credentials for {currentUser.name}
+                Choose a new password for {currentUser.name}
               </p>
             </div>
           </div>
@@ -151,7 +151,7 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
 
               <div>
                 <label className="block text-xs font-bold text-ink-soft mb-1">
-                  New Password (min 6 characters)
+                  New Password (min 8 characters)
                 </label>
                 <input
                   type={showPass ? 'text' : 'password'}
@@ -181,7 +181,7 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowPass(!showPass)}
-                  className="text-xs font-semibold flex items-center gap-1 bg-surface border border-line-control text-ink hover:bg-sunken"
+                  className="min-h-11 rounded-lg px-3 text-xs font-semibold flex items-center gap-1.5 bg-surface border border-line-control text-ink hover:bg-sunken"
                 >
                   {showPass ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                   <span>{showPass ? 'Hide passwords' : 'Show passwords'}</span>

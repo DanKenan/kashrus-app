@@ -232,7 +232,7 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-bold text-ink">
-                  Factory Kashrut & Airtable Ingredients Audit
+                  Ingredients audit
                 </h2>
                 <span className="text-xs px-2 py-0.5 rounded-full font-bold uppercase bg-sunken text-ink-soft border border-line">
                   Industrial Plant
@@ -241,8 +241,6 @@ export const FactoryAuditHubModal: React.FC<FactoryAuditHubModalProps> = ({
               <p className="text-sm text-ink-soft flex items-center gap-1.5 mt-0.5">
                 <Building2 className="w-3.5 h-3.5 text-ink-soft" />
                 <span className="font-semibold text-ink-soft">{currentVenue.name}</span>
-                <span>•</span>
-                <span>Assigned Mashgiach: {currentUser?.name}</span>
               </p>
             </div>
           </div>

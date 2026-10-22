@@ -197,7 +197,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       {/* Footer */}
       <footer className="relative z-10 w-full px-4 py-5 text-center">
         <p className="text-[11px] text-ink-faint">
-          Hartford Kashrut Commission (HKC) • Shutfey — Institutional Kashrus Oversight
+          Shutfey — Kashrus oversight for agencies
         </p>
       </footer>
     </div>

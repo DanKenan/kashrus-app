@@ -742,8 +742,10 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                                 <Clock className="w-4 h-4" aria-hidden /> Due {formatTaskTimes(task)}
                               </span>
                             )}
-                            <span dir="auto" className="min-w-0 text-base text-ink-soft truncate">
-                              {/* D3c (mockup): a small grey subtitle — category · status words. */}
+                            <span dir="auto" className={`min-w-0 max-w-full text-base text-ink-soft break-words ${isOpen ? '' : 'line-clamp-2'}`}>
+                              {/* D3c (mockup): a small grey subtitle — category · status words.
+                                  QA2 batch C: it wraps (two lines at most while closed) instead of running off the
+                                  screen, now that a "No" keeps who answered and when (#116), e.g. at 200 % text. */}
                               {task.category ? <>{task.category} · </> : null}
                               <span data-kiosk-status>{st.word}</span>
                             </span>

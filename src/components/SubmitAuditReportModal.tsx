@@ -48,9 +48,10 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
 }) => {
   const [startTime, setStartTime] = useState('8:30 AM');
   const [endTime, setEndTime] = useState('2:30 PM');
-  const [factoryRepresentative, setFactoryRepresentative] = useState('QA Plant Manager');
+  const [factoryRepresentative, setFactoryRepresentative] = useState('');
   const [summaryNotes, setSummaryNotes] = useState('');
-  const [mashgiachSigned, setMashgiachSigned] = useState(true);
+  // QA2 #12: nothing is pre-filled or pre-ticked; the person ticks the box themselves.
+  const [mashgiachSigned, setMashgiachSigned] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const errorRef = useRef<HTMLDivElement>(null);
@@ -227,7 +228,7 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
 
             <div>
               <label className="block text-xs font-semibold uppercase tracking-wider text-ink-soft mb-1">
-                Factory Escort / QA Contact
+                Plant contact (optional)
               </label>
               <div className="relative">
                 <User className="w-3.5 h-3.5 absolute left-3 top-2.5 text-ink-soft" />
@@ -235,7 +236,7 @@ export const SubmitAuditReportModal: React.FC<SubmitAuditReportModalProps> = ({
                   type="text"
                   value={factoryRepresentative}
                   onChange={(e) => setFactoryRepresentative(e.target.value)}
-                  placeholder="QA Director / Escort"
+                  placeholder="Name"
                   className="w-full pl-8.5 pr-3 py-2 border text-ink placeholder:text-ink-soft focus:outline-none bg-surface border-line-control rounded-lg text-base focus:ring-2 focus:ring-gold/40 focus:border-gold"
                 />
               </div>

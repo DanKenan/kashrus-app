@@ -770,7 +770,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                   <button
                     type="button"
                     onClick={() => handleRemoveTask(idx)}
-                    className="p-1 transition bg-surface border border-line-control text-bad hover:bg-sunken"
+                    className="p-1.5 rounded-lg transition bg-surface border border-line-control text-bad hover:bg-sunken"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -808,7 +808,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowTemplateManager(!showTemplateManager)}
-                  className="text-xs font-bold hover:underline bg-surface border border-line-control text-ink hover:bg-sunken"
+                  className="min-h-11 rounded-lg px-3 text-xs font-bold bg-surface border border-line-control text-ink hover:bg-sunken"
                 >
                   {showTemplateManager ? '▾ Hide default tasks' : '▸ Edit default tasks for all events'}
                 </button>
@@ -826,7 +826,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                         <button
                           type="button"
                           onClick={() => handleDeleteTemplate(t.id)}
-                          className="p-1 transition bg-surface border border-line-control text-bad hover:bg-sunken"
+                          className="p-1.5 rounded-lg transition bg-surface border border-line-control text-bad hover:bg-sunken"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
