@@ -17,8 +17,9 @@ import testIdentityInvariants from './test-identity-invariants.mjs';
 import testIdentityProjection from './test-identity-projection.mjs';
 import testAgencyLogo from './test-agency-logo.mjs';
 import testRecoveryCodes from './test-recovery-codes.mjs';
+import testInvites from './test-invites.mjs';
 
-const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken, testVenueScope, testCertOptions, testIdentityInvariants, testIdentityProjection, testAgencyLogo, testRecoveryCodes];
+const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken, testVenueScope, testCertOptions, testIdentityInvariants, testIdentityProjection, testAgencyLogo, testRecoveryCodes, testInvites];
 
 export async function runAll() {
   console.log(`\n=== Stage 4 PR A Tests (${tests.length} tests) ===\n`);
