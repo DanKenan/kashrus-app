@@ -5,6 +5,8 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue, filterToVenue } from './lib/venueSelection';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
+import { AgencySwitcherSheet } from './components/AgencySwitcherSheet';
+import { fetchMemberships, Membership } from './lib/memberships';
 import { AgencyDashboard } from './components/AgencyDashboard';
 import { Header } from './components/Header';
 import { StatsProgressBar } from './components/StatsProgressBar';
@@ -56,7 +58,7 @@ import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
-import { apiFetch, apiWrite, clearSession, getSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice } from './lib/api';
+import { apiFetch, apiWrite, clearSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice } from './lib/api';
 import { noVenueMessage } from './lib/venueRemoved';
 
 const DEFAULT_USERS: User[] = [
@@ -346,6 +348,19 @@ export default function App() {
   const [taskToEdit, setTaskToEdit] = useState<Task | null>(null);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
+  // 10g: the agencies under this login (several = "Switch agency" in the menu).
+  // Read for the signed-in phone session, including a restored one; never on a kiosk.
+  const [memberships, setMemberships] = useState<Membership[]>([]);
+  const [isAgencySwitcherOpen, setIsAgencySwitcherOpen] = useState(false);
+  const currentUserRowId = currentUser?.id || null;
+  useEffect(() => {
+    if (isKiosk || !currentUserRowId) { setMemberships([]); setIsAgencySwitcherOpen(false); return; }
+    let active = true;
+    void fetchMemberships(getSessionToken()).then((list) => {
+      if (active) setMemberships(list || []);
+    });
+    return () => { active = false; };
+  }, [isKiosk, currentUserRowId]);
   const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
   // Item 10i: Phase C (invite-only adds) for the admin's own agency, as the
   // server reports it. Read at sign-in and again each time Add member or New
@@ -1846,6 +1861,7 @@ export default function App() {
         currentUser={currentUser}
         onLogout={handleLogout}
         onOpenChangePassword={() => setIsChangePasswordOpen(true)}
+        onOpenAgencySwitcher={memberships.length > 1 ? () => setIsAgencySwitcherOpen(true) : undefined}
         onOpenTaskModal={leaveHomeThen(handleOpenCreateTask)}
         onOpenHistoryModal={leaveHomeThen(() => setIsHistoryModalOpen(true))}
         onOpenEventsModal={() => setIsEventsModalOpen(true)}
@@ -2335,6 +2351,14 @@ export default function App() {
         agencyName={currentUser.agencyName}
         onUpdateUser={handleUpdateUser}
         onDeleteUser={handleDeleteUser}
+      />
+
+      <AgencySwitcherSheet
+        isOpen={isAgencySwitcherOpen && memberships.length > 1}
+        onClose={() => setIsAgencySwitcherOpen(false)}
+        memberships={memberships}
+        currentMembershipId={currentUser.id}
+        onActivated={(token, user) => { setSessionToken(token); handleLoginSuccess(user); }}
       />
 
       <VenueSwitcherSheet
