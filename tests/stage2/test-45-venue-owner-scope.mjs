@@ -73,16 +73,19 @@ export default {
     };
     const userRec = async (uid) => JSON.stringify(((await ctx.getDoc()).users || []).find((u) => u.id === uid));
     const venueCount = async () => ((await ctx.getDoc()).venues || []).length;
+    const userCount = async () => ((await ctx.getDoc()).users || []).length;
 
     const refusals = [];
     const expectRefused = async (email, victimId, label) => {
       const before = await userRec(victimId);
-      const v0 = await ctx.getVersion();
+      // Not the doc version: a scheduled-reset rollover can bump it during the
+      // check (flake). What this refusal could write is a venue or a user row.
       const n0 = await venueCount();
+      const u0 = await userCount();
       const r = await createVenue(email, label);
       assert(r.status === 409, `${label}: must be 409, got ${r.status} ${r.text.slice(0, 120)}`);
       assert(r.json && r.json.error === REFUSAL && r.json.code === 'OWNER_EMAIL_UNAVAILABLE', `${label}: generic body, got ${r.text.slice(0, 120)}`);
-      assert((await ctx.getVersion()) === v0 && (await venueCount()) === n0, `${label}: nothing written`);
+      assert((await venueCount()) === n0 && (await userCount()) === u0, `${label}: nothing written (no venue, no user row)`);
       assert((await userRec(victimId)) === before, `${label}: victim record byte-for-byte unchanged`);
       refusals.push(r.text);
     };

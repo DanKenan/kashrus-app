@@ -31,7 +31,7 @@ import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './sr
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
-import { credentialMayLink } from './src/server/invites.ts';
+import { credentialMayLink, newInviteToken, phaseCEnabled, parseInviteInput, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail } from './src/server/invites.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN } from './src/server/platform-auth.js';
 import { log } from './src/server/log.ts';
@@ -484,6 +484,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/mint-kiosk-token' },
         { method: 'GET', path: '/__test__/alert-routing' },
         { method: 'GET', path: '/__test__/route-table' },
+        { method: 'POST', path: '/__test__/phase-c' },
       ]
     : []),
 ];
@@ -2450,6 +2451,8 @@ let taskTemplates: TaskTemplate[] = [];
 let incidents: Incident[] = [];
 let announcements: Announcement[] = [];
 let passwordResets: PasswordResetRequest[] = [];
+// Item 10h: invites (server-only; never in INITIAL_STATE, broadcasts or exports; only the token's sha256 is stored).
+let invites: any[] = [];
 let passwordResetRateLimits: PasswordResetRateLimits = emptyRateLimits();
 
 /** Kiosk PIN lockout state (persisted in the state doc, survives restarts). */
@@ -2578,6 +2581,9 @@ function hydrateState(parsed: any) {
           (r: any) => r && r.email && (r.codeHash || r.code) && new Date(r.expiresAt).getTime() > now - 3600000
         );
       }
+
+      // Item 10h: invites (records with no id are dropped defensively).
+      invites = Array.isArray(parsed.invites) ? parsed.invites.filter((i: any) => i && typeof i === 'object' && typeof i.id === 'string') : [];
 
       // Rate-limit state is persisted so limits survive restarts and work
       // across instances. Malformed entries are dropped defensively.
@@ -2850,6 +2856,7 @@ function stateSnapshot() {
     resetPepper: (globalThis as any).__resetPepper || undefined,
     passwordResets,
     passwordResetRateLimits,
+    invites,
     kioskPinLockouts,
     kioskDevices,
     kioskPairings,
@@ -7861,6 +7868,151 @@ function logoFreshAgency(freshDoc: any, userId: string, agencyId: string): { con
   return { agencies: freshAgencies, agency };
 }
 
+
+// ---------------------------------------------------------------------------
+// Item 10h: invites — create / list / revoke (design v2, [10H-DS2] agreed).
+// Inert until 10i (no accept route). Every route answers 404 while the
+// caller's agency Phase C flag is OFF (no production writer exists in item
+// 10). Only the token's sha256 is stored; the raw token appears once, in the
+// create response, inside a RELATIVE link fragment.
+// ---------------------------------------------------------------------------
+const INVITE_NOT_FOUND = { error: 'Not found.' };
+
+/** requireAdmin + kiosk refused (403, as every admin route), then the flag on the cache (404). */
+function inviteGate(req: any, res: any): { caller: UserProfile; agencyId: string } | null {
+  if ((req as any).kiosk === true) {
+    res.status(403).json({ error: 'Only administrators can perform this action.' });
+    return null;
+  }
+  const caller = requireAdmin(req, res);
+  if (!caller) return null;
+  const agencyId = caller.agencyId || 'agency-hkc';
+  const agency = agencies.find((a) => a && a.id === agencyId);
+  if (!phaseCEnabled(agency)) {
+    res.status(404).json(INVITE_NOT_FOUND);
+    return null;
+  }
+  return { caller, agencyId };
+}
+
+/**
+ * B1: the same authority on FRESH data inside the transaction — caller row
+ * still exists, still admin, same agency (403); agency exists and flag ON (404).
+ */
+function inviteFreshGate(freshDoc: any, userId: string, agencyId: string): { conflict: string; conflictStatus: number; conflictCode: string } | null {
+  const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+  const freshCaller = freshUsers.find((u: any) => u && u.id === userId);
+  if (!freshCaller || freshCaller.role !== 'admin' || (freshCaller.agencyId || 'agency-hkc') !== agencyId) {
+    return { conflict: 'Only administrators can perform this action.', conflictStatus: 403, conflictCode: 'FORBIDDEN' };
+  }
+  const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+  const agency = freshAgencies.find((a: any) => a && a.id === agencyId);
+  if (!phaseCEnabled(agency)) return { conflict: 'Not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+  return null;
+}
+
+app.post('/api/agency/invites', async (req, res) => {
+  const gate = inviteGate(req, res);
+  if (!gate) return;
+  const { caller, agencyId } = gate;
+  const cachedVenueIds = venues.filter((v) => (v.agencyId || 'agency-hkc') === agencyId).map((v) => v.id);
+  const parsed = parseInviteInput(req.body || {}, cachedVenueIds);
+  if (parsed.ok === false) return res.status(400).json({ error: parsed.error, code: parsed.code });
+  const input = parsed.value;
+  // Generated once, before the transaction, so a retried mutator stores the same hash.
+  const token = newInviteToken();
+  const inviteId = `inv_${crypto.randomUUID()}`;
+  const createdAt = new Date().toISOString();
+  const expiresAt = new Date(Date.parse(createdAt) + INVITE_TTL_MS).toISOString();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const denied = inviteFreshGate(freshDoc, caller.id, agencyId);
+      if (denied) return denied;
+      const freshVenueIds = (Array.isArray(freshDoc.venues) ? freshDoc.venues : [])
+        .filter((v: any) => v && (v.agencyId || 'agency-hkc') === agencyId).map((v: any) => v.id);
+      const again = parseInviteInput({ email: input.email, role: input.role, venueIds: input.role === 'admin' ? undefined : input.venueIds }, freshVenueIds);
+      if (again.ok === false) return { conflict: again.error, conflictStatus: 400, conflictCode: again.code };
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const onTeam = freshUsers.some((u: any) => u && normalizeInviteEmail(u.email) === input.email && (u.agencyId || 'agency-hkc') === agencyId);
+      if (onTeam) return { conflict: 'This person is already on your team.', conflictStatus: 409, conflictCode: 'ALREADY_ON_TEAM' };
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const existing: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
+      // Idempotent retry of this same request.
+      if (existing.some((i: any) => i && i.id === inviteId)) return { doc: freshDoc, result: { replaced: [] as string[] } };
+      const replaced: string[] = [];
+      const kept = existing.map((i: any) => {
+        if (i && i.agencyId === agencyId && i.email === input.email && isLiveInvite(i, nowMs)) {
+          replaced.push(String(i.id));
+          return { ...i, status: 'revoked', revokedAt: nowIso, revokedBy: caller.id, revokeReason: 'replaced' };
+        }
+        return i;
+      });
+      const record = {
+        id: inviteId, agencyId, email: input.email, role: input.role, venueIds: again.value.venueIds,
+        invitedBy: caller.id, createdAt, expiresAt, inviteTokenHash: token.hash, status: 'pending',
+      };
+      return { doc: { ...freshDoc, invites: [...pruneInvites(kept, nowMs), record] }, result: { replaced } };
+    },
+    { label: 'invite-create', requireVersion: true }
+  );
+  if (!committed) return;
+  const replaced: string[] = (committed.result as any)?.replaced || [];
+  for (const rid of replaced) console.log(`[audit] invite replaced: admin ${caller.id} agency ${agencyId} invite ${rid}`);
+  console.log(`[audit] invite created: admin ${caller.id} agency ${agencyId} invite ${inviteId}`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(201).json({
+    invite: { id: inviteId, email: input.email, role: input.role, venueIds: input.role === 'admin' ? [] : input.venueIds, expiresAt },
+    link: `/invite#t=${token.raw}`,
+  });
+});
+
+app.get('/api/agency/invites', (req, res) => {
+  const gate = inviteGate(req, res);
+  if (!gate) return;
+  const nowMs = Date.now();
+  const list = invites
+    .filter((i) => i && i.agencyId === gate.agencyId && isLiveInvite(i, nowMs))
+    .sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? 1 : String(a.createdAt) > String(b.createdAt) ? -1 : 0))
+    .map(inviteListView);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ invites: list });
+});
+
+app.delete('/api/agency/invites/:id', async (req, res) => {
+  const gate = inviteGate(req, res);
+  if (!gate) return;
+  const { caller, agencyId } = gate;
+  const id = String(req.params.id || '');
+  const cached = invites.find((i) => i && i.id === id && i.agencyId === agencyId);
+  if (!cached) return res.status(404).json(INVITE_NOT_FOUND);
+  const nowMs = Date.now();
+  // Idempotent: already revoked or expired -> success, nothing written (no version bump, no audit).
+  if (cached.status === 'revoked' || (cached.status === 'pending' && !isLiveInvite(cached, nowMs))) return res.json({ success: true });
+  if (cached.status === 'accepted') return res.status(409).json({ error: 'This invite was already accepted.', code: 'INVITE_ACCEPTED' });
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const denied = inviteFreshGate(freshDoc, caller.id, agencyId);
+      if (denied) return denied;
+      const existing: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
+      const fresh = existing.find((i: any) => i && i.id === id && i.agencyId === agencyId);
+      if (!fresh) return { conflict: 'Not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+      const t = Date.now();
+      if (fresh.status === 'accepted') return { conflict: 'This invite was already accepted.', conflictStatus: 409, conflictCode: 'INVITE_ACCEPTED' };
+      if (!isLiveInvite(fresh, t)) return { doc: freshDoc, result: { changed: false } };
+      const nowIso = new Date(t).toISOString();
+      const next = existing.map((i: any) => (i && i.id === id ? { ...i, status: 'revoked', revokedAt: nowIso, revokedBy: caller.id, revokeReason: 'revoked' } : i));
+      return { doc: { ...freshDoc, invites: pruneInvites(next, t) }, result: { changed: true } };
+    },
+    { label: 'invite-revoke', requireVersion: true }
+  );
+  if (!committed) return;
+  if ((committed.result as any)?.changed) console.log(`[audit] invite revoked: admin ${caller.id} agency ${agencyId} invite ${id}`);
+  res.json({ success: true });
+});
+
 app.get('/api/agency/logo', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
@@ -8076,13 +8228,14 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     if (!requireAdmin(req, res)) return;
     const db = firestoreDb;
     if (!db) return res.status(503).json({ error: 'db unavailable' });
-    const { users, agencies: newAgencies } = req.body || {};
+    const { users, agencies: newAgencies, venues: newVenues, invites: newInvites } = req.body || {};
     if (!Array.isArray(users)) return res.status(400).json({ error: 'users array required' });
     const docRef = db.collection('app-state').doc('main');
     const snap = await docRef.get();
     const doc = (snap && snap.data && snap.data()) || {};
     // 10g (Test 64 F): optionally replace agencies too (to remove one under a live v2 token).
-    await docRef.set({ ...doc, users, ...(Array.isArray(newAgencies) ? { agencies: newAgencies } : {}) });
+    // 10h (Test 67 G/I/J): optionally replace venues / invites too (stored doc only; the cache keeps the old lists).
+    await docRef.set({ ...doc, users, ...(Array.isArray(newAgencies) ? { agencies: newAgencies } : {}), ...(Array.isArray(newVenues) ? { venues: newVenues } : {}), ...(Array.isArray(newInvites) ? { invites: newInvites } : {}) });
     res.json({ ok: true });
   });
   // TEST ONLY: seed a media doc directly into the `media` collection so the
@@ -8693,6 +8846,20 @@ if (isTestMode()) {
   // getJwtSecret(). Lets tests obtain valid sessions without reading the
   // signing secret from the doc (Test 18's restore cycle strips jwtSecret by
   // design). Test mode only — never a production credential.
+  // TEST ONLY (10h, isTestMode()): set an agency's Phase C flag (C4: item 10
+  // has NO production writer; 10j is the operator route, NEEDS DON 1).
+  app.post('/api/__test__/phase-c', async (req, res) => {
+    const { agencyId, enabled } = req.body || {};
+    if (typeof agencyId !== 'string' || typeof enabled !== 'boolean') return res.status(400).json({ error: 'agencyId (string) and enabled (boolean) required' });
+    const committed = await commitOrRespond(req, res, (freshDoc) => {
+      const list: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      if (!list.some((a: any) => a && a.id === agencyId)) return { conflict: 'Agency not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+      const nowIso = new Date().toISOString();
+      return { doc: { ...freshDoc, agencies: list.map((a: any) => (a && a.id === agencyId ? { ...a, phaseC: { enabled, setAt: nowIso, setBy: 'test-hook' } } : a)) }, result: { ok: true } };
+    }, { label: 'test-phase-c' });
+    if (!committed) return;
+    res.json({ ok: true });
+  });
   // TEST ONLY (10g, isTestMode()): the Express route table (method + path), so
   // Test 64 can walk EVERY route with a choose token (B6 central enforcement).
   app.get('/api/__test__/route-table', (_req, res) => {

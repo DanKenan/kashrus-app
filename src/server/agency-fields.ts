@@ -19,6 +19,7 @@ export type DomainStatus = 'none' | 'pending' | 'verified' | 'failed';
 
 /** Fields only the server may write (never accepted from a request body). */
 export const SERVER_ONLY_AGENCY_FIELDS = [
+  'phaseC', // 10h: Phase C flag — no client or admin route may set it
   'domainStatus',
   'domainVerificationToken',
   'domainVerifiedAt',
