@@ -124,18 +124,25 @@ export default {
     const otherIp = await call('POST', '/api/agencies/register', ipH(ipY), regBody(E('mashB'), 13));
     assert(otherIp.status === 409 && otherIp.text === t0, `another IP is not limited (taken -> same 409): ${otherIp.status} ${otherIp.text.slice(0, 120)}`);
 
-    // ---- 3. POST /api/users ----
-    const vBefore = await ctx.getVersion();
+    // ---- 3. POST /api/users (invites always on: "Add team member" is an invite) ----
+    // An email used in another agency gets exactly the answer an unknown email
+    // gets (a pending invite, 10i V2/W1), names nothing of the other agency and
+    // writes no row; the other agency's rows stay byte-for-byte unchanged.
+    const shapeOf = (j) => JSON.stringify(Object.keys(j || {}).sort()) + JSON.stringify(Object.keys((j && j.invite) || {}).sort());
+    const rowsB0 = JSON.stringify(((await ctx.getDoc()).users || []).filter((u) => u.agencyId === B));
+    const usersN0 = ((await ctx.getDoc()).users || []).length;
     const cross = await call('POST', '/api/users', auth(tAdminA), { email: E('mashB'), name: 'Someone', role: 'mashgiach', venueId: VA });
-    assert(cross.status === 409, `other-agency email must be refused 409, got ${cross.status} ${cross.text.slice(0, 160)}`);
-    assert(cross.json?.error === "This email can't be added directly.", `cross-agency add text: ${cross.text}`);
-    assert(!leakWords.test(cross.text) && !cross.text.includes(NAME_B) && !cross.text.includes(B) && !cross.text.includes('T56 Mash B'), `cross-agency refusal must name nothing: ${cross.text}`);
+    assert(cross.status === 201 && cross.json?.pending === true, `other-agency email gets the unknown-email answer (pending invite), got ${cross.status} ${cross.text.slice(0, 160)}`);
+    assert(!leakWords.test(cross.text) && !cross.text.includes(NAME_B) && !cross.text.includes(B) && !cross.text.includes('T56 Mash B'), `cross-agency answer must name nothing: ${cross.text}`);
     const crossAdmin = await call('POST', '/api/users', auth(tAdminA), { email: E('adminB'), name: 'Someone', role: 'coordinator', venueId: VA });
-    assert(crossAdmin.status === 409 && crossAdmin.text === cross.text, `other agency's admin email: same refusal (${crossAdmin.status} ${crossAdmin.text})`);
+    assert(crossAdmin.status === 201 && shapeOf(crossAdmin.json) === shapeOf(cross.json) && !crossAdmin.text.includes(B), `other agency's admin email: same answer (${crossAdmin.status} ${crossAdmin.text.slice(0, 160)})`);
+    const ok = await call('POST', '/api/users', auth(tAdminA), { email: E('newA'), name: 'T56 New', role: 'mashgiach', venueId: VA });
+    assert(ok.status === 201 && shapeOf(ok.json) === shapeOf(cross.json), `a new email gets the same invite answer: ${ok.status} ${ok.text.slice(0, 160)}`);
+    assert(((await ctx.getDoc()).users || []).length === usersN0, 'an invite writes no user row');
+    assert(JSON.stringify(((await ctx.getDoc()).users || []).filter((u) => u.agencyId === B)) === rowsB0, "the other agency's rows are unchanged");
+    const vBefore = await ctx.getVersion();
     const own = await call('POST', '/api/users', auth(tAdminA), { email: E('mashA'), name: 'Dup', role: 'mashgiach', venueId: VA });
     assert(own.status === 409 && /already exists/.test(own.json?.error || ''), `own-team email keeps its text: ${own.status} ${own.text}`);
-    assert((await ctx.getVersion()) === vBefore, 'refused add-member attempts must write nothing');
-    const ok = await call('POST', '/api/users', auth(tAdminA), { email: E('newA'), name: 'T56 New', role: 'mashgiach', venueId: VA });
-    assert(ok.status === 201, `a new email is still added directly (unchanged): ${ok.status} ${ok.text.slice(0, 160)}`);
+    assert((await ctx.getVersion()) === vBefore, 'a refused add-member attempt must write nothing');
   },
 };

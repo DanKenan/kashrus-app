@@ -12,6 +12,8 @@
  * document through the API is impractical (test 14). Both verify what can be
  * verified automatically and document the manual steps in their headers.
  */
+import { inviteAndAccept } from './invite-helpers.mjs';
+
 export async function runAll(baseUrl, extraCtx = {}) {
   // Authenticate as the default admin user for all test requests.
   // The seed admin (kenan@hartfordkashrut.org, usr_admin) starts with no
@@ -66,6 +68,33 @@ export async function runAll(baseUrl, extraCtx = {}) {
       let json = null;
       try { json = await res.json(); } catch {}
       return { status: res.status, json };
+    },
+    /**
+     * Invites always on (Don 2026-10-22): the ONE production way to add a team
+     * member — POST /api/users (a pending invite) then the invitee accepts the
+     * link with their own password (mode 'new'). Returns the old POST /api/users
+     * shape on success: { status: 201, json: { user } } (the admin's view of the
+     * new row); any refusal comes back as { status, json } from the step that
+     * refused. `headers` = the inviting admin's (default: the harness admin).
+     */
+    async addMember(body, headers = authHeaders) {
+      const { password, ...inviteBody } = body || {};
+      if (inviteBody.role !== 'admin' && !inviteBody.venueId) {
+        // An invite names a real venue of the inviting agency (the old
+        // admin-set-password path silently defaulted to 'venue-crown-market').
+        const ag = await fetch(`${baseUrl}/api/agencies/current`, { headers });
+        let agj = null; try { agj = await ag.json(); } catch {}
+        const agencyId = agj?.agency?.id;
+        const doc = await ctx.getDoc();
+        let v = (doc.venues || []).find((x) => x && (x.agencyId || 'agency-hkc') === agencyId && !(doc.deletedVenueIds || []).includes(x.id));
+        if (!v && agencyId) {
+          v = { id: `venue-stage2-default-${agencyId}`, name: 'Stage2 default venue', agencyId };
+          await fetch(`${baseUrl}/api/__test__/inject-fixture`, { method: 'POST', headers: authHeaders, body: JSON.stringify({ venues: [v] }) });
+        }
+        if (v) inviteBody.venueId = v.id;
+      }
+      const r = await inviteAndAccept(baseUrl, headers, { ...inviteBody, password });
+      return { status: r.status, json: r.json };
     },
   };
 

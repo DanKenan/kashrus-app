@@ -44,7 +44,7 @@ export default {
     // --- 1b. Kiosk-PIN user: create a user WITH a populated kioskPin, so the
     // export-strip check below is meaningful (round 5: the code previously
     // only stripped password, leaking PINs despite the docs claiming otherwise).
-    const ku = await ctx.api('POST', '/api/users', {
+    const ku = await ctx.addMember({
       email: `test18-pin-${ts}@test.local`,
       name: `Test18 PIN ${ts}`,
       role: 'mashgiach',

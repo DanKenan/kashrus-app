@@ -35,9 +35,14 @@ export function newInviteToken(): { raw: string; hash: string } {
   return { raw, hash: hashInviteToken(raw) };
 }
 
-/** Per-agency Phase C flag (C4). Server-only; only exactly `enabled === true` counts. */
+/**
+ * Phase C (invites) for an agency. Don 2026-10-22 10:36Z ("We don't need the
+ * button"): invites are ON for EVERY agency, always. Any agency record counts;
+ * a stored `phaseC` value (written by the retired 10j route or older data) is
+ * ignored and never written. A missing agency is still false (fail closed).
+ */
 export function phaseCEnabled(agency: any): boolean {
-  return !!agency && typeof agency === 'object' && !!agency.phaseC && agency.phaseC.enabled === true;
+  return !!agency && typeof agency === 'object';
 }
 
 export function normalizeInviteEmail(email: unknown): string {

@@ -24,6 +24,7 @@
  * canAssignTasks, and an agency-less user; trigger each broadcast and assert
  * per-recipient scoping.
  */
+import { inviteAndAccept } from './invite-helpers.mjs';
 
 const AGENCY_B = 'agency-test22-b';
 
@@ -211,15 +212,13 @@ export default {
     clearAll();
 
     // --- 4. USERS_UPDATED (create): per-recipient roster, no cross-agency receipt ---
-    const cr = await fetch(`${baseUrl}/api/users`, {
-      method: 'POST',
-      headers: authB(tokenAdminB),
-      body: JSON.stringify({ email: newBEmail, name: 'Test22 New B', role: 'mashgiach', password: 'test-password-123' }),
-    });
+    // Invites always on: the agency-B admin invites, the invitee accepts; the
+    // accept is what broadcasts the new roster (agency B only).
+    const cr = await inviteAndAccept(baseUrl, authB(tokenAdminB), { email: newBEmail, name: 'Test22 New B', role: 'mashgiach', venueId: `venue-test22-b-${ts}`, password: 'test-password-123' });
     if (cr.status !== 200 && cr.status !== 201) {
-      throw new Error(`agency-B user create failed: ${cr.status} ${JSON.stringify(await cr.json())}`);
+      throw new Error(`agency-B user create failed: ${cr.status} ${cr.text}`);
     }
-    const newUserId = (await cr.json()).user?.id;
+    const newUserId = cr.json.user?.id;
     const cuAdminB = await waitForType(connAdminB.messages, 'USERS_UPDATED');
     const cuStaffB = await waitForType(connStaffB.messages, 'USERS_UPDATED');
     const cuAssignerB = await waitForType(connAssignerB.messages, 'USERS_UPDATED');
@@ -284,22 +283,17 @@ export default {
     {
       const mkUser = async (suffix) => {
         const email = `fp-${suffix}-${ts}@agency-b.test`;
-        const res = await fetch(`${baseUrl}/api/users`, {
-          method: 'POST',
-          headers: authB(tokenAdminB),
-          body: JSON.stringify({
-            email,
-            name: `Fp ${suffix}`,
-            role: 'mashgiach',
-            agencyId: AGENCY_B,
-            venueId: `venue-test22-b-${ts}`,
-            password: 'Temp1234!',
-          }),
+        const res = await inviteAndAccept(baseUrl, authB(tokenAdminB), {
+          email,
+          name: `Fp ${suffix}`,
+          role: 'mashgiach',
+          venueId: `venue-test22-b-${ts}`,
+          password: 'Temp1234!',
         });
         if (res.status !== 200 && res.status !== 201) {
           throw new Error(`fast-path: fp user ${suffix} create failed: ${res.status}`);
         }
-        const { user } = await res.json();
+        const { user } = res.json;
         const conn = await connectWs(baseUrl, await mintToken(baseUrl, user.id));
         if (!conn.messages.some((m) => m.type === 'INITIAL_STATE')) {
           throw new Error(`fast-path: fp socket ${suffix} got no INITIAL_STATE`);

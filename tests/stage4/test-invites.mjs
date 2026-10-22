@@ -25,7 +25,8 @@ export default {
       seen.add(raw);
     }
     assert(seen.size === 500, 'distinct tokens');
-    assert(phaseCEnabled({ phaseC: { enabled: true } }) && !phaseCEnabled({ phaseC: { enabled: 'true' } }) && !phaseCEnabled({ phaseC: {} }) && !phaseCEnabled({}) && !phaseCEnabled(null), 'phaseC only exactly true');
+    // Invites always on (Don 2026-10-22): every agency record counts, whatever its stored phaseC; no agency -> false.
+    assert(phaseCEnabled({ phaseC: { enabled: true } }) && phaseCEnabled({ phaseC: { enabled: false } }) && phaseCEnabled({ phaseC: {} }) && phaseCEnabled({}) && !phaseCEnabled(null) && !phaseCEnabled(undefined) && !phaseCEnabled('agency-x'), 'invites on for every agency record, never for a missing one');
     assert(!('phaseC' in stripServerOnlyAgencyFields({ name: 'x', phaseC: { enabled: true } })), 'phaseC stripped from client bodies');
     assert(!('phaseC' in agencyAdminView({ id: 'a', name: 'A', phaseC: { enabled: true } })), 'phaseC not in the admin view');
     assert(J(INVITE_ROLES) === J(['admin', 'coordinator', 'mashgiach']), 'roles');
@@ -133,11 +134,19 @@ export default {
       const path = await import('node:path');
       const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
       const server = fs.readFileSync(path.join(root, 'server.ts'), 'utf8');
-      // N4: exactly two writers of phaseC — the test hook and the 10j route.
-      const writers = server.split('\n').filter((l) => /phaseC:\s*\{/.test(l));
-      assert(writers.length === 2, `10j phaseC writers: ${writers.length} ${J(writers.map((l) => l.trim().slice(0, 80)))}`);
-      assert(writers.some((l) => l.includes("setBy: 'test-hook'")) && writers.some((l) => l.includes('setBy: caller.id')), '10j the two writers are the test hook and the enable route');
-      assert(server.includes("app.post('/api/agency/invites/enable'") && !/app\.(post|put|delete)\('\/api\/agency\/invites\/disable'/.test(server), '10j one-way: an enable route and no disable route');
+      // Invites always on: NO writer of phaseC is left (the 10j route and the test hook are gone).
+      const writers = server.split('\n').filter((l) => /phaseC:\s*\{/.test(l) || /\.phaseC\s*=/.test(l));
+      assert(writers.length === 0, `phaseC writers: ${writers.length} ${J(writers.map((l) => l.trim().slice(0, 80)))}`);
+      assert(!server.includes("'/api/__test__/phase-c'") && !server.includes("'/api/__test__/invites-client-ready'"), 'the phase-c and invites-client-ready test hooks are gone');
+      // The retired enable route stays for old clients and writes nothing (no commit in its body).
+      const en = server.indexOf("app.post('/api/agency/invites/enable'");
+      const enBody = server.slice(en, server.indexOf('\n});\n', en));
+      // [IAO-RV1] B1: a fresh admin re-check inside commitOrRespond whose only success returns the fresh doc unchanged (no-op path).
+      assert(en > 0 && enBody.includes('alreadyOn: true') && !/phaseC/.test(enBody), 'enable route: answers alreadyOn, never touches phaseC');
+      const docReturns = enBody.match(/doc:\s*[^,}]+/g) || [];
+      assert(docReturns.length === 1 && /doc:\s*freshDoc\s*$/.test(docReturns[0]), `enable route: the only doc it returns is the unchanged fresh doc: ${J(docReturns)}`);
+      assert(/freshCaller\.role !== 'admin'/.test(enBody), 'enable route: fresh admin re-check');
+      assert(!/app\.(post|put|delete)\('\/api\/agency\/invites\/disable'/.test(server), 'no disable route');
       // B1: the route ships only with the invite-aware client in the same tree.
       const appTsx = fs.readFileSync(path.join(root, 'src', 'App.tsx'), 'utf8');
       assert(/data\.pending === true/.test(appTsx) && appTsx.includes('fullInviteLink('), '10j B1: App.tsx handles the pending-invite answer');

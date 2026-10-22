@@ -7761,49 +7761,22 @@ app.get('/api/agencies', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Item 10j ([10J-DS2]): the agency's own admin turns invites (Phase C) ON for
-// their own agency. One-way (there is no OFF route). No secret, no operator
-// token. Fail closed: the fresh caller must still be an admin of the agency,
-// the bundled client must be the invite-aware one, and the identity invariant
-// precheck (the same helpers as perEntityStatus and the commit checker) must
-// find no invalid group in the whole store and no unmigrated row in this
-// agency. Writes agencies[i].phaseC only; nothing is broadcast.
+// Invites always on (Don 2026-10-22 10:36Z, "Agreed — invites-always-on"):
+// every agency uses invites; there is no toggle. The retired 10j route stays
+// for old clients: admin only (kiosk 403), answers "already on" and writes
+// NOTHING. The agency-wide identity precheck it ran is replaced by per-person
+// fail-closed checks where a person is invited, accepted or sent an invite
+// (invitePersonNeedsCheck below).
 // ---------------------------------------------------------------------------
-const INVITES_PRECHECK_FAILED = { error: "Invites can't be turned on yet: the team records need a check first. Please contact Shutfey support.", code: 'INVITES_PRECHECK_FAILED' };
-const INVITES_CLIENT_NOT_READY = { error: "Invites can't be turned on from here yet. Please update the app and try again.", code: 'INVITES_CLIENT_NOT_READY' };
-let invitesClientReadyTestOverride: boolean | null = null;
-/** B1: is this server serving the invite-aware client? Production: the built client (dist/index.html) is in this image. */
-function invitesClientReady(): boolean {
-  if (isTestMode() && invitesClientReadyTestOverride !== null) return invitesClientReadyTestOverride;
-  if (process.env.NODE_ENV !== 'production') return true; // dev: vite serves this tree's own client
-  try {
-    return fs.existsSync(path.join(process.cwd(), 'dist', 'index.html'));
-  } catch {
-    return false;
-  }
-}
-/** Identity precheck on a fresh doc: null = ok, else a log reason (ids and codes only). */
-function invitesPrecheck(freshUsers: any[], freshAgencies: any[], agencyId: string): string | null {
-  const unmigrated = freshUsers.filter((u) => u && (u.agencyId || 'agency-hkc') === agencyId && !(typeof u.personId === 'string' && u.personId));
-  if (unmigrated.length) return `unmigrated rows in agency: ${unmigrated.length} (${unmigrated.slice(0, 5).map((u) => u.id).join(',')})`;
-  const byId = new Map<string, any>(freshUsers.filter((u) => u && typeof u.id === 'string').map((u) => [u.id, u] as [string, any]));
-  for (const g of identityGroups(freshUsers)) {
-    if (g.length < 2) continue;
-    const rows = g.map((id) => byId.get(id));
-    if (!rows.some((r: any) => typeof r?.personId === 'string' && r.personId)) continue;
-    const issues = groupIssues(rows, freshAgencies);
-    if (issues.length) return `invalid identity group: ${issues.map((i: any) => `${i.code}[${(i.rowIds || []).join(',')}]`).join('; ')}`;
-  }
-  return null;
-}
 app.post('/api/agency/invites/enable', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   if ((req as any).kiosk === true) return res.status(403).json({ error: 'Admin access required.' });
   const caller = requireAdmin(req, res);
   if (!caller) return;
   const agencyId = caller.agencyId || 'agency-hkc'; // rule T: the caller's own agency only (any body agencyId is ignored)
-  // B1 / N3: the bundled client must be the invite-aware one; checked before the transaction, nothing written.
-  if (!invitesClientReady()) return res.status(409).json(INVITES_CLIENT_NOT_READY);
+  // [IAO-RV1] B1: the fresh admin re-check stays (I2). Read-only: the mutator
+  // returns the fresh doc unchanged (commitState's version-neutral no-op path:
+  // no write, no broadcast) or refuses.
   const committed = await commitOrRespond(
     req, res,
     (freshDoc) => {
@@ -7813,27 +7786,36 @@ app.post('/api/agency/invites/enable', async (req, res) => {
       if (!freshCaller || freshCaller.role !== 'admin' || (freshCaller.agencyId || 'agency-hkc') !== agencyId) {
         return { conflict: 'Admin access required.', conflictStatus: 403, conflictCode: 'FORBIDDEN' };
       }
-      const agency = freshAgencies.find((a) => a && a.id === agencyId);
-      if (!agency) return { conflict: 'Not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
-      if (phaseCEnabled(agency)) return { doc: freshDoc, result: { alreadyOn: true } }; // N1: after the fresh re-check
-      const why = invitesPrecheck(freshUsers, freshAgencies, agencyId);
-      if (why) {
-        log.warn(`[invites] enable refused for agency ${agencyId} by ${caller.id}: ${why}`);
-        return { conflict: INVITES_PRECHECK_FAILED.error, conflictStatus: 409, conflictCode: INVITES_PRECHECK_FAILED.code };
-      }
-      const nowIso = new Date().toISOString();
-      return {
-        doc: { ...freshDoc, agencies: freshAgencies.map((a: any) => (a && a.id === agencyId ? { ...a, phaseC: { enabled: true, setAt: nowIso, setBy: caller.id } } : a)) },
-        result: { alreadyOn: false },
-      };
+      if (!freshAgencies.some((a) => a && a.id === agencyId)) return { conflict: 'Not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+      return { doc: freshDoc, result: { alreadyOn: true } };
     },
-    { label: 'agency-invites-enable' }
+    { label: 'invites-enable-check' }
   );
   if (!committed) return;
-  const alreadyOn = (committed as any)?.result?.alreadyOn === true;
-  if (!alreadyOn) log.info(`[audit] invites turned ON: agency ${agencyId} by admin ${caller.id}`);
-  res.json({ ok: true, invitesEnabled: true, alreadyOn });
+  res.json({ ok: true, invitesEnabled: true, alreadyOn: true });
 });
+
+const INVITE_PERSON_NEEDS_CHECK = { error: "This person's account needs a check before they can be invited. Please contact Shutfey support.", code: 'INVITE_PERSON_NEEDS_CHECK' };
+/**
+ * Per-person replacement for the 10j precheck: true when a row with this
+ * email (normalised) sits in an identity group with issues (groupIssues, the
+ * same helpers as the commit checker). `ownAgencyOnly`: only groups that
+ * include a row of that agency count (invite create keeps 10i V2/W1 — an email
+ * used in another agency gets the same answer as an unknown one).
+ */
+function invitePersonNeedsCheck(freshUsers: any[], freshAgencies: any[], email: string, ownAgencyOnly?: string): boolean {
+  const key = normalizeInviteEmail(email);
+  if (!key) return false;
+  const byId = new Map<string, any>(freshUsers.filter((u) => u && typeof u.id === 'string').map((u) => [u.id, u] as [string, any]));
+  for (const g of identityGroups(freshUsers)) {
+    const rows = g.map((id) => byId.get(id)).filter(Boolean);
+    if (rows.length < 2) continue; // a one-row person has no group invariants (groupIssues is for 2+ rows, as in the commit checker)
+    if (!rows.some((r: any) => normalizeInviteEmail(r.email) === key)) continue;
+    if (ownAgencyOnly && !rows.some((r: any) => (r.agencyId || 'agency-hkc') === ownAgencyOnly)) continue;
+    if (groupIssues(rows, freshAgencies).length) return true;
+  }
+  return false;
+}
 
 // Get current agency details for logged in user
 app.get('/api/agencies/current', (req, res) => {
@@ -8152,6 +8134,12 @@ function createMemberInviteInTx(
   if (users.some((u: any) => u && normalizeInviteEmail(u.email) === input.email && (u.agencyId || 'agency-hkc') === agencyId)) {
     return { conflict: opts.ownTeamText || 'This person is already on your team.', conflictStatus: 409, conflictCode: 'ALREADY_ON_TEAM' };
   }
+  // Invites always on (I4): a person whose identity group has issues and
+  // touches this agency is refused here, per person (replaces the agency-wide
+  // 10j precheck). Other agencies' rows are not looked at (10i V2/W1).
+  if (invitePersonNeedsCheck(users, Array.isArray(docAfter.agencies) ? docAfter.agencies : [], input.email, agencyId)) {
+    return { conflict: INVITE_PERSON_NEEDS_CHECK.error, conflictStatus: 409, conflictCode: INVITE_PERSON_NEEDS_CHECK.code };
+  }
   const existing: any[] = Array.isArray(docAfter.invites) ? docAfter.invites : [];
   const mine = existing.find((i: any) => i && i.id === pre.inviteId);
   if (mine) return { doc: docAfter, invite: mine, replaced: [] }; // idempotent retry
@@ -8383,6 +8371,11 @@ app.post('/api/invites/accept', async (req, res) => {
       if (!credentialMayLink(cred.credentialOrigin) || !pid) {
         return { conflict: INVITE_NOT_LINKABLE_TEXT, conflictStatus: 403, conflictCode: 'INVITE_ACCOUNT_NOT_LINKABLE' };
       }
+      // Invites always on (I4): the person's identity group must be valid on
+      // fresh data; otherwise a plain 409, nothing written, not a failed attempt.
+      if (invitePersonNeedsCheck(freshUsers, freshAgencies, inv.email)) {
+        return { conflict: INVITE_PERSON_NEEDS_CHECK.error, conflictStatus: 409, conflictCode: INVITE_PERSON_NEEDS_CHECK.code };
+      }
       const personRows = freshUsers.filter((u: any) => u && u.personId === pid);
       // d) P already has a membership in that agency: accepted, nothing created.
       const already = personRows.find((u: any) => (u.agencyId || 'agency-hkc') === inv.agencyId);
@@ -8418,6 +8411,19 @@ app.post('/api/invites/accept', async (req, res) => {
   console.log(`[audit] invite accepted: invite ${inviteId} agency ${cachedInv.agencyId} row ${r.rowId} (${r.kind})`);
   // E1 at the first multi join: every old session of the person ends now.
   for (const id of (r.bumpIds || []) as string[]) revokeUserPhoneSockets(id);
+  // Invites always on: accepting is now the only way a member joins, so the
+  // agency's open screens get the new roster here (the old POST /api/users
+  // create broadcast), built per recipient for THIS agency only.
+  {
+    const joined: any = users.find((u) => u.id === r.rowId);
+    const joinedAgencyId = joined ? (joined.agencyId || 'agency-hkc') : null;
+    if (joinedAgencyId) {
+      broadcast('USERS_UPDATED', { agencyId: joinedAgencyId }, undefined, joinedAgencyId, (meta, base) => ({
+        ...base,
+        users: getSafeUsersForAgency(joinedAgencyId, recipientForMeta(meta)),
+      }));
+    }
+  }
   // Response = the 10g login response (choose token when the person is multi).
   const row: any = users.find((u) => u.id === r.rowId);
   if (!row) return res.status(500).json({ error: 'Accepted, but the account could not be loaded. Please sign in.' });
@@ -8453,6 +8459,8 @@ function sendInviteRefusal(rows: readonly any[], target: any, callerId: string):
   if (target.id === callerId) return true;
   if (target.id === PLATFORM_OPERATOR_USER_ID) return true;
   if (target.isPrimaryAdmin === true) return true;
+  // Invites always on (I4): an unmigrated row (no personId) cannot take an invite.
+  if (!(typeof target.personId === 'string' && target.personId)) return true;
   if (credentialMayLink(target.credentialOrigin)) return true;
   if (isMultiPersonRow(rows as any[], target)) return true;
   return false;
@@ -9763,27 +9771,7 @@ if (isTestMode()) {
   // getJwtSecret(). Lets tests obtain valid sessions without reading the
   // signing secret from the doc (Test 18's restore cycle strips jwtSecret by
   // design). Test mode only — never a production credential.
-  // TEST ONLY (10h, isTestMode()): set an agency's Phase C flag (C4: item 10
-  // has NO production writer; 10j is the operator route, NEEDS DON 1).
-  // TEST ONLY (10j, isTestMode()): force the client-readiness answer (null = the real check).
-  app.post('/api/__test__/invites-client-ready', (req, res) => {
-    const v = (req.body || {}).ready;
-    if (v !== null && typeof v !== 'boolean') return res.status(400).json({ error: 'ready (boolean or null) required' });
-    invitesClientReadyTestOverride = v;
-    res.json({ ok: true });
-  });
-  app.post('/api/__test__/phase-c', async (req, res) => {
-    const { agencyId, enabled } = req.body || {};
-    if (typeof agencyId !== 'string' || typeof enabled !== 'boolean') return res.status(400).json({ error: 'agencyId (string) and enabled (boolean) required' });
-    const committed = await commitOrRespond(req, res, (freshDoc) => {
-      const list: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
-      if (!list.some((a: any) => a && a.id === agencyId)) return { conflict: 'Agency not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
-      const nowIso = new Date().toISOString();
-      return { doc: { ...freshDoc, agencies: list.map((a: any) => (a && a.id === agencyId ? { ...a, phaseC: { enabled, setAt: nowIso, setBy: 'test-hook' } } : a)) }, result: { ok: true } };
-    }, { label: 'test-phase-c' });
-    if (!committed) return;
-    res.json({ ok: true });
-  });
+  // (Invites always on: the 10h phase-c and 10j invites-client-ready test hooks are gone with the flag.)
   // TEST ONLY (10g, isTestMode()): the Express route table (method + path), so
   // Test 64 can walk EVERY route with a choose token (B6 central enforcement).
   app.get('/api/__test__/route-table', (_req, res) => {
@@ -10038,37 +10026,27 @@ app.post('/api/venues', async (req, res) => {
   // (no row, no admin-set password), so an email used in another agency gets
   // the same answer as an unknown one. Read from the cache for the pre-check
   // and re-read from FRESH data inside the transaction.
-  let ownerInviteMode = phaseCEnabled(callerAgency);
   // Item 10c (A5): the owner email is resolved INSIDE the caller's agency.
   // A row with that email in another agency (another membership of the same
   // person, or anyone else) is never reused and never moved; it only makes
   // the generic refusal. Same rule on cached and fresh data.
   const resolveVenueOwnerEmail = (list: any[]): { idx: number; refused: boolean } => {
-    let otherAgency = false;
     for (let i = 0; i < (list || []).length; i++) {
       const u = list[i];
       if (!u || typeof u.email !== 'string' || u.email.trim().toLowerCase() !== cleanOwnerEmail) continue;
-      if ((normalizeStoredUser(u).agencyId || 'agency-hkc') !== callerAgencyId) { otherAgency = true; continue; }
+      if ((normalizeStoredUser(u).agencyId || 'agency-hkc') !== callerAgencyId) continue; // another agency: an owner invite, same as an unknown email
       return { idx: i, refused: ownerEmailRefused(u) };
     }
-    return { idx: -1, refused: otherAgency && !ownerInviteMode };
+    return { idx: -1, refused: false };
   };
   if (cleanOwnerEmail) {
     if (resolveVenueOwnerEmail(users).refused) {
       return res.status(409).json({ error: VENUE_OWNER_EMAIL_REFUSAL, code: 'OWNER_EMAIL_UNAVAILABLE' });
     }
   }
-  const ownerUserId = `usr_owner_${crypto.randomUUID()}`;
   const createdAt = new Date().toISOString();
-  // Hash the owner password once, outside the transaction (bcrypt is CPU-heavy;
-  // the hash is deterministic input to the mutator).
-  // 10i ([10I-RV1] B1): with Phase C ON (cached) the owner gets an invite, so
-  // ownerPassword is never read or hashed and no fallback password is made.
-  const ownerPasswordHash: string | null = ownerInviteMode
-    ? null
-    : ownerPassword?.trim()
-      ? bcrypt.hashSync(ownerPassword.trim(), 10)
-      : bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 10);
+  // Invites always on: a new owner gets an invite, so ownerPassword is never
+  // read or hashed and no fallback password is made.
 
   const newVenue: Venue = {
     id: newVenueId,
@@ -10108,9 +10086,7 @@ app.post('/api/venues', async (req, res) => {
 
       let newUsers = [...freshUsers];
       let createdOwner: any = null;
-      let newOwnerId: string | null = null; // 10b: a NEW owner row (admin chose its password)
       let inviteOwner = false; // 10i: an owner invite is written instead of a row
-      ownerInviteMode = phaseCEnabled((Array.isArray(freshDoc.agencies) ? freshDoc.agencies : []).find((a: any) => a && a.id === callerAgencyId));
       if (cleanOwnerEmail) {
         // Item 8v + 10c (A5): the same rule on FRESH data (the user may have
         // changed role/agency since the cached pre-check); only a row of the
@@ -10120,9 +10096,11 @@ app.post('/api/venues', async (req, res) => {
           return { conflict: VENUE_OWNER_EMAIL_REFUSAL, conflictStatus: 409, conflictCode: 'OWNER_EMAIL_UNAVAILABLE' };
         }
         const existingOwnerIdx = freshOwner.idx;
-        if (existingOwnerIdx === -1 && ownerInviteMode) {
+        if (existingOwnerIdx === -1) {
+          // Invites always on: a new owner always gets an owner INVITE (no
+          // row, no admin-set password).
           inviteOwner = true;
-        } else if (existingOwnerIdx !== -1) {
+        } else {
           newUsers[existingOwnerIdx] = {
             ...newUsers[existingOwnerIdx],
             venueId: newVenueId,
@@ -10130,24 +10108,6 @@ app.post('/api/venues', async (req, res) => {
             agencyId: callerAgencyId,
           };
           createdOwner = newUsers[existingOwnerIdx];
-        } else {
-          // The cache said Phase C ON (no hash made) but the fresh flag is OFF:
-          // refuse rather than create an owner without a password; a retry
-          // takes the flag-OFF path.
-          if (!ownerPasswordHash) return { conflict: 'Something changed while saving. Please try again.', conflictStatus: 409, conflictCode: 'PHASE_C_CHANGED' };
-          const ownerUser: UserProfile = {
-            id: ownerUserId,
-            agencyId: callerAgencyId,
-            email: cleanOwnerEmail,
-            name: ownerName?.trim() || `${name.trim()} Owner`,
-            role: 'owner',
-            venueId: newVenueId,
-            avatarColor: '#d97706',
-            password: ownerPasswordHash,
-          };
-          newUsers.push(ownerUser);
-          createdOwner = ownerUser;
-          newOwnerId = ownerUserId;
         }
       }
 
@@ -10181,7 +10141,6 @@ app.post('/api/venues', async (req, res) => {
           },
         },
         result: { venue: venueToAdd, tasks: tasksToAdd, owner: createdOwner },
-        ...(newOwnerId ? { credentialOriginSetById: { [newOwnerId]: 'admin' as const } } : {}),
       };
       if (!inviteOwner) return proposed;
       // 10i (W1): the owner invite is built ON the proposed doc (which already
@@ -12398,11 +12357,13 @@ app.post('/api/users', async (req, res) => {
   // New users are always created in the caller's own agency.
   const callerAgencyId = caller.agencyId || 'agency-hkc';
 
-  // 10i (design v3 B, [10I-DS3]): when the caller's agency has Phase C ON,
-  // "Add team member" creates a pending INVITE (no row, no password; any
+  // 10i (design v3 B, [10I-DS3]) + invites always on (Don 2026-10-22): "Add
+  // team member" creates a pending INVITE (no row, no password; any
   // `password` in the body is ignored). Every email that is not already on
-  // the caller's own team gets the same 201. Flag OFF: unchanged below.
-  if (phaseCEnabled(agencies.find((a) => a && a.id === callerAgencyId))) {
+  // the caller's own team gets the same 201. There is no other way to add a
+  // member (the admin-set-password path is gone).
+  if (!phaseCEnabled(agencies.find((a) => a && a.id === callerAgencyId))) return res.status(404).json({ error: 'Agency record not found.' });
+  {
     if ((req as any).kiosk === true) return res.status(403).json({ error: 'Only administrators can perform this action.' });
     const body = stripServerOnlyUserFields(req.body || {});
     const rawRole = body.role;
@@ -12427,94 +12388,8 @@ app.post('/api/users', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     return res.status(201).json({ pending: true, invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}` });
   }
-
-  const { email, name, role, password, venueId, permissions, phoneNumber } = stripServerOnlyUserFields(req.body || {}); // 8b: no server-only identity field from a body
-  if (!email || !name) {
-    return res.status(400).json({ error: 'Email and name are required' });
-  }
-  // K1: optional phone number (E.164), validated before anything is written.
-  const phoneNorm = normalizePhoneNumber(phoneNumber);
-  if (!phoneNorm.ok) {
-    return res.status(400).json({ error: PHONE_NUMBER_ERROR });
-  }
-
-  // Pre-generate stable ID + hash the password BEFORE the transaction so retries
-  // never create a duplicate user or re-hash (bcrypt is CPU-heavy).
-  const newUserId = `usr_${Date.now()}`;
-  const initialPassword = (password && String(password).trim()) || crypto.randomBytes(9).toString('hex');
-  const passwordHash = bcrypt.hashSync(initialPassword, 10);
-  const cleanEmail = email.trim().toLowerCase();
-
-  const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f97316'];
-  const validRole =
-    role === 'admin'
-      ? 'admin'
-      : role === 'coordinator'
-      ? 'coordinator'
-      : role === 'owner'
-      ? 'owner'
-      : 'mashgiach';
-
-  const agencyVenues = venues.filter((v) => (v.agencyId || 'agency-hkc') === callerAgencyId);
-  // A client-supplied venueId must belong to the caller's agency.
-  let targetVenueId: string | undefined = validRole === 'admin' ? undefined : (agencyVenues[0]?.id || 'venue-crown-market');
-  if (validRole !== 'admin' && venueId) {
-    const chosen = agencyVenues.find((v) => v.id === venueId);
-    if (!chosen) {
-      return res.status(403).json({ error: 'You can only assign team members to venues in your own agency.' });
-    }
-    targetVenueId = chosen.id;
-  }
-
-  // 10i (W3): the same role defaults as an invite's profile (one helper).
-  const defaultPermissions: UserPermissions = defaultPermissionsFor(validRole, permissions);
-
-  const newUser: UserProfile = {
-    id: newUserId,
-    agencyId: callerAgencyId,
-    email: cleanEmail,
-    name: name.trim(),
-    role: validRole,
-    venueId: targetVenueId,
-    permissions: defaultPermissions,
-    avatarColor: colors[Math.floor(Math.random() * colors.length)],
-    password: passwordHash,
-    ...(phoneNorm.value ? { phoneNumber: phoneNorm.value } : {}),
-  };
-
-  const committed = await commitOrRespond(
-    req, res,
-    (freshDoc) => {
-      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
-      // Email uniqueness must be checked against FRESH data, not the cache.
-      // (Two concurrent creates with the same email: one wins, the other gets 409 —
-      // the duplicate-user case idempotency alone can't prevent.)
-      const existing = freshUsers.find((u) => u.email.toLowerCase() === cleanEmail);
-      // 10a: only the caller's OWN agency is named; an email used in another
-      // agency gets a text that says nothing about where it is used.
-      if (existing) {
-        return {
-          conflict: (existing.agencyId || 'agency-hkc') === callerAgencyId
-            ? 'A team member with this email already exists'
-            : "This email can't be added directly.",
-        };
-      }
-      // Idempotency: our own user ID already created by a previous attempt.
-      const selfExisting = freshUsers.find((u) => u.id === newUserId);
-      if (selfExisting) return { doc: freshDoc, result: selfExisting };
-      // 10b (plan v4 C1): the admin chose this password.
-      return { doc: { ...freshDoc, users: [...freshUsers, newUser] }, result: newUser, credentialOriginSetById: { [newUserId]: 'admin' } };
-    },
-    { label: 'create-user' }
-  );
-  if (!committed) return;
-  const created = committed.result as UserProfile;
-  broadcast('USERS_UPDATED', { agencyId: callerAgencyId }, undefined, callerAgencyId, (meta, base) => ({
-    ...base,
-    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
-  }));
-  res.status(201).json({ user: managerViewOf(created, caller) });
 });
+
 
 // Update user permissions or role
 app.put('/api/users/:id', async (req, res) => {

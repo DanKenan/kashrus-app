@@ -331,8 +331,8 @@ export default {
       // ---------- f) zone writes + rule T ----------
       const mEmail = `t37-m-${ts}@test.local`;
       const cEmail = `t37-c-${ts}@test.local`;
-      const cm = await ctx.api('POST', '/api/users', { email: mEmail, name: 'T37 M', role: 'mashgiach', password: 'pw-t37-mmm', venueId: ny.id });
-      const cc = await ctx.api('POST', '/api/users', { email: cEmail, name: 'T37 C', role: 'coordinator', password: 'pw-t37-ccc', venueId: ny.id });
+      const cm = await ctx.addMember({ email: mEmail, name: 'T37 M', role: 'mashgiach', password: 'pw-t37-mmm', venueId: ny.id });
+      const cc = await ctx.addMember({ email: cEmail, name: 'T37 C', role: 'coordinator', password: 'pw-t37-ccc', venueId: ny.id });
       assert([200, 201].includes(cm.status) && [200, 201].includes(cc.status), `user create failed: ${cm.status}/${cc.status}`);
       const mTok = await loginAs(baseUrl, mEmail, 'pw-t37-mmm');
       const cTok = await loginAs(baseUrl, cEmail, 'pw-t37-ccc');

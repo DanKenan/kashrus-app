@@ -86,12 +86,22 @@ export default {
     const ts = Date.now();
     const details = [];
 
+    // The test's venue is made first: with invites always on, a member is invited
+    // to a named venue (no silent default venue), and this agency keeps exactly
+    // the venues the reset below expects.
+    const vr = await ctx.api('POST', '/api/venues', { name: `Stage2 Test10 Venue ${ts}` });
+    if (vr.status !== 201 && vr.status !== 200) {
+      throw new Error(`venue create failed: ${vr.status} ${JSON.stringify(vr.json)}`);
+    }
+    const venueId = vr.json.venue.id;
+
     // ---------- 1. Non-admin rejection ----------
     const nonAdminEmail = `reset-nonadmin-${ts}@test.local`;
-    const cu = await ctx.api('POST', '/api/users', {
+    const cu = await ctx.addMember({
       email: nonAdminEmail,
       name: 'Reset NonAdmin',
       role: 'mashgiach',
+      venueId,
       password: 'nonadmin-pw-123',
     });
     if (cu.status !== 200 && cu.status !== 201) {
@@ -120,11 +130,6 @@ export default {
     details.push('non-admin → 403');
 
     // ---------- 2. Manual reset works ----------
-    const vr = await ctx.api('POST', '/api/venues', { name: `Stage2 Test10 Venue ${ts}` });
-    if (vr.status !== 201 && vr.status !== 200) {
-      throw new Error(`venue create failed: ${vr.status} ${JSON.stringify(vr.json)}`);
-    }
-    const venueId = vr.json.venue.id;
     const tr = await ctx.api('POST', '/api/tasks', {
       venueId,
       title: `Stage2 Test10 Task ${ts}`,
@@ -178,8 +183,16 @@ export default {
     if (!snap.entries.some((e) => e.taskId === taskId)) {
       throw new Error('snapshot does not archive the completed task');
     }
-    if (rr.json.snapshot && rr.json.snapshot.venueId !== venueId) {
-      throw new Error(`response snapshot venue mismatch: ${rr.json.snapshot.venueId}`);
+    // The response carries the FIRST snapshot of this reset (the frontend shows
+    // one). Other tests may have added HKC venues (invites always on: a member
+    // is invited to a real venue), so it must be one of THIS reset's archived
+    // snapshots, for a venue of the caller's agency — not necessarily ours.
+    if (rr.json.snapshot) {
+      const hkcVenueIds = new Set((doc.venues || []).filter((v) => (v.agencyId || 'agency-hkc') === 'agency-hkc').map((v) => v.id));
+      const archived = (doc.historyLogs || []).some((h) => h.id === rr.json.snapshot.id && h.venueId === rr.json.snapshot.venueId);
+      if (!archived || !hkcVenueIds.has(rr.json.snapshot.venueId)) {
+        throw new Error(`response snapshot venue mismatch: ${rr.json.snapshot.venueId}`);
+      }
     }
     details.push(`reset works: task cleared, snapshot archived, version ${vBefore}→${vAfter}`);
 

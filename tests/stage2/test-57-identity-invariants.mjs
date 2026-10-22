@@ -24,7 +24,7 @@
  *    identity migration route (apply) still migrates a legacy row to
  *    personId = its own id.
  *  4 credentialOrigin (server-only): register -> 'self-registered'; add-member
- *    and a new venue owner -> 'admin'; the person's own change-password keeps
+ *    and a new venue owner are invites (always on) -> 'invite-new' once accepted; the person's own change-password keeps
  *    it; an agency-assisted reset -> 'agency-reset'; any other password write
  *    drops it; a request body can never set or change it (nor credentialOwner,
  *    recoveryCodeHashes, recoveryFailures, joinedAt); it never appears in a
@@ -32,6 +32,8 @@
  */
 function assert(c, m) { if (!c) throw new Error(m); }
 const J = (x) => JSON.stringify(x);
+
+import { inviteAndAccept, inviteMember, acceptNew } from './invite-helpers.mjs';
 
 export default {
   name: 'Test 57: identity invariants — no multi-membership row can be created; credentialOrigin (10b)',
@@ -102,15 +104,19 @@ export default {
 
     // ---- 1. production routes: an email used elsewhere is refused, nothing written ----
     let v0 = await ctx.getVersion();
-    r = await call('POST', '/api/users', auth(tA), { email: E('mashB'), name: 'T57 Dup', role: 'mashgiach', venueId: VA, password: 'stage2-t57-x', operationId: `op-t57-u1-${ts}` });
-    assert(r.status === 409, `POST /api/users with another agency's email: 409, got ${r.status} ${r.text.slice(0, 160)}`);
+    // Invites always on: "Add team member" with another agency's email gets the
+    // unknown-email answer (a pending invite, no row); the invitee can never
+    // turn it into a second row with a new password (accept 'new' refuses).
+    r = await inviteMember(baseUrl, auth(tA), { email: E('mashB'), name: 'T57 Dup', role: 'mashgiach', venueId: VA, password: 'stage2-t57-x', operationId: `op-t57-u1-${ts}` });
+    assert(r.status === 201 && r.token, `POST /api/users with another agency's email: a pending invite, got ${r.status} ${r.text.slice(0, 160)}`);
+    { const a = await acceptNew(baseUrl, r.token, 'stage2-t57-x-new'); assert(a.status >= 400 && a.status < 500, `accept 'new' with an email used elsewhere must refuse, got ${a.status} ${a.text.slice(0, 160)}`); }
     r = await call('POST', '/api/users', auth(tA), { email: E('mashA').toUpperCase(), name: 'T57 Dup2', role: 'mashgiach', venueId: VA, password: 'stage2-t57-x', operationId: `op-t57-u2-${ts}` });
     assert(r.status === 409, `POST /api/users with an own-team email (other case): 409, got ${r.status}`);
     r = await call('POST', '/api/agencies/register', ipH(), { agencyName: `T57 Reg X ${ts}`, shortCode: 'T57X', adminName: 'T57 X', adminEmail: E('mashB'), adminPassword: 'stage2-t57-regpass', initialVenueName: 'T57 X venue' });
     assert(r.status === 409, `register with a used email: 409, got ${r.status}`);
     r = await call('POST', '/api/venues', auth(tA), { name: `T57 Owner venue ${ts}`, ownerEmail: E('mashB'), ownerName: 'Whoever', ownerPassword: 'stage2-t57-owner', operationId: `op-t57-v1-${ts}` });
-    assert(r.status === 409, `POST /api/venues with another agency's email as owner: 409, got ${r.status} ${r.text.slice(0, 160)}`);
-    await unchanged(v0, 'refused creates');
+    assert(r.status === 201 && r.json?.owner === null && r.json?.ownerInvite, `POST /api/venues with another agency's email as owner: an owner invite, no row, got ${r.status} ${r.text.slice(0, 160)}`);
+    { const t = /#t=([A-Za-z0-9_-]+)/.exec(r.json.ownerInviteLink || '')?.[1]; const a = await acceptNew(baseUrl, t, 'stage2-t57-owner-new'); assert(a.status >= 400 && a.status < 500, `owner invite accept 'new' with an email used elsewhere must refuse, got ${a.status}`); }
     assert((await withEmail(E('mashB'))).length === 1 && (await withEmail(E('mashA'))).length === 1, 'refused creates wrote a row');
 
     // PUT /api/users/:id and /venues: no email change path (a body email is ignored)
@@ -213,27 +219,31 @@ export default {
     noServerOnly(regLogin.json, 'login response');
     const tReg = regLogin.json.token;
     // add-member -> admin
-    r = await call('POST', '/api/users', auth(tA), { email: E('added'), name: 'T57 Added', role: 'mashgiach', venueId: VA, password: 'stage2-t57-added', operationId: `op-t57-add-${ts}` });
+    // add-member -> invite -> accepted: the row records 'invite-new' (the person chose the password)
+    r = await inviteAndAccept(baseUrl, auth(tA), { email: E('added'), name: 'T57 Added', role: 'mashgiach', venueId: VA, password: 'stage2-t57-added', operationId: `op-t57-add-${ts}` });
     assert(r.status === 201, `add-member ${r.status} ${r.text.slice(0, 160)}`);
-    noServerOnly(r.json, 'add-member response');
+    noServerOnly(r.invite, 'add-member (invite) response');
+    noServerOnly(r.accept, 'invite accept response');
     const addedId = r.json.user.id;
-    assert((await rowOf(addedId)).credentialOrigin === 'admin', `add-member must record 'admin': ${(await rowOf(addedId)).credentialOrigin}`);
+    assert((await rowOf(addedId)).credentialOrigin === 'invite-new', `an accepted invite must record 'invite-new': ${(await rowOf(addedId)).credentialOrigin}`);
     // new venue owner -> admin
     r = await call('POST', '/api/venues', auth(tA), { name: `T57 Owner venue 2 ${ts}`, ownerEmail: E('owner'), ownerName: 'T57 Owner', ownerPassword: 'stage2-t57-owner', operationId: `op-t57-v2-${ts}` });
     assert(r.status === 201 || r.status === 200, `venue with a new owner ${r.status} ${r.text.slice(0, 160)}`);
     noServerOnly(r.json, 'create-venue response');
+    assert(r.json.owner === null && r.json.ownerInvite && (await withEmail(E('owner'))).length === 0, 'a new venue owner is an owner invite (no row, no admin-set password)');
+    { const t = /#t=([A-Za-z0-9_-]+)/.exec(r.json.ownerInviteLink || '')?.[1]; const a = await acceptNew(baseUrl, t, 'stage2-t57-owner'); assert(a.status === 200, `owner invite accept ${a.status} ${a.text.slice(0, 160)}`); }
     const owner = (await withEmail(E('owner')))[0];
-    assert(owner && owner.credentialOrigin === 'admin', `a new venue owner must record 'admin': ${owner?.credentialOrigin}`);
+    assert(owner && owner.role === 'owner' && owner.credentialOrigin === 'invite-new', `an accepted owner invite must record 'invite-new': ${owner?.credentialOrigin}`);
     // a body can never set or change the credential fields
     let lv = await ctx.getVersion();
     r = await call('PUT', `/api/users/${addedId}`, auth(tA), { name: 'T57 Added 2', credentialOrigin: 'self-registered', credentialOwner: true, recoveryCodeHashes: ['x'], recoveryFailures: 0, joinedAt: 1, expectedVersion: lv });
     assert(r.status === 200, `PUT with forged credential fields ${r.status}`);
     const added2 = await rowOf(addedId);
-    assert(added2.credentialOrigin === 'admin' && added2.credentialOwner === undefined && added2.recoveryCodeHashes === undefined && added2.recoveryFailures === undefined && added2.joinedAt === undefined, `forged credential fields stored: ${J(added2)}`.replace(/\$2[aby]\$[^"]*/g, '<hash>'));
-    r = await call('POST', '/api/users', auth(tA), { email: E('added3'), name: 'T57 Added 3', role: 'mashgiach', venueId: VA, password: 'stage2-t57-added', credentialOrigin: 'self-registered', credentialOwner: true, operationId: `op-t57-add3-${ts}` });
+    assert(added2.credentialOrigin === 'invite-new' && added2.credentialOwner === undefined && added2.recoveryCodeHashes === undefined && added2.recoveryFailures === undefined && added2.joinedAt === undefined, `forged credential fields stored: ${J(added2)}`.replace(/\$2[aby]\$[^"]*/g, '<hash>'));
+    r = await inviteAndAccept(baseUrl, auth(tA), { email: E('added3'), name: 'T57 Added 3', role: 'mashgiach', venueId: VA, password: 'stage2-t57-added', credentialOrigin: 'self-registered', credentialOwner: true, operationId: `op-t57-add3-${ts}` });
     assert(r.status === 201, `add-member with forged fields ${r.status}`);
     const added3 = await rowOf(r.json.user.id);
-    assert(added3.credentialOrigin === 'admin' && added3.credentialOwner === undefined, `add-member body must not set the origin: ${added3.credentialOrigin}`);
+    assert(added3.credentialOrigin === 'invite-new' && added3.credentialOwner !== true, `add-member body must not set the origin: ${added3.credentialOrigin}`);
     // the roster never carries them
     r = await call('GET', '/api/users', auth(tA));
     assert(r.status === 200, `roster ${r.status}`);
