@@ -77,17 +77,21 @@ export default {
         { id: U('t'), email: E('t'), name: 'T69 Target', role: 'mashgiach', agencyId: A, venueId: A1 },
         { id: U('self'), email: E('self'), name: 'T69 Self', role: 'mashgiach', agencyId: A, venueId: A1 },
         { id: U('m'), email: E('m'), name: 'T69 Multi', role: 'mashgiach', agencyId: A, venueId: A1 },
+        { id: U('ma'), email: E('ma'), name: 'T69 Multi admin-set', role: 'mashgiach', agencyId: A, venueId: A1 },
         { id: U('bB'), email: E('bb'), name: 'T69 B member', role: 'mashgiach', agencyId: B, venueId: B1 },
         { id: U('f'), email: E('f'), name: 'T69 Fresh target', role: 'mashgiach', agencyId: A, venueId: A1 },
       ],
     });
     assert(inj.status === 200, `inject-fixture: ${inj.status}`);
-    for (const k of ['t', 'self', 'm', 'ad2', 'f']) assert((await hook('set-password', { userId: U(k), password: PW })).status === 200, `set-password ${k}`);
+    for (const k of ['t', 'self', 'm', 'ma', 'ad2', 'f']) assert((await hook('set-password', { userId: U(k), password: PW })).status === 200, `set-password ${k}`);
     {
       const users = await rows();
       const m = users.find((u) => u.id === U('m'));
-      const planted = users.map((u) => (u.id === U('self') ? { ...u, credentialOrigin: 'self-registered' } : u.id === U('m') ? { ...u, credentialOwner: true, credentialOrigin: 'self-registered' } : u));
+      const ma = users.find((u) => u.id === U('ma'));
+      const planted = users.map((u) => (u.id === U('self') ? { ...u, credentialOrigin: 'self-registered' } : u.id === U('m') ? { ...u, credentialOwner: true, credentialOrigin: 'self-registered' } : u.id === U('ma') ? { ...u, credentialOwner: true, credentialOrigin: 'admin' } : u));
       planted.push({ id: U('m2'), email: m.email, name: 'T69 Multi in B', role: 'mashgiach', agencyId: B, venueId: B1, personId: m.personId, avatarColor: '#64748b' });
+      // A multi person whose password is admin-set: ONLY the multi-person rule refuses them (km2).
+      planted.push({ id: U('ma2'), email: ma.email, name: 'T69 Multi admin-set in B', role: 'mashgiach', agencyId: B, venueId: B1, personId: ma.personId, avatarColor: '#64748b' });
       assert((await hook('doc-set-users', { users: planted })).status === 200, 'plant origins + multi person');
       await rehydrate('0');
     }
@@ -102,7 +106,7 @@ export default {
       await flag(B, true);
       v0 = await ctx.getVersion();
       const before = J(await doc());
-      for (const [k, label] of [['adA', 'self'], ['prim', 'primary admin'], ['self', 'own password (self-registered)'], ['m', 'multi person']]) {
+      for (const [k, label] of [['adA', 'self'], ['prim', 'primary admin'], ['self', 'own password (self-registered)'], ['m', 'multi person'], ['ma', 'multi person (admin-set password)']]) {
         const r = await send(tA, U(k));
         assert(r.status === 409 && r.json?.code === 'INVITE_NOT_AVAILABLE', `R ${label} 409: ${r.status} ${r.text.slice(0, 100)}`);
       }
