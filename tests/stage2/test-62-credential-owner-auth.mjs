@@ -189,10 +189,15 @@ export default {
 
     // ---- B: login resolves X ----
     {
+      // 10g: a multi person's login returns a choose token; activating the
+      // owner X gives the same credential-owner session as before 10g.
       const lg = await login(PE, PW);
-      assert(lg.status === 200 && lg.json?.user?.id === X, `B login -> X ${lg.status} ${lg.text.slice(0, 120)}`);
-      assert(!J(decode(lg.json.token)).includes(Y2), 'B never a Y session');
-      console.log('  ✓ B login resolves the owner row');
+      assert(lg.status === 200 && lg.json?.chooseMembership === true && lg.json?.user === undefined, `B login -> chooser ${lg.status} ${lg.text.slice(0, 120)}`);
+      assert(decode(lg.json.token).cr === X, 'B the choose token names the owner row X');
+      const act = await call('POST', '/api/auth/activate', auth(lg.json.token), { membershipId: X });
+      assert(act.status === 200 && act.json?.user?.id === X, `B activate X: ${act.status} ${act.text.slice(0, 120)}`);
+      assert(!J(decode(act.json.token)).includes(Y2), 'B never a Y session');
+      console.log('  ✓ B login resolves the owner row (10g: chooser, then activate X)');
     }
 
     // ---- C: forgot refused for P, no push ----
@@ -300,7 +305,7 @@ export default {
       assert((await ws2.waitClose()) === 4401, `F old Y token WS handshake 4401 (${ws2.code})`);
       ws2.close(); wsY.close();
       const lg = await login(PE, NEW);
-      assert(lg.status === 200 && lg.json?.user?.id === X, `F new password logs in as X ${lg.status}`);
+      assert(lg.status === 200 && lg.json?.chooseMembership === true && decode(lg.json.token).cr === X, `F new password logs in (chooser for owner X) ${lg.status}`);
       assert((await login(PE, PW)).status === 401, 'F old password refused');
       console.log('  ✓ E/F change-password from Y changes the one credential, kills every old session of P, hands Y a fresh token');
     }

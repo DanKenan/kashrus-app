@@ -1,7 +1,7 @@
 /**
  * Item 8d: session token classifier + resolver (unit, pure).
  */
-import { classifySessionClaims as C, resolveSessionRow as R, sessionClaimsFor as S, tokenEpochOf } from '../../src/server/session-token.ts';
+import { classifySessionClaims as C, resolveSessionRow as R, sessionClaimsFor as S, tokenEpochOf, resolveChooseOwner, chooseClaimsFor, credentialRowOfPerson } from '../../src/server/session-token.ts';
 
 function assert(c, m) { if (!c) throw new Error(m); }
 
@@ -69,5 +69,54 @@ export default {
     assert(JSON.stringify(S({ id: 'u9', personId: 'other', tokenEpoch: 1 })) === JSON.stringify({ v: 2, sub: 'other', mem: 'u9', ep: 1 }), '10e: membership row (personId ≠ id) → v2');
     assert(JSON.stringify(S({ id: 'u8', personId: '' })) === JSON.stringify({ sub: 'u8' }), 'empty personId → v1');
     console.log('  ✓ issuing: v2 only when personId === id');
+    // ---- 10g: choose token ----
+    const ck = (o) => C(o)?.kind ?? null;
+    const chooseTable = [
+      [{ v: 3, sub: 'p1', cr: 'x1', ep: 0 }, 'choose'],
+      [{ v: 3, sub: 'p1', cr: 'x1', ep: 4 }, 'choose'],
+      [{ v: 3, sub: 'p1', cr: 'x1', ep: 0, mem: 'x1' }, null],
+      [{ v: 3, sub: 'p1', cr: 'x1', ep: 0, kiosk: true }, null],
+      [{ v: 3, sub: 'p1', cr: 'x1', ep: 0, venueId: 'v' }, null],
+      [{ v: 3, sub: 'p1', ep: 0 }, null],
+      [{ v: 3, sub: '', cr: 'x1', ep: 0 }, null],
+      [{ v: 3, sub: 'p1', cr: 'x1', ep: -1 }, null],
+      [{ v: 3, sub: 'p1', cr: 'x1', ep: 1.5 }, null],
+      [{ v: 3, sub: 'p1', cr: 'x1' }, null],
+      [{ v: '3', sub: 'p1', cr: 'x1', ep: 0 }, null],
+      [{ sub: 'p1', cr: 'x1' }, null],
+      [{ v: 2, sub: 'p1', mem: 'x1', ep: 0, cr: 'x1' }, 'v2'],
+    ];
+    for (const [o, want] of chooseTable) assert(ck(o) === want, `choose classify ${JSON.stringify(o)} -> ${want} (got ${ck(o)})`);
+    const P = [
+      { id: 'x1', personId: 'p1', credentialOwner: true, tokenEpoch: 2, agencyId: 'A' },
+      { id: 'y1', personId: 'p1', tokenEpoch: 1, agencyId: 'B' },
+      { id: 's1', personId: 's1', agencyId: 'A' },
+      { id: 'q1', personId: 'q1', credentialOwner: true, agencyId: 'A' },
+      { id: 'q2', personId: 'q1', credentialOwner: true, agencyId: 'B' },
+    ];
+    const cho = (o) => resolveChooseOwner(C(o), P)?.id ?? null;
+    assert(R(C({ v: 3, sub: 'p1', cr: 'x1', ep: 2 }), P) === undefined, 'resolveSessionRow(choose) is ALWAYS undefined');
+    assert(cho({ v: 3, sub: 'p1', cr: 'x1', ep: 2 }) === 'x1', 'owner at its epoch');
+    assert(cho({ v: 3, sub: 'p1', cr: 'x1', ep: 1 }) === null, 'stale epoch (E1)');
+    assert(cho({ v: 3, sub: 'p1', cr: 'y1', ep: 1 }) === null, 'non-owner row (E3: owner moved)');
+    assert(cho({ v: 3, sub: 'p2', cr: 'x1', ep: 2 }) === null, 'cross person');
+    assert(cho({ v: 3, sub: 'p1', cr: 'gone', ep: 0 }) === null, 'deleted row');
+    assert(cho({ v: 3, sub: 's1', cr: 's1', ep: 0 }) === 's1', 'single-row person: its only row is the owner');
+    assert(cho({ v: 3, sub: 'q1', cr: 'q1', ep: 0 }) === null, 'two owners: invalid group fails closed');
+    assert(resolveChooseOwner(C({ v: 2, sub: 'p1', mem: 'x1', ep: 2 }), P) === undefined, 'a v2 token is not a choose token');
+    assert(credentialRowOfPerson(P, 'p1')?.id === 'x1' && credentialRowOfPerson(P, 'nobody') === undefined, 'credentialRowOfPerson');
+    assert(JSON.stringify(chooseClaimsFor(P[0])) === JSON.stringify({ v: 3, sub: 'p1', cr: 'x1', ep: 2 }), 'chooseClaimsFor');
+    console.log('  ✓ 10g choose token: strict shape, never a session row, owner-now + epoch');
+
+    // ---- 10g: v2 agency check ----
+    const ags = [{ id: 'A' }];
+    assert(R(C({ v: 2, sub: 'p1', mem: 'x1', ep: 2 }), P, ags)?.id === 'x1', 'v2, agency exists');
+    assert(R(C({ v: 2, sub: 'p1', mem: 'y1', ep: 1 }), P, ags) === undefined, 'v2, agency gone -> refused');
+    assert(R(C({ v: 2, sub: 'p1', mem: 'y1', ep: 1 }), P)?.id === 'y1', 'no agencies list given -> unchanged');
+    assert(R(C({ v: 2, sub: 'n1', mem: 'n1', ep: 0 }), [{ id: 'n1', personId: 'n1' }], ags)?.id === 'n1', 'v2 row without agencyId -> unchanged');
+    assert(R(C({ sub: 'l1' }), [{ id: 'l1', agencyId: 'gone' }], ags)?.id === 'l1', 'v1 unchanged by the agency check');
+    assert(R(C({ sub: 'k1', kiosk: true }), [{ id: 'k1', agencyId: 'gone' }], ags)?.id === 'k1', 'kiosk unchanged by the agency check');
+    console.log('  ✓ 10g v2 agency check (v1 / kiosk unchanged)');
   },
 };
+
