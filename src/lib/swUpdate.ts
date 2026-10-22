@@ -107,11 +107,12 @@ function reloadedRecently(): boolean {
 }
 
 /**
- * Reload the page for an update. `force` is for an explicit tap on
- * "Update app"; automatic reloads are skipped if one just happened.
+ * Reload the page for an update (only ever from a tap). [UPD-RV1] B2: the
+ * loop guard holds for every update reload, taps included: if one happened
+ * less than RELOAD_GUARD_MS ago, nothing reloads and false comes back.
  */
-export function reloadForUpdate(force = false): boolean {
-  if (!force && reloadedRecently()) return false;
+export function reloadForUpdate(): boolean {
+  if (reloadedRecently()) return false;
   try {
     sessionStorage.setItem(RELOAD_KEY, String(Date.now()));
   } catch {
@@ -149,7 +150,7 @@ function waitForInstalled(worker: ServiceWorker, timeoutMs: number): Promise<boo
  * within TAKEOVER_TIMEOUT_MS — a reload then would only bring back the old
  * copy.
  */
-function takeOver(reg: ServiceWorkerRegistration, force: boolean): Promise<boolean> {
+function takeOver(reg: ServiceWorkerRegistration): Promise<boolean> {
   const waiting = reg.waiting;
   if (!waiting) return Promise.resolve(false);
   const controls = () =>
@@ -163,10 +164,16 @@ function takeOver(reg: ServiceWorkerRegistration, force: boolean): Promise<boole
       finished = true;
       clearTimeout(timer);
       navigator.serviceWorker.removeEventListener('controllerchange', onChange);
-      takeoverInProgress = ok;
       // Only ever called from a tap (the bar or "Update app").
-      if (ok) reloadForUpdate(force);
-      resolve(ok);
+      let reloaded = false;
+      if (ok) {
+        reloaded = reloadForUpdate();
+        // The loop guard held the reload: the new version controls the page,
+        // so the bar offers the reload again (a later tap).
+        if (!reloaded) reloadPending = true;
+      }
+      takeoverInProgress = reloaded;
+      resolve(reloaded);
     };
     const onChange = () => {
       if (controls()) finish(true);
@@ -181,22 +188,29 @@ function takeOver(reg: ServiceWorkerRegistration, force: boolean): Promise<boole
   });
 }
 
-/** "Update app" button. */
-export async function checkForUpdate(): Promise<UpdateCheckResult> {
-  if (!supported()) {
-    reloadForUpdate(true);
-    return 'updating';
-  }
+/**
+ * "Update app" button. [UPD-RV1] B1: the same safety gate as the bar's tap,
+ * checked first and again right before any switch or reload (the checks in
+ * between are asynchronous). Busy -> { busy } and nothing changes.
+ */
+export async function checkForUpdate(
+  blocked: () => UpdateBlockReason | null = updateBlockedReason,
+): Promise<UpdateCheckResult | { busy: UpdateBlockReason }> {
+  const first = blocked();
+  if (first) return { busy: first };
+  const reloadIfSafe = (): UpdateCheckResult | { busy: UpdateBlockReason } => {
+    const reason = blocked();
+    if (reason) return { busy: reason };
+    return reloadForUpdate() ? 'updating' : 'failed';
+  };
+  if (!supported()) return reloadIfSafe();
   let reg: ServiceWorkerRegistration | undefined;
   try {
     reg = await navigator.serviceWorker.getRegistration();
   } catch {
     reg = undefined;
   }
-  if (!reg) {
-    reloadForUpdate(true);
-    return 'updating';
-  }
+  if (!reg) return reloadIfSafe();
   if (!reg.waiting && !reg.installing) {
     try {
       await reg.update();
@@ -208,16 +222,21 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
   if (!incoming) {
     if (reloadPending) {
       // The new version already controls this page; a reload shows it.
-      setState('updating');
-      reloadForUpdate(true);
-      return 'updating';
+      const res = reloadIfSafe();
+      if (res === 'updating') setState('updating');
+      return res;
     }
     return 'current';
   }
   const installed = await waitForInstalled(incoming, INSTALL_TIMEOUT_MS);
   if (!installed || !reg.waiting) return 'failed';
+  const late = blocked();
+  if (late) {
+    markReady();
+    return { busy: late };
+  }
   setState('updating');
-  if (await takeOver(reg, true)) return 'updating';
+  if (await takeOver(reg)) return 'updating';
   markReady();
   if (state === 'updating') setState('none');
   return 'failed';
@@ -235,7 +254,7 @@ export async function applyUpdate(
   const reg = registration;
   if (reg?.waiting) {
     setState('updating');
-    const ok = await takeOver(reg, true);
+    const ok = await takeOver(reg);
     if (!ok) {
       setState('ready');
       return 'failed';
@@ -244,8 +263,8 @@ export async function applyUpdate(
   }
   if (reloadPending) {
     // The new version already controls this page; a reload shows it.
+    if (!reloadForUpdate()) return 'failed';
     setState('updating');
-    reloadForUpdate(true);
     return 'updating';
   }
   setState('none');

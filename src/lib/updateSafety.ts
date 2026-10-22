@@ -8,6 +8,9 @@ import { writesInFlight } from './api';
  *  - open: a form, sheet or dialog is open (every one of the app's is a
  *    full-screen `fixed inset-0` layer, or marks itself with role="dialog",
  *    aria-modal or data-modal).
+ * The header's see-through click-outside layer behind an open menu
+ * (data-menu-backdrop) holds no work and is not counted, so "Update app" in
+ * that menu can run ([UPD-RV1] B1).
  * Anything else that holds unsaved work keeps the 428 draft safety net.
  */
 export type UpdateBlockReason = 'saving' | 'typing' | 'open';
@@ -25,6 +28,6 @@ export function updateBlockedReason(): UpdateBlockReason | null {
     if (textInput || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable) return 'typing';
   }
   const layers = Array.from(document.querySelectorAll(OPEN_LAYER) as ArrayLike<Element>);
-  if (layers.some((l) => !l.closest?.('[data-update-banner]'))) return 'open';
+  if (layers.some((l) => !l.closest?.('[data-update-banner]') && !l.hasAttribute?.('data-menu-backdrop'))) return 'open';
   return null;
 }

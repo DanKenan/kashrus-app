@@ -155,18 +155,83 @@ globalThis.fetch = async () => { throw new TypeError('offline'); };
 await api.apiWrite('/api/x', { method: 'POST', body: '{}' });
 ok('G a failed write does not leave the counter stuck', api.writesInFlight() === 0);
 
+// ---- C: the "Update app" button goes through the same gate ([UPD-RV1] B1) ----
+swu.__resetSwUpdatesForTest(); sessionStorage._m = {};
+{
+  const s0 = skips(); const r0 = reloads;
+  const w5 = worker('installed'); reg.waiting = w5; reg.installing = null; sw.controller = oldWorker;
+  swu.initSwUpdates(reg);
+  let c = await swu.checkForUpdate(() => 'saving');
+  ok('C Update app while saving -> busy, nothing sent, no reload', typeof c === 'object' && c.busy === 'saving' && skips() === s0 && reloads === r0, JSON.stringify(c));
+  c = await swu.checkForUpdate(() => 'open');
+  ok('C Update app while a form is open -> busy, nothing sent, no reload', typeof c === 'object' && c.busy === 'open' && skips() === s0 && reloads === r0);
+  // gate turns busy only after the asynchronous check (re-checked right before the switch)
+  let n = 0;
+  c = await swu.checkForUpdate(() => (n++ === 0 ? null : 'typing'));
+  ok('C busy right before the switch -> busy, nothing sent', typeof c === 'object' && c.busy === 'typing' && skips() === s0 && reloads === r0, JSON.stringify(c));
+  ok('C ... the bar still offers the tap', swu.getUpdateState() === 'ready');
+  // safe -> switch + one reload
+  const cp = swu.checkForUpdate(() => null);
+  await tick(); await tick();
+  ok('C safe -> SKIP_WAITING', skips() === s0 + 1);
+  sw.controller = w5; w5.state = 'activated'; swEv.emit('controllerchange');
+  c = await cp;
+  ok('C ... exactly one reload', c === 'updating' && reloads === r0 + 1, `c=${JSON.stringify(c)} reloads=${reloads}`);
+}
+// ---- L: the loop guard holds for every update reload ([UPD-RV1] B2) ----
+{
+  // already-activated path, second reload inside the guard window
+  swu.__resetSwUpdatesForTest();
+  reg.waiting = null; reg.installing = null;
+  swu.initSwUpdates(reg); swu.onNewVersionActivated();
+  const r0 = reloads;
+  let a = await swu.applyUpdate(() => null);
+  ok('L bar tap reload inside the guard window -> no reload, failed', a === 'failed' && reloads === r0, `a=${JSON.stringify(a)} reloads=${reloads}`);
+  ok('L ... bar offers it again', swu.getUpdateState() === 'ready');
+  a = await swu.checkForUpdate(() => null);
+  ok('L Update app reload inside the guard window -> no reload, failed', a === 'failed' && reloads === r0, `a=${JSON.stringify(a)}`);
+  // takeover path inside the guard window: the worker takes over, the reload is held
+  swu.__resetSwUpdatesForTest();
+  const w6 = worker('installed'); reg.waiting = w6; sw.controller = oldWorker;
+  swu.initSwUpdates(reg);
+  const tp = swu.applyUpdate(() => null);
+  await tick();
+  sw.controller = w6; w6.state = 'activated'; swEv.emit('controllerchange');
+  a = await tp;
+  ok('L takeover inside the guard window -> no reload, failed', a === 'failed' && reloads === r0, `a=${JSON.stringify(a)} reloads=${reloads}`);
+  ok('L ... the bar offers the reload again', swu.getUpdateState() === 'ready');
+  // after the window: the reload goes
+  sessionStorage._m = {};
+  reg.waiting = null;
+  a = await swu.applyUpdate(() => null);
+  ok('L after the guard window -> one reload', a === 'updating' && reloads === r0 + 1, `a=${JSON.stringify(a)} reloads=${reloads}`);
+  // the reload-only path re-checks the gate right before reloading (after the async update check)
+  swu.__resetSwUpdatesForTest(); sessionStorage._m = {};
+  reg.waiting = null; reg.installing = null;
+  swu.initSwUpdates(reg); swu.onNewVersionActivated();
+  let m = 0; const r1 = reloads;
+  a = await swu.checkForUpdate(() => (m++ === 0 ? null : 'saving'));
+  ok('L Update app: busy right before the reload -> busy, no reload', typeof a === 'object' && a.busy === 'saving' && reloads === r1, `a=${JSON.stringify(a)}`);
+}
+layers = []; active = null;
+layers = [{ closest: () => null, hasAttribute: (n) => n === 'data-menu-backdrop' }];
+ok('G the header menu backdrop alone -> safe', updateBlockedReason() === null);
+layers = [];
+
 // ---- S: static wiring ----
 const src = fs.readFileSync(new URL('../../src/lib/swUpdate.ts', import.meta.url), 'utf8');
 const main = fs.readFileSync(new URL('../../src/main.tsx', import.meta.url), 'utf8');
 ok('S bar rendered once next to the app', (main.match(/<UpdateBanner \/>/g) || []).length === 1);
 ok('S no startup/untouched auto-switch left', !/stillStarting|STARTUP_WINDOW|interacted/.test(src));
-ok('S takeOver only from the two taps (applyUpdate, checkForUpdate)', (src.match(/takeOver\(reg, true\)/g) || []).length === 2 && !/takeOver\(reg, false\)/.test(src));
+ok('S takeOver only from the two taps (applyUpdate, checkForUpdate)', (src.match(/takeOver\(reg\)/g) || []).length === 2);
 {
-  const all = (src.match(/reloadForUpdate\(/g) || []).length;
-  const forced = (src.match(/reloadForUpdate\(true\)/g) || []).length;
-  // the definition + the one inside takeOver (reached only from the taps); every other call is a tap's (force=true)
-  ok('S every other reload is a tap\'s (force=true)', all - forced === 2 && /if \(ok\) reloadForUpdate\(force\)/.test(src), `all=${all} forced=${forced}`);
+  // [UPD-RV1] B2: no forced reload left; every update reload goes through the guard.
+  const calls = (src.match(/reloadForUpdate\(/g) || []).length;
+  ok('S no force flag left on reloads', !/reloadForUpdate\(true\)/.test(src) && /export function reloadForUpdate\(\): boolean \{\n\s+if \(reloadedRecently\(\)\) return false;/.test(src), `calls=${calls}`);
+  ok('S checkForUpdate is gated', /export async function checkForUpdate\(\s*blocked: \(\) => UpdateBlockReason \| null = updateBlockedReason/.test(src));
 }
+const hdr = fs.readFileSync(new URL('../../src/components/Header.tsx', import.meta.url), 'utf8');
+ok('S the header menu backdrop is marked (not counted as an open form)', /data-menu-backdrop=""\s+className="fixed inset-0 z-40 bg-transparent"/.test(hdr));
 
 console.log(`${passed} passed, ${failures} failed.`);
 process.exit(failures ? 1 : 0);

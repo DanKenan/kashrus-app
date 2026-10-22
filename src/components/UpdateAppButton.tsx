@@ -11,7 +11,7 @@ import { checkForUpdate } from '../lib/swUpdate';
  * so even if the update is interrupted (dying phone, dropped network) the
  * app keeps the last working cached version instead of white-screening.
  */
-type Status = 'idle' | 'checking' | 'current' | 'failed';
+type Status = 'idle' | 'checking' | 'current' | 'failed' | 'busy';
 
 const STATUS_MS = 4000;
 
@@ -38,7 +38,8 @@ export const UpdateAppButton: React.FC = () => {
     } catch {
       result = 'failed';
     }
-    if (result === 'current') showFor('current');
+    if (typeof result === 'object') showFor('busy'); // [UPD-RV1] B1: something is saving, open or being typed
+    else if (result === 'current') showFor('current');
     else if (result === 'failed') showFor('failed');
     // 'updating': the new version controls the page and it is reloading.
     else showFor('idle');
@@ -52,7 +53,9 @@ export const UpdateAppButton: React.FC = () => {
         ? 'You have the newest version'
         : status === 'failed'
           ? "Couldn't update, try again"
-          : 'Update app';
+          : status === 'busy'
+            ? "Finish what's open, then try again"
+            : 'Update app';
 
   return (
     <button
