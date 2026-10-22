@@ -37,6 +37,9 @@ import { EventsModal } from './components/EventsModal';
 import { CreateEventModal } from './components/CreateEventModal';
 import { CopyEventDialog } from './components/CopyEventDialog';
 import { ConfirmModal } from './components/ConfirmModal';
+import { VenueTabs } from './components/VenueTabs';
+import { AgencyEventsScreen } from './components/AgencyEventsScreen';
+import { SHOW_FACTORY_AUDIT } from './lib/features';
 import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
@@ -360,6 +363,10 @@ export default function App() {
   const [focusEventId, setFocusEventId] = useState<string | null>(null);
   const [events, setEvents] = useState<KosherEvent[]>([]);
   const [isFactoryAuditOpen, setIsFactoryAuditOpen] = useState(false);
+  // Don 2026-10-22: the admin's agency-wide Events screen (from the dashboard).
+  const [isAgencyEventsOpen, setIsAgencyEventsOpen] = useState(false);
+  const [agencyEventsReload, setAgencyEventsReload] = useState(0);
+  const [createEventVenueId, setCreateEventVenueId] = useState<string | null>(null);
 
   // In-App Confirm Dialog State (replaces window.confirm)
   const [confirmModalConfig, setConfirmModalConfig] = useState<{
@@ -1249,6 +1256,9 @@ export default function App() {
   const handleEventCreated = (newEvent: KosherEvent) => {
     setEvents((prev) => [newEvent, ...prev.filter((e) => e.id !== newEvent.id)]);
     showToast(`Kosher Event registered: "${newEvent.title}"`);
+    setCreateEventVenueId(null);
+    // From the agency Events screen: stay there and show the new event in the list.
+    if (isAgencyEventsOpen) { setAgencyEventsReload((k) => k + 1); return; }
     setIsEventsModalOpen(true);
   };
 
@@ -1794,7 +1804,7 @@ export default function App() {
         onOpenHistoryModal={leaveHomeThen(() => setIsHistoryModalOpen(true))}
         onOpenEventsModal={() => setIsEventsModalOpen(true)}
         onOpenCreateEvent={() => setIsCreateEventModalOpen(true)}
-        onOpenFactoryAudit={() => setIsFactoryAuditOpen(true)}
+        onOpenFactoryAudit={SHOW_FACTORY_AUDIT ? () => setIsFactoryAuditOpen(true) : undefined}
         eventsCount={events.length}
         onOpenTeamModal={() => setIsTeamModalOpen(true)}
         onOpenKioskDevices={() => setIsKioskDevicesOpen(true)}
@@ -2001,9 +2011,29 @@ export default function App() {
             } : undefined}
             reloadKey={adminHomeReloadKey}
             onSelectVenue={(id) => { setAdminHome(false); handleSelectVenue(id); }}
+            onOpenEvents={() => setIsAgencyEventsOpen(true)}
           />
         ) : (
           <>
+          {/* Don 2026-10-22: the venue's own things sit on the venue's screen, not in the top menu. */}
+          {!isKiosk && (
+          <div className="mb-3 max-sm:order-first">
+          <VenueTabs
+            currentUser={currentUser}
+            active={isEventsModalOpen ? 'events' : isFactoryAuditOpen ? 'factory' : isTeamModalOpen ? 'team' : isHistoryModalOpen ? 'history' : 'board'}
+            eventsCount={events.length}
+            onBoard={() => { setIsEventsModalOpen(false); setIsFactoryAuditOpen(false); setIsTeamModalOpen(false); setIsHistoryModalOpen(false); }}
+            onOpen={(tab) => {
+              if (tab === 'events') setIsEventsModalOpen(true);
+              else if (tab === 'factory') setIsFactoryAuditOpen(true);
+              else if (tab === 'team') setIsTeamModalOpen(true);
+              else setIsHistoryModalOpen(true);
+            }}
+            onNewAssignment={handleOpenCreateTask}
+            onResetBoard={handleResetDailyBoard}
+          />
+          </div>
+          )}
             {/* Live Progress Header / Owner Audit Banner (the kiosk shows its own progress ring) */}
             {isKiosk ? null : currentUser?.role === 'owner' ? (
               <OwnerAuditBanner
@@ -2040,7 +2070,7 @@ export default function App() {
             )}
 
         {/* Factory & Airtable Ingredients Audit Quick Banner (Shown for Industrial Plant facilities) */}
-        {!isKiosk && (currentVenue?.category?.toLowerCase().includes('industrial') || currentVenue?.category?.toLowerCase().includes('plant') || currentVenue?.category?.toLowerCase().includes('factory')) && (
+        {SHOW_FACTORY_AUDIT && !isKiosk && (currentVenue?.category?.toLowerCase().includes('industrial') || currentVenue?.category?.toLowerCase().includes('plant') || currentVenue?.category?.toLowerCase().includes('factory')) && (
           <div className={`${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:order-1' : ''} mb-4 px-4 py-3 rounded-[20px] bg-gold-wash border border-gold/30 tactile-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-fade-in`}>
             <div className="flex items-center gap-3 min-w-0">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2 shrink-0">
@@ -2338,12 +2368,22 @@ export default function App() {
       />
 
       {/* Create / Notify Event Modal */}
+      <AgencyEventsScreen
+        isOpen={isAgencyEventsOpen && currentUser?.role === 'admin'}
+        onClose={() => setIsAgencyEventsOpen(false)}
+        currentUser={currentUser}
+        venues={venues}
+        timeZone={currentVenueTimeZone}
+        reloadKey={agencyEventsReload}
+        onCreateForVenue={(venueId) => { setCreateEventVenueId(venueId); setIsCreateEventModalOpen(true); }}
+      />
+
       <CreateEventModal
         isOpen={isCreateEventModalOpen}
-        onClose={() => setIsCreateEventModalOpen(false)}
+        onClose={() => { setIsCreateEventModalOpen(false); setCreateEventVenueId(null); }}
         onEventCreated={handleEventCreated}
         currentUser={currentUser}
-        currentVenue={currentVenue}
+        currentVenue={(createEventVenueId && venues.find((v) => v.id === createEventVenueId)) || currentVenue}
         allVenues={venues}
         availableMashgichim={knownUsers}
       />

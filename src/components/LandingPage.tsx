@@ -1,4 +1,5 @@
 import React from 'react';
+import { SHOW_FACTORY_AUDIT } from '../lib/features';
 import {
   ClipboardCheck,
   Factory,
@@ -87,7 +88,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <ShutfeyLogo size="xl" showSubtitle={false} />
           <p className="mt-6 text-sm sm:text-base text-ink-soft leading-relaxed">
             The daily operations board for kosher agencies, mashgichim, and venues —
-            shift rosters, compliance checklists, and factory audits in one warm, tactile workspace.
+            shift rosters, compliance checklists, and events in one warm, tactile workspace.
           </p>
         </div>
 
@@ -184,7 +185,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
         {/* Feature strip */}
         <div className="mt-10 grid sm:grid-cols-3 gap-3 w-full max-w-4xl">
-          {FEATURES.map((f) => (
+          {FEATURES.filter((f) => SHOW_FACTORY_AUDIT || f.title !== 'Factory Audit Hub').map((f) => (
             <div key={f.title} className="bg-surface/70 border border-line/70 rounded-[20px] p-5 tactile-1">
               <f.icon className="w-5 h-5 text-gold-deep" />
               <p className="mt-3 text-sm font-bold text-ink">{f.title}</p>

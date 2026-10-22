@@ -2,6 +2,7 @@ import { venueTimeZone } from '../lib/workday';
 import { HeaderDateLine } from './HeaderDateLine';
 import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { useMinWidth } from '../lib/useMinWidth';
 import { ConfirmModal } from './ConfirmModal';
 import { clearSession } from '../lib/api';
 import { 
@@ -147,6 +148,10 @@ export const Header: React.FC<HeaderProps> = ({
     }
   };
   const canEnterKiosk = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
+  // Don 2026-10-22: "Enter kiosk mode" only on a tablet-size screen (>= 768 px wide); a phone is never a kiosk.
+  const isTabletWidth = useMinWidth(768);
+  // Don 2026-10-22: "Kiosk tablets" (pairing/unpairing) is management: admin only.
+  const canManageKiosks = currentUser?.role === 'admin';
 
   // QA2 #10: the venue name always shows (it truncates with …). With an agency
   // logo the phone header makes room by hiding the word "Shutfey" and keeping
@@ -490,8 +495,9 @@ export const Header: React.FC<HeaderProps> = ({
                       </div>
 
                       {/* Kiosk mode: turn this device into a shared wall tablet */}
-                      {canEnterKiosk && (
+                      {canEnterKiosk && (isTabletWidth || canManageKiosks) && (
                         <div className="px-1 py-0.5 border-t border-line/60 mt-1 pt-1">
+                          {isTabletWidth && (
                           <button
                             onClick={enterKioskMode}
                             className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
@@ -500,7 +506,8 @@ export const Header: React.FC<HeaderProps> = ({
                             <Tablet className="w-4 h-4 text-gold-deep" />
                             <span>Enter kiosk mode</span>
                           </button>
-                          {onOpenKioskDevices && (
+                          )}
+                          {canManageKiosks && onOpenKioskDevices && (
                             <button
                               onClick={() => { setUserMenuOpen(false); onOpenKioskDevices(); }}
                               className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
@@ -706,78 +713,8 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
 
-          {canUserAssignTasks(currentUser) && (
-            <button
-              onClick={() => { setMobileMenuOpen(false); onOpenTaskModal(); }}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-bold rounded-xl text-white bg-gradient-to-r from-gold to-gold-deep shadow-xs cursor-pointer"
-            >
-              <Plus className="w-4 h-4 stroke-[2.5]" />
-              <span>Create New Assignment</span>
-            </button>
-          )}
-
-          {/* Factory Ingredients Audit on Mobile */}
-          {onOpenFactoryAudit && (
-            <button
-              onClick={() => { setMobileMenuOpen(false); onOpenFactoryAudit(); }}
-              className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold rounded-xl text-gold-ink bg-gold-wash border border-gold/40 cursor-pointer tactile-1"
-            >
-              <span className="flex items-center gap-2">
-                <Factory className="w-4 h-4 text-gold-deep" />
-                <span>Ingredients audit</span>
-              </span>
-            </button>
-          )}
-
-          {/* Events Hub on Mobile */}
-          <button
-            onClick={() => { setMobileMenuOpen(false); onOpenEventsModal(); }}
-            className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold rounded-xl text-gold-ink bg-gold-wash border border-gold/40 cursor-pointer tactile-1"
-          >
-            <span className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-gold-deep" />
-              <span>Kosher Events & Banquets</span>
-            </span>
-            {eventsCount > 0 && (
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-gold text-white">
-                {eventsCount} active
-              </span>
-            )}
-          </button>
-
-          <div className="grid grid-cols-2 gap-2 pt-1">
-            {(currentUser?.role === 'admin' || currentUser?.role === 'coordinator') && (
-              <button
-                onClick={() => { setMobileMenuOpen(false); onOpenTeamModal(); }}
-                className="flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-ink-soft bg-sunken cursor-pointer"
-              >
-                <Users className="w-4 h-4 text-gold-deep" />
-                <span>Mashgichim ({totalWorkersCount})</span>
-              </button>
-            )}
-            <button
-              onClick={() => { setMobileMenuOpen(false); onOpenHistoryModal(); }}
-              className={`flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-ink-soft bg-sunken cursor-pointer ${
-                currentUser?.role === 'admin' ? '' : 'col-span-2'
-              }`}
-            >
-              <History className="w-4 h-4 text-gold-deep" />
-              <span>History Log</span>
-            </button>
-          </div>
-
-          {currentUser?.role === 'admin' && (
-            <div className="space-y-1.5">
-              <button
-                onClick={() => { setMobileMenuOpen(false); onResetDailyBoard(); }}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl text-gold-deep bg-gold-wash border border-gold/40 cursor-pointer"
-              >
-                <RotateCcw className="w-4 h-4" />
-                <span>Reset Daily Board Now</span>
-              </button>
-
-            </div>
-          )}
+          {/* Don 2026-10-22: the menu is for general/account things. New assignment, Events,
+              Factory Audit, Team, History and Reset board live on the venue screen (VenueTabs). */}
 
           {/* Theme Switcher on Mobile */}
           <button
@@ -796,8 +733,9 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="rounded-xl bg-sunken px-1 py-1">
               <PushNotificationToggle userEmail={currentUser.email} />
               <UpdateAppButton />
-              {canEnterKiosk && (
+              {canEnterKiosk && (isTabletWidth || canManageKiosks) && (
                 <>
+                  {isTabletWidth && (
                   <button
                     onClick={enterKioskMode}
                     className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-surface transition cursor-pointer text-ink-soft"
@@ -806,7 +744,8 @@ export const Header: React.FC<HeaderProps> = ({
                     <Tablet className="w-4 h-4 text-gold-deep" />
                     <span>Enter kiosk mode</span>
                   </button>
-                  {onOpenKioskDevices && (
+                  )}
+                  {canManageKiosks && onOpenKioskDevices && (
                     <button
                       onClick={() => { setMobileMenuOpen(false); onOpenKioskDevices(); }}
                       className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-surface transition cursor-pointer text-ink-soft"
