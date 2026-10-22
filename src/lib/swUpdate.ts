@@ -5,60 +5,96 @@
  * Why this exists: the service worker precaches index.html and the JS. A new
  * deploy installs a NEW service worker, which then WAITS until it is told to
  * take over (sw.ts only calls skipWaiting on a { type: 'SKIP_WAITING' }
- * message). Until it takes over, the old precached app keeps being served —
- * which is why clearing site data was the only way to see a deploy.
+ * message). Until it takes over, the old precached app keeps being served.
  *
+ * The rule (Don, "New version — tap to update"): the app NEVER reloads on its
+ * own. A new version that is waiting shows a slim bar ("New version ready" +
+ * "Tap to update", components/UpdateBanner.tsx); only that tap, or the "Update
+ * app" button, switches and reloads:
+ *  - Tap (applyUpdate): only when nothing is being saved, no form/sheet is
+ *    open and nobody is typing (lib/updateSafety.ts); otherwise the bar says
+ *    "Will update when you're done" and offers the tap again. Then: tell the
+ *    waiting worker to take over → reload once, only when it really controls
+ *    the page.
  *  - "Update app" button (checkForUpdate): check → wait until the new worker
- *    has finished installing → tell it to take over → reload only once it
- *    really controls the page. No update → 'current' (the button says so; no
- *    reload). Check or takeover failed → 'failed' (no reload into the old copy).
- *  - Opening the app (initSwUpdates): while the page is still untouched (no
- *    tap or key press yet, first STARTUP_WINDOW_MS), a waiting worker — one
- *    that installed during an earlier visit, or one that finishes installing
- *    now — takes over and the page reloads once. Returning to a page nobody
- *    has touched since it loaded does the same.
- *  - A page someone has used is NEVER reloaded on its own: the new version
- *    waits for the next open or the button. Resuming only downloads it.
+ *    has finished installing → take over → reload. No update → 'current' (the
+ *    button says so; no reload). Check or takeover failed → 'failed'.
+ *  - Another tab switched versions (or the browser swapped them while this
+ *    page was open): this page keeps working on the code it has and shows the
+ *    bar; the tap reloads it.
+ *  - Nobody taps: the waiting version takes over by itself only through the
+ *    browser's normal lifecycle (every window of the app closed, then opened
+ *    again), with no reload of anyone's page.
+ *  - Checks for a new version (download only, never a switch): on open, when
+ *    the app comes back to the screen (at most every RESUME_CHECK_MS), when
+ *    the device is back online, and every PERIODIC_CHECK_MS while visible.
  *
- * Automatic reloads are guarded (at most one per RELOAD_GUARD_MS, stored in
+ * Reloads are guarded (at most one per RELOAD_GUARD_MS, stored in
  * sessionStorage) so a bad deploy can never cause a reload loop.
  */
 
+import { updateBlockedReason, type UpdateBlockReason } from './updateSafety';
+
 const RELOAD_KEY = 'shutfey-sw-reload-at';
 const RELOAD_GUARD_MS = 30_000;
-/** Install finished this soon after load, before any input → take over now. */
-const STARTUP_WINDOW_MS = 10_000;
 /** While open, look for a new version at most this often (on resume). */
 const RESUME_CHECK_MS = 15 * 60_000;
+/** While visible, look for a new version this often. */
+const PERIODIC_CHECK_MS = 60 * 60_000;
 const INSTALL_TIMEOUT_MS = 60_000;
 const TAKEOVER_TIMEOUT_MS = 10_000;
 
 export type UpdateCheckResult = 'updating' | 'current' | 'failed';
+/** none: nothing new · ready: a new version is waiting for the tap · updating: switching/reloading. */
+export type UpdateState = 'none' | 'ready' | 'updating';
+export type ApplyUpdateResult = 'updating' | 'current' | 'failed' | { busy: UpdateBlockReason };
 
 /** This page asked the new worker to take over (its own reload follows). */
 let takeoverInProgress = false;
-/** Another tab activated a new version; reload at the next safe moment. */
+/** A new version already controls this page (another tab, or the browser); a reload shows it. */
 let reloadPending = false;
-/** When this page loaded, and whether anyone has tapped or typed since. */
-const startedAt = Date.now();
-let interacted = false;
+let registration: ServiceWorkerRegistration | undefined;
+let state: UpdateState = 'none';
+const listeners = new Set<() => void>();
 /** The page opened under an older worker (not a first visit). */
 const openedControlled =
   typeof navigator !== 'undefined' && 'serviceWorker' in navigator && !!navigator.serviceWorker.controller;
-if (typeof window !== 'undefined') {
-  const markInteracted = () => {
-    interacted = true;
-  };
-  window.addEventListener('pointerdown', markInteracted, { capture: true, once: true });
-  window.addEventListener('keydown', markInteracted, { capture: true, once: true });
+
+function setState(next: UpdateState): void {
+  if (state === next) return;
+  state = next;
+  for (const l of [...listeners]) {
+    try {
+      l();
+    } catch {
+      // a listener's error never breaks the others
+    }
+  }
 }
 
-function stillStarting(): boolean {
-  return !interacted && Date.now() - startedAt <= STARTUP_WINDOW_MS;
+/** The bar's state (useSyncExternalStore). */
+export function getUpdateState(): UpdateState {
+  return state;
+}
+export function subscribeUpdate(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 function supported(): boolean {
   return typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
+}
+
+function hasController(): boolean {
+  return supported() && !!navigator.serviceWorker.controller;
+}
+
+/** A new version is waiting (and this is not the very first visit): show the bar. */
+function markReady(): void {
+  if (takeoverInProgress) return;
+  if (reloadPending || (registration?.waiting && hasController())) setState('ready');
 }
 
 function reloadedRecently(): boolean {
@@ -128,10 +164,8 @@ function takeOver(reg: ServiceWorkerRegistration, force: boolean): Promise<boole
       clearTimeout(timer);
       navigator.serviceWorker.removeEventListener('controllerchange', onChange);
       takeoverInProgress = ok;
-      // An automatic switch never reloads a page someone started using while
-      // it ran (a tap or key press since); the new version shows on the next
-      // open. The explicit tap always reloads.
-      if (ok && (force || !interacted)) reloadForUpdate(force);
+      // Only ever called from a tap (the bar or "Update app").
+      if (ok) reloadForUpdate(force);
       resolve(ok);
     };
     const onChange = () => {
@@ -171,84 +205,121 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
     }
   }
   const incoming = reg.installing ?? reg.waiting;
-  if (!incoming) return 'current';
+  if (!incoming) {
+    if (reloadPending) {
+      // The new version already controls this page; a reload shows it.
+      setState('updating');
+      reloadForUpdate(true);
+      return 'updating';
+    }
+    return 'current';
+  }
   const installed = await waitForInstalled(incoming, INSTALL_TIMEOUT_MS);
   if (!installed || !reg.waiting) return 'failed';
-  return (await takeOver(reg, true)) ? 'updating' : 'failed';
+  setState('updating');
+  if (await takeOver(reg, true)) return 'updating';
+  markReady();
+  if (state === 'updating') setState('none');
+  return 'failed';
+}
+
+/**
+ * The bar's tap. Switches only when it is safe (nothing saving, no open
+ * form/sheet, nobody typing); otherwise answers { busy } and changes nothing.
+ */
+export async function applyUpdate(
+  blocked: () => UpdateBlockReason | null = updateBlockedReason,
+): Promise<ApplyUpdateResult> {
+  const reason = blocked();
+  if (reason) return { busy: reason };
+  const reg = registration;
+  if (reg?.waiting) {
+    setState('updating');
+    const ok = await takeOver(reg, true);
+    if (!ok) {
+      setState('ready');
+      return 'failed';
+    }
+    return 'updating';
+  }
+  if (reloadPending) {
+    // The new version already controls this page; a reload shows it.
+    setState('updating');
+    reloadForUpdate(true);
+    return 'updating';
+  }
+  setState('none');
+  return 'current';
 }
 
 /**
  * A new version became active (registerSW's onNeedReload). If this page asked
- * for it, its own reload is already on the way. If another tab did, this page
- * keeps working and reloads at the next safe moment: right now if nobody has
- * touched it yet, otherwise when it comes back from a long time in the
- * background.
+ * for it, its own reload is already on the way. Otherwise (another tab, or the
+ * browser's own lifecycle) this page keeps working and shows the bar.
  */
 export function onNewVersionActivated(): void {
   if (takeoverInProgress) return;
-  if (stillStarting()) {
-    reloadForUpdate();
-    return;
-  }
-  reloadPending = true; // used only if the page is still untouched on return
+  reloadPending = true;
+  markReady();
 }
 
 /** Call once at startup with the registration from registerSW. */
 export function initSwUpdates(reg: ServiceWorkerRegistration | undefined): void {
   if (!supported() || !reg) return;
+  registration = reg;
 
-  // First visit: nothing old to replace (sw.ts claims the page on activate).
-  const hadController = () => !!navigator.serviceWorker.controller;
-
-  const watchStartupInstall = (worker: ServiceWorker | null) => {
+  // A worker that finishes installing while this page is open: show the bar
+  // once it is waiting (never on a first visit: nothing old to replace).
+  const watchInstall = (worker: ServiceWorker | null) => {
     if (!worker) return;
-    const left = STARTUP_WINDOW_MS - (Date.now() - startedAt);
-    if (left <= 0) return;
-    void waitForInstalled(worker, left).then((ok) => {
-      if (ok && stillStarting() && hadController() && reg.waiting) {
-        void takeOver(reg, false);
+    const onChange = () => {
+      if (worker.state === 'installed') markReady();
+      if (worker.state === 'installed' || worker.state === 'redundant' || worker.state === 'activated') {
+        worker.removeEventListener('statechange', onChange);
       }
+    };
+    worker.addEventListener('statechange', onChange);
+    onChange();
+  };
+  markReady();
+  watchInstall(reg.installing);
+  reg.addEventListener('updatefound', () => watchInstall(reg.installing));
+
+  // The browser may swap versions by itself while this page is open (the
+  // last other window closed). No reload: the bar offers it.
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (openedControlled && !takeoverInProgress) {
+      reloadPending = true;
+      markReady();
+    }
+  });
+
+  // Look for a new version now and then (download only, never a switch).
+  let lastCheck = Date.now();
+  const check = (minGapMs: number) => {
+    const now = Date.now();
+    if (now - lastCheck < minGapMs) return;
+    lastCheck = now;
+    reg.update().catch(() => {
+      // offline — try again on the next trigger
     });
   };
-  if (reg.waiting) {
-    // Found too late (someone already tapped or typed): it waits for the
-    // next open or the button.
-    if (stillStarting() && hadController()) void takeOver(reg, false);
-  } else {
-    watchStartupInstall(reg.installing);
-  }
-  reg.addEventListener('updatefound', () => watchStartupInstall(reg.installing));
-  // The browser may swap versions by itself while this page opens (the last
-  // old tab just closed). If that happens before anyone touches the page,
-  // reload once so the page runs the new code too.
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (openedControlled && !takeoverInProgress && stillStarting()) reloadForUpdate();
-  });
-
-  // Back from the background: look for a new version now and then (download
-  // only). A page that sat untouched since it loaded switches right away —
-  // nobody's work is on it. A page someone has used is never reloaded on its
-  // own (a half-written report must survive a phone call); it gets the new
-  // version on the next open or from the button.
-  let lastCheck = startedAt;
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
-    if (!interacted) {
-      if (reloadPending) {
-        reloadForUpdate();
-        return;
-      }
-      if (hadController() && reg.waiting) {
-        void takeOver(reg, false);
-        return;
-      }
-    }
-    const now = Date.now();
-    if (now - lastCheck >= RESUME_CHECK_MS) {
-      lastCheck = now;
-      reg.update().catch(() => {
-        // offline — try again on the next resume
-      });
-    }
+    markReady();
+    check(RESUME_CHECK_MS);
   });
+  window.addEventListener('online', () => check(0));
+  setInterval(() => {
+    if (document.visibilityState === 'visible') check(PERIODIC_CHECK_MS - 1000);
+  }, PERIODIC_CHECK_MS);
+}
+
+/** Tests only: reset module state. */
+export function __resetSwUpdatesForTest(): void {
+  takeoverInProgress = false;
+  reloadPending = false;
+  registration = undefined;
+  state = 'none';
+  listeners.clear();
 }

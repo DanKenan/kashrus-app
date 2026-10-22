@@ -378,14 +378,28 @@ export function newActionId(): string {
  * - `draft`: on 428 STALE_CLIENT, persist the user's input so a refresh does
  *   not silently discard it. The app restores it from localStorage.
  */
-export async function apiWrite<T = any>(
-  input: string,
-  init: RequestInit & {
-    expectedVersion?: number;
-    operationId?: string;
-    draft?: { key: string; label: string; data: () => unknown };
-  } = {}
-): Promise<ApiWriteResult<T>> {
+/** Writes sent and not answered yet (the update bar waits for 0: lib/updateSafety.ts). */
+let inFlightWrites = 0;
+export function writesInFlight(): number {
+  return inFlightWrites;
+}
+
+type ApiWriteInit = RequestInit & {
+  expectedVersion?: number;
+  operationId?: string;
+  draft?: { key: string; label: string; data: () => unknown };
+};
+
+export async function apiWrite<T = any>(input: string, init: ApiWriteInit = {}): Promise<ApiWriteResult<T>> {
+  inFlightWrites++;
+  try {
+    return await apiWriteOnce<T>(input, init);
+  } finally {
+    inFlightWrites = Math.max(0, inFlightWrites - 1);
+  }
+}
+
+async function apiWriteOnce<T = any>(input: string, init: ApiWriteInit): Promise<ApiWriteResult<T>> {
   const { expectedVersion, operationId, draft, ...fetchInit } = init;
   // Stable operationId: reuse the caller's (for retries) or generate once.
   const opId = operationId || crypto.randomUUID();
