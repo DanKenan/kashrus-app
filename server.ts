@@ -4519,6 +4519,7 @@ const activeSockets = new Map<WebSocket, SocketMeta>();
  * - HANDOFF_NOTE when note.venueId matches
  * - ANNOUNCEMENT (agency-scoped; the REST allowlist includes it)
  * - USER_PRESENCE (counts only)
+ * - AGENCY_UPDATED for its own agency, cut to { agency: { id, logoRev, timeZone } } (N3)
  * - USERS_UPDATED as the venue roster (names/roles/avatars, no emails)
  * - DAILY_RESET/DEMO_RESTORED with tasks/historyLogs/
  *   snapshots filtered to the kiosk venue (so the board isn't stale)
@@ -4558,6 +4559,11 @@ function kioskMaySee(meta: SocketMeta, type: string, payload: any): boolean {
     }
     case 'USER_PRESENCE':
       return true;
+    case 'AGENCY_UPDATED':
+      // N3 (item 12 follow-up): a tablet must see a logo / time-zone change
+      // without a new PIN login. Only its own agency's; the payload is cut to
+      // { agency: { id, logoRev, timeZone } } by kioskFilterPayload below.
+      return !!payload?.agency?.id && payload.agency.id === (meta.kioskAgencyId || meta.agencyId);
     case 'USERS_UPDATED':
     case 'DAILY_RESET':
     case 'DEMO_RESTORED':
@@ -4619,6 +4625,18 @@ function kioskFilterPayload(meta: SocketMeta, type: string, payload: any): any {
       .filter((u: any) => u && (u.venueId === venueId || personAtVenue(u, venueId)))
       .map((u: any) => ({ id: u.id, name: u.name, avatarColor: u.avatarColor, role: u.role }));
   switch (type) {
+    case 'AGENCY_UPDATED': {
+      // N3: an explicit allowlist — nothing but the agency id, its logo
+      // revision (string or null, the client's refetch signal) and its zone.
+      const a = p.agency || {};
+      return {
+        agency: {
+          id: a.id,
+          logoRev: typeof a.logoRev === 'string' && a.logoRev ? a.logoRev : null,
+          timeZone: typeof a.timeZone === 'string' ? a.timeZone : null,
+        },
+      };
+    }
     case 'USERS_UPDATED':
       return { ...p, users: roster(p.users) };
     case 'HISTORY_PRUNED':

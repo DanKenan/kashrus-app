@@ -64,8 +64,12 @@ check('legacy domain without status gets pending + token', [legacy.domainStatus,
 
 // projections
 const full = { id: 'a', name: 'A', shortCode: 'A', certificationSeal: 'S', region: 'R', contactPhone: 'P', timeZone: 'America/New_York', slug: 'a-1', brandName: 'B', logoUrl: 'https://l', adminEmail: 'x@y', createdAt: 'c', customDomain: 'd.org', domainStatus: 'pending', domainVerificationToken: 'SECRET', domainVerifiedAt: 'v', domainLastCheckedAt: 'l', somethingNew: 1 };
-check('public keys', Object.keys(agencyPublicProfile(full)).sort(), ['brandName', 'certificationOptions', 'certificationSeal', 'contactPhone', 'id', 'logoUrl', 'name', 'region', 'shortCode', 'slug', 'timeZone']);
-check('admin keys', Object.keys(agencyAdminView(full)).sort(), ['adminEmail', 'brandName', 'certificationOptions', 'certificationSeal', 'contactPhone', 'createdAt', 'customDomain', 'domainLastCheckedAt', 'domainStatus', 'domainVerifiedAt', 'id', 'logoUrl', 'name', 'region', 'shortCode', 'slug', 'timeZone']);
+check('public keys', Object.keys(agencyPublicProfile(full)).sort(), ['brandName', 'certificationOptions', 'certificationSeal', 'contactPhone', 'id', 'logoRev', 'logoUrl', 'name', 'region', 'shortCode', 'slug', 'timeZone']);
+check('admin keys', Object.keys(agencyAdminView(full)).sort(), ['adminEmail', 'brandName', 'certificationOptions', 'certificationSeal', 'contactPhone', 'createdAt', 'customDomain', 'domainLastCheckedAt', 'domainStatus', 'domainVerifiedAt', 'id', 'logoRev', 'logoUrl', 'name', 'region', 'shortCode', 'slug', 'timeZone']);
+// Item 12 (#97): logoRev is ALWAYS on both projections: null when unset, the stored string when set.
+check('logoRev null when unset', [agencyPublicProfile(full).logoRev, agencyAdminView(full).logoRev], [null, null]);
+check('logoRev passes through', [agencyPublicProfile({ ...full, logoRev: 'r7' }).logoRev, agencyAdminView({ ...full, logoRev: 'r7' }).logoRev], ['r7', 'r7']);
+check('logoRev junk -> null', agencyPublicProfile({ ...full, logoRev: 42 }).logoRev, null);
 check('V1: malformed stored options project as the defaults', agencyPublicProfile({ ...full, certificationOptions: 'junk' }).certificationOptions, ['Glatt meat', 'Dairy', 'DE', 'Parve']);
 check('no projection carries the token', JSON.stringify([agencyPublicProfile(full), agencyAdminView(full)]).includes('SECRET'), false);
 check('strip server-only', Object.keys(stripServerOnlyAgencyFields({ slug: 's', domainStatus: 'verified', domainVerificationToken: 't', domainVerifiedAt: 'v', domainLastCheckedAt: 'l' })), ['slug']);
