@@ -13,7 +13,8 @@ import {
   Building2,
   Sparkles,
   UserPlus,
-  Factory
+  Factory,
+  ScanFace
 } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import { LandingBackButton } from './LandingPage';
@@ -22,6 +23,7 @@ import { AgencySignupForm, REGISTERED_SIGN_IN_TEXT } from './AgencySignupForm';
 import { PWAInstallButton } from './PWAInstallButton';
 import { ForgotPasswordModal } from './ForgotPasswordModal';
 import { apiFetch, setSessionToken } from '../lib/api';
+import { PASSKEY_TEXT, clearPasswordSignInMark, markPasswordSignIn, passkeysInBrowser, signInWithPasskey } from '../lib/passkeys';
 import { signInErrorText } from '../lib/venueRemoved';
 import { activateMembership, cleanMemberships, isChooseAnswer, Membership } from '../lib/memberships';
 import { getRoleLabel } from '../lib/permissions';
@@ -59,6 +61,35 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   // 10g: an email with several agencies signs in, then picks which one to open.
   const [chooser, setChooser] = useState<{ token: string; memberships: Membership[] } | null>(null);
 
+  // 11b-c (b): Face ID / fingerprint sign-in.
+  const [passkeyLoading, setPasskeyLoading] = useState(false);
+  const [showPasskeyButton] = useState(() => passkeysInBrowser());
+  const handlePasskeySignIn = async () => {
+    if (passkeyLoading || isLoading) return;
+    setErrorMessage(null);
+    setNotice(null);
+    setPasskeyLoading(true);
+    // Not a password sign-in: no Face ID offer may follow from an older password attempt.
+    clearPasswordSignInMark();
+    try {
+      // Same answer as /api/auth/login: several agencies -> the chooser; one -> signed in.
+      const data = await signInWithPasskey();
+      if (isChooseAnswer(data)) {
+        const list = cleanMemberships(data.memberships);
+        if (list.length === 0) throw new Error('User profile could not be verified.');
+        setChooser({ token: data.token, memberships: list });
+        return;
+      }
+      if (!data?.user) throw new Error('User profile could not be verified.');
+      if (data.token) setSessionToken(data.token);
+      onLoginSuccess(data.user);
+    } catch (err: any) {
+      setErrorMessage(err?.message || PASSKEY_TEXT.signInFailed);
+    } finally {
+      setPasskeyLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -92,6 +123,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         setIsLoading(false);
         return;
       }
+
+      // 11b-c: a password sign-in is what may offer Face ID afterwards.
+      markPasswordSignIn();
 
       // 10g: several agencies under this login -> the person picks one. The
       // choose token is NOT a session; it is kept only in this screen.
@@ -442,6 +476,27 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     )}
                   </button>
                 </form>
+
+                {showPasskeyButton && (
+                  <>
+                    <div className="my-4 flex items-center gap-3 text-[11px] text-ink-faint" aria-hidden="true">
+                      <div className="h-px flex-1 bg-line" /><span>{PASSKEY_TEXT.or}</span><div className="h-px flex-1 bg-line" />
+                    </div>
+                    <button
+                      type="button"
+                      data-passkey-signin
+                      onClick={handlePasskeySignIn}
+                      disabled={passkeyLoading || isLoading}
+                      className="w-full py-3 px-4 rounded-xl pressable bg-surface border border-line-control text-ink hover:bg-sunken text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition disabled:opacity-60 cursor-pointer"
+                    >
+                      {passkeyLoading ? (
+                        <><div className="w-4 h-4 border-2 border-gold-deep border-t-transparent rounded-full animate-spin" /><span>{PASSKEY_TEXT.waiting}</span></>
+                      ) : (
+                        <><ScanFace className="w-4 h-4 text-gold-deep" /><span>{PASSKEY_TEXT.signInButton}</span></>
+                      )}
+                    </button>
+                  </>
+                )}
 
                 {/* Forgot password link */}
                 <button
