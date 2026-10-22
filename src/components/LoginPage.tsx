@@ -22,6 +22,7 @@ import { AgencySignupForm } from './AgencySignupForm';
 import { PWAInstallButton } from './PWAInstallButton';
 import { ForgotPasswordModal } from './ForgotPasswordModal';
 import { apiFetch, setSessionToken } from '../lib/api';
+import { signInErrorText } from '../lib/venueRemoved';
 
 interface LoginPageProps {
   onLoginSuccess: (user: UserType) => void;
@@ -75,7 +76,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || 'Authentication failed. Please check your email and password.');
+        throw new Error(signInErrorText(data, 'Authentication failed. Please check your email and password.'));
       }
 
       // First-run setup: admin has no password yet → create it now.

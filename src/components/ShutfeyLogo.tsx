@@ -55,10 +55,10 @@ export const ShutfeyLogo: React.FC<LogoProps> = ({
   return (
     <div className={`flex items-center gap-2 sm:gap-2.5 min-w-0 ${className}`}>
       {showAgencyLogo && <>
-        <img src={agencyLogoSrc} alt={agencyName} className="h-[32px] max-w-[120px] w-auto object-contain shrink-0 max-[389px]:hidden"
+        <img src={agencyLogoSrc} alt={agencyName} className="h-[32px] max-w-[120px] max-sm:h-[28px] max-sm:max-w-[64px] w-auto object-contain shrink-0 max-[389px]:hidden"
           onError={() => setFailedSrc(agencyLogoSrc)}
           onLoad={(event) => { const image = event.currentTarget; if (image.naturalWidth / image.naturalHeight > 120 / 32) setFailedSrc(agencyLogoSrc); }} />
-        <span aria-hidden="true" className="h-[32px] w-[1px] bg-line shrink-0 max-[389px]:hidden" />
+        <span aria-hidden="true" className="h-[32px] max-sm:h-[28px] w-[1px] bg-line shrink-0 max-[389px]:hidden" />
       </>}
       {/* Shutfey brand mark — Don's drawing (Oct 14, 2026): three partners above the pot,
           with the check. Traced to SVG and recoloured in D2 (V3: ink / gold-deep / gold;

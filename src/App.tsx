@@ -50,6 +50,7 @@ import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles,
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, getSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice } from './lib/api';
+import { noVenueMessage } from './lib/venueRemoved';
 
 const DEFAULT_USERS: User[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', permissions: { canFillTasks: true, canAssignTasks: true } },
@@ -1926,8 +1927,26 @@ export default function App() {
       {/* Main Body */}
       <main className={`flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-12 ${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:flex max-sm:flex-col' : ''}`}>
         
-        {/* Welcome Empty State for newly registered Kosher Agencies or when starting from scratch */}
-        {venues.length === 0 ? (
+        {/* QA2 #8: a non-admin with no venue (e.g. their venue was deleted) never
+            sees the admin setup screen below; one plain message instead. */}
+        {venues.length === 0 && !isKiosk && noVenueMessage(currentUser) ? (
+          <div data-no-venue-notice role="status" className="my-10 p-8 sm:p-10 rounded-3xl bg-surface border border-line tactile-2 text-center max-w-md mx-auto animate-fade-in">
+            <div className="w-14 h-14 rounded-2xl bg-sunken text-ink-soft mx-auto flex items-center justify-center mb-4 border border-line">
+              <Building2 className="w-7 h-7" />
+            </div>
+            <h3 className="text-lg font-bold text-ink">{noVenueMessage(currentUser)}</h3>
+            {currentUser?.agencyName && (
+              <p className="text-sm text-ink-soft mt-2">{currentUser.agencyName}</p>
+            )}
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="pressable mt-6 min-h-11 px-6 rounded-xl bg-surface border border-line-control text-ink font-semibold text-sm hover:bg-sunken focus:outline-none focus:ring-2 focus:ring-gold"
+            >
+              Sign out
+            </button>
+          </div>
+        ) : venues.length === 0 ? (
           <div className="my-10 p-8 sm:p-10 rounded-3xl bg-surface border border-gold/40 tactile-3 text-center max-w-2xl mx-auto animate-fade-in">
             <div className="w-16 h-16 rounded-2xl bg-gold-wash text-gold-deep mx-auto flex items-center justify-center mb-4 ring-8 ring-gold/15 border border-gold/30">
               <Building2 className="w-8 h-8" />

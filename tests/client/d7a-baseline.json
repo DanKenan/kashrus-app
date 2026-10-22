@@ -147,7 +147,7 @@
    "Transmitted inspection summaries, signed Mashgiach logs, and Rabbinic conclusions.",
    "File New Inspection Report",
    "critical violation found",
-   "Audit on 2026-10-21 (07:30 – 10:15)",
+   "Audit on 2026-10-21 (7:30 AM – 10:15 AM)",
    "Report #r1",
    "Approved Checked:",
    "Verified Present:",
@@ -409,8 +409,8 @@
    "Yossi Abramowitz-Goldberger",
    "Cancel",
    "File Official Report to Agency",
-   "placeholder=08:30 AM",
-   "placeholder=14:30 PM",
+   "placeholder=8:30 AM",
+   "placeholder=2:30 PM",
    "placeholder=QA Director / Escort",
    "placeholder=Detail your walk-through observations: storage bay conditions, bulk railcar unloading, CIP sanitization temperatures, packaging lines, and any items questioned or confirmed with plant management..."
   ]
@@ -422,8 +422,8 @@
     "/api/factory-reports",
     {
      "venueId": "v1",
-     "startTime": "08:30 AM",
-     "endTime": "14:30 PM",
+     "startTime": "8:30 AM",
+     "endTime": "2:30 PM",
      "factoryRepresentative": "QA Plant Manager",
      "auditedIngredients": [
       {
