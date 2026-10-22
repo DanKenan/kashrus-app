@@ -47,6 +47,7 @@ import {
 } from './src/lib/workday.ts';
 // 6c: shared any-time recognition and write normalization.
 import { isAnyTimeTask, normalizeAnyTimeTask } from './src/lib/anyTime.ts';
+import { certificationLabel } from './src/lib/certOptions.ts';
 import { mountStaticFiles } from './src/server/static-files.ts';
 import { consistencyRoute } from './src/server/consistency-route.js';
 
@@ -9059,7 +9060,7 @@ app.post('/api/venues', async (req, res) => {
 // Admin edits venue details
 app.put('/api/venues/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, category, address, certification, ownerEmail, timeZone } = req.body;
+  const { name, category, address, certification, ownerEmail, timeZone, certificationDetail } = req.body || {};
 
   const caller = requireAdmin(req, res);
   // requireAdmin already sent the 403 — see the note above; never double-send.
@@ -9078,14 +9079,32 @@ app.put('/api/venues/:id', async (req, res) => {
   if (tzInput.error) {
     return res.status(400).json({ error: tzInput.error });
   }
+  // Venue cert edit: optional certification detail, validated exactly like
+  // POST /api/venues (one sanitized cert option: an agency option or a typed
+  // "other"). Absent = unchanged (and `certification` text behaves as
+  // before); ''/null = clear (no type picked). When present, the server
+  // builds `certification` itself from the agency's current name and ignores
+  // any certification text sent in the same request.
+  const certDetailGiven = certificationDetail !== undefined;
+  let cleanCertDetail = '';
+  if (certDetailGiven && certificationDetail !== null &&
+      !(typeof certificationDetail === 'string' && certificationDetail.trim() === '')) {
+    const r = typeof certificationDetail === 'string' ? sanitizeCertOptions([certificationDetail]) : { ok: false as const, error: '' };
+    if (!r.ok) return res.status(400).json({ error: 'The certification detail must be plain text, 60 characters or fewer.', code: 'CERT_DETAIL_INVALID' });
+    cleanCertDetail = r.options[0];
+  }
+  const certEdited = certDetailGiven || certification !== undefined;
   const zoneNow = serverNow();
 
-  // Baseline for semantic conflict detection on name/category/address/timeZone.
+  // Baseline for semantic conflict detection on name/category/address/timeZone
+  // and the certification pair.
   const baseline = {
     name: existing.name,
     category: existing.category,
     address: existing.address,
     timeZone: (existing as any).timeZone || null,
+    certification: existing.certification ?? null,
+    certificationDetail: (existing as any).certificationDetail ?? null,
   };
 
   const committed = await commitOrRespond(
@@ -9104,14 +9123,29 @@ app.put('/api/venues/:id', async (req, res) => {
       if (tzInput.value !== undefined && ((freshVenue as any).timeZone || null) !== baseline.timeZone) {
         return { conflict: 'Conflict: venue time zone was changed by someone else. Please refresh and try again.' };
       }
+      if (certEdited && ((freshVenue.certification ?? null) !== baseline.certification ||
+          ((freshVenue as any).certificationDetail ?? null) !== baseline.certificationDetail)) {
+        return { conflict: 'Conflict: venue certification was changed by someone else. Please refresh and try again.' };
+      }
+      let nextCertification = certification !== undefined ? certification.trim() : freshVenue.certification;
+      if (certDetailGiven) {
+        // Same agency-name source as POST /api/venues (Item V1), read fresh.
+        const freshAgencyForCert: any = (Array.isArray(freshDoc.agencies) ? freshDoc.agencies : []).find((a: any) => a && a.id === callerAgencyId);
+        const agencyName = (typeof freshAgencyForCert?.name === 'string' && freshAgencyForCert.name.trim()) || 'Certified Kosher';
+        nextCertification = certificationLabel(agencyName, cleanCertDetail);
+      }
       const updated: Venue = {
         ...freshVenue,
         name: name !== undefined ? name.trim() : freshVenue.name,
         category: category !== undefined ? category.trim() : freshVenue.category,
         address: address !== undefined ? address.trim() : freshVenue.address,
-        certification: certification !== undefined ? certification.trim() : freshVenue.certification,
+        certification: nextCertification,
         ownerEmail: ownerEmail !== undefined ? ownerEmail?.trim().toLowerCase() : freshVenue.ownerEmail,
       };
+      if (certDetailGiven) {
+        if (cleanCertDetail) (updated as any).certificationDetail = cleanCertDetail;
+        else delete (updated as any).certificationDetail;
+      }
       if (tzInput.value !== undefined) {
         if (tzInput.value) (updated as any).timeZone = tzInput.value;
         else delete (updated as any).timeZone;
