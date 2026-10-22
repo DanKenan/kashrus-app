@@ -48,6 +48,8 @@ export const SESSION_VIA = [
   'kiosk-login',
   /** 11a-s3: a kiosk token from before 11a-s3 moved to the kiosk cookie (its record ends no later than that token). */
   'kiosk-adopt',
+  /** 11b-s: a passkey (Face ID / fingerprint) sign-in. */
+  'passkey',
   'test',
 ] as const;
 export type SessionVia = (typeof SESSION_VIA)[number];
@@ -79,6 +81,18 @@ export type SessionDoc = {
   kioskDeviceId?: string;
   venueId?: string;
   pvAtIssue?: string;
+  /**
+   * 11b-s (plan 11.2): a session that came from a passkey sign-in names that
+   * passkey; it is refused as soon as the passkey is removed. Absent: password.
+   */
+  authMethod?: { type: 'passkey'; personId: string; credentialId: string };
+  /**
+   * 11b-s (plan 9.5): the last password re-entry or passkey assertion made on
+   * THIS session, and the person's recentAuthEpoch at that moment. Valid 5
+   * minutes; never copied to another session (adopt, choose, activate).
+   */
+  recentAuthAtMs?: number;
+  recentAuthEpoch?: number;
 };
 
 /** The claim shapes a session can back (see session-token.ts SessionClaims). */
@@ -96,6 +110,10 @@ export function buildUserSession(input: {
   nowMs: number;
   /** 11a-s2 adopt: the record never outlives this moment (the adopted token's own expiry). */
   capExpMs?: number;
+  /** 11b-s: the passkey this session comes from (passkey sign-in, or the membership chosen after one). */
+  authMethod?: { type: 'passkey'; personId: string; credentialId: string };
+  /** 11b-s: the proof given on this very sign-in (password login, passkey sign-in). */
+  recentAuth?: { atMs: number; epoch: number };
 }): SessionDoc {
   const { sid, row, epoch, via, nowMs } = input;
   if (!isSid(sid)) throw new Error('buildUserSession: bad sid');
@@ -120,6 +138,8 @@ export function buildUserSession(input: {
     userAgentHint: String(input.userAgent ?? '').slice(0, 60),
     revokedAt: null,
     revokeReason: null,
+    ...(input.authMethod ? { authMethod: { type: 'passkey' as const, personId: input.authMethod.personId, credentialId: input.authMethod.credentialId } } : {}),
+    ...(input.recentAuth ? { recentAuthAtMs: input.recentAuth.atMs, recentAuthEpoch: input.recentAuth.epoch } : {}),
   };
 }
 

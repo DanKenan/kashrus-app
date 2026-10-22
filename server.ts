@@ -25,13 +25,19 @@ import {
   findDomainClash,
   withCustomDomain,
 } from './src/server/agency-fields.js';
-import { classifySessionClaims, resolveSessionRow, resolveChooseOwner, chooseClaimsFor, sessionClaimsFor, tokenEpochOf, type SessionClaims } from './src/server/session-token.ts';
+import { classifySessionClaims, resolveSessionRow, resolveChooseOwner, chooseClaimsFor, credentialRowOfPerson, sessionClaimsFor, tokenEpochOf, type SessionClaims } from './src/server/session-token.ts';
 import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
-import { buildUserSession, buildKioskSession, sessionBacksClaims, cachePut, cacheFresh, isSid, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
-import { userCookieConfig, kioskCookieConfig, deviceCookieConfig, cookieValues, setCookieHeader, setDeviceCookieHeader, isDeviceCredentialShape, clearCookieHeader, trustedOrigins, originTrusted, CSRF_ORIGIN_BODY } from './src/server/session-cookie.ts';
+import { buildUserSession, buildKioskSession, sessionBacksClaims, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
+import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
+import {
+  PASSKEYS_MAX, CHALLENGE_TTL_MS, RECENT_AUTH_MS, CREDENTIAL_ID_RE, CHALLENGE_ID_RE, credentialIdHash, newPersonCredentials, asPersonCredentials, findPasskey,
+  originMayEnroll, recentAuthValid, cleanPasskeyName, defaultPasskeyName, publicPasskey, challengeMatches, counterAcceptable, isPasskeyAuthMethod,
+  type PersonCredentialsDoc, type PasskeyEntry, type ChallengeDoc, type PasskeyAuthMethod,
+} from './src/server/passkeys.ts';
+import { userCookieConfig, kioskCookieConfig, deviceCookieConfig, cookieValues, setCookieHeader, setDeviceCookieHeader, isDeviceCredentialShape, clearCookieHeader, trustedOrigins, originTrusted, normalizeOrigin, CSRF_ORIGIN_BODY } from './src/server/session-cookie.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
 import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetToken, resetLinkForToken, credentialStampHash, stampsEqual, isLiveResetLink, resetLinkAdminView, pruneResetLinks, makeRoomForResetLink, mayMakeResetLink, resetSuspensionRecord } from './src/server/reset-links.ts';
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
@@ -360,8 +366,8 @@ function signSessionToken(row: { id: string; personId?: string; tokenEpoch?: unk
 
 /** 10g: a choose token for a multi person's credential row (10 minutes; accepted ONLY on GET /api/auth/memberships and POST /api/auth/activate). */
 const CHOOSE_TOKEN_TTL_SECONDS = 10 * 60;
-function signChooseToken(ownerRow: { id: string; personId?: string; tokenEpoch?: unknown }): string {
-  return signClaims(chooseClaimsFor(ownerRow), CHOOSE_TOKEN_TTL_SECONDS);
+function signChooseToken(ownerRow: { id: string; personId?: string; tokenEpoch?: unknown }, passkeyCredentialId?: string): string {
+  return signClaims(chooseClaimsFor(ownerRow, passkeyCredentialId), CHOOSE_TOKEN_TTL_SECONDS);
 }
 
 /** Kiosk session token: venue-scoped, 3h expiry (KIOSK_TOKEN_TTL_SECONDS), kiosk:true claim.
@@ -596,6 +602,9 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'GET', path: '/kiosk/device' },
   { method: 'POST', path: '/kiosk/device/unpair' },
   { method: 'POST', path: '/kiosk/login' },
+  // 11b-s: passkey sign-in (trusted Origin only, per-IP limits, generic 401).
+  { method: 'POST', path: '/auth/passkey/options' },
+  { method: 'POST', path: '/auth/passkey/verify' },
   // Test-only endpoints (registered only when STAGE2_TEST_MODE=true; the
   // routes themselves don't exist in production, but list them here so the
   // auth middleware doesn't 401 them in test mode).
@@ -614,6 +623,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/drop-socket-meta' },
         { method: 'POST', path: '/__test__/mint-token' },
         { method: 'POST', path: '/__test__/session-hooks' },
+        { method: 'POST', path: '/__test__/passkey-hooks' },
         { method: 'POST', path: '/__test__/set-password' },
         { method: 'POST', path: '/__test__/mint-kiosk-token' },
         { method: 'GET', path: '/__test__/alert-routing' },
@@ -751,7 +761,7 @@ app.use('/api', async (req, res, next) => {
     const chooserRoute = (req.method === 'GET' && req.path === '/auth/memberships') || (req.method === 'POST' && req.path === '/auth/activate');
     const owner = chooserRoute ? resolveChooseOwner(payload, users as any[]) : undefined;
     if (!owner) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
-    (req as any).chooseClaims = { personId: payload.personId, ownerRowId: payload.ownerRowId };
+    (req as any).chooseClaims = { personId: payload.personId, ownerRowId: payload.ownerRowId, ...(payload.passkeyCredentialId ? { passkeyCredentialId: payload.passkeyCredentialId } : {}) };
     return next();
   }
   // 11a-s1 (plan 9.1 / 10.1): a token carrying sid is valid only while its
@@ -1067,22 +1077,20 @@ async function sessionStoreRevoke(sid: string, reason: string, nowIso: string): 
   return out;
 }
 
-async function issueSessionToken(row: any, req: any, via: SessionVia, opts: { capExpMs?: number } = {}): Promise<MintResult> {
-  if (!row || sessionIneligibleCode(row)) return { ineligible: true };
+type UserMintOpts = { capExpMs?: number; authMethod?: PasskeyAuthMethod; recentAuth?: { atMs: number; epoch: number } };
+/** The record a user sign-in writes (not stored yet). */
+function newUserSessionDoc(row: any, req: any, via: SessionVia, opts: UserMintOpts = {}): SessionDoc {
   const sid = base64url(crypto.randomBytes(16));
   const epoch = tokenEpochOf(row) ?? 0;
-  const nowMs = Date.now();
-  const doc = buildUserSession({ sid, row, epoch, via, userAgent: req?.headers?.['user-agent'], nowMs, capExpMs: opts.capExpMs });
-  let stored = false;
-  for (let attempt = 0; attempt < 2 && !stored; attempt++) {
-    try {
-      await sessionStorePut(doc);
-      stored = true;
-    } catch (err: any) {
-      log.warn(`[session] create failed (attempt ${attempt + 1}): ${err?.message || err}`);
-    }
-  }
-  if (!stored) return { down: true };
+  return buildUserSession({
+    sid, row, epoch, via, userAgent: req?.headers?.['user-agent'], nowMs: Date.now(), capExpMs: opts.capExpMs,
+    authMethod: opts.authMethod, recentAuth: opts.recentAuth,
+  });
+}
+/** After the record is stored: this instance's map, the eligibility re-check on the CURRENT row, the token. */
+function finishUserSessionMint(row: any, req: any, doc: SessionDoc): MintResult {
+  const sid = doc.sid;
+  const epoch = doc.epochAtIssue;
   cachePut(sessionCache, sid, { doc, readAtMs: Date.now() });
   // Re-check eligibility against the CURRENT row after the await (a commit may have landed meanwhile).
   const fresh: any = users.find((u) => u.id === row.id);
@@ -1094,6 +1102,21 @@ async function issueSessionToken(row: any, req: any, via: SessionVia, opts: { ca
   // cookie (sessionCookieOnJson below), from a trusted Origin only.
   if (req && typeof req === 'object') req.mintedSession = { kind: 'user', token, sid, absoluteExpMs: doc.absoluteExpMs };
   return { token, sid, absoluteExpMs: doc.absoluteExpMs };
+}
+async function issueSessionToken(row: any, req: any, via: SessionVia, opts: UserMintOpts = {}): Promise<MintResult> {
+  if (!row || sessionIneligibleCode(row)) return { ineligible: true };
+  const doc = newUserSessionDoc(row, req, via, opts);
+  let stored = false;
+  for (let attempt = 0; attempt < 2 && !stored; attempt++) {
+    try {
+      await sessionStorePut(doc);
+      stored = true;
+    } catch (err: any) {
+      log.warn(`[session] create failed (attempt ${attempt + 1}): ${err?.message || err}`);
+    }
+  }
+  if (!stored) return { down: true };
+  return finishUserSessionMint(row, req, doc);
 }
 /**
  * 11a-s3 (plan 9.1, 15.1): a kiosk token backed by a kiosk session record
@@ -1144,6 +1167,98 @@ function anySessionClaims(claims: any): (SessionBackedClaims & { sid: string }) 
   return sessionBackedClaims(claims) || kioskSessionClaims(claims);
 }
 
+// ---------------------------------------------------------------------------
+// 11b-s (plan 9.4 / 9.5 / 10.3 / 11.2): passkey stores. personCredentials,
+// passkeyIndex and webauthnChallenges are separate collections (never in
+// app-state/main); one transaction helper reads and writes them together with
+// sessions/{sid}. Local mode without Firestore keeps them in this process.
+// ---------------------------------------------------------------------------
+const PK_COLLECTIONS = ['personCredentials', 'passkeyIndex', 'webauthnChallenges', 'sessions'] as const;
+type PkCollection = (typeof PK_COLLECTIONS)[number];
+const localPkDocs = new Map<string, any>();
+let localPkChain: Promise<unknown> = Promise.resolve();
+/** Plan 11.2: this instance's copy of each person's credentials (authoritative on the single instance; removal updates it synchronously). */
+const personCredCache = new Map<string, { doc: PersonCredentialsDoc | null; readAtMs: number }>();
+/** Test mode only: the NEXT passkey transaction pauses this long between its reads and its writes (forced interleavings). */
+let pkTxPauseOnceForTests = 0;
+async function pkTestPause(): Promise<void> {
+  if (!isTestMode() || !pkTxPauseOnceForTests) return;
+  const ms = pkTxPauseOnceForTests;
+  pkTxPauseOnceForTests = 0;
+  await new Promise((r) => setTimeout(r, ms));
+}
+type PkTx = {
+  get(col: PkCollection, id: string): Promise<any | null>;
+  set(col: PkCollection, id: string, doc: any): void;
+  del(col: PkCollection, id: string): void;
+};
+/** One transaction over the passkey collections and sessions (every read before any write; Firestore retries on conflict). */
+async function pkTransaction<T>(fn: (tx: PkTx) => Promise<T>): Promise<T> {
+  if (isTestMode() && sessionStoreFaultForTests) throw new Error('session store fault (test)');
+  if (firestoreDb) {
+    return firestoreDb.runTransaction(async (tx: any) => {
+      const ref = (col: PkCollection, id: string) => firestoreDb.collection(col).doc(id);
+      return fn({
+        get: async (col, id) => { const snap = await tx.get(ref(col, id)); return snap.exists ? snap.data() : null; },
+        set: (col, id, doc) => { tx.set(ref(col, id), JSON.parse(JSON.stringify(doc))); },
+        del: (col, id) => { tx.delete(ref(col, id)); },
+      });
+    });
+  }
+  // Local mode: one transaction at a time; writes apply only when fn finishes.
+  const run = async () => {
+    const writes: Array<() => void> = [];
+    const out = await fn({
+      get: async (col, id) => {
+        if (col === 'sessions') return localSessions.has(id) ? JSON.parse(JSON.stringify(localSessions.get(id))) : null;
+        const v = localPkDocs.get(`${col}/${id}`);
+        return v === undefined ? null : JSON.parse(JSON.stringify(v));
+      },
+      set: (col, id, doc) => { const v = JSON.parse(JSON.stringify(doc)); writes.push(() => { if (col === 'sessions') localSessions.set(id, v); else localPkDocs.set(`${col}/${id}`, v); }); },
+      del: (col, id) => { writes.push(() => { if (col === 'sessions') localSessions.delete(id); else localPkDocs.delete(`${col}/${id}`); }); },
+    });
+    for (const w of writes) w();
+    return out;
+  };
+  const p = localPkChain.then(run, run);
+  localPkChain = p.catch(() => undefined);
+  return p as Promise<T>;
+}
+async function personCredentialsRead(personId: string): Promise<PersonCredentialsDoc | null> {
+  const raw = await pkTransaction(async (tx) => tx.get('personCredentials', personId));
+  const doc = raw ? asPersonCredentials(raw, personId) : null;
+  personCredCache.set(personId, { doc, readAtMs: Date.now() });
+  return doc;
+}
+/** Is this session's passkey (if it came from one) still there? authoritative: a store read; else the 15 s copy. */
+async function passkeySessionCheck(doc: SessionDoc | null, authoritative: boolean): Promise<'ok' | 'refused' | 'down'> {
+  if (!doc || doc.authMethod === undefined) return 'ok';
+  if (!isPasskeyAuthMethod(doc.authMethod) || doc.authMethod.personId !== doc.personId) return 'refused';
+  const { personId, credentialId } = doc.authMethod;
+  const cached = personCredCache.get(personId);
+  if (!authoritative && cached && Date.now() - cached.readAtMs < SESSION_CACHE_FRESH_MS) return findPasskey(cached.doc, credentialId) ? 'ok' : 'refused';
+  let pc: PersonCredentialsDoc | null;
+  try {
+    pc = await personCredentialsRead(personId);
+  } catch (err: any) {
+    log.warn(`[passkey] credentials read failed: ${err?.message || err}`);
+    return 'down';
+  }
+  return findPasskey(pc, credentialId) ? 'ok' : 'refused';
+}
+/** Synchronous form for the paths that use this instance's copies (WS deliveries, adopt): a removed passkey is refused at once. */
+function passkeyCachedOk(doc: SessionDoc | null | undefined): boolean {
+  if (!doc || doc.authMethod === undefined) return true;
+  if (!isPasskeyAuthMethod(doc.authMethod) || doc.authMethod.personId !== doc.personId) return false;
+  const cached = personCredCache.get(doc.authMethod.personId);
+  if (!cached) return true; // not read on this instance yet: the next authoritative check reads it
+  return !!findPasskey(cached.doc, doc.authMethod.credentialId);
+}
+/** sessionBacksClaims + (11b-s) the passkey the session came from is still there. */
+function sessionLive(doc: unknown, claims: SessionBackedClaims | null | undefined, nowMs: number): boolean {
+  return sessionBacksClaims(doc, claims, nowMs) && passkeyCachedOk(doc as SessionDoc);
+}
+
 /**
  * Plan 10.1. authoritative=true (every mutating request, WS upgrade): a direct
  * store read, no cache. authoritative=false (GET/HEAD): the cached entry when
@@ -1154,7 +1269,8 @@ async function checkSession(claims: SessionBackedClaims & { sid: string }, autho
   const nowMs = Date.now();
   const cached = sessionCache.get(claims.sid);
   if (!authoritative && cacheFresh(cached, nowMs)) {
-    return sessionBacksClaims(cached.doc, claims, nowMs) ? 'ok' : 'refused';
+    if (!sessionBacksClaims(cached.doc, claims, nowMs)) return 'refused';
+    return passkeySessionCheck(cached.doc, false);
   }
   let doc: SessionDoc | null;
   try {
@@ -1167,7 +1283,9 @@ async function checkSession(claims: SessionBackedClaims & { sid: string }, autho
   const during = sessionCache.get(claims.sid);
   if (during && during.doc && during.doc.revokedAt && !(doc && doc.revokedAt)) doc = during.doc;
   cachePut(sessionCache, claims.sid, { doc, readAtMs: Date.now() });
-  return sessionBacksClaims(doc, claims, Date.now()) ? 'ok' : 'refused';
+  if (!sessionBacksClaims(doc, claims, Date.now())) return 'refused';
+  // 11b-s (plan 11.2): a session from a passkey ends when that passkey is removed.
+  return passkeySessionCheck(doc, authoritative);
 }
 
 /** Closes (4401 unless told otherwise) every open socket whose token carries this sid. */
@@ -3007,7 +3125,7 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
     if (sc) {
       const nowMs = Date.now();
       const entry = sessionCache.get(sc.sid);
-      if (entry && !sessionBacksClaims(entry.doc, sc, nowMs)) {
+      if (entry && !sessionLive(entry.doc, sc, nowMs)) {
         try { client.close(4401, 'Unauthorized'); } catch {}
         activeSockets.delete(client);
         return null;
@@ -4522,7 +4640,7 @@ async function replayCommittedOperation(req: any, res: any, label: string): Prom
 async function commitOrRespond(
   req: any,
   res: any,
-  mutator: (freshDoc: any, currentVersion: number) => MutatorOutcome,
+  mutator: (freshDoc: any, currentVersion: number, preRead?: any) => MutatorOutcome,
   options: Omit<CommitOptions, 'expectedVersion' | 'operationId'> = {}
 ): Promise<CommitResult | null> {
   const { expectedVersion, operationId, idempotencyKey, authUserId, payloadHash, opTarget } = idempotencyScopeFor(req);
@@ -5722,7 +5840,7 @@ wss.on('connection', (ws, req) => {
     const current = liveSessionRow(socketClaims);
     // 11a-s1: a sid socket also needs its session still backed in the map
     // (a revocation that landed during the store read is caught here).
-    const sessionOk = !wsSession || sessionBacksClaims(sessionCache.get(wsSession.sid)?.doc, wsSession, Date.now());
+    const sessionOk = !wsSession || sessionLive(sessionCache.get(wsSession.sid)?.doc, wsSession, Date.now());
     const stillOk = isKiosk
       ? !!current && kioskSessionStillValid(current, { agencyId: kioskAgencyId, venueId: kioskVenueId, pv: kioskPv, deviceId: kioskDeviceId }) && sessionOk
       : !!current && current.id === authedUser.id && sessionOk;
@@ -10671,6 +10789,49 @@ if (isTestMode()) {
     }
     res.json({ routes: out });
   });
+  // 11b-s test hooks (test mode only; 404 outside it - Test 80 H):
+  //  get-person {personId}: the stored personCredentials doc; get-index
+  //  {credentialId}: its index entry; get-challenge {challengeId}; expire-challenge
+  //  {challengeId}: move its end into the past; age-recent-auth {sid, ageMs}: make
+  //  the session's recent proof older; pause-once {ms}: the next passkey
+  //  transaction pauses between its reads and its writes (forced interleavings);
+  //  drop-cache {personId}: forget this instance's copy (another instance's view).
+  app.post('/api/__test__/passkey-hooks', async (req, res) => {
+    const b = req.body || {};
+    try {
+      if (b.action === 'pause-once') { pkTxPauseOnceForTests = Math.max(0, Math.min(5000, Number(b.ms) || 0)); return res.json({ ok: true }); }
+      if (b.action === 'drop-cache') { personCredCache.delete(String(b.personId || '')); return res.json({ ok: true }); }
+      if (b.action === 'get-person') return res.json({ doc: await pkTransaction(async (tx) => tx.get('personCredentials', String(b.personId || ''))) });
+      if (b.action === 'get-index') return res.json({ doc: await pkTransaction(async (tx) => tx.get('passkeyIndex', credentialIdHash(String(b.credentialId || '')))) });
+      if (b.action === 'get-challenge') return res.json({ doc: await pkTransaction(async (tx) => tx.get('webauthnChallenges', String(b.challengeId || ''))) });
+      if (b.action === 'expire-challenge') {
+        const id = String(b.challengeId || '');
+        const ok = await pkTransaction(async (tx) => {
+          const c = await tx.get('webauthnChallenges', id);
+          if (!c) return false;
+          tx.set('webauthnChallenges', id, { ...c, expMs: Date.now() - 1 });
+          return true;
+        });
+        return res.json({ ok });
+      }
+      if (b.action === 'age-recent-auth') {
+        const sid = String(b.sid || '');
+        if (!isSid(sid)) return res.status(400).json({ error: 'sid required' });
+        const next = await pkTransaction(async (tx) => {
+          const cur = await tx.get('sessions', sid);
+          if (!cur || typeof cur.recentAuthAtMs !== 'number') return null;
+          const n = { ...cur, recentAuthAtMs: cur.recentAuthAtMs - Math.max(0, Number(b.ageMs) || 0) };
+          tx.set('sessions', sid, n);
+          return n;
+        });
+        if (next) cachePut(sessionCache, sid, { doc: next, readAtMs: Date.now() });
+        return res.json({ ok: !!next });
+      }
+      res.status(400).json({ error: 'unknown action' });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
   // 11a-s1 test hooks (test mode only; 404 outside it — Test 77 H):
   //  get {sid}: the stored record (no cache); revoke-silent {sid}: revoke in the
   //  STORE only (what another app instance's logout looks like to this one);
@@ -15012,8 +15173,21 @@ app.post('/api/auth/login', async (req, res) => {
       token: signChooseToken(freshCred),
     });
   }
+  // 11b-s (plan 9.5): the password typed here is a fresh proof on this new
+  // session (5 minutes, for adding a passkey right after signing in). If the
+  // person's credentials can't be read, the sign-in still works without it.
+  let loginRecentAuth: { atMs: number; epoch: number } | undefined;
+  const loginPersonId = typeof (freshCred as any).personId === 'string' && (freshCred as any).personId ? String((freshCred as any).personId) : null;
+  if (loginPersonId) {
+    try {
+      const pc = await personCredentialsRead(loginPersonId);
+      loginRecentAuth = { atMs: Date.now(), epoch: pc ? pc.recentAuthEpoch : 0 };
+    } catch {
+      loginRecentAuth = undefined;
+    }
+  }
   // QA2 #8: the person's venue was deleted and no other venue is left.
-  const loginMint = await issueSessionToken(freshCred, req, 'login');
+  const loginMint = await issueSessionToken(freshCred, req, 'login', { recentAuth: loginRecentAuth });
   if (sendMintFailure(res, loginMint, freshCred)) return;
   const token = (loginMint as { token: string }).token;
   res.json({
@@ -15490,6 +15664,8 @@ const MERGE_SHARED_AGENCY = { error: "Both accounts are in the same agency, so t
 const MERGE_STALE = { error: 'Your accounts changed. Please sign in again.', code: 'MERGE_STALE' } as const;
 const MERGE_NEEDS_CHECK = { error: 'Some older records need a check before these accounts can be merged. Please contact Shutfey support.', code: 'MERGE_NEEDS_CHECK' } as const;
 const MERGE_NOT_LINKABLE = { error: "These accounts can't be merged here. Please contact support.", code: 'ACCOUNT_NOT_LINKABLE' } as const;
+/** 11b-s (plan 9.5): passkeys follow one person and are never merged. */
+const MERGE_HAS_PASSKEYS = { error: 'First remove Face ID / fingerprint sign-in from the account that is being merged away, then try again.', code: 'MERGE_HAS_PASSKEYS' } as const;
 
 type MergeVia = 'merge-into' | 'bring-in';
 type MergeRefusal = { status: number; body: { error: string; code: string } };
@@ -15586,7 +15762,7 @@ async function accountMergeRoute(req: any, res: any, via: MergeVia) {
 
   const committed = await commitOrRespond(
     req, res,
-    (freshDoc) => {
+    (freshDoc, _currentVersion, preRead) => {
       const nowMs = Date.now();
       const nowIso = new Date(nowMs).toISOString();
       const fu: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
@@ -15605,6 +15781,8 @@ async function accountMergeRoute(req: any, res: any, via: MergeVia) {
       }
       const refusal = mergeRefusal(fu, fa, fSurvivor, fRetired);
       if (refusal) return { conflict: refusal.body.error, conflictStatus: refusal.status, conflictCode: refusal.body.code };
+      const retiredPk = asPersonCredentials(preRead?.retiredCredentials, verified.retiredPid);
+      if (retiredPk && retiredPk.passkeys.length > 0) return { conflict: MERGE_HAS_PASSKEYS.error, conflictStatus: 409, conflictCode: MERGE_HAS_PASSKEYS.code };
       const A = verified.survivorPid;
       const B = verified.retiredPid;
       const survivorEmail = normalizeInviteEmail(fSurvivor.email);
@@ -15655,7 +15833,12 @@ async function accountMergeRoute(req: any, res: any, via: MergeVia) {
         ...(survivorSingle ? { firstMultiOwnerIds: [String(fSurvivor.id)] } : {}),
       };
     },
-    { label: 'account-merge', idempotencyKey: `account-merge|${verified.callerId}|${operationId}`, payloadHash, returnDuplicate: true }
+    {
+      label: 'account-merge', idempotencyKey: `account-merge|${verified.callerId}|${operationId}`, payloadHash, returnDuplicate: true,
+      // 11b-s (plan 9.5): passkeys are never merged. Read IN the merge transaction,
+      // so a passkey added meanwhile aborts and retries the merge, which then refuses.
+      preReads: async (_freshDoc, read) => ({ retiredCredentials: await read('personCredentials', verified.retiredPid) }),
+    }
   );
   if (!committed) return;
   const r: any = (committed as any).result || {};
@@ -15787,7 +15970,7 @@ app.post('/api/auth/session/adopt', async (req, res) => {
   const backed = sessionBackedClaims(claims);
   if (backed) {
     const doc = sessionCache.get(backed.sid)?.doc;
-    if (!doc || !sessionBacksClaims(doc, backed, Date.now())) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+    if (!doc || !sessionLive(doc, backed, Date.now())) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
     if (!setUserCookie(res, (req as any).authToken, doc.absoluteExpMs)) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
     return res.json({ ok: true, adopted: true });
   }
@@ -15842,7 +16025,7 @@ app.post('/api/kiosk/session/adopt', async (req, res) => {
   const backed = kioskSessionClaims(claims);
   if (backed) {
     const doc = sessionCache.get(backed.sid)?.doc;
-    if (!doc || !sessionBacksClaims(doc, backed, Date.now())) return refused();
+    if (!doc || !sessionLive(doc, backed, Date.now())) return refused();
     if (!setKioskCookie(res, (req as any).authToken, doc.absoluteExpMs)) return refused();
   } else {
     const iat = tokenNumericClaim((req as any).authToken, 'iat');
@@ -15879,10 +16062,459 @@ app.post('/api/auth/activate', async (req, res) => {
   const row = membershipId ? (users as any[]).find((u) => u && u.id === membershipId) : undefined;
   const agencyOk = !!row && typeof row.agencyId === 'string' && (agencies as any[]).some((a) => a && a.id === row.agencyId);
   if (!row || row.personId !== who.personId || !agencyOk) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
-  const activeMint = await issueSessionToken(row, req, 'activate');
+  // 11b-s (plan 11.2): a choice made after a passkey sign-in is a passkey
+  // session (it ends when that passkey is removed); the passkey must still be
+  // there now. Never a recent proof (plan 9.5: not copied by choose).
+  const chosenPk = (req as any).chooseClaims?.passkeyCredentialId;
+  let authMethod: PasskeyAuthMethod | undefined;
+  if (typeof chosenPk === 'string') {
+    authMethod = { type: 'passkey', personId: who.personId, credentialId: chosenPk };
+    let pc: PersonCredentialsDoc | null;
+    try { pc = await personCredentialsRead(who.personId); } catch (err) { return storeDown(res, err, 'activate'); }
+    if (!findPasskey(pc, chosenPk)) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  }
+  const activeMint = await issueSessionToken(row, req, 'activate', { authMethod });
   if (sendMintFailure(res, activeMint, row)) return; // QA2 #8 / 10L; 11a-s1: 503 when the session record could not be written
   const activeToken = (activeMint as { token: string }).token;
   res.json({ token: activeToken, user: getSelfUser(row as UserProfile) });
+});
+
+// ---------------------------------------------------------------------------
+// 11b-s (plan v8 11b-s, 9.4, 9.5, 10.3, 10.7, 10.8, 11.2; Don B12, B13, B16,
+// B17): passkeys - "Face ID / fingerprint" sign-in. Optional; the password
+// always keeps working and is never removed. RP ID = the host of the trusted
+// Origin the ceremony came from (today the run.app host; a later custom domain
+// means people add their passkey again there). userVerification 'required'
+// (Face ID, fingerprint or the phone's screen lock), discoverable credentials.
+// ---------------------------------------------------------------------------
+const PASSKEY_UNAVAILABLE = { error: 'Face ID / fingerprint sign-in is not available for this account.', code: 'PASSKEY_UNAVAILABLE' };
+const RECENT_AUTH_REQUIRED = { error: 'Please enter your password again first.', code: 'RECENT_AUTH_REQUIRED' };
+const PASSKEY_ADD_FAILED = { error: "Face ID / fingerprint couldn't be added. Please try again.", code: 'PASSKEY_FAILED' };
+const PASSKEY_LOGIN_FAILED = { error: "That Face ID / fingerprint sign-in didn't work. Please use your password.", code: 'PASSKEY_FAILED' };
+const PASSKEY_LIMIT = { error: `You can add up to ${PASSKEYS_MAX} Face ID / fingerprint sign-ins. Remove one first.`, code: 'PASSKEY_LIMIT' };
+const PASSKEY_NOT_FOUND = { error: 'That Face ID / fingerprint sign-in was not found.', code: 'PASSKEY_NOT_FOUND' };
+const WRONG_PASSWORD = { error: 'That password is not right.', code: 'WRONG_PASSWORD' };
+const passkeyOptionsLimiter = createWindowLimiter({ max: 30, windowMs: 15 * 60 * 1000, maxKeys: 10000 });
+const passkeyVerifyLimiter = createWindowLimiter({ max: 30, windowMs: 15 * 60 * 1000, maxKeys: 10000 });
+const recentAuthLimiter = createWindowLimiter({ max: 10, windowMs: 15 * 60 * 1000, maxKeys: 10000 });
+
+function passkeyAudit(event: string, personId: string, credentialId: string | null, extra = ''): void {
+  // Never a key, a counter or the credential id itself: a short hash names the passkey.
+  const tag = credentialId ? credentialIdHash(credentialId).slice(0, 10) : '-';
+  log.info(`[passkey-audit] ${event} person ${personId} passkey ${tag}${extra ? ` ${extra}` : ''}`);
+}
+function passkeyRateLimited(limiter: ReturnType<typeof createWindowLimiter>, req: any, res: any): boolean {
+  const hit = limiter.hit(`pk|${getClientIp(req)}`, Date.now());
+  if (hit.allowed) return false;
+  res.setHeader('Retry-After', String(hit.retryAfterSec));
+  res.status(429).json({ error: `Too many requests. Please try again in ${Math.ceil(hit.retryAfterSec / 60)} minute(s).`, code: 'RATE_LIMITED' });
+  return true;
+}
+/** The WebAuthn RP ID for a trusted origin: its host (plan 9.4 expectedRPID; stored on the challenge). */
+function rpIdForOrigin(origin: string): string {
+  return new URL(origin).hostname;
+}
+/** A signed-in person on a server session (v2 token with sid; never kiosk, choose, v1 or a pre-11 token). */
+function passkeyUser(req: any, needSid = true): { row: any; personId: string; sid: string | null } | null {
+  if (req.kiosk === true || req.chooseClaims) return null;
+  const claims = req.tokenClaims as SessionClaims | null | undefined;
+  if (!claims || claims.kind !== 'v2') return null;
+  const sid = isSid((claims as any).sid) ? (claims as any).sid as string : null;
+  if (needSid && (!sid || req.sessionId !== sid)) return null;
+  const me = req.authUser;
+  const row = me ? (users as any[]).find((u) => u && u.id === me.id) : undefined;
+  if (!row || typeof row.personId !== 'string' || !row.personId || row.personId !== claims.personId) return null;
+  return { row, personId: row.personId, sid };
+}
+/** Plan 10.8 + 10.4: may this person add a passkey right now? (own password origin, at least one active membership) */
+function personMayEnroll(personId: string): boolean {
+  const cred: any = credentialRowOfPerson(users as any[], personId);
+  if (!cred || !originMayEnroll(cred.credentialOrigin) || cred.credentialPending) return false;
+  return membershipsOfPerson(personId).length > 0;
+}
+function storeDown(res: any, err: any, what: string): void {
+  log.warn(`[passkey] ${what} store error: ${err?.message || err}`);
+  res.status(503).json(SESSION_STORE_DOWN_BODY);
+}
+/** Closes the open sockets of every session that came from this passkey (this instance; others refuse at their next check). */
+function closeSocketsOfPasskey(personId: string, credentialId: string): void {
+  for (const [client, meta] of Array.from(activeSockets.entries())) {
+    const sid = (meta as any)?.tokenClaims?.sid;
+    if (!isSid(sid)) continue;
+    const am: any = sessionCache.get(sid)?.doc?.authMethod;
+    if (!am || am.personId !== personId || am.credentialId !== credentialId) continue;
+    try { client.close(4401, 'Unauthorized'); } catch {}
+    activeSockets.delete(client);
+  }
+}
+
+/**
+ * Plan 9.5: a password re-entry on THIS session; for 5 minutes it may add or
+ * remove a passkey. Wrong password: 403 WRONG_PASSWORD (never 401, which would
+ * sign the person out).
+ */
+app.post('/api/auth/recent-auth', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const who = passkeyUser(req);
+  if (!who) return res.status(403).json(PASSKEY_UNAVAILABLE);
+  const lim = recentAuthLimiter.hit(`ra|${who.personId}|${getClientIp(req)}`, Date.now());
+  if (!lim.allowed) {
+    res.setHeader('Retry-After', String(lim.retryAfterSec));
+    return res.status(429).json({ error: `Too many tries. Please try again in ${Math.ceil(lim.retryAfterSec / 60)} minute(s).`, code: 'RATE_LIMITED' });
+  }
+  const cred: any = credentialRowOfPerson(users as any[], who.personId);
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (!cred || !cred.password || !password || (await checkPassword(password, cred.password)) === 'invalid') return res.status(403).json(WRONG_PASSWORD);
+  let next: SessionDoc | null = null;
+  try {
+    next = await pkTransaction(async (tx) => {
+      const pc = asPersonCredentials(await tx.get('personCredentials', who.personId), who.personId);
+      const cur = (await tx.get('sessions', who.sid!)) as SessionDoc | null;
+      if (!cur || cur.revokedAt || cur.kind !== 'user' || cur.rowId !== who.row.id || Date.now() >= cur.absoluteExpMs) return null;
+      const out: SessionDoc = { ...cur, recentAuthAtMs: Date.now(), recentAuthEpoch: pc ? pc.recentAuthEpoch : 0 };
+      tx.set('sessions', who.sid!, out);
+      return out;
+    });
+  } catch (err) {
+    return storeDown(res, err, 'recent-auth');
+  }
+  if (!next) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
+  cachePut(sessionCache, who.sid!, { doc: next, readAtMs: Date.now() });
+  res.json({ ok: true, recentAuthUntil: new Date(next.recentAuthAtMs! + RECENT_AUTH_MS).toISOString() });
+});
+
+/** The person's own passkeys (name, added, last used; never a key) and whether they may add one. */
+app.get('/api/passkeys', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const who = passkeyUser(req, false);
+  if (!who) return res.status(403).json(PASSKEY_UNAVAILABLE);
+  let pc: PersonCredentialsDoc | null;
+  try { pc = await personCredentialsRead(who.personId); } catch (err) { return storeDown(res, err, 'list'); }
+  const list = pc ? pc.passkeys.map(publicPasskey) : [];
+  res.json({ passkeys: list, canAdd: personMayEnroll(who.personId) && list.length < PASSKEYS_MAX });
+});
+
+app.post('/api/passkeys/register/options', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!requestOriginTrusted(req)) return res.status(403).json(CSRF_ORIGIN_BODY);
+  const who = passkeyUser(req);
+  if (!who || !personMayEnroll(who.personId)) return res.status(403).json(PASSKEY_UNAVAILABLE);
+  const origin = normalizeOrigin(req.headers.origin)!;
+  const challengeBytes = crypto.randomBytes(32);
+  const nowMs = Date.now();
+  const ch: ChallengeDoc = {
+    id: base64url(crypto.randomBytes(16)), challenge: base64url(challengeBytes), purpose: 'register', rpId: rpIdForOrigin(origin), origin,
+    personId: who.personId, rowId: String(who.row.id), sid: who.sid, createdAtMs: nowMs, expMs: nowMs + CHALLENGE_TTL_MS, consumedAt: null,
+  };
+  let out: { pc: PersonCredentialsDoc } | { refuse: 'recent' | 'limit' } ;
+  try {
+    out = await pkTransaction(async (tx) => {
+      let pc = asPersonCredentials(await tx.get('personCredentials', who.personId), who.personId);
+      const cur = (await tx.get('sessions', who.sid!)) as SessionDoc | null;
+      const isNew = !pc;
+      if (!pc) pc = newPersonCredentials(who.personId, new Date().toISOString());
+      if (!cur || cur.revokedAt || !recentAuthValid(cur, pc.recentAuthEpoch, Date.now())) return { refuse: 'recent' as const };
+      if (pc.passkeys.length >= PASSKEYS_MAX) return { refuse: 'limit' as const };
+      if (isNew) tx.set('personCredentials', who.personId, pc);
+      tx.set('webauthnChallenges', ch.id, ch);
+      return { pc };
+    });
+  } catch (err) {
+    return storeDown(res, err, 'register/options');
+  }
+  if ('refuse' in out) return out.refuse === 'recent' ? res.status(403).json(RECENT_AUTH_REQUIRED) : res.status(409).json(PASSKEY_LIMIT);
+  const pc = out.pc;
+  personCredCache.set(who.personId, { doc: pc, readAtMs: Date.now() });
+  const options = await generateRegistrationOptions({
+    rpName: 'Shutfey',
+    rpID: ch.rpId,
+    userName: String(who.row.email || 'Shutfey account'),
+    userDisplayName: String(who.row.name || who.row.email || 'Shutfey account'),
+    userID: new Uint8Array(Buffer.from(pc.passkeyUserHandle, 'base64url')),
+    challenge: new Uint8Array(challengeBytes),
+    timeout: CHALLENGE_TTL_MS,
+    attestationType: 'none',
+    excludeCredentials: pc.passkeys.map((p) => ({ id: p.credentialId, transports: p.transports })),
+    authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
+  });
+  res.json({ challengeId: ch.id, options });
+});
+
+app.post('/api/passkeys/register/verify', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!requestOriginTrusted(req)) return res.status(403).json(CSRF_ORIGIN_BODY);
+  const who = passkeyUser(req);
+  if (!who || !personMayEnroll(who.personId)) return res.status(403).json(PASSKEY_UNAVAILABLE);
+  const origin = normalizeOrigin(req.headers.origin)!;
+  const challengeId = typeof req.body?.challengeId === 'string' ? req.body.challengeId : '';
+  const response = req.body?.response;
+  if (!CHALLENGE_ID_RE.test(challengeId) || !response || typeof response !== 'object' || typeof response.id !== 'string' || !CREDENTIAL_ID_RE.test(response.id)) {
+    return res.status(400).json(PASSKEY_ADD_FAILED);
+  }
+  const credentialId: string = response.id;
+  const idx = credentialIdHash(credentialId);
+  const name = cleanPasskeyName(req.body?.name, defaultPasskeyName(req.headers['user-agent']));
+  type R = { ok: PasskeyEntry; pc: PersonCredentialsDoc } | { fail: 'failed' | 'recent' | 'limit' | 'taken' | 'unavailable' };
+  let out: R;
+  try {
+    out = await pkTransaction<R>(async (tx) => {
+      const ch = await tx.get('webauthnChallenges', challengeId);
+      const pcRaw = await tx.get('personCredentials', who.personId);
+      const cur = (await tx.get('sessions', who.sid!)) as SessionDoc | null;
+      const index = await tx.get('passkeyIndex', idx);
+      await pkTestPause();
+      const nowMs = Date.now();
+      // Any unconsumed challenge presented here is used up (single use), whatever the outcome.
+      const consume = () => { if (ch && !ch.consumedAt) tx.set('webauthnChallenges', challengeId, { ...ch, consumedAt: new Date(nowMs).toISOString() }); };
+      if (!challengeMatches(ch, { id: challengeId, purpose: 'register', origin, personId: who.personId, rowId: String(who.row.id), sid: who.sid }, nowMs)) { consume(); return { fail: 'failed' }; }
+      const pc = asPersonCredentials(pcRaw, who.personId);
+      if (!pc) { consume(); return { fail: 'failed' }; }
+      if (!cur || cur.revokedAt || !recentAuthValid(cur, pc.recentAuthEpoch, nowMs)) { consume(); return { fail: 'recent' }; }
+      // Plan 10.4 / 10.8, read at commit time: still an own-password person with an active membership.
+      if (!personMayEnroll(who.personId)) { consume(); return { fail: 'unavailable' }; }
+      let info: any;
+      try {
+        const v = await verifyRegistrationResponse({
+          response, expectedChallenge: ch.challenge, expectedOrigin: ch.origin, expectedRPID: ch.rpId,
+          requireUserPresence: true, requireUserVerification: true,
+        });
+        if (!v.verified) { consume(); return { fail: 'failed' }; }
+        info = v.registrationInfo;
+      } catch {
+        consume();
+        return { fail: 'failed' };
+      }
+      if (!info || info.credential?.id !== credentialId || info.userVerified !== true) { consume(); return { fail: 'failed' }; }
+      // Plan 10.7: one credential id belongs to one person, forever (a removed one stays taken).
+      if (index || findPasskey(pc, credentialId)) { consume(); return { fail: 'taken' }; }
+      if (pc.passkeys.length >= PASSKEYS_MAX) { consume(); return { fail: 'limit' }; }
+      const nowIso = new Date(nowMs).toISOString();
+      const entry: PasskeyEntry = {
+        credentialId,
+        publicKey: Buffer.from(info.credential.publicKey).toString('base64url'),
+        counter: Number(info.credential.counter) || 0,
+        transports: Array.isArray(info.credential.transports) ? info.credential.transports.filter((t: unknown) => typeof t === 'string').slice(0, 8) : [],
+        aaguid: typeof info.aaguid === 'string' ? info.aaguid : '',
+        name, createdAt: nowIso, lastUsedAt: null, createdBySid: who.sid,
+      };
+      const nextPc: PersonCredentialsDoc = { ...pc, passkeys: [...pc.passkeys, entry], updatedAt: nowIso };
+      consume();
+      tx.set('personCredentials', who.personId, nextPc);
+      tx.set('passkeyIndex', idx, { credentialIdHash: idx, personId: who.personId, createdAt: nowIso, removedAt: null });
+      return { ok: entry, pc: nextPc };
+    });
+  } catch (err) {
+    return storeDown(res, err, 'register/verify');
+  }
+  if ('fail' in out) {
+    if (out.fail === 'taken') passkeyAudit('register-refused-taken', who.personId, credentialId);
+    if (out.fail === 'recent') return res.status(403).json(RECENT_AUTH_REQUIRED);
+    if (out.fail === 'limit') return res.status(409).json(PASSKEY_LIMIT);
+    if (out.fail === 'unavailable') return res.status(403).json(PASSKEY_UNAVAILABLE);
+    return res.status(400).json(PASSKEY_ADD_FAILED);
+  }
+  personCredCache.set(who.personId, { doc: out.pc, readAtMs: Date.now() });
+  passkeyAudit('added', who.personId, credentialId, `row ${who.row.id} device "${out.ok.name}"`);
+  res.status(201).json({ ok: true, passkey: publicPasskey(out.ok) });
+});
+
+app.patch('/api/passkeys/:id', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const who = passkeyUser(req, false);
+  if (!who) return res.status(403).json(PASSKEY_UNAVAILABLE);
+  const id = String(req.params.id || '');
+  if (!CREDENTIAL_ID_RE.test(id) || typeof req.body?.name !== 'string') return res.status(400).json({ error: 'Please enter a name.' });
+  const name = cleanPasskeyName(req.body.name, '');
+  if (!name) return res.status(400).json({ error: 'Please enter a name.' });
+  let out: PersonCredentialsDoc | null;
+  try {
+    out = await pkTransaction(async (tx) => {
+      const pc = asPersonCredentials(await tx.get('personCredentials', who.personId), who.personId);
+      if (!pc || !findPasskey(pc, id)) return null;
+      const next = { ...pc, passkeys: pc.passkeys.map((p) => (p.credentialId === id ? { ...p, name } : p)), updatedAt: new Date().toISOString() };
+      tx.set('personCredentials', who.personId, next);
+      return next;
+    });
+  } catch (err) {
+    return storeDown(res, err, 'rename');
+  }
+  if (!out) return res.status(404).json(PASSKEY_NOT_FOUND);
+  personCredCache.set(who.personId, { doc: out, readAtMs: Date.now() });
+  res.json({ ok: true, passkey: publicPasskey(findPasskey(out, id)!) });
+});
+
+/**
+ * Plan 11.2: removal is ONE write to personCredentials/{P}: the passkey goes,
+ * credVersion and recentAuthEpoch move (every recent proof of the person ends),
+ * its index entry becomes a tombstone (that credential id can never be added
+ * again). Every session that came from it is refused at its next check; this
+ * instance closes their sockets now. The password and password sessions are
+ * untouched (B16: no admin recovery; the person removes a lost phone's passkey).
+ */
+app.delete('/api/passkeys/:id', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const who = passkeyUser(req);
+  if (!who) return res.status(403).json(PASSKEY_UNAVAILABLE);
+  const id = String(req.params.id || '');
+  if (!CREDENTIAL_ID_RE.test(id)) return res.status(404).json(PASSKEY_NOT_FOUND);
+  const idx = credentialIdHash(id);
+  type R = { ok: PersonCredentialsDoc } | { fail: 'recent' | 'missing' };
+  let out: R;
+  try {
+    out = await pkTransaction<R>(async (tx) => {
+      const pc = asPersonCredentials(await tx.get('personCredentials', who.personId), who.personId);
+      const cur = (await tx.get('sessions', who.sid!)) as SessionDoc | null;
+      const index = await tx.get('passkeyIndex', idx);
+      await pkTestPause();
+      const nowMs = Date.now();
+      if (!cur || cur.revokedAt || !recentAuthValid(cur, pc ? pc.recentAuthEpoch : 0, nowMs)) return { fail: 'recent' };
+      if (!pc || !findPasskey(pc, id)) return { fail: 'missing' };
+      const nowIso = new Date(nowMs).toISOString();
+      const next: PersonCredentialsDoc = {
+        ...pc, passkeys: pc.passkeys.filter((p) => p.credentialId !== id), credVersion: pc.credVersion + 1, recentAuthEpoch: pc.recentAuthEpoch + 1, updatedAt: nowIso,
+      };
+      tx.set('personCredentials', who.personId, next);
+      tx.set('passkeyIndex', idx, { credentialIdHash: idx, personId: who.personId, createdAt: index?.createdAt || nowIso, removedAt: nowIso });
+      return { ok: next };
+    });
+  } catch (err) {
+    return storeDown(res, err, 'remove');
+  }
+  if ('fail' in out) return out.fail === 'recent' ? res.status(403).json(RECENT_AUTH_REQUIRED) : res.status(404).json(PASSKEY_NOT_FOUND);
+  personCredCache.set(who.personId, { doc: out.ok, readAtMs: Date.now() });
+  closeSocketsOfPasskey(who.personId, id);
+  passkeyAudit('removed', who.personId, id, `row ${who.row.id}`);
+  res.json({ ok: true });
+});
+
+/** Public: the start of a passkey sign-in (no email; the phone offers its passkeys for this host). */
+app.post('/api/auth/passkey/options', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!requestOriginTrusted(req)) return res.status(403).json(CSRF_ORIGIN_BODY);
+  if (passkeyRateLimited(passkeyOptionsLimiter, req, res)) return;
+  const origin = normalizeOrigin(req.headers.origin)!;
+  const challengeBytes = crypto.randomBytes(32);
+  const nowMs = Date.now();
+  const ch: ChallengeDoc = {
+    id: base64url(crypto.randomBytes(16)), challenge: base64url(challengeBytes), purpose: 'login', rpId: rpIdForOrigin(origin), origin,
+    personId: null, rowId: null, sid: null, createdAtMs: nowMs, expMs: nowMs + CHALLENGE_TTL_MS, consumedAt: null,
+  };
+  try {
+    await pkTransaction(async (tx) => { tx.set('webauthnChallenges', ch.id, ch); });
+  } catch (err) {
+    return storeDown(res, err, 'login/options');
+  }
+  const options = await generateAuthenticationOptions({ rpID: ch.rpId, challenge: new Uint8Array(challengeBytes), timeout: CHALLENGE_TTL_MS, userVerification: 'required' });
+  res.json({ challengeId: ch.id, options });
+});
+
+/**
+ * Public: finish a passkey sign-in. The person comes ONLY from the credential
+ * index (no email or person id is read from the request), the userHandle must
+ * be that person's, the challenge is consumed, the counter checked, and the
+ * session record written - all in one transaction (plan 9.4 / 10.3 / 10.7).
+ * The answer is the same as a password sign-in: one membership -> a session
+ * (and the cookie, when opted in); several -> a choose token. A passkey alone
+ * never signs anyone in: the person needs an active membership (10.4).
+ */
+app.post('/api/auth/passkey/verify', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!requestOriginTrusted(req)) return res.status(403).json(CSRF_ORIGIN_BODY);
+  if (passkeyRateLimited(passkeyVerifyLimiter, req, res)) return;
+  const origin = normalizeOrigin(req.headers.origin)!;
+  const challengeId = typeof req.body?.challengeId === 'string' ? req.body.challengeId : '';
+  const response = req.body?.response;
+  if (!CHALLENGE_ID_RE.test(challengeId) || !response || typeof response !== 'object' || typeof response.id !== 'string' || !CREDENTIAL_ID_RE.test(response.id)) {
+    return res.status(401).json(PASSKEY_LOGIN_FAILED);
+  }
+  const credentialId: string = response.id;
+  const userHandle = typeof response.response?.userHandle === 'string' ? response.response.userHandle : '';
+  const idx = credentialIdHash(credentialId);
+  type R =
+    | { fail: string; personId?: string }
+    | { single: true; row: any; doc: SessionDoc; pc: PersonCredentialsDoc }
+    | { choose: true; cred: any; pc: PersonCredentialsDoc }
+    | { ineligible: true; row: any; pc: PersonCredentialsDoc };
+  let out: R;
+  try {
+    out = await pkTransaction<R>(async (tx) => {
+      const ch = await tx.get('webauthnChallenges', challengeId);
+      const index = await tx.get('passkeyIndex', idx);
+      const personId = index && typeof index.personId === 'string' && index.personId && !index.removedAt ? index.personId : null;
+      const pcRaw = personId ? await tx.get('personCredentials', personId) : null;
+      const sidCandidate = base64url(crypto.randomBytes(16));
+      const taken = await tx.get('sessions', sidCandidate);
+      await pkTestPause();
+      const nowMs = Date.now();
+      const consume = () => { if (ch && !ch.consumedAt) tx.set('webauthnChallenges', challengeId, { ...ch, consumedAt: new Date(nowMs).toISOString() }); };
+      if (!challengeMatches(ch, { id: challengeId, purpose: 'login', origin }, nowMs)) { consume(); return { fail: 'challenge' }; }
+      if (!personId) { consume(); return { fail: 'unknown-credential' }; }
+      const pc = asPersonCredentials(pcRaw, personId);
+      const entry = findPasskey(pc, credentialId);
+      if (!pc || !entry) { consume(); return { fail: 'unknown-credential', personId }; }
+      if (!userHandle || userHandle !== pc.passkeyUserHandle) { consume(); return { fail: 'user-handle-mismatch', personId }; }
+      let newCounter: number;
+      try {
+        const v = await verifyAuthenticationResponse({
+          response, expectedChallenge: ch.challenge, expectedOrigin: ch.origin, expectedRPID: ch.rpId, requireUserVerification: true,
+          credential: { id: entry.credentialId, publicKey: new Uint8Array(Buffer.from(entry.publicKey, 'base64url')), counter: entry.counter, transports: entry.transports as any },
+        });
+        if (!v.verified || v.authenticationInfo.userVerified !== true || v.authenticationInfo.credentialID !== credentialId) { consume(); return { fail: 'assertion', personId }; }
+        newCounter = v.authenticationInfo.newCounter;
+      } catch (err: any) {
+        consume();
+        return { fail: /counter/i.test(String(err?.message || '')) ? 'counter' : 'assertion', personId };
+      }
+      // Plan 9.4 rule (ii): a non-zero counter never goes backwards (or stays).
+      if (!counterAcceptable(entry.counter, newCounter)) { consume(); return { fail: 'counter', personId }; }
+      const nowIso = new Date(nowMs).toISOString();
+      const nextPc: PersonCredentialsDoc = {
+        ...pc, passkeys: pc.passkeys.map((p) => (p.credentialId === credentialId ? { ...p, counter: newCounter, lastUsedAt: nowIso } : p)), updatedAt: nowIso,
+      };
+      // Plan 10.4: the person must have an active membership NOW (single-instance
+      // authoritative state); the answers mirror a password sign-in.
+      const cred: any = credentialRowOfPerson(users as any[], personId);
+      if (!cred || cred.credentialPending || !cred.password) { consume(); return { fail: 'no-credential', personId }; }
+      const multi = isMultiPersonRow(users, cred);
+      const active = membershipsOfPerson(personId).length > 0;
+      // A paused or venue-removed membership: the same 403 a password sign-in gives (nothing is signed in).
+      if (multi ? !active : sessionIneligibleCode(cred)) { consume(); tx.set('personCredentials', personId, nextPc); return { ineligible: true, row: cred, pc: nextPc }; }
+      if (!active) { consume(); return { fail: 'no-membership', personId }; }
+      consume();
+      tx.set('personCredentials', personId, nextPc);
+      if (multi) return { choose: true, cred, pc: nextPc };
+      if (taken) throw new Error('session id already exists');
+      const doc = newUserSessionDoc(cred, req, 'passkey', {
+        authMethod: { type: 'passkey', personId, credentialId },
+        recentAuth: { atMs: nowMs, epoch: pc.recentAuthEpoch },
+      });
+      const stored: SessionDoc = { ...doc, sid: sidCandidate };
+      tx.set('sessions', sidCandidate, stored);
+      return { single: true, row: cred, doc: stored, pc: nextPc };
+    });
+  } catch (err) {
+    return storeDown(res, err, 'login/verify');
+  }
+  if ('fail' in out) {
+    if (out.personId && out.fail !== 'assertion') passkeyAudit(`login-refused-${out.fail}`, out.personId, credentialId);
+    return res.status(401).json(PASSKEY_LOGIN_FAILED);
+  }
+  const pid = ('cred' in out ? out.cred : out.row).personId as string;
+  personCredCache.set(pid, { doc: out.pc, readAtMs: Date.now() });
+  if ('choose' in out) {
+    passkeyAudit('login-choose', pid, credentialId);
+    return res.json({
+      success: true,
+      chooseMembership: true,
+      memberships: membershipsOfPerson(pid).map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role })),
+      token: signChooseToken(out.cred, credentialId),
+    });
+  }
+  if ('ineligible' in out) return res.status(403).json(isMultiPersonRow(users, out.row) ? noMembershipBody(pid) : ineligibleBody(out.row));
+  const minted = finishUserSessionMint(out.row, req, out.doc);
+  if (sendMintFailure(res, minted, out.row)) return;
+  passkeyAudit('login', pid, credentialId, `row ${out.row.id}`);
+  res.json({ success: true, user: getSelfUser(out.row as UserProfile), token: (minted as { token: string }).token });
 });
 
 // ---------------------------------------------------------------------------
