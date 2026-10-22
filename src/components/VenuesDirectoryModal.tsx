@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { CertificationBadge } from './CertificationBadge';
+import { EditCertificationSheet } from './EditCertificationSheet';
 import { ProgressRing } from './ProgressRing';
 import { 
   X, 
@@ -11,6 +12,7 @@ import {
   Search, 
   Trash2, 
   Clock,
+  Pencil,
 } from 'lucide-react';
 import { Venue } from '../types';
 import { ConfirmModal } from './ConfirmModal';
@@ -139,6 +141,8 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [venueToDelete, setVenueToDelete] = useState<Venue | null>(null);
+  const [venueToEditCert, setVenueToEditCert] = useState<Venue | null>(null);
+  const idBase = useId();
 
   if (!isOpen) return null;
 
@@ -250,7 +254,8 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
               <p className="text-sm mt-2">Try a different name, address or hashgacha.</p>
             </div>
           ) : (
-            filteredVenues.map((venue) => {
+            filteredVenues.map((venue, index) => {
+              const nameId = `${idBase}-venue-${index}`;
               const isCurrent = currentVenue?.id === venue.id;
               const rate = venue.completionRate ?? 0;
               const totalTasks = venue.totalTasksToday ?? 0;
@@ -275,7 +280,7 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                     <div className="flex items-start justify-between gap-2 mb-1.5">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <h3 dir="auto" className="min-w-0 break-words text-sm font-bold text-ink group-hover:text-gold-deep transition">
+                          <h3 id={nameId} dir="auto" className="min-w-0 break-words text-sm font-bold text-ink group-hover:text-gold-deep transition">
                             {venue.name}
                           </h3>
                           {isCurrent && (
@@ -309,9 +314,27 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
                           <span dir="auto" className="min-w-0 break-words">{venue.address}</span>
                         </div>
                       )}
-                      {venue.certification && (
-                        <div className="flex items-start gap-1.5 text-ok">
-                          <CertificationBadge certification={venue.certification} certificationDetail={venue.certificationDetail} agencyName={agencyName} agencyShortCode={agencyShortCode} logoSrc={agencyLogoSrc} iconClassName="w-3 h-3 mt-0.5 text-ok shrink-0" />
+                      {(venue.certification || (isAdmin && onVenueUpdated)) && (
+                        <div className="flex items-center gap-1.5 text-ok" data-venue-certification-row>
+                          <div className="flex min-w-0 flex-1 items-start gap-1.5">
+                            {venue.certification ? (
+                              <CertificationBadge certification={venue.certification} certificationDetail={venue.certificationDetail} agencyName={agencyName} agencyShortCode={agencyShortCode} logoSrc={agencyLogoSrc} iconClassName="w-3 h-3 mt-0.5 text-ok shrink-0" />
+                            ) : (
+                              <span className="text-ink-soft">No certification</span>
+                            )}
+                          </div>
+                          {isAdmin && onVenueUpdated && (
+                            <button
+                              type="button"
+                              data-edit-certification
+                              aria-labelledby={`${nameId}-edit ${nameId}`}
+                              onClick={(e) => { e.stopPropagation(); setVenueToEditCert(venue); }}
+                              className="pressable inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-lg border border-line-control bg-surface px-2.5 text-xs font-semibold text-ink hover:bg-sunken focus:outline-none focus:ring-2 focus:ring-gold"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                              <span id={`${nameId}-edit`}>Edit<span className="sr-only"> certification for</span></span>
+                            </button>
+                          )}
                         </div>
                       )}
                       <VenueTimeZoneRow
@@ -373,6 +396,15 @@ export const VenuesDirectoryModal: React.FC<VenuesDirectoryModalProps> = ({
         </div>
 
       </div>
+
+      {venueToEditCert && onVenueUpdated && (
+        <EditCertificationSheet
+          venue={venueToEditCert}
+          agencyName={agencyName}
+          onClose={() => setVenueToEditCert(null)}
+          onSaved={onVenueUpdated}
+        />
+      )}
 
       {/* Delete Venue Confirmation Modal */}
       <ConfirmModal
