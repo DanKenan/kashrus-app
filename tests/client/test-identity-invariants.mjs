@@ -209,11 +209,17 @@ const row = (id, email, extra = {}) => ({ id, agencyId: 'ag-x', email, name: id,
   const hookEnd = hookAt >= 0 ? src.indexOf('\n  app.', hookAt + 10) : -1;
   const acceptAt = src.indexOf("app.post('/api/invites/accept'");
   const acceptEnd = acceptAt >= 0 ? src.indexOf('\napp.', acceptAt + 10) : -1;
-  check(`newMembership is produced exactly twice in server.ts (found ${producers.length})`, producers.length === 2);
+  // 10M part 1: the third producer is register-existing (a new admin row of an existing person).
+  const regAt = src.indexOf("app.post('/api/agencies/register-existing'");
+  const regEnd = regAt >= 0 ? src.indexOf('\napp.', regAt + 10) : -1;
+  const inAccept = (p) => acceptAt >= 0 && p > acceptAt && p < acceptEnd;
+  const inReg = (p) => regAt >= 0 && p > regAt && p < regEnd;
+  check(`newMembership is produced exactly three times in server.ts (found ${producers.length})`, producers.length === 3);
   check('…once inside the test-mode identity-build-person hook', producers.some((p) => hookAt >= 0 && p > hookAt && p < hookEnd));
-  check('…and once inside the 10i accept handler', producers.some((p) => acceptAt >= 0 && p > acceptAt && p < acceptEnd));
+  check('…once inside the 10i accept handler', producers.filter(inAccept).length === 1);
+  check('…and once inside the 10M register-existing handler', producers.filter(inReg).length === 1);
   const owners = [...src.matchAll(/firstMultiOwnerIds:\s*\[/g)].map((m) => m.index);
-  check(`firstMultiOwnerIds is produced only by the accept handler (found ${owners.length})`, owners.length === 1 && owners[0] > acceptAt && owners[0] < acceptEnd);
+  check(`firstMultiOwnerIds is produced only by the accept and register-existing handlers (found ${owners.length})`, owners.length === 2 && owners.filter(inAccept).length === 1 && owners.filter(inReg).length === 1);
   check('the growth allowance is derived from the joins the enforcement accepted', /allowGrowthRowIds: acceptedJoins/.test(src) && !/allowGrowthRowIds:\s*(req|body|new Set\(\s*req)/.test(src));
   const setters = [...src.matchAll(/credentialOriginSetById:\s*\{\s*\[([A-Za-z.]+)\]:\s*'([a-z-]+)'/g)].map((m) => m[2]).sort();
   // Invites always on (#122): add-member and owner creation no longer set a password, so no 'admin' writer is left.

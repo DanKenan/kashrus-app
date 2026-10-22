@@ -186,6 +186,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-72-invites-enable.mjs')).default,
     (await import('./test-73-reset-links.mjs')).default,
     (await import('./test-74-qa2s2.mjs')).default,
+    (await import('./test-75-register-existing.mjs')).default,
   ];
 
   const docKiB = async () => Math.round(JSON.stringify(await ctx.getDoc()).length / 1024);

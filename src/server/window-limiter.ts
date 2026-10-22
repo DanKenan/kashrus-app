@@ -17,6 +17,8 @@
 export interface WindowLimiter {
   /** Count one attempt for `key` at `nowMs`. allowed=false when the key already had `max` attempts in the window (nothing is added then). */
   hit(key: string, nowMs: number): { allowed: boolean; retryAfterSec: number };
+  /** 10M: is `key` at `max` attempts in the window? Reads only (adds nothing). */
+  blocked(key: string, nowMs: number): { blocked: boolean; retryAfterSec: number };
   /** Number of keys currently held (for tests). */
   size(): number;
 }
@@ -48,6 +50,11 @@ export function createWindowLimiter(opts: { max: number; windowMs: number; maxKe
       map.set(key, arr);
       if (map.size > maxKeys) sweep(nowMs);
       return { allowed: true, retryAfterSec: 0 };
+    },
+    blocked(key: string, nowMs: number) {
+      const arr = live(map.get(key), nowMs);
+      if (arr.length < max) return { blocked: false, retryAfterSec: 0 };
+      return { blocked: true, retryAfterSec: Math.max(1, Math.ceil((arr[0] + windowMs - nowMs) / 1000)) };
     },
     size() {
       return map.size;

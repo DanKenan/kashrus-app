@@ -471,6 +471,8 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'GET', path: '/reset-links/preview' }, // 10L: bearer = the reset-link token (header), per-IP limit
   { method: 'POST', path: '/reset-links/accept' }, // 10L: bearer = the reset-link token (header), per-IP limit
   { method: 'POST', path: '/agencies/register' },
+  // 10M part 1: public (the sign-up page); the existing account's password is the proof.
+  { method: 'POST', path: '/agencies/register-existing' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
   // Kiosk (2b): a tablet is paired to one venue by an admin/coordinator.
@@ -3429,6 +3431,8 @@ type MutatorOutcome =
   | { conflict: string; conflictStatus?: number; conflictCode?: string };
 
 interface CommitOptions {
+  /** 10M (P1.11): commitOrRespond returns { result, duplicate: true } for a replay instead of answering it. */
+  returnDuplicate?: boolean;
   /**
    * 8c: reads made INSIDE the transaction after the monolith read and before
    * any write: (freshDoc copy, read(collection, id) → data | null) → value
@@ -4030,12 +4034,17 @@ async function commitOrRespond(
     if (options.requireVersion && expectedVersion === undefined) {
       throw new StaleClientError();
     }
-    return await commitState(mutator, { ...options, expectedVersion, operationId, idempotencyKey, idempotencyUserId: authUserId, payloadHash, opType: options.label, opMethod: req.method, opTarget });
+    // 10M (P1.11): a route with no session scopes its own key and payload hash
+    // (the body carries a password, which must never be hashed into a record).
+    return await commitState(mutator, { ...options, expectedVersion, operationId, idempotencyKey: options.idempotencyKey ?? idempotencyKey, idempotencyUserId: authUserId, payloadHash: options.payloadHash ?? payloadHash, opType: options.label, opMethod: req.method, opTarget });
   } catch (err: any) {
     // All error paths send the HTTP response and return null, so the caller's
     // `if (!committed) return;` guard works. (Returning the Express Response
     // object here would be truthy and break that guard.)
     if (err instanceof DuplicateOperationError) {
+      // 10M (P1.11): a route that builds its response after the commit (a
+      // fresh session token is never stored) gets the stored result back.
+      if (options.returnDuplicate) return { result: err.cachedResult.result, duplicate: true } as any;
       // Idempotent retry: the original result was already broadcast when it
       // first committed. Return it directly without re-broadcasting.
       res.json(err.cachedResult.result);
@@ -7580,6 +7589,67 @@ app.delete('/api/handoff-notes/:id', async (req, res) => {
 const REGISTER_EMAIL_REFUSED_TEXT = "This email can't be used to register a new agency.";
 const registerLimiter = createWindowLimiter({ max: 10, windowMs: 60 * 60 * 1000, maxKeys: 10000 });
 
+/**
+ * 10M (P1.6): the records a new agency starts with — the agency, its starter
+ * venue and (when asked) the starter tasks — built ONE way for both
+ * POST /api/agencies/register and POST /api/agencies/register-existing.
+ * Pure: ids come from the caller's stamp; agencyId is a fresh UUID.
+ */
+function buildNewAgencyRecords(input: {
+  agencyName: string; shortCode?: any; certificationSeal?: any; region?: any; contactPhone?: any;
+  initialVenueName?: any; initialVenueCategory?: any; includeStarterTemplates?: any;
+  adminEmail: string; stamp: string; createdAt: string;
+}) {
+  const cleanAgencyName = input.agencyName.trim();
+  const agencyId = `agency-${crypto.randomUUID()}`;
+  const shortCode = input.shortCode;
+  const derivedShortCode =
+    (typeof shortCode === 'string' && shortCode.trim()) ||
+    cleanAgencyName
+      .split(' ')
+      .filter((w) => w.length > 0)
+      .map((w) => w[0])
+      .join('')
+      .toUpperCase()
+      .slice(0, 6) ||
+    'KOSHER';
+  // Item V1: default seal = the agency name (no "- Kosher Supervision").
+  const cleanSeal = (typeof input.certificationSeal === 'string' && input.certificationSeal.trim()) || cleanAgencyName;
+  const cleanRegion = (typeof input.region === 'string' && input.region.trim()) || 'Regional Kashrut Authority';
+  const venueId = `venue-${input.stamp}`;
+  const newAgency: Agency = {
+    id: agencyId,
+    name: cleanAgencyName,
+    shortCode: derivedShortCode,
+    adminEmail: input.adminEmail,
+    certificationSeal: cleanSeal,
+    region: cleanRegion,
+    contactPhone: input.contactPhone ? String(input.contactPhone).trim() : undefined,
+    createdAt: input.createdAt,
+  };
+  const venueName = (typeof input.initialVenueName === 'string' && input.initialVenueName.trim()) || `${cleanAgencyName} Certified Kitchen`;
+  const venueCategory = (typeof input.initialVenueCategory === 'string' && input.initialVenueCategory.trim()) || 'Food Service';
+  const starterVenue: Venue = {
+    id: venueId,
+    agencyId,
+    name: venueName,
+    category: venueCategory,
+    address: cleanRegion,
+    certification: cleanSeal,
+    createdAt: input.createdAt,
+  };
+  let starterTasks: TaskItem[] = [];
+  if (input.includeStarterTemplates) {
+    const templateCat = venueCategory.toLowerCase().includes('bakery')
+      ? 'bakery'
+      : venueCategory.toLowerCase().includes('catering')
+      ? 'catering'
+      : 'restaurant';
+    starterTasks = generateTemplateTasks(venueId, templateCat, agencyId);
+  }
+  return { cleanAgencyName, agencyId, derivedShortCode, newAgency, starterVenue, starterTasks };
+}
+
 app.post('/api/agencies/register', async (req, res) => {
   const {
     agencyName,
@@ -7627,41 +7697,18 @@ app.post('/api/agencies/register', async (req, res) => {
     return res.status(409).json({ error: REGISTER_EMAIL_REFUSED_TEXT });
   }
 
-  const cleanAgencyName = agencyName.trim();
-  const agencyId = `agency-${crypto.randomUUID()}`;
-  const derivedShortCode =
-    (shortCode && shortCode.trim()) ||
-    cleanAgencyName
-      .split(' ')
-      .filter((w) => w.length > 0)
-      .map((w) => w[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 6) ||
-    'KOSHER';
-
-  // Item V1: default seal = the agency name (no "- Kosher Supervision").
-  const cleanSeal = (certificationSeal && certificationSeal.trim()) || cleanAgencyName;
-  const cleanRegion = (region && region.trim()) || 'Regional Kashrut Authority';
+  const stamp = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  // 10M (P1.6): ONE builder for the agency, its starter venue and starter
+  // tasks, shared with POST /api/agencies/register-existing (no drift).
+  const { cleanAgencyName, agencyId, derivedShortCode, newAgency, starterVenue, starterTasks } = buildNewAgencyRecords({
+    agencyName, shortCode, certificationSeal, region, contactPhone, initialVenueName, initialVenueCategory, includeStarterTemplates,
+    adminEmail: cleanAdminEmail, stamp, createdAt,
+  });
 
   // Pre-generate stable IDs + hash password BEFORE the transaction.
-  // Random base (stable within this call) so IDs are unique across calls.
-  const stamp = crypto.randomUUID();
   const adminUserId = `usr_admin_${stamp}`;
-  const venueId = `venue-${stamp}`;
-  const createdAt = new Date().toISOString();
   const adminPasswordHash = bcrypt.hashSync(adminPassword.trim(), 10);
-
-  const newAgency: Agency = {
-    id: agencyId,
-    name: cleanAgencyName,
-    shortCode: derivedShortCode,
-    adminEmail: cleanAdminEmail,
-    certificationSeal: cleanSeal,
-    region: cleanRegion,
-    contactPhone: contactPhone ? contactPhone.trim() : undefined,
-    createdAt,
-  };
 
   const adminUser: UserProfile = {
     id: adminUserId,
@@ -7672,29 +7719,6 @@ app.post('/api/agencies/register', async (req, res) => {
     avatarColor: '#3b82f6',
     password: adminPasswordHash,
   };
-
-  const venueName = (initialVenueName && initialVenueName.trim()) || `${cleanAgencyName} Certified Kitchen`;
-  const venueCategory = (initialVenueCategory && initialVenueCategory.trim()) || 'Food Service';
-
-  const starterVenue: Venue = {
-    id: venueId,
-    agencyId,
-    name: venueName,
-    category: venueCategory,
-    address: cleanRegion,
-    certification: cleanSeal,
-    createdAt,
-  };
-
-  let starterTasks: TaskItem[] = [];
-  if (includeStarterTemplates) {
-    const templateCat = venueCategory.toLowerCase().includes('bakery')
-      ? 'bakery'
-      : venueCategory.toLowerCase().includes('catering')
-      ? 'catering'
-      : 'restaurant';
-    starterTasks = generateTemplateTasks(venueId, templateCat, agencyId);
-  }
 
   const committed = await commitOrRespond(
     req, res,
@@ -7757,6 +7781,171 @@ app.post('/api/agencies/register', async (req, res) => {
     token: issueSessionToken(users.find((u) => u.id === user.id) || user),
     venue,
     tasks: createdTasks,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10M part 1 ("Agreed — 10M part 1", design files/shutfey-10M-design.txt):
+// a person who already has a Shutfey account registers a NEW agency and
+// becomes its admin under the SAME sign-in. Public route (the sign-up page);
+// the password is the proof (P1.4); kiosk tokens are refused.
+// ---------------------------------------------------------------------------
+const REGISTER_EXISTING_FAIL_LIMIT = { max: 5, windowMs: 15 * 60 * 1000 };
+const registerExistingFailLimiter = createWindowLimiter({ ...REGISTER_EXISTING_FAIL_LIMIT, maxKeys: 10000 });
+const REGISTER_EXISTING_MAX_PER_DAY = 3;
+const ACCOUNT_NOT_LINKABLE = { error: "This account can't add an agency here. Please contact support.", code: 'ACCOUNT_NOT_LINKABLE' } as const;
+const REGISTER_EXISTING_LIMIT = { error: "You've added several agencies today. Please try again tomorrow.", code: 'REGISTER_EXISTING_LIMIT' } as const;
+const OPERATION_ID_RE = /^[A-Za-z0-9_-]{8,100}$/;
+
+app.post('/api/agencies/register-existing', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if ((req as any).kiosk === true) return res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
+  const body = stripServerOnlyUserFields(req.body || {});
+  const { agencyName, shortCode, certificationSeal, region, contactPhone, adminName, initialVenueName, initialVenueCategory, includeStarterTemplates = false, email, password, operationId } = body;
+  if (typeof agencyName !== 'string' || !agencyName.trim()) {
+    return res.status(400).json({ error: 'Kosher Agency Name is required (e.g. "Chicago Rabbinical Council (cRc)").' });
+  }
+  if (typeof email !== 'string' || !email.trim() || !email.includes('@')) return res.status(400).json({ error: 'A valid email is required.' });
+  if (typeof password !== 'string' || !password) return res.status(400).json({ error: 'Please enter your password.', code: 'PASSWORD_REQUIRED' });
+  if (typeof operationId !== 'string' || !OPERATION_ID_RE.test(operationId)) return res.status(400).json({ error: 'Please refresh and try again.', code: 'OPERATION_ID_REQUIRED' });
+  for (const [k, v] of Object.entries({ shortCode, certificationSeal, region, contactPhone, adminName, initialVenueName, initialVenueCategory })) {
+    if (v !== undefined && v !== null && typeof v !== 'string') return res.status(400).json({ error: `${k} must be text.`, code: 'REGISTER_INVALID' });
+  }
+  const normalizedEmail = email.trim().toLowerCase();
+  // P1.3: the SAME per-IP budget as /register, counted before the email is looked at.
+  const registerHit = registerLimiter.hit(`register|${getClientIp(req)}`, Date.now());
+  if (!registerHit.allowed) {
+    res.setHeader('Retry-After', String(registerHit.retryAfterSec));
+    return res.status(429).json({ error: `Too many requests. Please try again in ${Math.ceil(registerHit.retryAfterSec / 60)} minute(s).`, code: 'RATE_LIMITED' });
+  }
+  // P1.3: failed password checks per email (5 / 15 min).
+  const failKey = `register-existing|${normalizedEmail}`;
+  const fb = registerExistingFailLimiter.blocked(failKey, Date.now());
+  if (fb.blocked) {
+    res.setHeader('Retry-After', String(fb.retryAfterSec));
+    return res.status(429).json({ error: `Too many attempts. Please try again in ${Math.ceil(fb.retryAfterSec / 60)} minute(s).`, code: 'RATE_LIMITED' });
+  }
+  const refuse401 = () => {
+    registerExistingFailLimiter.hit(failKey, Date.now());
+    return res.status(401).json({ error: LOGIN_FAILED_TEXT });
+  };
+  // P1.4: the person's credential row; bcrypt OUTSIDE the transaction.
+  const cred: any = credentialRowForEmailIn(users, agencies, normalizedEmail);
+  if (!cred || typeof cred.password !== 'string' || !cred.password || cred.credentialPending) return refuse401();
+  const check = await checkPassword(password, cred.password);
+  if (check === 'invalid') return refuse401();
+  const verifiedCredId = String(cred.id);
+  const verifiedHash = String(cred.password);
+  const pid = typeof cred.personId === 'string' ? cred.personId : '';
+  // P1.5 (cached data; re-run on fresh data in the commit).
+  const proofRefusal = (rows: any[], agencyList: any[], c: any): { status: number; body: { error: string; code: string } } | null => {
+    const p = typeof c?.personId === 'string' ? c.personId : '';
+    if (!credentialMayLink(c?.credentialOrigin) || !p) return { status: 403, body: { ...ACCOUNT_NOT_LINKABLE } };
+    if (isPlatformOperator(c?.id, false, rows as any)) return { status: 403, body: { ...ACCOUNT_NOT_LINKABLE } };
+    if (c?.resetSuspended) return { status: 403, body: { ...RESET_CONFIRM_NEEDED } };
+    if (invitePersonNeedsCheck(rows, agencyList, normalizedEmail)) return { status: 409, body: { ...INVITE_PERSON_NEEDS_CHECK } };
+    return null;
+  };
+  const pre = proofRefusal(users, agencies, cred);
+  if (pre) return res.status(pre.status).json(pre.body);
+
+  const stamp = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const built = buildNewAgencyRecords({
+    agencyName, shortCode, certificationSeal, region, contactPhone, initialVenueName, initialVenueCategory, includeStarterTemplates,
+    adminEmail: normalizedEmail, stamp, createdAt,
+  });
+  const newRowId = `usr_admin_${stamp}`;
+  // P1.11: the key is scoped to the PERSON; the payload hash never includes the password.
+  const { password: _pw, operationId: _op, expectedVersion: _ev, ...hashable } = body as any;
+  const payloadHash = crypto.createHash('sha256').update(JSON.stringify({ ...hashable, email: normalizedEmail })).digest('hex').slice(0, 16);
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const nowMs = Date.now();
+      const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      // V6: the FRESH credential row is the one whose password verified, same hash.
+      const fc: any = credentialRowForEmailIn(freshUsers, freshAgencies, normalizedEmail);
+      if (!fc || String(fc.id) !== verifiedCredId || fc.password !== verifiedHash || fc.personId !== pid) {
+        return { conflict: LOGIN_FAILED_TEXT, conflictStatus: 401, conflictCode: 'LOGIN_FAILED' };
+      }
+      const fr = proofRefusal(freshUsers, freshAgencies, fc);
+      if (fr) return { conflict: fr.body.error, conflictStatus: fr.status, conflictCode: fr.body.code };
+      // P1.12: at most 3 agencies created this way per person per 24 h (atomic).
+      const recent = freshAgencies.filter((a: any) => a && a.createdByPersonId === pid && typeof a.createdAt === 'string' &&
+        nowMs - Date.parse(a.createdAt) < 24 * 60 * 60 * 1000).length;
+      if (recent >= REGISTER_EXISTING_MAX_PER_DAY) {
+        return { conflict: REGISTER_EXISTING_LIMIT.error, conflictStatus: 429, conflictCode: REGISTER_EXISTING_LIMIT.code };
+      }
+      const personRows = freshUsers.filter((u: any) => u && u.personId === pid);
+      const firstMulti = personRows.length === 1;
+      const agencyRec: any = {
+        ...built.newAgency,
+        createdByPersonId: pid,
+        slug: uniqueSlug(slugBase(built.derivedShortCode, built.cleanAgencyName), freshAgencies, built.agencyId),
+      };
+      const row: any = {
+        id: newRowId,
+        agencyId: built.agencyId,
+        email: fc.email,
+        name: (typeof adminName === 'string' && adminName.trim()) || (typeof fc.name === 'string' && fc.name) || `${built.cleanAgencyName} Administrator`,
+        role: 'admin',
+        permissions: defaultPermissionsFor('admin'),
+        avatarColor: '#3b82f6',
+      };
+      const tasksToAdd = built.starterTasks.filter((t) => !freshTasks.some((ft: any) => ft && ft.id === t.id));
+      const bumpIds = firstMulti ? personRows.map((u: any) => String(u.id)) : [];
+      const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
+      return {
+        doc: {
+          ...freshDoc,
+          agencies: [...freshAgencies, agencyRec],
+          users: [...freshUsers, row],
+          venues: [...freshVenues, built.starterVenue],
+          tasks: [...freshTasks, ...tasksToAdd],
+          ...(firstMulti ? { passwordResets: freshResets.filter((r: any) => !r || normalizeInviteEmail(r.email) !== normalizeInviteEmail(fc.email)) } : {}),
+        },
+        result: { agencyId: built.agencyId, rowId: newRowId, credId: String(fc.id), bumpIds, venueId: built.starterVenue.id },
+        newMembership: { [newRowId]: pid },
+        ...(firstMulti ? { firstMultiOwnerIds: [String(fc.id)], tokenEpochBumpIds: bumpIds } : {}),
+      };
+    },
+    { label: 'register-existing', idempotencyKey: `register-existing|${pid}|${operationId}`, payloadHash, returnDuplicate: true }
+  );
+  if (!committed) return;
+  const r: any = committed.result;
+  const replay = (committed as any).duplicate === true;
+  // [10M-RV1] N1: the first commit's side effects run once; a replay only
+  // issues a fresh session (below).
+  if (!replay) {
+    console.log(`[audit] agency registered by an existing account: agency ${r.agencyId} row ${r.rowId}`);
+    for (const id of (r.bumpIds || []) as string[]) revokeUserPhoneSockets(id);
+  }
+  const agency: any = agencies.find((a) => a.id === r.agencyId);
+  const row: any = users.find((u) => u.id === r.rowId);
+  if (!agency || !row) return res.status(500).json({ error: 'The agency was created, but it could not be loaded. Please sign in.' });
+  // [10M-DS2] B1: a replay hands out a session only for a membership that is
+  // still this verified person's, in that agency (eligibility: issueSessionToken).
+  if (row.personId !== pid || (row.agencyId || 'agency-hkc') !== r.agencyId) {
+    return res.status(409).json({ error: 'This sign-up was already used. Please sign in.', code: 'REGISTER_EXISTING_REPLAY_INVALID' });
+  }
+  // [10M-RV1] B1: the same broadcast as /api/agencies/register, scoped to the
+  // NEW agency only (nobody else is in it); not repeated on a replay.
+  if (!replay) broadcast('AGENCY_REGISTERED', { agency: agencyAdminView(agency), adminEmail: normalizedEmail }, undefined, agency.id);
+  const token = issueSessionToken(row);
+  if (!token) return res.status(403).json(ineligibleBody(row));
+  const memberships = membershipsOfPerson(String(row.personId)).map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role }));
+  res.status(201).json({
+    success: true,
+    agency: agencyAdminView(agency),
+    user: getSelfUser(row),
+    token,
+    venue: venues.find((v) => v.id === r.venueId) || null,
+    memberships,
   });
 });
 
