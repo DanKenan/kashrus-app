@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Building2, CheckCircle2, AlertTriangle, MessageSquare, Phone, User } from 'lucide-react';
+import { Building2, CalendarDays, CheckCircle2, AlertTriangle, MessageSquare, Phone, User } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { rosterKey } from '../lib/rosterDisplay';
 
@@ -41,9 +41,11 @@ interface AgencyDashboardProps {
   logo?: { agencyName: string; agencyShortCode: string; logoSrc: string | null; onOpen: () => void };
   reloadKey?: number;
   onSelectVenue: (venueId: string) => void;
+  /** Don 2026-10-22: opens the agency-wide Events screen. */
+  onOpenEvents?: () => void;
 }
 
-export function AgencyDashboard({ onSelectVenue, reloadKey, logo }: AgencyDashboardProps) {
+export function AgencyDashboard({ onSelectVenue, reloadKey, logo, onOpenEvents }: AgencyDashboardProps) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -95,7 +97,16 @@ export function AgencyDashboard({ onSelectVenue, reloadKey, logo }: AgencyDashbo
 
   return (
     <section className="space-y-4 text-ink">
-      <h2 className="text-2xl font-semibold">Agency Dashboard</h2>
+      <div className="flex items-center gap-3">
+        <h2 className="text-2xl font-semibold flex-1 min-w-0">Agency Dashboard</h2>
+        {onOpenEvents && (
+          <button type="button" onClick={onOpenEvents} data-agency-events-btn
+            className="pressable min-h-11 inline-flex items-center gap-1.5 px-3 rounded-xl bg-surface border border-line-control text-ink text-sm font-semibold hover:bg-sunken cursor-pointer shrink-0">
+            <CalendarDays aria-hidden="true" className="w-4 h-4 text-gold-deep" />
+            <span>Events</span>
+          </button>
+        )}
+      </div>
       {logo && <div className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface p-4">
         {logo.logoSrc ? <img src={logo.logoSrc} alt={logo.agencyName} className="h-[32px] max-w-[120px] w-auto object-contain" /> : <span className="rounded-lg border border-line bg-sunken px-2 text-xs text-ink">{logo.agencyShortCode}</span>}
         <span className="flex-1 min-w-0 text-sm font-semibold">Agency logo</span>
