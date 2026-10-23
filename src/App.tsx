@@ -64,7 +64,7 @@ import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from '
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
-import { END_DATE_TEXT, dayWords, lastDayOf, nextEndMs, noteServerNow, serverNowMs, withOwnScope, withoutEndedVenues, ymdIn, zoneForVenue } from './lib/venueEndDates';
+import { END_DATE_TEXT, dayWords, lastDayOf, nextEndMs, noteServerNow, serverNowMs, venueLeftOwnScope, withOwnScope, withoutEndedVenues, ymdIn, zoneForVenue } from './lib/venueEndDates';
 
 const DEFAULT_USERS: User[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', permissions: { canFillTasks: true, canAssignTasks: true } },
@@ -365,6 +365,9 @@ export default function App() {
   // Modals
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [taskToEdit, setTaskToEdit] = useState<Task | null>(null);
+  // 12a-c (RV2): the venue the task editor was opened for (the task's own
+  // venue, else the venue on screen when a new task was started).
+  const [taskEditorVenueId, setTaskEditorVenueId] = useState<string | null>(null);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   // 11b-c: Face ID / passkeys.
@@ -601,6 +604,19 @@ export default function App() {
       window.removeEventListener('focus', onVisible);
     };
   }, [isKiosk, currentUser?.id, currentUser?.role, JSON.stringify(currentUser?.myVenueUntil || null), serverClockRev]);
+
+  // 12a-c (RV2): when the editor's venue leaves the person's own scope (their
+  // end date passed, or a pushed SCOPE_CHANGED removed it), close the editor
+  // and drop the task it held, so the lost venue's data is not left on screen.
+  // Only with the server's own scope (myVenueIds); admins and old servers keep today's behavior.
+  useEffect(() => {
+    if (!isTaskModalOpen || isKiosk) return;
+    if (!venueLeftOwnScope(currentUser, taskEditorVenueId)) return;
+    setIsTaskModalOpen(false);
+    setTaskToEdit(null);
+    setTaskEditorVenueId(null);
+    showToast(END_DATE_TEXT.editorClosed);
+  }, [isTaskModalOpen, isKiosk, taskEditorVenueId, currentUser?.role, JSON.stringify(currentUser?.myVenueIds ?? null)]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -1616,6 +1632,13 @@ export default function App() {
   };
 
   // Open Task Modal
+  // 12a-c (RV2): every way into the task editor records the venue it is for.
+  const openTaskEditor = (task: Task | null) => {
+    setTaskToEdit(task);
+    setTaskEditorVenueId(task?.venueId || currentVenue?.id || null);
+    setIsTaskModalOpen(true);
+  };
+
   const handleOpenCreateTask = () => {
     if (!currentUser) {
       showToast('Please sign in first.');
@@ -1625,8 +1648,7 @@ export default function App() {
       showToast('Permission required. You do not have permission to assign or create new tasks.');
       return;
     }
-    setTaskToEdit(null);
-    setIsTaskModalOpen(true);
+    openTaskEditor(null);
   };
 
   // Sign Out Handler
@@ -1879,8 +1901,7 @@ export default function App() {
           showToast('You do not have permission to edit task definitions.');
           return;
         }
-        setTaskToEdit(task);
-        setIsTaskModalOpen(true);
+        openTaskEditor(task);
       }}
       onDeleteTask={handleDeleteTask}
       onOpenTaskModal={handleOpenCreateTask}
@@ -1906,8 +1927,7 @@ export default function App() {
           showToast('You do not have permission to edit task definitions.');
           return;
         }
-        setTaskToEdit(task);
-        setIsTaskModalOpen(true);
+        openTaskEditor(task);
       }}
       onDeleteTask={handleDeleteTask}
       onOpenTaskModal={handleOpenCreateTask}
@@ -2377,8 +2397,7 @@ export default function App() {
                 showToast('You do not have permission to edit task definitions.');
                 return;
               }
-              setTaskToEdit(task);
-              setIsTaskModalOpen(true);
+              openTaskEditor(task);
             }}
             onDeleteTask={handleDeleteTask}
             onOpenTaskModal={handleOpenCreateTask}
@@ -2463,6 +2482,7 @@ export default function App() {
         onClose={() => {
           setIsTaskModalOpen(false);
           setTaskToEdit(null);
+          setTaskEditorVenueId(null);
         }}
         onSave={handleSaveTask}
         taskToEdit={taskToEdit}

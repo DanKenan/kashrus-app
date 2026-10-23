@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import {
   END_DATE_TEXT, lastDayOf, dayWords, ymdIn, addDays, daysBetween, parseUntil, zoneForVenue, safeZone,
   buildVenueOps, withOwnScope, withoutEndedVenues, endedVenues, nextEndMs, cleanUntilMap,
-  rosterUntilLines, noteServerNow, serverNowMs, resetServerOffset,
+  rosterUntilLines, noteServerNow, serverNowMs, resetServerOffset, venueLeftOwnScope,
 } from '../../src/lib/venueEndDates.ts';
 
 let passed = 0; let failures = 0;
@@ -104,6 +104,22 @@ eq('R pool member (no home)', rosterUntilLines({ venueId: '', venueIds: ['b'], v
 
 // C — source checks
 const src = (p) => fs.readFileSync(new URL('../../' + p, import.meta.url), 'utf8');
+
+// V — (RV2) the task editor's venue leaving the person's own scope
+{
+  const U2 = Date.parse('2026-10-26T04:00:00.000Z');
+  const p = { id: 'p', role: 'coordinator', venueId: '', myVenueIds: ['b'], myVenueUntil: { b: '2026-10-26T04:00:00.000Z' }, myVenueRev: 3 };
+  ok('V in scope -> false', venueLeftOwnScope(p, 'b') === false);
+  ok('V timer path: own end passes -> editor venue left scope', venueLeftOwnScope(withoutEndedVenues(p, U2), 'b') === true);
+  ok('V timer path: before the end -> still in scope', venueLeftOwnScope(withoutEndedVenues(p, U2 - 1), 'b') === false);
+  ok('V pushed path: SCOPE_CHANGED without the venue -> left scope', venueLeftOwnScope(withOwnScope(p, 'p', { venueIds: [], myVenueUntil: {}, myVenueRev: 4 }), 'b') === true);
+  ok('V pushed path: SCOPE_CHANGED keeping the venue -> in scope', venueLeftOwnScope(withOwnScope(p, 'p', { venueIds: ['b', 'c'], myVenueRev: 4 }), 'b') === false);
+  ok('V pushed path: only another venue removed -> in scope', venueLeftOwnScope(withOwnScope({ ...p, myVenueIds: ['b', 'c'] }, 'p', { venueIds: ['b'], myVenueRev: 4 }), 'b') === false);
+  ok('V admin never', venueLeftOwnScope({ ...p, role: 'admin', myVenueIds: [] }, 'b') === false);
+  ok('V old server (no myVenueIds) never', venueLeftOwnScope({ id: 'p', role: 'mashgiach', venueId: 'a' }, 'b') === false);
+  ok('V no editor venue never', venueLeftOwnScope(p, null) === false && venueLeftOwnScope(p, '') === false);
+  ok('V no user never', venueLeftOwnScope(null, 'b') === false);
+}
 const sheet = src('src/components/VenueAccessSheet.tsx');
 ok('C sheet: dates only with venueRevision', /typeof record\.venueRevision === 'number'/.test(sheet) && /const datesOn = opened\.rev !== null/.test(sheet));
 ok('C sheet: old server keeps the venues PUT with expectedVenueIds', /\/venues`, \{\s*method: 'PUT'/.test(sheet) && sheet.includes('expectedVenueIds: original.venueIds'));
@@ -123,6 +139,9 @@ ok('C app: server scope only with myVenueRev (old server = today)', app.includes
 ok('C app: kiosk ended keeps the device (no clearKioskDevice)', !/kioskSessionEndedRef\.current = \(\) => \{[\s\S]{0,300}clearKioskDevice/.test(app));
 ok('C app: no-venue screen also when the own scope (new server only) holds no loaded venue', app.includes('(venues.length === 0 || noVenueInScope) && !isKiosk && noVenueMessage(currentUser) ?') && /typeof currentUser\.myVenueRev === 'number' && Array\.isArray\(currentUser\.myVenueIds\)/.test(app));
 ok('C app: no-home text for NO_VENUE_TEXT only', app.includes('noVenueMessage(currentUser) === NO_VENUE_TEXT ?'));
+ok('C app (RV2): every way into the task editor records its venue', (app.match(/openTaskEditor\(task\);/g) || []).length === 3 && app.includes('openTaskEditor(null);') && (app.match(/setTaskToEdit\(task\);/g) || []).length === 1 && app.includes('setTaskEditorVenueId(task?.venueId || currentVenue?.id || null);'));
+ok('C app (RV2): editor closes and drops its task when its venue leaves the own scope', /if \(!venueLeftOwnScope\(currentUser, taskEditorVenueId\)\) return;\s*setIsTaskModalOpen\(false\);\s*setTaskToEdit\(null\);\s*setTaskEditorVenueId\(null\);/.test(app) && app.includes('JSON.stringify(currentUser?.myVenueIds ?? null)]);'));
+ok('C app (RV2): kiosk editor untouched', app.includes('if (!isTaskModalOpen || isKiosk) return;'));
 const kiosk = src('src/components/KioskLogin.tsx');
 ok('C kiosk: notice on the name list', kiosk.includes('data-kiosk-notice') && kiosk.includes('{notice}'));
 ok('C labels live in one block', !/Your time at this venue has ended/.test(app + kiosk + sheet) && !/not on a venue right now/.test(app));

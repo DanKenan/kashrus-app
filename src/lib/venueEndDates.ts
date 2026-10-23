@@ -24,6 +24,7 @@ export const END_DATE_TEXT = {
   noVenueTitle: "You're not on a venue right now.",
   noVenueBody: "When you're added to a venue, your tasks will show up here.",
   moreVenues: (n: number) => `+${n} more`,
+  editorClosed: 'That venue is no longer on your list, so the task editor was closed.',
 } as const;
 
 export const DEFAULT_TIME_ZONE = 'America/New_York';
@@ -254,4 +255,14 @@ export function withoutEndedVenues<T extends { myVenueIds?: string[]; myVenueUnt
     myVenueUntil: until,
     ...(Array.isArray(prev.myVenueIds) ? { myVenueIds: prev.myVenueIds.filter((id) => !ended.includes(id)) } : {}),
   };
+}
+
+/**
+ * 12a-c (RV2): the task editor's venue is no longer in the person's own scope.
+ * Only a non-admin with the server's own scope (myVenueIds) can lose a venue
+ * this way; no venue id, an admin, or an old server -> false (today's behavior).
+ */
+export function venueLeftOwnScope(user: { role?: string; myVenueIds?: string[] } | null | undefined, venueId: string | null | undefined): boolean {
+  if (!user || user.role === 'admin' || !venueId || !Array.isArray(user.myVenueIds)) return false;
+  return !user.myVenueIds.includes(venueId);
 }
