@@ -81,7 +81,11 @@ const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]);
 check(`only in-page, sign-in and contact links (${hrefs.filter((h) => !/^(#[\w-]+|\/|mailto:|tel:|sms:)/.test(h)).join(',')})`, hrefs.every((h) => /^(#[\w-]+|\/|mailto:|tel:|sms:)/.test(h)));
 for (const f of ['src/components/home/home.html', 'src/components/home/home.css', 'src/components/home/HomeLanding.tsx', 'src/components/home/homeDemos.ts', 'index.html']) check(`no "Adler" in ${f}`, !/adler/i.test(read(f)));
 const tsx = read('src/components/home/HomeLanding.tsx');
-check('kiosk setup kept (same code as the old home screen)', tsx.includes("localStorage.setItem('kiosk_mode', '1')") && tsx.includes('?kiosk=1') && tsx.includes('Set up this device as a venue kiosk'));
+const ksrc = read('src/lib/kioskSetup.ts');
+check('kiosk setup kept (same code as the old home screen)', ksrc.includes("localStorage.setItem('kiosk_mode', '1')") && ksrc.includes('?kiosk=1') && tsx.includes('Set up this device as a venue kiosk') && tsx.includes("from '../../lib/kioskSetup'"));
+const login = read('src/components/LoginPage.tsx');
+check('sign-in screen (shared address, login mode) also has the kiosk setup button; not on an agency address', /\{!branded && authMode === 'login' && !chooser && \(\s*<button[\s\S]*?data-kiosk-setup=""[\s\S]*?onClick=\{enterKioskSetup\}[\s\S]*?Set up this device as a venue kiosk/.test(login) && login.includes("from '../lib/kioskSetup'"));
+check('LoginPage does not import the lazy home page', !/components\/home|\.\/home\//.test(login));
 check('HomeLanding: demos stopped and grain class removed on unmount', /return \(\) => \{[\s\S]*stopDemos\(\);[\s\S]*classList\.remove\('shf-home-on'\)/.test(tsx));
 
 // ---- App wiring (source) ----

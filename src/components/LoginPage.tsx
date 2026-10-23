@@ -14,13 +14,15 @@ import {
   Sparkles,
   UserPlus,
   Factory,
-  ScanFace
+  ScanFace,
+  Tablet
 } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import { LandingBackButton } from './LandingPage';
 import { User as UserType } from '../types';
 import { AgencySignupForm, REGISTERED_SIGN_IN_TEXT } from './AgencySignupForm';
 import { PWAInstallButton } from './PWAInstallButton';
+import { enterKioskSetup } from '../lib/kioskSetup';
 import { ForgotPasswordModal } from './ForgotPasswordModal';
 import { apiFetch, setSessionToken } from '../lib/api';
 import { PASSKEY_TEXT, PasskeyError, cancelPasskeyPrompt, clearPasswordSignInMark, markPasswordSignIn, passkeysInBrowser, signInWithPasskey } from '../lib/passkeys';
@@ -586,6 +588,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
           {/* Facility Highlights / System Status */}
           <div className="mt-5 space-y-3 px-2">
+            {/* Shared address: tablet setup is easy to find here too (not on an agency's own address). */}
+            {!branded && authMode === 'login' && !chooser && (
+              <button
+                type="button"
+                data-kiosk-setup=""
+                onClick={enterKioskSetup}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-dashed border-line text-xs font-semibold text-ink-faint hover:text-ink hover:border-gold/50 transition cursor-pointer"
+              >
+                <Tablet className="w-4 h-4" />
+                Set up this device as a venue kiosk
+              </button>
+            )}
             <PWAInstallButton variant="banner" />
             {!branded && <div className="grid grid-cols-2 gap-3 text-[11px] text-ink-faint">
               <div className="flex items-center gap-2">

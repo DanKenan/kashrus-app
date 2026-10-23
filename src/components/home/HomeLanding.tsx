@@ -3,6 +3,7 @@ import { UpdateAppButton } from '../UpdateAppButton';
 import markup from './home.html?raw';
 import './home.css';
 import { runHomeDemos } from './homeDemos';
+import { enterKioskSetup } from '../../lib/kioskSetup';
 
 /**
  * The public home page on the shared Shutfey address (approved v2 design,
@@ -17,16 +18,6 @@ import { runHomeDemos } from './homeDemos';
 interface HomeLandingProps {
   /** "Sign in" in the top bar: today's sign-in screen. */
   onSignIn: () => void;
-}
-
-export function enterKioskSetup(): void {
-  // Same as the previous home screen's "Set up this device as a venue kiosk".
-  try {
-    localStorage.setItem('kiosk_mode', '1');
-  } catch {
-    // ignore
-  }
-  window.location.href = `${window.location.pathname}?kiosk=1`;
 }
 
 const HomeLanding: React.FC<HomeLandingProps> = ({ onSignIn }) => {
