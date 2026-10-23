@@ -315,6 +315,7 @@ export interface ServerBroadcastMessage {
     | 'VENUE_CREATED' 
     | 'VENUE_UPDATED' 
     | 'VENUE_DELETED' 
+    | 'POOL_UPDATED' // 12b-s/12b-c: { count } only, to admins/owners/coordinators
     | 'AGENCY_REGISTERED' 
     | 'AGENCY_UPDATED'
     | 'EVENT_CREATED'

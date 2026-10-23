@@ -38,6 +38,7 @@ import { PasskeyOffer } from './components/PasskeyOffer';
 import { PasskeysModal } from './components/PasskeysModal';
 import { clearPasswordSignInMark, currentAccountId, isPhoneLike, listPasskeys, offerDismissed, platformPasskeyAvailable, takePasswordSignInMark } from './lib/passkeys';
 import { TeamModal } from './components/TeamModal';
+import { PoolModal, POOL_UPDATED_EVENT } from './components/PoolPanel';
 import { CreateVenueModal } from './components/CreateVenueModal';
 import { VenuesDirectoryModal } from './components/VenuesDirectoryModal';
 import { EventsModal } from './components/EventsModal';
@@ -390,6 +391,8 @@ export default function App() {
     return () => { active = false; };
   }, [isKiosk, currentUserRowId]);
   const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
+  // 12b-c: owners open the Pool from their menu (admins/coordinators use the Team tab).
+  const [isPoolOpen, setIsPoolOpen] = useState(false);
   // Item 10i: Phase C (invite-only adds) for the admin's own agency, as the
   // server reports it. Read at sign-in and again each time Add member or New
   // venue opens; null (not known) keeps today's forms.
@@ -842,6 +845,9 @@ export default function App() {
         if (msg.payload.activeWorkersCount !== undefined) {
           setActiveWorkersCount(msg.payload.activeWorkersCount);
         }
+      } else if (msg.type === 'POOL_UPDATED') {
+        // 12b-c: a count only (no personal data); an open Pool reloads itself.
+        try { window.dispatchEvent(new CustomEvent(POOL_UPDATED_EVENT)); } catch { /* old browsers */ }
       } else if (msg.type === 'USERS_UPDATED' && msg.payload) {
         if (Array.isArray(msg.payload.users)) {
           setKnownUsers(msg.payload.users);
@@ -2023,6 +2029,7 @@ export default function App() {
         onOpenFactoryAudit={SHOW_FACTORY_AUDIT ? () => setIsFactoryAuditOpen(true) : undefined}
         eventsCount={events.length}
         onOpenTeamModal={() => setIsTeamModalOpen(true)}
+        onOpenPool={currentUser?.role === 'owner' && !isKiosk ? () => setIsPoolOpen(true) : undefined}
         onOpenKioskDevices={() => setIsKioskDevicesOpen(true)}
         onResetDailyBoard={handleResetDailyBoard}
         isRealtimeConnected={isRealtimeConnected}
@@ -2440,7 +2447,7 @@ export default function App() {
       {currentUser && !isKiosk && (
         <PhoneNav
           user={currentUser}
-          hasVenues={venues.length > 0}
+          hasVenues={venues.length > 0 && !noVenueInScope}
           onOpenTaskModal={leaveHomeThen(handleOpenCreateTask)}
           onOpenShiftNote={leaveHomeThen(() => updates.setSheetOpen(true, 'notes'))}
           onOpenVenues={() => setIsVenuesDirectoryOpen(true)}
@@ -2541,6 +2548,10 @@ export default function App() {
         onUpdateUser={handleUpdateUser}
         onDeleteUser={handleDeleteUser}
       />
+
+      {currentUser.role === 'owner' && !isKiosk && (
+        <PoolModal isOpen={isPoolOpen} onClose={() => setIsPoolOpen(false)} currentUser={currentUser} venues={venues} refreshKey={knownUsers} />
+      )}
 
       <MergeAccountsSheet
         isOpen={isMergeAccountsOpen && !isKiosk}
