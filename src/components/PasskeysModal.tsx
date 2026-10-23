@@ -21,6 +21,8 @@ export const PasskeysModal: React.FC<{ isOpen: boolean; userId: string; onClose:
   // stops once the dialog closes or the browser is signed in as someone else.
   const session = useRef(0);
   const inFlight = useRef(false);
+  // Cancel ends the running action too (attempt number): nothing more is sent for it.
+  const attempt = useRef(0);
   const guardFor = (s: number) => () => session.current === s && currentAccountId() === userId;
   useEffect(() => {
     session.current += 1;
@@ -43,15 +45,20 @@ export const PasskeysModal: React.FC<{ isOpen: boolean; userId: string; onClose:
   // One action at a time; v() is false once the dialog closed or the account changed.
   const run = async (fn: (v: () => boolean) => Promise<void>) => {
     if (inFlight.current) return;
-    const v = guardFor(session.current);
+    const sameDialog = guardFor(session.current);
+    const mine = ++attempt.current;
+    const v = () => sameDialog() && attempt.current === mine;
     if (!v()) return;
     inFlight.current = true; setBusy(true); setError(null);
     try { await fn(v); } catch (e: any) {
       if (!v() || (e instanceof PasskeyError && e.kind === 'stale')) return;
       if (e instanceof PasskeyError && e.kind === 'needPassword') { setNeedPasswordToAdd(true); return; }
       setError(e?.message || T.offline);
-    } finally { inFlight.current = false; if (v()) setBusy(false); }
+    } finally {
+      if (attempt.current === mine) { inFlight.current = false; if (sameDialog()) setBusy(false); }
+    }
   };
+  const cancelAction = () => { attempt.current += 1; inFlight.current = false; setBusy(false); };
   const stop = () => new PasskeyError('stale', '');
   const add = () => run(async (v) => { await addPasskey({ stillValid: v }); if (!v()) throw stop(); setNeedPasswordToAdd(false); setPassword(''); onToast?.(T.addedToast); await load(v); });
   const addWithPassword = (ev: React.FormEvent) => { ev.preventDefault(); run(async (v) => { await confirmPassword(password); if (!v()) throw stop(); setPassword(''); setNeedPasswordToAdd(false); await addPasskey({ stillValid: v }); if (!v()) throw stop(); onToast?.(T.addedToast); await load(v); }); };
@@ -104,7 +111,7 @@ export const PasskeysModal: React.FC<{ isOpen: boolean; userId: string; onClose:
                       <input id={`pk-name-${p.id}`} value={editing.name} maxLength={40} autoFocus required onChange={(e) => setEditing({ id: p.id, name: e.target.value })}
                         className="w-full px-3 py-2 text-base rounded-xl bg-surface border border-line-control text-ink focus:outline-none focus:border-gold" />
                       <div className="flex justify-end gap-2">
-                        <button type="button" onClick={() => setEditing(null)} className={btn}>{T.cancel}</button>
+                        <button type="button" onClick={() => { cancelAction(); setEditing(null); }} className={btn}>{T.cancel}</button>
                         <button type="submit" disabled={busy || !editing.name.trim()} className="min-h-11 px-4 rounded-lg text-xs font-bold bg-gold-deep text-paper tactile-1 cursor-pointer disabled:opacity-50">{T.save}</button>
                       </div>
                     </form>
@@ -115,7 +122,7 @@ export const PasskeysModal: React.FC<{ isOpen: boolean; userId: string; onClose:
                       {error && <ErrorBox text={error} />}
                       {pwInput}
                       <div className="flex justify-end gap-2">
-                        <button type="button" onClick={() => { setRemoving(null); setPassword(''); setError(null); }} className={btn}>{T.cancel}</button>
+                        <button type="button" onClick={() => { cancelAction(); setRemoving(null); setPassword(''); setError(null); }} className={btn}>{T.cancel}</button>
                         <button type="submit" disabled={busy} className="min-h-11 px-4 rounded-lg text-xs font-bold bg-rose-600 text-white cursor-pointer disabled:opacity-50">{T.removeButton}</button>
                       </div>
                     </form>

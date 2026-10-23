@@ -71,6 +71,8 @@ const CID = 'abcdefghijklmnopqrstuv';
   ok('T no "WebAuthn" in any visible word', vals.every((v) => !/webauthn/i.test(v)));
   ok('T Don\'s pick: the button says "Quick sign-in", Face ID or fingerprint under it', P.PASSKEY_TEXT.signInButton === 'Quick sign-in' && P.PASSKEY_TEXT.signInSubline === 'Face ID or fingerprint');
   ok('T no label says just "Face ID" (always "Face ID or fingerprint" / "your fingerprint")', vals.every((v) => !/Face ID(?! or (your )?fingerprint)/.test(v)));
+  { const m = fs.readFileSync(new URL('../../src/components/PasskeysModal.tsx', import.meta.url), 'utf8'); const cut = m.indexOf('if (!isOpen) return null;');
+    ok('T list dialog: every hook comes before its early return (React hook order)', cut > 0 && !/\buse(State|Ref|Effect)\(/.test(m.slice(cut))); }
   ok('T every value is non-empty text', vals.every((v) => typeof v === 'string' && v.trim().length > 0));
   const src = ['src/components/PasskeyOffer.tsx', 'src/components/PasskeysModal.tsx'].map((f) => fs.readFileSync(new URL('../../' + f, import.meta.url), 'utf8')).join('\n');
   ok('T the two screens hold no hard-coded "Face ID"', !/Face ID/.test(src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')));
