@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { noticeSiteRefusal } from '../lib/site';
 import { AlertCircle, Building2, KeyRound, Lock, LogIn, Moon, Sun, UserPlus } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
+import { type SiteAgency } from '../lib/site';
+import { SiteInviteHeader, inviteAgencyIsSite, useSiteBrandLogo } from './SiteRefusedScreen';
 import { User as UserType } from '../types';
 import { setSessionToken } from '../lib/api';
 import { getRoleLabel } from '../lib/permissions';
@@ -36,13 +38,16 @@ interface InvitePageProps {
   onLeave: () => void;
   darkMode: boolean;
   onToggleDarkMode: () => void;
+  /** Domains PR B follow-up: this page is an agency's own address (from /api/site): its logo or name on top. */
+  site?: SiteAgency | null;
 }
 
 async function readJson(res: Response): Promise<any> {
   try { return await res.json(); } catch { return {}; }
 }
 
-export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, onLeave, darkMode, onToggleDarkMode }) => {
+export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, onLeave, darkMode, onToggleDarkMode, site = null }) => {
+  const { logo: siteLogo, onLogoError } = useSiteBrandLogo(site);
   const [view, setView] = useState<View>({ kind: 'loading' });
   const [preview, setPreview] = useState<Preview | null>(null);
   const [password, setPassword] = useState('');
@@ -229,8 +234,13 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
     body = (
       <div className="space-y-5">
         <div className="text-center">
-          <p className="text-sm font-semibold text-ink-soft">You're invited to join</p>
-          <h1 data-invite-agency className="text-xl sm:text-2xl font-black tracking-tight text-ink break-words">{preview?.agencyName || 'an agency on Shutfey'}</h1>
+          {site && !siteLogo && inviteAgencyIsSite(preview?.agencyName, site) ? (
+            // The agency's name is already large above: not said twice.
+            <h1 data-invite-heading className="text-xl sm:text-2xl font-black tracking-tight text-ink">You're invited</h1>
+          ) : (<>
+            <p className="text-sm font-semibold text-ink-soft">You're invited to join</p>
+            <h1 data-invite-agency className="text-xl sm:text-2xl font-black tracking-tight text-ink break-words">{preview?.agencyName || 'an agency on Shutfey'}</h1>
+          </>)}
           {(preview?.name || roleLabel) && (
             <p className="text-sm text-ink-soft mt-1 break-words">
               {preview?.name}{preview?.name && roleLabel ? ' · ' : ''}{roleLabel}
@@ -281,8 +291,8 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
 
   return (
     <div className="min-h-screen bg-paper text-ink flex flex-col">
-      <header className="w-full px-4 sm:px-6 py-4 flex items-center justify-between max-w-7xl mx-auto">
-        <ShutfeyLogo size="sm" showSubtitle={true} />
+      <header className={`w-full px-4 sm:px-6 py-4 flex items-center ${site ? 'justify-end' : 'justify-between'} max-w-7xl mx-auto`}>
+        {!site && <ShutfeyLogo size="sm" showSubtitle={true} />}
         <button
           type="button"
           onClick={onToggleDarkMode}
@@ -294,6 +304,7 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
       </header>
       <main className="flex-1 flex items-start sm:items-center justify-center px-4 py-6">
         <div data-invite-page className="w-full max-w-md bg-surface rounded-3xl p-6 sm:p-8 e3 border border-line">
+          {site && <SiteInviteHeader agency={site} logo={siteLogo} onLogoError={onLogoError} />}
           {body}
         </div>
       </main>
