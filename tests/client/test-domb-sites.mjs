@@ -234,4 +234,20 @@ check('Agency ID line', sheetHtml.includes('data-agency-id') && sheetHtml.includ
 check('Agency ID is not an input', !/<input[^>]*agency-vv-demo/.test(sheetHtml));
 globalThis.fetch = origFetch;
 
+// --- reset links (plain fetch): another agency's link on an agency address shows the screen (RV2) ---
+{ const R = await import('../../src/lib/resetLinks.ts');
+  S.resetSiteForTests(); handler = () => ({ body: { site: 'agency', agency: { name: 'Valley Vaad' }, sharedOrigin: SHARED_O } }); await S.loadSite();
+  const refuse = async () => ({ ok: false, status: 403, json: async () => ({ available: false, code: 'WRONG_SITE', sharedOrigin: SHARED_O, error: 'x' }) });
+  api.setSessionToken('tok-r'); events.length = 0;
+  const pv = await R.previewResetLink('t1', refuse); await new Promise((r) => setTimeout(r, 10));
+  check('reset preview refused: screen-only event, sign-in kept', pv.state === 'error' && siteEvents().length === 1 && siteEvents()[0].detail.signedOut === false && api.getSessionToken() === 'tok-r');
+  events.length = 0;
+  const ac = await R.acceptResetLink('t1', 'new-password-1', refuse); await new Promise((r) => setTimeout(r, 10));
+  check('reset accept refused: screen-only event', ac.state === 'error' && siteEvents().length === 1 && siteEvents()[0].detail.code === 'WRONG_SITE');
+  S.resetSiteForTests(); handler = () => ({ body: { site: 'shared' } }); await S.loadSite(); events.length = 0;
+  const pv2 = await R.previewResetLink('t1', async () => ({ ok: false, status: 403, json: async () => ({ code: 'WRONG_SITE', error: 'Nope' }) }));
+  check('reset preview on the shared address: today\'s error, no event', pv2.state === 'error' && pv2.message === 'Nope' && siteEvents().length === 0);
+  api.setSessionToken(null);
+}
+
 console.log(`DOMB CLIENT: ${passed}/${passed} checks passed`);

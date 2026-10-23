@@ -5,6 +5,7 @@
 // opens /reset#t=<token> and chooses a new password. The link is shown once,
 // right after it is made, and never stored by the app.
 
+import { noticeSiteRefusal } from './site';
 import { apiFetch, apiWrite, versionFromResponse } from './api';
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -155,6 +156,8 @@ export async function previewResetLink(token: string, fetcher: typeof fetch = fe
     const res = await fetcher('/api/reset-links/preview', { method: 'GET', headers: { 'X-Reset-Token': token }, cache: 'no-store', credentials: 'omit' });
     if (res.status === 404) return { state: 'invalid' };
     const d: any = await res.json().catch(() => null);
+    // Domains PR B: another agency's link on an agency address -> the refusal screen.
+    if (noticeSiteRefusal(res.status, d)) return { state: 'error', message: RESET_TRY_AGAIN_TEXT };
     if (res.ok && d) {
       return { state: 'ok', firstName: typeof d.firstName === 'string' ? d.firstName : '', agencyName: typeof d.agencyName === 'string' ? d.agencyName : '', expiresAt: typeof d.expiresAt === 'string' ? d.expiresAt : null };
     }
@@ -183,6 +186,7 @@ export async function acceptResetLink(token: string, newPassword: string, fetche
     const d: any = await res.json().catch(() => null);
     if (res.ok && d && d.user && typeof d.token === 'string' && d.token) return { state: 'ok', user: d.user, token: d.token };
     if (res.status === 404) return { state: 'invalid' };
+    if (noticeSiteRefusal(res.status, d)) return { state: 'error', message: RESET_TRY_AGAIN_TEXT, code: d.code };
     const msg = (d && typeof d.error === 'string' && d.error.trim()) || '';
     if (d && d.passwordChanged === true) return { state: 'changed-no-session', message: msg || 'Your password was changed, but you cannot sign in here right now. Ask your agency admin.' };
     if (res.ok) return { state: 'error', message: RESET_TRY_AGAIN_TEXT };
