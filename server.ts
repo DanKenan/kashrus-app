@@ -38,6 +38,7 @@ import {
   type PersonCredentialsDoc, type PasskeyEntry, type ChallengeDoc, type PasskeyAuthMethod,
 } from './src/server/passkeys.ts';
 import { userCookieConfig, kioskCookieConfig, deviceCookieConfig, cookieValues, setCookieHeader, setDeviceCookieHeader, isDeviceCredentialShape, clearCookieHeader, trustedOrigins, originTrusted, normalizeOrigin, CSRF_ORIGIN_BODY } from './src/server/session-cookie.ts';
+import { parseAppSites, classifyHost, passkeyAddressKind, SITE_NOT_SET_UP_BODY, WRONG_SITE_BODY, SHARED_ORIGIN, type SiteClass } from './src/server/sites.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
 import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetToken, resetLinkForToken, credentialStampHash, stampsEqual, isLiveResetLink, resetLinkAdminView, pruneResetLinks, makeRoomForResetLink, mayMakeResetLink, resetSuspensionRecord } from './src/server/reset-links.ts';
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
@@ -464,6 +465,84 @@ app.use(express.json({ limit: '2mb' }));
 // ---------------------------------------------------------------------------
 const USER_COOKIE = userCookieConfig(isTestMode());
 const TRUSTED_ORIGINS = trustedOrigins({ appOrigins: process.env.APP_ORIGINS, testMode: isTestMode(), port: PORT });
+
+// ---------------------------------------------------------------------------
+// Per-agency custom addresses, PR A (domains plan v4, 2a-2c). The raw Host
+// header (never req.hostname / X-Forwarded-Host) selects a policy:
+// SHARED (this service's pinned run.app hosts and their "<tag>---" revision
+// URLs; off Cloud Run also the loopback names) = exactly today; SITE (a host
+// listed in APP_SITES) = only that agency's people, Origin must be the site's
+// own; UNKNOWN = sign-in, sessions, sockets and kiosks refused. TRUSTED_ORIGINS
+// above stays the SHARED-host list (byte-identical to before); a SITE host
+// trusts only its own origin.
+// ---------------------------------------------------------------------------
+const SITES_LOCAL = !process.env.K_SERVICE;
+const APP_SITES_CONFIG = parseAppSites(process.env.APP_SITES, { local: SITES_LOCAL });
+function siteAgencyExists(agencyId: string): boolean {
+  return (agencies as any[]).some((a) => a && a.id === agencyId);
+}
+/** The request's (or upgrade's) site class, from the raw Host header; cached on the request. */
+function siteOf(req: any): SiteClass {
+  if (req && req.__siteClass) return req.__siteClass as SiteClass;
+  const c = classifyHost(req?.rawHeaders, { sites: APP_SITES_CONFIG.sites, local: SITES_LOCAL, agencyExists: siteAgencyExists });
+  if (req) Object.defineProperty(req, '__siteClass', { value: c, enumerable: false, configurable: true });
+  return c;
+}
+/** The agency of a membership row (legacy rows without agencyId are HKC, as callerAgencyId). */
+function rowAgencyId(row: any): string {
+  return (row && row.agencyId) || 'agency-hkc';
+}
+/**
+ * On a SITE host: the person's ONE eligible membership row in the site's
+ * agency (membershipsOfPerson applies today's rules), or null. A single-row
+ * person: the row itself when its agency is the site's (today's eligibility
+ * then applies unchanged at session issue).
+ */
+function siteMembershipRow(cred: any, agencyId: string): any | null {
+  return siteMembershipRowIn(users as any[], agencies as any[], venues as any[], deletedVenueIds, cred, agencyId);
+}
+/**
+ * siteMembershipRow on EXPLICIT state (a transaction's fresh users, agencies,
+ * venues and deletedVenueIds), with membershipsOfPerson's rules: the row's
+ * agency exists, it is not paused (resetSuspended) and its venue was not
+ * removed. The person is re-read from these rows by id.
+ */
+function siteMembershipRowIn(rows: readonly any[], agencyList: readonly any[], venueList: readonly any[], deletedIds: readonly string[], cred: any, agencyId: string): any | null {
+  if (!cred) return null;
+  const fresh = (rows as any[]).find((u) => u && u.id === cred.id);
+  if (!fresh) return null;
+  if (isMultiPersonRow(rows as any[], fresh)) {
+    const ms = (rows as any[]).filter((u) => u && u.personId === fresh.personId && typeof u.agencyId === 'string' && u.agencyId === agencyId &&
+      (agencyList as any[]).some((a) => a && a.id === u.agencyId) && !u.resetSuspended && !venueRemovedForIn(u, venueList, deletedIds));
+    return ms.length === 1 ? ms[0] : null;
+  }
+  return rowAgencyId(fresh) === agencyId ? fresh : null;
+}
+/** Domains PR A (2f): true on a SITE host when the thing being used belongs to another agency (SHARED host: never). */
+function siteRefusesAgency(req: any, agencyId: unknown): boolean {
+  const s = siteOf(req);
+  return s.kind === 'site' && (typeof agencyId === 'string' && agencyId ? agencyId : 'agency-hkc') !== s.agencyId;
+}
+function sendWrongSite(res: any): void {
+  res.set('Cache-Control', 'no-store');
+  res.status(403).json(WRONG_SITE_BODY);
+}
+function logAppSitesAtStart(): void {
+  for (const m of APP_SITES_CONFIG.malformed) log.warn(`[sites] APP_SITES entry ignored (malformed): ${JSON.stringify(m)}`);
+  for (const e of APP_SITES_CONFIG.entries) {
+    const a = (agencies as any[]).find((x) => x && x.id === e.agencyId);
+    if (!e.ok) log.warn(`[sites] ${e.host} -> ${e.agencyId}: rejected (${e.reason})`);
+    else if (!a) log.warn(`[sites] ${e.host} -> ${e.agencyId}: agency not found, host is UNKNOWN`);
+    else log.info(`[sites] ${e.host} -> ${e.agencyId} (${String(a.name || '')})`);
+  }
+}
+/** /api/health's site list: host, whether it is live, the agency name (no ids). */
+function healthSites(): Array<{ host: string; ok: boolean; agencyName: string | null }> {
+  return APP_SITES_CONFIG.entries.map((e) => {
+    const a = e.ok ? (agencies as any[]).find((x) => x && x.id === e.agencyId) : null;
+    return { host: e.host, ok: !!a, agencyName: a ? String(a.name || '') : null };
+  });
+}
 /**
  * Transition opt-in: a client that moved to cookies (11a-c) says so on every
  * request with X-Shutfey-Auth: cookie (and /ws?auth=cookie on the socket).
@@ -476,6 +555,11 @@ function cookieAuthRequested(req: any): boolean {
   return req?.headers?.['x-shutfey-auth'] === 'cookie';
 }
 function requestOriginTrusted(req: any): boolean {
+  // Domains PR A (2b): a SITE host trusts only its own origin; a SHARED host
+  // only the shared list (exactly today); an UNKNOWN host nothing.
+  const site = siteOf(req);
+  if (site.kind === 'site') return req?.headers?.origin === site.origin;
+  if (site.kind !== 'shared') return false;
   return originTrusted(req?.headers?.origin, TRUSTED_ORIGINS);
 }
 function setUserCookie(res: any, token: string, absoluteExpMs: number): boolean {
@@ -593,6 +677,9 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'POST', path: '/agencies/register-existing' },
   { method: 'GET', path: '/push/public-key' },
   { method: 'GET', path: '/agencies/by-domain' },
+  // Domains PR A (2g): the sign-in page's site description and logo (no session).
+  { method: 'GET', path: '/site' },
+  { method: 'GET', path: '/site/logo' },
   // Kiosk (2b): a tablet is paired to one venue by an admin/coordinator.
   // Pairing start/status and the device record are authenticated by the
   // secrets they carry; login requires the device header. The old public
@@ -638,14 +725,6 @@ function isPublicApiRoute(method: string, path: string): boolean {
   return PUBLIC_API_ROUTES.some((r) => r.method === method && r.path === path);
 }
 
-// Custom domains: agencyId -> hostname (e.g. app.hartfordkashrut.org).
-// Item 8a: only a VERIFIED domain held by exactly one agency matches (fail
-// closed). Nothing in this release can verify a domain, so an admin-typed,
-// unverified customDomain never influences a request or the public lookup.
-function agencyIdForHostname(hostname: string): string | null {
-  return agencyIdForVerifiedHost(agencies as any[], hostname);
-}
-
 app.use('/api', async (req, res, next) => {
   // MAINTENANCE HOTFIX (2026-10-18, from main): operator cutover switch.
   // Refuses all mutations with 503 so old-version writes stop before cutover.
@@ -687,10 +766,25 @@ app.use('/api', async (req, res, next) => {
     });
   }
 
-  // Resolve agency from custom domain when present (used by login/agency pages).
-  const domainAgencyId = agencyIdForHostname(req.hostname || '');
-  if (domainAgencyId) {
-    (req as any).domainAgencyId = domainAgencyId;
+  // Domains PR A (2a/2b): the raw Host selects the site policy BEFORE the
+  // public-route exemption. UNKNOWN host: only /api/health and /api/site(/logo)
+  // answer; everything else (sign-in, sessions, kiosks, invites, resets,
+  // recovery) is 403 SITE_NOT_SET_UP. SITE host: every mutating request, with
+  // or without a credential, must carry exactly the site's own Origin.
+  const site = siteOf(req);
+  if (site.kind === 'unknown') {
+    const open = (req.method === 'GET' || req.method === 'HEAD') && (req.path === '/health' || req.path === '/site' || req.path === '/site/logo');
+    if (!open) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(403).json(SITE_NOT_SET_UP_BODY);
+    }
+  }
+  if (site.kind === 'site' && !SAFE_METHODS.includes(req.method) && req.headers.origin !== site.origin) {
+    return res.status(403).json(CSRF_ORIGIN_BODY);
+  }
+  // Item 8a's hostname lookup is replaced by the raw-Host site (2g): req.hostname honours X-Forwarded-Host.
+  if (site.kind === 'site') {
+    (req as any).domainAgencyId = site.agencyId;
   }
 
   if (isPublicApiRoute(req.method, req.path)) return next();
@@ -825,6 +919,14 @@ app.use('/api', async (req, res, next) => {
     (req as any).kiosk = true;
     (req as any).kioskVenueId = tokenVenueId;
     (req as any).kioskDeviceId = tokenDev;
+  }
+
+  // Domains PR A (2f): on a SITE host the session's agency must be the
+  // site's (kiosk: the token's agency, which the device and row checks above
+  // already tie to the tablet's venue). Never converted to another membership.
+  if (site.kind === 'site') {
+    const sessionAgency = (req as any).kiosk === true ? (payload?.kind === 'kiosk' ? String(payload.agencyId || '') : '') : rowAgencyId(user);
+    if (sessionAgency !== site.agencyId) return sendWrongSite(res);
   }
 
   // Force the verified identity: endpoints keying off userEmail now see the
@@ -3353,6 +3455,8 @@ interface KioskPairing {
   venueId?: string;
   venueName?: string;
   approvedAt?: number; // ms epoch, stamped by the pair commit; the claim deadline is DERIVED (approvedAt + TTL), never stored
+  // Domains PR A (2f): the agency of the SITE host the pairing started on (absent: the shared host).
+  pairingSite?: string;
 }
 let kioskPairings: { [pairingId: string]: KioskPairing } = {};
 
@@ -5904,6 +6008,14 @@ function broadcast(
 }
 
 wss.on('connection', (ws, req) => {
+  // Domains PR A (2a/2b/2f): the raw Host selects the policy before anything
+  // is read or sent. UNKNOWN host: close 4403. SITE host: every socket (token
+  // or cookie) must carry exactly the site's own Origin.
+  const wsSite = siteOf(req);
+  if (wsSite.kind === 'unknown' || (wsSite.kind === 'site' && req.headers.origin !== wsSite.origin)) {
+    ws.close(4403, 'Forbidden');
+    return;
+  }
 
   // Token via ?token=… query param (set by the client from its session).
   let authedUser: any = null;
@@ -5926,7 +6038,7 @@ wss.on('connection', (ws, req) => {
       // 11a-s3: or the kiosk cookie K (never both; plan 9.2).
       const kioskValues = cookieValues(req.headers.cookie, KIOSK_COOKIE.name);
       if (values.length >= 1 || kioskValues.length >= 1) {
-        if (!originTrusted(req.headers.origin, TRUSTED_ORIGINS)) {
+        if (!requestOriginTrusted(req)) {
           ws.close(4403, 'Forbidden');
           return;
         }
@@ -6001,6 +6113,13 @@ wss.on('connection', (ws, req) => {
   }
 
   const agencyId = authedUser.agencyId || 'agency-hkc';
+  // Domains PR A (2f): on a SITE host a phone socket's session agency, and a
+  // kiosk socket's token agency (tied to its device's venue by the checks
+  // above and by the KIOSK_DEVICE frame), must be the site's. Nothing sent yet.
+  if (wsSite.kind === 'site' && (isKiosk ? kioskAgencyId : agencyId) !== wsSite.agencyId) {
+    ws.close(4403, 'Forbidden');
+    return;
+  }
 
   // Addendum finding 1: a kiosk socket proves its device with its FIRST
   // frame — { type: 'KIOSK_DEVICE', credential: '<deviceId>.<secret>' } —
@@ -6665,6 +6784,8 @@ app.get('/api/health', (req, res) => {
     currentWorkDate,
     venuesCount: venues.length,
     tasksCount: tasks.length,
+    // Domains PR A (2a): listed only when APP_SITES is set (unset: the answer is exactly as before).
+    ...(typeof process.env.APP_SITES === 'string' && process.env.APP_SITES.trim() ? { sites: healthSites() } : {}),
   });
 });
 
@@ -8531,6 +8652,8 @@ function buildNewAgencyRecords(input: {
 }
 
 app.post('/api/agencies/register', async (req, res) => {
+  // Domains PR A (2f): a new agency is never registered on an agency's own address.
+  if (siteOf(req).kind === 'site') return sendWrongSite(res);
   const {
     agencyName,
     shortCode,
@@ -8683,6 +8806,8 @@ const REGISTER_EXISTING_LIMIT = { error: "You've added several agencies today. P
 const OPERATION_ID_RE = /^[A-Za-z0-9_-]{8,100}$/;
 
 app.post('/api/agencies/register-existing', async (req, res) => {
+  // Domains PR A (2f): a new agency is never registered on an agency's own address.
+  if (siteOf(req).kind === 'site') return sendWrongSite(res);
   res.set('Cache-Control', 'no-store');
   if ((req as any).kiosk === true) return res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
   const body = stripServerOnlyUserFields(req.body || {});
@@ -9496,6 +9621,8 @@ app.get('/api/invites/preview', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const inv = INVITE_TOKEN_RE.test(raw) ? acceptableInvite(invites, agencies, raw, Date.now()) : null;
   if (!inv) return res.status(404).json({ error: INVITE_LINK_INVALID_TEXT });
+  // Domains PR A (2f): on a SITE host another agency's invite shows nothing about itself.
+  if (siteRefusesAgency(req, inv.agencyId)) return res.status(403).json({ available: false, code: 'WRONG_SITE', sharedOrigin: SHARED_ORIGIN });
   const agency = agencies.find((a) => a && a.id === inv.agencyId);
   if (inv.kind === 'setup') {
     const member: any = users.find((u) => u.id === inv.memberId);
@@ -9514,6 +9641,8 @@ app.post('/api/invites/accept', async (req, res) => {
   if (!INVITE_TOKEN_RE.test(raw)) return invalidLink();
   const cachedInv = acceptableInvite(invites, agencies, raw, Date.now());
   if (!cachedInv) return invalidLink();
+  // Domains PR A (2f): refused before anything is consumed, counted or created.
+  if (siteRefusesAgency(req, cachedInv.agencyId)) return sendWrongSite(res);
   if (typeof password !== 'string' || !password) return res.status(400).json({ error: 'Please enter a password.', code: 'PASSWORD_REQUIRED' });
   if (cachedInv.kind === 'setup') return acceptSetupInvite(req, res, raw, cachedInv, password);
   if (mode !== 'new' && mode !== 'existing') return res.status(400).json({ error: 'Choose how to continue.', code: 'INVITE_MODE_INVALID' });
@@ -9550,6 +9679,7 @@ app.post('/api/invites/accept', async (req, res) => {
       // a) fresh: the same live invite, its agency exists with the flag ON.
       const inv = acceptableInvite(freshInvites, freshAgencies, raw, nowMs);
       if (!inv || inv.id !== inviteId || inv.kind === 'setup') return { conflict: INVITE_LINK_INVALID_TEXT, conflictStatus: 404, conflictCode: 'INVITE_INVALID' };
+      if (siteRefusesAgency(req, inv.agencyId)) return { conflict: WRONG_SITE_BODY.error, conflictStatus: 403, conflictCode: 'WRONG_SITE' };
       // f) generic failure: ONLY the counter (or the 5th-failure revocation) is written.
       const fail = () => {
         const n = (Number.isInteger(inv.failedAttempts) ? inv.failedAttempts : 0) + 1;
@@ -9786,6 +9916,7 @@ async function acceptSetupInvite(req: any, res: any, raw: string, cachedInv: any
         (m.agencyId || 'agency-hkc') === inv.agencyId && m.credentialPending === 'invite' &&
         normalizeInviteEmail(m.email) === inv.email && !isMultiPersonRow(freshUsers, m);
       if (!ok) return { conflict: INVITE_LINK_INVALID_TEXT, conflictStatus: 404, conflictCode: 'INVITE_INVALID' };
+      if (siteRefusesAgency(req, inv.agencyId)) return { conflict: WRONG_SITE_BODY.error, conflictStatus: 403, conflictCode: 'WRONG_SITE' };
       return {
         doc: {
           ...freshDoc,
@@ -10024,6 +10155,8 @@ app.get('/api/reset-links/preview', (req, res) => {
   const raw = String(req.get('x-reset-token') || '');
   const link = RESET_TOKEN_RE.test(raw) ? resetLinkForToken(resetLinks, raw) : null;
   if (!link || !isLiveResetLink(link, resetNowMs())) return invalid();
+  // Domains PR A (2f): on a SITE host another agency's reset link shows nothing about itself.
+  if (siteRefusesAgency(req, link.agencyId)) return res.status(403).json({ available: false, code: 'WRONG_SITE', sharedOrigin: SHARED_ORIGIN });
   const m = resetLinkMatch(users, agencies, venues, deletedVenueIds, link);
   if (m.ok === false) return invalid();
   const agency = agencies.find((a) => a && a.id === link.agencyId);
@@ -10043,6 +10176,8 @@ app.post('/api/reset-links/accept', async (req, res) => {
   const raw = String(req.get('x-reset-token') || '');
   const cachedLink = RESET_TOKEN_RE.test(raw) ? resetLinkForToken(resetLinks, raw) : null;
   if (!cachedLink || !isLiveResetLink(cachedLink, resetNowMs())) return invalid();
+  // Domains PR A (2f): refused before any password change, session revoke or token burn.
+  if (siteRefusesAgency(req, cachedLink.agencyId)) return sendWrongSite(res);
   const linkId = String(cachedLink.id);
   // bcrypt BEFORE the transaction (CPU-heavy); deterministic input to the mutator.
   const newHash = await hashPassword(newPassword);
@@ -10054,6 +10189,7 @@ app.post('/api/reset-links/accept', async (req, res) => {
         const link = freshLinks.find((l: any) => l && l.id === linkId);
         const nowMs = resetNowMs();
         if (!link || !resetTokenMatchesLink(link, raw) || !isLiveResetLink(link, nowMs)) return { doc: freshDoc, result: { kind: 'invalid' } };
+        if (siteRefusesAgency(req, link.agencyId)) return { doc: freshDoc, result: { kind: 'wrong-site' } };
         const freshUsers = docList(freshDoc, 'users');
         const freshAgencies = docList(freshDoc, 'agencies');
         const nowIso = new Date(nowMs).toISOString();
@@ -10113,6 +10249,7 @@ app.post('/api/reset-links/accept', async (req, res) => {
     return res.status(503).json({ error: 'Please try again in a moment.' });
   }
   const r: any = committed?.result;
+  if (r?.kind === 'wrong-site') return sendWrongSite(res);
   if (!r || r.kind !== 'ok') {
     if (r?.reason) log.info(`[audit] reset link refused at use: link ${linkId} (${r.reason})`);
     return invalid();
@@ -10193,6 +10330,49 @@ app.get('/api/agency/logo', async (req, res) => {
   res.json({ rev, mime: doc.mime, data: doc.data });
 });
 
+// Domains PR A (2g): the public site description for the sign-in page. No
+// session; the agency comes ONLY from the raw-Host site, never from the
+// query or body. no-store on every answer.
+app.get('/api/site', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const s = siteOf(req);
+  if (s.kind === 'shared') return res.json({ site: 'shared' });
+  const agency: any = s.kind === 'site' ? agencies.find((a) => a.id === s.agencyId) : undefined;
+  if (s.kind !== 'site' || !agency) return res.json({ site: 'unknown', sharedOrigin: SHARED_ORIGIN });
+  const pub = agencyPublicProfile(agency);
+  res.json({
+    site: 'agency',
+    agency: {
+      name: pub.name,
+      brandName: typeof agency.brandName === 'string' && agency.brandName ? agency.brandName : null,
+      shortCode: pub.shortCode,
+      logoRev: pub.logoRev ?? null,
+    },
+    sharedOrigin: SHARED_ORIGIN,
+  });
+});
+
+// Domains PR A (2g): the site agency's logo, same JSON and checks as
+// /api/agency/logo; the agency is the Host's site only. A rev-specific URL,
+// so a hit is publicly cacheable; anything else is a no-store 404.
+app.get('/api/site/logo', async (req, res) => {
+  const notFound = () => {
+    res.set('Cache-Control', 'no-store');
+    return res.status(404).json({ error: 'No logo at that revision.' });
+  };
+  const s = siteOf(req);
+  if (s.kind !== 'site') return notFound();
+  const agencyId = s.agencyId;
+  const rev = typeof req.query.rev === 'string' ? req.query.rev : '';
+  const agency = agencies.find((a) => a.id === agencyId);
+  if (!rev || !LOGO_REV_RE.test(rev) || !agency || agency.logoRev !== rev) return notFound();
+  let doc: any = null;
+  try { doc = await getLogoDoc(logoDocId(agencyId, rev)); } catch { return notFound(); }
+  if (!doc || doc.agencyId !== agencyId || doc.rev !== rev || typeof doc.data !== 'string' ||
+      !['image/png', 'image/jpeg', 'image/webp'].includes(doc.mime)) return notFound();
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.json({ rev, mime: doc.mime, data: doc.data });
+});
 app.put('/api/agency/logo', async (req, res) => {
   const user = logoAdminGate(req, res);
   if (!user) return;
@@ -10321,8 +10501,10 @@ app.put('/api/agency/certification-options', async (req, res) => {
 // Resolve the agency for the current hostname (custom-domain portals).
 // Public: the login page uses this to show the agency's name on their domain.
 app.get('/api/agencies/by-domain', (req, res) => {
-  // Item 8a: verified-only, unambiguous match; public profile only.
-  const agencyId = agencyIdForHostname(String(req.hostname || ''));
+  // Domains PR A (2g): the agency comes from the raw-Host SITE (APP_SITES),
+  // never from req.hostname (X-Forwarded-Host) or the 8a customDomain field.
+  const bySite = siteOf(req);
+  const agencyId = bySite.kind === 'site' ? bySite.agencyId : null;
   const agency = agencyId ? agencies.find((a) => a.id === agencyId) : undefined;
   if (!agency) return res.json({ agency: null });
   const pub = agencyPublicProfile(agency);
@@ -15382,6 +15564,8 @@ app.post('/api/kiosk/pairing/start', async (req, res) => {
   const clientIp = getClientIp(req);
   const nowMs = Date.now();
   const START_MAX = 10;
+  // Domains PR A (2f): a pairing started on a SITE host remembers that agency.
+  const startSite = siteOf(req);
   try {
     const committed = await commitState(
       (freshDoc) => {
@@ -15420,6 +15604,7 @@ app.post('/api/kiosk/pairing/start', async (req, res) => {
           createdAt: nowMs,
           expiresAt,
           status: 'pending',
+          ...(startSite.kind === 'site' ? { pairingSite: startSite.agencyId } : {}),
         };
         return {
           doc: { ...freshDoc, kioskPairings: pairings, kioskPairingLimits: limits },
@@ -15459,6 +15644,11 @@ app.get('/api/kiosk/pairing/status', async (req, res) => {
   const pairing = kioskPairings[parsed.id];
   if (!pairing) return notFound();
   if (!timingSafeStrEq(sha256Hex(parsed.secret), pairing.secretHash)) return notFound();
+  // Domains PR A (2f): after the secret check and before any data or cookie,
+  // the pairing must belong to this host's class (site agency, or shared);
+  // otherwise the tablet starts pairing again on the address it will use.
+  const stSite = siteOf(req);
+  if ((stSite.kind === 'site' ? pairing.pairingSite !== stSite.agencyId : !!pairing.pairingSite)) return notFound();
   if (pairing.status === 'pending') {
     if (pairing.expiresAt <= nowMs) return notFound();
     return res.json({ status: 'pending', expiresAt: new Date(pairing.expiresAt).toISOString() });
@@ -15468,6 +15658,7 @@ app.get('/api/kiosk/pairing/status', async (req, res) => {
   if (pairingEffectiveExpiry(pairing) <= nowMs) return notFound();
   const device = kioskDevices.find((d) => d.id === pairing.deviceId);
   if (!device) return notFound();
+  if (siteRefusesAgency(req, device.agencyId)) return notFound();
   const safe = safeKioskDevice(device);
   // 11a-s3 (plan 9.2): with the opt-in from a trusted Origin the approved
   // tablet also gets its device cookie D. The pairing secret IS the device
@@ -15488,6 +15679,8 @@ app.get('/api/kiosk/device', async (req, res) => {
   if (!device) {
     return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
   }
+  // Domains PR A (2f): on a SITE host only a tablet of the site's agency.
+  if (siteRefusesAgency(req, device.agencyId)) return sendWrongSite(res);
   const staff = users
     // K1: admins with a code are listed on every tablet of their own agency
     // (kioskUserFitsVenue); everyone else only at their own venue.
@@ -15526,6 +15719,8 @@ app.post('/api/kiosk/device/unpair', async (req, res) => {
   if (!device) {
     return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
   }
+  // Domains PR A (2f): on a SITE host only a tablet of the site's agency.
+  if (siteRefusesAgency(req, device.agencyId)) return sendWrongSite(res);
   try {
     await commitState(
       (freshDoc) => {
@@ -15690,6 +15885,11 @@ app.post('/api/kiosk/devices/pair', async (req, res) => {
           };
         }
         const [pairingId, pairing] = entry;
+        // Domains PR A (2f): a pairing started on a SITE host is approved only
+        // by that agency's admin/coordinator, for that agency's venue.
+        if (pairing.pairingSite && (pairing.pairingSite !== freshAgencyId || (freshVenue.agencyId || 'agency-hkc') !== pairing.pairingSite)) {
+          return { doc: { ...freshDoc, kioskPairings: pairings }, result: { invalid: true } };
+        }
         const deviceId = `kdev-${crypto.randomBytes(9).toString('hex')}`;
         const device: KioskDevice = {
           id: deviceId,
@@ -16028,6 +16228,8 @@ app.post('/api/kiosk/login', async (req, res) => {
   if (!device || !deviceProof) {
     return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
   }
+  // Domains PR A (2f): on a SITE host only a tablet of the site's agency signs in (nothing counted).
+  if (siteRefusesAgency(req, device.agencyId)) return sendWrongSite(res);
   const venueId = device.venueId;
   const user = users.find((u) => u.id === userId);
 
@@ -16427,9 +16629,14 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: LOGIN_FAILED_TEXT });
   }
 
+  // Domains PR A (2f): on a SITE host only the site agency's people sign in.
+  const loginSite = siteOf(req);
+
   // First-run setup: admin account with no password yet → client shows the
   // "create your password" screen instead of an error.
   if (!user.password && user.role === 'admin') {
+    // A SITE host offers setup only to its own agency's admin (else the uniform failure).
+    if (loginSite.kind === 'site' && !siteMembershipRow(user, loginSite.agencyId)) return res.status(401).json({ error: LOGIN_FAILED_TEXT });
     return res.json({ success: false, needsSetup: true, email: user.email });
   }
 
@@ -16438,13 +16645,23 @@ app.post('/api/auth/login', async (req, res) => {
   if (result === 'invalid') {
     return res.status(401).json({ error: LOGIN_FAILED_TEXT });
   }
+  // Domains PR A (2f): the site decision comes AFTER the credential check
+  // (same generic failure as today) and BEFORE anything is written (the
+  // legacy hash upgrade below included). No chooser on a SITE host: the
+  // session is for the person's membership in the site's agency.
+  let siteRow: any = null;
+  if (loginSite.kind === 'site') {
+    siteRow = siteMembershipRow(users.find((u) => u.id === user.id) || user, loginSite.agencyId);
+    if (!siteRow) return sendWrongSite(res);
+  }
   if (result === 'valid-needs-upgrade') {
     // Upgrade the legacy password hash inside a transaction so the write is
     // atomic and versioned like every other write. Login still succeeds even
     // if the upgrade write fails (the user proved they know the password).
     const newHash = await hashPassword(String(password));
+    let upgradeWrongSite = false;
     try {
-      await commitState(
+      const up = await commitState(
         (freshDoc) => {
           const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
           const freshUser = freshUsers.find((u) => u.id === user.id);
@@ -16454,6 +16671,12 @@ app.post('/api/auth/login', async (req, res) => {
           const freshAgenciesL: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
           if (credentialRowForEmailIn(freshUsers, freshAgenciesL, normalizedEmail)?.id !== user.id) {
             return { doc: freshDoc, result: { upgraded: false } };
+          }
+          // Domains PR A (2f, [DOMA-RV1] P2): on a SITE host the site decision is
+          // re-made on the FRESH rows; no site membership now → nothing is written.
+          if (loginSite.kind === 'site' &&
+              !siteMembershipRowIn(freshUsers, freshAgenciesL, docList(freshDoc, 'venues'), docList(freshDoc, 'deletedVenueIds'), freshUser, loginSite.agencyId)) {
+            return { doc: freshDoc, result: { upgraded: false, wrongSite: true } };
           }
           // Only upgrade if the stored password isn't already a bcrypt hash
           // (another concurrent login may have upgraded it first).
@@ -16466,15 +16689,24 @@ app.post('/api/auth/login', async (req, res) => {
         },
         { label: 'login-password-upgrade' }
       );
+      if (up?.result?.wrongSite) upgradeWrongSite = true;
     } catch (err) {
       log.warn('[login] Password-hash upgrade write failed (login still succeeds):', (err as any)?.message);
     }
+    // Domains PR A ([DOMA-RV2] P2): the transaction's fresh rows said this person
+    // has no membership of the site's agency → WRONG_SITE, before any session.
+    if (upgradeWrongSite) return sendWrongSite(res);
   }
 
   // 10g: a multi person chooses a membership first — no user, no v2 token,
   // only a choose token for the credential row (single-row: as today).
   const freshCred = users.find((u) => u.id === user.id) || user;
-  if (isMultiPersonRow(users, freshCred)) {
+  if (loginSite.kind === 'site') {
+    // Re-select on fresh rows (the upgrade above awaited); still none → WRONG_SITE, nothing signed in.
+    siteRow = siteMembershipRow(freshCred, loginSite.agencyId);
+    if (!siteRow) return sendWrongSite(res);
+  }
+  if (!siteRow && isMultiPersonRow(users, freshCred)) {
     // QA2 #8: memberships whose venue was deleted are not offered; none left → the clear refusal.
     if (membershipsOfPerson(String((freshCred as any).personId)).length === 0) return res.status(403).json(noMembershipBody(String((freshCred as any).personId)));
     return res.json({
@@ -16498,12 +16730,13 @@ app.post('/api/auth/login', async (req, res) => {
     }
   }
   // QA2 #8: the person's venue was deleted and no other venue is left.
-  const loginMint = await issueSessionToken(freshCred, req, 'login', { recentAuth: loginRecentAuth });
-  if (sendMintFailure(res, loginMint, freshCred)) return;
+  const sessionRow = siteRow || freshCred;
+  const loginMint = await issueSessionToken(sessionRow, req, 'login', { recentAuth: loginRecentAuth });
+  if (sendMintFailure(res, loginMint, sessionRow)) return;
   const token = (loginMint as { token: string }).token;
   res.json({
     success: true,
-    user: getSelfUser(user),
+    user: getSelfUser(siteRow || user),
     token,
   });
 });
@@ -16527,6 +16760,10 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   // Always return success (don't reveal if email exists).
   // 10k (K3): a member pending a setup invite gets no reset code either.
   if (!user || (user as any).credentialPending === 'invite') {
+    return res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
+  }
+  // Domains PR A (2f): on a SITE host the membership must be the site agency's (same generic answer, nothing written).
+  if (siteRefusesAgency(req, (user as any).agencyId)) {
     return res.json({ success: true, message: 'If this email is registered, a reset code was sent.' });
   }
 
@@ -16571,7 +16808,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       // before the transaction; otherwise nothing is created, nothing is
       // pushed, the counted rate limits stay, and the answer is the generic one.
       const freshCredF = credentialRowForEmailIn(freshUsersF, freshAgenciesF, normalizedEmail);
-      if (!freshCredF || freshCredF.id !== user.id) {
+      if (!freshCredF || freshCredF.id !== user.id || siteRefusesAgency(req, freshCredF.agencyId)) {
         return {
           doc: { ...freshDoc, passwordResetRateLimits: afterIp },
           result: { created: false },
@@ -16670,6 +16907,15 @@ app.post('/api/auth/verify-reset-code', async (req, res) => {
           doc: { ...freshDoc, passwordResets: freshResets.filter((r: any) => r.email !== normalizedEmail), passwordResetRateLimits: afterIpVerify },
           result: { notFound: true },
         };
+      }
+      // Domains PR A (2f): on a SITE host the request's membership must be the
+      // site agency's; else the "no request" answer and only the counter moves.
+      const vSite = siteOf(req);
+      if (vSite.kind === 'site') {
+        const vRow = credentialRowForEmailIn(vUsers, vAgencies, normalizedEmail);
+        if (!vRow || rowAgencyId(vRow) !== vSite.agencyId) {
+          return { doc: { ...freshDoc, passwordResetRateLimits: afterIpVerify }, result: { notFound: true } };
+        }
       }
       if (new Date(freshRequest.expiresAt).getTime() < nowMs) {
         return {
@@ -16780,6 +17026,10 @@ app.post('/api/auth/reset-password', async (req, res) => {
   if (typeof request.rowId === 'string' && request.rowId !== user.id) {
     return res.status(400).json({ error: 'Invalid or expired reset token.' });
   }
+  // Domains PR A (2f): on a SITE host the membership must be the site agency's (same answer, nothing written).
+  if (siteRefusesAgency(req, (user as any).agencyId)) {
+    return res.status(400).json({ error: 'Invalid or expired reset token.' });
+  }
 
   // Hash BEFORE the transaction (CPU-heavy); the hash is deterministic input.
   const newHash = await hashPassword(String(newPassword));
@@ -16804,7 +17054,8 @@ app.post('/api/auth/reset-password', async (req, res) => {
       const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
       if (agencyRecoveryRefusedFor(freshUsers, freshAgencies, normalizedEmail) ||
           credentialRowForEmailIn(freshUsers, freshAgencies, normalizedEmail)?.id !== user.id ||
-          (typeof freshRequest.rowId === 'string' && freshRequest.rowId !== user.id)) {
+          (typeof freshRequest.rowId === 'string' && freshRequest.rowId !== user.id) ||
+          siteRefusesAgency(req, freshUser.agencyId)) {
         return { conflict: 'Invalid or expired reset token.', conflictStatus: 400 };
       }
       const newUsers = freshUsers.map((u) => (u.id === user.id ? { ...u, password: newHash } : u));
@@ -17361,7 +17612,10 @@ app.get('/api/auth/memberships', (req, res) => {
   res.set('Cache-Control', 'no-store');
   const who = chooserPersonOf(req);
   if (!who) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
-  res.json({ memberships: membershipsOfPerson(who.personId).map((m) => ({ ...m, isCurrent: m.membershipId === who.currentRowId })) });
+  // Domains PR A (2f): a SITE host lists only the site agency's memberships.
+  const mSite = siteOf(req);
+  const listed = membershipsOfPerson(who.personId).filter((m) => mSite.kind !== 'site' || m.agencyId === mSite.agencyId);
+  res.json({ memberships: listed.map((m) => ({ ...m, isCurrent: m.membershipId === who.currentRowId })) });
 });
 
 app.post('/api/auth/activate', async (req, res) => {
@@ -17373,6 +17627,9 @@ app.post('/api/auth/activate', async (req, res) => {
   const row = membershipId ? (users as any[]).find((u) => u && u.id === membershipId) : undefined;
   const agencyOk = !!row && typeof row.agencyId === 'string' && (agencies as any[]).some((a) => a && a.id === row.agencyId);
   if (!row || row.personId !== who.personId || !agencyOk) return res.status(403).json({ error: MEMBERSHIP_UNAVAILABLE_TEXT });
+  // Domains PR A (2f): a SITE host activates only a membership in the site's agency.
+  const aSite = siteOf(req);
+  if (aSite.kind === 'site' && rowAgencyId(row) !== aSite.agencyId) return sendWrongSite(res);
   // 11b-s (plan 11.2): a choice made after a passkey sign-in is a passkey
   // session (it ends when that passkey is removed); the passkey must still be
   // there now. Never a recent proof (plan 9.5: not copied by choose).
@@ -17409,6 +17666,12 @@ const passkeyOptionsLimiter = createWindowLimiter({ max: 30, windowMs: 15 * 60 *
 const passkeyVerifyLimiter = createWindowLimiter({ max: 30, windowMs: 15 * 60 * 1000, maxKeys: 10000 });
 const recentAuthLimiter = createWindowLimiter({ max: 10, windowMs: 15 * 60 * 1000, maxKeys: 10000 });
 
+/** Domains PR A (2d): the list entry plus where the passkey works (kind + the site agency's name; never an id or a host guess). */
+function publicPasskeyWithAddress(p: PasskeyEntry): ReturnType<typeof publicPasskey> & { address: { kind: string; agencyName?: string } } {
+  const k = passkeyAddressKind(p.rpId, APP_SITES_CONFIG.sites, { local: SITES_LOCAL });
+  const a = k.kind === 'site' ? (agencies as any[]).find((x) => x && x.id === k.agencyId) : null;
+  return { ...publicPasskey(p), address: k.kind === 'site' && a ? { kind: 'site', agencyName: String(a.name || '') } : { kind: k.kind === 'site' ? 'other' : k.kind } };
+}
 function passkeyAudit(event: string, personId: string, credentialId: string | null, extra = ''): void {
   // Never a key, a counter or the credential id itself: a short hash names the passkey.
   const tag = credentialId ? credentialIdHash(credentialId).slice(0, 10) : '-';
@@ -17501,7 +17764,7 @@ app.get('/api/passkeys', async (req, res) => {
   if (!who) return res.status(403).json(PASSKEY_UNAVAILABLE);
   let pc: PersonCredentialsDoc | null;
   try { pc = await personCredentialsRead(who.personId); } catch (err) { return storeDown(res, err, 'list'); }
-  const list = pc ? pc.passkeys.map(publicPasskey) : [];
+  const list = pc ? pc.passkeys.map(publicPasskeyWithAddress) : [];
   res.json({ passkeys: list, canAdd: personMayEnroll(who.personId) && list.length < PASSKEYS_MAX });
 });
 
@@ -17620,6 +17883,8 @@ app.post('/api/passkeys/register/verify', async (req, res) => {
         transports: Array.isArray(info.credential.transports) ? info.credential.transports.filter((t: unknown) => typeof t === 'string').slice(0, 8) : [],
         aaguid: typeof info.aaguid === 'string' ? info.aaguid : '',
         name, createdAt: nowIso, lastUsedAt: null, createdBySid: who.sid,
+        // Domains PR A (2d): the RP ID this passkey was made for, from the server's own challenge (never the request).
+        rpId: ch.rpId,
       };
       const nextPc: PersonCredentialsDoc = { ...pc, passkeys: [...pc.passkeys, entry], updatedAt: nowIso };
       consume();
@@ -17639,7 +17904,7 @@ app.post('/api/passkeys/register/verify', async (req, res) => {
   }
   personCredCache.set(who.personId, { doc: out.pc, readAtMs: Date.now() });
   passkeyAudit('added', who.personId, credentialId, `row ${who.row.id} device "${out.ok.name}"`);
-  res.status(201).json({ ok: true, passkey: publicPasskey(out.ok) });
+  res.status(201).json({ ok: true, passkey: publicPasskeyWithAddress(out.ok) });
 });
 
 app.patch('/api/passkeys/:id', async (req, res) => {
@@ -17664,7 +17929,7 @@ app.patch('/api/passkeys/:id', async (req, res) => {
   }
   if (!out) return res.status(404).json(PASSKEY_NOT_FOUND);
   personCredCache.set(who.personId, { doc: out, readAtMs: Date.now() });
-  res.json({ ok: true, passkey: publicPasskey(findPasskey(out, id)!) });
+  res.json({ ok: true, passkey: publicPasskeyWithAddress(findPasskey(out, id)!) });
 });
 
 /**
@@ -17759,7 +18024,10 @@ app.post('/api/auth/passkey/verify', async (req, res) => {
     | { fail: string; personId?: string }
     | { single: true; row: any; doc: SessionDoc; pc: PersonCredentialsDoc }
     | { choose: true; cred: any; pc: PersonCredentialsDoc }
-    | { ineligible: true; row: any; pc: PersonCredentialsDoc };
+    | { ineligible: true; row: any; pc: PersonCredentialsDoc }
+    | { wrongSite: true; personId: string };
+  // Domains PR A (2f): on a SITE host the person's site-agency membership is selected INSIDE the transaction.
+  const pkSite = siteOf(req);
   let out: R;
   try {
     out = await pkTransaction<R>(async (tx) => {
@@ -17801,6 +18069,23 @@ app.post('/api/auth/passkey/verify', async (req, res) => {
       const cred: any = credentialRowOfPerson(users as any[], personId);
       if (!cred || cred.credentialPending || !cred.password) { consume(); return { fail: 'no-credential', personId }; }
       const multi = isMultiPersonRow(users, cred);
+      if (pkSite.kind === 'site') {
+        // Not the site's agency: the challenge is consumed, nothing else is written (no counter, no session).
+        const siteRow = siteMembershipRow(cred, pkSite.agencyId);
+        if (!siteRow) { consume(); return { wrongSite: true, personId }; }
+        if (multi) {
+          consume();
+          tx.set('personCredentials', personId, nextPc);
+          if (taken) throw new Error('session id already exists');
+          const sdoc = newUserSessionDoc(siteRow, req, 'passkey', {
+            authMethod: { type: 'passkey', personId, credentialId },
+            recentAuth: { atMs: nowMs, epoch: pc.recentAuthEpoch },
+          });
+          const sstored: SessionDoc = { ...sdoc, sid: sidCandidate };
+          tx.set('sessions', sidCandidate, sstored);
+          return { single: true, row: siteRow, doc: sstored, pc: nextPc };
+        }
+      }
       const active = membershipsOfPerson(personId).length > 0;
       // A paused or venue-removed membership: the same 403 a password sign-in gives (nothing is signed in).
       if (multi ? !active : sessionIneligibleCode(cred)) { consume(); tx.set('personCredentials', personId, nextPc); return { ineligible: true, row: cred, pc: nextPc }; }
@@ -17823,6 +18108,10 @@ app.post('/api/auth/passkey/verify', async (req, res) => {
   if ('fail' in out) {
     if (out.personId && out.fail !== 'assertion') passkeyAudit(`login-refused-${out.fail}`, out.personId, credentialId);
     return res.status(401).json(PASSKEY_LOGIN_FAILED);
+  }
+  if ('wrongSite' in out) {
+    passkeyAudit('login-refused-wrong-site', out.personId, credentialId);
+    return sendWrongSite(res);
   }
   const pid = ('cred' in out ? out.cred : out.row).personId as string;
   personCredCache.set(pid, { doc: out.pc, readAtMs: Date.now() });
@@ -17942,6 +18231,14 @@ app.post('/api/auth/recover', async (req, res) => {
           recoveryWriteById: { [freshCred.id]: { failures: recordRecoveryFailure(freshCred.recoveryFailures, nowMs) } },
         };
       }
+      // Domains PR A (2f): the code is proven; on a SITE host the person needs an
+      // eligible site-agency membership BEFORE the code is burned or anything
+      // changes. None: nothing is written, the generic answer plus a hint.
+      const rSite = siteOf(req);
+      if (rSite.kind === 'site' &&
+          !siteMembershipRowIn(freshUsers, freshAgencies, docList(freshDoc, 'venues'), docList(freshDoc, 'deletedVenueIds'), freshCred, rSite.agencyId)) {
+        return { doc: freshDoc, result: { ok: false, write: false, wrongSite: true } };
+      }
       const personRows = isMultiPersonRow(freshUsers, freshCred) ? personRowsIn(freshUsers, freshCred) : [freshCred];
       const bumpIds = personRows.filter((u: any) => typeof u.personId === 'string' && u.personId).map((u: any) => u.id);
       const freshResets: any[] = Array.isArray(freshDoc.passwordResets) ? freshDoc.passwordResets : [];
@@ -17964,16 +18261,21 @@ app.post('/api/auth/recover', async (req, res) => {
   );
   if (!committed) return;
   const result: any = (committed as any).result || {};
+  if (result.wrongSite === true) return res.status(401).json({ error: RECOVER_FAILED_TEXT, code: 'WRONG_SITE', sharedOrigin: SHARED_ORIGIN });
   if (!result.ok) return res.status(401).json({ error: RECOVER_FAILED_TEXT });
   const bumped: string[] = Array.isArray(result.bumpIds) ? result.bumpIds : [];
   for (const id of bumped) revokeUserPhoneSockets(id);
   const fresh = users.find((u) => u.id === cred.id) || cred;
   log.info(`[recovery] recovered user ${cred.id} (sessions revoked: ${bumped.length})`);
   // QA2 #8: the recovery stands; a membership whose venue was deleted gets no session.
-  const recoverMint = await issueSessionToken(fresh, req, 'recover');
-  if (sendMintFailure(res, recoverMint, fresh, true)) return;
+  // Domains PR A (2f): on a SITE host the session is for the site-agency membership.
+  const recSite = siteOf(req);
+  const recRow = recSite.kind === 'site' ? siteMembershipRow(fresh, recSite.agencyId) : fresh;
+  if (!recRow) return sendWrongSite(res);
+  const recoverMint = await issueSessionToken(recRow, req, 'recover');
+  if (sendMintFailure(res, recoverMint, recRow, true)) return;
   const recoveredToken = (recoverMint as { token: string }).token;
-  res.json({ success: true, user: getSelfUser(fresh), token: recoveredToken });
+  res.json({ success: true, user: getSelfUser(recRow), token: recoveredToken });
 });
 
 // ==========================================
@@ -18660,6 +18962,9 @@ async function startServer() {
   // scope reconcile, SCOPE_PING and the expiry sweep (the sweep itself skips
   // maintenance, FORCE_LOCAL_MODE and staged revisions).
   startGrantTimers();
+
+  // Domains PR A (2a): one line per APP_SITES entry (none when unset).
+  logAppSitesAtStart();
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[WorkPulse Server] Listening on http://0.0.0.0:${PORT} with WebSockets enabled at /ws`);
