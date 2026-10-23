@@ -19,6 +19,8 @@ import { getRoleLabel, canUserAssignTasks, canUserFillTasks, DEFAULT_ROLE_PERMIS
 import { ConfirmModal } from './ConfirmModal';
 import { KioskCodeDialog } from './KioskCodeDialog';
 import { VenueAccessSheet } from './VenueAccessSheet';
+import { PoolPanel, PoolMoveDialog, usePool } from './PoolPanel';
+import { POOL_TEXT, isFromPool, poolCount, poolOnlyIds } from '../lib/pool';
 import { END_DATE_TEXT, rosterUntilLines } from '../lib/venueEndDates';
 import { normalizePhone } from '../lib/kioskCodeShare';
 import { InviteLinkCard } from './InviteLinkCard';
@@ -124,8 +126,15 @@ export const TeamModal: React.FC<TeamModalProps> = ({
     void loadResetRequests().then((list) => { if (active) setResetRequests(list); });
     return () => { active = false; };
   }, [isOpen, mayAskResetRequests, currentUser?.id]);
+  // 12b-c: the Pool tab (admins and coordinators; owners open the Pool from their menu).
+  const showPoolTab = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
+  const [tab, setTab] = useState<'team' | 'pool'>('team');
+  const [moveTarget, setMoveTarget] = useState<UserType | null>(null);
+  const pool = usePool(isOpen && showPoolTab, currentUser?.role !== 'admin', users);
   useEffect(() => {
     if (!isOpen) {
+      setTab('team');
+      setMoveTarget(null);
       setInviteResult(null);
       setSendReview(null);
       setSentLink(null);
@@ -369,7 +378,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           !!currentUser?.venueId &&
           (u as any).venueId === currentUser?.venueId
       )
-    : users;
+    : (() => {
+        // 12b-c: Pool members with no venue right now live in the Pool tab (admin view).
+        const poolOnly = currentUser?.role === 'admin' ? poolOnlyIds(pool.data) : new Set<string>();
+        return poolOnly.size ? users.filter((u) => !poolOnly.has(u.id)) : users;
+      })();
 
   const filteredUsers = venueScopedUsers.filter((u) => {
     if (!searchQuery) return true;
@@ -411,7 +424,31 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          
+          {showPoolTab && (
+            <div role="tablist" aria-label="Team or Pool" className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-sunken border border-line">
+              {(['team', 'pool'] as const).map((t) => (
+                <button key={t} type="button" role="tab" aria-selected={tab === t} data-team-tab={t}
+                  onClick={() => setTab(t)}
+                  className={`min-h-11 rounded-lg text-base font-semibold cursor-pointer pressable ${tab === t ? 'bg-surface text-ink e1 border border-line' : 'text-ink-soft'}`}>
+                  {t === 'team' ? POOL_TEXT.teamTab : POOL_TEXT.poolTab(poolCount(pool.data))}
+                </button>
+              ))}
+            </div>
+          )}
+          {showPoolTab && tab === 'pool' && venueNotice && <p role="status" data-venue-notice className="text-sm text-ink-soft">{venueNotice}</p>}
+          {showPoolTab && tab === 'pool' && currentUser ? (
+            <PoolPanel currentUser={currentUser} venues={venues} pool={pool}
+              onAdminTick={currentUser.role === 'admin' ? (m) => {
+                // The roster row when this person is in it, else the Pool's own admin view of them
+                // (no main venue: the sheet shows no locked main row).
+                const u = users.find((x) => x.id === m.id);
+                const record = u && Array.isArray(u.venueIds)
+                  ? { ...u, venueIds: [...u.venueIds] }
+                  : { id: m.id, name: m.name, email: m.email || '', role: m.role, venueId: '', venueIds: [...(m.venueIds || [])], ...(m.venueUntil ? { venueUntil: m.venueUntil } : {}), ...(Number.isInteger(m.venueRevision) ? { venueRevision: m.venueRevision } : {}) } as unknown as UserType & { venueIds: string[] };
+                setVenueNotice(null); setVenueTarget(record);
+              } : undefined}
+              onCode={currentUser.role === 'admin' && onUpdateUser ? (id) => setCodeTargetId(id) : undefined} />
+          ) : (<>
 
           {/* Section 1: Add New Member Form (admin only) */}
           {!isCoordinatorView && (
@@ -656,6 +693,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                               You
                             </span>
                           )}
+                          {isAdminView && isFromPool(user, pool.data) && (
+                            <span data-from-pool className="text-xs px-2 py-0.5 rounded-md bg-gold-wash text-gold-ink font-semibold border border-gold/30">
+                              {POOL_TEXT.fromPool}
+                            </span>
+                          )}
                           {isAdminView && (() => {
                             const chip = sentIds.includes(user.id) ? 'Invite sent' : inviteChip(user);
                             return chip ? (
@@ -739,6 +781,15 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                             </span>
                           );
                         })()}
+                      </button>
+                    )}
+                    {/* 12b-c: admin moves a mashgiach / worker to the Pool (open work shown first). */}
+                    {currentUser?.role === 'admin' && (user.role === 'mashgiach' || user.role === 'worker') && !isCurrent
+                      && Array.isArray(user.venueIds) && user.venueIds.length > 0 && Number.isInteger(user.venueRevision) && (
+                      <button type="button" data-move-to-pool
+                        onClick={() => setMoveTarget(user)}
+                        className="min-h-11 px-3 py-2 rounded-xl bg-surface border border-line-control text-sm text-ink hover:bg-sunken pressable cursor-pointer">
+                        {POOL_TEXT.moveToPool}
                       </button>
                     )}
 
@@ -915,6 +966,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
               })}
             </div>
           </div>
+          </>)}
 
         </div>
 
@@ -937,7 +989,13 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           agencyTimeZone={currentUser?.agencyTimeZone}
           latest={(() => { const u = users.find((x) => x.id === venueTarget.id); return u && Array.isArray(u.venueIds) ? { ...u, venueIds: [...u.venueIds] } : null; })()}
           onClose={() => setVenueTarget(null)}
-          onSaved={() => { setVenueNotice('Venues updated'); setVenueTarget(null); }} />
+          onSaved={() => { setVenueNotice('Venues updated'); setVenueTarget(null); void pool.reload(); }} />
+      )}
+
+      {moveTarget && currentUser?.role === 'admin' && (
+        <PoolMoveDialog mode="move" person={moveTarget} venues={venues}
+          onClose={() => setMoveTarget(null)}
+          onDone={(msg) => { setVenueNotice(msg); setMoveTarget(null); void pool.reload(); }} />
       )}
 
       {/* K1: kiosk code sheet (set / reset / remove, phone, one-time display) */}

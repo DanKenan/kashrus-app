@@ -76,6 +76,8 @@ interface HeaderProps {
   /** 5a: the Updates bell, rendered beside the venue pill (App owns it). */
   updatesBell?: React.ReactNode;
   onOpenTeamModal: () => void;
+  /** 12b-c: owners only (admins/coordinators reach the Pool from Team). */
+  onOpenPool?: () => void;
   onOpenKioskDevices?: () => void;
   onResetDailyBoard: () => void;
   isRealtimeConnected: boolean;
@@ -115,6 +117,7 @@ export const Header: React.FC<HeaderProps> = ({
   eventsCount = 0,
   updatesBell,
   onOpenTeamModal,
+  onOpenPool,
   onOpenKioskDevices,
   onResetDailyBoard,
   isRealtimeConnected,
@@ -477,6 +480,19 @@ export const Header: React.FC<HeaderProps> = ({
                       )}
                     </div>
 
+                    {onOpenPool && (
+                      <button
+                        type="button"
+                        data-open-pool
+                        onClick={() => { setUserMenuOpen(false); onOpenPool(); }}
+                        aria-haspopup="dialog"
+                        className="w-full mb-2 min-h-11 flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl bg-sunken border border-line-control text-ink hover:bg-surface pressable cursor-pointer"
+                      >
+                        <Users className="w-4 h-4 shrink-0 text-gold-deep" />
+                        <span>Mashgiach Pool</span>
+                      </button>
+                    )}
+
                     {onOpenAgencySwitcher && (
                       <button
                         type="button"
@@ -712,6 +728,19 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <UserIcon className="w-4 h-4" />
               <span>Sign In to Your Account</span>
+            </button>
+          )}
+
+          {currentUser && onOpenPool && (
+            <button
+              type="button"
+              data-open-pool-mobile
+              onClick={() => { setMobileMenuOpen(false); onOpenPool(); }}
+              aria-haspopup="dialog"
+              className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl bg-sunken border border-line-control text-ink pressable cursor-pointer"
+            >
+              <Users className="w-4 h-4 shrink-0 text-gold-deep" />
+              <span>Mashgiach Pool</span>
             </button>
           )}
 
