@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { noticeSiteRefusal } from '../lib/site';
 import { AlertCircle, Building2, KeyRound, Lock, LogIn, Moon, Sun, UserPlus } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import { User as UserType } from '../types';
@@ -59,6 +60,7 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
         const res = await fetch('/api/invites/preview', { headers: { 'X-Invite-Token': token }, cache: 'no-store' });
         const data = await readJson(res);
         if (!active) return;
+        if (noticeSiteRefusal(res.status, data)) return;
         if (res.status === 404) { setView({ kind: 'invalid' }); return; }
         if (!res.ok) { setView({ kind: 'unavailable', message: res.status === 429 && data.error ? String(data.error) : GENERIC_ERROR }); return; }
         setPreview({ agencyName: String(data.agencyName || ''), role: String(data.role || ''), name: String(data.name || '') });
@@ -111,6 +113,7 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
       });
       const data = await readJson(res);
       if (res.ok) { finish(data); return; }
+      if (noticeSiteRefusal(res.status, data)) return;
       if (res.status === 404) { setView({ kind: 'invalid' }); return; }
       if (res.status === 403 && data.code === 'INVITE_ACCOUNT_NOT_LINKABLE') {
         setView({ kind: 'not-linkable', message: String(data.error || "This account can't be connected to another agency yet.") });
@@ -141,6 +144,7 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
         onLoginSuccess(data.user);
         return;
       }
+      if (noticeSiteRefusal(res.status, data)) return;
       setError(typeof data.error === 'string' && data.error ? data.error : 'Please sign in to continue.');
     } catch {
       setError(NETWORK_ERROR);

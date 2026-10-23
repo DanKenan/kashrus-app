@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
+import { SITE_TEXT } from '../lib/site';
 import { X } from 'lucide-react';
 import { apiFetch, apiWrite, versionFromResponse } from '../lib/api';
 import { COMMON_TIME_ZONES, DEFAULT_TIME_ZONE, timeZoneLabel } from '../lib/workday';
@@ -25,6 +26,8 @@ export function AgencySettingsSheet(props: AgencySettingsSheetProps) {
 export function AgencySettingsForm({ onClose, onSaved }: AgencySettingsSheetProps) {
   const [baseline, setBaseline] = useState<number | undefined>();
   const [loaded, setLoaded] = useState<AgencySettingsSaved | null>(null);
+  // Domains PR B (plan 2c): the agency's id, read-only, so Don can confirm each address's agency.
+  const [agencyId, setAgencyId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [zone, setZone] = useState(DEFAULT_TIME_ZONE);
@@ -55,6 +58,7 @@ export function AgencySettingsForm({ onClose, onSaved }: AgencySettingsSheetProp
           contactPhone: typeof a.contactPhone === 'string' ? a.contactPhone : '',
           timeZone: typeof a.timeZone === 'string' && a.timeZone ? a.timeZone : DEFAULT_TIME_ZONE,
         };
+        setAgencyId(typeof a.id === 'string' && a.id ? a.id : null);
         setLoaded(now); setName(now.name); setPhone(now.contactPhone); setZone(now.timeZone);
         setBaseline(version);
       } catch (e) { if (active) setError(e instanceof Error ? e.message : "Couldn't load the agency."); }
@@ -133,6 +137,11 @@ export function AgencySettingsForm({ onClose, onSaved }: AgencySettingsSheetProp
         <h2 id={titleId} className="text-base font-bold">Agency settings</h2>
         <button type="button" aria-label="Close" onClick={onClose} className={`${buttonClass} w-11 shrink-0 px-0 inline-flex items-center justify-center`}><X className="h-5 w-5" /></button>
       </div>
+      {agencyId && (
+        <p data-agency-id className="mb-4 text-sm text-ink-soft break-all">
+          {SITE_TEXT.agencyId}: <span className="font-mono text-ink select-all">{agencyId}</span>
+        </p>
+      )}
       <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <div>
           <label htmlFor={nameId} className="mb-1 block text-sm text-ink-soft">Agency name</label>

@@ -1,5 +1,6 @@
 import { ServerBroadcastMessage } from '../types';
-import { getSessionToken, getKioskDeviceSecret, sessionCredentialKey, waitForSignInChangesToSettle, confirmSessionAfterSocketRefusal } from './api';
+import { apiFetch, getSessionToken, getKioskDeviceSecret, sessionCredentialKey, waitForSignInChangesToSettle, confirmSessionAfterSocketRefusal } from './api';
+import { currentSite, siteRefusalFrom } from './site';
 
 /**
  * Item 11 client part 1: wait before reconnect attempt N (0-based). The first
@@ -110,6 +111,15 @@ class RealtimeSocket {
           void this.afterSessionRefused(token, generation);
           return;
         }
+        // Domains PR B (plan 2h): on an address the server has named as an
+        // agency's or unknown, a 4403 may mean "not on this address": ask over
+        // HTTP (apiFetch shows the screen and clears the sign-in on WRONG_SITE /
+        // SITE_NOT_SET_UP). Shared, or not known yet: today's reconnect.
+        const siteKind = currentSite()?.site;
+        if (event && (event as CloseEvent).code === 4403 && (siteKind === 'agency' || siteKind === 'unknown')) {
+          void this.afterSiteRefused(generation);
+          return;
+        }
         this.scheduleReconnect();
       };
 
@@ -121,6 +131,16 @@ class RealtimeSocket {
       console.warn('Failed to initiate WebSocket connection:', err);
       this.scheduleReconnect();
     }
+  }
+
+  private async afterSiteRefused(generation: number) {
+    let refused = false;
+    try {
+      const res = await apiFetch('/api/auth/me');
+      if (res.status === 403 || res.status === 401) refused = !!siteRefusalFrom(res.status, await res.clone().json().catch(() => null));
+    } catch { /* offline: reconnect later */ }
+    if (refused || generation !== this.generation || this.socket) return;
+    this.scheduleReconnect();
   }
 
   private scheduleReconnect() {

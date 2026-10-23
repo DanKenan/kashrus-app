@@ -83,7 +83,26 @@ export type StillValid = () => boolean;
 const stale = () => new PasskeyError('stale', '');
 const check = (stillValid?: StillValid) => { if (stillValid && !stillValid()) throw stale(); };
 
-export interface PasskeyRow { id: string; name: string; createdAt: string; lastUsedAt: string | null }
+/** Domains PR B (plan 2d): which address a passkey belongs to, as the server labels it (no host is guessed here). */
+export type PasskeyAddress = { kind: 'shared' } | { kind: 'site'; agencyName: string } | { kind: 'earlier' } | { kind: 'other' };
+export interface PasskeyRow { id: string; name: string; createdAt: string; lastUsedAt: string | null; address?: PasskeyAddress }
+export function passkeyAddressFrom(x: unknown): PasskeyAddress | undefined {
+  if (!x || typeof x !== 'object') return undefined;
+  const k = (x as any).kind;
+  if (k === 'shared' || k === 'earlier' || k === 'other') return { kind: k };
+  if (k === 'site') {
+    const n = (x as any).agencyName;
+    return typeof n === 'string' && n.trim() ? { kind: 'site', agencyName: n.trim().slice(0, 200) } : { kind: 'other' };
+  }
+  return undefined;
+}
+export function passkeyAddressLabel(a: PasskeyAddress | undefined): string | null {
+  if (!a) return null;
+  if (a.kind === 'shared') return 'Shutfey address';
+  if (a.kind === 'site') return `${a.agencyName} address`;
+  if (a.kind === 'earlier') return 'Earlier Shutfey address';
+  return 'Another address';
+}
 export interface PasskeyList { passkeys: PasskeyRow[]; canAdd: boolean }
 
 export type PasskeyErrorKind = 'stale' | 'cancelled' | 'already' | 'unavailable' | 'limit' | 'failed' | 'needPassword' | 'wrongPassword' | 'offline' | 'unsupported';
@@ -196,7 +215,7 @@ export async function listPasskeys(): Promise<PasskeyList> {
   const { res, data } = await call('/api/passkeys');
   if (!res.ok) throw errorFromAnswer(res.status, data, netError());
   const rows = Array.isArray(data?.passkeys) ? data.passkeys.filter((p: any) => p && typeof p.id === 'string') : [];
-  return { passkeys: rows.map((p: any) => ({ id: p.id, name: typeof p.name === 'string' && p.name ? p.name : 'Passkey', createdAt: p.createdAt ?? '', lastUsedAt: p.lastUsedAt ?? null })), canAdd: data?.canAdd === true };
+  return { passkeys: rows.map((p: any) => ({ id: p.id, name: typeof p.name === 'string' && p.name ? p.name : 'Passkey', createdAt: p.createdAt ?? '', lastUsedAt: p.lastUsedAt ?? null, address: passkeyAddressFrom(p.address) })), canAdd: data?.canAdd === true };
 }
 
 /** POST /api/auth/recent-auth: the password again, for adding after 5 min or removing. */

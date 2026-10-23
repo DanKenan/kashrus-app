@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { X, ScanFace, Pencil, Trash2, Plus, Info, Lock } from 'lucide-react';
 import { ErrorBox } from './PasskeyOffer';
 import {
-  addPasskey, cancelPasskeyPrompt, confirmPassword, currentAccountId, describeWhen, listPasskeys, platformPasskeyAvailable, removePasskey, renamePasskey,
+  addPasskey, passkeyAddressLabel, cancelPasskeyPrompt, confirmPassword, currentAccountId, describeWhen, listPasskeys, platformPasskeyAvailable, removePasskey, renamePasskey,
   PasskeyError, PasskeyList, PasskeyRow, PASSKEY_TEXT as T,
 } from '../lib/passkeys';
 
@@ -131,6 +131,7 @@ export const PasskeysModal: React.FC<{ isOpen: boolean; userId: string; onClose:
                       <ScanFace className="w-5 h-5 text-gold-deep shrink-0" />
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-semibold text-ink truncate">{p.name}</p>
+                        {passkeyAddressLabel(p.address) && <p data-passkey-address={p.address?.kind} className="text-xs text-ink-soft truncate">{passkeyAddressLabel(p.address)}</p>}
                         <p className="text-[11px] text-ink-faint">{T.added} {describeWhen(p.createdAt)} · {T.lastUsed} {describeWhen(p.lastUsedAt)}</p>
                       </div>
                       <button onClick={() => { setError(null); setEditing({ id: p.id, name: p.name }); }} className="w-11 h-11 inline-flex items-center justify-center rounded-lg text-ink-soft hover:bg-surface cursor-pointer" aria-label={T.rename(p.name)}><Pencil className="w-4 h-4" /></button>

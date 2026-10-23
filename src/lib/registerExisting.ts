@@ -1,3 +1,4 @@
+import { noticeSiteRefusal } from './site';
 // 10M part 1: add a new agency to an account the person already has.
 // This is a PUBLIC credential check (the sign-up page): it never sends the stored
 // session token and never goes through apiFetch, so a wrong password (401) shows
@@ -28,5 +29,7 @@ export async function registerIntoExistingAccount(body: RegisterExistingBody): P
   });
   let data: any = null;
   try { data = await res.json(); } catch { data = null; }
+  // Domains PR B: refused on this address (registration is for the Shutfey address) -> the screen.
+  noticeSiteRefusal(res.status, data);
   return { ok: res.ok, status: res.status, data: data || {} };
 }

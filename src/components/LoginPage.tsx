@@ -27,6 +27,8 @@ import { PASSKEY_TEXT, PasskeyError, cancelPasskeyPrompt, clearPasswordSignInMar
 import { signInErrorText } from '../lib/venueRemoved';
 import { activateMembership, cleanMemberships, isChooseAnswer, Membership } from '../lib/memberships';
 import { getRoleLabel } from '../lib/permissions';
+import { type SiteAgency } from '../lib/site';
+import { SiteSignInHeader } from './SiteRefusedScreen';
 
 interface LoginPageProps {
   onLoginSuccess: (user: UserType) => void;
@@ -36,6 +38,8 @@ interface LoginPageProps {
   initialMode?: 'login' | 'signup';
   /** Return to the public home page. */
   onBack?: () => void;
+  /** Domains PR B: this page is an agency's own address (from /api/site): its brand, sign-in only. */
+  site?: SiteAgency | null;
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({
@@ -44,8 +48,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   onToggleDarkMode,
   initialMode,
   onBack,
+  site = null,
 }) => {
-  const [authMode, setAuthMode] = useState<'login' | 'signup'>(initialMode || 'login');
+  const branded = !!site;
+  // Domains PR B: an agency address has no agency registration (the server refuses it there too).
+  const [authModeState, setAuthMode] = useState<'login' | 'signup'>(initialMode || 'login');
+  const authMode: 'login' | 'signup' = branded ? 'login' : authModeState;
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -233,15 +241,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       {/* Top Bar with Brand & Theme Toggle */}
       <header className="relative z-10 w-full px-4 sm:px-6 py-4 sm:py-5 flex items-center justify-between max-w-7xl mx-auto">
         <div className="flex items-center gap-3">
-          {onBack && <LandingBackButton onBack={onBack} />}
-          <ShutfeyLogo size="sm" showSubtitle={true} />
+          {onBack && !branded && <LandingBackButton onBack={onBack} />}
+          {!branded && <ShutfeyLogo size="sm" showSubtitle={true} />}
         </div>
         
         <div className="flex items-center gap-2 sm:gap-3">
-          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface/80 border border-line text-[11px] font-medium text-ink-soft backdrop-blur-sm">
+          {!branded && <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-full bg-surface/80 border border-line text-[11px] font-medium text-ink-soft backdrop-blur-sm">
             <ShieldCheck className="w-3.5 h-3.5 text-gold-deep" />
             <span>Multi-Agency Kashrut Network</span>
-          </div>
+          </div>}
 
           <PWAInstallButton />
 
@@ -263,6 +271,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           {/* Card Frame */}
           <div className="bg-surface/95 backdrop-blur-md rounded-3xl p-6 sm:p-8 tactile-5 border border-line">
             
+            {/* Domains PR B: the agency's own address shows its logo (or name) and sign-in only. */}
+            {site ? (
+              <SiteSignInHeader agency={site} />
+            ) : (<>
             {/* Header / Brand Emblem */}
             <div className="text-center mb-5">
               <div className="flex justify-center mb-3">
@@ -313,6 +325,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 <span>Sign Up Kosher Agency</span>
               </button>
             </div>
+            </>)}
 
             {authMode === 'signup' ? (
               /* Agency Sign Up Flow */
@@ -531,7 +544,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   Forgot your password?
                 </button>
 
-                {/* Callout to register new agency */}
+                {/* Callout to register new agency (Domains PR B: not on an agency's own address) */}
+                {!branded && <>
                 <div className="mt-5 p-3 rounded-2xl bg-gold-wash border border-gold/40 flex items-center justify-between text-xs">
                   <div className="text-left">
                     <p className="font-bold text-gold-ink text-[11px]">
@@ -563,6 +577,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     Each kosher agency and supervised venue operates in an isolated environment. Mashgichim and owners only access their authorized facilities.
                   </p>
                 </div>
+                </>}
 
               </>
             )}
@@ -572,7 +587,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           {/* Facility Highlights / System Status */}
           <div className="mt-5 space-y-3 px-2">
             <PWAInstallButton variant="banner" />
-            <div className="grid grid-cols-2 gap-3 text-[11px] text-ink-faint">
+            {!branded && <div className="grid grid-cols-2 gap-3 text-[11px] text-ink-faint">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="w-3.5 h-3.5 text-gold-deep shrink-0" />
                 <span>Real-time multi-tenant sync</span>
@@ -581,16 +596,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 <ShieldCheck className="w-3.5 h-3.5 text-gold-deep shrink-0" />
                 <span>Personalized Agency Portals</span>
               </div>
-            </div>
+            </div>}
           </div>
 
         </div>
       </main>
 
       {/* Footer */}
-      <footer className="relative z-10 w-full px-6 py-4 text-center text-xs text-ink-faint dark:text-ink-soft border-t border-line/60">
+      {!branded && <footer className="relative z-10 w-full px-6 py-4 text-center text-xs text-ink-faint dark:text-ink-soft border-t border-line/60">
         Shutfey Multi-Agency Kashrut Operations &copy; {new Date().getFullYear()} &bull; All Rights Reserved
-      </footer>
+      </footer>}
 
       {showForgot && (
         <ForgotPasswordModal

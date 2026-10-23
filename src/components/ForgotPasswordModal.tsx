@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { X, Mail, KeyRound, Lock, AlertTriangle } from 'lucide-react';
+import { noticeSiteRefusal } from '../lib/site';
 
 interface ForgotPasswordModalProps {
   onClose: () => void;
@@ -27,6 +28,8 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
         body: JSON.stringify({ email: email.trim() }),
       });
       const d = await res.json();
+      // Domains PR B: refused on this address -> the screen with the Shutfey-address button.
+      noticeSiteRefusal(res.status, d);
       if (res.ok) {
         setStep(2);
       } else {
@@ -50,6 +53,8 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
         body: JSON.stringify({ email: email.trim(), code: code.trim() }),
       });
       const d = await res.json();
+      // Domains PR B: refused on this address -> the screen with the Shutfey-address button.
+      noticeSiteRefusal(res.status, d);
       if (res.ok && d.resetToken) {
         setResetToken(d.resetToken);
         setStep(3);
@@ -81,6 +86,8 @@ export function ForgotPasswordModal({ onClose, onSuccess }: ForgotPasswordModalP
         body: JSON.stringify({ email: email.trim(), resetToken, newPassword }),
       });
       const d = await res.json();
+      // Domains PR B: refused on this address -> the screen with the Shutfey-address button.
+      noticeSiteRefusal(res.status, d);
       if (res.ok && d.success) {
         onSuccess(d.user, d.token);
         onClose();
