@@ -111,8 +111,16 @@ async function run({ kind = 'member', pick, chosen = true, answer }) {
 
 // ---- App wiring (source pins) ----
 const app = src('App.tsx');
-ok('app: onPasswordChosen wired on the invite page', /onPasswordChosen=\{\(\) => \{[\s\S]{0,700}leaveInvitePage\(\);[\s\S]{0,200}if \(currentUser\) \{ quietLogoutRef\.current = true; handleLogout\(\); \}[\s\S]{0,200}setAuthView\(initialAuthView\(\)\);[\s\S]{0,200}showToast\(PASSWORD_SET_TOAST, 9000\)/.test(app));
+ok('app: onPasswordChosen wired on the invite page', /onPasswordChosen=\{\(\) => \{[\s\S]{0,700}leaveInvitePage\(\);[\s\S]{0,200}if \(currentUser\) \{ quietLogoutRef\.current = true; handleLogout\(\); \}[\s\S]{0,200}setAuthView\('landing'\);[\s\S]{0,200}showToast\(PASSWORD_SET_TOAST, 9000\)/.test(app));
 ok('app: quiet sign-out keeps the full server sign-out but no toast and no sign-in form', /const handleLogout = \(\) => \{\s*clearLogoCache\(\);\s*const quiet = quietLogoutRef\.current;\s*quietLogoutRef\.current = false;/.test(app) && /if \(!quiet\) \{\s*if \(!kioskMode\) setAuthView\('auth'\);\s*if \(serverSignOut\) showToast\('Signed out successfully\.'\);\s*\}/.test(app) && /if \(serverSignOut\) void endServerSession\(getSessionToken\(\)\);/.test(app));
+// Installed home-screen app (RV2): the start view there is the sign-in form (initialAuthView -> 'auth'), but after a
+// password is chosen the person still lands on the welcome page (agency address) / home page (shared address).
+{
+  const pc = /onPasswordChosen=\{\(\) => \{([\s\S]*?)\n {8}\}\}/.exec(app);
+  ok('installed app: onPasswordChosen does not use initialAuthView (installed -> sign-in form)', !!pc && !pc[1].includes('initialAuthView') && pc[1].includes("setAuthView('landing')"));
+  ok('installed app: the welcome page renders for landing on an agency address with no installed-app check', /if \(authView === 'landing' && siteAgency\) \{/.test(app));
+  ok('installed app: the home page renders for landing on the shared address when homePageAllowed(), no installed-app check', /if \(authView === 'landing' && !siteAgency && homePageAllowed\(\)\) \{/.test(app));
+}
 ok('app: toast text', L.PASSWORD_SET_TOAST === 'Your password is set. Tap Sign in and use your email and new password.');
 ok('invite page: restyled sign-in look hooks', /className="shf-signin min-h-screen/.test(src('components/InvitePage.tsx')) && src('components/InvitePage.tsx').includes('shf-signin-card') && src('components/InvitePage.tsx').includes('shf-signin-top'));
 ok('invite page: no "See how the app works" button', !/how the app works/i.test(src('components/InvitePage.tsx')));

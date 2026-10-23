@@ -1823,11 +1823,12 @@ export default function App() {
         onPasswordChosen={() => {
           // Don, Oct 23: a new password signs nobody in. Whoever was signed in on this browser is signed out
           // (fully, quietly); the person lands on this address's welcome page (agency address) or home page
-          // (shared address), or the sign-in form in the installed app, and signs in there.
+          // (shared address; today's sign-in form only where the home page is not allowed), also in the
+          // installed app, and signs in there.
           leaveInvitePage();
           if (currentUser) { quietLogoutRef.current = true; handleLogout(); }
           setAuthInitialMode('login');
-          setAuthView(initialAuthView());
+          setAuthView('landing');
           try { window.scrollTo(0, 0); } catch { /* ignore */ }
           showToast(PASSWORD_SET_TOAST, 9000);
         }}
