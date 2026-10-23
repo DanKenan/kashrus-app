@@ -62,7 +62,7 @@ import { InvitePage } from './components/InvitePage';
 import { ResetPage } from './components/ResetPage';
 import { isResetPath, readResetToken } from './lib/resetLinks';
 import type { AddMemberInvite } from './components/TeamModal';
-import { fullInviteLink, isInvitePath, readInviteToken } from './lib/invites';
+import { PASSWORD_SET_TOAST, fullInviteLink, inviteLinkOrigin, isInvitePath, readInviteToken } from './lib/invites';
 import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage, Venue, KosherEvent } from './types';
 import { realtimeSocket } from './lib/socketClient';
 import { testFirestoreConnection } from './lib/firebaseClient';
@@ -641,9 +641,9 @@ export default function App() {
     showToast(END_DATE_TEXT.editorClosed);
   }, [isTaskModalOpen, isKiosk, taskEditorVenueId, currentUser?.role, JSON.stringify(currentUser?.myVenueIds ?? null)]);
 
-  const showToast = (msg: string) => {
+  const showToast = (msg: string, ms = 3500) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
+    setTimeout(() => setToastMessage(null), ms);
   };
 
   // 1. Fetch Venues whenever user changes
@@ -1358,7 +1358,7 @@ export default function App() {
     const data = result.data;
     // Item 10i: Phase C ON — the server made an invite (no user yet).
     if (data && data.pending === true) {
-      const link = fullInviteLink(data.link);
+      const link = fullInviteLink(data.link, inviteLinkOrigin(data.linkOrigin));
       if (!link) throw new Error('The invite was made, but its link is missing. Please try again.');
       return { link, name: String(data.invite?.name || userData.name), email: String(data.invite?.email || userData.email) };
     }
@@ -1678,8 +1678,13 @@ export default function App() {
   };
 
   // Sign Out Handler
+  // Set just before a call (invite page, a new password was just chosen): the same full sign-out of whoever
+  // was signed in on this browser, without the "Signed out" toast and without opening the sign-in form.
+  const quietLogoutRef = useRef(false);
   const handleLogout = () => {
     clearLogoCache();
+    const quiet = quietLogoutRef.current;
+    quietLogoutRef.current = false;
     // Domains PR B: a site refusal leaves the signed-in screens WITHOUT a server
     // sign-out and without the "Signed out" toast (the server already refused
     // that session on this address and apiFetch cleared it).
@@ -1709,8 +1714,10 @@ export default function App() {
     realtimeSocket.disconnect();
     // In kiosk mode the tablet returns to the PIN screen; anywhere else signing
     // out opens the sign-in form (not the home page).
-    if (!kioskMode) setAuthView('auth');
-    if (serverSignOut) showToast('Signed out successfully.');
+    if (!quiet) {
+      if (!kioskMode) setAuthView('auth');
+      if (serverSignOut) showToast('Signed out successfully.');
+    }
   };
 
   // 12a-c: a kiosk person's time at this venue ended (WS KIOSK_SESSION_ENDED or
@@ -1812,6 +1819,18 @@ export default function App() {
         onLeave={() => {
           leaveInvitePage();
           if (!currentUser) { setAuthInitialMode('login'); setAuthView('auth'); }
+        }}
+        onPasswordChosen={() => {
+          // Don, Oct 23: a new password signs nobody in. Whoever was signed in on this browser is signed out
+          // (fully, quietly); the person lands on this address's welcome page (agency address) or home page
+          // (shared address; today's sign-in form only where the home page is not allowed), also in the
+          // installed app, and signs in there.
+          leaveInvitePage();
+          if (currentUser) { quietLogoutRef.current = true; handleLogout(); }
+          setAuthInitialMode('login');
+          setAuthView('landing');
+          try { window.scrollTo(0, 0); } catch { /* ignore */ }
+          showToast(PASSWORD_SET_TOAST, 9000);
         }}
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode(!darkMode)}

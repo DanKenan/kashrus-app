@@ -12,7 +12,7 @@ import { apiFetch, apiWrite, versionFromResponse } from '../lib/api';
 import { certificationLabel, normalizeOption, validateOptions } from '../lib/certOptions';
 import { CertificationOptionsSheet } from './CertificationOptionsSheet';
 import { COMMON_TIME_ZONES, DEFAULT_TIME_ZONE, timeZoneLabel } from '../lib/workday';
-import { fullInviteLink } from '../lib/invites';
+import { fullInviteLink, inviteLinkOrigin } from '../lib/invites';
 import { InviteLinkCard } from './InviteLinkCard';
 
 interface CreateVenueModalProps {
@@ -172,7 +172,7 @@ export const CreateVenueModal: React.FC<CreateVenueModalProps> = ({
       }
 
       // Item 10i: with Phase C ON a new owner email comes back as an invite link.
-      const ownerLink = fullInviteLink(data.ownerInviteLink);
+      const ownerLink = fullInviteLink(data.ownerInviteLink, inviteLinkOrigin(data.ownerInviteLinkOrigin));
       if (ownerLink) {
         const who = data.ownerInvite && typeof data.ownerInvite === 'object' ? data.ownerInvite : {};
         setOwnerInvite({ link: ownerLink, forWhom: who.name && who.email ? `${who.name} (${who.email})` : String(who.email || ownerEmail.trim()) });

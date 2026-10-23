@@ -14,7 +14,7 @@ import { getRoleLabel } from '../lib/permissions';
 // Calls are plain fetch with no session header, so a signed-in browser's
 // session is never sent with the invite and never cleared by its answers.
 
-type Preview = { agencyName: string; role: string; name: string };
+type Preview = { agencyName: string; role: string; name: string; kind: string };
 type Membership = { membershipId: string; agencyId: string; agencyName: string; role: string };
 type View =
   | { kind: 'loading' }
@@ -40,13 +40,38 @@ interface InvitePageProps {
   onToggleDarkMode: () => void;
   /** Domains PR B follow-up: this page is an agency's own address (from /api/site): its logo or name on top. */
   site?: SiteAgency | null;
+  /**
+   * Don, Oct 23: after CHOOSING a password here (a new person, or the admin's
+   * "set your password" link) nobody is signed in; the app shows the welcome
+   * page of this address and they sign in there with the new password.
+   * Without it, today's behaviour (signed straight in).
+   */
+  onPasswordChosen?: () => void;
+}
+
+/**
+ * The accept answer carries a session for the person; on the choose-a-password
+ * paths it is never stored and is ended on the server at once. Bearer only and
+ * no cookies, so no other session this browser holds is touched. Best effort:
+ * as the token is never stored, this browser is not signed in either way.
+ */
+export function endAcceptSession(token: string): void {
+  try {
+    void fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'omit',
+      cache: 'no-store',
+      keepalive: true,
+    }).catch(() => undefined);
+  } catch { /* ignore */ }
 }
 
 async function readJson(res: Response): Promise<any> {
   try { return await res.json(); } catch { return {}; }
 }
 
-export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, onLeave, darkMode, onToggleDarkMode, site = null }) => {
+export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, onLeave, darkMode, onToggleDarkMode, site = null, onPasswordChosen }) => {
   const { logo: siteLogo, onLogoError } = useSiteBrandLogo(site);
   const [view, setView] = useState<View>({ kind: 'loading' });
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -68,7 +93,7 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
         if (noticeSiteRefusal(res.status, data)) return;
         if (res.status === 404) { setView({ kind: 'invalid' }); return; }
         if (!res.ok) { setView({ kind: 'unavailable', message: res.status === 429 && data.error ? String(data.error) : GENERIC_ERROR }); return; }
-        setPreview({ agencyName: String(data.agencyName || ''), role: String(data.role || ''), name: String(data.name || '') });
+        setPreview({ agencyName: String(data.agencyName || ''), role: String(data.role || ''), name: String(data.name || ''), kind: String(data.kind || '') });
         setView({ kind: 'choose' });
       } catch {
         if (active) setView({ kind: 'unavailable', message: NETWORK_ERROR });
@@ -84,7 +109,12 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
     setView({ kind });
   };
 
-  const finish = (data: any) => {
+  const finish = (data: any, mode: 'new' | 'existing') => {
+    if (onPasswordChosen && (mode === 'new' || preview?.kind === 'setup') && data && typeof data.token === 'string' && data.user && data.chooseMembership !== true) {
+      endAcceptSession(data.token);
+      onPasswordChosen();
+      return;
+    }
     if (data && data.chooseMembership === true && typeof data.token === 'string' && Array.isArray(data.memberships)) {
       setView({ kind: 'memberships', token: data.token, memberships: data.memberships });
       return;
@@ -117,7 +147,7 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
         body: JSON.stringify({ token, mode, password }),
       });
       const data = await readJson(res);
-      if (res.ok) { finish(data); return; }
+      if (res.ok) { finish(data, mode); return; }
       if (noticeSiteRefusal(res.status, data)) return;
       if (res.status === 404) { setView({ kind: 'invalid' }); return; }
       if (res.status === 403 && data.code === 'INVITE_ACCOUNT_NOT_LINKABLE') {
@@ -290,8 +320,11 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
   }
 
   return (
-    <div className="min-h-screen bg-paper text-ink flex flex-col">
-      <header className={`w-full px-4 sm:px-6 py-4 flex items-center ${site ? 'justify-end' : 'justify-between'} max-w-7xl mx-auto`}>
+    <div className="shf-signin min-h-screen text-ink flex flex-col relative overflow-hidden">
+      {/* The restyled sign-in's look (signin-look.css hooks; visual only). */}
+      <div className="shf-signin-glow-a absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[350px] blur-3xl pointer-events-none rounded-full" />
+      <div className="shf-signin-glow-b absolute bottom-0 right-0 w-[400px] h-[300px] blur-2xl pointer-events-none rounded-full" />
+      <header className={`shf-signin-top relative z-10 w-full px-4 sm:px-6 py-4 flex items-center ${site ? 'justify-end' : 'justify-between'} max-w-7xl mx-auto`}>
         {!site && <ShutfeyLogo size="sm" showSubtitle={true} />}
         <button
           type="button"
@@ -302,8 +335,8 @@ export const InvitePage: React.FC<InvitePageProps> = ({ token, onLoginSuccess, o
           {darkMode ? <Sun className="w-4 h-4" aria-hidden="true" /> : <Moon className="w-4 h-4" aria-hidden="true" />}
         </button>
       </header>
-      <main className="flex-1 flex items-start sm:items-center justify-center px-4 py-6">
-        <div data-invite-page className="w-full max-w-md bg-surface rounded-3xl p-6 sm:p-8 e3 border border-line">
+      <main className="relative z-10 flex-1 flex items-start sm:items-center justify-center px-4 py-6">
+        <div data-invite-page className="shf-signin-card w-full max-w-md bg-surface rounded-3xl p-6 sm:p-8 e3 border border-line">
           {site && <SiteInviteHeader agency={site} logo={siteLogo} onLogoError={onLogoError} />}
           {body}
         </div>

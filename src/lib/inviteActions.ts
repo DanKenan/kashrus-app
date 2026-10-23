@@ -5,7 +5,7 @@
 // Nothing here is stored; the link is shown once by the caller.
 
 import { apiFetch, apiWrite, versionFromResponse } from './api';
-import { fullInviteLink } from './invites';
+import { fullInviteLink, inviteLinkOrigin } from './invites';
 
 /** ok with the full link, or the words to show (message). */
 export interface SendInviteResult { ok: boolean; link?: string; expiresAt?: string | null; message?: string; conflict?: boolean }
@@ -31,7 +31,7 @@ export async function sendMemberInvite(userId: string, expectedVersion: number |
       expectedVersion,
     });
     if (r.ok) {
-      const link = fullInviteLink(r.data?.link);
+      const link = fullInviteLink(r.data?.link, inviteLinkOrigin(r.data?.linkOrigin));
       if (!link) return { ok: false, message: SEND_LINK_MISSING_TEXT };
       return { ok: true, link, expiresAt: typeof r.data?.invite?.expiresAt === 'string' ? r.data.invite.expiresAt : null };
     }
