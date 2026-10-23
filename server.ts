@@ -11592,7 +11592,7 @@ app.delete('/api/venues/:id', async (req, res) => {
         if (left.length === 0) orphanIds.push(u.id);
       }
       // Atomic cascade: venue + its tasks + its history all removed together.
-      return {
+      const out: any = {
         venueAccessSetById,
         ...(Object.keys(grantSetById).length ? { grantSetById } : {}),
         ...(orphanIds.length ? { tokenEpochBumpIds: orphanIds } : {}),
@@ -11607,6 +11607,15 @@ app.delete('/api/venues/:id', async (req, res) => {
         },
         result: { success: true, deletedVenueId: id, removedDeviceIds, orphanIds },
       };
+      // 4.5: closing grants into history must never block the deletion at the guard.
+      if (Object.keys(grantSetById).length) {
+        const fit = fitGrantBudget(out.doc, grantSetById);
+        if (fit.trimmed !== 'none') {
+          out.grantSetById = fit.gset;
+          log.warn(`[grants] venue delete ${id} near the size guard: history dropped (${fit.trimmed})`);
+        }
+      }
+      return out;
     },
     { label: 'delete-venue', requireVersion: true }
   );
@@ -14040,6 +14049,36 @@ function candidateBytes(doc: any): number {
   return JSON.stringify(JSON.parse(JSON.stringify(doc))).length;
 }
 
+/** A row's current grant fields (to rewrite its history through the one writer). */
+function grantFieldsOfRow(u: any): GrantFields {
+  const f: GrantFields = { venueId: typeof u.venueId === 'string' ? u.venueId : '', venueAccess: Array.isArray(u.venueAccess) ? [...u.venueAccess] : [], venueRev: venueRevOf(u) };
+  if (u.noHomeVenue === true) f.noHomeVenue = true;
+  if (u.venueGrants !== undefined) (f as any).venueGrants = u.venueGrants;
+  if (Array.isArray(u.venueHistory) && u.venueHistory.length) f.venueHistory = u.venueHistory;
+  return f;
+}
+
+/**
+ * 4.5 for multi-row grant writes (venue deletion, the 5.9 helper): access is
+ * only being REMOVED, so the commit must never fail at the 900 KiB guard on
+ * history growth. Measure the complete candidate (grant fields applied); above
+ * the guard drop the affected rows' history, then if still above, every row's
+ * venueHistory (audit detail only; the log line keeps the record).
+ */
+function fitGrantBudget(doc: any, gset: Record<string, GrantFields>): { gset: Record<string, GrantFields>; trimmed: 'none' | 'affected' | 'all' } {
+  const LIMIT = 900 * 1024;
+  const apply = (g: Record<string, GrantFields>) => ({ ...doc, users: (Array.isArray(doc.users) ? doc.users : []).map((u: any) => (u && g[u.id] ? withGrantFields(u, g[u.id]) : u)) });
+  if (candidateBytes(apply(gset)) <= LIMIT) return { gset, trimmed: 'none' };
+  const g1: Record<string, GrantFields> = {};
+  for (const k of Object.keys(gset)) g1[k] = trimHistory(gset[k], 0);
+  if (candidateBytes(apply(g1)) <= LIMIT) return { gset: g1, trimmed: 'affected' };
+  const g2: Record<string, GrantFields> = { ...g1 };
+  for (const u of Array.isArray(doc.users) ? doc.users : []) {
+    if (u && typeof u.id === 'string' && !g2[u.id] && u.personId && Array.isArray(u.venueHistory) && u.venueHistory.length) g2[u.id] = trimHistory(grantFieldsOfRow(u), 0);
+  }
+  return { gset: g2, trimmed: 'all' };
+}
+
 /** The person's own active dated ends (their scope only) + venueRev. */
 function selfGrantView(row: any): { venueRev: number; myVenueUntil: Record<string, string> } {
   const stored: any = (row && users.find((u: any) => u && u.id === row.id)) || row;
@@ -14485,9 +14524,13 @@ app.post('/api/platform/venue-grants/end-dated', async (req, res) => {
         datedGrantsFrozen: true,
         poolFrozen: true,
         invites: newInvites,
-        users: freshUsers.map((u) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)),
+        users: freshUsers,
       };
-      return { doc, grantSetById, result: { ended, revoked } };
+      // 4.5: the rollback must never fail at the guard on history growth.
+      const fit = fitGrantBudget(doc, grantSetById);
+      if (fit.trimmed !== 'none') log.warn(`[grants] end-dated near the size guard: history dropped (${fit.trimmed})`);
+      const outDoc = { ...doc, users: freshUsers.map((u) => (u && fit.gset[u.id] ? withGrantFields(u, fit.gset[u.id]) : u)) };
+      return { doc: outDoc, grantSetById: fit.gset, result: { ended, revoked } };
     },
     { label: 'venue-grants-end-dated', requireVersion: false }
   );

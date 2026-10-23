@@ -469,9 +469,13 @@ export default {
       // ===== K: size budget (4.5): growth refused above 820 KiB, reductions still commit =====
       x = await ops(tAdmin, U('mash2'), [{ op: 'add', venueId: V1, until: null }], await revOf(U('mash2')));
       assert(x.status === 200, `pre-bloat grant ${x.status} ${x.text.slice(0, 120)}`);
+      const V5 = `venue-t81-5-${ts}`;
+      assert((await ctx.api('POST', '/api/__test__/inject-fixture', { venues: [{ id: V5, name: 'T81 V5', agencyId: A }] })).status === 200, 'V5');
       // a row with grant state whose extra has no entry and no history: removing it GROWS the row (history entry)
       doc = await ctx.getDoc();
-      await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: [...doc.users, { id: U('tight'), email: E('tight'), name: 'T81 Tight', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 }, { id: U('tight2'), email: E('tight2'), name: 'T81 Tight 2', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight2'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 }] });
+      await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: [...doc.users, { id: U('tight'), email: E('tight'), name: 'T81 Tight', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 }, { id: U('tight2'), email: E('tight2'), name: 'T81 Tight 2', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight2'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 },
+        ...[1, 2, 3].map((k) => ({ id: U('vd' + k), email: E('vd' + k), name: 'T81 VD ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('vd' + k), venueAccess: [V1, V5], venueGrants: {}, venueRev: 1 })),
+        ...[1, 2, 3, 4, 5, 6].map((k) => ({ id: U('hd' + k), email: E('hd' + k), name: 'T81 HD ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('hd' + k), venueAccess: [V1, V2], venueGrants: { [V2]: { until: '2026-10-30T04:00:00.000Z' } }, venueRev: 1 }))] });
       await reloadCommit();
       doc = await ctx.getDoc();
       const cur = JSON.stringify(doc).length;
@@ -512,6 +516,17 @@ export default {
       x = await ops(tAdmin, U('tight2'), [{ op: 'remove', venueId: V3 }], 1);
       assert(x.status === 200, `venue-ops reduction just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
       assert(J((await rec(U('tight2'))).venueAccess) === J([V1]), 'venue-ops reduction applied');
+      // venue deletion closing grants on several rows (each grows by a history entry) must not fail at the guard
+      await setBloat(900 * 1024 - 20 - reloadCost);
+      x = await call(baseUrl, 'DELETE', `/api/venues/${V5}`, auth(tAdmin), { expectedVersion: await ctx.getVersion() });
+      assert(x.status === 200, `venue deletion just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
+      for (const k of [1, 2, 3]) assert(J((await rec(U('vd' + k))).venueAccess) === J([V1]), `vd${k} closed`);
+      // the 5.9 rollback helper just under the guard: ends every dated grant, sets the freeze
+      await setBloat(900 * 1024 - 20 - reloadCost);
+      x = await ctx.api('POST', '/api/platform/venue-grants/end-dated', {});
+      assert(x.status === 200 && x.json.remainingDated === 0 && x.json.datedGrantsFrozen === true && x.json.ended >= 6, `helper just under the hard guard ${x.status} ${J(x.json)}`);
+      for (const k of [1, 2, 3, 4, 5, 6]) assert(J((await rec(U('hd' + k))).venueAccess) === J([V1]), `hd${k} ended`);
+      await hook('grant-sweep', { unfreeze: true });
       doc = await ctx.getDoc();
       await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: doc.users, agencies: doc.agencies.filter((a) => a.id !== bloatId) });
       await reloadCommit();
