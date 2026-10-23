@@ -814,6 +814,12 @@ app.use('/api', async (req, res, next) => {
       provedDevice.id === tokenDev &&
       kioskSessionStillValid(user, { agencyId: tokenAgencyId, venueId: tokenVenueId, pv: tokenPv, deviceId: tokenDev });
     if (!stillValid) {
+      // 12a-s (5.8): the person's access to this tablet's venue ended; the
+      // DEVICE stays paired (an old tablet treats it like any kiosk 401).
+      if (typeof tokenDev === 'string' && provedDevice && provedDevice.id === tokenDev &&
+          kioskEndedByScope(user, { agencyId: tokenAgencyId, venueId: tokenVenueId, pv: tokenPv, deviceId: tokenDev })) {
+        return res.status(401).json({ error: 'Your time at this venue has ended.', code: 'KIOSK_SESSION_ENDED' });
+      }
       return res.status(401).json({ error: 'Sign in required. Please log in again.' });
     }
     (req as any).kiosk = true;
@@ -934,7 +940,7 @@ function personAtVenue(u: any, venueId: string | undefined | null): boolean {
   if (u.personId === undefined && typeof u.id === 'string') {
     const stored: any = users.find((x: any) => x && x.id === u.id);
     if (stored && stored.personId && stored.role === u.role && stored.venueId === u.venueId) {
-      full = { ...u, personId: stored.personId, venueAccess: stored.venueAccess };
+      full = { ...u, personId: stored.personId, venueAccess: stored.venueAccess, venueGrants: stored.venueGrants, noHomeVenue: stored.noHomeVenue };
     }
   }
   const s = venueScopeFor(full as any);
@@ -951,7 +957,91 @@ function venueScopeFor(user: UserProfile | null | undefined): 'agency' | string[
   // 9a: a migrated person's server-only venueAccess, intersected with the
   // venues CURRENTLY owned by their agency (fail closed; never all venues).
   // Unmigrated rows and empty/malformed lists: the valid home venue only.
-  return venueScopeOf(user as any, venues as any);
+  const own = venueScopeOf(user as any, venues as any);
+  // 12a-s (plan v6 4.6, canonical grant read): when the object is not the
+  // stored row itself (a kiosk acting copy, a reconstructed or presentation
+  // object), its scope is INTERSECTED with the stored row's scope at now, so
+  // a rewritten home or list can never outlive the stored grant (expiry,
+  // untick). The stored row is resolved by id + agency.
+  if (own === 'agency' || !user || typeof (user as any).id !== 'string') return own;
+  const stored: any = users.find((x: any) => x && x.id === (user as any).id);
+  if (!stored || stored === user || (stored.agencyId || 'agency-hkc') !== ((user as any).agencyId || 'agency-hkc')) return own;
+  const canon = venueScopeOf(stored, venues as any);
+  if (canon === 'agency') return own; // an admin acting on a kiosk: the acting copy's tablet scope
+  return own.filter((v) => canon.includes(v));
+}
+
+/**
+ * 12a-s: every venue-scope decision in this file (cached or fresh rows) uses
+ * serverNow() (test-aware clock) and the freshness status (4.7), configured
+ * once into venue-scope.ts so pure helpers called with fresh docs inside a
+ * transaction read the same clock at callback time.
+ */
+function venueScopeOf(user: any, venueList: any, opts?: { nowMs?: number; denyExtras?: boolean }): 'agency' | string[] {
+  return venueScopeRaw(user, venueList, opts);
+}
+configureVenueScope({ nowMs: () => serverNow().getTime(), denyExtras: () => freshnessIsStale() });
+
+// ---------------------------------------------------------------------------
+// 12a-s (plan v6 4.7 + section 20): authoritative freshness. Each process
+// confirms it holds the CURRENT stored document at least every 15 s (a
+// field-masked _v read; a full read + install only on change). Age is
+// measured on a MONOTONIC clock (performance.now), never wall time. Past
+// 60 s without confirmation the process is STALE: every extra (non-home)
+// venue grant of every non-admin is denied here until confirmed again.
+// Without Firestore (local file / FORCE_LOCAL_MODE) the process IS the
+// record and is never stale.
+// ---------------------------------------------------------------------------
+const FRESHNESS_REFRESH_MS = 15_000;
+const FRESHNESS_STALE_MS = 60_000;
+const FRESHNESS_READ_DEADLINE_MS = 5_000;
+let freshnessEnabled = false;
+let testMonoOffsetMs = 0; // test mode only (/api/__test__/freshness): advances the monotonic clock
+function monoNowMs(): number {
+  return performance.now() + (isTestMode() ? testMonoOffsetMs : 0);
+}
+let freshnessLastConfirmedMono = monoNowMs();
+function freshnessAgeMs(): number {
+  return monoNowMs() - freshnessLastConfirmedMono;
+}
+// Root (Oct 23, on N7): the freshness read is IDLE unless temporary access
+// exists. While no user in this process's state holds an active END-DATED
+// grant (every existing user today), the 15 s tick does zero reads and
+// freshness never goes stale. The flag is recomputed on every install
+// (hydrateState) and every tick; idle -> needed confirms at that install (the
+// install itself is the newest document), so the first dated grant is never
+// born stale.
+let freshnessNeededCached = false;
+// Root (Oct 23, N7 answer (a)): while idle, still one version read per 5 min,
+// so a process holding only undated access learns of an end date or removal
+// made by another process within 5 min (+ one tick).
+const FRESHNESS_IDLE_READ_MS = 300_000;
+let freshnessLastIdleReadMono = -Infinity;
+let freshnessReadCount = 0; // test-visible: version reads issued by the freshness check
+function freshnessNeedRecompute(): boolean {
+  const nowMs = serverNow().getTime();
+  let need = false;
+  for (const u of users as any[]) {
+    if (!u || !u.venueGrants || typeof u.venueGrants !== 'object' || Array.isArray(u.venueGrants)) continue;
+    for (const k of Object.keys(u.venueGrants)) {
+      const st = grantStateFor(u, k);
+      if (st.kind === 'dated' && st.untilMs > nowMs && Array.isArray(u.venueAccess) && u.venueAccess.includes(k)) { need = true; break; }
+    }
+    if (need) break;
+  }
+  if (need && !freshnessNeededCached) freshnessConfirm();
+  freshnessNeededCached = need;
+  return need;
+}
+function freshnessIsStale(): boolean {
+  return freshnessEnabled && freshnessNeededCached && freshnessAgeMs() > FRESHNESS_STALE_MS;
+}
+function freshnessStatus(): 'fresh' | 'stale' {
+  return freshnessIsStale() ? 'stale' : 'fresh';
+}
+/** Confirmation (section 20): only for the document actually INSTALLED here. */
+function freshnessConfirm(): void {
+  freshnessLastConfirmedMono = monoNowMs();
 }
 
 /** QA2 #5(b): a task status that is a real answer (not unanswered / 'pending'). */
@@ -1460,9 +1550,12 @@ function mayDoFieldWrite(user: UserProfile | null | undefined, venueId: string):
  */
 function normalizeStoredUser(u: any): any {
   let assignedVenue = u.venueId;
-  if (!assignedVenue && u.role !== 'admin') {
+  // 12a-s (plan v6 4.1): an explicit noHomeVenue row keeps its empty home;
+  // only legacy falsy homes (no marker) keep today's default.
+  if (!assignedVenue && u.role !== 'admin' && u.noHomeVenue !== true) {
     assignedVenue = 'venue-crown-market';
   }
+  if (!assignedVenue && u.role !== 'admin' && u.noHomeVenue === true) assignedVenue = '';
   // Convert legacy role 'worker' to 'mashgiach'
   const role = u.role === 'worker' ? 'mashgiach' : (u.role || 'mashgiach');
   const permissions = u.permissions || {
@@ -1498,9 +1591,17 @@ function canSeeEventServer(event: any, recipient: UserProfile | null | undefined
   const r = recipient as any;
   if (r.role === 'admin') return true;
   if (callerMaySeeVenue(recipient, event?.venueId)) return true;
-  if ((r.role === 'mashgiach' || r.role === 'worker') &&
+  // 12a-s (plan v6 6): the assigned-email exception needs a NON-EMPTY current
+  // scope (a person with no active venue, e.g. a Pool member, gets nothing).
+  if ((r.role === 'mashgiach' || r.role === 'worker') && hasCurrentScope(recipient) &&
       (event?.assignedMashgiachEmail || '').toLowerCase() === r.email.toLowerCase()) return true;
   return false;
+}
+
+/** 12a-s: a non-admin with at least one active venue now (admins: always). */
+function hasCurrentScope(user: UserProfile | null | undefined): boolean {
+  const s = venueScopeFor(user);
+  return s === 'agency' || s.length > 0;
 }
 
 /**
@@ -1518,7 +1619,7 @@ function mayFillEventTasks(user: UserProfile | null | undefined, event: any): bo
   if ((user as any).role === 'coordinator' && callerMaySeeVenue(user, (event as any)?.venueId)) return true;
   return canFillTasks(user) && (
     callerMaySeeVenue(user, (event as any)?.venueId) ||
-    ((event as any)?.assignedMashgiachEmail || '').toLowerCase() === (user as any).email.toLowerCase()
+    (hasCurrentScope(user) && ((event as any)?.assignedMashgiachEmail || '').toLowerCase() === (user as any).email.toLowerCase())
   );
 }
 
@@ -2628,7 +2729,10 @@ interface EventTaskTemplate {
 function getSelfUser(user: UserProfile) {
   const full = users.find((u) => u.id === user.id) || user;
   const scope = venueScopeFor(full);
-  return { ...getSafeUser(user), ...(scope === 'agency' ? {} : { myVenueIds: scope }) };
+  if (scope === 'agency') return { ...getSafeUser(user) };
+  // 12a-s (5.8): the person's OWN venueRev and active end dates (additive).
+  const g = selfGrantView(full);
+  return { ...getSafeUser(user), myVenueIds: scope, myVenueRev: g.venueRev, myVenueUntil: g.myVenueUntil };
 }
 
 function getSafeUser(user: UserProfile) {
@@ -2689,7 +2793,18 @@ function managerViewOf(user: UserProfile, recipient: any) {
   if (recipient.role === 'admin' && (recipient.agencyId || 'agency-hkc') === (user.agencyId || 'agency-hkc')) {
     const stored = users.find((u) => u.id === user.id) || user;
     const scope = venueScopeFor(stored);
-    if (Array.isArray(scope)) safe.venueIds = [...scope];
+    if (Array.isArray(scope)) {
+      safe.venueIds = [...scope];
+      // 12a-s (5.8): the active end dates next to venueIds (same-agency admins only).
+      const until = activeUntilMap(stored, scope, serverNow().getTime());
+      if (Object.keys(until).length) safe.venueUntil = until;
+    }
+  }
+  // 12a-s: the precondition for POST /api/users/:id/venue-ops (expectedVenueRev),
+  // for anyone who manages this person (admin, or a coordinator sharing a venue).
+  if (user.role !== 'admin') {
+    const stored = users.find((u) => u.id === user.id) || user;
+    safe.venueRevision = venueRevOf(stored);
   }
   return safe;
 }
@@ -3099,6 +3214,11 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
   // 11a-s1: a sid socket still waiting for its connect-time session read is
   // not registered yet: it gets nothing, and is not closed as unauthorized.
   if (!meta && sessionPendingSockets.has(client)) return null;
+  // 12a-s: a kiosk socket whose person lost the tablet's venue is told why before it closes.
+  if (meta && meta.kiosk && kioskEndedByScope(users.find((u) => u.id === meta.userId), { agencyId: meta.kioskAgencyId, venueId: meta.kioskVenueId, pv: meta.kioskPv, deviceId: meta.kioskDeviceId })) {
+    endKioskSocket(client, meta);
+    return null;
+  }
   if (!meta || !recipientForMeta(meta)) {
     try {
       client.close(4401, 'Unauthorized');
@@ -3154,6 +3274,11 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
       agencyId: meta.kioskAgencyId, venueId: meta.kioskVenueId, pv: meta.kioskPv, deviceId: meta.kioskDeviceId,
     });
     if (!stillValid) {
+      // 12a-s: venue access ended -> tell the tablet before closing (device stays paired).
+      if (kioskEndedByScope(user, { agencyId: meta.kioskAgencyId, venueId: meta.kioskVenueId, pv: meta.kioskPv, deviceId: meta.kioskDeviceId })) {
+        endKioskSocket(client, meta);
+        return null;
+      }
       try {
         client.close(4401, 'Unauthorized');
       } catch {}
@@ -3273,8 +3398,22 @@ let vapidKeys: { publicKey: string; privateKey: string } | null = null;
 
 // Load persisted state if exists
 // Hydrate all in-memory state from a parsed snapshot (local file or Firestore).
+// 12a-s (plan v6 5.9 / 10.3): document keys this build only CARRIES (or reads
+// as flags): the rollback freeze and 12b-s pool contacts. Absent = absent in
+// the snapshot too (no change for an existing document).
+let carriedDocFields: { datedGrantsFrozen?: boolean; poolFrozen?: boolean; poolContacts?: any[] } = {};
 function hydrateState(parsed: any) {
+  try { hydrateStateInner(parsed); } finally { try { freshnessNeedRecompute(); } catch {} }
+}
+function hydrateStateInner(parsed: any) {
   try {
+      {
+        const c: typeof carriedDocFields = {};
+        if (parsed && parsed.datedGrantsFrozen === true) c.datedGrantsFrozen = true;
+        if (parsed && parsed.poolFrozen === true) c.poolFrozen = true;
+        if (parsed && Array.isArray(parsed.poolContacts)) c.poolContacts = parsed.poolContacts;
+        carriedDocFields = c;
+      }
       if (parsed.isDemoCleared !== undefined) {
         isDemoCleared = Boolean(parsed.isDemoCleared);
       }
@@ -3600,6 +3739,7 @@ function stateSnapshot() {
     kioskDevices,
     kioskPairings,
     kioskPairingLimits,
+    ...carriedDocFields,
   };
 }
 
@@ -4045,6 +4185,9 @@ type MutatorOutcome =
        * (admin venue grant, venue deletion prune). The ONLY way venueAccess
        * changes beyond the home venue; see src/server/identity.ts. */
       venueAccessSetById?: Record<string, string[]>;
+      /** 12a-s: row id -> the full grant record from applyGrantOps (src/server/venue-grants.ts).
+       * The ONLY writer of venueId-with-grants, noHomeVenue, venueGrants, venueHistory, venueRev. */
+      grantSetById?: Record<string, GrantFields>;
     } & IdentityOutcomeFields /* 10b: credentialOriginSetById, passwordKeepsOriginIds (src/server/identity.ts) */
   | { conflict: string; conflictStatus?: number; conflictCode?: string };
 
@@ -4162,7 +4305,8 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
 import { enforceIdentityFields, identityGroups, groupIssues, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, applyOwnerTransfer, m4Successor, identityProjection, type IdentityOutcomeFields } from './src/server/identity.js';
-import { venueScope as venueScopeOf, resolveTargetVenue, sharedVenues, mayManageEventAt } from './src/server/venue-scope.js';
+import { venueScope as venueScopeRaw, resolveTargetVenue, sharedVenues, mayManageEventAt, configureVenueScope } from './src/server/venue-scope.js';
+import { applyGrantOps, endDatedGrants, historyEntry as grantHistoryEntry, withGrantFields, trimHistory, activeUntilMap, venueRevOf, isHomeless, validTimeZone as grantZoneValid, DEFAULT_TIME_ZONE as GRANT_DEFAULT_TZ, grantContainer, grantStateFor, type GrantOp, type GrantFields, type GrantFailure } from './src/server/venue-grants.js';
 /** QA2S2 #9: the one refusal of an event write by someone who may not manage events there. */
 const EVENT_FORBIDDEN_BODY = { code: 'EVENT_FORBIDDEN', error: 'Only admins, venue owners and coordinators can create events.' } as const;
 /** QA2S2 #9 (E5): the fresh caller row of a commit, or null when it is gone or left the agency. */
@@ -4220,11 +4364,16 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, outcome: any, la
     migrateRowIds: migrateRowIds && migrateRowIds.length ? new Set(migrateRowIds) : undefined,
     bumpTokenEpochIds: tokenEpochBumpIds && tokenEpochBumpIds.length ? new Set(tokenEpochBumpIds) : undefined,
     venueAccessSetById: venueAccessSetById && Object.keys(venueAccessSetById).length ? new Map(Object.entries(venueAccessSetById)) : undefined,
+    grantSetById: outcome?.grantSetById && Object.keys(outcome.grantSetById).length ? new Map(Object.entries(outcome.grantSetById as Record<string, GrantFields>)) : undefined,
+    nowMs: serverNow().getTime(),
     ...extra,
     resetLinksBefore,
     resetLinksAfter,
     onViolation: (rowId, field) =>
       log.warn(`[identity] reverted a mutator change to server-only field ${field} on user ${rowId}`),
+    // 12a-s (4.5): a closure written here (home change / promotion) may use the
+    // history-shedding fallback at the size guard (it only removes access).
+    onGrantClose: () => { if (outcome && typeof outcome === 'object') outcome.grantBudgetFallback = true; },
     onOriginChange: (rowId, from, to) =>
       log.info(`[identity] credentialOrigin user ${rowId}: ${from ?? 'none'} -> ${to ?? 'none'} (cause ${label})`),
   });
@@ -4466,14 +4615,33 @@ async function commitState(
           newDoc.idempotencyRecords = pruneIdempotencyRecords(existingRecords);
         }
         // Firestore rejects `undefined` with a synchronous throw — strip via JSON round-trip.
-        const payload = JSON.parse(JSON.stringify(newDoc));
+        let payload = JSON.parse(JSON.stringify(newDoc));
         // Document-size guard: Firestore hard limit is 1 MiB. We refuse at
         // 900 KiB to leave headroom for the _v/savedAt fields and to fail
         // with a clear error instead of a cryptic Firestore rejection.
         // Until Stage 3 (per-collection docs), photo/voice base64 is the main
         // size risk — see TEST_RESULTS.md for the analysis.
         const SIZE_LIMIT_BYTES = 900 * 1024;
-        const payloadSize = JSON.stringify(payload).length;
+        let payloadSize = JSON.stringify(payload).length;
+        // 12a-s (4.5): a commit that only REMOVES venue access (venue-ops or
+        // venues-PUT reductions, the sweep, venue deletion, the 5.9 helper, an
+        // identity closure) must not fail at the guard on its own history: as
+        // a last step the final payload (idempotency record included) sheds
+        // every user's venueHistory (audit detail; the log line keeps the
+        // record). Any other commit is untouched.
+        if (payloadSize > SIZE_LIMIT_BYTES && (outcome as any).grantBudgetFallback === true && Array.isArray(outcome.doc?.users)) {
+          const shed = (outcome.doc.users as any[]).map((u: any) => {
+            if (!u || !Array.isArray(u.venueHistory)) return u;
+            const { venueHistory: _h, ...rest } = u;
+            return rest;
+          });
+          outcome.doc = { ...outcome.doc, users: shed };
+          newDoc.users = shed;
+          payload = JSON.parse(JSON.stringify(newDoc));
+          const before = payloadSize;
+          payloadSize = JSON.stringify(payload).length;
+          log.warn(`[grants] ${label} at the size guard: venueHistory shed (${before} -> ${payloadSize})`);
+        }
         if (payloadSize > SIZE_LIMIT_BYTES) {
           throw new DocumentTooLargeError(payloadSize, SIZE_LIMIT_BYTES);
         }
@@ -4493,9 +4661,9 @@ async function commitState(
       // If a newer transaction already hydrated the cache (higher _v),
       // this older result must NOT overwrite it.
       const committedVersion = committed.version;
-      if (committedVersion > stateVersion) {
-        hydrateState(committed.doc);
-        stateVersion = committedVersion;
+      // 12a-s (4.7): the same strictly-newer install the freshness refresh
+      // uses; it confirms freshness only when THIS document is installed.
+      if (installIfNewer(committed.doc, committedVersion, `commit:${label}`)) {
         // PR D note: No per-entity reload needed here. The transaction already
         // dual-wrote to per-entity collections, and hydrateState loads the same
         // entity data from the monolith doc. Both layouts are in sync.
@@ -5302,6 +5470,10 @@ type SocketMeta = {
   tokenClaims?: SessionClaims;
   /** 11a-s1: deliveries were held while this sid socket's session was re-read; send a fresh INITIAL_STATE when it answers ok. */
   sessionResyncPending?: boolean;
+  /** 12a-s: the effective-scope key this socket was last told about (one notification per transition). */
+  scopeKey?: string;
+  /** 12a-s: the client asked for SCOPE_PING (opt-in). */
+  scopePing?: boolean;
 };
 const activeSockets = new Map<WebSocket, SocketMeta>();
 
@@ -5383,7 +5555,13 @@ function initialStateForSocket(meta: SocketMeta | undefined): any | null {
   const recipient = recipientForMeta(meta);
   if (!recipient) return null;
   const baseState = agencyStateFor(meta.agencyId, recipient);
-  if (!meta.kiosk) return baseState;
+  if (!meta.kiosk) {
+    // 12a-s (5.8): this state reflects the current effective scope; carry the
+    // person's own venueRev/end dates and the server clock (additive fields).
+    meta.scopeKey = phoneScopeKey(recipient);
+    const g = selfGrantView(recipient);
+    return { ...baseState, serverNow: serverNow().toISOString(), myVenueRev: g.venueRev, myVenueUntil: g.myVenueUntil, freshness: freshnessStatus() };
+  }
   const kioskVenueId = meta.kioskVenueId;
   if (!kioskVenueId) return null;
   // D3c (ChatGPT's #46 review): an explicit key allowlist, never a spread of
@@ -5722,6 +5900,7 @@ function broadcast(
 }
 
 wss.on('connection', (ws, req) => {
+
   // Token via ?token=… query param (set by the client from its session).
   let authedUser: any = null;
   let socketClaims: SessionClaims | null = null;
@@ -5952,6 +6131,13 @@ wss.on('connection', (ws, req) => {
         // Rule X: never rebuild security meta from a client message.
         // Presence changes nothing security-relevant — keep the meta as is.
         broadcast('USER_PRESENCE', { activeWorkersCount: activeSockets.size }, undefined, agencyId);
+      }
+      // 12a-s (5.8): SCOPE_PING is opt-in. A phone client that handles it
+      // (12a-c and later) asks once per socket; the live client never does, so
+      // it never receives one. A preference flag only, nothing security-relevant.
+      if (parsed.type === 'SCOPE_PING_SUBSCRIBE') {
+        const m = activeSockets.get(ws);
+        if (m && !m.kiosk) m.scopePing = true;
       }
     } catch (e) {
       // ignore
@@ -9345,6 +9531,16 @@ app.post('/api/invites/accept', async (req, res) => {
         ...(typeof inv.phoneNumber === 'string' && inv.phoneNumber ? { phoneNumber: inv.phoneNumber } : {}),
       };
       const venueAccessSetById = venueIds.length > 1 ? { [newRowId]: venueIds } : undefined;
+      // 12a-s (plan v6 11): an invite with venueIds [] for a non-admin creates a
+      // noHomeVenue row (no 12a-s route creates such invites); refused while
+      // the 5.9 freeze is set.
+      const poolInvite = role !== 'admin' && Array.isArray(inv.venueIds) && inv.venueIds.length === 0;
+      if (poolInvite && freshDoc.poolFrozen === true) {
+        return { conflict: 'Ask your agency admin to add you to a venue.', conflictStatus: 409, conflictCode: 'POOL_FROZEN' };
+      }
+      const grantSetById: Record<string, GrantFields> | undefined = poolInvite
+        ? { [newRowId]: { venueId: '', noHomeVenue: true, venueAccess: [], venueRev: 1, venueHistory: [grantHistoryEntry('', nowIso, nowIso, 'joined_pool', null)] } }
+        : undefined;
 
       if (mode === 'new') {
         // b) nobody may hold the email anywhere; otherwise the generic failure.
@@ -9355,6 +9551,7 @@ app.post('/api/invites/accept', async (req, res) => {
           result: { kind: 'new', rowId: newRowId },
           credentialOriginSetById: { [newRowId]: 'invite-new' as const },
           ...(venueAccessSetById ? { venueAccessSetById } : {}),
+          ...(grantSetById ? { grantSetById } : {}),
         };
       }
 
@@ -9393,6 +9590,7 @@ app.post('/api/invites/accept', async (req, res) => {
         newMembership: { [newRowId]: pid },
         ...(firstMulti ? { firstMultiOwnerIds: [String(cred.id)], tokenEpochBumpIds: bumpIds } : {}),
         ...(venueAccessSetById ? { venueAccessSetById } : {}),
+        ...(grantSetById ? { grantSetById } : {}),
       };
     },
     { label: 'invite-accept' }
@@ -11421,8 +11619,17 @@ app.delete('/api/venues/:id', async (req, res) => {
       // it legitimately; a foreign row naming it is pruned too (it never
       // granted anything — reads re-check the venue's agency).
       const venueAccessSetById: Record<string, string[]> = {};
+      // 12a-s (9.8): a row with grant state goes through applyGrantOps (the
+      // deleted venue closes into history as 'venue_deleted'); other rows keep
+      // today's prune exactly.
+      const grantSetById: Record<string, GrantFields> = {};
+      const venuesAfterDelete = freshVenues.filter((v) => v && v.id !== id);
       for (const u of Array.isArray(freshDoc.users) ? freshDoc.users : []) {
         if (u && typeof u.id === 'string' && Array.isArray(u.venueAccess) && u.venueAccess.includes(id) && u.venueId !== id) {
+          if (u.personId && u.role !== 'admin' && hasGrantStateLoose(u)) {
+            const g = applyGrantOps(u, [], grantCtxFor({ ...freshDoc, venues: venuesAfterDelete }, u.agencyId || 'agency-hkc', null, serverNow().getTime()));
+            if (g.ok) { grantSetById[u.id] = g.fields; continue; }
+          }
           venueAccessSetById[u.id] = u.venueAccess.filter((x: any) => x !== id);
         }
       }
@@ -11439,8 +11646,9 @@ app.delete('/api/venues/:id', async (req, res) => {
         if (left.length === 0) orphanIds.push(u.id);
       }
       // Atomic cascade: venue + its tasks + its history all removed together.
-      return {
+      const out: any = {
         venueAccessSetById,
+        ...(Object.keys(grantSetById).length ? { grantSetById } : {}),
         ...(orphanIds.length ? { tokenEpochBumpIds: orphanIds } : {}),
         doc: {
           ...freshDoc,
@@ -11453,6 +11661,16 @@ app.delete('/api/venues/:id', async (req, res) => {
         },
         result: { success: true, deletedVenueId: id, removedDeviceIds, orphanIds },
       };
+      // 4.5: closing grants into history must never block the deletion at the guard.
+      if (Object.keys(grantSetById).length) {
+        const fit = fitGrantBudget(out.doc, grantSetById);
+        out.grantBudgetFallback = true;
+        if (fit.trimmed !== 'none') {
+          out.grantSetById = fit.gset;
+          log.warn(`[grants] venue delete ${id} near the size guard: history dropped (${fit.trimmed})`);
+        }
+      }
+      return out;
     },
     { label: 'delete-venue', requireVersion: true }
   );
@@ -13852,6 +14070,602 @@ app.put('/api/users/:id', async (req, res) => {
   res.json({ user: managerViewOf(updated, caller) });
 });
 
+
+// ===========================================================================
+// Item 12, 12a-s: end dates and expiry core (plan v6 4.6, 4.7, 5.1, 5.2, 5.8,
+// 5.9, section 20). Every grant mutation goes through applyGrantOps
+// (src/server/venue-grants.ts) and reaches storage only through grantSetById.
+// ===========================================================================
+
+/** 12a-s: the IANA zone of a venue (venue -> agency -> America/New_York). */
+function grantZoneFor(venueId: string, venueList: readonly any[], agencyList: readonly any[]): string {
+  const v: any = (venueList || []).find((x: any) => x && x.id === venueId);
+  if (v && grantZoneValid(v.timeZone)) return v.timeZone;
+  const a: any = (agencyList || []).find((x: any) => x && x.id === ((v && v.agencyId) || 'agency-hkc'));
+  if (a && grantZoneValid(a.timeZone)) return a.timeZone;
+  return GRANT_DEFAULT_TZ;
+}
+
+function grantCtxFor(doc: any, agencyId: string, actor: string | null, nowMs: number) {
+  const vs: any[] = Array.isArray(doc?.venues) ? doc.venues : [];
+  const as: any[] = Array.isArray(doc?.agencies) ? doc.agencies : [];
+  return {
+    nowMs,
+    actor,
+    agencyVenueIds: new Set<string>(vs.filter((v) => v && typeof v.id === 'string' && (v.agencyId || 'agency-hkc') === agencyId).map((v) => v.id)),
+    zoneFor: (vid: string) => grantZoneFor(vid, vs, as),
+    datedFrozen: doc?.datedGrantsFrozen === true,
+  };
+}
+
+/** 12a-s (4.5): growth operations are refused above this candidate size (the 900 KiB guard's own measure). */
+const GRANT_GROWTH_LIMIT_BYTES = 820 * 1024;
+function candidateBytes(doc: any): number {
+  return JSON.stringify(JSON.parse(JSON.stringify(doc))).length;
+}
+
+/** A row's current grant fields (to rewrite its history through the one writer). */
+function grantFieldsOfRow(u: any): GrantFields {
+  const f: GrantFields = { venueId: typeof u.venueId === 'string' ? u.venueId : '', venueAccess: Array.isArray(u.venueAccess) ? [...u.venueAccess] : [], venueRev: venueRevOf(u) };
+  if (u.noHomeVenue === true) f.noHomeVenue = true;
+  if (u.venueGrants !== undefined) (f as any).venueGrants = u.venueGrants;
+  if (Array.isArray(u.venueHistory) && u.venueHistory.length) f.venueHistory = u.venueHistory;
+  return f;
+}
+
+/**
+ * 4.5 for multi-row grant writes (venue deletion, the 5.9 helper): access is
+ * only being REMOVED, so the commit must never fail at the 900 KiB guard on
+ * history growth. Measure the complete candidate (grant fields applied); above
+ * the guard drop the affected rows' history, then if still above, every row's
+ * venueHistory (audit detail only; the log line keeps the record).
+ */
+function fitGrantBudget(doc: any, gset: Record<string, GrantFields>): { gset: Record<string, GrantFields>; trimmed: 'none' | 'affected' | 'all' } {
+  const LIMIT = 900 * 1024;
+  const apply = (g: Record<string, GrantFields>) => ({ ...doc, users: (Array.isArray(doc.users) ? doc.users : []).map((u: any) => (u && g[u.id] ? withGrantFields(u, g[u.id]) : u)) });
+  if (candidateBytes(apply(gset)) <= LIMIT) return { gset, trimmed: 'none' };
+  const g1: Record<string, GrantFields> = {};
+  for (const k of Object.keys(gset)) g1[k] = trimHistory(gset[k], 0);
+  if (candidateBytes(apply(g1)) <= LIMIT) return { gset: g1, trimmed: 'affected' };
+  const g2: Record<string, GrantFields> = { ...g1 };
+  for (const u of Array.isArray(doc.users) ? doc.users : []) {
+    if (u && typeof u.id === 'string' && !g2[u.id] && u.personId && Array.isArray(u.venueHistory) && u.venueHistory.length) g2[u.id] = trimHistory(grantFieldsOfRow(u), 0);
+  }
+  return { gset: g2, trimmed: 'all' };
+}
+
+/** The person's own active dated ends (their scope only) + venueRev. */
+function selfGrantView(row: any): { venueRev: number; myVenueUntil: Record<string, string> } {
+  const stored: any = (row && users.find((u: any) => u && u.id === row.id)) || row;
+  const scope = venueScopeFor(stored);
+  return { venueRev: venueRevOf(stored), myVenueUntil: scope === 'agency' ? {} : activeUntilMap(stored, scope, serverNow().getTime()) };
+}
+
+/**
+ * 4.7: install a stored document only if its version is STRICTLY NEWER than
+ * the installed one. Synchronous, so compare + install are one step on the
+ * event loop (the commit-hydration lock). Freshness is confirmed only when
+ * THIS document was installed (section 20).
+ */
+function installIfNewer(doc: any, version: number, source: string): boolean {
+  if (!doc || typeof version !== 'number' || !(version > stateVersion)) {
+    if (doc && typeof version === 'number') log.info(`[freshness] ${source}: v${version} not newer than installed v${stateVersion}; discarded`);
+    return false;
+  }
+  hydrateState(doc);
+  stateVersion = version;
+  freshnessConfirm();
+  return true;
+}
+
+let freshnessRefreshInFlight = false;
+let testFreshnessFailReads = false; // test mode only
+let testFreshnessHangReads = false; // test mode only
+/** test mode only: a fetched document is held here before install (delayed-refresh race test). */
+let testFreshnessHoldInstall: null | { release: () => void } = null;
+let testFreshnessHoldNext = false;
+let testFreshnessFailFull = false; // test mode only: the full read fails after a successful version read
+let testFreshnessSimulateNewer = false; // test mode only: the version read reports installed + 1
+
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('read deadline')), ms);
+    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
+async function readStoredVersion(): Promise<number | null> {
+  freshnessReadCount++;
+  if (isTestMode() && testFreshnessFailReads) throw new Error('test: read failure');
+  if (isTestMode() && testFreshnessHangReads) return new Promise<number | null>(() => {});
+  const ref = firestoreDb.doc(FIRESTORE_STATE_DOC);
+  let snap: any;
+  if (typeof firestoreDb.getAll === 'function') {
+    const arr = await firestoreDb.getAll(ref, { fieldMask: ['_v'] });
+    snap = arr && arr[0];
+  } else {
+    snap = await ref.get();
+  }
+  if (!snap || !snap.exists) return null;
+  const v = snap.get ? snap.get('_v') : (snap.data() || {})._v;
+  if (isTestMode() && testFreshnessSimulateNewer && typeof v === 'number') return Math.max(v, stateVersion) + 1;
+  return typeof v === 'number' ? v : null;
+}
+
+/**
+ * 4.7: one authoritative refresh. Version read (5 s deadline): equal to the
+ * installed version -> confirmed; newer -> full read (5 s deadline) and a
+ * strictly-newer install (which confirms); anything else confirms nothing.
+ */
+async function freshnessRefreshOnce(source = 'tick'): Promise<{ result: string; version?: number | null }> {
+  if (!firestoreDb || !durableStateLoaded || !freshnessEnabled) return { result: 'disabled' };
+  if (freshnessRefreshInFlight) return { result: 'in-flight' };
+  freshnessRefreshInFlight = true;
+  try {
+    const v = await withDeadline(readStoredVersion(), FRESHNESS_READ_DEADLINE_MS);
+    if (v === null) return { result: 'no-doc' };
+    if (v === stateVersion) {
+      freshnessConfirm();
+      return { result: 'confirmed', version: v };
+    }
+    if (v < stateVersion) return { result: 'older', version: v };
+    if (isTestMode() && (testFreshnessFailReads || testFreshnessFailFull)) throw new Error('test: full read failure');
+    const snap = await withDeadline(firestoreDb.doc(FIRESTORE_STATE_DOC).get(), FRESHNESS_READ_DEADLINE_MS) as any;
+    const doc = snap && snap.exists ? snap.data() : null;
+    if (isTestMode() && testFreshnessHoldNext) {
+      testFreshnessHoldNext = false;
+      await new Promise<void>((resolve) => { testFreshnessHoldInstall = { release: resolve }; });
+      testFreshnessHoldInstall = null;
+    }
+    const ver = doc && typeof doc._v === 'number' ? doc._v : -1;
+    if (installIfNewer(doc, ver, `refresh:${source}`)) {
+      reconcileScopes('refresh', true);
+      return { result: 'installed', version: ver };
+    }
+    return { result: 'discarded', version: ver };
+  } catch (err: any) {
+    log.warn(`[freshness] refresh failed (${source}): ${err?.message || 'error'}`);
+    return { result: 'failed' };
+  } finally {
+    freshnessRefreshInFlight = false;
+    reconcileScopes('freshness', false);
+  }
+}
+
+/** The effective-scope key of a phone socket's person (scope + dates + venueRev). */
+function phoneScopeKey(row: any): string {
+  const scope = venueScopeFor(row);
+  if (scope === 'agency') return 'agency';
+  const until = activeUntilMap(row, scope, serverNow().getTime());
+  return `${venueRevOf(row)}|${scope.join(',')}|${JSON.stringify(until)}`;
+}
+
+function sendInitialStateTo(client: WebSocket, meta: SocketMeta): void {
+  const st = initialStateForSocket(meta);
+  if (!st) return;
+  client.send(JSON.stringify({
+    type: 'INITIAL_STATE',
+    payload: { ...st, activeWorkersCount: activeSockets.size },
+    timestamp: new Date().toISOString(),
+    version: typeof stateVersion === 'number' ? stateVersion : undefined,
+  }));
+}
+
+/** 5.8 (b): end one kiosk socket whose person lost the tablet's venue. */
+function endKioskSocket(client: WebSocket, meta: SocketMeta): void {
+  try {
+    client.send(JSON.stringify({ type: 'KIOSK_SESSION_ENDED', payload: { reason: 'venue-ended' }, timestamp: new Date().toISOString() }));
+  } catch {}
+  try { client.close(4401, 'Unauthorized'); } catch {}
+  activeSockets.delete(client);
+  log.info(`[grants] kiosk session ended for user ${meta.userId} at venue ${meta.kioskVenueId} (venue access ended)`);
+}
+
+/** A kiosk session that is valid in every way except the person's venue scope. */
+function kioskEndedByScope(user: any, sess: { agencyId?: string; venueId?: string; pv?: string; deviceId?: string }): boolean {
+  if (!user || !sess || !sess.agencyId || !sess.venueId) return false;
+  if (kioskUserFitsVenue(user, sess.agencyId, sess.venueId)) return false;
+  const device = sess.deviceId ? liveKioskDevice(sess.deviceId) : null;
+  return !!user.kioskPinHash && !!device && device.agencyId === sess.agencyId && device.venueId === sess.venueId &&
+    pinRevOf(user) !== undefined && String(pinRevOf(user)) === sess.pv && !sessionIneligibleCode(user);
+}
+
+function sendKioskRefresh(agencyId: string): void {
+  for (const [client, meta] of Array.from(activeSockets.entries())) {
+    if (!meta || !meta.kiosk || (meta.kioskAgencyId || '') !== agencyId || client.readyState !== WebSocket.OPEN) continue;
+    try { client.send(JSON.stringify({ type: 'KIOSK_REFRESH', payload: {}, timestamp: new Date().toISOString() })); } catch {}
+  }
+}
+
+/**
+ * 4.7 / 5.8 / section 20: recompute every connected person's EFFECTIVE scope
+ * (grant record + clock + freshness) and notify each socket ONCE per
+ * transition: phone sockets get SCOPE_CHANGED + their own INITIAL_STATE;
+ * kiosk sockets of a person who lost the tablet venue get
+ * KIOSK_SESSION_ENDED and close 4401 (the device stays paired). Denial does
+ * not depend on this (every boundary re-checks); this only tells clients.
+ */
+function reconcileScopes(source: string, fromRefresh: boolean): number {
+  let notified = 0;
+  const changedAgencies = new Set<string>();
+  for (const [client, meta] of Array.from(activeSockets.entries())) {
+    if (!meta || client.readyState !== WebSocket.OPEN) continue;
+    const row: any = users.find((u: any) => u && u.id === meta.userId);
+    if (!row) continue;
+    if (meta.kiosk) {
+      if (kioskEndedByScope(row, { agencyId: meta.kioskAgencyId, venueId: meta.kioskVenueId, pv: meta.kioskPv, deviceId: meta.kioskDeviceId })) {
+        endKioskSocket(client, meta);
+        if (meta.kioskAgencyId) changedAgencies.add(meta.kioskAgencyId);
+        notified++;
+      }
+      continue;
+    }
+    if (!meta.tokenClaims || !liveSessionRow(meta.tokenClaims)) continue;
+    const key = phoneScopeKey(row);
+    if (meta.scopeKey === undefined) { meta.scopeKey = key; continue; }
+    if (meta.scopeKey === key) continue;
+    // A real delivery: the same per-socket gate as every broadcast (session
+    // re-read, revocation); a held socket gets a fresh state when it answers.
+    if (!authorizeSocket(client)) continue;
+    meta.scopeKey = key;
+    const scope = venueScopeFor(row);
+    const view = selfGrantView(row);
+    try {
+      client.send(JSON.stringify({
+        type: 'SCOPE_CHANGED',
+        payload: { myVenueRev: view.venueRev, venueIds: scope === 'agency' ? undefined : scope, myVenueUntil: view.myVenueUntil, freshness: freshnessStatus(), serverNow: serverNow().toISOString() },
+        timestamp: new Date().toISOString(),
+      }));
+      sendInitialStateTo(client, meta);
+    } catch {}
+    changedAgencies.add(row.agencyId || 'agency-hkc');
+    notified++;
+  }
+  for (const a of changedAgencies) {
+    sendKioskRefresh(a);
+    if (fromRefresh) {
+      broadcast('USERS_UPDATED', { agencyId: a }, undefined, a, (meta, base) => ({ ...base, users: getSafeUsersForAgency(a, recipientForMeta(meta)) }));
+    }
+  }
+  if (notified) log.info(`[grants] scope notifications (${source}): ${notified}`);
+  return notified;
+}
+
+/** 5.8: SCOPE_PING to phone sockets (effective-scope revision = venueRev + freshness). */
+function sendScopePings(): number {
+  let n = 0;
+  for (const [client, meta] of Array.from(activeSockets.entries())) {
+    if (!meta || meta.kiosk || client.readyState !== WebSocket.OPEN) continue;
+    const row: any = users.find((u: any) => u && u.id === meta.userId);
+    if (!row || !meta.tokenClaims || !liveSessionRow(meta.tokenClaims)) continue;
+    // Opt-in only, and through the same per-socket gate as every delivery
+    // (session re-read, revocation): a refused or held socket gets nothing.
+    if (!meta.scopePing) continue;
+    if (!authorizeSocket(client)) continue;
+    try {
+      client.send(JSON.stringify({ type: 'SCOPE_PING', payload: { myVenueRev: venueRevOf(row), freshness: freshnessStatus(), serverNow: serverNow().toISOString() }, timestamp: new Date().toISOString() }));
+      n++;
+    } catch {}
+  }
+  return n;
+}
+
+let testGrantSweepDisabled = false; // test mode only
+
+/** Rows (cached) that have a grant to CLOSE now (expired, deleted venue, invalid). */
+function sweepCandidates(doc: any, nowMs: number): Array<{ id: string; fields: GrantFields; agencyId: string; closed: number }> {
+  const out: Array<{ id: string; fields: GrantFields; agencyId: string; closed: number }> = [];
+  for (const u of Array.isArray(doc?.users) ? doc.users : []) {
+    if (!u || typeof u.id !== 'string' || !u.personId || u.role === 'admin') continue;
+    const list = Array.isArray(u.venueAccess) ? u.venueAccess : [];
+    if (list.length <= (isHomeless(u) ? 0 : 1) && grantContainer(u) !== 'malformed') continue;
+    const agencyId = u.agencyId || 'agency-hkc';
+    const r = applyGrantOps(u, [], grantCtxFor(doc, agencyId, null, nowMs));
+    if (r.ok && r.closed.length) out.push({ id: u.id, fields: r.fields, agencyId, closed: r.closed.length });
+  }
+  return out;
+}
+
+/**
+ * 4.6: the expiry sweep (tidy-up and live clearing; not the security
+ * boundary). Commits ONLY when a row has a grant to close, re-deciding on the
+ * FRESH document (an extension that committed first wins). Never in
+ * maintenance, FORCE_LOCAL_MODE or a staged revision. Errors are logged.
+ */
+async function runGrantSweep(source: string): Promise<{ committed: boolean; rows: number }> {
+  if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return { committed: false, rows: 0 };
+  if (isTestMode() && testGrantSweepDisabled && source !== 'test') return { committed: false, rows: 0 };
+  if (!sweepCandidates({ users, venues, agencies }, serverNow().getTime()).length) return { committed: false, rows: 0 };
+  try {
+    const res = await commitState((freshDoc) => {
+      const nowMs = serverNow().getTime();
+      const cands = sweepCandidates(freshDoc, nowMs);
+      if (!cands.length) return { doc: freshDoc, result: { rows: 0, agencies: [] } };
+      const grantSetById: Record<string, GrantFields> = {};
+      for (const c of cands) grantSetById[c.id] = c.fields;
+      let doc: any = { ...freshDoc, users: (freshDoc.users as any[]).map((u: any) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)) };
+      // 4.5: an access-reducing commit is never blocked by history.
+      if (candidateBytes(doc) > 900 * 1024) {
+        for (const id of Object.keys(grantSetById)) grantSetById[id] = trimHistory(grantSetById[id], 0);
+        doc = { ...freshDoc, users: (freshDoc.users as any[]).map((u: any) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)) };
+        log.warn('[grants] sweep near the size guard: committed without history entries');
+      }
+      return { doc, grantSetById, result: { rows: cands.length, agencies: Array.from(new Set(cands.map((c) => c.agencyId))) }, grantBudgetFallback: true };
+    }, { label: 'grant-sweep' });
+    const r: any = res.result || {};
+    if (r.rows) {
+      log.info(`[grants] sweep (${source}) closed grants on ${r.rows} row(s)`);
+      for (const a of r.agencies || []) {
+        broadcast('USERS_UPDATED', { agencyId: a }, undefined, a, (meta, base) => ({ ...base, users: getSafeUsersForAgency(a, recipientForMeta(meta)) }));
+        sendKioskRefresh(a);
+      }
+      reconcileScopes('sweep', false);
+    }
+    return { committed: !!r.rows, rows: r.rows || 0 };
+  } catch (err: any) {
+    log.warn(`[grants] sweep (${source}) failed: ${err?.message || 'error'}`);
+    return { committed: false, rows: 0 };
+  }
+}
+
+let grantTimersStarted = false;
+/** One 15 s tick: a read only while temporary (end-dated) access exists. */
+async function freshnessTick(): Promise<string> {
+  if (!freshnessNeedRecompute()) {
+    if (monoNowMs() - freshnessLastIdleReadMono < FRESHNESS_IDLE_READ_MS) return 'idle';
+    freshnessLastIdleReadMono = monoNowMs();
+    const ri: any = await freshnessRefreshOnce('idle');
+    freshnessNeedRecompute();
+    return 'idle-read:' + (typeof ri === 'string' ? ri : (ri?.result ?? 'done'));
+  }
+  const r: any = await freshnessRefreshOnce('tick');
+  return typeof r === 'string' ? r : (r?.result ?? 'done');
+}
+function startGrantTimers(): void {
+  if (grantTimersStarted) return;
+  grantTimersStarted = true;
+  setInterval(() => { void freshnessTick(); }, FRESHNESS_REFRESH_MS).unref?.();
+  // In-memory only: dated grants passing their instant, and fresh->stale.
+  setInterval(() => { try { reconcileScopes('tick', false); } catch (e: any) { log.warn(`[grants] reconcile failed: ${e?.message}`); } }, 5_000).unref?.();
+  setInterval(() => { try { sendScopePings(); } catch {} }, 30_000).unref?.();
+  setInterval(() => { void runGrantSweep('tick'); }, 60_000).unref?.();
+  void runGrantSweep('startup');
+}
+
+/**
+ * 5.1: POST /api/users/:id/venue-ops — admin of the agency only (plan v6 6).
+ * Body { ops: [...], expectedVenueRev }. Everything is decided on the fresh
+ * document at txNow (serverNow() read inside the callback, so a retry re-reads).
+ */
+app.post('/api/users/:id/venue-ops', async (req, res) => {
+  // Don (Oct 22, 9:42 PM): admins agency-wide; OWNERS and COORDINATORS too,
+  // but only for venues they themselves own (owner: their home venue) or
+  // coordinate (coordinator: their current scope), and only for mashgichim /
+  // workers (rule T, fail closed). Never a kiosk session.
+  const caller = getAuthUser(req);
+  if (!caller || (req as any).kiosk === true || !['admin', 'coordinator', 'owner'].includes(String((caller as any).role))) {
+    return res.status(403).json({ error: 'Only an admin, owner or coordinator can change venue access.', code: 'NOT_ALLOWED' });
+  }
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  const { id } = req.params;
+  if (freshnessIsStale()) {
+    return res.status(503).json({ error: 'Venue changes are paused for a moment. Please try again shortly.', code: 'FRESHNESS_STALE' });
+  }
+  const body = req.body || {};
+  const rawOps = body.ops;
+  const expectedVenueRev = body.expectedVenueRev;
+  if (!Number.isInteger(expectedVenueRev) || expectedVenueRev < 0) {
+    return res.status(400).json({ error: 'expectedVenueRev is required.', code: 'VENUE_OPS_INVALID' });
+  }
+  if (!Array.isArray(rawOps) || rawOps.length === 0 || rawOps.length > 20) {
+    return res.status(400).json({ error: 'Send between 1 and 20 venue changes.', code: 'VENUE_OPS_INVALID' });
+  }
+  const ops: GrantOp[] = [];
+  for (const o of rawOps) {
+    if (!o || typeof o !== 'object' || typeof o.venueId !== 'string' || !o.venueId || o.venueId.length > 200) {
+      return res.status(400).json({ error: 'Each change needs a venue.', code: 'VENUE_OPS_INVALID' });
+    }
+    if (o.op === 'add' || o.op === 'set_until') {
+      if (!Object.prototype.hasOwnProperty.call(o, 'until') || (o.until !== null && typeof o.until !== 'string')) {
+        return res.status(400).json({ error: 'Choose an end date or "no end date".', code: 'UNTIL_INVALID' });
+      }
+      ops.push({ op: o.op, venueId: o.venueId, until: o.until });
+    } else if (o.op === 'remove') {
+      ops.push({ op: 'remove', venueId: o.venueId });
+    } else {
+      return res.status(400).json({ error: 'Unknown venue change.', code: 'VENUE_OPS_INVALID' });
+    }
+  }
+  const cached = users.find((u) => u.id === id);
+  if (!cached || (cached.agencyId || 'agency-hkc') !== callerAgencyId) {
+    return res.status(404).json({ error: 'Team member not found.' });
+  }
+  const deny = (msg: string, status: number, code: string) => ({ conflict: msg, conflictStatus: status, conflictCode: code });
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const txNow = serverNow().getTime();
+      if (freshnessIsStale()) return deny('Venue changes are paused for a moment. Please try again shortly.', 503, 'FRESHNESS_STALE');
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshCaller = freshUsers.find((u) => u && u.id === caller.id);
+      const freshRole = freshCaller ? String(freshCaller.role) : '';
+      if (!freshCaller || !['admin', 'coordinator', 'owner'].includes(freshRole) || (freshCaller.agencyId || 'agency-hkc') !== callerAgencyId || sessionIneligibleCode(freshCaller)) {
+        return deny('Only an admin, owner or coordinator of this agency can change venue access.', 403, 'NOT_ALLOWED');
+      }
+      const target = freshUsers.find((u) => u && u.id === id);
+      if (!target || (target.agencyId || 'agency-hkc') !== callerAgencyId) {
+        return deny('Team member not found (they may have been deleted).', 404, 'NOT_FOUND');
+      }
+      if (target.role === 'admin') return deny('Admins already cover every venue of the agency.', 400, 'TARGET_IS_ADMIN');
+      if (freshRole !== 'admin') {
+        // Owners and coordinators: mashgichim and workers only, and every
+        // venue an op touches must be one the caller owns / coordinates now.
+        if (target.role !== 'mashgiach' && target.role !== 'worker') {
+          return deny('You can only change venues for mashgichim and workers.', 403, 'NOT_ALLOWED');
+        }
+        const freshVenueList: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+        if (ops.some((o) => !mayManageEventAt(freshCaller, o.venueId, freshVenueList))) {
+          return deny('You can only change access to venues you own or coordinate.', 403, 'VENUE_NOT_IN_SCOPE');
+        }
+        // Don (Oct 22, 9:44 PM, option A): a cross-venue loan by an owner or
+        // coordinator needs an end date (unless the person has no main venue).
+        if (!isHomeless(target) && ops.some((o) => (o.op === 'add' || o.op === 'set_until') && o.until === null)) {
+          return deny('Choose an end date for borrowed help.', 400, 'UNTIL_REQUIRED');
+        }
+      }
+      if (!target.personId) return deny('This account has not been upgraded yet; try again shortly.', 409, 'NOT_MIGRATED');
+      if (venueRevOf(target) !== expectedVenueRev) {
+        return deny("Conflict: this person's venues were changed by someone else. Please refresh and try again.", 409, 'VENUES_CHANGED');
+      }
+      const r = applyGrantOps(target, ops, grantCtxFor(freshDoc, callerAgencyId, caller.id, txNow));
+      if (!r.ok) { const f = r as GrantFailure; return deny(f.error, f.status, f.code); }
+      const doc: any = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, r.fields) : u)) };
+      // 4.5: growth is refused near the size guard; reductions never are.
+      if (r.growth && candidateBytes(doc) > GRANT_GROWTH_LIMIT_BYTES) {
+        return deny('The app storage is nearly full; this change cannot be saved right now.', 409, 'STATE_NEAR_FULL');
+      }
+      let fields = r.fields;
+      let outDoc = doc;
+      if (!r.growth && candidateBytes(doc) > 900 * 1024) {
+        fields = trimHistory(r.fields, 0);
+        outDoc = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
+        log.warn(`[grants] venue-ops on ${id} near the size guard: committed without history`);
+      }
+      return { doc: outDoc, grantSetById: { [id]: fields }, result: { userId: id, closed: r.closed.length }, ...(r.growth ? {} : { grantBudgetFallback: true }) };
+    },
+    { label: 'venue-ops', requireVersion: true }
+  );
+  if (!committed) return;
+  const fresh: any = users.find((u) => u.id === id);
+  const scope = fresh ? venueScopeFor(fresh) : [];
+  let venueIds = scope === 'agency' ? [] : scope;
+  // A non-admin caller hears only about venues it owns / coordinates.
+  if (caller.role !== 'admin') venueIds = venueIds.filter((v) => mayManageEventAt(caller as any, v, venues as any));
+  const view = fresh ? activeUntilMap(fresh, venueIds, serverNow().getTime()) : {};
+  log.info(`[audit] venue-ops: ${caller.role} ${caller.id} on user ${id}: ${ops.map((o) => o.op + ':' + o.venueId).join(',')} -> [${venueIds.join(',')}] rev ${venueRevOf(fresh)} (agency ${callerAgencyId})`);
+  broadcast('USERS_UPDATED', { agencyId: callerAgencyId }, undefined, callerAgencyId, (meta, base) => ({
+    ...base,
+    users: getSafeUsersForAgency(callerAgencyId, recipientForMeta(meta)),
+  }));
+  sendKioskRefresh(callerAgencyId);
+  reconcileScopes('venue-ops', false);
+  res.json({ success: true, userId: id, venueIds, venueUntil: view, venueRev: venueRevOf(fresh) });
+});
+
+/**
+ * 5.9: rollback helper (platform operator only; production use is NEEDS DON
+ * N6). One transaction: sets datedGrantsFrozen + poolFrozen, closes EVERY
+ * dated grant now ('ended'), revokes every live pool invite (non-admin,
+ * venueIds []). Returns the counts that must be 0 before a rollback below
+ * 12a-s.
+ */
+app.post('/api/platform/venue-grants/end-dated', async (req, res) => {
+  const op = requirePlatformOperator(req, res);
+  if (!op) return;
+  if (freshnessIsStale()) return res.status(503).json({ error: 'Try again shortly.', code: 'FRESHNESS_STALE' });
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const nowMs = serverNow().getTime();
+      const nowIso = new Date(nowMs).toISOString();
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const grantSetById: Record<string, GrantFields> = {};
+      let ended = 0;
+      for (const u of freshUsers) {
+        if (!u || !u.personId || u.role === 'admin') continue;
+        const r = endDatedGrants(u, grantCtxFor(freshDoc, u.agencyId || 'agency-hkc', null, nowMs));
+        if (!r.ok || !r.changed) continue;
+        grantSetById[u.id] = r.fields;
+        ended += r.closed.filter((c) => c.why === 'ended').length;
+      }
+      const invites: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
+      let revoked = 0;
+      const newInvites = invites.map((i: any) => {
+        if (i && i.status !== 'accepted' && i.status !== 'revoked' && i.kind !== 'setup' && String(i.role) !== 'admin' && Array.isArray(i.venueIds) && i.venueIds.length === 0) {
+          revoked++;
+          return { ...i, status: 'revoked', revokedAt: nowIso, revokedBy: 'system', revokeReason: 'pool-frozen' };
+        }
+        return i;
+      });
+      const doc: any = {
+        ...freshDoc,
+        datedGrantsFrozen: true,
+        poolFrozen: true,
+        invites: newInvites,
+        users: freshUsers,
+      };
+      // 4.5: the rollback must never fail at the guard on history growth.
+      const fit = fitGrantBudget(doc, grantSetById);
+      if (fit.trimmed !== 'none') log.warn(`[grants] end-dated near the size guard: history dropped (${fit.trimmed})`);
+      const outDoc = { ...doc, users: freshUsers.map((u) => (u && fit.gset[u.id] ? withGrantFields(u, fit.gset[u.id]) : u)) };
+      return { doc: outDoc, grantSetById: fit.gset, result: { ended, revoked }, grantBudgetFallback: true };
+    },
+    { label: 'venue-grants-end-dated', requireVersion: false }
+  );
+  if (!committed) return;
+  const r: any = (committed as any).result || {};
+  const remainingDated = users.reduce((n, u: any) => n + Object.values(isPlainObjectLoose(u?.venueGrants) ? u.venueGrants : {}).filter((e: any) => e && e.until != null).length, 0);
+  const noHomeRows = users.filter((u: any) => u && u.noHomeVenue === true).length;
+  const snap: any = stateSnapshot();
+  const livePoolInvites = (Array.isArray(snap.invites) ? snap.invites : []).filter((i: any) => i && i.status !== 'accepted' && i.status !== 'revoked' && i.kind !== 'setup' && String(i.role) !== 'admin' && Array.isArray(i.venueIds) && i.venueIds.length === 0 && Date.parse(i.expiresAt) > Date.now()).length;
+  const poolContacts = Array.isArray(snap.poolContacts) ? snap.poolContacts.length : 0;
+  log.warn(`[audit] platform ${op.id} froze dated grants: ended ${r.ended}, revoked ${r.revoked} pool invite(s); remaining dated ${remainingDated}, noHome ${noHomeRows}, live pool invites ${livePoolInvites}, contacts ${poolContacts}`);
+  for (const a of agencies) { sendKioskRefresh(a.id); }
+  reconcileScopes('end-dated', false);
+  res.json({ success: true, ended: r.ended, revokedPoolInvites: r.revoked, remainingDated, noHomeVenueRows: noHomeRows, livePoolInvites, poolContacts, datedGrantsFrozen: true, poolFrozen: true });
+});
+function hasGrantStateLoose(row: any): boolean {
+  return !!row && (row.venueGrants !== undefined || Array.isArray(row.venueHistory) || row.venueRev !== undefined || row.noHomeVenue !== undefined);
+}
+function isPlainObjectLoose(x: any): boolean {
+  return !!x && typeof x === 'object' && !Array.isArray(x);
+}
+
+/** Test mode only (404 otherwise): freshness controls for stage2. */
+app.post('/api/__test__/freshness', async (req, res) => {
+  if (!isTestMode()) return res.status(404).json({ error: 'Not found' });
+  const b = req.body || {};
+  if (typeof b.advanceMonoMs === 'number') testMonoOffsetMs += b.advanceMonoMs;
+  if (typeof b.failReads === 'boolean') testFreshnessFailReads = b.failReads;
+  if (typeof b.hangReads === 'boolean') testFreshnessHangReads = b.hangReads;
+  if (b.holdNextInstall === true) testFreshnessHoldNext = true;
+  if (b.releaseHeld === true && testFreshnessHoldInstall) testFreshnessHoldInstall.release();
+  if (b.enable === true) freshnessEnabled = true;
+  if (typeof b.failFullReads === 'boolean') testFreshnessFailFull = b.failFullReads;
+  if (typeof b.simulateNewer === 'boolean') testFreshnessSimulateNewer = b.simulateNewer;
+  let refresh: any = null;
+  if (b.refreshNow === true) refresh = b.wait === false ? (void freshnessRefreshOnce('test'), 'started') : await freshnessRefreshOnce('test');
+  if (b.reconcileNow === true) reconcileScopes('test', false);
+  if (b.pingNow === true) sendScopePings();
+  let tick: any = null;
+  if (b.tick === true) tick = await freshnessTick();
+  if (b.recompute === true) freshnessNeedRecompute();
+  res.json({ status: freshnessStatus(), ageMs: Math.round(freshnessAgeMs()), enabled: freshnessEnabled, stateVersion, refresh, held: !!testFreshnessHoldInstall, tick, needed: freshnessNeededCached, reads: freshnessReadCount });
+});
+
+/** Test mode only (404 otherwise): the grant sweep. */
+app.post('/api/__test__/grant-sweep', async (req, res) => {
+  if (!isTestMode()) return res.status(404).json({ error: 'Not found' });
+  const b = req.body || {};
+  if (typeof b.disable === 'boolean') testGrantSweepDisabled = b.disable;
+  if (b.unfreeze === true && (carriedDocFields.datedGrantsFrozen || carriedDocFields.poolFrozen)) {
+    await commitState((freshDoc) => {
+      const { datedGrantsFrozen: _a, poolFrozen: _b, ...rest } = freshDoc || {};
+      return { doc: rest, result: { ok: true } };
+    }, { label: 'test-grant-unfreeze' });
+  }
+  const out = b.runNow === true ? await runGrantSweep('test') : null;
+  res.json({ disabled: testGrantSweepDisabled, run: out, stateVersion });
+});
+
+/** Test mode only (404 otherwise): a member's raw grant record (no credentials). */
+app.get('/api/__test__/grant-record/:id', (req, res) => {
+  if (!isTestMode()) return res.status(404).json({ error: 'Not found' });
+  const u: any = users.find((x) => x.id === req.params.id);
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  res.json({ venueId: u.venueId, noHomeVenue: u.noHomeVenue, venueAccess: u.venueAccess, venueGrants: u.venueGrants, venueHistory: u.venueHistory, venueRev: u.venueRev, stateVersion });
+});
+
 /**
  * 9a — admin grants a person venues inside the admin's own agency ("9a plan
  * v2"). Body: { venueIds: string[], expectedVenueIds?: string[] }.
@@ -13904,6 +14718,18 @@ app.put('/api/users/:id/venues', async (req, res) => {
         return deny('This account has not been upgraded yet; try again shortly.', 409, 'NOT_MIGRATED');
       }
       const before = venueScopeOf(target, freshVenues) as string[];
+      // 12a-s (5.2): the expected list is REQUIRED for a row that carries end
+      // dates or had a tick end in the last 24 h (an old tab cannot silently
+      // revive an ended tick); compared against the normalized (active) scope.
+      const txNow = serverNow().getTime();
+      const hasDates = grantContainer(target) !== 'legacy' && Object.keys(isPlainObjectLoose(target.venueGrants) ? target.venueGrants : {}).some((k) => grantStateFor(target, k).kind !== 'undated');
+      const recentEnd = Array.isArray(target.venueHistory) && target.venueHistory.some((h: any) => h && h.why === 'ended' && Date.parse(h.to) > txNow - 86400000);
+      // RV5: ANY row carrying grant state needs the expected list (the history
+      // that marks a recent end can be shed at the size guard; venueRev stays).
+      // The live client always sends it (VenueAccessSheet).
+      if (expected === undefined && (hasDates || recentEnd || hasGrantStateLoose(target) || grantContainer(target) === 'malformed')) {
+        return deny("This person's venues changed. Please refresh and try again.", 409, 'VENUES_CHANGED');
+      }
       if (expected !== undefined) {
         const a = [...before].sort().join('\u0000');
         const b = Array.from(new Set(expected as string[])).sort().join('\u0000');
@@ -13913,9 +14739,45 @@ app.put('/api/users/:id/venues', async (req, res) => {
       const bad = requested.filter((v) => !own.has(v));
       if (bad.length) return deny('Every venue must be a venue of your agency.', 400, 'VENUE_NOT_IN_AGENCY');
       const list = requested.filter((v) => v !== target.venueId);
+      if (!hasGrantStateLoose(target)) {
+        // A row with no 12a-s grant state: exactly today's write.
+        return {
+          doc: { ...freshDoc, users: [...freshUsers] },
+          venueAccessSetById: { [id]: list },
+          result: { userId: id, before, home: target.venueId || null, list },
+        };
+      }
+      // 12a-s: converted to ops on the NORMALIZED fresh row: unlisted active
+      // extras -> remove; listed and active -> untouched (dates kept); listed
+      // and not active -> add with no end date.
+      const ctx = grantCtxFor(freshDoc, callerAgencyId, caller.id, txNow);
+      const norm = applyGrantOps(target, [], ctx);
+      if (!norm.ok) { const f = norm as GrantFailure; return deny(f.error, f.status, f.code); }
+      const home = norm.fields.venueId;
+      const active = norm.fields.venueAccess.filter((v) => v !== home);
+      const ops: GrantOp[] = [
+        ...active.filter((v) => !list.includes(v)).map((v) => ({ op: 'remove' as const, venueId: v })),
+        ...list.filter((v) => !active.includes(v)).map((v) => ({ op: 'add' as const, venueId: v, until: null })),
+      ];
+      const r = applyGrantOps(withGrantFields(target, norm.fields), ops, ctx);
+      if (!r.ok) { const f = r as GrantFailure; return deny(f.error, f.status, f.code); }
+      // keep today's order (the request's order) for the extras
+      let fields: GrantFields = { ...r.fields, venueAccess: [...(home ? [home] : []), ...list.filter((v) => r.fields.venueAccess.includes(v))], venueRev: venueRevOf(target) + (r.changed || norm.changed ? 1 : 0) };
+      // 4.5, the same budget as venue-ops: growth is refused near the size
+      // guard; a reduction near the hard guard commits without history.
+      let outDoc: any = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
+      if (r.growth && candidateBytes(outDoc) > GRANT_GROWTH_LIMIT_BYTES) {
+        return deny('The app storage is nearly full; this change cannot be saved right now.', 409, 'STATE_NEAR_FULL');
+      }
+      if (!r.growth && candidateBytes(outDoc) > 900 * 1024) {
+        fields = trimHistory(fields, 0);
+        outDoc = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
+        log.warn(`[grants] venues PUT on ${id} near the size guard: committed without history`);
+      }
       return {
-        doc: { ...freshDoc, users: [...freshUsers] },
-        venueAccessSetById: { [id]: list },
+        doc: outDoc,
+        grantSetById: { [id]: fields },
+        ...(r.growth ? {} : { grantBudgetFallback: true }),
         result: { userId: id, before, home: target.venueId || null, list },
       };
     },
@@ -17240,6 +18102,10 @@ async function startServer() {
     if (!loaded && !durableStateLoaded) {
       throw new Error('[Firestore] Could not load durable state at boot — refusing to start with empty state.');
     }
+    // 12a-s (4.7): the boot load is this process's first confirmed install.
+    freshnessEnabled = true;
+    freshnessLastIdleReadMono = monoNowMs(); // the boot load is the newest document
+    freshnessConfirm();
   } else {
     durableStateLoaded = true; // No Firestore configured; local file is the source of truth.
   }
@@ -17340,6 +18206,11 @@ async function startServer() {
     // Cache headers that let every deploy reach phones (see static-files.ts).
     mountStaticFiles(app, distPath);
   }
+
+  // 12a-s: freshness refresh (reads only; staged revisions run it too),
+  // scope reconcile, SCOPE_PING and the expiry sweep (the sweep itself skips
+  // maintenance, FORCE_LOCAL_MODE and staged revisions).
+  startGrantTimers();
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[WorkPulse Server] Listening on http://0.0.0.0:${PORT} with WebSockets enabled at /ws`);

@@ -22,6 +22,7 @@
  *   never accepted from a request body, never sent to a client.
  */
 
+import { type GrantFields, closeAllExtras, hasGrantState, isPlainObject, venueRevOf } from './venue-grants.ts';
 import crypto from 'crypto';
 
 /**
@@ -38,6 +39,9 @@ export const SERVER_ONLY_USER_FIELDS = [
   'credentialOwner', 'credentialOrigin', 'recoveryCodeHashes', 'recoveryFailures', 'joinedAt',
   'credentialPending', // 10k: 'invite' while a member's admin-set password is revoked (Send invite)
   'resetSuspended', // 10L: { linkId, at, byAgencyId } while a membership is paused after another agency's reset link
+  // Item 12 (12a-s): per-venue end dates. Written ONLY through grantSetById
+  // (applyGrantOps in venue-grants.ts); never from a body, never in a payload.
+  'venueGrants', 'venueHistory', 'venueRev', 'noHomeVenue',
 ] as const;
 
 /**
@@ -153,6 +157,14 @@ export interface IdentityEnforceOptions {
    */
   venueAccessSetById?: ReadonlyMap<string, readonly string[]>;
   /**
+   * Item 12 (12a-s): row id -> the full grant record from applyGrantOps
+   * (venueId, noHomeVenue, venueAccess, venueGrants, venueHistory, venueRev).
+   * The ONLY writer of the grant fields; wins over venueAccessSetById.
+   */
+  grantSetById?: ReadonlyMap<string, GrantFields>;
+  /** 12a-s: the commit's clock (history timestamps when a home change or a promotion closes grants). */
+  nowMs?: number;
+  /**
    * 10b: the ONLY way credentialOrigin is set or changed. Row id → origin.
    * A value outside CREDENTIAL_ORIGINS is ignored (reported as a violation).
    */
@@ -234,6 +246,8 @@ export interface IdentityEnforceOptions {
    * is reverted, and the caller logs it, so it is never silent.
    */
   onViolation?: (rowId: string, field: string) => void;
+  /** 12a-s: a grant closure happened during enforcement (history written). */
+  onGrantClose?: (rowId: string) => void;
   /** 10b: every credentialOrigin change (row id, old, new; never a value). */
   onOriginChange?: (rowId: string, from: string | null, to: string | null) => void;
 }
@@ -543,18 +557,66 @@ export function enforceIdentityFields(
     }
     if (out.personId) {
       const d = deriveIdentityFields(out, afterAgencies);
-      const set = opts.venueAccessSetById?.get(row.id);
-      if (set) out.venueAccess = mergeVenueAccess(out.venueId, set);
+      const gset = opts.grantSetById?.get(row.id);
+      const set = gset ? undefined : opts.venueAccessSetById?.get(row.id);
+      let preserved = false;
+      if (gset) {
+        out.venueId = gset.venueId;
+        out.venueAccess = [...gset.venueAccess];
+      } else if (set) out.venueAccess = mergeVenueAccess(out.venueId, set);
       else if (
         prev && prev.personId && prev.venueId === out.venueId && Array.isArray(prev.venueAccess) &&
         // a stored list is home-first; one headed by another venue is stale → reset
         (!out.venueId || prev.venueAccess[0] === out.venueId)
-      )
+      ) {
         out.venueAccess = mergeVenueAccess(out.venueId, prev.venueAccess);
-      else out.venueAccess = d.venueAccess;
+        preserved = true;
+      } else out.venueAccess = d.venueAccess;
       out.isPrimaryAdmin = d.isPrimaryAdmin;
-      if (opts.onViolation && !set && prev && prev.venueId === out.venueId && row.venueAccess !== undefined && JSON.stringify(row.venueAccess) !== JSON.stringify(out.venueAccess))
+      if (opts.onViolation && !set && !gset && prev && prev.venueId === out.venueId && row.venueAccess !== undefined && JSON.stringify(row.venueAccess) !== JSON.stringify(out.venueAccess))
         opts.onViolation(row.id, 'venueAccess');
+      // 12a-s: the grant fields (dates, history, venueRev, noHomeVenue).
+      const GRANT_KEYS = ['venueGrants', 'venueHistory', 'venueRev', 'noHomeVenue'] as const;
+      const setKey = (k: string, v: unknown) => { if (v === undefined) delete out[k]; else out[k] = v; };
+      if (gset) {
+        setKey('noHomeVenue', gset.noHomeVenue ? true : undefined);
+        setKey('venueGrants', gset.venueGrants);
+        setKey('venueHistory', gset.venueHistory);
+        setKey('venueRev', gset.venueRev);
+      } else if (prev && (preserved || set) && !(out.role === 'admin' && prev.role !== 'admin' && hasGrantState(prev))) {
+        // Same home (or the 9a list writer): the stored grant record is kept
+        // EXACTLY; a mutator's own change to it is reverted.
+        for (const k of GRANT_KEYS) {
+          if (opts.onViolation && JSON.stringify(row[k]) !== JSON.stringify(prev[k])) opts.onViolation(row.id, k);
+          setKey(k, prev[k]);
+        }
+        if (set && hasGrantState(prev)) {
+          // 9a list writer on a row with dates: keep entries of venues still listed.
+          const listed = new Set(out.venueAccess);
+          if (isPlainObject(prev.venueGrants)) {
+            const g: any = {};
+            for (const k of Object.keys(prev.venueGrants)) if (listed.has(k)) g[k] = prev.venueGrants[k];
+            setKey('venueGrants', Object.keys(g).length ? g : undefined);
+          }
+          setKey('venueRev', venueRevOf(prev) + 1);
+        }
+      } else if (prev && hasGrantState(prev)) {
+        // The home changed (or promotion to admin): every extra was reset;
+        // close them into history, clear the marker, venueRev + 1.
+        const c = closeAllExtras(prev, out.venueId, 'unticked', opts.nowMs ?? Date.now());
+        if (opts.onGrantClose) opts.onGrantClose(row.id);
+        delete out.venueGrants;
+        delete out.noHomeVenue;
+        setKey('venueHistory', c.venueHistory);
+        out.venueRev = c.venueRev;
+        if (out.role === 'admin') out.venueAccess = d.venueAccess;
+      } else {
+        // A new row, or a row with no grant state: only grantSetById writes these.
+        for (const k of GRANT_KEYS) {
+          if (opts.onViolation && row[k] !== undefined) opts.onViolation(row.id, k);
+          delete out[k];
+        }
+      }
     }
     return out;
   });
