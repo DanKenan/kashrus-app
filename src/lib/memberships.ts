@@ -9,6 +9,7 @@
 // 11a-c: a null token means this device's own sign-in: the cookie when the
 // device is on it (sessionAuthHeaders), else nothing to send.
 
+import { noticeSiteRefusal } from './site';
 import { hasSessionCredential, sessionAuthHeaders } from './api';
 
 export interface Membership {
@@ -82,6 +83,7 @@ export async function activateMembership(token: string | null, membershipId: str
     if (res.ok && data && typeof data.token === 'string' && data.token && data.user) {
       return { ok: true, token: data.token, user: data.user };
     }
+    noticeSiteRefusal(res.status, data);
     return { ok: false, error: typeof data?.error === 'string' && data.error ? data.error : MEMBERSHIP_ERROR_TEXT };
   } catch {
     return { ok: false, error: MEMBERSHIP_NETWORK_TEXT };

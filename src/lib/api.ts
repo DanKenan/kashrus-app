@@ -1,3 +1,4 @@
+import { announceSiteRefusal, currentSite, siteRefusalFrom, type SiteRefusal } from './site';
 // Central API helper: attaches the signed session token to every request.
 // Use apiFetch('/api/...') everywhere instead of raw fetch().
 
@@ -354,6 +355,19 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   // Track the server's document version from every API response so writes
   // can send back the version this client last saw (version contract).
   trackVersionHeader(res);
+  // Domains PR B (plan 2h): "not on this address" (WRONG_SITE / SITE_NOT_SET_UP).
+  // The server sends these only on an agency or unknown address, never on the
+  // shared one; a page that knows it is on the shared address ignores them.
+  if ((res.status === 403 || res.status === 401) && currentSite()?.site !== 'shared') {
+    let refusal: SiteRefusal | null = null;
+    try { refusal = siteRefusalFrom(res.status, await res.clone().json()); } catch { /* not JSON */ }
+    if (refusal) {
+      // A signed-in client clears its local sign-in first (only the one this request used).
+      if (usedToken && getSessionToken() === usedToken) clearSession();
+      else if (!usedToken && usedCookieKey && sessionCredentialKey() === usedCookieKey) clearSession();
+      announceSiteRefusal(refusal);
+    }
+  }
   if (res.status === 401) {
     const code401 = await unauthorizedCode(res);
     applyKioskUnpaired(code401);
