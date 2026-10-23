@@ -1,13 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { X, ScanFace, Pencil, Trash2, Plus, Info, Lock } from 'lucide-react';
 import { ErrorBox } from './PasskeyOffer';
 import {
-  addPasskey, confirmPassword, describeWhen, listPasskeys, platformPasskeyAvailable, removePasskey, renamePasskey,
+  addPasskey, cancelPasskeyPrompt, confirmPassword, currentAccountId, describeWhen, listPasskeys, platformPasskeyAvailable, removePasskey, renamePasskey,
   PasskeyError, PasskeyList, PasskeyRow, PASSKEY_TEXT as T,
 } from '../lib/passkeys';
 
 /** Item 11b-c (c): Face ID / passkeys in settings: add, rename, remove. */
-export const PasskeysModal: React.FC<{ isOpen: boolean; onClose: () => void; onChanged?: (l: PasskeyList) => void; onToast?: (msg: string) => void }> = ({ isOpen, onClose, onChanged, onToast }) => {
+export const PasskeysModal: React.FC<{ isOpen: boolean; userId: string; onClose: () => void; onChanged?: (l: PasskeyList) => void; onToast?: (msg: string) => void }> = ({ isOpen, userId, onClose, onChanged, onToast }) => {
   const [list, setList] = useState<PasskeyList | null>(null);
   const [platform, setPlatform] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -17,29 +17,46 @@ export const PasskeysModal: React.FC<{ isOpen: boolean; onClose: () => void; onC
   const [password, setPassword] = useState('');
   const [needPasswordToAdd, setNeedPasswordToAdd] = useState(false);
 
-  const load = async () => {
-    try { const l = await listPasskeys(); setList(l); onChanged?.(l); }
-    catch (e: any) { setError(e?.message || T.offline); }
+  // Each opening is one session of this dialog; every step of every action
+  // stops once the dialog closes or the browser is signed in as someone else.
+  const session = useRef(0);
+  const inFlight = useRef(false);
+  const guardFor = (s: number) => () => session.current === s && currentAccountId() === userId;
+  useEffect(() => {
+    session.current += 1;
+    return () => { session.current += 1; if (inFlight.current) cancelPasskeyPrompt(); };
+  }, [isOpen, userId]);
+
+  const load = async (valid = guardFor(session.current)) => {
+    try { const l = await listPasskeys(); if (!valid()) return; setList(l); onChanged?.(l); }
+    catch (e: any) { if (valid()) setError(e?.message || T.offline); }
   };
   useEffect(() => {
     if (!isOpen) return;
+    setList(null); setBusy(false);
     setError(null); setEditing(null); setRemoving(null); setPassword(''); setNeedPasswordToAdd(false);
     load(); platformPasskeyAvailable().then(setPlatform);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
   if (!isOpen) return null;
 
-  const run = async (fn: () => Promise<void>) => {
-    setBusy(true); setError(null);
-    try { await fn(); } catch (e: any) {
+  // One action at a time; v() is false once the dialog closed or the account changed.
+  const run = async (fn: (v: () => boolean) => Promise<void>) => {
+    if (inFlight.current) return;
+    const v = guardFor(session.current);
+    if (!v()) return;
+    inFlight.current = true; setBusy(true); setError(null);
+    try { await fn(v); } catch (e: any) {
+      if (!v() || (e instanceof PasskeyError && e.kind === 'stale')) return;
       if (e instanceof PasskeyError && e.kind === 'needPassword') { setNeedPasswordToAdd(true); return; }
       setError(e?.message || T.offline);
-    } finally { setBusy(false); }
+    } finally { inFlight.current = false; if (v()) setBusy(false); }
   };
-  const add = () => run(async () => { await addPasskey(); setNeedPasswordToAdd(false); setPassword(''); onToast?.(T.addedToast); await load(); });
-  const addWithPassword = (ev: React.FormEvent) => { ev.preventDefault(); run(async () => { await confirmPassword(password); setPassword(''); setNeedPasswordToAdd(false); await addPasskey(); onToast?.(T.addedToast); await load(); }); };
-  const saveName = (ev: React.FormEvent) => { ev.preventDefault(); if (!editing) return; const e = editing; run(async () => { await renamePasskey(e.id, e.name.trim()); setEditing(null); await load(); }); };
-  const confirmRemove = (ev: React.FormEvent) => { ev.preventDefault(); if (!removing) return; const r = removing; run(async () => { await confirmPassword(password); await removePasskey(r.id); setRemoving(null); setPassword(''); onToast?.(T.removedToast); await load(); }); };
+  const stop = () => new PasskeyError('stale', '');
+  const add = () => run(async (v) => { await addPasskey({ stillValid: v }); if (!v()) throw stop(); setNeedPasswordToAdd(false); setPassword(''); onToast?.(T.addedToast); await load(v); });
+  const addWithPassword = (ev: React.FormEvent) => { ev.preventDefault(); run(async (v) => { await confirmPassword(password); if (!v()) throw stop(); setPassword(''); setNeedPasswordToAdd(false); await addPasskey({ stillValid: v }); if (!v()) throw stop(); onToast?.(T.addedToast); await load(v); }); };
+  const saveName = (ev: React.FormEvent) => { ev.preventDefault(); if (!editing) return; const e = editing; run(async (v) => { await renamePasskey(e.id, e.name.trim()); if (!v()) throw stop(); setEditing(null); await load(v); }); };
+  const confirmRemove = (ev: React.FormEvent) => { ev.preventDefault(); if (!removing) return; const r = removing; run(async (v) => { await confirmPassword(password); if (!v()) throw stop(); await removePasskey(r.id, v); if (!v()) throw stop(); setRemoving(null); setPassword(''); onToast?.(T.removedToast); await load(v); }); };
 
   const rows = list?.passkeys ?? [];
   const full = rows.length >= 10;

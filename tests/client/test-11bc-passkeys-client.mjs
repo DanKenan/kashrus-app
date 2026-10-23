@@ -2,8 +2,10 @@
  * Item 11b-c client: Face ID / passkeys (src/lib/passkeys.ts) against fakes of the
  * server answers (#138) and of the phone (navigator.credentials).
  *  T  every visible word lives in PASSKEY_TEXT; never "WebAuthn".
- *  O  the offer: set by a password sign-in, read once, only inside the 5-minute proof
- *     window; "Not now" is remembered per account.
+ *  O  the offer: set by a completed password sign-in FOR THAT ACCOUNT, read once, only
+ *     inside the 5-minute proof window; phones only; "Not now" is remembered per account.
+ *  G  every step of add / remove / sign-in stops (silently) once the dialog closed or the
+ *     browser is signed in as someone else; the phone is not asked, nothing more is sent.
  *  S  support: no PublicKeyCredential = no button; the platform check.
  *  E  errors -> plain words: 5xx = try again (never a sign-out), RECENT_AUTH_REQUIRED,
  *     PASSKEY_UNAVAILABLE, PASSKEY_LIMIT, WRONG_PASSWORD; phone cancel / already / unsupported.
@@ -67,38 +69,110 @@ const CID = 'abcdefghijklmnopqrstuv';
 {
   const vals = Object.values(P.PASSKEY_TEXT).map((v) => (typeof v === 'function' ? v('X') : v));
   ok('T no "WebAuthn" in any visible word', vals.every((v) => !/webauthn/i.test(v)));
+  ok('T Don\'s pick: the button says "Quick sign-in", Face ID or fingerprint under it', P.PASSKEY_TEXT.signInButton === 'Quick sign-in' && P.PASSKEY_TEXT.signInSubline === 'Face ID or fingerprint');
+  ok('T no label says just "Face ID" (always "Face ID or fingerprint" / "your fingerprint")', vals.every((v) => !/Face ID(?! or (your )?fingerprint)/.test(v)));
   ok('T every value is non-empty text', vals.every((v) => typeof v === 'string' && v.trim().length > 0));
   const src = ['src/components/PasskeyOffer.tsx', 'src/components/PasskeysModal.tsx'].map((f) => fs.readFileSync(new URL('../../' + f, import.meta.url), 'utf8')).join('\n');
   ok('T the two screens hold no hard-coded "Face ID"', !/Face ID/.test(src.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')));
   const strip = (t) => t.replace(/\{\/\*[\s\S]*?\*\/\}/g, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   const login = fs.readFileSync(new URL('../../src/components/LoginPage.tsx', import.meta.url), 'utf8');
   const hdr = fs.readFileSync(new URL('../../src/components/Header.tsx', import.meta.url), 'utf8');
-  ok('T sign-in and menu words come from PASSKEY_TEXT', /PASSKEY_TEXT\.signInButton/.test(login) && /PASSKEY_TEXT\.waiting/.test(login) && (hdr.match(/PASSKEY_TEXT\.menuRow/g) || []).length === 2 && !/>[^<{]*Face ID[^<{]*</.test(strip(login + hdr)));
+  ok('T sign-in and menu words come from PASSKEY_TEXT', /PASSKEY_TEXT\.signInButton/.test(login) && /PASSKEY_TEXT\.signInSubline/.test(login) && /PASSKEY_TEXT\.waiting/.test(login) && (hdr.match(/PASSKEY_TEXT\.menuRow/g) || []).length === 2 && !/>[^<{]*Face ID[^<{]*</.test(strip(login + hdr)));
 }
 
-// O: the offer mark and "Not now"
+// O: the offer mark (bound to the account its password sign-in opened) and "Not now"
 {
   reset();
-  ok('O no mark = no offer', P.takePasswordSignInMark() === false);
-  P.markPasswordSignIn();
-  ok('O a fresh password sign-in = offer', P.takePasswordSignInMark() === true);
-  ok('O read once', P.takePasswordSignInMark() === false);
   const now = Date.now();
-  sstore.set('shutfey_password_signin_at', String(now - P.PASSWORD_PROOF_MS + 1000));
-  ok('O inside the 5-minute window', P.takePasswordSignInMark(now) === true);
-  sstore.set('shutfey_password_signin_at', String(now - P.PASSWORD_PROOF_MS));
-  ok('O at 5 minutes: no offer', P.takePasswordSignInMark(now) === false);
+  const put = (v) => sstore.set('shutfey_password_signin_at', typeof v === 'string' ? v : JSON.stringify(v));
+  ok('O no mark = no offer', P.takePasswordSignInMark('u1') === null);
+  P.markPasswordSignIn('u1', now);
+  ok('O this account, just now = offer until +5 min', P.takePasswordSignInMark('u1', now) === now + P.PASSWORD_PROOF_MS);
+  ok('O read once', P.takePasswordSignInMark('u1', now) === null);
+  P.markPasswordSignIn('u1', now);
+  ok('O another account never gets it', P.takePasswordSignInMark('u2', now) === null);
+  ok('O ... and the mark is gone after that read', P.takePasswordSignInMark('u1', now) === null);
+  put({ u: 'u1', at: now - P.PASSWORD_PROOF_MS + 1000 });
+  ok('O inside the 5-minute window', P.takePasswordSignInMark('u1', now) === now + 1000);
+  put({ u: 'u1', at: now - P.PASSWORD_PROOF_MS });
+  ok('O at 5 minutes: no offer', P.takePasswordSignInMark('u1', now) === null);
   ok('O after the window the mark is gone too', sstore.has('shutfey_password_signin_at') === false);
-  sstore.set('shutfey_password_signin_at', String(now + 60000));
-  ok('O a mark from the future: no offer', P.takePasswordSignInMark(now) === false);
-  sstore.set('shutfey_password_signin_at', 'junk');
-  ok('O a broken mark: no offer', P.takePasswordSignInMark(now) === false);
-  P.markPasswordSignIn(); P.clearPasswordSignInMark();
-  ok('O a Face ID sign-in clears an older password mark', P.takePasswordSignInMark() === false);
+  put({ u: 'u1', at: now + 60000 });
+  ok('O a mark from the future: no offer', P.takePasswordSignInMark('u1', now) === null);
+  put('junk'); ok('O a broken mark: no offer', P.takePasswordSignInMark('u1', now) === null);
+  put(String(now)); ok('O an old bare timestamp mark: no offer', P.takePasswordSignInMark('u1', now) === null);
+  put({ u: 'u1' }); ok('O a mark without a time: no offer', P.takePasswordSignInMark('u1', now) === null);
+  P.markPasswordSignIn('', now); ok('O no account id = no mark', !sstore.has('shutfey_password_signin_at'));
+  P.markPasswordSignIn('u1', now); ok('O an empty reader id never matches', P.takePasswordSignInMark('', now) === null);
+  put({ u: '', at: now }); ok('O an empty id on both sides never matches', P.takePasswordSignInMark('', now) === null);
+  P.markPasswordSignIn('u1'); P.clearPasswordSignInMark();
+  ok('O a Face ID sign-in clears an older password mark', P.takePasswordSignInMark('u1') === null);
   ok('O not dismissed at first', P.offerDismissed('u1') === false);
   P.dismissOffer('u1');
   ok('O "Not now" remembered for that account', P.offerDismissed('u1') === true);
   ok('O ... and only that account', P.offerDismissed('u2') === false);
+  store.set('current_user', JSON.stringify({ id: 'u7', name: 'x' }));
+  ok('O current account read from the shared sign-in', P.currentAccountId() === 'u7');
+  store.set('current_user', 'junk'); ok('O broken current user = none', P.currentAccountId() === null);
+  store.set('current_user', JSON.stringify({ id: 5 })); ok('O a non-text id = none', P.currentAccountId() === null);
+  store.delete('current_user'); ok('O signed out = none', P.currentAccountId() === null);
+  // phone only
+  const mm = (coarse) => (q) => ({ matches: q === '(pointer: coarse)' ? coarse : false });
+  globalThis.matchMedia = mm(true); globalThis.screen = { width: 390, height: 844 };
+  ok('O a phone (touch, short side 390) = phone', P.isPhoneLike() === true);
+  globalThis.screen = { width: 1280, height: 800 };
+  ok('O a big touch screen is not a phone', P.isPhoneLike() === false);
+  globalThis.matchMedia = mm(false); globalThis.screen = { width: 390, height: 844 };
+  ok('O no touch = not a phone', P.isPhoneLike() === false);
+  delete globalThis.matchMedia; ok('O no matchMedia = not a phone', P.isPhoneLike() === false);
+  globalThis.matchMedia = mm(true); globalThis.screen = { width: 0, height: 0 };
+  ok('O unknown screen = not a phone', P.isPhoneLike() === false);
+  globalThis.screen = { width: 599, height: 900 }; ok('O short side 599 = phone', P.isPhoneLike() === true);
+  globalThis.screen = { width: 600, height: 900 }; ok('O short side 600 = not a phone', P.isPhoneLike() === false);
+}
+
+// G: a step-by-step action stops when it is no longer valid (dialog closed, another account)
+{
+  reset();
+  let calls = 0; let valid = true;
+  routes['POST /api/passkeys/register/options'] = () => { calls++; return [200, { challengeId: CID, options: OPTS_R }]; };
+  routes['POST /api/passkeys/register/verify'] = () => { calls++; return [201, { ok: true, passkey: { id: 'k1' } }]; };
+  await throwsKind('G add: invalid before the start sends nothing', () => P.addPasskey({ stillValid: () => false }), 'stale');
+  ok('G ... nothing sent', calls === 0 && sent.length === 0);
+  phone.lastCreate = null;
+  routes['POST /api/passkeys/register/options'] = () => { calls++; valid = false; return [200, { challengeId: CID, options: OPTS_R }]; };
+  await throwsKind('G add: invalid after options = the phone is not asked', () => P.addPasskey({ stillValid: () => valid }), 'stale');
+  ok('G ... phone not asked, no verify', phone.lastCreate === null && !sent.some((x) => x.url.endsWith('/verify')));
+  valid = true; routes['POST /api/passkeys/register/options'] = [200, { challengeId: CID, options: OPTS_R }];
+  phone.create = async () => { valid = false; return fakeCred('create'); };
+  sent.length = 0;
+  await throwsKind('G add: invalid after the phone = no verify', () => P.addPasskey({ stillValid: () => valid }), 'stale');
+  ok('G ... no verify sent', !sent.some((x) => x.url.endsWith('/verify')));
+  valid = true; phone.create = async () => { valid = false; throw Object.assign(new Error('x'), { name: 'NotAllowedError' }); };
+  await throwsKind('G add: a phone error after the dialog closed is silent', () => P.addPasskey({ stillValid: () => valid }), 'stale');
+  phone.create = null;
+  // remove
+  sent.length = 0; routes['DELETE /api/passkeys/a'] = [200, { ok: true }];
+  await throwsKind('G remove: invalid = no DELETE', () => P.removePasskey('a', () => false), 'stale');
+  ok('G ... nothing sent', sent.length === 0);
+  // sign-in
+  valid = true; let vcalls = 0;
+  routes['POST /api/auth/passkey/options'] = () => { valid = false; return [200, { challengeId: CID, options: OPTS_A }]; };
+  routes['POST /api/auth/passkey/verify'] = () => { vcalls++; return [200, { token: 't', user: { id: 'u' } }]; };
+  phone.lastGet = null;
+  await throwsKind('G sign-in: page closed after options = phone not asked', () => P.signInWithPasskey(() => valid), 'stale');
+  ok('G ... no prompt, no verify', phone.lastGet === null && vcalls === 0);
+  valid = true; routes['POST /api/auth/passkey/options'] = [200, { challengeId: CID, options: OPTS_A }];
+  phone.get = async () => { valid = false; return fakeCred('get'); };
+  await throwsKind('G sign-in: closed during the prompt = no verify', () => P.signInWithPasskey(() => valid), 'stale');
+  ok('G ... no verify', vcalls === 0);
+  valid = true; phone.get = null;
+  routes['POST /api/auth/passkey/verify'] = () => { vcalls++; valid = false; return [200, { token: 't', user: { id: 'u' } }]; };
+  await throwsKind('G sign-in: a late answer is not used', () => P.signInWithPasskey(() => valid), 'stale');
+  phone.get = async () => { valid = false; throw Object.assign(new Error('x'), { name: 'NotAllowedError' }); }; valid = true;
+  await throwsKind('G sign-in: a phone error after close is silent', () => P.signInWithPasskey(() => valid), 'stale');
+  phone.get = null;
+  let n = 0; P.cancelPasskeyPrompt(); ok('G cancel with no prompt is harmless', n === 0);
 }
 
 // S: support
@@ -155,7 +229,7 @@ const CID = 'abcdefghijklmnopqrstuv';
   ok('A verify carries the challengeId and the phone answer, no name by default', verifyBody?.challengeId === CID && verifyBody?.response?.id === 'Y3JlZA' && verifyBody?.response?.response?.attestationObject && !('name' in verifyBody));
   const opt = sent.find((s) => s.url === '/api/passkeys/register/options');
   ok('A requests opt in to the cookie', opt?.headers.get('X-Shutfey-Auth') === 'cookie');
-  await P.addPasskey('Work phone');
+  await P.addPasskey({ name: 'Work phone' });
   ok('A a given name is sent', verifyBody?.name === 'Work phone');
   // the phone says no -> nothing goes to verify
   sent.length = 0; phone.create = async () => { throw Object.assign(new Error('x'), { name: 'NotAllowedError' }); };

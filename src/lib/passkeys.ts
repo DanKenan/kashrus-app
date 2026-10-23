@@ -1,6 +1,7 @@
 // Item 11b-c: Face ID / fingerprint sign-in (passkeys), client side.
 // Server: #138 (routes below). Browser side: @simplewebauthn/browser (B13).
 import {
+  WebAuthnAbortService,
   browserSupportsWebAuthn,
   platformAuthenticatorIsAvailable,
   startAuthentication,
@@ -10,37 +11,39 @@ import { apiFetch } from './api';
 
 /**
  * EVERY word the person sees for this feature, in one place, so the name of
- * the feature (Don's pick: "Face ID" today) changes in one commit. Plain words
+ * the feature (Don's pick, Oct 22: "Quick sign-in", with "Face ID or
+ * fingerprint" under it) changes in one commit. Plain words
  * only: never "WebAuthn" (plan 11b-c).
  */
 export const PASSKEY_TEXT = {
   // sign-in page
-  signInButton: 'Sign in with Face ID',
-  waiting: 'Waiting for Face ID…',
+  signInButton: 'Quick sign-in',
+  signInSubline: 'Face ID or fingerprint',
+  waiting: 'Waiting for Face ID or fingerprint…',
   or: 'or',
   // one-time offer after a password sign-in
   offerTitle: 'Sign in faster next time?',
   offerBody: 'Use Face ID or your fingerprint instead of typing your password on this phone. Your password keeps working.',
-  offerAdd: 'Add Face ID',
+  offerAdd: 'Add Face ID or fingerprint',
   offerNotNow: 'Not now',
-  offerLater: 'You can add it later from the menu, under Face ID / passkeys.',
+  offerLater: 'You can add it later from the menu, under Face ID or fingerprint.',
   tryAgain: 'Try again',
   ok: 'OK',
-  doneTitle: 'Face ID is on',
-  doneBody: 'Next time, tap "Sign in with Face ID" on this phone. Your password still works too.',
+  doneTitle: 'Quick sign-in is on',
+  doneBody: 'Next time, tap "Quick sign-in" on this phone. Your password still works too.',
   done: 'Done',
   passwordTitle: 'Enter your password',
   passwordPlaceholder: 'Password',
   continue: 'Continue',
   // menu + settings list
-  menuRow: 'Face ID / passkeys',
-  listTitle: 'Face ID / passkeys',
+  menuRow: 'Face ID or fingerprint',
+  listTitle: 'Face ID or fingerprint',
   listSubtitle: 'Sign in without typing your password',
   listAria: 'Your passkeys',
   loading: 'Loading…',
-  emptyTitle: 'No Face ID added yet',
+  emptyTitle: 'No Face ID or fingerprint added yet',
   emptyBody: 'Add it on each phone you use. Your password keeps working.',
-  addButton: 'Add Face ID on this phone',
+  addButton: 'Add Face ID or fingerprint on this phone',
   added: 'Added',
   lastUsed: 'Last used',
   nameLabel: 'Name',
@@ -52,17 +55,17 @@ export const PASSKEY_TEXT = {
   removeBody: 'Anyone signed in with it is signed out, and that phone will need your password next time. Enter your password to confirm.',
   removeButton: 'Remove',
   yourPassword: 'Your password',
-  addedToast: 'Face ID added.',
+  addedToast: 'Face ID or fingerprint added.',
   removedToast: 'Removed.',
   // errors and limits, in plain words
   unsupported: "This phone or browser can't use Face ID or fingerprint sign-in. Your password still works.",
-  cancelled: 'Face ID was cancelled or timed out. Nothing was changed.',
-  signInCancelled: 'Face ID was cancelled. Try again, or sign in with your password.',
-  signInFailed: "That Face ID isn't set up for Shutfey on this phone. Sign in with your password, then add Face ID from the menu.",
-  alreadyOnPhone: 'Face ID is already set up for your account on this phone.',
-  unavailable: "Face ID sign-in isn't available for this account. Your password keeps working.",
+  cancelled: 'Face ID or fingerprint was cancelled or timed out. Nothing was changed.',
+  signInCancelled: 'Face ID or fingerprint was cancelled. Try again, or sign in with your password.',
+  signInFailed: "That Face ID or fingerprint isn't set up for Shutfey on this phone. Sign in with your password, then add it from the menu.",
+  alreadyOnPhone: 'Face ID or fingerprint is already set up for your account on this phone.',
+  unavailable: "Quick sign-in isn't available for this account. Your password keeps working.",
   limit: 'You already have 10 passkeys. Remove one to add another.',
-  saveFailed: "Face ID couldn't be saved. Please try again.",
+  saveFailed: "Face ID or fingerprint couldn't be saved. Please try again.",
   renameFailed: "The name couldn't be saved. Please try again.",
   removeFailed: "It couldn't be removed. Please try again.",
   needPassword: 'To keep your account safe, enter your password first.',
@@ -70,10 +73,20 @@ export const PASSKEY_TEXT = {
   offline: "Can't reach Shutfey right now. Please try again in a moment.",
 } as const;
 
+/**
+ * A step-by-step action stops (PasskeyError 'stale', shown to nobody) as soon
+ * as this returns false: the dialog closed, or the browser is now signed in as
+ * someone else (another tab, a sign-out). Checked before every request and
+ * before asking the phone.
+ */
+export type StillValid = () => boolean;
+const stale = () => new PasskeyError('stale', '');
+const check = (stillValid?: StillValid) => { if (stillValid && !stillValid()) throw stale(); };
+
 export interface PasskeyRow { id: string; name: string; createdAt: string; lastUsedAt: string | null }
 export interface PasskeyList { passkeys: PasskeyRow[]; canAdd: boolean }
 
-export type PasskeyErrorKind = 'cancelled' | 'already' | 'unavailable' | 'limit' | 'failed' | 'needPassword' | 'wrongPassword' | 'offline' | 'unsupported';
+export type PasskeyErrorKind = 'stale' | 'cancelled' | 'already' | 'unavailable' | 'limit' | 'failed' | 'needPassword' | 'wrongPassword' | 'offline' | 'unsupported';
 export class PasskeyError extends Error {
   constructor(public kind: PasskeyErrorKind, message: string) { super(message); this.name = 'PasskeyError'; }
 }
@@ -83,25 +96,59 @@ export const PASSWORD_PROOF_MS = 5 * 60 * 1000;
 const PW_SIGNIN_KEY = 'shutfey_password_signin_at';
 const offerDismissedKey = (userId: string) => `shutfey_passkey_offer_off:${userId}`;
 
-/** Set by a password sign-in on this tab; the offer is shown once after it. */
-export function markPasswordSignIn(): void {
-  try { sessionStorage.setItem(PW_SIGNIN_KEY, String(Date.now())); } catch { /* ignore */ }
+/**
+ * Written only when a PASSWORD sign-in has completed on this tab, for the
+ * account it opened (after the agency chooser too), with the time the password
+ * was accepted. Read once by that account; anything else is ignored.
+ */
+export function markPasswordSignIn(userId: string, at: number = Date.now()): void {
+  if (!userId) return;
+  try { sessionStorage.setItem(PW_SIGNIN_KEY, JSON.stringify({ u: userId, at })); } catch { /* ignore */ }
 }
 export function clearPasswordSignInMark(): void {
   try { sessionStorage.removeItem(PW_SIGNIN_KEY); } catch { /* ignore */ }
 }
-/** Read once: true only for a password sign-in on this tab inside the proof window. */
-export function takePasswordSignInMark(now: number = Date.now()): boolean {
+/**
+ * Read once (the mark is removed whatever it says). Returns the moment the
+ * offer stops being allowed (password time + 5 min) when the mark is this
+ * account's and still inside the window; otherwise null.
+ */
+export function takePasswordSignInMark(userId: string, now: number = Date.now()): number | null {
   let v: string | null = null;
-  try { v = sessionStorage.getItem(PW_SIGNIN_KEY); sessionStorage.removeItem(PW_SIGNIN_KEY); } catch { return false; }
-  const at = Number(v);
-  return v !== null && Number.isFinite(at) && at <= now && now - at < PASSWORD_PROOF_MS;
+  try { v = sessionStorage.getItem(PW_SIGNIN_KEY); sessionStorage.removeItem(PW_SIGNIN_KEY); } catch { return null; }
+  if (!v || !userId) return null;
+  let m: any = null;
+  try { m = JSON.parse(v); } catch { return null; }
+  const at = m && typeof m === 'object' ? Number(m.at) : NaN;
+  if (!m || m.u !== userId || !Number.isFinite(at) || at > now || now - at >= PASSWORD_PROOF_MS) return null;
+  return at + PASSWORD_PROOF_MS;
+}
+/** The account this browser is signed in as now (shared by every tab), or null. */
+export function currentAccountId(): string | null {
+  try { const u = JSON.parse(localStorage.getItem('current_user') || 'null'); return u && typeof u.id === 'string' ? u.id : null; } catch { return null; }
+}
+/**
+ * The automatic offer is for phones only (a laptop with Touch ID / Windows
+ * Hello can still add one from the menu): a touch-first screen whose short
+ * side is phone-sized.
+ */
+export function isPhoneLike(): boolean {
+  try {
+    const coarse = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+    const w = Number(window.screen?.width), h = Number(window.screen?.height);
+    return coarse && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0 && Math.min(w, h) < 600;
+  } catch { return false; }
 }
 export function offerDismissed(userId: string): boolean {
   try { return localStorage.getItem(offerDismissedKey(userId)) === '1'; } catch { return true; }
 }
 export function dismissOffer(userId: string): void {
   try { localStorage.setItem(offerDismissedKey(userId), '1'); } catch { /* ignore */ }
+}
+
+/** Stops a Face ID prompt this page started (e.g. the sign-in page closed). */
+export function cancelPasskeyPrompt(): void {
+  try { WebAuthnAbortService.cancelCeremony(); } catch { /* ignore */ }
 }
 
 /** The sign-in button shows only where the browser has passkeys at all. */
@@ -158,13 +205,17 @@ export async function confirmPassword(password: string): Promise<void> {
   if (!res.ok) throw errorFromAnswer(res.status, data, new PasskeyError('wrongPassword', PASSKEY_TEXT.wrongPassword));
 }
 
-export async function addPasskey(name?: string): Promise<PasskeyRow | null> {
+export async function addPasskey(opts: { name?: string; stillValid?: StillValid } = {}): Promise<PasskeyRow | null> {
+  const { name, stillValid } = opts;
   if (!passkeysInBrowser()) throw new PasskeyError('unsupported', PASSKEY_TEXT.unsupported);
+  check(stillValid);
   const opt = await call('/api/passkeys/register/options', post({}));
+  check(stillValid);
   if (!opt.res.ok) throw errorFromAnswer(opt.res.status, opt.data, new PasskeyError('failed', PASSKEY_TEXT.saveFailed));
   if (!opt.data?.challengeId || !opt.data?.options) throw new PasskeyError('failed', PASSKEY_TEXT.saveFailed);
   let response: unknown;
-  try { response = await startRegistration({ optionsJSON: opt.data.options }); } catch (e) { throw errorFromBrowser(e, PASSKEY_TEXT.cancelled); }
+  try { response = await startRegistration({ optionsJSON: opt.data.options }); } catch (e) { check(stillValid); throw errorFromBrowser(e, PASSKEY_TEXT.cancelled); }
+  check(stillValid);
   const v = await call('/api/passkeys/register/verify', post({ challengeId: opt.data.challengeId, response, ...(name ? { name } : {}) }));
   if (!v.res.ok) throw errorFromAnswer(v.res.status, v.data, new PasskeyError('failed', PASSKEY_TEXT.saveFailed));
   return v.data?.passkey ?? null;
@@ -175,20 +226,24 @@ export async function renamePasskey(id: string, name: string): Promise<void> {
   if (!res.ok) throw errorFromAnswer(res.status, data, new PasskeyError('failed', PASSKEY_TEXT.renameFailed));
 }
 
-export async function removePasskey(id: string): Promise<void> {
+export async function removePasskey(id: string, stillValid?: StillValid): Promise<void> {
+  check(stillValid);
   const { res, data } = await call(`/api/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw errorFromAnswer(res.status, data, new PasskeyError('failed', PASSKEY_TEXT.removeFailed));
 }
 
 /** Passkey sign-in: success is the same body as /api/auth/login (a session, or the agency chooser). */
-export async function signInWithPasskey(): Promise<any> {
+export async function signInWithPasskey(stillValid?: StillValid): Promise<any> {
   if (!passkeysInBrowser()) throw new PasskeyError('unsupported', PASSKEY_TEXT.unsupported);
   const opt = await call('/api/auth/passkey/options', post({}));
+  check(stillValid);
   if (!opt.res.ok) throw errorFromAnswer(opt.res.status, opt.data, new PasskeyError('failed', PASSKEY_TEXT.signInFailed));
   if (!opt.data?.challengeId || !opt.data?.options) throw new PasskeyError('failed', PASSKEY_TEXT.signInFailed);
   let response: unknown;
-  try { response = await startAuthentication({ optionsJSON: opt.data.options }); } catch (e) { throw errorFromBrowser(e, PASSKEY_TEXT.signInCancelled); }
+  try { response = await startAuthentication({ optionsJSON: opt.data.options }); } catch (e) { check(stillValid); throw errorFromBrowser(e, PASSKEY_TEXT.signInCancelled); }
+  check(stillValid);
   const v = await call('/api/auth/passkey/verify', post({ challengeId: opt.data.challengeId, response }));
+  check(stillValid);
   if (!v.res.ok) throw errorFromAnswer(v.res.status, v.data, new PasskeyError('failed', PASSKEY_TEXT.signInFailed));
   return v.data;
 }

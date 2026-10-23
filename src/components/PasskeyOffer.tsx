@@ -1,27 +1,47 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ScanFace, CheckCircle2, AlertCircle, Lock } from 'lucide-react';
-import { addPasskey, confirmPassword, dismissOffer, PasskeyError, PASSKEY_TEXT as T } from '../lib/passkeys';
+import { addPasskey, cancelPasskeyPrompt, confirmPassword, currentAccountId, dismissOffer, PasskeyError, PASSKEY_TEXT as T } from '../lib/passkeys';
 
 /** Item 11b-c (a): the one-time "Add Face ID" offer after a password sign-in. */
 export const PasskeyOffer: React.FC<{ userId: string; onClose: () => void; onAdded?: () => void }> = ({ userId, onClose, onAdded }) => {
   const [step, setStep] = useState<'offer' | 'working' | 'password' | 'done' | 'error'>('offer');
   const [error, setError] = useState<PasskeyError | null>(null);
   const [password, setPassword] = useState('');
+  // Every step stops once this card is gone or the browser is signed in as someone else.
+  const open = useRef(true);
+  const busy = useRef(false);
+  useEffect(() => { open.current = true; return () => { open.current = false; if (busy.current) cancelPasskeyPrompt(); }; }, []);
+  const stillValid = () => open.current && currentAccountId() === userId;
 
-  const notNow = () => { dismissOffer(userId); onClose(); };
+  const notNow = () => { open.current = false; dismissOffer(userId); onClose(); };
   const add = async () => {
+    if (!stillValid()) return;
+    busy.current = true;
     setError(null); setStep('working');
-    try { await addPasskey(); dismissOffer(userId); setStep('done'); onAdded?.(); }
-    catch (e: any) {
+    try {
+      await addPasskey({ stillValid });
+      if (!stillValid()) return;
+      dismissOffer(userId); setStep('done'); onAdded?.();
+    } catch (e: any) {
+      if (!stillValid() || (e instanceof PasskeyError && e.kind === 'stale')) return;
       const pe = e instanceof PasskeyError ? e : new PasskeyError('failed', T.saveFailed);
       if (pe.kind === 'needPassword') { setStep('password'); return; }
       setError(pe); setStep('error');
-    }
+    } finally { busy.current = false; }
   };
   const submitPassword = async (ev: React.FormEvent) => {
-    ev.preventDefault(); setError(null);
-    try { await confirmPassword(password); setPassword(''); await add(); }
-    catch (e: any) { setError(e instanceof PasskeyError ? e : new PasskeyError('failed', T.offline)); }
+    ev.preventDefault();
+    if (busy.current || !stillValid()) return;
+    busy.current = true; setError(null);
+    try { await confirmPassword(password); }
+    catch (e: any) {
+      busy.current = false;
+      if (stillValid()) setError(e instanceof PasskeyError ? e : new PasskeyError('failed', T.offline));
+      return;
+    }
+    busy.current = false;
+    if (!stillValid()) return;
+    setPassword(''); await add();
   };
   const final = error && (error.kind === 'unavailable' || error.kind === 'unsupported' || error.kind === 'limit' || error.kind === 'already');
 
@@ -37,7 +57,7 @@ export const PasskeyOffer: React.FC<{ userId: string; onClose: () => void; onAdd
             <>
               <h2 id="passkey-offer-title" className="mt-4 text-base font-bold text-ink">{T.doneTitle}</h2>
               <p className="mt-1.5 text-xs text-ink-soft">{T.doneBody}</p>
-              <button onClick={onClose} className="mt-6 w-full py-3 rounded-xl pressable bg-gradient-to-b from-gold to-gold-deep text-white text-sm font-bold tactile-2 cursor-pointer">{T.done}</button>
+              <button onClick={() => { open.current = false; onClose(); }} className="mt-6 w-full py-3 rounded-xl pressable bg-gradient-to-b from-gold to-gold-deep text-white text-sm font-bold tactile-2 cursor-pointer">{T.done}</button>
             </>
           ) : step === 'password' ? (
             <form onSubmit={submitPassword} className="text-left">
@@ -66,7 +86,7 @@ export const PasskeyOffer: React.FC<{ userId: string; onClose: () => void; onAdd
                     : (<><ScanFace className="w-4 h-4" /><span>{step === 'error' ? T.tryAgain : T.offerAdd}</span></>)}
                 </button>
               )}
-              <button onClick={final ? onClose : notNow} className={`${final ? 'mt-6 bg-surface border border-line-control text-ink' : 'mt-2 text-ink-soft'} w-full min-h-11 rounded-xl text-sm font-semibold cursor-pointer`}>
+              <button onClick={final ? () => { open.current = false; onClose(); } : notNow} className={`${final ? 'mt-6 bg-surface border border-line-control text-ink' : 'mt-2 text-ink-soft'} w-full min-h-11 rounded-xl text-sm font-semibold cursor-pointer`}>
                 {final ? T.ok : T.offerNotNow}
               </button>
               {!final && <p className="mt-3 text-[11px] text-ink-faint">{T.offerLater}</p>}

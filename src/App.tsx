@@ -36,7 +36,7 @@ import { LandingPage } from './components/LandingPage';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { PasskeyOffer } from './components/PasskeyOffer';
 import { PasskeysModal } from './components/PasskeysModal';
-import { PASSKEY_TEXT, clearPasswordSignInMark, listPasskeys, offerDismissed, platformPasskeyAvailable, takePasswordSignInMark } from './lib/passkeys';
+import { clearPasswordSignInMark, currentAccountId, isPhoneLike, listPasskeys, offerDismissed, platformPasskeyAvailable, takePasswordSignInMark } from './lib/passkeys';
 import { TeamModal } from './components/TeamModal';
 import { CreateVenueModal } from './components/CreateVenueModal';
 import { VenuesDirectoryModal } from './components/VenuesDirectoryModal';
@@ -1593,13 +1593,14 @@ export default function App() {
     setPasskeyOfferFor(null);
     if (isKiosk || !currentUser?.id) { if (isKiosk) clearPasswordSignInMark(); return; }
     const userId = currentUser.id;
-    const offer = takePasswordSignInMark();
+    // Only this account's own password sign-in on this tab, inside the proof window.
+    const offerUntil = takePasswordSignInMark(userId);
     let live = true;
     listPasskeys().then(async (l) => {
       if (!live) return;
       setPasskeyMenu(l.canAdd || l.passkeys.length > 0);
-      if (offer && l.canAdd && l.passkeys.length === 0 && !offerDismissed(userId) && await platformPasskeyAvailable()) {
-        if (live) setPasskeyOfferFor(userId);
+      if (offerUntil !== null && isPhoneLike() && l.canAdd && l.passkeys.length === 0 && !offerDismissed(userId) && await platformPasskeyAvailable()) {
+        if (live && Date.now() < offerUntil && currentAccountId() === userId) setPasskeyOfferFor(userId);
       }
     }).catch(() => { /* unread: the row stays hidden; never a sign-out from here */ });
     return () => { live = false; };
@@ -2373,6 +2374,7 @@ export default function App() {
       {!isKiosk && currentUser && (
         <PasskeysModal
           isOpen={isPasskeysOpen}
+          userId={currentUser.id}
           onClose={() => setIsPasskeysOpen(false)}
           onChanged={(l) => setPasskeyMenu(l.canAdd || l.passkeys.length > 0)}
           onToast={showToast}
