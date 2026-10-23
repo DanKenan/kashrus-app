@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { 
   Mail, 
   Lock, 
@@ -13,7 +13,8 @@ import {
   Building2,
   Sparkles,
   UserPlus,
-  Factory
+  Factory,
+  ScanFace
 } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import { LandingBackButton } from './LandingPage';
@@ -22,6 +23,7 @@ import { AgencySignupForm, REGISTERED_SIGN_IN_TEXT } from './AgencySignupForm';
 import { PWAInstallButton } from './PWAInstallButton';
 import { ForgotPasswordModal } from './ForgotPasswordModal';
 import { apiFetch, setSessionToken } from '../lib/api';
+import { PASSKEY_TEXT, PasskeyError, cancelPasskeyPrompt, clearPasswordSignInMark, markPasswordSignIn, passkeysInBrowser, signInWithPasskey } from '../lib/passkeys';
 import { signInErrorText } from '../lib/venueRemoved';
 import { activateMembership, cleanMemberships, isChooseAnswer, Membership } from '../lib/memberships';
 import { getRoleLabel } from '../lib/permissions';
@@ -57,10 +59,61 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [setupConfirm, setSetupConfirm] = useState('');
   const [showForgot, setShowForgot] = useState(false);
   // 10g: an email with several agencies signs in, then picks which one to open.
-  const [chooser, setChooser] = useState<{ token: string; memberships: Membership[] } | null>(null);
+  // 11b-c: passwordAt = this chooser came from a password (the Face ID offer may follow).
+  const [chooser, setChooser] = useState<{ token: string; memberships: Membership[]; passwordAt?: number } | null>(null);
+
+  // 11b-c (b): Face ID / fingerprint sign-in.
+  const [passkeyLoading, setPasskeyLoading] = useState(false);
+  const [showPasskeyButton] = useState(() => passkeysInBrowser());
+  // One sign-in at a time (password or Face ID); a Face ID answer that comes
+  // back after this page closed or after another attempt started is ignored.
+  const passkeyAttempt = useRef(0);
+  const mounted = useRef(true);
+  const passkeyPending = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      passkeyAttempt.current += 1;
+      if (passkeyPending.current) cancelPasskeyPrompt();
+    };
+  }, []);
+  const handlePasskeySignIn = async () => {
+    if (passkeyLoading || isLoading || passkeyPending.current) return;
+    const mine = ++passkeyAttempt.current;
+    const live = () => mounted.current && passkeyAttempt.current === mine;
+    setErrorMessage(null);
+    setNotice(null);
+    setPasskeyLoading(true);
+    passkeyPending.current = true;
+    // Not a password sign-in: no Face ID offer may follow from an older password attempt.
+    clearPasswordSignInMark();
+    try {
+      // Same answer as /api/auth/login: several agencies -> the chooser; one -> signed in.
+      const data = await signInWithPasskey(live);
+      if (!live()) return;
+      if (isChooseAnswer(data)) {
+        const list = cleanMemberships(data.memberships);
+        if (list.length === 0) throw new Error('User profile could not be verified.');
+        setChooser({ token: data.token, memberships: list });
+        return;
+      }
+      if (!data?.user) throw new Error('User profile could not be verified.');
+      if (data.token) setSessionToken(data.token);
+      onLoginSuccess(data.user);
+    } catch (err: any) {
+      if (!live() || (err instanceof PasskeyError && err.kind === 'stale')) return;
+      setErrorMessage(err?.message || PASSKEY_TEXT.signInFailed);
+    } finally {
+      if (passkeyAttempt.current === mine) passkeyPending.current = false;
+      if (live()) setPasskeyLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // 11b-c: never two sign-ins at once (a Face ID prompt is open).
+    if (isLoading || passkeyLoading || passkeyPending.current) return;
     setErrorMessage(null);
     setNotice(null);
 
@@ -93,12 +146,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         return;
       }
 
+      const passwordAt = Date.now();
+
       // 10g: several agencies under this login -> the person picks one. The
       // choose token is NOT a session; it is kept only in this screen.
       if (isChooseAnswer(data)) {
         const list = cleanMemberships(data.memberships);
         if (list.length > 0) {
-          setChooser({ token: data.token, memberships: list });
+          setChooser({ token: data.token, memberships: list, passwordAt });
           setPassword('');
           return;
         }
@@ -109,6 +164,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         setSessionToken(data.token);
       }
       if (data.user) {
+        // 11b-c: this password sign-in may be followed by the Face ID offer.
+        if (typeof data.user.id === 'string') markPasswordSignIn(data.user.id, passwordAt);
         onLoginSuccess(data.user);
       } else {
         throw new Error('User profile could not be verified.');
@@ -128,6 +185,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     setIsLoading(false);
     if (r.ok && r.token && r.user) {
       setSessionToken(r.token);
+      if (chooser.passwordAt && typeof r.user.id === 'string') markPasswordSignIn(r.user.id, chooser.passwordAt);
       setChooser(null);
       onLoginSuccess(r.user);
       return;
@@ -426,7 +484,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
                   <button
                     type="submit"
-                    disabled={isLoading}
+                    disabled={isLoading || passkeyLoading}
                     className="w-full mt-2 py-3 px-4 rounded-xl pressable bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white text-xs sm:text-sm font-bold tactile-2 flex items-center justify-center gap-2 transition disabled:opacity-50 cursor-pointer"
                   >
                     {isLoading ? (
@@ -442,6 +500,28 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     )}
                   </button>
                 </form>
+
+                {showPasskeyButton && (
+                  <>
+                    <div className="my-4 flex items-center gap-3 text-[11px] text-ink-faint" aria-hidden="true">
+                      <div className="h-px flex-1 bg-line" /><span>{PASSKEY_TEXT.or}</span><div className="h-px flex-1 bg-line" />
+                    </div>
+                    <button
+                      type="button"
+                      data-passkey-signin
+                      onClick={handlePasskeySignIn}
+                      disabled={passkeyLoading || isLoading}
+                      className="w-full py-3 px-4 rounded-xl pressable bg-surface border border-line-control text-ink hover:bg-sunken text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition disabled:opacity-60 cursor-pointer"
+                    >
+                      {passkeyLoading ? (
+                        <><div className="w-4 h-4 border-2 border-gold-deep border-t-transparent rounded-full animate-spin" /><span>{PASSKEY_TEXT.waiting}</span></>
+                      ) : (
+                        <><ScanFace className="w-4 h-4 text-gold-deep" /><span>{PASSKEY_TEXT.signInButton}</span></>
+                      )}
+                    </button>
+                    <p className="mt-1.5 text-center text-[11px] text-ink-faint">{PASSKEY_TEXT.signInSubline}</p>
+                  </>
+                )}
 
                 {/* Forgot password link */}
                 <button

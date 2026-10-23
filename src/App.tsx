@@ -34,6 +34,9 @@ import { KioskPairing } from './components/KioskPairing';
 import { KioskDevicesModal } from './components/KioskDevicesModal';
 import { LandingPage } from './components/LandingPage';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
+import { PasskeyOffer } from './components/PasskeyOffer';
+import { PasskeysModal } from './components/PasskeysModal';
+import { clearPasswordSignInMark, currentAccountId, isPhoneLike, listPasskeys, offerDismissed, platformPasskeyAvailable, takePasswordSignInMark } from './lib/passkeys';
 import { TeamModal } from './components/TeamModal';
 import { CreateVenueModal } from './components/CreateVenueModal';
 import { VenuesDirectoryModal } from './components/VenuesDirectoryModal';
@@ -356,6 +359,10 @@ export default function App() {
   const [taskToEdit, setTaskToEdit] = useState<Task | null>(null);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
+  // 11b-c: Face ID / passkeys.
+  const [isPasskeysOpen, setIsPasskeysOpen] = useState(false);
+  const [passkeyMenu, setPasskeyMenu] = useState(false);
+  const [passkeyOfferFor, setPasskeyOfferFor] = useState<string | null>(null);
   // 10g: the agencies under this login (several = "Switch agency" in the menu).
   // Read for the signed-in phone session, including a restored one; never on a kiosk.
   const [memberships, setMemberships] = useState<Membership[]>([]);
@@ -1577,6 +1584,28 @@ export default function App() {
     showToast('Signed out successfully.');
   };
 
+  // 11b-c: the menu entry shows when this account may add one or already has one;
+  // the one-time offer follows a password sign-in on a phone that can use Face ID.
+  useEffect(() => {
+    // A sign-out or another sign-in starts from nothing: no list, no row, no offer.
+    setIsPasskeysOpen(false);
+    setPasskeyMenu(false);
+    setPasskeyOfferFor(null);
+    if (isKiosk || !currentUser?.id) { if (isKiosk) clearPasswordSignInMark(); return; }
+    const userId = currentUser.id;
+    // Only this account's own password sign-in on this tab, inside the proof window.
+    const offerUntil = takePasswordSignInMark(userId);
+    let live = true;
+    listPasskeys().then(async (l) => {
+      if (!live) return;
+      setPasskeyMenu(l.canAdd || l.passkeys.length > 0);
+      if (offerUntil !== null && isPhoneLike() && l.canAdd && l.passkeys.length === 0 && !offerDismissed(userId) && await platformPasskeyAvailable()) {
+        if (live && Date.now() < offerUntil && currentAccountId() === userId) setPasskeyOfferFor(userId);
+      }
+    }).catch(() => { /* unread: the row stays hidden; never a sign-out from here */ });
+    return () => { live = false; };
+  }, [currentUser?.id, isKiosk]);
+
   const handleLoginSuccess = (user: User) => {
     userRequestContext.current.generation += 1;
     requestContext.current.generation += 1;
@@ -1876,6 +1905,7 @@ export default function App() {
         currentUser={currentUser}
         onLogout={handleLogout}
         onOpenChangePassword={() => setIsChangePasswordOpen(true)}
+        onOpenPasskeys={passkeyMenu ? () => setIsPasskeysOpen(true) : undefined}
         onOpenAgencySwitcher={memberships.length > 1 ? () => setIsAgencySwitcherOpen(true) : undefined}
         onOpenMergeAccounts={() => setIsMergeAccountsOpen(true)}
         onOpenTaskModal={leaveHomeThen(handleOpenCreateTask)}
@@ -2340,6 +2370,19 @@ export default function App() {
         onClose={() => setIsHistoryModalOpen(false)}
         historyLogs={historyLogs}
       />
+
+      {!isKiosk && currentUser && (
+        <PasskeysModal
+          isOpen={isPasskeysOpen}
+          userId={currentUser.id}
+          onClose={() => setIsPasskeysOpen(false)}
+          onChanged={(l) => setPasskeyMenu(l.canAdd || l.passkeys.length > 0)}
+          onToast={showToast}
+        />
+      )}
+      {!isKiosk && passkeyOfferFor && currentUser?.id === passkeyOfferFor && (
+        <PasskeyOffer userId={passkeyOfferFor} onClose={() => setPasskeyOfferFor(null)} onAdded={() => setPasskeyMenu(true)} />
+      )}
 
       <ChangePasswordModal
         isOpen={isChangePasswordOpen}

@@ -34,9 +34,11 @@ import {
   Trash2,
   Factory,
   Tablet,
-  Home
+  Home,
+  ScanFace,
 } from 'lucide-react';
 import { User, Venue } from '../types';
+import { PASSKEY_TEXT } from '../lib/passkeys';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import { PWAInstallButton } from './PWAInstallButton';
 import { PushNotificationToggle } from './PushNotificationToggle';
@@ -63,6 +65,8 @@ interface HeaderProps {
   onOpenAuth?: () => void;
   onLogout: () => void;
   onOpenChangePassword?: () => void;
+  /** 11b-c: Face ID / passkeys (absent = hidden: no passkeys and none allowed). */
+  onOpenPasskeys?: () => void;
   onOpenTaskModal: () => void;
   onOpenHistoryModal: () => void;
   onOpenEventsModal: () => void;
@@ -102,6 +106,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAuth,
   onLogout,
   onOpenChangePassword,
+  onOpenPasskeys,
   onOpenTaskModal,
   onOpenHistoryModal,
   onOpenEventsModal,
@@ -552,6 +557,17 @@ export const Header: React.FC<HeaderProps> = ({
                         </button>
                       )}
 
+                      {onOpenPasskeys && (
+                        <button
+                          onClick={() => { setUserMenuOpen(false); onOpenPasskeys(); }}
+                          aria-haspopup="dialog"
+                          className="w-full flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
+                        >
+                          <ScanFace className="w-4 h-4 text-ink-faint" />
+                          <span>{PASSKEY_TEXT.menuRow}</span>
+                        </button>
+                      )}
+
                       {onOpenMergeAccounts && (
                         <button
                           onClick={() => { setUserMenuOpen(false); onOpenMergeAccounts(); }}
@@ -807,6 +823,18 @@ export const Header: React.FC<HeaderProps> = ({
                 </>
               )}
             </div>
+          )}
+
+          {currentUser && onOpenPasskeys && (
+            <button
+              type="button"
+              onClick={() => { setMobileMenuOpen(false); onOpenPasskeys(); }}
+              aria-haspopup="dialog"
+              className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl hover:bg-sunken transition cursor-pointer text-ink-soft"
+            >
+              <ScanFace className="w-4 h-4 text-ink-faint" />
+              <span>{PASSKEY_TEXT.menuRow}</span>
+            </button>
           )}
 
           {currentUser && onOpenMergeAccounts && (
