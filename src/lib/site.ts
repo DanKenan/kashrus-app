@@ -88,6 +88,8 @@ export function siteWaitNeeded(hostname: string | undefined = typeof window !== 
 export const SITE_WAIT_MAX_MS = 6000;
 let current: SiteInfo | null = null;
 let loading: Promise<SiteInfo> | null = null;
+/** True only when the server itself answered 'shared' (not a failed/slow/unreadable answer). */
+let sharedConfirmed = false;
 /** What this page knows about its site right now (null = not answered yet). */
 export function currentSite(): SiteInfo | null { return current; }
 
@@ -101,7 +103,11 @@ export function loadSite(fetchImpl: typeof fetch = (input, init) => fetch(input,
       const timer = ctrl ? setTimeout(() => ctrl.abort(), SITE_WAIT_MAX_MS) : null;
       try {
         const res = await fetchImpl('/api/site', { cache: 'no-store', credentials: 'same-origin', signal: ctrl?.signal });
-        if (res.ok) info = parseSiteAnswer(await res.json()) || SHARED;
+        if (res.ok) {
+          const parsed = parseSiteAnswer(await res.json());
+          if (parsed) info = parsed;
+          sharedConfirmed = parsed?.site === 'shared';
+        }
       } finally { if (timer) clearTimeout(timer); }
     } catch { /* offline, too slow or an older server: keep today's page */ }
     current = info;
@@ -109,7 +115,17 @@ export function loadSite(fetchImpl: typeof fetch = (input, init) => fetch(input,
   })();
   return loading;
 }
-export function resetSiteForTests(): void { current = null; loading = null; }
+export function resetSiteForTests(): void { current = null; loading = null; sharedConfirmed = false; }
+
+/**
+ * The public home page shows only on an address known to be the shared one:
+ * a Cloud Run / local host (no wait needed), or any other host whose
+ * /api/site answer said 'shared'. A custom host whose answer failed keeps
+ * today's sign-in form (never the Shutfey home page on an agency address).
+ */
+export function homePageAllowed(hostname?: string): boolean {
+  return !siteWaitNeeded(hostname) || sharedConfirmed;
+}
 
 /** The site agency's logo as a data URL (GET /api/site/logo?rev=), or null. */
 export async function loadSiteLogo(rev: string | null, fetchImpl: typeof fetch = (input, init) => fetch(input, init)): Promise<string | null> {

@@ -1,7 +1,7 @@
 import { AgencyLogoSheet } from './components/AgencyLogoSheet';
 import { AgencySettingsSheet } from './components/AgencySettingsSheet';
 import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgencyFields } from './lib/agencyLogo';
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue, filterToVenue } from './lib/venueSelection';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
@@ -32,7 +32,11 @@ import { ReadersPanel } from './components/Receipts';
 import type { UpdatesContext } from './lib/updates';
 import { KioskPairing } from './components/KioskPairing';
 import { KioskDevicesModal } from './components/KioskDevicesModal';
-import { LandingPage } from './components/LandingPage';
+import { initialAuthView } from './lib/homeRoute';
+import { HomeLandingBoundary } from './components/HomeLandingBoundary';
+// The public home page is its own lazily loaded file (JS + CSS): a signed-in
+// person, a kiosk tablet or an agency address never downloads it.
+const HomeLanding = lazy(() => import('./components/home/HomeLanding'));
 import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { PasskeyOffer } from './components/PasskeyOffer';
 import { PasskeysModal } from './components/PasskeysModal';
@@ -65,7 +69,7 @@ import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from '
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
-import { SITE_REFUSED_EVENT, sharedOriginFor, siteRefusalAction, useSite, type SiteRefusal, type SiteRefusalEvent } from './lib/site';
+import { SITE_REFUSED_EVENT, sharedOriginFor, siteRefusalAction, useSite, type SiteRefusal, type SiteRefusalEvent, homePageAllowed } from './lib/site';
 import { SiteRefusedScreen } from './components/SiteRefusedScreen';
 import { END_DATE_TEXT, dayWords, lastDayOf, nextEndMs, noteServerNow, serverNowMs, venueLeftOwnScope, withOwnScope, withoutEndedVenues, ymdIn, zoneForVenue } from './lib/venueEndDates';
 
@@ -110,21 +114,9 @@ export default function App() {
     return null;
   });
 
-  // Saved session from a previous visit (offered on the landing page).
-  const [savedSession, setSavedSession] = useState<User | null>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('current_user');
-      if (saved) {
-        try {
-          return JSON.parse(saved);
-        } catch {}
-      }
-    }
-    return null;
-  });
-
-  // Which public screen is showing: the landing home page or the auth form.
-  const [authView, setAuthView] = useState<'landing' | 'auth'>('landing');
+  // Which public screen is showing: the home page or the sign-in form. The
+  // installed home-screen app opens on the sign-in form (lib/homeRoute.ts).
+  const [authView, setAuthView] = useState<'landing' | 'auth'>(initialAuthView);
 
   // ---- Kiosk mode: shared wall tablet ----
   // Activated via ?kiosk=1 (persisted in localStorage so it survives reloads).
@@ -215,7 +207,8 @@ export default function App() {
       localStorage.removeItem('kiosk_mode');
       localStorage.removeItem('kiosk_venue_id');
     }
-    setAuthView('landing');
+    // Leaving kiosk mode opens the sign-in form (not the home page).
+    setAuthView('auth');
   };
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'signup'>('login');
 
@@ -1712,9 +1705,9 @@ export default function App() {
     }
     clearSession();
     realtimeSocket.disconnect();
-    setSavedSession(null);
-    // In kiosk mode the tablet returns to the PIN screen, not the landing page.
-    if (!kioskMode) setAuthView('landing');
+    // In kiosk mode the tablet returns to the PIN screen; anywhere else signing
+    // out opens the sign-in form (not the home page).
+    if (!kioskMode) setAuthView('auth');
     if (serverSignOut) showToast('Signed out successfully.');
   };
 
@@ -1761,7 +1754,6 @@ export default function App() {
     setAdminHome(!isKiosk && user.role === 'admin');
     if (!isKiosk && user.role === 'admin') setAdminHomeReloadKey((key) => key + 1);
     setCurrentUser(user);
-    setSavedSession(user);
     setCurrentVenueId(null);
     // Reconnect real-time socket with the new session token.
     realtimeSocket.reconnect();
@@ -1878,40 +1870,29 @@ export default function App() {
         </div>
       );
     }
-    // Domains PR B: an agency's own address opens on its branded sign-in (no Shutfey landing page, no registration).
-    if (authView === 'landing' && !siteAgency) {
+    // Domains PR B: an agency's own address opens on its branded sign-in (no Shutfey home page, no registration).
+    // The shared address shows the home page (its own lazy file) until "Sign in" is tapped.
+    if (authView === 'landing' && !siteAgency && homePageAllowed()) {
+      const openSignInFromHome = () => {
+        // The sign-in form opens at the top of the page, not where the home page was scrolled to.
+        try { window.scrollTo(0, 0); } catch { /* ignore */ }
+        setAuthInitialMode('login');
+        setAuthView('auth');
+      };
       return (
-        <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
+        <>
           {toastMessage && (
             <div className="fixed bottom-5 right-5 z-50 bg-ink text-paper text-xs font-semibold px-4 py-3 rounded-2xl tactile-4 border border-line-strong flex items-center gap-2 animate-slide-up">
               <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
               <span>{toastMessage}</span>
             </div>
           )}
-          <LandingPage
-            savedUser={savedSession}
-            onContinueAs={() => {
-              if (savedSession) handleLoginSuccess(savedSession);
-            }}
-            onUseDifferentAccount={() => {
-              setSavedSession(null);
-              clearLogoCache();
-              if (typeof window !== 'undefined') localStorage.removeItem('current_user');
-              setAuthInitialMode('login');
-              setAuthView('auth');
-            }}
-            onSignIn={() => {
-              setAuthInitialMode('login');
-              setAuthView('auth');
-            }}
-            onRegister={() => {
-              setAuthInitialMode('signup');
-              setAuthView('auth');
-            }}
-            darkMode={darkMode}
-            onToggleDarkMode={() => setDarkMode(!darkMode)}
-          />
-        </div>
+          <HomeLandingBoundary onSignIn={openSignInFromHome}>
+            <Suspense fallback={<div data-home-loading className="min-h-screen bg-paper" />}>
+              <HomeLanding onSignIn={openSignInFromHome} />
+            </Suspense>
+          </HomeLandingBoundary>
+        </>
       );
     }
     return (

@@ -2,6 +2,8 @@
 @import "@fontsource-variable/dm-sans/wght-italic.css";
 @import "@fontsource-variable/jetbrains-mono";
 @import "tailwindcss";
+/* The public home page (components/home) has its own scoped CSS; its markup must not generate app utilities. */
+@source not "./components/home";
 
 @variant dark (&:where(.dark, .dark *));
 
