@@ -575,11 +575,14 @@ export default {
       x = await call(baseUrl, 'POST', `/api/users/${U('tight5')}/venue-ops`, auth(tAdmin), { ops: [{ op: 'remove', venueId: V3 }], expectedVenueRev: 1, expectedVersion: await ctx.getVersion(), operationId: `t81-k-shed-${ts}` });
       assert(x.status === 200, `a reduction that sheds history ${x.status} ${x.text.slice(0, 160)}`);
       const t3 = await rec(U('tight3'));
-      assert(t3.venueHistory === undefined && J(t3.venueAccess) === J([V1]) && typeof t3.venueRev === 'number', `tight3 history shed, venueRev kept ${J(t3)}`);
+      // 12b-s (Don, Oct 23): no wipe-all; only the OLDEST entries go (the 'hist' row's, ended at T0), so tight3's newer end survives
+      assert(t3.venueHistory?.[0]?.why === 'ended' && J(t3.venueAccess) === J([V1]) && typeof t3.venueRev === 'number', `tight3's newer history kept (oldest-first), venueRev kept ${J(t3)}`);
+      // RV5 still holds when a row's history WAS shed (it can be, when it is the oldest): drop it as the shed would
       doc = await ctx.getDoc();
-      await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: doc.users, agencies: doc.agencies.filter((a) => a.id !== bloatId) });
+      await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: doc.users.map((u) => { if (u.id !== U('tight3')) return u; const { venueHistory: _h, ...rest } = u; return rest; }), agencies: doc.agencies.filter((a) => a.id !== bloatId) });
       await reloadCommit();
       assert(JSON.stringify(await ctx.getDoc()).length < 820 * 1024, 'bloat removed');
+      assert((await rec(U('tight3'))).venueHistory === undefined, 'tight3 history gone (as after a shed)');
       x = await putV(tAdmin, U('tight3'), { venueIds: [V1, V3] });
       assert(x.status === 409 && x.json?.code === 'VENUES_CHANGED', `stale old tab cannot revive an expired venue after its history was shed ${x.status} ${x.text.slice(0, 120)}`);
       assert(J((await rec(U('tight3'))).venueAccess) === J([V1]), 'still not revived');

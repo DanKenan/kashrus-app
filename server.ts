@@ -4003,11 +4003,14 @@ class OperationConflictError extends Error {
   code = 'OPERATION_CONFLICT';
   /** Item 8s: a mutator may name the HTTP status/code of its refusal (default 409). */
   status = 409;
-  constructor(message: string, status?: number, code?: string) {
+  /** 12b-s: extra JSON fields of the refusal (allowlisted by the mutator). */
+  extra: Record<string, unknown> | undefined;
+  constructor(message: string, status?: number, code?: string, extra?: Record<string, unknown>) {
     super(message);
     this.name = 'OperationConflictError';
     if (status) this.status = status;
     if (code) this.code = code;
+    if (extra && typeof extra === 'object') this.extra = extra;
   }
 }
 
@@ -4189,7 +4192,7 @@ type MutatorOutcome =
        * The ONLY writer of venueId-with-grants, noHomeVenue, venueGrants, venueHistory, venueRev. */
       grantSetById?: Record<string, GrantFields>;
     } & IdentityOutcomeFields /* 10b: credentialOriginSetById, passwordKeepsOriginIds (src/server/identity.ts) */
-  | { conflict: string; conflictStatus?: number; conflictCode?: string };
+  | { conflict: string; conflictStatus?: number; conflictCode?: string; /** 12b-s: extra JSON fields of the refusal (e.g. POOL_DUPLICATE {kind, displayName}). */ conflictExtra?: Record<string, unknown> };
 
 interface CommitOptions {
   /** 10M (P1.11): commitOrRespond returns { result, duplicate: true } for a replay instead of answering it. */
@@ -4306,7 +4309,8 @@ import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
 import { enforceIdentityFields, identityGroups, groupIssues, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, applyOwnerTransfer, m4Successor, identityProjection, type IdentityOutcomeFields } from './src/server/identity.js';
 import { venueScope as venueScopeRaw, resolveTargetVenue, sharedVenues, mayManageEventAt, configureVenueScope } from './src/server/venue-scope.js';
-import { applyGrantOps, endDatedGrants, historyEntry as grantHistoryEntry, withGrantFields, trimHistory, activeUntilMap, venueRevOf, isHomeless, validTimeZone as grantZoneValid, DEFAULT_TIME_ZONE as GRANT_DEFAULT_TZ, grantContainer, grantStateFor, type GrantOp, type GrantFields, type GrantFailure } from './src/server/venue-grants.js';
+import { parsePoolContact, poolContactView, agencyContacts, isPoolContact, isPoolInvite, findPoolDuplicates, revokeLinkedInvite, dropContactsForAcceptedInvites, POOL_CONTACT_CAP } from './src/server/pool.js';
+import { applyGrantOps, endDatedGrants, historyNeedsPrune, retainedHistory, shedOldestHistory, moveToPoolFields, makeMainFields, lastVenueOf, historyEntry as grantHistoryEntry, withGrantFields, trimHistory, activeUntilMap, venueRevOf, isHomeless, validTimeZone as grantZoneValid, DEFAULT_TIME_ZONE as GRANT_DEFAULT_TZ, grantContainer, grantStateFor, type GrantOp, type GrantFields, type GrantFailure } from './src/server/venue-grants.js';
 /** QA2S2 #9: the one refusal of an event write by someone who may not manage events there. */
 const EVENT_FORBIDDEN_BODY = { code: 'EVENT_FORBIDDEN', error: 'Only admins, venue owners and coordinators can create events.' } as const;
 /** QA2S2 #9 (E5): the fresh caller row of a commit, or null when it is gone or left the agency. */
@@ -4454,7 +4458,7 @@ async function commitState(
     const preRead = options.preReads ? await options.preReads(pristineBefore, async () => null) : undefined;
     const outcome = mutator(beforeDoc, stateVersion, preRead);
     if ('conflict' in outcome) {
-      throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
+      throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode, (outcome as any).conflictExtra);
     }
     outcome.doc = applyIdentityInvariant(pristineBefore, outcome.doc, outcome, label);
     hydrateState(outcome.doc);
@@ -4566,7 +4570,7 @@ async function commitState(
           : undefined;
         const outcome = mutator(baseDoc, currentVersion, preRead);
         if ('conflict' in outcome) {
-          throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode);
+          throw new OperationConflictError(outcome.conflict, outcome.conflictStatus, outcome.conflictCode, (outcome as any).conflictExtra);
         }
         outcome.doc = applyIdentityInvariant(identityBase, outcome.doc, outcome, label);
 
@@ -4625,22 +4629,22 @@ async function commitState(
         let payloadSize = JSON.stringify(payload).length;
         // 12a-s (4.5): a commit that only REMOVES venue access (venue-ops or
         // venues-PUT reductions, the sweep, venue deletion, the 5.9 helper, an
-        // identity closure) must not fail at the guard on its own history: as
-        // a last step the final payload (idempotency record included) sheds
-        // every user's venueHistory (audit detail; the log line keeps the
-        // record). Any other commit is untouched.
-        if (payloadSize > SIZE_LIMIT_BYTES && (outcome as any).grantBudgetFallback === true && Array.isArray(outcome.doc?.users)) {
-          const shed = (outcome.doc.users as any[]).map((u: any) => {
-            if (!u || !Array.isArray(u.venueHistory)) return u;
-            const { venueHistory: _h, ...rest } = u;
-            return rest;
-          });
-          outcome.doc = { ...outcome.doc, users: shed };
-          newDoc.users = shed;
-          payload = JSON.parse(JSON.stringify(newDoc));
-          const before = payloadSize;
-          payloadSize = JSON.stringify(payload).length;
-          log.warn(`[grants] ${label} at the size guard: venueHistory shed (${before} -> ${payloadSize})`);
+        // identity closure, move-to-pool) must not fail at the guard on its
+        // own history. 12b-s (Don, Oct 23): no more wiping everyone's history;
+        // as a last step the OLDEST venueHistory entries (across the document)
+        // are dropped, only as many as needed (the log line keeps the count).
+        // Any other commit is untouched; the 900 KiB guard itself stays.
+        for (let pass = 0; pass < 4 && payloadSize > SIZE_LIMIT_BYTES && (outcome as any).grantBudgetFallback === true && Array.isArray(outcome.doc?.users); pass++) {
+          const shed = shedOldestHistory(outcome.doc.users as any[], payloadSize - SIZE_LIMIT_BYTES);
+          if (shed.dropped === 0) break;
+          {
+            outcome.doc = { ...outcome.doc, users: shed.users };
+            newDoc.users = shed.users;
+            payload = JSON.parse(JSON.stringify(newDoc));
+            const before = payloadSize;
+            payloadSize = JSON.stringify(payload).length;
+            log.warn(`[grants] ${label} at the size guard: ${shed.dropped} oldest venueHistory entr${shed.dropped === 1 ? 'y' : 'ies'} dropped (${before} -> ${payloadSize})`);
+          }
         }
         if (payloadSize > SIZE_LIMIT_BYTES) {
           throw new DocumentTooLargeError(payloadSize, SIZE_LIMIT_BYTES);
@@ -4861,7 +4865,7 @@ async function commitOrRespond(
       return null;
     }
     if (err instanceof OperationConflictError) {
-      res.status(err.status || 409).json({ error: err.message, code: err.code || 'OPERATION_CONFLICT' });
+      res.status(err.status || 409).json({ ...(err.extra || {}), error: err.message, code: err.code || 'OPERATION_CONFLICT' });
       return null;
     }
     if (err instanceof RateLimitError) {
@@ -9302,10 +9306,14 @@ function newInvitePre(): InvitePre {
  */
 function createMemberInviteInTx(
   docAfter: any, callerId: string, agencyId: string, body: any, pre: InvitePre,
-  opts: { allowOwner?: boolean; ownTeamText?: string } = {}
-): { conflict: string; conflictStatus: number; conflictCode: string } | { doc: any; invite: any; replaced: string[] } {
+  opts: { allowOwner?: boolean; ownTeamText?: string; contactId?: string } = {}
+): { conflict: string; conflictStatus: number; conflictCode: string; conflictExtra?: Record<string, unknown> } | { doc: any; invite: any; replaced: string[] } {
   const denied = inviteFreshGate(docAfter, callerId, agencyId);
   if (denied) return denied;
+  // 12b-s: a Pool invite (no main venue) is refused while the 5.9 freeze is set.
+  if (body?.pool === true && docAfter.poolFrozen === true) {
+    return { conflict: 'The Pool is switched off right now.', conflictStatus: 409, conflictCode: 'POOL_FROZEN' };
+  }
   const agencyVenueIds = (Array.isArray(docAfter.venues) ? docAfter.venues : [])
     .filter((v: any) => v && (v.agencyId || 'agency-hkc') === agencyId).map((v: any) => v.id);
   const parsed = parseMemberInvite(body, agencyVenueIds, { allowOwner: opts.allowOwner === true, normalizePhone: normalizePhoneNumber, phoneError: PHONE_NUMBER_ERROR });
@@ -9324,6 +9332,13 @@ function createMemberInviteInTx(
   const existing: any[] = Array.isArray(docAfter.invites) ? docAfter.invites : [];
   const mine = existing.find((i: any) => i && i.id === pre.inviteId);
   if (mine) return { doc: docAfter, invite: mine, replaced: [] }; // idempotent retry
+  // 12b-s (5.7): Pool invites also get the soft phone check (families share
+  // phones; confirmSharedPhone: true goes ahead). Team invites are unchanged.
+  if (body?.pool === true && input.phoneNumber && body?.confirmSharedPhone !== true) {
+    const selfContact = opts.contactId ? agencyContacts(docAfter, agencyId).find((c: any) => c.id === opts.contactId) : null;
+    const dup = findPoolDuplicates(docAfter, agencyId, { phone: input.phoneNumber }, { contactId: opts.contactId, inviteId: selfContact?.inviteId }, Date.now());
+    if (dup.phone) return { conflict: `This phone number is already used by ${dup.phone.displayName || 'someone'} in your agency.`, conflictStatus: 409, conflictCode: 'POOL_PHONE_SHARED', conflictExtra: { kind: dup.phone.kind, displayName: dup.phone.displayName } };
+  }
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
   const replaced: string[] = [];
@@ -9341,7 +9356,29 @@ function createMemberInviteInTx(
     invitedBy: callerId, createdAt: pre.createdAt, expiresAt: pre.expiresAt,
     inviteTokenHash: pre.token.hash, status: 'pending', failedAttempts: 0,
   };
-  return { doc: { ...docAfter, invites: [...pruneInvites(kept, nowMs), record] }, invite: record, replaced };
+  // 12b-s (5.6): a Pool contact of this agency with the same email (or the
+  // contact this invite is sent from) is LINKED to the new invite instead of
+  // becoming a duplicate.
+  let poolContacts = docAfter.poolContacts;
+  if (Array.isArray(poolContacts) && poolContacts.length) {
+    let linked = false;
+    const nextContacts = poolContacts.map((c: any) => {
+      if (!isPoolContact(c) || c.agencyId !== agencyId) return c;
+      const same = (opts.contactId && c.id === opts.contactId) || (typeof c.email === 'string' && normalizeInviteEmail(c.email) === input.email);
+      if (!same) return c;
+      linked = true;
+      return { ...c, status: 'invited', inviteId: record.id, updatedAt: nowIso };
+    });
+    if (linked) poolContacts = nextContacts;
+  }
+  const out: any = { ...docAfter, invites: [...pruneInvites(kept, nowMs), record] };
+  if (poolContacts !== docAfter.poolContacts) out.poolContacts = poolContacts;
+  // 12b-s (RV1, 4.5): a Pool invite (incl. one sent from a contact) is growth:
+  // refused when the complete candidate is over 820 KiB. Team invites unchanged.
+  if (body?.pool === true && candidateBytes(out) > GRANT_GROWTH_LIMIT_BYTES) {
+    return { conflict: 'The app storage is nearly full; this change cannot be saved right now.', conflictStatus: 409, conflictCode: 'STATE_NEAR_FULL' };
+  }
+  return { doc: out, invite: record, replaced };
 }
 
 function inviteCreatedView(rec: any): { id: string; email: string; name: string; role: string; venueIds: string[]; expiresAt: string } {
@@ -9503,7 +9540,8 @@ app.post('/api/invites/accept', async (req, res) => {
 
   const committed = await commitOrRespond(
     req, res,
-    (freshDoc) => {
+    // 12b-s (5.6): accepting a Pool invite removes the contact it was sent from.
+    withPoolContactCleanup((freshDoc: any) => {
       const nowMs = Date.now();
       const nowIso = new Date(nowMs).toISOString();
       const freshInvites: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
@@ -9592,7 +9630,7 @@ app.post('/api/invites/accept', async (req, res) => {
         ...(venueAccessSetById ? { venueAccessSetById } : {}),
         ...(grantSetById ? { grantSetById } : {}),
       };
-    },
+    }),
     { label: 'invite-accept' }
   );
   if (!committed) return;
@@ -10358,6 +10396,11 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     const doc = (snap && snap.data && snap.data()) || {};
     // 10g (Test 64 F): optionally replace agencies too (to remove one under a live v2 token).
     // 10h (Test 67 G/I/J): optionally replace venues / invites too (stored doc only; the cache keeps the old lists).
+    // 12b-s (Test 82): optionally replace poolContacts / set poolFrozen (stored doc only).
+    const b = req.body || {};
+    if (Array.isArray(b.poolContacts)) doc.poolContacts = b.poolContacts;
+    if (b.poolFrozen === true) doc.poolFrozen = true;
+    if (b.poolFrozen === false) delete doc.poolFrozen;
     await docRef.set({ ...doc, users, ...(Array.isArray(newAgencies) ? { agencies: newAgencies } : {}), ...(Array.isArray(newVenues) ? { venues: newVenues } : {}), ...(Array.isArray(newInvites) ? { invites: newInvites } : {}), ...(Array.isArray(newResetLinks) ? { resetLinks: newResetLinks } : {}) });
     res.json({ ok: true });
   });
@@ -11663,12 +11706,8 @@ app.delete('/api/venues/:id', async (req, res) => {
       };
       // 4.5: closing grants into history must never block the deletion at the guard.
       if (Object.keys(grantSetById).length) {
-        const fit = fitGrantBudget(out.doc, grantSetById);
+        // 12b-s (RV1): no pre-trim; the commit guard sheds the OLDEST entries if needed.
         out.grantBudgetFallback = true;
-        if (fit.trimmed !== 'none') {
-          out.grantSetById = fit.gset;
-          log.warn(`[grants] venue delete ${id} near the size guard: history dropped (${fit.trimmed})`);
-        }
       }
       return out;
     },
@@ -13805,9 +13844,12 @@ app.post('/api/users', async (req, res) => {
       req, res,
       (freshDoc) => {
         const agencyVenues = (Array.isArray(freshDoc.venues) ? freshDoc.venues : []).filter((v: any) => v && (v.agencyId || 'agency-hkc') === callerAgencyId);
-        const venueIds = role === 'admin' ? [] : [typeof body.venueId === 'string' && body.venueId ? body.venueId : (agencyVenues[0]?.id || '')];
+        // 12b-s: "pool": true = no main venue (a Pool invite); without it the
+        // first-venue default stays (old clients unchanged).
+        const pool = (req.body || {}).pool === true;
+        const venueIds = role === 'admin' || pool ? [] : [typeof body.venueId === 'string' && body.venueId ? body.venueId : (agencyVenues[0]?.id || '')];
         const built = createMemberInviteInTx(freshDoc, caller.id, callerAgencyId,
-          { email: body.email, name: body.name, phoneNumber: body.phoneNumber, permissions: body.permissions, role, venueIds },
+          { email: body.email, name: body.name, phoneNumber: body.phoneNumber, permissions: body.permissions, role, venueIds, ...(pool ? { pool: true } : {}), ...((req.body || {}).confirmSharedPhone === true ? { confirmSharedPhone: true } : {}) },
           pre, { ownTeamText: 'A team member with this email already exists' });
         if ('conflict' in built) return built;
         return { doc: built.doc, result: { invite: built.invite, replaced: built.replaced } };
@@ -14116,23 +14158,15 @@ function grantFieldsOfRow(u: any): GrantFields {
 /**
  * 4.5 for multi-row grant writes (venue deletion, the 5.9 helper): access is
  * only being REMOVED, so the commit must never fail at the 900 KiB guard on
- * history growth. Measure the complete candidate (grant fields applied); above
- * the guard drop the affected rows' history, then if still above, every row's
- * venueHistory (audit detail only; the log line keeps the record).
+ * history growth. 12b-s (RV1, Don Oct 23): nothing is pre-trimmed here; the
+ * caller sets grantBudgetFallback and the commit guard drops the document's
+ * OLDEST history entries, only as many as the final payload needs.
  */
-function fitGrantBudget(doc: any, gset: Record<string, GrantFields>): { gset: Record<string, GrantFields>; trimmed: 'none' | 'affected' | 'all' } {
-  const LIMIT = 900 * 1024;
-  const apply = (g: Record<string, GrantFields>) => ({ ...doc, users: (Array.isArray(doc.users) ? doc.users : []).map((u: any) => (u && g[u.id] ? withGrantFields(u, g[u.id]) : u)) });
-  if (candidateBytes(apply(gset)) <= LIMIT) return { gset, trimmed: 'none' };
-  const g1: Record<string, GrantFields> = {};
-  for (const k of Object.keys(gset)) g1[k] = trimHistory(gset[k], 0);
-  if (candidateBytes(apply(g1)) <= LIMIT) return { gset: g1, trimmed: 'affected' };
-  const g2: Record<string, GrantFields> = { ...g1 };
-  for (const u of Array.isArray(doc.users) ? doc.users : []) {
-    if (u && typeof u.id === 'string' && !g2[u.id] && u.personId && Array.isArray(u.venueHistory) && u.venueHistory.length) g2[u.id] = trimHistory(grantFieldsOfRow(u), 0);
-  }
-  return { gset: g2, trimmed: 'all' };
+function fitGrantBudget(_doc: any, gset: Record<string, GrantFields>): { gset: Record<string, GrantFields>; trimmed: 'none' } {
+  return { gset, trimmed: 'none' };
 }
+
+
 
 /** The person's own active dated ends (their scope only) + venueRev. */
 function selfGrantView(row: any): { venueRev: number; myVenueUntil: Record<string, string> } {
@@ -14367,6 +14401,25 @@ function sweepCandidates(doc: any, nowMs: number): Array<{ id: string; fields: G
 }
 
 /**
+ * 12b-s (Don, Oct 23 4:16 AM, "2 weeks"): rows whose stored venueHistory holds
+ * an entry that ended 14 days ago or more. The sweep rewrites ONLY their
+ * history (venueRev and access unchanged; no notifications).
+ */
+function historyPruneCandidates(doc: any, nowMs: number, skip: ReadonlySet<string>): Array<{ id: string; fields: GrantFields }> {
+  const out: Array<{ id: string; fields: GrantFields }> = [];
+  for (const u of Array.isArray(doc?.users) ? doc.users : []) {
+    if (!u || typeof u.id !== 'string' || !u.personId || skip.has(u.id)) continue;
+    if (u.role === 'admin' && !Array.isArray(u.venueAccess)) continue;
+    if (!historyNeedsPrune(u, nowMs)) continue;
+    const f = grantFieldsOfRow(u);
+    const h = retainedHistory(u, nowMs);
+    if (h.length) f.venueHistory = h; else delete f.venueHistory;
+    out.push({ id: u.id, fields: f });
+  }
+  return out;
+}
+
+/**
  * 4.6: the expiry sweep (tidy-up and live clearing; not the security
  * boundary). Commits ONLY when a row has a grant to close, re-deciding on the
  * FRESH document (an extension that committed first wins). Never in
@@ -14375,24 +14428,27 @@ function sweepCandidates(doc: any, nowMs: number): Array<{ id: string; fields: G
 async function runGrantSweep(source: string): Promise<{ committed: boolean; rows: number }> {
   if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return { committed: false, rows: 0 };
   if (isTestMode() && testGrantSweepDisabled && source !== 'test') return { committed: false, rows: 0 };
-  if (!sweepCandidates({ users, venues, agencies }, serverNow().getTime()).length) return { committed: false, rows: 0 };
+  {
+    const n0 = serverNow().getTime();
+    const c0 = sweepCandidates({ users, venues, agencies }, n0);
+    if (!c0.length && !historyPruneCandidates({ users }, n0, new Set()).length) return { committed: false, rows: 0 };
+  }
   try {
     const res = await commitState((freshDoc) => {
       const nowMs = serverNow().getTime();
       const cands = sweepCandidates(freshDoc, nowMs);
-      if (!cands.length) return { doc: freshDoc, result: { rows: 0, agencies: [] } };
+      const prunes = historyPruneCandidates(freshDoc, nowMs, new Set(cands.map((c) => c.id)));
+      if (!cands.length && !prunes.length) return { doc: freshDoc, result: { rows: 0, agencies: [] } };
       const grantSetById: Record<string, GrantFields> = {};
       for (const c of cands) grantSetById[c.id] = c.fields;
-      let doc: any = { ...freshDoc, users: (freshDoc.users as any[]).map((u: any) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)) };
-      // 4.5: an access-reducing commit is never blocked by history.
-      if (candidateBytes(doc) > 900 * 1024) {
-        for (const id of Object.keys(grantSetById)) grantSetById[id] = trimHistory(grantSetById[id], 0);
-        doc = { ...freshDoc, users: (freshDoc.users as any[]).map((u: any) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)) };
-        log.warn('[grants] sweep near the size guard: committed without history entries');
-      }
-      return { doc, grantSetById, result: { rows: cands.length, agencies: Array.from(new Set(cands.map((c) => c.agencyId))) }, grantBudgetFallback: true };
+      for (const p of prunes) grantSetById[p.id] = p.fields;
+      const doc: any = { ...freshDoc, users: (freshDoc.users as any[]).map((u: any) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)) };
+      // 4.5: an access-reducing commit is never blocked by history: the commit
+      // guard drops the document's OLDEST entries if needed (12b-s, no pre-trim).
+      return { doc, grantSetById, result: { rows: cands.length, pruned: prunes.length, agencies: Array.from(new Set(cands.map((c) => c.agencyId))) }, grantBudgetFallback: true };
     }, { label: 'grant-sweep' });
     const r: any = res.result || {};
+    if (r.pruned) log.info(`[grants] sweep (${source}) dropped venue history older than 14 days on ${r.pruned} row(s)`);
     if (r.rows) {
       log.info(`[grants] sweep (${source}) closed grants on ${r.rows} row(s)`);
       for (const a of r.agencies || []) {
@@ -14401,7 +14457,7 @@ async function runGrantSweep(source: string): Promise<{ committed: boolean; rows
       }
       reconcileScopes('sweep', false);
     }
-    return { committed: !!r.rows, rows: r.rows || 0 };
+    return { committed: !!(r.rows || r.pruned), rows: r.rows || 0 };
   } catch (err: any) {
     log.warn(`[grants] sweep (${source}) failed: ${err?.message || 'error'}`);
     return { committed: false, rows: 0 };
@@ -14524,14 +14580,9 @@ app.post('/api/users/:id/venue-ops', async (req, res) => {
       if (r.growth && candidateBytes(doc) > GRANT_GROWTH_LIMIT_BYTES) {
         return deny('The app storage is nearly full; this change cannot be saved right now.', 409, 'STATE_NEAR_FULL');
       }
-      let fields = r.fields;
-      let outDoc = doc;
-      if (!r.growth && candidateBytes(doc) > 900 * 1024) {
-        fields = trimHistory(r.fields, 0);
-        outDoc = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
-        log.warn(`[grants] venue-ops on ${id} near the size guard: committed without history`);
-      }
-      return { doc: outDoc, grantSetById: { [id]: fields }, result: { userId: id, closed: r.closed.length }, ...(r.growth ? {} : { grantBudgetFallback: true }) };
+      // A reduction is never blocked by history: the commit guard drops the
+      // document's OLDEST entries if needed (12b-s, no pre-trim).
+      return { doc, grantSetById: { [id]: r.fields }, result: { userId: id, closed: r.closed.length }, ...(r.growth ? {} : { grantBudgetFallback: true }) };
     },
     { label: 'venue-ops', requireVersion: true }
   );
@@ -14550,6 +14601,403 @@ app.post('/api/users/:id/venue-ops', async (req, res) => {
   sendKioskRefresh(callerAgencyId);
   reconcileScopes('venue-ops', false);
   res.json({ success: true, userId: id, venueIds, venueUntil: view, venueRev: venueRevOf(fresh) });
+});
+
+// ---------------------------------------------------------------------------
+// Item 12, 12b-s (plan v6 5.3-5.7; Don Oct 22 + Oct 23): the Pool (people with
+// no main venue, and contacts with no account yet), move-to-pool, make-main,
+// and the agency borrow list. Rule T, fail closed:
+//   admin       = the whole agency: Pool members (manager view), live Pool
+//                 invites, contacts (add / edit / delete / invite), move-to-pool,
+//                 make-main.
+//   owner/coord = Pool members as name + last venue only (to tick them into
+//                 their OWN venues with venue-ops), and the borrow list (name +
+//                 main venue only) of their agency's other venues.
+//   anyone else = 403 and zero Pool bytes.
+// ---------------------------------------------------------------------------
+const POOL_ROLES = ['admin', 'coordinator', 'owner'];
+
+/** 5.6: wrap an invite-accept mutator so a contact whose linked invite is now accepted leaves the Pool list. */
+function withPoolContactCleanup<A extends any[]>(fn: (freshDoc: any, ...rest: A) => any): (freshDoc: any, ...rest: A) => any {
+  return (freshDoc: any, ...rest: A) => {
+    const out = fn(freshDoc, ...rest);
+    if (out && typeof out === 'object' && !('conflict' in out) && out.doc) out.doc = dropContactsForAcceptedInvites(out.doc);
+    return out;
+  };
+}
+
+function poolGate(req: any, res: any, roles: readonly string[]): { caller: UserProfile; agencyId: string } | null {
+  const caller = getAuthUser(req);
+  if (!caller) { res.status(401).json({ error: 'Not signed in.' }); return null; }
+  if ((req as any).kiosk === true || !roles.includes(String((caller as any).role))) {
+    res.status(403).json({ error: 'Only an admin, owner or coordinator can see the Pool.', code: 'NOT_ALLOWED' });
+    return null;
+  }
+  return { caller, agencyId: caller.agencyId || 'agency-hkc' };
+}
+
+/** Same-agency rows with no main venue (noHomeVenue), non-admin. */
+function poolMemberRows(agencyId: string, list: readonly any[] = users): any[] {
+  return list.filter((u: any) => u && u.role !== 'admin' && (u.agencyId || 'agency-hkc') === agencyId && u.noHomeVenue === true && isHomeless(u));
+}
+
+function livePoolInvites(agencyId: string, list: readonly any[], nowMs: number): any[] {
+  return list.filter((i: any) => i && i.agencyId === agencyId && isLiveInvite(i, nowMs) && isPoolInvite(i));
+}
+
+function venueNameOf(venueId: string, agencyId: string): string | null {
+  const v = venues.find((x: any) => x && x.id === venueId && (x.agencyId || 'agency-hkc') === agencyId);
+  return v ? String(v.name || '') : null;
+}
+
+/** POOL_UPDATED {count}: admins get members + contacts + live Pool invites; owners/coordinators get members. No personal data. */
+function sendPoolUpdated(agencyId: string): void {
+  const nowMs = Date.now();
+  const members = poolMemberRows(agencyId).length;
+  const adminCount = members + agencyContacts({ poolContacts: carriedDocFields.poolContacts }, agencyId).length + livePoolInvites(agencyId, invites, nowMs).length;
+  for (const client of wss.clients) {
+    if (client.readyState !== WebSocket.OPEN) continue;
+    const meta = authorizeSocket(client);
+    if (!meta || meta.kiosk || meta.agencyId !== agencyId) continue;
+    const row: any = users.find((u) => u.id === meta.userId);
+    if (!row || (row.agencyId || 'agency-hkc') !== agencyId || !POOL_ROLES.includes(String(row.role))) continue;
+    const count = row.role === 'admin' ? adminCount : members;
+    try { client.send(JSON.stringify({ type: 'POOL_UPDATED', payload: { count }, timestamp: new Date().toISOString(), version: typeof stateVersion === 'number' ? stateVersion : undefined })); } catch {}
+  }
+}
+
+/**
+ * GET /api/pool. Admin: { members, invites, contacts }. Owner/coordinator:
+ * { members } with name + last venue only. Cache-Control no-store.
+ */
+app.get('/api/pool', (req, res) => {
+  const gate = poolGate(req, res, POOL_ROLES);
+  if (!gate) return;
+  const { caller, agencyId } = gate;
+  const fresh: any = users.find((u) => u.id === caller.id);
+  if (!fresh || !POOL_ROLES.includes(String(fresh.role)) || (fresh.agencyId || 'agency-hkc') !== agencyId || sessionIneligibleCode(fresh)) {
+    return res.status(403).json({ error: 'Only an admin, owner or coordinator can see the Pool.', code: 'NOT_ALLOWED' });
+  }
+  const nowMs = serverNow().getTime();
+  res.setHeader('Cache-Control', 'no-store');
+  const lastOf = (u: any) => {
+    const lv = lastVenueOf(u, nowMs);
+    return lv ? { lastVenueId: lv.venueId, lastVenueName: venueNameOf(lv.venueId, agencyId), lastVenueTo: lv.to } : {};
+  };
+  const rows = poolMemberRows(agencyId);
+  if (fresh.role !== 'admin') {
+    // name + last venue only (+ the venue-ops precondition); no email, phone,
+    // permissions, code state, contacts or invites.
+    const members = rows.filter((u) => !sessionIneligibleCode(u)).map((u) => ({
+      id: String(u.id), name: String(u.name || ''), role: String(u.role), venueRevision: venueRevOf(u), ...lastOf(u),
+    }));
+    return res.json({ members });
+  }
+  const members = rows.map((u) => ({ ...managerViewOf(u as any, fresh), ...lastOf(u) }));
+  const poolInvites = livePoolInvites(agencyId, invites, nowMs).map(inviteListView);
+  const contacts = agencyContacts({ poolContacts: carriedDocFields.poolContacts }, agencyId).map((c) => poolContactView(c, invites, nowMs));
+  res.json({ members, invites: poolInvites, contacts });
+});
+
+/**
+ * GET /api/pool/borrow (Don Oct 22, option A without the note): the agency's
+ * mashgichim and workers whose MAIN venue is one the caller does not own /
+ * coordinate: name + main venue only (plus the venue-ops precondition). The
+ * loan itself is venue-ops on the caller's own venue with a required end date.
+ */
+app.get('/api/pool/borrow', (req, res) => {
+  const gate = poolGate(req, res, POOL_ROLES);
+  if (!gate) return;
+  const { caller, agencyId } = gate;
+  const fresh: any = users.find((u) => u.id === caller.id);
+  if (!fresh || !POOL_ROLES.includes(String(fresh.role)) || (fresh.agencyId || 'agency-hkc') !== agencyId || sessionIneligibleCode(fresh)) {
+    return res.status(403).json({ error: 'Only an admin, owner or coordinator can see this list.', code: 'NOT_ALLOWED' });
+  }
+  const agencyVenues = venues.filter((v: any) => v && (v.agencyId || 'agency-hkc') === agencyId);
+  const people = users
+    .filter((u: any) => u && u.id !== fresh.id && (u.agencyId || 'agency-hkc') === agencyId && (u.role === 'mashgiach' || u.role === 'worker'))
+    .filter((u: any) => !isHomeless(u) && typeof u.venueId === 'string' && agencyVenues.some((v: any) => v.id === u.venueId))
+    .filter((u: any) => !sessionIneligibleCode(u))
+    .filter((u: any) => fresh.role === 'admin' || !mayManageEventAt(fresh, u.venueId, venues as any))
+    .map((u: any) => ({ id: String(u.id), name: String(u.name || ''), homeVenueId: String(u.venueId), homeVenueName: venueNameOf(u.venueId, agencyId) || '', venueRevision: venueRevOf(u) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ people });
+});
+
+/** Admin + Phase C (the same gate as invites) for every contact write. */
+function poolAdminGate(req: any, res: any): { caller: UserProfile; agencyId: string } | null {
+  return inviteGate(req, res);
+}
+
+const CONTACT_CHANGED = { conflict: 'This contact was changed by someone else. Refresh and try again.', conflictStatus: 409, conflictCode: 'CONTACT_CHANGED' };
+
+/** Hard email duplicate -> 409 POOL_DUPLICATE; soft phone match -> 409 POOL_PHONE_SHARED unless confirmed. */
+function poolDuplicateDeny(doc: any, agencyId: string, probe: { email?: string; phone?: string }, self: { contactId?: string; inviteId?: string }, confirmSharedPhone: boolean, nowMs: number) {
+  const d = findPoolDuplicates(doc, agencyId, probe, self, nowMs);
+  if (d.email) return { conflict: `${d.email.displayName || 'Someone'} in your agency already uses this email.`, conflictStatus: 409, conflictCode: 'POOL_DUPLICATE', conflictExtra: { kind: d.email.kind, displayName: d.email.displayName } };
+  if (d.phone && !confirmSharedPhone) return { conflict: `This phone number is already used by ${d.phone.displayName || 'someone'} in your agency.`, conflictStatus: 409, conflictCode: 'POOL_PHONE_SHARED', conflictExtra: { kind: d.phone.kind, displayName: d.phone.displayName } };
+  return null;
+}
+
+app.post('/api/pool/contacts', async (req, res) => {
+  const gate = poolAdminGate(req, res);
+  if (!gate) return;
+  const { caller, agencyId } = gate;
+  const parsed = parsePoolContact(req.body, normalizePhoneNumber, false);
+  if (parsed.ok === false) return res.status(400).json({ error: parsed.error, code: parsed.code });
+  const input = parsed.value;
+  const contactId = `pc_${crypto.randomUUID()}`;
+  const confirm = (req.body || {}).confirmSharedPhone === true;
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const denied = inviteFreshGate(freshDoc, caller.id, agencyId);
+      if (denied) return denied;
+      if (freshDoc.poolFrozen === true) return { conflict: 'The Pool is switched off right now.', conflictStatus: 409, conflictCode: 'POOL_FROZEN' };
+      const list: any[] = Array.isArray(freshDoc.poolContacts) ? freshDoc.poolContacts : [];
+      const mine = list.find((c: any) => c && c.id === contactId);
+      if (mine) return { doc: freshDoc, result: { contact: mine } }; // idempotent retry
+      if (agencyContacts(freshDoc, agencyId).length >= POOL_CONTACT_CAP) {
+        return { conflict: `The Pool can hold up to ${POOL_CONTACT_CAP} contacts.`, conflictStatus: 409, conflictCode: 'POOL_FULL' };
+      }
+      const nowMs = Date.now();
+      const dup = poolDuplicateDeny(freshDoc, agencyId, { email: input.email, phone: input.phone }, {}, confirm, nowMs);
+      if (dup) return dup;
+      const nowIso = new Date(nowMs).toISOString();
+      const contact: any = { id: contactId, agencyId, name: input.name, ...(input.email ? { email: input.email } : {}), ...(input.phone ? { phone: input.phone } : {}), ...(input.note ? { note: input.note } : {}), status: 'details', createdBy: caller.id, createdAt: nowIso, updatedAt: nowIso };
+      const doc = { ...freshDoc, poolContacts: [...list, contact] };
+      if (candidateBytes(doc) > GRANT_GROWTH_LIMIT_BYTES) return { conflict: 'The app storage is nearly full; this change cannot be saved right now.', conflictStatus: 409, conflictCode: 'STATE_NEAR_FULL' };
+      return { doc, result: { contact } };
+    },
+    { label: 'pool-contact-create', requireVersion: true }
+  );
+  if (!committed) return;
+  const c = (committed.result as any).contact;
+  console.log(`[audit] pool contact created: admin ${caller.id} agency ${agencyId} contact ${c.id}`);
+  sendPoolUpdated(agencyId);
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(201).json({ contact: poolContactView(c, invites, Date.now()) });
+});
+
+/** The fresh contact of this agency by id + its updatedAt precondition. */
+function freshContactFor(freshDoc: any, agencyId: string, id: string, expectedUpdatedAt: unknown): { contact: any; list: any[] } | { conflict: string; conflictStatus: number; conflictCode: string } {
+  const list: any[] = Array.isArray(freshDoc.poolContacts) ? freshDoc.poolContacts : [];
+  const contact = list.find((c: any) => isPoolContact(c) && c.id === id && c.agencyId === agencyId);
+  if (!contact) return { conflict: 'This contact is no longer in the Pool.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+  if (typeof expectedUpdatedAt !== 'string' || expectedUpdatedAt !== contact.updatedAt) return CONTACT_CHANGED;
+  return { contact, list };
+}
+
+app.patch('/api/pool/contacts/:id', async (req, res) => {
+  const gate = poolAdminGate(req, res);
+  if (!gate) return;
+  const { caller, agencyId } = gate;
+  const id = String(req.params.id || '');
+  const parsed = parsePoolContact(req.body, normalizePhoneNumber, true);
+  if (parsed.ok === false) return res.status(400).json({ error: parsed.error, code: parsed.code });
+  const input = parsed.value;
+  const confirm = (req.body || {}).confirmSharedPhone === true;
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const denied = inviteFreshGate(freshDoc, caller.id, agencyId);
+      if (denied) return denied;
+      const f = freshContactFor(freshDoc, agencyId, id, (req.body || {}).expectedUpdatedAt);
+      if ('conflict' in f) return f;
+      const prev = f.contact;
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const next: any = { ...prev, updatedAt: nowIso };
+      if (input.name !== undefined) next.name = input.name;
+      for (const k of ['email', 'phone', 'note'] as const) {
+        if ((input as any)[k] !== undefined) next[k] = (input as any)[k];
+        if (input.clear.includes(k)) delete next[k];
+      }
+      const emailChanged = (prev.email || '') !== (next.email || '');
+      const dup = poolDuplicateDeny(freshDoc, agencyId,
+        { email: emailChanged ? next.email : undefined, phone: (prev.phone || '') !== (next.phone || '') ? next.phone : undefined },
+        { contactId: prev.id, inviteId: prev.inviteId }, confirm, nowMs);
+      if (dup) return dup;
+      let invitesOut = freshDoc.invites;
+      let revoked: string | null = null;
+      if (emailChanged && prev.status === 'invited') {
+        // 5.6: a changed email kills the old link; "send the invite again".
+        const r = revokeLinkedInvite(Array.isArray(freshDoc.invites) ? freshDoc.invites : [], prev, caller.id, nowMs, 'contact-edited');
+        invitesOut = r.invites; revoked = r.revoked;
+        next.status = 'details';
+        delete next.inviteId;
+      }
+      const doc = { ...freshDoc, invites: invitesOut, poolContacts: f.list.map((c: any) => (c && c.id === id ? next : c)) };
+      const grew = candidateBytes(doc) > candidateBytes(freshDoc);
+      if (grew && candidateBytes(doc) > GRANT_GROWTH_LIMIT_BYTES) return { conflict: 'The app storage is nearly full; this change cannot be saved right now.', conflictStatus: 409, conflictCode: 'STATE_NEAR_FULL' };
+      return { doc, result: { contact: next, revoked } };
+    },
+    { label: 'pool-contact-edit', requireVersion: true }
+  );
+  if (!committed) return;
+  const r: any = committed.result;
+  console.log(`[audit] pool contact edited: admin ${caller.id} agency ${agencyId} contact ${id}${r.revoked ? ` (invite ${r.revoked} revoked)` : ''}`);
+  sendPoolUpdated(agencyId);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ contact: poolContactView(r.contact, invites, Date.now()) });
+});
+
+app.delete('/api/pool/contacts/:id', async (req, res) => {
+  const gate = poolAdminGate(req, res);
+  if (!gate) return;
+  const { caller, agencyId } = gate;
+  const id = String(req.params.id || '');
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const denied = inviteFreshGate(freshDoc, caller.id, agencyId);
+      if (denied) return denied;
+      const f = freshContactFor(freshDoc, agencyId, id, (req.body || {}).expectedUpdatedAt);
+      if ('conflict' in f) return f;
+      // 5.6: deleting a contact revokes its live invite in the same transaction.
+      const r = revokeLinkedInvite(Array.isArray(freshDoc.invites) ? freshDoc.invites : [], f.contact, caller.id, Date.now(), 'contact-deleted');
+      return { doc: { ...freshDoc, invites: r.invites, poolContacts: f.list.filter((c: any) => !(c && c.id === id)) }, result: { revoked: r.revoked } };
+    },
+    { label: 'pool-contact-delete', requireVersion: true }
+  );
+  if (!committed) return;
+  const r: any = committed.result;
+  console.log(`[audit] pool contact deleted: admin ${caller.id} agency ${agencyId} contact ${id}${r.revoked ? ` (invite ${r.revoked} revoked)` : ''}`);
+  sendPoolUpdated(agencyId);
+  res.json({ success: true });
+});
+
+/** POST /api/pool/contacts/:id/invite {expectedUpdatedAt, expectedEmail}: a Pool invite (no main venue) from a contact. */
+app.post('/api/pool/contacts/:id/invite', async (req, res) => {
+  const gate = poolAdminGate(req, res);
+  if (!gate) return;
+  const { caller, agencyId } = gate;
+  const id = String(req.params.id || '');
+  const body = req.body || {};
+  const pre = newInvitePre();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const denied = inviteFreshGate(freshDoc, caller.id, agencyId);
+      if (denied) return denied;
+      if (freshDoc.poolFrozen === true) return { conflict: 'The Pool is switched off right now.', conflictStatus: 409, conflictCode: 'POOL_FROZEN' };
+      const existing: any[] = Array.isArray(freshDoc.invites) ? freshDoc.invites : [];
+      const mineInv = existing.find((i: any) => i && i.id === pre.inviteId);
+      if (mineInv) return { doc: freshDoc, result: { invite: mineInv, replaced: [] } }; // idempotent retry
+      const f = freshContactFor(freshDoc, agencyId, id, body.expectedUpdatedAt);
+      if ('conflict' in f) return f;
+      const c = f.contact;
+      if (typeof c.email !== 'string' || !c.email) return { conflict: 'Add an email address to send an invite.', conflictStatus: 400, conflictCode: 'POOL_INVITE_NEEDS_EMAIL' };
+      if (typeof body.expectedEmail !== 'string' || normalizeInviteEmail(body.expectedEmail) !== c.email) return CONTACT_CHANGED;
+      const nowMs = Date.now();
+      // Hard email duplicate against rows, OTHER live invites and other contacts (self-excluded).
+      const dup = poolDuplicateDeny(freshDoc, agencyId, { email: c.email }, { contactId: c.id, inviteId: c.inviteId }, true, nowMs);
+      if (dup) return dup;
+      // "Send again": the old token stays dead.
+      const rv = revokeLinkedInvite(existing, c, caller.id, nowMs, 'resent');
+      const built = createMemberInviteInTx({ ...freshDoc, invites: rv.invites }, caller.id, agencyId,
+        { email: c.email, name: c.name, ...(c.phone ? { phoneNumber: c.phone } : {}), role: 'mashgiach', venueIds: [], pool: true, confirmSharedPhone: true },
+        pre, { contactId: c.id });
+      if ('conflict' in built) return built;
+      return { doc: built.doc, result: { invite: built.invite, replaced: [...(rv.revoked ? [rv.revoked] : []), ...built.replaced] } };
+    },
+    { label: 'pool-contact-invite', requireVersion: true }
+  );
+  if (!committed) return;
+  const { invite: rec, replaced } = committed.result as any;
+  auditInviteCreated(caller.id, agencyId, rec, replaced || []);
+  sendPoolUpdated(agencyId);
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(201).json({ invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}` });
+});
+
+/** The open work a move / main change would leave behind at `venueIds` (N4: nothing is reassigned). */
+function openWorkAt(target: any, venueIds: readonly string[]): { tasks: Array<{ id: string; title: string; venueId: string }>; events: Array<{ id: string; title: string; venueId: string; date: string }> } {
+  const email = normalizeInviteEmail(target?.email);
+  const set = new Set(venueIds);
+  const t = tasks
+    .filter((x: any) => x && set.has(x.venueId) && !x.isCompleted && Array.isArray(x.assignedTo) && email && x.assignedTo.some((a: any) => normalizeInviteEmail(a) === email))
+    .slice(0, 50).map((x: any) => ({ id: String(x.id), title: String(x.title || ''), venueId: String(x.venueId) }));
+  const today = new Date(serverNow().getTime() - 86400000).toISOString().slice(0, 10);
+  const e = events
+    .filter((x: any) => x && set.has(x.venueId) && email && normalizeInviteEmail(x.assignedMashgiachEmail) === email && !(typeof x.date === 'string' && x.date < today))
+    .slice(0, 50).map((x: any) => ({ id: String(x.id), title: String(x.title || ''), venueId: String(x.venueId), date: String(x.date || '') }));
+  return { tasks: t, events: e };
+}
+
+/** Shared by move-to-pool and make-main: admin of the agency, fresh checks, one commit. */
+async function poolGrantRoute(req: any, res: any, label: string, build: (target: any, ctx: any, freshDoc: any) => any): Promise<void> {
+  const caller = getAuthUser(req);
+  if (!caller || (req as any).kiosk === true || caller.role !== 'admin') {
+    res.status(403).json({ error: 'Only an admin can do this.', code: 'NOT_ALLOWED' });
+    return;
+  }
+  const agencyId = caller.agencyId || 'agency-hkc';
+  const id = String(req.params.id || '');
+  const body = req.body || {};
+  if (freshnessIsStale()) { res.status(503).json({ error: 'Venue changes are paused for a moment. Please try again shortly.', code: 'FRESHNESS_STALE' }); return; }
+  if (!Number.isInteger(body.expectedVenueRev) || body.expectedVenueRev < 0) { res.status(400).json({ error: 'expectedVenueRev is required.', code: 'VENUE_OPS_INVALID' }); return; }
+  const cached: any = users.find((u) => u.id === id);
+  if (!cached || (cached.agencyId || 'agency-hkc') !== agencyId) { res.status(404).json({ error: 'Team member not found.' }); return; }
+  const deny = (msg: string, status: number, code: string) => ({ conflict: msg, conflictStatus: status, conflictCode: code });
+  const dryRun = body.dryRun === true;
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const txNow = serverNow().getTime();
+      if (freshnessIsStale()) return deny('Venue changes are paused for a moment. Please try again shortly.', 503, 'FRESHNESS_STALE');
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshCaller = freshUsers.find((u) => u && u.id === caller.id);
+      if (!freshCaller || freshCaller.role !== 'admin' || (freshCaller.agencyId || 'agency-hkc') !== agencyId || sessionIneligibleCode(freshCaller)) return deny('Only an admin can do this.', 403, 'NOT_ALLOWED');
+      const target = freshUsers.find((u) => u && u.id === id);
+      if (!target || (target.agencyId || 'agency-hkc') !== agencyId) return deny('Team member not found (they may have been deleted).', 404, 'NOT_FOUND');
+      if (target.role === 'admin') return deny('Admins already cover every venue of the agency.', 400, 'TARGET_IS_ADMIN');
+      if (!target.personId) return deny('This account has not been upgraded yet; try again shortly.', 409, 'NOT_MIGRATED');
+      if (venueRevOf(target) !== body.expectedVenueRev) return deny("Conflict: this person's venues were changed by someone else. Please refresh and try again.", 409, 'VENUES_CHANGED');
+      const built = build(target, grantCtxFor(freshDoc, agencyId, caller.id, txNow), freshDoc);
+      if ('conflict' in built) return built;
+      const r = built.r;
+      if (!r.ok) return deny(r.error, r.status, r.code);
+      const lost = (Array.isArray(target.venueAccess) ? target.venueAccess : []).concat(target.venueId ? [target.venueId] : []).filter((v: string) => v && !r.fields.venueAccess.includes(v));
+      const summary = { venueIds: r.fields.venueAccess, mainVenueId: r.fields.venueId || null, openWork: openWorkAt(target, Array.from(new Set(lost))) };
+      if (dryRun) return { doc: freshDoc, result: { dryRun: true, ...summary } };
+      const doc: any = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, r.fields) : u)) };
+      if (r.growth && candidateBytes(doc) > GRANT_GROWTH_LIMIT_BYTES) return deny('The app storage is nearly full; this change cannot be saved right now.', 409, 'STATE_NEAR_FULL');
+      // A reduction is never blocked by history: the commit guard drops the
+      // document's OLDEST entries if needed.
+      return { doc, grantSetById: { [id]: r.fields }, result: summary, ...(r.growth ? {} : { grantBudgetFallback: true }) };
+    },
+    { label, requireVersion: true }
+  );
+  if (!committed) return;
+  const out: any = committed.result || {};
+  if (out.dryRun) { res.setHeader('Cache-Control', 'no-store'); res.json(out); return; }
+  const fresh: any = users.find((u) => u.id === id);
+  log.info(`[audit] ${label}: admin ${caller.id} on user ${id} -> main ${fresh?.venueId || '(pool)'} [${(fresh?.venueAccess || []).join(',')}] rev ${venueRevOf(fresh)} (agency ${agencyId})`);
+  broadcast('USERS_UPDATED', { agencyId }, undefined, agencyId, (meta, base) => ({ ...base, users: getSafeUsersForAgency(agencyId, recipientForMeta(meta)) }));
+  sendKioskRefresh(agencyId);
+  reconcileScopes(label, false);
+  sendPoolUpdated(agencyId);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ success: true, userId: id, ...out, venueRev: venueRevOf(fresh) });
+}
+
+/** 5.3: POST /api/users/:id/move-to-pool {expectedVenueRev, dryRun?} (admin). */
+app.post('/api/users/:id/move-to-pool', async (req, res) => {
+  await poolGrantRoute(req, res, 'move-to-pool', (target, ctx, freshDoc) => {
+    if (freshDoc.poolFrozen === true) return { conflict: 'The Pool is switched off right now.', conflictStatus: 409, conflictCode: 'POOL_FROZEN' };
+    return { r: moveToPoolFields(target, ctx) };
+  });
+});
+
+/** 5.4: POST /api/users/:id/make-main {venueId, keepOldMainAsExtra, expectedVenueRev, dryRun?} (admin). */
+app.post('/api/users/:id/make-main', async (req, res) => {
+  const body = req.body || {};
+  if (typeof body.venueId !== 'string' || !body.venueId || body.venueId.length > 200 || typeof body.keepOldMainAsExtra !== 'boolean') {
+    return res.status(400).json({ error: 'Choose a venue, and whether to keep the old main venue.', code: 'VENUE_OPS_INVALID' });
+  }
+  await poolGrantRoute(req, res, 'make-main', (target, ctx) => ({ r: makeMainFields(target, body.venueId, body.keepOldMainAsExtra, ctx) }));
 });
 
 /**
@@ -14595,8 +15043,7 @@ app.post('/api/platform/venue-grants/end-dated', async (req, res) => {
         users: freshUsers,
       };
       // 4.5: the rollback must never fail at the guard on history growth.
-      const fit = fitGrantBudget(doc, grantSetById);
-      if (fit.trimmed !== 'none') log.warn(`[grants] end-dated near the size guard: history dropped (${fit.trimmed})`);
+      const fit = fitGrantBudget(doc, grantSetById); // 12b-s: no pre-trim; the commit guard sheds the oldest entries
       const outDoc = { ...doc, users: freshUsers.map((u) => (u && fit.gset[u.id] ? withGrantFields(u, fit.gset[u.id]) : u)) };
       return { doc: outDoc, grantSetById: fit.gset, result: { ended, revoked }, grantBudgetFallback: true };
     },
@@ -14714,6 +15161,11 @@ app.put('/api/users/:id/venues', async (req, res) => {
       if (target.role === 'admin') {
         return deny('Admins already cover every venue of the agency.', 400, 'TARGET_IS_ADMIN');
       }
+      // 12b-s: a Pool member (no main venue) is changed only through venue-ops;
+      // an old open tab's sheet save for them is refused (plan v6 11).
+      if (isHomeless(target)) {
+        return deny('Refresh the app to change the venues of someone in the Pool.', 400, 'POOL_MEMBER_NEEDS_REFRESH');
+      }
       if (!target.personId) {
         return deny('This account has not been upgraded yet; try again shortly.', 409, 'NOT_MIGRATED');
       }
@@ -14765,15 +15217,12 @@ app.put('/api/users/:id/venues', async (req, res) => {
       let fields: GrantFields = { ...r.fields, venueAccess: [...(home ? [home] : []), ...list.filter((v) => r.fields.venueAccess.includes(v))], venueRev: venueRevOf(target) + (r.changed || norm.changed ? 1 : 0) };
       // 4.5, the same budget as venue-ops: growth is refused near the size
       // guard; a reduction near the hard guard commits without history.
-      let outDoc: any = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
+      const outDoc: any = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
       if (r.growth && candidateBytes(outDoc) > GRANT_GROWTH_LIMIT_BYTES) {
         return deny('The app storage is nearly full; this change cannot be saved right now.', 409, 'STATE_NEAR_FULL');
       }
-      if (!r.growth && candidateBytes(outDoc) > 900 * 1024) {
-        fields = trimHistory(fields, 0);
-        outDoc = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
-        log.warn(`[grants] venues PUT on ${id} near the size guard: committed without history`);
-      }
+      // A reduction is never blocked by history: the commit guard drops the
+      // document's OLDEST entries if needed (12b-s, no pre-trim).
       return {
         doc: outDoc,
         grantSetById: { [id]: fields },

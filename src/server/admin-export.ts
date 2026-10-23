@@ -36,12 +36,16 @@ export const EXPORT_COLLECTIONS = [
   'agencies', 'venues', 'tasks', 'historyLogs', 'handoffNotes', 'taskTemplates',
   'incidents', 'announcements', 'users', 'events', 'eventTaskTemplates',
   'airtableConfigs', 'approvedIngredients', 'factoryReports', 'kioskDevices',
+  // 12b-s (4.4): the agency's own Pool contacts (allowlisted fields).
+  'poolContacts',
 ] as const;
 
 const USER_FIELDS = [
   'id', 'agencyId', 'email', 'name', 'role', 'avatarColor', 'venueId',
   'permissions', 'phoneNumber', 'kioskPinSetAt', 'kioskPinRev', 'createdAt', 'updatedAt',
 ];
+
+const POOL_CONTACT_FIELDS = ['id', 'agencyId', 'name', 'email', 'phone', 'note', 'status', 'inviteId', 'createdBy', 'createdAt', 'updatedAt'];
 
 const AIRTABLE_FIELDS = [
   'id', 'agencyId', 'venueId', 'baseId', 'tableName', 'viewName',
@@ -120,6 +124,7 @@ function projectRecord(collection: string, rec: any): any {
     return { ...pick(rec, AIRTABLE_FIELDS), hasApiKey: typeof rec?.apiKey === 'string' && rec.apiKey.length > 0 };
   }
   if (collection === 'kioskDevices') return pick(rec, KIOSK_DEVICE_FIELDS);
+  if (collection === 'poolContacts') return pick(rec, POOL_CONTACT_FIELDS);
   return rec;
 }
 
