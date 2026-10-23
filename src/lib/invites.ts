@@ -38,6 +38,25 @@ export function fullInviteLink(path: unknown, origin?: string): string | null {
   return `${base}${path}`;
 }
 
+/**
+ * The server's `linkOrigin` beside an invite link (the agency's own address,
+ * from APP_SITES), when it is a plain http(s) origin and nothing else;
+ * otherwise undefined, so fullInviteLink falls back to this page's origin.
+ */
+export function inviteLinkOrigin(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value) return undefined;
+  try {
+    const u = new URL(value);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return undefined;
+    return u.origin === value ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** After choosing a password on the invite page (Don, Oct 23): the toast on the welcome / home page they land on. */
+export const PASSWORD_SET_TOAST = 'Your password is set. Tap Sign in and use your email and new password.';
+
 /** Is this page the invite page? */
 export function isInvitePath(pathname: string | null | undefined): boolean {
   return String(pathname || '').replace(/\/+$/, '') === '/invite';

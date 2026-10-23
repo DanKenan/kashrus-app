@@ -11,6 +11,13 @@ import {
 } from '../lib/pool';
 import { END_DATE_TEXT, addDays, dayWords, serverNowMs, ymdIn, zoneForVenue } from '../lib/venueEndDates';
 import { InviteLinkCard } from './InviteLinkCard';
+import { fullInviteLink, inviteLinkOrigin } from '../lib/invites';
+
+/** The full link to send (the agency's own address when it has one), from the server's "/invite#t=…" answer. */
+function poolInviteLink(data: unknown): string {
+  const d = (data || {}) as { link?: unknown; linkOrigin?: unknown };
+  return fullInviteLink(d.link, inviteLinkOrigin(d.linkOrigin)) || String(d.link || '');
+}
 
 export const POOL_UPDATED_EVENT = 'shutfey:pool-updated';
 
@@ -120,7 +127,7 @@ export function AddToPoolSheet({ contact, onClose, onDone }: { contact?: PoolCon
       if (!contact && sendNow && saved) {
         const inv = await inviteContact({ ...saved, status: saved.status || 'details' } as PoolContact);
         if (inv.ok && typeof (inv.data as any)?.link === 'string') {
-          onDone(POOL_TEXT.added(saved.name), { link: (inv.data as any).link, name: saved.name });
+          onDone(POOL_TEXT.added(saved.name), { link: poolInviteLink(inv.data), name: saved.name });
           return;
         }
         onDone(`${POOL_TEXT.added(saved.name)} ${poolErrorText(inv)}`);
@@ -394,7 +401,7 @@ export function PoolPanel({ currentUser, venues, pool, onAdminTick, onCode }: Po
     setBusyId(c.id);
     try {
       const r = await inviteContact(c);
-      if (r.ok && typeof (r.data as any)?.link === 'string') done(`${POOL_TEXT.sendInvite}: ${c.name}`, { link: (r.data as any).link, name: c.name });
+      if (r.ok && typeof (r.data as any)?.link === 'string') done(`${POOL_TEXT.sendInvite}: ${c.name}`, { link: poolInviteLink(r.data), name: c.name });
       else { setNotice(poolErrorText(r)); void reload(); }
     } finally { setBusyId(null); }
   };

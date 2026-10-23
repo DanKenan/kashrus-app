@@ -324,7 +324,7 @@ const PREVIEW = { 'GET /api/invites/preview': { status: 200, body: { kind: 'memb
 // ---- A: App wiring (source) ----
 {
   const app = fs.readFileSync(new URL('../../src/App.tsx', import.meta.url), 'utf8');
-  ok('A pending answer -> full link returned', /data\.pending === true[\s\S]{0,200}fullInviteLink\(data\.link\)/.test(app));
+  ok('A pending answer -> full link returned', /data\.pending === true[\s\S]{0,200}fullInviteLink\(data\.link, inviteLinkOrigin\(data\.linkOrigin\)\)/.test(app));
   ok('A today\'s add path unchanged after it', app.includes("setKnownUsers((prev) => (prev.some((u) => u.id === data.user.id) ? prev : [...prev, data.user]));"));
   const iInvite = app.indexOf('if (invitePage && !isKiosk)'); const iAuth = app.indexOf('if (!currentUser) {\n    // Kiosk tablets');
   ok('A invite page before the sign-in screens', iInvite > 0 && iAuth > iInvite);
