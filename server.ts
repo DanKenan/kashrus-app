@@ -38,7 +38,7 @@ import {
   type PersonCredentialsDoc, type PasskeyEntry, type ChallengeDoc, type PasskeyAuthMethod,
 } from './src/server/passkeys.ts';
 import { userCookieConfig, kioskCookieConfig, deviceCookieConfig, cookieValues, setCookieHeader, setDeviceCookieHeader, isDeviceCredentialShape, clearCookieHeader, trustedOrigins, originTrusted, normalizeOrigin, CSRF_ORIGIN_BODY } from './src/server/session-cookie.ts';
-import { parseAppSites, classifyHost, passkeyAddressKind, SITE_NOT_SET_UP_BODY, WRONG_SITE_BODY, SHARED_ORIGIN, type SiteClass } from './src/server/sites.ts';
+import { parseAppSites, classifyHost, siteOrigin, passkeyAddressKind, SITE_NOT_SET_UP_BODY, WRONG_SITE_BODY, SHARED_ORIGIN, type SiteClass } from './src/server/sites.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
 import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetToken, resetLinkForToken, credentialStampHash, stampsEqual, isLiveResetLink, resetLinkAdminView, pruneResetLinks, makeRoomForResetLink, mayMakeResetLink, resetSuspensionRecord } from './src/server/reset-links.ts';
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
@@ -542,6 +542,18 @@ function healthSites(): Array<{ host: string; ok: boolean; agencyName: string | 
     const a = e.ok ? (agencies as any[]).find((x) => x && x.id === e.agencyId) : null;
     return { host: e.host, ok: !!a, agencyName: a ? String(a.name || '') : null };
   });
+}
+/**
+ * Invite links on the agency's own address: the origin of the first APP_SITES
+ * entry for this agency that is live (entry ok and the agency exists, as
+ * classifyHost decides), or null when the agency has no address of its own.
+ * Invite answers keep `link` ("/invite#t=…") as before and add this beside it.
+ */
+function inviteLinkOrigin(agencyId: unknown): string | null {
+  const id = typeof agencyId === 'string' && agencyId ? agencyId : 'agency-hkc';
+  if (!siteAgencyExists(id)) return null;
+  const e = APP_SITES_CONFIG.entries.find((x) => x.ok && x.agencyId === id && APP_SITES_CONFIG.sites.get(x.host) === id);
+  return e ? siteOrigin(e.host, { local: SITES_LOCAL }) : null;
 }
 /**
  * Transition opt-in: a client that moved to cookies (11a-c) says so on every
@@ -9533,7 +9545,7 @@ app.post('/api/agency/invites', async (req, res) => {
   const { invite: rec, replaced } = committed.result as any;
   auditInviteCreated(caller.id, agencyId, rec, replaced || []);
   res.setHeader('Cache-Control', 'no-store');
-  res.status(201).json({ invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}` });
+  res.status(201).json({ invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}`, linkOrigin: inviteLinkOrigin(agencyId) });
 });
 
 app.get('/api/agency/invites', (req, res) => {
@@ -9789,7 +9801,11 @@ app.post('/api/invites/accept', async (req, res) => {
   const row: any = users.find((u) => u.id === r.rowId);
   if (!row) return res.status(500).json({ error: 'Accepted, but the account could not be loaded. Please sign in.' });
   const credRow: any = r.credId ? users.find((u) => u.id === r.credId) : row;
-  if (credRow && isMultiPersonRow(users, credRow)) {
+  // On a SITE host, as for password sign-in there: no chooser; the session is
+  // for the membership just accepted (it is in the site's agency, checked
+  // above). Another agency's membership could not be opened on this address.
+  const acceptOnSite = siteOf(req).kind === 'site';
+  if (!acceptOnSite && credRow && isMultiPersonRow(users, credRow)) {
     // QA2 #8: no membership left to choose (all venues deleted) -> the clear refusal.
     if (membershipsOfPerson(String(credRow.personId)).length === 0) return res.status(403).json(noMembershipBody(String(credRow.personId)));
     return res.json({
@@ -9894,7 +9910,7 @@ app.post('/api/users/:id/invite', async (req, res) => {
   for (const rid of (replaced || []) as string[]) console.log(`[audit] setup invite replaced: admin ${caller.id} agency ${agencyId} invite ${rid}`);
   console.log(`[audit] setup invite: admin ${caller.id} agency ${agencyId} member ${targetId} invite ${rec.id}`);
   res.setHeader('Cache-Control', 'no-store');
-  res.status(201).json({ invite: { id: String(rec.id), kind: 'setup', memberId: targetId, email: String(rec.email), expiresAt: String(rec.expiresAt) }, link: `/invite#t=${pre.token.raw}` });
+  res.status(201).json({ invite: { id: String(rec.id), kind: 'setup', memberId: targetId, email: String(rec.email), expiresAt: String(rec.expiresAt) }, link: `/invite#t=${pre.token.raw}`, linkOrigin: inviteLinkOrigin(agencyId) });
 });
 
 /** 10k: accept a 'setup' invite — the member chooses their own password (N2: one commit). */
@@ -11684,7 +11700,7 @@ app.post('/api/venues', async (req, res) => {
     venue,
     tasks: createdTasks,
     owner: owner ? getSafeUser(owner) : null,
-    ...(ownerInvite ? { ownerInvite: inviteCreatedView(ownerInvite), ownerInviteLink: `/invite#t=${ownerInvitePre.token.raw}` } : {}),
+    ...(ownerInvite ? { ownerInvite: inviteCreatedView(ownerInvite), ownerInviteLink: `/invite#t=${ownerInvitePre.token.raw}`, ownerInviteLinkOrigin: inviteLinkOrigin(ownerInvite.agencyId || callerAgencyId) } : {}),
   });
 });
 
@@ -14044,7 +14060,7 @@ app.post('/api/users', async (req, res) => {
     const { invite: rec, replaced } = committed.result as any;
     auditInviteCreated(caller.id, callerAgencyId, rec, replaced || []);
     res.setHeader('Cache-Control', 'no-store');
-    return res.status(201).json({ pending: true, invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}` });
+    return res.status(201).json({ pending: true, invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}`, linkOrigin: inviteLinkOrigin(callerAgencyId) });
   }
 });
 
@@ -15093,7 +15109,7 @@ app.post('/api/pool/contacts/:id/invite', async (req, res) => {
   auditInviteCreated(caller.id, agencyId, rec, replaced || []);
   sendPoolUpdated(agencyId);
   res.setHeader('Cache-Control', 'no-store');
-  res.status(201).json({ invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}` });
+  res.status(201).json({ invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}`, linkOrigin: inviteLinkOrigin(agencyId) });
 });
 
 /** The open work a move / main change would leave behind at `venueIds` (N4: nothing is reassigned). */
