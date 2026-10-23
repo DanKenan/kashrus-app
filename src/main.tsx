@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import { MotionConfig } from 'motion/react';
 import { registerSW } from 'virtual:pwa-register';
 import { initSwUpdates, onNewVersionActivated } from './lib/swUpdate';
+import { installChunkReload } from './lib/chunkReload';
 import App from './App.tsx';
 import { UpdateBanner } from './components/UpdateBanner';
 import './index.css';
@@ -21,6 +22,9 @@ registerSW({
     onNewVersionActivated();
   },
 });
+
+// A tab still on an old version reloads once if a lazy-loaded file is gone (see chunkReload.ts).
+installChunkReload();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

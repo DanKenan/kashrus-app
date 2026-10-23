@@ -26,11 +26,12 @@ ok('A Reset board admin only; New assignment for assigners', vt.includes("const 
 ok('A tab row scrolls sideways on a narrow phone, 44px targets', vt.includes('overflow-x-auto') && vt.includes('min-w-max') && vt.includes('min-h-11'));
 // Factory Audit hidden everywhere (Don 10:47Z)
 const feat = fs.readFileSync(new URL('../../src/lib/features.ts', import.meta.url), 'utf8');
-const land = fs.readFileSync(new URL('../../src/components/LandingPage.tsx', import.meta.url), 'utf8');
+// The public home page (landing-on-app) replaced the old home-screen cards; it never mentions Factory Audit.
+const land = fs.readFileSync(new URL('../../src/components/home/home.html', import.meta.url), 'utf8');
 ok('F flag is off', /export const SHOW_FACTORY_AUDIT = false;/.test(feat));
 ok('F header gets no factory handler while hidden', app.includes('onOpenFactoryAudit={SHOW_FACTORY_AUDIT ? () => setIsFactoryAuditOpen(true) : undefined}'));
 ok('F industrial-venue banner hidden', app.includes('{SHOW_FACTORY_AUDIT && !isKiosk && (currentVenue?.category'));
-ok('F landing card hidden', land.includes("SHOW_FACTORY_AUDIT || f.title !== 'Factory Audit Hub'") && !/factory audits in one/.test(land));
+ok('F landing card hidden', !/factory/i.test(land) && !/factory audits in one/.test(land));
 ok('F the modal code stays', app.includes('<FactoryAuditHubModal'));
 // agency events (Don 10:47Z)
 const { sortAgencyEvents, isNewEvent, eventAssigneeText } = await import('../../src/lib/agencyEvents.ts');
