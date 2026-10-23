@@ -86,6 +86,10 @@ jobs:
           # data. Single instance eliminates the entire class of bugs.
           anns['autoscaling.knative.dev/maxScale'] = '1'
           tpl['metadata']['annotations'] = anns
+          # gcloud writes an explicit revision name into the template (e.g. after a
+          # manual `gcloud run services update`); replaying it makes replace fail
+          # with ALREADY_EXISTS. Let Cloud Run name the new revision.
+          tpl['metadata'].pop('name', None)
           c = tpl['spec']['containers'][0]
           c['image'] = os.environ['IMAGE']
           env = c.get('env', [])
