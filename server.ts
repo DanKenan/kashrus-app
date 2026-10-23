@@ -1012,6 +1012,11 @@ function freshnessAgeMs(): number {
 // install itself is the newest document), so the first dated grant is never
 // born stale.
 let freshnessNeededCached = false;
+// Root (Oct 23, N7 answer (a)): while idle, still one version read per 5 min,
+// so a process holding only undated access learns of an end date or removal
+// made by another process within 5 min (+ one tick).
+const FRESHNESS_IDLE_READ_MS = 300_000;
+let freshnessLastIdleReadMono = -Infinity;
 let freshnessReadCount = 0; // test-visible: version reads issued by the freshness check
 function freshnessNeedRecompute(): boolean {
   const nowMs = serverNow().getTime();
@@ -14406,7 +14411,13 @@ async function runGrantSweep(source: string): Promise<{ committed: boolean; rows
 let grantTimersStarted = false;
 /** One 15 s tick: a read only while temporary (end-dated) access exists. */
 async function freshnessTick(): Promise<string> {
-  if (!freshnessNeedRecompute()) return 'idle';
+  if (!freshnessNeedRecompute()) {
+    if (monoNowMs() - freshnessLastIdleReadMono < FRESHNESS_IDLE_READ_MS) return 'idle';
+    freshnessLastIdleReadMono = monoNowMs();
+    const ri: any = await freshnessRefreshOnce('idle');
+    freshnessNeedRecompute();
+    return 'idle-read:' + (typeof ri === 'string' ? ri : (ri?.result ?? 'done'));
+  }
   const r: any = await freshnessRefreshOnce('tick');
   return typeof r === 'string' ? r : (r?.result ?? 'done');
 }
@@ -18093,6 +18104,7 @@ async function startServer() {
     }
     // 12a-s (4.7): the boot load is this process's first confirmed install.
     freshnessEnabled = true;
+    freshnessLastIdleReadMono = monoNowMs(); // the boot load is the newest document
     freshnessConfirm();
   } else {
     durableStateLoaded = true; // No Firestore configured; local file is the source of truth.

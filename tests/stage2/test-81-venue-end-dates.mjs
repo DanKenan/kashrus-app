@@ -136,7 +136,14 @@ export default {
       for (let k = 0; k < 3; k++) { fz = await hook('freshness', { tick: true }); assert(fz.tick === 'idle', `tick ${k} idle ${J(fz)}`); }
       fz = await hook('freshness', { advanceMonoMs: 61000 });
       assert(fz.reads === reads0 && fz.status === 'fresh', `0 freshness reads over 3 ticks, never stale while idle ${J(fz)}`);
-      details.push('A0 freshness idle: no temporary grants -> 0 reads over 3 ticks, never stale');
+      // root N7 (a): idle = one version read per 5 min, not more
+      await hook('freshness', { advanceMonoMs: 300000 });
+      fz = await hook('freshness', { tick: true });
+      assert(String(fz.tick).startsWith('idle-read') && fz.reads === reads0 + 1, `idle read after 5 min ${J(fz)}`);
+      for (let k = 0; k < 3; k++) { fz = await hook('freshness', { tick: true, advanceMonoMs: 15000 }); assert(fz.tick === 'idle', `idle cadence ${k} ${J(fz)}`); }
+      assert(fz.reads === reads0 + 1, `idle reads stay at the 5-min cadence ${J(fz)}`);
+      const readsA0 = fz.reads;
+      details.push('A0 freshness idle: no temporary grants -> no reads for 5 min, then one version read per 5 min; never stale');
 
       // ===== A: refusals and role rules =====
       let rev = await revOf(U('mash'));
@@ -168,7 +175,7 @@ export default {
       // coordinator loan at V1 for mash2 (home V2), owner loan at V3 for mash2; both dated
       r = await ops(tCoord, U('mash2'), [{ op: 'add', venueId: V1, until: '2026-10-24' }], await revOf(U('mash2')));
       fz = await hook('freshness', { tick: true });
-      assert(fz.needed === true && fz.status === 'fresh' && fz.reads === reads0 + 1 && fz.tick !== 'idle', `first temporary grant -> reads resume (born fresh) ${J(fz)}`);
+      assert(fz.needed === true && fz.status === 'fresh' && fz.reads === readsA0 + 1 && !String(fz.tick).startsWith('idle'), `first temporary grant -> 15 s reads resume (born fresh) ${J(fz)}`);
       assert(r.status === 200 && J(r.json.venueIds) === J([V1]), `coordinator loan ${r.status} ${r.text.slice(0, 200)} (response limited to the caller's venues)`);
       r = await ops(tOwner, U('mash2'), [{ op: 'add', venueId: V3, until: '2026-10-25' }], await revOf(U('mash2')));
       assert(r.status === 200 && J(r.json.venueIds) === J([V3]), `owner loan ${r.status} ${r.text.slice(0, 200)}`);
@@ -545,7 +552,9 @@ export default {
       fz = await hook('freshness', { recompute: true });
       const readsK = fz.reads;
       fz = await hook('freshness', { tick: true });
-      assert(fz.needed === false && fz.tick === 'idle' && fz.reads === readsK, `every temporary grant ended -> reads stop ${J(fz)}`);
+      assert(fz.needed === false && String(fz.tick).startsWith('idle') && fz.reads <= readsK + 1, `every temporary grant ended -> back to idle cadence ${J(fz)}`);
+      fz = await hook('freshness', { tick: true });
+      assert(fz.tick === 'idle' && fz.reads <= readsK + 1, `idle: no 15 s reads ${J(fz)}`);
       for (const k of [1, 2, 3, 4, 5, 6]) assert(J((await rec(U('hd' + k))).venueAccess) === J([V1]), `hd${k} ended`);
       await hook('grant-sweep', { unfreeze: true });
       // shortening an undated grant (undated -> dated adds metadata) just under the guard commits
@@ -607,6 +616,22 @@ export default {
           const tAdminS = await mint(U('adminA'), Bu);
           const tMashB = await mint(U('mash'), Bu);
           assert(J(taskIds(await tasksAt(tMashB, V3, Bu))) === J([`task-t81-3-${ts}`]), 'B sees V3');
+          // root N7 (a): idle process B learns of an end date set on A within 5 min + one tick (normal ticks, fake clocks)
+          const hookB = async (path, body) => { const q = await call(Bu, 'POST', `/api/__test__/${path}`, ctx.authHeaders, body); assert(q.status === 200, `${path} on B ${q.status}`); return q.json; };
+          await hookB('grant-sweep', { disable: true });
+          let fbB = await hookB('freshness', { recompute: true, tick: true });
+          assert(fbB.needed === false, `B idle (only undated access) ${J(fbB)}`);
+          r = await ops(tAdmin, U('mash'), [{ op: 'set_until', venueId: V3, until: '2026-10-23' }], await revOf(U('mash')));
+          assert(r.status === 200, `A sets an end date ${r.status} ${r.text.slice(0, 120)}`);
+          fbB = await hookB('freshness', { tick: true, advanceMonoMs: 15000 });
+          assert(fbB.tick === 'idle' && fbB.needed === false, `B has not read yet (idle cadence) ${J(fbB)}`);
+          fbB = await hookB('freshness', { tick: true, advanceMonoMs: 300000 });
+          assert(String(fbB.tick).startsWith('idle-read') && fbB.needed === true, `B reads within 5 min and installs the end date ${J(fbB)}`);
+          await hookB('clock', { iso: '2026-10-24T04:00:00.000Z' });
+          assert(taskIds(await tasksAt(tMashB, V3, Bu)).length === 0, 'B enforces the end date A set');
+          await hookB('clock', { iso: null });
+          fbB = await hookB('freshness', { tick: true });
+          assert(!String(fbB.tick).startsWith('idle'), `B now at the 15 s cadence (temporary access in play) ${J(fbB)}`);
           const wsB = openWs(tMashB, null, Bu);
           await wsB.until(() => wsB.count('INITIAL_STATE') > 0, 8000);
           r = await ops(tAdmin, U('mash'), [{ op: 'remove', venueId: V3 }], await revOf(U('mash')));
