@@ -102,6 +102,7 @@ const si = postcss.parse(read('src/components/signin-look.css'));
 let siRules = 0; const siBad = [];
 si.walkRules((r) => { siRules++; for (const s of r.selectors) if (!s.startsWith('.shf-signin')) siBad.push(s); });
 check(`sign-in look: all ${siRules} rules scoped under .shf-signin (${siBad.slice(0, 3).join(', ')})`, siRules > 10 && siBad.length === 0);
+check('sign-in submit: dark text on the light gold (home page button colours, contrast >= 4.5:1)', /button\[type=submit\]\{background:linear-gradient\(180deg,#f0be6b,#dd9d3e\);color:#22170d/.test(read('src/components/signin-look.css')));
 check('sign-in look is small (< 4 KB)', read('src/components/signin-look.css').length < 4096);
 const lp = read('src/components/LoginPage.tsx');
 check('LoginPage root carries the look class; hooks on top bar, card, below-card, footer', ['shf-signin min-h-screen', 'shf-signin-top', 'shf-signin-card', 'shf-signin-below', 'shf-signin-foot'].every((c) => lp.includes(c)));

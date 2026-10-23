@@ -16,7 +16,8 @@
 /* the card */
 .shf-signin .shf-signin-card{background:var(--surface,#fff);border-color:rgba(255,255,255,.12);box-shadow:0 30px 80px -24px rgba(0,0,0,.65),0 2px 0 rgba(255,255,255,.04) inset}
 .shf-signin .shf-signin-card h1,.shf-signin .shf-signin-card h2{font-family:"Shutfey Home Serif",Georgia,serif;font-weight:600;letter-spacing:-.01em}
-.shf-signin .shf-signin-card button[type=submit]{background:linear-gradient(180deg,#e7ad55,#c9862f);color:#fff;border-radius:999px}
+.shf-signin .shf-signin-card button[type=submit]{background:linear-gradient(180deg,#f0be6b,#dd9d3e);color:#22170d;border-radius:999px;box-shadow:0 8px 22px rgba(224,166,75,.3),inset 0 1px 0 rgba(255,255,255,.5)}
+.shf-signin .shf-signin-card button[type=submit] .border-white{border-color:#22170d;border-top-color:transparent}
 .shf-signin .shf-signin-card button[type=submit]:hover{filter:brightness(1.05)}
 /* below the card and the footer, on the dark background */
 .shf-signin .shf-signin-below .text-ink-faint,.shf-signin .shf-signin-below .text-ink-soft{color:rgba(255,255,255,.7)}
