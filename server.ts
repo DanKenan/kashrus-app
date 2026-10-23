@@ -499,13 +499,24 @@ function rowAgencyId(row: any): string {
  * then applies unchanged at session issue).
  */
 function siteMembershipRow(cred: any, agencyId: string): any | null {
+  return siteMembershipRowIn(users as any[], agencies as any[], venues as any[], deletedVenueIds, cred, agencyId);
+}
+/**
+ * siteMembershipRow on EXPLICIT state (a transaction's fresh users, agencies,
+ * venues and deletedVenueIds), with membershipsOfPerson's rules: the row's
+ * agency exists, it is not paused (resetSuspended) and its venue was not
+ * removed. The person is re-read from these rows by id.
+ */
+function siteMembershipRowIn(rows: readonly any[], agencyList: readonly any[], venueList: readonly any[], deletedIds: readonly string[], cred: any, agencyId: string): any | null {
   if (!cred) return null;
-  if (isMultiPersonRow(users, cred)) {
-    const ms = membershipsOfPerson(String(cred.personId)).filter((m) => m.agencyId === agencyId);
-    if (ms.length !== 1) return null;
-    return (users as any[]).find((u) => u && u.id === ms[0].membershipId) || null;
+  const fresh = (rows as any[]).find((u) => u && u.id === cred.id);
+  if (!fresh) return null;
+  if (isMultiPersonRow(rows as any[], fresh)) {
+    const ms = (rows as any[]).filter((u) => u && u.personId === fresh.personId && typeof u.agencyId === 'string' && u.agencyId === agencyId &&
+      (agencyList as any[]).some((a) => a && a.id === u.agencyId) && !u.resetSuspended && !venueRemovedForIn(u, venueList, deletedIds));
+    return ms.length === 1 ? ms[0] : null;
   }
-  return rowAgencyId(cred) === agencyId ? cred : null;
+  return rowAgencyId(fresh) === agencyId ? fresh : null;
 }
 /** Domains PR A (2f): true on a SITE host when the thing being used belongs to another agency (SHARED host: never). */
 function siteRefusesAgency(req: any, agencyId: unknown): boolean {
@@ -16660,6 +16671,12 @@ app.post('/api/auth/login', async (req, res) => {
           if (credentialRowForEmailIn(freshUsers, freshAgenciesL, normalizedEmail)?.id !== user.id) {
             return { doc: freshDoc, result: { upgraded: false } };
           }
+          // Domains PR A (2f, [DOMA-RV1] P2): on a SITE host the site decision is
+          // re-made on the FRESH rows; no site membership now → nothing is written.
+          if (loginSite.kind === 'site' &&
+              !siteMembershipRowIn(freshUsers, freshAgenciesL, docList(freshDoc, 'venues'), docList(freshDoc, 'deletedVenueIds'), freshUser, loginSite.agencyId)) {
+            return { doc: freshDoc, result: { upgraded: false, wrongSite: true } };
+          }
           // Only upgrade if the stored password isn't already a bcrypt hash
           // (another concurrent login may have upgraded it first).
           if (isBcryptHash(freshUser.password)) {
@@ -18213,7 +18230,8 @@ app.post('/api/auth/recover', async (req, res) => {
       // eligible site-agency membership BEFORE the code is burned or anything
       // changes. None: nothing is written, the generic answer plus a hint.
       const rSite = siteOf(req);
-      if (rSite.kind === 'site' && !siteMembershipRow(freshCred, rSite.agencyId)) {
+      if (rSite.kind === 'site' &&
+          !siteMembershipRowIn(freshUsers, freshAgencies, docList(freshDoc, 'venues'), docList(freshDoc, 'deletedVenueIds'), freshCred, rSite.agencyId)) {
         return { doc: freshDoc, result: { ok: false, write: false, wrongSite: true } };
       }
       const personRows = isMultiPersonRow(freshUsers, freshCred) ? personRowsIn(freshUsers, freshCred) : [freshCred];

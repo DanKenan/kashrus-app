@@ -208,7 +208,12 @@ export default {
     // (The upgrade must not run when B signs in on A's site.)
     const legacyRow = `usr-t83-legacy-${ts}`;
     const legacyEmail = `t83-legacy-${ts}@test.local`;
-    const injL = await ctx.api('POST', '/api/__test__/inject-fixture', { users: [{ id: legacyRow, email: legacyEmail, name: 'T83 Legacy', role: 'admin', agencyId: B, password: 'legacy-pass-83' }] });
+    const legacy2Row = `usr-t83-legacy2-${ts}`;
+    const legacy2Email = `t83-legacy2-${ts}@test.local`;
+    const injL = await ctx.api('POST', '/api/__test__/inject-fixture', { users: [
+      { id: legacyRow, email: legacyEmail, name: 'T83 Legacy', role: 'admin', agencyId: B, password: 'legacy-pass-83' },
+      { id: legacy2Row, email: legacy2Email, name: 'T83 Legacy 2', role: 'admin', agencyId: A, password: 'legacy2-pass-83' },
+    ] });
     assert(injL.status === 200, `legacy fixture: ${injL.status}`);
 
     // ---- restart with APP_SITES ----
@@ -281,6 +286,19 @@ export default {
       assert((await storedPw()) === 'legacy-pass-83', 'L the legacy password is not upgraded by a wrong-site sign-in');
       const llS = await login(SHARED, legacyEmail, 'legacy-pass-83');
       assert(llS.status === 200 && /^\$2[aby]\$/.test(String(await storedPw())), `L control: a shared-host sign-in upgrades it (as today): ${llS.status} ${J(await storedPw())}`);
+      // [DOMA-RV1] P2: the upgrade transaction re-makes the site decision on the
+      // FRESH rows. Staged race: the cache still has legacy person L2 in agency A,
+      // the stored doc already has L2 in agency B; a site-A sign-in must not write the hash.
+      const docR = await ctx.getDoc();
+      const l2Row = (docR.users || []).find((u) => u.id === legacy2Row);
+      assert(l2Row && l2Row.password === 'legacy2-pass-83' && l2Row.agencyId === A, `L race fixture: ${J(l2Row && { p: l2Row.password, a: l2Row.agencyId })}`);
+      const staged = (docR.users || []).map((u) => (u.id === legacy2Row ? { ...u, agencyId: B } : u));
+      assert((await ctx.api('POST', '/api/__test__/doc-set-users', { users: staged })).status === 200, 'L race: stage the stored doc');
+      const lRace = await login(SA, legacy2Email, 'legacy2-pass-83');
+      const l2After = ((await ctx.getDoc()).users || []).find((u) => u.id === legacy2Row);
+      assert(l2After && l2After.password === 'legacy2-pass-83', `L race: no hash upgrade when the fresh row is no longer the site agency's (${lRace.status}): ${J(l2After && l2After.password)}`);
+      assert([200, 403].includes(lRace.status), `L race answer: ${lRace.status} ${J(lRace.json)}`);
+      assert((await ctx.api('POST', '/api/__test__/doc-set-users', { users: docR.users })).status === 200, 'L race: restore the stored doc');
       const lmA = await login(SA, m.email, m.pw);
       assert(lmA.status === 403 && lmA.json?.code === 'WRONG_SITE', `L multi person with no site-A membership refused: ${lmA.status}`);
       const lmM = await login(SM, m.email, m.pw);
@@ -440,6 +458,20 @@ export default {
       await unchanged(v, 'R refused recovery (code not burned)');
       const recBad = await call('POST', '/api/auth/recover', { host: SA, origin: SA_O, body: { email: m.email, code: 'AAAA-BBBB-CCCC', newPassword: 'm-recovered-83' } });
       assert(recBad.status === 401 && recBad.json?.code !== 'WRONG_SITE', 'R a wrong code gets no hint');
+      // [DOMA-RV1] P2: the recovery site check reads the transaction's FRESH rows.
+      // Staged race: the cache still has m's MA membership eligible, the stored doc
+      // has it paused; recovery on site M must burn nothing and change nothing.
+      const docQ = await ctx.getDoc();
+      const stagedQ = (docQ.users || []).map((u) => (u.id === maRow ? { ...u, resetSuspended: { at: new Date().toISOString(), reason: 't83-race' } } : u));
+      assert((await ctx.api('POST', '/api/__test__/doc-set-users', { users: stagedQ })).status === 200, 'R race: stage the stored doc');
+      const credBefore = J((docQ.users || []).find((u) => u.personId && u.email === m.email && u.recoveryCodeHashes)?.recoveryCodeHashes);
+      const recRace = await call('POST', '/api/auth/recover', { host: SM, origin: SM_O, body: { email: m.email, code: rcodes.json.codes[1], newPassword: 'm-race-83' } });
+      const docQ2 = await ctx.getDoc();
+      const credAfter = J((docQ2.users || []).find((u) => u.personId && u.email === m.email && u.recoveryCodeHashes)?.recoveryCodeHashes);
+      assert(recRace.status === 401 && recRace.json?.code === 'WRONG_SITE' && !recRace.json.token, `R race: refused on the fresh rows: ${recRace.status} ${J(recRace.json)}`);
+      assert(typeof credBefore === 'string' && credBefore.length > 2 && credAfter === credBefore, `R race: no recovery code burned (${typeof credBefore})`);
+      assert((await ctx.api('POST', '/api/__test__/doc-set-users', { users: docQ.users })).status === 200, 'R race: restore the stored doc');
+      assert((await login(SM, m.email, m.pw)).status === 200, 'R race: m\'s password unchanged');
       const recM = await call('POST', '/api/auth/recover', { host: SM, origin: SM_O, body: { email: m.email, code: rc, newPassword: 'm-recovered-83' } });
       assert(recM.status === 200 && recM.json?.token && recM.json.user?.agencyId === MA, `R the same code works on m's own site (session for MA): ${recM.status} ${J(recM.json && recM.json.error)}`);
       m.pw = 'm-recovered-83';
