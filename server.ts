@@ -10347,6 +10347,8 @@ app.get('/api/site', (req, res) => {
       brandName: typeof agency.brandName === 'string' && agency.brandName ? agency.brandName : null,
       shortCode: pub.shortCode,
       logoRev: pub.logoRev ?? null,
+      // Welcome page help section (Call/Text). Agency settings' public phone only.
+      contactPhone: typeof pub.contactPhone === 'string' && pub.contactPhone.trim() ? pub.contactPhone.trim().slice(0, 40) : null,
     },
     sharedOrigin: SHARED_ORIGIN,
   });

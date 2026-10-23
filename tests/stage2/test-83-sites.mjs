@@ -237,6 +237,7 @@ export default {
       const sa = await call('GET', '/api/site', { host: SA });
       assert(sa.status === 200 && sa.json?.site === 'agency' && sa.json.agency?.name === `T83 a ${ts}` && sa.json.sharedOrigin && !J(sa.json).includes(A), `S /api/site on site A: ${J(sa.json)}`);
       assert(/no-store/.test(String(sa.headers['cache-control'])), 'S /api/site is no-store');
+      assert('contactPhone' in (sa.json.agency || {}) && (sa.json.agency.contactPhone === null || (typeof sa.json.agency.contactPhone === 'string' && sa.json.agency.contactPhone.length <= 40)), `S /api/site carries contactPhone (string or null): ${J(sa.json.agency)}`);
       assert((await call('GET', '/api/site', { host: SA, headers: { 'X-Forwarded-Host': SM } })).json?.agency?.name === `T83 a ${ts}`, 'S X-Forwarded-Host cannot switch the site');
       const lg = await call('GET', `/api/site/logo?rev=nope`, { host: SA });
       assert(lg.status === 404 && /no-store/.test(String(lg.headers['cache-control'])), `S logo with a wrong rev: ${lg.status}`);
