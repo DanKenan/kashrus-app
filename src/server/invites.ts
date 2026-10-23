@@ -67,6 +67,14 @@ export function parseInviteInput(body: any, agencyVenueIds: readonly string[]): 
     if (rawVenues !== undefined && rawVenues !== null && !(Array.isArray(rawVenues) && rawVenues.length === 0)) return venueError;
     return { ok: true, value: { email, role, venueIds: [] } };
   }
+  // 12b-s (5.6): "pool": true = a mashgiach invite with NO main venue
+  // (venueIds []); accepting it creates a Pool row (noHomeVenue). Without the
+  // flag the old shape stays required (old clients unchanged).
+  if (body?.pool === true) {
+    if (role !== 'mashgiach') return { ok: false, error: 'Only mashgichim can be invited to the Pool.', code: 'POOL_ROLE_INVALID' };
+    if (rawVenues !== undefined && rawVenues !== null && !(Array.isArray(rawVenues) && rawVenues.length === 0)) return venueError;
+    return { ok: true, value: { email, role: role as InviteRole, venueIds: [] } };
+  }
   if (!Array.isArray(rawVenues) || rawVenues.length === 0 || rawVenues.length > INVITE_MAX_VENUES) return venueError;
   const allowed = new Set(agencyVenueIds);
   const out: string[] = [];
@@ -149,6 +157,7 @@ export function parseMemberInvite(
 ): { ok: true; value: MemberInviteInput } | { ok: false; error: string; code: string } {
   const isOwner = body?.role === 'owner';
   if (isOwner && !opts.allowOwner) return { ok: false, error: 'Choose a valid role.', code: 'INVITE_ROLE_INVALID' };
+  if (isOwner && body?.pool === true) return { ok: false, error: 'Only mashgichim can be invited to the Pool.', code: 'POOL_ROLE_INVALID' };
   const base = parseInviteInput(isOwner ? { ...body, role: 'mashgiach' } : body, agencyVenueIds);
   if (base.ok === false) return base;
   const name = typeof body?.name === 'string' ? body.name.trim() : '';

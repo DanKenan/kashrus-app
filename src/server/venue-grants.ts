@@ -7,7 +7,9 @@
  *   venueGrants  { [venueId]: { from: ISO|null, until: ISO|null, by: id|null } }
  *                metadata of EXTRA venues in venueAccess (never the home).
  *                until = the exclusive end instant (access while now < until).
- *   venueHistory closed intervals, newest first, cap 10.
+ *   venueHistory closed intervals, newest first, cap 10; entries whose end
+ *                (`to`) is 14 days old or older are dropped (Don, Oct 23:
+ *                "2 weeks"; 12b-s).
  *   venueRev     integer, +1 on every grant change.
  *   noHomeVenue  true = a non-admin row with NO main venue (12b-s Pool);
  *                venueAccess is then a plain list of extras (no home head).
@@ -20,6 +22,8 @@
 
 export const MAX_GRANT_KEYS = 50;
 export const HISTORY_CAP = 10;
+/** 12b-s (Don, Oct 23 4:16 AM): venue history is kept for 2 weeks only. */
+export const HISTORY_RETENTION_MS = 14 * 86400000;
 export const MAX_UNTIL_DAYS = 366;
 export const DEFAULT_TIME_ZONE = 'America/New_York';
 
@@ -28,7 +32,7 @@ export type GrantState =
   | { kind: 'dated'; untilMs: number; until: string }
   | { kind: 'denied' };
 
-export type HistoryWhy = 'ended' | 'unticked' | 'moved_to_pool' | 'made_main' | 'venue_deleted' | 'invalid_data' | 'joined_pool';
+export type HistoryWhy = 'ended' | 'unticked' | 'moved_to_pool' | 'made_main' | 'main_replaced' | 'venue_deleted' | 'invalid_data' | 'joined_pool';
 
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
@@ -229,10 +233,28 @@ export function historyEntry(venueId: string, from: string | null, to: string, w
   return { venueId: String(venueId), from: from ?? null, to, why, by: by ?? null };
 }
 
-/** Existing history (valid entries only), newest first. */
-function priorHistory(row: any): GrantFields['venueHistory'] {
+/** A history entry still inside the 2-week window at nowMs (its end is less than 14 days old). */
+export function historyEntryRetained(e: any, nowMs: number): boolean {
+  if (!isPlainObject(e) || typeof e.venueId !== 'string' || typeof e.to !== 'string') return false;
+  const t = Date.parse(e.to);
+  return Number.isFinite(t) && t > nowMs - HISTORY_RETENTION_MS;
+}
+
+/** Existing history (valid entries inside the 2-week window only), newest first. */
+export function retainedHistory(row: any, nowMs: number): NonNullable<GrantFields['venueHistory']> {
   const h = Array.isArray(row?.venueHistory) ? row.venueHistory : [];
-  return h.filter((e: any) => isPlainObject(e) && typeof e.venueId === 'string' && typeof e.to === 'string').slice(0, HISTORY_CAP) as any;
+  return h.filter((e: any) => historyEntryRetained(e, nowMs)).slice(0, HISTORY_CAP) as any;
+}
+
+/** True when the stored history holds anything the 2-week rule (or the cap / validity) would drop. */
+export function historyNeedsPrune(row: any, nowMs: number): boolean {
+  if (row?.venueHistory === undefined) return false;
+  if (!Array.isArray(row.venueHistory)) return true;
+  return retainedHistory(row, nowMs).length !== row.venueHistory.length;
+}
+
+function priorHistory(row: any, nowMs: number): GrantFields['venueHistory'] {
+  return retainedHistory(row, nowMs);
 }
 
 export function applyGrantOps(row: any, ops: readonly GrantOp[], ctx: GrantCtx): GrantResult {
@@ -325,7 +347,7 @@ export function applyGrantOps(row: any, ops: readonly GrantOp[], ctx: GrantCtx):
   if (fields.venueGrants && Object.keys(fields.venueGrants).length > MAX_GRANT_KEYS) {
     return fail(400, 'TOO_MANY_VENUES', `A person can have at most ${MAX_GRANT_KEYS} extra venues.`);
   }
-  const hist = [...newHist, ...(priorHistory(row) || [])].slice(0, HISTORY_CAP);
+  const hist = [...newHist, ...(priorHistory(row, ctx.nowMs) || [])].slice(0, HISTORY_CAP);
   if (hist.length) fields.venueHistory = hist;
   return { ok: true, changed, fields, closed, growth };
 }
@@ -358,7 +380,7 @@ export function closeAllExtras(prev: any, newHome: string, why: HistoryWhy, nowM
   const list: string[] = Array.isArray(prev?.venueAccess) ? prev.venueAccess.filter((x: unknown) => typeof x === 'string' && !!x && x !== prevHome && x !== newHome) : [];
   const g = grantContainer(prev) === 'ok' ? prev.venueGrants : {};
   const add: any[] = list.map((v) => historyEntry(v, isPlainObject(g[v]) && typeof g[v].from === 'string' ? g[v].from : null, nowIso, why, null));
-  const hist = [...add, ...(priorHistory(prev) || [])].slice(0, HISTORY_CAP);
+  const hist = [...add, ...(priorHistory(prev, nowMs) || [])].slice(0, HISTORY_CAP);
   return { venueHistory: hist.length ? hist : undefined, venueRev: venueRevOf(prev) + 1, changed: true };
 }
 
@@ -378,4 +400,108 @@ export function endDatedGrants(row: any, ctx: GrantCtx): GrantResult {
   const hist = [...add, ...(norm.fields.venueHistory || [])].slice(0, HISTORY_CAP);
   fields.venueHistory = hist;
   return { ok: true, changed: true, fields, closed: [...norm.closed, ...dated.map((v) => ({ venueId: v, why: 'ended' as HistoryWhy }))], growth: false };
+}
+
+/**
+ * 12b-s (5.3): move a non-admin row to the Pool. Normalize first, then close
+ * the main venue and every extra ('moved_to_pool'); the row keeps
+ * noHomeVenue, no venues, venueRev +1. Access only goes down (growth false).
+ */
+export function moveToPoolFields(row: any, ctx: GrantCtx): GrantResult {
+  const norm = applyGrantOps(row, [], ctx);
+  if (!norm.ok) return norm;
+  const home = norm.fields.venueId;
+  const extras = norm.fields.venueAccess.filter((v) => v !== home);
+  if (!home && extras.length === 0) return fail(409, 'ALREADY_IN_POOL', 'This person is already in the Pool.');
+  const nowIso = new Date(ctx.nowMs).toISOString();
+  const g = norm.fields.venueGrants || {};
+  const add = [
+    ...(home ? [historyEntry(home, null, nowIso, 'moved_to_pool', ctx.actor)] : []),
+    ...extras.map((v) => historyEntry(v, g[v]?.from ?? null, nowIso, 'moved_to_pool', ctx.actor)),
+  ];
+  const fields: GrantFields = { venueId: '', noHomeVenue: true, venueAccess: [], venueRev: venueRevOf(row) + 1 };
+  const hist = [...add, ...(norm.fields.venueHistory || [])].slice(0, HISTORY_CAP);
+  if (hist.length) fields.venueHistory = hist;
+  const closed = [...norm.closed, ...(home ? [{ venueId: home, why: 'moved_to_pool' as HistoryWhy }] : []), ...extras.map((v) => ({ venueId: v, why: 'moved_to_pool' as HistoryWhy }))];
+  return { ok: true, changed: true, fields, closed, growth: false };
+}
+
+/**
+ * 12b-s (5.4): make `venueId` the main venue (never dated). Its extra grant,
+ * if any, closes as 'made_main'; the old main is kept as an UNDATED extra when
+ * keepOldMainAsExtra, else it closes as 'main_replaced'. Other extras keep
+ * their dates. noHomeVenue is cleared; venueRev +1.
+ */
+export function makeMainFields(row: any, venueId: string, keepOldMainAsExtra: boolean, ctx: GrantCtx): GrantResult {
+  if (typeof venueId !== 'string' || !venueId) return fail(400, 'VENUE_IDS_INVALID', 'Choose a venue.');
+  if (!ctx.agencyVenueIds.has(venueId)) return fail(400, 'VENUE_NOT_IN_AGENCY', 'Every venue must be a venue of your agency.');
+  const norm = applyGrantOps(row, [], ctx);
+  if (!norm.ok) return norm;
+  const oldHome = norm.fields.venueId;
+  if (oldHome && oldHome === venueId) return fail(409, 'ALREADY_MAIN', 'This is already their main venue.');
+  const nowIso = new Date(ctx.nowMs).toISOString();
+  const g: Record<string, any> = norm.fields.venueGrants || {};
+  const extras = norm.fields.venueAccess.filter((v) => v !== oldHome);
+  const wasExtra = extras.includes(venueId);
+  const add: NonNullable<GrantFields['venueHistory']> = [];
+  const closed: Array<{ venueId: string; why: HistoryWhy }> = [];
+  if (wasExtra) { add.push(historyEntry(venueId, g[venueId]?.from ?? null, nowIso, 'made_main', ctx.actor)); closed.push({ venueId, why: 'made_main' }); }
+  const keepOld = !!oldHome && keepOldMainAsExtra === true;
+  if (oldHome && !keepOld) { add.push(historyEntry(oldHome, null, nowIso, 'main_replaced', ctx.actor)); closed.push({ venueId: oldHome, why: 'main_replaced' }); }
+  const restExtras = extras.filter((v) => v !== venueId);
+  const access = [venueId, ...restExtras];
+  if (keepOld && !access.includes(oldHome)) access.push(oldHome);
+  const fields: GrantFields = { venueId, venueAccess: access, venueRev: venueRevOf(row) + 1 };
+  const grants: Record<string, any> = {};
+  for (const k of restExtras) if (g[k]) grants[k] = g[k];
+  if (Object.keys(grants).length) fields.venueGrants = grants;
+  if (access.length - 1 > MAX_GRANT_KEYS) return fail(400, 'TOO_MANY_VENUES', `A person can have at most ${MAX_GRANT_KEYS} extra venues.`);
+  const hist = [...add, ...(norm.fields.venueHistory || [])].slice(0, HISTORY_CAP);
+  if (hist.length) fields.venueHistory = hist;
+  // growth = the person gains access or loses an end date
+  const growth = !wasExtra || (g[venueId] && g[venueId].until !== null);
+  return { ok: true, changed: true, fields, closed: [...norm.closed, ...closed], growth: !!growth };
+}
+
+/** 12b-s: the newest venue in the (retained) history, e.g. "Last at Venue B". */
+export function lastVenueOf(row: any, nowMs: number): { venueId: string; to: string } | null {
+  for (const e of retainedHistory(row, nowMs)) {
+    if (e.venueId) return { venueId: e.venueId, to: e.to };
+  }
+  return null;
+}
+
+/**
+ * 12b-s: drop the OLDEST venueHistory entries across `rows` (by end time,
+ * oldest first) until about `overBytes` are freed. Returns new row objects
+ * for the rows it touched; every other row is the same object.
+ */
+export function shedOldestHistory(rows: any[], overBytes: number): { users: any[]; dropped: number } {
+  if (!(overBytes > 0) || !Array.isArray(rows)) return { users: rows, dropped: 0 };
+  const all: Array<{ r: number; e: number; t: number; size: number }> = [];
+  rows.forEach((u: any, r: number) => {
+    if (!u || !Array.isArray(u.venueHistory)) return;
+    u.venueHistory.forEach((h: any, e: number) => {
+      const t = h && typeof h.to === 'string' ? Date.parse(h.to) : NaN;
+      all.push({ r, e, t: Number.isFinite(t) ? t : -Infinity, size: JSON.stringify(h ?? null).length + 1 });
+    });
+  });
+  all.sort((a, b) => a.t - b.t);
+  const drop = new Map<number, Set<number>>();
+  let freed = 0, dropped = 0;
+  for (const x of all) {
+    if (freed >= overBytes + 64) break;
+    if (!drop.has(x.r)) drop.set(x.r, new Set());
+    drop.get(x.r)!.add(x.e);
+    freed += x.size; dropped++;
+  }
+  if (!dropped) return { users: rows, dropped: 0 };
+  const users = rows.map((u: any, r: number) => {
+    const d = drop.get(r);
+    if (!d) return u;
+    const h = (u.venueHistory as any[]).filter((_: any, e: number) => !d.has(e));
+    const { venueHistory: _old, ...rest } = u;
+    return h.length ? { ...rest, venueHistory: h } : rest;
+  });
+  return { users, dropped };
 }
