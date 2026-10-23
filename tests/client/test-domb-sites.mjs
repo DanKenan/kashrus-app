@@ -295,6 +295,20 @@ globalThis.fetch = origFetch;
   check('backup download: key taken before the fetch, refusal routed before the error', exp.length > 0 && exp.indexOf("fetch('/api/admin/export'") > 0 && exp.indexOf('await noticeSiteRefusalFor(res, sentKey)') > exp.indexOf("fetch('/api/admin/export'"));
 }
 
+// --- signed-out plain-fetch paths: registration and the forgot-password modal (RV4 sweep) ---
+{ S.resetSiteForTests(); handler = () => ({ body: { site: 'agency', agency: { name: 'Valley Vaad' }, sharedOrigin: SHARED_O } }); await S.loadSite();
+  const RE = await import('../../src/lib/registerExisting.ts');
+  api.setSessionToken('tok-re'); events.length = 0; handler = () => ({ status: 403, body: { code: 'WRONG_SITE', sharedOrigin: SHARED_O, error: 'x' } });
+  const rr = await RE.registerIntoExistingAccount({});
+  await new Promise((r) => setTimeout(r, 10));
+  check('register-existing refused: answer unchanged, screen only, sign-in kept', rr.status === 403 && siteEvents().length === 1 && siteEvents()[0].detail.signedOut === false && api.getSessionToken() === 'tok-re');
+  api.setSessionToken(null);
+  const fp = (await import('node:fs')).readFileSync(new URL('../../src/components/ForgotPasswordModal.tsx', import.meta.url), 'utf8');
+  const reads = fp.split('const d = await res.json();').length - 1;
+  const routed = fp.split('const d = await res.json();\n      // Domains PR B: refused on this address -> the screen with the Shutfey-address button.\n      noticeSiteRefusal(res.status, d);').length - 1;
+  check('forgot-password modal: all 3 answers routed to the screen', reads === 3 && routed === 3);
+}
+
 // --- the token -> cookie move (its own /api/auth/me check and the adopt) on an agency address (RV3) ---
 { S.resetSiteForTests(); handler = () => ({ body: { site: 'agency', agency: { name: 'Valley Vaad' }, sharedOrigin: SHARED_O } }); await S.loadSite();
   const refused = { status: 403, body: { code: 'WRONG_SITE', sharedOrigin: SHARED_O, error: 'x' } };
