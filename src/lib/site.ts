@@ -11,6 +11,8 @@ export type SiteInfo =
   | { site: 'unknown'; sharedOrigin: string | null };
 export type SiteRefusalCode = 'WRONG_SITE' | 'SITE_NOT_SET_UP';
 export type SiteRefusal = { code: SiteRefusalCode; sharedOrigin: string | null };
+/** signedOut: true = this device's sign-in was the one refused and has been cleared; false = a signed-out call was refused. */
+export type SiteRefusalEvent = SiteRefusal & { signedOut: boolean };
 
 export const SITE_REFUSED_EVENT = 'shutfey:site-refused';
 const SHARED: SiteInfo = { site: 'shared' };
@@ -153,7 +155,7 @@ export function siteRefusalFrom(status: number, body: unknown): SiteRefusal | nu
   return { code, sharedOrigin: safeSharedOrigin((body as any).sharedOrigin) };
 }
 
-export function announceSiteRefusal(r: SiteRefusal): void {
+export function announceSiteRefusal(r: SiteRefusalEvent): void {
   try { window.dispatchEvent(new CustomEvent(SITE_REFUSED_EVENT, { detail: r })); } catch { /* ignore */ }
 }
 
@@ -161,8 +163,20 @@ export function announceSiteRefusal(r: SiteRefusal): void {
 export function noticeSiteRefusal(status: number, body: unknown): boolean {
   if (current?.site === 'shared') return false;
   const r = siteRefusalFrom(status, body);
-  if (r) announceSiteRefusal(r);
-  return !!r;
+  if (!r) return false;
+  // These callers send no sign-in: the screen only (signedOut: false). Decided once the site is known.
+  void loadSite().then((s) => { if (s.site !== 'shared') announceSiteRefusal({ ...r, signedOut: false }); });
+  return true;
+}
+
+/**
+ * What the app does with a refusal event: 'leave' = this device's refused sign-in
+ * was cleared, leave the signed-in screens (no server sign-out: the server already
+ * refused that session here); 'screen' = show the screen and keep any sign-in.
+ */
+export function siteRefusalAction(e: SiteRefusalEvent | undefined, signedIn: boolean): 'leave' | 'screen' | 'ignore' {
+  if (!e || (e.code !== 'WRONG_SITE' && e.code !== 'SITE_NOT_SET_UP')) return 'ignore';
+  return e.signedOut === true && signedIn ? 'leave' : 'screen';
 }
 
 /** The Shutfey address to send a person to: /api/site's answer first, else the refusal's (both are the server's words). */

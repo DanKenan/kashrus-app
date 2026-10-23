@@ -111,11 +111,12 @@ class RealtimeSocket {
           void this.afterSessionRefused(token, generation);
           return;
         }
-        // Domains PR B (plan 2h): on an agency or unknown address a 4403 may mean
-        // "not on this address": ask over HTTP (apiFetch shows the screen and
-        // clears the sign-in on WRONG_SITE / SITE_NOT_SET_UP). The shared
-        // address keeps today's reconnect.
-        if (event && (event as CloseEvent).code === 4403 && currentSite()?.site !== 'shared') {
+        // Domains PR B (plan 2h): on an address the server has named as an
+        // agency's or unknown, a 4403 may mean "not on this address": ask over
+        // HTTP (apiFetch shows the screen and clears the sign-in on WRONG_SITE /
+        // SITE_NOT_SET_UP). Shared, or not known yet: today's reconnect.
+        const siteKind = currentSite()?.site;
+        if (event && (event as CloseEvent).code === 4403 && (siteKind === 'agency' || siteKind === 'unknown')) {
           void this.afterSiteRefused(generation);
           return;
         }

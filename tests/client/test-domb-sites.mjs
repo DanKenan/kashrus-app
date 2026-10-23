@@ -8,7 +8,7 @@ function check(name, value) { assert.ok(value, name); passed++; }
 const store = new Map();
 globalThis.localStorage = { getItem: k => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) };
 const events = [];
-globalThis.window = { location: { hostname: 'app.valley.test', pathname: '/' }, dispatchEvent: (e) => { events.push(e); return true; }, addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
+globalThis.window = { location: { hostname: 'app.valley.test', host: 'app.valley.test', origin: 'https://app.valley.test', protocol: 'https:', pathname: '/', hash: '' }, dispatchEvent: (e) => { events.push(e); return true; }, addEventListener() {}, removeEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
 Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: function CustomEventStub(type, init) { return { type, detail: init?.detail }; } });
 globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {}, cookie: '' };
 if (!globalThis.navigator) globalThis.navigator = { userAgent: 'node' };
@@ -103,18 +103,31 @@ api.setSessionToken('tok-1'); events.length = 0;
 let r = await api.apiFetch('/api/tasks');
 check('403 still returned to caller', r.status === 403);
 check('token cleared', api.getSessionToken() === null);
-check('event with code + origin', siteEvents().length === 1 && siteEvents()[0].detail.code === 'WRONG_SITE' && siteEvents()[0].detail.sharedOrigin === SHARED_O);
+check('event with code + origin + signedOut', siteEvents().length === 1 && siteEvents()[0].detail.code === 'WRONG_SITE' && siteEvents()[0].detail.sharedOrigin === SHARED_O && siteEvents()[0].detail.signedOut === true);
 check('no session-expired event', !events.some((e) => e.type === 'shutfey:unauthorized'));
 // a newer sign-in stored while the refused request was in flight is kept
 api.setSessionToken('tok-old'); events.length = 0;
 handler = (u, o) => { api.setSessionToken('tok-new'); return { status: 403, body: { code: 'WRONG_SITE', sharedOrigin: SHARED_O } }; };
 await api.apiFetch('/api/tasks');
-check('newer token kept', api.getSessionToken() === 'tok-new' && siteEvents().length === 1);
+check('newer token kept, and no event for the stale sign-in (RV1)', api.getSessionToken() === 'tok-new' && siteEvents().length === 0);
 // SITE_NOT_SET_UP from a signed-out page: event, nothing to clear
 api.setSessionToken(null); events.length = 0;
 handler = () => ({ status: 403, body: { code: 'SITE_NOT_SET_UP', sharedOrigin: SHARED_O } });
 await api.apiFetch('/api/auth/login', { method: 'POST', body: '{}' });
-check('not-set-up event', siteEvents().length === 1 && siteEvents()[0].detail.code === 'SITE_NOT_SET_UP');
+check('not-set-up event, signedOut false', siteEvents().length === 1 && siteEvents()[0].detail.code === 'SITE_NOT_SET_UP' && siteEvents()[0].detail.signedOut === false);
+// a signed-out call refused while this device IS signed in (e.g. an invite preview): screen only, sign-in kept (RV1)
+api.setSessionToken('tok-keep'); events.length = 0;
+handler = () => ({ status: 403, body: { available: false, code: 'WRONG_SITE', sharedOrigin: SHARED_O } });
+await api.apiFetch('/api/invites/preview', { headers: { Authorization: 'Bearer invite-token' } });
+check('caller-set credential: not treated as this device\'s sign-in', api.getSessionToken() === 'tok-keep');
+check('noticeSiteRefusal (plain fetch): true, screen-only event', S.noticeSiteRefusal(403, { available: false, code: 'WRONG_SITE', sharedOrigin: SHARED_O }) === true);
+await new Promise((r) => setTimeout(r, 10));
+check('plain-fetch refusal: signedOut false, token kept', siteEvents().length >= 1 && siteEvents().every((e) => e.detail.signedOut === false) && api.getSessionToken() === 'tok-keep');
+// the App's decision (RV1): leave the signed-in screens only for this device's own refused sign-in
+check('action: own sign-in refused -> leave', S.siteRefusalAction({ code: 'WRONG_SITE', sharedOrigin: null, signedOut: true }, true) === 'leave');
+check('action: signed-out call while signed in -> screen only', S.siteRefusalAction({ code: 'WRONG_SITE', sharedOrigin: null, signedOut: false }, true) === 'screen');
+check('action: signed out -> screen', S.siteRefusalAction({ code: 'SITE_NOT_SET_UP', sharedOrigin: null, signedOut: true }, false) === 'screen');
+check('action: nothing/other -> ignore', S.siteRefusalAction(undefined, true) === 'ignore' && S.siteRefusalAction({ code: 'X', signedOut: true }, true) === 'ignore');
 // other 403s: nothing
 api.setSessionToken('tok-2'); events.length = 0;
 handler = () => ({ status: 403, body: { code: 'FORBIDDEN', error: 'no' } });
@@ -127,6 +140,52 @@ await S.loadSite(); events.length = 0;
 await api.apiFetch('/api/tasks');
 check('shared: token kept, no event', api.getSessionToken() === 'tok-2' && siteEvents().length === 0);
 check('shared: noticeSiteRefusal false', S.noticeSiteRefusal(403, { code: 'WRONG_SITE' }) === false && siteEvents().length === 0);
+// site not known yet when the refusal arrives: decided after /api/site answers (RV1)
+S.resetSiteForTests(); events.length = 0;
+handler = (u) => (u === '/api/site' ? { body: { site: 'shared' } } : { status: 403, body: { code: 'WRONG_SITE', sharedOrigin: SHARED_O } });
+await api.apiFetch('/api/tasks');
+check('pending site that turns out shared: token kept, no event', api.getSessionToken() === 'tok-2' && siteEvents().length === 0);
+S.resetSiteForTests(); events.length = 0;
+handler = (u) => (u === '/api/site' ? { body: { site: 'unknown', sharedOrigin: SHARED_O } } : { status: 403, body: { code: 'SITE_NOT_SET_UP', sharedOrigin: SHARED_O } });
+await api.apiFetch('/api/tasks');
+check('pending site that turns out unknown: cleared + event', api.getSessionToken() === null && siteEvents().length === 1 && siteEvents()[0].detail.signedOut === true);
+api.setSessionToken(null);
+
+// --- socket 4403 (RV1): confirmed over HTTP only on an address named agency/unknown; otherwise today's reconnect ---
+class FakeWS {
+  static all = [];
+  constructor(url) { this.url = url; this.readyState = 0; FakeWS.all.push(this); }
+  send() {}
+  open() { this.readyState = 1; this.onopen?.(); }
+  serverClose(code) { this.readyState = 3; this.onclose?.({ code }); }
+  close() { if (this.readyState === 3) return; this.readyState = 3; queueMicrotask(() => this.onclose?.({ code: 1005 })); }
+}
+Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeWS });
+const timers = []; const realST = globalThis.setTimeout;
+const capture = () => { globalThis.setTimeout = (fn, ms, ...x) => { if (ms >= 1000) { timers.push({ fn, ms }); return timers.length; } return realST(fn, ms, ...x); }; };
+const release = () => { globalThis.setTimeout = realST; };
+const tick = (ms = 40) => new Promise((r) => realST(r, ms));
+const { realtimeSocket: rs } = await import('../../src/lib/socketClient.ts');
+const lastWS = () => FakeWS.all[FakeWS.all.length - 1];
+for (const [label, siteAnswer] of [['not known yet', null], ['shared', { site: 'shared' }]]) {
+  S.resetSiteForTests(); if (siteAnswer) { handler = () => ({ body: siteAnswer }); await S.loadSite(); }
+  api.setSessionToken('tok-ws'); events.length = 0; timers.length = 0; calls.length = 0; capture();
+  handler = () => ({ status: 403, body: { code: 'WRONG_SITE', sharedOrigin: SHARED_O } });
+  rs.connect('a@x.test', 'A'); const w = lastWS(); w.open(); w.serverClose(4403); await tick();
+  check(`ws 4403, site ${label}: no HTTP check, today's reconnect`, !calls.some((c) => c.url === '/api/auth/me') && timers.length === 1 && api.getSessionToken() === 'tok-ws' && siteEvents().length === 0);
+  timers.length = 0; rs.disconnect(); release();
+}
+S.resetSiteForTests(); handler = () => ({ body: { site: 'agency', agency: { name: 'Valley Vaad' }, sharedOrigin: SHARED_O } }); await S.loadSite();
+api.setSessionToken('tok-ws2'); events.length = 0; timers.length = 0; calls.length = 0; capture();
+handler = (u) => (u === '/api/auth/me' ? { status: 403, body: { code: 'WRONG_SITE', sharedOrigin: SHARED_O } } : { body: {} });
+rs.connect('a@x.test', 'A'); { const w = lastWS(); w.open(); w.serverClose(4403); } await tick();
+check('ws 4403 on an agency address: checked, refused -> cleared + screen, no reconnect', calls.some((c) => c.url === '/api/auth/me') && api.getSessionToken() === null && siteEvents().length === 1 && timers.length === 0);
+rs.disconnect(); release();
+api.setSessionToken('tok-ws3'); events.length = 0; timers.length = 0; calls.length = 0; capture();
+handler = (u) => (u === '/api/auth/me' ? { status: 200, body: { user: {} } } : { body: {} });
+rs.connect('a@x.test', 'A'); { const w = lastWS(); w.open(); w.serverClose(4403); } await tick();
+check('ws 4403 on an agency address, session fine: reconnect, kept', api.getSessionToken() === 'tok-ws3' && timers.length === 1 && siteEvents().length === 0);
+timers.length = 0; rs.disconnect(); release();
 api.setSessionToken(null);
 
 // --- passkey address labels ---
@@ -157,7 +216,7 @@ const base = { onLoginSuccess() {}, darkMode: false, onToggleDarkMode() {} };
 html = renderToStaticMarkup(React.createElement(LoginPage, { ...base, site: agency, initialMode: 'signup' }));
 check('branded (no logo): name once, large, then "Sign in"', html.includes('data-site-name') && html.split('Valley Vaad').length - 1 === 1 && html.includes('>Sign in<') && html.includes('Powered by Shutfey'));
 check('branded: no registration', !html.includes('Register Agency') && !html.includes('Sign Up Kosher Agency') && !html.includes('Kosher Agency Registration'));
-check('branded: sign-in form even when asked for signup', html.includes('type="password"'));
+check('branded: sign-in form even when asked for signup', html.includes('type="password"') && html.includes('placeholder="Email"') && html.includes('Forgot your password?'));
 check('branded: name in large text without logo', html.includes('data-site-name'));
 const plain = renderToStaticMarkup(React.createElement(LoginPage, { ...base, onBack() {} }));
 check('shared page unchanged: registration + Shutfey copy', plain.includes('Register Agency') && plain.includes('Sign Up Kosher Agency') && plain.includes('Kosher Shift &amp; Daily Board') && !plain.includes('Powered by Shutfey'));

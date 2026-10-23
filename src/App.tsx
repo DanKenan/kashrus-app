@@ -65,7 +65,7 @@ import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from '
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
-import { SITE_REFUSED_EVENT, sharedOriginFor, useSite, type SiteRefusal } from './lib/site';
+import { SITE_REFUSED_EVENT, sharedOriginFor, siteRefusalAction, useSite, type SiteRefusal, type SiteRefusalEvent } from './lib/site';
 import { SiteRefusedScreen } from './components/SiteRefusedScreen';
 import { END_DATE_TEXT, dayWords, lastDayOf, nextEndMs, noteServerNow, serverNowMs, venueLeftOwnScope, withOwnScope, withoutEndedVenues, ymdIn, zoneForVenue } from './lib/venueEndDates';
 
@@ -239,13 +239,19 @@ export default function App() {
   const site = useSite();
   const siteAgency = site?.site === 'agency' ? site.agency : null;
   const [siteRefusal, setSiteRefusal] = useState<SiteRefusal | null>(null);
+  const siteLeaveRef = useRef(false);
   useEffect(() => {
     const onSiteRefused = (event: Event) => {
-      const detail = (event as CustomEvent<SiteRefusal | undefined>).detail;
-      if (!detail) return;
-      setSiteRefusal(detail);
-      // apiFetch already cleared the stored sign-in; leave the signed-in screens too.
-      if (currentUser) handleLogout();
+      const detail = (event as CustomEvent<SiteRefusalEvent | undefined>).detail;
+      const action = siteRefusalAction(detail, !!currentUser);
+      if (action === 'ignore' || !detail) return;
+      setSiteRefusal({ code: detail.code, sharedOrigin: detail.sharedOrigin });
+      // This device's refused sign-in was cleared by apiFetch: leave the signed-in
+      // screens (no server sign-out). A signed-out call's refusal keeps any sign-in.
+      if (action === 'leave') {
+        siteLeaveRef.current = true;
+        try { handleLogout(); } finally { siteLeaveRef.current = false; }
+      }
     };
     window.addEventListener(SITE_REFUSED_EVENT, onSiteRefused);
     return () => window.removeEventListener(SITE_REFUSED_EVENT, onSiteRefused);
@@ -1679,11 +1685,15 @@ export default function App() {
   // Sign Out Handler
   const handleLogout = () => {
     clearLogoCache();
+    // Domains PR B: a site refusal leaves the signed-in screens WITHOUT a server
+    // sign-out and without the "Signed out" toast (the server already refused
+    // that session on this address and apiFetch cleared it).
+    const serverSignOut = !siteLeaveRef.current;
     // Item 11: end this session on the server first (POST /api/auth/logout with
     // the token), then forget the token below. Best effort: offline or any
     // error still signs out on this device. After a 401 the token is already
     // gone and nothing is sent.
-    void endServerSession(getSessionToken());
+    if (serverSignOut) void endServerSession(getSessionToken());
     setIsAgencyLogoOpen(false);
     userRequestContext.current.generation += 1;
     requestContext.current.generation += 1;
@@ -1705,7 +1715,7 @@ export default function App() {
     setSavedSession(null);
     // In kiosk mode the tablet returns to the PIN screen, not the landing page.
     if (!kioskMode) setAuthView('landing');
-    showToast('Signed out successfully.');
+    if (serverSignOut) showToast('Signed out successfully.');
   };
 
   // 12a-c: a kiosk person's time at this venue ended (WS KIOSK_SESSION_ENDED or

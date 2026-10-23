@@ -1,4 +1,4 @@
-import { announceSiteRefusal, currentSite, siteRefusalFrom, type SiteRefusal } from './site';
+import { announceSiteRefusal, currentSite, loadSite, siteRefusalFrom, type SiteRefusal } from './site';
 // Central API helper: attaches the signed session token to every request.
 // Use apiFetch('/api/...') everywhere instead of raw fetch().
 
@@ -361,11 +361,20 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   if ((res.status === 403 || res.status === 401) && currentSite()?.site !== 'shared') {
     let refusal: SiteRefusal | null = null;
     try { refusal = siteRefusalFrom(res.status, await res.clone().json()); } catch { /* not JSON */ }
-    if (refusal) {
-      // A signed-in client clears its local sign-in first (only the one this request used).
-      if (usedToken && getSessionToken() === usedToken) clearSession();
-      else if (!usedToken && usedCookieKey && sessionCredentialKey() === usedCookieKey) clearSession();
-      announceSiteRefusal(refusal);
+    // Decided only once the page knows its site (loadSite is one cached call, capped).
+    if (refusal && (await loadSite()).site !== 'shared') {
+      // A caller-set Authorization (a choose/invite token) is not this device's sign-in.
+      const usedCredential = !callerSetAuth && (!!usedToken || !!usedCookieKey);
+      const stillCurrent = usedToken ? getSessionToken() === usedToken : !!usedCookieKey && sessionCredentialKey() === usedCookieKey;
+      if (!usedCredential) {
+        // A signed-out call (sign-in, invite preview, recovery): the screen only; any sign-in stays.
+        announceSiteRefusal({ ...refusal, signedOut: false });
+      } else if (stillCurrent) {
+        // A signed-in client clears its local sign-in first (only the one this request used).
+        clearSession();
+        announceSiteRefusal({ ...refusal, signedOut: true });
+      }
+      // else: the refused credential was replaced meanwhile (a newer sign-in): nothing to do.
     }
   }
   if (res.status === 401) {
