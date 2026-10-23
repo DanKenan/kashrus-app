@@ -14645,9 +14645,20 @@ app.put('/api/users/:id/venues', async (req, res) => {
       const r = applyGrantOps(withGrantFields(target, norm.fields), ops, ctx);
       if (!r.ok) { const f = r as GrantFailure; return deny(f.error, f.status, f.code); }
       // keep today's order (the request's order) for the extras
-      const fields = { ...r.fields, venueAccess: [...(home ? [home] : []), ...list.filter((v) => r.fields.venueAccess.includes(v))], venueRev: venueRevOf(target) + (r.changed || norm.changed ? 1 : 0) };
+      let fields: GrantFields = { ...r.fields, venueAccess: [...(home ? [home] : []), ...list.filter((v) => r.fields.venueAccess.includes(v))], venueRev: venueRevOf(target) + (r.changed || norm.changed ? 1 : 0) };
+      // 4.5, the same budget as venue-ops: growth is refused near the size
+      // guard; a reduction near the hard guard commits without history.
+      let outDoc: any = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
+      if (r.growth && candidateBytes(outDoc) > GRANT_GROWTH_LIMIT_BYTES) {
+        return deny('The app storage is nearly full; this change cannot be saved right now.', 409, 'STATE_NEAR_FULL');
+      }
+      if (!r.growth && candidateBytes(outDoc) > 900 * 1024) {
+        fields = trimHistory(fields, 0);
+        outDoc = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
+        log.warn(`[grants] venues PUT on ${id} near the size guard: committed without history`);
+      }
       return {
-        doc: { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) },
+        doc: outDoc,
         grantSetById: { [id]: fields },
         result: { userId: id, before, home: target.venueId || null, list },
       };

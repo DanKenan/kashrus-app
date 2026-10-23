@@ -469,6 +469,10 @@ export default {
       // ===== K: size budget (4.5): growth refused above 820 KiB, reductions still commit =====
       x = await ops(tAdmin, U('mash2'), [{ op: 'add', venueId: V1, until: null }], await revOf(U('mash2')));
       assert(x.status === 200, `pre-bloat grant ${x.status} ${x.text.slice(0, 120)}`);
+      // a row with grant state whose extra has no entry and no history: removing it GROWS the row (history entry)
+      doc = await ctx.getDoc();
+      await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: [...doc.users, { id: U('tight'), email: E('tight'), name: 'T81 Tight', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 }, { id: U('tight2'), email: E('tight2'), name: 'T81 Tight 2', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight2'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 }] });
+      await reloadCommit();
       doc = await ctx.getDoc();
       const cur = JSON.stringify(doc).length;
       const pad = Math.max(0, 850 * 1024 - cur);
@@ -482,10 +486,37 @@ export default {
       assert(x.status === 409 && x.json?.code === 'STATE_NEAR_FULL', `growth refused near full ${x.status} ${x.text.slice(0, 160)}`);
       x = await ops(tAdmin, U('mash2'), [{ op: 'remove', venueId: V1 }], await revOf(U('mash2')));
       assert(x.status === 200, `a reduction still commits near full ${x.status} ${x.text.slice(0, 160)}`);
+      // the legacy venues PUT (today's UI) gets the same budget on a row with grant state
+      x = await putV(tAdmin, U('mash'), { venueIds: [V1, V3, V2], expectedVenueIds: [V1, V3] });
+      assert(x.status === 409 && x.json?.code === 'STATE_NEAR_FULL', `legacy PUT growth refused near full ${x.status} ${x.text.slice(0, 160)}`);
+      // just under the hard guard: a reduction through the PUT still commits (history dropped if needed)
+      // (the reload commit itself adds a small agency row; measure it, then aim)
+      const setBloat = async (targetChars) => {
+        const d0 = await ctx.getDoc();
+        const b0 = d0.agencies.find((a) => a.id === bloatId);
+        const len = JSON.stringify(d0).length - b0.notes.length;
+        await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: d0.users, agencies: d0.agencies.map((a) => (a.id === bloatId ? { ...a, notes: 'x'.repeat(Math.max(0, targetChars - len)) } : a)) });
+        await reloadCommit();
+        return JSON.stringify(await ctx.getDoc()).length;
+      };
+      let sz = await setBloat(900 * 1024 - 2000);
+      const reloadCost = sz - (900 * 1024 - 2000);
+      sz = await setBloat(900 * 1024 - 20 - reloadCost * 1 - 0);
+      // (the second reload adds another row of the same size)
+      assert(sz <= 900 * 1024 && sz > 900 * 1024 - 200, `document just under the hard guard (${900 * 1024 - sz} chars below)`);
+      x = await putV(tAdmin, U('tight'), { venueIds: [V1], expectedVenueIds: [V1, V3] });
+      assert(x.status === 200, `legacy PUT reduction just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
+      const tr = await rec(U('tight'));
+      assert(J(tr.venueAccess) === J([V1]) && tr.venueRev === 2, `reduction applied (history dropped to fit) ${J(tr)}`);
+      await setBloat(900 * 1024 - 20 - reloadCost);
+      x = await ops(tAdmin, U('tight2'), [{ op: 'remove', venueId: V3 }], 1);
+      assert(x.status === 200, `venue-ops reduction just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
+      assert(J((await rec(U('tight2'))).venueAccess) === J([V1]), 'venue-ops reduction applied');
       doc = await ctx.getDoc();
       await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: doc.users, agencies: doc.agencies.filter((a) => a.id !== bloatId) });
       await reloadCommit();
       assert(JSON.stringify(await ctx.getDoc()).length < 820 * 1024, 'bloat removed');
+
       details.push(`K size: growth 409 STATE_NEAR_FULL at ${kib} KiB, reduction commits`);
 
       // ===== L: deleting a venue closes a dated grant at it as 'venue_deleted' (9.8) =====
