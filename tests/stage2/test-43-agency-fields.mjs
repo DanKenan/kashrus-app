@@ -24,9 +24,9 @@
  *    loser's retry on a fresh version is refused as taken; two concurrent
  *    agency registrations with the same short code both succeed with
  *    DIFFERENT slugs.
- *  8 host matching is verified-only: a pending domain resolves to nothing on
- *    /api/agencies/by-domain; a verified one resolves (public profile only);
- *    two agencies verified on one domain resolve to nothing (fail closed).
+ *  8 host matching (domains PR A): the 8a customDomain, pending or verified,
+ *    never resolves on /api/agencies/by-domain; such a host is UNKNOWN (403
+ *    SITE_NOT_SET_UP, no agency named). Sites come only from APP_SITES (test 83).
  */
 import http from 'node:http';
 
@@ -82,7 +82,7 @@ function connectWs(baseUrl, token) {
 }
 
 export default {
-  name: 'Test 43: agency data fields — allowlisted egress, admin-only writes, transactional slug/domain uniqueness, verified-only host matching (8a)',
+  name: 'Test 43: agency data fields — allowlisted egress, admin-only writes, transactional slug/domain uniqueness, customDomain never selects an agency (domains PR A)',
   whatItProves:
     'Admins of their own agency alone set slug/brand/logo/domain; staff never see admin or domain data; the DNS proof value never leaves the server; slug and domain are unique under concurrent writes and legacy values; unverified domains never resolve.',
 
@@ -265,21 +265,22 @@ export default {
     for (const m of [...wsMash.messages, ...wsAdmin.messages]) seen.push(JSON.stringify(m));
     wsMash.close(); wsAdmin.close();
 
-    // --- 8. verified-only host matching ----------------------------------------
-    const pend = await hostGet(baseUrl, '/api/agencies/by-domain', domA);
-    seen.push(pend.text);
-    assert(pend.status === 200 && pend.json?.agency === null, `pending domain must not resolve: ${pend.text}`);
-    const ver = await hostGet(baseUrl, '/api/agencies/by-domain', verifiedDomain.toUpperCase());
-    seen.push(ver.text);
-    assert(ver.json?.agency?.id === verifiedAgency, `verified domain resolves: ${ver.text}`);
-    for (const k of ['adminEmail', ...DOMAIN_KEYS]) assert(!(k in ver.json.agency), `by-domain must not expose ${k}`);
-    const dup = await hostGet(baseUrl, '/api/agencies/by-domain', dupeDomain);
-    seen.push(dup.text);
-    assert(dup.json?.agency === null, `two agencies on one verified domain must resolve to nothing: ${dup.text}`);
-
+    // --- 8. host matching: the 8a customDomain is never read --------------------
+    // Domains PR A (plan v4 2a/2c/2g): the agency of an address comes ONLY from
+    // APP_SITES (server config) by the raw Host; the 8a customDomain field,
+    // pending or verified, no longer resolves anything. A host that is not one
+    // of this service's own addresses is UNKNOWN: /api/agencies/by-domain answers
+    // 403 SITE_NOT_SET_UP there and names no agency (the positive by-domain case
+    // on a configured site is in test 83).
+    for (const [label, host] of [['pending domain', domA], ['verified domain', verifiedDomain.toUpperCase()], ['two agencies on one verified domain', dupeDomain]]) {
+      const r = await hostGet(baseUrl, '/api/agencies/by-domain', host);
+      seen.push(r.text);
+      assert(r.status === 403 && r.json?.code === 'SITE_NOT_SET_UP' && !('agency' in (r.json || {})), `${label} must not resolve: ${r.status} ${r.text}`);
+      assert(!r.text.includes(verifiedAgency) && !r.text.includes(A) && !r.text.includes(B), `${label}: no agency named`);
+    }
     // The DNS proof values never appeared in any response or socket message.
     const all = seen.join('\n');
     assert(!all.includes(liveToken) && !all.includes('f'.repeat(64)), 'a domainVerificationToken value leaked to a client');
-    return 'egress allowlists (HTTP + WS), admin-only writes, validation, server-only fields, domain lifecycle, normalised + atomic uniqueness, 10/10 concurrent races, register race, verified-only host matching';
+    return 'egress allowlists (HTTP + WS), admin-only writes, validation, server-only fields, domain lifecycle, normalised + atomic uniqueness, 10/10 concurrent races, register race, customDomain never selects an agency';
   },
 };

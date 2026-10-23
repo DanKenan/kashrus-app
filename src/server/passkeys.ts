@@ -39,6 +39,8 @@ export type PasskeyEntry = {
   createdAt: string;
   lastUsedAt: string | null;
   createdBySid: string | null;
+  /** Domains PR A (2d): the RP ID it was made for (server-written from the challenge). Absent on older entries. */
+  rpId?: string;
 };
 
 export type PersonCredentialsDoc = {

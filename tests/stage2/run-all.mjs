@@ -195,6 +195,8 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-81-venue-end-dates.mjs')).default,
     FRESH_STATE,
     (await import('./test-82-pool.mjs')).default,
+    FRESH_STATE,
+    (await import('./test-83-sites.mjs')).default,
   ];
 
   const docKiB = async () => Math.round(JSON.stringify(await ctx.getDoc()).length / 1024);
