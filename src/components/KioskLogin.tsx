@@ -12,6 +12,9 @@ interface KioskStaff {
 }
 
 interface KioskLoginProps {
+  /** 12a-c: one plain line over the name list (the kiosk-ended line from END_DATE_TEXT). */
+  notice?: string | null;
+  onNoticeDone?: () => void;
   onLoginSuccess: (user: User) => void;
   onExitKiosk: () => void;
   onUnpaired?: () => void;
@@ -23,7 +26,7 @@ interface KioskLoginProps {
  * Hung on a wall in the establishment: pick your name, punch in your
  * 4-6 digit code, and you're in. Big targets, no typing, no passwords.
  */
-export function KioskLogin({ onLoginSuccess, onExitKiosk, onUnpaired, darkMode }: KioskLoginProps) {
+export function KioskLogin({ notice, onNoticeDone, onLoginSuccess, onExitKiosk, onUnpaired, darkMode }: KioskLoginProps) {
   const [venueName, setVenueName] = useState('Loading…');
   const [staff, setStaff] = useState<KioskStaff[]>([]);
   const [selected, setSelected] = useState<KioskStaff | null>(null);
@@ -103,7 +106,17 @@ export function KioskLogin({ onLoginSuccess, onExitKiosk, onUnpaired, darkMode }
     }
   };
 
+  // 12a-c: the notice stays a short while, and goes when the next person taps their name.
+  const onNoticeDoneRef = useRef(onNoticeDone);
+  onNoticeDoneRef.current = onNoticeDone;
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => onNoticeDoneRef.current?.(), 20000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
   const pickStaff = (s: KioskStaff) => {
+    if (notice) onNoticeDone?.();
     setSelected(s);
     setPin('');
     setError('');
@@ -165,6 +178,12 @@ export function KioskLogin({ onLoginSuccess, onExitKiosk, onUnpaired, darkMode }
         <p className="mt-16 text-k-body text-ink-soft animate-pulse">Loading…</p>
       ) : !selected ? (
         <div className="mt-6 sm:mt-8 w-full max-w-5xl flex flex-col gap-4">
+          {notice && (
+            <p data-kiosk-notice role="status"
+              className="mx-auto max-w-xl w-full px-5 py-4 rounded-2xl bg-sunken border border-line text-center text-k-body font-semibold text-ink">
+              {notice}
+            </p>
+          )}
           <p className="text-center text-k-body text-ink-soft">Tap your name</p>
           {staff.length === 0 && (
             <p className="text-center text-base text-ink-soft max-w-xl mx-auto">

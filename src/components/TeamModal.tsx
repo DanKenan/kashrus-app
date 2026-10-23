@@ -19,6 +19,7 @@ import { getRoleLabel, canUserAssignTasks, canUserFillTasks, DEFAULT_ROLE_PERMIS
 import { ConfirmModal } from './ConfirmModal';
 import { KioskCodeDialog } from './KioskCodeDialog';
 import { VenueAccessSheet } from './VenueAccessSheet';
+import { END_DATE_TEXT, rosterUntilLines } from '../lib/venueEndDates';
 import { normalizePhone } from '../lib/kioskCodeShare';
 import { InviteLinkCard } from './InviteLinkCard';
 import { sendMemberInvite, loadMemberForInvite, inviteChip, SEND_CHANGED_TEXT } from '../lib/inviteActions';
@@ -727,6 +728,17 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                           : <span style={{ color: 'var(--bad)' }} className="font-semibold">No venue — tap to set</span>}
                         {user.venueIds.filter((id) => id !== user.venueId && venues.some((venue) => venue.id === id)).length > 0 &&
                           ` +${user.venueIds.filter((id) => id !== user.venueId && venues.some((venue) => venue.id === id)).length}`}
+                        {/* 12a-c: dated extra venues read "Hill Deli until Sun" (only when the server sends dates). */}
+                        {(() => {
+                          const dated = rosterUntilLines(user, venues, currentUser?.agencyTimeZone);
+                          if (dated.length === 0) return null;
+                          return (
+                            <span data-roster-until className="block text-sm text-ink-soft">
+                              {dated.slice(0, 3).map((line) => <span key={line.venueId} className="block break-words">{line.text}</span>)}
+                              {dated.length > 3 && <span className="block">{END_DATE_TEXT.moreVenues(dated.length - 3)}</span>}
+                            </span>
+                          );
+                        })()}
                       </button>
                     )}
 
@@ -922,6 +934,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 
       {venueTarget && currentUser?.role === 'admin' && (
         <VenueAccessSheet record={venueTarget} venues={venues}
+          agencyTimeZone={currentUser?.agencyTimeZone}
+          latest={(() => { const u = users.find((x) => x.id === venueTarget.id); return u && Array.isArray(u.venueIds) ? { ...u, venueIds: [...u.venueIds] } : null; })()}
           onClose={() => setVenueTarget(null)}
           onSaved={() => { setVenueNotice('Venues updated'); setVenueTarget(null); }} />
       )}

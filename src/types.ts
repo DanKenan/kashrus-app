@@ -68,6 +68,14 @@ export interface User {
   myVenueIds?: string[];
   /** 9a2: ONLY on team records sent to an ADMIN of the same agency: that person's venue scope (home first; sanitized, current venues of the agency). Absent for admin targets (agency-wide) and for every other recipient. */
   venueIds?: string[];
+  /** 12a-s/12a-c: ONLY next to venueIds (same-agency admin): active end dates of extra venues (venueId -> exclusive instant, ISO). Absent = none dated / older server. */
+  venueUntil?: Record<string, string>;
+  /** 12a-s/12a-c: for managers of a non-admin: the precondition (expectedVenueRev) for POST /api/users/:id/venue-ops. Absent = older server (the sheet keeps today's PUT). */
+  venueRevision?: number;
+  /** 12a-s/12a-c: ONLY on the signed-in person's own payload: their own active end dates (venueId -> exclusive instant). */
+  myVenueUntil?: Record<string, string>;
+  /** 12a-s/12a-c: ONLY on the signed-in person's own payload: their own venueRev. */
+  myVenueRev?: number;
   kioskPin?: string; // 4-6 digit PIN for shared kiosk tablets (never sent to clients)
   hasKioskPin?: boolean; // K1: server-set marker for managers (never the digits or hash)
   phoneNumber?: string; // K1: optional E.164 number, sent only to admins/coordinator-in-scope
@@ -317,7 +325,9 @@ export interface ServerBroadcastMessage {
     | 'AUDIT_REPORT_SUBMITTED'
     | 'HISTORY_PRUNED'
     | 'DEMO_RESTORED'
-    | 'KIOSK_DEVICES_UPDATED';
+    | 'KIOSK_DEVICES_UPDATED'
+    | 'SCOPE_CHANGED'
+    | 'KIOSK_SESSION_ENDED';
   payload: any;
   timestamp: string;
   senderEmail?: string;
