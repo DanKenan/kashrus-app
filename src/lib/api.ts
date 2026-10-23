@@ -282,11 +282,13 @@ function applyKioskUnpaired(responseCode: string | undefined): void {
   }
 }
 
-function signOutLocally(): void {
+function signOutLocally(code?: string): void {
   // Token expired or revoked — clear it and tell the app to show login.
+  // 12a-c: the 401's code rides along (KIOSK_SESSION_ENDED: the kiosk shows
+  // "Your time at this venue has ended." and stays paired).
   clearSession();
   try {
-    window.dispatchEvent(new CustomEvent('shutfey:unauthorized'));
+    window.dispatchEvent(new CustomEvent('shutfey:unauthorized', { detail: { code } }));
   } catch {
     // ignore
   }
@@ -353,17 +355,18 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   // can send back the version this client last saw (version contract).
   trackVersionHeader(res);
   if (res.status === 401) {
-    applyKioskUnpaired(await unauthorizedCode(res));
+    const code401 = await unauthorizedCode(res);
+    applyKioskUnpaired(code401);
     // QA2 Q2: a wrong CURRENT password on Change password is the person's
     // typo, not an expired session — keep them signed in (the form says so).
     const wrongCurrentPassword = await isWrongCurrentPassword401(input, res);
     // Item 11: only the session this request was sent with is over; a token
     // stored while it was on its way (a fresh sign-in, a changed password) is
     // kept. Checked after the last await, right before clearing.
-    if (usedToken && !wrongCurrentPassword && getSessionToken() === usedToken) signOutLocally();
+    if (usedToken && !wrongCurrentPassword && getSessionToken() === usedToken) signOutLocally(code401);
     // 11a-c: the same rule on the cookie: only while the cookie sign-in this
     // request was sent with is still this device's sign-in.
-    else if (!usedToken && usedCookieKey && !wrongCurrentPassword && sessionCredentialKey() === usedCookieKey) signOutLocally();
+    else if (!usedToken && usedCookieKey && !wrongCurrentPassword && sessionCredentialKey() === usedCookieKey) signOutLocally(code401);
   }
   return res;
 }
@@ -577,7 +580,7 @@ export async function confirmSessionAfterSocketRefusal(
     // or replaced no longer speaks for this device — in each case keep it.
     if (sessionCredentialKey() !== token || signInChangePending() || !stillWanted()) return 'unknown';
     applyKioskUnpaired(code);
-    signOutLocally();
+    signOutLocally(code);
     return 'ended';
   }
   return res.ok ? 'valid' : 'unknown';

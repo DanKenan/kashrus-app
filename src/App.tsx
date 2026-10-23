@@ -63,7 +63,8 @@ import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles,
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry } from './lib/api';
-import { noVenueMessage } from './lib/venueRemoved';
+import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
+import { END_DATE_TEXT, dayWords, lastDayOf, nextEndMs, noteServerNow, serverNowMs, venueLeftOwnScope, withOwnScope, withoutEndedVenues, ymdIn, zoneForVenue } from './lib/venueEndDates';
 
 const DEFAULT_USERS: User[] = [
   { id: 'usr_admin', agencyId: 'agency-hkc', agencyName: 'Hartford Kashrut Commission (HKC)', agencyShortCode: 'HKC', agencySeal: 'Glatt Kosher & Mehadrin Kashrut', email: 'kenan@hartfordkashrut.org', name: 'Kenan (Admin)', role: 'admin', avatarColor: '#3b82f6', permissions: { canFillTasks: true, canAssignTasks: true } },
@@ -232,8 +233,15 @@ export default function App() {
 
   // Expired/revoked token: any API 401 drops back to the login screen.
   useEffect(() => {
-    const onUnauthorized = () => {
+    const onUnauthorized = (event: Event) => {
       if (currentUser) {
+        // 12a-c: on a kiosk, a person whose time at this venue ended goes back
+        // to the name list with one plain line; the tablet stays paired.
+        const code = (event as CustomEvent<{ code?: string } | undefined>).detail?.code;
+        if (isKiosk && code === 'KIOSK_SESSION_ENDED') {
+          kioskSessionEndedRef.current();
+          return;
+        }
         handleLogout();
         showToast('Your session expired. Please sign in again.');
       }
@@ -357,6 +365,9 @@ export default function App() {
   // Modals
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [taskToEdit, setTaskToEdit] = useState<Task | null>(null);
+  // 12a-c (RV2): the venue the task editor was opened for (the task's own
+  // venue, else the venue on screen when a new task was started).
+  const [taskEditorVenueId, setTaskEditorVenueId] = useState<string | null>(null);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   // 11b-c: Face ID / passkeys.
@@ -439,13 +450,22 @@ export default function App() {
     return venues[0] || null;
   }, [venues, currentVenueId, currentUser, eligibleVenues]);
 
+  // 12a-c: on a server that sends the person's own scope (myVenueRev), a
+  // non-admin whose scope holds none of the loaded venues (last tick ended,
+  // or their own end date just passed) sees the no-venue screen, not an empty board.
+  const noVenueInScope = !!currentUser && currentUser.role !== 'admin' && !isKiosk
+    && typeof currentUser.myVenueRev === 'number' && Array.isArray(currentUser.myVenueIds)
+    && venues.length > 0 && eligibleVenues.length === 0;
+
   // Venue discovery survives switches; only an authentication change invalidates it.
   const userRequestContext = useRef({ userId: currentUser?.id, generation: 0 });
   if (userRequestContext.current.userId !== currentUser?.id) {
     userRequestContext.current = { userId: currentUser?.id, generation: userRequestContext.current.generation + 1 };
   }
-  const socketContext = useRef({ currentUser, venues, eligibleVenues, currentVenueId, currentVenue });
-  socketContext.current = { currentUser, venues, eligibleVenues, currentVenueId, currentVenue };
+  // 12a-c: set once handleLogout exists (below); the socket handler calls it.
+  const kioskSessionEndedRef = useRef<() => void>(() => {});
+  const socketContext = useRef({ currentUser, venues, eligibleVenues, currentVenueId, currentVenue, isKiosk, onKioskSessionEnded: () => kioskSessionEndedRef.current() });
+  socketContext.current = { currentUser, venues, eligibleVenues, currentVenueId, currentVenue, isKiosk, onKioskSessionEnded: () => kioskSessionEndedRef.current() };
 
   // Invalidate synchronously so a response cannot land between selection and effects.
   const requestContext = useRef({ key: '', generation: 0 });
@@ -553,6 +573,51 @@ export default function App() {
   }, [currentUser, venues, currentVenue?.id, eligibleVenues]);
 
   // Show temporary toast notification
+  // 12a-c: the one line the kiosk name list shows after a person's time ended.
+  const [kioskNotice, setKioskNotice] = useState<string | null>(null);
+  // 12a-c: bumps when the server's clock (serverNow) moved, so end timers re-arm.
+  const [serverClockRev, setServerClockRev] = useState(0);
+
+  // 12a-c (5.8): when one of the person's own end dates passes (server clock),
+  // drop that venue now; the server's own update follows. One timer, re-armed
+  // on every change, and re-checked when the tab comes back.
+  useEffect(() => {
+    if (isKiosk || !currentUser || currentUser.role === 'admin' || !currentUser.myVenueUntil) return;
+    const until = currentUser.myVenueUntil;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => setCurrentUser((prev) => withoutEndedVenues(prev, serverNowMs()));
+    const arm = () => {
+      if (timer) clearTimeout(timer);
+      const next = nextEndMs(until, serverNowMs());
+      if (next === null) return;
+      // Long waits are re-armed (browser timers cap near 24.8 days).
+      timer = setTimeout(() => { check(); arm(); }, Math.min(Math.max(0, next - serverNowMs()) + 250, 6 * 3600000));
+    };
+    check();
+    arm();
+    const onVisible = () => { if (document.visibilityState === 'visible') { check(); arm(); } };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [isKiosk, currentUser?.id, currentUser?.role, JSON.stringify(currentUser?.myVenueUntil || null), serverClockRev]);
+
+  // 12a-c (RV2): when the editor's venue leaves the person's own scope (their
+  // end date passed, or a pushed SCOPE_CHANGED removed it), close the editor
+  // and drop the task it held, so the lost venue's data is not left on screen.
+  // Only with the server's own scope (myVenueIds); admins and old servers keep today's behavior.
+  useEffect(() => {
+    if (!isTaskModalOpen || isKiosk) return;
+    if (!venueLeftOwnScope(currentUser, taskEditorVenueId)) return;
+    setIsTaskModalOpen(false);
+    setTaskToEdit(null);
+    setTaskEditorVenueId(null);
+    showToast(END_DATE_TEXT.editorClosed);
+  }, [isTaskModalOpen, isKiosk, taskEditorVenueId, currentUser?.role, JSON.stringify(currentUser?.myVenueIds ?? null)]);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
@@ -653,8 +718,28 @@ export default function App() {
     const unsubMsg = realtimeSocket.onMessage((msg: ServerBroadcastMessage) => {
       const { currentUser, venues, eligibleVenues, currentVenueId, currentVenue } = socketContext.current;
       if (requestContext.current.generation !== generation || !currentUser) return;
+      // 12a-c (5.8): a person's scope changed (a tick, an end date, an untick).
+      // Take the new scope quietly (no toast); the INITIAL_STATE that follows
+      // replaces the data. Kiosk sockets never get this.
+      if (msg.type === 'SCOPE_CHANGED') {
+        if (!socketContext.current.isKiosk && currentUser.role !== 'admin' && msg.payload) {
+          if (noteServerNow(msg.payload.serverNow)) setServerClockRev((n) => n + 1);
+          setCurrentUser((prev) => withOwnScope(prev, currentUser.id, msg.payload));
+        }
+        return;
+      }
+      // 12a-c: this person's time at the tablet's venue ended. The tablet stays
+      // paired; it returns to the name list with one plain line.
+      if (msg.type === 'KIOSK_SESSION_ENDED') {
+        if (socketContext.current.isKiosk) socketContext.current.onKioskSessionEnded();
+        return;
+      }
+      // 12a-c: a server that sends myVenueRev scopes the venue list itself
+      // (the person's own scope at this moment), so the list is the scope.
+      const scopeFromServer = msg.type === 'INITIAL_STATE' && !socketContext.current.isKiosk
+        && currentUser.role !== 'admin' && typeof msg.payload?.myVenueRev === 'number' && Array.isArray(msg.payload?.venues);
       const snapshotVenues: Venue[] = msg.type === 'INITIAL_STATE' && Array.isArray(msg.payload?.venues)
-        ? eligibleVenuesFor(currentUser, msg.payload.venues) : eligibleVenues;
+        ? (scopeFromServer ? msg.payload.venues : eligibleVenuesFor(currentUser, msg.payload.venues)) : eligibleVenues;
       const filterStaffVenue = currentUser.role !== 'admin' && snapshotVenues.length >= 2;
       if (currentUser.role !== 'admin' && !currentVenue && msg.type !== 'INITIAL_STATE') return;
       // Stage 2 version contract: every broadcast carries the document
@@ -671,6 +756,14 @@ export default function App() {
         // A session restored from before #97 has no agencyLogoRev: take the fresh
         // agency fields from the user's own roster row (runs before any early return).
         if (Array.isArray(msg.payload.users)) setCurrentUser((prev) => withFreshAgencyFields(prev, msg.payload.users));
+        if (scopeFromServer) {
+          if (noteServerNow(msg.payload.serverNow)) setServerClockRev((n) => n + 1);
+          setCurrentUser((prev) => withOwnScope(prev, currentUser.id, {
+            venueIds: (msg.payload.venues as Venue[]).map((v) => v.id),
+            myVenueUntil: msg.payload.myVenueUntil,
+            myVenueRev: msg.payload.myVenueRev,
+          }));
+        }
         if (currentUser.role !== 'admin') {
           if (Array.isArray(msg.payload.venues)) setVenues(msg.payload.venues);
           const saved = typeof window !== 'undefined'
@@ -1539,6 +1632,13 @@ export default function App() {
   };
 
   // Open Task Modal
+  // 12a-c (RV2): every way into the task editor records the venue it is for.
+  const openTaskEditor = (task: Task | null) => {
+    setTaskToEdit(task);
+    setTaskEditorVenueId(task?.venueId || currentVenue?.id || null);
+    setIsTaskModalOpen(true);
+  };
+
   const handleOpenCreateTask = () => {
     if (!currentUser) {
       showToast('Please sign in first.');
@@ -1548,8 +1648,7 @@ export default function App() {
       showToast('Permission required. You do not have permission to assign or create new tasks.');
       return;
     }
-    setTaskToEdit(null);
-    setIsTaskModalOpen(true);
+    openTaskEditor(null);
   };
 
   // Sign Out Handler
@@ -1582,6 +1681,15 @@ export default function App() {
     // In kiosk mode the tablet returns to the PIN screen, not the landing page.
     if (!kioskMode) setAuthView('landing');
     showToast('Signed out successfully.');
+  };
+
+  // 12a-c: a kiosk person's time at this venue ended (WS KIOSK_SESSION_ENDED or
+  // a 401 with that code): back to the name list, the tablet stays paired.
+  kioskSessionEndedRef.current = () => {
+    if (!isKiosk || !currentUser) return;
+    handleLogout();
+    setToastMessage(null);
+    setKioskNotice(END_DATE_TEXT.kioskEnded);
   };
 
   // 11b-c: the menu entry shows when this account may add one or already has one;
@@ -1696,6 +1804,8 @@ export default function App() {
             />
           ) : (
             <KioskLogin
+              notice={kioskNotice}
+              onNoticeDone={() => setKioskNotice(null)}
               onLoginSuccess={handleLoginSuccess}
               onExitKiosk={exitKioskMode}
               onUnpaired={() => setKioskDeviceState(null)}
@@ -1791,8 +1901,7 @@ export default function App() {
           showToast('You do not have permission to edit task definitions.');
           return;
         }
-        setTaskToEdit(task);
-        setIsTaskModalOpen(true);
+        openTaskEditor(task);
       }}
       onDeleteTask={handleDeleteTask}
       onOpenTaskModal={handleOpenCreateTask}
@@ -1818,8 +1927,7 @@ export default function App() {
           showToast('You do not have permission to edit task definitions.');
           return;
         }
-        setTaskToEdit(task);
-        setIsTaskModalOpen(true);
+        openTaskEditor(task);
       }}
       onDeleteTask={handleDeleteTask}
       onOpenTaskModal={handleOpenCreateTask}
@@ -2058,12 +2166,20 @@ export default function App() {
         
         {/* QA2 #8: a non-admin with no venue (e.g. their venue was deleted) never
             sees the admin setup screen below; one plain message instead. */}
-        {venues.length === 0 && !isKiosk && noVenueMessage(currentUser) ? (
+        {(venues.length === 0 || noVenueInScope) && !isKiosk && noVenueMessage(currentUser) ? (
           <div data-no-venue-notice role="status" className="my-10 p-8 sm:p-10 rounded-3xl bg-surface border border-line tactile-2 text-center max-w-md mx-auto animate-fade-in">
             <div className="w-14 h-14 rounded-2xl bg-sunken text-ink-soft mx-auto flex items-center justify-center mb-4 border border-line">
               <Building2 className="w-7 h-7" />
             </div>
-            <h3 className="text-lg font-bold text-ink">{noVenueMessage(currentUser)}</h3>
+            {/* 12a-c (M2): a person with no venue right now (no main venue, no tick) gets a calm line, not "contact your agency". */}
+            {noVenueMessage(currentUser) === NO_VENUE_TEXT ? (
+              <>
+                <h3 className="text-lg font-bold text-ink">{END_DATE_TEXT.noVenueTitle}</h3>
+                <p data-no-venue-body className="text-base text-ink-soft mt-2">{END_DATE_TEXT.noVenueBody}</p>
+              </>
+            ) : (
+              <h3 className="text-lg font-bold text-ink">{noVenueMessage(currentUser)}</h3>
+            )}
             {currentUser?.agencyName && (
               <p className="text-sm text-ink-soft mt-2">{currentUser.agencyName}</p>
             )}
@@ -2125,6 +2241,20 @@ export default function App() {
         ) : (
           <>
           {/* Don 2026-10-22: the venue's own things sit on the venue's screen, not in the top menu. */}
+          {/* 12a-c: the person's own end date at this venue ("You're at Hill Deli until the end of Sunday."). */}
+          {!isKiosk && currentUser.role !== 'admin' && currentVenue && (() => {
+            const until = currentUser.myVenueUntil?.[currentVenue.id];
+            if (!until || currentVenue.id === currentUser.venueId) return null;
+            const zone = zoneForVenue(currentVenue, currentUser.agencyTimeZone);
+            const day = lastDayOf(until, zone);
+            const words = day ? dayWords(day, ymdIn(serverNowMs(), zone)) : null;
+            if (!words) return null;
+            return (
+              <p data-self-until role="note" className="mb-3 max-sm:order-first px-3 py-2 rounded-xl bg-sunken border border-line text-sm text-ink">
+                {END_DATE_TEXT.selfUntil(currentVenue.name, words.long)}
+              </p>
+            );
+          })()}
           {!isKiosk && (
           <div className="mb-3 max-sm:order-first">
           <VenueTabs
@@ -2267,8 +2397,7 @@ export default function App() {
                 showToast('You do not have permission to edit task definitions.');
                 return;
               }
-              setTaskToEdit(task);
-              setIsTaskModalOpen(true);
+              openTaskEditor(task);
             }}
             onDeleteTask={handleDeleteTask}
             onOpenTaskModal={handleOpenCreateTask}
@@ -2353,6 +2482,7 @@ export default function App() {
         onClose={() => {
           setIsTaskModalOpen(false);
           setTaskToEdit(null);
+          setTaskEditorVenueId(null);
         }}
         onSave={handleSaveTask}
         taskToEdit={taskToEdit}
