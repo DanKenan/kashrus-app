@@ -37,6 +37,13 @@ const run = async function () {
   ok(r.ok && J(r.fields.venueAccess) === J(['v1']) && r.closed.length === 1 && r.fields.venueHistory === undefined, `expired 30 days ago: closed, no history ${J(r.fields)}`);
   r = applyGrantOps(m({ venueGrants: { v2: { from: null, until: iso(T0 - 3 * DAY), by: 'x' } }, venueRev: 1 }), [], ctx());
   ok(r.ok && r.fields.venueHistory.length === 1 && r.fields.venueHistory[0].why === 'ended', 'expired 3 days ago: recorded');
+  // RV2: the cap drops the OLDEST entries, even when a new entry is older than stored ones
+  const ten = Array.from({ length: 10 }, (_, i) => ({ venueId: 'v3', from: null, to: iso(T0 - (i + 1) * DAY), why: 'unticked', by: 'd' + (i + 1) }));
+  r = applyGrantOps(m({ venueGrants: { v2: { from: null, until: iso(T0 - 13 * DAY), by: 'x' } }, venueHistory: ten, venueRev: 1 }), [], ctx());
+  ok(r.ok && J(r.fields.venueHistory.map((h) => h.by || h.why)) === J(['d1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7', 'd8', 'd9', 'd10']), `13-day-old new entry loses to the 10 newer ones ${J(r.fields.venueHistory.map((h) => h.by))}`);
+  r = applyGrantOps(m({ venueGrants: { v2: { from: null, until: iso(T0 - 5.5 * DAY), by: 'x' } }, venueHistory: ten, venueRev: 1 }), [], ctx());
+  ok(r.ok && r.fields.venueHistory[5].why === 'ended' && r.fields.venueHistory.length === 10 && !r.fields.venueHistory.some((h) => h.by === 'd10'), `a 5.5-day-old end sorts in place and the 10-day entry goes ${J(r.fields.venueHistory.map((h) => h.by))}`);
+  ok(lastVenueOf({ venueHistory: [{ ...ten[3], venueId: 'vOld' }, { ...ten[0], venueId: 'vNew' }] }, T0)?.venueId === 'vNew', 'last venue uses the newest end');
   // cap still 10
   const many = m({ venueHistory: Array.from({ length: 15 }, (_, i) => h('v2', T0 - i * 3600000)) });
   ok(retainedHistory(many, T0).length === HISTORY_CAP, 'cap 10 still holds');

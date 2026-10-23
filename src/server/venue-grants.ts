@@ -241,9 +241,14 @@ export function historyEntryRetained(e: any, nowMs: number): boolean {
 }
 
 /** Existing history (valid entries inside the 2-week window only), newest first. */
+/** RV2: newest first by end time (stable for equal ends), so the cap always drops the OLDEST entries. */
+function newestFirst(list: readonly any[]): any[] {
+  return list.map((e, i) => ({ e, i, t: Date.parse(e.to) })).sort((a, b) => (b.t - a.t) || (a.i - b.i)).map((x) => x.e);
+}
+
 export function retainedHistory(row: any, nowMs: number): NonNullable<GrantFields['venueHistory']> {
   const h = Array.isArray(row?.venueHistory) ? row.venueHistory : [];
-  return h.filter((e: any) => historyEntryRetained(e, nowMs)).slice(0, HISTORY_CAP) as any;
+  return newestFirst(h.filter((e: any) => historyEntryRetained(e, nowMs))).slice(0, HISTORY_CAP) as any;
 }
 
 /** True when the stored history holds anything the 2-week rule (or the cap / validity) would drop. */
@@ -259,7 +264,7 @@ function priorHistory(row: any, nowMs: number): GrantFields['venueHistory'] {
 
 /** RV1: the 2-week rule and the cap applied to a COMBINED (new + prior) history, newest first. */
 function keepHistory(list: readonly any[], nowMs: number): NonNullable<GrantFields['venueHistory']> {
-  return list.filter((e: any) => historyEntryRetained(e, nowMs)).slice(0, HISTORY_CAP) as any;
+  return newestFirst(list.filter((e: any) => historyEntryRetained(e, nowMs))).slice(0, HISTORY_CAP) as any;
 }
 
 export function applyGrantOps(row: any, ops: readonly GrantOp[], ctx: GrantCtx): GrantResult {
