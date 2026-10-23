@@ -312,7 +312,9 @@ export function PoolMoveDialog({ mode, person, venues, onClose, onDone }: {
     if (again) { await run(true); setError(POOL_TEXT.previewChanged); }
   };
   useEffect(() => { if (mode === 'move') void run(true); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (mode === 'make-main' && venueId) { preview.current = null; setWork(null); void run(true); } }, [venueId, keepOld]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Every choice change (including back to "Choose a venue") drops the old preview first.
+  useEffect(() => { if (mode === 'make-main') { preview.current = null; setWork(null); if (venueId) void run(true); } }, [venueId, keepOld]); // eslint-disable-line react-hooks/exhaustive-deps
+  const shownMatches = !!work && !!preview.current && preview.current.venueId === venueId && preview.current.keepOld === keepOld;
   const name = (id: string) => venues.find((v) => v.id === id)?.name || '';
   return (
     <Sheet title={mode === 'move' ? POOL_TEXT.moveTitle(person.name) : POOL_TEXT.makeMainTitle(person.name)} onClose={onClose} testId={mode}>
@@ -350,7 +352,7 @@ export function PoolMoveDialog({ mode, person, venues, onClose, onDone }: {
       {error && <p role="alert" className="mt-3 text-base text-ink">{error}</p>}
       <div className="mt-4 grid grid-cols-2 gap-2">
         <button type="button" className={btn} onClick={onClose} disabled={busy}>{POOL_TEXT.cancel}</button>
-        <button type="button" data-confirm className={btnGold} disabled={busy || !work || rev === null} onClick={() => void run(false)}>
+        <button type="button" data-confirm className={btnGold} disabled={busy || !shownMatches || rev === null} onClick={() => void run(false)}>
           {mode === 'move' ? POOL_TEXT.confirmMove : POOL_TEXT.confirmMakeMain}
         </button>
       </div>

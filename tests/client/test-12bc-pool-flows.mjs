@@ -84,6 +84,22 @@ const OPEN = { dryRun: true, openWork: { tasks: [{ id: 't1', title: 'Check the e
   ok('V3 preview then confirm, both at version 21, same venue', c.length === 2 && c[0].body.dryRun === true && c[1].body.dryRun === false && c[1].body.expectedVersion === 21 && c[1].body.venueId === 'v-b', JSON.stringify(c.map((x) => x.body)));
 }
 
+// V4 make-main: going back to "Choose a venue" drops the preview and disables the confirm ([12BC-RV2] nit)
+{
+  calls.length = 0; observeVersion(25);
+  answer = (p, b) => (b?.dryRun ? { status: 200, data: { dryRun: true, openWork: { tasks: [], events: [] } } } : { status: 200, data: { success: true } });
+  const m = mount(PoolMoveDialog, { mode: 'make-main', person: { id: 'u2', name: 'Leah Gold', venueId: '', venueRevision: 4 }, venues, onClose() {}, onDone() {} });
+  await m.render();
+  const pick = async (v) => { const sel = m.find((e) => e.type === 'select')[0]; await sel.props.onChange({ target: { value: v } }); await m.render(); };
+  const confirmBtn = () => m.find((e) => e.props['data-confirm'] !== undefined)[0];
+  await pick('v-b');
+  ok('V4 a preview enables the confirm', confirmBtn().props.disabled === false);
+  await pick('');
+  ok('V4 back to "Choose a venue": confirm disabled, preview gone', confirmBtn().props.disabled === true && !/No open tasks/.test(m.text()));
+  await confirmBtn().props.onClick(); await m.render();
+  ok('V4 and nothing is confirmed', calls.filter((c) => c.path === '/api/users/u2/make-main' && c.body.dryRun === false).length === 0);
+}
+
 // S1 tick sheet: a venue that leaves the offered list is dropped and never sent
 {
   calls.length = 0; observeVersion(30);
