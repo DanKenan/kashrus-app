@@ -50,6 +50,10 @@ export function VenueAccessSheet({ record, venues, agencyTimeZone, latest, onClo
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const savingRef = useRef(false);
+  // The roster's newest record for this person, read at the moment a 409 lands
+  // (a USERS_UPDATED that arrived during the save is used too).
+  const latestRef = useRef(latest);
+  latestRef.current = latest;
   const original = opened.record;
   const home = original.venueId || '';
   const datesOn = opened.rev !== null;
@@ -67,6 +71,7 @@ export function VenueAccessSheet({ record, venues, agencyTimeZone, latest, onClo
   const todayFor = (venue: Venue) => ymdIn(serverNowMs(), zoneForVenue(venue, agencyTimeZone));
 
   const conflict = () => {
+    const latest = latestRef.current;
     if (latest && Array.isArray(latest.venueIds) && latest.venueRevision !== opened.record.venueRevision) {
       const next = openedFrom(latest, venues, agencyTimeZone);
       setOpened(next);
