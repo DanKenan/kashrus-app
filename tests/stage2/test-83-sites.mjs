@@ -154,6 +154,26 @@ export default {
       return { id: r.json.user.id, email: E(k), pw: PW(k), agencyId: r.json.user.agencyId, token: r.json.token };
     };
 
+    // V: every invite-making route's link origin (agency invite, setup invite, pool invite, venue-owner invite).
+    const inviteOrigins = async (tok, k, setupTarget, venueId) => {
+      const o = {};
+      const ag = await call('POST', '/api/agency/invites', { origin: SHARED_O, bearer: tok, body: { name: `T83 ${k} Ag`, email: `t83-${k}-ag-${ts}@test.local`, role: 'mashgiach', venueIds: [venueId], expectedVersion: await version() } });
+      assert(ag.status === 201 && /^\/invite#t=/.test(ag.json?.link || ''), `${k} agency invite: ${ag.status} ${J(ag.json && ag.json.error)}`);
+      o.agency = ag.json.linkOrigin;
+      const su = await call('POST', `/api/users/${setupTarget}/invite`, { origin: SHARED_O, bearer: tok, body: { expectedVersion: await version() } });
+      assert(su.status === 201 && /^\/invite#t=/.test(su.json?.link || ''), `${k} setup invite: ${su.status} ${J(su.json && su.json.error)}`);
+      o.setup = su.json.linkOrigin;
+      const pcA = await call('POST', '/api/pool/contacts', { origin: SHARED_O, bearer: tok, body: { name: `T83 ${k} Pool`, email: `t83-${k}-pool-${ts}@test.local`, expectedVersion: await version() } });
+      const pcR = pcA.json?.contact || {};
+      assert((pcA.status === 201 || pcA.status === 200) && pcR.id, `${k} pool contact: ${pcA.status} ${J(pcA.json && pcA.json.error)}`);
+      const pi = await call('POST', `/api/pool/contacts/${pcR.id}/invite`, { origin: SHARED_O, bearer: tok, body: { expectedUpdatedAt: pcR.updatedAt, expectedEmail: `t83-${k}-pool-${ts}@test.local`, expectedVersion: await version() } });
+      assert(pi.status === 201 && /^\/invite#t=/.test(pi.json?.link || ''), `${k} pool invite: ${pi.status} ${J(pi.json && pi.json.error)}`);
+      o.pool = pi.json.linkOrigin;
+      const vn = await call('POST', '/api/venues', { origin: SHARED_O, bearer: tok, body: { name: `T83 ${k} venue ${ts}`, ownerEmail: `t83-${k}-owner-${ts}@test.local`, ownerName: 'T83 Owner', operationId: `op-t83-${crypto.randomUUID()}` } });
+      assert(vn.status === 201 && /^\/invite#t=/.test(vn.json?.ownerInviteLink || ''), `${k} venue owner invite: ${vn.status} ${J(vn.json && vn.json.error)}`);
+      o.owner = vn.json.ownerInviteLinkOrigin;
+      return o;
+    };
     // ---- setup on the shared host (APP_SITES unset) ----
     const a = await register('a');
     const b = await register('b');
@@ -218,8 +238,12 @@ export default {
     const injL = await ctx.api('POST', '/api/__test__/inject-fixture', { users: [
       { id: legacyRow, email: legacyEmail, name: 'T83 Legacy', role: 'admin', agencyId: B, password: 'legacy-pass-83' },
       { id: legacy2Row, email: legacy2Email, name: 'T83 Legacy 2', role: 'admin', agencyId: A, password: 'legacy2-pass-83' },
+      { id: `usr-t83-setu-${ts}`, personId: `usr-t83-setu-${ts}`, email: `t83-setu-${ts}@test.local`, name: 'T83 Setup U', role: 'mashgiach', agencyId: A, venueId: vA, credentialOrigin: 'admin', password: 'setup-u-pass-83' },
+      { id: `usr-t83-sets-${ts}`, personId: `usr-t83-sets-${ts}`, email: `t83-sets-${ts}@test.local`, name: 'T83 Setup S', role: 'mashgiach', agencyId: A, venueId: vA, credentialOrigin: 'admin', password: 'setup-s-pass-83' },
     ] });
     assert(injL.status === 200, `legacy fixture: ${injL.status}`);
+    const oU = await inviteOrigins(la0.json.token, 'u', `usr-t83-setu-${ts}`, vA);
+    assert(oU.agency === null && oU.setup === null && oU.pool === null && oU.owner === null, `U APP_SITES unset: every invite route answers linkOrigin null: ${J(oU)}`);
 
     // ---- restart with APP_SITES ----
     const appSites = [`${SA}=${A}`, `${SM}=${MA}`, `dup.test:${port}=${A}`, `dup.test:${port}=${B}`, `ghost.test:${port}=agency-t83-missing`, `${SHARED}=${B}`, 'not an entry'].join(';');
@@ -440,6 +464,8 @@ export default {
       assert((pc.status === 201 || pc.status === 200) && pcId, `V pool contact: ${pc.status} ${J(pc.json && Object.keys(pc.json))}`);
       const pci = await call('POST', `/api/pool/contacts/${pcId}/invite`, { origin: SHARED_O, bearer: la2.json.token, body: { expectedUpdatedAt: pcRec.updatedAt, expectedEmail: `t83-pool-${ts}@test.local`, expectedVersion: await version() } });
       assert(pci.status === 201 && /^\/invite#t=/.test(pci.json?.link || '') && pci.json.linkOrigin === SA_O, `V pool invite: linkOrigin = site A: ${pci.status} ${J(pci.json && { o: pci.json.linkOrigin, err: pci.json.error })}`);
+      const oS = await inviteOrigins(la2.json.token, 's', `usr-t83-sets-${ts}`, vA);
+      assert(oS.agency === SA_O && oS.setup === SA_O && oS.pool === SA_O && oS.owner === SA_O, `V site agency A: every invite route answers linkOrigin = site A: ${J(oS)}`);
       // Existing person of another agency joins A on A's own address: a session for the A membership, no chooser.
       const invC = await call('POST', '/api/users', { origin: SHARED_O, bearer: la2.json.token, body: { name: 'T83 C', email: c.email, role: 'mashgiach', venueId: vA, expectedVersion: await version() } });
       const tokC = /#t=([A-Za-z0-9_-]+)/.exec(invC.json?.link || '')?.[1];
