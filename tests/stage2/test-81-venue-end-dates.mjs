@@ -429,7 +429,24 @@ export default {
       assert(nr.noHomeVenue === true && nr.venueId === '' && J(nr.venueAccess) === J([]) && nr.venueHistory?.[0]?.why === 'joined_pool', `accept -> noHomeVenue row ${J(nr)}`);
       const pl2 = await call(baseUrl, 'POST', '/api/auth/login', { 'Content-Type': 'application/json' }, { email: E('pinv'), password: PW });
       assert(pl2.status === 200 && J(pl2.json.user.myVenueIds) === J([]), `fresh email+password sign-in, empty scope ${pl2.status} ${pl2.text.slice(0, 160)}`);
-      details.push('G2 invite with venueIds [] accepts into a noHomeVenue row; fresh sign-in has an empty scope');
+      // the same person accepts an empty-venue invite from agency B with their EXISTING account (mode 'existing')
+      const inv3 = await inviteMember(baseUrl, auth(tAdminB), { email: E('pinv'), name: 'T81 Pool Invitee', role: 'mashgiach', venueId: VB });
+      assert(inv3.token, `agency B invite ${inv3.status} ${inv3.text.slice(0, 160)}`);
+      doc = await ctx.getDoc();
+      await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: doc.users, invites: (doc.invites || []).map((i) => (i.email === E('pinv') && i.agencyId === B ? { ...i, venueIds: [] } : i)) });
+      await reloadCommit();
+      x = await call(baseUrl, 'POST', '/api/invites/accept', { 'Content-Type': 'application/json', 'X-Forwarded-For': `10.81.${ts % 200}.9` }, { token: inv3.token, mode: 'existing', password: PW });
+      assert(x.status === 200, `existing-account accept ${x.status} ${x.text.slice(0, 200)}`);
+      const rowB = ((await ctx.getDoc()).users || []).find((u) => u.email === E('pinv') && u.agencyId === B);
+      const nrB = rowB && (await rec(rowB.id));
+      assert(nrB && nrB.noHomeVenue === true && nrB.venueId === '' && J(nrB.venueAccess) === J([]) && nrB.venueHistory?.[0]?.why === 'joined_pool', `existing-mode accept -> noHomeVenue row ${J(nrB)}`);
+      await ctx.restartServer();
+      await clock(T0);
+      await hook('grant-sweep', { disable: true });
+      const nrB2 = await rec(rowB.id);
+      assert(nrB2.noHomeVenue === true && nrB2.venueId === '' && J(nrB2.venueAccess) === J([]), `existing-mode noHome row survives a restart (no invented home) ${J(nrB2)}`);
+      await clock(null);
+      details.push('G2 invite with venueIds [] accepts into a noHomeVenue row (new AND existing account, through restart); fresh sign-in has an empty scope');
 
       // ===== I: 5.9 helper =====
       await clock(T0);

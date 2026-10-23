@@ -51,7 +51,11 @@ export function grantContainer(row: any): 'legacy' | 'ok' | 'malformed' {
 export function parseInstant(x: unknown): number | null {
   if (typeof x !== 'string' || !ISO_INSTANT.test(x)) return null;
   const ms = Date.parse(x);
-  return Number.isFinite(ms) ? ms : null;
+  if (!Number.isFinite(ms)) return null;
+  // Exact round trip (the writer only stores toISOString()): an impossible
+  // calendar instant (2027-02-30T...) that Date.parse would roll forward is
+  // malformed, and malformed denies.
+  return new Date(ms).toISOString() === x ? ms : null;
 }
 
 /** The grant state of one EXTRA venue of a row (never call it for the home). */
@@ -315,6 +319,11 @@ export function applyGrantOps(row: any, ops: readonly GrantOp[], ctx: GrantCtx):
   if (entryKeys.length) {
     fields.venueGrants = {};
     for (const k of kept) if (entries[k]) fields.venueGrants[k] = entries[k];
+  }
+  // The reader treats a container over MAX_GRANT_KEYS as malformed (every
+  // extra denied), so the writer never produces one.
+  if (fields.venueGrants && Object.keys(fields.venueGrants).length > MAX_GRANT_KEYS) {
+    return fail(400, 'TOO_MANY_VENUES', `A person can have at most ${MAX_GRANT_KEYS} extra venues.`);
   }
   const hist = [...newHist, ...(priorHistory(row) || [])].slice(0, HISTORY_CAP);
   if (hist.length) fields.venueHistory = hist;

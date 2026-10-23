@@ -21,7 +21,7 @@ const run = async function () {
   ok(grantStateFor(m({ venueGrants: { v2: { from: null } } }), 'v2').kind === 'undated', 'no until key = undated');
   ok(grantStateFor(m({ venueGrants: { v2: { until: null } } }), 'v2').kind === 'undated', 'until null = undated');
   ok(grantStateFor(m({ venueGrants: { v2: { until: U } } }), 'v2').kind === 'dated', 'valid until = dated');
-  for (const bad of ['2026-10-24', 'tomorrow', 12345, '2026-13-40T00:00:00Z', '']) ok(grantStateFor(m({ venueGrants: { v2: { until: bad } } }), 'v2').kind === 'denied', `until ${J(bad)} denied`);
+  for (const bad of ['2026-10-24', 'tomorrow', 12345, '2026-13-40T00:00:00Z', '', '2027-02-30T00:00:00.000Z', '2026-04-31T04:00:00.000Z', '2026-10-24T24:00:00.000Z']) ok(grantStateFor(m({ venueGrants: { v2: { until: bad } } }), 'v2').kind === 'denied', `until ${J(bad)} denied`);
   for (const bad of [null, 'x', [], 5]) ok(grantStateFor(m({ venueGrants: { v2: bad } }), 'v2').kind === 'denied', `entry ${J(bad)} denied`);
   ok(grantStateFor(m({ venueGrants: [] }), 'v2').kind === 'denied', 'malformed container denies');
   // ---- until is exclusive (boundary) ----
@@ -76,6 +76,16 @@ const run = async function () {
   ok(applyGrantOps(m({}), [{ op: 'remove', venueId: 'v1' }], ctx()).code === 'MAIN_VENUE_LOCKED', 'home locked (remove)');
   ok(applyGrantOps(m({}), [{ op: 'set_until', venueId: 'v1', until: null }], ctx()).code === 'MAIN_VENUE_LOCKED', 'home locked (set_until)');
   ok(applyGrantOps(m({}), [{ op: 'remove', venueId: 'v3' }], ctx()).code === 'NOT_TICKED', 'remove not ticked');
+  {
+    // the writer never produces a container the reader calls malformed (> 50 keys)
+    const many = Array.from({ length: 52 }, (_, i) => 'w' + i);
+    const cx = ctx({ agencyVenueIds: new Set(['v1', ...many]) });
+    let row = m({ venueAccess: ['v1'] });
+    for (let i = 0; i < 50; i++) { const rr = applyGrantOps(row, [{ op: 'add', venueId: many[i], until: null }], cx); ok(rr.ok, `add ${i}`); row = withGrantFields(row, rr.fields); }
+    ok(grantContainer(row) === 'ok' && Object.keys(row.venueGrants).length === 50, '50 extras is the most');
+    ok(applyGrantOps(row, [{ op: 'add', venueId: many[50], until: null }], cx).code === 'TOO_MANY_VENUES', '51st extra refused');
+    ok(applyGrantOps(row, [{ op: 'remove', venueId: many[0] }], cx).ok, 'a removal still works at the cap');
+  }
   ok(applyGrantOps(m({}), [{ op: 'add', venueId: 'vb', until: null }], ctx()).code === 'VENUE_NOT_IN_AGENCY', 'foreign venue');
   ok(applyGrantOps(m({}), [{ op: 'add', venueId: 'v3', until: '2026-10-01' }], ctx()).code === 'UNTIL_IN_PAST', 'past');
   ok(applyGrantOps(m({}), [{ op: 'add', venueId: 'v3', until: '2026-10-30' }], ctx({ datedFrozen: true })).code === 'DATED_GRANTS_FROZEN', 'frozen refuses dates');
@@ -126,6 +136,14 @@ const run = async function () {
   let out = enforceIdentityFields(prev, [{ ...prev[0], venueGrants: { v2: { until: null } }, venueRev: 9, noHomeVenue: true }], ag, {});
   ok(out[0].venueGrants.v2.until === U && out[0].venueRev === 2 && out[0].noHomeVenue === undefined, 'a mutator cannot write grant fields');
   const gf = applyGrantOps(prev[0], [{ op: 'set_until', venueId: 'v2', until: null }], ctx()).fields;
+  {
+    // a new membership row for an existing person (invite accept, mode 'existing') takes grantSetById too
+    const ex = { id: 'old', email: 'e@x.com', personId: 'pp', role: 'mashgiach', agencyId: 'B', venueId: 'vb' };
+    const nw = { id: 'nw', email: 'e@x.com', role: 'mashgiach', agencyId: 'A', venueId: '' };
+    const pg = { venueId: '', noHomeVenue: true, venueAccess: [], venueRev: 1, venueHistory: [{ venueId: '', from: 'x', to: 'x', why: 'joined_pool', by: null }] };
+    const o2 = enforceIdentityFields([ex], [ex, nw], [{ id: 'A' }, { id: 'B' }], { newMembership: new Map([['nw', 'pp']]), grantSetById: new Map([['nw', pg]]) }).find((x) => x.id === 'nw');
+    ok(o2 && o2.personId === 'pp' && o2.noHomeVenue === true && o2.venueRev === 1 && o2.venueHistory[0].why === 'joined_pool', `new membership row takes grantSetById ${J(o2)}`);
+  }
   out = enforceIdentityFields(prev, [prev[0]], ag, { grantSetById: new Map([['u1', gf]]) });
   ok(out[0].venueGrants.v2.until === null && out[0].venueRev === 3, 'grantSetById writes');
   out = enforceIdentityFields(prev, [{ ...prev[0], venueId: 'v3' }], ag, { nowMs: T0 });

@@ -9497,7 +9497,6 @@ app.post('/api/invites/accept', async (req, res) => {
           result: { kind: 'new', rowId: newRowId },
           credentialOriginSetById: { [newRowId]: 'invite-new' as const },
           ...(venueAccessSetById ? { venueAccessSetById } : {}),
-        ...(grantSetById ? { grantSetById } : {}),
           ...(grantSetById ? { grantSetById } : {}),
         };
       }
@@ -9537,6 +9536,7 @@ app.post('/api/invites/accept', async (req, res) => {
         newMembership: { [newRowId]: pid },
         ...(firstMulti ? { firstMultiOwnerIds: [String(cred.id)], tokenEpochBumpIds: bumpIds } : {}),
         ...(venueAccessSetById ? { venueAccessSetById } : {}),
+        ...(grantSetById ? { grantSetById } : {}),
       };
     },
     { label: 'invite-accept' }
