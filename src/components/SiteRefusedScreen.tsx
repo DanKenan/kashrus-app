@@ -17,6 +17,41 @@ export function SiteBrand({ agency, size = 'lg' }: { agency: SiteAgency; size?: 
   return <p data-site-name className={`${size === 'lg' ? 'text-3xl sm:text-4xl' : 'text-2xl'} font-black tracking-tight text-ink break-words leading-tight`}>{name}</p>;
 }
 
+/** The site agency's logo as shown (null = none, not loaded yet, or it failed to draw). */
+export function useSiteBrandLogo(agency: SiteAgency | null | undefined): { logo: string | null; onLogoError: () => void } {
+  const src = useSiteLogo(agency?.logoRev ?? null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const logo = agency && src && failed !== src ? src : null;
+  return { logo, onLogoError: () => setFailed(logo) };
+}
+
+/**
+ * The top of the invite page on an agency's own address: its logo, or, with
+ * no logo, its name in large text; then the small "Powered by Shutfey".
+ */
+export function SiteInviteHeader({ agency, logo, onLogoError }: { agency: SiteAgency; logo: string | null; onLogoError: () => void }) {
+  const name = siteDisplayName(agency);
+  return (
+    <div data-site-brand className="text-center mb-5">
+      {logo ? (
+        <div className="flex justify-center mb-2">
+          <img data-site-logo src={logo} alt={name} onError={onLogoError} className="max-h-28 max-w-[85%] w-auto object-contain mx-auto" />
+        </div>
+      ) : (
+        <p data-site-name className="text-3xl sm:text-4xl font-black tracking-tight text-ink break-words leading-tight">{name}</p>
+      )}
+      <div className="mt-1"><PoweredByShutfey /></div>
+    </div>
+  );
+}
+
+/** True when the invite's agency is the site agency (so its name is already shown large above). */
+export function inviteAgencyIsSite(inviteAgencyName: string | null | undefined, agency: SiteAgency): boolean {
+  const n = (x: string | null | undefined) => (x || '').trim().toLowerCase();
+  const a = n(inviteAgencyName);
+  return !!a && (a === n(agency.name) || a === n(agency.brandName));
+}
+
 /**
  * The top of the agency's own sign-in page: its logo + "<name> sign-in", or,
  * with no logo, the name in large text + "Sign in" (the name is not said twice).

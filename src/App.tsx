@@ -1799,8 +1799,9 @@ export default function App() {
     );
   }
   // On an address that is not a Cloud Run or local one, the signed-out screens
-  // wait (briefly) for /api/site so a person never sees the wrong brand.
-  if (!site && !currentUser) {
+  // wait (briefly) for /api/site so a person never sees the wrong brand (the
+  // invite page too, signed in or not).
+  if (!site && (!currentUser || (invitePage && !isKiosk))) {
     return <div data-site-loading className="min-h-screen bg-paper" />;
   }
 
@@ -1820,6 +1821,7 @@ export default function App() {
         }}
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode(!darkMode)}
+        site={siteAgency}
       />
     );
   }
