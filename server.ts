@@ -4339,6 +4339,9 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, outcome: any, la
     resetLinksAfter,
     onViolation: (rowId, field) =>
       log.warn(`[identity] reverted a mutator change to server-only field ${field} on user ${rowId}`),
+    // 12a-s (4.5): a closure written here (home change / promotion) may use the
+    // history-shedding fallback at the size guard (it only removes access).
+    onGrantClose: () => { if (outcome && typeof outcome === 'object') outcome.grantBudgetFallback = true; },
     onOriginChange: (rowId, from, to) =>
       log.info(`[identity] credentialOrigin user ${rowId}: ${from ?? 'none'} -> ${to ?? 'none'} (cause ${label})`),
   });
@@ -4580,14 +4583,33 @@ async function commitState(
           newDoc.idempotencyRecords = pruneIdempotencyRecords(existingRecords);
         }
         // Firestore rejects `undefined` with a synchronous throw — strip via JSON round-trip.
-        const payload = JSON.parse(JSON.stringify(newDoc));
+        let payload = JSON.parse(JSON.stringify(newDoc));
         // Document-size guard: Firestore hard limit is 1 MiB. We refuse at
         // 900 KiB to leave headroom for the _v/savedAt fields and to fail
         // with a clear error instead of a cryptic Firestore rejection.
         // Until Stage 3 (per-collection docs), photo/voice base64 is the main
         // size risk — see TEST_RESULTS.md for the analysis.
         const SIZE_LIMIT_BYTES = 900 * 1024;
-        const payloadSize = JSON.stringify(payload).length;
+        let payloadSize = JSON.stringify(payload).length;
+        // 12a-s (4.5): a commit that only REMOVES venue access (venue-ops or
+        // venues-PUT reductions, the sweep, venue deletion, the 5.9 helper, an
+        // identity closure) must not fail at the guard on its own history: as
+        // a last step the final payload (idempotency record included) sheds
+        // every user's venueHistory (audit detail; the log line keeps the
+        // record). Any other commit is untouched.
+        if (payloadSize > SIZE_LIMIT_BYTES && (outcome as any).grantBudgetFallback === true && Array.isArray(outcome.doc?.users)) {
+          const shed = (outcome.doc.users as any[]).map((u: any) => {
+            if (!u || !Array.isArray(u.venueHistory)) return u;
+            const { venueHistory: _h, ...rest } = u;
+            return rest;
+          });
+          outcome.doc = { ...outcome.doc, users: shed };
+          newDoc.users = shed;
+          payload = JSON.parse(JSON.stringify(newDoc));
+          const before = payloadSize;
+          payloadSize = JSON.stringify(payload).length;
+          log.warn(`[grants] ${label} at the size guard: venueHistory shed (${before} -> ${payloadSize})`);
+        }
         if (payloadSize > SIZE_LIMIT_BYTES) {
           throw new DocumentTooLargeError(payloadSize, SIZE_LIMIT_BYTES);
         }
@@ -11610,6 +11632,7 @@ app.delete('/api/venues/:id', async (req, res) => {
       // 4.5: closing grants into history must never block the deletion at the guard.
       if (Object.keys(grantSetById).length) {
         const fit = fitGrantBudget(out.doc, grantSetById);
+        out.grantBudgetFallback = true;
         if (fit.trimmed !== 'none') {
           out.grantSetById = fit.gset;
           log.warn(`[grants] venue delete ${id} near the size guard: history dropped (${fit.trimmed})`);
@@ -14334,7 +14357,7 @@ async function runGrantSweep(source: string): Promise<{ committed: boolean; rows
         doc = { ...freshDoc, users: (freshDoc.users as any[]).map((u: any) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)) };
         log.warn('[grants] sweep near the size guard: committed without history entries');
       }
-      return { doc, grantSetById, result: { rows: cands.length, agencies: Array.from(new Set(cands.map((c) => c.agencyId))) } };
+      return { doc, grantSetById, result: { rows: cands.length, agencies: Array.from(new Set(cands.map((c) => c.agencyId))) }, grantBudgetFallback: true };
     }, { label: 'grant-sweep' });
     const r: any = res.result || {};
     if (r.rows) {
@@ -14463,7 +14486,7 @@ app.post('/api/users/:id/venue-ops', async (req, res) => {
         outDoc = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
         log.warn(`[grants] venue-ops on ${id} near the size guard: committed without history`);
       }
-      return { doc: outDoc, grantSetById: { [id]: fields }, result: { userId: id, closed: r.closed.length } };
+      return { doc: outDoc, grantSetById: { [id]: fields }, result: { userId: id, closed: r.closed.length }, ...(r.growth ? {} : { grantBudgetFallback: true }) };
     },
     { label: 'venue-ops', requireVersion: true }
   );
@@ -14530,7 +14553,7 @@ app.post('/api/platform/venue-grants/end-dated', async (req, res) => {
       const fit = fitGrantBudget(doc, grantSetById);
       if (fit.trimmed !== 'none') log.warn(`[grants] end-dated near the size guard: history dropped (${fit.trimmed})`);
       const outDoc = { ...doc, users: freshUsers.map((u) => (u && fit.gset[u.id] ? withGrantFields(u, fit.gset[u.id]) : u)) };
-      return { doc: outDoc, grantSetById: fit.gset, result: { ended, revoked } };
+      return { doc: outDoc, grantSetById: fit.gset, result: { ended, revoked }, grantBudgetFallback: true };
     },
     { label: 'venue-grants-end-dated', requireVersion: false }
   );
@@ -14703,6 +14726,7 @@ app.put('/api/users/:id/venues', async (req, res) => {
       return {
         doc: outDoc,
         grantSetById: { [id]: fields },
+        ...(r.growth ? {} : { grantBudgetFallback: true }),
         result: { userId: id, before, home: target.venueId || null, list },
       };
     },

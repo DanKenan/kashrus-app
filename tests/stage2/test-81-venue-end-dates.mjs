@@ -474,6 +474,8 @@ export default {
       // a row with grant state whose extra has no entry and no history: removing it GROWS the row (history entry)
       doc = await ctx.getDoc();
       await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: [...doc.users, { id: U('tight'), email: E('tight'), name: 'T81 Tight', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 }, { id: U('tight2'), email: E('tight2'), name: 'T81 Tight 2', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight2'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 },
+        { id: U('hist'), email: E('hist'), name: 'T81 Hist', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('hist'), venueAccess: [V1], venueGrants: {}, venueRev: 1 },
+        ...[3, 4].map((k) => ({ id: U('tight' + k), email: E('tight' + k), name: 'T81 Tight ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight' + k), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 })),
         ...[1, 2, 3].map((k) => ({ id: U('vd' + k), email: E('vd' + k), name: 'T81 VD ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('vd' + k), venueAccess: [V1, V5], venueGrants: {}, venueRev: 1 })),
         ...[1, 2, 3, 4, 5, 6].map((k) => ({ id: U('hd' + k), email: E('hd' + k), name: 'T81 HD ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('hd' + k), venueAccess: [V1, V2], venueGrants: { [V2]: { until: '2026-10-30T04:00:00.000Z' } }, venueRev: 1 }))] });
       await reloadCommit();
@@ -499,34 +501,48 @@ export default {
         const d0 = await ctx.getDoc();
         const b0 = d0.agencies.find((a) => a.id === bloatId);
         const len = JSON.stringify(d0).length - b0.notes.length;
-        await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: d0.users, agencies: d0.agencies.map((a) => (a.id === bloatId ? { ...a, notes: 'x'.repeat(Math.max(0, targetChars - len)) } : a)) });
+        // a row with full venue history (shed by the size-guard fallback when a removal needs room); replenished each time
+        const hist = Array.from({ length: 10 }, (_, i) => ({ venueId: V3, from: T0, to: T0, why: 'unticked', by: U('adminA') + '-' + i }));
+        const users1 = d0.users.map((u) => (u.id === U('hist') ? { ...u, venueHistory: hist } : u));
+        const histDelta = JSON.stringify(users1).length - JSON.stringify(d0.users).length;
+        await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: users1, agencies: d0.agencies.map((a) => (a.id === bloatId ? { ...a, notes: 'x'.repeat(Math.max(0, targetChars - len - histDelta)) } : a)) });
         await reloadCommit();
         return JSON.stringify(await ctx.getDoc()).length;
       };
       let sz = await setBloat(900 * 1024 - 2000);
       const reloadCost = sz - (900 * 1024 - 2000);
-      sz = await setBloat(900 * 1024 - 20 - reloadCost * 1 - 0);
+      sz = await setBloat(900 * 1024 - 300 - reloadCost);
       // (the second reload adds another row of the same size)
-      assert(sz <= 900 * 1024 && sz > 900 * 1024 - 200, `document just under the hard guard (${900 * 1024 - sz} chars below)`);
-      x = await putV(tAdmin, U('tight'), { venueIds: [V1], expectedVenueIds: [V1, V3] });
+      assert(sz <= 900 * 1024 - 250 && sz > 900 * 1024 - 400, `document just under the hard guard (${900 * 1024 - sz} chars below)`);
+      x = await putV(tAdmin, U('tight'), { venueIds: [V1], expectedVenueIds: [V1, V3], operationId: `t81-k-put-${ts}` });
       assert(x.status === 200, `legacy PUT reduction just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
       const tr = await rec(U('tight'));
       assert(J(tr.venueAccess) === J([V1]) && tr.venueRev === 2, `reduction applied (history dropped to fit) ${J(tr)}`);
-      await setBloat(900 * 1024 - 20 - reloadCost);
-      x = await ops(tAdmin, U('tight2'), [{ op: 'remove', venueId: V3 }], 1);
+      await setBloat(900 * 1024 - 300 - reloadCost);
+      x = await call(baseUrl, 'POST', `/api/users/${U('tight2')}/venue-ops`, auth(tAdmin), { ops: [{ op: 'remove', venueId: V3 }], expectedVenueRev: 1, expectedVersion: await ctx.getVersion(), operationId: `t81-k-ops-${ts}` });
       assert(x.status === 200, `venue-ops reduction just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
       assert(J((await rec(U('tight2'))).venueAccess) === J([V1]), 'venue-ops reduction applied');
       // venue deletion closing grants on several rows (each grows by a history entry) must not fail at the guard
-      await setBloat(900 * 1024 - 20 - reloadCost);
-      x = await call(baseUrl, 'DELETE', `/api/venues/${V5}`, auth(tAdmin), { expectedVersion: await ctx.getVersion() });
+      await setBloat(900 * 1024 - 300 - reloadCost);
+      x = await call(baseUrl, 'DELETE', `/api/venues/${V5}`, auth(tAdmin), { expectedVersion: await ctx.getVersion(), operationId: `t81-k-del-${ts}` });
       assert(x.status === 200, `venue deletion just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
       for (const k of [1, 2, 3]) assert(J((await rec(U('vd' + k))).venueAccess) === J([V1]), `vd${k} closed`);
       // the 5.9 rollback helper just under the guard: ends every dated grant, sets the freeze
-      await setBloat(900 * 1024 - 20 - reloadCost);
-      x = await ctx.api('POST', '/api/platform/venue-grants/end-dated', {});
+      await setBloat(900 * 1024 - 300 - reloadCost);
+      x = await ctx.api('POST', '/api/platform/venue-grants/end-dated', { operationId: `t81-k-helper-${ts}` });
       assert(x.status === 200 && x.json.remainingDated === 0 && x.json.datedGrantsFrozen === true && x.json.ended >= 6, `helper just under the hard guard ${x.status} ${J(x.json)}`);
       for (const k of [1, 2, 3, 4, 5, 6]) assert(J((await rec(U('hd' + k))).venueAccess) === J([V1]), `hd${k} ended`);
       await hook('grant-sweep', { unfreeze: true });
+      // shortening an undated grant (undated -> dated adds metadata) just under the guard commits
+      await setBloat(900 * 1024 - 300 - reloadCost);
+      x = await call(baseUrl, 'POST', `/api/users/${U('tight3')}/venue-ops`, auth(tAdmin), { ops: [{ op: 'set_until', venueId: V3, until: '2026-10-30' }], expectedVenueRev: 1, expectedVersion: await ctx.getVersion(), operationId: `t81-k-short-${ts}` });
+      assert(x.status === 200 && x.json.venueUntil?.[V3] === '2026-10-31T04:00:00.000Z', `shortening just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
+      // a home reassignment through today's user edit (identity closes the extras) just under the guard commits
+      await setBloat(900 * 1024 - 300 - reloadCost);
+      x = await call(baseUrl, 'PUT', `/api/users/${U('tight4')}`, auth(tAdmin), { venueId: V2, expectedVersion: await ctx.getVersion(), operationId: `t81-k-home-${ts}` });
+      assert(x.status === 200, `home reassignment just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
+      const t4 = await rec(U('tight4'));
+      assert(t4.venueId === V2 && !(t4.venueAccess || []).includes(V3), `home moved, extras closed ${J(t4)}`);
       doc = await ctx.getDoc();
       await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: doc.users, agencies: doc.agencies.filter((a) => a.id !== bloatId) });
       await reloadCommit();

@@ -246,6 +246,8 @@ export interface IdentityEnforceOptions {
    * is reverted, and the caller logs it, so it is never silent.
    */
   onViolation?: (rowId: string, field: string) => void;
+  /** 12a-s: a grant closure happened during enforcement (history written). */
+  onGrantClose?: (rowId: string) => void;
   /** 10b: every credentialOrigin change (row id, old, new; never a value). */
   onOriginChange?: (rowId: string, from: string | null, to: string | null) => void;
 }
@@ -602,6 +604,7 @@ export function enforceIdentityFields(
         // The home changed (or promotion to admin): every extra was reset;
         // close them into history, clear the marker, venueRev + 1.
         const c = closeAllExtras(prev, out.venueId, 'unticked', opts.nowMs ?? Date.now());
+        if (opts.onGrantClose) opts.onGrantClose(row.id);
         delete out.venueGrants;
         delete out.noHomeVenue;
         setKey('venueHistory', c.venueHistory);
