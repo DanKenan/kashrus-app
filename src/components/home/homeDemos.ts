@@ -3,7 +3,7 @@
  * query runs inside `root`; the returned function stops every loop, observer,
  * listener and timer, so nothing keeps running once the page is gone.
  */
-type Api = {
+export type Api = {
   q: (s: string) => HTMLElement | null;
   w: (ms: number) => Promise<void>;
   add: (c: string) => void;
@@ -16,7 +16,7 @@ type Api = {
   type: (s: string, speed?: number) => Promise<void>;
   fill: (s: string) => void;
 };
-type Script = [(a: Api) => Promise<void>, (a: Api) => void];
+export type Script = [(a: Api) => Promise<void>, (a: Api) => void];
 
 class Cancel {}
 
@@ -24,7 +24,12 @@ class Cancel {}
 // StrictMode runs effects twice) begins from the original, not a played state.
 const pristine = new WeakMap<HTMLElement, { html: string; base: string }>();
 
-export function runHomeDemos(root: HTMLElement, reduce: boolean): () => void {
+/**
+ * `scripts` (optional): another page's demo table (the agency welcome page);
+ * by default the home page's own. Everything else (reveals, top bar, loops,
+ * cleanup) is shared.
+ */
+export function runHomeDemos(root: HTMLElement, reduce: boolean, scripts?: Record<string, Script>): () => void {
   let dead = false;
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const later = (fn: () => void, ms: number) => {
@@ -164,7 +169,7 @@ export function runHomeDemos(root: HTMLElement, reduce: boolean): () => void {
     }
   };
 
-  const S: Record<string, Script> = {
+  const S: Record<string, Script> = scripts ?? {
     hero: [async (a) => {
       await a.w(900); a.on('.p-new'); await a.w(2300); a.off('.p-new'); await a.w(300); a.add('s-new');
       await a.w(1300); await a.tap('.tk-tap .tgt'); a.add('s-done'); a.hide();

@@ -1,0 +1,132 @@
+/* Agency welcome page (agency own addresses): the approved preview's additions on top of the home page styles (home.css).
+   Every selector is scoped under .shf-welc. Lazy: loaded only with AgencyWelcome. */
+.shf-welc .top-seal{width:34px;height:34px}
+.shf-welc .w-brand{font-family:var(--serif);font-weight:600;font-size:19px}
+.shf-welc .hero-seal{display:flex;justify-content:center;margin-bottom:14px}
+.shf-welc .big-seal{width:92px;height:92px;filter:drop-shadow(0 6px 24px rgba(224,166,75,.35))}
+.shf-welc .powered{display:flex;align-items:center;justify-content:center;gap:8px;margin:22px 0 0;font-size:14px;color:rgba(255,255,255,.6);font-weight:600}
+.shf-welc .powered .mark{width:24px;height:18px;color:var(--gold)}
+.shf-welc .w-hero .btn.lg{padding:18px 34px}
+.shf-welc .hero-sign .phone{animation:shf-welc-floaty 6s ease-in-out infinite}
+@keyframes shf-welc-floaty{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+.shf-welc .w-login .lg-form{padding:7cqw 7cqw}
+.shf-welc .site-h{display:flex;flex-direction:column;align-items:center;text-align:center;margin:3cqw 0 6cqw}
+.shf-welc .lg-seal{width:19cqw;height:19cqw;color:#b8772b}
+.shf-welc .site-h b{font-family:var(--serif);font-weight:600;font-size:1.45em;margin-top:2.4cqw;line-height:1.1}
+.shf-welc .site-h small{margin-top:1cqw;font-size:.85em}
+.shf-welc .w-login .fl{margin-bottom:3cqw}
+.shf-welc .w-login .inp{min-height:10.5cqw;display:flex;align-items:center}
+.shf-welc .inp .ph{font-style:normal;color:#a89a8a}
+.shf-welc .w-login .pbtn{margin-top:2cqw;font-size:.9em}
+.shf-welc .orl{display:flex;align-items:center;gap:2.4cqw;margin:3.4cqw 0 0;font-size:.75em;color:#9a8b7b}
+.shf-welc .orl::before,.shf-welc .orl::after{content:"";flex:1;height:1px;background:#e2d6c4}
+.shf-welc .w-login .qbtn{margin-top:3cqw}
+.shf-welc .how-intro{padding:64px 22px 40px;text-align:center;background:var(--cream)}
+.shf-welc .how-intro h2{margin:0 0 10px}
+.shf-welc .how-intro>p:not(.eyebrow){margin:0 auto;max-width:30em;font-size:18px;color:#4d4036}
+.shf-welc .mini-steps{list-style:none;padding:0;margin:24px auto 0;display:flex;flex-wrap:wrap;gap:8px;justify-content:center;max-width:640px;counter-reset:m}
+.shf-welc .mini-steps li{counter-increment:m}
+.shf-welc .mini-steps a{display:inline-flex;align-items:center;gap:7px;text-decoration:none;font-weight:700;font-size:14.5px;background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:8px 14px 8px 8px}
+.shf-welc .mini-steps a::before{content:counter(m);display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#f5e6cc;color:var(--gold2);font-size:13px}
+.shf-welc .txt .sub{margin-top:12px}
+.shf-welc .txt .tip{margin-top:14px;font-size:15.5px;background:#f5ecdc;border-left:3px solid var(--gold);padding:10px 14px;border-radius:0 12px 12px 0;color:#4d4036}
+.shf-welc .txt b{color:var(--ink)}
+.shf-welc .one-demo,.shf-welc .install-demo{display:flex;flex-direction:column;align-items:center;gap:16px}
+.shf-welc .board-demo .tk{opacity:0;transform:translateY(14px)}
+.shf-welc .board-demo.bi1 .b1,.shf-welc .board-demo.bi2 .b2,.shf-welc .board-demo.bi3 .b3,.shf-welc .board-demo.bi4 .b4{opacity:1;transform:none}
+.shf-welc .board-demo.hl .b2{border-color:#e0a64b;box-shadow:0 0 0 2.5px rgba(224,166,75,.55)}
+.shf-welc .sign-demo .rn .r2{display:none}
+.shf-welc .sign-demo.s-done .rn .r0{display:none}
+.shf-welc .sign-demo.s-done .rn .r2{display:inline}
+.shf-welc .sign-demo.s-done .ring{--p:.66!important}
+.shf-welc .cap .c1{white-space:nowrap}
+@media(max-width:400px){.shf-welc .cap span{font-size:13px}}
+.shf-welc .app.safari{padding:0;background:#fff}
+.shf-welc .sf-page{position:absolute;inset:0 0 22cqw;padding:6cqw 9cqw;background:#f8f4ed}
+.shf-welc .skf{height:10cqw;border-radius:2.4cqw;background:#fff;border:1.5px solid #e2d6c4;margin-bottom:3cqw}
+.shf-welc .skb{height:10cqw;border-radius:2.6cqw;background:linear-gradient(180deg,#e7ad55,#c9862f);margin-top:4cqw}
+.shf-welc .sf-bar{position:absolute;left:0;right:0;bottom:0;height:22cqw;background:rgba(246,244,241,.97);border-top:1px solid #e5e0d8;padding:2.2cqw 4cqw 0}
+.shf-welc .sf-url{display:block;text-align:center;font-size:.72em;font-weight:600;background:#e9e6e1;border-radius:2.4cqw;padding:1.8cqw;color:#3b342d}
+.shf-welc .sf-tools{display:flex;justify-content:space-around;align-items:center;margin-top:2.2cqw;color:#2f7cf6;font-size:1.05em}
+.shf-welc .sf-tools i{font-style:normal}
+.shf-welc .sf-share{display:grid;place-items:center;width:8cqw;height:8cqw;border-radius:2cqw;transition:transform .15s,background .2s}
+.shf-welc .shi{display:inline-block;width:5.4cqw;height:5.4cqw;background:#2f7cf6;-webkit-mask:var(--sm) center/contain no-repeat;mask:var(--sm) center/contain no-repeat;--sm:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v12M7.5 7.5 12 3l4.5 4.5M8 10H6a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1h-2'/%3E%3C/svg%3E")}
+.shf-welc .shi.inl{width:17px;height:17px;vertical-align:-3px;background:var(--gold2)}
+.shf-welc .sf-share.press,.shf-welc .a2hs.press,.shf-welc .addb.press{transform:scale(.92);background:rgba(47,124,246,.12)}
+.shf-welc .sheet{position:absolute;inset:0;z-index:4;background:rgba(0,0,0,.28);display:flex;align-items:flex-end;opacity:0;pointer-events:none;transition:opacity .35s}
+.shf-welc .sh-card,.shf-welc .add-card{width:100%;background:#f2f1ef;border-radius:5cqw 5cqw 0 0;padding:4cqw;transform:translateY(100%);transition:transform .5s var(--ease)}
+.shf-welc .i-share .sh-share,.shf-welc .i-add .sh-add{opacity:1}
+.shf-welc .i-share .sh-share .sh-card,.shf-welc .i-add .sh-add .add-card{transform:none}
+.shf-welc .sh-app{display:flex;align-items:center;gap:3cqw;background:#fff;border-radius:3cqw;padding:2.6cqw;margin-bottom:3cqw}
+.shf-welc .sh-app img,.shf-welc .add-row img{width:11cqw;height:11cqw;border-radius:2.6cqw}
+.shf-welc .sh-app b,.shf-welc .add-row b{display:block;font-size:.9em}
+.shf-welc .sh-app small,.shf-welc .add-row small{font-size:.7em}
+.shf-welc .sh-list{background:#fff;border-radius:3cqw;overflow:hidden}
+.shf-welc .sh-list span{display:flex;justify-content:space-between;align-items:center;padding:2.5cqw 3.4cqw;font-size:.82em;border-bottom:1px solid #eeeae4;transition:background .2s}
+.shf-welc .sh-list span:last-child{border-bottom:0}
+.shf-welc .sh-list .a2hs{font-weight:700}
+.shf-welc .sh-list .a2hs i{font-style:normal;color:#555}
+.shf-welc .add-card{border-radius:5cqw 5cqw 0 0;padding-bottom:20cqw}
+.shf-welc .add-top{display:flex;justify-content:space-between;align-items:center;font-size:.82em;margin-bottom:4cqw}
+.shf-welc .add-top span{color:#2f7cf6}
+.shf-welc .add-top .addb{font-weight:800;padding:1cqw 2cqw;border-radius:2cqw}
+.shf-welc .add-row{display:flex;align-items:center;gap:3cqw;background:#fff;border-radius:3cqw;padding:3cqw}
+.shf-welc .home{position:absolute;inset:0;z-index:6;background:linear-gradient(160deg,#5b4636,#2b1f16 55%,#7a5a3c);opacity:0;transition:opacity .5s;padding:8cqw 6cqw}
+.shf-welc .i-home .home{opacity:1}
+.shf-welc .hgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6cqw 4.5cqw}
+.shf-welc .ha{display:flex;flex-direction:column;align-items:center;gap:1.4cqw}
+.shf-welc .ha i{width:14cqw;height:14cqw;border-radius:3.4cqw;background:rgba(255,255,255,.22)}
+.shf-welc .ha small{width:9cqw;height:1.6cqw;border-radius:1cqw;background:rgba(255,255,255,.3)}
+.shf-welc .ha.anew img{width:14cqw;height:14cqw;border-radius:3.4cqw;box-shadow:0 4px 14px rgba(0,0,0,.35)}
+.shf-welc .ha.anew small{width:auto;height:auto;background:none;color:#fff;font-size:.62em;font-weight:600}
+.shf-welc .ha.anew{transform:scale(0);transition:transform .55s cubic-bezier(.3,1.6,.5,1)}
+.shf-welc .i-pop .ha.anew{transform:none}
+.shf-welc .os-cards{display:grid;gap:10px;margin-top:4px}
+.shf-welc .os{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:14px 16px}
+.shf-welc .os>b{display:block;font-size:16px;margin-bottom:4px}
+.shf-welc .os ol{margin:0;padding-left:20px;font-size:15.5px;color:#4d4036;display:grid;gap:3px}
+@media(min-width:760px){.shf-welc .os-cards{grid-template-columns:1fr 1fr}}
+.shf-welc .kiosk-demo.k-done .toast{transform:translate(-50%,150%);opacity:0}
+.shf-welc .kiosk-demo.k-done2 .toast{transform:translate(-50%,0);opacity:1}
+.shf-welc .kiosk-demo .rn .r2{display:none}
+.shf-welc .kiosk-demo.k-done2 .rn .r1{display:none}
+.shf-welc .kiosk-demo.k-done2 .rn .r2{display:inline}
+.shf-welc .kiosk-demo.k-done2 .ring.big{--p:1!important}
+.shf-welc .k-done2 .kr-tap2{background:#f3faf5;border-color:#9fd3b2}
+.shf-welc .k-done2 .kr-tap2 .md{display:none}
+.shf-welc .k-done2 .kr-tap2 .mdone{display:block}
+.shf-welc .ktop .end.press{transform:scale(.94);background:#5a4535}
+.shf-welc .help-seal{width:72px;height:72px;margin-bottom:14px}
+.shf-welc .help .btn.ghost{background:rgba(255,255,255,.08);color:#fff}
+.shf-welc .signin-again{margin-top:26px}
+.shf-welc .foot .brand.small{font-family:var(--serif);font-weight:600;color:rgba(255,255,255,.8)}
+.shf-welc .foot-seal{width:24px;height:24px}
+.shf-welc .pw2{display:flex;align-items:center;gap:7px}
+.shf-welc .pw2 .mark{width:20px;height:15px;color:var(--gold)}
+@media (prefers-reduced-motion:reduce){.shf-welc .hero-sign .phone{animation:none}}
+@media(min-width:900px){.shf-welc .w-hero .hero-seal,.shf-welc .w-hero .powered{justify-content:flex-start}}
+@media(max-width:759px){.shf-welc .topnav a:not(.pill){display:none!important}}
+.shf-welc .w-brand span,.shf-welc .topnav .pill{white-space:nowrap}
+@media(max-width:380px){.shf-welc .w-brand{font-size:17px}}
+.shf-welc .three span b{display:inline;font-size:inherit;color:var(--ink)}
+.shf-welc .help .fine{line-height:1.8}
+.shf-welc .phone .scr .sh-app img,.shf-welc .phone .scr .add-row img{width:11cqw;height:11cqw;flex:none;object-fit:cover}
+.shf-welc .phone .scr .ha.anew img{width:14cqw;height:14cqw;flex:none}
+.shf-welc .site-h b{font-family:var(--sans);font-weight:900;font-size:1.15em;letter-spacing:-.01em}
+
+/* Agency logo slots: the logo is a CSS background (--w-logo, a validated data: URL set by AgencyWelcome),
+   so the demos' markup resets never drop it. No logo = the slots are not shown. */
+.shf-welc .w-logo{display:none;flex:none;background:var(--w-logo) center/contain no-repeat;aspect-ratio:var(--w-logo-ar,1)}
+.shf-welc.w-has-logo .w-logo{display:inline-block}
+.shf-welc .top-seal{height:34px;width:auto;max-width:120px}
+.shf-welc .big-seal{height:92px;width:auto;max-width:260px}
+.shf-welc .lg-seal{height:19cqw;width:auto;max-width:60cqw}
+.shf-welc .help-seal{height:72px;width:auto;max-width:220px}
+.shf-welc .foot-seal{height:24px;width:auto;max-width:90px}
+.shf-welc .hero-seal{min-height:0}
+.shf-welc:not(.w-has-logo) .hero-seal{display:none}
+.shf-welc span[data-w-name],.shf-welc span[data-w-short],.shf-welc span[data-w-host]{display:inline;font-size:inherit;color:inherit;margin:0;font-weight:inherit}
+.shf-welc .w-brand{display:inline-flex;align-items:center;gap:8px;min-width:0;text-decoration:none}
+.shf-welc .w-brand span[data-w-name]{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:min(52vw,420px)}
+.shf-welc .hero h1,.shf-welc .eyebrow,.shf-welc .site-h b{overflow-wrap:anywhere}
+.shf-welc [hidden]{display:none!important}

@@ -234,16 +234,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-paper text-ink flex flex-col justify-between transition-colors relative overflow-hidden">
+    <div className="shf-signin min-h-screen text-ink flex flex-col justify-between transition-colors relative overflow-hidden">
       
       {/* Subtle Background Ambience */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[350px] bg-gold/10 blur-3xl pointer-events-none rounded-full" />
-      <div className="absolute bottom-0 right-0 w-[400px] h-[300px] bg-emerald-500/10 blur-2xl pointer-events-none rounded-full" />
+      <div className="shf-signin-glow-a absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[350px] blur-3xl pointer-events-none rounded-full" />
+      <div className="shf-signin-glow-b absolute bottom-0 right-0 w-[400px] h-[300px] blur-2xl pointer-events-none rounded-full" />
 
       {/* Top Bar with Brand & Theme Toggle */}
-      <header className="relative z-10 w-full px-4 sm:px-6 py-4 sm:py-5 flex items-center justify-between max-w-7xl mx-auto">
+      <header className="shf-signin-top relative z-10 w-full px-4 sm:px-6 py-4 sm:py-5 flex items-center justify-between max-w-7xl mx-auto">
         <div className="flex items-center gap-3">
-          {onBack && !branded && <LandingBackButton onBack={onBack} />}
+          {onBack && <LandingBackButton onBack={onBack} />}
           {!branded && <ShutfeyLogo size="sm" showSubtitle={true} />}
         </div>
         
@@ -271,7 +271,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         <div className={`w-full transition-all duration-300 ${authMode === 'signup' ? 'max-w-xl' : 'max-w-md'}`}>
           
           {/* Card Frame */}
-          <div className="bg-surface/95 backdrop-blur-md rounded-3xl p-6 sm:p-8 tactile-5 border border-line">
+          <div className="shf-signin-card bg-surface/95 backdrop-blur-md rounded-3xl p-6 sm:p-8 tactile-5 border border-line">
             
             {/* Domains PR B: the agency's own address shows its logo (or name) and sign-in only. */}
             {site ? (
@@ -587,7 +587,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           </div>
 
           {/* Facility Highlights / System Status */}
-          <div className="mt-5 space-y-3 px-2">
+          <div className="shf-signin-below mt-5 space-y-3 px-2">
             {/* Shared address: tablet setup is easy to find here too (not on an agency's own address). */}
             {!branded && authMode === 'login' && !chooser && (
               <button
@@ -617,7 +617,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       </main>
 
       {/* Footer */}
-      {!branded && <footer className="relative z-10 w-full px-6 py-4 text-center text-xs text-ink-faint dark:text-ink-soft border-t border-line/60">
+      {!branded && <footer className="shf-signin-foot relative z-10 w-full px-6 py-4 text-center text-xs text-ink-faint dark:text-ink-soft border-t border-line/60">
         Shutfey Multi-Agency Kashrut Operations &copy; {new Date().getFullYear()} &bull; All Rights Reserved
       </footer>}
 
