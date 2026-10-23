@@ -231,6 +231,13 @@ export default {
     // "pool": true on the Team route
     x = await call('POST', '/api/users', auth(tAdmin), { email: E('poolinv'), name: 'T82 Pool Invite', role: 'mashgiach', pool: true });
     assert(x.status === 201 && J(x.json.invite.venueIds) === J([]), `pool:true invite ${x.status} ${x.text.slice(0, 200)}`);
+    // RV1: the shared-phone confirmation goes through /api/users too
+    x = await call('POST', '/api/users', auth(tAdmin), { email: E('poolph'), name: 'T82 Phone', role: 'mashgiach', pool: true, phoneNumber: '+18605550111' });
+    assert(x.status === 409 && x.json.code === 'POOL_PHONE_SHARED' && x.json.kind === 'member', `pool invite with a shared phone ${x.status} ${x.text}`);
+    x = await call('POST', '/api/users', auth(tAdmin), { email: E('poolph'), name: 'T82 Phone', role: 'mashgiach', pool: true, phoneNumber: '+18605550111', confirmSharedPhone: true });
+    assert(x.status === 201 && J(x.json.invite.venueIds) === J([]), `confirmed shared phone on /api/users ${x.status} ${x.text.slice(0, 200)}`);
+    x = await call('POST', '/api/users', auth(tAdmin), { email: E('poolinv4'), name: 'T82 Admin pool', role: 'admin', pool: true });
+    assert(x.status === 400 && x.json.code === 'POOL_ROLE_INVALID', `pool admin refused ${x.status} ${x.text}`);
     x = await call('POST', '/api/users', auth(tAdmin), { email: E('poolinv2'), name: 'T82 X', role: 'coordinator', pool: true });
     assert(x.status === 400 && x.json.code === 'POOL_ROLE_INVALID', `pool coordinator refused ${x.status} ${x.text}`);
     x = await call('POST', '/api/users', auth(tAdmin), { email: E('poolinv3'), name: 'T82 Y', role: 'mashgiach', venueId: V2 });
@@ -360,6 +367,54 @@ export default {
     sw = await hook('grant-sweep', { runNow: true });
     assert(sw.run?.committed === false && (await V()) === v1, `second sweep writes nothing ${J(sw)}`);
     details.push('F venue history: entries 14+ days old dropped by the sweep, newer kept, venueRev/access unchanged, second sweep writes nothing');
+
+    // ===== G (RV1): near the size limits =====
+    const LIMIT = 900 * 1024;
+    const bloatId = `agency-t82-bloat-${ts}`;
+    assert((await ctx.api('POST', '/api/__test__/inject-fixture', { agencies: [{ id: bloatId, name: 'T82 bloat', notes: '' }] })).status === 200, 'bloat agency');
+    const setBloat = async (target, usersMap) => {
+      const d0 = await ctx.getDoc();
+      const b0 = d0.agencies.find((a) => a.id === bloatId);
+      const users1 = usersMap ? d0.users.map(usersMap) : d0.users;
+      const len = JSON.stringify({ ...d0, users: users1 }).length - (b0.notes || '').length;
+      await call('POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: users1, agencies: d0.agencies.map((a) => (a.id === bloatId ? { ...a, notes: 'x'.repeat(Math.max(0, target - len)) } : a)) });
+      await reloadCommit();
+      return JSON.stringify(await ctx.getDoc()).length;
+    };
+    // G1: above 820 KiB every Pool growth path refuses; a Team invite is unchanged
+    let sz = await setBloat(830 * 1024);
+    assert(sz > 820 * 1024 && sz < LIMIT - 4096, `at ${Math.round(sz / 1024)} KiB`);
+    x = await createC(tAdmin, { name: 'T82 near full' });
+    assert(x.status === 409 && x.json.code === 'STATE_NEAR_FULL', `contact create near full ${x.status} ${x.text}`);
+    const c4n = await contactIn(tAdmin, c4.id);
+    x = await inviteC(tAdmin, c4.id, { expectedUpdatedAt: c4n.updatedAt, expectedEmail: E('link') });
+    assert(x.status === 409 && x.json.code === 'STATE_NEAR_FULL', `contact invite near full ${x.status} ${x.text}`);
+    x = await call('POST', '/api/users', auth(tAdmin), { email: E('poolnf'), name: 'T82 NF', role: 'mashgiach', pool: true });
+    assert(x.status === 409 && x.json.code === 'STATE_NEAR_FULL', `pool:true invite near full ${x.status} ${x.text}`);
+    x = await call('POST', '/api/users', auth(tAdmin), { email: E('teamnf'), name: 'T82 Team NF', role: 'mashgiach', venueId: V1 });
+    assert(x.status === 201, `a Team invite is unchanged near full ${x.status}`);
+    // G2: a reduction just over the hard guard drops only the document's OLDEST history entries
+    const nowG = Date.now();
+    const HG = (v, ago, by) => ({ venueId: v, from: null, to: new Date(nowG - ago * 86400000).toISOString(), why: 'unticked', by });
+    const seed = (u) => (u.id === U('mash2') ? { ...u, venueHistory: [HG(V3, 1, 'recent')] } : u.id === U('coord') ? { ...u, venueRev: u.venueRev ?? 0, venueHistory: [HG(V2, 9, 'old9'), HG(V3, 10, 'old10'), HG(V2, 11, 'old11'), HG(V2, 12, 'old12'), HG(V3, 13, 'old13')] } : u);
+    sz = await setBloat(LIMIT - 3000, seed);
+    const reloadCost = sz - (LIMIT - 3000);
+    sz = await setBloat(LIMIT - 60 - reloadCost, seed);
+    assert(sz <= LIMIT - 20 && sz > LIMIT - 200, `just under the hard guard (${LIMIT - sz} chars below)`);
+    assert((await rec(U('coord'))).venueHistory?.length === 5 && (await rec(U('mash2'))).venueHistory?.length === 1, 'seeded histories');
+    x = await call('POST', `/api/users/${U('mash2')}/venue-ops`, auth(tAdmin), { ops: [{ op: 'remove', venueId: V1 }], expectedVenueRev: await revOf(U('mash2')), expectedVersion: await V(), operationId: `t82-g2-${ts}` });
+    assert(x.status === 200, `a reduction over the guard commits ${x.status} ${x.text.slice(0, 200)}`);
+    const m2h = (await rec(U('mash2'))).venueHistory || [];
+    const ch = (await rec(U('coord'))).venueHistory || [];
+    assert(m2h.length === 2 && m2h[0].venueId === V1 && m2h[0].why === 'unticked' && m2h[1].by === 'recent', `the affected row keeps its new and its 1-day-old entry ${J(m2h)}`);
+    const order = ['old9', 'old10', 'old11', 'old12', 'old13'];
+    assert(ch.length >= 1 && ch.length < 5 && J(ch.map((h) => h.by)) === J(order.slice(0, ch.length)), `only the oldest entries elsewhere went ${J(ch)}`);
+    assert(JSON.stringify(await ctx.getDoc()).length <= LIMIT, 'under the guard');
+    d = await ctx.getDoc();
+    await call('POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: d.users, agencies: d.agencies.filter((a) => a.id !== bloatId) });
+    await reloadCommit();
+    assert(JSON.stringify(await ctx.getDoc()).length < 820 * 1024, 'bloat removed');
+    details.push('G size: Pool growth (contact, contact invite, pool:true invite) refused above 820 KiB, Team invite unchanged; a reduction over the guard drops only the oldest entries (the affected row keeps its recent history)');
     console.log('  ' + details.join('\n  '));
   },
 };

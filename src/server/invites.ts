@@ -63,6 +63,8 @@ export function parseInviteInput(body: any, agencyVenueIds: readonly string[]): 
   if (typeof role !== 'string' || !(INVITE_ROLES as readonly string[]).includes(role)) return { ok: false, error: 'Choose a valid role.', code: 'INVITE_ROLE_INVALID' };
   const rawVenues = body?.venueIds;
   const venueError = { ok: false as const, error: 'Choose venues from your own agency.', code: 'INVITE_VENUES_INVALID' };
+  // 12b-s (RV1 nit): the Pool flag is checked before the admin shape.
+  if (body?.pool === true && role !== 'mashgiach') return { ok: false, error: 'Only mashgichim can be invited to the Pool.', code: 'POOL_ROLE_INVALID' };
   if (role === 'admin') {
     if (rawVenues !== undefined && rawVenues !== null && !(Array.isArray(rawVenues) && rawVenues.length === 0)) return venueError;
     return { ok: true, value: { email, role, venueIds: [] } };

@@ -9373,6 +9373,11 @@ function createMemberInviteInTx(
   }
   const out: any = { ...docAfter, invites: [...pruneInvites(kept, nowMs), record] };
   if (poolContacts !== docAfter.poolContacts) out.poolContacts = poolContacts;
+  // 12b-s (RV1, 4.5): a Pool invite (incl. one sent from a contact) is growth:
+  // refused when the complete candidate is over 820 KiB. Team invites unchanged.
+  if (body?.pool === true && candidateBytes(out) > GRANT_GROWTH_LIMIT_BYTES) {
+    return { conflict: 'The app storage is nearly full; this change cannot be saved right now.', conflictStatus: 409, conflictCode: 'STATE_NEAR_FULL' };
+  }
   return { doc: out, invite: record, replaced };
 }
 
@@ -11701,12 +11706,8 @@ app.delete('/api/venues/:id', async (req, res) => {
       };
       // 4.5: closing grants into history must never block the deletion at the guard.
       if (Object.keys(grantSetById).length) {
-        const fit = fitGrantBudget(out.doc, grantSetById);
+        // 12b-s (RV1): no pre-trim; the commit guard sheds the OLDEST entries if needed.
         out.grantBudgetFallback = true;
-        if (fit.trimmed !== 'none') {
-          out.grantSetById = fit.gset;
-          log.warn(`[grants] venue delete ${id} near the size guard: history dropped (${fit.trimmed})`);
-        }
       }
       return out;
     },
@@ -13848,7 +13849,7 @@ app.post('/api/users', async (req, res) => {
         const pool = (req.body || {}).pool === true;
         const venueIds = role === 'admin' || pool ? [] : [typeof body.venueId === 'string' && body.venueId ? body.venueId : (agencyVenues[0]?.id || '')];
         const built = createMemberInviteInTx(freshDoc, caller.id, callerAgencyId,
-          { email: body.email, name: body.name, phoneNumber: body.phoneNumber, permissions: body.permissions, role, venueIds, ...(pool ? { pool: true } : {}) },
+          { email: body.email, name: body.name, phoneNumber: body.phoneNumber, permissions: body.permissions, role, venueIds, ...(pool ? { pool: true } : {}), ...((req.body || {}).confirmSharedPhone === true ? { confirmSharedPhone: true } : {}) },
           pre, { ownTeamText: 'A team member with this email already exists' });
         if ('conflict' in built) return built;
         return { doc: built.doc, result: { invite: built.invite, replaced: built.replaced } };
@@ -14157,31 +14158,12 @@ function grantFieldsOfRow(u: any): GrantFields {
 /**
  * 4.5 for multi-row grant writes (venue deletion, the 5.9 helper): access is
  * only being REMOVED, so the commit must never fail at the 900 KiB guard on
- * history growth. Measure the complete candidate (grant fields applied); above
- * the guard drop the affected rows' history, then if still above, every row's
- * venueHistory (audit detail only; the log line keeps the record).
+ * history growth. 12b-s (RV1, Don Oct 23): nothing is pre-trimmed here; the
+ * caller sets grantBudgetFallback and the commit guard drops the document's
+ * OLDEST history entries, only as many as the final payload needs.
  */
-function fitGrantBudget(doc: any, gset: Record<string, GrantFields>): { gset: Record<string, GrantFields>; trimmed: 'none' | 'affected' | 'all' } {
-  const LIMIT = 900 * 1024;
-  const apply = (g: Record<string, GrantFields>) => ({ ...doc, users: (Array.isArray(doc.users) ? doc.users : []).map((u: any) => (u && g[u.id] ? withGrantFields(u, g[u.id]) : u)) });
-  if (candidateBytes(apply(gset)) <= LIMIT) return { gset, trimmed: 'none' };
-  const g1: Record<string, GrantFields> = {};
-  for (const k of Object.keys(gset)) g1[k] = trimHistory(gset[k], 0);
-  if (candidateBytes(apply(g1)) <= LIMIT) return { gset: g1, trimmed: 'affected' };
-  // 12b-s: then the OLDEST history entries of other rows, only as many as needed (no wipe-all).
-  const applied = apply(g1);
-  const over = candidateBytes(applied) - LIMIT;
-  const shed = shedOldestHistory(applied.users, over);
-  const g2: Record<string, GrantFields> = { ...g1 };
-  for (const u of shed.users) {
-    if (!u || typeof u.id !== 'string' || g2[u.id] || !u.personId) continue;
-    const prev = (Array.isArray(doc.users) ? doc.users : []).find((x: any) => x && x.id === u.id);
-    if (!prev || JSON.stringify(prev.venueHistory) === JSON.stringify(u.venueHistory)) continue;
-    const f = grantFieldsOfRow(prev);
-    if (Array.isArray(u.venueHistory) && u.venueHistory.length) f.venueHistory = u.venueHistory; else delete f.venueHistory;
-    g2[u.id] = f;
-  }
-  return { gset: g2, trimmed: 'all' };
+function fitGrantBudget(_doc: any, gset: Record<string, GrantFields>): { gset: Record<string, GrantFields>; trimmed: 'none' } {
+  return { gset, trimmed: 'none' };
 }
 
 
@@ -14460,13 +14442,9 @@ async function runGrantSweep(source: string): Promise<{ committed: boolean; rows
       const grantSetById: Record<string, GrantFields> = {};
       for (const c of cands) grantSetById[c.id] = c.fields;
       for (const p of prunes) grantSetById[p.id] = p.fields;
-      let doc: any = { ...freshDoc, users: (freshDoc.users as any[]).map((u: any) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)) };
-      // 4.5: an access-reducing commit is never blocked by history.
-      if (candidateBytes(doc) > 900 * 1024) {
-        for (const id of Object.keys(grantSetById)) grantSetById[id] = trimHistory(grantSetById[id], 0);
-        doc = { ...freshDoc, users: (freshDoc.users as any[]).map((u: any) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)) };
-        log.warn('[grants] sweep near the size guard: committed without history entries');
-      }
+      const doc: any = { ...freshDoc, users: (freshDoc.users as any[]).map((u: any) => (u && grantSetById[u.id] ? withGrantFields(u, grantSetById[u.id]) : u)) };
+      // 4.5: an access-reducing commit is never blocked by history: the commit
+      // guard drops the document's OLDEST entries if needed (12b-s, no pre-trim).
       return { doc, grantSetById, result: { rows: cands.length, pruned: prunes.length, agencies: Array.from(new Set(cands.map((c) => c.agencyId))) }, grantBudgetFallback: true };
     }, { label: 'grant-sweep' });
     const r: any = res.result || {};
@@ -14602,14 +14580,9 @@ app.post('/api/users/:id/venue-ops', async (req, res) => {
       if (r.growth && candidateBytes(doc) > GRANT_GROWTH_LIMIT_BYTES) {
         return deny('The app storage is nearly full; this change cannot be saved right now.', 409, 'STATE_NEAR_FULL');
       }
-      let fields = r.fields;
-      let outDoc = doc;
-      if (!r.growth && candidateBytes(doc) > 900 * 1024) {
-        fields = trimHistory(r.fields, 0);
-        outDoc = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
-        log.warn(`[grants] venue-ops on ${id} near the size guard: committed without history`);
-      }
-      return { doc: outDoc, grantSetById: { [id]: fields }, result: { userId: id, closed: r.closed.length }, ...(r.growth ? {} : { grantBudgetFallback: true }) };
+      // A reduction is never blocked by history: the commit guard drops the
+      // document's OLDEST entries if needed (12b-s, no pre-trim).
+      return { doc, grantSetById: { [id]: r.fields }, result: { userId: id, closed: r.closed.length }, ...(r.growth ? {} : { grantBudgetFallback: true }) };
     },
     { label: 'venue-ops', requireVersion: true }
   );
@@ -14991,14 +14964,9 @@ async function poolGrantRoute(req: any, res: any, label: string, build: (target:
       if (dryRun) return { doc: freshDoc, result: { dryRun: true, ...summary } };
       const doc: any = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, r.fields) : u)) };
       if (r.growth && candidateBytes(doc) > GRANT_GROWTH_LIMIT_BYTES) return deny('The app storage is nearly full; this change cannot be saved right now.', 409, 'STATE_NEAR_FULL');
-      let fields = r.fields;
-      let outDoc = doc;
-      if (!r.growth && candidateBytes(doc) > 900 * 1024) {
-        fields = trimHistory(r.fields, 0);
-        outDoc = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
-        log.warn(`[grants] ${label} on ${id} near the size guard: committed without history`);
-      }
-      return { doc: outDoc, grantSetById: { [id]: fields }, result: summary, ...(r.growth ? {} : { grantBudgetFallback: true }) };
+      // A reduction is never blocked by history: the commit guard drops the
+      // document's OLDEST entries if needed.
+      return { doc, grantSetById: { [id]: r.fields }, result: summary, ...(r.growth ? {} : { grantBudgetFallback: true }) };
     },
     { label, requireVersion: true }
   );
@@ -15075,8 +15043,7 @@ app.post('/api/platform/venue-grants/end-dated', async (req, res) => {
         users: freshUsers,
       };
       // 4.5: the rollback must never fail at the guard on history growth.
-      const fit = fitGrantBudget(doc, grantSetById);
-      if (fit.trimmed !== 'none') log.warn(`[grants] end-dated near the size guard: history dropped (${fit.trimmed})`);
+      const fit = fitGrantBudget(doc, grantSetById); // 12b-s: no pre-trim; the commit guard sheds the oldest entries
       const outDoc = { ...doc, users: freshUsers.map((u) => (u && fit.gset[u.id] ? withGrantFields(u, fit.gset[u.id]) : u)) };
       return { doc: outDoc, grantSetById: fit.gset, result: { ended, revoked }, grantBudgetFallback: true };
     },
@@ -15250,15 +15217,12 @@ app.put('/api/users/:id/venues', async (req, res) => {
       let fields: GrantFields = { ...r.fields, venueAccess: [...(home ? [home] : []), ...list.filter((v) => r.fields.venueAccess.includes(v))], venueRev: venueRevOf(target) + (r.changed || norm.changed ? 1 : 0) };
       // 4.5, the same budget as venue-ops: growth is refused near the size
       // guard; a reduction near the hard guard commits without history.
-      let outDoc: any = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
+      const outDoc: any = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
       if (r.growth && candidateBytes(outDoc) > GRANT_GROWTH_LIMIT_BYTES) {
         return deny('The app storage is nearly full; this change cannot be saved right now.', 409, 'STATE_NEAR_FULL');
       }
-      if (!r.growth && candidateBytes(outDoc) > 900 * 1024) {
-        fields = trimHistory(fields, 0);
-        outDoc = { ...freshDoc, users: freshUsers.map((u) => (u && u.id === id ? withGrantFields(u, fields) : u)) };
-        log.warn(`[grants] venues PUT on ${id} near the size guard: committed without history`);
-      }
+      // A reduction is never blocked by history: the commit guard drops the
+      // document's OLDEST entries if needed (12b-s, no pre-trim).
       return {
         doc: outDoc,
         grantSetById: { [id]: fields },

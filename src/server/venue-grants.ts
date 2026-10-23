@@ -257,6 +257,11 @@ function priorHistory(row: any, nowMs: number): GrantFields['venueHistory'] {
   return retainedHistory(row, nowMs);
 }
 
+/** RV1: the 2-week rule and the cap applied to a COMBINED (new + prior) history, newest first. */
+function keepHistory(list: readonly any[], nowMs: number): NonNullable<GrantFields['venueHistory']> {
+  return list.filter((e: any) => historyEntryRetained(e, nowMs)).slice(0, HISTORY_CAP) as any;
+}
+
 export function applyGrantOps(row: any, ops: readonly GrantOp[], ctx: GrantCtx): GrantResult {
   const nowIso = new Date(ctx.nowMs).toISOString();
   const homeless = isHomeless(row);
@@ -347,7 +352,7 @@ export function applyGrantOps(row: any, ops: readonly GrantOp[], ctx: GrantCtx):
   if (fields.venueGrants && Object.keys(fields.venueGrants).length > MAX_GRANT_KEYS) {
     return fail(400, 'TOO_MANY_VENUES', `A person can have at most ${MAX_GRANT_KEYS} extra venues.`);
   }
-  const hist = [...newHist, ...(priorHistory(row, ctx.nowMs) || [])].slice(0, HISTORY_CAP);
+  const hist = keepHistory([...newHist, ...(priorHistory(row, ctx.nowMs) || [])], ctx.nowMs);
   if (hist.length) fields.venueHistory = hist;
   return { ok: true, changed, fields, closed, growth };
 }
@@ -380,7 +385,7 @@ export function closeAllExtras(prev: any, newHome: string, why: HistoryWhy, nowM
   const list: string[] = Array.isArray(prev?.venueAccess) ? prev.venueAccess.filter((x: unknown) => typeof x === 'string' && !!x && x !== prevHome && x !== newHome) : [];
   const g = grantContainer(prev) === 'ok' ? prev.venueGrants : {};
   const add: any[] = list.map((v) => historyEntry(v, isPlainObject(g[v]) && typeof g[v].from === 'string' ? g[v].from : null, nowIso, why, null));
-  const hist = [...add, ...(priorHistory(prev, nowMs) || [])].slice(0, HISTORY_CAP);
+  const hist = keepHistory([...add, ...(priorHistory(prev, nowMs) || [])], nowMs);
   return { venueHistory: hist.length ? hist : undefined, venueRev: venueRevOf(prev) + 1, changed: true };
 }
 
@@ -397,8 +402,8 @@ export function endDatedGrants(row: any, ctx: GrantCtx): GrantResult {
   const rest: Record<string, any> = {};
   for (const k of Object.keys(g)) if (!dated.includes(k)) rest[k] = g[k];
   if (Object.keys(rest).length) fields.venueGrants = rest; else delete fields.venueGrants;
-  const hist = [...add, ...(norm.fields.venueHistory || [])].slice(0, HISTORY_CAP);
-  fields.venueHistory = hist;
+  const hist = keepHistory([...add, ...(norm.fields.venueHistory || [])], ctx.nowMs);
+  if (hist.length) fields.venueHistory = hist; else delete fields.venueHistory;
   return { ok: true, changed: true, fields, closed: [...norm.closed, ...dated.map((v) => ({ venueId: v, why: 'ended' as HistoryWhy }))], growth: false };
 }
 
@@ -420,7 +425,7 @@ export function moveToPoolFields(row: any, ctx: GrantCtx): GrantResult {
     ...extras.map((v) => historyEntry(v, g[v]?.from ?? null, nowIso, 'moved_to_pool', ctx.actor)),
   ];
   const fields: GrantFields = { venueId: '', noHomeVenue: true, venueAccess: [], venueRev: venueRevOf(row) + 1 };
-  const hist = [...add, ...(norm.fields.venueHistory || [])].slice(0, HISTORY_CAP);
+  const hist = keepHistory([...add, ...(norm.fields.venueHistory || [])], ctx.nowMs);
   if (hist.length) fields.venueHistory = hist;
   const closed = [...norm.closed, ...(home ? [{ venueId: home, why: 'moved_to_pool' as HistoryWhy }] : []), ...extras.map((v) => ({ venueId: v, why: 'moved_to_pool' as HistoryWhy }))];
   return { ok: true, changed: true, fields, closed, growth: false };
@@ -456,7 +461,7 @@ export function makeMainFields(row: any, venueId: string, keepOldMainAsExtra: bo
   for (const k of restExtras) if (g[k]) grants[k] = g[k];
   if (Object.keys(grants).length) fields.venueGrants = grants;
   if (access.length - 1 > MAX_GRANT_KEYS) return fail(400, 'TOO_MANY_VENUES', `A person can have at most ${MAX_GRANT_KEYS} extra venues.`);
-  const hist = [...add, ...(norm.fields.venueHistory || [])].slice(0, HISTORY_CAP);
+  const hist = keepHistory([...add, ...(norm.fields.venueHistory || [])], ctx.nowMs);
   if (hist.length) fields.venueHistory = hist;
   // growth = the person gains access or loses an end date
   const growth = !wasExtra || (g[venueId] && g[venueId].until !== null);

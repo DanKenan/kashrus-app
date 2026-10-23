@@ -32,6 +32,11 @@ const run = async function () {
   ok(c.venueHistory.length === 3 && c.venueHistory.every((e) => Date.parse(e.to) > T0 - 14 * DAY), 'closeAllExtras drops old entries');
   // a 20-day-old row with nothing recent: history disappears
   ok(retainedHistory(m({ venueHistory: [h('v2', T0 - 20 * DAY), h('v3', T0 - 21 * DAY)] }), T0).length === 0, 'all old -> empty');
+  // RV1: a grant that ended 30 days ago is closed WITHOUT writing an out-of-window entry; one ended 3 days ago is recorded
+  r = applyGrantOps(m({ venueGrants: { v2: { from: null, until: iso(T0 - 30 * DAY), by: 'x' } }, venueRev: 1 }), [], ctx());
+  ok(r.ok && J(r.fields.venueAccess) === J(['v1']) && r.closed.length === 1 && r.fields.venueHistory === undefined, `expired 30 days ago: closed, no history ${J(r.fields)}`);
+  r = applyGrantOps(m({ venueGrants: { v2: { from: null, until: iso(T0 - 3 * DAY), by: 'x' } }, venueRev: 1 }), [], ctx());
+  ok(r.ok && r.fields.venueHistory.length === 1 && r.fields.venueHistory[0].why === 'ended', 'expired 3 days ago: recorded');
   // cap still 10
   const many = m({ venueHistory: Array.from({ length: 15 }, (_, i) => h('v2', T0 - i * 3600000)) });
   ok(retainedHistory(many, T0).length === HISTORY_CAP, 'cap 10 still holds');
@@ -146,6 +151,7 @@ const run = async function () {
   ok(ip.ok && J(ip.value.venueIds) === J([]), 'pool invite: no venues');
   ok(parseInviteInput({ email: 'p@ex.com', role: 'mashgiach', pool: true, venueIds: ['v1'] }, ['v1']).ok === false, 'pool + venues -> refused');
   ok(parseInviteInput({ email: 'p@ex.com', role: 'coordinator', pool: true }, ['v1']).code === 'POOL_ROLE_INVALID', 'only mashgichim in the Pool');
+  ok(parseInviteInput({ email: 'p@ex.com', role: 'admin', pool: true }, ['v1']).code === 'POOL_ROLE_INVALID', 'no Pool admins (RV1 nit)');
   ok(parseInviteInput({ email: 'p@ex.com', role: 'mashgiach', venueIds: [] }, ['v1']).ok === false, 'without the flag the old shape stays required');
   ok(parseMemberInvite({ email: 'p@ex.com', name: 'P', role: 'owner', pool: true }, ['v1'], { allowOwner: true, normalizePhone: phone, phoneError: 'x' }).code === 'POOL_ROLE_INVALID', 'no Pool owners');
   console.log(`pool (12b-s): ${n}/${n} passed`);
