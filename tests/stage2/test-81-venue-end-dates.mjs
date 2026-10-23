@@ -129,6 +129,15 @@ export default {
     await clock(T0);
     await hook('grant-sweep', { disable: true });
     try {
+      // ===== A0 (root, on N7): the freshness read is idle unless temporary access exists =====
+      let fz = await hook('freshness', { recompute: true });
+      assert(fz.needed === false, `no end-dated grant anywhere -> not needed ${J(fz)}`);
+      const reads0 = fz.reads;
+      for (let k = 0; k < 3; k++) { fz = await hook('freshness', { tick: true }); assert(fz.tick === 'idle', `tick ${k} idle ${J(fz)}`); }
+      fz = await hook('freshness', { advanceMonoMs: 61000 });
+      assert(fz.reads === reads0 && fz.status === 'fresh', `0 freshness reads over 3 ticks, never stale while idle ${J(fz)}`);
+      details.push('A0 freshness idle: no temporary grants -> 0 reads over 3 ticks, never stale');
+
       // ===== A: refusals and role rules =====
       let rev = await revOf(U('mash'));
       assert(rev === 0, `fresh row venueRev 0, got ${rev}`);
@@ -158,6 +167,8 @@ export default {
 
       // coordinator loan at V1 for mash2 (home V2), owner loan at V3 for mash2; both dated
       r = await ops(tCoord, U('mash2'), [{ op: 'add', venueId: V1, until: '2026-10-24' }], await revOf(U('mash2')));
+      fz = await hook('freshness', { tick: true });
+      assert(fz.needed === true && fz.status === 'fresh' && fz.reads === reads0 + 1 && fz.tick !== 'idle', `first temporary grant -> reads resume (born fresh) ${J(fz)}`);
       assert(r.status === 200 && J(r.json.venueIds) === J([V1]), `coordinator loan ${r.status} ${r.text.slice(0, 200)} (response limited to the caller's venues)`);
       r = await ops(tOwner, U('mash2'), [{ op: 'add', venueId: V3, until: '2026-10-25' }], await revOf(U('mash2')));
       assert(r.status === 200 && J(r.json.venueIds) === J([V3]), `owner loan ${r.status} ${r.text.slice(0, 200)}`);
@@ -475,7 +486,7 @@ export default {
       doc = await ctx.getDoc();
       await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: [...doc.users, { id: U('tight'), email: E('tight'), name: 'T81 Tight', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 }, { id: U('tight2'), email: E('tight2'), name: 'T81 Tight 2', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight2'), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 },
         { id: U('hist'), email: E('hist'), name: 'T81 Hist', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('hist'), venueAccess: [V1], venueGrants: {}, venueRev: 1 },
-        ...[3, 4].map((k) => ({ id: U('tight' + k), email: E('tight' + k), name: 'T81 Tight ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight' + k), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 })),
+        ...[3, 4, 5].map((k) => ({ id: U('tight' + k), email: E('tight' + k), name: 'T81 Tight ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight' + k), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 })),
         ...[1, 2, 3].map((k) => ({ id: U('vd' + k), email: E('vd' + k), name: 'T81 VD ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('vd' + k), venueAccess: [V1, V5], venueGrants: {}, venueRev: 1 })),
         ...[1, 2, 3, 4, 5, 6].map((k) => ({ id: U('hd' + k), email: E('hd' + k), name: 'T81 HD ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('hd' + k), venueAccess: [V1, V2], venueGrants: { [V2]: { until: '2026-10-30T04:00:00.000Z' } }, venueRev: 1 }))] });
       await reloadCommit();
@@ -531,6 +542,10 @@ export default {
       await setBloat(900 * 1024 - 300 - reloadCost);
       x = await ctx.api('POST', '/api/platform/venue-grants/end-dated', { operationId: `t81-k-helper-${ts}` });
       assert(x.status === 200 && x.json.remainingDated === 0 && x.json.datedGrantsFrozen === true && x.json.ended >= 6, `helper just under the hard guard ${x.status} ${J(x.json)}`);
+      fz = await hook('freshness', { recompute: true });
+      const readsK = fz.reads;
+      fz = await hook('freshness', { tick: true });
+      assert(fz.needed === false && fz.tick === 'idle' && fz.reads === readsK, `every temporary grant ended -> reads stop ${J(fz)}`);
       for (const k of [1, 2, 3, 4, 5, 6]) assert(J((await rec(U('hd' + k))).venueAccess) === J([V1]), `hd${k} ended`);
       await hook('grant-sweep', { unfreeze: true });
       // shortening an undated grant (undated -> dated adds metadata) just under the guard commits
@@ -543,10 +558,23 @@ export default {
       assert(x.status === 200, `home reassignment just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
       const t4 = await rec(U('tight4'));
       assert(t4.venueId === V2 && !(t4.venueAccess || []).includes(V3), `home moved, extras closed ${J(t4)}`);
+      // RV5: expiry -> history shed at the guard -> an old tab's PUT without the expected list must not revive the venue
+      await clock('2026-10-31T04:00:00.000Z');
+      sw = await hook('grant-sweep', { runNow: true });
+      assert(sw.run?.committed === true && (await rec(U('tight3'))).venueHistory?.[0]?.why === 'ended', 'tight3 expired and swept');
+      await setBloat(900 * 1024 - 300 - reloadCost);
+      x = await call(baseUrl, 'POST', `/api/users/${U('tight5')}/venue-ops`, auth(tAdmin), { ops: [{ op: 'remove', venueId: V3 }], expectedVenueRev: 1, expectedVersion: await ctx.getVersion(), operationId: `t81-k-shed-${ts}` });
+      assert(x.status === 200, `a reduction that sheds history ${x.status} ${x.text.slice(0, 160)}`);
+      const t3 = await rec(U('tight3'));
+      assert(t3.venueHistory === undefined && J(t3.venueAccess) === J([V1]) && typeof t3.venueRev === 'number', `tight3 history shed, venueRev kept ${J(t3)}`);
       doc = await ctx.getDoc();
       await call(baseUrl, 'POST', '/api/__test__/doc-set-users', ctx.authHeaders, { users: doc.users, agencies: doc.agencies.filter((a) => a.id !== bloatId) });
       await reloadCommit();
       assert(JSON.stringify(await ctx.getDoc()).length < 820 * 1024, 'bloat removed');
+      x = await putV(tAdmin, U('tight3'), { venueIds: [V1, V3] });
+      assert(x.status === 409 && x.json?.code === 'VENUES_CHANGED', `stale old tab cannot revive an expired venue after its history was shed ${x.status} ${x.text.slice(0, 120)}`);
+      assert(J((await rec(U('tight3'))).venueAccess) === J([V1]), 'still not revived');
+      await clock(T0);
 
       details.push(`K size: growth 409 STATE_NEAR_FULL at ${kib} KiB, reduction commits`);
 

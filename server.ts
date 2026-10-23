@@ -1004,8 +1004,32 @@ let freshnessLastConfirmedMono = monoNowMs();
 function freshnessAgeMs(): number {
   return monoNowMs() - freshnessLastConfirmedMono;
 }
+// Root (Oct 23, on N7): the freshness read is IDLE unless temporary access
+// exists. While no user in this process's state holds an active END-DATED
+// grant (every existing user today), the 15 s tick does zero reads and
+// freshness never goes stale. The flag is recomputed on every install
+// (hydrateState) and every tick; idle -> needed confirms at that install (the
+// install itself is the newest document), so the first dated grant is never
+// born stale.
+let freshnessNeededCached = false;
+let freshnessReadCount = 0; // test-visible: version reads issued by the freshness check
+function freshnessNeedRecompute(): boolean {
+  const nowMs = serverNow().getTime();
+  let need = false;
+  for (const u of users as any[]) {
+    if (!u || !u.venueGrants || typeof u.venueGrants !== 'object' || Array.isArray(u.venueGrants)) continue;
+    for (const k of Object.keys(u.venueGrants)) {
+      const st = grantStateFor(u, k);
+      if (st.kind === 'dated' && st.untilMs > nowMs && Array.isArray(u.venueAccess) && u.venueAccess.includes(k)) { need = true; break; }
+    }
+    if (need) break;
+  }
+  if (need && !freshnessNeededCached) freshnessConfirm();
+  freshnessNeededCached = need;
+  return need;
+}
 function freshnessIsStale(): boolean {
-  return freshnessEnabled && freshnessAgeMs() > FRESHNESS_STALE_MS;
+  return freshnessEnabled && freshnessNeededCached && freshnessAgeMs() > FRESHNESS_STALE_MS;
 }
 function freshnessStatus(): 'fresh' | 'stale' {
   return freshnessIsStale() ? 'stale' : 'fresh';
@@ -3374,6 +3398,9 @@ let vapidKeys: { publicKey: string; privateKey: string } | null = null;
 // the snapshot too (no change for an existing document).
 let carriedDocFields: { datedGrantsFrozen?: boolean; poolFrozen?: boolean; poolContacts?: any[] } = {};
 function hydrateState(parsed: any) {
+  try { hydrateStateInner(parsed); } finally { try { freshnessNeedRecompute(); } catch {} }
+}
+function hydrateStateInner(parsed: any) {
   try {
       {
         const c: typeof carriedDocFields = {};
@@ -14143,6 +14170,7 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 async function readStoredVersion(): Promise<number | null> {
+  freshnessReadCount++;
   if (isTestMode() && testFreshnessFailReads) throw new Error('test: read failure');
   if (isTestMode() && testFreshnessHangReads) return new Promise<number | null>(() => {});
   const ref = firestoreDb.doc(FIRESTORE_STATE_DOC);
@@ -14376,10 +14404,16 @@ async function runGrantSweep(source: string): Promise<{ committed: boolean; rows
 }
 
 let grantTimersStarted = false;
+/** One 15 s tick: a read only while temporary (end-dated) access exists. */
+async function freshnessTick(): Promise<string> {
+  if (!freshnessNeedRecompute()) return 'idle';
+  const r: any = await freshnessRefreshOnce('tick');
+  return typeof r === 'string' ? r : (r?.result ?? 'done');
+}
 function startGrantTimers(): void {
   if (grantTimersStarted) return;
   grantTimersStarted = true;
-  setInterval(() => { void freshnessRefreshOnce('tick'); }, FRESHNESS_REFRESH_MS).unref?.();
+  setInterval(() => { void freshnessTick(); }, FRESHNESS_REFRESH_MS).unref?.();
   // In-memory only: dated grants passing their instant, and fresh->stale.
   setInterval(() => { try { reconcileScopes('tick', false); } catch (e: any) { log.warn(`[grants] reconcile failed: ${e?.message}`); } }, 5_000).unref?.();
   setInterval(() => { try { sendScopePings(); } catch {} }, 30_000).unref?.();
@@ -14592,7 +14626,10 @@ app.post('/api/__test__/freshness', async (req, res) => {
   if (b.refreshNow === true) refresh = b.wait === false ? (void freshnessRefreshOnce('test'), 'started') : await freshnessRefreshOnce('test');
   if (b.reconcileNow === true) reconcileScopes('test', false);
   if (b.pingNow === true) sendScopePings();
-  res.json({ status: freshnessStatus(), ageMs: Math.round(freshnessAgeMs()), enabled: freshnessEnabled, stateVersion, refresh, held: !!testFreshnessHoldInstall });
+  let tick: any = null;
+  if (b.tick === true) tick = await freshnessTick();
+  if (b.recompute === true) freshnessNeedRecompute();
+  res.json({ status: freshnessStatus(), ageMs: Math.round(freshnessAgeMs()), enabled: freshnessEnabled, stateVersion, refresh, held: !!testFreshnessHoldInstall, tick, needed: freshnessNeededCached, reads: freshnessReadCount });
 });
 
 /** Test mode only (404 otherwise): the grant sweep. */
@@ -14676,7 +14713,10 @@ app.put('/api/users/:id/venues', async (req, res) => {
       const txNow = serverNow().getTime();
       const hasDates = grantContainer(target) !== 'legacy' && Object.keys(isPlainObjectLoose(target.venueGrants) ? target.venueGrants : {}).some((k) => grantStateFor(target, k).kind !== 'undated');
       const recentEnd = Array.isArray(target.venueHistory) && target.venueHistory.some((h: any) => h && h.why === 'ended' && Date.parse(h.to) > txNow - 86400000);
-      if (expected === undefined && (hasDates || recentEnd || grantContainer(target) === 'malformed')) {
+      // RV5: ANY row carrying grant state needs the expected list (the history
+      // that marks a recent end can be shed at the size guard; venueRev stays).
+      // The live client always sends it (VenueAccessSheet).
+      if (expected === undefined && (hasDates || recentEnd || hasGrantStateLoose(target) || grantContainer(target) === 'malformed')) {
         return deny("This person's venues changed. Please refresh and try again.", 409, 'VENUES_CHANGED');
       }
       if (expected !== undefined) {
