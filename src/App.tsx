@@ -32,11 +32,13 @@ import { ReadersPanel } from './components/Receipts';
 import type { UpdatesContext } from './lib/updates';
 import { KioskPairing } from './components/KioskPairing';
 import { KioskDevicesModal } from './components/KioskDevicesModal';
-import { initialAuthView } from './lib/homeRoute';
+import { initialAuthView, isInstalledApp } from './lib/homeRoute';
 import { HomeLandingBoundary } from './components/HomeLandingBoundary';
 // The public home page is its own lazily loaded file (JS + CSS): a signed-in
 // person, a kiosk tablet or an agency address never downloads it.
 const HomeLanding = lazy(() => import('./components/home/HomeLanding'));
+// The welcome page on an agency's own address (its own lazy file, like the home page).
+const AgencyWelcome = lazy(() => import('./components/welcome/AgencyWelcome'));
 import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { PasskeyOffer } from './components/PasskeyOffer';
 import { PasskeysModal } from './components/PasskeysModal';
@@ -1870,7 +1872,30 @@ export default function App() {
         </div>
       );
     }
-    // Domains PR B: an agency's own address opens on its branded sign-in (no Shutfey home page, no registration).
+    // An agency's own address opens on that agency's welcome page (its own lazy file); "Sign in" opens its
+    // branded sign-in (Domains PR B, no registration). The installed app starts on the sign-in (initialAuthView).
+    if (authView === 'landing' && siteAgency) {
+      const openSignInFromWelcome = () => {
+        try { window.scrollTo(0, 0); } catch { /* ignore */ }
+        setAuthInitialMode('login');
+        setAuthView('auth');
+      };
+      return (
+        <>
+          {toastMessage && (
+            <div className="fixed bottom-5 right-5 z-50 bg-ink text-paper text-xs font-semibold px-4 py-3 rounded-2xl tactile-4 border border-line-strong flex items-center gap-2 animate-slide-up">
+              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span>{toastMessage}</span>
+            </div>
+          )}
+          <HomeLandingBoundary onSignIn={openSignInFromWelcome}>
+            <Suspense fallback={<div data-home-loading className="min-h-screen bg-paper" />}>
+              <AgencyWelcome agency={siteAgency} onSignIn={openSignInFromWelcome} />
+            </Suspense>
+          </HomeLandingBoundary>
+        </>
+      );
+    }
     // The shared address shows the home page (its own lazy file) until "Sign in" is tapped.
     if (authView === 'landing' && !siteAgency && homePageAllowed()) {
       const openSignInFromHome = () => {
@@ -1906,7 +1931,7 @@ export default function App() {
         <LoginPage
           onLoginSuccess={handleLoginSuccess}
           initialMode={siteAgency ? 'login' : authInitialMode}
-          onBack={siteAgency ? undefined : () => setAuthView('landing')}
+          onBack={siteAgency && isInstalledApp() ? undefined : () => setAuthView('landing')}
           site={siteAgency}
           darkMode={darkMode}
           onToggleDarkMode={() => setDarkMode(!darkMode)}

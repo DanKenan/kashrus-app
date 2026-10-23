@@ -7,6 +7,8 @@ import { installChunkReload } from './lib/chunkReload';
 import App from './App.tsx';
 import { UpdateBanner } from './components/UpdateBanner';
 import './index.css';
+// The sign-in screen's look (dark home-page background; scoped to .shf-signin, small).
+import './components/signin-look.css';
 
 // Register the PWA service worker. When a new version takes over and when the
 // page reloads is decided in one place, lib/swUpdate.ts: never on its own,

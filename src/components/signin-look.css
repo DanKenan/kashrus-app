@@ -1,0 +1,26 @@
+/* Sign-in screen in the home page's look (Don, Oct 23: the dark home page and a light sign-in felt like two apps).
+   Visual only: the same dark brown background, serif headings and gold button as the home / welcome pages; the
+   white card stays in the middle as the bridge into the light app. Every rule is scoped under .shf-signin
+   (LoginPage's root). The serif font file is the home page's own, downloaded only when the sign-in shows. */
+@font-face{font-family:"Shutfey Home Serif";src:url(./home/assets/home-landing-serif.woff2) format("woff2");font-weight:300 900;font-display:swap}
+.shf-signin{background:radial-gradient(120% 70% at 50% 0%,#33241a 0%,#1b130c 55%,#140e09 100%);color:#fff;color-scheme:dark}
+.shf-signin .shf-signin-glow-a{background:rgba(224,166,75,.16)}
+.shf-signin .shf-signin-glow-b{background:rgba(224,166,75,.07)}
+/* top bar on the dark background */
+.shf-signin .shf-signin-top .text-ink,.shf-signin .shf-signin-top .text-ink-soft,.shf-signin .shf-signin-top .text-ink-faint{color:rgba(255,255,255,.86)}
+.shf-signin .shf-signin-top button:hover{color:#fff}
+.shf-signin .shf-signin-top .bg-surface,.shf-signin .shf-signin-top .bg-surface\/80{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.18)}
+.shf-signin .shf-signin-top .border-line{border-color:rgba(255,255,255,.18)}
+.shf-signin .shf-signin-top img.dark\:hidden{display:none}
+.shf-signin .shf-signin-top img.dark\:block{display:block}
+/* the card */
+.shf-signin .shf-signin-card{background:var(--surface,#fff);border-color:rgba(255,255,255,.12);box-shadow:0 30px 80px -24px rgba(0,0,0,.65),0 2px 0 rgba(255,255,255,.04) inset}
+.shf-signin .shf-signin-card h1,.shf-signin .shf-signin-card h2{font-family:"Shutfey Home Serif",Georgia,serif;font-weight:600;letter-spacing:-.01em}
+.shf-signin .shf-signin-card button[type=submit]{background:linear-gradient(180deg,#e7ad55,#c9862f);color:#fff;border-radius:999px}
+.shf-signin .shf-signin-card button[type=submit]:hover{filter:brightness(1.05)}
+/* below the card and the footer, on the dark background */
+.shf-signin .shf-signin-below .text-ink-faint,.shf-signin .shf-signin-below .text-ink-soft{color:rgba(255,255,255,.7)}
+.shf-signin .shf-signin-below .border-line{border-color:rgba(255,255,255,.28)}
+.shf-signin .shf-signin-below button:hover{color:#fff}
+.shf-signin .shf-signin-below .text-gold-deep{color:#e0a64b}
+.shf-signin .shf-signin-foot{color:rgba(255,255,255,.5);border-color:rgba(255,255,255,.1)}

@@ -94,7 +94,7 @@ check('HomeLanding is a lazy import', /const HomeLanding = lazy\(\(\) => import\
 check('old hub component no longer imported', !/import \{ LandingPage \}/.test(app));
 check('landing only when not an agency site and allowed on this host', app.includes("if (authView === 'landing' && !siteAgency && homePageAllowed()) {"));
 check('installed app opens on the sign-in form', app.includes('useState<\'landing\' | \'auth\'>(initialAuthView)'));
-check('sign-out -> sign-in form; leaving kiosk -> sign-in form; only LoginPage "Home" opens the home page', app.includes("if (!kioskMode) setAuthView('auth');") && app.includes("// Leaving kiosk mode opens the sign-in form (not the home page).\n    setAuthView('auth');") && app.split("setAuthView('landing')").length === 2 && app.includes("onBack={siteAgency ? undefined : () => setAuthView('landing')}"));
+check('sign-out -> sign-in form; leaving kiosk -> sign-in form; only LoginPage "Home" opens the home page (or, on an agency address outside the installed app, its welcome page)', app.includes("if (!kioskMode) setAuthView('auth');") && app.includes("// Leaving kiosk mode opens the sign-in form (not the home page).\n    setAuthView('auth');") && app.split("setAuthView('landing')").length === 2 && app.includes("onBack={siteAgency && isInstalledApp() ? undefined : () => setAuthView('landing')}"));
 check('landing wrapped in its error boundary + Suspense', /<HomeLandingBoundary onSignIn=\{openSignInFromHome\}>\s*<Suspense fallback=/.test(app));
 const vite = read('vite.config.ts');
 // The home page's files ARE precached (like every other built file): a new version takes over only on a tap,

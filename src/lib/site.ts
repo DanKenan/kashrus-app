@@ -4,7 +4,11 @@
 // Shutfey address from the URL.
 import { useEffect, useState } from 'react';
 
-export type SiteAgency = { name: string; brandName: string | null; shortCode: string; logoRev: string | null };
+export type SiteAgency = {
+  name: string; brandName: string | null; shortCode: string; logoRev: string | null;
+  /** The agency's contact phone from its settings, when the server sends it (null/absent = not shown). */
+  contactPhone?: string | null;
+};
 export type SiteInfo =
   | { site: 'shared' }
   | { site: 'agency'; agency: SiteAgency; sharedOrigin: string | null }
@@ -61,11 +65,32 @@ export function parseSiteAnswer(body: unknown): SiteInfo | null {
         brandName: str(b.agency.brandName, 200),
         shortCode: str(b.agency.shortCode, 40) || '',
         logoRev: str(b.agency.logoRev, 64),
+        contactPhone: phoneLinks(b.agency.contactPhone) ? str(b.agency.contactPhone, 40) : null,
       },
       sharedOrigin: safeSharedOrigin(b.sharedOrigin),
     };
   }
   return null;
+}
+
+/** A phone number from agency settings as call/text links, or null when it is not a usable number. */
+export function phoneLinks(raw: unknown): { display: string; tel: string; sms: string } | null {
+  if (typeof raw !== 'string') return null;
+  const display = raw.trim();
+  if (!display || display.length > 40 || !/^\+?[\d\s().-]+$/.test(display)) return null;
+  const digits = display.replace(/\D/g, '');
+  if (digits.length < 7 || digits.length > 15) return null;
+  // A 10-digit number without "+" is a US/Canada number (+1).
+  const dial = display.startsWith('+') ? `+${digits}` : digits.length === 10 ? `+1${digits}` : digits.length === 11 && digits[0] === '1' ? `+${digits}` : digits;
+  // A stored US/Canada number in +1XXXXXXXXXX form reads as (XXX) XXX-XXXX; anything else as written.
+  const shown = /^\+1\d{10}$/.test(display) ? `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}` : display;
+  return { display: shown, tel: `tel:${dial}`, sms: `sms:${dial}` };
+}
+
+/** The short name the welcome page uses in sentences ("Your HKC admin…"): the short code when it is a short word, else the name. */
+export function welcomeShortName(agency: SiteAgency): string {
+  const code = (agency.shortCode || '').trim();
+  return /^[A-Za-z0-9]{2,8}$/.test(code) ? code : siteDisplayName(agency);
 }
 
 /** The name the sign-in page shows: the agency's brand name when it has one, else its name. */
