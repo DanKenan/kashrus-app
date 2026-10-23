@@ -9,8 +9,7 @@
 // 11a-c: a null token means this device's own sign-in: the cookie when the
 // device is on it (sessionAuthHeaders), else nothing to send.
 
-import { noticeSiteRefusal } from './site';
-import { hasSessionCredential, sessionAuthHeaders } from './api';
+import { deviceCredentialKeyFor, hasSessionCredential, noticeSiteRefusalFor, sessionAuthHeaders } from './api';
 
 export interface Membership {
   membershipId: string;
@@ -53,12 +52,14 @@ export function isChooseAnswer(data: any): data is { chooseMembership: true; tok
 export async function fetchMemberships(token: string | null): Promise<Membership[] | null> {
   if (!hasSessionCredential(token)) return null;
   try {
+    const sentKey = deviceCredentialKeyFor(token);
     const res = await fetch('/api/auth/memberships', {
       headers: sessionAuthHeaders(token),
       credentials: 'same-origin',
       cache: 'no-store',
     });
-    if (!res.ok) return null;
+    // Domains PR B: refused on this address -> the screen.
+    if (!res.ok) { await noticeSiteRefusalFor(res, sentKey); return null; }
     const data = await res.json().catch(() => null);
     return data ? cleanMemberships(data.memberships) : null;
   } catch {
@@ -72,6 +73,8 @@ export interface ActivateResult { ok: boolean; token?: string; user?: any; error
 export async function activateMembership(token: string | null, membershipId: string): Promise<ActivateResult> {
   if (!hasSessionCredential(token) || !membershipId) return { ok: false, error: MEMBERSHIP_ERROR_TEXT };
   try {
+    // A choose token is not this device's sign-in (screen only); a session token is.
+    const sentKey = deviceCredentialKeyFor(token);
     const res = await fetch('/api/auth/activate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...sessionAuthHeaders(token) },
@@ -79,11 +82,11 @@ export async function activateMembership(token: string | null, membershipId: str
       cache: 'no-store',
       body: JSON.stringify({ membershipId }),
     });
+    if (!res.ok) await noticeSiteRefusalFor(res, sentKey);
     const data = await res.json().catch(() => ({} as any));
     if (res.ok && data && typeof data.token === 'string' && data.token && data.user) {
       return { ok: true, token: data.token, user: data.user };
     }
-    noticeSiteRefusal(res.status, data);
     return { ok: false, error: typeof data?.error === 'string' && data.error ? data.error : MEMBERSHIP_ERROR_TEXT };
   } catch {
     return { ok: false, error: MEMBERSHIP_NETWORK_TEXT };

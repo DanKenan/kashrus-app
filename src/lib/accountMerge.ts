@@ -9,7 +9,7 @@
 // session of A and B ends, so a 401 here can mean "it went through". The screen
 // then says which email to sign in with instead of silently signing out.
 
-import { sessionAuthHeaders } from './api';
+import { sessionAuthHeaders, deviceCredentialKeyFor, noticeSiteRefusalFor } from './api';
 
 export type MergeMode = 'merge-into' | 'bring-in';
 
@@ -66,6 +66,8 @@ export function mergeBody(mode: MergeMode, input: MergeInput, operationId: strin
 }
 
 export async function mergeAccounts(mode: MergeMode, input: MergeInput, operationId: string, sessionToken: string | null): Promise<MergeResult> {
+  // Domains PR B: the device sign-in this request carries, taken before it is sent.
+  const sentKey = deviceCredentialKeyFor(sessionToken);
   try {
     const res = await fetch(MERGE_ROUTE[mode], {
       method: 'POST',
@@ -75,6 +77,8 @@ export async function mergeAccounts(mode: MergeMode, input: MergeInput, operatio
       cache: 'no-store',
       body: JSON.stringify(mergeBody(mode, input, operationId)),
     });
+    // Domains PR B: refused on this address -> the screen (this device's sign-in cleared only if it was the one sent).
+    await noticeSiteRefusalFor(res, sentKey);
     let data: any = null;
     try { data = await res.json(); } catch { data = null; }
     return { ok: res.ok, status: res.status, data: data || {} };

@@ -250,4 +250,66 @@ globalThis.fetch = origFetch;
   api.setSessionToken(null);
 }
 
+// --- every plain-fetch path that can be refused on an agency address (RV3) ---
+{ S.resetSiteForTests(); handler = () => ({ body: { site: 'agency', agency: { name: 'Valley Vaad' }, sharedOrigin: SHARED_O } }); await S.loadSite();
+  const refused = { status: 403, body: { code: 'WRONG_SITE', sharedOrigin: SHARED_O, error: 'x' } };
+  const M = await import('../../src/lib/memberships.ts');
+  const AM = await import('../../src/lib/accountMerge.ts');
+  // device credential keys
+  api.setSessionToken('tok-k');
+  check('key: the stored token', api.deviceCredentialKeyFor('tok-k') === 'tok-k');
+  check('key: another token (choose token) is not the device sign-in', api.deviceCredentialKeyFor('choose-1') === null);
+  api.setSessionToken(null);
+  check('key: nothing stored, no cookie -> null', api.deviceCredentialKeyFor(null) === null);
+  // memberships list with the device token
+  api.setSessionToken('tok-m'); events.length = 0; handler = () => refused;
+  check('memberships list refused -> null', (await M.fetchMemberships('tok-m')) === null);
+  check('memberships list refused -> device sign-in cleared + screen', api.getSessionToken() === null && siteEvents().length === 1 && siteEvents()[0].detail.signedOut === true);
+  // activate with a choose token: screen only, the stored sign-in kept
+  api.setSessionToken('tok-keep2'); events.length = 0; handler = () => refused;
+  const act = await M.activateMembership('choose-tok', 'm1');
+  check('activate (choose token) refused: error, screen only, sign-in kept', act.ok === false && api.getSessionToken() === 'tok-keep2' && siteEvents().length === 1 && siteEvents()[0].detail.signedOut === false);
+  // merge with the device token
+  events.length = 0; handler = () => refused;
+  const mr = await AM.mergeAccounts('merge-into', { email: 'a@b.test', password: 'p', currentPassword: 'c' }, 'op-1', 'tok-keep2');
+  check('merge refused: answer unchanged, device sign-in cleared + screen', mr.ok === false && mr.status === 403 && api.getSessionToken() === null && siteEvents().length === 1 && siteEvents()[0].detail.signedOut === true);
+  // merge sent with a token that was replaced meanwhile: nothing cleared, no screen
+  api.setSessionToken('tok-old2'); events.length = 0;
+  handler = () => { api.setSessionToken('tok-new2'); return refused; };
+  await AM.mergeAccounts('merge-into', { email: 'a@b.test', password: 'p', currentPassword: 'c' }, 'op-2', 'tok-old2');
+  check('merge refused for a replaced sign-in: newer kept, no screen', api.getSessionToken() === 'tok-new2' && siteEvents().length === 0);
+  // the socket's HTTP check after a 4401
+  api.setSessionToken('tok-c'); events.length = 0; handler = () => refused;
+  check('socket session check refused -> ended, cleared, screen', (await api.confirmSessionAfterSocketRefusal('tok-c')) === 'ended' && api.getSessionToken() === null && siteEvents().length === 1);
+  // the same calls on the shared address: today's behaviour, nothing new
+  S.resetSiteForTests(); handler = () => ({ body: { site: 'shared' } }); await S.loadSite();
+  api.setSessionToken('tok-s'); events.length = 0; handler = () => refused;
+  await M.fetchMemberships('tok-s'); await M.activateMembership('choose-tok', 'm1');
+  await AM.mergeAccounts('merge-into', { email: 'a@b.test', password: 'p', currentPassword: 'c' }, 'op-3', 'tok-s');
+  check('shared address: memberships/activate/merge refusals change nothing', api.getSessionToken() === 'tok-s' && siteEvents().length === 0);
+  check('shared address: socket check keeps today\'s answer', (await api.confirmSessionAfterSocketRefusal('tok-s')) === 'unknown' && api.getSessionToken() === 'tok-s');
+  api.setSessionToken(null);
+  // the admin backup download routes a refusal the same way (key captured before the request)
+  const hdr = (await import('node:fs')).readFileSync(new URL('../../src/components/Header.tsx', import.meta.url), 'utf8');
+  const exp = hdr.slice(hdr.indexOf("const sentKey = deviceCredentialKeyFor(getSessionToken());"), hdr.indexOf("throw new Error('Export failed')"));
+  check('backup download: key taken before the fetch, refusal routed before the error', exp.length > 0 && exp.indexOf("fetch('/api/admin/export'") > 0 && exp.indexOf('await noticeSiteRefusalFor(res, sentKey)') > exp.indexOf("fetch('/api/admin/export'"));
+}
+
+// --- the token -> cookie move (its own /api/auth/me check and the adopt) on an agency address (RV3) ---
+{ S.resetSiteForTests(); handler = () => ({ body: { site: 'agency', agency: { name: 'Valley Vaad' }, sharedOrigin: SHARED_O } }); await S.loadSite();
+  const refused = { status: 403, body: { code: 'WRONG_SITE', sharedOrigin: SHARED_O, error: 'x' } };
+  const nav = globalThis.navigator;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: { ...nav, locks: { request: async (_n, _o, cb) => cb() } } });
+  api.setSessionToken('tok-mv'); events.length = 0; const seen = [];
+  handler = (u) => { seen.push(u); return refused; };
+  await api.syncCookieSession();
+  check('move: me check refused -> device sign-in cleared + screen, no adopt', api.getSessionToken() === null && siteEvents().length === 1 && siteEvents()[0].detail.signedOut === true && !seen.some((u) => u.includes('adopt')));
+  api.setSessionToken('tok-mv2'); events.length = 0;
+  handler = (u) => (u.includes('/api/auth/me') ? { status: 200, body: { user: { id: 'u1' }, auth: 'bearer' } } : refused);
+  await api.syncCookieSession();
+  check('move: adopt refused -> device sign-in cleared + screen', api.getSessionToken() === null && !api.isCookieSession() && siteEvents().length === 1 && siteEvents()[0].detail.signedOut === true);
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: nav });
+  api.setSessionToken(null);
+}
+
 console.log(`DOMB CLIENT: ${passed}/${passed} checks passed`);

@@ -4,7 +4,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useMinWidth } from '../lib/useMinWidth';
 import { ConfirmModal } from './ConfirmModal';
-import { clearSession, endServerSession, sessionAuthHeaders } from '../lib/api';
+import { clearSession, deviceCredentialKeyFor, endServerSession, getSessionToken, noticeSiteRefusalFor, sessionAuthHeaders } from '../lib/api';
 import { 
   CheckCircle2, 
   Wifi, 
@@ -601,11 +601,13 @@ export const Header: React.FC<HeaderProps> = ({
                           setUserMenuOpen(false);
                           try {
                             // 11a-c: the stored token, else this device's cookie.
+                            const sentKey = deviceCredentialKeyFor(getSessionToken());
                             const res = await fetch('/api/admin/export', {
                               headers: sessionAuthHeaders(),
                               credentials: 'same-origin',
                             });
-                            if (!res.ok) throw new Error('Export failed');
+                            // Domains PR B: refused on this address -> the screen.
+                            if (!res.ok) { await noticeSiteRefusalFor(res, sentKey); throw new Error('Export failed'); }
                             const blob = await res.blob();
                             const url = URL.createObjectURL(blob);
                             const a = document.createElement('a');

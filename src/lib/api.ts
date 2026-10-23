@@ -295,6 +295,43 @@ function signOutLocally(code?: string): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Domains PR B (plan 2h): one rule for every call that can be told "not on this
+// address" (WRONG_SITE / SITE_NOT_SET_UP), apiFetch and plain fetch alike. The
+// server sends these only on an agency or unknown address; decided once
+// /api/site has answered, and never on the shared address.
+//   sentKey = the device sign-in the request carried (sessionCredentialKey() form:
+//   the stored token, or 'cookie:<n>'), or null for a call that carried none
+//   (sign-in, invite/reset links, a choose token).
+//   'cleared' = it was this device's current sign-in: cleared, screen (signedOut).
+//   'screen'  = no device sign-in was sent: the screen only, any sign-in kept.
+//   'stale'   = the sign-in sent was replaced meanwhile: nothing to do.
+// ---------------------------------------------------------------------------
+export async function noticeSiteRefusalFor(res: Response, sentKey: string | null): Promise<'cleared' | 'screen' | 'stale' | null> {
+  if (res.status !== 403 && res.status !== 401) return null;
+  if (currentSite()?.site === 'shared') return null;
+  let refusal: SiteRefusal | null = null;
+  try { refusal = siteRefusalFrom(res.status, await res.clone().json()); } catch { /* not JSON */ }
+  if (!refusal) return null;
+  if ((await loadSite()).site === 'shared') return null;
+  if (!sentKey) {
+    announceSiteRefusal({ ...refusal, signedOut: false });
+    return 'screen';
+  }
+  if (sessionCredentialKey() === sentKey) {
+    clearSession();
+    announceSiteRefusal({ ...refusal, signedOut: true });
+    return 'cleared';
+  }
+  return 'stale';
+}
+
+/** The device sign-in a plain-fetch call with sessionAuthHeaders(token) carries (null: none of this device's). */
+export function deviceCredentialKeyFor(token: string | null): string | null {
+  if (token) return token === getSessionToken() ? token : null;
+  return isCookieSession() ? sessionCredentialKey() : null;
+}
+
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const callerHeaders = new Headers(init.headers || {});
   const callerSetAuth = callerHeaders.has('Authorization');
@@ -356,27 +393,8 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   // can send back the version this client last saw (version contract).
   trackVersionHeader(res);
   // Domains PR B (plan 2h): "not on this address" (WRONG_SITE / SITE_NOT_SET_UP).
-  // The server sends these only on an agency or unknown address, never on the
-  // shared one; a page that knows it is on the shared address ignores them.
-  if ((res.status === 403 || res.status === 401) && currentSite()?.site !== 'shared') {
-    let refusal: SiteRefusal | null = null;
-    try { refusal = siteRefusalFrom(res.status, await res.clone().json()); } catch { /* not JSON */ }
-    // Decided only once the page knows its site (loadSite is one cached call, capped).
-    if (refusal && (await loadSite()).site !== 'shared') {
-      // A caller-set Authorization (a choose/invite token) is not this device's sign-in.
-      const usedCredential = !callerSetAuth && (!!usedToken || !!usedCookieKey);
-      const stillCurrent = usedToken ? getSessionToken() === usedToken : !!usedCookieKey && sessionCredentialKey() === usedCookieKey;
-      if (!usedCredential) {
-        // A signed-out call (sign-in, invite preview, recovery): the screen only; any sign-in stays.
-        announceSiteRefusal({ ...refusal, signedOut: false });
-      } else if (stillCurrent) {
-        // A signed-in client clears its local sign-in first (only the one this request used).
-        clearSession();
-        announceSiteRefusal({ ...refusal, signedOut: true });
-      }
-      // else: the refused credential was replaced meanwhile (a newer sign-in): nothing to do.
-    }
-  }
+  // A caller-set Authorization (a choose/invite token) is not this device's sign-in.
+  if (res.status === 403 || res.status === 401) await noticeSiteRefusalFor(res, callerSetAuth ? null : (usedToken || usedCookieKey));
   if (res.status === 401) {
     const code401 = await unauthorizedCode(res);
     applyKioskUnpaired(code401);
@@ -596,6 +614,8 @@ export async function confirmSessionAfterSocketRefusal(
   } catch {
     return 'unknown';
   }
+  // Domains PR B: refused on this address (the token, or this device's cookie key).
+  if ((await noticeSiteRefusalFor(res, token)) === 'cleared') return 'ended';
   if (res.status === 401) {
     const code = await unauthorizedCode(res);
     // After the last await: a token stored meanwhile is a newer session, a
@@ -621,9 +641,12 @@ let syncAgain = false;
 interface MeAnswer { status: number; userId?: string; auth?: string; kiosk?: { venueId?: string; deviceId?: string } }
 
 async function readMe(headers: Record<string, string>): Promise<MeAnswer> {
+  // Domains PR B: the device sign-in this check speaks for (token or cookie: one session).
+  const sentKey = sessionCredentialKey();
   try {
     const res = await fetch('/api/auth/me', { headers, credentials: 'same-origin', cache: 'no-store' });
     if (!res.ok) {
+      await noticeSiteRefusalFor(res, sentKey);
       await res.text().catch(() => '');
       return { status: res.status };
     }
@@ -689,7 +712,7 @@ async function moveTokenToCookie(token: string): Promise<void> {
         signal: ctrl.signal,
       });
       // Read the (small) answer so the request is finished, never left open.
-      await adopted.text().catch(() => '');
+      await adopted.clone().text().catch(() => '');
     } finally {
       clearTimeout(timer);
     }
@@ -699,6 +722,8 @@ async function moveTokenToCookie(token: string): Promise<void> {
     await sleep(sessionTiming.adoptAbortGraceMs);
     return;
   }
+  // Domains PR B: a site refusal is not "an older server" (the move simply stops).
+  if (adopted.status === 403 && (await noticeSiteRefusalFor(adopted, token))) return;
   if (adopted.status === 404 || adopted.status === 403) {
     cookieMoveUnsupported = true;
     return;
