@@ -133,7 +133,7 @@ ok('C Move to Pool admin only', /currentUser\?\.role === 'admin' && \(user\.role
 ok('C borrow list never for admins', /!isAdmin && borrow &&/.test(panel));
 ok('C contacts and invites admin only', /isAdmin && data\.invites\.map/.test(panel) && /isAdmin && data\.contacts\.map/.test(panel));
 ok('C labels come from POOL_TEXT (no stray "Add to Pool" literal in components)', !/>\s*Add to Pool\s*</.test(panel + team));
-ok('C borrow requires an end date (no remove-end button when required)', /\{!required && \(/.test(panel) && /missingEnd = required && ids\.some/.test(panel));
+ok('C borrow requires an end date (no remove-end button when required)', /\{!required && \(/.test(panel) && /missingEnd = required && picks\.some/.test(panel) && /n\[v\.id\] = required \? today : null/.test(panel));
 
 console.log(`12b-c pool client: ${passed} passed, ${failures} failed`);
 if (failures) process.exit(1);

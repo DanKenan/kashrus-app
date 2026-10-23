@@ -79,6 +79,7 @@ export const POOL_TEXT = {
   confirmMakeMain: 'Make main venue',
   checking: 'Checking…',
   changed: 'Someone else just changed this. Close and try again.',
+  previewChanged: 'Something changed since this list was shown. Check it again, then confirm.',
   loadFailed: "Couldn't load the Pool. Try again.",
   retry: 'Try again',
 } as const;
@@ -355,16 +356,32 @@ export function parseOpenWork(d: any): OpenWork {
   };
 }
 
-export function moveToPool(personId: string, venueRevision: number, dryRun: boolean) {
+/**
+ * move-to-pool / make-main. A dry run captures the version it was answered at; the confirm
+ * sends THAT version (RV1 P2), so a change after the preview (e.g. a task newly assigned)
+ * is refused with a conflict instead of being confirmed against an old open-work list.
+ */
+export function moveToPool(personId: string, venueRevision: number, dryRun: boolean, expectedVersion: number | undefined) {
   return apiWrite(`/api/users/${encodeURIComponent(personId)}/move-to-pool`, {
-    method: 'POST', expectedVersion: captureEditBaseline(), body: json({ expectedVenueRev: venueRevision, dryRun }),
+    method: 'POST', expectedVersion, body: json({ expectedVenueRev: venueRevision, dryRun }),
   });
 }
 
-export function makeMain(personId: string, venueRevision: number, venueId: string, keepOldMainAsExtra: boolean, dryRun: boolean) {
+export function makeMain(personId: string, venueRevision: number, venueId: string, keepOldMainAsExtra: boolean, dryRun: boolean, expectedVersion: number | undefined) {
   return apiWrite(`/api/users/${encodeURIComponent(personId)}/make-main`, {
-    method: 'POST', expectedVersion: captureEditBaseline(), body: json({ expectedVenueRev: venueRevision, venueId, keepOldMainAsExtra, dryRun }),
+    method: 'POST', expectedVersion, body: json({ expectedVenueRev: venueRevision, venueId, keepOldMainAsExtra, dryRun }),
   });
+}
+
+/** The version a dry run is sent at (the confirm reuses it). */
+export function previewVersion(): number | undefined {
+  return captureEditBaseline();
+}
+
+/** The selected venues a tick may send: only those still offered now (RV1 P2: scope can shrink while the sheet is open). */
+export function pickedForSubmit(picked: Record<string, string | null>, offered: ReadonlyArray<{ id: string }>): Array<{ venueId: string; lastDay: string | null }> {
+  const ok = new Set(offered.map((v) => v.id));
+  return Object.keys(picked).filter((id) => ok.has(id)).map((venueId) => ({ venueId, lastDay: picked[venueId] ?? null }));
 }
 
 /** Pool member ids (admin view): these rows live in the Pool tab, not the Team tab, unless they hold a venue now. */

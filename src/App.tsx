@@ -2550,7 +2550,7 @@ export default function App() {
       />
 
       {currentUser.role === 'owner' && !isKiosk && (
-        <PoolModal isOpen={isPoolOpen} onClose={() => setIsPoolOpen(false)} currentUser={currentUser} venues={venues} />
+        <PoolModal isOpen={isPoolOpen} onClose={() => setIsPoolOpen(false)} currentUser={currentUser} venues={venues} refreshKey={knownUsers} />
       )}
 
       <MergeAccountsSheet

@@ -7,7 +7,7 @@ import type { User, Venue } from '../types';
 import {
   POOL_TEXT, type BorrowPerson, type OpenWork, type PoolContact, type PoolData, type PoolMember,
   contactStatusLine, createContact, deleteContact, editContact, inviteContact, inviteStatusLine, loadBorrow, loadPool,
-  makeMain, memberWhereLine, moveToPool, ownVenuesForPool, parseOpenWork, poolErrorText, tickIn, validateAddForm,
+  makeMain, memberWhereLine, moveToPool, ownVenuesForPool, parseOpenWork, pickedForSubmit, poolErrorText, previewVersion, tickIn, validateAddForm,
 } from '../lib/pool';
 import { END_DATE_TEXT, addDays, dayWords, serverNowMs, ymdIn, zoneForVenue } from '../lib/venueEndDates';
 import { InviteLinkCard } from './InviteLinkCard';
@@ -187,14 +187,27 @@ export function PoolTickSheet({ person, borrowFrom, venues, agencyTimeZone, onCl
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const todayOf = (v: Venue) => ymdIn(serverNowMs(), zoneForVenue(v, agencyTimeZone));
-  const ids = Object.keys(picked);
-  const missingEnd = required && ids.some((id) => !picked[id]);
+  // Only venues still offered now count (a coordinator's scope can shrink while this is open).
+  const offeredKey = venues.map((v) => v.id).join(',');
+  useEffect(() => {
+    setPicked((p) => {
+      const keep = pickedForSubmit(p, venues);
+      if (keep.length === Object.keys(p).length) return p;
+      const n: Record<string, string | null> = {};
+      for (const k of keep) n[k.venueId] = k.lastDay;
+      return n;
+    });
+  }, [offeredKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const picks = pickedForSubmit(picked, venues);
+  const ids = picks.map((x) => x.venueId);
+  const missingEnd = required && picks.some((x) => !x.lastDay);
   const rev = Number.isInteger(person.venueRevision) ? person.venueRevision! : null;
   const save = async () => {
-    if (ids.length === 0 || missingEnd || rev === null) return;
+    const now = pickedForSubmit(picked, venues);
+    if (now.length === 0 || (required && now.some((x) => !x.lastDay)) || rev === null) return;
     setBusy(true); setError(null);
     try {
-      const r = await tickIn(person.id, rev, ids.map((venueId) => ({ venueId, lastDay: picked[venueId] ?? null })));
+      const r = await tickIn(person.id, rev, now);
       if (r.ok) { onDone(`${person.name}: venue saved.`); return; }
       setError(poolErrorText(r));
     } finally { setBusy(false); }
@@ -276,20 +289,30 @@ export function PoolMoveDialog({ mode, person, venues, onClose, onDone }: {
   const [work, setWork] = useState<OpenWork | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The version and choice the shown open-work list was computed at; the confirm sends exactly these.
+  const preview = useRef<{ version: number | undefined; venueId: string; keepOld: boolean } | null>(null);
   const rev = Number.isInteger(person.venueRevision) ? person.venueRevision! : null;
   const oldMain = person.venueId ? venues.find((v) => v.id === person.venueId) : undefined;
-  const run = async (dry: boolean) => {
+  const run = async (dry: boolean): Promise<void> => {
     if (rev === null || (mode === 'make-main' && !venueId)) return;
+    const shown = preview.current;
+    if (!dry && (!shown || shown.venueId !== venueId || shown.keepOld !== keepOld)) return;
+    const version = dry ? previewVersion() : shown!.version;
     setBusy(true); setError(null);
+    let again = false;
     try {
-      const r = mode === 'move' ? await moveToPool(person.id, rev, dry) : await makeMain(person.id, rev, venueId, keepOld, dry);
-      if (!r.ok) { setError(poolErrorText(r)); return; }
-      if (dry) { setWork(parseOpenWork(r.data)); return; }
-      onDone(mode === 'move' ? `${person.name} is in the Pool now.` : `${venues.find((v) => v.id === venueId)?.name || 'The venue'} is ${person.name}'s main venue now.`);
+      const r = mode === 'move' ? await moveToPool(person.id, rev, dry, version) : await makeMain(person.id, rev, venueId, keepOld, dry, version);
+      if (r.ok && dry) { preview.current = { version, venueId, keepOld }; setWork(parseOpenWork(r.data)); }
+      else if (r.ok) onDone(mode === 'move' ? `${person.name} is in the Pool now.` : `${venues.find((v) => v.id === venueId)?.name || 'The venue'} is ${person.name}'s main venue now.`);
+      else if (!dry && r.code === 'VERSION_CONFLICT') {
+        // Something changed after the preview: show the fresh list and ask again.
+        preview.current = null; setWork(null); again = true;
+      } else setError(poolErrorText(r));
     } finally { setBusy(false); }
+    if (again) { await run(true); setError(POOL_TEXT.previewChanged); }
   };
   useEffect(() => { if (mode === 'move') void run(true); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (mode === 'make-main' && venueId) { setWork(null); void run(true); } }, [venueId, keepOld]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (mode === 'make-main' && venueId) { preview.current = null; setWork(null); void run(true); } }, [venueId, keepOld]); // eslint-disable-line react-hooks/exhaustive-deps
   const name = (id: string) => venues.find((v) => v.id === id)?.name || '';
   return (
     <Sheet title={mode === 'move' ? POOL_TEXT.moveTitle(person.name) : POOL_TEXT.makeMainTitle(person.name)} onClose={onClose} testId={mode}>
@@ -511,8 +534,9 @@ export function PoolPanel({ currentUser, venues, pool, onAdminTick, onCode }: Po
 }
 
 /** Owners have no Team list: the Pool opens on its own. */
-export function PoolModal({ isOpen, onClose, currentUser, venues }: { isOpen: boolean; onClose: () => void; currentUser: User; venues: Venue[] }) {
-  const pool = usePool(isOpen, true);
+export function PoolModal({ isOpen, onClose, currentUser, venues, refreshKey }: { isOpen: boolean; onClose: () => void; currentUser: User; venues: Venue[]; refreshKey?: unknown }) {
+  // refreshKey = the roster (USERS_UPDATED): names, revisions and the borrow list stay current (RV1 P2).
+  const pool = usePool(isOpen, true, refreshKey);
   if (!isOpen) return null;
   return (
     <Sheet title={POOL_TEXT.poolTitle} onClose={onClose} testId="pool-modal">
