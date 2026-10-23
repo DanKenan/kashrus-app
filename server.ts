@@ -16659,8 +16659,9 @@ app.post('/api/auth/login', async (req, res) => {
     // atomic and versioned like every other write. Login still succeeds even
     // if the upgrade write fails (the user proved they know the password).
     const newHash = await hashPassword(String(password));
+    let upgradeWrongSite = false;
     try {
-      await commitState(
+      const up = await commitState(
         (freshDoc) => {
           const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
           const freshUser = freshUsers.find((u) => u.id === user.id);
@@ -16688,9 +16689,13 @@ app.post('/api/auth/login', async (req, res) => {
         },
         { label: 'login-password-upgrade' }
       );
+      if (up?.result?.wrongSite) upgradeWrongSite = true;
     } catch (err) {
       log.warn('[login] Password-hash upgrade write failed (login still succeeds):', (err as any)?.message);
     }
+    // Domains PR A ([DOMA-RV2] P2): the transaction's fresh rows said this person
+    // has no membership of the site's agency → WRONG_SITE, before any session.
+    if (upgradeWrongSite) return sendWrongSite(res);
   }
 
   // 10g: a multi person chooses a membership first — no user, no v2 token,

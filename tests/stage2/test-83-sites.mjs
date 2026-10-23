@@ -294,10 +294,13 @@ export default {
       assert(l2Row && l2Row.password === 'legacy2-pass-83' && l2Row.agencyId === A, `L race fixture: ${J(l2Row && { p: l2Row.password, a: l2Row.agencyId })}`);
       const staged = (docR.users || []).map((u) => (u.id === legacy2Row ? { ...u, agencyId: B } : u));
       assert((await ctx.api('POST', '/api/__test__/doc-set-users', { users: staged })).status === 200, 'L race: stage the stored doc');
+      v = await version();
       const lRace = await login(SA, legacy2Email, 'legacy2-pass-83');
       const l2After = ((await ctx.getDoc()).users || []).find((u) => u.id === legacy2Row);
       assert(l2After && l2After.password === 'legacy2-pass-83', `L race: no hash upgrade when the fresh row is no longer the site agency's (${lRace.status}): ${J(l2After && l2After.password)}`);
-      assert([200, 403].includes(lRace.status), `L race answer: ${lRace.status} ${J(lRace.json)}`);
+      // [DOMA-RV2] P2: the transaction's refusal is the answer — no session, token or cookie.
+      assert(lRace.status === 403 && lRace.json?.code === 'WRONG_SITE' && !lRace.json?.token && !lRace.json?.user && lRace.setCookies.length === 0, `L race: refused WRONG_SITE with no session: ${lRace.status} ${J(lRace.json)} ${J(lRace.names)}`);
+      await unchanged(v, 'L race: no session record or other write');
       assert((await ctx.api('POST', '/api/__test__/doc-set-users', { users: docR.users })).status === 200, 'L race: restore the stored doc');
       const lmA = await login(SA, m.email, m.pw);
       assert(lmA.status === 403 && lmA.json?.code === 'WRONG_SITE', `L multi person with no site-A membership refused: ${lmA.status}`);
