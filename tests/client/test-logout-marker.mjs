@@ -22,71 +22,86 @@ const api = await import('../../src/lib/api.ts');
 const prefix = 'shutfey_logout_in_flight:', id = '0123456789abcdef';
 let release, releaseError, request;
 globalThis.fetch = (url, opts) => {
-  request = { url, opts, markerAtFetch: documentFake.cookie };
+  request = { url, opts, writesAtFetch: writes.length };
   return new Promise((resolve, reject) => { releaseError = () => reject(new TypeError('offline')); release = () => resolve({ status: 200, text: async () => '{}' }); });
 };
 async function pendingLogout() {
+  writes.length = 0;
   const pending = api.endUnusedKioskSignIn(null);
   const sentId = request.opts.headers['X-Shutfey-Logout-Id'];
   assert.match(sentId, /^[0-9a-f]{16}$/, 'header id shape');
   assert.equal(request.url, '/api/auth/logout');
+  assert.equal(request.writesAtFetch, 0, 'no cookie write before request');
+  assert.equal(writes.length, 0, 'only the server creates an ack');
+  assert.match(store.get(prefix + sentId), /^\d+$/, 'plain timestamp, no marker flag');
   return { pending, sentId, key: prefix + sentId };
 }
 let p = await pendingLogout();
-assert.equal(request.markerAtFetch, `shutfey_lo_${p.sentId}=1`, 'marker exists before fetch');
-assert.match(store.get(p.key), /^\d+:m$/, 'timestamp has marker flag');
-assert.ok(writes.at(-1).endsWith('; Secure'), 'HTTPS marker is secure');
-assert.ok(Number(/Max-Age=(\d+)/.exec(writes.at(-1))?.[1]) > api.sessionTiming.logoutUnknownMaxMs / 1000, 'marker outlives the unknown-request window');
+jar.set(`shutfey_lo_${p.sentId}`, '1'); // browser applies the server's answer
 release(); await p.pending;
 assert.equal(store.has(p.key), false, 'answer removes key');
-assert.equal(jar.has(`shutfey_lo_${p.sentId}`), false, 'answer removes marker');
-assert.ok(writes.at(-1).includes('Max-Age=0'), 'cleanup expires marker');
+assert.equal(jar.size, 0, 'answer expires ack');
+assert.ok(writes.at(-1).includes('Max-Age=0'), 'cleanup expires ack');
+assert.ok(writes.at(-1).endsWith('; Secure'), 'HTTPS cleanup is secure');
 p = await pendingLogout();
+jar.set(`shutfey_lo_${p.sentId}`, '1');
 releaseError(); await p.pending;
 assert.equal(store.has(p.key), false, 'network error removes key');
-assert.equal(jar.size, 0, 'network error removes marker');
+assert.equal(jar.size, 0, 'network error expires ack');
 globalThis.location.protocol = 'http:';
 p = await pendingLogout();
-assert.ok(!writes.at(-1).includes('; Secure'), 'HTTP marker has no Secure');
 release(); await p.pending;
+assert.ok(!writes.at(-1).includes('; Secure'), 'HTTP cleanup has no Secure');
 globalThis.location.protocol = 'https:';
 const orphan = (value, keyId = id) => { store.clear(); store.set(prefix + keyId, value); };
-jar.set(`shutfey_lo_${id}`, '1');
-orphan(`${Date.now()}:m`);
-assert.equal(await api.signOutsSettled(0), false, 'present marker blocks');
-assert.equal(store.size, 1, 'present marker keeps key');
-jar.clear();
-assert.equal(await api.signOutsSettled(0), true, 'absent marker settles immediately');
-assert.equal(store.size, 0, 'absent marker removes orphan');
+for (const suffix of ['', ':m']) {
+  jar.set(`shutfey_lo_${id}`, '1');
+  orphan(`${Date.now()}${suffix}`);
+  assert.equal(await api.signOutsSettled(0), true, 'exact ack settles plain and old :m keys');
+  assert.equal(store.size, 0, 'ack removes orphan key');
+  assert.equal(jar.size, 0, 'consumed ack expired');
+  orphan(`${Date.now()}${suffix}`);
+  assert.equal(await api.signOutsSettled(0), false, 'eviction: absent ack keeps plain and old :m keys in flight');
+  assert.equal(store.size, 1, 'eviction keeps key');
+  orphan(`${Date.now() - api.sessionTiming.logoutUnknownMaxMs - 1}${suffix}`);
+  assert.equal(await api.signOutsSettled(0), true, 'eviction settles only after unknown window');
+  assert.equal(store.size, 0, 'expired key removed');
+}
+for (const value of ['0', '11', '', '1x']) {
+  jar.set(`shutfey_lo_${id}`, value);
+  orphan(String(Date.now()));
+  assert.equal(await api.signOutsSettled(0), false, 'ack value must be exactly 1');
+}
+jar.clear(); jar.set(`other_shutfey_lo_${id}`, '1');
 orphan(String(Date.now()));
-assert.equal(await api.signOutsSettled(0), false, 'old page without marker flag blocks');
+assert.equal(await api.signOutsSettled(0), false, 'ack cookie name must match exactly');
+jar.clear();
+for (const bad of ['bad', '0123456789abcde', '0123456789ABCDEf', '0123456789abcdef0']) {
+  jar.set(`shutfey_lo_${bad}`, '1');
+  orphan(`${Date.now()}:m`, bad);
+  assert.equal(await api.signOutsSettled(0), false, 'bad id with ack fails closed');
+}
+jar.clear(); jar.set(`shutfey_lo_${id}`, '1');
+orphan(String(Date.now())); unreadable = true;
+assert.equal(await api.signOutsSettled(0), false, 'unreadable cookies fail closed');
+unreadable = false;
 orphan(String(Date.now() - api.sessionTiming.logoutUnknownMaxMs - 1));
-assert.equal(await api.signOutsSettled(0), true, 'old page expires after unknown window');
-assert.equal(store.size, 0, 'expired key removed');
+assert.equal(await api.signOutsSettled(0), true, 'orphan with ack still expires');
+assert.equal(jar.size, 0, 'expired orphan ack removed');
 for (const mode of ['ignored', 'no document']) {
   blocked = mode === 'ignored';
   if (mode === 'no document') delete globalThis.document;
   p = await pendingLogout();
-  assert.match(store.get(p.key), /^\d+$/, `${mode}: no marker flag, header still sent`);
   release(); await p.pending;
+  orphan(String(Date.now()));
+  assert.equal(await api.signOutsSettled(0), false, `${mode}: no proof keeps key in flight`);
   globalThis.document = documentFake;
 }
 blocked = false;
-for (const bad of ['bad', '0123456789abcde', '0123456789ABCDEf', '0123456789abcdef0']) {
-  orphan(`${Date.now()}:m`, bad);
-  assert.equal(await api.signOutsSettled(0), false, 'bad id fails closed');
-}
-orphan(`${Date.now()}:m`); unreadable = true;
-assert.equal(await api.signOutsSettled(0), false, 'unreadable cookies fail closed');
-unreadable = false;
-jar.set(`shutfey_lo_${id}`, '1');
-orphan(`${Date.now() - api.sessionTiming.logoutUnknownMaxMs - 1}:m`);
-assert.equal(await api.signOutsSettled(0), true, 'marked orphan still expires');
-assert.equal(jar.size, 0, 'expired orphan marker removed');
 for (const bad of ['NaN', '1:m:x', '', '1:other']) {
   orphan(bad);
   assert.equal(await api.signOutsSettled(0), true, 'malformed value dropped');
   assert.equal(store.size, 0);
 }
 assert.equal(api.sessionTiming.logoutUnknownMaxMs, 600000, 'unknown window unchanged');
-console.log('PASS logout marker client');
+console.log('PASS logout ack client');

@@ -453,17 +453,15 @@ export function endServerSession(token: string | null = getSessionToken()): Prom
  * waits while any is on its way and otherwise keeps the token and tries later.
  * - In this tab: the set (exact).
  * - For the other tabs: one localStorage key per request
- *   (shutfey_logout_in_flight:<random id> = when it was sent, with :m when
- *   a readable marker cookie was set). The answer deletes that marker after
- *   deleting the sign-in cookies, so even after a reload a missing marker
- *   proves that exact answer has landed. The sending tab also removes the
- *   key and marker once its answer (or a network error) is in.
- * Keys without :m (older pages, cookies off, older server) keep the 10-minute rule; marker absence is checked only for ids of 16 lower-case hex.
- * - Without that proof, a key left by a tab that closed or navigated away
- *   (its keepalive request may still be on its way) counts as "maybe still
- *   on its way" for
- *   logoutUnknownMaxMs (10 min, longer than any request can live at the
- *   server and proxies), and only then is it dropped.
+ *   (shutfey_logout_in_flight:<random id> = when it was sent).
+ *   Only the server's answer sets a readable ack cookie with value 1, after
+ *   any sign-in cookie deletions. That exact ack proves the answer landed,
+ *   even after a reload; it is checked only for ids of 16 lower-case hex.
+ *   The server keeps acks for 660 seconds, beyond the 600-second key window.
+ *   The sending tab removes its key and ack on an answer or network error.
+ * - Without an ack (including eviction, cookies off or an older server), a
+ *   key left by a closed page keeps the logoutUnknownMaxMs (10-minute) rule.
+ *   Old values ending in :m are read the same way as plain timestamps.
  * A sign-out is still sent at once (never queued), so it leaves even if the
  * page navigates right after.
  */
@@ -478,22 +476,19 @@ function randomId(): string {
     return Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
   }
 }
-// Outlive the key window so marker expiry cannot be mistaken for an applied answer.
-const LOGOUT_MARKER_MAX_AGE_S = 660;
-function logoutMarkerCookie(id: string, maxAge: number): string {
-  return `shutfey_lo_${id}=${maxAge ? '1' : ''}; Path=/; Max-Age=${maxAge}; SameSite=Strict${globalThis.location?.protocol === 'https:' ? '; Secure' : ''}`;
+function expireLogoutAck(id: string): void {
+  try {
+    document.cookie = `shutfey_lo_${id}=; Path=/; Max-Age=0; SameSite=Strict${globalThis.location?.protocol === 'https:' ? '; Secure' : ''}`;
+  } catch { /* cookies unavailable */ }
 }
-function expireLogoutMarker(id: string): void {
-  try { document.cookie = logoutMarkerCookie(id, 0); } catch { /* cookies unavailable */ }
-}
-function trackLogout<T>(p: Promise<T>, id: string, markerSet: boolean): Promise<T> {
+function trackLogout<T>(p: Promise<T>, id: string): Promise<T> {
   logoutsInFlight.add(p);
   const key = `${LOGOUT_IN_FLIGHT_PREFIX}${id}`;
-  writeKey(key, `${Date.now()}${markerSet ? ':m' : ''}`);
+  writeKey(key, String(Date.now()));
   const done = () => {
     logoutsInFlight.delete(p);
     writeKey(key, null);
-    expireLogoutMarker(id);
+    expireLogoutAck(id);
   };
   p.then(done, done);
   return p;
@@ -501,12 +496,7 @@ function trackLogout<T>(p: Promise<T>, id: string, markerSet: boolean): Promise<
 
 function sendLogoutRequest(headers: Record<string, string>): Promise<Response> {
   const id = randomId();
-  let markerSet = false;
-  try {
-    document.cookie = logoutMarkerCookie(id, LOGOUT_MARKER_MAX_AGE_S);
-    markerSet = document.cookie.split(';').some((c) => c.trim() === `shutfey_lo_${id}=1`);
-  } catch { /* no readable cookies: keep the full unknown-request window */ }
-  return trackLogout(fetch('/api/auth/logout', { method: 'POST', headers: { ...headers, 'X-Shutfey-Logout-Id': id }, credentials: 'same-origin', keepalive: true }), id, markerSet);
+  return trackLogout(fetch('/api/auth/logout', { method: 'POST', headers: { ...headers, 'X-Shutfey-Logout-Id': id }, credentials: 'same-origin', keepalive: true }), id);
 }
 
 /** The other tabs' sign-out keys; drops the ones past logoutUnknownMaxMs. */
@@ -527,13 +517,14 @@ function otherTabsLogoutInFlight(): boolean {
       const validId = /^[0-9a-f]{16}$/.test(id);
       if (!Number.isFinite(sentAt) || Date.now() - sentAt >= sessionTiming.logoutUnknownMaxMs) {
         ls.removeItem(k);
-        if (validId) expireLogoutMarker(id);
+        if (validId) expireLogoutAck(id);
         continue;
       }
-      if (parsed?.[2] && validId) {
+      if (validId) {
         try {
-          if (!document.cookie.split(';').some((c) => c.trim().startsWith(`shutfey_lo_${id}=`))) {
+          if (document.cookie.split(';').some((c) => c.trim() === `shutfey_lo_${id}=1`)) {
             ls.removeItem(k);
+            expireLogoutAck(id);
             continue;
           }
         } catch { /* unreadable cookies: fail closed */ }
