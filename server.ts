@@ -34,11 +34,11 @@ import { buildUserSession, buildKioskSession, sessionBacksClaims, cachePut, cach
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import {
   PASSKEYS_MAX, CHALLENGE_TTL_MS, RECENT_AUTH_MS, CREDENTIAL_ID_RE, CHALLENGE_ID_RE, credentialIdHash, newPersonCredentials, asPersonCredentials, findPasskey,
-  originMayEnroll, recentAuthValid, cleanPasskeyName, defaultPasskeyName, publicPasskey, challengeMatches, counterAcceptable, isPasskeyAuthMethod,
+  originMayEnroll, recentAuthValid, chosenRecentAuth, cleanPasskeyName, defaultPasskeyName, publicPasskey, challengeMatches, counterAcceptable, isPasskeyAuthMethod,
   type PersonCredentialsDoc, type PasskeyEntry, type ChallengeDoc, type PasskeyAuthMethod,
 } from './src/server/passkeys.ts';
 import { userCookieConfig, kioskCookieConfig, deviceCookieConfig, cookieValues, setCookieHeader, setDeviceCookieHeader, isDeviceCredentialShape, clearCookieHeader, trustedOrigins, originTrusted, normalizeOrigin, CSRF_ORIGIN_BODY } from './src/server/session-cookie.ts';
-import { parseAppSites, classifyHost, siteOrigin, passkeyAddressKind, SITE_NOT_SET_UP_BODY, WRONG_SITE_BODY, SHARED_ORIGIN, type SiteClass } from './src/server/sites.ts';
+import { parseAppSites, classifyHost, siteOrigin, passkeyAddressKind, passkeyWorksHere, SITE_NOT_SET_UP_BODY, WRONG_SITE_BODY, SHARED_ORIGIN, type SiteClass } from './src/server/sites.ts';
 import { generateRecoveryCodes, matchRecoveryCode, burnRecoveryCode, recoveryLocked, recordRecoveryFailure, isRecoveryCodeSet } from './src/server/recovery-codes.ts';
 import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetToken, resetLinkForToken, credentialStampHash, stampsEqual, isLiveResetLink, resetLinkAdminView, pruneResetLinks, makeRoomForResetLink, mayMakeResetLink, resetSuspensionRecord } from './src/server/reset-links.ts';
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
@@ -372,8 +372,8 @@ function signSessionToken(row: { id: string; personId?: string; tokenEpoch?: unk
 
 /** 10g: a choose token for a multi person's credential row (10 minutes; accepted ONLY on GET /api/auth/memberships and POST /api/auth/activate). */
 const CHOOSE_TOKEN_TTL_SECONDS = 10 * 60;
-function signChooseToken(ownerRow: { id: string; personId?: string; tokenEpoch?: unknown }, passkeyCredentialId?: string): string {
-  return signClaims(chooseClaimsFor(ownerRow, passkeyCredentialId), CHOOSE_TOKEN_TTL_SECONDS);
+function signChooseToken(ownerRow: { id: string; personId?: string; tokenEpoch?: unknown }, passkeyCredentialId?: string, recentAuth?: { atMs: number; epoch: number }): string {
+  return signClaims(chooseClaimsFor(ownerRow, passkeyCredentialId, recentAuth), CHOOSE_TOKEN_TTL_SECONDS);
 }
 
 /** Kiosk session token: venue-scoped, 3h expiry (KIOSK_TOKEN_TTL_SECONDS), kiosk:true claim.
@@ -912,7 +912,11 @@ app.use('/api', async (req, res, next) => {
     const chooserRoute = (req.method === 'GET' && req.path === '/auth/memberships') || (req.method === 'POST' && req.path === '/auth/activate');
     const owner = chooserRoute ? resolveChooseOwner(payload, users as any[]) : undefined;
     if (!owner) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
-    (req as any).chooseClaims = { personId: payload.personId, ownerRowId: payload.ownerRowId, ...(payload.passkeyCredentialId ? { passkeyCredentialId: payload.passkeyCredentialId } : {}) };
+    (req as any).chooseClaims = {
+      personId: payload.personId, ownerRowId: payload.ownerRowId,
+      ...(payload.passkeyCredentialId ? { passkeyCredentialId: payload.passkeyCredentialId } : {}),
+      ...(payload.recentAuth ? { recentAuth: payload.recentAuth } : {}),
+    };
     return next();
   }
   // 11a-s1 (plan 9.1 / 10.1): a token carrying sid is valid only while its
@@ -11331,7 +11335,8 @@ if (isTestMode()) {
   //  {challengeId}: move its end into the past; age-recent-auth {sid, ageMs}: make
   //  the session's recent proof older; pause-once {ms}: the next passkey
   //  transaction pauses between its reads and its writes (forced interleavings);
-  //  drop-cache {personId}: forget this instance's copy (another instance's view).
+  //  drop-cache {personId}: forget this instance's copy (another instance's view);
+  //  strip-rpid {personId, credentialId}: remove the entry's stored rpId (FACEID2).
   app.post('/api/__test__/passkey-hooks', async (req, res) => {
     const b = req.body || {};
     try {
@@ -11348,6 +11353,18 @@ if (isTestMode()) {
           tx.set('webauthnChallenges', id, { ...c, expMs: Date.now() - 1 });
           return true;
         });
+        return res.json({ ok });
+      }
+      // FACEID2: strip-rpid {personId, credentialId}: make that entry look like one made before rpIds were stored.
+      if (b.action === 'strip-rpid') {
+        const personId = String(b.personId || ''), cid = String(b.credentialId || '');
+        const ok = await pkTransaction(async (tx) => {
+          const pc = await tx.get('personCredentials', personId);
+          if (!pc || !Array.isArray(pc.passkeys) || !pc.passkeys.some((p: any) => p && p.credentialId === cid)) return false;
+          tx.set('personCredentials', personId, { ...pc, passkeys: pc.passkeys.map((p: any) => { if (!p || p.credentialId !== cid) return p; const { rpId: _drop, ...rest } = p; return rest; }) });
+          return true;
+        });
+        personCredCache.delete(personId);
         return res.json({ ok });
       }
       if (b.action === 'age-recent-auth') {
@@ -17422,11 +17439,20 @@ app.post('/api/auth/login', async (req, res) => {
   if (!siteRow && isMultiPersonRow(users, freshCred)) {
     // QA2 #8: memberships whose venue was deleted are not offered; none left → the clear refusal.
     if (membershipsOfPerson(String((freshCred as any).personId)).length === 0) return res.status(403).json(noMembershipBody(String((freshCred as any).personId)));
+    // FACEID2: the password typed here is carried to the membership the person picks
+    // (activate copies it; it still ends 5 minutes after THIS moment). No read -> no proof.
+    let chooseRecentAuth: { atMs: number; epoch: number } | undefined;
+    try {
+      const pc = await personCredentialsRead(String((freshCred as any).personId));
+      chooseRecentAuth = { atMs: Date.now(), epoch: pc ? pc.recentAuthEpoch : 0 };
+    } catch {
+      chooseRecentAuth = undefined;
+    }
     return res.json({
       success: true,
       chooseMembership: true,
       memberships: membershipsOfPerson(String((freshCred as any).personId)).map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role })),
-      token: signChooseToken(freshCred),
+      token: signChooseToken(freshCred, undefined, chooseRecentAuth),
     });
   }
   // 11b-s (plan 9.5): the password typed here is a fresh proof on this new
@@ -18359,7 +18385,12 @@ app.post('/api/auth/activate', async (req, res) => {
     try { pc = await personCredentialsRead(who.personId); } catch (err) { return storeDown(res, err, 'activate'); }
     if (!findPasskey(pc, chosenPk)) return res.status(401).json({ error: 'Sign in required. Please log in again.' });
   }
-  const activeMint = await issueSessionToken(row, req, 'activate', { authMethod });
+  // FACEID2 (plan 9.5 as amended): ONLY with a choose token, the proof of the sign-in that
+  // issued it (password or Face ID) is copied to this session, unchanged: it still ends 5
+  // minutes after that sign-in, and recentAuthValid checks the person's CURRENT epoch at
+  // every use. An agency switch from a signed-in session never carries a proof.
+  const recentAuth = chosenRecentAuth((req as any).chooseClaims?.recentAuth, Date.now());
+  const activeMint = await issueSessionToken(row, req, 'activate', { authMethod, recentAuth });
   if (sendMintFailure(res, activeMint, row)) return; // QA2 #8 / 10L; 11a-s1: 503 when the session record could not be written
   const activeToken = (activeMint as { token: string }).token;
   res.json({ token: activeToken, user: getSelfUser(row as UserProfile) });
@@ -18482,8 +18513,15 @@ app.get('/api/passkeys', async (req, res) => {
   if (!who) return res.status(403).json(PASSKEY_UNAVAILABLE);
   let pc: PersonCredentialsDoc | null;
   try { pc = await personCredentialsRead(who.personId); } catch (err) { return storeDown(res, err, 'list'); }
-  const list = pc ? pc.passkeys.map(publicPasskeyWithAddress) : [];
-  res.json({ passkeys: list, canAdd: personMayEnroll(who.personId) && list.length < PASSKEYS_MAX });
+  // FACEID2: which passkeys work on THIS address (the raw Host of the page asking), so the
+  // one-time offer can key on "no passkey for this address" (a two-agency person on their
+  // agency's own address and on the Shutfey address needs one on each). hasPasskeyHere =
+  // a passkey made for this host, or an earlier one (no rpId) on a shared host - see
+  // passkeyWorksHere for that compatibility rule.
+  const here = siteOf(req);
+  const entries = pc ? pc.passkeys : [];
+  const list = entries.map((p) => ({ ...publicPasskeyWithAddress(p), here: passkeyWorksHere(p.rpId, here) }));
+  res.json({ passkeys: list, canAdd: personMayEnroll(who.personId) && list.length < PASSKEYS_MAX, hasPasskeyHere: list.some((p) => p.here) });
 });
 
 app.post('/api/passkeys/register/options', async (req, res) => {
@@ -18741,7 +18779,7 @@ app.post('/api/auth/passkey/verify', async (req, res) => {
   type R =
     | { fail: string; personId?: string }
     | { single: true; row: any; doc: SessionDoc; pc: PersonCredentialsDoc }
-    | { choose: true; cred: any; pc: PersonCredentialsDoc }
+    | { choose: true; cred: any; pc: PersonCredentialsDoc; proofAtMs: number }
     | { ineligible: true; row: any; pc: PersonCredentialsDoc }
     | { wrongSite: true; personId: string };
   // Domains PR A (2f): on a SITE host the person's site-agency membership is selected INSIDE the transaction.
@@ -18810,7 +18848,8 @@ app.post('/api/auth/passkey/verify', async (req, res) => {
       if (!active) { consume(); return { fail: 'no-membership', personId }; }
       consume();
       tx.set('personCredentials', personId, nextPc);
-      if (multi) return { choose: true, cred, pc: nextPc };
+      // FACEID2: this assertion is the fresh proof the chosen session gets (as a one-agency sign-in).
+      if (multi) return { choose: true, cred, pc: nextPc, proofAtMs: nowMs };
       if (taken) throw new Error('session id already exists');
       const doc = newUserSessionDoc(cred, req, 'passkey', {
         authMethod: { type: 'passkey', personId, credentialId },
@@ -18839,7 +18878,7 @@ app.post('/api/auth/passkey/verify', async (req, res) => {
       success: true,
       chooseMembership: true,
       memberships: membershipsOfPerson(pid).map(({ membershipId, agencyId, agencyName, role }) => ({ membershipId, agencyId, agencyName, role })),
-      token: signChooseToken(out.cred, credentialId),
+      token: signChooseToken(out.cred, credentialId, { atMs: out.proofAtMs, epoch: out.pc.recentAuthEpoch }),
     });
   }
   if ('ineligible' in out) return res.status(403).json(isMultiPersonRow(users, out.row) ? noMembershipBody(pid) : ineligibleBody(out.row));
