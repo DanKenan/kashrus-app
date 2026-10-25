@@ -46,7 +46,7 @@ const AgencyWelcome = lazy(() => import('./components/welcome/AgencyWelcome'));
 import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { PasskeyOffer } from './components/PasskeyOffer';
 import { PasskeysModal } from './components/PasskeysModal';
-import { clearPasswordSignInMark, currentAccountId, isPhoneLike, listPasskeys, offerDismissed, platformPasskeyAvailable, takePasswordSignInMark } from './lib/passkeys';
+import { clearPasswordSignInMark, currentAccountId, hasPasskeyForThisAddress, isPhoneLike, listPasskeys, offerDismissed, platformPasskeyAvailable, takePasswordSignInMark } from './lib/passkeys';
 import { TeamModal } from './components/TeamModal';
 import { PoolModal, POOL_UPDATED_EVENT } from './components/PoolPanel';
 import { CreateVenueModal } from './components/CreateVenueModal';
@@ -1785,7 +1785,8 @@ export default function App() {
   };
 
   // 11b-c: the menu entry shows when this account may add one or already has one;
-  // the one-time offer follows a password sign-in on a phone that can use Face ID.
+  // the one-time offer follows a password sign-in on a phone that can use Face ID,
+  // when none of this person's passkeys works on THIS address (FACEID2).
   useEffect(() => {
     // A sign-out or another sign-in starts from nothing: no list, no row, no offer.
     setIsPasskeysOpen(false);
@@ -1799,7 +1800,7 @@ export default function App() {
     listPasskeys().then(async (l) => {
       if (!live) return;
       setPasskeyMenu(l.canAdd || l.passkeys.length > 0);
-      if (offerUntil !== null && isPhoneLike() && l.canAdd && l.passkeys.length === 0 && !offerDismissed(userId) && await platformPasskeyAvailable()) {
+      if (offerUntil !== null && isPhoneLike() && l.canAdd && !hasPasskeyForThisAddress(l) && !offerDismissed(userId) && await platformPasskeyAvailable()) {
         if (live && Date.now() < offerUntil && currentAccountId() === userId) setPasskeyOfferFor(userId);
       }
     }).catch(() => { /* unread: the row stays hidden; never a sign-out from here */ });
