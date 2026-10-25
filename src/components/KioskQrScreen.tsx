@@ -3,7 +3,7 @@ import { KeyRound, RefreshCw, Tablet } from 'lucide-react';
 import type { User } from '../types';
 import { apiFetch, cookieSignInsSettled, endUnusedKioskSignIn, noteServerCookieSignIn, setSessionToken, signOutsSettled, trackCookieSignInRequest } from '../lib/api';
 import { makeQr, qrPath } from '../lib/qrEncode';
-import { KQR_UI_TEXT as T, countdownText } from '../lib/kioskQr';
+import { KQR_UI_TEXT as T, countdownText, kqrCodeFromPath, loadKqrInfoAgencyName } from '../lib/kioskQr';
 import { useSite, useSiteLogo } from '../lib/site';
 import { ShutfeyLogo } from './ShutfeyLogo';
 
@@ -65,6 +65,31 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
   const inflight = useRef<Promise<unknown> | null>(null);
   const leaving = useRef(false);
   const claimed = useRef(false);
+
+  const [sharedAgencyName, setSharedAgencyName] = useState('');
+  const infoLookup = useRef({ codes: new Set<string>(), succeeded: false, pending: false });
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const infoLink = shown.kind === 'code' ? shown.link : null;
+  useEffect(() => {
+    if (siteAgency || !infoLink) return;
+    let code: string | null = null;
+    try { code = kqrCodeFromPath(new URL(infoLink, window.location.origin).pathname); } catch { return; }
+    const lookup = infoLookup.current;
+    if (!code || lookup.succeeded || lookup.pending || lookup.codes.has(code) || lookup.codes.size >= 3) return;
+    lookup.codes.add(code);
+    lookup.pending = true;
+    // Independent of start/poll and leaving: this public GET only supplies header text.
+    void loadKqrInfoAgencyName(code).then((name) => {
+      lookup.pending = false;
+      if (!mounted.current || lookup.succeeded || name === null) return;
+      lookup.succeeded = true;
+      setSharedAgencyName(name);
+    });
+  }, [siteAgency, infoLink]);
 
   // The tablet's name and venue (the same call the PIN screen makes).
   useEffect(() => {
@@ -256,7 +281,7 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
       <div aria-hidden className="pointer-events-none absolute rounded-full" style={{ width: 420, height: 420, bottom: -200, right: -120, background: 'rgba(224,166,75,.07)', filter: 'blur(80px)' }} />
 
       <header className="relative z-10 w-full flex items-center justify-between gap-4 px-6 sm:px-10 pt-6">
-        <button type="button" onClick={tapLogo} aria-label="Shutfey logo" className="cursor-default flex items-center gap-3 min-h-11 text-left">
+        <button type="button" onClick={tapLogo} aria-label="Shutfey logo" className={`cursor-default flex items-center gap-3 min-h-11 text-left${!siteAgency && sharedAgencyName ? ' min-w-0' : ''}`}>
           {siteAgency ? (
             <>
               {logo ? <img src={logo} alt="" className="h-[52px] w-auto rounded-md bg-white/95 p-0.5" /> : null}
@@ -268,7 +293,12 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
           ) : (
             <>
               <span className="rounded-xl bg-white/95 px-2 py-1"><ShutfeyLogo size="md" showSubtitle={false} darkMode={false} /></span>
-              <span className="text-sm text-white/70">{T.staffSignIn}</span>
+              {sharedAgencyName ? (
+                <span className="flex flex-col min-w-0">
+                  <span data-kqr-agency dir="auto" className="text-[22px] leading-tight font-semibold truncate" style={{ fontFamily: SERIF }}>{sharedAgencyName}</span>
+                  <span className="text-sm text-white/70 mt-0.5">{T.staffSignIn}</span>
+                </span>
+              ) : <span className="text-sm text-white/70">{T.staffSignIn}</span>}
             </>
           )}
         </button>

@@ -235,7 +235,33 @@ export async function loadAppOrigins(): Promise<string[]> {
   }
 }
 
-export type KqrTablet = { ref: string; tabletName: string; venueName: string; sinceMs: number; endsAtMs: number };
+/** Public info: prefer the tablet's agency, with the older agency shape as fallback. */
+export function parseKqrInfoAgencyName(body: unknown): string {
+  if (!body || typeof body !== 'object') return '';
+  const b = body as any;
+  const name = b.tablet?.agencyName;
+  if (typeof name === 'string' && name.trim()) return name.slice(0, 200);
+  return typeof b.agency?.name === 'string' && b.agency.name.trim() ? b.agency.name.slice(0, 200) : '';
+}
+
+/** null means a failed lookup; an empty name is still a successful response. */
+export async function loadKqrInfoAgencyName(code: string): Promise<string | null> {
+  if (!KQR_CODE_RE.test(code)) return null;
+  try {
+    const res = await fetch(`/api/kiosk/qr/info/${encodeURIComponent(code)}`, { cache: 'no-store', credentials: 'same-origin' });
+    if (!res.ok) return null;
+    return parseKqrInfoAgencyName(await res.json());
+  } catch {
+    return null;
+  }
+}
+
+/** The tablets row keeps its original venue text when no agency is known. */
+export function kqrTabletLines(t: { venueName: string; agencyName: string }): string[] {
+  return t.agencyName ? [t.venueName, t.agencyName].filter(Boolean) : [t.venueName];
+}
+
+export type KqrTablet = { ref: string; tabletName: string; venueName: string; agencyName: string; sinceMs: number; endsAtMs: number };
 export function parseTablets(body: unknown): KqrTablet[] {
   const list = body && typeof body === 'object' ? (body as any).tablets : null;
   if (!Array.isArray(list)) return [];
@@ -243,7 +269,7 @@ export function parseTablets(body: unknown): KqrTablet[] {
   const num = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
   return list
     .filter((t: any) => t && typeof t.ref === 'string' && /^[A-Za-z0-9_-]{22}$/.test(t.ref))
-    .map((t: any) => ({ ref: t.ref, tabletName: str(t.tabletName), venueName: str(t.venueName), sinceMs: num(t.sinceMs), endsAtMs: num(t.endsAtMs) }));
+    .map((t: any) => ({ ref: t.ref, tabletName: str(t.tabletName), venueName: str(t.venueName), agencyName: str(t.agencyName), sinceMs: num(t.sinceMs), endsAtMs: num(t.endsAtMs) }));
 }
 
 /** "12:15 PM" in this phone's own time. */

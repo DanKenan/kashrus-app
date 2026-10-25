@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Tablet, X } from 'lucide-react';
-import { KQR_UI_TEXT as T, clockText, kqrLinkFromScan, kqrPhoneFetch, loadAppOrigins, parseTablets, wasJustRefused, type KqrTablet } from '../lib/kioskQr';
+import { KQR_UI_TEXT as T, clockText, kqrTabletLines, kqrLinkFromScan, kqrPhoneFetch, loadAppOrigins, parseTablets, wasJustRefused, type KqrTablet } from '../lib/kioskQr';
 
 interface TabletSignInSheetProps {
   open: boolean;
@@ -158,7 +158,13 @@ export function TabletSignInSheet({ open, startOn = 'scan', onClose, onScanned }
                   <span className="w-10 h-10 rounded-xl bg-gold-wash text-gold-ink flex items-center justify-center shrink-0"><Tablet className="w-5 h-5" aria-hidden /></span>
                   <div className="flex-1 min-w-0">
                     <p dir="auto" className="font-semibold text-[16px] truncate">{t.tabletName || 'Tablet'}</p>
-                    <p dir="auto" className="text-sm text-ink-soft truncate">{t.venueName}</p>
+                    {kqrTabletLines(t).map((line, i) => (
+                      i === 0 && (!t.agencyName || t.venueName) ? (
+                        <p key={i} dir="auto" className="text-sm text-ink-soft truncate">{line}</p>
+                      ) : (
+                        <p key={i} dir="auto" data-kqr-tablet-agency className="text-sm text-ink-soft line-clamp-2 break-words">{line}</p>
+                      )
+                    ))}
                   </div>
                   <button type="button" data-kqr-signout disabled={busyRef === t.ref} onClick={() => void signOut(t.ref)}
                     className="min-h-11 px-4 rounded-full border border-line-strong text-sm font-semibold text-bad bg-surface pressable disabled:opacity-50">

@@ -106,7 +106,47 @@ ok('C a QR sign-in request on its way is waited for; settled once its answer is 
 ok('E 503 -> try again', E(503, { code: 'KIOSK_QR_UNAVAILABLE' }).again === 'retry');
 ok('E no Yes / number / Face ID words anywhere', !/face id|passkey|six-digit|6-digit|yes, that/i.test(JSON.stringify(K.KQR_UI_TEXT)));
 ok('T countdown', K.countdownText(42000) === '0:42' && K.countdownText(60000) === '1:00' && K.countdownText(-5) === '0:00' && K.countdownText(100) === '0:01');
-ok('T tablets parsed, bad rows dropped', JSON.stringify(K.parseTablets({ tablets: [{ ref: code, tabletName: 'Hill Bakery tablet', venueName: 'Hill Bakery', sinceMs: 1, endsAtMs: 2 }, { ref: 'bad' }, null] })) === JSON.stringify([{ ref: code, tabletName: 'Hill Bakery tablet', venueName: 'Hill Bakery', sinceMs: 1, endsAtMs: 2 }]));
+ok('T tablets parsed, bad rows dropped', JSON.stringify(K.parseTablets({ tablets: [{ ref: code, tabletName: 'Hill Bakery tablet', venueName: 'Hill Bakery', sinceMs: 1, endsAtMs: 2 }, { ref: 'bad' }, null] })) === JSON.stringify([{ ref: code, tabletName: 'Hill Bakery tablet', venueName: 'Hill Bakery', agencyName: '', sinceMs: 1, endsAtMs: 2 }]));
+const tabletRow = { ref: code, tabletName: 'Demo tablet', venueName: 'Demo Grill' };
+ok('T tablets keep agencyName and ignore pickedUp', K.parseTablets({ tablets: [{ ...tabletRow, agencyName: 'Demo Kosher Agency', pickedUp: false }] })[0].agencyName === 'Demo Kosher Agency' && !('pickedUp' in K.parseTablets({ tablets: [tabletRow] })[0]));
+ok('T older / missing / non-string agencyName is empty', [undefined, null, 42, {}, ''].every((agencyName) => K.parseTablets({ tablets: [{ ...tabletRow, agencyName }] })[0].agencyName === '') && K.parseTablets({ tablets: [tabletRow] })[0].agencyName === '');
+ok('T agencyName capped at 200', K.parseTablets({ tablets: [{ ...tabletRow, agencyName: 'a'.repeat(201) }] })[0].agencyName === 'a'.repeat(200));
+const infoName = K.parseKqrInfoAgencyName;
+ok('I tablet agency takes precedence', infoName({ tablet: { agencyName: 'Demo Kosher Agency' }, agency: { name: 'Demo Agency' } }) === 'Demo Kosher Agency');
+ok('I missing / non-string names are empty', [null, undefined, {}, { tablet: {} }, { tablet: { agencyName: 42 }, agency: { name: false } }].every((body) => infoName(body) === ''));
+ok('I agency fallback for missing / empty / non-string tablet name', [undefined, '', '   ', 42].every((agencyName) => infoName({ tablet: { agencyName }, agency: { name: 'Demo Kosher Agency' } }) === 'Demo Kosher Agency'));
+ok('I both agency name shapes capped at 200', infoName({ tablet: { agencyName: 'a'.repeat(201) } }) === 'a'.repeat(200) && infoName({ agency: { name: 'b'.repeat(201) } }) === 'b'.repeat(200));
+ok('T lines show venue and agency separately', JSON.stringify(K.kqrTabletLines({ venueName: 'Demo Grill', agencyName: 'Demo Kosher Agency' })) === JSON.stringify(['Demo Grill', 'Demo Kosher Agency']));
+ok('T lines without agency preserve the venue, including empty', [tabletRow.venueName, ''].every((venueName) => JSON.stringify(K.kqrTabletLines({ venueName, agencyName: '' })) === JSON.stringify([venueName])));
+ok('T lines without venue show agency only', JSON.stringify(K.kqrTabletLines({ venueName: '', agencyName: 'Demo Kosher Agency' })) === JSON.stringify(['Demo Kosher Agency']));
+const originalFetch = globalThis.fetch;
+try {
+  let fetchCalls = 0;
+  let status = 200;
+  let body = { tablet: { agencyName: 'Demo Kosher Agency' } };
+  let networkError = false;
+  let request;
+  globalThis.fetch = async (url, init) => {
+    fetchCalls++;
+    request = { url, init };
+    if (networkError) throw new Error('Demo network failure');
+    return { ok: status === 200, json: async () => body };
+  };
+  ok('I load 200 with name', await K.loadKqrInfoAgencyName(code) === 'Demo Kosher Agency');
+  ok('I load uses the encoded code and public same-origin no-store fetch', request.url === `/api/kiosk/qr/info/${encodeURIComponent(code)}` && request.init.cache === 'no-store' && request.init.credentials === 'same-origin' && !request.init.headers);
+  body = {};
+  ok('I load 200 without name is empty', await K.loadKqrInfoAgencyName(code) === '');
+  for (const failureStatus of [404, 410, 429]) {
+    status = failureStatus;
+    ok(`I load ${status} is null`, await K.loadKqrInfoAgencyName(code) === null);
+  }
+  networkError = true;
+  ok('I load network throw is null', await K.loadKqrInfoAgencyName(code) === null);
+  const callsBeforeBadCode = fetchCalls;
+  ok('I load bad code is null without fetching', await K.loadKqrInfoAgencyName('bad/code') === null && fetchCalls === callsBeforeBadCode);
+} finally {
+  globalThis.fetch = originalFetch;
+}
 K.markRefusedKqr(code, 5000);
 ok('R a refused code is skipped by the scanner for a minute', K.wasJustRefused(code, 5000 + 59000) && !K.wasJustRefused(code, 5000 + 60000) && !K.wasJustRefused('Zz3_-xYz0123456789AbCd', 5001));
 ok('T hi', K.KQR_UI_TEXT.hi('Yossi', 'Hill Bakery') === 'Hi Yossi – Hill Bakery');
