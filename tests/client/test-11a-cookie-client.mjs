@@ -21,7 +21,8 @@
  *  M  memberships / activate / merge use the cookie when no token is given.
  * Run: npx tsx tests/client/test-11a-cookie-client.mjs
  */
-globalThis.document ??= { activeElement: null, addEventListener() {}, removeEventListener() {} };
+// This suite models cookies unavailable; marker-specific tests use a cookie jar.
+globalThis.document ??= { get cookie() { return ''; }, set cookie(_value) {}, activeElement: null, addEventListener() {}, removeEventListener() {} };
 const store = new Map();
 globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k), get length() { return store.size; }, key: (i) => Array.from(store.keys())[i] ?? null };
 // The browser's Web Locks, shared by every "tab" (module instance) of this test: FIFO, one holder,

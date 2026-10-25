@@ -1,3 +1,4 @@
+import { logoutMarkerClearHeader } from './src/server/logout-marker.ts';
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -643,6 +644,20 @@ function setDeviceCookie(res: any, credential: string): boolean {
 function clearDeviceCookie(res: any): void {
   res.append('Set-Cookie', clearCookieHeader(DEVICE_COOKIE));
 }
+// Runs before API authentication so even refused logouts acknowledge their marker.
+app.post('/api/auth/logout', (req, res, next) => {
+  const marker = logoutMarkerClearHeader(req.headers['x-shutfey-logout-id'], USER_COOKIE.secure);
+  if (marker) {
+    const writeHead = res.writeHead;
+    res.writeHead = function (...args: any[]) {
+      res.writeHead = writeHead;
+      res.append('Set-Cookie', marker);
+      return Reflect.apply(writeHead, this, args);
+    };
+  }
+  next();
+});
+
 const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
 /**
  * Every sign-in route answers res.json({ ..., token }) with the token

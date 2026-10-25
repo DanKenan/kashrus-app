@@ -453,11 +453,15 @@ export function endServerSession(token: string | null = getSessionToken()): Prom
  * waits while any is on its way and otherwise keeps the token and tries later.
  * - In this tab: the set (exact).
  * - For the other tabs: one localStorage key per request
- *   (shutfey_logout_in_flight:<random id> = when it was sent), removed by the
- *   tab that sent it once its answer (or a network error) is in. Requests are
- *   never cut off, so "removed" always means "it can no longer land".
- * - A key left by a tab that closed or navigated away (its request may still
- *   be on its way, e.g. keepalive) counts as "maybe still on its way" for
+ *   (shutfey_logout_in_flight:<random id> = when it was sent, with :m when
+ *   a readable marker cookie was set). The answer deletes that marker after
+ *   deleting the sign-in cookies, so even after a reload a missing marker
+ *   proves that exact answer has landed. The sending tab also removes the
+ *   key and marker once its answer (or a network error) is in.
+ * Keys without :m (older pages, cookies off, older server) keep the 10-minute rule; marker absence is checked only for ids of 16 lower-case hex.
+ * - Without that proof, a key left by a tab that closed or navigated away
+ *   (its keepalive request may still be on its way) counts as "maybe still
+ *   on its way" for
  *   logoutUnknownMaxMs (10 min, longer than any request can live at the
  *   server and proxies), and only then is it dropped.
  * A sign-out is still sent at once (never queued), so it leaves even if the
@@ -471,23 +475,38 @@ function randomId(): string {
     globalThis.crypto.getRandomValues(bytes);
     return Array.from(bytes, (x) => x.toString(16).padStart(2, '0')).join('');
   } catch {
-    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+    return Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
   }
 }
-function trackLogout<T>(p: Promise<T>): Promise<T> {
+// Outlive the key window so marker expiry cannot be mistaken for an applied answer.
+const LOGOUT_MARKER_MAX_AGE_S = 660;
+function logoutMarkerCookie(id: string, maxAge: number): string {
+  return `shutfey_lo_${id}=${maxAge ? '1' : ''}; Path=/; Max-Age=${maxAge}; SameSite=Strict${globalThis.location?.protocol === 'https:' ? '; Secure' : ''}`;
+}
+function expireLogoutMarker(id: string): void {
+  try { document.cookie = logoutMarkerCookie(id, 0); } catch { /* cookies unavailable */ }
+}
+function trackLogout<T>(p: Promise<T>, id: string, markerSet: boolean): Promise<T> {
   logoutsInFlight.add(p);
-  const key = `${LOGOUT_IN_FLIGHT_PREFIX}${randomId()}`;
-  writeKey(key, String(Date.now()));
+  const key = `${LOGOUT_IN_FLIGHT_PREFIX}${id}`;
+  writeKey(key, `${Date.now()}${markerSet ? ':m' : ''}`);
   const done = () => {
     logoutsInFlight.delete(p);
     writeKey(key, null);
+    expireLogoutMarker(id);
   };
   p.then(done, done);
   return p;
 }
 
 function sendLogoutRequest(headers: Record<string, string>): Promise<Response> {
-  return trackLogout(fetch('/api/auth/logout', { method: 'POST', headers, credentials: 'same-origin', keepalive: true }));
+  const id = randomId();
+  let markerSet = false;
+  try {
+    document.cookie = logoutMarkerCookie(id, LOGOUT_MARKER_MAX_AGE_S);
+    markerSet = document.cookie.split(';').some((c) => c.trim() === `shutfey_lo_${id}=1`);
+  } catch { /* no readable cookies: keep the full unknown-request window */ }
+  return trackLogout(fetch('/api/auth/logout', { method: 'POST', headers: { ...headers, 'X-Shutfey-Logout-Id': id }, credentials: 'same-origin', keepalive: true }), id, markerSet);
 }
 
 /** The other tabs' sign-out keys; drops the ones past logoutUnknownMaxMs. */
@@ -501,9 +520,25 @@ function otherTabsLogoutInFlight(): boolean {
       if (k && k.startsWith(LOGOUT_IN_FLIGHT_PREFIX)) keys.push(k);
     }
     for (const k of keys) {
-      const sentAt = Number(ls.getItem(k));
-      if (Number.isFinite(sentAt) && Date.now() - sentAt < sessionTiming.logoutUnknownMaxMs) any = true;
-      else ls.removeItem(k);
+      const value = ls.getItem(k) ?? '';
+      const parsed = /^(\d+)(:m)?$/.exec(value);
+      const sentAt = parsed ? Number(parsed[1]) : NaN;
+      const id = k.slice(LOGOUT_IN_FLIGHT_PREFIX.length);
+      const validId = /^[0-9a-f]{16}$/.test(id);
+      if (!Number.isFinite(sentAt) || Date.now() - sentAt >= sessionTiming.logoutUnknownMaxMs) {
+        ls.removeItem(k);
+        if (validId) expireLogoutMarker(id);
+        continue;
+      }
+      if (parsed?.[2] && validId) {
+        try {
+          if (!document.cookie.split(';').some((c) => c.trim().startsWith(`shutfey_lo_${id}=`))) {
+            ls.removeItem(k);
+            continue;
+          }
+        } catch { /* unreadable cookies: fail closed */ }
+      }
+      any = true;
     }
   } catch {
     // no storage: only this tab's own requests are known
