@@ -30,7 +30,7 @@ import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
-import { buildUserSession, buildKioskSession, sessionBacksClaims, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
+import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState, kqrPickupVerdict, keepKnownSessionFacts, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import {
   PASSKEYS_MAX, CHALLENGE_TTL_MS, RECENT_AUTH_MS, CREDENTIAL_ID_RE, CHALLENGE_ID_RE, credentialIdHash, newPersonCredentials, asPersonCredentials, findPasskey,
@@ -61,7 +61,7 @@ import { isAnyTimeTask, normalizeAnyTimeTask } from './src/lib/anyTime.ts';
 import { certificationLabel } from './src/lib/certOptions.ts';
 import { mountStaticFiles } from './src/server/static-files.ts';
 import {
-  KQR_CODE_TTL_MS, KQR_CLAIM_WINDOW_MS, KQR_EXTRA_CODE_GAP_MS, KQR_APPROVAL_ID_RE, KQR_REF_RE, KQR_PAGE_PATH_RE, KQR_TEXT,
+  KQR_CODE_TTL_MS, KQR_CLAIM_WINDOW_MS, KQR_PICKUP_WINDOW_MS, KQR_EXTRA_CODE_GAP_MS, KQR_APPROVAL_ID_RE, KQR_REF_RE, KQR_PAGE_PATH_RE, KQR_TEXT,
   isKqrCode, kqrDeriveKey, kqrHash, kqrRandom, kqrEmitOrigin, kqrLink, kqrView, kqrApproveGate, kqrFirstName, asKqrDevice,
   type KqrCodeDoc, type KqrDeviceDoc,
 } from './src/server/kiosk-qr.ts';
@@ -1548,26 +1548,76 @@ function sessionLive(doc: unknown, claims: SessionBackedClaims | null | undefine
  * (the caller answers 503 — never a 401, so nobody is signed out by an outage).
  */
 async function checkSession(claims: SessionBackedClaims & { sid: string }, authoritative: boolean): Promise<'ok' | 'refused' | 'down'> {
+  const { verdict, doc } = await checkSessionRecord(claims, authoritative);
+  if (verdict !== 'ok') return verdict;
+  if (isTestMode() && kqrVerdictDelayOnceForTests) { const ms = kqrVerdictDelayOnceForTests; kqrVerdictDelayOnceForTests = 0; await new Promise((r) => setTimeout(r, ms)); }
+  // Kiosk QR cleanup (item 4): the tablet's first use of a new QR session marks
+  // it picked up (one store write); a session not picked up in time is dead,
+  // also when its deadline passed after the record check ([KQRCLN-RV1] 1).
+  const next = kqrPickupVerdict(doc, Date.now());
+  if (next !== 'mark') return next;
+  // [KQRCLN-RV1] 3: no store write in a read-only mode; the tablet is told to try again.
+  if (kqrPickupWritesBlocked()) return 'down';
+  let marked: SessionDoc | null;
+  try {
+    marked = await kqrMarkPickedUp(claims.sid);
+  } catch (err: any) {
+    log.warn(`[session] kiosk QR pick-up write failed: ${err?.message || err}`);
+    return 'down';
+  }
+  const nowMs = Date.now();
+  return sessionBacksClaims(marked, claims, nowMs) && kqrPickupVerdict(marked, nowMs) === 'ok' ? 'ok' : 'refused';
+}
+/** Test mode only: the NEXT checkSession waits this long between the record check and the pick-up verdict; the NEXT tablet answer waits between its transaction and publishing its session. */
+let kqrVerdictDelayOnceForTests = 0;
+let kqrPublishDelayOnceForTests = 0;
+/** The modes in which this instance writes nothing (maintenance, FORCE_LOCAL_MODE, a staged revision). */
+function kqrPickupWritesBlocked(): boolean {
+  return process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision();
+}
+/** [KQRCLN-RV1] 2 / [KQRCLN-RV2] 1: puts a session record into this instance's map without losing a revocation or a pick-up the map already knows. */
+function sessionCachePublish(sid: string, doc: SessionDoc | null): SessionDoc | null {
+  const next = keepKnownSessionFacts(doc, sessionCache.get(sid)?.doc);
+  cachePut(sessionCache, sid, { doc: next, readAtMs: Date.now() });
+  return next;
+}
+/** Kiosk QR cleanup (item 4): store first (only a live, still-pending session is marked), then this instance's copy. */
+async function kqrMarkPickedUp(sid: string): Promise<SessionDoc | null> {
+  let doc = (await pkTransaction(async (tx) => {
+    const cur = (await tx.get('sessions', sid)) as SessionDoc | null;
+    if (!cur || cur.revokedAt || kqrPickupState(cur, Date.now()) !== 'pending') return cur;
+    const next: SessionDoc = { ...cur, qrPickedUpAtMs: Date.now() };
+    tx.set('sessions', sid, next);
+    return next;
+  })) as SessionDoc | null;
+  // A local revocation that landed meanwhile wins (as in checkSessionRecord).
+  const during = sessionCache.get(sid);
+  if (during && during.doc && during.doc.revokedAt && !(doc && doc.revokedAt)) doc = during.doc;
+  return sessionCachePublish(sid, doc);
+}
+/** The record check behind checkSession; returns the record it decided on. */
+async function checkSessionRecord(claims: SessionBackedClaims & { sid: string }, authoritative: boolean): Promise<{ verdict: 'ok' | 'refused' | 'down'; doc: SessionDoc | null }> {
   const nowMs = Date.now();
   const cached = sessionCache.get(claims.sid);
   if (!authoritative && cacheFresh(cached, nowMs)) {
-    if (!sessionBacksClaims(cached.doc, claims, nowMs)) return 'refused';
-    return passkeySessionCheck(cached.doc, false);
+    if (!sessionBacksClaims(cached.doc, claims, nowMs)) return { verdict: 'refused', doc: cached.doc };
+    return { verdict: await passkeySessionCheck(cached.doc, false), doc: cached.doc };
   }
   let doc: SessionDoc | null;
   try {
     doc = await sessionStoreGet(claims.sid);
   } catch (err: any) {
     log.warn(`[session] read failed: ${err?.message || err}`);
-    return 'down';
+    return { verdict: 'down', doc: null };
   }
   // A local revocation that landed while this read was in flight wins.
   const during = sessionCache.get(claims.sid);
   if (during && during.doc && during.doc.revokedAt && !(doc && doc.revokedAt)) doc = during.doc;
-  cachePut(sessionCache, claims.sid, { doc, readAtMs: Date.now() });
-  if (!sessionBacksClaims(doc, claims, Date.now())) return 'refused';
+  // [KQRCLN-RV1] 2: a pick-up this instance already knows is not lost to this (possibly older) read.
+  doc = sessionCachePublish(claims.sid, doc);
+  if (!sessionBacksClaims(doc, claims, Date.now())) return { verdict: 'refused', doc };
   // 11b-s (plan 11.2): a session from a passkey ends when that passkey is removed.
-  return passkeySessionCheck(doc, authoritative);
+  return { verdict: await passkeySessionCheck(doc, authoritative), doc };
 }
 
 /** Closes (4401 unless told otherwise) every open socket whose token carries this sid. */
@@ -11408,6 +11458,35 @@ if (isTestMode()) {
         sessionCache.set(sid, { ...e, readAtMs: Date.now() - Number(req.body?.ageMs || 0) });
         return res.json({ ok: true });
       }
+      // Kiosk QR cleanup (item 4): kqr-pickup-age {sid, ageMs}: time passing for the
+      // tablet's pick-up clock (its deadline and, when set, its pick-up moment move back).
+      if (action === 'kqr-pickup-age') {
+        const ageMs = Math.max(0, Math.min(24 * 3600 * 1000, Number(req.body?.ageMs) || 0));
+        const cur = await sessionStoreGet(sid);
+        if (!cur || typeof cur.qrPickupByMs !== 'number') return res.json({ ok: false });
+        const older = (d: any) => ({ ...d, qrPickupByMs: d.qrPickupByMs - ageMs, ...(typeof d.qrPickedUpAtMs === 'number' ? { qrPickedUpAtMs: d.qrPickedUpAtMs - ageMs } : {}) });
+        await sessionStorePut(older(cur) as SessionDoc, false);
+        // This instance's copy keeps what it knew (picked up or not); only its clock moves.
+        const e = sessionCache.get(sid);
+        if (e && e.doc && typeof e.doc.qrPickupByMs === 'number') sessionCache.set(sid, { doc: older(e.doc) as SessionDoc, readAtMs: e.readAtMs });
+        return res.json({ ok: true });
+      }
+      // [KQRCLN-RV2] kqr-store-older {sid}: the STORE copy loses its pick-up moment (what an
+      // older read looks like to this instance); this instance's copy is left alone.
+      if (action === 'kqr-store-older') {
+        const cur = await sessionStoreGet(sid);
+        if (!cur || typeof cur.qrPickedUpAtMs !== 'number') return res.json({ ok: false });
+        const { qrPickedUpAtMs: _drop, ...rest } = cur;
+        await sessionStorePut(rest as SessionDoc, false);
+        return res.json({ ok: true });
+      }
+      // [KQRCLN-RV2] verdict-delay-once {ms}: the next checkSession pauses between its record check and its pick-up verdict.
+      if (action === 'verdict-delay-once') { kqrVerdictDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
+      // [KQRCLN-RV1] cache-doc {sid}: this instance's copy of the record (read only).
+      if (action === 'cache-doc') {
+        const e = sessionCache.get(sid);
+        return res.json({ cached: !!e, doc: e ? e.doc : null });
+      }
       if (action === 'expire') {
         const cur = await sessionStoreGet(sid);
         if (!cur) return res.json({ ok: false });
@@ -11426,17 +11505,21 @@ if (isTestMode()) {
     const { action, deviceId, personId, approvalId } = req.body || {};
     try {
       if (action === 'reset-limits') { kqrResetLimitersForTests(); return res.json({ ok: true }); }
+      // [KQRCLN-RV2] publish-delay-once {ms}: the next signed-in tablet answer pauses between its transaction and publishing its session.
+      if (action === 'publish-delay-once') { kqrPublishDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
       if (action === 'person') {
         if (typeof personId !== 'string' || !personId) return res.status(400).json({ error: 'personId required' });
         return res.json({ doc: await pkTransaction(async (tx) => tx.get('kioskQrPersons', personId)) });
       }
       if (action === 'person-pad') {
         // Pads (n > 0) or clears (n = 0) a person's tablet list with fake live entries (overflow tests).
+        // all: true also drops the real entries first (a list of exactly n fake live entries).
         if (typeof personId !== 'string' || !personId) return res.status(400).json({ error: 'personId required' });
         const n = Math.max(0, Math.min(200, Number(req.body?.n) || 0));
+        const dropAll = req.body?.all === true;
         const doc = await pkTransaction(async (tx) => {
           const cur = await tx.get('kioskQrPersons', personId);
-          const items = (Array.isArray(cur?.items) ? cur.items : []).filter((x: any) => !x?.fake);
+          const items = (Array.isArray(cur?.items) ? cur.items : []).filter((x: any) => !dropAll && !x?.fake);
           for (let i = 0; i < n; i++) items.push({ fake: true, ref: kqrRandom(), sid: kqrRandom(), deviceId: 'fake', agencyId: 'fake', venueId: 'fake', createdAtMs: Date.now(), absoluteExpMs: Date.now() + 3600 * 1000 });
           const next = { personId, items };
           tx.set('kioskQrPersons', personId, next);
@@ -16904,6 +16987,8 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
     let claimedSession: any = null;
     let personIndex: any = null;
     let approverPasskeyOk = true;
+    /** Entries of the person's tablet list whose session has ended (signed out, expired or never picked up). */
+    const endedSids = new Set<string>();
     if (mode === 'poll' && view.kind === 'approved' && approval) {
       approverSession = await tx.get('sessions', approval.sid);
       personIndex = await tx.get('kioskQrPersons', approval.personId);
@@ -16915,6 +17000,18 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
         else {
           const pc = asPersonCredentials(await tx.get('personCredentials', am.personId), am.personId);
           approverPasskeyOk = !!findPasskey(pc, am.credentialId);
+        }
+      }
+      // Kiosk QR cleanup (items 2 and 4): at the cap, each live entry's session is
+      // read; one signed out from the phone (revoked), ended or never picked up
+      // by its tablet frees its slot at once. An entry without a record still
+      // counts until its own end (fail closed). Below the cap nothing more is read.
+      const liveItems = (Array.isArray(personIndex?.items) ? personIndex.items : []).filter((x: any) => x && typeof x.absoluteExpMs === 'number' && x.absoluteExpMs > nowMs);
+      if (liveItems.length >= KQR_PERSON_LIVE_MAX) {
+        for (const it of liveItems) {
+          if (typeof it.sid !== 'string' || !isSid(it.sid)) continue;
+          const s = (await tx.get('sessions', it.sid)) as SessionDoc | null;
+          if (s && (s.revokedAt || !(typeof s.absoluteExpMs === 'number' && nowMs < s.absoluteExpMs) || kqrPickupState(s, nowMs) === 'missed')) endedSids.add(it.sid);
         }
       }
     }
@@ -16962,7 +17059,7 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
       const s = claimedSession as SessionDoc | null;
       const row: any = s ? (users as any[]).find((u) => u && u.id === s.rowId) : null;
       const ok = !!s && sameDevice && s.kind === 'kiosk' && s.via === 'kiosk-qr' && !s.revokedAt && nowMs < s.absoluteExpMs &&
-        s.kioskDeviceId === device.id && dev.lastSid === s.sid &&
+        kqrPickupState(s, nowMs) !== 'missed' && s.kioskDeviceId === device.id && dev.lastSid === s.sid &&
         !!row && kioskSessionStillValid(row, { agencyId: s.agencyId || undefined, venueId: s.venueId, pv: s.pvAtIssue, deviceId: s.kioskDeviceId });
       if (ok) return { kind: 'signed-in', session: s!, row, restored: true };
       const recent = typeof code.claimedAtMs === 'number' && nowMs - code.claimedAtMs < KQR_CLAIM_WINDOW_MS;
@@ -16980,7 +17077,7 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
       const rowOk = !!row && row.personId === approval.personId && (tokenEpochOf(row) ?? 0) === approval.epoch &&
         pinRevOf(row) !== undefined && String(pinRevOf(row)) === approval.pv && kqrRowFitsVenue(row, device.agencyId, device.venueId);
       const deviceOk = sameDevice && !!liveKioskDevice(device.id) && dev.lastSessionAtMs <= (code.approvedAtMs || 0);
-      const liveCount = (Array.isArray(personIndex?.items) ? personIndex.items : []).filter((x: any) => x && typeof x.absoluteExpMs === 'number' && x.absoluteExpMs > nowMs).length;
+      const liveCount = (Array.isArray(personIndex?.items) ? personIndex.items : []).filter((x: any) => x && typeof x.absoluteExpMs === 'number' && x.absoluteExpMs > nowMs && !endedSids.has(x.sid)).length;
       const capOk = liveCount < KQR_PERSON_LIVE_MAX;
       if (!sessionOk || !rowOk || !deviceOk || !capOk) {
         end('refused', !sessionOk ? 'approver-session' : !rowOk ? 'row-changed' : !deviceOk ? 'device-changed' : 'too-many-tablets');
@@ -16995,6 +17092,8 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
         }),
         qrRef,
         qrApproverSid: approval.sid,
+        // Kiosk QR cleanup (item 4): the tablet must use this session within the window.
+        qrPickupByMs: nowMs + KQR_PICKUP_WINDOW_MS,
       };
       if (await tx.get('sessions', sid)) throw new Error('session id already exists');
       tx.set('sessions', sid, sess);
@@ -17006,7 +17105,8 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
       const items: any[] = Array.isArray(personIndex?.items) ? personIndex.items : [];
       // [KQRS-RV1] 2: only ended entries are dropped (never a live one, which would
       // be impossible to sign out from the phone); at the cap the claim is refused.
-      const kept = items.filter((x) => x && typeof x.absoluteExpMs === 'number' && x.absoluteExpMs > nowMs);
+      // Cleanup items 2/4: an entry whose session was read above as ended is dropped too.
+      const kept = items.filter((x) => x && typeof x.absoluteExpMs === 'number' && x.absoluteExpMs > nowMs && !endedSids.has(x.sid));
       kept.push({ ref: qrRef, sid, deviceId: device.id, agencyId: device.agencyId, venueId: device.venueId, createdAtMs: nowMs, absoluteExpMs: sess.absoluteExpMs });
       tx.set('kioskQrPersons', approval.personId, { personId: approval.personId, items: kept });
       return { kind: 'signed-in', session: sess, row, restored: false };
@@ -17052,7 +17152,14 @@ async function kqrTabletRoute(mode: 'start' | 'cancel' | 'poll', req: any, res: 
   }
   // Signed in (C5): the session record exists; hand the tablet its K.
   const s = out.session;
-  cachePut(sessionCache, s.sid, { doc: s, readAtMs: Date.now() });
+  if (isTestMode() && kqrPublishDelayOnceForTests) { const ms = kqrPublishDelayOnceForTests; kqrPublishDelayOnceForTests = 0; await new Promise((r) => setTimeout(r, ms)); }
+  // [KQRCLN-RV1] 2 / [KQRCLN-RV2] 1: a (claim retry's) snapshot never erases a revocation or a
+  // pick-up this instance already knows, and the record as published must still be live.
+  const pub = sessionCachePublish(s.sid, s);
+  const pubNow = Date.now();
+  if (!pub || pub.revokedAt || !(pubNow < pub.absoluteExpMs) || kqrPickupState(pub, pubNow) === 'missed') {
+    return res.status(409).json({ error: KQR_TEXT.tabletDidNotFinish, code: 'KIOSK_QR_NOT_FINISHED' });
+  }
   const iat = Math.floor(s.createdAtMs / 1000);
   const token = signKioskToken(String(out.row.id), device.agencyId, device.venueId, String(s.pvAtIssue), device.id, s.sid, { iat, exp: iat + KIOSK_TOKEN_TTL_SECONDS });
   const venueId = device.venueId;
@@ -17111,7 +17218,8 @@ app.get('/api/kiosk/qr/info/:code', async (req, res) => {
   const agency: any = (agencies as any[]).find((a) => a && a.id === doc!.agencyId);
   const pub = agency ? agencyPublicProfile(agency) : null;
   return res.json({
-    tablet: { name: String(device.name || '') },
+    // Kiosk QR cleanup (item 1): the same tablet shape as the approve answer (additive).
+    tablet: { name: String(device.name || ''), venueName: kqrVenueName(doc.venueId), agencyName: pub ? String(pub.name || '') : '' },
     venue: { name: kqrVenueName(doc.venueId) },
     agency: { name: pub ? pub.name : '', shortCode: pub ? pub.shortCode ?? null : null, logoRev: pub ? pub.logoRev ?? null : null },
   });
@@ -17208,7 +17316,7 @@ app.get('/api/kiosk/qr/approval/:id', async (req, res) => {
   const nowMs = Date.now();
   if (c.state === 'approved' && typeof c.claimDeadlineMs === 'number' && nowMs < c.claimDeadlineMs) return res.json({ state: 'waiting', tablet });
   if (c.state === 'claimed' && s && s.kind === 'kiosk' && s.personId === me.personId) {
-    const live = !s.revokedAt && nowMs < s.absoluteExpMs;
+    const live = !s.revokedAt && nowMs < s.absoluteExpMs && kqrPickupState(s, nowMs) !== 'missed';
     return res.json({ state: live ? 'done' : 'ended', tablet, ...(live ? { ref: s.qrRef || null, endsAtMs: s.absoluteExpMs } : {}) });
   }
   return res.json({ state: 'failed', tablet, message: KQR_TEXT.notOpened });
@@ -17226,6 +17334,8 @@ async function kqrPersonSessions(personId: string, req: any): Promise<Array<{ it
       const s = (await tx.get('sessions', it.sid)) as SessionDoc | null;
       if (!s || s.kind !== 'kiosk' || s.via !== 'kiosk-qr' || s.personId !== personId || s.qrRef !== it.ref) continue;
       if (s.revokedAt || !(nowMs < s.absoluteExpMs)) continue;
+      // Kiosk QR cleanup (item 4): never picked up by the tablet in time -> dead, not listed.
+      if (kqrPickupState(s, nowMs) === 'missed') continue;
       if (siteRefusesAgency(req, s.agencyId)) continue;
       out.push({ item: it, s });
     }
@@ -17243,7 +17353,12 @@ app.get('/api/kiosk/qr/tablets', async (req, res) => {
   return res.json({
     tablets: list.map(({ s }) => {
       const device = kioskDevices.find((x) => x.id === s.kioskDeviceId);
-      return { ref: s.qrRef, tabletName: String(device?.name || ''), venueName: kqrVenueName(String(s.venueId || '')), sinceMs: s.createdAtMs, endsAtMs: s.absoluteExpMs };
+      return {
+        ref: s.qrRef, tabletName: String(device?.name || ''), venueName: kqrVenueName(String(s.venueId || '')),
+        // Kiosk QR cleanup (items 1 and 4, additive): the agency's name; false while the tablet has not used its session yet.
+        agencyName: kqrAgencyName(String(s.agencyId || '')), pickedUp: kqrPickupState(s, Date.now()) === 'done',
+        sinceMs: s.createdAtMs, endsAtMs: s.absoluteExpMs,
+      };
     }),
   });
 });

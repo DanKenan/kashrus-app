@@ -102,7 +102,60 @@ export type SessionDoc = {
    */
   qrRef?: string;
   qrApproverSid?: string;
+  /**
+   * Kiosk QR cleanup (item 4): a QR tablet session must be USED by the tablet
+   * (its first request with the new K) before this moment, else it is dead
+   * (sessionBacksClaims) and no longer listed or counted. qrPickedUpAtMs is
+   * written by that first use. Sessions made before this field existed carry
+   * neither and are unaffected.
+   */
+  qrPickupByMs?: number;
+  qrPickedUpAtMs?: number;
 };
+
+/**
+ * Kiosk QR cleanup (item 4): 'done' = picked up by the tablet (or a session
+ * that never needed it), 'pending' = not used yet and still inside its window,
+ * 'missed' = never used in time (or a malformed deadline): dead, fail closed.
+ */
+export function kqrPickupState(doc: unknown, nowMs: number): 'done' | 'pending' | 'missed' {
+  if (!doc || typeof doc !== 'object') return 'done';
+  const d = doc as Partial<SessionDoc>;
+  if (!('qrPickupByMs' in d) || d.qrPickupByMs === undefined) return 'done';
+  const by = d.qrPickupByMs;
+  if (typeof by !== 'number' || !Number.isFinite(by)) return 'missed';
+  const at = d.qrPickedUpAtMs;
+  if (typeof at === 'number' && Number.isFinite(at) && at <= by) return 'done';
+  return nowMs < by ? 'pending' : 'missed';
+}
+
+/**
+ * Kiosk QR cleanup (item 4, [KQRCLN-RV1] 1): what a request on a session
+ * record that already backs its token does next: 'ok' (picked up, or never
+ * needed), 'refused' (missed - also when the deadline passed after the record
+ * check), or 'mark' (the first use: write the pick-up, then decide).
+ */
+export function kqrPickupVerdict(doc: unknown, nowMs: number): 'ok' | 'refused' | 'mark' {
+  const st = kqrPickupState(doc, nowMs);
+  return st === 'done' ? 'ok' : st === 'missed' ? 'refused' : 'mark';
+}
+
+/**
+ * Kiosk QR cleanup ([KQRCLN-RV1] 2, [KQRCLN-RV2] 1): before an older read of a
+ * session record replaces this instance's copy, what the copy already knows and
+ * what can only move forward is kept: a revocation (never undone) and a
+ * pick-up (same deadline). Everything else comes from the newer publication.
+ */
+export function keepKnownSessionFacts<T>(next: T, cur: unknown): T {
+  if (!next || typeof next !== 'object' || !cur || typeof cur !== 'object') return next;
+  const n = next as any, c = cur as any;
+  if (n.sid !== c.sid) return next;
+  let out: any = n;
+  if (!n.revokedAt && c.revokedAt) out = { ...out, revokedAt: c.revokedAt, revokeReason: c.revokeReason ?? null };
+  if (typeof n.qrPickupByMs === 'number' && n.qrPickupByMs === c.qrPickupByMs && typeof n.qrPickedUpAtMs !== 'number' &&
+      typeof c.qrPickedUpAtMs === 'number' && Number.isFinite(c.qrPickedUpAtMs)) out = { ...out, qrPickedUpAtMs: c.qrPickedUpAtMs };
+  return out as T;
+}
 
 /** The claim shapes a session can back (see session-token.ts SessionClaims). */
 export type SessionBackedClaims =
@@ -229,6 +282,8 @@ export function sessionBacksClaims(doc: unknown, claims: SessionBackedClaims | n
   }
   if (d.revokedAt) return false;
   if (typeof d.absoluteExpMs !== 'number' || !Number.isFinite(d.absoluteExpMs) || nowMs >= d.absoluteExpMs) return false;
+  // Kiosk QR cleanup (item 4): a QR tablet session never picked up in time is dead.
+  if (kqrPickupState(d, nowMs) === 'missed') return false;
   return true;
 }
 

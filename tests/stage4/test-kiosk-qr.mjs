@@ -5,7 +5,9 @@
 import {
   KQR_CODE_RE, KQR_CODE_TTL_MS, KQR_CLAIM_WINDOW_MS, KQR_EXTRA_CODE_GAP_MS, KQR_PAGE_PATH_RE, KQR_TEXT,
   isKqrCode, kqrDeriveKey, kqrHash, kqrRandom, kqrEmitOrigin, kqrLink, kqrView, kqrApproveGate, kqrFirstName, asKqrDevice, emptyKqrDevice,
+  KQR_PICKUP_WINDOW_MS,
 } from '../../src/server/kiosk-qr.ts';
+import { kqrPickupState, kqrPickupVerdict, keepKnownSessionFacts, sessionBacksClaims } from '../../src/server/sessions.ts';
 
 function assert(c, m) { if (!c) throw new Error(m); }
 const J = (o) => JSON.stringify(o);
@@ -54,6 +56,38 @@ export default {
     const d = asKqrDevice({ g: -1, codeHash: 'zz', lastSid: 5, lastExtraAtMs: 'x' }, 'd9');
     assert(J(d) === J(emptyKqrDevice('d9')), `malformed device doc reads as fresh: ${J(d)}`);
     assert(KQR_TEXT.expired === 'This code has expired. Scan the new code on the tablet.' && KQR_TEXT.unusable === "This code can't be used. Scan the code on the tablet again.", 'words');
-    return { details: ['shape', 'hash', 'link', 'views', 'gate'] };
+
+    // Kiosk QR cleanup (item 4): a QR tablet session must be picked up (used) by its tablet in time.
+    assert(KQR_PICKUP_WINDOW_MS === 60000, 'pick-up window 60 s');
+    const ks = { sid: 'S'.repeat(22), kind: 'kiosk', personId: 'p1', rowId: 'r1', agencyId: 'ag', epochAtIssue: 0, via: 'kiosk-qr', createdAt: 'x', createdAtMs: 1000,
+      absoluteExpMs: 1000 + 3 * 3600 * 1000, userAgentHint: '', revokedAt: null, revokeReason: null, kioskDeviceId: 'd1', venueId: 'v', pvAtIssue: '1' };
+    const kc = { kind: 'kiosk', userId: 'r1', agencyId: 'ag', venueId: 'v', pv: '1', dev: 'd1', sid: ks.sid };
+    assert(kqrPickupState(ks, 1e9) === 'done' && sessionBacksClaims(ks, kc, 5000), 'a session without the field (made before this change, or a PIN session) is unaffected');
+    const pend = { ...ks, qrPickupByMs: 61000 };
+    assert(kqrPickupState(pend, 60999) === 'pending' && sessionBacksClaims(pend, kc, 60999), 'not used yet, inside the window: pending and usable');
+    assert(kqrPickupState(pend, 61000) === 'missed' && !sessionBacksClaims(pend, kc, 61000), 'not used by exactly 60 s: missed and dead');
+    const used = { ...pend, qrPickedUpAtMs: 5000 };
+    assert(kqrPickupState(used, 1e7) === 'done' && sessionBacksClaims(used, kc, 1e7), 'picked up in time: done for its whole life');
+    assert(!sessionBacksClaims({ ...used, revokedAt: 'now' }, kc, 6000), 'picked up does not beat a revocation');
+    assert(kqrPickupState({ ...pend, qrPickedUpAtMs: 61001 }, 70000) === 'missed', 'a pick-up after the deadline does not count');
+    for (const bad of [null, 'x', NaN, Infinity]) assert(kqrPickupState({ ...ks, qrPickupByMs: bad }, 0) === 'missed', `a malformed deadline fails closed: ${String(bad)}`);
+    assert(kqrPickupState({ ...pend, qrPickedUpAtMs: 'x' }, 2000) === 'pending', 'a malformed pick-up moment is not a pick-up');
+    // [KQRCLN-RV1] 1: after the record check, the deadline is checked again explicitly.
+    assert(kqrPickupVerdict(ks, 1e9) === 'ok' && kqrPickupVerdict(used, 1e9) === 'ok', 'verdict: done -> ok');
+    assert(kqrPickupVerdict(pend, 60999) === 'mark' && kqrPickupVerdict(pend, 61000) === 'refused', 'verdict: pending -> mark, deadline crossed -> refused');
+    // [KQRCLN-RV1] 2: an older read never erases a pick-up this instance already knows; a revocation still wins.
+    assert(keepKnownSessionFacts(pend, used).qrPickedUpAtMs === 5000, 'an older pending read keeps the known pick-up');
+    const revOld = keepKnownSessionFacts({ ...pend, revokedAt: 'r' }, used);
+    assert(revOld.revokedAt === 'r' && revOld.qrPickedUpAtMs === 5000 && !sessionBacksClaims(revOld, kc, 6000), 'a revocation in the newer read still wins');
+    assert(keepKnownSessionFacts(pend, { ...used, sid: 'T'.repeat(22) }) === pend && keepKnownSessionFacts(pend, { ...used, qrPickupByMs: 99 }) === pend, 'only the same session and deadline');
+    assert(keepKnownSessionFacts(null, used) === null && keepKnownSessionFacts(pend, null) === pend && keepKnownSessionFacts(used, pend) === used, 'nothing to keep');
+    assert(keepKnownSessionFacts(pend, { ...pend, qrPickedUpAtMs: 'x' }) === pend, 'a malformed known pick-up is not kept');
+    // [KQRCLN-RV2] 1: an older read never revives a revocation this instance already knows.
+    const revKnown = keepKnownSessionFacts(used, { ...used, revokedAt: 'r1', revokeReason: 'kiosk-qr-phone-signout' });
+    assert(revKnown.revokedAt === 'r1' && revKnown.revokeReason === 'kiosk-qr-phone-signout' && !sessionBacksClaims(revKnown, kc, 6000), 'a known revocation survives an older unrevoked read');
+    assert(keepKnownSessionFacts(used, { ...used, sid: 'T'.repeat(22), revokedAt: 'r1' }) === used, 'another session\'s revocation is not copied');
+    const userDoc = { ...ks, kind: 'user', qrPickupByMs: undefined };
+    assert(keepKnownSessionFacts(userDoc, { ...userDoc, revokedAt: 'r2' }).revokedAt === 'r2', 'any session kind keeps a known revocation');
+    return { details: ['shape', 'hash', 'link', 'views', 'gate', 'pick-up'] };
   },
 };
