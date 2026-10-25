@@ -13,6 +13,7 @@ globalThis.localStorage = { getItem: (k) => (lstore.has(k) ? lstore.get(k) : nul
 globalThis.sessionStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
 
 const { makeQr, qrPath } = await import('../../src/lib/qrEncode.ts');
+const { kqrDecodeRgba } = await import('../../src/lib/kqrFrameReader.ts');
 const K = await import('../../src/lib/kioskQr.ts');
 const A = await import('../../src/lib/api.ts');
 
@@ -27,6 +28,38 @@ ok('Q dark module', m[m.length - 8][8] === true);
 ok('Q svg path has one square per dark module', (qrPath(m).match(/M/g) || []).length === m.flat().filter(Boolean).length);
 let threw = false; try { makeQr('x'.repeat(2000)); } catch { threw = true; }
 ok('Q too long -> throws (never a wrong code)', threw);
+// Always decode RGBA frames with the same reader used by the camera fallback.
+const decodeQr = (text) => {
+  const mm = makeQr(text), sc = 6, w = (mm.length + 8) * sc;
+  const rgba = new Uint8ClampedArray(w * w * 4).fill(255);
+  mm.forEach((row, y) => row.forEach((dark, x) => {
+    if (dark) for (let a = 0; a < sc; a++) for (let b = 0; b < sc; b++) {
+      const i = (((y + 4) * sc + b) * w + (x + 4) * sc + a) * 4;
+      rgba[i] = rgba[i + 1] = rgba[i + 2] = 0;
+    }
+  }));
+  return kqrDecodeRgba(rgba, w, w);
+};
+const readerTexts = [link, 'https://shutfey-abc123-uc.a.run.app/k/' + code, 'http://127.0.0.1:3490/k/' + code];
+const readerVersions = new Set();
+for (let n = 1; n <= 700 && readerVersions.size < 20; n++) {
+  const t = (n < 20 ? '' : 'https://x.org/k/') + 'Ab3_-xYz09'.repeat(70).slice(0, n);
+  let v;
+  try { v = (makeQr(t).length - 17) / 4; } catch { break; }
+  if (!readerVersions.has(v)) { readerVersions.add(v); readerTexts.push(t); }
+}
+ok('Q RGBA covers every version 1-20', [...Array(20)].every((_, i) => readerVersions.has(i + 1)));
+for (const t of readerTexts) {
+  ok(`Q RGBA reader reads it back (${t.length} chars, version ${(makeQr(t).length - 17) / 4})`, decodeQr(t) === t);
+}
+const readerOrigins = ['https://app.hartfordkashrut.org'];
+ok('Q decoded kiosk link passes the validator', JSON.stringify(K.kqrLinkFromScan(decodeQr(link), readerOrigins)) === JSON.stringify({ origin: readerOrigins[0], code }));
+for (const t of ['https://evil.example/k/' + code, link + '?x=1']) {
+  const decoded = decodeQr(t);
+  ok('Q decoded foreign or query link is refused: ' + t, decoded === t && K.kqrLinkFromScan(decoded, readerOrigins) === null);
+}
+ok('Q all-white image has no code', kqrDecodeRgba(new Uint8ClampedArray(240 * 240 * 4).fill(255), 240, 240) === null);
+
 const zbar = spawnSync('sh', ['-c', 'command -v zbarimg'], { encoding: 'utf8' }).stdout.trim();
 if (zbar) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kqr-'));
@@ -163,6 +196,13 @@ ok('W approve waits for the sign-in cookie', /isCookieSession\(\) && !getSession
 ok('W the code leaves the address bar (/k only) and is kept for this tab', app.includes("window.history.replaceState(null, '', kioskMode ? '/' : '/k')") && app.includes('savePendingKqr(code)'));
 ok('W signed out on /k -> the sign-in form, then back', /if \(kqrPage && !isKiosk\) \{[\s\S]*?<LoginPage[\s\S]*?onLoginSuccess=\{handleLoginSuccess\}/.test(app));
 ok('W scanner: listed origins only; other address -> that address', sheet.includes('kqrLinkFromScan(f.rawValue, origins)') && sheet.includes('window.location.assign(`${link.origin}/k/${link.code}`)'));
+ok('W scanner lazily imports the frame reader', sheet.includes("import('../lib/kqrFrameReader')") && !/^import\s.*(?:kqrFrameReader|jsqr)/m.test(sheet));
+const sourceFiles = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+  const file = path.join(dir, entry.name);
+  return entry.isDirectory() ? sourceFiles(file) : [file];
+});
+const sourceRoot = new URL('../../src/', import.meta.url);
+ok('W only the lazy reader mentions jsqr', sourceFiles(sourceRoot.pathname).every((file) => file === path.join(sourceRoot.pathname, 'lib/kqrFrameReader.ts') || !fs.readFileSync(file, 'utf8').includes('jsqr')));
 ok('W scanner camera off -> camera-app tip', sheet.includes('T.scanNoCamera'));
 ok('W tablet: start, poll, cancel on "Use your code instead"', tab.includes("'/api/kiosk/qr/start'") && tab.includes("'/api/kiosk/qr/poll'") && tab.includes("apiFetch('/api/kiosk/qr/cancel', { method: 'POST' })"));
 ok('W tablet: a poll without the link while the code is live keeps the code on screen', tab.includes("if (lastLink && typeof d.codeIssuedAtMs === 'number' && d.codeIssuedAtMs === lastIssuedAt && d.retryInMs === undefined) return later(KQR_POLL_MS, false);"));

@@ -23,7 +23,8 @@ function makeDetector(): Detector | null {
  * "Sign in to a tablet" (phone menu): the camera, which reads only a tablet
  * link on an address the server lists (/api/site appOrigins), and "Tablets
  * you're signed in on" with Sign out on each. A phone whose browser has no
- * code reader is told to use its camera app (the link page does the rest).
+ * code reader decodes camera frames with the small lazy reader, falling back
+ * to the camera-app text only if the camera is off.
  */
 export function TabletSignInSheet({ open, startOn = 'scan', onClose, onScanned }: TabletSignInSheetProps) {
   const [view, setView] = useState<'scan' | 'tablets'>(startOn);
@@ -60,11 +61,22 @@ export function TabletSignInSheet({ open, startOn = 'scan', onClose, onScanned }
     let hintTimer: ReturnType<typeof setTimeout> | null = null;
     setCamera('starting');
     setHint(null);
-    const detector = makeDetector();
+    let detector = makeDetector();
     (async () => {
       origins = await loadAppOrigins();
       if (!live) return;
-      if (!detector || !navigator.mediaDevices?.getUserMedia) { setCamera('off'); return; }
+      if (!navigator.mediaDevices?.getUserMedia) { setCamera('off'); return; }
+      if (!detector) {
+        try {
+          const { createFrameDetector } = await import('../lib/kqrFrameReader');
+          if (!live) return;
+          detector = createFrameDetector();
+        } catch {
+          if (live) setCamera('off');
+          return;
+        }
+      }
+      const reader = detector;
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
       } catch {
@@ -82,7 +94,7 @@ export function TabletSignInSheet({ open, startOn = 'scan', onClose, onScanned }
         if (!live) return;
         try {
           if (v.readyState >= 2) {
-            const found = await detector.detect(v);
+            const found = await reader.detect(v);
             if (!live) return;
             for (const f of found) {
               const link = kqrLinkFromScan(f.rawValue, origins);
