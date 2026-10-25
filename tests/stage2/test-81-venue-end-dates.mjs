@@ -624,13 +624,17 @@ export default {
           await hookB('grant-sweep', { disable: true });
           let fbB = await hookB('freshness', { recompute: true, tick: true });
           assert(fbB.needed === false, `B idle (only undated access) ${J(fbB)}`);
-          r = await ops(tAdmin, U('mash'), [{ op: 'set_until', venueId: V3, until: '2026-10-23' }], await revOf(U('mash')));
+          // A runs on the real clock here: the end date is two days after today in New York (a fixed date became a past date).
+          const jUntil = new Date(Date.parse(new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) + 'T12:00:00Z') + 2 * 86400000).toISOString().slice(0, 10);
+          r = await ops(tAdmin, U('mash'), [{ op: 'set_until', venueId: V3, until: jUntil }], await revOf(U('mash')));
           assert(r.status === 200, `A sets an end date ${r.status} ${r.text.slice(0, 120)}`);
+          const jEndIso = r.json?.venueUntil?.[V3];
+          assert(typeof jEndIso === 'string', `A answers the end instant ${r.text.slice(0, 160)}`);
           fbB = await hookB('freshness', { tick: true, advanceMonoMs: 15000 });
           assert(fbB.tick === 'idle' && fbB.needed === false, `B has not read yet (idle cadence) ${J(fbB)}`);
           fbB = await hookB('freshness', { tick: true, advanceMonoMs: 300000 });
           assert(String(fbB.tick).startsWith('idle-read') && fbB.needed === true, `B reads within 5 min and installs the end date ${J(fbB)}`);
-          await hookB('clock', { iso: '2026-10-24T04:00:00.000Z' });
+          await hookB('clock', { iso: jEndIso });
           assert(taskIds(await tasksAt(tMashB, V3, Bu)).length === 0, 'B enforces the end date A set');
           await hookB('clock', { iso: null });
           fbB = await hookB('freshness', { tick: true });
