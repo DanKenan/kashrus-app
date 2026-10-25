@@ -28,8 +28,8 @@ export default {
     assert(kqrLink('https://a.example', c) === `https://a.example/k/${c}`, 'link shape');
     let threw = false; try { kqrLink('https://a.example', 'nope'); } catch { threw = true; }
     assert(threw, 'kqrLink refuses a non-code');
-    for (const p of ['/k', '/k/', `/k/${c}`, `/k/${c}/`]) assert(KQR_PAGE_PATH_RE.test(p), `page path ${p}`);
-    for (const p of ['/kk', '/k/a/b', '/api/k/x', '/ki']) assert(!KQR_PAGE_PATH_RE.test(p), `not the page ${p}`);
+    for (const p of ['/k', '/k/', `/k/${c}`, `/k/${c}/`, '/k/a/b']) assert(KQR_PAGE_PATH_RE.test(p), `page path ${p}`);
+    for (const p of ['/kk', '/api/k/x', '/ki', '/k.html']) assert(!KQR_PAGE_PATH_RE.test(p), `not the page ${p}`);
 
     const dev = { ...emptyKqrDevice('d1'), g: 3, codeHash: 'a'.repeat(64) };
     const base = { hash: 'a'.repeat(64), state: 'live', deviceId: 'd1', agencyId: 'ag', venueId: 'v', deviceSecretHash: 'x', g: 3, createdAtMs: 1000, expiresAtMs: 61000 };

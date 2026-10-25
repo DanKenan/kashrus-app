@@ -458,12 +458,11 @@ const server = http.createServer(app);
 // In local dev (no proxy), this is harmless — req.ip falls back to socket.
 app.set('trust proxy', 1);
 
-app.use(express.json({ limit: '2mb' }));
-
 // Kiosk QR (C10, G "CSRF / consent"): the phone page a QR opens (/k/<code>)
-// carries a one-use secret in its URL and holds the one "Yes" button, so
-// every answer on /k and /k/* (whoever serves it: the SPA fallback or the dev
-// server) is never cached, never framed and never sends a Referer. The headers
+// carries a one-use secret in its URL and approves on load (scan = approve),
+// so every answer on /k and anything under it (whoever serves it: the SPA
+// fallback or the dev server) is never cached, never framed and never sends a
+// Referer. Registered before any body parsing. The headers
 // are forced at writeHead so a later setHeader cannot weaken them.
 function kqrForcePageHeaders(res: any): void {
   res.setHeader('Cache-Control', 'no-store');
@@ -489,6 +488,9 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+app.use(express.json({ limit: '2mb' }));
+
 
 // ---------------------------------------------------------------------------
 // Item 11, 11a-s2 (plan v8 9.2, 9.3, 10.6, 11a-s): the user session cookie U.
@@ -11406,6 +11408,34 @@ if (isTestMode()) {
         if (typeof personId !== 'string' || !personId) return res.status(400).json({ error: 'personId required' });
         return res.json({ doc: await pkTransaction(async (tx) => tx.get('kioskQrPersons', personId)) });
       }
+      if (action === 'person-pad') {
+        // Pads (n > 0) or clears (n = 0) a person's tablet list with fake live entries (overflow tests).
+        if (typeof personId !== 'string' || !personId) return res.status(400).json({ error: 'personId required' });
+        const n = Math.max(0, Math.min(200, Number(req.body?.n) || 0));
+        const doc = await pkTransaction(async (tx) => {
+          const cur = await tx.get('kioskQrPersons', personId);
+          const items = (Array.isArray(cur?.items) ? cur.items : []).filter((x: any) => !x?.fake);
+          for (let i = 0; i < n; i++) items.push({ fake: true, ref: kqrRandom(), sid: kqrRandom(), deviceId: 'fake', agencyId: 'fake', venueId: 'fake', createdAtMs: Date.now(), absoluteExpMs: Date.now() + 3600 * 1000 });
+          const next = { personId, items };
+          tx.set('kioskQrPersons', personId, next);
+          return next;
+        });
+        return res.json({ ok: true, count: doc.items.length });
+      }
+      if (action === 'session-passkey') {
+        // Marks a stored user session as passkey-backed (credentialId need not exist) and drops this instance's copies.
+        const sid = String(req.body?.sid || '');
+        if (!isSid(sid)) return res.status(400).json({ error: 'sid required' });
+        const next = await pkTransaction(async (tx) => {
+          const cur = await tx.get('sessions', sid);
+          if (!cur || !cur.personId) return null;
+          const n = { ...cur, authMethod: { type: 'passkey', personId: cur.personId, credentialId: String(req.body?.credentialId || '') } };
+          tx.set('sessions', sid, n);
+          return n;
+        });
+        if (next) { sessionCache.delete(sid); personCredCache.delete(next.personId); }
+        return res.json({ ok: !!next });
+      }
       if (action === 'approval') {
         if (typeof approvalId !== 'string' || !approvalId) return res.status(400).json({ error: 'approvalId required' });
         return res.json({ doc: await pkTransaction(async (tx) => tx.get('kioskQrApprovals', approvalId)) });
@@ -16710,6 +16740,8 @@ app.post('/api/kiosk/login', async (req, res) => {
 // code (one more field and one more check at claim; no migration).
 // ---------------------------------------------------------------------------
 const KQR_STAFF_ROLES = ['mashgiach', 'worker', 'coordinator', 'admin'];
+/** [KQRS-RV1] 2: at most this many live QR tablet sessions per person (each is listed and can be signed out from the phone). */
+const KQR_PERSON_LIVE_MAX = 50;
 /** C8: refused approvals per person / per session (10 in 10 min) and per IP (30 in 10 min); public info per IP. */
 const KQR_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 let kqrPersonLimiter = createWindowLimiter({ max: 10, windowMs: KQR_LIMIT_WINDOW_MS, maxKeys: 20000 });
@@ -16849,9 +16881,20 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
     let approverSession: any = null;
     let claimedSession: any = null;
     let personIndex: any = null;
+    let approverPasskeyOk = true;
     if (mode === 'poll' && view.kind === 'approved' && approval) {
       approverSession = await tx.get('sessions', approval.sid);
       personIndex = await tx.get('kioskQrPersons', approval.personId);
+      // [KQRS-RV1] 1: a session that came from a passkey is valid only while that
+      // passkey exists - read from the store inside this transaction (never a cache).
+      const am = approverSession && (approverSession as any).authMethod;
+      if (am !== undefined && am !== null) {
+        if (!isPasskeyAuthMethod(am) || am.personId !== approverSession.personId) approverPasskeyOk = false;
+        else {
+          const pc = asPersonCredentials(await tx.get('personCredentials', am.personId), am.personId);
+          approverPasskeyOk = !!findPasskey(pc, am.credentialId);
+        }
+      }
     }
     if (mode === 'poll' && view.kind === 'claimed' && code && typeof code.claimedSid === 'string') {
       claimedSession = await tx.get('sessions', code.claimedSid);
@@ -16910,13 +16953,15 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
       // The approving session's own row must still back it (same person, same epoch, still eligible).
       const approverRow: any = s ? (users as any[]).find((u) => u && u.id === s.rowId) : null;
       const sessionOk = !!s && s.kind === 'user' && s.sid === approval.sid && !s.revokedAt && typeof s.absoluteExpMs === 'number' && nowMs < s.absoluteExpMs &&
-        s.personId === approval.personId && passkeyCachedOk(s) &&
+        s.personId === approval.personId && approverPasskeyOk &&
         !!approverRow && approverRow.personId === approval.personId && (tokenEpochOf(approverRow) ?? 0) === s.epochAtIssue && !sessionIneligibleCode(approverRow);
       const rowOk = !!row && row.personId === approval.personId && (tokenEpochOf(row) ?? 0) === approval.epoch &&
         pinRevOf(row) !== undefined && String(pinRevOf(row)) === approval.pv && kqrRowFitsVenue(row, device.agencyId, device.venueId);
       const deviceOk = sameDevice && !!liveKioskDevice(device.id) && dev.lastSessionAtMs <= (code.approvedAtMs || 0);
-      if (!sessionOk || !rowOk || !deviceOk) {
-        end('refused', !sessionOk ? 'approver-session' : !rowOk ? 'row-changed' : 'device-changed');
+      const liveCount = (Array.isArray(personIndex?.items) ? personIndex.items : []).filter((x: any) => x && typeof x.absoluteExpMs === 'number' && x.absoluteExpMs > nowMs).length;
+      const capOk = liveCount < KQR_PERSON_LIVE_MAX;
+      if (!sessionOk || !rowOk || !deviceOk || !capOk) {
+        end('refused', !sessionOk ? 'approver-session' : !rowOk ? 'row-changed' : !deviceOk ? 'device-changed' : 'too-many-tablets');
         return fresh(false, true);
       }
       const sid = base64url(crypto.randomBytes(16));
@@ -16937,7 +16982,9 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
       dev.lastSessionAtMs = nowMs;
       tx.set('kioskQrDevices', device.id, dev);
       const items: any[] = Array.isArray(personIndex?.items) ? personIndex.items : [];
-      const kept = items.filter((x) => x && typeof x.absoluteExpMs === 'number' && x.absoluteExpMs > nowMs).slice(-49);
+      // [KQRS-RV1] 2: only ended entries are dropped (never a live one, which would
+      // be impossible to sign out from the phone); at the cap the claim is refused.
+      const kept = items.filter((x) => x && typeof x.absoluteExpMs === 'number' && x.absoluteExpMs > nowMs);
       kept.push({ ref: qrRef, sid, deviceId: device.id, agencyId: device.agencyId, venueId: device.venueId, createdAtMs: nowMs, absoluteExpMs: sess.absoluteExpMs });
       tx.set('kioskQrPersons', approval.personId, { personId: approval.personId, items: kept });
       return { kind: 'signed-in', session: sess, row, restored: false };

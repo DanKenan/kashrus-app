@@ -1,21 +1,25 @@
 /**
  * Test 84 (kiosk QR sign-in, server; addendum v2 AGREED Oct 24 2026 on plan
- * v8 9.7): a signed-in phone scans the tablet's code, taps "Yes, that's me",
- * and the tablet opens on that person. No passkey, no number.
+ * v8 9.7; Don's final word Oct 24 7:58 PM ET: "Just the mashgiach logged in
+ * to his account, can scan QR code. That's it."): a signed-in phone opens the
+ * scanned link, its page POSTs the approval, and the tablet opens on that
+ * person. No passkey, no number, no separate confirm.
  *  A  approval / sessions: a phone with a cookie session and NO passkey
  *     approves, the tablet's poll claims (cookie tablet: K + D, never a token
  *     in JSON; header tablet: token in JSON); a 'kiosk-qr' session record (3 h);
  *     info never consumes or changes anything; no session / Bearer-only / a
- *     revoked or expired session / a K -> refused; no PIN, or a PIN only at
+ *     revoked or expired session / a K -> refused; a passkey-backed approving
+ *     session whose passkey is gone (no cached copy) -> nothing opens; no PIN, or a PIN only at
  *     another venue of the same agency -> refused; two phones on one code ->
  *     one approval, the same person again -> "Already approved"; the phone
- *     session revoked or expired between Yes and claim -> nothing opens.
+ *     session revoked or expired between approval and claim -> nothing opens;
+ *     a person at the live-tablet cap -> nothing opens, no live entry dropped.
  *  C  CSRF / consent: approve without / with a foreign / null Origin, without
  *     X-Shutfey-Auth, or by GET -> refused, nothing approved; /k and /k/<code>
  *     are never framed, cached or referred; signing in approves nothing.
  *  R  clocks and races: approve at 59 s and claim after the code's 60 s;
  *     claim at 29.8 s ok and at exactly 30 s refused; reload, Cancel, a PIN
- *     sign-in, unpair and a PIN removal between Yes and claim kill the
+ *     sign-in, unpair and a PIN removal between approval and claim kill the
  *     approval; competing polls create one session; a lost claim answer is
  *     restored with the SAME session only while it is live and the tablet's
  *     latest (not after phone sign-out, a PIN sign-in, a new credential or
@@ -46,7 +50,7 @@ const SHARED_ORIGIN_CFG = 'https://workers-collaborative-dashboard-1080260390009
 const CODE_RE = /^[A-Za-z0-9_-]{22}$/;
 
 export default {
-  name: 'Test 84: kiosk QR sign-in (server) — scan, tap Yes, the tablet opens',
+  name: 'Test 84: kiosk QR sign-in (server) — a signed-in phone scans, the tablet opens',
   whatItProves:
     'A signed-in phone (no passkey, no number) approves one live tablet code with one POST from the right site; only the tablet that owns the code claims it, once, inside 30 s, while the approving session, the person\'s PIN at that venue and the tablet record are unchanged; links come from server config only; refusals are rate-limited without ever locking a tablet; the PIN pad is unchanged.',
 
@@ -213,7 +217,7 @@ export default {
       assert(rov.status === 403 && rov.json?.code === 'KIOSK_QR_NOT_HERE', `A PIN only at another venue of the agency -> refused: ${rov.status}`);
       assert((await codeState(T1)) === 'live', 'A refused approvals approve nothing');
 
-      // The real Yes (no passkey on this person, no number).
+      // The approval (scan = approve; no passkey on this person, no number).
       const ok = await approve(yossi, s0.code);
       assert(ok.status === 200 && typeof ok.json?.approvalId === 'string' && ok.json.tablet?.name === 'Front tablet' && ok.json.tablet.venueName === `Hill Bakery ${ts}` && !ok.json.already, `A approve: ${ok.status} ${J(ok.json)}`);
       assert(!/sid|hash|token|deviceId/.test(ok.text), `A approve answer carries no session data: ${ok.text}`);
@@ -251,7 +255,7 @@ export default {
       const kAppr = await call('POST', '/api/kiosk/qr/approve', { cookies: [`${D}=${T1.cred}`, `${K}=${c1.set[K].value}`], origin: SHARED_O, optIn: true, body: { code: s2.code } });
       assert(kAppr.status === 403 || kAppr.status === 401, `A a K cannot approve: ${kAppr.status}`);
 
-      // Approving session revoked / expired between Yes and claim -> nothing opens.
+      // Approving session revoked / expired between approval and claim -> nothing opens.
       const tmp = await phoneLogin(ppl.chaim.email, ppl.chaim.password);
       const s3 = await freshCode(T3);
       const a3 = await approve(tmp, s3.code);
@@ -269,6 +273,24 @@ export default {
       const s5 = await freshCode(T3);
       assert((await approve(tmp, s5.code)).status === 401, 'A a revoked session cannot approve');
       assert((await approve(tmp2, s5.code)).status === 401, 'A an expired session cannot approve');
+      // [KQRS-RV1] 1: a passkey-backed approving session whose passkey is gone (no cached copy) -> nothing opens.
+      const pkPhone = await phoneLogin(ppl.chaim.email, ppl.chaim.password);
+      const s6 = await freshCode(T3);
+      assert((await approve(pkPhone, s6.code)).status === 200, 'A approve (passkey session)');
+      assert((await hook({ action: 'session-passkey', sid: pkPhone.sid, credentialId: 'removed-passkey-t84' })).ok === true, 'A mark the approving session passkey-backed');
+      const c6 = await poll(T3);
+      assert(!signedIn(c6) && c6.json?.notFinished === true && !c6.set[K], `A approving passkey removed (cache missing) -> nothing opens: ${J(c6.json)}`);
+      // [KQRS-RV1] 2: at the live-tablet cap the claim is refused and no live entry is dropped.
+      const listBefore = await tabletsOf(yossi);
+      assert((await hook({ action: 'person-pad', personId: ppl.yossi.id, n: 50 })).ok === true, 'A pad the tablet list');
+      const s7 = await freshCode(T3);
+      assert((await approve(yossi, s7.code)).status === 200, 'A approve (cap)');
+      const c7 = await poll(T3);
+      assert(!signedIn(c7) && c7.json?.notFinished === true && !c7.set[K], `A at the cap -> nothing opens: ${J(c7.json)}`);
+      const idx = (await hook({ action: 'person', personId: ppl.yossi.id })).doc;
+      assert(idx.items.length === 50 + listBefore.length && listBefore.every((x) => idx.items.some((i) => i.ref === x.ref)), `A no live entry dropped: ${idx.items.length}`);
+      assert(J((await tabletsOf(yossi)).map((x) => x.ref)) === J(listBefore.map((x) => x.ref)), 'A the real tablets stay listed (and can be signed out)');
+      await hook({ action: 'person-pad', personId: ppl.yossi.id, n: 0 });
     }
 
     // =========================== C: CSRF / consent ===========================
@@ -298,10 +320,11 @@ export default {
     {
       // Approve at 59 s, claim after the code's own 60 s: ok (the claim window rules).
       let s = await freshCode(T1);
-      await hook({ action: 'backdate', deviceId: T1.id, ms: 58500 });
+      // (57 s back leaves headroom for a slow mock store; the code still expires before the claim.)
+      await hook({ action: 'backdate', deviceId: T1.id, ms: 57000 });
       const a59 = await approve(yossi, s.code);
-      assert(a59.status === 200, `R approve at ~59 s: ${a59.status} ${J(a59.json)}`);
-      await hook({ action: 'backdate', deviceId: T1.id, ms: 3000 });
+      assert(a59.status === 200, `R approve near the end of the code's life: ${a59.status} ${J(a59.json)}`);
+      await hook({ action: 'backdate', deviceId: T1.id, ms: 4500 });
       const p61 = await poll(T1);
       assert(signedIn(p61), `R claim after the code's 60 s -> ok: ${J(p61.json)}`);
       // Approve after 60 s: expired.
@@ -325,7 +348,7 @@ export default {
       const lst = await status(yossi, late.json.approvalId);
       assert(lst.json?.state === 'failed' && lst.json.message === "The tablet didn't open. Scan again.", `R phone: the tablet didn't open: ${J(lst.json)}`);
 
-      // Reload / Cancel between Yes and claim kill the approval.
+      // Reload / Cancel between approval and claim kill the approval.
       for (const [label, kill] of [['reload', (t) => start(t)], ['Cancel', (t) => cancel(t)]]) {
         s = await freshCode(T1);
         const ap = await approve(yossi, s.code);
@@ -334,10 +357,10 @@ export default {
         const k = await kill(T1);
         assert(k.status === 200 && k.json?.state === 'waiting' && !k.set[K], `R ${label}: ${k.status}`);
         const p = await poll(T1);
-        assert(!signedIn(p) && !p.set[K], `R ${label} between Yes and claim -> nothing opens: ${J(p.json)}`);
+        assert(!signedIn(p) && !p.set[K], `R ${label} between approval and claim -> nothing opens: ${J(p.json)}`);
         assert((await status(yossi, ap.json.approvalId)).json?.state === 'failed', `R ${label}: phone sees failed`);
       }
-      // A PIN sign-in on the tablet between Yes and claim.
+      // A PIN sign-in on the tablet between approval and claim.
       s = await freshCode(T1);
       assert((await approve(yossi, s.code)).status === 200, 'R approve before PIN sign-in');
       const pin = await call('POST', '/api/kiosk/login', { cookies: [`${D}=${T1.cred}`], optIn: true, origin: SHARED_O, body: { userId: ppl.chaim.id, pin: '1357' } });
@@ -346,15 +369,15 @@ export default {
       const pp = await poll(T1);
       assert(!signedIn(pp) && !pp.set[K], `R a PIN sign-in kills the pending QR approval: ${J(pp.json)}`);
       assert((await board(T1, pinK)).status === 200, 'R the PIN session is untouched');
-      // A PIN removal (entitlement revocation) between Yes and claim.
+      // A PIN removal (entitlement revocation) between approval and claim.
       s = await freshCode(T3);
       assert((await approve(chaim, s.code)).status === 200, 'R approve before PIN removal');
       await setPin(a.token, ppl.chaim.id, '');
       const pr = await poll(T3);
-      assert(!signedIn(pr) && pr.json?.notFinished === true, `R PIN removed between Yes and claim -> nothing opens: ${J(pr.json)}`);
+      assert(!signedIn(pr) && pr.json?.notFinished === true, `R PIN removed between approval and claim -> nothing opens: ${J(pr.json)}`);
       await setPin(a.token, ppl.chaim.id, '1357');
       chaim.pinBack = true;
-      // Unpair between Yes and claim.
+      // Unpair between approval and claim.
       const TU = await pairTablet(a.token, vA1, 'Temp tablet');
       s = await freshCode(TU);
       assert((await approve(chaim, s.code)).status === 200, 'R approve before unpair');

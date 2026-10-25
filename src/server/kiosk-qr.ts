@@ -31,8 +31,8 @@ export const KQR_EXTRA_CODE_GAP_MS = 20 * 1000;
 export const KQR_APPROVAL_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 /** A tablet-session reference for "Sign out" (D2): 128-bit random, base64url. */
 export const KQR_REF_RE = /^[A-Za-z0-9_-]{22}$/;
-/** The page path a QR link points at: /k/ + the code. */
-export const KQR_PAGE_PATH_RE = /^\/k(\/[^/]*)?\/?$/;
+/** The page a QR link points at (/k/ + the code) and everything under /k. */
+export const KQR_PAGE_PATH_RE = /^\/k(\/.*)?$/;
 
 export type KqrCodeState = 'live' | 'approved' | 'claimed' | 'expired' | 'cancelled' | 'refused';
 
