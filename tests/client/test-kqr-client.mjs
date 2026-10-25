@@ -137,7 +137,8 @@ ok('W phone: a QR answer never clears the session itself (no site-refusal sign-o
 ok('W tablet: no start/poll while a sign-out is on its way (its answer would delete the new cookie)', tab.includes('if (!(await signOutsSettled(KQR_POLL_MS))) return later(KQR_POLL_MS, first);'));
 ok('W tablet: a claim answer landing after the screen is gone is ended, and tracked until then', tab.includes('trackCookieSignInRequest(') && tab.includes("if (!live && res.ok && body?.state === 'signed-in') await endUnusedKioskSignIn("));
 ok('W tablet: "Use your code instead" lets a poll on its way land first (a scan just now opens the tablet)', tab.includes('if (inflight.current) await Promise.race([inflight.current') && tab.includes('if (claimed.current) return;'));
-ok('W PIN sign-in and the sign-out retry wait for a QR sign-in on its way', pin.includes('await cookieSignInsSettled();') && src('lib/api.ts').includes('if (signInsInFlight.size > 0) await cookieSignInsSettled();'));
+ok('W PIN sign-in and the sign-out retry wait for a QR sign-in on its way, and send nothing while it still is', pin.includes('if (!(await cookieSignInsSettled())) {') && pin.includes('setError(KIOSK_FINISHING_SIGN_IN);') && src('lib/api.ts').includes('if (signInsInFlight.size > 0 && !(await cookieSignInsSettled())) return;'));
+ok('W a reopened QR screen waits for an earlier screen\'s start/poll (and its cleanup) before its own', tab.includes('if (!(await cookieSignInsSettled(KQR_POLL_MS))) return later(KQR_POLL_MS, first);'));
 ok('W tablet signs out -> QR screen again', app.includes("if (kioskMode) setKioskSignIn('qr');"));
 
 console.log(`\n${passed} passed, ${failures} failed`);

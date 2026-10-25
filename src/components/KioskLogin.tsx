@@ -4,6 +4,9 @@ import { ShutfeyLogo } from './ShutfeyLogo';
 import type { User } from '../types';
 import { apiFetch, cookieSignInsSettled, setSessionToken } from '../lib/api';
 
+/** Shown when a phone sign-in answer is still on its way to this tablet (kiosk QR). */
+export const KIOSK_FINISHING_SIGN_IN = 'This tablet is finishing a sign-in. Tap Sign in again in a moment.';
+
 interface KioskStaff {
   id: string;
   name: string;
@@ -92,8 +95,12 @@ export function KioskLogin({ notice, onNoticeDone, onLoginSuccess, onExitKiosk, 
     setError('');
     try {
       // Kiosk QR: a phone sign-in answer still on its way (the QR screen was just left) lands and
-      // is ended first, so it can never sign this tablet in on top of this PIN sign-in.
-      await cookieSignInsSettled();
+      // is ended first, so it can never sign this tablet in on top of this PIN sign-in. Still on its
+      // way after the wait: no sign-in now (the code stays; Sign in again in a moment).
+      if (!(await cookieSignInsSettled())) {
+        setError(KIOSK_FINISHING_SIGN_IN);
+        return;
+      }
       const r = await apiFetch('/api/kiosk/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

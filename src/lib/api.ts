@@ -581,8 +581,9 @@ async function sendPendingLogout(headers: Record<string, string>): Promise<void>
   const waits = [0, ...sessionTiming.storeRetryDelaysMs];
   for (const waitMs of waits) {
     if (waitMs) await sleep(waitMs);
-    // A tablet QR sign-in on its way sets a new sign-in cookie: wait for it (it clears the mark if it signed in).
-    if (signInsInFlight.size > 0) await cookieSignInsSettled();
+    // A tablet QR sign-in on its way sets a new sign-in cookie: wait for it (it clears the mark if it
+    // signed in). Still on its way: send nothing now (the mark stays; the next start sends it).
+    if (signInsInFlight.size > 0 && !(await cookieSignInsSettled())) return;
     // A new sign-in meanwhile cleared the mark: its cookie must not be ended.
     if (readKey(LOGOUT_PENDING_KEY) !== '1') return;
     if (await postLogoutOnCookie(headers)) {
@@ -764,7 +765,7 @@ export function trackCookieSignInRequest<T>(p: Promise<T>): Promise<T> {
   return p;
 }
 /** Resolves true once no tracked sign-in request is on its way (false after maxMs). */
-export async function cookieSignInsSettled(maxMs = 20000): Promise<boolean> {
+export async function cookieSignInsSettled(maxMs = 30000): Promise<boolean> {
   const started = Date.now();
   while (signInsInFlight.size > 0) {
     if (Date.now() - started >= maxMs) return false;

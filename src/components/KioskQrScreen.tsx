@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { KeyRound, RefreshCw, Tablet } from 'lucide-react';
 import type { User } from '../types';
-import { apiFetch, endUnusedKioskSignIn, noteServerCookieSignIn, setSessionToken, signOutsSettled, trackCookieSignInRequest } from '../lib/api';
+import { apiFetch, cookieSignInsSettled, endUnusedKioskSignIn, noteServerCookieSignIn, setSessionToken, signOutsSettled, trackCookieSignInRequest } from '../lib/api';
 import { makeQr, qrPath } from '../lib/qrEncode';
 import { KQR_UI_TEXT as T, countdownText } from '../lib/kioskQr';
 import { useSite, useSiteLogo } from '../lib/site';
@@ -105,6 +105,9 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
       // A sign-out still on its way deletes this browser's sign-in cookie when its answer lands:
       // no request that can sign the tablet in until it has.
       if (!(await signOutsSettled(KQR_POLL_MS))) return later(KQR_POLL_MS, first);
+      // An earlier screen's start/poll still on its way (its answer may sign the tablet in, or end a
+      // sign-in nobody used): none of ours until it is handled. This screen's own are one at a time.
+      if (!(await cookieSignInsSettled(KQR_POLL_MS))) return later(KQR_POLL_MS, first);
       if (!live || leaving.current) return;
       const sent = apiFetch(first ? '/api/kiosk/qr/start' : '/api/kiosk/qr/poll', { method: 'POST' }).then(async (res) => ({ res, body: (await res.json().catch(() => ({}))) as any }));
       // Its answer can sign the tablet in. If it does after this screen is gone, nobody uses that
