@@ -141,17 +141,20 @@ export function kqrPickupVerdict(doc: unknown, nowMs: number): 'ok' | 'refused' 
 }
 
 /**
- * Kiosk QR cleanup ([KQRCLN-RV1] 2): before an older read of a session record
- * replaces this instance's copy, a pick-up the copy already knows is kept (a
- * pick-up only ever moves forward). Everything else, a revocation included,
- * comes from the newer publication.
+ * Kiosk QR cleanup ([KQRCLN-RV1] 2, [KQRCLN-RV2] 1): before an older read of a
+ * session record replaces this instance's copy, what the copy already knows and
+ * what can only move forward is kept: a revocation (never undone) and a
+ * pick-up (same deadline). Everything else comes from the newer publication.
  */
-export function keepKnownPickup<T>(next: T, cur: unknown): T {
+export function keepKnownSessionFacts<T>(next: T, cur: unknown): T {
   if (!next || typeof next !== 'object' || !cur || typeof cur !== 'object') return next;
   const n = next as any, c = cur as any;
-  if (n.sid !== c.sid || typeof n.qrPickupByMs !== 'number' || n.qrPickupByMs !== c.qrPickupByMs) return next;
-  if (typeof n.qrPickedUpAtMs === 'number' || typeof c.qrPickedUpAtMs !== 'number' || !Number.isFinite(c.qrPickedUpAtMs)) return next;
-  return { ...n, qrPickedUpAtMs: c.qrPickedUpAtMs };
+  if (n.sid !== c.sid) return next;
+  let out: any = n;
+  if (!n.revokedAt && c.revokedAt) out = { ...out, revokedAt: c.revokedAt, revokeReason: c.revokeReason ?? null };
+  if (typeof n.qrPickupByMs === 'number' && n.qrPickupByMs === c.qrPickupByMs && typeof n.qrPickedUpAtMs !== 'number' &&
+      typeof c.qrPickedUpAtMs === 'number' && Number.isFinite(c.qrPickedUpAtMs)) out = { ...out, qrPickedUpAtMs: c.qrPickedUpAtMs };
+  return out as T;
 }
 
 /** The claim shapes a session can back (see session-token.ts SessionClaims). */

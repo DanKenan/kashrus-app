@@ -30,7 +30,7 @@ import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
-import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState, kqrPickupVerdict, keepKnownPickup, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
+import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState, kqrPickupVerdict, keepKnownSessionFacts, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import {
   PASSKEYS_MAX, CHALLENGE_TTL_MS, RECENT_AUTH_MS, CREDENTIAL_ID_RE, CHALLENGE_ID_RE, credentialIdHash, newPersonCredentials, asPersonCredentials, findPasskey,
@@ -1550,6 +1550,7 @@ function sessionLive(doc: unknown, claims: SessionBackedClaims | null | undefine
 async function checkSession(claims: SessionBackedClaims & { sid: string }, authoritative: boolean): Promise<'ok' | 'refused' | 'down'> {
   const { verdict, doc } = await checkSessionRecord(claims, authoritative);
   if (verdict !== 'ok') return verdict;
+  if (isTestMode() && kqrVerdictDelayOnceForTests) { const ms = kqrVerdictDelayOnceForTests; kqrVerdictDelayOnceForTests = 0; await new Promise((r) => setTimeout(r, ms)); }
   // Kiosk QR cleanup (item 4): the tablet's first use of a new QR session marks
   // it picked up (one store write); a session not picked up in time is dead,
   // also when its deadline passed after the record check ([KQRCLN-RV1] 1).
@@ -1567,13 +1568,16 @@ async function checkSession(claims: SessionBackedClaims & { sid: string }, autho
   const nowMs = Date.now();
   return sessionBacksClaims(marked, claims, nowMs) && kqrPickupVerdict(marked, nowMs) === 'ok' ? 'ok' : 'refused';
 }
+/** Test mode only: the NEXT checkSession waits this long between the record check and the pick-up verdict; the NEXT tablet answer waits between its transaction and publishing its session. */
+let kqrVerdictDelayOnceForTests = 0;
+let kqrPublishDelayOnceForTests = 0;
 /** The modes in which this instance writes nothing (maintenance, FORCE_LOCAL_MODE, a staged revision). */
 function kqrPickupWritesBlocked(): boolean {
   return process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision();
 }
-/** [KQRCLN-RV1] 2: puts a session record into this instance's map without losing a pick-up the map already knows. */
+/** [KQRCLN-RV1] 2 / [KQRCLN-RV2] 1: puts a session record into this instance's map without losing a revocation or a pick-up the map already knows. */
 function sessionCachePublish(sid: string, doc: SessionDoc | null): SessionDoc | null {
-  const next = keepKnownPickup(doc, sessionCache.get(sid)?.doc);
+  const next = keepKnownSessionFacts(doc, sessionCache.get(sid)?.doc);
   cachePut(sessionCache, sid, { doc: next, readAtMs: Date.now() });
   return next;
 }
@@ -11467,6 +11471,17 @@ if (isTestMode()) {
         if (e && e.doc && typeof e.doc.qrPickupByMs === 'number') sessionCache.set(sid, { doc: older(e.doc) as SessionDoc, readAtMs: e.readAtMs });
         return res.json({ ok: true });
       }
+      // [KQRCLN-RV2] kqr-store-older {sid}: the STORE copy loses its pick-up moment (what an
+      // older read looks like to this instance); this instance's copy is left alone.
+      if (action === 'kqr-store-older') {
+        const cur = await sessionStoreGet(sid);
+        if (!cur || typeof cur.qrPickedUpAtMs !== 'number') return res.json({ ok: false });
+        const { qrPickedUpAtMs: _drop, ...rest } = cur;
+        await sessionStorePut(rest as SessionDoc, false);
+        return res.json({ ok: true });
+      }
+      // [KQRCLN-RV2] verdict-delay-once {ms}: the next checkSession pauses between its record check and its pick-up verdict.
+      if (action === 'verdict-delay-once') { kqrVerdictDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
       // [KQRCLN-RV1] cache-doc {sid}: this instance's copy of the record (read only).
       if (action === 'cache-doc') {
         const e = sessionCache.get(sid);
@@ -11490,6 +11505,8 @@ if (isTestMode()) {
     const { action, deviceId, personId, approvalId } = req.body || {};
     try {
       if (action === 'reset-limits') { kqrResetLimitersForTests(); return res.json({ ok: true }); }
+      // [KQRCLN-RV2] publish-delay-once {ms}: the next signed-in tablet answer pauses between its transaction and publishing its session.
+      if (action === 'publish-delay-once') { kqrPublishDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
       if (action === 'person') {
         if (typeof personId !== 'string' || !personId) return res.status(400).json({ error: 'personId required' });
         return res.json({ doc: await pkTransaction(async (tx) => tx.get('kioskQrPersons', personId)) });
@@ -17135,8 +17152,14 @@ async function kqrTabletRoute(mode: 'start' | 'cancel' | 'poll', req: any, res: 
   }
   // Signed in (C5): the session record exists; hand the tablet its K.
   const s = out.session;
-  // [KQRCLN-RV1] 2: a claim retry's snapshot never erases a pick-up this instance already knows.
-  sessionCachePublish(s.sid, s);
+  if (isTestMode() && kqrPublishDelayOnceForTests) { const ms = kqrPublishDelayOnceForTests; kqrPublishDelayOnceForTests = 0; await new Promise((r) => setTimeout(r, ms)); }
+  // [KQRCLN-RV1] 2 / [KQRCLN-RV2] 1: a (claim retry's) snapshot never erases a revocation or a
+  // pick-up this instance already knows, and the record as published must still be live.
+  const pub = sessionCachePublish(s.sid, s);
+  const pubNow = Date.now();
+  if (!pub || pub.revokedAt || !(pubNow < pub.absoluteExpMs) || kqrPickupState(pub, pubNow) === 'missed') {
+    return res.status(409).json({ error: KQR_TEXT.tabletDidNotFinish, code: 'KIOSK_QR_NOT_FINISHED' });
+  }
   const iat = Math.floor(s.createdAtMs / 1000);
   const token = signKioskToken(String(out.row.id), device.agencyId, device.venueId, String(s.pvAtIssue), device.id, s.sid, { iat, exp: iat + KIOSK_TOKEN_TTL_SECONDS });
   const venueId = device.venueId;

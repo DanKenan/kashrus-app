@@ -707,6 +707,32 @@ export default {
       assert((await board(T3, w4.k)).status === 200 && typeof (await recOf(w4.sid))?.qrPickedUpAtMs === 'number', 'X live again: the first use picks it up');
       const cd = await sessionHook({ action: 'cache-doc', sid: w4.sid });
       assert(cd.cached && typeof cd.doc?.qrPickedUpAtMs === 'number', 'X this instance\'s copy knows the pick-up');
+      // An older read of the record (no pick-up in it) after the deadline never signs a picked-up tablet out.
+      await sessionHook({ action: 'kqr-pickup-age', sid: w4.sid, ageMs: 61000 });
+      assert((await sessionHook({ action: 'kqr-store-older', sid: w4.sid })).ok === true, 'X the store copy reads older');
+      await sessionHook({ action: 'cache-age', sid: w4.sid, ageMs: 60000 });
+      assert((await board(T3, w4.k)).status === 200, 'X an older read does not erase the known pick-up (the tablet keeps working)');
+      const cd2 = await sessionHook({ action: 'cache-doc', sid: w4.sid });
+      assert(cd2.doc?.qrPickedUpAtMs === cd.doc.qrPickedUpAtMs - 61000, `X the copy keeps the original pick-up moment: ${J([cd2.doc?.qrPickedUpAtMs, cd.doc.qrPickedUpAtMs])}`);
+      // [KQRCLN-RV2] 1: a claim retry whose snapshot predates a phone sign-out never revives the session.
+      const w5 = await claimOn(T3, 'retry vs sign-out');
+      assert((await board(T3, w5.k)).status === 200, 'X the tablet uses it (picked up)');
+      const rowW4 = (await tabletsOf(yossi)).find((x) => x.tabletName === 'Side tablet' && x.pickedUp === true);
+      assert(rowW4, 'X the Side tablet is listed');
+      await hook({ action: 'publish-delay-once', ms: 1500 });
+      const retryP = poll(T3);
+      await sleep(400);
+      assert((await ph(yossi, 'POST', '/api/kiosk/qr/tablets/signout', { ref: rowW4.ref })).status === 200, 'X phone signs the tablet out while a claim retry is in flight');
+      const retry = await retryP;
+      assert(retry.status === 409 && retry.json?.code === 'KIOSK_QR_NOT_FINISHED' && !retry.set[K], `X the late retry hands nothing out: ${retry.status} ${J(retry.json)}`);
+      assert((await board(T3, w5.k)).status === 401, 'X the signed-out session stays refused (the copy keeps the revocation)');
+      assert((await sessionHook({ action: 'cache-doc', sid: w5.sid })).doc?.revokedAt, 'X this instance\'s copy is revoked');
+      // [KQRCLN-RV2] should-fix: the record check passes, then the deadline passes before the pick-up verdict -> refused.
+      const w6 = await claimOn(T1, 'deadline after the record check');
+      await sessionHook({ action: 'kqr-pickup-age', sid: w6.sid, ageMs: 60000 - 1000 });
+      await sessionHook({ action: 'verdict-delay-once', sid: w6.sid, ms: 2500 });
+      assert((await board(T1, w6.k)).status === 401, 'X deadline crossed between the record check and the verdict -> refused');
+      assert((await recOf(w6.sid))?.qrPickedUpAtMs === undefined, 'X ...and nothing is marked');
       await hook({ action: 'person-pad', personId: ppl.yossi.id, n: 0 });
       for (const t of await tabletsOf(yossi)) await ph(yossi, 'POST', '/api/kiosk/qr/tablets/signout', { ref: t.ref });
     }
