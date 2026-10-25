@@ -12,6 +12,9 @@
  * exists in these collections).
  */
 
+import { isPlatformOperator, PLATFORM_OPERATOR_USER_ID } from './platform-auth.ts';
+import { credentialMayLink } from './invites.ts';
+
 /**
  * Collection -> email field paths. `a.b` walks an object, `a[]` walks a list
  * (a list of strings at the end of a path: each matching item is replaced;
@@ -168,4 +171,45 @@ export function rewriteEmailRefs(doc: any, agencyIds: ReadonlySet<string>, fromE
     if (changed) patch[c] = next;
   }
   return { ok: true, patch, replaced };
+}
+
+// ---------------------------------------------------------------------------
+// MERGE-FIX (files/shutfey-mergefix-plan.txt v2, E1/E2): who may be merged.
+// ---------------------------------------------------------------------------
+
+/**
+ * The ONE exception to the linkable-origin rule: the pinned platform operator
+ * row (usr_admin, still a valid operator on these rows) may be the SURVIVOR
+ * when its credentialOrigin is absent (no recorded origin: it predates 10b) or
+ * linkable. 'admin', 'agency-reset' and any other value stay refused. This is
+ * an explicit trust exception for that one row, not proof of its history.
+ * Every other absent-origin (legacy) row stays non-linkable.
+ */
+export function isOperatorSurvivor(rows: readonly any[], survivorCred: any): boolean {
+  if (!survivorCred || survivorCred.id !== PLATFORM_OPERATOR_USER_ID) return false;
+  if (!isPlatformOperator(survivorCred.id, false, rows as any)) return false;
+  const origin = survivorCred.credentialOrigin;
+  return origin === undefined || origin === null || credentialMayLink(origin);
+}
+
+/**
+ * Origin + operator rules of a merge (the caller already resolved both
+ * credential rows and both persons' rows from the SAME list `rows`):
+ *  - the retired credential must be linkable (no exception);
+ *  - the survivor credential must be linkable, or the operator exception;
+ *  - the pinned operator row (by row id, valid operator or not) is never on
+ *    the retired side;
+ *  - on the survivor side only as the survivor's own credential row while
+ *    it is a valid operator (the operator exception).
+ * Fail closed on anything missing.
+ */
+export function mergeOriginOperatorOk(rows: readonly any[], survivorCred: any, retiredCred: any, survivorRows: readonly any[], retiredRows: readonly any[]): boolean {
+  if (!survivorCred || !retiredCred) return false;
+  const operatorSurvivor = isOperatorSurvivor(rows, survivorCred);
+  if (!credentialMayLink(retiredCred.credentialOrigin)) return false;
+  if (!credentialMayLink(survivorCred.credentialOrigin) && !operatorSurvivor) return false;
+  const pinned = (u: any) => !!u && (u.id === PLATFORM_OPERATOR_USER_ID || isPlatformOperator(u.id, false, rows as any));
+  if (retiredRows.some(pinned)) return false;
+  if (survivorRows.some((u: any) => pinned(u) && !(operatorSurvivor && u.id === survivorCred.id))) return false;
+  return true;
 }

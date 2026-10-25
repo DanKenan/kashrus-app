@@ -198,6 +198,9 @@ export async function runAll(baseUrl, extraCtx = {}) {
     FRESH_STATE,
     (await import('./test-83-sites.mjs')).default,
     (await import('./test-84-kiosk-qr.mjs')).default,
+    // MERGE-FIX: merges into the operator row and re-signs the suite's admin session; keep it LAST, after its own fresh state.
+    FRESH_STATE,
+    (await import('./test-85-merge-operator.mjs')).default,
   ];
 
   const docKiB = async () => Math.round(JSON.stringify(await ctx.getDoc()).length / 1024);

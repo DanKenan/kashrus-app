@@ -44,7 +44,7 @@ import { RESET_LINK_TTL_MS, RESET_LINK_INVALID_TEXT, RESET_TOKEN_RE, newResetTok
 import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteListView, pruneInvites, INVITE_TTL_MS, normalizeInviteEmail, parseMemberInvite, defaultPermissionsFor, inviteDisplayName, inviteHashMatches, hashInviteToken, INVITE_ACCEPT_FAILED_TEXT, INVITE_LINK_INVALID_TEXT, INVITE_NOT_LINKABLE_TEXT, INVITE_MAX_FAILED_ATTEMPTS } from './src/server/invites.ts';
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN, PLATFORM_OPERATOR_USER_ID } from './src/server/platform-auth.js';
-import { rewriteEmailRefs } from './src/server/account-merge.js';
+import { rewriteEmailRefs, isOperatorSurvivor, mergeOriginOperatorOk } from './src/server/account-merge.js';
 import { log } from './src/server/log.ts';
 import {
   DEFAULT_TIME_ZONE,
@@ -10065,6 +10065,9 @@ function resetLinkRefused(rows: readonly any[], agencyList: readonly any[], venu
   if (target.credentialPending === 'invite') return true;
   if (venueRemovedForIn(target, venueList, deletedIds)) return true;
   const cred = credentialRowForRowIn(rows as any[], agencyList as any[], target);
+  // MERGE-FIX: never for the pinned platform operator's credential, also when it
+  // is reached through another membership of the operator's person.
+  if (cred && cred.id === PLATFORM_OPERATOR_USER_ID) return true;
   return !cred || !credentialStampHash(cred.id, cred.password);
 }
 
@@ -10088,6 +10091,8 @@ function resetLinkMatch(
     return { ok: false, reason: 'member-changed' };
   }
   const cred = credentialRowForRowIn(rows as any[], agencyList as any[], row);
+  // MERGE-FIX: a link never writes the platform operator's credential (fresh rows at accept).
+  if (cred && cred.id === PLATFORM_OPERATOR_USER_ID) return { ok: false, reason: 'member-changed' };
   const stamp = cred ? credentialStampHash(cred.id, cred.password) : null;
   if (!cred || cred.id !== link.credentialOwnerId || !stampsEqual(stamp, link.credentialStampHash)) return { ok: false, reason: 'credential-changed' };
   return { ok: true, row, cred };
@@ -17934,6 +17939,8 @@ const MERGE_SHARED_AGENCY = { error: "Both accounts are in the same agency, so t
 const MERGE_STALE = { error: 'Your accounts changed. Please sign in again.', code: 'MERGE_STALE' } as const;
 const MERGE_NEEDS_CHECK = { error: 'Some older records need a check before these accounts can be merged. Please contact Shutfey support.', code: 'MERGE_NEEDS_CHECK' } as const;
 const MERGE_NOT_LINKABLE = { error: "These accounts can't be merged here. Please contact support.", code: 'ACCOUNT_NOT_LINKABLE' } as const;
+/** MERGE-FIX: the platform operator survives only through merge-into (its password typed fresh). */
+const MERGE_USE_MERGE_INTO = { error: 'To keep this account as the main one, sign in to your other account, open "Merge two accounts" and choose "Merge into my main account".', code: 'MERGE_USE_MERGE_INTO' } as const;
 /** 11b-s (plan 9.5): passkeys follow one person and are never merged. */
 const MERGE_HAS_PASSKEYS = { error: 'First remove Face ID / fingerprint sign-in from the account that is being merged away, then try again.', code: 'MERGE_HAS_PASSKEYS' } as const;
 
@@ -17941,17 +17948,17 @@ type MergeVia = 'merge-into' | 'bring-in';
 type MergeRefusal = { status: number; body: { error: string; code: string } };
 
 /** M5: the refusals after proof (same function on cached and on FRESH data). */
-function mergeRefusal(rows: any[], agencyList: any[], survivorCred: any, retiredCred: any): MergeRefusal | null {
+function mergeRefusal(rows: any[], agencyList: any[], survivorCred: any, retiredCred: any, via: MergeVia): MergeRefusal | null {
   const sp = typeof survivorCred?.personId === 'string' ? survivorCred.personId : '';
   const rp = typeof retiredCred?.personId === 'string' ? retiredCred.personId : '';
   if (!sp || !rp) return { status: 403, body: { ...MERGE_NOT_LINKABLE } };
   if (sp === rp) return { status: 409, body: { ...MERGE_SAME_ACCOUNT } };
-  if (!credentialMayLink(survivorCred.credentialOrigin) || !credentialMayLink(retiredCred.credentialOrigin)) return { status: 403, body: { ...MERGE_NOT_LINKABLE } };
+  // MERGE-FIX (plan v2 E1/E2): linkable origins, plus the one operator-survivor exception.
   const sRows = rows.filter((u: any) => u && u.personId === sp);
   const rRows = rows.filter((u: any) => u && u.personId === rp);
+  if (!mergeOriginOperatorOk(rows, survivorCred, retiredCred, sRows, rRows)) return { status: 403, body: { ...MERGE_NOT_LINKABLE } };
   if (!sRows.length || !rRows.length) return { status: 409, body: { ...MERGE_STALE } };
   const all = [...sRows, ...rRows];
-  if (all.some((u: any) => isPlatformOperator(u.id, false, rows as any))) return { status: 403, body: { ...MERGE_NOT_LINKABLE } };
   if (all.some((u: any) => u.credentialPending)) return { status: 403, body: { ...MERGE_NOT_LINKABLE } };
   if (all.some((u: any) => u.resetSuspended)) return { status: 403, body: { ...RESET_CONFIRM_NEEDED } };
   if (invitePersonNeedsCheck(rows, agencyList, String(survivorCred.email || '')) || invitePersonNeedsCheck(rows, agencyList, String(retiredCred.email || ''))) {
@@ -17959,6 +17966,9 @@ function mergeRefusal(rows: any[], agencyList: any[], survivorCred: any, retired
   }
   const sAgencies = new Set<string>(sRows.map((u: any) => u.agencyId || 'agency-hkc'));
   if (rRows.some((u: any) => sAgencies.has(u.agencyId || 'agency-hkc'))) return { status: 409, body: { ...MERGE_SHARED_AGENCY } };
+  // MERGE-FIX: the operator's own password must be checked in THIS request.
+  // merge-into types it; bring-in only has the session -> the plain way round.
+  if (isOperatorSurvivor(rows, survivorCred) && via !== 'merge-into') return { status: 403, body: { ...MERGE_USE_MERGE_INTO } };
   return null;
 }
 
@@ -18020,7 +18030,7 @@ async function accountMergeRoute(req: any, res: any, via: MergeVia) {
   }
   const survivorCred: any = via === 'merge-into' ? typedCred : callerCred;
   const retiredCred: any = via === 'merge-into' ? callerCred : typedCred;
-  const pre = mergeRefusal(users as any[], agencies as any[], survivorCred, retiredCred);
+  const pre = mergeRefusal(users as any[], agencies as any[], survivorCred, retiredCred, via);
   if (pre) return res.status(pre.status).json(pre.body);
   const verified = {
     callerId: String(caller.id), callerPid,
@@ -18049,7 +18059,7 @@ async function accountMergeRoute(req: any, res: any, via: MergeVia) {
           String(fSurvivor.personId) !== verified.survivorPid || String(fRetired.personId) !== verified.retiredPid) {
         return { conflict: MERGE_STALE.error, conflictStatus: 409, conflictCode: MERGE_STALE.code };
       }
-      const refusal = mergeRefusal(fu, fa, fSurvivor, fRetired);
+      const refusal = mergeRefusal(fu, fa, fSurvivor, fRetired, via);
       if (refusal) return { conflict: refusal.body.error, conflictStatus: refusal.status, conflictCode: refusal.body.code };
       const retiredPk = asPersonCredentials(preRead?.retiredCredentials, verified.retiredPid);
       if (retiredPk && retiredPk.passkeys.length > 0) return { conflict: MERGE_HAS_PASSKEYS.error, conflictStatus: 409, conflictCode: MERGE_HAS_PASSKEYS.code };
