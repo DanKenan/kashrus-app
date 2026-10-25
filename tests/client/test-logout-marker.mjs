@@ -37,7 +37,8 @@ async function pendingLogout() {
   return { pending, sentId, key: prefix + sentId };
 }
 let p = await pendingLogout();
-jar.set(`shutfey_lo_${p.sentId}`, '1'); // browser applies the server's answer
+jar.set(`shutfey_lo_${p.sentId}`, '1');
+jar.set(`shutfey_logout_ack_${p.sentId}`, '1'); // browser applies the server's answer
 release(); await p.pending;
 assert.equal(store.has(p.key), false, 'answer removes key');
 assert.equal(jar.size, 0, 'answer expires ack');
@@ -45,6 +46,7 @@ assert.ok(writes.at(-1).includes('Max-Age=0'), 'cleanup expires ack');
 assert.ok(writes.at(-1).endsWith('; Secure'), 'HTTPS cleanup is secure');
 p = await pendingLogout();
 jar.set(`shutfey_lo_${p.sentId}`, '1');
+jar.set(`shutfey_logout_ack_${p.sentId}`, '1');
 releaseError(); await p.pending;
 assert.equal(store.has(p.key), false, 'network error removes key');
 assert.equal(jar.size, 0, 'network error expires ack');
@@ -56,6 +58,7 @@ globalThis.location.protocol = 'https:';
 const orphan = (value, keyId = id) => { store.clear(); store.set(prefix + keyId, value); };
 for (const suffix of ['', ':m']) {
   jar.set(`shutfey_lo_${id}`, '1');
+  jar.set(`shutfey_logout_ack_${id}`, '1');
   orphan(`${Date.now()}${suffix}`);
   assert.equal(await api.signOutsSettled(0), true, 'exact ack settles plain and old :m keys');
   assert.equal(store.size, 0, 'ack removes orphan key');
@@ -67,21 +70,31 @@ for (const suffix of ['', ':m']) {
   assert.equal(await api.signOutsSettled(0), true, 'eviction settles only after unknown window');
   assert.equal(store.size, 0, 'expired key removed');
 }
+for (const suffix of ['', ':m']) {
+  jar.set(`shutfey_lo_${id}`, '1');
+  orphan(`${Date.now()}${suffix}`);
+  assert.equal(await api.signOutsSettled(0), false, 'draft marker is not proof');
+  assert.equal(store.size, 1, 'draft marker keeps key in flight');
+  orphan(`${Date.now() - api.sessionTiming.logoutUnknownMaxMs - 1}${suffix}`);
+  assert.equal(await api.signOutsSettled(0), true, 'draft marker waits until the window ends');
+  assert.equal(store.size, 0, 'expired draft key removed');
+  assert.equal(jar.size, 0, 'expired draft marker cleaned up');
+}
 for (const value of ['0', '11', '', '1x']) {
-  jar.set(`shutfey_lo_${id}`, value);
+  jar.set(`shutfey_logout_ack_${id}`, value);
   orphan(String(Date.now()));
   assert.equal(await api.signOutsSettled(0), false, 'ack value must be exactly 1');
 }
-jar.clear(); jar.set(`other_shutfey_lo_${id}`, '1');
+jar.clear(); jar.set(`other_shutfey_logout_ack_${id}`, '1');
 orphan(String(Date.now()));
 assert.equal(await api.signOutsSettled(0), false, 'ack cookie name must match exactly');
 jar.clear();
 for (const bad of ['bad', '0123456789abcde', '0123456789ABCDEf', '0123456789abcdef0']) {
-  jar.set(`shutfey_lo_${bad}`, '1');
+  jar.set(`shutfey_logout_ack_${bad}`, '1');
   orphan(`${Date.now()}:m`, bad);
   assert.equal(await api.signOutsSettled(0), false, 'bad id with ack fails closed');
 }
-jar.clear(); jar.set(`shutfey_lo_${id}`, '1');
+jar.clear(); jar.set(`shutfey_logout_ack_${id}`, '1');
 orphan(String(Date.now())); unreadable = true;
 assert.equal(await api.signOutsSettled(0), false, 'unreadable cookies fail closed');
 unreadable = false;

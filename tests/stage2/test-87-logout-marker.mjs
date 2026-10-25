@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { LOGOUT_ACK_MAX_AGE_S, logoutAckSetCookie } from '../../src/server/logout-marker.ts';
 const id = '0123456789abcdef';
-const marker = `shutfey_lo_${id}`;
+const marker = `shutfey_logout_ack_${id}`;
 const expected = `${marker}=1; Path=/; Max-Age=660; SameSite=Strict`;
 function helperCases() {
   assert.ok(LOGOUT_ACK_MAX_AGE_S > 600, 'ack outlives unknown-request window');
@@ -25,6 +25,7 @@ export default {
       });
       const text = await res.text();
       assert.ok(!text.includes(id), 'body never echoes logout id');
+      assert.ok(!res.headers.getSetCookie().some((c) => c.startsWith('shutfey_lo_')), 'server never sets draft marker');
       return { status: res.status, text, cookies: res.headers.getSetCookie(), json: () => JSON.parse(text) };
     }
     const ts = Date.now();
@@ -54,10 +55,10 @@ export default {
     checkAck(await call('/api/auth/logout', { token }), 401);
     for (const bad of [null, '../x', '0123456789abcde', '0123456789ABCDEf', '0123456789abcdef0']) {
       const r = await call('/api/auth/logout', { logoutId: bad });
-      assert.ok(!r.cookies.some((c) => c.startsWith('shutfey_lo_')), 'bad/missing header adds no cookie');
+      assert.ok(!r.cookies.some((c) => c.startsWith('shutfey_logout_ack_')), 'bad/missing header adds no cookie');
     }
     const health = await call('/api/health', { method: 'GET' });
-    assert.ok(!health.cookies.some((c) => c.startsWith('shutfey_lo_')), 'other route adds no marker');
+    assert.ok(!health.cookies.some((c) => c.startsWith('shutfey_logout_ack_')), 'other route adds no marker');
     return 'helper cases; 200 U/K + ack last; 401 missing/revoked; 400/403/413/503; malformed ids; other route; no body echo';
   },
 };

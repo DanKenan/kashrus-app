@@ -454,7 +454,7 @@ export function endServerSession(token: string | null = getSessionToken()): Prom
  * - In this tab: the set (exact).
  * - For the other tabs: one localStorage key per request
  *   (shutfey_logout_in_flight:<random id> = when it was sent).
- *   Only the server's answer sets a readable ack cookie with value 1, after
+ *   Only the server's answer sets shutfey_logout_ack_<id>=1, after
  *   any sign-in cookie deletions. That exact ack proves the answer landed,
  *   even after a reload; it is checked only for ids of 16 lower-case hex.
  *   The server keeps acks for 660 seconds, beyond the 600-second key window.
@@ -462,6 +462,7 @@ export function endServerSession(token: string | null = getSessionToken()): Prom
  * - Without an ack (including eviction, cookies off or an older server), a
  *   key left by a closed page keeps the logoutUnknownMaxMs (10-minute) rule.
  *   Old values ending in :m are read the same way as plain timestamps.
+ *   Draft shutfey_lo_<id> cookies are never proof; they are only cleaned up.
  * A sign-out is still sent at once (never queued), so it leaves even if the
  * page navigates right after.
  */
@@ -477,9 +478,11 @@ function randomId(): string {
   }
 }
 function expireLogoutAck(id: string): void {
-  try {
-    document.cookie = `shutfey_lo_${id}=; Path=/; Max-Age=0; SameSite=Strict${globalThis.location?.protocol === 'https:' ? '; Secure' : ''}`;
-  } catch { /* cookies unavailable */ }
+  for (const prefix of ['shutfey_logout_ack_', 'shutfey_lo_']) {
+    try {
+      document.cookie = `${prefix}${id}=; Path=/; Max-Age=0; SameSite=Strict${globalThis.location?.protocol === 'https:' ? '; Secure' : ''}`;
+    } catch { /* cookies unavailable */ }
+  }
 }
 function trackLogout<T>(p: Promise<T>, id: string): Promise<T> {
   logoutsInFlight.add(p);
@@ -522,7 +525,7 @@ function otherTabsLogoutInFlight(): boolean {
       }
       if (validId) {
         try {
-          if (document.cookie.split(';').some((c) => c.trim() === `shutfey_lo_${id}=1`)) {
+          if (document.cookie.split(';').some((c) => c.trim() === `shutfey_logout_ack_${id}=1`)) {
             ls.removeItem(k);
             expireLogoutAck(id);
             continue;
