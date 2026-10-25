@@ -25,6 +25,13 @@ export const KQR_CODE_RE = /^[A-Za-z0-9_-]{22}$/;
 export const KQR_CODE_TTL_MS = 60 * 1000;
 /** C2: after approval the tablet has 30 s to claim (claimDeadline = approvedAt + 30 s). */
 export const KQR_CLAIM_WINDOW_MS = 30 * 1000;
+/**
+ * Kiosk QR cleanup (item 4): after the claim the tablet must USE its new
+ * session (any request with the new K) within this window, else the session
+ * is dead, unlisted and frees its slot. The tablet's first request comes a
+ * few seconds after the claim (3 s greeting).
+ */
+export const KQR_PICKUP_WINDOW_MS = 60 * 1000;
 /** C1: at most one EXTRA new code (Cancel / reload) per 20 s per device. */
 export const KQR_EXTRA_CODE_GAP_MS = 20 * 1000;
 /** An approval id (C7): 128-bit random, base64url. */

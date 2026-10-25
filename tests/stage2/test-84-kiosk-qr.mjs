@@ -48,6 +48,47 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const U = 'shutfey_s', K = 'shutfey_ks', D = 'shutfey_kd'; // test-mode cookie names
 const SHARED_ORIGIN_CFG = 'https://workers-collaborative-dashboard-1080260390009.us-east1.run.app';
 const CODE_RE = /^[A-Za-z0-9_-]{22}$/;
+const b64u = (b) => Buffer.from(b).toString('base64url');
+const sha256 = (b) => crypto.createHash('sha256').update(b).digest();
+const claimsOf = (t) => JSON.parse(Buffer.from(String(t).split('.')[1], 'base64url').toString('utf8'));
+// A software passkey (ES256, 'none' attestation, UP + UV), as in Test 86 (cleanup item 3: a valid passkey-backed claim).
+function cborHead(major, n) {
+  if (n < 24) return Buffer.from([(major << 5) | n]);
+  if (n < 256) return Buffer.from([(major << 5) | 24, n]);
+  const b = Buffer.alloc(3); b[0] = (major << 5) | 25; b.writeUInt16BE(n, 1); return b;
+}
+function cbor(v) {
+  if (typeof v === 'number') return v >= 0 ? cborHead(0, v) : cborHead(1, -1 - v);
+  if (typeof v === 'string') { const b = Buffer.from(v, 'utf8'); return Buffer.concat([cborHead(3, b.length), b]); }
+  if (Buffer.isBuffer(v)) return Buffer.concat([cborHead(2, v.length), v]);
+  if (v instanceof Map) return Buffer.concat([cborHead(5, v.size), ...[...v].flatMap(([k, x]) => [cbor(k), cbor(x)])]);
+  throw new Error('cbor');
+}
+class SoftPasskey {
+  constructor() {
+    const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    this.priv = privateKey; this.jwk = publicKey.export({ format: 'jwk' });
+    this.credId = crypto.randomBytes(32); this.id = b64u(this.credId); this.counter = 5; this.userHandle = null;
+  }
+  register(options, origin) {
+    const clientData = Buffer.from(J({ type: 'webauthn.create', challenge: options.challenge, origin, crossOrigin: false }));
+    const cose = cbor(new Map([[1, 2], [3, -7], [-1, 1], [-2, Buffer.from(this.jwk.x, 'base64url')], [-3, Buffer.from(this.jwk.y, 'base64url')]]));
+    const len = Buffer.alloc(2); len.writeUInt16BE(this.credId.length);
+    const cnt = Buffer.alloc(4); cnt.writeUInt32BE(this.counter);
+    const authData = Buffer.concat([sha256(options.rp.id), Buffer.from([0x45]), cnt, Buffer.alloc(16), len, this.credId, cose]);
+    const att = cbor(new Map([['fmt', 'none'], ['attStmt', new Map()], ['authData', authData]]));
+    this.userHandle = options.user.id;
+    return { id: this.id, rawId: this.id, type: 'public-key', response: { clientDataJSON: b64u(clientData), attestationObject: b64u(att), transports: ['internal'] }, clientExtensionResults: {}, authenticatorAttachment: 'platform' };
+  }
+  assertion(options, origin) {
+    this.counter += 1;
+    const cnt = Buffer.alloc(4); cnt.writeUInt32BE(this.counter);
+    const authData = Buffer.concat([sha256(options.rpId), Buffer.from([0x05]), cnt]);
+    const clientData = Buffer.from(J({ type: 'webauthn.get', challenge: options.challenge, origin, crossOrigin: false }));
+    const sig = crypto.sign('sha256', Buffer.concat([authData, sha256(clientData)]), this.priv);
+    return { id: this.id, rawId: this.id, type: 'public-key', response: { clientDataJSON: b64u(clientData), authenticatorData: b64u(authData), signature: b64u(sig), userHandle: this.userHandle }, clientExtensionResults: {}, authenticatorAttachment: 'platform' };
+  }
+}
 
 export default {
   name: 'Test 84: kiosk QR sign-in (server) — a signed-in phone scans, the tablet opens',
@@ -193,6 +234,7 @@ export default {
       const before = await hook({ action: 'get', deviceId: T1.id });
       const info = await call('GET', `/api/kiosk/qr/info/${s0.code}`);
       assert(info.status === 200 && info.json?.tablet?.name === 'Front tablet' && info.json.venue?.name === `Hill Bakery ${ts}` && info.json.agency?.name === `T84 a ${ts}`, `A info names: ${info.status} ${J(info.json)}`);
+      assert(info.json.tablet.venueName === `Hill Bakery ${ts}` && info.json.tablet.agencyName === `T84 a ${ts}`, `A info tablet carries venue and agency names (cleanup item 1): ${J(info.json.tablet)}`);
       assert(!info.text.includes(T1.id) && !info.text.includes(A) && !info.text.includes(before.code.hash) && !/sid|personId|deviceId|hash/.test(info.text), `A info carries no ids or hashes: ${info.text}`);
       for (let i = 0; i < 3; i++) await call('GET', `/api/kiosk/qr/info/${s0.code}`);
       const after = await hook({ action: 'get', deviceId: T1.id });
@@ -235,12 +277,15 @@ export default {
       const rec = (await sessionHook({ action: 'get', sid: kc.sid })).doc;
       assert(rec && rec.kind === 'kiosk' && rec.via === 'kiosk-qr' && rec.rowId === ppl.yossi.id && rec.kioskDeviceId === T1.id && rec.venueId === vA1 && rec.absoluteExpMs === rec.createdAtMs + 3 * 3600 * 1000 && rec.revokedAt === null, `A kiosk-qr session record ${J(rec && { kind: rec.kind, via: rec.via })}`);
       assert(kc.dev === T1.id && kc.exp - kc.iat === 3 * 3600, 'A K bound to this tablet, 3 h');
+      assert(rec.qrPickupByMs === rec.createdAtMs + 60000 && rec.qrPickedUpAtMs === undefined, `A the tablet has 60 s to pick its session up (cleanup item 4): ${J({ by: rec.qrPickupByMs, at: rec.qrPickedUpAtMs })}`);
       const bd = await board(T1, c1.set[K].value);
       assert(bd.status === 200, `A the tablet works on D + K: ${bd.status}`);
       const st2 = await status(yossi, ok.json.approvalId);
       assert(st2.status === 200 && st2.json?.state === 'done' && typeof st2.json.ref === 'string' && st2.json.endsAtMs === rec.absoluteExpMs, `A phone sees "Done": ${J(st2.json)}`);
       const tl = await tabletsOf(yossi);
       assert(tl.length === 1 && tl[0].ref === st2.json.ref && tl[0].tabletName === 'Front tablet' && tl[0].venueName === `Hill Bakery ${ts}`, `A "Tablets you're signed in on": ${J(tl)}`);
+      assert(tl[0].agencyName === `T84 a ${ts}` && tl[0].pickedUp === true, `A the row names the agency; the tablet used its session (cleanup items 1, 4): ${J(tl[0])}`);
+      assert((await sessionHook({ action: 'get', sid: kc.sid })).doc?.qrPickedUpAtMs >= rec.createdAtMs, 'A the tablet\'s first request marked the session picked up');
       assert((await approve(chaim, s0.code)).status === 404, 'A a claimed code cannot be approved again');
 
       // Header tablet (transition path): the token in JSON, no cookies.
@@ -531,6 +576,94 @@ export default {
       assert((await status(yossi, ap.json.approvalId)).json?.state === 'ended', 'P status after sign-out: ended');
     }
 
+    // ============ X: cleanups (passkey-backed claim, cap races, phone sign-out frees a slot, pick-up) ============
+    {
+      const live = (doc) => (Array.isArray(doc?.items) ? doc.items : []).filter((x) => x && x.absoluteExpMs > Date.now());
+      /** Exactly n live entries, all fake (records missing: they count until their end), no real tablet left. */
+      const padTo = async (n) => {
+        for (const t of await tabletsOf(yossi)) await ph(yossi, 'POST', '/api/kiosk/qr/tablets/signout', { ref: t.ref });
+        assert((await hook({ action: 'person-pad', personId: ppl.yossi.id, n, all: true })).ok === true, 'X pad');
+        assert(live((await hook({ action: 'person', personId: ppl.yossi.id })).doc).length === n && (await tabletsOf(yossi)).length === 0, `X ${n} live entries`);
+      };
+      const kSid = (c) => claimsOf(c.set[K].value).sid;
+
+      // Item 3a: a VALID passkey-backed approving session opens the tablet (store check at claim, cached copy dropped).
+      const adm = await call('POST', '/api/__test__/mint-token', { body: { userId: a.id } });
+      assert(adm.status === 200 && adm.json?.token, `X mint admin a: ${adm.status}`);
+      await setPin(adm.json.token, a.id, '1122');
+      const aPhone = await phoneLogin(a.email, a.pw);
+      const pk = new SoftPasskey();
+      const op = await ph(aPhone, 'POST', '/api/passkeys/register/options', {});
+      assert(op.status === 200 && op.json?.challengeId, `X passkey register options: ${op.status} ${J(op.json)}`);
+      const rv = await ph(aPhone, 'POST', '/api/passkeys/register/verify', { challengeId: op.json.challengeId, response: pk.register(op.json.options, SHARED_O) });
+      assert(rv.status === 201 && rv.json?.passkey?.id === pk.id, `X passkey added: ${rv.status} ${J(rv.json && { c: rv.json.code, e: rv.json.error })}`);
+      const po = await call('POST', '/api/auth/passkey/options', { origin: SHARED_O, optIn: true, body: {} });
+      assert(po.status === 200 && po.json?.challengeId, `X passkey sign-in options: ${po.status}`);
+      const pv = await call('POST', '/api/auth/passkey/verify', { origin: SHARED_O, optIn: true, body: { challengeId: po.json.challengeId, response: pk.assertion(po.json.options, SHARED_O) } });
+      assert(pv.status === 200 && pv.set[U] && pv.set[U].value && !pv.set[U].cleared, `X Face ID sign-in on the phone (cookie): ${pv.status} ${J(pv.json && (pv.json.code || pv.json.error))} ${J(pv.names)}`);
+      const pkPhone = { host: SHARED, origin: SHARED_O, cookie: `${U}=${pv.set[U].value}`, sid: claimsOf(pv.set[U].value).sid };
+      const pkRec = (await sessionHook({ action: 'get', sid: pkPhone.sid })).doc;
+      assert(pkRec?.authMethod?.type === 'passkey' && pkRec.authMethod.credentialId === pk.id, `X the phone session is passkey-backed: ${J(pkRec && pkRec.authMethod)}`);
+      const sp = await freshCode(T3);
+      assert((await approve(pkPhone, sp.code)).status === 200, 'X approve with a passkey-backed session');
+      await call('POST', '/api/__test__/passkey-hooks', { body: { action: 'drop-cache', personId: claimsOf(aPhone.token).personId || a.id } });
+      const cp = await poll(T3);
+      assert(signedIn(cp) && cp.json.user?.id === a.id && cp.set[K], `X valid passkey-backed approval -> the tablet opens: ${cp.status} ${J(cp.json)}`);
+      assert((await board(T3, cp.set[K].value)).status === 200, 'X that tablet works');
+      assert((await ph(pkPhone, 'POST', '/api/kiosk/qr/tablets/signout', { ref: (await tabletsOf(pkPhone))[0]?.ref || 'x'.repeat(22) })).status === 200, 'X sign that tablet out again');
+
+      // Item 3b: two tablets claim at once at 49 live sessions -> exactly one wins slot 50.
+      await padTo(49);
+      const r1 = await freshCode(T1), r3 = await freshCode(T3);
+      assert((await approve(yossi, r1.code)).status === 200 && (await approve(yossi, r3.code)).status === 200, 'X approve two tablets');
+      const [q1, q3] = await Promise.all([poll(T1), poll(T3)]);
+      const wins = [q1, q3].filter(signedIn);
+      assert(wins.length === 1, `X concurrent claims at 49: exactly one opens: ${J([q1.json?.state, q1.json?.notFinished, q3.json?.state, q3.json?.notFinished])}`);
+      const lost = signedIn(q1) ? q3 : q1, winT = signedIn(q1) ? T1 : T3, loseT = signedIn(q1) ? T3 : T1, win = wins[0];
+      assert(lost.status === 200 && lost.json?.notFinished === true && !lost.set[K], `X the other tablet does not open: ${J(lost.json)}`);
+      assert(live((await hook({ action: 'person', personId: ppl.yossi.id })).doc).length === 50, 'X 50 live entries, never 51');
+      // Still at the cap: another claim is refused.
+      const r4 = await freshCode(loseT);
+      assert((await approve(yossi, r4.code)).status === 200, 'X approve at the cap');
+      assert(!signedIn(await poll(loseT)), 'X at the cap nothing opens');
+
+      // Item 2: "Sign out" from the phone frees the slot at once (not after 3 h).
+      const winRow = (await tabletsOf(yossi)).find((x) => x.tabletName === (winT === T1 ? 'Front tablet' : 'Side tablet'));
+      assert(winRow, 'X the winner is listed');
+      assert((await ph(yossi, 'POST', '/api/kiosk/qr/tablets/signout', { ref: winRow.ref })).status === 200, 'X phone signs the winner out');
+      assert((await board(winT, win.set[K].value)).status === 401, 'X the signed-out tablet is refused');
+      const r5 = await freshCode(loseT);
+      const a5 = await approve(yossi, r5.code);
+      assert(a5.status === 200, 'X approve after the sign-out');
+      const q5 = await poll(loseT);
+      assert(signedIn(q5), `X the freed slot is usable at once: ${J(q5.json)}`);
+      const idx5 = (await hook({ action: 'person', personId: ppl.yossi.id })).doc;
+      assert(!idx5.items.some((x) => x.sid === kSid(win)) && live(idx5).length === 50, `X the signed-out entry is dropped, 50 live: ${live(idx5).length}`);
+
+      // Item 4: a tablet that never picks its session up (answer lost) is listed as not picked up, then dropped after 60 s.
+      const missedSid = kSid(q5);
+      const row5 = (await tabletsOf(yossi)).find((x) => x.tabletName === (loseT === T1 ? 'Front tablet' : 'Side tablet'));
+      assert(row5 && row5.pickedUp === false, `X not used yet: listed, pickedUp false: ${J(row5)}`);
+      assert((await sessionHook({ action: 'kqr-pickup-age', sid: missedSid, ageMs: 60000 })).ok === true, 'X 60 s pass');
+      assert(!(await tabletsOf(yossi)).some((x) => x.ref === row5.ref), 'X never picked up in 60 s -> no longer listed');
+      assert((await status(yossi, a5.json.approvalId)).json?.state === 'ended', 'X the phone\'s status for it: ended');
+      assert((await board(loseT, q5.set[K].value)).status === 401, 'X a late first use of that session is refused (fail closed)');
+      const q5b = await poll(loseT);
+      assert(!signedIn(q5b) && !q5b.set[K], `X a late claim retry does not hand it out again: ${J(q5b.json)}`);
+      // ...and it no longer counts: the slot is free.
+      const r6 = await freshCode(winT);
+      assert((await approve(yossi, r6.code)).status === 200, 'X approve after the missed pick-up');
+      const q6 = await poll(winT);
+      assert(signedIn(q6), `X the missed session frees its slot: ${J(q6.json)}`);
+      // A session the tablet used in time stays (its pick-up never expires).
+      assert((await board(winT, q6.set[K].value)).status === 200, 'X first use inside 60 s');
+      assert((await sessionHook({ action: 'kqr-pickup-age', sid: kSid(q6), ageMs: 3600 * 1000 })).ok === true, 'X an hour passes');
+      assert((await board(winT, q6.set[K].value)).status === 200, 'X a picked-up tablet keeps working');
+      assert((await tabletsOf(yossi)).some((x) => x.pickedUp === true && x.tabletName === (winT === T1 ? 'Front tablet' : 'Side tablet')), 'X still listed, picked up');
+      await hook({ action: 'person-pad', personId: ppl.yossi.id, n: 0 });
+      for (const t of await tabletsOf(yossi)) await ph(yossi, 'POST', '/api/kiosk/qr/tablets/signout', { ref: t.ref });
+    }
+
     // =========================== H: addresses (APP_SITES) ===========================
     const m = await register('m');
     const rx = await call('POST', '/api/agencies/register-existing', { origin: SHARED_O, body: { agencyName: `T84 m2 ${ts}`, email: m.email, password: m.pw, operationId: `op-${crypto.randomUUID()}` } });
@@ -616,6 +749,6 @@ export default {
     } finally {
       await ctx.restartServer({});
     }
-    return { details: ['A approval/sessions', 'C CSRF/consent', 'R clocks/races', 'B abuse', 'P status/sign-out', 'H addresses'] };
+    return { details: ['A approval/sessions', 'C CSRF/consent', 'R clocks/races', 'B abuse', 'P status/sign-out', 'X cleanups', 'H addresses'] };
   },
 };
