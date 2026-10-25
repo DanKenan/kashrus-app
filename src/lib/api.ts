@@ -581,6 +581,9 @@ async function sendPendingLogout(headers: Record<string, string>): Promise<void>
   const waits = [0, ...sessionTiming.storeRetryDelaysMs];
   for (const waitMs of waits) {
     if (waitMs) await sleep(waitMs);
+    // A tablet QR sign-in on its way sets a new sign-in cookie: wait for it (it clears the mark if it
+    // signed in). Still on its way: send nothing now (the mark stays; the next start sends it).
+    if (signInsInFlight.size > 0 && !(await cookieSignInsSettled())) return;
     // A new sign-in meanwhile cleared the mark: its cookie must not be ended.
     if (readKey(LOGOUT_PENDING_KEY) !== '1') return;
     if (await postLogoutOnCookie(headers)) {
@@ -746,6 +749,69 @@ async function moveTokenToCookie(token: string): Promise<void> {
   writeKey(LOGOUT_PENDING_KEY, null);
   if (onTablet && deviceSecret) setKioskDevice(`${KIOSK_DEVICE_COOKIE_PREFIX}${before.kiosk?.deviceId}`);
   setSessionTokenQuietly(null);
+}
+
+/**
+ * Kiosk QR: requests whose answer can sign this tablet in (the tablet's poll: a claim answer
+ * sets the sign-in cookie on a cookie tablet). A sign-out retry waits for them, and the PIN
+ * sign-in waits for them, so no late answer lands on top of a newer sign-in or sign-out.
+ * The tracked promise settles only after a late claim nobody uses has been ended.
+ */
+const signInsInFlight = new Set<Promise<unknown>>();
+export function trackCookieSignInRequest<T>(p: Promise<T>): Promise<T> {
+  signInsInFlight.add(p);
+  const done = () => { signInsInFlight.delete(p); };
+  p.then(done, done);
+  return p;
+}
+/** Resolves true once no tracked sign-in request is on its way (false after maxMs). */
+export async function cookieSignInsSettled(maxMs = 30000): Promise<boolean> {
+  const started = Date.now();
+  while (signInsInFlight.size > 0) {
+    if (Date.now() - started >= maxMs) return false;
+    await sleep(50);
+  }
+  return true;
+}
+/**
+ * Resolves true once no sign-out request is on its way in any tab (false after maxMs): the same
+ * conservative rule as the move to the cookie (a key left by a page that is gone counts for up to
+ * logoutUnknownMaxMs, since its keepalive request may still land and delete the sign-in cookie).
+ */
+export function signOutsSettled(maxMs = sessionTiming.logoutSettleMaxMs): Promise<boolean> {
+  return waitForLogoutsToSettle(maxMs);
+}
+/**
+ * A tablet QR sign-in whose answer came after the screen was left (nobody will use it): end it
+ * on the server. Its own token (a header tablet), or the sign-in cookie that answer just set.
+ * Tracked as a sign-out, so a sign-in made next waits for it before moving to the cookie.
+ */
+export async function endUnusedKioskSignIn(token: string | null): Promise<void> {
+  const headers: Record<string, string> = { [COOKIE_AUTH_HEADER]: COOKIE_AUTH_VALUE };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const kioskDevice = getKioskDeviceSecret();
+  if (kioskDevice) headers['X-Kiosk-Device'] = kioskDevice;
+  for (const waitMs of [0, ...sessionTiming.storeRetryDelaysMs]) {
+    if (waitMs) await sleep(waitMs);
+    try {
+      const res = await sendLogoutRequest(headers);
+      await res.text().catch(() => '');
+      if (res.status !== 503) return;
+    } catch {
+      return;
+    }
+  }
+}
+
+/**
+ * Kiosk QR sign-in on a tablet paired with the device cookie: the server set the sign-in cookie in
+ * its answer and sent no token. This device is now signed in on the cookie, as after a move: a new
+ * cookie sign-in id, no stored token, and an older unconfirmed sign-out never ends this one.
+ */
+export function noteServerCookieSignIn(): void {
+  setSessionTokenQuietly(null);
+  writeKey(LOGOUT_PENDING_KEY, null);
+  writeKey(COOKIE_SESSION_KEY, newCookieSessionId());
 }
 
 /** Clears the stored token without starting another move (the cookie now carries the sign-in). */

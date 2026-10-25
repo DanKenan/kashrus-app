@@ -31,6 +31,10 @@ import { AlertsTab } from './components/AlertsTab';
 import { ReadersPanel } from './components/Receipts';
 import type { UpdatesContext } from './lib/updates';
 import { KioskPairing } from './components/KioskPairing';
+import { KioskQrScreen } from './components/KioskQrScreen';
+import { KioskQrPhone } from './components/KioskQrPhone';
+import { TabletSignInSheet } from './components/TabletSignInSheet';
+import { isKqrPath, kqrCodeFromPath, readCanUseTabletSignIn, readPendingKqr, savePendingKqr, clearPendingKqr } from './lib/kioskQr';
 import { KioskDevicesModal } from './components/KioskDevicesModal';
 import { initialAuthView, isInstalledApp } from './lib/homeRoute';
 import { HomeLandingBoundary } from './components/HomeLandingBoundary';
@@ -69,7 +73,7 @@ import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
-import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry } from './lib/api';
+import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry, syncCookieSession, isCookieSession } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
 import { SITE_REFUSED_EVENT, sharedOriginFor, siteRefusalAction, useSite, type SiteRefusal, type SiteRefusalEvent, homePageAllowed } from './lib/site';
 import { SiteRefusedScreen } from './components/SiteRefusedScreen';
@@ -423,7 +427,56 @@ export default function App() {
   // 10L: the public reset page (/reset#t=…), read once when the app opens.
   const [resetPage, setResetPage] = useState(() => typeof window !== 'undefined' && isResetPath(window.location.pathname));
   const [resetToken] = useState(() => (typeof window !== 'undefined' ? readResetToken(window.location.hash) : null));
+  // Kiosk QR sign-in (client): the tablet-link page /k/<code>. The code is kept
+  // for this tab only (sessionStorage, while the person signs in) and the
+  // address bar shows /k. Not on a kiosk tablet.
+  const [kqrPage, setKqrPage] = useState(() => {
+    if (typeof window === 'undefined' || !isKqrPath(window.location.pathname)) return false;
+    const code = kqrCodeFromPath(window.location.pathname);
+    try { window.history.replaceState(null, '', kioskMode ? '/' : '/k'); } catch { /* ignore */ }
+    if (kioskMode) return false;
+    if (code) savePendingKqr(code);
+    return true;
+  });
+  const [kqrCode, setKqrCode] = useState<string | null>(() => (kqrPage ? readPendingKqr() : null));
+  /** "Sign in to a tablet" (scanner) / "Tablets you're signed in on": open on which view, or closed. */
+  const [tabletSheet, setTabletSheet] = useState<null | 'scan' | 'tablets'>(null);
+  const [canTabletSignIn, setCanTabletSignIn] = useState(false);
+  /** The tablet's sign-in screen: the QR code (default) or today's PIN screen. */
+  const [kioskSignIn, setKioskSignIn] = useState<'qr' | 'code'>('qr');
+  /** false once this server answered that it has no QR sign-in (an older server): the PIN screen as before. */
+  const [kqrOnServer, setKqrOnServer] = useState(true);
   const [isKioskDevicesOpen, setIsKioskDevicesOpen] = useState(false);
+  // D1: the menu row shows only when the server says this signed-in phone may open a tablet here
+  // (GET /api/auth/me canUseTabletSignIn, read on the sign-in cookie; never on a kiosk).
+  useEffect(() => {
+    setCanTabletSignIn(false);
+    if (isKiosk || !currentUser?.id) { setTabletSheet(null); return; }
+    let live = true;
+    (async () => {
+      // The server answers on the sign-in cookie only: after a new sign-in, wait for the move to it.
+      for (let i = 0; i < 15 && live; i++) {
+        await syncCookieSession();
+        if (!live) return;
+        if (isCookieSession() && !getSessionToken()) break;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      if (!live || !isCookieSession() || getSessionToken()) return;
+      const ok = await readCanUseTabletSignIn();
+      if (live) setCanTabletSignIn(ok);
+    })();
+    return () => { live = false; };
+  }, [isKiosk, currentUser?.id, currentUser?.agencyId]);
+  // The tablet's PIN screen goes back to the QR screen after 90 s with no touch.
+  useEffect(() => {
+    if (!isKiosk || currentUser || kioskSignIn !== 'code' || !kqrOnServer) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const arm = () => { clearTimeout(timer); timer = setTimeout(() => setKioskSignIn('qr'), 90 * 1000); };
+    arm();
+    const evs = ['pointerdown', 'keydown', 'touchstart'];
+    evs.forEach((e) => window.addEventListener(e, arm, { passive: true }));
+    return () => { clearTimeout(timer); evs.forEach((e) => window.removeEventListener(e, arm)); };
+  }, [isKiosk, !!currentUser, kioskSignIn, kqrOnServer]);
   const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
   const [isCreateEventModalOpen, setIsCreateEventModalOpen] = useState(false);
   // Item 7: the event being copied (dialog open while set) and the new copy to select.
@@ -1685,6 +1738,8 @@ export default function App() {
     clearLogoCache();
     const quiet = quietLogoutRef.current;
     quietLogoutRef.current = false;
+    // Kiosk QR: a tablet that signs out shows its QR screen again.
+    if (kioskMode) setKioskSignIn('qr');
     // Domains PR B: a site refusal leaves the signed-in screens WITHOUT a server
     // sign-out and without the "Signed out" toast (the server already refused
     // that session on this address and apiFetch cleared it).
@@ -1859,6 +1914,40 @@ export default function App() {
     );
   }
 
+  // Kiosk QR sign-in: the tablet-link page. Signed in: approve on open (no tap). Signed out:
+  // the sign-in form first, then this page again with the same code (this tab only).
+  if (kqrPage && !isKiosk) {
+    const leaveKqrPage = () => {
+      clearPendingKqr();
+      try { window.history.replaceState(null, '', '/'); } catch { /* ignore */ }
+      setKqrPage(false);
+      setKqrCode(null);
+    };
+    if (currentUser) {
+      return (
+        <KioskQrPhone
+          code={kqrCode}
+          user={currentUser}
+          agencyName={siteAgency ? (siteAgency.brandName || siteAgency.name) : (currentUser.agencyName || '')}
+          onLeave={leaveKqrPage}
+          onScanAgain={() => { leaveKqrPage(); setTabletSheet('scan'); }}
+        />
+      );
+    }
+    return (
+      <div data-kqr-signin className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
+        <LoginPage
+          onLoginSuccess={handleLoginSuccess}
+          initialMode="login"
+          onBack={() => { leaveKqrPage(); setAuthView(siteAgency || homePageAllowed() ? 'landing' : 'auth'); }}
+          site={siteAgency}
+          darkMode={darkMode}
+          onToggleDarkMode={() => setDarkMode(!darkMode)}
+        />
+      </div>
+    );
+  }
+
   // Public screens: the landing home page opens first; auth form on demand.
   // Require authentication to view tasks and shift operations
   if (!currentUser) {
@@ -1879,14 +1968,27 @@ export default function App() {
               darkMode={darkMode}
             />
           ) : (
-            <KioskLogin
-              notice={kioskNotice}
-              onNoticeDone={() => setKioskNotice(null)}
-              onLoginSuccess={handleLoginSuccess}
-              onExitKiosk={exitKioskMode}
-              onUnpaired={() => setKioskDeviceState(null)}
-              darkMode={darkMode}
-            />
+            kioskSignIn === 'qr' && kqrOnServer ? (
+              <KioskQrScreen
+                notice={kioskNotice}
+                onNoticeDone={() => setKioskNotice(null)}
+                onLoginSuccess={handleLoginSuccess}
+                onUseCode={() => setKioskSignIn('code')}
+                onUnavailable={() => setKqrOnServer(false)}
+                onUnpaired={() => setKioskDeviceState(null)}
+                onExitKiosk={exitKioskMode}
+              />
+            ) : (
+              <KioskLogin
+                notice={kioskNotice}
+                onNoticeDone={() => setKioskNotice(null)}
+                onLoginSuccess={handleLoginSuccess}
+                onExitKiosk={exitKioskMode}
+                onUnpaired={() => setKioskDeviceState(null)}
+                onUseQr={kqrOnServer ? () => setKioskSignIn('qr') : undefined}
+                darkMode={darkMode}
+              />
+            )
           )}
         </div>
       );
@@ -2104,6 +2206,7 @@ export default function App() {
         onLogout={handleLogout}
         onOpenChangePassword={() => setIsChangePasswordOpen(true)}
         onOpenPasskeys={passkeyMenu ? () => setIsPasskeysOpen(true) : undefined}
+        onOpenTabletSignIn={canTabletSignIn && !isKiosk ? () => setTabletSheet('scan') : undefined}
         onOpenAgencySwitcher={memberships.length > 1 ? () => setIsAgencySwitcherOpen(true) : undefined}
         onOpenMergeAccounts={() => setIsMergeAccountsOpen(true)}
         onOpenTaskModal={leaveHomeThen(handleOpenCreateTask)}
@@ -2599,6 +2702,20 @@ export default function App() {
           onClose={() => setIsPasskeysOpen(false)}
           onChanged={(l) => setPasskeyMenu(l.canAdd || l.passkeys.length > 0)}
           onToast={showToast}
+        />
+      )}
+      {!isKiosk && currentUser && (
+        <TabletSignInSheet
+          open={tabletSheet !== null}
+          startOn={tabletSheet || 'scan'}
+          onClose={() => setTabletSheet(null)}
+          onScanned={(code) => {
+            savePendingKqr(code);
+            try { window.history.replaceState(null, '', '/k'); } catch { /* ignore */ }
+            setTabletSheet(null);
+            setKqrCode(code);
+            setKqrPage(true);
+          }}
         />
       )}
       {!isKiosk && passkeyOfferFor && currentUser?.id === passkeyOfferFor && (
