@@ -34,7 +34,7 @@ import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import {
   PASSKEYS_MAX, CHALLENGE_TTL_MS, RECENT_AUTH_MS, CREDENTIAL_ID_RE, CHALLENGE_ID_RE, credentialIdHash, newPersonCredentials, asPersonCredentials, findPasskey,
-  originMayEnroll, recentAuthValid, chosenRecentAuth, cleanPasskeyName, defaultPasskeyName, publicPasskey, challengeMatches, counterAcceptable, isPasskeyAuthMethod,
+  recentAuthValid, chosenRecentAuth, cleanPasskeyName, defaultPasskeyName, publicPasskey, challengeMatches, counterAcceptable, isPasskeyAuthMethod,
   type PersonCredentialsDoc, type PasskeyEntry, type ChallengeDoc, type PasskeyAuthMethod,
 } from './src/server/passkeys.ts';
 import { userCookieConfig, kioskCookieConfig, deviceCookieConfig, cookieValues, setCookieHeader, setDeviceCookieHeader, isDeviceCredentialShape, clearCookieHeader, trustedOrigins, originTrusted, normalizeOrigin, CSRF_ORIGIN_BODY } from './src/server/session-cookie.ts';
@@ -18564,10 +18564,10 @@ function passkeyUser(req: any, needSid = true): { row: any; personId: string; si
   if (!row || typeof row.personId !== 'string' || !row.personId || row.personId !== claims.personId) return null;
   return { row, personId: row.personId, sid };
 }
-/** Plan 10.8 + 10.4: may this person add a passkey right now? (own password origin, at least one active membership) */
+/** May this person add a passkey right now? (credential ready, at least one active membership) */
 function personMayEnroll(personId: string): boolean {
   const cred: any = credentialRowOfPerson(users as any[], personId);
-  if (!cred || !originMayEnroll(cred.credentialOrigin) || cred.credentialPending) return false;
+  if (!cred || cred.credentialPending) return false;
   return membershipsOfPerson(personId).length > 0;
 }
 function storeDown(res: any, err: any, what: string): void {
@@ -18728,7 +18728,7 @@ app.post('/api/passkeys/register/verify', async (req, res) => {
       const pc = asPersonCredentials(pcRaw, who.personId);
       if (!pc) { consume(); return { fail: 'failed' }; }
       if (!cur || cur.revokedAt || !recentAuthValid(cur, pc.recentAuthEpoch, nowMs)) { consume(); return { fail: 'recent' }; }
-      // Plan 10.4 / 10.8, read at commit time: still an own-password person with an active membership.
+      // Read at commit time: still a person with a ready credential and an active membership.
       if (!personMayEnroll(who.personId)) { consume(); return { fail: 'unavailable' }; }
       let info: any;
       try {

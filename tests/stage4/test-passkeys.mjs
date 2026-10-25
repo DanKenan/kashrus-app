@@ -1,10 +1,10 @@
 /**
- * Item 11, 11b-s: passkey record rules (unit, pure): enrollment origins,
+ * Item 11, 11b-s: passkey record rules (unit, pure):
  * the 5-minute recent proof, challenge matching, counters, names, the public
  * view, the index key, the passkey session marker and the choose token's pk.
  */
 import {
-  originMayEnroll, recentAuthValid, challengeMatches, counterAcceptable, cleanPasskeyName, defaultPasskeyName, publicPasskey,
+  recentAuthValid, challengeMatches, counterAcceptable, cleanPasskeyName, defaultPasskeyName, publicPasskey,
   credentialIdHash, isPasskeyAuthMethod, asPersonCredentials, newPersonCredentials, findPasskey, RECENT_AUTH_MS, CHALLENGE_TTL_MS, PASSKEYS_MAX,
 } from '../../src/server/passkeys.ts';
 import { buildUserSession } from '../../src/server/sessions.ts';
@@ -16,11 +16,8 @@ const CID = 'AbCdEfGhIjKlMnOpQrStUv0123456789_-xyz';
 
 export default {
   name: 'Item 11 (11b-s): passkey rules (unit)',
-  whatItProves: 'Exactly self-registered and invite-new may enroll; a recent proof lasts under 5 minutes and dies when the person epoch moves; a challenge is usable only unexpired, unconsumed, for its purpose, origin and (register) person/row/session; a non-zero counter must grow; names are cleaned; the public view has no key; the choose token carries pk only well-formed.',
+  whatItProves: 'A recent proof lasts under 5 minutes and dies when the person epoch moves; a challenge is usable only unexpired, unconsumed, for its purpose, origin and (register) person/row/session; a non-zero counter must grow; names are cleaned; the public view has no key; the choose token carries pk only well-formed.',
   async run() {
-    for (const [o, want] of [['self-registered', true], ['invite-new', true], ['admin', false], ['agency-reset', false], ['none', false], [undefined, false], [null, false], ['', false], ['Self-registered', false]]) {
-      assert(originMayEnroll(o) === want, `originMayEnroll(${J(o)}) = ${want}`);
-    }
     const now = 1_000_000_000;
     assert(RECENT_AUTH_MS === 5 * 60 * 1000 && CHALLENGE_TTL_MS === 120 * 1000 && PASSKEYS_MAX === 10, 'constants');
     assert(recentAuthValid({ recentAuthAtMs: now - 1000, recentAuthEpoch: 2 }, 2, now), 'fresh proof valid');
@@ -70,6 +67,6 @@ export default {
     const ch0 = C(chooseClaimsFor({ id: 'r', personId: 'p' }));
     assert(ch0 && ch0.kind === 'choose' && !('passkeyCredentialId' in ch0), 'choose token without pk');
     assert(C({ v: 3, sub: 'p', cr: 'r', ep: 0, pk: 'bad id!' }) === null && C({ v: 3, sub: 'p', cr: 'r', ep: 0, pk: 5 }) === null, 'malformed pk -> no token');
-    return 'origins, proof window + epoch, challenge matching, counters, names, public view, index key, session marker, choose pk';
+    return 'proof window + epoch, challenge matching, counters, names, public view, index key, session marker, choose pk';
   },
 };
