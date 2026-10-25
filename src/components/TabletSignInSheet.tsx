@@ -162,7 +162,7 @@ export function TabletSignInSheet({ open, startOn = 'scan', onClose, onScanned }
                       i === 0 && (!t.agencyName || t.venueName) ? (
                         <p key={i} dir="auto" className="text-sm text-ink-soft truncate">{line}</p>
                       ) : (
-                        <p key={i} dir="auto" data-kqr-tablet-agency className="text-sm text-ink-soft truncate">{line}</p>
+                        <p key={i} dir="auto" data-kqr-tablet-agency className="text-sm text-ink-soft line-clamp-2 break-words">{line}</p>
                       )
                     ))}
                   </div>
