@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Loader2, Tablet } from 'lucide-react';
 import type { User } from '../types';
-import { apiFetch, getSessionToken, isCookieSession, syncCookieSession } from '../lib/api';
+import { getSessionToken, isCookieSession, syncCookieSession } from '../lib/api';
 import { KQR_UI_TEXT as T, clearPendingKqr, clockText, kqrErrorFor, kqrPhoneFetch, markRefusedKqr, type KqrError } from '../lib/kioskQr';
 
 /** The phone asks how the tablet is doing about once a second; the tablet has 30 s to open (server C2). */
@@ -73,15 +73,9 @@ export function KioskQrPhone({ code, user, agencyName, onLeave, onScanAgain }: K
       }
       if (!live) return;
       if (a.status !== 200 || typeof a.body?.approvalId !== 'string') {
+        // (A 401 was already checked with GET /api/auth/me in kqrPhoneFetch: signed out for real ->
+        // the sign-in page, which comes back here with the code.)
         const err = kqrErrorFor(a.status, a.body);
-        if (err.kind === 'site') return; // the app shows "not on this address"
-        if (err.kind === 'signIn') {
-          // Signed out for real? GET /api/auth/me signs this phone out the usual way, and the
-          // sign-in page comes back here with the code. Else the plain "sign in again" screen.
-          try { const me = await apiFetch('/api/auth/me', { cache: 'no-store' }); await me.text().catch(() => ''); } catch { /* offline */ }
-          if (!live) return;
-          return fail(err);
-        }
         if (err.kind === 'expired' || err.kind === 'unusable' || err.kind === 'notHere') clearPendingKqr();
         return fail(err);
       }

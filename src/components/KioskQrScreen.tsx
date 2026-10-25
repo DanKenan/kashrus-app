@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { KeyRound, RefreshCw, Tablet } from 'lucide-react';
 import type { User } from '../types';
-import { apiFetch, setSessionToken } from '../lib/api';
+import { apiFetch, noteServerCookieSignIn, setSessionToken } from '../lib/api';
 import { makeQr, qrPath } from '../lib/qrEncode';
 import { KQR_UI_TEXT as T, countdownText } from '../lib/kioskQr';
 import { useSite, useSiteLogo } from '../lib/site';
@@ -11,6 +11,13 @@ import { ShutfeyLogo } from './ShutfeyLogo';
 export const KQR_POLL_MS = 2000;
 /** "Hi Yossi – Hill Bakery" stays this long before the tablet opens (B14). */
 export const KQR_WELCOME_MS = 3000;
+
+/**
+ * "Use your code instead" sends cancel and leaves this screen. A screen opened again before that
+ * answer lands waits for it, so the late cancel never kills the new screen's code.
+ */
+let cancelInFlight: Promise<unknown> | null = null;
+const CANCEL_WAIT_MAX_MS = 5000;
 
 type Shown =
   | { kind: 'loading' }
@@ -74,6 +81,9 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
     let live = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let lastLink: string | null = null;
+    // When the code on screen was issued: a poll keeps it only while it names the same code.
+    let lastIssuedAt: number | null = null;
+    let lastRestartAt = 0;
     let lineTimer: ReturnType<typeof setTimeout> | null = null;
     const later = (ms: number, first: boolean) => {
       if (!live) return;
@@ -81,6 +91,10 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
     };
     const step = async (first: boolean) => {
       if (!live) return;
+      if (first && cancelInFlight) {
+        await Promise.race([cancelInFlight, new Promise((res) => setTimeout(res, CANCEL_WAIT_MAX_MS))]);
+        if (!live) return;
+      }
       let r: Response;
       try {
         r = await apiFetch(first ? '/api/kiosk/qr/start' : '/api/kiosk/qr/poll', { method: 'POST' });
@@ -96,7 +110,10 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
         return later(r.status === 429 && retry > 0 ? Math.min(retry, 60) * 1000 : KQR_POLL_MS * 2, first);
       }
       if (d.state === 'signed-in' && d.user) {
+        // A tablet paired with the device cookie gets the sign-in cookie from this answer (no token):
+        // this device is now signed in on the cookie, like a sign-in moved there.
         if (typeof d.token === 'string' && d.token) setSessionToken(d.token);
+        else noteServerCookieSignIn();
         const g = d.greeting || {};
         setShown({ kind: 'welcome', firstName: String(g.firstName || ''), venueName: String(g.venueName || '') });
         const user = d.user as User;
@@ -112,6 +129,7 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
         if (typeof d.link === 'string' && d.link) {
           if (d.link !== lastLink) {
             lastLink = d.link;
+            lastIssuedAt = typeof d.codeIssuedAtMs === 'number' ? d.codeIssuedAtMs : null;
             const ttl = typeof d.expiresAtMs === 'number' && typeof d.codeIssuedAtMs === 'number' ? Math.max(1000, Math.min(120000, d.expiresAtMs - d.codeIssuedAtMs)) : 60000;
             setShown({ kind: 'code', link: d.link, shownAt: Date.now(), ttlMs: ttl });
           }
@@ -119,8 +137,18 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
         }
         // The server keeps only a hash of the code: a poll while the code on screen is still live
         // answers without the link (just its times). Keep showing it.
-        if (lastLink && typeof d.codeIssuedAtMs === 'number' && d.retryInMs === undefined) return later(KQR_POLL_MS, false);
+        if (lastLink && typeof d.codeIssuedAtMs === 'number' && d.codeIssuedAtMs === lastIssuedAt && d.retryInMs === undefined) return later(KQR_POLL_MS, false);
+        // A newer code than the one on screen (issued by a call this screen did not make): the one
+        // shown is dead and the new one can't be shown, so ask for a fresh one (at most every 10 s).
+        if (typeof d.codeIssuedAtMs === 'number' && d.codeIssuedAtMs !== lastIssuedAt && d.retryInMs === undefined && Date.now() - lastRestartAt > 10000) {
+          lastRestartAt = Date.now();
+          lastLink = null;
+          lastIssuedAt = null;
+          setShown({ kind: 'soon' });
+          return later(0, true);
+        }
         lastLink = null;
+        lastIssuedAt = null;
         setShown({ kind: 'soon' });
         const wait = typeof d.retryInMs === 'number' && d.retryInMs > 0 ? Math.min(d.retryInMs, 30000) : KQR_POLL_MS;
         // A code the server could not issue yet comes on a later poll.
@@ -164,7 +192,11 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
 
   const useCode = () => {
     // The code on screen dies with this (a phone that scans it now is told so).
-    void apiFetch('/api/kiosk/qr/cancel', { method: 'POST' }).catch(() => {});
+    const p: Promise<unknown> = apiFetch('/api/kiosk/qr/cancel', { method: 'POST' })
+      .then((r) => r.text().catch(() => ''))
+      .catch(() => {})
+      .finally(() => { if (cancelInFlight === p) cancelInFlight = null; });
+    cancelInFlight = p;
     onUseCode();
   };
 

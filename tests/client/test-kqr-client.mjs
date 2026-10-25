@@ -8,10 +8,13 @@ const ok = (n, c, d = '') => { if (c) { passed++; console.log('PASS ' + n); } el
 
 // sessionStorage for the pending code.
 const store = new Map();
+const lstore = new Map();
+globalThis.localStorage = { getItem: (k) => (lstore.has(k) ? lstore.get(k) : null), setItem: (k, v) => lstore.set(k, String(v)), removeItem: (k) => lstore.delete(k) };
 globalThis.sessionStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
 
 const { makeQr, qrPath } = await import('../../src/lib/qrEncode.ts');
 const K = await import('../../src/lib/kioskQr.ts');
+const A = await import('../../src/lib/api.ts');
 
 // Q: the QR maker. Structure always; decoded by a real reader when one is on this machine (zbarimg).
 const code = 'Ab3_-xYz0123456789AbCd';
@@ -27,7 +30,16 @@ ok('Q too long -> throws (never a wrong code)', threw);
 const zbar = spawnSync('sh', ['-c', 'command -v zbarimg'], { encoding: 'utf8' }).stdout.trim();
 if (zbar) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kqr-'));
-  const texts = [link, 'https://shutfey-abc123-uc.a.run.app/k/' + code, 'http://127.0.0.1:3490/k/' + code, 'x', 'https://a-very-long-agency-address.example.org/k/' + code + '?' + 'q'.repeat(120)];
+  // One text per version 1-20 (the shortest that needs it), plus the real link shapes.
+  const texts = [link, 'https://shutfey-abc123-uc.a.run.app/k/' + code, 'http://127.0.0.1:3490/k/' + code];
+  const seen = new Set();
+  for (let n = 1; n <= 700 && seen.size < 20; n++) {
+    const t = (n < 20 ? '' : 'https://x.org/k/') + 'Ab3_-xYz09'.repeat(70).slice(0, n);
+    let v;
+    try { v = (makeQr(t).length - 17) / 4; } catch { break; }
+    if (!seen.has(v)) { seen.add(v); texts.push(t); }
+  }
+  ok('Q every version 1-20 is used by some length', [...Array(20)].every((_, i) => seen.has(i + 1)), [...seen].join(','));
   for (const t of texts) {
     const mm = makeQr(t);
     const n = mm.length + 8, sc = 6;
@@ -41,7 +53,7 @@ if (zbar) {
     ok(`Q a real reader reads it back (${t.length} chars, version ${(mm.length - 17) / 4})`, out === t, JSON.stringify(out.slice(0, 60)));
   }
   fs.rmSync(tmp, { recursive: true, force: true });
-} else console.log('SKIP Q reader check (no zbarimg here)');
+} else console.log('SKIP Q reader check (no zbarimg on this machine: install zbar-tools to decode all 20 versions)');
 
 // P: the link page path and the code kept while signing in.
 ok('P /k/<code> -> code', K.kqrCodeFromPath('/k/' + code) === code && K.kqrCodeFromPath('/k/' + code + '/') === code);
@@ -77,7 +89,13 @@ const nh = E(403, { code: 'KIOSK_QR_NOT_HERE', error: "You can't sign in on this
 ok('E not here keeps the server words with the venue', nh.kind === 'notHere' && nh.title === "You can't sign in on this tablet" && nh.body === 'Ask your administrator for a code at Hill Bakery.' && nh.again === 'none', JSON.stringify(nh));
 ok('E too many: the server words', E(429, { code: 'RATE_LIMITED', error: 'Too many tries. Wait a minute and scan again.' }).body === 'Too many tries. Wait a minute and scan again.');
 ok('E sign in first', E(401, { code: 'SIGN_IN_FIRST' }).kind === 'signIn');
-ok('E wrong address -> the app screen', E(403, { code: 'WRONG_SITE' }).kind === 'site');
+ok('E wrong address -> its own screen (scan with the camera app), never a sign-out', E(403, { code: 'WRONG_SITE' }).kind === 'site' && !!E(403, { code: 'WRONG_SITE' }).title && E(403, { code: 'SITE_NOT_SET_UP' }).kind === 'site');
+// C: a cookie tablet opened by a phone is signed in on the cookie, like a sign-in moved there.
+A.setSessionToken('tok-before'); lstore.set('shutfey_logout_pending', '1');
+const keyBefore = A.sessionCredentialKey();
+A.noteServerCookieSignIn();
+ok('C cookie claim: no token, on the cookie (so sign-out ends the server session), old pending sign-out dropped, a new sign-in key', A.getSessionToken() === null && A.isCookieSession() && A.hasSessionCredential() && !lstore.get('shutfey_logout_pending') && A.sessionCredentialKey() !== keyBefore);
+A.clearSession();
 ok('E 503 -> try again', E(503, { code: 'KIOSK_QR_UNAVAILABLE' }).again === 'retry');
 ok('E no Yes / number / Face ID words anywhere', !/face id|passkey|six-digit|6-digit|yes, that/i.test(JSON.stringify(K.KQR_UI_TEXT)));
 ok('T countdown', K.countdownText(42000) === '0:42' && K.countdownText(60000) === '1:00' && K.countdownText(-5) === '0:00' && K.countdownText(100) === '0:01');
@@ -100,11 +118,15 @@ ok('W signed out on /k -> the sign-in form, then back', /if \(kqrPage && !isKios
 ok('W scanner: listed origins only; other address -> that address', sheet.includes('kqrLinkFromScan(f.rawValue, origins)') && sheet.includes('window.location.assign(`${link.origin}/k/${link.code}`)'));
 ok('W scanner camera off -> camera-app tip', sheet.includes('T.scanNoCamera'));
 ok('W tablet: start, poll, cancel on "Use your code instead"', tab.includes("'/api/kiosk/qr/start'") && tab.includes("'/api/kiosk/qr/poll'") && tab.includes("apiFetch('/api/kiosk/qr/cancel', { method: 'POST' })"));
-ok('W tablet: a poll without the link while the code is live keeps the code on screen', tab.includes("if (lastLink && typeof d.codeIssuedAtMs === 'number' && d.retryInMs === undefined) return later(KQR_POLL_MS, false);"));
+ok('W tablet: a poll without the link while the code is live keeps the code on screen', tab.includes("if (lastLink && typeof d.codeIssuedAtMs === 'number' && d.codeIssuedAtMs === lastIssuedAt && d.retryInMs === undefined) return later(KQR_POLL_MS, false);"));
 ok('W tablet: token only from a token answer; welcome 3 s', tab.includes("if (typeof d.token === 'string' && d.token) setSessionToken(d.token);") && tab.includes('KQR_WELCOME_MS = 3000'));
 ok('W tablet: an older server (404 without a code) -> PIN screen as before', tab.includes("if (r.status === 404 && !d.code) { cb.current.onUnavailable(); return; }") && app.includes('onUnavailable={() => setKqrOnServer(false)}'));
 ok('W PIN sign-in unchanged (same call, same token handling)', pin.includes("apiFetch('/api/kiosk/login'") && pin.includes('if (d.token) setSessionToken(d.token);'));
 ok('W scanner skips a just-refused code', sheet.includes('wasJustRefused(link.code)') && phone.includes("if (error.again === 'scan') markRefusedKqr(code);"));
+ok('W cookie tablet: the claim marks this device as signed in on the cookie (sign-out ends the server session, realtime uses the cookie)', tab.includes('else noteServerCookieSignIn();'));
+ok('W tablet: a late cancel from "Use your code instead" is waited for before a new start', tab.includes('if (first && cancelInFlight)') && tab.includes('cancelInFlight = p;'));
+ok('W tablet: a poll keeps the code on screen only while it names the same code', tab.includes('d.codeIssuedAtMs === lastIssuedAt') && tab.includes('return later(0, true);'));
+ok('W phone: a QR answer never clears the session itself (no site-refusal sign-out); 401 / site refusal -> /api/auth/me', !lib.includes('noticeSiteRefusalFor') && !lib.includes('clearSession') && lib.includes('await confirmPhoneSession();'));
 ok('W tablet signs out -> QR screen again', app.includes("if (kioskMode) setKioskSignIn('qr');"));
 
 console.log(`\n${passed} passed, ${failures} failed`);

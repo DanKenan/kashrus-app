@@ -748,6 +748,17 @@ async function moveTokenToCookie(token: string): Promise<void> {
   setSessionTokenQuietly(null);
 }
 
+/**
+ * Kiosk QR sign-in on a tablet paired with the device cookie: the server set the sign-in cookie in
+ * its answer and sent no token. This device is now signed in on the cookie, as after a move: a new
+ * cookie sign-in id, no stored token, and an older unconfirmed sign-out never ends this one.
+ */
+export function noteServerCookieSignIn(): void {
+  setSessionTokenQuietly(null);
+  writeKey(LOGOUT_PENDING_KEY, null);
+  writeKey(COOKIE_SESSION_KEY, newCookieSessionId());
+}
+
 /** Clears the stored token without starting another move (the cookie now carries the sign-in). */
 function setSessionTokenQuietly(token: string | null): void {
   credentialGeneration++;

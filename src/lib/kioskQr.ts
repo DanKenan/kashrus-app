@@ -4,7 +4,7 @@
 // server to approve it (no tap, no number, no Face ID) and the tablet opens.
 // Pure helpers + the phone's calls. The words on screen live in KQR_UI_TEXT;
 // a server message is shown where the server sends one.
-import { apiFetch, COOKIE_AUTH_HEADER, COOKIE_AUTH_VALUE, noticeSiteRefusalFor, sessionCredentialKey } from './api';
+import { apiFetch, COOKIE_AUTH_HEADER, COOKIE_AUTH_VALUE } from './api';
 
 /** A code: 128-bit random, base64url, exactly 22 characters (server C1). */
 export const KQR_CODE_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -31,6 +31,8 @@ export const KQR_UI_TEXT = {
   scanTip: "Camera not working? Open your phone's camera app and point it at the tablet instead.",
   scanNoCamera: "This phone can't scan here. Open your phone's camera app and point it at the code on the tablet.",
   scanNotOurs: "That isn't a Shutfey tablet code.",
+  siteTitle: "This tablet isn't on this address",
+  siteBody: "Scan the code on the tablet with your phone's camera app. It opens the tablet's own address.",
   scanOldCode: 'That code was already tried. Scan the new code on the tablet.',
   tabletsLink: "Tablets you're signed in on",
   // Phone: the link page
@@ -164,7 +166,7 @@ export function kqrErrorFor(status: number, body: any): KqrError {
   const code = body && typeof body.code === 'string' ? body.code : '';
   const msg = body && typeof body.error === 'string' ? body.error : '';
   const T = KQR_UI_TEXT;
-  if (code === 'WRONG_SITE' || code === 'SITE_NOT_SET_UP') return { kind: 'site', title: '', body: '', again: 'none' };
+  if (code === 'WRONG_SITE' || code === 'SITE_NOT_SET_UP') return { kind: 'site', title: T.siteTitle, body: T.siteBody, again: 'scan' };
   if (code === 'KIOSK_QR_EXPIRED' || status === 410) return { kind: 'expired', title: T.expiredTitle, body: T.expiredBody, again: 'scan' };
   if (code === 'KIOSK_QR_NOT_HERE') {
     // "You can't sign in on this tablet. Ask your administrator for a code at <venue>." -> the second sentence.
@@ -185,7 +187,6 @@ export function kqrErrorFor(status: number, body: any): KqrError {
 export async function kqrPhoneFetch(path: string, init: { method?: 'GET' | 'POST'; body?: unknown } = {}): Promise<{ status: number; body: any }> {
   const headers: Record<string, string> = { [COOKIE_AUTH_HEADER]: COOKIE_AUTH_VALUE };
   if (init.body !== undefined) headers['Content-Type'] = 'application/json';
-  const sentKey = sessionCredentialKey();
   const res = await fetch(path, {
     method: init.method || 'GET',
     headers,
@@ -193,9 +194,22 @@ export async function kqrPhoneFetch(path: string, init: { method?: 'GET' | 'POST
     cache: 'no-store',
     ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
   });
-  await noticeSiteRefusalFor(res, sentKey);
   const body = await res.json().catch(() => ({}));
+  // Never a sign-out from a QR answer itself (a site refusal here can be about the tablet's
+  // address, not this phone's sign-in). Signed out for real? GET /api/auth/me decides, with the
+  // app's usual rules.
+  if (res.status === 401 || (res.status === 403 && (body?.code === 'WRONG_SITE' || body?.code === 'SITE_NOT_SET_UP'))) await confirmPhoneSession();
   return { status: res.status, body };
+}
+
+/** GET /api/auth/me through apiFetch: a real sign-out signs this phone out the usual way; anything else changes nothing. */
+async function confirmPhoneSession(): Promise<void> {
+  try {
+    const me = await apiFetch('/api/auth/me', { cache: 'no-store' });
+    await me.text().catch(() => '');
+  } catch {
+    // offline: nothing changes
+  }
 }
 
 /** GET /api/auth/me: may this signed-in phone use "Sign in to a tablet" on this address? false on anything else. */
