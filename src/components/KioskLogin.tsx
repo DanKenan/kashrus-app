@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { AlertCircle, Delete, LogIn } from 'lucide-react';
+import { AlertCircle, Delete, LogIn, QrCode } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import type { User } from '../types';
 import { apiFetch, setSessionToken } from '../lib/api';
@@ -18,6 +18,8 @@ interface KioskLoginProps {
   onLoginSuccess: (user: User) => void;
   onExitKiosk: () => void;
   onUnpaired?: () => void;
+  /** Kiosk QR sign-in: back to the QR screen (absent = this server has none: the screen is as before). */
+  onUseQr?: () => void;
   darkMode: boolean;
 }
 
@@ -26,7 +28,7 @@ interface KioskLoginProps {
  * Hung on a wall in the establishment: pick your name, punch in your
  * 4-6 digit code, and you're in. Big targets, no typing, no passwords.
  */
-export function KioskLogin({ notice, onNoticeDone, onLoginSuccess, onExitKiosk, onUnpaired, darkMode }: KioskLoginProps) {
+export function KioskLogin({ notice, onNoticeDone, onLoginSuccess, onExitKiosk, onUnpaired, onUseQr, darkMode }: KioskLoginProps) {
   const [venueName, setVenueName] = useState('Loading…');
   const [staff, setStaff] = useState<KioskStaff[]>([]);
   const [selected, setSelected] = useState<KioskStaff | null>(null);
@@ -215,6 +217,19 @@ export function KioskLogin({ notice, onNoticeDone, onLoginSuccess, onExitKiosk, 
               </button>
             ))}
           </div>
+          {onUseQr && (
+            <div className="flex justify-center">
+              <button
+                type="button"
+                data-kqr-use-qr
+                onClick={onUseQr}
+                className="mt-2 min-h-11 sm:min-h-16 px-6 inline-flex items-center gap-2 rounded-2xl border border-line-strong bg-surface text-k-body font-semibold text-ink pressable"
+              >
+                <QrCode className="w-6 h-6 text-gold-deep" aria-hidden />
+                <span>Sign in with your phone</span>
+              </button>
+            </div>
+          )}
           <div className="flex justify-center">
             <button
               onClick={onExitKiosk}

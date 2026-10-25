@@ -36,9 +36,11 @@ import {
   Tablet,
   Home,
   ScanFace,
+  QrCode,
 } from 'lucide-react';
 import { User, Venue } from '../types';
 import { PASSKEY_TEXT } from '../lib/passkeys';
+import { KQR_UI_TEXT } from '../lib/kioskQr';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import { PWAInstallButton } from './PWAInstallButton';
 import { PushNotificationToggle } from './PushNotificationToggle';
@@ -67,6 +69,8 @@ interface HeaderProps {
   onOpenChangePassword?: () => void;
   /** 11b-c: Face ID / passkeys (absent = hidden: no passkeys and none allowed). */
   onOpenPasskeys?: () => void;
+  /** Kiosk QR sign-in: "Sign in to a tablet" (absent = hidden; App passes it only when /api/auth/me says canUseTabletSignIn). */
+  onOpenTabletSignIn?: () => void;
   onOpenTaskModal: () => void;
   onOpenHistoryModal: () => void;
   onOpenEventsModal: () => void;
@@ -109,6 +113,7 @@ export const Header: React.FC<HeaderProps> = ({
   onLogout,
   onOpenChangePassword,
   onOpenPasskeys,
+  onOpenTabletSignIn,
   onOpenTaskModal,
   onOpenHistoryModal,
   onOpenEventsModal,
@@ -480,6 +485,22 @@ export const Header: React.FC<HeaderProps> = ({
                       )}
                     </div>
 
+                    {onOpenTabletSignIn && (
+                      <button
+                        type="button"
+                        data-open-tablet-signin
+                        onClick={() => { setUserMenuOpen(false); onOpenTabletSignIn(); }}
+                        aria-haspopup="dialog"
+                        className="w-full mb-2 min-h-11 flex items-center gap-2.5 px-2.5 py-2 text-left rounded-xl bg-gold-wash border border-gold/40 text-ink pressable cursor-pointer"
+                      >
+                        <QrCode className="w-5 h-5 shrink-0 text-gold-deep" />
+                        <span className="flex flex-col min-w-0">
+                          <span className="text-xs font-bold">{KQR_UI_TEXT.menuRow}</span>
+                          <span className="text-[11px] text-ink-soft">{KQR_UI_TEXT.menuRowSub}</span>
+                        </span>
+                      </button>
+                    )}
+
                     {onOpenPool && (
                       <button
                         type="button"
@@ -730,6 +751,22 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <UserIcon className="w-4 h-4" />
               <span>Sign In to Your Account</span>
+            </button>
+          )}
+
+          {currentUser && onOpenTabletSignIn && (
+            <button
+              type="button"
+              data-open-tablet-signin
+              onClick={() => { setMobileMenuOpen(false); onOpenTabletSignIn(); }}
+              aria-haspopup="dialog"
+              className="w-full min-h-14 flex items-center gap-3 px-3 py-2.5 text-left rounded-xl bg-gold-wash border border-gold/40 text-ink pressable cursor-pointer"
+            >
+              <QrCode className="w-6 h-6 shrink-0 text-gold-deep" />
+              <span className="flex flex-col min-w-0">
+                <span className="text-sm font-bold">{KQR_UI_TEXT.menuRow}</span>
+                <span className="text-xs text-ink-soft">{KQR_UI_TEXT.menuRowSub}</span>
+              </span>
             </button>
           )}
 
