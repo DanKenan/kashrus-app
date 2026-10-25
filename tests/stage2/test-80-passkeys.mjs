@@ -22,6 +22,9 @@
  *     passkey (counter always 0) works every time.
  *  D  multi-agency: a passkey sign-in gives the choose token; the chosen
  *     session is a passkey session; a fresh password sign-in still chooses.
+ *     FACEID2: the chosen session keeps the sign-in's own proof (password or
+ *     Face ID), unchanged, so it may add a passkey without a second password
+ *     for the rest of those 5 minutes.
  *  E  removal: needs a fresh proof; sessions from that passkey are refused at
  *     once (HTTP, socket 4401, and on a re-read as another instance would),
  *     password sessions keep working but lose their proof; the id can never be
@@ -405,8 +408,13 @@ export default {
       const act = await call(baseUrl, 'POST', '/api/auth/activate', { bearer: ml.json.token, origin: ORIGIN, body: { membershipId: ml.json.memberships[0].membershipId } });
       assert(act.status === 200 && act.json?.token, `D activate: ${act.status}`);
       const actDoc = await sessionDoc(claimsOf(act.json.token).sid);
-      assert(actDoc && actDoc.recentAuthAtMs === undefined && !actDoc.authMethod, 'D a chosen session carries no proof (not copied by choose)');
-      assert((await regOptions(act.json.token)).json?.code === 'RECENT_AUTH_REQUIRED', 'D needs a password re-entry first');
+      // FACEID2: the password typed at sign-in is carried by the choose token (ra/re) and copied, unchanged, to the chosen session.
+      const mlc = claimsOf(ml.json.token);
+      assert(Number.isSafeInteger(mlc.ra) && Number.isSafeInteger(mlc.re), `D the password choose token carries the sign-in proof ${J({ ra: mlc.ra, re: mlc.re })}`);
+      assert(actDoc && actDoc.recentAuthAtMs === mlc.ra && actDoc.recentAuthEpoch === mlc.re && !actDoc.authMethod, `D a chosen session carries the sign-in proof, not restarted ${J({ at: actDoc && actDoc.recentAuthAtMs, ra: mlc.ra })}`);
+      assert((await regOptions(act.json.token)).status === 200, 'D the chosen session may add a passkey right after the password (no second password)');
+      assert((await hook({ action: 'age-recent-auth', sid: claimsOf(act.json.token).sid, ageMs: 5 * 60 * 1000 + 1000 })).json?.ok === true, 'D age the proof');
+      assert((await regOptions(act.json.token)).json?.code === 'RECENT_AUTH_REQUIRED', 'D after the 5 minutes it needs a password re-entry');
       assert((await recentAuth(act.json.token, m.pw)).status === 200, 'D re-entry');
       const pkM = new SoftPasskey();
       await addPasskey(act.json.token, pkM, 'D');
@@ -417,8 +425,9 @@ export default {
       const mact = await call(baseUrl, 'POST', '/api/auth/activate', { bearer: mp.json.token, origin: ORIGIN, body: { membershipId: mp.json.memberships[1].membershipId } });
       assert(mact.status === 200 && mact.json?.token, `D activate after passkey: ${mact.status}`);
       const mDoc = await sessionDoc(claimsOf(mact.json.token).sid);
-      assert(mDoc.via === 'activate' && mDoc.authMethod?.credentialId === pkM.id && mDoc.recentAuthAtMs === undefined, `D the chosen session is a passkey session ${J({ via: mDoc.via, am: mDoc.authMethod })}`);
-      details.push('D multi: passkey -> choose token (pk) -> activated passkey session; choose token cannot add; activate copies no proof');
+      assert(Number.isSafeInteger(mc.ra) && Number.isSafeInteger(mc.re), 'D the passkey choose token carries the assertion as the sign-in proof');
+      assert(mDoc.via === 'activate' && mDoc.authMethod?.credentialId === pkM.id && mDoc.recentAuthAtMs === mc.ra && mDoc.recentAuthEpoch === mc.re, `D the chosen session is a passkey session with the sign-in proof ${J({ via: mDoc.via, am: mDoc.authMethod })}`);
+      details.push('D multi: passkey -> choose token (pk + proof) -> activated passkey session; choose token cannot add; activate copies the sign-in proof unchanged (FACEID2), and it still ends after 5 minutes');
 
       // ---- E: removal
       const sp = await pkSignIn(pkA); // a passkey session

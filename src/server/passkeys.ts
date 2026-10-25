@@ -118,6 +118,22 @@ export function recentAuthValid(session: { recentAuthAtMs?: unknown; recentAuthE
   return session.recentAuthEpoch === personEpoch;
 }
 
+/**
+ * FACEID2: the proof a choose token carries from the sign-in that issued it
+ * (password or Face ID), as the chosen session's recentAuth: copied unchanged
+ * (never restarted) while it is inside its 5 minutes, else none. The epoch is
+ * the person's at sign-in; recentAuthValid compares it with the CURRENT one at
+ * every use, so a passkey removed meanwhile ends it.
+ */
+export function chosenRecentAuth(recentAuth: unknown, nowMs: number): { atMs: number; epoch: number } | undefined {
+  if (!recentAuth || typeof recentAuth !== 'object') return undefined;
+  const { atMs, epoch } = recentAuth as { atMs?: unknown; epoch?: unknown };
+  if (typeof atMs !== 'number' || typeof epoch !== 'number') return undefined;
+  if (!Number.isSafeInteger(atMs) || atMs < 0 || !Number.isSafeInteger(epoch) || epoch < 0) return undefined;
+  if (atMs > nowMs || nowMs - atMs >= RECENT_AUTH_MS) return undefined;
+  return { atMs, epoch };
+}
+
 /** A passkey's display name: trimmed, control characters removed, at most 40 characters; empty -> the fallback. */
 export function cleanPasskeyName(x: unknown, fallback: string): string {
   const s = typeof x === 'string' ? x.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, PASSKEY_NAME_MAX).trim() : '';

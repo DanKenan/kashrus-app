@@ -30,12 +30,13 @@ export type SessionClaims =
   /** endsAtMs: set by server.ts verifyToken only (the kiosk 3 h cap); never by the classifier. */
   | { kind: 'kiosk'; userId: string; agencyId?: string; venueId?: string; pv?: string; dev?: string; sid?: string; endsAtMs?: number }
   /** 10g: proves a person's credential, grants NO membership (never authUser). */
-  | { kind: 'choose'; personId: string; ownerRowId: string; ep: number; passkeyCredentialId?: string };
+  | { kind: 'choose'; personId: string; ownerRowId: string; ep: number; passkeyCredentialId?: string; recentAuth?: { atMs: number; epoch: number } };
 
 const KIOSK_CLAIMS = ['kiosk', 'agencyId', 'venueId', 'pv', 'dev'];
 const V2_CLAIMS = ['v', 'mem', 'ep'];
 const has = (o: any, k: string) => Object.prototype.hasOwnProperty.call(o, k);
 const nonEmpty = (x: unknown): x is string => typeof x === 'string' && x.length > 0;
+const isProofInt = (x: unknown): x is number => typeof x === 'number' && Number.isSafeInteger(x) && x >= 0;
 
 export function classifySessionClaims(data: any): SessionClaims | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
@@ -65,12 +66,21 @@ export function classifySessionClaims(data: any): SessionClaims | null {
       if (has(data, 'mem') || hasSid) return null;
       if (!nonEmpty(data.sub) || !nonEmpty(data.cr)) return null;
       if (typeof data.ep !== 'number' || !Number.isInteger(data.ep) || data.ep < 0) return null;
+      // FACEID2: ra/re = the fresh proof (password or Face ID) of the sign-in that issued this
+      // choose token: its moment (ms) and the person's recentAuthEpoch then. Both or neither,
+      // non-negative safe integers only; anything else refuses the token.
+      let recentAuth: { atMs: number; epoch: number } | undefined;
+      if (has(data, 'ra') || has(data, 're')) {
+        if (!isProofInt(data.ra) || !isProofInt(data.re)) return null;
+        recentAuth = { atMs: data.ra, epoch: data.re };
+      }
+      const raPart = recentAuth ? { recentAuth } : {};
       // 11b-s: pk = the passkey this choice comes from (the chosen session carries it); optional, well-formed only.
       if (has(data, 'pk')) {
         if (typeof data.pk !== 'string' || !/^[A-Za-z0-9_-]{16,1364}$/.test(data.pk)) return null;
-        return { kind: 'choose', personId: data.sub, ownerRowId: data.cr, ep: data.ep, passkeyCredentialId: data.pk };
+        return { kind: 'choose', personId: data.sub, ownerRowId: data.cr, ep: data.ep, passkeyCredentialId: data.pk, ...raPart };
       }
-      return { kind: 'choose', personId: data.sub, ownerRowId: data.cr, ep: data.ep };
+      return { kind: 'choose', personId: data.sub, ownerRowId: data.cr, ep: data.ep, ...raPart };
     }
     if (data.v !== 2) return null;
     if (!nonEmpty(data.sub) || !nonEmpty(data.mem)) return null;
@@ -136,9 +146,18 @@ export function resolveChooseOwner<T extends { id: string; personId?: string; to
   return epoch !== null && epoch === claims.ep ? cr : undefined;
 }
 
-/** 10g: the choose claims for a person's credential row (signed with a 10-minute exp by the server). */
-export function chooseClaimsFor(ownerRow: { id: string; personId?: string; tokenEpoch?: unknown }, passkeyCredentialId?: string): Record<string, unknown> {
-  return { v: 3, sub: ownerRow.personId, cr: ownerRow.id, ep: tokenEpochOf(ownerRow) ?? 0, ...(passkeyCredentialId ? { pk: passkeyCredentialId } : {}) };
+/**
+ * 10g: the choose claims for a person's credential row (signed with a 10-minute exp by the server).
+ * FACEID2: recentAuth = the fresh proof of the sign-in that issues this token (ra/re), carried to
+ * the session the person then picks (POST /api/auth/activate copies it, never extends it).
+ */
+export function chooseClaimsFor(
+  ownerRow: { id: string; personId?: string; tokenEpoch?: unknown },
+  passkeyCredentialId?: string,
+  recentAuth?: { atMs: number; epoch: number },
+): Record<string, unknown> {
+  const proof = recentAuth && isProofInt(recentAuth.atMs) && isProofInt(recentAuth.epoch) ? { ra: recentAuth.atMs, re: recentAuth.epoch } : {};
+  return { v: 3, sub: ownerRow.personId, cr: ownerRow.id, ep: tokenEpochOf(ownerRow) ?? 0, ...(passkeyCredentialId ? { pk: passkeyCredentialId } : {}), ...proof };
 }
 
 /** v2 for any row with a personId (10e: membership rows too); otherwise the legacy v1 claims. */

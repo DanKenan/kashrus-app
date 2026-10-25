@@ -204,6 +204,24 @@ export function passkeyAddressKind(
   return { kind: 'other' };
 }
 
+/**
+ * FACEID2: does a stored passkey work on the address of THIS request? A passkey
+ * works only on the host it was made on (its RP ID = that host's name, no port).
+ * `here` is the raw-Host classification of the request (it only selects what the
+ * list says; it authenticates nothing; X-Forwarded-Host is never read), so the
+ * answer describes the host of the PAGE asking. An unknown host: never (checked
+ * before any comparison). No rpId (made before rpIds were stored, when only the
+ * shared run.app addresses existed): a COMPATIBILITY HEURISTIC, not exact -
+ * counted as here on any shared host and never on a site host. Its only wrong
+ * answer: an earlier passkey made on the OTHER run.app host counts as here
+ * (the offer then stays off, as before this change; the menu can still add one).
+ */
+export function passkeyWorksHere(rpId: unknown, here: SiteClass): boolean {
+  if (here.kind === 'unknown' || !here.host) return false;
+  if (typeof rpId !== 'string' || !rpId) return here.kind === 'shared';
+  return rpId === hostName(here.host);
+}
+
 export const SITE_NOT_SET_UP_BODY = {
   error: "This address isn't set up yet. Please use the Shutfey address.",
   code: 'SITE_NOT_SET_UP',
