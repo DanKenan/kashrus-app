@@ -332,16 +332,15 @@ export default {
       await plantOrigin(b.id, 'agency-reset');
       const vB = await regVerify(sbv.token, { challengeId: opB.json.challengeId, response: new SoftPasskey().register(opB.json.options, ORIGIN) });
       assert(vB.status === 201, `B origin changed to agency-reset before verify succeeds: ${vB.status}`);
-      // Readiness still gets checked between options and verify.
-      const opPending = await regOptions(sbv.token);
+      await plantOrigin(b.id, 'invite-new');
+      // Readiness still gets checked between options and verify on a throwaway person.
+      const bp = await register('b-pending');
+      const sbp = await signIn(bp);
+      const opPending = await regOptions(sbp.token);
       assert(opPending.status === 200, 'B options before credential becomes pending');
-      await plantFields({ [b.id]: { credentialPending: 'invite' } });
-      try {
-        const pending = await regVerify(sbv.token, { challengeId: opPending.json.challengeId, response: new SoftPasskey().register(opPending.json.options, ORIGIN) });
-        assert(pending.status === 403 && pending.json?.code === 'PASSKEY_UNAVAILABLE', `B pending credential before verify: ${pending.status}`);
-      } finally {
-        await plantFields({ [b.id]: { credentialPending: undefined, credentialOrigin: 'invite-new' } });
-      }
+      await plantFields({ [bp.id]: { credentialPending: 'invite' } });
+      const pending = await regVerify(sbp.token, { challengeId: opPending.json.challengeId, response: new SoftPasskey().register(opPending.json.options, ORIGIN) });
+      assert(pending.status === 403 && pending.json?.code === 'PASSKEY_UNAVAILABLE', `B pending credential before verify: ${pending.status}`);
       details.push('B all origins enroll with fresh proof; absent-origin passkey signs in; stale proof needs re-entry; origin changes allowed, pending credential refused at verify');
 
       // ---- C: sign in with a passkey
