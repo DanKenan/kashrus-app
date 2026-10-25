@@ -85,7 +85,11 @@ const check = (stillValid?: StillValid) => { if (stillValid && !stillValid()) th
 
 /** Domains PR B (plan 2d): which address a passkey belongs to, as the server labels it (no host is guessed here). */
 export type PasskeyAddress = { kind: 'shared' } | { kind: 'site'; agencyName: string } | { kind: 'earlier' } | { kind: 'other' };
-export interface PasskeyRow { id: string; name: string; createdAt: string; lastUsedAt: string | null; address?: PasskeyAddress }
+/**
+ * FACEID2: here = the server's word that this passkey works on the address this
+ * page is on (#156). Absent when talking to an older server.
+ */
+export interface PasskeyRow { id: string; name: string; createdAt: string; lastUsedAt: string | null; address?: PasskeyAddress; here?: boolean }
 export function passkeyAddressFrom(x: unknown): PasskeyAddress | undefined {
   if (!x || typeof x !== 'object') return undefined;
   const k = (x as any).kind;
@@ -103,7 +107,16 @@ export function passkeyAddressLabel(a: PasskeyAddress | undefined): string | nul
   if (a.kind === 'earlier') return 'Earlier Shutfey address';
   return 'Another address';
 }
-export interface PasskeyList { passkeys: PasskeyRow[]; canAdd: boolean }
+export interface PasskeyList { passkeys: PasskeyRow[]; canAdd: boolean; hasPasskeyHere?: boolean }
+
+/**
+ * FACEID2: does this person already have Face ID / fingerprint that works on
+ * THIS address? Uses the server's own answer (#156); an older server that does
+ * not send it falls back to the rule before FACEID2 (any passkey at all).
+ */
+export function hasPasskeyForThisAddress(l: PasskeyList): boolean {
+  return typeof l.hasPasskeyHere === 'boolean' ? l.hasPasskeyHere : l.passkeys.length > 0;
+}
 
 export type PasskeyErrorKind = 'stale' | 'cancelled' | 'already' | 'unavailable' | 'limit' | 'failed' | 'needPassword' | 'wrongPassword' | 'offline' | 'unsupported';
 export class PasskeyError extends Error {
@@ -215,7 +228,7 @@ export async function listPasskeys(): Promise<PasskeyList> {
   const { res, data } = await call('/api/passkeys');
   if (!res.ok) throw errorFromAnswer(res.status, data, netError());
   const rows = Array.isArray(data?.passkeys) ? data.passkeys.filter((p: any) => p && typeof p.id === 'string') : [];
-  return { passkeys: rows.map((p: any) => ({ id: p.id, name: typeof p.name === 'string' && p.name ? p.name : 'Passkey', createdAt: p.createdAt ?? '', lastUsedAt: p.lastUsedAt ?? null, address: passkeyAddressFrom(p.address) })), canAdd: data?.canAdd === true };
+  return { passkeys: rows.map((p: any) => ({ id: p.id, name: typeof p.name === 'string' && p.name ? p.name : 'Passkey', createdAt: p.createdAt ?? '', lastUsedAt: p.lastUsedAt ?? null, address: passkeyAddressFrom(p.address), here: typeof p.here === 'boolean' ? p.here : undefined })), canAdd: data?.canAdd === true, hasPasskeyHere: typeof data?.hasPasskeyHere === 'boolean' ? data.hasPasskeyHere : undefined };
 }
 
 /** POST /api/auth/recent-auth: the password again, for adding after 5 min or removing. */
