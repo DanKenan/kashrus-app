@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { AlertCircle, Delete, LogIn, QrCode } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import type { User } from '../types';
-import { apiFetch, setSessionToken } from '../lib/api';
+import { apiFetch, cookieSignInsSettled, setSessionToken } from '../lib/api';
 
 interface KioskStaff {
   id: string;
@@ -91,6 +91,9 @@ export function KioskLogin({ notice, onNoticeDone, onLoginSuccess, onExitKiosk, 
     setBusy(true);
     setError('');
     try {
+      // Kiosk QR: a phone sign-in answer still on its way (the QR screen was just left) lands and
+      // is ended first, so it can never sign this tablet in on top of this PIN sign-in.
+      await cookieSignInsSettled();
       const r = await apiFetch('/api/kiosk/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { KeyRound, RefreshCw, Tablet } from 'lucide-react';
 import type { User } from '../types';
-import { apiFetch, noteServerCookieSignIn, setSessionToken } from '../lib/api';
+import { apiFetch, endUnusedKioskSignIn, noteServerCookieSignIn, setSessionToken, signOutsSettled, trackCookieSignInRequest } from '../lib/api';
 import { makeQr, qrPath } from '../lib/qrEncode';
 import { KQR_UI_TEXT as T, countdownText } from '../lib/kioskQr';
 import { useSite, useSiteLogo } from '../lib/site';
@@ -18,6 +18,8 @@ export const KQR_WELCOME_MS = 3000;
  */
 let cancelInFlight: Promise<unknown> | null = null;
 const CANCEL_WAIT_MAX_MS = 5000;
+/** "Use your code instead" waits this long at most for a poll on its way. */
+const KQR_LEAVE_WAIT_MS = 3000;
 
 type Shown =
   | { kind: 'loading' }
@@ -58,6 +60,11 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
 
   const cb = useRef({ onLoginSuccess, onUnavailable, onUnpaired });
   cb.current = { onLoginSuccess, onUnavailable, onUnpaired };
+  // The start/poll on its way (its answer can sign the tablet in), "Use your code instead" pressed,
+  // and a sign-in this screen took (the welcome is showing).
+  const inflight = useRef<Promise<unknown> | null>(null);
+  const leaving = useRef(false);
+  const claimed = useRef(false);
 
   // The tablet's name and venue (the same call the PIN screen makes).
   useEffect(() => {
@@ -86,22 +93,35 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
     let lastRestartAt = 0;
     let lineTimer: ReturnType<typeof setTimeout> | null = null;
     const later = (ms: number, first: boolean) => {
-      if (!live) return;
+      if (!live || leaving.current) return;
       timer = setTimeout(() => void step(first), ms);
     };
     const step = async (first: boolean) => {
-      if (!live) return;
+      if (!live || leaving.current) return;
       if (first && cancelInFlight) {
         await Promise.race([cancelInFlight, new Promise((res) => setTimeout(res, CANCEL_WAIT_MAX_MS))]);
-        if (!live) return;
+        if (!live || leaving.current) return;
       }
+      // A sign-out still on its way deletes this browser's sign-in cookie when its answer lands:
+      // no request that can sign the tablet in until it has.
+      if (!(await signOutsSettled(KQR_POLL_MS))) return later(KQR_POLL_MS, first);
+      if (!live || leaving.current) return;
+      const sent = apiFetch(first ? '/api/kiosk/qr/start' : '/api/kiosk/qr/poll', { method: 'POST' }).then(async (res) => ({ res, body: (await res.json().catch(() => ({}))) as any }));
+      // Its answer can sign the tablet in. If it does after this screen is gone, nobody uses that
+      // sign-in: end it before anything else may sign in (tracked until then).
+      const settled = trackCookieSignInRequest(
+        sent.then(async ({ res, body }) => {
+          if (!live && res.ok && body?.state === 'signed-in') await endUnusedKioskSignIn(typeof body.token === 'string' && body.token ? body.token : null);
+        }).catch(() => {})
+      );
+      inflight.current = settled;
       let r: Response;
+      let d: any;
       try {
-        r = await apiFetch(first ? '/api/kiosk/qr/start' : '/api/kiosk/qr/poll', { method: 'POST' });
+        ({ res: r, body: d } = await sent);
       } catch {
         return later(KQR_POLL_MS * 2, first);
       }
-      const d: any = await r.json().catch(() => ({}));
       if (!live) return;
       if (!r.ok) {
         if (r.status === 404 && !d.code) { cb.current.onUnavailable(); return; }
@@ -110,6 +130,7 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
         return later(r.status === 429 && retry > 0 ? Math.min(retry, 60) * 1000 : KQR_POLL_MS * 2, first);
       }
       if (d.state === 'signed-in' && d.user) {
+        claimed.current = true;
         // A tablet paired with the device cookie gets the sign-in cookie from this answer (no token):
         // this device is now signed in on the cookie, like a sign-in moved there.
         if (typeof d.token === 'string' && d.token) setSessionToken(d.token);
@@ -190,7 +211,13 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
     }
   }, [shown.kind === 'code' ? shown.link : null]);
 
-  const useCode = () => {
+  const useCode = async () => {
+    if (leaving.current) return;
+    leaving.current = true;
+    // A poll on its way may already carry a sign-in (someone scanned just now): let it land first.
+    // If it signed the tablet in, the welcome goes on for that person; else the PIN screen.
+    if (inflight.current) await Promise.race([inflight.current, new Promise((res) => setTimeout(res, KQR_LEAVE_WAIT_MS))]);
+    if (claimed.current) return;
     // The code on screen dies with this (a phone that scans it now is told so).
     const p: Promise<unknown> = apiFetch('/api/kiosk/qr/cancel', { method: 'POST' })
       .then((r) => r.text().catch(() => ''))
