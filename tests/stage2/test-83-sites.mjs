@@ -203,7 +203,8 @@ export default {
     // ---- U: APP_SITES unset = today ----
     const h0 = await call('GET', '/api/health');
     assert(h0.status === 200 && !('sites' in h0.json), `U health has no sites when unset: ${J(Object.keys(h0.json || {}))}`);
-    assert(J((await call('GET', '/api/site')).json) === J({ site: 'shared' }), 'U /api/site on the shared host');
+    // Kiosk QR (B3): the shared host also lists the addresses a tablet QR may point at (no sites: the shared address only).
+    assert(J((await call('GET', '/api/site')).json) === J({ site: 'shared', appOrigins: ['https://workers-collaborative-dashboard-1080260390009.us-east1.run.app'] }), 'U /api/site on the shared host');
     assert((await call('GET', '/api/site', { headers: { 'X-Forwarded-Host': 'site-a.test' } })).json?.site === 'shared', 'U X-Forwarded-Host does not select a site');
     const la0 = await login(SHARED, a.email, a.pw, { headers: { 'X-Forwarded-Host': 'unmapped.test' } });
     assert(la0.status === 200 && la0.json.token && la0.json.user?.agencyId === A, `U single sign-in on the shared host (X-Forwarded-Host ignored): ${la0.status}`);

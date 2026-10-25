@@ -27,8 +27,9 @@ import testAccountMerge from './test-account-merge.mjs';
 import testVenueGrants from './test-venue-grants.mjs';
 import testPool from './test-pool.mjs';
 import testSites from './test-sites.mjs';
+import testKioskQr from './test-kiosk-qr.mjs';
 
-const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken, testVenueScope, testCertOptions, testIdentityInvariants, testIdentityProjection, testAgencyLogo, testRecoveryCodes, testInvites, testResetLinks, testAccountMerge, testSessions, testSessionCookie, testKioskSessions, testPasskeys, testVenueGrants, testPool, testSites];
+const tests = [testConsistency, testBackup, testRestore, testLogging, testStaticCache, testWorkday, testIdentity, testHistoryRetention, testMigrateIdentity, testSessionToken, testVenueScope, testCertOptions, testIdentityInvariants, testIdentityProjection, testAgencyLogo, testRecoveryCodes, testInvites, testResetLinks, testAccountMerge, testSessions, testSessionCookie, testKioskSessions, testPasskeys, testVenueGrants, testPool, testSites, testKioskQr];
 
 export async function runAll() {
   console.log(`\n=== Stage 4 PR A Tests (${tests.length} tests) ===\n`);
