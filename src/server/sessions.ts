@@ -50,6 +50,8 @@ export const SESSION_VIA = [
   'kiosk-adopt',
   /** 11b-s: a passkey (Face ID / fingerprint) sign-in. */
   'passkey',
+  /** Kiosk QR (addendum v2): a tablet opened by a signed-in phone's "Yes, that's me" (kind 'kiosk'). */
+  'kiosk-qr',
   'test',
 ] as const;
 export type SessionVia = (typeof SESSION_VIA)[number];
@@ -93,6 +95,13 @@ export type SessionDoc = {
    */
   recentAuthAtMs?: number;
   recentAuthEpoch?: number;
+  /**
+   * Kiosk QR (addendum v2), kind 'kiosk' via 'kiosk-qr' only: the reference
+   * the approving person's phone signs this tablet out with (D2), and the
+   * approving phone session (bookkeeping; never an authorization input).
+   */
+  qrRef?: string;
+  qrApproverSid?: string;
 };
 
 /** The claim shapes a session can back (see session-token.ts SessionClaims). */

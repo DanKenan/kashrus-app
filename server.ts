@@ -60,6 +60,11 @@ import {
 import { isAnyTimeTask, normalizeAnyTimeTask } from './src/lib/anyTime.ts';
 import { certificationLabel } from './src/lib/certOptions.ts';
 import { mountStaticFiles } from './src/server/static-files.ts';
+import {
+  KQR_CODE_TTL_MS, KQR_CLAIM_WINDOW_MS, KQR_EXTRA_CODE_GAP_MS, KQR_APPROVAL_ID_RE, KQR_REF_RE, KQR_PAGE_PATH_RE, KQR_TEXT,
+  isKqrCode, kqrDeriveKey, kqrHash, kqrRandom, kqrEmitOrigin, kqrLink, kqrView, kqrApproveGate, kqrFirstName, asKqrDevice,
+  type KqrCodeDoc, type KqrDeviceDoc,
+} from './src/server/kiosk-qr.ts';
 import { consistencyRoute } from './src/server/consistency-route.js';
 
 // ---------------------------------------------------------------------------
@@ -455,6 +460,36 @@ app.set('trust proxy', 1);
 
 app.use(express.json({ limit: '2mb' }));
 
+// Kiosk QR (C10, G "CSRF / consent"): the phone page a QR opens (/k/<code>)
+// carries a one-use secret in its URL and holds the one "Yes" button, so
+// every answer on /k and /k/* (whoever serves it: the SPA fallback or the dev
+// server) is never cached, never framed and never sends a Referer. The headers
+// are forced at writeHead so a later setHeader cannot weaken them.
+function kqrForcePageHeaders(res: any): void {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+}
+app.use((req, res, next) => {
+  if ((req.method === 'GET' || req.method === 'HEAD') && KQR_PAGE_PATH_RE.test(req.path)) {
+    const writeHead = res.writeHead;
+    (res as any).writeHead = function (this: any, ...args: any[]) {
+      kqrForcePageHeaders(res);
+      // A headers object passed straight to writeHead would win over setHeader: drop those names there.
+      for (const a of args) {
+        if (a && typeof a === 'object' && !Array.isArray(a)) {
+          for (const k of Object.keys(a)) {
+            if (['cache-control', 'referrer-policy', 'x-frame-options', 'content-security-policy'].includes(k.toLowerCase())) delete a[k];
+          }
+        }
+      }
+      return (writeHead as any).apply(this, args);
+    };
+  }
+  next();
+});
+
 // ---------------------------------------------------------------------------
 // Item 11, 11a-s2 (plan v8 9.2, 9.3, 10.6, 11a-s): the user session cookie U.
 // Bearer (and ?token= on the socket) stay accepted unchanged during the
@@ -701,6 +736,11 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   { method: 'GET', path: '/kiosk/device' },
   { method: 'POST', path: '/kiosk/device/unpair' },
   { method: 'POST', path: '/kiosk/login' },
+  // Kiosk QR (C6): the tablet's code, poll/claim and Cancel are authenticated
+  // by the exact device credential (X-Kiosk-Device or D), never by a session.
+  { method: 'POST', path: '/kiosk/qr/start' },
+  { method: 'POST', path: '/kiosk/qr/poll' },
+  { method: 'POST', path: '/kiosk/qr/cancel' },
   // 11b-s: passkey sign-in (trusted Origin only, per-IP limits, generic 401).
   { method: 'POST', path: '/auth/passkey/options' },
   { method: 'POST', path: '/auth/passkey/verify' },
@@ -725,6 +765,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/passkey-hooks' },
         { method: 'POST', path: '/__test__/set-password' },
         { method: 'POST', path: '/__test__/mint-kiosk-token' },
+        { method: 'POST', path: '/__test__/kqr-hooks' },
         { method: 'GET', path: '/__test__/alert-routing' },
         { method: 'GET', path: '/__test__/route-table' },
         { method: 'POST', path: '/__test__/phase-c' },
@@ -734,6 +775,8 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
 ];
 
 function isPublicApiRoute(method: string, path: string): boolean {
+  // Kiosk QR (C6): the code's public info (no session; never mutates).
+  if (method === 'GET' && /^\/kiosk\/qr\/info\/[^/]{1,64}$/.test(path)) return true;
   return PUBLIC_API_ROUTES.some((r) => r.method === method && r.path === path);
 }
 
@@ -979,6 +1022,11 @@ app.use('/api', async (req, res, next) => {
       (method === 'GET' && path === '/auth/me') ||
       (method === 'POST' && path === '/kiosk/session/adopt');
     if (!allowed) {
+      // Kiosk QR (C7): a kiosk session asking about an approval gets the same "not found" as anyone else not entitled to it.
+      if (method === 'GET' && /^\/kiosk\/qr\/approval\/[^/]*$/.test(path)) {
+        res.set('Cache-Control', 'no-store');
+        return res.status(404).json({ error: KQR_TEXT.notFound, code: 'NOT_FOUND' });
+      }
       return res.status(403).json({
         error: 'This kiosk session can only clock in and out.',
         code: 'KIOSK_SCOPE',
@@ -1343,7 +1391,9 @@ async function issueKioskSessionToken(
   let stored = false;
   for (let attempt = 0; attempt < 2 && !stored; attempt++) {
     try {
-      await sessionStorePut(doc);
+      // Kiosk QR (C2/C5): the record and the tablet's QR generation bump are
+      // ONE write, so a kiosk sign-in on this tablet kills a pending QR approval.
+      await kqrPutKioskSessionForDevice(doc);
       stored = true;
     } catch (err: any) {
       log.warn(`[session] kiosk create failed (attempt ${attempt + 1}): ${err?.message || err}`);
@@ -1377,7 +1427,11 @@ function anySessionClaims(claims: any): (SessionBackedClaims & { sid: string }) 
 // app-state/main); one transaction helper reads and writes them together with
 // sessions/{sid}. Local mode without Firestore keeps them in this process.
 // ---------------------------------------------------------------------------
-const PK_COLLECTIONS = ['personCredentials', 'passkeyIndex', 'webauthnChallenges', 'sessions'] as const;
+// Kiosk QR (addendum v2): kioskQr (codes, by HMAC), kioskQrDevices (generation +
+// current code per tablet), kioskQrApprovals (approval id -> code) and
+// kioskQrPersons (a person's QR tablet sessions, for "Tablets you're signed in
+// on") ride the same transaction helper: separate small docs, never app-state/main.
+const PK_COLLECTIONS = ['personCredentials', 'passkeyIndex', 'webauthnChallenges', 'sessions', 'kioskQr', 'kioskQrDevices', 'kioskQrApprovals', 'kioskQrPersons'] as const;
 type PkCollection = (typeof PK_COLLECTIONS)[number];
 const localPkDocs = new Map<string, any>();
 let localPkChain: Promise<unknown> = Promise.resolve();
@@ -1427,6 +1481,24 @@ async function pkTransaction<T>(fn: (tx: PkTx) => Promise<T>): Promise<T> {
   const p = localPkChain.then(run, run);
   localPkChain = p.catch(() => undefined);
   return p as Promise<T>;
+}
+/**
+ * Kiosk QR (C2/C5): store a kiosk session record (create only, never
+ * overwrite) and, in the same transaction, bump that tablet's QR generation
+ * and note the session as the tablet's latest. Used by every kiosk sign-in
+ * (PIN, adopt). Same fault/delay test hooks as sessionStorePut.
+ */
+async function kqrPutKioskSessionForDevice(doc: SessionDoc): Promise<void> {
+  const deviceId = String(doc.kioskDeviceId || '');
+  if (!deviceId) throw new Error('kiosk session without device');
+  await pkTransaction(async (tx) => {
+    const existing = await tx.get('sessions', doc.sid);
+    if (existing) throw new Error('session id already exists');
+    const dev = asKqrDevice(await tx.get('kioskQrDevices', deviceId), deviceId);
+    tx.set('sessions', doc.sid, doc);
+    tx.set('kioskQrDevices', deviceId, { ...dev, g: dev.g + 1, lastSid: doc.sid, lastSessionAtMs: doc.createdAtMs });
+  });
+  await sessionTestDelay('write');
 }
 async function personCredentialsRead(personId: string): Promise<PersonCredentialsDoc | null> {
   const raw = await pkTransaction(async (tx) => tx.get('personCredentials', personId));
@@ -10349,10 +10421,25 @@ app.get('/api/agency/logo', async (req, res) => {
 // Domains PR A (2g): the public site description for the sign-in page. No
 // session; the agency comes ONLY from the raw-Host site, never from the
 // query or body. no-store on every answer.
+/**
+ * Kiosk QR (B3): the addresses a tablet QR link may point at, for the in-app
+ * scanner's exact-host check (not a CORS list): the shared Shutfey address
+ * plus the live own addresses of `agencyId` (a SITE host), or of every agency
+ * (the shared host, where people of any agency sign in).
+ */
+function kqrAppOrigins(agencyId: string | null): string[] {
+  const out = new Set<string>([SHARED_ORIGIN]);
+  for (const e of APP_SITES_CONFIG.entries) {
+    if (!e.ok || APP_SITES_CONFIG.sites.get(e.host) !== e.agencyId || !siteAgencyExists(e.agencyId)) continue;
+    if (agencyId !== null && e.agencyId !== agencyId) continue;
+    out.add(siteOrigin(e.host, { local: SITES_LOCAL }));
+  }
+  return Array.from(out);
+}
 app.get('/api/site', (req, res) => {
   res.set('Cache-Control', 'no-store');
   const s = siteOf(req);
-  if (s.kind === 'shared') return res.json({ site: 'shared' });
+  if (s.kind === 'shared') return res.json({ site: 'shared', appOrigins: kqrAppOrigins(null) });
   const agency: any = s.kind === 'site' ? agencies.find((a) => a.id === s.agencyId) : undefined;
   if (s.kind !== 'site' || !agency) return res.json({ site: 'unknown', sharedOrigin: SHARED_ORIGIN });
   const pub = agencyPublicProfile(agency);
@@ -10367,6 +10454,7 @@ app.get('/api/site', (req, res) => {
       contactPhone: typeof pub.contactPhone === 'string' && pub.contactPhone.trim() ? pub.contactPhone.trim().slice(0, 40) : null,
     },
     sharedOrigin: SHARED_ORIGIN,
+    appOrigins: kqrAppOrigins(s.agencyId),
   });
 });
 
@@ -11303,6 +11391,50 @@ if (isTestMode()) {
         await sessionStorePut(next, false);
         if (sessionCache.has(sid)) sessionCache.set(sid, { doc: next, readAtMs: sessionCache.get(sid)!.readAtMs });
         return res.json({ ok: true });
+      }
+      res.status(400).json({ error: 'unknown action' });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+  // Kiosk QR (test mode only): read a tablet's QR docs, move a code's clocks back, reset the QR limiters.
+  app.post('/api/__test__/kqr-hooks', async (req, res) => {
+    const { action, deviceId, personId, approvalId } = req.body || {};
+    try {
+      if (action === 'reset-limits') { kqrResetLimitersForTests(); return res.json({ ok: true }); }
+      if (action === 'person') {
+        if (typeof personId !== 'string' || !personId) return res.status(400).json({ error: 'personId required' });
+        return res.json({ doc: await pkTransaction(async (tx) => tx.get('kioskQrPersons', personId)) });
+      }
+      if (action === 'approval') {
+        if (typeof approvalId !== 'string' || !approvalId) return res.status(400).json({ error: 'approvalId required' });
+        return res.json({ doc: await pkTransaction(async (tx) => tx.get('kioskQrApprovals', approvalId)) });
+      }
+      if (typeof deviceId !== 'string' || !deviceId) return res.status(400).json({ error: 'deviceId required' });
+      if (action === 'get') {
+        const out = await pkTransaction(async (tx) => {
+          const dev = await tx.get('kioskQrDevices', deviceId);
+          const code = dev && typeof dev.codeHash === 'string' ? await tx.get('kioskQr', dev.codeHash) : null;
+          return { dev, code };
+        });
+        return res.json(out);
+      }
+      if (action === 'backdate') {
+        const ms = Number(req.body?.ms);
+        if (!Number.isFinite(ms) || ms < 0 || ms > 24 * 3600 * 1000) return res.status(400).json({ error: 'ms' });
+        const out = await pkTransaction(async (tx) => {
+          const dev = await tx.get('kioskQrDevices', deviceId);
+          if (!dev || typeof dev.codeHash !== 'string') return null;
+          const code = await tx.get('kioskQr', dev.codeHash);
+          if (!code) return null;
+          const next: any = { ...code };
+          for (const k of ['createdAtMs', 'expiresAtMs', 'approvedAtMs', 'claimDeadlineMs']) if (typeof next[k] === 'number') next[k] -= ms;
+          tx.set('kioskQr', dev.codeHash, next);
+          // Time passing for this tablet: its own clocks move back by the same amount.
+          tx.set('kioskQrDevices', deviceId, { ...dev, lastExtraAtMs: Math.max(0, (dev.lastExtraAtMs || 0) - ms), lastSessionAtMs: Math.max(0, (dev.lastSessionAtMs || 0) - ms) });
+          return next;
+        });
+        return res.json({ ok: !!out, code: out });
       }
       res.status(400).json({ error: 'unknown action' });
     } catch (err: any) {
@@ -16558,6 +16690,517 @@ app.post('/api/kiosk/login', async (req, res) => {
   res.json({ user: getSafeUser(kioskActingUser(user, venueId)), token: kioskToken });
 });
 
+// ---------------------------------------------------------------------------
+// Kiosk QR sign-in, server (addendum v2 AGREED, Oct 24 2026, on plan v8 9.7).
+// Don (Oct 24, 7:58 PM, final): "Just the mashgiach logged in to his account,
+// can scan QR code. That's it. Simple." A signed-in phone that opens the
+// scanned link approves it (the page POSTs approve on load); no passkey, no
+// number, no separate confirm. It proves "this signed-in person approved
+// opening the tablet named <tablet> at <venue>". A confirm step can be added
+// later on the client alone (info first, approve on the tap): no server change.
+//   Tablet (exact device credential: X-Kiosk-Device or D; never a session):
+//     POST /api/kiosk/qr/start   the QR screen opened / reloaded (g bump, new code)
+//     POST /api/kiosk/qr/cancel  Cancel (g bump: a pending approval dies)
+//     POST /api/kiosk/qr/poll    current code, rotation, and the CLAIM (C5)
+//   Public: GET /api/kiosk/qr/info/<code>  tablet / venue / agency names only
+//   Phone (live U backed by a live user session; never Bearer-only, K, choose):
+//     POST /api/kiosk/qr/approve {code}, GET /api/kiosk/qr/approval/<id>,
+//     GET /api/kiosk/qr/tablets, POST /api/kiosk/qr/tablets/signout {ref}
+// The PIN pad is unchanged. A number step can be added later on the approved
+// code (one more field and one more check at claim; no migration).
+// ---------------------------------------------------------------------------
+const KQR_STAFF_ROLES = ['mashgiach', 'worker', 'coordinator', 'admin'];
+/** C8: refused approvals per person / per session (10 in 10 min) and per IP (30 in 10 min); public info per IP. */
+const KQR_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+let kqrPersonLimiter = createWindowLimiter({ max: 10, windowMs: KQR_LIMIT_WINDOW_MS, maxKeys: 20000 });
+let kqrSessionLimiter = createWindowLimiter({ max: 10, windowMs: KQR_LIMIT_WINDOW_MS, maxKeys: 20000 });
+let kqrIpLimiter = createWindowLimiter({ max: 30, windowMs: KQR_LIMIT_WINDOW_MS, maxKeys: 20000 });
+let kqrInfoLimiter = createWindowLimiter({ max: 60, windowMs: 60 * 1000, maxKeys: 20000 });
+/** A tablet polls about every 2 s; anything far above that is refused before any store read. */
+let kqrTabletLimiter = createWindowLimiter({ max: 120, windowMs: 60 * 1000, maxKeys: 20000 });
+function kqrResetLimitersForTests(): void {
+  kqrPersonLimiter = createWindowLimiter({ max: 10, windowMs: KQR_LIMIT_WINDOW_MS, maxKeys: 20000 });
+  kqrSessionLimiter = createWindowLimiter({ max: 10, windowMs: KQR_LIMIT_WINDOW_MS, maxKeys: 20000 });
+  kqrIpLimiter = createWindowLimiter({ max: 30, windowMs: KQR_LIMIT_WINDOW_MS, maxKeys: 20000 });
+  kqrInfoLimiter = createWindowLimiter({ max: 60, windowMs: 60 * 1000, maxKeys: 20000 });
+  kqrTabletLimiter = createWindowLimiter({ max: 120, windowMs: 60 * 1000, maxKeys: 20000 });
+}
+let kqrKeyCache: { secret: string; key: Buffer } | null = null;
+function kqrCodeHash(code: string): string {
+  const secret = getJwtSecret();
+  if (!kqrKeyCache || kqrKeyCache.secret !== secret) kqrKeyCache = { secret, key: kqrDeriveKey(secret) };
+  return kqrHash(kqrKeyCache.key, code);
+}
+function kqrNoStore(res: any): void {
+  res.set('Cache-Control', 'no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Frame-Options', 'DENY');
+}
+function asKqrCode(raw: any, hash: string): KqrCodeDoc | null {
+  if (!raw || typeof raw !== 'object' || raw.hash !== hash) return null;
+  return raw as KqrCodeDoc;
+}
+function kqrAgencyName(agencyId: string): string {
+  const a: any = (agencies as any[]).find((x) => x && x.id === agencyId);
+  return a ? String(a.name || '') : '';
+}
+function kqrVenueName(venueId: string): string {
+  const v: any = (venues as any[]).find((x) => x && x.id === venueId);
+  return v ? String(v.name || '') : '';
+}
+/** C4 / B11: may this membership row open a tablet at (agencyId, venueId)? The tablet's staff-list rule plus a live PIN, fill rights and eligibility. */
+function kqrRowFitsVenue(row: any, agencyId: string, venueId: string): boolean {
+  return (
+    !!row &&
+    rowAgencyId(row) === agencyId &&
+    siteAgencyExists(agencyId) &&
+    KQR_STAFF_ROLES.includes(row.role) &&
+    !!row.kioskPinHash &&
+    pinRevOf(row) !== undefined &&
+    kioskUserFitsVenue(row, agencyId, venueId) &&
+    canFillTasks(kioskActingUser(row, venueId)) &&
+    !sessionIneligibleCode(row)
+  );
+}
+/** D1: the menu row shows when some active row of this person may open some tablet allowed on THIS address. */
+function kqrCanUseTabletSignIn(req: any, row: any): boolean {
+  const claims = (req as any).tokenClaims;
+  if ((req as any).authVia !== 'cookie' || !claims || claims.kind !== 'v2' || !(req as any).sessionId) return false;
+  const site = siteOf(req);
+  for (const r of personRowsIn(users as any[], row)) {
+    const agencyId = rowAgencyId(r);
+    if (site.kind === 'site' && agencyId !== site.agencyId) continue;
+    if ((venues as any[]).some((v) => v && (v.agencyId || 'agency-hkc') === agencyId && kqrRowFitsVenue(r, agencyId, v.id))) return true;
+  }
+  return false;
+}
+/** The phone side (C6): a live U cookie backed by a live user session of a person (v2). Else "Sign in first". */
+function kqrPhone(req: any, res: any): { row: any; personId: string; sid: string } | null {
+  kqrNoStore(res);
+  const claims = (req as any).tokenClaims;
+  const me = (req as any).authUser;
+  const row = me && (req as any).kiosk !== true ? (users as any[]).find((u) => u && u.id === me.id) : null;
+  if (!row || (req as any).authVia !== 'cookie' || !claims || claims.kind !== 'v2' || !isSid(claims.sid) || (req as any).sessionId !== claims.sid ||
+      typeof row.personId !== 'string' || !row.personId) {
+    res.status(401).json({ error: KQR_TEXT.signInFirst, code: 'SIGN_IN_FIRST' });
+    return null;
+  }
+  return { row, personId: row.personId, sid: claims.sid };
+}
+/** C8: is any of this approver's buckets full? */
+function kqrBlocked(personId: string, sid: string, ip: string, nowMs: number): number {
+  const b = [kqrPersonLimiter.blocked(`p|${personId}`, nowMs), kqrSessionLimiter.blocked(`s|${sid}`, nowMs), kqrIpLimiter.blocked(`i|${ip}`, nowMs)];
+  const hit = b.filter((x) => x.blocked);
+  return hit.length ? Math.max(...hit.map((x) => x.retryAfterSec)) : 0;
+}
+function kqrCountRefusal(personId: string, sid: string, ip: string, nowMs: number): void {
+  kqrPersonLimiter.hit(`p|${personId}`, nowMs);
+  kqrSessionLimiter.hit(`s|${sid}`, nowMs);
+  kqrIpLimiter.hit(`i|${ip}`, nowMs);
+}
+
+type KqrTabletAnswer =
+  | { kind: 'waiting'; code: string | null; codeIssuedAtMs: number | null; expiresAtMs: number | null; retryInMs?: number; notFinished?: boolean }
+  | { kind: 'signed-in'; session: SessionDoc; row: any; restored: boolean };
+
+/** A fresh code for this device inside the transaction (writes are queued by the caller's tx). */
+function kqrIssue(tx: any, dev: KqrDeviceDoc, device: KioskDevice, nowMs: number, extra: boolean, prev: KqrCodeDoc | null): { code: string; doc: KqrCodeDoc } {
+  // Storage stays bounded: the code before the one being replaced is deleted
+  // unless someone approved it (an approval is kept for its phone's progress).
+  // The one being replaced stays, so a late scan still reads "expired".
+  if (dev.prevCodeHash && dev.prevCodeHash !== dev.codeHash && (!prev || !prev.approval)) tx.del('kioskQr', dev.prevCodeHash);
+  dev.prevCodeHash = dev.codeHash;
+  const code = kqrRandom();
+  const hash = kqrCodeHash(code);
+  const doc: KqrCodeDoc = {
+    hash, state: 'live', deviceId: device.id, agencyId: device.agencyId, venueId: device.venueId, deviceSecretHash: device.secretHash,
+    g: dev.g, createdAtMs: nowMs, expiresAtMs: nowMs + KQR_CODE_TTL_MS,
+  };
+  tx.set('kioskQr', hash, doc);
+  dev.codeHash = hash;
+  if (extra) dev.lastExtraAtMs = nowMs;
+  return { code, doc };
+}
+/** Is a new code now an EXTRA one (C1: the current code is still in its own lifetime and not finished)? */
+function kqrNewCodeIsExtra(code: KqrCodeDoc | null, nowMs: number): boolean {
+  if (!code || code.state === 'claimed' || code.state === 'refused' || code.state === 'expired') return false;
+  const until = code.state === 'approved' ? Math.max(code.expiresAtMs, code.claimDeadlineMs || 0) : code.expiresAtMs;
+  return nowMs < until;
+}
+
+/**
+ * The tablet's one step (start / cancel / poll), in ONE transaction over the
+ * device doc, its current code and (claim only) the approving session and the
+ * person's tablet list. Every read happens before any write.
+ */
+async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDevice, userAgent: unknown): Promise<KqrTabletAnswer> {
+  return pkTransaction(async (tx) => {
+    const nowMs = Date.now();
+    const dev = asKqrDevice(await tx.get('kioskQrDevices', device.id), device.id);
+    const code = dev.codeHash ? asKqrCode(await tx.get('kioskQr', dev.codeHash), dev.codeHash) : null;
+    const prevCode = dev.prevCodeHash && dev.prevCodeHash !== dev.codeHash ? asKqrCode(await tx.get('kioskQr', dev.prevCodeHash), dev.prevCodeHash) : null;
+    let view = kqrView(code, dev, device.id, nowMs);
+    // Everything is tied to the server's record of the tablet (C5): another
+    // credential, agency or venue than at issue makes the code dead.
+    const sameDevice = !!code && code.deviceSecretHash === device.secretHash && code.agencyId === device.agencyId && code.venueId === device.venueId;
+    if (code && !sameDevice && view.kind !== 'none') view = { kind: 'dead' };
+    const approval = code && code.approval ? code.approval : null;
+    // Reads needed by a claim or a claim retry (before any write).
+    let approverSession: any = null;
+    let claimedSession: any = null;
+    let personIndex: any = null;
+    if (mode === 'poll' && view.kind === 'approved' && approval) {
+      approverSession = await tx.get('sessions', approval.sid);
+      personIndex = await tx.get('kioskQrPersons', approval.personId);
+    }
+    if (mode === 'poll' && view.kind === 'claimed' && code && typeof code.claimedSid === 'string') {
+      claimedSession = await tx.get('sessions', code.claimedSid);
+    }
+
+    const end = (state: KqrCodeDoc['state'], reason: string) => {
+      if (code) tx.set('kioskQr', code.hash, { ...code, state, endedAtMs: nowMs, endReason: reason });
+    };
+    const fresh = (extraAllowed: boolean, notFinished = false): KqrTabletAnswer => {
+      const extra = extraAllowed && kqrNewCodeIsExtra(code, nowMs);
+      if (extra && nowMs - dev.lastExtraAtMs < KQR_EXTRA_CODE_GAP_MS) {
+        // No new code yet; the device keeps pointing at the dead one, so the
+        // next poll is still an extra code (no way around the 20 s gap).
+        tx.set('kioskQrDevices', device.id, dev);
+        return { kind: 'waiting', code: null, codeIssuedAtMs: null, expiresAtMs: null, retryInMs: dev.lastExtraAtMs + KQR_EXTRA_CODE_GAP_MS - nowMs, ...(notFinished ? { notFinished } : {}) };
+      }
+      const issued = kqrIssue(tx, dev, device, nowMs, extra, prevCode);
+      tx.set('kioskQrDevices', device.id, dev);
+      return { kind: 'waiting', code: issued.code, codeIssuedAtMs: issued.doc.createdAtMs, expiresAtMs: issued.doc.expiresAtMs, ...(notFinished ? { notFinished } : {}) };
+    };
+
+    if (mode !== 'poll') {
+      // C2: reload / Cancel bump the generation; a pending (or live) code dies.
+      if (code && (code.state === 'live' || code.state === 'approved')) end('cancelled', mode);
+      const extraNeeded = kqrNewCodeIsExtra(code, nowMs);
+      dev.g += 1;
+      if (extraNeeded && nowMs - dev.lastExtraAtMs < KQR_EXTRA_CODE_GAP_MS) {
+        tx.set('kioskQrDevices', device.id, dev);
+        return { kind: 'waiting', code: null, codeIssuedAtMs: null, expiresAtMs: null, retryInMs: dev.lastExtraAtMs + KQR_EXTRA_CODE_GAP_MS - nowMs };
+      }
+      const issued = kqrIssue(tx, dev, device, nowMs, extraNeeded, prevCode);
+      tx.set('kioskQrDevices', device.id, dev);
+      return { kind: 'waiting', code: issued.code, codeIssuedAtMs: issued.doc.createdAtMs, expiresAtMs: issued.doc.expiresAtMs };
+    }
+
+    // ---- poll
+    if (view.kind === 'live' && code) {
+      return { kind: 'waiting', code: null, codeIssuedAtMs: code.createdAtMs, expiresAtMs: code.expiresAtMs };
+    }
+    if (view.kind === 'claimed' && code) {
+      // C5 claim retry: the exact original credential, the claimed session still
+      // live and still the tablet's latest -> the same session again (same end).
+      const s = claimedSession as SessionDoc | null;
+      const row: any = s ? (users as any[]).find((u) => u && u.id === s.rowId) : null;
+      const ok = !!s && sameDevice && s.kind === 'kiosk' && s.via === 'kiosk-qr' && !s.revokedAt && nowMs < s.absoluteExpMs &&
+        s.kioskDeviceId === device.id && dev.lastSid === s.sid &&
+        !!row && kioskSessionStillValid(row, { agencyId: s.agencyId || undefined, venueId: s.venueId, pv: s.pvAtIssue, deviceId: s.kioskDeviceId });
+      if (ok) return { kind: 'signed-in', session: s!, row, restored: true };
+      const recent = typeof code.claimedAtMs === 'number' && nowMs - code.claimedAtMs < KQR_CLAIM_WINDOW_MS;
+      return fresh(false, recent);
+    }
+    if (view.kind === 'approved' && code && approval) {
+      // C5: the claim. Every condition is re-read here; any miss -> terminal, fresh code.
+      const s = approverSession as SessionDoc | null;
+      const row: any = (users as any[]).find((u) => u && u.id === approval.rowId);
+      // The approving session's own row must still back it (same person, same epoch, still eligible).
+      const approverRow: any = s ? (users as any[]).find((u) => u && u.id === s.rowId) : null;
+      const sessionOk = !!s && s.kind === 'user' && s.sid === approval.sid && !s.revokedAt && typeof s.absoluteExpMs === 'number' && nowMs < s.absoluteExpMs &&
+        s.personId === approval.personId && passkeyCachedOk(s) &&
+        !!approverRow && approverRow.personId === approval.personId && (tokenEpochOf(approverRow) ?? 0) === s.epochAtIssue && !sessionIneligibleCode(approverRow);
+      const rowOk = !!row && row.personId === approval.personId && (tokenEpochOf(row) ?? 0) === approval.epoch &&
+        pinRevOf(row) !== undefined && String(pinRevOf(row)) === approval.pv && kqrRowFitsVenue(row, device.agencyId, device.venueId);
+      const deviceOk = sameDevice && !!liveKioskDevice(device.id) && dev.lastSessionAtMs <= (code.approvedAtMs || 0);
+      if (!sessionOk || !rowOk || !deviceOk) {
+        end('refused', !sessionOk ? 'approver-session' : !rowOk ? 'row-changed' : 'device-changed');
+        return fresh(false, true);
+      }
+      const sid = base64url(crypto.randomBytes(16));
+      const qrRef = kqrRandom();
+      const sess: SessionDoc = {
+        ...buildKioskSession({
+          sid, row, epoch: tokenEpochOf(row) ?? 0, agencyId: device.agencyId, venueId: device.venueId, deviceId: device.id,
+          pv: approval.pv, via: 'kiosk-qr', userAgent, nowMs,
+        }),
+        qrRef,
+        qrApproverSid: approval.sid,
+      };
+      if (await tx.get('sessions', sid)) throw new Error('session id already exists');
+      tx.set('sessions', sid, sess);
+      tx.set('kioskQr', code.hash, { ...code, state: 'claimed', claimedAtMs: nowMs, claimedSid: sid });
+      dev.g += 1;
+      dev.lastSid = sid;
+      dev.lastSessionAtMs = nowMs;
+      tx.set('kioskQrDevices', device.id, dev);
+      const items: any[] = Array.isArray(personIndex?.items) ? personIndex.items : [];
+      const kept = items.filter((x) => x && typeof x.absoluteExpMs === 'number' && x.absoluteExpMs > nowMs).slice(-49);
+      kept.push({ ref: qrRef, sid, deviceId: device.id, agencyId: device.agencyId, venueId: device.venueId, createdAtMs: nowMs, absoluteExpMs: sess.absoluteExpMs });
+      tx.set('kioskQrPersons', approval.personId, { personId: approval.personId, items: kept });
+      return { kind: 'signed-in', session: sess, row, restored: false };
+    }
+    // none / expired / approved-late / dead: the old code ends; ordinary rotation
+    // (a dead code still inside its own lifetime counts as an extra one).
+    if (code && code.state === 'live') end(view.kind === 'expired' ? 'expired' : 'cancelled', view.kind);
+    if (code && code.state === 'approved') end(view.kind === 'approved-late' ? 'expired' : 'cancelled', view.kind);
+    return fresh(true, view.kind === 'approved-late');
+  });
+}
+
+async function kqrTabletRoute(mode: 'start' | 'cancel' | 'poll', req: any, res: any) {
+  kqrNoStore(res);
+  if (kioskHeaderTooLong(req, 'x-kiosk-device')) return res.status(400).json({ error: 'Request too large.' });
+  const proof = resolveKioskDeviceProof(req);
+  if (!proof) return res.status(401).json({ error: 'This tablet is not paired.', code: 'KIOSK_UNPAIRED' });
+  const device = proof.device;
+  // B1: a link only for a tablet on a SHARED host or its own agency's SITE host (UNKNOWN is refused by the middleware).
+  if (siteRefusesAgency(req, device.agencyId)) return sendWrongSite(res);
+  const lim = kqrTabletLimiter.hit(`d|${device.id}`, Date.now());
+  if (!lim.allowed) {
+    res.set('Retry-After', String(lim.retryAfterSec));
+    return res.status(429).json({ error: KQR_TEXT.tooMany, code: 'RATE_LIMITED' });
+  }
+  let out: KqrTabletAnswer;
+  try {
+    out = await kqrTabletStep(mode, device, req.headers['user-agent']);
+  } catch (err: any) {
+    log.warn(`[kiosk-qr] ${mode} failed: ${err?.message || err}`);
+    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+  }
+  if (out.kind === 'waiting') {
+    const origin = kqrEmitOrigin(inviteLinkOrigin(device.agencyId), SHARED_ORIGIN);
+    return res.json({
+      state: 'waiting',
+      link: out.code ? kqrLink(origin, out.code) : null,
+      codeIssuedAtMs: out.codeIssuedAtMs,
+      expiresAtMs: out.expiresAtMs,
+      ...(out.retryInMs !== undefined ? { retryInMs: out.retryInMs } : {}),
+      ...(out.notFinished ? { notFinished: true, message: KQR_TEXT.tabletDidNotFinish } : {}),
+    });
+  }
+  // Signed in (C5): the session record exists; hand the tablet its K.
+  const s = out.session;
+  cachePut(sessionCache, s.sid, { doc: s, readAtMs: Date.now() });
+  const iat = Math.floor(s.createdAtMs / 1000);
+  const token = signKioskToken(String(out.row.id), device.agencyId, device.venueId, String(s.pvAtIssue), device.id, s.sid, { iat, exp: iat + KIOSK_TOKEN_TTL_SECONDS });
+  const venueId = device.venueId;
+  const body: any = {
+    state: 'signed-in',
+    user: getSafeUser(kioskActingUser(out.row as UserProfile, venueId)),
+    greeting: { firstName: kqrFirstName(out.row.name), venueName: kqrVenueName(venueId) },
+    endsAtMs: s.absoluteExpMs,
+    ...(out.restored ? { restored: true } : {}),
+  };
+  if (proof.via === 'cookie') {
+    // A cookie tablet (11a-c): K only, never a token in JSON; U deleted, D set again.
+    if (!setKioskCookie(res, token, s.absoluteExpMs)) return res.status(409).json({ error: KQR_TEXT.tabletDidNotFinish, code: 'KIOSK_QR_NOT_FINISHED' });
+    clearUserCookie(res);
+    setDeviceCookie(res, proof.credential);
+    return res.json(body);
+  }
+  // A tablet still on the header + Bearer transition path (v8 9.7 / B8): the token in JSON, as a PIN sign-in.
+  return res.json({ ...body, token });
+}
+app.post('/api/kiosk/qr/start', (req, res) => kqrTabletRoute('start', req, res));
+app.post('/api/kiosk/qr/cancel', (req, res) => kqrTabletRoute('cancel', req, res));
+app.post('/api/kiosk/qr/poll', (req, res) => kqrTabletRoute('poll', req, res));
+
+/** C6: public info for a code: tablet, venue and agency names (+ logo revision). Never mutates or starts anything. */
+app.get('/api/kiosk/qr/info/:code', async (req, res) => {
+  kqrNoStore(res);
+  const lim = kqrInfoLimiter.hit(`i|${getClientIp(req)}`, Date.now());
+  if (!lim.allowed) {
+    res.set('Retry-After', String(lim.retryAfterSec));
+    return res.status(429).json({ error: KQR_TEXT.tooMany, code: 'RATE_LIMITED' });
+  }
+  const code = String(req.params.code || '');
+  const unusable = () => res.status(404).json({ error: KQR_TEXT.unusable, code: 'KIOSK_QR_UNUSABLE' });
+  if (!isKqrCode(code)) return unusable();
+  const hash = kqrCodeHash(code);
+  let doc: KqrCodeDoc | null = null;
+  let dev: KqrDeviceDoc | null = null;
+  try {
+    const got = await pkTransaction(async (tx) => {
+      const c = asKqrCode(await tx.get('kioskQr', hash), hash);
+      const d = c ? asKqrDevice(await tx.get('kioskQrDevices', c.deviceId), c.deviceId) : null;
+      return { c, d };
+    });
+    doc = got.c; dev = got.d;
+  } catch (err: any) {
+    log.warn(`[kiosk-qr] info read failed: ${err?.message || err}`);
+    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+  }
+  const device = doc ? liveKioskDevice(doc.deviceId) : null;
+  if (!doc || !dev || !device || device.secretHash !== doc.deviceSecretHash || device.venueId !== doc.venueId || device.agencyId !== doc.agencyId) return unusable();
+  if (siteRefusesAgency(req, doc.agencyId)) return sendWrongSite(res);
+  const gate = kqrApproveGate(doc, dev, '', Date.now());
+  if (gate === 'expired') return res.status(410).json({ error: KQR_TEXT.expired, code: 'KIOSK_QR_EXPIRED' });
+  if (gate !== 'ok') return unusable();
+  const agency: any = (agencies as any[]).find((a) => a && a.id === doc!.agencyId);
+  const pub = agency ? agencyPublicProfile(agency) : null;
+  return res.json({
+    tablet: { name: String(device.name || '') },
+    venue: { name: kqrVenueName(doc.venueId) },
+    agency: { name: pub ? pub.name : '', shortCode: pub ? pub.shortCode ?? null : null, logoRev: pub ? pub.logoRev ?? null : null },
+  });
+});
+
+/** C3 / C4: the approval (scan = approve, Don Oct 24). POST only, never a GET side effect; strict Origin + X-Shutfey-Auth (the middleware) + a live U. */
+app.post('/api/kiosk/qr/approve', async (req, res) => {
+  const me = kqrPhone(req, res);
+  if (!me) return;
+  const ip = getClientIp(req);
+  const nowMs = Date.now();
+  const wait = kqrBlocked(me.personId, me.sid, ip, nowMs);
+  if (wait) {
+    res.set('Retry-After', String(wait));
+    return res.status(429).json({ error: KQR_TEXT.tooMany, code: 'RATE_LIMITED' });
+  }
+  const refuse = (status: number, body: any) => {
+    kqrCountRefusal(me.personId, me.sid, ip, Date.now());
+    return res.status(status).json(body);
+  };
+  const code = (req.body || {}).code;
+  if (!isKqrCode(code)) return refuse(404, { error: KQR_TEXT.unusable, code: 'KIOSK_QR_UNUSABLE' });
+  const hash = kqrCodeHash(code);
+  let result: { kind: 'ok' | 'already'; approvalId: string; device: KioskDevice } | { kind: 'refused'; status: number; body: any; wrongSite?: boolean };
+  try {
+    result = await pkTransaction(async (tx) => {
+      const now = Date.now();
+      const doc = asKqrCode(await tx.get('kioskQr', hash), hash);
+      const dev = doc ? asKqrDevice(await tx.get('kioskQrDevices', doc.deviceId), doc.deviceId) : null;
+      const unusable = { kind: 'refused' as const, status: 404, body: { error: KQR_TEXT.unusable, code: 'KIOSK_QR_UNUSABLE' } };
+      if (!doc || !dev) return unusable;
+      // C4: device, agency and venue come only from the paired device record of the code.
+      const device = liveKioskDevice(doc.deviceId);
+      if (!device || device.secretHash !== doc.deviceSecretHash || device.agencyId !== doc.agencyId || device.venueId !== doc.venueId) return unusable;
+      // B2: approve on a SHARED host or a live SITE host of the device's agency only.
+      if (siteRefusesAgency(req, device.agencyId)) return { kind: 'refused' as const, status: 403, body: WRONG_SITE_BODY, wrongSite: true };
+      const gate = kqrApproveGate(doc, dev, me.personId, now);
+      if (gate === 'already') return { kind: 'already' as const, approvalId: doc.approval!.id, device };
+      if (gate === 'expired') return { kind: 'refused' as const, status: 410, body: { error: KQR_TEXT.expired, code: 'KIOSK_QR_EXPIRED' } };
+      if (gate !== 'ok') return unusable;
+      // C4: the membership row of the signed-in person in the device's agency (one eligible row), with a PIN at exactly that venue.
+      const row: any = siteMembershipRow(me.row, device.agencyId);
+      if (!row || row.personId !== me.personId || !kqrRowFitsVenue(row, device.agencyId, device.venueId)) {
+        return { kind: 'refused' as const, status: 403, body: { error: KQR_TEXT.notHere(kqrVenueName(device.venueId)), code: 'KIOSK_QR_NOT_HERE' } };
+      }
+      const approvalId = kqrRandom();
+      tx.set('kioskQr', hash, {
+        ...doc, state: 'approved', approvedAtMs: now, claimDeadlineMs: now + KQR_CLAIM_WINDOW_MS,
+        approval: { id: approvalId, personId: me.personId, rowId: String(row.id), sid: me.sid, epoch: tokenEpochOf(row) ?? 0, pv: String(pinRevOf(row)) },
+      });
+      tx.set('kioskQrApprovals', approvalId, { approvalId, codeHash: hash, personId: me.personId, createdAtMs: now });
+      return { kind: 'ok' as const, approvalId, device };
+    });
+  } catch (err: any) {
+    log.warn(`[kiosk-qr] approve failed: ${err?.message || err}`);
+    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+  }
+  if (result.kind === 'refused') {
+    if (result.wrongSite) { kqrCountRefusal(me.personId, me.sid, ip, Date.now()); return sendWrongSite(res); }
+    return refuse(result.status, result.body);
+  }
+  const d = result.device;
+  return res.json({
+    approvalId: result.approvalId,
+    ...(result.kind === 'already' ? { already: true, message: KQR_TEXT.already } : {}),
+    tablet: { name: String(d.name || ''), venueName: kqrVenueName(d.venueId), agencyName: kqrAgencyName(d.agencyId) },
+  });
+});
+
+/** C7: the approving phone's progress. Unknown, foreign and unauthorized ids get the same "not found". */
+app.get('/api/kiosk/qr/approval/:id', async (req, res) => {
+  const me = kqrPhone(req, res);
+  if (!me) return;
+  const id = String(req.params.id || '');
+  const notFound = () => res.status(404).json({ error: KQR_TEXT.notFound, code: 'NOT_FOUND' });
+  if (!KQR_APPROVAL_ID_RE.test(id)) return notFound();
+  let got: { a: any; c: KqrCodeDoc | null; s: SessionDoc | null };
+  try {
+    got = await pkTransaction(async (tx) => {
+      const a = await tx.get('kioskQrApprovals', id);
+      const c = a && typeof a.codeHash === 'string' ? asKqrCode(await tx.get('kioskQr', a.codeHash), a.codeHash) : null;
+      const s = c && c.state === 'claimed' && typeof c.claimedSid === 'string' ? ((await tx.get('sessions', c.claimedSid)) as SessionDoc | null) : null;
+      return { a, c, s };
+    });
+  } catch (err: any) {
+    log.warn(`[kiosk-qr] approval read failed: ${err?.message || err}`);
+    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+  }
+  const { a, c, s } = got;
+  if (!a || !c || a.personId !== me.personId || !c.approval || c.approval.id !== id || c.approval.personId !== me.personId) return notFound();
+  if (siteRefusesAgency(req, c.agencyId)) return notFound();
+  const device = kioskDevices.find((x) => x.id === c.deviceId);
+  const tablet = { name: String(device?.name || ''), venueName: kqrVenueName(c.venueId) };
+  const nowMs = Date.now();
+  if (c.state === 'approved' && typeof c.claimDeadlineMs === 'number' && nowMs < c.claimDeadlineMs) return res.json({ state: 'waiting', tablet });
+  if (c.state === 'claimed' && s && s.kind === 'kiosk' && s.personId === me.personId) {
+    const live = !s.revokedAt && nowMs < s.absoluteExpMs;
+    return res.json({ state: live ? 'done' : 'ended', tablet, ...(live ? { ref: s.qrRef || null, endsAtMs: s.absoluteExpMs } : {}) });
+  }
+  return res.json({ state: 'failed', tablet, message: KQR_TEXT.notOpened });
+});
+
+/** D2: the person's own live QR tablet sessions ("Tablets you're signed in on"); on a SITE host that agency's only. */
+async function kqrPersonSessions(personId: string, req: any): Promise<Array<{ item: any; s: SessionDoc }>> {
+  return pkTransaction(async (tx) => {
+    const idx = await tx.get('kioskQrPersons', personId);
+    const items: any[] = Array.isArray(idx?.items) ? idx.items : [];
+    const out: Array<{ item: any; s: SessionDoc }> = [];
+    const nowMs = Date.now();
+    for (const it of items) {
+      if (!it || !isSid(it.sid) || typeof it.ref !== 'string') continue;
+      const s = (await tx.get('sessions', it.sid)) as SessionDoc | null;
+      if (!s || s.kind !== 'kiosk' || s.via !== 'kiosk-qr' || s.personId !== personId || s.qrRef !== it.ref) continue;
+      if (s.revokedAt || !(nowMs < s.absoluteExpMs)) continue;
+      if (siteRefusesAgency(req, s.agencyId)) continue;
+      out.push({ item: it, s });
+    }
+    return out;
+  });
+}
+app.get('/api/kiosk/qr/tablets', async (req, res) => {
+  const me = kqrPhone(req, res);
+  if (!me) return;
+  let list: Array<{ item: any; s: SessionDoc }>;
+  try { list = await kqrPersonSessions(me.personId, req); } catch (err: any) {
+    log.warn(`[kiosk-qr] tablets read failed: ${err?.message || err}`);
+    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+  }
+  return res.json({
+    tablets: list.map(({ s }) => {
+      const device = kioskDevices.find((x) => x.id === s.kioskDeviceId);
+      return { ref: s.qrRef, tabletName: String(device?.name || ''), venueName: kqrVenueName(String(s.venueId || '')), sinceMs: s.createdAtMs, endsAtMs: s.absoluteExpMs };
+    }),
+  });
+});
+/** D2: "Sign out" on one tablet row: ends only that kiosk session (HTTP at once, socket 4401). */
+app.post('/api/kiosk/qr/tablets/signout', async (req, res) => {
+  const me = kqrPhone(req, res);
+  if (!me) return;
+  const ref = (req.body || {}).ref;
+  const notFound = () => res.status(404).json({ error: KQR_TEXT.notFound, code: 'NOT_FOUND' });
+  if (typeof ref !== 'string' || !KQR_REF_RE.test(ref)) return notFound();
+  let list: Array<{ item: any; s: SessionDoc }>;
+  try { list = await kqrPersonSessions(me.personId, req); } catch (err: any) {
+    log.warn(`[kiosk-qr] signout read failed: ${err?.message || err}`);
+    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+  }
+  const hit = list.find((x) => x.s.qrRef === ref);
+  if (!hit) return notFound();
+  try {
+    await revokeSessionsAtomic([hit.s.sid], 'kiosk-qr-phone-signout');
+  } catch (err: any) {
+    log.warn(`[kiosk-qr] signout failed: ${err?.message || err}`);
+    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+  }
+  return res.json({ ok: true });
+});
+
 // Formal Login Endpoint — bcrypt passwords, signed session token on success.
 // Legacy plaintext passwords are transparently upgraded to bcrypt on login.
 // 10a (item 10, plan v4): non-enumerating public answers. These texts never
@@ -17578,7 +18221,7 @@ app.get('/api/auth/me', (req, res) => {
     const venueId = (req as any).kioskVenueId;
     return res.json({ user: getSafeUser(kioskActingUser(row as UserProfile, venueId)), auth: (req as any).authVia, kiosk: { venueId, deviceId: (req as any).kioskDeviceId } });
   }
-  res.json({ user: getSelfUser(row as UserProfile), auth: (req as any).authVia });
+  res.json({ user: getSelfUser(row as UserProfile), auth: (req as any).authVia, canUseTabletSignIn: kqrCanUseTabletSignIn(req, row) });
 });
 
 /**
