@@ -1,7 +1,8 @@
 /**
  * Item 11, PR 11b-s (plan v8 11b-s + 9.4 / 9.5 / 10.3 / 10.7 / 10.8 / 11.2):
  * passkey (Face ID / fingerprint / phone screen lock) records and the pure
- * rules around them. No I/O here; server.ts does the reads, the transactions
+ * rules around them. Don decision A (Oct 25): every credential origin may enroll after a fresh proof.
+ * No I/O here; server.ts does the reads, the transactions
  * and the WebAuthn verification (@simplewebauthn/server).
  *
  * Storage (server-only collections, never inside app-state/main or users[]):
@@ -22,8 +23,6 @@ export const CHALLENGE_TTL_MS = 120 * 1000;
 /** Plan 9.5: a password re-entry or a passkey assertion on THIS session counts for 5 minutes. */
 export const RECENT_AUTH_MS = 5 * 60 * 1000;
 export const PASSKEY_NAME_MAX = 40;
-/** Plan 10.8: only people who chose their own password may add a passkey. */
-export const PASSKEY_ENROLL_ORIGINS = ['self-registered', 'invite-new'] as const;
 /** A WebAuthn credential id as base64url (1..1023 bytes -> at most 1364 characters). */
 export const CREDENTIAL_ID_RE = /^[A-Za-z0-9_-]{16,1364}$/;
 export const CHALLENGE_ID_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -103,11 +102,6 @@ export function asPersonCredentials(x: unknown, personId: string): PersonCredent
 export function findPasskey(doc: PersonCredentialsDoc | null, credentialId: string): PasskeyEntry | null {
   if (!doc) return null;
   return doc.passkeys.find((p) => p && p.credentialId === credentialId) || null;
-}
-
-/** Plan 10.8: exactly 'self-registered' and 'invite-new' may enroll; anything else (admin, agency-reset, absent) fails closed. */
-export function originMayEnroll(origin: unknown): boolean {
-  return typeof origin === 'string' && (PASSKEY_ENROLL_ORIGINS as readonly string[]).includes(origin);
 }
 
 /** Plan 9.5: the session's recent proof is valid for 5 minutes and only while the person's recentAuthEpoch has not moved. */

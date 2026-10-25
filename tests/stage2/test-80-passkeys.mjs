@@ -12,8 +12,8 @@
  *     expired challenge, wrong origin / RP ID in the response, no user
  *     verification, the same passkey twice, more than 10; a choose token, a
  *     token from before item 11 and a kiosk token cannot add one.
- *  B  credential origins: exactly self-registered and invite-new may add a
- *     passkey (admin, agency-reset, absent: refused).
+ *  B  every credential origin may enroll with a fresh proof, including absent;
+ *     stale proof needs password re-entry; verify rechecks credential readiness.
  *  C  sign-in: same answer as a password sign-in (token + user; the cookie when
  *     opted in); the person comes only from the index (an email in the body is
  *     ignored); refused (generic 401): replay, expired challenge, a register
@@ -124,7 +124,7 @@ function wsOpen(baseUrl, token) {
 export default {
   name: 'Test 80: item 11 (11b-s) — passkey (Face ID / fingerprint) server routes',
   whatItProves:
-    'Passkeys can be added only with a fresh proof by people who chose their own password, sign in exactly like a password (single or choose), never alone (an active membership is required), are single-use per challenge with counter and user-handle checks, die with every session they made when removed, are stored outside the app-state document, and leave password sign-in and kiosks unchanged.',
+    'Passkeys can be added only with a fresh proof regardless of credential origin, sign in exactly like a password (single or choose), never alone (an active membership is required), are single-use per challenge with counter and user-handle checks, die with every session they made when removed, are stored outside the app-state document, and leave password sign-in and kiosks unchanged.',
 
   async run(baseUrl, ctx) {
     const ts = Date.now();
@@ -297,26 +297,51 @@ export default {
       assert((await call(baseUrl, 'GET', '/api/passkeys', { bearer: s0.token })).json?.canAdd === false, 'A canAdd false at 10');
       details.push('A add: fresh proof, options shape, single use, origin/RP/UV/expiry/duplicate/10 limits, stale proof + re-entry, old token refused');
 
-      // ---- B: credential origins
+      // ---- B: every credential origin (Don decision A, Oct 25)
+      // Separate people keep A's cap and the later pkA/count assumptions unchanged.
       const b = await register('b');
-      const sb = await signIn(b);
-      assert((await regOptions(sb.token)).status === 200, 'B self-registered may add');
-      for (const origin of ['admin', 'agency-reset', undefined, 'invite-new']) {
-        await plantOrigin(b.id, origin);
-        const sbx = await signIn(b);
-        const r = await regOptions(sbx.token);
-        if (origin === 'invite-new') assert(r.status === 200, `B invite-new may add: ${r.status}`);
-        else assert(r.status === 403 && r.json?.code === 'PASSKEY_UNAVAILABLE', `B ${origin ?? 'absent'} may not add: ${r.status}`);
+      for (const origin of ['admin', 'agency-reset', undefined, 'invite-new', 'self-registered']) {
+        const label = origin ?? 'absent';
+        const person = await register(`b-${label}`);
+        await plantOrigin(person.id, origin);
+        const sb = await signIn(person);
+        const list = await call(baseUrl, 'GET', '/api/passkeys', { bearer: sb.token });
+        assert(list.status === 200 && list.json?.canAdd === true, `B ${label} canAdd`);
+        const op = await regOptions(sb.token);
+        assert(op.status === 200, `B ${label} fresh options: ${op.status}`);
+        const pk = new SoftPasskey();
+        const v = await regVerify(sb.token, { challengeId: op.json.challengeId, response: pk.register(op.json.options, ORIGIN) });
+        assert(v.status === 201 && v.json?.passkey?.id === pk.id, `B ${label} verifies: ${v.status}`);
+        const added = await call(baseUrl, 'GET', '/api/passkeys', { bearer: sb.token });
+        assert(added.status === 200 && added.json?.passkeys?.some((p) => p.id === pk.id), `B ${label} passkey listed`);
+        if (origin === undefined) {
+          const signed = await pkSignIn(pk);
+          assert(signed.status === 200 && signed.json?.success === true && signed.json.user?.id === person.id && typeof signed.json.token === 'string', `B absent-origin passkey signs in: ${signed.status}`);
+        }
+        if (origin === 'admin' || origin === 'agency-reset' || origin === undefined) {
+          assert((await hook({ action: 'age-recent-auth', sid: sb.sid, ageMs: 5 * 60 * 1000 + 1000 })).json?.ok, `B ${label} age proof`);
+          const stale = await regOptions(sb.token);
+          assert(stale.status === 403 && stale.json?.code === 'RECENT_AUTH_REQUIRED', `B ${label} stale proof: ${stale.status}`);
+          assert((await recentAuth(sb.token, person.pw)).status === 200, `B ${label} password re-entry`);
+          assert((await regOptions(sb.token)).status === 200, `B ${label} re-entry opens options`);
+        }
       }
-      // the origin is checked again at verify (it may change between options and verify)
       const sbv = await signIn(b);
       const opB = await regOptions(sbv.token);
-      assert(opB.status === 200, 'B options while invite-new');
+      assert(opB.status === 200, 'B options before origin changes');
       await plantOrigin(b.id, 'agency-reset');
       const vB = await regVerify(sbv.token, { challengeId: opB.json.challengeId, response: new SoftPasskey().register(opB.json.options, ORIGIN) });
-      assert(vB.status === 403 && vB.json?.code === 'PASSKEY_UNAVAILABLE', `B origin changed before verify: ${vB.status}`);
+      assert(vB.status === 201, `B origin changed to agency-reset before verify succeeds: ${vB.status}`);
       await plantOrigin(b.id, 'invite-new');
-      details.push('B origins: self-registered + invite-new add; admin, agency-reset, absent refused');
+      // Readiness still gets checked between options and verify on a throwaway person.
+      const bp = await register('b-pending');
+      const sbp = await signIn(bp);
+      const opPending = await regOptions(sbp.token);
+      assert(opPending.status === 200, 'B options before credential becomes pending');
+      await plantFields({ [bp.id]: { credentialPending: 'invite' } });
+      const pending = await regVerify(sbp.token, { challengeId: opPending.json.challengeId, response: new SoftPasskey().register(opPending.json.options, ORIGIN) });
+      assert(pending.status === 403 && pending.json?.code === 'PASSKEY_UNAVAILABLE', `B pending credential before verify: ${pending.status}`);
+      details.push('B all origins enroll with fresh proof; absent-origin passkey signs in; stale proof needs re-entry; origin changes allowed, pending credential refused at verify');
 
       // ---- C: sign in with a passkey
       const c1 = await pkSignIn(pkA, { req: { optIn: true }, origin: ORIGIN });
