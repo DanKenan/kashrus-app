@@ -30,7 +30,7 @@ import { agencyIsCleared } from './src/server/agency-flags.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
-import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
+import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState, kqrPickupVerdict, keepKnownPickup, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import {
   PASSKEYS_MAX, CHALLENGE_TTL_MS, RECENT_AUTH_MS, CREDENTIAL_ID_RE, CHALLENGE_ID_RE, credentialIdHash, newPersonCredentials, asPersonCredentials, findPasskey,
@@ -1548,11 +1548,15 @@ function sessionLive(doc: unknown, claims: SessionBackedClaims | null | undefine
  * (the caller answers 503 — never a 401, so nobody is signed out by an outage).
  */
 async function checkSession(claims: SessionBackedClaims & { sid: string }, authoritative: boolean): Promise<'ok' | 'refused' | 'down'> {
-  const verdict = await checkSessionRecord(claims, authoritative);
+  const { verdict, doc } = await checkSessionRecord(claims, authoritative);
   if (verdict !== 'ok') return verdict;
   // Kiosk QR cleanup (item 4): the tablet's first use of a new QR session marks
-  // it picked up (one store write); a session not picked up in time is dead.
-  if (kqrPickupState(sessionCache.get(claims.sid)?.doc, Date.now()) !== 'pending') return 'ok';
+  // it picked up (one store write); a session not picked up in time is dead,
+  // also when its deadline passed after the record check ([KQRCLN-RV1] 1).
+  const next = kqrPickupVerdict(doc, Date.now());
+  if (next !== 'mark') return next;
+  // [KQRCLN-RV1] 3: no store write in a read-only mode; the tablet is told to try again.
+  if (kqrPickupWritesBlocked()) return 'down';
   let marked: SessionDoc | null;
   try {
     marked = await kqrMarkPickedUp(claims.sid);
@@ -1561,7 +1565,17 @@ async function checkSession(claims: SessionBackedClaims & { sid: string }, autho
     return 'down';
   }
   const nowMs = Date.now();
-  return sessionBacksClaims(marked, claims, nowMs) && kqrPickupState(marked, nowMs) === 'done' ? 'ok' : 'refused';
+  return sessionBacksClaims(marked, claims, nowMs) && kqrPickupVerdict(marked, nowMs) === 'ok' ? 'ok' : 'refused';
+}
+/** The modes in which this instance writes nothing (maintenance, FORCE_LOCAL_MODE, a staged revision). */
+function kqrPickupWritesBlocked(): boolean {
+  return process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision();
+}
+/** [KQRCLN-RV1] 2: puts a session record into this instance's map without losing a pick-up the map already knows. */
+function sessionCachePublish(sid: string, doc: SessionDoc | null): SessionDoc | null {
+  const next = keepKnownPickup(doc, sessionCache.get(sid)?.doc);
+  cachePut(sessionCache, sid, { doc: next, readAtMs: Date.now() });
+  return next;
 }
 /** Kiosk QR cleanup (item 4): store first (only a live, still-pending session is marked), then this instance's copy. */
 async function kqrMarkPickedUp(sid: string): Promise<SessionDoc | null> {
@@ -1575,30 +1589,31 @@ async function kqrMarkPickedUp(sid: string): Promise<SessionDoc | null> {
   // A local revocation that landed meanwhile wins (as in checkSessionRecord).
   const during = sessionCache.get(sid);
   if (during && during.doc && during.doc.revokedAt && !(doc && doc.revokedAt)) doc = during.doc;
-  cachePut(sessionCache, sid, { doc, readAtMs: Date.now() });
-  return doc;
+  return sessionCachePublish(sid, doc);
 }
-async function checkSessionRecord(claims: SessionBackedClaims & { sid: string }, authoritative: boolean): Promise<'ok' | 'refused' | 'down'> {
+/** The record check behind checkSession; returns the record it decided on. */
+async function checkSessionRecord(claims: SessionBackedClaims & { sid: string }, authoritative: boolean): Promise<{ verdict: 'ok' | 'refused' | 'down'; doc: SessionDoc | null }> {
   const nowMs = Date.now();
   const cached = sessionCache.get(claims.sid);
   if (!authoritative && cacheFresh(cached, nowMs)) {
-    if (!sessionBacksClaims(cached.doc, claims, nowMs)) return 'refused';
-    return passkeySessionCheck(cached.doc, false);
+    if (!sessionBacksClaims(cached.doc, claims, nowMs)) return { verdict: 'refused', doc: cached.doc };
+    return { verdict: await passkeySessionCheck(cached.doc, false), doc: cached.doc };
   }
   let doc: SessionDoc | null;
   try {
     doc = await sessionStoreGet(claims.sid);
   } catch (err: any) {
     log.warn(`[session] read failed: ${err?.message || err}`);
-    return 'down';
+    return { verdict: 'down', doc: null };
   }
   // A local revocation that landed while this read was in flight wins.
   const during = sessionCache.get(claims.sid);
   if (during && during.doc && during.doc.revokedAt && !(doc && doc.revokedAt)) doc = during.doc;
-  cachePut(sessionCache, claims.sid, { doc, readAtMs: Date.now() });
-  if (!sessionBacksClaims(doc, claims, Date.now())) return 'refused';
+  // [KQRCLN-RV1] 2: a pick-up this instance already knows is not lost to this (possibly older) read.
+  doc = sessionCachePublish(claims.sid, doc);
+  if (!sessionBacksClaims(doc, claims, Date.now())) return { verdict: 'refused', doc };
   // 11b-s (plan 11.2): a session from a passkey ends when that passkey is removed.
-  return passkeySessionCheck(doc, authoritative);
+  return { verdict: await passkeySessionCheck(doc, authoritative), doc };
 }
 
 /** Closes (4401 unless told otherwise) every open socket whose token carries this sid. */
@@ -11445,10 +11460,17 @@ if (isTestMode()) {
         const ageMs = Math.max(0, Math.min(24 * 3600 * 1000, Number(req.body?.ageMs) || 0));
         const cur = await sessionStoreGet(sid);
         if (!cur || typeof cur.qrPickupByMs !== 'number') return res.json({ ok: false });
-        const next: SessionDoc = { ...cur, qrPickupByMs: cur.qrPickupByMs - ageMs, ...(typeof cur.qrPickedUpAtMs === 'number' ? { qrPickedUpAtMs: cur.qrPickedUpAtMs - ageMs } : {}) };
-        await sessionStorePut(next, false);
-        if (sessionCache.has(sid)) sessionCache.set(sid, { doc: next, readAtMs: sessionCache.get(sid)!.readAtMs });
+        const older = (d: any) => ({ ...d, qrPickupByMs: d.qrPickupByMs - ageMs, ...(typeof d.qrPickedUpAtMs === 'number' ? { qrPickedUpAtMs: d.qrPickedUpAtMs - ageMs } : {}) });
+        await sessionStorePut(older(cur) as SessionDoc, false);
+        // This instance's copy keeps what it knew (picked up or not); only its clock moves.
+        const e = sessionCache.get(sid);
+        if (e && e.doc && typeof e.doc.qrPickupByMs === 'number') sessionCache.set(sid, { doc: older(e.doc) as SessionDoc, readAtMs: e.readAtMs });
         return res.json({ ok: true });
+      }
+      // [KQRCLN-RV1] cache-doc {sid}: this instance's copy of the record (read only).
+      if (action === 'cache-doc') {
+        const e = sessionCache.get(sid);
+        return res.json({ cached: !!e, doc: e ? e.doc : null });
       }
       if (action === 'expire') {
         const cur = await sessionStoreGet(sid);
@@ -17113,7 +17135,8 @@ async function kqrTabletRoute(mode: 'start' | 'cancel' | 'poll', req: any, res: 
   }
   // Signed in (C5): the session record exists; hand the tablet its K.
   const s = out.session;
-  cachePut(sessionCache, s.sid, { doc: s, readAtMs: Date.now() });
+  // [KQRCLN-RV1] 2: a claim retry's snapshot never erases a pick-up this instance already knows.
+  sessionCachePublish(s.sid, s);
   const iat = Math.floor(s.createdAtMs / 1000);
   const token = signKioskToken(String(out.row.id), device.agencyId, device.venueId, String(s.pvAtIssue), device.id, s.sid, { iat, exp: iat + KIOSK_TOKEN_TTL_SECONDS });
   const venueId = device.venueId;

@@ -660,6 +660,53 @@ export default {
       assert((await sessionHook({ action: 'kqr-pickup-age', sid: kSid(q6), ageMs: 3600 * 1000 })).ok === true, 'X an hour passes');
       assert((await board(winT, q6.set[K].value)).status === 200, 'X a picked-up tablet keeps working');
       assert((await tabletsOf(yossi)).some((x) => x.pickedUp === true && x.tabletName === (winT === T1 ? 'Front tablet' : 'Side tablet')), 'X still listed, picked up');
+
+      // [KQRCLN-RV1] pick-up interleavings: a socket alone picks up; sign-out before the first use;
+      // the deadline passing during the record read; no pick-up write in a read-only mode.
+      for (const t of await tabletsOf(yossi)) await ph(yossi, 'POST', '/api/kiosk/qr/tablets/signout', { ref: t.ref });
+      await hook({ action: 'person-pad', personId: ppl.yossi.id, n: 0, all: true });
+      const claimOn = async (t, label) => {
+        const fc = await freshCode(t);
+        assert((await approve(yossi, fc.code)).status === 200, `X approve (${label})`);
+        const c = await poll(t);
+        assert(signedIn(c) && c.set[K], `X claim (${label}): ${J(c.json)}`);
+        return { k: c.set[K].value, sid: kSid(c) };
+      };
+      const recOf = async (sid) => (await sessionHook({ action: 'get', sid })).doc;
+      // A socket opened on the new K is the first use.
+      const w1 = await claimOn(T1, 'socket');
+      const wsr = await new Promise((resolve) => {
+        const w = new WebSocket(`ws://127.0.0.1:${port}/ws?auth=cookie`, { headers: { Cookie: `${D}=${T1.cred}; ${K}=${w1.k}`, Origin: SHARED_O } });
+        const o = { initial: false, code: null };
+        const tm = setTimeout(() => { try { w.close(); } catch {} resolve(o); }, 7000);
+        w.on('message', (d) => { try { if (JSON.parse(String(d)).type === 'INITIAL_STATE') { o.initial = true; clearTimeout(tm); try { w.close(); } catch {} resolve(o); } } catch {} });
+        w.on('close', (code) => { o.code = code; clearTimeout(tm); resolve(o); });
+        w.on('error', () => {});
+      });
+      assert(wsr.initial, `X the socket opens on the new K: ${J(wsr)}`);
+      assert(typeof (await recOf(w1.sid))?.qrPickedUpAtMs === 'number', 'X a socket alone picks the session up');
+      // Signed out from the phone before the tablet ever used it: refused, never marked.
+      const w2 = await claimOn(T3, 'sign-out first');
+      const row2 = (await tabletsOf(yossi)).find((x) => x.pickedUp === false);
+      assert(row2, 'X listed as not picked up yet');
+      assert((await ph(yossi, 'POST', '/api/kiosk/qr/tablets/signout', { ref: row2.ref })).status === 200, 'X phone signs it out first');
+      assert((await board(T3, w2.k)).status === 401 && (await recOf(w2.sid))?.qrPickedUpAtMs === undefined, 'X then its first use is refused and nothing is marked');
+      // The deadline passes while the record is being read: refused, never marked.
+      const w3 = await claimOn(T3, 'deadline during read');
+      await sessionHook({ action: 'kqr-pickup-age', sid: w3.sid, ageMs: 60000 - 400 });
+      await sessionHook({ action: 'cache-age', sid: w3.sid, ageMs: 60000 });
+      await sessionHook({ action: 'read-delay-once', ms: 1500 });
+      assert((await board(T3, w3.k)).status === 401, 'X the deadline passed during the record read -> refused');
+      assert((await recOf(w3.sid))?.qrPickedUpAtMs === undefined, 'X ...and nothing is marked');
+      // Read-only mode (staged revision): no pick-up write; the tablet is told to try again; then it works.
+      const w4 = await claimOn(T3, 'read-only');
+      assert((await call('POST', '/api/__test__/staged', { body: { enabled: true } })).status === 200, 'X staged on');
+      const ro = await board(T3, w4.k);
+      assert((await call('POST', '/api/__test__/staged', { body: { enabled: false } })).status === 200, 'X staged off');
+      assert(ro.status === 503 && (await recOf(w4.sid))?.qrPickedUpAtMs === undefined, `X a staged revision writes no pick-up (503, try again): ${ro.status}`);
+      assert((await board(T3, w4.k)).status === 200 && typeof (await recOf(w4.sid))?.qrPickedUpAtMs === 'number', 'X live again: the first use picks it up');
+      const cd = await sessionHook({ action: 'cache-doc', sid: w4.sid });
+      assert(cd.cached && typeof cd.doc?.qrPickedUpAtMs === 'number', 'X this instance\'s copy knows the pick-up');
       await hook({ action: 'person-pad', personId: ppl.yossi.id, n: 0 });
       for (const t of await tabletsOf(yossi)) await ph(yossi, 'POST', '/api/kiosk/qr/tablets/signout', { ref: t.ref });
     }
