@@ -104,10 +104,13 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
       }
       // A sign-out still on its way deletes this browser's sign-in cookie when its answer lands:
       // no request that can sign the tablet in until it has.
-      if (!(await signOutsSettled(KQR_POLL_MS))) return later(KQR_POLL_MS, first);
       // An earlier screen's start/poll still on its way (its answer may sign the tablet in, or end a
       // sign-in nobody used): none of ours until it is handled. This screen's own are one at a time.
-      if (!(await cookieSignInsSettled(KQR_POLL_MS))) return later(KQR_POLL_MS, first);
+      if (!(await signOutsSettled(KQR_POLL_MS)) || !(await cookieSignInsSettled(KQR_POLL_MS))) {
+        // No code yet ("New code in a moment"; "Use your code instead" works meanwhile).
+        if (live && first) setShown((cur) => (cur.kind === 'loading' ? { kind: 'soon' } : cur));
+        return later(KQR_POLL_MS, first);
+      }
       if (!live || leaving.current) return;
       const sent = apiFetch(first ? '/api/kiosk/qr/start' : '/api/kiosk/qr/poll', { method: 'POST' }).then(async (res) => ({ res, body: (await res.json().catch(() => ({}))) as any }));
       // Its answer can sign the tablet in. If it does after this screen is gone, nobody uses that

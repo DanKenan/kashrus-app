@@ -134,11 +134,11 @@ ok('W cookie tablet: the claim marks this device as signed in on the cookie (sig
 ok('W tablet: a late cancel from "Use your code instead" is waited for before a new start', tab.includes('if (first && cancelInFlight)') && tab.includes('cancelInFlight = p;'));
 ok('W tablet: a poll keeps the code on screen only while it names the same code', tab.includes('d.codeIssuedAtMs === lastIssuedAt') && tab.includes('return later(0, true);'));
 ok('W phone: a QR answer never clears the session itself (no site-refusal sign-out); 401 / site refusal -> /api/auth/me', !lib.includes('noticeSiteRefusalFor') && !lib.includes('clearSession') && lib.includes('await confirmPhoneSession();'));
-ok('W tablet: no start/poll while a sign-out is on its way (its answer would delete the new cookie)', tab.includes('if (!(await signOutsSettled(KQR_POLL_MS))) return later(KQR_POLL_MS, first);'));
+ok('W tablet: no start/poll while a sign-out is on its way (its answer would delete the new cookie); a key from a page that is gone counts as long as for the move', tab.includes('if (!(await signOutsSettled(KQR_POLL_MS)) || !(await cookieSignInsSettled(KQR_POLL_MS))) {') && src('lib/api.ts').includes('return waitForLogoutsToSettle(maxMs);') && !src('lib/api.ts').includes('recentLogoutKey'));
 ok('W tablet: a claim answer landing after the screen is gone is ended, and tracked until then', tab.includes('trackCookieSignInRequest(') && tab.includes("if (!live && res.ok && body?.state === 'signed-in') await endUnusedKioskSignIn("));
 ok('W tablet: "Use your code instead" lets a poll on its way land first (a scan just now opens the tablet)', tab.includes('if (inflight.current) await Promise.race([inflight.current') && tab.includes('if (claimed.current) return;'));
 ok('W PIN sign-in and the sign-out retry wait for a QR sign-in on its way, and send nothing while it still is', pin.includes('if (!(await cookieSignInsSettled())) {') && pin.includes('setError(KIOSK_FINISHING_SIGN_IN);') && src('lib/api.ts').includes('if (signInsInFlight.size > 0 && !(await cookieSignInsSettled())) return;'));
-ok('W a reopened QR screen waits for an earlier screen\'s start/poll (and its cleanup) before its own', tab.includes('if (!(await cookieSignInsSettled(KQR_POLL_MS))) return later(KQR_POLL_MS, first);'));
+ok('W a reopened QR screen waits for an earlier screen\'s start/poll (and its cleanup) before its own', tab.includes('|| !(await cookieSignInsSettled(KQR_POLL_MS))'));
 ok('W tablet signs out -> QR screen again', app.includes("if (kioskMode) setKioskSignIn('qr');"));
 
 console.log(`\n${passed} passed, ${failures} failed`);

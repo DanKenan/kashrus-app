@@ -774,31 +774,12 @@ export async function cookieSignInsSettled(maxMs = 30000): Promise<boolean> {
   return true;
 }
 /**
- * Resolves true once no sign-out request of this tab is on its way, nor one another tab (or this
- * page before a reload) sent in the last 30 s (false after maxMs). Unlike the move to the cookie,
- * the tablet's QR screen can't wait out a key left by a page that is gone (up to 10 min).
+ * Resolves true once no sign-out request is on its way in any tab (false after maxMs): the same
+ * conservative rule as the move to the cookie (a key left by a page that is gone counts for up to
+ * logoutUnknownMaxMs, since its keepalive request may still land and delete the sign-in cookie).
  */
-export async function signOutsSettled(maxMs = sessionTiming.logoutSettleMaxMs): Promise<boolean> {
-  const started = Date.now();
-  while (logoutsInFlight.size > 0 || recentLogoutKey(30000)) {
-    if (Date.now() - started >= maxMs) return false;
-    await sleep(50);
-  }
-  return true;
-}
-function recentLogoutKey(maxAgeMs: number): boolean {
-  try {
-    const ls = globalThis.localStorage;
-    for (let i = 0; i < ls.length; i++) {
-      const k = ls.key(i);
-      if (!k || !k.startsWith(LOGOUT_IN_FLIGHT_PREFIX)) continue;
-      const sentAt = Number(ls.getItem(k));
-      if (Number.isFinite(sentAt) && Date.now() - sentAt < maxAgeMs) return true;
-    }
-  } catch {
-    // no storage: this tab's own requests only
-  }
-  return false;
+export function signOutsSettled(maxMs = sessionTiming.logoutSettleMaxMs): Promise<boolean> {
+  return waitForLogoutsToSettle(maxMs);
 }
 /**
  * A tablet QR sign-in whose answer came after the screen was left (nobody will use it): end it
