@@ -99,8 +99,21 @@ export default {
     };
 
     // ---- fixture: agency A in New York time ----
-    const T0 = '2026-10-23T16:00:00.000Z'; // noon EDT
-    const UNTIL = '2026-10-24T04:00:00.000Z'; // midnight after Oct 23, New York
+    // Every date here is relative to the real clock (it once said Oct 23-31, 2026; once the real clock
+    // passed those dates, the windows below that run on the real clock ended a grant the test still counted).
+    // D0 is the New York date 12 h from now, so T0 (noon on D0) is never before the real clock and at most
+    // about 25 h after it, the first end date (the midnight after D0) is at least 12 h ahead of the real
+    // clock, and every end date in this test stays ahead of it. day(n) = D0 + n days; nyAt = a New York
+    // wall time as an instant (EDT or EST, whichever applies); endOf(n) = the midnight after day(n) in New York.
+    const NY = 'America/New_York';
+    const nyParts = (ms) => Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: NY, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(ms).map((p) => [p.type, p.value]));
+    const nyOffsetMs = (ms) => { const p = nyParts(ms); return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(ms / 1000) * 1000; };
+    const nyAt = (ymd, hh) => { const g = Date.parse(`${ymd}T${String(hh).padStart(2, '0')}:00:00.000Z`); return new Date(g - nyOffsetMs(g - nyOffsetMs(g))).toISOString(); };
+    const D0 = new Date(Date.now() + 12 * 3600000).toLocaleDateString('en-CA', { timeZone: NY });
+    const day = (n) => new Date(Date.parse(`${D0}T12:00:00.000Z`) + n * 86400000).toISOString().slice(0, 10);
+    const endOf = (n) => nyAt(day(n + 1), 0);
+    const T0 = nyAt(day(0), 12); // noon in New York
+    const UNTIL = endOf(0); // midnight after day(0), New York
     let r = await ctx.api('POST', '/api/__test__/inject-fixture', {
       agencies: [
         { id: A, name: `T81 A ${ts}`, shortCode: 'T81A', adminEmail: E('adminA'), timeZone: 'America/New_York' },
@@ -121,7 +134,7 @@ export default {
         { id: U('legacy'), email: E('legacy'), name: 'T81 Legacy', role: 'mashgiach', agencyId: A, venueId: V1 },
       ],
       tasks: [task(`task-t81-1-${ts}`, A, V1), task(`task-t81-2-${ts}`, A, V2), task(`task-t81-3-${ts}`, A, V3)],
-      events: [{ id: `event-t81-2-${ts}`, agencyId: A, venueId: V2, title: 'T81 event at V2', date: '2026-10-23', assignedMashgiachEmail: E('pool'), tasks: [] }],
+      events: [{ id: `event-t81-2-${ts}`, agencyId: A, venueId: V2, title: 'T81 event at V2', date: day(0), assignedMashgiachEmail: E('pool'), tasks: [] }],
     });
     assert(r.status === 200, `inject-fixture ${r.status} ${J(r.json)}`);
     const tAdmin = await mint(U('adminA')), tAdminB = await mint(U('adminB')), tCoord = await mint(U('coord'));
@@ -157,27 +170,27 @@ export default {
       await refuse(tAdmin, U('mash'), [{ op: 'add', venueId: V1, until: null }], 400, 'MAIN_VENUE_LOCKED', 'main venue add');
       await refuse(tAdmin, U('mash'), [{ op: 'remove', venueId: V1 }], 400, 'MAIN_VENUE_LOCKED', 'main venue remove');
       await refuse(tAdmin, U('mash'), [{ op: 'add', venueId: VB, until: null }], 400, 'VENUE_NOT_IN_AGENCY', 'foreign venue');
-      await refuse(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: '2026-10-22' }], 400, 'UNTIL_IN_PAST', 'past');
-      await refuse(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: '2027-12-01' }], 400, 'UNTIL_TOO_FAR', 'too far');
+      await refuse(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: day(-1) }], 400, 'UNTIL_IN_PAST', 'past');
+      await refuse(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: day(400) }], 400, 'UNTIL_TOO_FAR', 'too far');
       await refuse(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: '23/10/2026' }], 400, 'UNTIL_INVALID', 'malformed date');
       await refuse(tAdmin, U('mash'), [{ op: 'add', venueId: V2 }], 400, 'UNTIL_INVALID', 'add without the until key');
       await refuse(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: null }], 409, 'VENUES_CHANGED', 'stale venueRev', 7);
       await refuse(tAdmin, U('mash'), [{ op: 'remove', venueId: V2 }], 409, 'NOT_TICKED', 'remove not ticked');
       await refuse(tAdmin, U('adminA'), [{ op: 'add', venueId: V2, until: null }], 400, 'TARGET_IS_ADMIN', 'admin target');
       // coordinator (V1) / owner (V3): only their own venues, mashgichim only, loans need an end date
-      await refuse(tCoord, U('mash'), [{ op: 'add', venueId: V2, until: '2026-10-23' }], 403, 'VENUE_NOT_IN_SCOPE', 'coordinator outside scope');
-      await refuse(tOwner, U('mash'), [{ op: 'add', venueId: V2, until: '2026-10-23' }], 403, 'VENUE_NOT_IN_SCOPE', 'owner outside own venue');
-      await refuse(tCoord, U('coord2'), [{ op: 'add', venueId: V1, until: '2026-10-23' }], 403, 'NOT_ALLOWED', 'coordinator target');
+      await refuse(tCoord, U('mash'), [{ op: 'add', venueId: V2, until: day(0) }], 403, 'VENUE_NOT_IN_SCOPE', 'coordinator outside scope');
+      await refuse(tOwner, U('mash'), [{ op: 'add', venueId: V2, until: day(0) }], 403, 'VENUE_NOT_IN_SCOPE', 'owner outside own venue');
+      await refuse(tCoord, U('coord2'), [{ op: 'add', venueId: V1, until: day(0) }], 403, 'NOT_ALLOWED', 'coordinator target');
       await refuse(tCoord, U('mash2'), [{ op: 'add', venueId: V1, until: null }], 400, 'UNTIL_REQUIRED', 'loan without end date', await revOf(U('mash2')));
       assert((await revOf(U('mash'))) === 0 && (await rec(U('mash'))).venueGrants === undefined, 'refusals wrote nothing');
       details.push('A refusals: roles, scope, main venue, dates, venueRev, foreign venue/agency');
 
       // coordinator loan at V1 for mash2 (home V2), owner loan at V3 for mash2; both dated
-      r = await ops(tCoord, U('mash2'), [{ op: 'add', venueId: V1, until: '2026-10-24' }], await revOf(U('mash2')));
+      r = await ops(tCoord, U('mash2'), [{ op: 'add', venueId: V1, until: day(1) }], await revOf(U('mash2')));
       fz = await hook('freshness', { tick: true });
       assert(fz.needed === true && fz.status === 'fresh' && fz.reads === readsA0 + 1 && !String(fz.tick).startsWith('idle'), `first temporary grant -> 15 s reads resume (born fresh) ${J(fz)}`);
       assert(r.status === 200 && J(r.json.venueIds) === J([V1]), `coordinator loan ${r.status} ${r.text.slice(0, 200)} (response limited to the caller's venues)`);
-      r = await ops(tOwner, U('mash2'), [{ op: 'add', venueId: V3, until: '2026-10-25' }], await revOf(U('mash2')));
+      r = await ops(tOwner, U('mash2'), [{ op: 'add', venueId: V3, until: day(2) }], await revOf(U('mash2')));
       assert(r.status === 200 && J(r.json.venueIds) === J([V3]), `owner loan ${r.status} ${r.text.slice(0, 200)}`);
       let m2 = await rec(U('mash2'));
       assert(J(m2.venueAccess) === J([V2, V1, V3]) && m2.venueGrants[V1].by === U('coord') && m2.venueGrants[V3].by === U('owner') && m2.venueRev === 2, `loan record ${J(m2)}`);
@@ -190,7 +203,7 @@ export default {
       details.push('A role rules: coordinator/owner loans only at own venue, dated, audited (by); cannot touch other venues');
 
       // ===== B: admin dated grant for mash at V2 until today; kiosk at V2 =====
-      r = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: '2026-10-23' }], 0);
+      r = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: day(0) }], 0);
       assert(r.status === 200 && J(r.json.venueIds) === J([V1, V2]) && r.json.venueUntil[V2] === UNTIL && r.json.venueRev === 1, `admin grant ${r.status} ${r.text.slice(0, 200)}`);
       // admin roster carries venueUntil + venueRevision; coordinator/mashgiach rosters never carry dates
       let roster = await call(baseUrl, 'GET', '/api/users', auth(tAdmin));
@@ -278,25 +291,25 @@ export default {
       assert(sw.run?.committed === false && (await ctx.getVersion()) === v1 && v1 > v0, 'second sweep writes nothing');
       // race: extend-then-sweep (the extension wins)
       await clock(T0);
-      r = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: '2026-10-23' }], 2);
+      r = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: day(0) }], 2);
       assert(r.status === 200, `re-tick ${r.status}`);
-      r = await ops(tAdmin, U('mash'), [{ op: 'set_until', venueId: V2, until: '2026-10-24' }], 3);
-      assert(r.status === 200 && r.json.venueUntil[V2] === '2026-10-25T04:00:00.000Z', `extend ${r.text.slice(0, 160)}`);
+      r = await ops(tAdmin, U('mash'), [{ op: 'set_until', venueId: V2, until: day(1) }], 3);
+      assert(r.status === 200 && r.json.venueUntil[V2] === endOf(1), `extend ${r.text.slice(0, 160)}`);
       await clock(new Date(Date.parse(UNTIL) + 1000).toISOString());
       sw = await hook('grant-sweep', { runNow: true });
       assert(sw.run?.committed === false && J((await rec(U('mash'))).venueAccess) === J([V1, V2]), 'extension committed first wins (sweep closes nothing)');
       // sweep-then-extend: after the close an extension is NOT_TICKED, a new add is a new grant
-      await clock('2026-10-25T04:00:00.000Z');
+      await clock(endOf(1));
       sw = await hook('grant-sweep', { runNow: true });
       assert(sw.run?.committed === true, 'sweep closes at the extended end');
-      x = await ops(tAdmin, U('mash'), [{ op: 'set_until', venueId: V2, until: '2026-10-26' }], await revOf(U('mash')));
+      x = await ops(tAdmin, U('mash'), [{ op: 'set_until', venueId: V2, until: day(3) }], await revOf(U('mash')));
       assert(x.status === 409 && x.json?.code === 'NOT_TICKED', `extend after close ${x.status}`);
       r = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: null }], await revOf(U('mash')));
       assert(r.status === 200 && r.json.venueUntil[V2] === undefined, 'a new add after close is a new (undated) grant');
       details.push('C sweep: closes once with history, second sweep no write; extend-then-sweep and sweep-then-extend');
 
       // ===== D: legacy PUT =====
-      r = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V3, until: '2026-10-30' }], await revOf(U('mash')));
+      r = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V3, until: day(7) }], await revOf(U('mash')));
       assert(r.status === 200, 'dated V3');
       const putV = async (token, id, body) => call(baseUrl, 'PUT', `/api/users/${id}/venues`, auth(token), { ...body, expectedVersion: await ctx.getVersion() });
       x = await putV(tAdmin, U('mash'), { venueIds: [V1, V2, V3] });
@@ -304,7 +317,7 @@ export default {
       x = await putV(tAdmin, U('mash'), { venueIds: [V1, V3], expectedVenueIds: [V1, V2, V3] });
       assert(x.status === 200 && J(x.json.venueIds) === J([V1, V3]), `old sheet untick V2 ${x.status} ${x.text.slice(0, 160)}`);
       mr = await rec(U('mash'));
-      assert(mr.venueGrants?.[V3]?.until === '2026-10-31T04:00:00.000Z' && mr.venueHistory[0].why === 'unticked', `kept venue keeps its date ${J(mr)}`);
+      assert(mr.venueGrants?.[V3]?.until === endOf(7) && mr.venueHistory[0].why === 'unticked', `kept venue keeps its date ${J(mr)}`);
       // a legacy row: written exactly as before (no grant fields appear)
       x = await putV(tAdmin, U('legacy'), { venueIds: [V3, V2] });
       assert(x.status === 200 && J(x.json.venueIds) === J([V1, V3, V2]), `legacy put ${x.text.slice(0, 160)}`);
@@ -338,7 +351,7 @@ export default {
       let fr = await hook('freshness', { refreshNow: true });
       assert(fr.status === 'fresh' && fr.enabled === true, `fresh at start ${J(fr)}`);
       await hook('freshness', { advanceMonoMs: 30000 });
-      await clock('2026-10-20T16:00:00.000Z'); // wall clock jumps BACK 3 days
+      await clock(nyAt(day(-3), 12)); // wall clock jumps BACK 3 days
       fr = await hook('freshness', { advanceMonoMs: 31000 });
       assert(fr.status === 'stale', `61 s on the monotonic clock = STALE despite a backward wall-clock jump ${J(fr)}`);
       await clock(T0);
@@ -416,7 +429,7 @@ export default {
       assert(taskIds(await tasksAt(tPool, null)).length === 0 && taskIds(await tasksAt(tPool, V2)).length === 0, 'no tasks');
       const wsPool = openWs(tPool, null);
       await wsPool.until(() => wsPool.count('INITIAL_STATE') > 0, 8000);
-      r = await ops(tAdmin, U('pool'), [{ op: 'add', venueId: V2, until: '2026-10-23' }], 1);
+      r = await ops(tAdmin, U('pool'), [{ op: 'add', venueId: V2, until: day(0) }], 1);
       assert(r.status === 200 && J(r.json.venueIds) === J([V2]), `tick a no-home person ${r.text.slice(0, 160)}`);
       await wsPool.until(() => wsPool.count('SCOPE_CHANGED') > 0, 5000);
       assert(wsPool.count('SCOPE_CHANGED') === 1, 'the open socket is told at once (first tick)');
@@ -477,7 +490,7 @@ export default {
       assert(x.status !== 200, `a pool invite is dead after the freeze ${x.status}`);
       await clock(T0);
       assert((await rec(U('mash'))).venueGrants?.[V3] === undefined && J((await rec(U('mash'))).venueAccess) === J([V1]), 'dated V3 ended');
-      x = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V3, until: '2026-10-30' }], await revOf(U('mash')));
+      x = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V3, until: day(7) }], await revOf(U('mash')));
       assert(x.status === 409 && x.json?.code === 'DATED_GRANTS_FROZEN', `frozen refuses dates ${x.status}`);
       x = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V3, until: null }], await revOf(U('mash')));
       assert(x.status === 200, 'undated still allowed');
@@ -495,7 +508,7 @@ export default {
         { id: U('hist'), email: E('hist'), name: 'T81 Hist', role: 'mashgiach', agencyId: A, venueId: V1, personId: U('hist'), venueAccess: [V1], venueGrants: {}, venueRev: 1 },
         ...[3, 4, 5].map((k) => ({ id: U('tight' + k), email: E('tight' + k), name: 'T81 Tight ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('tight' + k), venueAccess: [V1, V3], venueGrants: {}, venueRev: 1 })),
         ...[1, 2, 3].map((k) => ({ id: U('vd' + k), email: E('vd' + k), name: 'T81 VD ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('vd' + k), venueAccess: [V1, V5], venueGrants: {}, venueRev: 1 })),
-        ...[1, 2, 3, 4, 5, 6].map((k) => ({ id: U('hd' + k), email: E('hd' + k), name: 'T81 HD ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('hd' + k), venueAccess: [V1, V2], venueGrants: { [V2]: { until: '2026-10-30T04:00:00.000Z' } }, venueRev: 1 }))] });
+        ...[1, 2, 3, 4, 5, 6].map((k) => ({ id: U('hd' + k), email: E('hd' + k), name: 'T81 HD ' + k, role: 'mashgiach', agencyId: A, venueId: V1, personId: U('hd' + k), venueAccess: [V1, V2], venueGrants: { [V2]: { until: endOf(6) } }, venueRev: 1 }))] });
       await reloadCommit();
       doc = await ctx.getDoc();
       const cur = JSON.stringify(doc).length;
@@ -506,7 +519,7 @@ export default {
       const kib = Math.round(JSON.stringify(await ctx.getDoc()).length / 1024);
       assert(kib > 820 && kib < 900, `document at ${kib} KiB`);
       const revK = await revOf(U('mash'));
-      x = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: '2026-10-23' }], revK);
+      x = await ops(tAdmin, U('mash'), [{ op: 'add', venueId: V2, until: day(0) }], revK);
       assert(x.status === 409 && x.json?.code === 'STATE_NEAR_FULL', `growth refused near full ${x.status} ${x.text.slice(0, 160)}`);
       x = await ops(tAdmin, U('mash2'), [{ op: 'remove', venueId: V1 }], await revOf(U('mash2')));
       assert(x.status === 200, `a reduction still commits near full ${x.status} ${x.text.slice(0, 160)}`);
@@ -559,8 +572,8 @@ export default {
       await hook('grant-sweep', { unfreeze: true });
       // shortening an undated grant (undated -> dated adds metadata) just under the guard commits
       await setBloat(900 * 1024 - 300 - reloadCost);
-      x = await call(baseUrl, 'POST', `/api/users/${U('tight3')}/venue-ops`, auth(tAdmin), { ops: [{ op: 'set_until', venueId: V3, until: '2026-10-30' }], expectedVenueRev: 1, expectedVersion: await ctx.getVersion(), operationId: `t81-k-short-${ts}` });
-      assert(x.status === 200 && x.json.venueUntil?.[V3] === '2026-10-31T04:00:00.000Z', `shortening just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
+      x = await call(baseUrl, 'POST', `/api/users/${U('tight3')}/venue-ops`, auth(tAdmin), { ops: [{ op: 'set_until', venueId: V3, until: day(7) }], expectedVenueRev: 1, expectedVersion: await ctx.getVersion(), operationId: `t81-k-short-${ts}` });
+      assert(x.status === 200 && x.json.venueUntil?.[V3] === endOf(7), `shortening just under the hard guard commits ${x.status} ${x.text.slice(0, 160)}`);
       // a home reassignment through today's user edit (identity closes the extras) just under the guard commits
       await setBloat(900 * 1024 - 300 - reloadCost);
       x = await call(baseUrl, 'PUT', `/api/users/${U('tight4')}`, auth(tAdmin), { venueId: V2, expectedVersion: await ctx.getVersion(), operationId: `t81-k-home-${ts}` });
@@ -568,7 +581,7 @@ export default {
       const t4 = await rec(U('tight4'));
       assert(t4.venueId === V2 && !(t4.venueAccess || []).includes(V3), `home moved, extras closed ${J(t4)}`);
       // RV5: expiry -> history shed at the guard -> an old tab's PUT without the expected list must not revive the venue
-      await clock('2026-10-31T04:00:00.000Z');
+      await clock(endOf(7));
       sw = await hook('grant-sweep', { runNow: true });
       assert(sw.run?.committed === true && (await rec(U('tight3'))).venueHistory?.[0]?.why === 'ended', 'tight3 expired and swept');
       await setBloat(900 * 1024 - 300 - reloadCost);
@@ -593,7 +606,7 @@ export default {
       // ===== L: deleting a venue closes a dated grant at it as 'venue_deleted' (9.8) =====
       const V4 = `venue-t81-4-${ts}`;
       assert((await ctx.api('POST', '/api/__test__/inject-fixture', { venues: [{ id: V4, name: 'T81 V4', agencyId: A }] })).status === 200, 'V4');
-      x = await ops(tAdmin, U('mash2'), [{ op: 'add', venueId: V4, until: '2026-10-23' }], await revOf(U('mash2')));
+      x = await ops(tAdmin, U('mash2'), [{ op: 'add', venueId: V4, until: day(0) }], await revOf(U('mash2')));
       assert(x.status === 200, `grant at V4 ${x.status} ${x.text.slice(0, 120)}`);
       const revBeforeDel = await revOf(U('mash2'));
       x = await call(baseUrl, 'DELETE', `/api/venues/${V4}`, auth(tAdmin), { expectedVersion: await ctx.getVersion() });
