@@ -9,13 +9,25 @@ export const InstallCard: React.FC<{ env: InstallCardEnv; install: () => Promise
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const title = useRef<HTMLHeadingElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const close = () => { snoozeInstallCard(); onClose(); };
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    root.current?.querySelector<HTMLButtonElement>('button')?.focus();
-    return () => { clearTimeout(timer.current); previous?.focus(); };
+    const appRoot = document.getElementById('root');
+    const previousInert = appRoot?.getAttribute('inert') ?? null;
+    appRoot?.setAttribute('inert', '');
+    return () => {
+      clearTimeout(timer.current);
+      if (previousInert === null) appRoot?.removeAttribute('inert');
+      else appRoot?.setAttribute('inert', previousInert);
+      if (previous && document.contains(previous)) previous.focus();
+    };
   }, []);
+  useEffect(() => {
+    // View changes remove Install; disabling it can also drop focus onto body.
+    title.current?.focus();
+  }, [view, busy]);
   const path = installCardPath(env);
   if (!path && !busy) return null;
   const add = async () => {
@@ -41,17 +53,22 @@ export const InstallCard: React.FC<{ env: InstallCardEnv; install: () => Promise
       onKeyDown={(event) => {
         if (event.key === 'Escape') { event.preventDefault(); close(); }
         if (event.key === 'Tab') {
-          const buttons = root.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
-          if (!buttons?.length) return;
-          const first = buttons[0], last = buttons[buttons.length - 1];
-          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+          const targets = Array.from(root.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? []);
+          const first = targets[0] ?? title.current;
+          const last = targets[targets.length - 1] ?? title.current;
+          if (!first || !last) return;
+          const active = document.activeElement;
+          if (!targets.length || active === title.current || !root.current?.contains(active)) {
+            event.preventDefault();
+            (event.shiftKey ? last : first).focus();
+          } else if (event.shiftKey && active === first) { event.preventDefault(); last.focus(); }
+          else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
         }
       }}>
       <div className="w-full max-h-full overflow-y-auto rounded-t-2xl bg-surface border border-line p-6 e3 animate-slide-up space-y-4" style={{ paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))' }}>
         <div className="flex items-center gap-4">
           {view === 'offer' && <img src="/pwa-192x192.png" alt="" width={56} height={56} className="w-14 h-14 rounded-xl e2 shrink-0" />}
-          <h2 id="install-card-title" className="flex-1 text-start text-lg font-bold text-ink">{view === 'offer' ? 'Add Shutfey to your home screen' : view === 'ios-steps' ? 'Add to Home Screen' : 'Open in Safari first'}</h2>
+          <h2 ref={title} id="install-card-title" tabIndex={-1} className="outline-none flex-1 text-start text-lg font-bold text-ink">{view === 'offer' ? 'Add Shutfey to your home screen' : view === 'ios-steps' ? 'Add to Home Screen' : 'Open in Safari first'}</h2>
           <button aria-label="Close" onClick={close} className="min-h-11 min-w-11 flex items-center justify-center rounded-xl text-ink-soft pressable"><X /></button>
         </div>
         {view === 'offer' && <>
