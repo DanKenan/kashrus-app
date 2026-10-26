@@ -80,4 +80,7 @@ assert.ok(card.includes("appRoot?.setAttribute('inert', previousInert)"));
 assert.match(card, /<h2[^>]+tabIndex={-1}/);
 assert.match(card, /useEffect\(\(\) => {[^}]*title\.current\?\.focus\(\);\s*}, \[view, busy\]\)/);
 assert.ok(card.includes('document.contains(previous)'));
+assert.match(card, /const visible = !!path \|\| busy;/);
+assert.match(card, /useEffect\(\(\) => \{\s*if \(!visible\) return;[\s\S]*?appRoot\?\.setAttribute\('inert', ''\)[\s\S]*?\}, \[visible\]\)/);
+assert.match(card, /useEffect\(\(\) => \{\s*if \(path === null && !busy\) onClose\(\);\s*\}, \[path, busy, onClose\]\)/);
 console.log('Install card rules, UA, storage and source checks passed');

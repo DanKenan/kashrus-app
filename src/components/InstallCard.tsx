@@ -12,7 +12,10 @@ export const InstallCard: React.FC<{ env: InstallCardEnv; install: () => Promise
   const title = useRef<HTMLHeadingElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const close = () => { snoozeInstallCard(); onClose(); };
+  const path = installCardPath(env);
+  const visible = !!path || busy;
   useEffect(() => {
+    if (!visible) return;
     const previous = document.activeElement as HTMLElement | null;
     const appRoot = document.getElementById('root');
     const previousInert = appRoot?.getAttribute('inert') ?? null;
@@ -23,13 +26,15 @@ export const InstallCard: React.FC<{ env: InstallCardEnv; install: () => Promise
       else appRoot?.setAttribute('inert', previousInert);
       if (previous && document.contains(previous)) previous.focus();
     };
-  }, []);
+  }, [visible]);
   useEffect(() => {
     // View changes remove Install; disabling it can also drop focus onto body.
     title.current?.focus();
   }, [view, busy]);
-  const path = installCardPath(env);
-  if (!path && !busy) return null;
+  useEffect(() => {
+    if (path === null && !busy) onClose();
+  }, [path, busy, onClose]);
+  if (!visible) return null;
   const add = async () => {
     if (path === 'ios-safari') { setView('ios-steps'); return; }
     if (path === 'ios-other') { setView('ios-open-safari'); return; }
