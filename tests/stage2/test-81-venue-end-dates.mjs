@@ -101,9 +101,10 @@ export default {
     // ---- fixture: agency A in New York time ----
     // Every date here is relative to the real clock (it once said Oct 23-31, 2026; once the real clock
     // passed those dates, the windows below that run on the real clock ended a grant the test still counted).
-    // D0 is the New York date 12 h from now, so the real clock stays within 12 h of T0 and every end date
-    // in this test is still ahead of it. day(n) = D0 + n days; nyAt = a New York wall time as an instant
-    // (EDT or EST, whichever applies); endOf(n) = the midnight after day(n) in New York.
+    // D0 is the New York date 12 h from now, so T0 (noon on D0) is never before the real clock and at most
+    // about 25 h after it, the first end date (the midnight after D0) is at least 12 h ahead of the real
+    // clock, and every end date in this test stays ahead of it. day(n) = D0 + n days; nyAt = a New York
+    // wall time as an instant (EDT or EST, whichever applies); endOf(n) = the midnight after day(n) in New York.
     const NY = 'America/New_York';
     const nyParts = (ms) => Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: NY, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(ms).map((p) => [p.type, p.value]));
     const nyOffsetMs = (ms) => { const p = nyParts(ms); return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(ms / 1000) * 1000; };
