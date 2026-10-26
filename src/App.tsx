@@ -44,6 +44,9 @@ const HomeLanding = lazy(() => import('./components/home/HomeLanding'));
 // The welcome page on an agency's own address (its own lazy file, like the home page).
 const AgencyWelcome = lazy(() => import('./components/welcome/AgencyWelcome'));
 import { ChangePasswordModal } from './components/ChangePasswordModal';
+import { InstallCard } from './components/InstallCard';
+import { usePWAInstall } from './hooks/usePWAInstall';
+import { appMarkedInstalled, installCardPath, installCardSnoozed, isIOSDevice, isIOSSafari, isStandalone } from './lib/installCard';
 import { PasskeyOffer } from './components/PasskeyOffer';
 import { PasskeysModal } from './components/PasskeysModal';
 import { clearPasswordSignInMark, currentAccountId, hasPasskeyForThisAddress, isPhoneLike, listPasskeys, offerDismissed, platformPasskeyAvailable, takePasswordSignInMark } from './lib/passkeys';
@@ -399,6 +402,25 @@ export default function App() {
   const [isPasskeysOpen, setIsPasskeysOpen] = useState(false);
   const [passkeyMenu, setPasskeyMenu] = useState(false);
   const [passkeyOfferFor, setPasskeyOfferFor] = useState<string | null>(null);
+  const [freshInstallFor, setFreshInstallFor] = useState<string | null>(null);
+  const [passkeyCheckFor, setPasskeyCheckFor] = useState<string | null>(null);
+  const [passkeyOfferPending, setPasskeyOfferPending] = useState(false);
+  const pwaInstall = usePWAInstall();
+  const [installCardOpenFor, setInstallCardOpenFor] = useState<string | null>(null);
+  const installWindow = useRef<{ userId: string; until: number } | null>(null);
+  const installGate = !!freshInstallFor && freshInstallFor === currentUser?.id && !isKiosk && !passkeyOfferPending && passkeyCheckFor === currentUser?.id && !passkeyOfferFor;
+  const installEnv = useMemo(() => {
+    if (!installGate) return null;
+    try {
+      if (typeof window === 'undefined') return null;
+      const ua = window.navigator?.userAgent ?? '';
+      return {
+        fresh: true, kiosk: false, phone: isPhoneLike(), standalone: pwaInstall.isInstalled || isStandalone(),
+        installedMark: appMarkedInstalled(), snoozed: installCardSnoozed(),
+        hasPrompt: pwaInstall.isInstallable, ios: isIOSDevice(ua), iosSafari: isIOSSafari(ua),
+      };
+    } catch { return null; }
+  }, [installGate, pwaInstall.isInstalled, pwaInstall.isInstallable]);
   // 10g: the agencies under this login (several = "Switch agency" in the menu).
   // Read for the signed-in phone session, including a restored one; never on a kiosk.
   const [memberships, setMemberships] = useState<Membership[]>([]);
@@ -441,6 +463,27 @@ export default function App() {
   const [kqrCode, setKqrCode] = useState<string | null>(() => (kqrPage ? readPendingKqr() : null));
   /** "Sign in to a tablet" (scanner) / "Tablets you're signed in on": open on which view, or closed. */
   const [tabletSheet, setTabletSheet] = useState<null | 'scan' | 'tablets'>(null);
+  useEffect(() => {
+    if (!freshInstallFor || freshInstallFor !== currentUser?.id || isKiosk) {
+      installWindow.current = null;
+      setInstallCardOpenFor(null);
+      return;
+    }
+    if (!installGate) return;
+    if (installWindow.current?.userId !== freshInstallFor) {
+      installWindow.current = { userId: freshInstallFor, until: Date.now() + 60_000 };
+    }
+    // Once open, it remains available until a decision, even after this deadline.
+    if (installCardOpenFor === freshInstallFor) return;
+    const remaining = installWindow.current.until - Date.now();
+    if (remaining <= 0) { setFreshInstallFor(null); return; }
+    if (!kqrPage && !tabletSheet && installEnv && installCardPath(installEnv)) {
+      setInstallCardOpenFor(freshInstallFor);
+      return;
+    }
+    const timeout = setTimeout(() => setFreshInstallFor(null), remaining);
+    return () => clearTimeout(timeout);
+  }, [freshInstallFor, currentUser?.id, isKiosk, installGate, installCardOpenFor, installEnv, kqrPage, tabletSheet]);
   const [canTabletSignIn, setCanTabletSignIn] = useState(false);
   /** The tablet's sign-in screen: the QR code (default) or today's PIN screen. */
   const [kioskSignIn, setKioskSignIn] = useState<'qr' | 'code'>('qr');
@@ -1756,6 +1799,7 @@ export default function App() {
     setKnownUsers([]);
     setIsVenueSwitcherOpen(false);
     setAdminHome(false);
+    setFreshInstallFor(null);
     setCurrentUser(null);
     setCurrentVenueId(null);
     setVenues([]);
@@ -1792,22 +1836,29 @@ export default function App() {
     setIsPasskeysOpen(false);
     setPasskeyMenu(false);
     setPasskeyOfferFor(null);
+    setPasskeyCheckFor(null);
+    setPasskeyOfferPending(false);
+    setFreshInstallFor((id) => !isKiosk && id === currentUser?.id ? id : null);
     if (isKiosk || !currentUser?.id) { if (isKiosk) clearPasswordSignInMark(); return; }
     const userId = currentUser.id;
     // Only this account's own password sign-in on this tab, inside the proof window.
     const offerUntil = takePasswordSignInMark(userId);
     let live = true;
+    setPasskeyOfferPending(true);
     listPasskeys().then(async (l) => {
       if (!live) return;
       setPasskeyMenu(l.canAdd || l.passkeys.length > 0);
       if (offerUntil !== null && isPhoneLike() && l.canAdd && !hasPasskeyForThisAddress(l) && !offerDismissed(userId) && await platformPasskeyAvailable()) {
         if (live && Date.now() < offerUntil && currentAccountId() === userId) setPasskeyOfferFor(userId);
       }
-    }).catch(() => { /* unread: the row stays hidden; never a sign-out from here */ });
+    }).catch(() => { /* unread: the row stays hidden; never a sign-out from here */ }).finally(() => {
+      if (live) { setPasskeyOfferPending(false); setPasskeyCheckFor(userId); }
+    });
     return () => { live = false; };
   }, [currentUser?.id, isKiosk]);
 
   const handleLoginSuccess = (user: User) => {
+    setFreshInstallFor(!isKiosk ? user.id : null);
     userRequestContext.current.generation += 1;
     requestContext.current.generation += 1;
     setVenues([]);
@@ -2721,6 +2772,10 @@ export default function App() {
       )}
       {!isKiosk && passkeyOfferFor && currentUser?.id === passkeyOfferFor && (
         <PasskeyOffer userId={passkeyOfferFor} onClose={() => setPasskeyOfferFor(null)} onAdded={() => setPasskeyMenu(true)} />
+      )}
+
+      {!isKiosk && !passkeyOfferFor && !passkeyOfferPending && passkeyCheckFor === currentUser?.id && !kqrPage && !tabletSheet && installEnv && installCardOpenFor === currentUser?.id && (
+        <InstallCard key={currentUser?.id} env={installEnv} install={pwaInstall.install} onClose={() => setFreshInstallFor(null)} />
       )}
 
       <ChangePasswordModal
