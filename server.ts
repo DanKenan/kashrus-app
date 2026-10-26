@@ -1,3 +1,4 @@
+import { logoutAckSetCookie } from './src/server/logout-marker.ts';
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -448,6 +449,20 @@ function verifyToken(token: string): SessionClaims | null {
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
+// Register first so body-parser errors and authentication refusals also acknowledge logout.
+app.post('/api/auth/logout', (req, res, next) => {
+  const ack = logoutAckSetCookie(req.headers['x-shutfey-logout-id'], USER_COOKIE.secure);
+  if (ack) {
+    const writeHead = res.writeHead;
+    res.writeHead = function (...args: any[]) {
+      res.writeHead = writeHead;
+      res.append('Set-Cookie', ack);
+      return Reflect.apply(writeHead, this, args);
+    };
+  }
+  next();
+});
+
 const server = http.createServer(app);
 
 // Trust Cloud Run's proxy chain for correct client IP detection.
