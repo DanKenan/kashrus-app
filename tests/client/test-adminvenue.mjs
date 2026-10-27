@@ -42,11 +42,12 @@ function applyCreated(user, selectedVenueId, staffSeveral, prev, created) {
   if (!canSeeTask(created, user) || !inVenueScope(created, scope)) return prev;
   return prev.some((t) => t.id === created.id) ? prev : [...prev, created];
 }
-function applyUpdated(user, selectedVenueId, staffSeveral, prev, updated) {
+function applyUpdated(user, selectedVenueId, staffSeveral, prev, updated, currentVenueId = selectedVenueId) {
+  // App.tsx: the generic payload.venueId guard lets TASK_UPDATED through so a moved task can leave the list.
   const scope = socketVenueScope(user, selectedVenueId, staffSeveral);
-  return canSeeTask(updated, user) && inVenueScope(updated, scope)
-    ? prev.map((t) => (t.id === updated.id ? updated : t))
-    : prev.filter((t) => t.id !== updated.id);
+  const shownHere = canSeeTask(updated, user) && inVenueScope(updated, scope)
+    && !(updated.venueId && currentVenueId && updated.venueId !== currentVenueId);
+  return { list: shownHere ? prev.map((t) => (t.id === updated.id ? updated : t)) : prev.filter((t) => t.id !== updated.id), toast: shownHere };
 }
 const ids = (l) => l.map((t) => t.id);
 
@@ -76,10 +77,16 @@ eq('C admin Yosi: Yosi task added', ids(applyCreated(admin, YOSI, false, start, 
 eq('C duplicate id not added twice', ids(applyCreated(admin, YOSI, false, start, { id: 't1', venueId: YOSI })), ['t1', 't5']);
 
 // U — TASK_UPDATED
-eq('U admin Yosi: Crown update does not merge', ids(applyUpdated(admin, YOSI, false, start, { id: 't2', venueId: CROWN, title: 'Turn on rice cooker' })), ['t1', 't5']);
-eq('U admin Yosi: task moved to Crown is removed', ids(applyUpdated(admin, YOSI, false, start, { id: 't5', venueId: CROWN, title: 'Wash station' })), ['t1']);
-eq('U admin Yosi: venueless update removes, never shows', ids(applyUpdated(admin, YOSI, false, start, { id: 't1', title: 'Check produce' })), ['t5']);
-eq('U admin Yosi: Yosi update merges', applyUpdated(admin, YOSI, false, start, { id: 't1', venueId: YOSI, title: 'Done' })[0].title, 'Done');
+eq('U admin Yosi: Crown update does not merge', ids(applyUpdated(admin, YOSI, false, start, { id: 't2', venueId: CROWN, title: 'Turn on rice cooker' }).list), ['t1', 't5']);
+ok('U admin Yosi: Crown update -> no toast', !applyUpdated(admin, YOSI, false, start, { id: 't2', venueId: CROWN, title: 'Turn on rice cooker' }).toast);
+eq('U admin Yosi: task moved to Crown is removed', ids(applyUpdated(admin, YOSI, false, start, { id: 't5', venueId: CROWN, title: 'Wash station' }).list), ['t1']);
+eq('U admin Yosi: venueless update removes, never shows', ids(applyUpdated(admin, YOSI, false, start, { id: 't1', title: 'Check produce' }).list), ['t5']);
+ok('U admin Yosi: venueless update -> no toast', !applyUpdated(admin, YOSI, false, start, { id: 't1', title: 'Check produce' }).toast);
+eq('U admin Yosi: Yosi update merges', applyUpdated(admin, YOSI, false, start, { id: 't1', venueId: YOSI, title: 'Done' }).list[0].title, 'Done');
+ok('U admin Yosi: Yosi update -> toast', applyUpdated(admin, YOSI, false, start, { id: 't1', venueId: YOSI, title: 'Done' }).toast);
+const wStart = [{ id: 'w1', venueId: YOSI, title: 'a' }];
+eq('U one-venue staff: task moved to another venue leaves the list', ids(applyUpdated(worker, YOSI, false, wStart, { id: 'w1', venueId: CROWN, title: 'a' }).list), []);
+eq('U one-venue staff: own-venue update merges', applyUpdated(worker, YOSI, false, wStart, { id: 'w1', venueId: YOSI, title: 'b' }).list[0].title, 'b');
 
 // E — other per-venue lists
 const events = [{ id: 'e1', venueId: YOSI }, { id: 'e2', venueId: CROWN }, { id: 'e3' }];
@@ -103,7 +110,9 @@ ok('S INITIAL_STATE tasks scoped', /setTasks\(scopeListToVenue<Task>\(msg\.paylo
 ok('S INITIAL_STATE history scoped', /setHistoryLogs\(scopeListToVenue\(msg\.payload\.historyLogs, venueScope\)\)/.test(init));
 ok('S INITIAL_STATE events scoped', /setEvents\(scopeListToVenue\(msg\.payload\.events, eventScope\)\)/.test(init));
 const upd = block("msg.type === 'TASK_UPDATED'", "msg.type === 'TASK_CREATED'");
-ok('S TASK_UPDATED scoped', /inVenueScope\(updated, venueScope\)/.test(upd));
+ok('S TASK_UPDATED scoped', /inVenueScope\(updated, venueScope\)/.test(upd) && /updated\.venueId !== currentVenue\.id/.test(upd));
+ok('S TASK_UPDATED toast only when shown here', /if \(shownHere && msg\.senderEmail/.test(upd));
+ok('S generic venueId guard lets TASK_UPDATED through (moved task leaves the list)', /msgVenueId !== currentVenue\.id && msg\.type !== 'TASK_UPDATED'\) \{\s*return;/.test(handler));
 const cre = block("msg.type === 'TASK_CREATED'", "msg.type === 'TASK_DELETED'");
 ok('S TASK_CREATED scoped', /!inVenueScope\(created, venueScope\)\) return;/.test(cre));
 const reset = block("msg.type === 'DAILY_RESET'", "msg.type === 'HISTORY_PRUNED'");

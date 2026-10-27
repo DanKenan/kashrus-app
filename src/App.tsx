@@ -879,7 +879,8 @@ export default function App() {
       if (msg.version !== undefined) observeVersion(msg.version);
       // Filter out messages for other venues if venueId is present
       const msgVenueId = (msg.payload as any)?.venueId;
-      if (msgVenueId && currentVenue?.id && msgVenueId !== currentVenue.id) {
+      // (TASK_UPDATED goes on: a task moved to another venue is removed below.)
+      if (msgVenueId && currentVenue?.id && msgVenueId !== currentVenue.id && msg.type !== 'TASK_UPDATED') {
         return;
       }
 
@@ -919,12 +920,17 @@ export default function App() {
         }
       } else if (msg.type === 'TASK_UPDATED' && msg.payload) {
         const updated = msg.payload as Task;
+        // Shown here only if this person may see it AND it belongs to the venue
+        // on screen; otherwise it leaves the list (e.g. moved to another venue)
+        // and no toast names it.
+        const shownHere = canSeeTask(updated, currentUser) && inVenueScope(updated, venueScope)
+          && !(updated.venueId && currentVenue?.id && updated.venueId !== currentVenue.id);
         setTasks((prev) =>
-          canSeeTask(updated, currentUser) && inVenueScope(updated, venueScope)
+          shownHere
             ? prev.map((t) => (t.id === updated.id ? updated : t))
             : prev.filter((t) => t.id !== updated.id)
         );
-        if (msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
+        if (shownHere && msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
           showToast(`${updated.updatedByName || msg.senderEmail} updated "${updated.title}"`);
         }
       } else if (msg.type === 'TASK_CREATED' && msg.payload) {
