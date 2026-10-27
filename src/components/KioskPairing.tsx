@@ -133,10 +133,12 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
           </>
         ) : code ? (
           <div
-            className="tactile-4 bg-card border-2 border-line-strong rounded-3xl px-8 py-7 text-center"
+            data-pairing-code=""
+            className="tactile-4 bg-card border-2 border-line-strong rounded-3xl px-6 sm:px-8 py-7 text-center max-w-full"
             aria-label={`Pairing code ${code}`}
           >
-            <span className="block text-6xl font-black tracking-[0.18em] font-sans">{code}</span>
+            {/* Phones (a work phone can be a kiosk too): smaller so the 6 characters fit a 390 px screen. */}
+            <span className="block text-5xl sm:text-6xl font-black tracking-[0.12em] sm:tracking-[0.18em] font-sans">{code}</span>
           </div>
         ) : (
           <p className="text-ink-soft animate-pulse">Getting a code…</p>

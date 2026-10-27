@@ -96,4 +96,7 @@ check('App: an unpaired kiosk never renders a signed-in screen, even before that
 const body = app.slice(app.indexOf('{/* Main Body */}'));
 check('App: never the admin setup screen on a kiosk', body.indexOf('venues.length === 0 && isKiosk ? (') > 0 && body.indexOf('venues.length === 0 && isKiosk ? (') < body.indexOf('Establish First Kosher Venue') && body.includes('data-kiosk-no-venue'));
 
+const pairing = read('src/components/KioskPairing.tsx');
+check('pairing code fits a phone (smaller below sm, box never wider than the screen)', /data-pairing-code=""[\s\S]{0,200}?max-w-full/.test(pairing) && pairing.includes('text-5xl sm:text-6xl font-black tracking-[0.12em] sm:tracking-[0.18em]'));
+
 console.log(`test-kioskbtn: ${passed} checks passed`);
