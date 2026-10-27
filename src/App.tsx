@@ -79,6 +79,7 @@ import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry, syncCookieSession, isCookieSession } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
 import { forgetSignedInUserForKiosk, isKioskEntryUrl, stripKioskEntryFromUrl } from './lib/kioskSetup';
+import { effectiveViewportWidth } from './lib/desktopMode';
 import { SITE_REFUSED_EVENT, sharedOriginFor, siteRefusalAction, useSite, type SiteRefusal, type SiteRefusalEvent, homePageAllowed } from './lib/site';
 import { SiteRefusedScreen } from './components/SiteRefusedScreen';
 import { END_DATE_TEXT, dayWords, lastDayOf, nextEndMs, noteServerNow, serverNowMs, venueLeftOwnScope, withOwnScope, withoutEndedVenues, ymdIn, zoneForVenue } from './lib/venueEndDates';
@@ -386,11 +387,11 @@ export default function App() {
   // D4b: phones (< 640 px) open on cards unless the person picked the table on a phone
   // (remembered); 640–767 opens on cards and 768+ on the table, as before.
   const [viewMode, setViewMode] = useState<TaskViewMode>(() =>
-    initialTaskView(typeof window !== 'undefined' ? window.innerWidth : 1024, readPhoneTaskView())
+    initialTaskView(typeof window !== 'undefined' ? effectiveViewportWidth() : 1024, readPhoneTaskView())
   );
   const changeViewMode = (mode: TaskViewMode) => {
     setViewMode(mode);
-    if (typeof window !== 'undefined') rememberPhoneTaskView(mode, window.innerWidth);
+    if (typeof window !== 'undefined') rememberPhoneTaskView(mode, effectiveViewportWidth());
   };
   // Kiosk only (D3a): the kiosk list is the default; table and cards stay one tap away.
   const [kioskView, setKioskView] = useState<'list' | 'table' | 'cards'>('list');
