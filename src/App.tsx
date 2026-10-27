@@ -3,7 +3,8 @@ import { AgencySettingsSheet } from './components/AgencySettingsSheet';
 import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgencyFields } from './lib/agencyLogo';
 import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
-import { venueStorageKey, eligibleVenuesFor, resolveVenue, filterToVenue } from './lib/venueSelection';
+import { venueStorageKey, eligibleVenuesFor, resolveVenue } from './lib/venueSelection';
+import { socketVenueScope, scopeListToVenue, inVenueScope } from './lib/socketVenueScope';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
 import { AgencySwitcherSheet } from './components/AgencySwitcherSheet';
 import { MergeAccountsSheet } from './components/MergeAccountsSheet';
@@ -867,6 +868,10 @@ export default function App() {
       const snapshotVenues: Venue[] = msg.type === 'INITIAL_STATE' && Array.isArray(msg.payload?.venues)
         ? (scopeFromServer ? msg.payload.venues : eligibleVenuesFor(currentUser, msg.payload.venues)) : eligibleVenues;
       const filterStaffVenue = currentUser.role !== 'admin' && snapshotVenues.length >= 2;
+      // ADMINVENUE: an admin's socket carries the whole agency; narrow every
+      // task/history/event payload to the venue on screen (as REST does).
+      const venueScope = socketVenueScope(currentUser, currentVenue?.id || (currentUser.role === 'admin' ? currentVenueId : null), filterStaffVenue);
+      const eventScope = currentUser.role === 'admin' ? venueScope : (filterStaffVenue ? currentVenue?.id || null : null);
       if (currentUser.role !== 'admin' && !currentVenue && msg.type !== 'INITIAL_STATE') return;
       // Stage 2 version contract: every broadcast carries the document
       // version that produced it — keep the client's last-known version fresh
@@ -904,10 +909,10 @@ export default function App() {
           }
         }
         if (Array.isArray(msg.payload.tasks))
-          setTasks((filterStaffVenue ? filterToVenue<Task>(msg.payload.tasks, currentVenue?.id) : msg.payload.tasks)
+          setTasks(scopeListToVenue<Task>(msg.payload.tasks, venueScope)
             .filter((t: Task) => canSeeTask(t, currentUser)));
-        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(filterStaffVenue ? filterToVenue(msg.payload.historyLogs, currentVenue?.id) : msg.payload.historyLogs);
-        if (Array.isArray(msg.payload.events)) setEvents(filterStaffVenue ? filterToVenue(msg.payload.events, currentVenue?.id) : msg.payload.events);
+        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
+        if (Array.isArray(msg.payload.events)) setEvents(scopeListToVenue(msg.payload.events, eventScope));
         if (Array.isArray(msg.payload.users)) setKnownUsers(msg.payload.users);
         if (msg.payload.activeWorkersCount !== undefined) {
           setActiveWorkersCount(msg.payload.activeWorkersCount);
@@ -915,7 +920,7 @@ export default function App() {
       } else if (msg.type === 'TASK_UPDATED' && msg.payload) {
         const updated = msg.payload as Task;
         setTasks((prev) =>
-          canSeeTask(updated, currentUser)
+          canSeeTask(updated, currentUser) && inVenueScope(updated, venueScope)
             ? prev.map((t) => (t.id === updated.id ? updated : t))
             : prev.filter((t) => t.id !== updated.id)
         );
@@ -924,7 +929,7 @@ export default function App() {
         }
       } else if (msg.type === 'TASK_CREATED' && msg.payload) {
         const created = msg.payload as Task;
-        if (!canSeeTask(created, currentUser)) return;
+        if (!canSeeTask(created, currentUser) || !inVenueScope(created, venueScope)) return;
         setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
         if (msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
           showToast(`New assignment added: "${created.title}"`);
@@ -933,16 +938,15 @@ export default function App() {
         setTasks((prev) => prev.filter((t) => t.id !== msg.payload.id));
       } else if (msg.type === 'DAILY_RESET' && msg.payload) {
         if (Array.isArray(msg.payload.tasks))
-          setTasks((filterStaffVenue ? filterToVenue<Task>(msg.payload.tasks, currentVenue?.id) : msg.payload.tasks)
+          setTasks(scopeListToVenue<Task>(msg.payload.tasks, venueScope)
             .filter((t: Task) => canSeeTask(t, currentUser)));
-        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(filterStaffVenue ? filterToVenue(msg.payload.historyLogs, currentVenue?.id) : msg.payload.historyLogs);
+        if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
         showToast('Daily board has refreshed for the day! Previous records archived.');
       } else if (msg.type === 'HISTORY_PRUNED' && msg.payload) {
         // 8r: history older than 7 days was removed on the server; replace
         // the list with the server's committed, per-recipient copy.
         if (Array.isArray(msg.payload.historyLogs)) {
-          if (!filterStaffVenue) setHistoryLogs(msg.payload.historyLogs);
-          else setHistoryLogs(filterToVenue(msg.payload.historyLogs, currentVenue?.id));
+          setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
         }
       } else if (msg.type === 'AGENCY_UPDATED' && msg.payload?.agency?.id) {
         // Item 6: the agency zone decides "today" for venues without their own
@@ -978,6 +982,7 @@ export default function App() {
         }
       } else if (msg.type === 'EVENT_CREATED' && msg.payload?.event) {
         const newEvt = msg.payload.event as KosherEvent;
+        if (!inVenueScope(newEvt, eventScope)) return;
         setEvents((prev) => {
           if (prev.some((e) => e.id === newEvt.id)) return prev;
           return [...prev, newEvt];
@@ -994,7 +999,9 @@ export default function App() {
         }
       } else if (msg.type === 'EVENT_UPDATED' && msg.payload?.event) {
         const updatedEvt = msg.payload.event as KosherEvent;
-        setEvents((prev) => prev.map((e) => (e.id === updatedEvt.id ? updatedEvt : e)));
+        setEvents((prev) => (inVenueScope(updatedEvt, eventScope)
+          ? prev.map((e) => (e.id === updatedEvt.id ? updatedEvt : e))
+          : prev.filter((e) => e.id !== updatedEvt.id)));
       } else if (msg.type === 'EVENT_DELETED' && msg.payload?.id) {
         setEvents((prev) => prev.filter((e) => e.id !== msg.payload.id));
       } else if (msg.type === 'DEMO_RESTORED') {
@@ -1004,8 +1011,11 @@ export default function App() {
             setCurrentVenueId(msg.payload.venues[0].id);
           }
         }
-        if (Array.isArray(msg.payload?.tasks)) setTasks(msg.payload.tasks);
-        if (Array.isArray(msg.payload?.events)) setEvents(msg.payload.events);
+        // The restore selects the first venue; a scoped screen shows only its records.
+        const restoredScope = venueScope && msg.payload?.venues?.[0]?.id ? String(msg.payload.venues[0].id) : venueScope;
+        const restoredEventScope = currentUser.role === 'admin' ? restoredScope : eventScope;
+        if (Array.isArray(msg.payload?.tasks)) setTasks(scopeListToVenue<Task>(msg.payload.tasks, restoredScope));
+        if (Array.isArray(msg.payload?.events)) setEvents(scopeListToVenue<KosherEvent>(msg.payload.events, restoredEventScope));
         if (Array.isArray(msg.payload?.users)) setKnownUsers(msg.payload.users);
         setIsDemoCleared(false);
         showToast('Demo facilities and checklists have been restored.');
