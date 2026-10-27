@@ -5583,8 +5583,11 @@ const overdueNotified = new Map<string, number>();
  * may see the task under the existing server rule (canSeeTaskServer: rule-T
  * venue scope + private-task rule), and who are named by it:
  *  - assignedTo includes 'all' (or is empty): the agency's users at the
- *    task's venue + the agency's admins (unless explicitOnly);
- *  - explicit emails: only those resolving to such a user.
+ *    task's venue (personAtVenue), unless explicitOnly. ADMINALL (Don, Oct 27):
+ *    an agency admin is NOT part of a venue's "All" team (admin scope is the
+ *    whole agency, so personAtVenue is false for an admin) and gets a task push
+ *    only when the task names them. Visibility/control are unchanged;
+ *  - explicit emails: only those resolving to such a user (an admin included).
  * Unknown / other-agency / invisible emails are silently omitted; the task's
  * stored assignedTo is never rewritten. De-duplicated by user id.
  */
@@ -5605,7 +5608,7 @@ function taskPushRecipients(task: any, usersList: any[], venuesList: any[], opts
     if ((u.agencyId || 'agency-hkc') !== taskAgency) continue;
     if (!canSeeTaskServer(task, u as any)) continue;
     const named = explicit.has(raw.email.trim().toLowerCase());
-    const inAll = toAll && (u.role === 'admin' || personAtVenue(raw, task.venueId));
+    const inAll = toAll && personAtVenue(raw, task.venueId);
     if (!named && !inAll) continue;
     seen.add(raw.id);
     out.push(u);
@@ -5644,7 +5647,7 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
 
     // Item 8t: recipients are resolved inside the TASK'S agency and must be
     // able to see the task (canSeeTaskServer); delivery is identity-bound.
-    // ('all' = the agency's users at the venue + the agency's admins.)
+    // ('all' = the agency's users at the venue; admins only when named.)
     for (const recipient of taskPushRecipients(task, users, venues)) {
       sendPushToRecipient(
         recipient,
