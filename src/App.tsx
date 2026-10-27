@@ -78,7 +78,7 @@ import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from '
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry, syncCookieSession, isCookieSession } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
-import { forgetSignedInUserForKiosk, isKioskEntryUrl } from './lib/kioskSetup';
+import { forgetSignedInUserForKiosk, isKioskEntryUrl, stripKioskEntryFromUrl } from './lib/kioskSetup';
 import { SITE_REFUSED_EVENT, sharedOriginFor, siteRefusalAction, useSite, type SiteRefusal, type SiteRefusalEvent, homePageAllowed } from './lib/site';
 import { SiteRefusedScreen } from './components/SiteRefusedScreen';
 import { END_DATE_TEXT, dayWords, lastDayOf, nextEndMs, noteServerNow, serverNowMs, venueLeftOwnScope, withOwnScope, withoutEndedVenues, ymdIn, zoneForVenue } from './lib/venueEndDates';
@@ -162,6 +162,8 @@ export default function App() {
         // Every signed-in key (current_user too), so a reload cannot bring the
         // previous person back.
         forgetSignedInUserForKiosk();
+        // A later reload must not enter again (it would sign out staff on the paired kiosk).
+        stripKioskEntryFromUrl();
         return true;
       }
       localStorage.removeItem('kiosk_venue_id');

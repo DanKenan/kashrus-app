@@ -68,12 +68,28 @@ window.location.pathname = '/';
 K.enterKioskSetup();
 check('enterKioskSetup: kiosk flag + ?kiosk=1 on the same address', store.get('kiosk_mode') === '1' && window.location.href === '/?kiosk=1');
 
+// ---- ?kiosk=1 leaves the address once handled ----
+const hist = [];
+window.history = { state: { k: 1 }, replaceState: (s, _t, url) => { hist.push({ s, url }); } };
+window.location.search = '?kiosk=1'; window.location.pathname = '/'; window.location.hash = '';
+K.stripKioskEntryFromUrl();
+check('strip: ?kiosk=1 -> / (history state kept)', hist.length === 1 && hist[0].url === '/' && hist[0].s.k === 1);
+window.location.search = '?a=b&kiosk=1'; window.location.hash = '#x';
+K.stripKioskEntryFromUrl();
+check('strip: other parameters and the hash are kept', hist[1]?.url === '/?a=b#x');
+window.location.search = '?kiosk=0'; K.stripKioskEntryFromUrl(); window.location.search = ''; K.stripKioskEntryFromUrl();
+check('strip: nothing to do for ?kiosk=0 or no parameter', hist.length === 2);
+window.history = { replaceState() { throw new Error('blocked'); } }; window.location.search = '?kiosk=1';
+let threw2 = false; try { K.stripKioskEntryFromUrl(); } catch { threw2 = true; }
+check('strip: a history error does not throw', !threw2);
+window.location.search = ''; window.location.hash = '';
+
 // ---- App: kiosk entry starts signed out, and a kiosk never shows a signed-in person without a device ----
 const app = read('src/App.tsx');
 const cuInit = app.slice(app.indexOf('const [currentUser, setCurrentUser] = useState<User | null>(() => {'), app.indexOf("const [authView, setAuthView]"));
 check('App: currentUser starts null on ?kiosk=1 (before reading current_user)', cuInit.indexOf('if (isKioskEntryUrl(window.location.search)) return null;') > 0 && cuInit.indexOf('isKioskEntryUrl') < cuInit.indexOf("localStorage.getItem('current_user')"));
 const kInit = app.slice(app.indexOf("if (params.get('kiosk') === '1') {"), app.indexOf("return localStorage.getItem('kiosk_mode') === '1';"));
-check('App: ?kiosk=1 ends the server session, then forgets every signed-in key', kInit.indexOf('endSessionForKioskEntry();') > 0 && kInit.indexOf('forgetSignedInUserForKiosk();') > kInit.indexOf('endSessionForKioskEntry();'));
+check('App: ?kiosk=1 ends the server session, then forgets every signed-in key, then leaves the address', kInit.indexOf('endSessionForKioskEntry();') > 0 && kInit.indexOf('forgetSignedInUserForKiosk();') > kInit.indexOf('endSessionForKioskEntry();') && kInit.indexOf('stripKioskEntryFromUrl();') > kInit.indexOf('forgetSignedInUserForKiosk();'));
 check('App: the kiosk init runs before anything else reads current_user at start', app.indexOf("if (params.get('kiosk') === '1') {") < app.indexOf("const saved = typeof window !== 'undefined' ? localStorage.getItem('current_user') : null;"));
 check('App: an unpaired kiosk with a person signs them out quietly', /const kioskUnpairedUser = isKiosk && !kioskDevice && !!currentUser;\s*useEffect\(\(\) => \{\s*if \(!kioskUnpairedUser\) return;\s*quietLogoutRef\.current = true;\s*handleLogout\(\);/.test(app));
 check('App: an unpaired kiosk never renders a signed-in screen, even before that runs', /if \(kioskUnpairedUser\) \{\s*return <div data-kiosk-clearing className="min-h-screen bg-paper" \/>;\s*\}\s*if \(!currentUser\) \{\n    \/\/ Kiosk tablets pair once/.test(app) && app.indexOf('if (kioskUnpairedUser) {') > app.indexOf('const kioskUnpairedUser'));

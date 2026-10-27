@@ -56,3 +56,20 @@ export function forgetSignedInUserForKiosk(): void {
     }
   }
 }
+
+/**
+ * After a kiosk entry is handled, drop ?kiosk=1 from the address so a reload
+ * (or an app update reload) does not enter again and sign out the person who
+ * has since signed in on the paired kiosk. Other parameters are kept.
+ */
+export function stripKioskEntryFromUrl(): void {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('kiosk') !== '1') return;
+    params.delete('kiosk');
+    const q = params.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${q ? `?${q}` : ''}${window.location.hash || ''}`);
+  } catch {
+    // ignore
+  }
+}
