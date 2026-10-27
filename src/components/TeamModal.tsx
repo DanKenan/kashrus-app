@@ -26,6 +26,7 @@ import { normalizePhone } from '../lib/kioskCodeShare';
 import { InviteLinkCard } from './InviteLinkCard';
 import { sendMemberInvite, loadMemberForInvite, inviteChip, SEND_CHANGED_TEXT } from '../lib/inviteActions';
 import { canMakeResetLink, makeResetLink, loadResetRequests, confirmPausedMember, type ResetRequest } from '../lib/resetLinks';
+import { isMyTask } from '../lib/myTasks';
 
 /** Item 10i: what Add member returns when the agency's Phase C is ON (the server made an invite, not a user). */
 export interface AddMemberInvite {
@@ -658,10 +659,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                 const canAssignVal = canUserAssignTasks(user);
                 const isBusy = updatingUserId === user.id;
                 
-                // Count tasks assigned specifically to this user
-                const assignedCount = tasks.filter(
-                  (t) => t.assignedTo.includes('all') || t.assignedTo.includes(user.email)
-                ).length;
+                // Tasks that count as this user's own (an admin's: only those naming them)
+                const assignedCount = tasks.filter((t) => isMyTask(t, user)).length;
 
                 const canSendInvite = isAdminView && !isCurrent && !isPrimaryAdmin;
                 const wasSent = sentIds.includes(user.id) || user.invitePending === true;
