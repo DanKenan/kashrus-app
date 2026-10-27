@@ -952,7 +952,8 @@ export default function App() {
         // 8r: history older than 7 days was removed on the server; replace
         // the list with the server's committed, per-recipient copy.
         if (Array.isArray(msg.payload.historyLogs)) {
-          setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
+          if (!venueScope) setHistoryLogs(msg.payload.historyLogs);
+          else setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
         }
       } else if (msg.type === 'AGENCY_UPDATED' && msg.payload?.agency?.id) {
         // Item 6: the agency zone decides "today" for venues without their own
