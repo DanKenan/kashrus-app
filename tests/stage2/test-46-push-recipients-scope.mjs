@@ -7,8 +7,8 @@
  * pushes went to any listed email; delivery matched subscriptions by email only.
  * Proves (plan "Agreed — ChatGPT — 8t plan v3"), asserting on ENDPOINTS from the
  * test-only push log (recorded before any network send):
- *  O1 overdue 'all' task in A → A's venue users + A's admins only; no B admin, no
- *     other-venue user
+ *  O1 overdue 'all' task in A → A's venue users only (ADMINALL, Oct 27: an agency
+ *     admin is not part of a venue's 'All'); no A or B admin, no other-venue user
  *  O2 overdue explicit [A user, B user, unknown] → the A user only
  *  O3 private task: an assignee who cannot see it (other venue) → nothing;
  *     positive twin → pushed
@@ -128,8 +128,8 @@ export default {
       // O1
       const o1 = await logFor(`Overdue: T46 all ${ts}`);
       checkEndpoints(o1, 'O1');
-      assert(same(recips(o1), want('admina', 'coorda1', 'masha1', 'victim')), `O1 'all' recipients: ${JSON.stringify(recips(o1))}`);
-      assert(!o1.some((e) => e.endpoint === ep('adminb') || e.endpoint === ep('mashb1') || e.endpoint === ep('masha2')), 'O1: no B user and no other-venue user');
+      assert(same(recips(o1), want('coorda1', 'masha1', 'victim')), `O1 'all' recipients: ${JSON.stringify(recips(o1))}`);
+      assert(!o1.some((e) => e.endpoint === ep('admina') || e.endpoint === ep('adminb') || e.endpoint === ep('mashb1') || e.endpoint === ep('masha2')), 'O1: no B user and no other-venue user');
       // O2
       const o2 = await logFor(`Overdue: T46 exp ${ts}`);
       checkEndpoints(o2, 'O2');
@@ -205,6 +205,6 @@ export default {
       const back = await ctx.api('GET', '/api/__test__/push-log');
       assert(back.status === 200, `G: hooks back in test mode: ${back.status}`);
     }
-    return 'test-only hooks 404 outside test mode; task pushes: overdue all → A venue users + A admins only; explicit → in-agency visible assignee only; private invisible → none; create → A assignee only; legacy never used; endpoints = recipient\'s own; delete removes subs in one commit, reborn email never reaches old devices';
+    return 'test-only hooks 404 outside test mode; task pushes: overdue all → A venue users only (no admins); explicit → in-agency visible assignee only; private invisible → none; create → A assignee only; legacy never used; endpoints = recipient\'s own; delete removes subs in one commit, reborn email never reaches old devices';
   },
 };
