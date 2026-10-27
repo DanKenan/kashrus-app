@@ -192,6 +192,9 @@ export default {
     const evBody = (venueId, extra = {}) => ({ title: `T74 event ${Math.random().toString(36).slice(2, 7)}`, location: 'Hall', date: '2031-05-01', venueId, ...extra });
     const create = (k, body) => call(baseUrl, 'POST', '/api/events', tok[k], { ...body, operationId: op() });
     const forbidden = (r, label) => {
+      // MANAGER RV1: xA's stored role 'viewer' is unknown to the server, so it
+      // now gets no session at all (401) — stronger than the old 403.
+      if (/\bxA\b/.test(label) && r.status === 401) return;
       if (r.status !== 403) throw new Error(`${label}: expected 403, got ${r.status} ${JSON.stringify(r.json)}`);
       if (r.json?.code !== undefined && r.json.code !== 'EVENT_FORBIDDEN' && r.json.code !== 'KIOSK_SCOPE') throw new Error(`${label}: code ${r.json.code}`);
     };
@@ -204,7 +207,7 @@ export default {
       for (const [k, v] of [['mA', vA1], ['xA', vA1], ['coA', vA2], ['owA', vA2], ['owA2', vA1], ['adB', vA1]]) {
         const r = await create(k, evBody(v));
         forbidden(r, `B create ${k}@${v}`);
-        if (r.json?.code !== 'EVENT_FORBIDDEN' && k !== 'adB') throw new Error(`B create ${k}: code ${r.json?.code}`);
+        if (r.json?.code !== 'EVENT_FORBIDDEN' && k !== 'adB' && !(k === 'xA' && r.status === 401)) throw new Error(`B create ${k}: code ${r.json?.code}`);
       }
       forbidden(await kCall(kmA.token, 'POST', '/api/events', { ...evBody(vA1), operationId: op() }), 'B create kiosk');
       await unchanged(v0, 'B create refusals');
