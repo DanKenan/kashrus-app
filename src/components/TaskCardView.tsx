@@ -25,6 +25,7 @@ import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, ta
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
+import { TaskInstructions } from './TaskInstructions';
 
 interface TaskCardViewProps {
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
@@ -68,7 +69,6 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
 }) => {
   // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
   const nowMinutes = timeZone ? minutesIn(timeZone) : null;
-  const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
   const [notesState, setNotesState] = useState<Record<string, string>>({});
   // ROUND 5 — write baseline per task, captured when the notes editor OPENS
@@ -116,7 +116,6 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   return (
     <div className="space-y-3.5">
       {tasks.map((task, i) => {
-        const isDescOpen = expandedDesc[task.id];
         const isNotesOpen = expandedNotes[task.id];
         const currentNote = notesState[task.id] !== undefined ? notesState[task.id] : task.notes;
         const canFill = canUserFillTasks(currentUser);
@@ -234,29 +233,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                 )}
               </div>
 
-              {/* Collapsible Instructions */}
-              {task.description && (
-                <div className="mt-1">
-                  {isDescOpen ? (
-                    <div className="text-xs text-ink-soft bg-sunken p-3 rounded-xl mt-1.5 border border-line tactile-1">
-                      <p className="whitespace-pre-line leading-relaxed">{task.description}</p>
-                      <button
-                        onClick={() => setExpandedDesc((prev) => ({ ...prev, [task.id]: false }))}
-                        className="mt-2 text-[11px] font-bold text-gold-deep flex items-center gap-1 cursor-pointer hover:underline"
-                      >
-                        <ChevronUp className="w-3 h-3" /> Hide instructions
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setExpandedDesc((prev) => ({ ...prev, [task.id]: true }))}
-                      className="text-[11px] font-semibold text-ink-faint hover:text-gold-deep flex items-center gap-1 mt-0.5 cursor-pointer"
-                    >
-                      <ChevronDown className="w-3 h-3" /> Inspection Instructions & Halachic Notes
-                    </button>
-                  )}
-                </div>
-              )}
+              {/* Instructions: always shown, in a box that stands out (INSTRBOLD) */}
+              <TaskInstructions text={task.description} />
 
               {/* Mashgiach Assignment & Schedule Meta */}
               <div className="flex items-center justify-between text-xs text-ink-soft mt-3 pt-2.5 border-t border-line/70">
