@@ -6,7 +6,9 @@ import { categoryVars } from '../lib/categoryStyle';
 interface TaskFilterBarProps {
   searchQuery: string;
   onSearchChange: (q: string) => void;
-  selectedCategory: string;
+  /** Picked category chips (AND); empty = All. */
+  selectedCategories: string[];
+  /** 'all' clears every pick; a category toggles on/off. */
   onCategoryChange: (cat: string) => void;
   categories: string[];
   categoryCounts?: Record<string, number>;
@@ -21,7 +23,7 @@ interface TaskFilterBarProps {
 export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
   searchQuery,
   onSearchChange,
-  selectedCategory,
+  selectedCategories,
   onCategoryChange,
   categories,
   categoryCounts,
@@ -34,6 +36,7 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
 }) => {
   const counts: Record<string, number> = categoryCounts ?? {};
   const totalCount = Object.values(counts).reduce((a, b) => a + b, 0);
+  const allActive = selectedCategories.length === 0;
 
   return (
     <div className="max-sm:-order-1 flex flex-col gap-3 mb-5">
@@ -124,12 +127,13 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
           so the opening-shift and closing-shift mashgichim can jump straight
           to their list without wrestling through everything. */}
       {categories.length > 0 && (
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 -mx-1 px-1" role="tablist" aria-label="Filter by category">
+        <div className="flex items-center gap-2 overflow-x-auto pb-1 -mx-1 px-1" role="group" aria-label="Filter by category">
           <motion.button
             whileTap={{ scale: 0.94 }}
             onClick={() => onCategoryChange('all')}
+            aria-pressed={allActive}
             className={`shrink-0 inline-flex items-center gap-1.5 pl-2.5 pr-3 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer ${
-              selectedCategory === 'all'
+              allActive
                 ? 'bg-ink text-paper border-ink tactile-1'
                 : 'bg-surface text-ink-soft border-line hover:border-line-strong tactile-1'
             }`}
@@ -137,25 +141,26 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
             <Layers className="w-3.5 h-3.5" />
             <span>All</span>
             {categoryCounts && (
-              <span className={`tnum text-[10px] font-black px-1.5 py-0.5 rounded-full ${selectedCategory === 'all' ? 'bg-white/20' : 'bg-sunken'}`}>
+              <span className={`tnum text-[10px] font-black px-1.5 py-0.5 rounded-full ${allActive ? 'bg-white/20' : 'bg-sunken'}`}>
                 {totalCount}
               </span>
             )}
           </motion.button>
 
           {categories.map((c) => {
-            const active = selectedCategory === c;
+            const active = selectedCategories.includes(c);
             const count = categoryCounts?.[c];
             return (
               <motion.button
                 key={c}
                 whileTap={{ scale: 0.94 }}
-                onClick={() => onCategoryChange(active ? 'all' : c)}
+                onClick={() => onCategoryChange(c)}
+                aria-pressed={active}
                 style={categoryVars(c)}
                 className={`shrink-0 inline-flex items-center gap-1.5 pl-2 pr-3 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer ${
                   active ? 'cat-chip cat-ring cat-text ring-2 tactile-2' : 'bg-surface text-ink-soft border-line hover:border-line-strong tactile-1'
                 }`}
-                title={active ? `Show all categories` : `Show only ${c}`}
+                title={active ? `Unselect ${c}` : `Filter by ${c}`}
               >
                 <span className="cat-dot w-2.5 h-2.5 rounded-full shrink-0" />
                 <span className="max-w-[140px] truncate">{c}</span>
