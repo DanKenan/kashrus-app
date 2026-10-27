@@ -1,7 +1,7 @@
 import { AgencyLogoSheet } from './components/AgencyLogoSheet';
 import { AgencySettingsSheet } from './components/AgencySettingsSheet';
 import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgencyFields } from './lib/agencyLogo';
-import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, lazy, Suspense } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue } from './lib/venueSelection';
 import { socketVenueScope, scopeListToVenue, inVenueScope } from './lib/socketVenueScope';
@@ -64,6 +64,7 @@ import { AgencyEventsScreen } from './components/AgencyEventsScreen';
 import { SHOW_FACTORY_AUDIT } from './lib/features';
 import { signoffUndoBy, signoffUndoTitle, SIGNOFF_UNDO_TEXT } from './lib/signoffUndo';
 import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
+import { toggleCategory, matchesCategories, pruneCategories } from './lib/categoryFilter';
 import { isMyTask } from './lib/myTasks';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
@@ -374,7 +375,9 @@ export default function App() {
 
   // Filters & View modes
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState('all');
+  // Category chips: several can be picked at once (AND); [] = all categories.
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const changeCategory = useCallback((cat: string) => setSelectedCategories((prev) => toggleCategory(prev, cat)), []);
   const [activeTabFilter, setActiveTabFilter] = useState<'all' | 'mine' | 'pending' | 'completed'>(() => {
     // Mashgichim open straight onto the tasks designated for them
     try {
@@ -1665,6 +1668,11 @@ export default function App() {
     return counts;
   }, [tasks]);
 
+  // A picked category that vanished from the board (e.g. after a venue switch) would hide everything with no chip lit.
+  useEffect(() => {
+    setSelectedCategories((prev) => pruneCategories(prev, categories));
+  }, [categories]);
+
   // Filter tasks
   const filteredTasks = useMemo(() => {
     const nowForToday = new Date();
@@ -1684,8 +1692,8 @@ export default function App() {
         }
       }
 
-      // Category filter — a task shows under any of its categories
-      if (selectedCategory !== 'all' && !taskCategories(task).includes(selectedCategory)) {
+      // Category filter — with several chips picked, a task must carry every one (AND)
+      if (!matchesCategories(task, selectedCategories)) {
         return false;
       }
 
@@ -1712,7 +1720,7 @@ export default function App() {
 
       return true;
     });
-  }, [tasks, searchQuery, selectedCategory, showOnlyTodaySchedule, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
+  }, [tasks, searchQuery, selectedCategories, showOnlyTodaySchedule, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
 
   // Smart board order: urgent first, then the viewer's own assignments,
   // then the manual order (up/down arrows; initialized from target time).
@@ -2671,8 +2679,8 @@ export default function App() {
             myCompleted={myCompleted}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
-            selectedCategory={selectedCategory}
-            onCategoryChange={setSelectedCategory}
+            selectedCategories={selectedCategories}
+            onCategoryChange={changeCategory}
             categories={categories}
             categoryCounts={categoryCounts}
             showOnlyTodaySchedule={showOnlyTodaySchedule}
@@ -2710,8 +2718,8 @@ export default function App() {
           <TaskFilterBar
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
-            selectedCategory={selectedCategory}
-            onCategoryChange={setSelectedCategory}
+            selectedCategories={selectedCategories}
+            onCategoryChange={changeCategory}
             categories={categories}
             categoryCounts={categoryCounts}
             viewMode={viewMode}

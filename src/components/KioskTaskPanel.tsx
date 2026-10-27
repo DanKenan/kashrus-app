@@ -75,7 +75,9 @@ interface KioskTaskPanelProps {
   // The filter bar's controls, kept on the kiosk (restyled to kiosk sizes).
   searchQuery: string;
   onSearchChange: (q: string) => void;
-  selectedCategory: string;
+  /** Picked category chips (AND); empty = All. */
+  selectedCategories: string[];
+  /** 'all' clears every pick; a category toggles on/off. */
   onCategoryChange: (cat: string) => void;
   categories: string[];
   categoryCounts?: Record<string, number>;
@@ -214,7 +216,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   onEndShift,
   searchQuery,
   onSearchChange,
-  selectedCategory,
+  selectedCategories,
   onCategoryChange,
   categories,
   categoryCounts,
@@ -341,14 +343,14 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   // Anything the closed "Find a task" block is narrowing, so nothing is hidden silently.
   const isFiltered =
     searchQuery !== '' ||
-    selectedCategory !== 'all' ||
+    selectedCategories.length > 0 ||
     showOnlyTodaySchedule ||
     activeFilter === 'pending' ||
     activeFilter === 'completed' ||
     view !== 'list';
   const showAll = () => {
     if (searchQuery !== '') onSearchChange('');
-    if (selectedCategory !== 'all') onCategoryChange('all');
+    if (selectedCategories.length > 0) onCategoryChange('all');
     if (showOnlyTodaySchedule) onToggleScheduleFilter();
     if (activeFilter === 'pending' || activeFilter === 'completed') onSelectFilter('all');
     if (view !== 'list') onViewChange('list');
@@ -638,9 +640,9 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                   <div className="flex items-center gap-2 overflow-x-auto pb-1" role="group" aria-label="Filter by category">
                     <button
                       onClick={() => onCategoryChange('all')}
-                      aria-pressed={selectedCategory === 'all'}
+                      aria-pressed={selectedCategories.length === 0}
                       className={`pressable shrink-0 ${btn64} px-4 rounded-full text-base font-semibold border flex items-center gap-2 ${
-                        selectedCategory === 'all' ? 'bg-ink text-paper border-ink' : 'bg-surface text-ink-soft border-line'
+                        selectedCategories.length === 0 ? 'bg-ink text-paper border-ink' : 'bg-surface text-ink-soft border-line'
                       }`}
                     >
                       <Layers className="w-5 h-5" aria-hidden />
@@ -648,15 +650,15 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                       {categoryCounts && <span className="tnum">{totalCount}</span>}
                     </button>
                     {categories.map((c) => {
-                      const active = selectedCategory === c;
+                      const active = selectedCategories.includes(c);
                       const count = categoryCounts?.[c];
                       return (
                         <button
                           key={c}
-                          onClick={() => onCategoryChange(active ? 'all' : c)}
+                          onClick={() => onCategoryChange(c)}
                           aria-pressed={active}
                           style={categoryVars(c)}
-                          title={active ? 'Show all categories' : `Show only ${c}`}
+                          title={active ? `Unselect ${c}` : `Filter by ${c}`}
                           className={`pressable shrink-0 ${btn64} px-4 rounded-full text-base font-semibold border flex items-center gap-2 ${
                             active ? 'cat-chip cat-ring cat-text ring-2' : 'bg-surface text-ink-soft border-line'
                           }`}
