@@ -78,6 +78,7 @@ import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from '
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry, syncCookieSession, isCookieSession } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
+import { forgetSignedInUserForKiosk, isKioskEntryUrl, stripKioskEntryFromUrl } from './lib/kioskSetup';
 import { SITE_REFUSED_EVENT, sharedOriginFor, siteRefusalAction, useSite, type SiteRefusal, type SiteRefusalEvent, homePageAllowed } from './lib/site';
 import { SiteRefusedScreen } from './components/SiteRefusedScreen';
 import { END_DATE_TEXT, dayWords, lastDayOf, nextEndMs, noteServerNow, serverNowMs, venueLeftOwnScope, withOwnScope, withoutEndedVenues, ymdIn, zoneForVenue } from './lib/venueEndDates';
@@ -113,6 +114,10 @@ export default function App() {
   // directly instead of dropping back to the landing page.
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     if (typeof window !== 'undefined') {
+      // Kiosk entry (?kiosk=1) never starts as the person signed in before
+      // (Don, Oct 26: it opened as the admin with End shift). The stored keys
+      // are cleared by the kiosk block below, after the server sign-out.
+      if (isKioskEntryUrl(window.location.search)) return null;
       const saved = localStorage.getItem('current_user');
       if (saved) {
         try {
@@ -154,10 +159,11 @@ export default function App() {
         // 11a-c: the session behind it is ended on the server too (token or
         // cookie), so a sign-in cookie cannot carry the previous user in.
         endSessionForKioskEntry();
-        try {
-          localStorage.removeItem('shutfey_session_token');
-          localStorage.removeItem('shutfey_user');
-        } catch {}
+        // Every signed-in key (current_user too), so a reload cannot bring the
+        // previous person back.
+        forgetSignedInUserForKiosk();
+        // A later reload must not enter again (it would sign out staff on the paired kiosk).
+        stripKioskEntryFromUrl();
         return true;
       }
       localStorage.removeItem('kiosk_venue_id');
@@ -1828,6 +1834,17 @@ export default function App() {
     setKioskNotice(END_DATE_TEXT.kioskEnded);
   };
 
+  // A kiosk with no paired device never shows a signed-in person: only the
+  // pairing screen (Don, Oct 26). Any person still here (a restored session,
+  // an older build's leftovers) is signed out quietly on this device.
+  const kioskUnpairedUser = isKiosk && !kioskDevice && !!currentUser;
+  useEffect(() => {
+    if (!kioskUnpairedUser) return;
+    quietLogoutRef.current = true;
+    handleLogout();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kioskUnpairedUser]);
+
   // 11b-c: the menu entry shows when this account may add one or already has one;
   // the one-time offer follows a password sign-in on a phone that can use Face ID,
   // when none of this person's passkeys works on THIS address (FACEID2).
@@ -2002,6 +2019,11 @@ export default function App() {
 
   // Public screens: the landing home page opens first; auth form on demand.
   // Require authentication to view tasks and shift operations
+  // A kiosk with no paired device and a person still here: a blank frame until the quiet sign-out above runs
+  // (one render), then the pairing screen below. Never a signed-in screen.
+  if (kioskUnpairedUser) {
+    return <div data-kiosk-clearing className="min-h-screen bg-paper" />;
+  }
   if (!currentUser) {
     // Kiosk tablets pair once, then go straight to their venue's PIN screen.
     if (isKiosk) {
@@ -2436,6 +2458,15 @@ export default function App() {
             >
               Sign out
             </button>
+          </div>
+        ) : venues.length === 0 && isKiosk ? (
+          // Never the admin setup screen on a kiosk (Don, Oct 26): one plain line; End shift sits bottom-left.
+          <div data-kiosk-no-venue role="status" className="my-10 p-8 sm:p-10 rounded-3xl bg-surface border border-line tactile-2 text-center max-w-md mx-auto animate-fade-in">
+            <div className="w-14 h-14 rounded-2xl bg-sunken text-ink-soft mx-auto flex items-center justify-center mb-4 border border-line">
+              <Building2 className="w-7 h-7" />
+            </div>
+            <h3 className="text-lg font-bold text-ink">This tablet has no venue right now.</h3>
+            <p className="text-base text-ink-soft mt-2">Ask an admin to pair it again.</p>
           </div>
         ) : venues.length === 0 ? (
           <div className="my-10 p-8 sm:p-10 rounded-3xl bg-surface border border-gold/40 tactile-3 text-center max-w-2xl mx-auto animate-fade-in">

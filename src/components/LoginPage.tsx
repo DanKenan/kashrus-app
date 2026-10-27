@@ -22,7 +22,7 @@ import { LandingBackButton } from './LandingPage';
 import { User as UserType } from '../types';
 import { AgencySignupForm, REGISTERED_SIGN_IN_TEXT } from './AgencySignupForm';
 import { PWAInstallButton } from './PWAInstallButton';
-import { enterKioskSetup } from '../lib/kioskSetup';
+import { enterKioskSetup, isKioskModeOn } from '../lib/kioskSetup';
 import { ForgotPasswordModal } from './ForgotPasswordModal';
 import { apiFetch, setSessionToken } from '../lib/api';
 import { PASSKEY_TEXT, PasskeyError, cancelPasskeyPrompt, clearPasswordSignInMark, markPasswordSignIn, passkeysInBrowser, signInWithPasskey } from '../lib/passkeys';
@@ -588,8 +588,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
           {/* Facility Highlights / System Status */}
           <div className="shf-signin-below mt-5 space-y-3 px-2">
-            {/* Shared address: tablet setup is easy to find here too (not on an agency's own address). */}
-            {!branded && authMode === 'login' && !chooser && (
+            {/* Tablet setup is easy to find here too: the shared address and an agency's own address (Don, Oct 26:
+                the installed app has no address bar for ?kiosk=1). Plain sign-in only, never on a kiosk. */}
+            {authMode === 'login' && !chooser && !needsSetup && !isKioskModeOn() && (
               <button
                 type="button"
                 data-kiosk-setup=""
