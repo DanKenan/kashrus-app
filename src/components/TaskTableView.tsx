@@ -3,7 +3,6 @@ import { minutesIn } from '../lib/workday';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ChevronDown,
-  ChevronRight,
   ArrowRight,
   ChevronUp,
   Clock,
@@ -24,6 +23,7 @@ import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, ta
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
+import { TaskInstructions } from './TaskInstructions';
 
 interface TaskTableViewProps {
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
@@ -67,17 +67,12 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 }) => {
   // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
   const nowMinutes = timeZone ? minutesIn(timeZone) : null;
-  const [expandedDescriptions, setExpandedDescriptions] = useState<Record<string, boolean>>({});
   const [editingNotes, setEditingNotes] = useState<Record<string, string>>({});
   // ROUND 5 — write baseline per task, captured when the user FOCUSES the
   // notes field (the inline editor's "open" moment). The save carries the
   // version the notes were rendered from, not a later WebSocket update.
   const [notesBaseline, setNotesBaseline] = useState<Record<string, number | undefined>>({});
   const [saveIndicator, setSaveIndicator] = useState<Record<string, boolean>>({});
-
-  const toggleExpand = (id: string) => {
-    setExpandedDescriptions((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
 
   const handleNoteChange = (taskId: string, value: string) => {
     setEditingNotes((prev) => ({ ...prev, [taskId]: value }));
@@ -168,7 +163,6 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
           </thead>
           <tbody className="divide-y divide-line/60 text-xs text-ink-soft">
             {tasks.map((task, i) => {
-              const isExpanded = expandedDescriptions[task.id];
               const noteValue = editingNotes[task.id] !== undefined ? editingNotes[task.id] : task.notes;
               const isSaved = saveIndicator[task.id];
               const canFill = canUserFillTasks(currentUser);
@@ -234,28 +228,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                         </div>
                       </div>
 
-                      {task.description && (
-                        <div className="mt-1">
-                          {isExpanded ? (
-                            <div className="text-xs text-ink-soft bg-sunken p-2.5 rounded-xl border border-line mt-1 tactile-1">
-                              <p className="whitespace-pre-line leading-relaxed">{task.description}</p>
-                              <button
-                                onClick={() => toggleExpand(task.id)}
-                                className="mt-1.5 text-[10px] font-bold text-gold-deep hover:underline flex items-center gap-0.5 cursor-pointer"
-                              >
-                                <ChevronDown className="w-3 h-3" /> Hide instructions
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => toggleExpand(task.id)}
-                              className="text-[11px] text-ink-faint hover:text-gold-deep flex items-center gap-1 font-semibold transition cursor-pointer"
-                            >
-                              <ChevronRight className="w-3 h-3" /> View instructions
-                            </button>
-                          )}
-                        </div>
-                      )}
+                      <TaskInstructions text={task.description} />
                     </div>
                   </td>
 
