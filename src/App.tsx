@@ -4,6 +4,7 @@ import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgen
 import React, { useState, useEffect, useMemo, useRef, useCallback, lazy, Suspense } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue } from './lib/venueSelection';
+import { defaultScreen, forgetSavedScreens, readSavedScreen, saveScreen, sheetAllowed, type SavedScreen } from './lib/screenMemory';
 import { socketVenueScope, scopeListToVenue, inVenueScope } from './lib/socketVenueScope';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
 import { AgencySwitcherSheet } from './components/AgencySwitcherSheet';
@@ -166,6 +167,7 @@ export default function App() {
         // Every signed-in key (current_user too), so a reload cannot bring the
         // previous person back.
         forgetSignedInUserForKiosk();
+        forgetSavedScreens();
         // A later reload must not enter again (it would sign out staff on the paired kiosk).
         stripKioskEntryFromUrl();
         return true;
@@ -187,7 +189,9 @@ export default function App() {
     }
   });
   const isKiosk = kioskMode;
-  const [adminHome, setAdminHome] = useState(() => !isKiosk && currentUser?.role === 'admin');
+  // Don 2026-10-27: a refresh puts back the main screen the person was on (lib/screenMemory.ts). Never on the kiosk.
+  const [restoredScreen] = useState<SavedScreen>(() => (isKiosk ? defaultScreen(null) : readSavedScreen(currentUser)));
+  const [adminHome, setAdminHome] = useState(() => !isKiosk && currentUser?.role === 'admin' && restoredScreen.view === 'home');
   const [adminHomeReloadKey, setAdminHomeReloadKey] = useState(0);
   const leaveHomeThen = (fn: () => void) => () => {
     if (adminHome) {
@@ -369,7 +373,7 @@ export default function App() {
   // QA2 #27: admin agency settings sheet (name, phone, time zone).
   const [isAgencySettingsOpen, setIsAgencySettingsOpen] = useState(false);
   const [isVenueSwitcherOpen, setIsVenueSwitcherOpen] = useState(false);
-  const [isVenuesDirectoryOpen, setIsVenuesDirectoryOpen] = useState(false);
+  const [isVenuesDirectoryOpen, setIsVenuesDirectoryOpen] = useState(restoredScreen.sheet === 'venues');
   const [isCreateVenueOpen, setIsCreateVenueOpen] = useState(false);
   const [isDemoCleared, setIsDemoCleared] = useState(false);
 
@@ -408,7 +412,7 @@ export default function App() {
   // 12a-c (RV2): the venue the task editor was opened for (the task's own
   // venue, else the venue on screen when a new task was started).
   const [taskEditorVenueId, setTaskEditorVenueId] = useState<string | null>(null);
-  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(restoredScreen.sheet === 'history');
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   // 11b-c: Face ID / passkeys.
   const [isPasskeysOpen, setIsPasskeysOpen] = useState(false);
@@ -448,7 +452,7 @@ export default function App() {
     });
     return () => { active = false; };
   }, [isKiosk, currentUserRowId]);
-  const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
+  const [isTeamModalOpen, setIsTeamModalOpen] = useState(restoredScreen.sheet === 'team');
   // 12b-c: owners open the Pool from their menu (admins/coordinators use the Team tab).
   const [isPoolOpen, setIsPoolOpen] = useState(false);
   // Item 10i: Phase C (invite-only adds) for the admin's own agency, as the
@@ -532,7 +536,7 @@ export default function App() {
     evs.forEach((e) => window.addEventListener(e, arm, { passive: true }));
     return () => { clearTimeout(timer); evs.forEach((e) => window.removeEventListener(e, arm)); };
   }, [isKiosk, !!currentUser, kioskSignIn, kqrOnServer]);
-  const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
+  const [isEventsModalOpen, setIsEventsModalOpen] = useState(restoredScreen.sheet === 'events');
   const [isCreateEventModalOpen, setIsCreateEventModalOpen] = useState(false);
   // Item 7: the event being copied (dialog open while set) and the new copy to select.
   const [copySourceEvent, setCopySourceEvent] = useState<KosherEvent | null>(null);
@@ -541,6 +545,22 @@ export default function App() {
   const [isFactoryAuditOpen, setIsFactoryAuditOpen] = useState(false);
   // Don 2026-10-22: the admin's agency-wide Events screen (from the dashboard).
   const [isAgencyEventsOpen, setIsAgencyEventsOpen] = useState(false);
+
+  // Remember the main screen for a refresh (lib/screenMemory.ts): base view + main sheet only.
+  const screenView = currentUser?.role === 'admin' && adminHome ? 'home' : 'board';
+  const screenSheet = isVenuesDirectoryOpen ? 'venues' : isTeamModalOpen ? 'team' : isHistoryModalOpen ? 'history' : isEventsModalOpen ? 'events' : null;
+  useEffect(() => {
+    if (isKiosk || !currentUser) return;
+    saveScreen(currentUser, { view: screenView, sheet: screenSheet });
+  }, [isKiosk, currentUser, screenView, screenSheet]);
+  // Fail closed: a sheet the (refreshed) role cannot see never stays open.
+  useEffect(() => {
+    if (isKiosk || !screenSheet || sheetAllowed(currentUser, screenSheet)) return;
+    if (screenSheet === 'venues') setIsVenuesDirectoryOpen(false);
+    else if (screenSheet === 'team') setIsTeamModalOpen(false);
+    else if (screenSheet === 'history') setIsHistoryModalOpen(false);
+    else setIsEventsModalOpen(false);
+  }, [isKiosk, currentUser, screenSheet]);
   const [agencyEventsReload, setAgencyEventsReload] = useState(0);
   const [createEventVenueId, setCreateEventVenueId] = useState<string | null>(null);
 
@@ -1838,6 +1858,7 @@ export default function App() {
     if (typeof window !== 'undefined') {
       localStorage.removeItem('current_user');
       localStorage.removeItem('selected_venue_id');
+      forgetSavedScreens();
     }
     clearSession();
     realtimeSocket.disconnect();
