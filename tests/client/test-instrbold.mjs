@@ -7,6 +7,7 @@ import { TaskCardView } from '../../src/components/TaskCardView.tsx';
 import { TaskTableView } from '../../src/components/TaskTableView.tsx';
 let passed = 0, failures = 0;
 const ok = (n, c, d = '') => { if (c) { passed++; console.log('PASS ' + n); } else { failures++; console.log('FAIL ' + n + (d ? ' :: ' + String(d).slice(0, 400) : '')); } };
+const rd = (f) => fs.readFileSync(new URL('../../' + f, import.meta.url), 'utf8');
 const h = React.createElement;
 // Dynamic import so the board-view checks still run (and fail) on main, where the box does not exist yet.
 let TaskInstructions = () => null, INSTRUCTIONS_HEADING = '', isLongInstructions = () => false;
@@ -34,6 +35,8 @@ ok('undefined / null -> nothing', html(h(TaskInstructions, {})) === '' && html(h
 const longText = 'Step one. '.repeat(30);
 const lbox = html(h(TaskInstructions, { text: longText }));
 ok('long notes: clamped to 4 lines with a "Show all" button (aria-expanded=false)', isLongInstructions(longText) && /line-clamp-4/.test(lbox) && /aria-expanded="false"[^>]*>[\s\S]*Show all/.test(lbox), lbox.slice(0, 600));
+ok('boundary: 180 characters is short, 181 is long', !isLongInstructions('x'.repeat(180)) && isLongInstructions('x'.repeat(181)));
+ok('spacing on the 4 px grid (SPEC 3: no new half-steps)', !/\b(?:p|px|py|pt|pb|m|mt|mb|gap)-\d\.5\b/.test(rd('src/components/TaskInstructions.tsx')));
 ok('many lines count as long', isLongInstructions('a\nb\nc\nd\ne') && !isLongInstructions('a\nb\nc\nd'));
 
 // On the real board views
@@ -55,7 +58,6 @@ for (const [name, View] of [['card view (phone)', TaskCardView], ['table view (d
   ok(`${name}: the notes are visible without a tap`, out.includes('Mashgiach lights the pilot; Pas Yisroel.'));
   ok(`${name}: the old small toggle is gone`, !/View instructions|Hide instructions/.test(out));
 }
-const rd = (f) => fs.readFileSync(new URL('../../' + f, import.meta.url), 'utf8');
 ok('both board views use the shared box', ['src/components/TaskCardView.tsx', 'src/components/TaskTableView.tsx'].every((f) => rd(f).includes('<TaskInstructions text={task.description} />')));
 
 console.log(`\n${passed} passed, ${failures} failed`);

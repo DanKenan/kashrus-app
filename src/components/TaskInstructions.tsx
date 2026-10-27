@@ -22,9 +22,9 @@ export const TaskInstructions: React.FC<TaskInstructionsProps> = ({ text }) => {
     <section
       data-task-instructions
       aria-label={INSTRUCTIONS_HEADING}
-      className="mt-2 rounded-lg bg-sunken border border-line border-l-4 border-l-ink px-3 py-2.5"
+      className="mt-2 rounded-lg bg-sunken border border-line border-l-4 border-l-ink p-3"
     >
-      <h4 className="flex items-center gap-1.5 text-xs font-bold text-ink">
+      <h4 className="flex items-center gap-2 text-xs font-bold text-ink">
         <ScrollText className="w-4 h-4 shrink-0" aria-hidden />
         <span>{INSTRUCTIONS_HEADING}</span>
       </h4>
@@ -39,7 +39,7 @@ export const TaskInstructions: React.FC<TaskInstructionsProps> = ({ text }) => {
           type="button"
           aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
-          className="pressable mt-0.5 min-h-11 inline-flex items-center gap-1 text-xs font-semibold text-ink-soft hover:text-ink cursor-pointer"
+          className="pressable mt-1 min-h-11 inline-flex items-center gap-1 text-xs font-semibold text-ink-soft hover:text-ink cursor-pointer"
         >
           {open ? <ChevronUp className="w-4 h-4" aria-hidden /> : <ChevronDown className="w-4 h-4" aria-hidden />}
           {open ? 'Show less' : 'Show all'}
