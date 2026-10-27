@@ -19,7 +19,7 @@ export function credentialMayLink(origin: unknown): boolean {
 // server.ts. Tokens: 32 random bytes (base64url), only the sha256 is stored.
 // ---------------------------------------------------------------------------
 
-export const INVITE_ROLES = ['admin', 'coordinator', 'mashgiach'] as const;
+export const INVITE_ROLES = ['admin', 'coordinator', 'mashgiach', 'manager'] as const;
 export type InviteRole = (typeof INVITE_ROLES)[number];
 export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const INVITE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -84,6 +84,9 @@ export function parseInviteInput(body: any, agencyVenueIds: readonly string[]): 
     if (typeof v !== 'string' || !allowed.has(v)) return venueError;
     if (!out.includes(v)) out.push(v);
   }
+  // Manager (Don 2026-10-27, "same style as the owner"): exactly ONE venue,
+  // like an owner. A manager is never multi-venue through an invite.
+  if (role === 'manager' && out.length !== 1) return { ok: false, error: 'A manager belongs to exactly one venue.', code: 'INVITE_VENUES_INVALID' };
   return { ok: true, value: { email, role: role as InviteRole, venueIds: out } };
 }
 

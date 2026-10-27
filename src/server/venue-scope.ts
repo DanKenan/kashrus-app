@@ -68,6 +68,10 @@ export function venueScope(user: ScopeUser | null | undefined, venues: readonly 
   let home = !homeless && typeof user.venueId === 'string' && user.venueId ? user.venueId : null;
   if (home && !valid.has(home) && (venues || []).some((v) => v && v.id === home)) home = null;
   const out = home ? [home] : [];
+  // MANAGER (Don 2026-10-27, RV1): a manager's scope is their home venue ONLY.
+  // Extra-venue grants (venueAccess) never widen it, even ones kept from before
+  // a promotion to manager (fail closed, reads and writes alike).
+  if (user.role === 'manager') return out;
   if (!user.personId || !Array.isArray(user.venueAccess)) return out;
   // A stored list is written home-first for the home it was granted under
   // (identity.ts). A list whose head is not the current home is stale (written
@@ -96,6 +100,7 @@ export function venueScope(user: ScopeUser | null | undefined, venues: readonly 
  *   admin       -> any such venue;
  *   coordinator -> a venue in their scope (home + server-granted venueAccess);
  *   owner       -> their own home venue only (venueAccess never widens it);
+ *   manager     -> exactly like owner (Don 2026-10-27: "same style as the owner");
  *   anyone else (mashgiach, worker, unknown or missing role) -> false.
  * Callers pass the CURRENT venues (fresh venues inside a commit).
  */
@@ -107,7 +112,7 @@ export function mayManageEventAt(user: ScopeUser | null | undefined, venueId: un
     const scope = venueScope(user, venues, opts);
     return scope !== 'agency' && scope.includes(venueId);
   }
-  if (user.role === 'owner') return typeof user.venueId === 'string' && user.venueId === venueId;
+  if (user.role === 'owner' || user.role === 'manager') return typeof user.venueId === 'string' && user.venueId === venueId;
   return false;
 }
 

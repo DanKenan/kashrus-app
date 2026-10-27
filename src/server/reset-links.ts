@@ -14,9 +14,9 @@ export const RESET_LINK_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const RESET_LINK_CEILING = 1000;
 export const RESET_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 /** Roles a reset link can be made for (never an admin). 'worker' is the legacy name of mashgiach. */
-export const RESET_LINK_TARGET_ROLES = ['coordinator', 'mashgiach', 'owner', 'worker'] as const;
+export const RESET_LINK_TARGET_ROLES = ['coordinator', 'mashgiach', 'owner', 'manager', 'worker'] as const;
 /** Roles a coordinator may make a link for (never an admin or another coordinator). */
-export const RESET_LINK_COORDINATOR_TARGET_ROLES = ['mashgiach', 'owner', 'worker'] as const;
+export const RESET_LINK_COORDINATOR_TARGET_ROLES = ['mashgiach', 'owner', 'manager', 'worker'] as const;
 
 export const RESET_LINK_INVALID_TEXT = 'This link has expired or was already used.';
 
@@ -133,8 +133,8 @@ function existingVenuesOf(row: any, venues: readonly VenueLite[], agencyId: stri
 /**
  * P1 ([DS1 B2], [DS1 N1]; Don 2026-10-22): who may make a reset link for whom.
  * - Never for an admin, a primary admin or the platform operator, whoever asks.
- * - An admin: any coordinator / mashgiach / owner of their own agency.
- * - A coordinator: a mashgiach / owner of their own agency whose existing
+ * - An admin: any coordinator / mashgiach / owner / manager of their own agency.
+ * - A coordinator: a mashgiach / owner / manager of their own agency whose existing
  *   venues meet the coordinator's own existing venues (rule T, same data).
  *   A dangling venue id, another agency's venue or no venue grants nothing.
  * - Everyone else: never. Fail closed on anything missing.
