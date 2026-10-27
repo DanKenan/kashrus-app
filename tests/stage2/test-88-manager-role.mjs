@@ -26,6 +26,20 @@ const auth = (token) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'ap
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
 const J = JSON.stringify;
 
+function connectWs(baseUrl, token) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(baseUrl.replace(/^http/, 'ws') + `/ws?token=${token}`);
+    const messages = [];
+    const timer = setTimeout(() => reject(new Error('WS connect timeout')), 10000);
+    ws.onmessage = (e) => {
+      try { messages.push(JSON.parse(String(e.data))); } catch {}
+      if (messages.some((m) => m.type === 'INITIAL_STATE')) { clearTimeout(timer); resolve({ ws, messages }); }
+    };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error('WS error')); };
+    ws.onclose = (e) => { clearTimeout(timer); if (!messages.some((m) => m.type === 'INITIAL_STATE')) reject(new Error(`WS closed before INITIAL_STATE (code ${e.code})`)); };
+  });
+}
+
 async function mintToken(baseUrl, userId) {
   const res = await fetch(`${baseUrl}/api/__test__/mint-token`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId }),
@@ -55,6 +69,8 @@ export default {
       { id: id('masha2'), email: em('masha2'), name: 'T88 Mash A2', role: 'mashgiach', agencyId: A, venueId: vA2 },
       { id: id('mashg'), email: em('mashg'), name: 'T88 Mash A1 with A2 access', role: 'mashgiach', agencyId: A, venueId: vA1 },
       { id: id('coorda'), email: em('coorda'), name: 'T88 Coord A1', role: 'coordinator', agencyId: A, venueId: vA1 },
+      { id: id('mashi'), email: em('mashi'), name: 'T88 Mash A1 assigned at A2', role: 'mashgiach', agencyId: A, venueId: vA1 },
+      { id: id('mashj'), email: em('mashj'), name: 'T88 Mash A1 assigned at A2 (control)', role: 'mashgiach', agencyId: A, venueId: vA1 },
       { id: id('unkr'), email: em('unkr'), name: 'T88 Unknown Role A1', role: 'supervisor', agencyId: A, venueId: vA1 },
       { id: id('adminb'), email: em('adminb'), name: 'T88 Admin B', role: 'admin', agencyId: B },
       { id: id('ownerb'), email: em('ownerb'), name: 'T88 Owner B1', role: 'owner', agencyId: B, venueId: vB1 },
@@ -68,7 +84,9 @@ export default {
         { id: vB1, name: `T88 B1 ${ts}`, agencyId: B },
       ],
       users: people,
-      events: [ev('a1', A, vA1), ev('a2', A, vA2), ev('b1', B, vB1)],
+      events: [ev('a1', A, vA1), ev('a2', A, vA2), ev('b1', B, vB1),
+        { ...ev('i', A, vA2), mashgiachType: 'assigned_user', assignedMashgiachEmail: em('mashi') },
+        { ...ev('j', A, vA2), mashgiachType: 'assigned_user', assignedMashgiachEmail: em('mashj') }],
     });
     assert(inj.status === 200, `inject-fixture: ${inj.status} ${J(inj.json)}`);
     const tok = {};
@@ -279,13 +297,39 @@ export default {
       const stored = await row(id('unkr'));
       assert(stored && stored.role === 'supervisor', `H0 fixture row keeps its stored role: ${J(stored && stored.role)}`);
       const sess = await fetch(`${baseUrl}/api/__test__/mint-token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: J({ userId: id('unkr'), session: true }) });
-      assert(sess.status === 403, `H1 unknown role: no session is issued: ${sess.status}`);
+      const sessJ = await sess.json().catch(() => null);
+      assert(sess.status === 403 && sessJ?.code === 'ROLE_UNKNOWN', `H1 unknown role: no session is issued (ROLE_UNKNOWN): ${sess.status} ${J(sessJ)}`);
       const tu = auth(await mintToken(baseUrl, id('unkr'))); // a bare signed token (as if issued before)
       for (const path of ['/api/events', `/api/events?venueId=${vA1}`, '/api/users', '/api/auth/me']) {
         const r = await call(tu, 'GET', path);
         assert(r.status === 401 || r.status === 403, `H2 unknown role GET ${path}: ${r.status} ${r.text.slice(0, 160)}`);
         assert(!r.text.includes('ev-t88-') && !r.text.includes(vA1) && !r.text.includes(vA2), `H2 unknown role GET ${path}: zero event/venue bytes`);
       }
+    }
+
+    // ---- I (RV2): a promoted manager gets no live data of another venue's event they were assigned to ----
+    {
+      const up = await putRole('ownera', id('mashi'), { role: 'manager' });
+      assert(up.status === 200, `I1 owner promotes the A2 assignee: ${up.status} ${up.text}`);
+      const tmTok = await mintToken(baseUrl, id('mashi'));
+      const tjTok = await mintToken(baseUrl, id('mashj'));
+      const cm = await connectWs(baseUrl, tmTok);
+      const cj = await connectWs(baseUrl, tjTok);
+      try {
+        const initM = JSON.stringify(cm.messages.find((m) => m.type === 'INITIAL_STATE'));
+        assert(!initM.includes(`ev-t88-i-${ts}`) && !initM.includes(vA2), 'I2 the manager\'s INITIAL_STATE has no A2 event / venue bytes');
+        const initJ = JSON.stringify(cj.messages.find((m) => m.type === 'INITIAL_STATE'));
+        assert(initJ.includes(`ev-t88-j-${ts}`), 'I2 control: the mashgiach assignee sees their A2 event (the exception still works for mashgichim)');
+        const nM = cm.messages.length, nJ = cj.messages.length;
+        for (const k of ['i', 'j']) {
+          const del = await call('admina', 'DELETE', `/api/events/ev-t88-${k}-${ts}`, { expectedVersion: await ctx.getVersion(), operationId: `op88i-${k}-${ts}` });
+          assert(del.status === 200 || del.status === 204, `I3 admin deletes A2 event ${k}: ${del.status} ${del.text}`);
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+        assert(cj.messages.slice(nJ).some((m) => m.type === 'EVENT_DELETED' && J(m).includes(`ev-t88-j-${ts}`)), 'I4 control: the mashgiach assignee receives EVENT_DELETED for their A2 event');
+        const after = J(cm.messages.slice(nM));
+        assert(!after.includes(`ev-t88-i-${ts}`) && !after.includes(`ev-t88-j-${ts}`) && !after.includes(vA2) && !after.includes(em('mashi')), `I5 the promoted manager receives ZERO bytes of the A2 deletes: ${after.slice(0, 300)}`);
+      } finally { try { cm.ws.close(); } catch {} try { cj.ws.close(); } catch {} }
     }
 
     // ---- F: other agencies ----

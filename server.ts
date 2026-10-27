@@ -1781,9 +1781,11 @@ function sessionIneligibleCode(row: any): 'VENUE_REMOVED' | 'RESET_CONFIRM_NEEDE
 }
 const RESET_CONFIRM_NEEDED = { error: "Your access to this agency is paused after a password reset. Ask that agency's admin to confirm it.", code: 'RESET_CONFIRM_NEEDED' };
 const RESET_CONFIRM_NEEDED_AFTER_PASSWORD = { error: "Your password was changed, but your access to this agency is paused after a password reset. Ask that agency's admin to confirm it.", code: 'RESET_CONFIRM_NEEDED' };
+const ROLE_UNKNOWN_BODY = { error: 'Your account role is not recognised. Ask your agency admin to set your role.', code: 'ROLE_UNKNOWN' };
 /** The 403 body for a membership that may not get a session (fail closed: unknown -> VENUE_REMOVED wording). */
 function ineligibleBody(row: any, afterPassword = false): { error: string; code: string } {
   if (sessionIneligibleCode(row) === 'RESET_CONFIRM_NEEDED') return afterPassword ? RESET_CONFIRM_NEEDED_AFTER_PASSWORD : RESET_CONFIRM_NEEDED;
+  if (sessionIneligibleCode(row) === 'ROLE_UNKNOWN') return ROLE_UNKNOWN_BODY;
   return afterPassword ? VENUE_REMOVED_AFTER_PASSWORD : VENUE_REMOVED;
 }
 
@@ -1872,6 +1874,12 @@ function hasCurrentScope(user: UserProfile | null | undefined): boolean {
  * True when the recipient is the email named by an EVENT payload as the
  * event's assigned mashgiach (current or previous assignee).
  */
+/** The assigned-mashgiach exception (another venue's event) applies only to a
+ * mashgiach/worker with a current scope (12a-s); never to a manager or owner. */
+function assigneeExceptionRole(recipient: any): boolean {
+  return !!recipient && (recipient.role === 'mashgiach' || recipient.role === 'worker') && hasCurrentScope(recipient);
+}
+
 function eventAssigneeIs(recipient: any, email: any): boolean {
   return typeof email === 'string' && !!email &&
     (email || '').toLowerCase() === (recipient?.email || '').toLowerCase();
@@ -1883,7 +1891,7 @@ function mayFillEventTasks(user: UserProfile | null | undefined, event: any): bo
   if ((user as any).role === 'coordinator' && callerMaySeeVenue(user, (event as any)?.venueId)) return true;
   return canFillTasks(user) && (
     callerMaySeeVenue(user, (event as any)?.venueId) ||
-    (hasCurrentScope(user) && ((event as any)?.assignedMashgiachEmail || '').toLowerCase() === (user as any).email.toLowerCase())
+    (assigneeExceptionRole(user) && ((event as any)?.assignedMashgiachEmail || '').toLowerCase() === (user as any).email.toLowerCase())
   );
 }
 
@@ -6015,8 +6023,11 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
       // The event's assigned mashgiach (or the previous assignee after a
       // reassignment) must see the delete so their client drops the event —
       // same transition mechanism as private tasks.
-      if (eventAssigneeIs(recipient, p.assignedMashgiachEmail) ||
-          eventAssigneeIs(recipient, p.previousAssignee)) return payload;
+      // MANAGER RV2: the same exception as canSeeEventServer — only a
+      // mashgiach/worker with a current scope (never a manager/owner, whose
+      // scope is their home venue only).
+      if (assigneeExceptionRole(recipient) && (eventAssigneeIs(recipient, p.assignedMashgiachEmail) ||
+          eventAssigneeIs(recipient, p.previousAssignee))) return payload;
       return null;
     }
     case 'INGREDIENT_VERIFIED':
