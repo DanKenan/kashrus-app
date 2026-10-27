@@ -32,7 +32,7 @@ const otherAgencyAdmin = { id: 'u-admin', role: 'admin', agencyId: 'ag-2' };
 const S = (view, sheet = null) => ({ view, sheet });
 
 if (mod) {
-  const { screenFromStored, defaultScreen, readSavedScreen, saveScreen, forgetSavedScreens, sheetAllowed, screenStorageKey } = mod;
+  const { screenFromStored, defaultScreen, readSavedScreen, saveScreen, forgetSavedScreens, sheetAllowed, screenStorageKey, isRestrictedSheet, restoreConfirmed } = mod;
   const J = (o) => JSON.stringify(o);
 
   // Defaults (today's landing)
@@ -65,6 +65,28 @@ if (mod) {
   check('nothing stored -> admin home', screenFromStored(admin, null), S('home'));
   check('no user -> board', screenFromStored(null, J(S('board', 'team'))), S('board'));
   check('sheetAllowed no user', sheetAllowed(null, 'history'), false);
+  // The admin's agency-wide Events screen (from the dashboard)
+  check('admin home+agency events restored', screenFromStored(admin, J(S('home', 'agency-events'))), S('home', 'agency-events'));
+  check('coordinator agency events -> board', screenFromStored(coord, J(S('board', 'agency-events'))), S('board'));
+  check('mashgiach agency events -> board', screenFromStored(mash, J(S('board', 'agency-events'))), S('board'));
+
+  // Restricted sheets wait for the server's word on the role (stale cached role)
+  check('Team is restricted', isRestrictedSheet('team'), true);
+  check('Venues is restricted', isRestrictedSheet('venues'), true);
+  check('agency Events is restricted', isRestrictedSheet('agency-events'), true);
+  check('History is not restricted', isRestrictedSheet('history'), false);
+  check('Events is not restricted', isRestrictedSheet('events'), false);
+  check('server confirms admin -> Team reopens', restoreConfirmed(admin, { user: { id: 'u-admin', role: 'admin' } }, 'team'), true);
+  check('server confirms admin -> Venues reopens', restoreConfirmed(admin, { user: { id: 'u-admin', role: 'admin' } }, 'venues'), true);
+  check('server confirms coordinator -> Team reopens', restoreConfirmed(coord, { user: { id: 'u-coord', role: 'coordinator' } }, 'team'), true);
+  check('cached admin, server says mashgiach -> no Team', restoreConfirmed(admin, { user: { id: 'u-admin', role: 'mashgiach' } }, 'team'), false);
+  check('cached admin, server says coordinator -> no Venues', restoreConfirmed(admin, { user: { id: 'u-admin', role: 'coordinator' } }, 'venues'), false);
+  check('cached admin, server says coordinator -> no agency Events', restoreConfirmed(admin, { user: { id: 'u-admin', role: 'coordinator' } }, 'agency-events'), false);
+  check('server names another person -> no Team', restoreConfirmed(admin, { user: { id: 'u-other', role: 'admin' } }, 'team'), false);
+  check('server answers as a kiosk -> no Team', restoreConfirmed(admin, { user: { id: 'u-admin', role: 'admin' }, kiosk: { venueId: 'v' } }, 'team'), false);
+  check('no answer (401/offline) -> no Team', restoreConfirmed(admin, null, 'team'), false);
+  check('answer without a role -> no Team', restoreConfirmed(admin, { user: { id: 'u-admin' } }, 'team'), false);
+  check('no cached user -> no Team', restoreConfirmed(null, { user: { id: 'u-admin', role: 'admin' } }, 'team'), false);
 
   // Storage: per tab (sessionStorage), per agency + user
   check('nothing remembered yet', readSavedScreen(admin), S('home'));
@@ -95,9 +117,16 @@ const app = readFileSync(new URL('../../src/App.tsx', import.meta.url), 'utf8');
 const has = (label, re) => check(label, re.test(app), true);
 has('App reads the saved screen, kiosk excluded', /useState<SavedScreen>\(\(\) => \(isKiosk \? defaultScreen\(null\) : readSavedScreen\(currentUser\)\)\)/);
 has('admin home follows the saved view', /useState\(\(\) => !isKiosk && currentUser\?\.role === 'admin' && restoredScreen\.view === 'home'\)/);
-for (const [name, sheet] of [['VenuesDirectory', 'venues'], ['HistoryModal', 'history'], ['TeamModal', 'team'], ['EventsModal', 'events']]) {
-  has(`${name} opens from the saved sheet`, new RegExp(`\\[is${name}Open, setIs${name}Open\\] = useState\\(restoredScreen\\.sheet === '${sheet}'\\)`));
+for (const [name, sheet] of [['HistoryModal', 'history'], ['EventsModal', 'events']]) {
+  has(`${name} opens at once from the saved sheet`, new RegExp(`\\[is${name}Open, setIs${name}Open\\] = useState\\(restoredScreen\\.sheet === '${sheet}'\\)`));
 }
+for (const name of ['VenuesDirectory', 'TeamModal', 'AgencyEvents']) {
+  has(`${name} never opens from the cached role at load`, new RegExp(`\\[is${name}Open, setIs${name}Open\\] = useState\\(false\\)`));
+}
+has('restricted sheets reopen only after the server confirms (GET /api/auth/me)', /isRestrictedSheet\(sheet\)\) return;[\s\S]{0,120}apiFetch\('\/api\/auth\/me'[\s\S]{0,200}restoreConfirmed\(cached, me, sheet\)/);
+has('Team renders only for a role that may see it', /isOpen=\{isTeamModalOpen && sheetAllowed\(currentUser, 'team'\)\}/);
+has('Venues renders only for a role that may see it', /isOpen=\{isVenuesDirectoryOpen && sheetAllowed\(currentUser, 'venues'\)\}/);
+has('agency Events renders only for an admin', /isOpen=\{isAgencyEventsOpen && currentUser\?\.role === 'admin'\}/);
 has('screen saved on change, never on the kiosk', /if \(isKiosk \|\| !currentUser\) return;\s*saveScreen\(currentUser, \{ view: screenView, sheet: screenSheet \}\)/);
 has('a sheet the role cannot see is closed', /if \(isKiosk \|\| !screenSheet \|\| sheetAllowed\(currentUser, screenSheet\)\) return;/);
 has('sign-out forgets saved screens', /localStorage\.removeItem\('selected_venue_id'\);\s*forgetSavedScreens\(\);\s*\}\s*clearSession\(\);/);

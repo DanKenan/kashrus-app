@@ -5,7 +5,7 @@
  *
  * What is remembered: the base view (the admin's agency home or the venue
  * board) and which main sheet is open on top of it (Events, Team, History,
- * Venues). Nothing else: no task editor, dialog or form is ever restored.
+ * Venues, or the admin's agency-wide Events from the dashboard). Nothing else: no task editor, dialog or form is ever restored.
  * The selected venue is already remembered by venueSelection.ts.
  *
  * Where: sessionStorage. It survives a refresh, a reload and an app update in
@@ -19,12 +19,18 @@
  * Venues or the agency home for anyone but an admin), an unknown value or a
  * broken entry falls back to the default screen. The kiosk never reads or
  * writes it (App.tsx).
+ *
+ * The role used at load comes from this device's cached sign-in, which can be
+ * stale (e.g. an admin made a mashgiach since). So the sheets only some roles
+ * may see (Team, Venues, agency Events) are reopened only after the server
+ * confirms who is signed in and their role (restoreConfirmed); Events and
+ * History, which every role sees, reopen at once.
  */
 import type { User } from '../types';
 import { venueTabsFor } from '../components/VenueTabs';
 
 export type ScreenView = 'home' | 'board';
-export type ScreenSheet = 'events' | 'team' | 'history' | 'venues';
+export type ScreenSheet = 'events' | 'team' | 'history' | 'venues' | 'agency-events';
 export interface SavedScreen {
   view: ScreenView;
   sheet: ScreenSheet | null;
@@ -46,9 +52,28 @@ export function defaultScreen(user: Pick<User, 'role'> | null | undefined): Save
 /** May this role see this sheet? Mirrors the menus that open them. */
 export function sheetAllowed(user: Pick<User, 'role'> | null | undefined, sheet: unknown): sheet is ScreenSheet {
   if (!user) return false;
-  if (sheet === 'venues') return user.role === 'admin';
+  if (sheet === 'venues' || sheet === 'agency-events') return user.role === 'admin';
   if (sheet === 'events' || sheet === 'team' || sheet === 'history') return venueTabsFor(user).includes(sheet);
   return false;
+}
+
+/** Sheets only some roles may see: reopened only once the server confirms the role. */
+export function isRestrictedSheet(sheet: ScreenSheet | null): boolean {
+  return sheet === 'team' || sheet === 'venues' || sheet === 'agency-events';
+}
+
+/**
+ * Pure: may a restricted sheet be reopened, given the cached user this page
+ * loaded with and the server's answer to GET /api/auth/me? Only when the
+ * server names the same person, not as a kiosk, with a role that may see it.
+ */
+export function restoreConfirmed(cached: Pick<User, 'id'> | null | undefined, me: unknown, sheet: ScreenSheet | null): boolean {
+  if (!cached || !sheet || !me || typeof me !== 'object') return false;
+  const { user, kiosk } = me as { user?: unknown; kiosk?: unknown };
+  if (kiosk || !user || typeof user !== 'object') return false;
+  const u = user as { id?: unknown; role?: unknown };
+  if (typeof u.id !== 'string' || u.id !== cached.id || typeof u.role !== 'string') return false;
+  return sheetAllowed({ role: u.role as User['role'] }, sheet);
 }
 
 /** Pure: a stored value -> the screen to open, or the default when it is not allowed. */

@@ -4,7 +4,7 @@ import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgen
 import React, { useState, useEffect, useMemo, useRef, useCallback, lazy, Suspense } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue } from './lib/venueSelection';
-import { defaultScreen, forgetSavedScreens, readSavedScreen, saveScreen, sheetAllowed, type SavedScreen } from './lib/screenMemory';
+import { defaultScreen, forgetSavedScreens, isRestrictedSheet, readSavedScreen, restoreConfirmed, saveScreen, sheetAllowed, type SavedScreen } from './lib/screenMemory';
 import { socketVenueScope, scopeListToVenue, inVenueScope } from './lib/socketVenueScope';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
 import { AgencySwitcherSheet } from './components/AgencySwitcherSheet';
@@ -373,7 +373,7 @@ export default function App() {
   // QA2 #27: admin agency settings sheet (name, phone, time zone).
   const [isAgencySettingsOpen, setIsAgencySettingsOpen] = useState(false);
   const [isVenueSwitcherOpen, setIsVenueSwitcherOpen] = useState(false);
-  const [isVenuesDirectoryOpen, setIsVenuesDirectoryOpen] = useState(restoredScreen.sheet === 'venues');
+  const [isVenuesDirectoryOpen, setIsVenuesDirectoryOpen] = useState(false);
   const [isCreateVenueOpen, setIsCreateVenueOpen] = useState(false);
   const [isDemoCleared, setIsDemoCleared] = useState(false);
 
@@ -452,7 +452,7 @@ export default function App() {
     });
     return () => { active = false; };
   }, [isKiosk, currentUserRowId]);
-  const [isTeamModalOpen, setIsTeamModalOpen] = useState(restoredScreen.sheet === 'team');
+  const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
   // 12b-c: owners open the Pool from their menu (admins/coordinators use the Team tab).
   const [isPoolOpen, setIsPoolOpen] = useState(false);
   // Item 10i: Phase C (invite-only adds) for the admin's own agency, as the
@@ -548,16 +548,40 @@ export default function App() {
 
   // Remember the main screen for a refresh (lib/screenMemory.ts): base view + main sheet only.
   const screenView = currentUser?.role === 'admin' && adminHome ? 'home' : 'board';
-  const screenSheet = isVenuesDirectoryOpen ? 'venues' : isTeamModalOpen ? 'team' : isHistoryModalOpen ? 'history' : isEventsModalOpen ? 'events' : null;
+  const screenSheet = isVenuesDirectoryOpen ? 'venues' : isTeamModalOpen ? 'team' : isAgencyEventsOpen ? 'agency-events'
+    : isHistoryModalOpen ? 'history' : isEventsModalOpen ? 'events' : null;
+  const screenSheetRef = useRef(screenSheet);
+  screenSheetRef.current = screenSheet;
   useEffect(() => {
     if (isKiosk || !currentUser) return;
     saveScreen(currentUser, { view: screenView, sheet: screenSheet });
   }, [isKiosk, currentUser, screenView, screenSheet]);
+  // Team, Venues and agency Events reopen only once the server confirms who is
+  // signed in and their role (the cached role may be stale); never on a kiosk.
+  useEffect(() => {
+    const sheet = restoredScreen.sheet;
+    const cached = currentUser;
+    if (isKiosk || !cached || !isRestrictedSheet(sheet)) return;
+    let live = true;
+    apiFetch('/api/auth/me', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((me) => {
+        if (!live || screenSheetRef.current !== null || !restoreConfirmed(cached, me, sheet)) return;
+        if (sheet === 'venues') setIsVenuesDirectoryOpen(true);
+        else if (sheet === 'team') setIsTeamModalOpen(true);
+        else setIsAgencyEventsOpen(true);
+      })
+      .catch(() => {});
+    return () => { live = false; };
+    // Once, for the screen this page loaded with.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Fail closed: a sheet the (refreshed) role cannot see never stays open.
   useEffect(() => {
     if (isKiosk || !screenSheet || sheetAllowed(currentUser, screenSheet)) return;
     if (screenSheet === 'venues') setIsVenuesDirectoryOpen(false);
     else if (screenSheet === 'team') setIsTeamModalOpen(false);
+    else if (screenSheet === 'agency-events') setIsAgencyEventsOpen(false);
     else if (screenSheet === 'history') setIsHistoryModalOpen(false);
     else setIsEventsModalOpen(false);
   }, [isKiosk, currentUser, screenSheet]);
@@ -2869,7 +2893,7 @@ export default function App() {
       />
 
       <TeamModal
-        isOpen={isTeamModalOpen}
+        isOpen={isTeamModalOpen && sheetAllowed(currentUser, 'team')}
         onClose={() => setIsTeamModalOpen(false)}
         users={knownUsers}
         venues={venues}
@@ -2940,7 +2964,7 @@ export default function App() {
         agencyName={currentUser.agencyName}
         agencyShortCode={currentUser.agencyShortCode}
         agencyLogoSrc={agencyLogoSrc}
-        isOpen={isVenuesDirectoryOpen}
+        isOpen={isVenuesDirectoryOpen && sheetAllowed(currentUser, 'venues')}
         onClose={() => setIsVenuesDirectoryOpen(false)}
         venues={venues}
         currentVenue={currentVenue}
