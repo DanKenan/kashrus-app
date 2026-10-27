@@ -68,6 +68,10 @@ export function venueScope(user: ScopeUser | null | undefined, venues: readonly 
   let home = !homeless && typeof user.venueId === 'string' && user.venueId ? user.venueId : null;
   if (home && !valid.has(home) && (venues || []).some((v) => v && v.id === home)) home = null;
   const out = home ? [home] : [];
+  // MANAGER (Don 2026-10-27, RV1): a manager's scope is their home venue ONLY.
+  // Extra-venue grants (venueAccess) never widen it, even ones kept from before
+  // a promotion to manager (fail closed, reads and writes alike).
+  if (user.role === 'manager') return out;
   if (!user.personId || !Array.isArray(user.venueAccess)) return out;
   // A stored list is written home-first for the home it was granted under
   // (identity.ts). A list whose head is not the current home is stale (written

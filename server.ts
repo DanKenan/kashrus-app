@@ -1766,8 +1766,15 @@ function liveSessionRow(claims: any): any {
  * 'VENUE_REMOVED' (QA2 #8) or 'RESET_CONFIRM_NEEDED' (paused after another
  * agency's reset link until this agency's admin confirms) or null.
  */
-function sessionIneligibleCode(row: any): 'VENUE_REMOVED' | 'RESET_CONFIRM_NEEDED' | null {
+/** Every role the server knows (stored rows; 'worker' is the legacy name of mashgiach). */
+const SESSION_KNOWN_ROLES: ReadonlySet<string> = new Set(['admin', 'coordinator', 'mashgiach', 'owner', 'manager', 'worker']);
+function sessionIneligibleCode(row: any): 'VENUE_REMOVED' | 'RESET_CONFIRM_NEEDED' | 'ROLE_UNKNOWN' | null {
   if (!row) return null;
+  // MANAGER RV1 (fail closed): a stored row whose role the server does not know
+  // gets no session at all (sign-in, resolve, kiosk re-validation), so no
+  // read path can treat it as an unscoped "other role".
+  // (A missing/empty role is the legacy default mashgiach, as normalizeStoredUser reads it.)
+  if (row.role !== undefined && row.role !== null && row.role !== '' && (typeof row.role !== 'string' || !SESSION_KNOWN_ROLES.has(row.role))) return 'ROLE_UNKNOWN';
   if (venueRemovedFor(row)) return 'VENUE_REMOVED';
   if (row.resetSuspended) return 'RESET_CONFIRM_NEEDED';
   return null;

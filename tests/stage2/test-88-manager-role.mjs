@@ -18,6 +18,8 @@
  *     B) and may copy an event at A1 only.
  *  F  another agency's admin / owner cannot add or make a manager here.
  */
+import { inviteMember, acceptNew } from './invite-helpers.mjs';
+
 const A = 'agency-test88-a';
 const B = 'agency-test88-b';
 const auth = (token) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' });
@@ -51,7 +53,9 @@ export default {
       { id: id('masha'), email: em('masha'), name: 'T88 Mash A1', role: 'mashgiach', agencyId: A, venueId: vA1 },
       { id: id('worka'), email: em('worka'), name: 'T88 Worker A1', role: 'worker', agencyId: A, venueId: vA1 },
       { id: id('masha2'), email: em('masha2'), name: 'T88 Mash A2', role: 'mashgiach', agencyId: A, venueId: vA2 },
+      { id: id('mashg'), email: em('mashg'), name: 'T88 Mash A1 with A2 access', role: 'mashgiach', agencyId: A, venueId: vA1 },
       { id: id('coorda'), email: em('coorda'), name: 'T88 Coord A1', role: 'coordinator', agencyId: A, venueId: vA1 },
+      { id: id('unkr'), email: em('unkr'), name: 'T88 Unknown Role A1', role: 'supervisor', agencyId: A, venueId: vA1 },
       { id: id('adminb'), email: em('adminb'), name: 'T88 Admin B', role: 'admin', agencyId: B },
       { id: id('ownerb'), email: em('ownerb'), name: 'T88 Owner B1', role: 'owner', agencyId: B, venueId: vB1 },
     ];
@@ -68,7 +72,7 @@ export default {
     });
     assert(inj.status === 200, `inject-fixture: ${inj.status} ${J(inj.json)}`);
     const tok = {};
-    for (const k of ['admina', 'ownera', 'ownera2', 'mgra', 'masha', 'adminb', 'ownerb']) tok[k] = auth(await mintToken(baseUrl, id(k)));
+    for (const k of ['admina', 'ownera', 'ownera2', 'mgra', 'masha', 'mashg', 'adminb', 'ownerb']) tok[k] = auth(await mintToken(baseUrl, id(k)));
 
     const call = async (who, method, path, body) => {
       const r = await fetch(`${baseUrl}${path}`, { method, headers: tok[who] || who, body: body !== undefined ? J(body) : undefined });
@@ -119,10 +123,12 @@ export default {
       assert(inv.permissions && inv.permissions.canFillTasks === false && inv.permissions.canAssignTasks === false, `B1 owner cannot grant rights through the body: ${J(inv.permissions)}`);
       assert(!J(r.json).includes('inviteTokenHash'), 'B1 no token hash in the answer');
 
-      const viaHelper = await ctx.addMember({ email: em('ownmgr2'), name: 'T88 Owner Manager 2', role: 'manager', venueId: vA1, password: 'Stage2-t88-pass!' }, tok.ownera);
-      // (the helper's final lookup is the inviter's GET /api/users, which an
-      // owner may not read; the accepted row is checked in the doc instead)
-      assert(viaHelper.status === 201 || (viaHelper.status === 500 && viaHelper.json && viaHelper.json.user === null), `B2 owner-added manager accepts: ${viaHelper.status} ${J(viaHelper.json)}`);
+      // B2: the owner's invite is ACCEPTED by the invitee (explicit steps, each
+      // must succeed; no tolerated error branch).
+      const inv2 = await inviteMember(baseUrl, tok.ownera, { email: em('ownmgr2'), name: 'T88 Owner Manager 2', role: 'manager' });
+      assert(inv2.status === 201 && inv2.json?.pending === true && typeof inv2.token === 'string' && inv2.token.length > 10, `B2 owner invite: ${inv2.status} ${inv2.text}`);
+      const acc2 = await acceptNew(baseUrl, inv2.token, 'Stage2-t88-pass!');
+      assert(acc2.status === 200, `B2 invitee accepts: ${acc2.status} ${acc2.text}`);
       const u2 = ((await doc()).users || []).find((x) => x && x.email === em('ownmgr2'));
       assert(u2 && u2.role === 'manager' && u2.venueId === vA1 && u2.agencyId === A, `B2 accepted row: ${J(u2)}`);
 
@@ -158,13 +164,12 @@ export default {
       const d0 = await doc();
       const demoted = (d0.users || []).map((u) => (u.id === id('ownera2') ? { ...u, role: 'mashgiach' } : u));
       const s1 = await ctx.api('POST', '/api/__test__/doc-set-users', { users: demoted });
-      if (s1.status === 200) {
-        const fresh = await call('ownera2', 'POST', '/api/users', { email: em('fresh'), name: 'x', role: 'manager' });
-        assert(fresh.status === 403, `B7 demoted owner (fresh data): ${fresh.status} ${fresh.text}`);
-        assert((await invitesFor(em('fresh'))).length === 0, 'B7 nothing stored');
-        const s2 = await ctx.api('POST', '/api/__test__/doc-set-users', { users: d0.users });
-        assert(s2.status === 200, `B7 restore: ${s2.status}`);
-      }
+      assert(s1.status === 200, `B7 setup (demote in the committed doc): ${s1.status} ${J(s1.json)}`);
+      const fresh = await call('ownera2', 'POST', '/api/users', { email: em('fresh'), name: 'x', role: 'manager' });
+      assert(fresh.status === 403, `B7 demoted owner (fresh data): ${fresh.status} ${fresh.text}`);
+      assert((await invitesFor(em('fresh'))).length === 0, 'B7 nothing stored');
+      const s2 = await ctx.api('POST', '/api/__test__/doc-set-users', { users: d0.users });
+      assert(s2.status === 200, `B7 restore: ${s2.status}`);
     }
 
     // ---- C: the owner changes only the role of a person at their own venue ----
@@ -239,6 +244,48 @@ export default {
       assert(no.status === 403 || no.status === 404, `E3 manager copies venue A2 event: ${no.status} ${no.text}`);
       const nb = await copy('mgra', `ev-t88-b1-${ts}`);
       assert(nb.status === 403 || nb.status === 404, `E4 manager copies agency B event: ${nb.status}`);
+    }
+
+    // ---- G (RV1): a person promoted to manager keeps NO extra-venue access ----
+    {
+      // the admin gives mashg (home A1) extra access to A2 (a real grant)
+      let rowG = await row(id('mashg'));
+      for (let k = 0; k < 20 && !(rowG && rowG.personId); k++) { await new Promise((r) => setTimeout(r, 250)); rowG = await row(id('mashg')); }
+      assert(rowG && rowG.personId, `G0 fixture person migrated: ${J(rowG)}`);
+      const grant = await call('admina', 'POST', `/api/users/${id('mashg')}/venue-ops`, { ops: [{ op: 'add', venueId: vA2, until: null }], expectedVenueRev: rowG.venueRev || 0, expectedVersion: await ctx.getVersion(), operationId: `op88g-${ts}` });
+      assert(grant.status === 200, `G1 admin grants A2: ${grant.status} ${grant.text}`);
+      const asMash = await call('mashg', 'GET', '/api/events');
+      assert(asMash.status === 200 && eventIds(asMash).includes(`ev-t88-a2-${ts}`), `G1 control: the mashgiach sees A2 through the grant: ${asMash.status} ${J(eventIds(asMash))}`);
+      // the A1 owner promotes them to manager
+      const up = await putRole('ownera', id('mashg'), { role: 'manager' });
+      assert(up.status === 200, `G2 owner promotes: ${up.status} ${up.text}`);
+      const rowM = await row(id('mashg'));
+      assert(rowM && rowM.role === 'manager' && rowM.venueId === vA1, `G2 stored row: ${J(rowM && { role: rowM.role, venueId: rowM.venueId })}`);
+      const tm = auth(await mintToken(baseUrl, id('mashg')));
+      const asMgr = await call(tm, 'GET', '/api/events');
+      assert(asMgr.status === 200, `G3 manager GET /api/events: ${asMgr.status}`);
+      const idsM = eventIds(asMgr);
+      assert(idsM.includes(`ev-t88-a1-${ts}`) && !idsM.includes(`ev-t88-a2-${ts}`) && !asMgr.text.includes(vA2), `G3 manager scope is home only (no A2 bytes): ${J(idsM)}`);
+      const q = await call(tm, 'GET', `/api/events?venueId=${vA2}`);
+      assert(q.status === 403 || (q.status === 200 && !eventIds(q).includes(`ev-t88-a2-${ts}`) && !q.text.includes(vA2)), `G4 manager ?venueId=A2: ${q.status} ${q.text.slice(0, 200)}`);
+      const cpA2 = await copy(tm, `ev-t88-a2-${ts}`);
+      assert(cpA2.status === 403 || cpA2.status === 404, `G5 manager copies an A2 event: ${cpA2.status} ${cpA2.text}`);
+      const cpA1 = await copy(tm, `ev-t88-a1-${ts}`);
+      assert(cpA1.status === 201, `G6 manager copies an A1 event: ${cpA1.status} ${cpA1.text}`);
+    }
+
+    // ---- H (RV1): a stored row with an UNKNOWN role gets no session and reads nothing ----
+    {
+      const stored = await row(id('unkr'));
+      assert(stored && stored.role === 'supervisor', `H0 fixture row keeps its stored role: ${J(stored && stored.role)}`);
+      const sess = await fetch(`${baseUrl}/api/__test__/mint-token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: J({ userId: id('unkr'), session: true }) });
+      assert(sess.status === 403, `H1 unknown role: no session is issued: ${sess.status}`);
+      const tu = auth(await mintToken(baseUrl, id('unkr'))); // a bare signed token (as if issued before)
+      for (const path of ['/api/events', `/api/events?venueId=${vA1}`, '/api/users', '/api/auth/me']) {
+        const r = await call(tu, 'GET', path);
+        assert(r.status === 401 || r.status === 403, `H2 unknown role GET ${path}: ${r.status} ${r.text.slice(0, 160)}`);
+        assert(!r.text.includes('ev-t88-') && !r.text.includes(vA1) && !r.text.includes(vA2), `H2 unknown role GET ${path}: zero event/venue bytes`);
+      }
     }
 
     // ---- F: other agencies ----

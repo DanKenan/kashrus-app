@@ -13,6 +13,9 @@ const run = async function () {
   ok(J(sanitizeVenueAccess(['v2'], 'vb', validA)) === J(['v2']), 'foreign home not kept');
   const m = (o) => ({ role: 'mashgiach', agencyId: 'A', venueId: 'v1', personId: 'p', ...o });
   ok(J(venueScope(m({ venueAccess: ['v1', 'v2'] }), V)) === J(['v1', 'v2']), 'two venues');
+  // MANAGER (RV1): a manager's scope is the home venue only; extra grants never widen it.
+  ok(J(venueScope(m({ role: 'manager', venueAccess: ['v1', 'v2'] }), V)) === J(['v1']), 'manager: home only, extra grant ignored');
+  ok(J(venueScope(m({ role: 'owner', venueAccess: ['v1', 'v2'] }), V)) === J(['v1', 'v2']), 'owner scope unchanged by this PR (control)');
   ok(J(venueScope(m({ venueAccess: [] }), V)) === J(['v1']), 'empty = home only');
   ok(J(venueScope(m({ venueAccess: 'all' }), V)) === J(['v1']), 'malformed = home only');
   ok(J(venueScope(m({ venueAccess: ['vb'] }), V)) === J(['v1']), 'foreign venue never authorizes');
