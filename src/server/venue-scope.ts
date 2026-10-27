@@ -96,6 +96,7 @@ export function venueScope(user: ScopeUser | null | undefined, venues: readonly 
  *   admin       -> any such venue;
  *   coordinator -> a venue in their scope (home + server-granted venueAccess);
  *   owner       -> their own home venue only (venueAccess never widens it);
+ *   manager     -> exactly like owner (Don 2026-10-27: "same style as the owner");
  *   anyone else (mashgiach, worker, unknown or missing role) -> false.
  * Callers pass the CURRENT venues (fresh venues inside a commit).
  */
@@ -107,7 +108,7 @@ export function mayManageEventAt(user: ScopeUser | null | undefined, venueId: un
     const scope = venueScope(user, venues, opts);
     return scope !== 'agency' && scope.includes(venueId);
   }
-  if (user.role === 'owner') return typeof user.venueId === 'string' && user.venueId === venueId;
+  if (user.role === 'owner' || user.role === 'manager') return typeof user.venueId === 'string' && user.venueId === venueId;
   return false;
 }
 

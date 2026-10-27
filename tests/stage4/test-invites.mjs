@@ -29,7 +29,11 @@ export default {
     assert(phaseCEnabled({ phaseC: { enabled: true } }) && phaseCEnabled({ phaseC: { enabled: false } }) && phaseCEnabled({ phaseC: {} }) && phaseCEnabled({}) && !phaseCEnabled(null) && !phaseCEnabled(undefined) && !phaseCEnabled('agency-x'), 'invites on for every agency record, never for a missing one');
     assert(!('phaseC' in stripServerOnlyAgencyFields({ name: 'x', phaseC: { enabled: true } })), 'phaseC stripped from client bodies');
     assert(!('phaseC' in agencyAdminView({ id: 'a', name: 'A', phaseC: { enabled: true } })), 'phaseC not in the admin view');
-    assert(J(INVITE_ROLES) === J(['admin', 'coordinator', 'mashgiach']), 'roles');
+    assert(J(INVITE_ROLES) === J(['admin', 'coordinator', 'mashgiach', 'manager']), 'roles');
+    // Manager (Don 2026-10-27, owner-style): exactly ONE venue of the agency.
+    { const m = parseInviteInput({ email: 'm@b.co', role: 'manager', venueIds: ['v1'] }, ['v1', 'v2']); assert(m.ok && m.value.role === 'manager' && J(m.value.venueIds) === J(['v1']), `manager one venue ${J(m)}`); }
+    for (const venueIds of [['v1', 'v2'], [], undefined, ['vX']]) { const r = parseInviteInput({ email: 'm@b.co', role: 'manager', venueIds }, ['v1', 'v2']); assert(!r.ok && r.code === 'INVITE_VENUES_INVALID', `manager venues ${J(venueIds)}`); }
+    { const r = parseInviteInput({ email: 'm@b.co', role: 'manager', venueIds: [], pool: true }, ['v1']); assert(!r.ok && r.code === 'POOL_ROLE_INVALID', 'manager pool'); }
 
     const V = ['v1', 'v2'];
     const ok = parseInviteInput({ email: '  A@B.Co ', role: 'mashgiach', venueIds: ['v2', 'v1', 'v2'] }, V);

@@ -1929,7 +1929,7 @@ function publicUpdate<T extends { readBy?: string[] }>(item: T): Omit<T, 'readBy
   return rest;
 }
 
-const KNOWN_ANNOUNCEMENT_ROLES = ['all', 'admin', 'coordinator', 'owner', 'mashgiach', 'worker'];
+const KNOWN_ANNOUNCEMENT_ROLES = ['all', 'admin', 'coordinator', 'owner', 'manager', 'mashgiach', 'worker'];
 
 /**
  * 5a (review round 1): an ANNOUNCEMENT_DELETED event carries only { id, venueId },
@@ -2363,7 +2363,7 @@ interface Announcement {
   title: string;
   body: string;
   category: 'assignment' | 'update' | 'notice' | 'urgent';
-  targetRoles: string[]; // ['admin','coordinator','owner','mashgiach','worker'] or ['all']
+  targetRoles: string[]; // ['admin','coordinator','owner','manager','mashgiach','worker'] or ['all']
   venueId?: string; // optional: scoped to a specific venue
   createdAt: string;
   expiresAt?: string;
@@ -2546,7 +2546,7 @@ interface UserProfile {
   agencyId?: string;
   email: string;
   name: string;
-  role: 'admin' | 'coordinator' | 'mashgiach' | 'owner' | 'worker';
+  role: 'admin' | 'coordinator' | 'mashgiach' | 'owner' | 'manager' | 'worker';
   avatarColor: string;
   password?: string;
   kioskPin?: string; // 4-6 digit PIN for shared kiosk tablets (never sent to clients)
@@ -3205,7 +3205,7 @@ function resolveAssignableUser(callerUser: any, email: unknown, usersList: any[]
     const u = normalizeStoredUser(raw);
     if ((u.agencyId || 'agency-hkc') !== agencyId) continue;
     if (!EVENT_ASSIGNABLE_ROLES.has(raw.role) && !EVENT_ASSIGNABLE_ROLES.has(u.role)) continue;
-    if (raw.role === 'owner' || u.role === 'owner') continue;
+    if (raw.role === 'owner' || u.role === 'owner' || raw.role === 'manager' || u.role === 'manager') continue;
     if (scope !== 'agency' && !(u.role === 'admin' || personInScope(raw, scope as string[]))) continue;
     return u;
   }
@@ -9569,6 +9569,25 @@ function inviteFreshGate(freshDoc: any, userId: string, agencyId: string): { con
   return null;
 }
 
+/**
+ * Manager role (Don 2026-10-27): the fresh gate for an OWNER adding a manager.
+ * The caller row still exists, is still an OWNER of this agency, can still
+ * sign in, has a home venue (not a Pool row) equal to `venueId`, and that
+ * venue is an existing venue of the agency. Otherwise 403 (fail closed).
+ */
+function ownerManagerFreshGate(freshDoc: any, userId: string, agencyId: string, venueId: string): { conflict: string; conflictStatus: number; conflictCode: string } | null {
+  const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+  const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+  const fc = freshUsers.find((u: any) => u && u.id === userId);
+  const ok = !!fc && fc.role === 'owner' && (fc.agencyId || 'agency-hkc') === agencyId && !sessionIneligibleCode(fc) &&
+    !isHomeless(fc) && typeof fc.venueId === 'string' && !!fc.venueId && fc.venueId === venueId &&
+    freshVenues.some((v: any) => v && v.id === venueId && (v.agencyId || 'agency-hkc') === agencyId);
+  if (!ok) return { conflict: 'Owners can only add a manager for their own venue.', conflictStatus: 403, conflictCode: 'NOT_ALLOWED' };
+  const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+  if (!phaseCEnabled(freshAgencies.find((a: any) => a && a.id === agencyId))) return { conflict: 'Not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
+  return null;
+}
+
 type InvitePre = { inviteId: string; token: { raw: string; hash: string }; createdAt: string; expiresAt: string };
 /** Generated once BEFORE a transaction, so a retried mutator stores the same id and hash. */
 function newInvitePre(): InvitePre {
@@ -9586,9 +9605,14 @@ function newInvitePre(): InvitePre {
  */
 function createMemberInviteInTx(
   docAfter: any, callerId: string, agencyId: string, body: any, pre: InvitePre,
-  opts: { allowOwner?: boolean; ownTeamText?: string; contactId?: string } = {}
+  opts: { allowOwner?: boolean; ownTeamText?: string; contactId?: string; ownerManagerVenueId?: string } = {}
 ): { conflict: string; conflictStatus: number; conflictCode: string; conflictExtra?: Record<string, unknown> } | { doc: any; invite: any; replaced: string[] } {
-  const denied = inviteFreshGate(docAfter, callerId, agencyId);
+  // Manager role (Don 2026-10-27): a venue OWNER may invite a MANAGER for
+  // their own home venue only; every other caller needs the admin gate.
+  const ownerManager = typeof opts.ownerManagerVenueId === 'string';
+  const denied = ownerManager
+    ? ownerManagerFreshGate(docAfter, callerId, agencyId, opts.ownerManagerVenueId as string)
+    : inviteFreshGate(docAfter, callerId, agencyId);
   if (denied) return denied;
   // 12b-s: a Pool invite (no main venue) is refused while the 5.9 freeze is set.
   if (body?.pool === true && docAfter.poolFrozen === true) {
@@ -9599,6 +9623,14 @@ function createMemberInviteInTx(
   const parsed = parseMemberInvite(body, agencyVenueIds, { allowOwner: opts.allowOwner === true, normalizePhone: normalizePhoneNumber, phoneError: PHONE_NUMBER_ERROR });
   if (parsed.ok === false) return { conflict: parsed.error, conflictStatus: 400, conflictCode: parsed.code };
   const input = parsed.value;
+  if (ownerManager) {
+    // Owner path: role manager, exactly the owner's home venue, role-default
+    // permissions (an owner cannot grant more through the body).
+    if (input.role !== 'manager' || input.venueIds.length !== 1 || input.venueIds[0] !== opts.ownerManagerVenueId) {
+      return { conflict: 'Owners can only add a manager for their own venue.', conflictStatus: 403, conflictCode: 'NOT_ALLOWED' };
+    }
+    input.permissions = defaultPermissionsFor('manager');
+  }
   const users: any[] = Array.isArray(docAfter.users) ? docAfter.users : [];
   if (users.some((u: any) => u && normalizeInviteEmail(u.email) === input.email && (u.agencyId || 'agency-hkc') === agencyId)) {
     return { conflict: opts.ownTeamText || 'This person is already on your team.', conflictStatus: 409, conflictCode: 'ALREADY_ON_TEAM' };
@@ -9621,6 +9653,11 @@ function createMemberInviteInTx(
   }
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
+  // Owner path: never replaces (revokes) a pending invite someone else made
+  // for this email (it could be an admin's invite for another role).
+  if (ownerManager && existing.some((i: any) => i && i.kind !== 'setup' && i.agencyId === agencyId && i.email === input.email && isLiveInvite(i, nowMs))) {
+    return { conflict: 'This person already has a pending invite. Ask your agency admin.', conflictStatus: 409, conflictCode: 'INVITE_PENDING' };
+  }
   const replaced: string[] = [];
   const kept = existing.map((i: any) => {
     if (i && i.kind !== 'setup' && i.agencyId === agencyId && i.email === input.email && isLiveInvite(i, nowMs)) {
@@ -12577,7 +12614,7 @@ app.put('/api/tasks/:id', async (req, res) => {
         caller.role === 'admin' ||
         (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
         ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
-        (caller.role === 'owner' && caller.permissions?.canFillTasks === true);
+        ((caller.role === 'owner' || caller.role === 'manager') && caller.permissions?.canFillTasks === true);
 
       if (!canFill) {
         return res.status(403).json({ error: 'You do not have permission to fill or update task statuses.' });
@@ -12735,7 +12772,7 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
       caller.role === 'admin' ||
       (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
       ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
-      (caller.role === 'owner' && caller.permissions?.canFillTasks === true);
+      ((caller.role === 'owner' || caller.role === 'manager') && caller.permissions?.canFillTasks === true);
     if (!isLogger && !canFill) {
       return res.status(403).json({ error: 'You do not have permission to remove checks.' });
     }
@@ -12807,7 +12844,7 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
       caller.role === 'admin' ||
       (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
       ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
-      (caller.role === 'owner' && caller.permissions?.canFillTasks === true);
+      ((caller.role === 'owner' || caller.role === 'manager') && caller.permissions?.canFillTasks === true);
     if (!canFill) {
       return res.status(403).json({ error: 'You do not have permission to log checks.' });
     }
@@ -13426,7 +13463,7 @@ app.get('/api/events', (req, res) => {
   // Visibility: admin sees everything; owner/coordinator/mashgiach/worker
   // are filtered by canSeeEventServer (rule T + the assigned-mashgiach
   // exception — see the helper). Other roles keep the venueId-param behavior.
-  if (callerRole === 'owner' || callerRole === 'coordinator' ||
+  if (callerRole === 'owner' || callerRole === 'manager' || callerRole === 'coordinator' ||
       callerRole === 'mashgiach' || callerRole === 'worker') {
     agencyEvents = agencyEvents.filter((e) => canSeeEventServer(e, caller));
   } else if (venueId && venueId !== 'all') {
@@ -13739,7 +13776,7 @@ app.post('/api/events/:id/copy', async (req, res) => {
   if (!requireSameAgency(req, res, source, 'events')) return;
   // QA2S2 #9 (E2), fail closed: admin = whole agency; coordinator = own
   // venue(s); owner = own venue. Mashgichim, workers and kiosk sessions: 403.
-  if ((req as any).kiosk === true || !['admin', 'coordinator', 'owner'].includes(String(caller.role))) {
+  if ((req as any).kiosk === true || !['admin', 'coordinator', 'owner', 'manager'].includes(String(caller.role))) {
     return res.status(403).json(EVENT_FORBIDDEN_BODY);
   }
   // The copy stays at the source event's venue, which must EXIST (explicit:
@@ -14303,7 +14340,51 @@ app.get('/api/users', (req, res) => {
   res.json({ users: agencyUsers });
 });
 
+/**
+ * Manager role (Don 2026-10-27): a venue OWNER adds a MANAGER for their own
+ * home venue — a pending invite exactly like an admin's "Add team member",
+ * with role 'manager', venueIds [home], role-default permissions. The body
+ * cannot widen it (other venues, Pool, other roles: 403). Re-checked on fresh
+ * data in the transaction (ownerManagerFreshGate). Never replaces another
+ * pending invite for the same email.
+ */
+async function ownerAddsManager(req: any, res: any, caller: UserProfile): Promise<any> {
+  const callerAgencyId = caller.agencyId || 'agency-hkc';
+  const deny = () => res.status(403).json({ error: 'Owners can only add a manager for their own venue.', code: 'NOT_ALLOWED' });
+  const raw = req.body || {};
+  const home = typeof (caller as any).venueId === 'string' ? (caller as any).venueId : '';
+  if (!home || isHomeless(caller as any) || raw.pool === true) return deny();
+  if (raw.venueId !== undefined && raw.venueId !== home) return deny();
+  if (raw.venueIds !== undefined && !(Array.isArray(raw.venueIds) && raw.venueIds.length === 1 && raw.venueIds[0] === home)) return deny();
+  if (!phaseCEnabled(agencies.find((a) => a && a.id === callerAgencyId))) return res.status(404).json({ error: 'Agency record not found.' });
+  const body = stripServerOnlyUserFields(raw);
+  const pre = newInvitePre();
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const built = createMemberInviteInTx(freshDoc, caller.id, callerAgencyId,
+        { email: body.email, name: body.name, phoneNumber: body.phoneNumber, role: 'manager', venueIds: [home] },
+        pre, { ownTeamText: 'A team member with this email already exists', ownerManagerVenueId: home });
+      if ('conflict' in built) return built;
+      return { doc: built.doc, result: { invite: built.invite, replaced: built.replaced } };
+    },
+    { label: 'owner-add-manager' }
+  );
+  if (!committed) return;
+  const { invite: rec } = committed.result as any;
+  console.log(`[audit] invite created: owner ${caller.id} agency ${callerAgencyId} invite ${rec.id} role manager`);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(201).json({ pending: true, invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}`, linkOrigin: inviteLinkOrigin(callerAgencyId) });
+}
+
 app.post('/api/users', async (req, res) => {
+  // Manager role (Don 2026-10-27): an OWNER may add a MANAGER (own venue only).
+  {
+    const who = getAuthUser(req);
+    if (who && (req as any).kiosk !== true && (who as any).role === 'owner' && (req.body || {}).role === 'manager') {
+      return ownerAddsManager(req, res, who);
+    }
+  }
   // Only admins can create users — verified from the session token, never the body.
   const caller = requireAdmin(req, res);
   if (!caller) return;
@@ -14320,7 +14401,7 @@ app.post('/api/users', async (req, res) => {
     if ((req as any).kiosk === true) return res.status(403).json({ error: 'Only administrators can perform this action.' });
     const body = stripServerOnlyUserFields(req.body || {});
     const rawRole = body.role;
-    const role = rawRole === 'admin' || rawRole === 'coordinator' || rawRole === 'owner' ? rawRole : 'mashgiach';
+    const role = rawRole === 'admin' || rawRole === 'coordinator' || rawRole === 'owner' || rawRole === 'manager' ? rawRole : 'mashgiach';
     const pre = newInvitePre();
     const committed = await commitOrRespond(
       req, res,
@@ -14347,6 +14428,24 @@ app.post('/api/users', async (req, res) => {
 });
 
 
+/**
+ * Manager role (Don 2026-10-27): may this OWNER change `target`'s role
+ * (to manager / mashgiach)? Same agency, both have a real home venue (no Pool
+ * row), the target's home IS the owner's home, that venue exists in the
+ * agency, the target is a mashgiach, worker or manager (never an owner, admin
+ * or coordinator) and not the owner themselves. Fail closed.
+ */
+function ownerMayChangeRole(owner: any, target: any, venueList: any[]): boolean {
+  if (!owner || !target || owner.role !== 'owner' || typeof owner.id !== 'string' || owner.id === target.id) return false;
+  const agencyId = owner.agencyId || 'agency-hkc';
+  if ((target.agencyId || 'agency-hkc') !== agencyId) return false;
+  if (!['mashgiach', 'worker', 'manager'].includes(String(target.role))) return false;
+  if (isHomeless(owner) || isHomeless(target)) return false;
+  const home = typeof owner.venueId === 'string' ? owner.venueId : '';
+  if (!home || target.venueId !== home) return false;
+  return (venueList || []).some((v: any) => v && v.id === home && (v.agencyId || 'agency-hkc') === agencyId);
+}
+
 // Update user permissions or role
 app.put('/api/users/:id', async (req, res) => {
   // Admins can update users. Coordinators may ONLY set/re-save a kiosk PIN
@@ -14361,7 +14460,10 @@ app.put('/api/users/:id', async (req, res) => {
   }
   const callerIsAdmin = caller.role === 'admin';
   const callerIsCoordinator = caller.role === 'coordinator';
-  if (!callerIsAdmin && !callerIsCoordinator) {
+  // Manager role (Don 2026-10-27): an OWNER may make a person at their own
+  // venue a manager (or a manager back a mashgiach) — role only, see below.
+  const callerIsOwner = caller.role === 'owner';
+  if (!callerIsAdmin && !callerIsCoordinator && !callerIsOwner) {
     return res.status(403).json({ error: 'Only admins can manage team members.' });
   }
   const callerAgencyId = caller.agencyId || 'agency-hkc';
@@ -14403,6 +14505,19 @@ app.put('/api/users/:id', async (req, res) => {
       sharedVenues(caller as any, existingUser as any, venues as any).length > 0;
     if (!onlyPin || !targetOk) {
       return res.status(403).json({ error: 'Coordinators can only set kiosk PINs for mashgichim and workers at their own venue.' });
+    }
+  }
+
+  // Owner role-only path (manager role): body = { role } (plus transport
+  // fields) with role 'manager' or 'mashgiach'; target = a mashgiach, worker
+  // or manager whose home venue is the owner's own home venue. Never an
+  // owner, admin or coordinator; never anyone's venue, name, PIN or rights.
+  if (callerIsOwner) {
+    const TRANSPORT_FIELDS = ['userEmail', 'adminEmail', 'expectedVersion', 'operationId'];
+    const bodyKeys = Object.keys(req.body || {}).filter((k) => !TRANSPORT_FIELDS.includes(k));
+    const roleOnly = bodyKeys.length === 1 && bodyKeys[0] === 'role' && (role === 'manager' || role === 'mashgiach');
+    if (!roleOnly || !ownerMayChangeRole(caller, existingUser, venues as any[])) {
+      return res.status(403).json({ error: 'Owners can only make someone at their own venue a manager, or a manager a mashgiach.', code: 'NOT_ALLOWED' });
     }
   }
 
@@ -14460,6 +14575,15 @@ app.put('/api/users/:id', async (req, res) => {
           return { conflict: 'Coordinators can only set kiosk PINs for mashgichim and workers at their own venue.' };
         }
       }
+      // Owner path: the same rule on FRESH caller and target rows.
+      if (callerIsOwner) {
+        const freshCaller = freshUsers.find((u) => u.id === caller.id);
+        const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+        if (!freshCaller || freshCaller.role !== 'owner' || (freshCaller.agencyId || 'agency-hkc') !== callerAgencyId ||
+            sessionIneligibleCode(freshCaller) || !ownerMayChangeRole(freshCaller, freshUser, freshVenues)) {
+          return { conflict: 'Owners can only make someone at their own venue a manager, or a manager a mashgiach.', conflictStatus: 403, conflictCode: 'NOT_ALLOWED' };
+        }
+      }
       // Conflict if someone else changed a field this request is editing.
       if (name !== undefined && freshUser.name !== baseline.name) {
         return { conflict: 'Conflict: this team member\'s name was changed by someone else. Please refresh and try again.' };
@@ -14476,6 +14600,8 @@ app.put('/api/users/:id', async (req, res) => {
           ? 'coordinator'
           : role === 'owner'
           ? 'owner'
+          : role === 'manager'
+          ? 'manager'
           : 'mashgiach';
       // Never demote the last admin of the agency (counted on fresh data).
       if (newRole !== 'admin' && freshUser.role === 'admin') {
@@ -14981,7 +15107,7 @@ app.post('/api/users/:id/venue-ops', async (req, res) => {
   // coordinate (coordinator: their current scope), and only for mashgichim /
   // workers (rule T, fail closed). Never a kiosk session.
   const caller = getAuthUser(req);
-  if (!caller || (req as any).kiosk === true || !['admin', 'coordinator', 'owner'].includes(String((caller as any).role))) {
+  if (!caller || (req as any).kiosk === true || !['admin', 'coordinator', 'owner', 'manager'].includes(String((caller as any).role))) {
     return res.status(403).json({ error: 'Only an admin, owner or coordinator can change venue access.', code: 'NOT_ALLOWED' });
   }
   const callerAgencyId = caller.agencyId || 'agency-hkc';
@@ -15027,7 +15153,7 @@ app.post('/api/users/:id/venue-ops', async (req, res) => {
       const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
       const freshCaller = freshUsers.find((u) => u && u.id === caller.id);
       const freshRole = freshCaller ? String(freshCaller.role) : '';
-      if (!freshCaller || !['admin', 'coordinator', 'owner'].includes(freshRole) || (freshCaller.agencyId || 'agency-hkc') !== callerAgencyId || sessionIneligibleCode(freshCaller)) {
+      if (!freshCaller || !['admin', 'coordinator', 'owner', 'manager'].includes(freshRole) || (freshCaller.agencyId || 'agency-hkc') !== callerAgencyId || sessionIneligibleCode(freshCaller)) {
         return deny('Only an admin, owner or coordinator of this agency can change venue access.', 403, 'NOT_ALLOWED');
       }
       const target = freshUsers.find((u) => u && u.id === id);
@@ -15097,7 +15223,7 @@ app.post('/api/users/:id/venue-ops', async (req, res) => {
 //                 main venue only) of their agency's other venues.
 //   anyone else = 403 and zero Pool bytes.
 // ---------------------------------------------------------------------------
-const POOL_ROLES = ['admin', 'coordinator', 'owner'];
+const POOL_ROLES = ['admin', 'coordinator', 'owner', 'manager'];
 
 /** 5.6: wrap an invite-accept mutator so a contact whose linked invite is now accepted leaves the Pool list. */
 function withPoolContactCleanup<A extends any[]>(fn: (freshDoc: any, ...rest: A) => any): (freshDoc: any, ...rest: A) => any {
@@ -19620,7 +19746,7 @@ app.post('/api/factory-reports', async (req, res) => {
   if (!requireVenueAccess(req, res, venueId)) return;
   // QA2 #6 (rule T: owner = own venue): a venue owner may file the official
   // report for their OWN venue, whatever their fill permission.
-  const ownerAtOwnVenue = (caller as any).role === 'owner' && callerMaySeeVenue(caller, venueId);
+  const ownerAtOwnVenue = ((caller as any).role === 'owner' || (caller as any).role === 'manager') && callerMaySeeVenue(caller, venueId);
   if (!mayDoFieldWrite(caller, venueId) && !ownerAtOwnVenue) {
     return res.status(403).json({ error: 'You can only submit factory reports at your own venue.' });
   }

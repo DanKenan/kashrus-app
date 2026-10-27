@@ -28,7 +28,7 @@ export interface UserDoc {
   agencyId?: string;
   email: string; // Always lowercase
   name: string;
-  role: 'admin' | 'coordinator' | 'mashgiach' | 'owner' | 'worker';
+  role: 'admin' | 'coordinator' | 'mashgiach' | 'owner' | 'manager' | 'worker';
   avatarColor: string;
   password?: string; // bcrypt hash — NEVER exposed via API
   kioskPin?: string; // NEVER exposed via API
