@@ -64,6 +64,7 @@ import { AgencyEventsScreen } from './components/AgencyEventsScreen';
 import { SHOW_FACTORY_AUDIT } from './lib/features';
 import { signoffUndoBy, signoffUndoTitle, SIGNOFF_UNDO_TEXT } from './lib/signoffUndo';
 import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
+import { isMyTask } from './lib/myTasks';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { InvitePage } from './components/InvitePage';
@@ -1644,9 +1645,7 @@ export default function App() {
   const completedTasks = tasks.filter((t) => t.isCompleted).length;
   const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
-  const myTasks = tasks.filter(
-    (t) => t.assignedTo.includes('all') || (currentUser && t.assignedTo.includes(currentUser.email))
-  );
+  const myTasks = tasks.filter((t) => isMyTask(t, currentUser));
   const myTotal = myTasks.length;
   const myCompleted = myTasks.filter((t) => t.isCompleted).length;
 
@@ -1704,8 +1703,7 @@ export default function App() {
 
       // Tab filter
       if (activeTabFilter === 'mine') {
-        const isAssigned = task.assignedTo.includes('all') || (currentUser && task.assignedTo.includes(currentUser.email));
-        if (!isAssigned) return false;
+        if (!isMyTask(task, currentUser)) return false;
       } else if (activeTabFilter === 'pending') {
         if (task.isCompleted) return false;
       } else if (activeTabFilter === 'completed') {
@@ -1714,7 +1712,7 @@ export default function App() {
 
       return true;
     });
-  }, [tasks, searchQuery, selectedCategory, showOnlyTodaySchedule, activeTabFilter, currentUser?.email, currentVenueTimeZone]);
+  }, [tasks, searchQuery, selectedCategory, showOnlyTodaySchedule, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
 
   // Smart board order: urgent first, then the viewer's own assignments,
   // then the manual order (up/down arrows; initialized from target time).

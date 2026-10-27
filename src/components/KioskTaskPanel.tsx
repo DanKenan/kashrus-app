@@ -28,6 +28,7 @@ import { formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories, b
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
+import { isMyTask } from '../lib/myTasks';
 
 /**
  * KioskTaskPanel — the signed-in wall-tablet view (D3a, design only;
@@ -268,7 +269,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
     const firstName = currentUser.name.split(' ')[0];
     savingRef.current = { ...savingRef.current, [taskId]: { op, toDone } };
     const task = tasks.find((t) => t.id === taskId);
-    savingMine.current[taskId] = !!task && (task.assignedTo.includes('all') || task.assignedTo.includes(currentUser.email));
+    savingMine.current[taskId] = !!task && isMyTask(task, currentUser);
     setSaving(savingRef.current);
     if (toDone) primeChime();
     if (isBarUndo) {
