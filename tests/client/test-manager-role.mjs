@@ -133,6 +133,8 @@ check('App: manager gets the owner banner', app.includes('{isKiosk ? null : isVe
 check('App: manager gets the Pool like an owner', app.includes('onOpenPool={isVenueOwnerLike(currentUser) && !isKiosk ?'), true);
 const header = src('src/components/Header.tsx');
 check('Header: owner Team row (desk + phone menus)', header.includes('data-open-owner-team') && header.includes('data-open-owner-team-mobile'), true);
+const ots = src('src/components/OwnerTeamSheet.tsx');
+check('owner sheet: a late answer after close is dropped (generation guard, RV1 P3)', /generation\.current \+= 1/.test(ots) && (ots.match(/gen !== generation\.current|gen === generation\.current/g) || []).length >= 5, true);
 check('Create event: manager venue fixed like owner', src('src/components/CreateEventModal.tsx').includes("currentUser?.role === 'owner' || currentUser?.role === 'manager'"), true);
 
 console.log(`\n${passes} passed, ${failures} failed`);

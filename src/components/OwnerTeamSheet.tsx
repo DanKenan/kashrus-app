@@ -7,7 +7,7 @@
 // the buttons follow ownerRoleSwitchFor / ownerMayAddManager (the client
 // mirror of the server's ownerMayChangeRole / ownerAddsManager); the server
 // decides and its answer is shown as written.
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { UserPlus } from 'lucide-react';
 import type { User } from '../types';
 import { getRoleLabel, ownerMayAddManager, ownerRoleSwitchFor } from '../lib/permissions';
@@ -78,10 +78,13 @@ export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [link, setLink] = useState<{ link: string; name: string } | null>(null);
+  // Bumped on every close: an answer that lands after the sheet was closed (and
+  // maybe reopened with a new draft) is dropped, never applied to the new draft.
+  const generation = useRef(0);
   if (!isOpen || !ownerMayAddManager(currentUser)) return null;
   const home = String(currentUser.venueId || '');
   const rows = ownerTeamRows(currentUser, roster);
-  const close = () => { setAdding(false); setAsking(null); setError(null); setLink(null); onClose(); };
+  const close = () => { generation.current += 1; setAdding(false); setAsking(null); setError(null); setLink(null); setBusy(false); onClose(); };
 
   const submitAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -90,15 +93,17 @@ export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName
     if (!name || !email) { setError(OWNER_TEAM_TEXT.needNameEmail); return; }
     const phone = normalizePhone(form.phone);
     if (phone === null) { setError(OWNER_TEAM_TEXT.badPhone); return; }
+    const gen = generation.current;
     setBusy(true); setError(null);
     try {
       const made = await onAddManager({ name, email, role: 'manager', venueId: home, ...(phone ? { phoneNumber: phone } : {}) });
+      if (gen !== generation.current) return;
       if (made && typeof made.link === 'string') setLink({ link: made.link, name: made.name || name });
       setForm({ name: '', email: '', phone: '' });
       setAdding(false);
     } catch (err: any) {
-      setError(err?.message || OWNER_TEAM_TEXT.failed);
-    } finally { setBusy(false); }
+      if (gen === generation.current) setError(err?.message || OWNER_TEAM_TEXT.failed);
+    } finally { if (gen === generation.current) setBusy(false); }
   };
 
   const confirmSwitch = async () => {
@@ -106,13 +111,14 @@ export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName
     // Re-check on the current roster: the row must still allow exactly this switch.
     const row = rows.find((r) => r.user.id === asking.id);
     if (!row || row.switchTo !== asking.to) { setAsking(null); return; }
+    const gen = generation.current;
     setBusy(true); setError(null);
     try {
       await onSetRole(asking.id, asking.to);
-      setAsking(null);
+      if (gen === generation.current) setAsking(null);
     } catch (err: any) {
-      setError(err?.message || OWNER_TEAM_TEXT.failed);
-    } finally { setBusy(false); }
+      if (gen === generation.current) setError(err?.message || OWNER_TEAM_TEXT.failed);
+    } finally { if (gen === generation.current) setBusy(false); }
   };
 
   return (
