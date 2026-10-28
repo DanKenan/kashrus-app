@@ -26,6 +26,7 @@ import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 import { TaskInstructions } from './TaskInstructions';
+import { TaskAnswerPhoto } from './TaskAnswerPhoto';
 
 interface TaskCardViewProps {
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
@@ -531,6 +532,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                     )}
                   </div>
                 )}
+                {/* PHOTOALL: optional photo with the answer (toggle / yes-no / status / checkbox) */}
+                <TaskAnswerPhoto task={task} canAttach={canFill} />
               </div>
 
               {/* Attribution & Signature Banner */}

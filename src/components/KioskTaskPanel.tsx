@@ -29,6 +29,7 @@ import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 import { isMyTask } from '../lib/myTasks';
+import { TaskAnswerPhoto } from './TaskAnswerPhoto';
 
 /**
  * KioskTaskPanel — the signed-in wall-tablet view (D3a, design only;
@@ -839,6 +840,9 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                             })}
                           </div>
                         )}
+
+                        {/* PHOTOALL: optional photo with the answer (toggle / yes-no / status / checkbox) */}
+                        <TaskAnswerPhoto task={task} canAttach={canFill} size="kiosk" />
 
                         {canFill && task.inputType === 'check_in' && (
                           <label
