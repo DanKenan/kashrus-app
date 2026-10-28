@@ -4,7 +4,7 @@ import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgen
 import React, { useState, useEffect, useMemo, useRef, useCallback, lazy, Suspense } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue } from './lib/venueSelection';
-import { defaultScreen, forgetSavedScreens, isRestrictedSheet, pendingOnAnswer, pendingOnScreen, readSavedScreen, saveScreen, sheetAllowed, startPendingRestore, type PendingRestore, type SavedScreen } from './lib/screenMemory';
+import { defaultScreen, forgetSavedScreens, isRestrictedSheet, pendingOnAnswer, pendingOnInteraction, pendingOnScreen, readSavedScreen, saveScreen, sheetAllowed, startPendingRestore, type PendingRestore, type SavedScreen } from './lib/screenMemory';
 import { socketVenueScope, scopeListToVenue, inVenueScope } from './lib/socketVenueScope';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
 import { AgencySwitcherSheet } from './components/AgencySwitcherSheet';
@@ -555,6 +555,23 @@ export default function App() {
   // While that waits the stored target is kept; navigation or another
   // person/agency/sign-out drops it (lib/screenMemory.ts PendingRestore).
   const pendingRestore = useRef<PendingRestore | null>(startPendingRestore(currentUser, restoredScreen, isKiosk));
+  const screenNow = useRef<{ user: User | null; screen: SavedScreen }>({ user: null, screen: restoredScreen });
+  screenNow.current = { user: isKiosk ? null : currentUser, screen: { view: screenView, sheet: screenSheet } };
+  // Any tap or key press while the restore waits: the person's own navigation wins.
+  useEffect(() => {
+    if (!pendingRestore.current) return;
+    const drop = () => {
+      const next = pendingOnInteraction(pendingRestore.current);
+      pendingRestore.current = next.pending;
+      const { user, screen } = screenNow.current;
+      if (next.save && user) saveScreen(user, screen);
+      off();
+    };
+    const off = () => { window.removeEventListener('pointerdown', drop, true); window.removeEventListener('keydown', drop, true); };
+    window.addEventListener('pointerdown', drop, true);
+    window.addEventListener('keydown', drop, true);
+    return off;
+  }, []);
   useEffect(() => {
     const screen = { view: screenView, sheet: screenSheet } as SavedScreen;
     const next = pendingOnScreen(pendingRestore.current, isKiosk ? null : currentUser, screen);

@@ -32,7 +32,7 @@ const otherAgencyAdmin = { id: 'u-admin', role: 'admin', agencyId: 'ag-2' };
 const S = (view, sheet = null) => ({ view, sheet });
 
 if (mod) {
-  const { screenFromStored, defaultScreen, readSavedScreen, saveScreen, forgetSavedScreens, sheetAllowed, screenStorageKey, isRestrictedSheet, restoreConfirmed, startPendingRestore, pendingOnScreen, pendingOnAnswer } = mod;
+  const { screenFromStored, defaultScreen, readSavedScreen, saveScreen, forgetSavedScreens, sheetAllowed, screenStorageKey, isRestrictedSheet, restoreConfirmed, startPendingRestore, pendingOnScreen, pendingOnAnswer, pendingOnInteraction } = mod;
   const J = (o) => JSON.stringify(o);
 
   // Defaults (today's landing)
@@ -147,6 +147,21 @@ if (mod) {
     check('server says mashgiach: not opened, dropped, default saved', [no.open, no.pending, no.saveDefault], [false, null, true]);
     check('answer for a different sheet -> ignored', pendingOnAnswer(pend, admin, meAdmin, 'venues').open, false);
   }
+  {
+    // RV3: Board tapped (screen key unchanged) or a venue switch while waiting: the tap drops the restore and saves.
+    for (const what of ['Board tapped on the board', 'venue switched on the board']) {
+      session.clear(); globalThis.window = { sessionStorage: fake(session), localStorage: fake(local) };
+      saveScreen(admin, S('board', 'team'));
+      let pend = pendingOnScreen(startPendingRestore(admin, readSavedScreen(admin), false), admin, S('board')).pending;
+      const tap = pendingOnInteraction(pend); pend = tap.pending;
+      if (tap.save) saveScreen(admin, S('board'));
+      const r = pendingOnScreen(pend, admin, S('board'));
+      check(`${what}: restore dropped, screen saved`, [tap.save, pend, r.save], [true, null, true]);
+      check(`${what}: late confirm -> no open`, pendingOnAnswer(pend, admin, meAdmin, 'team').open, false);
+      check(`${what}: a later reload opens the board, not Team`, readSavedScreen(admin), S('board'));
+    }
+    check('a tap with nothing waiting saves nothing extra', pendingOnInteraction(null).save, false);
+  }
   session.clear();
 
   // Storage: per tab (sessionStorage), per agency + user
@@ -190,6 +205,7 @@ has('Team renders only for a role that may see it', /isOpen=\{isTeamModalOpen &&
 has('Venues renders only for a role that may see it', /isOpen=\{isVenuesDirectoryOpen && sheetAllowed\(currentUser, 'venues'\)\}/);
 has('agency Events renders only for an admin', /isOpen=\{isAgencyEventsOpen && currentUser\?\.role === 'admin'\}/);
 has('screen saved on change (unless a restore waits), never on the kiosk', /pendingOnScreen\(pendingRestore\.current, isKiosk \? null : currentUser, screen\);[\s\S]{0,80}if \(isKiosk \|\| !currentUser \|\| !next\.save\) return;\s*saveScreen\(currentUser, screen\)/);
+has('any tap or key press while waiting drops the restore and saves the screen', /const next = pendingOnInteraction\(pendingRestore\.current\);[\s\S]{0,200}if \(next\.save && user\) saveScreen\(user, screen\);[\s\S]{0,400}addEventListener\('pointerdown', drop, true\);\s*window\.addEventListener\('keydown', drop, true\);/);
 has('pending restore starts from the loaded screen, not on a kiosk', /useRef<PendingRestore \| null>\(startPendingRestore\(currentUser, restoredScreen, isKiosk\)\)/);
 has('a sheet the role cannot see is closed', /if \(isKiosk \|\| !screenSheet \|\| sheetAllowed\(currentUser, screenSheet\)\) return;/);
 has('sign-out forgets saved screens', /localStorage\.removeItem\('selected_venue_id'\);\s*forgetSavedScreens\(\);\s*\}\s*clearSession\(\);/);

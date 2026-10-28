@@ -81,8 +81,10 @@ export function restoreConfirmed(cached: Pick<User, 'id'> | null | undefined, me
  * `who` is the storage key of the person the page loaded as; `at` is the
  * screen on show while waiting (filled on the first save). While it waits,
  * the stored target is kept (a second reload tries again); any navigation or
- * a change of person/agency/sign-out drops it, so a late answer never reopens
- * a sheet over what the person chose, or for someone else.
+ * a change of person/agency/sign-out drops it, and so does any tap or key
+ * press in the app (pendingOnInteraction: Board, a venue switch, anything the
+ * person does, even when the screen key stays the same), so a late answer
+ * never reopens a sheet over what the person chose, or for someone else.
  */
 export interface PendingRestore {
   sheet: ScreenSheet;
@@ -112,6 +114,15 @@ export function pendingOnScreen(pending: PendingRestore | null, user: ScreenUser
   if (pending.at === null) return { pending: { ...pending, at: here }, save: false };
   if (pending.at === here) return { pending, save: false };
   return { pending: null, save: true };
+}
+
+/**
+ * Pure: the person tapped or pressed a key while a restore waits. Their own
+ * navigation wins: the restore is dropped and the screen on show is saved
+ * (replacing the stored target), even if its view and sheet look the same.
+ */
+export function pendingOnInteraction(pending: PendingRestore | null): { pending: null; save: boolean } {
+  return { pending: null, save: !!pending };
 }
 
 /**
