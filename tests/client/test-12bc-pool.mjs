@@ -125,8 +125,9 @@ const header = fs.readFileSync(new URL('../../src/components/Header.tsx', import
 const panel = fs.readFileSync(new URL('../../src/components/PoolPanel.tsx', import.meta.url), 'utf8');
 ok('C no-venue screen hides the gold "+" (PhoneNav hasVenues)', /hasVenues=\{venues\.length > 0 && !noVenueInScope\}/.test(app));
 ok('C POOL_UPDATED becomes a window event', /msg\.type === 'POOL_UPDATED'[\s\S]{0,200}POOL_UPDATED_EVENT/.test(app));
-ok('C owner Pool entry only for owners, never kiosk', /onOpenPool=\{currentUser\?\.role === 'owner' && !isKiosk/.test(app));
-ok('C Pool modal mounted for owners only', /currentUser\.role === 'owner' && !isKiosk && \(\s*<PoolModal/.test(app));
+// Manager role (Don 2026-10-27): a manager has the owner's Pool entry (isVenueOwnerLike = owner | manager).
+ok('C owner Pool entry only for owners (and managers), never kiosk', /onOpenPool=\{isVenueOwnerLike\(currentUser\) && !isKiosk/.test(app));
+ok('C Pool modal mounted for owners (and managers) only', /isVenueOwnerLike\(currentUser\) && !isKiosk && \(\s*<PoolModal/.test(app));
 ok('C Header shows Pool only when given', /\{onOpenPool && \(/.test(header));
 ok('C Team tabs only for admin/coordinator', /showPoolTab = currentUser\?\.role === 'admin' \|\| currentUser\?\.role === 'coordinator'/.test(team));
 ok('C Move to Pool admin only', /currentUser\?\.role === 'admin' && \(user\.role === 'mashgiach' \|\| user\.role === 'worker'\)/.test(team));
