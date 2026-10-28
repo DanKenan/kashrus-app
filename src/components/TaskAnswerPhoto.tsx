@@ -74,18 +74,24 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
   const [caption, setCaption] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [full, setFull] = useState(false);
+  // RV3: the full-size view is open for ONE photo id; it closes by itself when
+  // that photo is removed, replaced or reset (no dialog, no key trap).
+  const [fullId, setFullId] = useState<string | null>(null);
   // The server's answer, until the task itself (live update) catches up.
   const [override, setOverride] = useState<AnswerPhotoOverride | null>(null);
   // RV1: ONE operation id per pending save (a retry after an unknown outcome
   // reuses it, so the server answers the first save instead of replacing again);
   // a new photo or a changed caption is a new operation.
   const [opId, setOpId] = useState<string>(() => newActionId());
+  // RV3: the task's photo when THIS operation was first sent; a retry of the
+  // same operation keeps it (its answer may be the first attempt's photo).
+  const opBasisRef = useRef<{ opId: string; basis: string | null } | null>(null);
   const live = task.answerPhoto || null;
   const liveId = live?.id ?? null;
   const effective = reconcileAnswerPhotoOverride(override, liveId);
   const shown = effective ? effective.ref : live;
   const [src, setSrc] = useState<string | null>(shown ? bytesCache.get(shown.id) || null : null);
+  const full = !!fullId && !!shown && shown.id === fullId && !!src;
   const fileRef = useRef<HTMLInputElement | null>(null);
   const liveRef = useRef<string | null>(liveId);
   liveRef.current = liveId;
@@ -99,15 +105,15 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
   // else's change), the task is the truth again: drop the local answer so it
   // can never come back later. Transient state is per task.
   useEffect(() => { if (override && !effective) setOverride(null); }, [override, effective]);
-  useEffect(() => { setOverride(null); setDraft(null); setCaption(''); setError(null); setFull(false); }, [task.id]);
+  useEffect(() => { setOverride(null); setDraft(null); setCaption(''); setError(null); setFullId(null); }, [task.id]);
 
   // RV1: the full-size view is modal: focus to Close, Escape closes, Tab stays
   // inside, focus returns to the thumbnail.
   useEffect(() => {
-    if (!full) return;
+    if (!full) { if (fullId) setFullId(null); return; }
     closeRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); setFull(false); }
+      if (e.key === 'Escape') { e.preventDefault(); setFullId(null); }
       else if (e.key === 'Tab') { e.preventDefault(); closeRef.current?.focus(); }
     };
     document.addEventListener('keydown', onKey);
@@ -115,7 +121,7 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
       document.removeEventListener('keydown', onKey);
       thumbRef.current?.focus();
     };
-  }, [full]);
+  }, [full, fullId]);
 
   useEffect(() => {
     if (!shown) { setSrc(null); return; }
@@ -164,7 +170,8 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
     if (!draft || busy) return;
     setBusy(true);
     setError(null);
-    const basis = live?.id ?? null;
+    if (opBasisRef.current?.opId !== opId) opBasisRef.current = { opId, basis: live?.id ?? null };
+    const basis = opBasisRef.current.basis;
     const tid = task.id;
     const result = await apiWrite(`/api/tasks/${encodeURIComponent(tid)}/answer-photo`, {
       method: 'POST',
@@ -200,7 +207,7 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
     if (taskRef.current !== tid) return;
     if (result.ok) {
       if (liveRef.current === basis) setOverride({ basis, ref: result.data?.answerPhoto || null });
-      setFull(false);
+      setFullId(null);
     } else {
       setError(result.error || 'The photo was not removed. Please try again.');
     }
@@ -216,7 +223,7 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
             type="button"
             data-answer-photo-thumb
             ref={thumbRef}
-            onClick={() => src && setFull(true)}
+            onClick={() => src && shown && setFullId(shown.id)}
             aria-label="Open the photo full size"
             className={`pressable shrink-0 overflow-hidden rounded-lg border border-line bg-surface cursor-pointer ${k ? 'w-20 h-20' : 'w-14 h-14'}`}
           >
@@ -316,13 +323,13 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
 
       {error && <p role="alert" className="text-bad font-semibold">{error}</p>}
 
-      {full && src && shown && typeof document !== 'undefined' && createPortal(
+      {full && shown && src && typeof document !== 'undefined' && createPortal(
         <div
           role="dialog"
           aria-modal="true"
           aria-label="Photo"
           data-answer-photo-full
-          onClick={() => setFull(false)}
+          onClick={() => setFullId(null)}
           className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-scrim backdrop-blur-sm p-4"
         >
           <img src={src} alt={shown.caption || 'Photo'} className="max-w-full max-h-[75vh] rounded-lg object-contain" />
@@ -333,7 +340,7 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
           <button
             type="button"
             ref={closeRef}
-            onClick={() => setFull(false)}
+            onClick={() => setFullId(null)}
             className={`pressable px-4 rounded-xl border border-line bg-surface font-bold text-ink cursor-pointer ${k ? 'min-h-16 text-base' : 'min-h-11 text-sm'}`}
           >
             Close

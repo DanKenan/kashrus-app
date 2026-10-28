@@ -13085,6 +13085,9 @@ function answerPhotoMayWriteFresh(req: any, freshDoc: any, freshTask: any, calle
   if (!row) return false;
   const base: any = normalizeStoredUser(row);
   if ((base.agencyId || 'agency-hkc') !== agencyId) return false;
+  // RV3: the membership must still be eligible for a session at all (phone
+  // and kiosk alike): paused after a reset, venue removed, unknown role.
+  if (sessionIneligibleCode(row)) return false;
   const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
   const venueLive = (vid: any) => freshVenues.some((v: any) => v && v.id === vid && (v.agencyId || 'agency-hkc') === agencyId);
   // RULE T on the UNMODIFIED fresh row (RV2: never on a kiosk acting copy,
@@ -13102,7 +13105,6 @@ function answerPhotoMayWriteFresh(req: any, freshDoc: any, freshTask: any, calle
     const devId = (req as any).kioskDeviceId;
     const dev = (Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : []).find((d: any) => d && d.id === devId);
     if (!devId || !dev || dev.venueId !== tv || (dev.agencyId || 'agency-hkc') !== agencyId) return false;
-    if (sessionIneligibleCode(row)) return false;
     // Only now the acting copy (an admin acts as a mashgiach on a tablet).
     actor = kioskActingUser(base, tv);
   }

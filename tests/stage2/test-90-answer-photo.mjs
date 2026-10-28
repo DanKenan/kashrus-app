@@ -283,6 +283,13 @@ export default {
       assert([401, 403, 409].includes(fd.status), `I2 ${why}: DELETE must be refused on fresh data, got ${fd.status}`);
       assert(((await taskInDoc(T.toggle.id)).answerPhoto?.id || null) === keepTask, `I2 ${why}: the task's photo is unchanged`);
     }
+    // RV3: a membership paused after a password reset (stored doc only) may not write either.
+    await setUsers(storedUsers.map((u) => (u.id === m2id ? { ...u, resetSuspended: true } : u)));
+    const sp = await call('POST', T.toggle.id, tok.mash2, { photoData: small });
+    const sd = await call('DELETE', T.toggle.id, tok.mash2);
+    assert([401, 403, 409].includes(sp.status) && [401, 403, 409].includes(sd.status), `I2 paused membership: POST/DELETE refused, got ${sp.status}/${sd.status}`);
+    if (sp.status === 409) refusedWithBytes++;
+    assert(((await taskInDoc(T.toggle.id)).answerPhoto?.id || null) === keepTask, 'I2 paused membership: the task\'s photo is unchanged');
     await setUsers(storedUsers);
     assert(refusedWithBytes >= 1, `I2: at least one refusal came from the commit itself (409), got ${refusedWithBytes}`);
     // I3: bytes of a save that did not commit are NOT deleted on that path (an

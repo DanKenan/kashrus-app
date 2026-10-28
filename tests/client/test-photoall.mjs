@@ -76,6 +76,15 @@ ok('RV1 save retries reuse ONE operation id (new photo or caption = new id)', /o
 ok('RV1 full size is modal: focus to Close, Escape closes, Tab stays, focus returns', /closeRef\.current\?\.focus\(\)/.test(src) && /e\.key === 'Escape'/.test(src) && /e\.key === 'Tab'/.test(src) && /thumbRef\.current\?\.focus\(\)/.test(src));
 ok('RV1 kiosk Close button is a 64 px target', /ref=\{closeRef\}[\s\S]{0,200}k \? 'min-h-16 text-base'/.test(src));
 
+
+// RV3 review fixes
+ok('RV3 a retried save keeps the basis of its first attempt', /opBasisRef\.current\?\.opId !== opId\) opBasisRef\.current = \{ opId, basis: live\?\.id \?\? null \}/.test(src) && /const basis = opBasisRef\.current\.basis;/.test(src));
+if (typeof reconcileAnswerPhotoOverride === 'function') {
+  // save A (basis null) lost; B replaces it; the retry answers A with the ORIGINAL basis null -> not shown over B
+  ok('RV3 a retry answering a superseded photo never shows over the newer one', reconcileAnswerPhotoOverride({ basis: null, ref: { id: 'aph-A' } }, 'aph-B') === null);
+}
+ok('RV3 the full-size view is tied to one photo id and closes when it goes', /const full = !!fullId && !!shown && shown\.id === fullId && !!src;/.test(src) && /if \(!full\) \{ if \(fullId\) setFullId\(null\); return; \}/.test(src) && /\}, \[full, fullId\]\);/.test(src));
+
 // On the real board views
 const tasks = [...types.map((t) => mk(t)), mk('check_in'), mk('yes_no', { id: 't-yes-photo', title: 'Yes with photo', answerPhoto: photo })];
 const noop = () => {};
