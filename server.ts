@@ -28,6 +28,7 @@ import {
 } from './src/server/agency-fields.js';
 import { classifySessionClaims, resolveSessionRow, resolveChooseOwner, chooseClaimsFor, credentialRowOfPerson, sessionClaimsFor, tokenEpochOf, type SessionClaims } from './src/server/session-token.ts';
 import { agencyIsCleared } from './src/server/agency-flags.ts';
+import { CHECKIN_PHOTO_ID_PREFIX, classifyCheckInPhoto, checkInPhotoIdOf, checkInPhotoKey, checkInPhotoKeys, expireCheckInPhoto, registerCheckInPhotoRead } from './src/server/checkin-photos.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
@@ -1029,6 +1030,8 @@ app.use('/api', async (req, res, next) => {
       (method === 'PUT' && /^\/tasks\/[^/]+$/.test(path)) ||
       (method === 'POST' && /^\/tasks\/[^/]+\/check-in$/.test(path)) ||
       (method === 'DELETE' && /^\/tasks\/[^/]+\/check-in\/[^/]+$/.test(path)) ||
+      // CHECKINPHOTO: read one check-in photo (same task gate as the answer photo).
+      (method === 'GET' && /^\/tasks\/[^/]+\/check-in\/[^/]+\/photo$/.test(path)) ||
       // PHOTOALL: the optional answer photo (same task gate as check-in).
       ((method === 'GET' || method === 'POST' || method === 'DELETE') && /^\/tasks\/[^/]+\/answer-photo$/.test(path)) ||
       (method === 'GET' && path === '/history') ||
@@ -2278,7 +2281,8 @@ interface TaskCheckInItem {
   byName: string | null;
   byEmail: string | null;
   at: string; // ISO timestamp
-  photoData?: string; // base64 data URL (optional photo evidence)
+  photoData?: string; // OLD check-ins only: inline base64 data URL (read as before, never written now)
+  photoId?: string; // CHECKINPHOTO: the photo's id in taskPhotos (bytes outside the shared document)
   photoCaption?: string;
 }
 
@@ -5497,8 +5501,9 @@ function cleanupExpiredMedia() {
   for (const task of tasks) {
     if (!task.checkIns) continue;
     for (const checkIn of task.checkIns) {
-      if (checkIn.photoData && checkIn.at < cutoffIso) {
+      if ((checkIn.photoData || checkIn.photoId) && checkIn.at < cutoffIso) {
         checkIn.photoData = undefined;
+        checkIn.photoId = undefined; // CHECKINPHOTO: the sweep then removes the bytes
         cleaned++;
       }
     }
@@ -5547,9 +5552,7 @@ function cleanupExpiredMedia() {
           });
         const newTasks = freshTasks.map((t) => {
           const checkIns = Array.isArray(t.checkIns) ? t.checkIns : [];
-          const newCheckIns = checkIns.map((c: any) =>
-            c.photoData && c.at < cutoffIso ? { ...c, photoData: undefined } : c
-          );
+          const newCheckIns = checkIns.map((c: any) => expireCheckInPhoto(c, cutoffIso));
           return newCheckIns.some((c: any, i: number) => c !== checkIns[i]) ? { ...t, checkIns: newCheckIns } : t;
         });
         return {
@@ -12814,6 +12817,7 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
   }
 
   const now = new Date().toISOString();
+  let removedPhotoId: string | null = null; // CHECKINPHOTO
 
   const committed = await commitOrRespond(
     req, res,
@@ -12828,6 +12832,7 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
       if (!freshCheckIns.some((c: any) => c.id === checkInId)) {
         return { doc: freshDoc, result: freshTask };
       }
+      removedPhotoId = checkInPhotoIdOf(freshCheckIns.find((c: any) => c.id === checkInId));
       const updated: TaskItem = {
         ...freshTask,
         checkIns: freshCheckIns.filter((c: any) => c.id !== checkInId),
@@ -12840,6 +12845,8 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
   );
   if (!committed) return;
   const updated = committed.result as TaskItem;
+  // CHECKINPHOTO: its stored bytes go now (best effort; the sweep is the backstop).
+  if (removedPhotoId) void deleteAnswerPhotoDoc(checkInPhotoKey(id, removedPhotoId));
 
   broadcastTaskUpdated(updated, updated, caller.email);
   res.json(updated);
@@ -12872,7 +12879,7 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
     return res.status(403).json({ error: 'You can only work on tasks at your own venue.' });
   }
 
-  const { photoData, photoCaption } = req.body;
+  const { photoData, photoCaption } = req.body || {};
   // Fill permission checked against the VERIFIED session user.
   {
     const canFill =
@@ -12893,9 +12900,32 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
     byName: caller.name || null,
     byEmail: caller.email || null,
     at: now,
-    photoData: typeof photoData === 'string' && photoData.startsWith('data:image/') ? photoData.slice(0, 500000) : undefined, // cap at ~500KB
-    photoCaption: typeof photoCaption === 'string' ? photoCaption.slice(0, 200) : undefined,
   };
+  if (typeof photoCaption === 'string' && photoCaption) checkIn.photoCaption = photoCaption.slice(0, ANSWER_PHOTO_CAPTION_MAX);
+  // CHECKINPHOTO: the photo's BYTES go to the photo store (taskPhotos, as the
+  // answer photos), only after every gate above passed; the check-in keeps the
+  // reference. A photo that cannot be kept (too large, not an image, store
+  // down, save too slow) never loses the check-in: it is logged without it.
+  const photoVerdict = classifyCheckInPhoto(photoData, ANSWER_PHOTO_MAX_CHARS, ANSWER_PHOTO_DATA_RE);
+  if (photoVerdict === 'ok') {
+    const photoId = `${CHECKIN_PHOTO_ID_PREFIX}${crypto.randomUUID()}`;
+    try {
+      await putAnswerPhotoDoc(checkInPhotoKey(id, photoId), {
+        taskId: id,
+        checkInId,
+        agencyId: (existing as any).agencyId || 'agency-hkc',
+        venueId: (existing as any).venueId || null,
+        byEmail: caller.email || null,
+        createdAt: now,
+        photoData,
+      });
+      checkIn.photoId = photoId;
+    } catch (e) {
+      log.error('[checkin-photo] store failed; logging the check-in without it:', e);
+    }
+  } else if (photoVerdict !== 'none') {
+    log.warn(`[checkin-photo] photo not kept (${photoVerdict}); logging the check-in without it`);
+  }
 
   const committed = await commitOrRespond(
     req,
@@ -12915,9 +12945,16 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
       if (alreadyLogged) {
         return { doc: freshDoc, result: freshTask };
       }
+      // CHECKINPHOTO: a save past the deadline never publishes its photo (the
+      // sweep may remove bytes older than its grace); the check-in still goes.
+      let entry = checkIn;
+      if (entry.photoId && answerPhotoNow() - Date.parse(now) > ANSWER_PHOTO_SAVE_DEADLINE_MS) {
+        const { photoId: _late, ...rest } = entry;
+        entry = rest;
+      }
       const updated: TaskItem = {
         ...freshTask,
-        checkIns: [...(freshTask.checkIns || []), checkIn],
+        checkIns: [...(freshTask.checkIns || []), entry],
         updatedByEmail: caller.email || freshTask.updatedByEmail || null,
         updatedByName: caller.name || freshTask.updatedByName || null,
         updatedAt: now,
@@ -13017,6 +13054,8 @@ async function sweepAnswerPhotos(nowMs: number = Date.now()): Promise<number> {
     }
     const referenced = new Set<string>();
     for (const t of taskList) if (t?.answerPhoto?.id) referenced.add(answerPhotoKey(t.id, t.answerPhoto.id));
+    // CHECKINPHOTO: check-in photos share the store; a check-in still pointing at its bytes keeps them.
+    for (const t of taskList) for (const k of checkInPhotoKeys(t)) referenced.add(k);
     let entries: Array<{ key: string; createdAt?: string }> = [];
     if (!firestoreDb) {
       let names: string[] = [];
@@ -13272,6 +13311,15 @@ app.get('/api/tasks/:id/answer-photo', async (req, res) => {
   }
   res.set('Cache-Control', 'private, no-store');
   res.json({ id: ref.id, photoData: doc.photoData });
+});
+
+// CHECKINPHOTO: one check-in photo's bytes (stored or old inline), behind the task's own visibility.
+registerCheckInPhotoRead(app, {
+  requireAuthUser,
+  findTask: (taskId) => tasks.find((t) => t.id === taskId),
+  gate: (req, res, task, caller) => answerPhotoGate(req, res, task, caller, false),
+  getPhotoDoc: getAnswerPhotoDoc,
+  log,
 });
 
 if (isTestMode()) {

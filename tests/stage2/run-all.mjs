@@ -200,6 +200,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-84-kiosk-qr.mjs')).default,
     (await import('./test-86-faceid-two-agencies.mjs')).default,
     (await import('./test-87-logout-marker.mjs')).default,
+    (await import('./test-92-checkin-photo.mjs')).default, // CHECKINPHOTO
     (await import('./test-88-manager-role.mjs')).default,
     (await import('./test-89-admin-not-in-all.mjs')).default,
     (await import('./test-90-answer-photo.mjs')).default,

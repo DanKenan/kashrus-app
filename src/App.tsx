@@ -8,6 +8,7 @@ import { defaultScreen, forgetSavedScreens, isRestrictedSheet, pendingOnAnswer, 
 import { socketVenueScope, scopeListToVenue, inVenueScope } from './lib/socketVenueScope';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
 import { AgencySwitcherSheet } from './components/AgencySwitcherSheet';
+import { afterCheckInWithPhoto, checkInPhotoTooLarge, CHECKIN_PHOTO_TOO_LARGE } from './components/CheckInPhoto';
 import { MergeAccountsSheet } from './components/MergeAccountsSheet';
 import { fetchMemberships, Membership } from './lib/memberships';
 import { AgencyDashboard } from './components/AgencyDashboard';
@@ -1232,6 +1233,12 @@ export default function App() {
       showToast('You do not have permission to log checks.');
       return;
     }
+    // CHECKINPHOTO: over the photo cap → nothing is sent; pick another photo.
+    if (checkInPhotoTooLarge(photoData)) {
+      showToast(CHECKIN_PHOTO_TOO_LARGE);
+      return;
+    }
+    const beforeIds = new Set<string>((tasks.find((t) => t.id === taskId)?.checkIns || []).map((c) => c.id));
     const now = new Date().toISOString();
     const optimistic = {
       id: `checkin-local-${Date.now()}`,
@@ -1268,8 +1275,12 @@ export default function App() {
       }),
     });
     if (result.ok) {
+      // CHECKINPHOTO: keep the photo we just sent for its stored id (no reload);
+      // if the server logged the check without its photo, say so.
+      const photoNote = photoData ? afterCheckInWithPhoto(beforeIds, result.data, currentUser.email, photoData) : null;
       // Ensure sync (server is the source of truth for the check-in list)
       setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)));
+      if (photoNote) showToast(photoNote);
     } else {
       // Roll back the optimistic check-in so it doesn't linger as if logged.
       setTasks((prev) =>

@@ -29,7 +29,8 @@ import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 import { isMyTask } from '../lib/myTasks';
-import { TaskAnswerPhoto } from './TaskAnswerPhoto';
+import { TaskAnswerPhoto, compressPhoto } from './TaskAnswerPhoto';
+import { CheckInPhoto } from './CheckInPhoto';
 
 /**
  * KioskTaskPanel — the signed-in wall-tablet view (D3a, design only;
@@ -373,22 +374,8 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   };
 
   const readPhoto = (taskId: string, file: File) => {
-    // Same capture path as TaskCardView: resize to max 800 px, JPEG 0.7.
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        const scale = Math.min(1, 800 / Math.max(img.width, img.height));
-        canvas.width = img.width * scale;
-        canvas.height = img.height * scale;
-        canvas.getContext('2d')?.drawImage(img, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-        onCheckIn(taskId, dataUrl);
-      };
-      img.src = reader.result as string;
-    };
-    reader.readAsDataURL(file);
+    // Same capture path as TaskCardView: max 800 px, JPEG 0.7 (stepping down only if still over the photo cap).
+    compressPhoto(file).then((dataUrl) => onCheckIn(taskId, dataUrl)).catch(() => { /* unreadable file: nothing logged */ });
   };
 
   const counts: Record<string, number> = categoryCounts ?? {};
@@ -884,20 +871,12 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                                     </button>
                                   )}
                                 </div>
-                                {c.photoData && (
-                                  <img
-                                    src={c.photoData}
-                                    alt={c.photoCaption || 'Check-in photo'}
-                                    className="mt-2 w-full max-w-md rounded-lg border border-line object-cover max-h-60 cursor-pointer"
-                                    onClick={() => {
-                                      // Same tap-to-enlarge as TaskCardView.
-                                      const w = window.open();
-                                      if (w) {
-                                        w.document.write(`<img src="${c.photoData}" style="max-width:100%"/>`);
-                                      }
-                                    }}
-                                  />
-                                )}
+                                {/* Same tap-to-enlarge as TaskCardView. */}
+                                <CheckInPhoto
+                                  taskId={task.id}
+                                  checkIn={c}
+                                  className="mt-2 w-full max-w-md rounded-lg border border-line object-cover max-h-60 cursor-pointer"
+                                />
                               </li>
                             ))}
                           </ul>
