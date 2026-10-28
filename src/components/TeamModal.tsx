@@ -369,6 +369,21 @@ export const TeamModal: React.FC<TeamModalProps> = ({
             </div>
           )}
           {showPoolTab && tab === 'pool' && venueNotice && <p role="status" data-venue-notice className="text-sm text-ink-soft">{venueNotice}</p>}
+          {/* Section 1: Add New Member Form. Admin: every role it may add, with rights.
+              Coordinator (Don 2026-10-27 11:30 PM): Mashgiach or Manager at the
+              venue they are on, if it is in their scope; the admins are notified.
+              Kept mounted (hidden) while the Pool tab shows, so a shown invite link
+              or an add still in flight survives a tab switch (review RV1 P2). */}
+          <div data-add-member-slot className={showPoolTab && tab === 'pool' ? 'hidden' : undefined} hidden={showPoolTab && tab === 'pool'}>
+            {!isCoordinatorView ? (
+              <AddMemberForm roles={ADMIN_ADD_ROLES} showPermissions venueId={currentVenue?.id}
+                existingEmails={users.map((u) => u.email || '')} onAddUser={onAddUser} />
+            ) : coordinatorAddVenue ? (
+              <AddMemberForm roles={STAFF_ADD_ROLES} showPermissions={false} venueId={coordinatorAddVenue.id}
+                venueNote={STAFF_ADD_NOTE(coordinatorAddVenue.name)}
+                existingEmails={users.map((u) => u.email || '')} onAddUser={onAddUser} />
+            ) : null}
+          </div>
           {showPoolTab && tab === 'pool' && currentUser ? (
             <PoolPanel currentUser={currentUser} venues={venues} pool={pool}
               onAdminTick={currentUser.role === 'admin' ? (m) => {
@@ -383,17 +398,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
               onCode={currentUser.role === 'admin' && onUpdateUser ? (id) => setCodeTargetId(id) : undefined} />
           ) : (<>
 
-          {/* Section 1: Add New Member Form. Admin: every role it may add, with rights.
-              Coordinator (Don 2026-10-27 11:30 PM): Mashgiach or Manager at the
-              venue they are on, if it is in their scope; the admins are notified. */}
-          {!isCoordinatorView ? (
-            <AddMemberForm roles={ADMIN_ADD_ROLES} showPermissions venueId={currentVenue?.id}
-              existingEmails={users.map((u) => u.email || '')} onAddUser={onAddUser} />
-          ) : coordinatorAddVenue ? (
-            <AddMemberForm roles={STAFF_ADD_ROLES} showPermissions={false} venueId={coordinatorAddVenue.id}
-              venueNote={STAFF_ADD_NOTE(coordinatorAddVenue.name)}
-              existingEmails={users.map((u) => u.email || '')} onAddUser={onAddUser} />
-          ) : null}
+
 
           {/* Section 2: Team Roster List with Inline Permission Toggles */}
           <div>

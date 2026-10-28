@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { mount } from './lib/mini-render.mjs';
 
 let failures = 0; let passes = 0;
 function check(label, actual, expected) {
@@ -191,6 +192,19 @@ if (TM.TeamModal) {
   const aHtml = tmRender(admin, { id: 'v1', name: 'Demo Bistro', agencyId: AG });
   check('admin Team: add form with Mashgiach, Coordinator, Manager', optsIn(aHtml, 'data-add-member-role'), ['mashgiach:Mashgiach (Field Inspector)', 'coordinator:Coordinator (Can Add Tasks)', 'manager:Manager (Runs this venue)']);
   check('admin Team: no staff note', aHtml.includes('data-add-member-venue-note'), false);
+  // RV1 P2: the add form stays mounted (hidden) while the Pool tab shows, so a shown link / an add in flight survives.
+  try {
+    const tmm = mount(TM.TeamModal, tmProps(admin, { id: 'v1', name: 'Demo Bistro', agencyId: AG }, [admin, mash]));
+    await tmm.render();
+    const walkEls = function* (n) { if (!n || typeof n !== 'object') return; if (Array.isArray(n)) { for (const c of n) yield* walkEls(c); return; } if (!React.isValidElement(n)) return; yield n; yield* walkEls(n.props?.children); };
+    const formEl = () => [...walkEls(tmm.tree())].find((e) => e.type === AF.AddMemberForm);
+    const slot = () => [...walkEls(tmm.tree())].find((e) => e.props && e.props['data-add-member-slot'] !== undefined);
+    check('Team tab: add form shown', !!formEl() && slot()?.props.hidden === false, true);
+    await tmm.click((e) => e.props['data-team-tab'] === 'pool');
+    check('Pool tab: the add form stays mounted, hidden', !!formEl() && slot()?.props.hidden === true && /\bhidden\b/.test(slot()?.props.className || ''), true);
+    await tmm.click((e) => e.props['data-team-tab'] === 'team');
+    check('back on Team: the same form, shown', !!formEl() && slot()?.props.hidden === false, true);
+  } catch (e) { console.error(`FAIL pool-tab keeps the form: ${String(e.message).split('\n')[0]}`); failures++; }
 } else { console.error('FAIL TeamModal missing'); failures++; }
 
 // Where roles are chosen or shown
