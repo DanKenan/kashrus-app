@@ -28,7 +28,8 @@
  *  Q  (RV1) the answer-photo sweep — all an older server revision knows (rolling
  *     deploy / rollback) — never removes a check-in photo (own collection)
  *  R  (RV1) the commit re-checks the caller on FRESH data: lost fill permission,
- *     moved to another venue, removed → refused, nothing logged
+ *     moved to another venue, removed, (RV2) tablet PIN cleared or changed →
+ *     refused, nothing logged
  *  S  (RV1) a failing or stuck photo store never holds or loses the check-in:
  *     logged without the photo (bounded wait); late bytes swept after the grace
  */
@@ -304,6 +305,26 @@ export default {
         assert((await taskInDoc(T.prob.id)).checkIns.length === n0, `R ${why}: nothing logged`);
       }
     } finally { await setUsers(storedUsers); }
+    // RV2: a kiosk PIN cleared or changed while the photo was stored revokes the tablet session too.
+    const mrow = storedUsers.find((u) => u.id === mid);
+    assert(mrow?.kioskPinHash && Number.isInteger(mrow.kioskPinRev), 'R: the kiosk login left a PIN hash and revision on the stored row');
+    const kioskFresh = [
+      ['kiosk PIN cleared', storedUsers.map((u) => (u.id === mid ? { ...u, kioskPinHash: undefined, kioskPin: undefined, kioskPinRev: (u.kioskPinRev || 0) + 1 } : u))],
+      ['kiosk PIN changed', storedUsers.map((u) => (u.id === mid ? { ...u, kioskPinRev: (u.kioskPinRev || 0) + 1 } : u))],
+    ];
+    try {
+      for (const [why, users] of kioskFresh) {
+        const n0 = (await taskInDoc(T.ci.id)).checkIns.length;
+        await setUsers(users);
+        const r = await logCheck(T.ci.id, K, { photoData: jpeg(2200, `fresh-${why}`) });
+        rCodes.push(r.status);
+        assert([401, 403, 409].includes(r.status), `R ${why}: refused on fresh data, got ${r.status} ${JSON.stringify(r.json)?.slice(0, 160)}`);
+        await setUsers(storedUsers);
+        assert((await taskInDoc(T.ci.id)).checkIns.length === n0, `R ${why}: nothing logged`);
+      }
+    } finally { await setUsers(storedUsers); }
+    const rk = await logCheck(T.ci.id, K, { photoData: jpeg(2200, 'fresh-kiosk-ok') });
+    assert(rk.status === 200 && newest(rk.json)?.photoId, `R twin: kiosk PIN unchanged → logs with a photo (${rk.status})`);
     const rOk = await logCheck(T.prob.id, tok.mash, { photoData: jpeg(2200, 'fresh-ok') });
     assert(rOk.status === 200 && newest(rOk.json)?.photoId, `R twin: restored → logs with a photo (${rOk.status})`);
     out.push(`R fresh gate ${rCodes.join(',')}`);

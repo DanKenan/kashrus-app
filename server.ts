@@ -996,6 +996,7 @@ app.use('/api', async (req, res, next) => {
     (req as any).kiosk = true;
     (req as any).kioskVenueId = tokenVenueId;
     (req as any).kioskDeviceId = tokenDev;
+    (req as any).kioskPv = tokenPv; // CHECKINPHOTO (RV2): the fresh gate re-checks the PIN revision
   }
 
   // Domains PR A (2f): on a SITE host the session's agency must be the
@@ -2282,7 +2283,7 @@ interface TaskCheckInItem {
   byEmail: string | null;
   at: string; // ISO timestamp
   photoData?: string; // OLD check-ins only: inline base64 data URL (read as before, never written now)
-  photoId?: string; // CHECKINPHOTO: the photo's id in taskPhotos (bytes outside the shared document)
+  photoId?: string; // CHECKINPHOTO: the photo's id in checkInPhotos (bytes outside the shared document)
   photoCaption?: string;
 }
 
@@ -13164,6 +13165,10 @@ function answerPhotoMayWriteFresh(
     const devId = (req as any).kioskDeviceId;
     const dev = (Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : []).find((d: any) => d && d.id === devId);
     if (!devId || !dev || dev.venueId !== tv || (dev.agencyId || 'agency-hkc') !== agencyId) return false;
+    // CHECKINPHOTO (RV2): the kiosk PIN is still set, at the token's revision
+    // (a PIN clear or change while the photo was stored revokes the session).
+    const pv = (req as any).kioskPv;
+    if (!row.kioskPinHash || pinRevOf(row) === undefined || typeof pv !== 'string' || String(pinRevOf(row)) !== pv) return false;
     // Only now the acting copy (an admin acts as a mashgiach on a tablet).
     actor = kioskActingUser(base, tv);
   }

@@ -18,7 +18,7 @@ export interface TaskCheckInItem {
   byEmail: string | null;
   at: string; // ISO timestamp
   photoData?: string; // OLD check-ins only: inline base64 data URL
-  photoId?: string; // CHECKINPHOTO: photo id in taskPhotos (bytes outside the shared document)
+  photoId?: string; // CHECKINPHOTO: photo id in checkInPhotos (bytes outside the shared document)
   photoCaption?: string;
 }
 

@@ -92,5 +92,52 @@ ok('server: 30-day expiry drops the photo (inline or reference), keeps the check
 const fresh = { id: 'y', at: '2026-03-01T00:00:00.000Z', photoId: 'cph-12345678-aaaa' };
 ok('server: a recent photo is untouched (same object)', expireCheckInPhoto(fresh, '2026-02-01T00:00:00.000Z') === fresh && expireCheckInPhoto({ id: 'z', at: '2026-01-01' }, '2026-02-01') .id === 'z');
 
+// RV2: a passing read problem never hides the photo for good — retry while it is on screen.
+{
+  const { readCheckInPhoto, createCheckInPhotoLoader, CHECKIN_PHOTO_RETRY_MS } = mod;
+  ok('RV2: retry helpers exist', typeof readCheckInPhoto === 'function' && typeof createCheckInPhotoLoader === 'function' && Array.isArray(CHECKIN_PHOTO_RETRY_MS));
+  if (typeof readCheckInPhoto === 'function' && typeof createCheckInPhotoLoader === 'function') {
+    const resp = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+    const kinds = [];
+    for (const f of [
+      async () => { throw new TypeError('Failed to fetch'); },
+      async () => resp(503, { error: 'x' }), async () => resp(429, {}), async () => resp(401, {}),
+      async () => resp(404, {}), async () => resp(403, {}), async () => resp(200, { photoData: NEW }), async () => resp(200, {}),
+    ]) kinds.push((await readCheckInPhoto(f, '/u')).kind);
+    ok('RV2: offline / 5xx / 429 / 401 → try again; 404 / 403 / no bytes → missing; bytes → ok', kinds.join(',') === 'retry,retry,retry,retry,missing,missing,ok,missing', kinds.join(','));
+
+    // A mounted photo: the first read is rejected, the next ones succeed — the photo appears without a remount.
+    const timers = []; const results = []; let calls = 0;
+    const script = [{ kind: 'retry' }, { kind: 'retry' }, { kind: 'ok', data: NEW }];
+    const L = createCheckInPhotoLoader({
+      read: async () => script[Math.min(calls++, script.length - 1)],
+      onResult: (r) => results.push(r.kind),
+      setTimer: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; },
+      clearTimer: (t) => { t.cleared = true; },
+      delays: [2000, 5000],
+    });
+    await L.start();
+    ok('RV2: a failed read keeps the placeholder and schedules another try (2 s)', results.join() === 'retry' && timers.length === 1 && timers[0].ms === 2000);
+    await L.retryNow(); // back online: try at once, the pending timer is dropped
+    ok('RV2: back online → tried at once, the pending wait cleared, the next wait backs off (5 s)', calls === 2 && timers[0].cleared && timers.length === 2 && timers[1].ms === 5000);
+    timers[1].fn(); await new Promise((r) => setTimeout(r, 0));
+    ok('RV2: the next try succeeds → the photo shows, no more tries', results.join() === 'retry,retry,ok' && timers.length === 2 && calls === 3);
+    await L.retryNow();
+    ok('RV2: once loaded, nothing reads again', calls === 3);
+
+    const t2 = []; let c2 = 0; const r2 = [];
+    const M = createCheckInPhotoLoader({ read: async () => { c2++; return { kind: 'missing' }; }, onResult: (r) => r2.push(r.kind), setTimer: (fn, ms) => { t2.push(ms); return {}; }, clearTimer: () => {} });
+    await M.start(); await M.retryNow();
+    ok('RV2: a confirmed-missing photo is not retried', c2 === 1 && t2.length === 0 && r2.join() === 'missing');
+
+    const t3 = []; let c3 = 0;
+    const S = createCheckInPhotoLoader({ read: async () => { c3++; return { kind: 'retry' }; }, onResult: () => {}, setTimer: (fn, ms) => { const t = { fn, ms, cleared: false }; t3.push(t); return t; }, clearTimer: (t) => { t.cleared = true; } });
+    await S.start(); S.stop(); await S.retryNow();
+    ok('RV2: off screen (unmounted) → the wait is cleared and nothing reads again', c3 === 1 && t3[0].cleared && t3[0].ms === CHECKIN_PHOTO_RETRY_MS[0]);
+    const src = rd('src/components/CheckInPhoto.tsx');
+    ok('RV2: the component retries when the device comes back online or the app is shown again', /addEventListener\('online'/.test(src) && /addEventListener\('visibilitychange'/.test(src) && /loader\.stop\(\)/.test(src));
+  }
+}
+
 console.log(`\n${passed} passed, ${failures} failed`);
 if (failures) process.exit(1);
