@@ -108,7 +108,7 @@ for (const t of types) {
   ok(`${t}: the camera sits beside the answer, in the same row`, /^<div data-answer-photo-row="true" class="flex gap-2"><div class="min-w-0 flex-1 flex flex-col justify-center"><i>ANSWER<\/i><\/div><button type="button" data-answer-photo-add="true"/.test(o), o.slice(0, 300));
 }
 const logCheckLook = 'border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30';
-ok('the camera has the Log check camera look (44 px, rounded, sunken, line border)', addOut.includes(logCheckLook) && /data-answer-photo-add="true"[^>]*class="[^"]*\bmin-h-11 px-3 rounded-xl\b/.test(addOut) && rd('src/components/TaskCardView.tsx').includes('px-3 flex items-center justify-center rounded-xl text-xs font-bold border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30'), addOut.slice(0, 500));
+ok('the camera has the Log check camera look (rounded, sunken, line border) and a 44 x 44 px target', addOut.includes(logCheckLook) && /data-answer-photo-add="true"[^>]*class="[^"]*\bmin-h-11 min-w-11 px-3 rounded-xl\b/.test(addOut) && rd('src/components/TaskCardView.tsx').includes('px-3 flex items-center justify-center rounded-xl text-xs font-bold border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30'), addOut.slice(0, 500));
 ok('saved photo: "Change photo" is the same icon-only camera', iconOnly(withPhoto) && /aria-label="Change photo"/.test(withPhoto) && !/>\s*Change photo\s*</.test(withPhoto));
 ok('kiosk: icon only too, a 64 px square', iconOnly(kiosk) && !/>\s*Add photo\s*</.test(kiosk));
 const besideWithPhoto = html(h(TaskAnswerPhoto, { task: mk('yes_no', { answerPhoto: photo }), canAttach: true }, h('i', null, 'ANSWER')));

@@ -234,7 +234,7 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
         disabled={busy}
         aria-label={shown ? 'Change photo' : 'Add photo'}
         title={shown ? 'Change photo (replaces this one)' : 'Add photo (optional)'}
-        className={`pressable shrink-0 flex items-center justify-center border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30 ${k ? 'self-start min-h-16 min-w-16 rounded-xl' : desk ? 'w-8 h-8 rounded-lg' : 'min-h-11 px-3 rounded-xl'}`}
+        className={`pressable shrink-0 flex items-center justify-center border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30 ${k ? 'self-start min-h-16 min-w-16 rounded-xl' : desk ? 'w-8 h-8 rounded-lg' : 'min-h-11 min-w-11 px-3 rounded-xl'}`}
       >
         <Camera className={icon} aria-hidden />
       </button>
