@@ -11,7 +11,7 @@
 // the buttons follow ownerRoleSwitchFor / ownerMayAddManager (the client
 // mirror of the server's ownerMayChangeRole / ownerAddsManager); the server
 // decides and its answer is shown as written.
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { UserPlus } from 'lucide-react';
 import type { User } from '../types';
 import { ownerMayAddManager, ownerRoleSwitchFor } from '../lib/permissions';
@@ -107,6 +107,10 @@ export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName
   // Bumped on every close: an answer that lands after the sheet was closed (and
   // maybe reopened with a new draft) is dropped, never applied to the new draft.
   const generation = useRef(0);
+  // A roster refresh (e.g. another session changed this person) that no longer
+  // allows the pending pick clears it: no stale confirm, the dropdown shows the saved role (RV P3).
+  const pendingStillAllowed = !asking || ownerTeamRows(currentUser, roster).some((r) => r.user.id === asking.id && r.switchTo === asking.to);
+  useEffect(() => { if (!pendingStillAllowed) setAsking(null); }, [pendingStillAllowed]);
   if (!isOpen || !ownerMayAddManager(currentUser)) return null;
   const home = String(currentUser.venueId || '');
   const rows = ownerTeamRows(currentUser, roster);
@@ -190,7 +194,7 @@ export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName
         ) : (
           <ul className="divide-y divide-line border border-line rounded-xl">
             {rows.map(({ user, switchTo }) => {
-              const open = asking?.id === user.id;
+              const open = asking?.id === user.id && asking.to === switchTo;
               return (
                 <li key={user.id} data-owner-team-row={user.id} className="p-3 space-y-2">
                   <div className="flex items-center justify-between gap-3">

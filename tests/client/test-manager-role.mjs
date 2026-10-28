@@ -155,6 +155,7 @@ check('Header: owner Team row (desk + phone menus)', header.includes('data-open-
 const ots = src('src/components/OwnerTeamSheet.tsx');
 check('owner sheet: a late answer after close is dropped (generation guard, RV1 P3)', /generation\.current \+= 1/.test(ots) && (ots.match(/gen !== generation\.current|gen === generation\.current/g) || []).length >= 5, true);
 check('owner sheet: a failed save puts the dropdown back and shows the error', /catch \(err: any\) \{[\s\S]{0,160}setAsking\(null\); setError\(/.test(ots), true);
+check('owner sheet: a pick the refreshed roster no longer allows shows no confirm and is cleared (RV P3)', ots.includes('const open = asking?.id === user.id && asking.to === switchTo;') && /useEffect\(\(\) => \{ if \(!pendingStillAllowed\) setAsking\(null\); \}/.test(ots), true);
 check('Create event: manager venue fixed like owner', src('src/components/CreateEventModal.tsx').includes("currentUser?.role === 'owner' || currentUser?.role === 'manager'"), true);
 
 console.log(`\n${passes} passed, ${failures} failed`);
