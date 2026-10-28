@@ -222,7 +222,7 @@ export default {
     assert(again.status === 200, `G: DELETE again is idempotent (${again.status})`);
     // A deleted task leaves its photo bytes unreferenced: the sweep removes them
     // once past the in-flight grace (10 min), never before.
-    const dt = await fetch(`${baseUrl}/api/tasks/${T.checkbox.id}`, { method: 'DELETE', headers: tok.admin });
+    const dt = await fetch(`${baseUrl}/api/tasks/${T.checkbox.id}?expectedVersion=${await ctx.getVersion()}`, { method: 'DELETE', headers: tok.admin });
     assert(dt.status === 200, `G: delete task ${dt.status}`);
     const sw0 = await ctx.api('POST', '/api/__test__/answer-photo-sweep', { nowMs: Date.now() });
     assert(sw0.status === 200 && sw0.json.removed === 0, `G: a fresh orphan is kept during the grace (removed ${sw0.json?.removed})`);

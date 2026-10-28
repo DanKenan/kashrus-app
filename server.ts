@@ -12983,8 +12983,18 @@ async function deleteAnswerPhotoDoc(key: string): Promise<void> {
  * daily reset, a deleted task), after the in-flight grace. Never throws. */
 async function sweepAnswerPhotos(nowMs: number = Date.now()): Promise<number> {
   try {
+    // References from the STORED document when there is one (another server
+    // instance may have committed a photo this cache has not seen yet); a
+    // failed read aborts the sweep (nothing is deleted).
+    let taskList: any[] = tasks;
+    if (firestoreDb) {
+      const snap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
+      const stored = snap && snap.exists ? snap.data() : null;
+      if (!stored || !Array.isArray(stored.tasks)) return 0;
+      taskList = stored.tasks;
+    }
     const referenced = new Set<string>();
-    for (const t of tasks) if ((t as any).answerPhoto?.id) referenced.add(answerPhotoKey(t.id, (t as any).answerPhoto.id));
+    for (const t of taskList) if (t?.answerPhoto?.id) referenced.add(answerPhotoKey(t.id, t.answerPhoto.id));
     let entries: Array<{ key: string; createdAt?: string }> = [];
     if (!firestoreDb) {
       entries = [...localAnswerPhotos.entries()].map(([key, d]) => ({ key, createdAt: d?.createdAt }));
