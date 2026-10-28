@@ -59,8 +59,8 @@ interface Props {
   task: Task;
   /** May this person record the answer (and so add or remove the photo)? */
   canAttach: boolean;
-  /** 'kiosk' = the wall tablet's larger targets and text. */
-  size?: 'phone' | 'kiosk';
+  /** 'kiosk' = the wall tablet's larger targets and text; 'desk' = a compact camera for the desk table. */
+  size?: 'phone' | 'desk' | 'kiosk';
   /**
    * Don (Oct 27): the camera is an icon-only button like the Log check one.
    * When the answer control is passed as children, the camera sits beside it
@@ -152,6 +152,7 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
   if (!shown && !draft && !canAttach) return <>{children}</>;
 
   const k = size === 'kiosk';
+  const desk = size === 'desk';
   const btn = k
     ? 'min-h-16 px-4 text-base gap-2 rounded-xl'
     : 'min-h-11 px-3 text-xs gap-2 rounded-xl';
@@ -233,7 +234,7 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
         disabled={busy}
         aria-label={shown ? 'Change photo' : 'Add photo'}
         title={shown ? 'Change photo (replaces this one)' : 'Add photo (optional)'}
-        className={`pressable shrink-0 flex items-center justify-center rounded-xl border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30 ${k ? 'self-start min-h-16 min-w-16' : 'min-h-11 px-3'}`}
+        className={`pressable shrink-0 flex items-center justify-center border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30 ${k ? 'self-start min-h-16 min-w-16 rounded-xl' : desk ? 'w-8 h-8 rounded-lg' : 'min-h-11 px-3 rounded-xl'}`}
       >
         <Camera className={icon} aria-hidden />
       </button>
@@ -365,8 +366,8 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
   if (children === undefined) return rows;
   return (
     <>
-      <div data-answer-photo-row className="flex gap-2">
-        <div className="min-w-0 flex-1 flex flex-col justify-center">{children}</div>
+      <div data-answer-photo-row className={desk ? 'flex items-start gap-3' : 'flex gap-2'}>
+        <div className={desk ? 'min-w-0' : 'min-w-0 flex-1 flex flex-col justify-center'}>{children}</div>
         {camera}
       </div>
       {shown || draft || error ? rows : null}

@@ -107,13 +107,16 @@ for (const t of types) {
   ok(`${t}: the camera is icon only (no "Add photo" text), named "Add photo" for screen readers`, iconOnly(o) && !/>\s*Add photo\s*</.test(o) && /aria-label="Add photo"/.test(o), o.slice(0, 500));
   ok(`${t}: the camera sits beside the answer, in the same row`, /^<div data-answer-photo-row="true" class="flex gap-2"><div class="min-w-0 flex-1 flex flex-col justify-center"><i>ANSWER<\/i><\/div><button type="button" data-answer-photo-add="true"/.test(o), o.slice(0, 300));
 }
-const logCheckLook = 'rounded-xl border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30';
-ok('the camera has the Log check camera look (44 px, rounded, sunken, line border)', addOut.includes(logCheckLook) && /data-answer-photo-add="true"[^>]*class="[^"]*\bmin-h-11 px-3\b/.test(addOut) && rd('src/components/TaskCardView.tsx').includes('px-3 flex items-center justify-center rounded-xl text-xs font-bold border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30'), addOut.slice(0, 500));
+const logCheckLook = 'border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30';
+ok('the camera has the Log check camera look (44 px, rounded, sunken, line border)', addOut.includes(logCheckLook) && /data-answer-photo-add="true"[^>]*class="[^"]*\bmin-h-11 px-3 rounded-xl\b/.test(addOut) && rd('src/components/TaskCardView.tsx').includes('px-3 flex items-center justify-center rounded-xl text-xs font-bold border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30'), addOut.slice(0, 500));
 ok('saved photo: "Change photo" is the same icon-only camera', iconOnly(withPhoto) && /aria-label="Change photo"/.test(withPhoto) && !/>\s*Change photo\s*</.test(withPhoto));
 ok('kiosk: icon only too, a 64 px square', iconOnly(kiosk) && !/>\s*Add photo\s*</.test(kiosk));
 const besideWithPhoto = html(h(TaskAnswerPhoto, { task: mk('yes_no', { answerPhoto: photo }), canAttach: true }, h('i', null, 'ANSWER')));
 ok('saved photo: the thumbnail line ("Photo by X · time", caption) stays under the answer row', /^<div data-answer-photo-row="true"[\s\S]*aria-label="Change photo"[\s\S]*<\/div><div data-answer-photo="true"[\s\S]*data-answer-photo-thumb[\s\S]*Seal on the walk-in[\s\S]*Photo by <span class="font-semibold text-ink">Dana Demo<\/span>/.test(besideWithPhoto) && count(besideWithPhoto, 'data-answer-photo-add') === 1, besideWithPhoto.slice(0, 600));
 ok('read-only viewer, no photo: only the answer itself', html(h(TaskAnswerPhoto, { task: mk('yes_no'), canAttach: false }, h('i', null, 'ANSWER'))) === '<i>ANSWER</i>');
+const deskOut = html(h(TaskAnswerPhoto, { task: mk('yes_no'), canAttach: true, size: 'desk' }, h('i', null, 'ANSWER')));
+ok('desk table: a compact 32 px camera right after the answer (not pushed to the far edge)', /^<div data-answer-photo-row="true" class="flex items-start gap-3"><div class="min-w-0"><i>ANSWER<\/i><\/div><button type="button" data-answer-photo-add="true"[^>]*class="[^"]*\bw-8 h-8 rounded-lg\b/.test(deskOut) && iconOnly(deskOut), deskOut.slice(0, 400));
+ok('desk table view uses the compact camera', /<TaskAnswerPhoto task=\{task\} canAttach=\{canFill\} size="desk">/.test(rd('src/components/TaskTableView.tsx')));
 ok('check_in: only its own controls (no camera row)', html(h(TaskAnswerPhoto, { task: mk('check_in'), canAttach: true }, h('i', null, 'ANSWER'))) === '<i>ANSWER</i>');
 
 const kp = rd('src/components/KioskTaskPanel.tsx');
