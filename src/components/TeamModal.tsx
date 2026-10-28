@@ -2,11 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { 
   X, 
   Users, 
-  UserPlus, 
   Trash2, 
-  User, 
   Mail, 
-  AlertTriangle, 
   Building2, 
   CheckSquare, 
   PlusCircle,
@@ -15,14 +12,14 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { User as UserType, UserRole, Task, Venue, UserPermissions } from '../types';
-import { getRoleLabel, canUserAssignTasks, canUserFillTasks, DEFAULT_ROLE_PERMISSIONS } from '../lib/permissions';
+import { getRoleLabel, canUserAssignTasks, canUserFillTasks, DEFAULT_ROLE_PERMISSIONS, STAFF_ADD_ROLES, staffMayAddMemberAt } from '../lib/permissions';
+import { AddMemberForm, ADMIN_ADD_ROLES, STAFF_ADD_NOTE } from './AddMemberForm';
 import { ConfirmModal } from './ConfirmModal';
 import { KioskCodeDialog } from './KioskCodeDialog';
 import { VenueAccessSheet } from './VenueAccessSheet';
 import { PoolPanel, PoolMoveDialog, usePool } from './PoolPanel';
 import { POOL_TEXT, isFromPool, poolCount, poolOnlyIds } from '../lib/pool';
 import { END_DATE_TEXT, rosterUntilLines } from '../lib/venueEndDates';
-import { normalizePhone } from '../lib/kioskCodeShare';
 import { InviteLinkCard } from './InviteLinkCard';
 import { sendMemberInvite, loadMemberForInvite, inviteChip, SEND_CHANGED_TEXT } from '../lib/inviteActions';
 import { canMakeResetLink, makeResetLink, loadResetRequests, confirmPausedMember, type ResetRequest } from '../lib/resetLinks';
@@ -31,12 +28,9 @@ import { isMyTask } from '../lib/myTasks';
 /** Roles the admin's role picker knows (worker shows as Mashgiach). An unknown role gets the plain badge, never a picker (fail closed). */
 const TEAM_ROLE_CHOICES: string[] = ['mashgiach', 'worker', 'coordinator', 'manager', 'owner', 'admin'];
 
-/** Item 10i: what Add member returns when the agency's Phase C is ON (the server made an invite, not a user). */
-export interface AddMemberInvite {
-  link: string;
-  name: string;
-  email: string;
-}
+/** Item 10i: what Add member returns (now defined with the shared add form). */
+export type { AddMemberInvite } from './AddMemberForm';
+import type { AddMemberInvite } from './AddMemberForm';
 
 interface TeamModalProps {
   isOpen: boolean;
@@ -80,16 +74,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 }) => {
   const [venueTarget, setVenueTarget] = useState<(UserType & { venueIds: string[] }) | null>(null);
   const [venueNotice, setVenueNotice] = useState<string | null>(null);
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [newPhone, setNewPhone] = useState('');
   // K1: whose kiosk-code sheet is open (looked up fresh from `users`).
   const [codeTargetId, setCodeTargetId] = useState<string | null>(null);
-  const [role, setRole] = useState<UserRole>('mashgiach');
-  const [canFill, setCanFill] = useState<boolean>(true);
-  const [canAssign, setCanAssign] = useState<boolean>(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
   const [userToDelete, setUserToDelete] = useState<UserType | null>(null);
@@ -99,9 +85,11 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   // code (+ optional phone) sheet on mashgiach/worker rows (Don's decision
   // 8:50 PM ET Oct 19; phone added in K1, Oct 20).
   const isCoordinatorView = currentUser?.role === 'coordinator';
+  // Team adds (Don 2026-10-27 11:30 PM): a coordinator adds a Mashgiach or Manager
+  // at the venue they are on, only when it is one of their own venues.
+  const coordinatorAddVenue = isCoordinatorView && currentVenue && staffMayAddMemberAt(currentUser, currentVenue.id) ? currentVenue : null;
   const [actionAlert, setActionAlert] = useState<string | null>(null);
   // Item 10i: the invite link just made (shown once, never stored).
-  const [inviteResult, setInviteResult] = useState<{ link: string; forWhom: string } | null>(null);
   // INVITES CLIENT C3: Send invite for one member (confirm first; the link is shown once).
   // B1 ([INVC-DS3]): the record the admin reviews and the version of the response it came from.
   const [sendReview, setSendReview] = useState<{ user: UserType; version: number; changed: boolean } | null>(null);
@@ -139,7 +127,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
     if (!isOpen) {
       setTab('team');
       setMoveTarget(null);
-      setInviteResult(null);
       setSendReview(null);
       setSentLink(null);
       setSendError(null);
@@ -226,64 +213,6 @@ export const TeamModal: React.FC<TeamModalProps> = ({
     setConfirmTarget(null);
     if (r.ok) setConfirmedIds((prev) => (prev.includes(target.id) ? prev : [...prev, target.id]));
     else setConfirmError({ userId: target.id, message: r.message || "Couldn't confirm. Please try again." });
-  };
-
-  // When role changes in the creation form, sync default permissions
-  const handleRoleChange = (newRole: UserRole) => {
-    setRole(newRole);
-    const defaults = DEFAULT_ROLE_PERMISSIONS[newRole] || { canFillTasks: true, canAssignTasks: false };
-    setCanFill(defaults.canFillTasks ?? false);
-    setCanAssign(defaults.canAssignTasks ?? false);
-  };
-
-  const handleAddSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    // Invites are always on (Don 2026-10-22): a new person gets a link and chooses their own password.
-    if (!name.trim() || !email.trim()) {
-      setError('Please provide a name and an email.');
-      return;
-    }
-
-    const phoneClean = normalizePhone(newPhone);
-    if (phoneClean === null) {
-      setError("That phone number doesn't look right. Use digits, with + and the country code outside the US.");
-      return;
-    }
-
-    const emailClean = email.trim().toLowerCase();
-    if (users.some((u) => (u.email?.toLowerCase() || '') === emailClean)) {
-      setError('A team member with this email already exists.');
-      return;
-    }
-
-    try {
-      setIsSubmitting(true);
-      const added = await onAddUser({
-        name: name.trim(),
-        email: emailClean,
-        role: role === 'coordinator' || role === 'manager' ? role : 'mashgiach',
-        venueId: currentVenue?.id,
-        permissions: {
-          canFillTasks: canFill,
-          canAssignTasks: canAssign,
-        },
-        ...(phoneClean ? { phoneNumber: phoneClean } : {}),
-      });
-      if (added && typeof added.link === 'string') {
-        setInviteResult({ link: added.link, forWhom: `${added.name} (${added.email})` });
-      }
-      setName('');
-      setEmail('');
-      setNewPhone('');
-      setRole('mashgiach');
-      setCanFill(true);
-      setCanAssign(false);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to add team member.');
-    } finally {
-      setIsSubmitting(false);
-    }
   };
 
   const handleTogglePermission = async (user: UserType, perm: 'canFillTasks' | 'canAssignTasks', currentVal: boolean) => {
@@ -454,153 +383,17 @@ export const TeamModal: React.FC<TeamModalProps> = ({
               onCode={currentUser.role === 'admin' && onUpdateUser ? (id) => setCodeTargetId(id) : undefined} />
           ) : (<>
 
-          {/* Section 1: Add New Member Form (admin only) */}
-          {!isCoordinatorView && (
-          <div className="p-4 rounded-2xl bg-sunken border border-line e1">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-ink-soft mb-3 flex items-center gap-1.5">
-              <UserPlus className="w-3.5 h-3.5 text-ok" />
-              Add New Team Member
-            </h3>
-
-            {error && (
-              <div className="mb-3 p-2.5 rounded-xl bg-bad-bg border border-bad text-xs text-bad flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-                <span>{error}</span>
-              </div>
-            )}
-
-            {inviteResult ? (
-              <InviteLinkCard
-                link={inviteResult.link}
-                forWhom={inviteResult.forWhom}
-                onDone={() => setInviteResult(null)}
-                doneLabel="Add another person"
-              />
-            ) : (
-            <form onSubmit={handleAddSubmit} className="space-y-3 text-xs">
-              <p data-invite-mode-note className="text-sm text-ink-soft">
-                No password needed. You'll get a link to send them, and they choose their own password.
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                <div className="sm:col-span-4">
-                  <label className="block font-semibold text-ink-soft mb-1">
-                    Full Name
-                  </label>
-                  <div className="relative">
-                    <User className="w-3.5 h-3.5 text-ink-soft absolute left-3 top-1/2 -translate-y-1/2" />
-                    <input
-                      id="new-member-name-input"
-                      type="text"
-                      required
-                      placeholder="Full name"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
-                    />
-                  </div>
-                </div>
-
-                <div className="sm:col-span-4">
-                  <label className="block font-semibold text-ink-soft mb-1">
-                    Email
-                  </label>
-                  <div className="relative">
-                    <Mail className="w-3.5 h-3.5 text-ink-soft absolute left-3 top-1/2 -translate-y-1/2" />
-                    <input
-                      id="new-member-email-input"
-                      type="email"
-                      required
-                      placeholder="e.g. dcohen@hartfordkashrut.org"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
-                    />
-                  </div>
-                </div>
-
-
-                <div className="sm:col-span-4">
-                  <label className="block font-semibold text-ink-soft mb-1">
-                    Role
-                  </label>
-                  <select
-                    id="new-member-role-select"
-                    value={role === 'coordinator' || role === 'manager' ? role : 'mashgiach'}
-                    onChange={(e) => handleRoleChange(e.target.value as UserRole)}
-                    className="w-full py-2 px-3 font-medium focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
-                  >
-                    <option value="mashgiach">Mashgiach (Field Inspector)</option>
-                    <option value="coordinator">Coordinator (Can Add Tasks)</option>
-                    <option value="manager">Manager (Runs this venue)</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* K1: optional phone, so a kiosk code can be sent straight to them */}
-              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                <div className="sm:col-span-4">
-                  <label htmlFor="new-member-phone-input" className="block font-semibold text-ink-soft mb-1">
-                    Phone (optional)
-                  </label>
-                  <div className="relative">
-                    <Phone className="w-3.5 h-3.5 text-ink-soft absolute left-3 top-1/2 -translate-y-1/2" />
-                    <input
-                      id="new-member-phone-input"
-                      type="tel"
-                      placeholder="For sending the kiosk code"
-                      value={newPhone}
-                      onChange={(e) => setNewPhone(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 placeholder-ink-faint focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Permission checkboxes for the new user */}
-              <div className="pt-2 border-t border-line flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-5">
-                  <span className="font-semibold text-ink-soft">
-                    Permissions:
-                  </span>
-                  <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={canFill}
-                      onChange={(e) => setCanFill(e.target.checked)}
-                      className="w-4 h-4 accent-gold rounded border-line-control cursor-pointer"
-                    />
-                    <span className="text-ink-soft">
-                      Can Fill Up Tasks & Notes
-                    </span>
-                  </label>
-                  <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={canAssign}
-                      onChange={(e) => setCanAssign(e.target.checked)}
-                      className="w-4 h-4 accent-gold rounded border-line-control cursor-pointer"
-                    />
-                    <span className="text-ink-soft">
-                      Can Assign / Add New Tasks
-                    </span>
-                  </label>
-                </div>
-
-                <button
-                  id="add-member-submit-btn"
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="pressable py-2 px-4 rounded-xl hover:brightness-105 disabled:opacity-50 font-bold flex items-center justify-center gap-1.5 e1 cursor-pointer shrink-0 bg-gold-deep text-paper"
-                >
-                  <UserPlus className="w-4 h-4" />
-                  <span>{isSubmitting ? 'Creating link…' : 'Create invite link'}</span>
-                </button>
-              </div>
-            </form>
-            )}
-          </div>
-
-          )} {/* end admin-only Add Member form */}
+          {/* Section 1: Add New Member Form. Admin: every role it may add, with rights.
+              Coordinator (Don 2026-10-27 11:30 PM): Mashgiach or Manager at the
+              venue they are on, if it is in their scope; the admins are notified. */}
+          {!isCoordinatorView ? (
+            <AddMemberForm roles={ADMIN_ADD_ROLES} showPermissions venueId={currentVenue?.id}
+              existingEmails={users.map((u) => u.email || '')} onAddUser={onAddUser} />
+          ) : coordinatorAddVenue ? (
+            <AddMemberForm roles={STAFF_ADD_ROLES} showPermissions={false} venueId={coordinatorAddVenue.id}
+              venueNote={STAFF_ADD_NOTE(coordinatorAddVenue.name)}
+              existingEmails={users.map((u) => u.email || '')} onAddUser={onAddUser} />
+          ) : null}
 
           {/* Section 2: Team Roster List with Inline Permission Toggles */}
           <div>

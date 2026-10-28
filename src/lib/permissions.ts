@@ -115,13 +115,14 @@ export function isVenueOwnerLike(user: { role?: string } | null | undefined): bo
   return !!user && (user.role === 'owner' || user.role === 'manager');
 }
 
-type RoleMember = { id?: string; role?: string; venueId?: string; agencyId?: string; noHomeVenue?: boolean };
+type RoleMember = { id?: string; role?: string; venueId?: string; agencyId?: string; noHomeVenue?: boolean; myVenueIds?: string[] };
 const homeOf = (u: RoleMember): string => (typeof u.venueId === 'string' ? u.venueId : '');
 
 /**
- * May this OWNER add a manager? Only an owner (never a manager, coordinator or
- * anyone else) with a real home venue; the invite is for that venue only.
- * Mirror of the server's ownerAddsManager; the server decides.
+ * May this OWNER add team members (a mashgiach or a manager) and open the
+ * owner's Team sheet? Only an owner (never a manager, coordinator or anyone
+ * else) with a real home venue; an invite is for that venue only. Mirror of
+ * the server's staffAddsMember (owner branch); the server decides.
  */
 export function ownerMayAddManager(caller: RoleMember | null | undefined): boolean {
   return !!caller && caller.role === 'owner' && !!homeOf(caller) && caller.noHomeVenue !== true;
@@ -142,4 +143,30 @@ export function ownerRoleSwitchFor(caller: RoleMember | null | undefined, target
   if (target.role === 'mashgiach' || target.role === 'worker') return 'manager';
   if (target.role === 'manager') return 'mashgiach';
   return null;
+}
+
+/**
+ * Team adds (Don 2026-10-27 11:30 PM: "make the owner and coordinators able to
+ * add"): the only roles an owner or a coordinator may add. Never owner,
+ * admin, coordinator or worker (server: STAFF_ADD_ROLES).
+ */
+export const STAFF_ADD_ROLES = ['mashgiach', 'manager'] as const;
+
+/**
+ * May this OWNER or COORDINATOR add a team member at `venueId`? Mirror of the
+ * server's staffMayAddMemberAt (fail closed): an owner at their own home
+ * venue; a coordinator at a venue of their own scope (the server's
+ * myVenueIds when it sent them, else their home venue). Admins use the
+ * admin form; everyone else: no.
+ */
+export function staffMayAddMemberAt(caller: RoleMember | null | undefined, venueId: string | null | undefined): boolean {
+  if (!caller || typeof venueId !== 'string' || !venueId) return false;
+  if (caller.role === 'owner') return ownerMayAddManager(caller) && homeOf(caller) === venueId;
+  if (caller.role === 'coordinator') {
+    const scope = Array.isArray(caller.myVenueIds)
+      ? caller.myVenueIds.filter((x) => typeof x === 'string' && !!x)
+      : (homeOf(caller) && caller.noHomeVenue !== true ? [homeOf(caller)] : []);
+    return scope.includes(venueId);
+  }
+  return false;
 }

@@ -1,6 +1,9 @@
 // Manager role (Don 2026-10-27, "same style as the owner"; server #169): the
-// venue OWNER's Team sheet. An owner may add a manager for their own home venue
-// (a pending invite, like an admin's "Add team member") and switch a mashgiach
+// venue OWNER's Team sheet. An owner may add a team member — a Mashgiach or a
+// Manager — for their own home venue with the SAME "Add New Team Member" form
+// the admin uses (Don 11:01 PM: "Keep the same style as until now. Just add
+// another option of manager."; 11:30 PM: owners and coordinators may add, the
+// admins are notified and it shows in Announcements), and switch a mashgiach
 // at that venue to manager, or a manager back to mashgiach, with the same role
 // dropdown the admin's Team screen uses (Don 2026-10-27 10:15 PM: "one of the
 // options as you toggle", not a button per person); for an owner it offers
@@ -8,16 +11,15 @@
 // confirm first; a failed save puts the dropdown back. Nothing else: no
 // owner, admin or coordinator is listed, no other venue, no name, PIN or
 // rights. A manager never sees this sheet. Rule T, fail closed: the list and
-// the buttons follow ownerRoleSwitchFor / ownerMayAddManager (the client
-// mirror of the server's ownerMayChangeRole / ownerAddsManager); the server
+// the buttons follow ownerRoleSwitchFor / staffMayAddMemberAt (the client
+// mirror of the server's ownerMayChangeRole / staffAddsMember); the server
 // decides and its answer is shown as written.
 import React, { useEffect, useRef, useState } from 'react';
 import { UserPlus } from 'lucide-react';
 import type { User } from '../types';
-import { ownerMayAddManager, ownerRoleSwitchFor } from '../lib/permissions';
-import { normalizePhone } from '../lib/kioskCodeShare';
+import { ownerMayAddManager, ownerRoleSwitchFor, staffMayAddMemberAt, STAFF_ADD_ROLES } from '../lib/permissions';
 import { Sheet } from './PoolPanel';
-import { InviteLinkCard } from './InviteLinkCard';
+import { AddMemberForm, STAFF_ADD_NOTE, type AddMemberInput, type AddMemberInvite } from './AddMemberForm';
 
 /** All labels of this sheet in one block. */
 export const OWNER_TEAM_TEXT = {
@@ -26,15 +28,7 @@ export const OWNER_TEAM_TEXT = {
   intro: (venue: string) => `Mashgichim and managers at ${venue}. A manager runs this venue with you.`,
   thisVenue: 'your venue',
   empty: 'No mashgichim or managers here yet.',
-  addManager: 'Add manager',
-  addTitle: 'Add a manager',
-  addHint: 'They get a link to set their own password. A manager sees and does what you do at this venue.',
-  name: 'Name',
-  email: 'Email',
-  phone: 'Phone (optional)',
-  needNameEmail: 'Please enter a name and an email.',
-  badPhone: "That phone number doesn't look right. Use digits, with + and the country code outside the US.",
-  send: 'Make invite link',
+  addMember: 'Add team member',
   cancel: 'Cancel',
   roleLabel: (name: string) => `Role for ${name}`,
   optMashgiach: 'Mashgiach',
@@ -45,7 +39,6 @@ export const OWNER_TEAM_TEXT = {
   confirmMashgiachBody: 'They will no longer manage this venue.',
   yes: 'Yes, change',
   failed: "Couldn't save. Please try again.",
-  linkHint: (name: string) => `Send this link to ${name}.`,
   done: 'Done',
 } as const;
 
@@ -83,7 +76,6 @@ const btn = 'min-h-11 px-3 rounded-xl bg-surface border border-line-control text
 const btnGold = 'min-h-11 px-4 rounded-xl bg-gold-deep text-paper text-sm font-semibold pressable cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed';
 // Same look as the admin Team screen's role picker (TeamModal).
 const roleSelect = 'text-base font-semibold px-2 py-0.5 rounded-lg uppercase tracking-wider cursor-pointer border border-line-control min-w-0 bg-sunken text-ink-soft focus:ring-2 focus:ring-gold/40 focus:border-gold disabled:opacity-50 disabled:cursor-not-allowed';
-const input = 'w-full min-h-11 px-3 rounded-lg bg-surface border border-line-control text-base text-ink placeholder-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/40 focus:border-gold';
 
 interface OwnerTeamSheetProps {
   isOpen: boolean;
@@ -91,19 +83,17 @@ interface OwnerTeamSheetProps {
   currentUser: User;
   roster: User[];
   venueName?: string;
-  /** POST /api/users { role: 'manager', venueId: home } — returns the invite link. */
-  onAddManager: (input: { name: string; email: string; role: 'manager'; venueId: string; phoneNumber?: string }) => Promise<void | { link: string; name: string; email: string }>;
+  /** POST /api/users { role: 'mashgiach' | 'manager', venueId: home } — returns the invite link. */
+  onAddMember: (input: AddMemberInput) => Promise<void | AddMemberInvite>;
   /** PUT /api/users/:id with exactly { role }. */
   onSetRole: (userId: string, role: 'manager' | 'mashgiach') => Promise<void>;
 }
 
-export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName, onAddManager, onSetRole }: OwnerTeamSheetProps) {
+export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName, onAddMember, onSetRole }: OwnerTeamSheetProps) {
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ name: '', email: '', phone: '' });
   const [asking, setAsking] = useState<{ id: string; to: 'manager' | 'mashgiach' } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [link, setLink] = useState<{ link: string; name: string } | null>(null);
   // Bumped on every close: an answer that lands after the sheet was closed (and
   // maybe reopened with a new draft) is dropped, never applied to the new draft.
   const generation = useRef(0);
@@ -114,27 +104,8 @@ export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName
   if (!isOpen || !ownerMayAddManager(currentUser)) return null;
   const home = String(currentUser.venueId || '');
   const rows = ownerTeamRows(currentUser, roster);
-  const close = () => { generation.current += 1; setAdding(false); setAsking(null); setError(null); setLink(null); setBusy(false); onClose(); };
-
-  const submitAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const name = form.name.trim();
-    const email = form.email.trim().toLowerCase();
-    if (!name || !email) { setError(OWNER_TEAM_TEXT.needNameEmail); return; }
-    const phone = normalizePhone(form.phone);
-    if (phone === null) { setError(OWNER_TEAM_TEXT.badPhone); return; }
-    const gen = generation.current;
-    setBusy(true); setError(null);
-    try {
-      const made = await onAddManager({ name, email, role: 'manager', venueId: home, ...(phone ? { phoneNumber: phone } : {}) });
-      if (gen !== generation.current) return;
-      if (made && typeof made.link === 'string') setLink({ link: made.link, name: made.name || name });
-      setForm({ name: '', email: '', phone: '' });
-      setAdding(false);
-    } catch (err: any) {
-      if (gen === generation.current) setError(err?.message || OWNER_TEAM_TEXT.failed);
-    } finally { if (gen === generation.current) setBusy(false); }
-  };
+  const close = () => { generation.current += 1; setAdding(false); setAsking(null); setError(null); setBusy(false); onClose(); };
+  const mayAdd = staffMayAddMemberAt(currentUser, home);
 
   const confirmSwitch = async () => {
     if (!asking) return;
@@ -156,37 +127,20 @@ export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName
     <Sheet title={OWNER_TEAM_TEXT.title} onClose={close} testId="owner-team">
       <div data-owner-team className="space-y-3">
         <p className="text-sm text-ink-soft">{OWNER_TEAM_TEXT.intro(venueName || OWNER_TEAM_TEXT.thisVenue)}</p>
-        {link && (
-          <InviteLinkCard link={link.link} forWhom={link.name} hint={OWNER_TEAM_TEXT.linkHint(link.name)}
-            onDone={() => setLink(null)} doneLabel={OWNER_TEAM_TEXT.done} />
-        )}
-        {!link && !adding && (
-          <button type="button" data-owner-add-manager className={`${btnGold} w-full inline-flex items-center justify-center gap-2`}
+        {mayAdd && !adding && (
+          <button type="button" data-owner-add-member className={`${btnGold} w-full inline-flex items-center justify-center gap-2`}
             onClick={() => { setAdding(true); setAsking(null); setError(null); }}>
-            <UserPlus aria-hidden="true" className="w-4 h-4" />{OWNER_TEAM_TEXT.addManager}
+            <UserPlus aria-hidden="true" className="w-4 h-4" />{OWNER_TEAM_TEXT.addMember}
           </button>
         )}
-        {adding && (
-          <form data-owner-add-form onSubmit={submitAdd} className="p-3 rounded-xl bg-sunken border border-line space-y-3">
-            <h3 className="text-sm font-semibold text-ink">{OWNER_TEAM_TEXT.addTitle}</h3>
-            <p className="text-sm text-ink-soft">{OWNER_TEAM_TEXT.addHint}</p>
-            <label className="block text-sm font-semibold text-ink-soft">{OWNER_TEAM_TEXT.name}
-              <input data-owner-add-name className={`${input} mt-1`} value={form.name} maxLength={80} autoComplete="off"
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
-            </label>
-            <label className="block text-sm font-semibold text-ink-soft">{OWNER_TEAM_TEXT.email}
-              <input data-owner-add-email className={`${input} mt-1`} type="email" value={form.email} autoComplete="off"
-                onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} />
-            </label>
-            <label className="block text-sm font-semibold text-ink-soft">{OWNER_TEAM_TEXT.phone}
-              <input data-owner-add-phone className={`${input} mt-1`} inputMode="tel" value={form.phone} autoComplete="off"
-                onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} />
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              <button type="button" className={btn} disabled={busy} onClick={() => { setAdding(false); setError(null); }}>{OWNER_TEAM_TEXT.cancel}</button>
-              <button type="submit" data-owner-add-submit className={btnGold} disabled={busy}>{OWNER_TEAM_TEXT.send}</button>
-            </div>
-          </form>
+        {mayAdd && adding && (
+          <div data-owner-add-form>
+            <AddMemberForm roles={STAFF_ADD_ROLES} showPermissions={false} venueId={home}
+              venueNote={STAFF_ADD_NOTE(venueName)} idPrefix="owner-"
+              existingEmails={(Array.isArray(roster) ? roster : []).map((u) => u.email || '')}
+              onAddUser={onAddMember} onCancel={() => setAdding(false)}
+              onInviteDone={() => setAdding(false)} doneLabel={OWNER_TEAM_TEXT.done} />
+          </div>
         )}
         {error && <p role="alert" data-owner-team-error className="text-base text-ink">{error}</p>}
         {rows.length === 0 ? (

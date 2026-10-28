@@ -26,16 +26,18 @@ const POOL = await load('../../src/lib/pool.ts');
 const R = await load('../../src/lib/resetLinks.ts');
 const NAV = await load('../../src/components/PhoneNav.tsx');
 const OT = await load('../../src/components/OwnerTeamSheet.tsx');
+const AF = await load('../../src/components/AddMemberForm.tsx');
+const TM = await load('../../src/components/TeamModal.tsx');
 
 const AG = 'ag-demo';
 const owner = { id: 'u-own', role: 'owner', agencyId: AG, venueId: 'v1', name: 'Olive Owner', email: 'o@demo.test' };
 const manager = { id: 'u-mgr', role: 'manager', agencyId: AG, venueId: 'v1', name: 'Mia Manager', email: 'm@demo.test' };
-const mash = { id: 'u-mash', role: 'mashgiach', agencyId: AG, venueId: 'v1', name: 'Moshe Mashgiach' };
+const mash = { id: 'u-mash', role: 'mashgiach', agencyId: AG, venueId: 'v1', name: 'Moshe Mashgiach', email: 'mm@demo.test' };
 const worker = { id: 'u-wrk', role: 'worker', agencyId: AG, venueId: 'v1', name: 'Wes Worker' };
 const mashOther = { id: 'u-mash2', role: 'mashgiach', agencyId: AG, venueId: 'v2', name: 'Other Venue' };
 const owner2 = { id: 'u-own2', role: 'owner', agencyId: AG, venueId: 'v1', name: 'Second Owner' };
-const coord = { id: 'u-co', role: 'coordinator', agencyId: AG, venueId: 'v1', name: 'Coco Coordinator' };
-const admin = { id: 'u-ad', role: 'admin', agencyId: AG, name: 'Ada Admin' };
+const coord = { id: 'u-co', role: 'coordinator', agencyId: AG, venueId: 'v1', name: 'Coco Coordinator', email: 'co@demo.test' };
+const admin = { id: 'u-ad', role: 'admin', agencyId: AG, name: 'Ada Admin', email: 'ad@demo.test' };
 const foreign = { id: 'u-f', role: 'mashgiach', agencyId: 'ag-other', venueId: 'v1', name: 'Foreign' };
 const poolMash = { id: 'u-pool', role: 'mashgiach', agencyId: AG, noHomeVenue: true, name: 'Pool Person' };
 const venues = [{ id: 'v1', agencyId: AG }, { id: 'v2', agencyId: AG }];
@@ -68,13 +70,30 @@ check('admin reset link for a manager', R.canMakeResetLink?.(admin, manager), tr
 check('coordinator (same venue) reset link for a manager', R.canMakeResetLink?.(coord, manager), true);
 check('manager makes no reset links', R.canMakeResetLink?.(manager, mash), false);
 
-// Owner adds managers; nobody else through this path
+// Owner adds team members (mashgiach or manager); nobody else through this path
 check('owner may add a manager', P.ownerMayAddManager?.(owner), true);
 check('manager may NOT add a manager', P.ownerMayAddManager?.(manager), false);
 check('coordinator may NOT add a manager (owner path)', P.ownerMayAddManager?.(coord), false);
 check('mashgiach may NOT add a manager', P.ownerMayAddManager?.(mash), false);
 check('owner without a home venue may NOT', P.ownerMayAddManager?.({ ...owner, venueId: undefined }), false);
 check('owner in the Pool may NOT', P.ownerMayAddManager?.({ ...owner, noHomeVenue: true }), false);
+
+// Team adds (Don 2026-10-27 11:30 PM): owners at home, coordinators in their scope; Mashgiach or Manager only
+check('staff add roles = Mashgiach, Manager', P.STAFF_ADD_ROLES ? [...P.STAFF_ADD_ROLES] : 'missing', ['mashgiach', 'manager']);
+const may = (c, v) => (P.staffMayAddMemberAt ? P.staffMayAddMemberAt(c, v) : 'missing');
+check('add: owner at home', may(owner, 'v1'), true);
+check('add: owner at another venue', may(owner, 'v2'), false);
+check('add: owner without a venue id', may(owner, ''), false);
+check('add: owner in the Pool', may({ ...owner, noHomeVenue: true }, 'v1'), false);
+check('add: coordinator at home', may(coord, 'v1'), true);
+check('add: coordinator at another venue', may(coord, 'v2'), false);
+check('add: coordinator with server scope [v1, v2] at v2', may({ ...coord, myVenueIds: ['v1', 'v2'] }, 'v2'), true);
+check('add: coordinator with server scope [v1] at v2', may({ ...coord, myVenueIds: ['v1'] }, 'v2'), false);
+check('add: Pool coordinator, no scope', may({ ...coord, venueId: undefined, noHomeVenue: true }, 'v1'), false);
+check('add: manager never', may(manager, 'v1'), false);
+check('add: mashgiach never', may(mash, 'v1'), false);
+check('add: admin uses the admin form (not this rule)', may(admin, 'v1'), false);
+check('add: unknown role never', may({ id: 'x', role: 'janitor', agencyId: AG, venueId: 'v1' }, 'v1'), false);
 
 // Owner role switch: mashgiach <-> manager at the owner's own venue only
 const sw = (c, t) => (P.ownerRoleSwitchFor ? P.ownerRoleSwitchFor(c, t) : 'missing');
@@ -115,8 +134,10 @@ check('owner role options', OT.OWNER_ROLE_OPTIONS ? [...OT.OWNER_ROLE_OPTIONS] :
 const h = React.createElement;
 const noop = async () => {};
 if (OT.OwnerTeamSheet) {
-  const html = renderToStaticMarkup(h(OT.OwnerTeamSheet, { isOpen: true, onClose: () => {}, currentUser: owner, roster, venueName: 'Demo Bistro', onAddManager: noop, onSetRole: noop }));
-  check('owner sheet: Add manager button', html.includes('data-owner-add-manager') && html.includes('Add manager'), true);
+  const html = renderToStaticMarkup(h(OT.OwnerTeamSheet, { isOpen: true, onClose: () => {}, currentUser: owner, roster, venueName: 'Demo Bistro', onAddMember: noop, onSetRole: noop }));
+  // Don 11:01 PM Oct 27: no special "Add manager" button — the same "Add team member" as the admin, Manager is one more role.
+  check('owner sheet: Add team member button', html.includes('data-owner-add-member') && html.includes('Add team member'), true);
+  check('owner sheet: no "Add manager" button', /Add manager|data-owner-add-manager/.test(html), false);
   // Don 10:15 PM Oct 27: the role is a dropdown option (like the admin Team screen), not a "Make manager" button per person.
   check('owner sheet: no per-person Make manager / Make mashgiach buttons', /Make manager|Make mashgiach|data-owner-switch=/.test(html), false);
   const selects = [...html.matchAll(/<select[^>]*data-owner-role-select="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)];
@@ -129,18 +150,58 @@ if (OT.OwnerTeamSheet) {
   check('owner dropdown: same look as the admin role picker', /<select[^>]*data-owner-role-select="u-mash"[^>]*class="[^"]*uppercase tracking-wider[^"]*border-line-control/.test(html) || /<select[^>]*class="[^"]*uppercase tracking-wider[^"]*border-line-control[^"]*"[^>]*data-owner-role-select/.test(html), true);
   check('owner sheet: no owner/admin/coordinator/other-venue rows', ['u-own2', 'u-ad', 'u-co', 'u-mash2', 'u-f', 'u-pool', 'u-own"'].some((id) => html.includes(`data-owner-team-row="${id}`)), false);
   check('owner sheet: venue named', html.includes('Demo Bistro'), true);
-  const mhtml = renderToStaticMarkup(h(OT.OwnerTeamSheet, { isOpen: true, onClose: () => {}, currentUser: manager, roster, onAddManager: noop, onSetRole: noop }));
+  const mhtml = renderToStaticMarkup(h(OT.OwnerTeamSheet, { isOpen: true, onClose: () => {}, currentUser: manager, roster, onAddMember: noop, onSetRole: noop }));
   check('manager: owner Team sheet renders nothing', mhtml, '');
-  const chtml = renderToStaticMarkup(h(OT.OwnerTeamSheet, { isOpen: true, onClose: () => {}, currentUser: coord, roster, onAddManager: noop, onSetRole: noop }));
+  const chtml = renderToStaticMarkup(h(OT.OwnerTeamSheet, { isOpen: true, onClose: () => {}, currentUser: coord, roster, onAddMember: noop, onSetRole: noop }));
   check('coordinator: owner Team sheet renders nothing', chtml, '');
 } else { console.error('FAIL OwnerTeamSheet missing'); failures++; }
+
+// The ONE add form (admin, coordinator, owner): same card, labels, ids; roles differ
+const optsIn = (html, sel) => {
+  const m = html.match(new RegExp(`<select[^>]*${sel}[^>]*>([\\s\\S]*?)</select>`));
+  return m ? [...m[1].matchAll(/<option value="([^"]+)"[^>]*>([^<]*)<\/option>/g)].map((o) => `${o[1]}:${o[2]}`) : 'no select';
+};
+if (AF.AddMemberForm) {
+  const staff = renderToStaticMarkup(h(AF.AddMemberForm, { roles: P.STAFF_ADD_ROLES, showPermissions: false, venueId: 'v1', venueNote: AF.STAFF_ADD_NOTE?.('Demo Bistro'), existingEmails: [], onAddUser: noop, onCancel: () => {}, idPrefix: 'owner-' }));
+  check('staff form: Mashgiach (default) and Manager only', optsIn(staff, 'data-add-member-role'), ['mashgiach:Mashgiach (Field Inspector)', 'manager:Manager (Runs this venue)']);
+  check('staff form: Mashgiach selected first', /<option value="mashgiach" selected/.test(staff), true);
+  check('staff form: never owner/admin/coordinator/worker', /<option value="(owner|admin|coordinator|worker)"/.test(staff), false);
+  check('staff form: no rights checkboxes (role defaults)', /type="checkbox"/.test(staff), false);
+  check('staff form: same card title as the admin', staff.includes('Add New Team Member') && staff.includes('Create invite link') && staff.includes('Full Name') && staff.includes('Phone (optional)'), true);
+  check('staff form: says where they join and that admins are notified', staff.includes('They join Demo Bistro. Your agency admins are notified, and it shows in Announcements.'), true);
+  check('staff form: Cancel when given', staff.includes('data-add-member-cancel'), true);
+  check('staff form: ids prefixed (no clash with the admin form)', staff.includes('id="owner-new-member-name-input"') && !staff.includes('id="new-member-name-input"'), true);
+  const adminForm = renderToStaticMarkup(h(AF.AddMemberForm, { roles: AF.ADMIN_ADD_ROLES, showPermissions: true, venueId: 'v1', existingEmails: [], onAddUser: noop }));
+  check('admin form: unchanged roles and labels', optsIn(adminForm, 'data-add-member-role'), ['mashgiach:Mashgiach (Field Inspector)', 'coordinator:Coordinator (Can Add Tasks)', 'manager:Manager (Runs this venue)']);
+  check('admin form: rights checkboxes kept', (adminForm.match(/type="checkbox"/g) || []).length, 2);
+  check('admin form: unchanged ids', adminForm.includes('id="new-member-name-input"') && adminForm.includes('id="add-member-submit-btn"') && adminForm.includes('id="new-member-role-select"'), true);
+  check('admin form: no Cancel', adminForm.includes('data-add-member-cancel'), false);
+} else { console.error('FAIL AddMemberForm missing'); failures++; }
+if (TM.TeamModal) {
+  const tmProps = (cu, venue, users) => ({ isOpen: true, onClose: () => {}, users, tasks: [], currentUser: cu, currentVenue: venue, venues: [{ id: 'v1', name: 'Demo Bistro', agencyId: AG }, { id: 'v2', name: 'Demo Deli', agencyId: AG }], onAddUser: noop, onUpdateUser: noop, onDeleteUser: noop });
+  const tmRender = (cu, venue) => { try { return renderToStaticMarkup(h(TM.TeamModal, tmProps(cu, venue, [cu, mash]))); } catch (e) { return `RENDER ERROR ${e.message}`; } };
+  const cHome = tmRender(coord, { id: 'v1', name: 'Demo Bistro', agencyId: AG });
+  check('Team renders', cHome.startsWith('RENDER ERROR') ? cHome.slice(0, 200) : 'ok', 'ok');
+  check('coordinator Team: add form at their own venue', cHome.includes('data-add-member-form'), true);
+  check('coordinator Team: Mashgiach and Manager only', optsIn(cHome, 'data-add-member-role'), ['mashgiach:Mashgiach (Field Inspector)', 'manager:Manager (Runs this venue)']);
+  check('coordinator Team: no rights checkboxes in the add form', /data-add-member-form[\s\S]*type="checkbox"[\s\S]*<\/form>/.test(cHome), false);
+  check('coordinator Team: names the venue', cHome.includes('They join Demo Bistro.'), true);
+  const cOther = tmRender(coord, { id: 'v2', name: 'Demo Deli', agencyId: AG });
+  check('coordinator Team: no add form at a venue outside their scope', cOther.includes('data-add-member-form'), false);
+  const aHtml = tmRender(admin, { id: 'v1', name: 'Demo Bistro', agencyId: AG });
+  check('admin Team: add form with Mashgiach, Coordinator, Manager', optsIn(aHtml, 'data-add-member-role'), ['mashgiach:Mashgiach (Field Inspector)', 'coordinator:Coordinator (Can Add Tasks)', 'manager:Manager (Runs this venue)']);
+  check('admin Team: no staff note', aHtml.includes('data-add-member-venue-note'), false);
+} else { console.error('FAIL TeamModal missing'); failures++; }
 
 // Where roles are chosen or shown
 const types = src('src/types.ts');
 check('UserRole has manager', /export type UserRole = [^;]*'manager'/.test(types), true);
 const team = src('src/components/TeamModal.tsx');
-check('admin add form offers Manager', /<option value="manager">Manager \(/.test(team), true);
-check('admin add form sends manager', team.includes("role: role === 'coordinator' || role === 'manager' ? role : 'mashgiach'"), true);
+const addForm = src('src/components/AddMemberForm.tsx');
+check('admin add form offers Manager', /manager: 'Manager \(Runs this venue\)'/.test(addForm) && /ADMIN_ADD_ROLES[^=]*= \['mashgiach', 'coordinator', 'manager'\]/.test(addForm), true);
+check('add form only ever sends a role it offers (fail closed)', addForm.includes('role: pickRole(role),') && addForm.includes("(roles as readonly string[]).includes(r)"), true);
+check('add form sends rights only for the admin', addForm.includes('...(showPermissions ? { permissions:'), true);
+check('admin and coordinator Team use the shared form', team.includes('<AddMemberForm roles={ADMIN_ADD_ROLES} showPermissions') && team.includes('<AddMemberForm roles={STAFF_ADD_ROLES} showPermissions={false}'), true);
 check('admin row picker offers Manager', team.includes('<option value="manager">Manager</option>'), true);
 check('row picker only for known roles (unknown: badge)', team.includes('TEAM_ROLE_CHOICES.includes(user.role)'), true);
 check('Announcements: Managers', /manager:\s*'Managers'/.test(src('src/components/Announcements.tsx')), true);
@@ -153,7 +214,9 @@ check('App: manager gets the Pool like an owner', app.includes('onOpenPool={isVe
 const header = src('src/components/Header.tsx');
 check('Header: owner Team row (desk + phone menus)', header.includes('data-open-owner-team') && header.includes('data-open-owner-team-mobile'), true);
 const ots = src('src/components/OwnerTeamSheet.tsx');
-check('owner sheet: a late answer after close is dropped (generation guard, RV1 P3)', /generation\.current \+= 1/.test(ots) && (ots.match(/gen !== generation\.current|gen === generation\.current/g) || []).length >= 5, true);
+check('owner sheet: a late answer after close is dropped (generation guard, RV1 P3)', /generation\.current \+= 1/.test(ots) && (ots.match(/gen !== generation\.current|gen === generation\.current/g) || []).length >= 3, true);
+check('add form: a late answer after it is gone is dropped', /if \(!alive\.current\) return;/.test(addForm) && /alive\.current = false/.test(addForm), true);
+check('App: owner add sends the shared add', app.includes('onAddMember={handleAddUser}'), true);
 check('owner sheet: a failed save puts the dropdown back and shows the error', /catch \(err: any\) \{[\s\S]{0,160}setAsking\(null\); setError\(/.test(ots), true);
 check('owner sheet: a pick the refreshed roster no longer allows shows no confirm and is cleared (RV P3)', ots.includes('const open = asking?.id === user.id && asking.to === switchTo;') && /useEffect\(\(\) => \{ if \(!pendingStillAllowed\) setAsking\(null\); \}/.test(ots), true);
 check('Create event: manager venue fixed like owner', src('src/components/CreateEventModal.tsx').includes("currentUser?.role === 'owner' || currentUser?.role === 'manager'"), true);

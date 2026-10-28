@@ -2947,7 +2947,7 @@ export default function App() {
           currentUser={currentUser}
           roster={knownUsers}
           venueName={venues.find((v) => v.id === currentUser.venueId)?.name}
-          onAddManager={handleAddUser}
+          onAddMember={handleAddUser}
           onSetRole={(userId, role) => handleUpdateUser(userId, { role })}
         />
       )}
