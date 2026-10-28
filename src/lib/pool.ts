@@ -141,7 +141,7 @@ export interface BorrowPerson {
 /** Rule T on the client: who may open the Pool at all (the server re-checks). */
 export function mayOpenPool(user: Pick<User, 'role'> | null | undefined, isKiosk = false): boolean {
   if (!user || isKiosk) return false;
-  return user.role === 'admin' || user.role === 'coordinator' || user.role === 'owner';
+  return user.role === 'admin' || user.role === 'coordinator' || user.role === 'owner' || user.role === 'manager';
 }
 
 /** Venues an owner/coordinator may bring someone to (same rule as the server's mayManageEventAt). */
@@ -151,7 +151,7 @@ export function ownVenuesForPool(
 ): Venue[] {
   if (!user) return [];
   if (user.role === 'admin') return [...venues];
-  if (user.role === 'owner') return venues.filter((v) => typeof user.venueId === 'string' && !!user.venueId && v.id === user.venueId);
+  if (user.role === 'owner' || user.role === 'manager') return venues.filter((v) => typeof user.venueId === 'string' && !!user.venueId && v.id === user.venueId);
   if (user.role === 'coordinator') {
     const scope = typeof user.myVenueRev === 'number' && Array.isArray(user.myVenueIds)
       ? user.myVenueIds

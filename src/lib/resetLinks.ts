@@ -39,17 +39,17 @@ const venuesOf = (u: Member): string[] => {
 /**
  * Who sees "Reset password link" on a member row — the server rule (mayMakeResetLink)
  * as far as the client can see it; the server decides. Never yourself, an admin or the
- * primary admin. Admin: any coordinator / mashgiach / owner / worker. Coordinator:
- * a mashgiach / owner / worker who shares one of the coordinator's venues.
+ * primary admin. Admin: any coordinator / mashgiach / owner / manager / worker. Coordinator:
+ * a mashgiach / owner / manager / worker who shares one of the coordinator's venues.
  */
 export function canMakeResetLink(caller: Member | null | undefined, target: Member | null | undefined): boolean {
   if (!caller || !target || caller.id === target.id) return false;
   if (target.isPrimaryAdmin === true) return false;
   const role = target.role || '';
-  if (!['coordinator', 'mashgiach', 'owner', 'worker'].includes(role)) return false;
+  if (!['coordinator', 'mashgiach', 'owner', 'manager', 'worker'].includes(role)) return false;
   if (caller.role === 'admin') return true;
   if (caller.role !== 'coordinator') return false;
-  if (!['mashgiach', 'owner', 'worker'].includes(role)) return false;
+  if (!['mashgiach', 'owner', 'manager', 'worker'].includes(role)) return false;
   const mine = venuesOf(caller);
   return venuesOf(target).some((v) => mine.includes(v));
 }

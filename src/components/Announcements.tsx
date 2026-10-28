@@ -24,6 +24,7 @@ export const ROLE_LABELS: Record<string, string> = {
   admin: 'Admins',
   coordinator: 'Coordinators',
   owner: 'Owners',
+  manager: 'Managers',
   mashgiach: 'Mashgiach team',
   worker: 'Workers',
 };

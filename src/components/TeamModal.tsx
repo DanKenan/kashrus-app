@@ -28,6 +28,9 @@ import { sendMemberInvite, loadMemberForInvite, inviteChip, SEND_CHANGED_TEXT } 
 import { canMakeResetLink, makeResetLink, loadResetRequests, confirmPausedMember, type ResetRequest } from '../lib/resetLinks';
 import { isMyTask } from '../lib/myTasks';
 
+/** Roles the admin's role picker knows (worker shows as Mashgiach). An unknown role gets the plain badge, never a picker (fail closed). */
+const TEAM_ROLE_CHOICES: string[] = ['mashgiach', 'worker', 'coordinator', 'manager', 'owner', 'admin'];
+
 /** Item 10i: what Add member returns when the agency's Phase C is ON (the server made an invite, not a user). */
 export interface AddMemberInvite {
   link: string;
@@ -259,7 +262,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
       const added = await onAddUser({
         name: name.trim(),
         email: emailClean,
-        role: role !== 'coordinator' ? 'mashgiach' : role,
+        role: role === 'coordinator' || role === 'manager' ? role : 'mashgiach',
         venueId: currentVenue?.id,
         permissions: {
           canFillTasks: canFill,
@@ -522,12 +525,13 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                   </label>
                   <select
                     id="new-member-role-select"
-                    value={role !== 'coordinator' ? 'mashgiach' : role}
+                    value={role === 'coordinator' || role === 'manager' ? role : 'mashgiach'}
                     onChange={(e) => handleRoleChange(e.target.value as UserRole)}
                     className="w-full py-2 px-3 font-medium focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   >
                     <option value="mashgiach">Mashgiach (Field Inspector)</option>
                     <option value="coordinator">Coordinator (Can Add Tasks)</option>
+                    <option value="manager">Manager (Runs this venue)</option>
                   </select>
                 </div>
               </div>
@@ -717,7 +721,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                           )}
 
                           {/* Role Selector / Badge (coordinators: badge only) */}
-                          {onUpdateUser && !isPrimaryAdmin && !isCoordinatorView ? (
+                          {onUpdateUser && !isPrimaryAdmin && !isCoordinatorView && TEAM_ROLE_CHOICES.includes(user.role) ? (
                             <select
                               value={user.role}
                               onChange={(e) => handleChangeUserRole(user, e.target.value as UserRole)}
@@ -729,6 +733,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                             >
                               <option value="mashgiach">Mashgiach</option>
                               <option value="coordinator">Coordinator</option>
+                              <option value="manager">Manager</option>
                               <option value="owner">Owner</option>
                               <option value="admin">Admin</option>
                             </select>

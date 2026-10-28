@@ -57,7 +57,7 @@ const input = 'w-full min-h-11 px-3 rounded-lg bg-surface border border-line-con
 const sheetStack: object[] = [];
 
 /** A small accessible dialog shell (Escape closes; focus stays inside). */
-function Sheet({ title, onClose, children, testId }: { title: string; onClose: () => void; children: React.ReactNode; testId?: string }) {
+export function Sheet({ title, onClose, children, testId }: { title: string; onClose: () => void; children: React.ReactNode; testId?: string }) {
   const titleId = useId();
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);

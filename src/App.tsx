@@ -54,6 +54,7 @@ import { PasskeysModal } from './components/PasskeysModal';
 import { clearPasswordSignInMark, currentAccountId, hasPasskeyForThisAddress, isPhoneLike, listPasskeys, offerDismissed, platformPasskeyAvailable, takePasswordSignInMark } from './lib/passkeys';
 import { TeamModal } from './components/TeamModal';
 import { PoolModal, POOL_UPDATED_EVENT } from './components/PoolPanel';
+import { OwnerTeamSheet } from './components/OwnerTeamSheet';
 import { CreateVenueModal } from './components/CreateVenueModal';
 import { VenuesDirectoryModal } from './components/VenuesDirectoryModal';
 import { EventsModal } from './components/EventsModal';
@@ -78,7 +79,7 @@ import { Task, TaskStatus, User, UserRole, DailySnapshot, ServerBroadcastMessage
 import { realtimeSocket } from './lib/socketClient';
 import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
-import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel } from './lib/permissions';
+import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel, isVenueOwnerLike, ownerMayAddManager } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry, syncCookieSession, isCookieSession } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
@@ -455,6 +456,7 @@ export default function App() {
   const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
   // 12b-c: owners open the Pool from their menu (admins/coordinators use the Team tab).
   const [isPoolOpen, setIsPoolOpen] = useState(false);
+  const [isOwnerTeamOpen, setIsOwnerTeamOpen] = useState(false);
   // Item 10i: Phase C (invite-only adds) for the admin's own agency, as the
   // server reports it. Read at sign-in and again each time Add member or New
   // venue opens; null (not known) keeps today's forms.
@@ -2385,7 +2387,8 @@ export default function App() {
         onOpenFactoryAudit={SHOW_FACTORY_AUDIT ? () => setIsFactoryAuditOpen(true) : undefined}
         eventsCount={events.length}
         onOpenTeamModal={() => setIsTeamModalOpen(true)}
-        onOpenPool={currentUser?.role === 'owner' && !isKiosk ? () => setIsPoolOpen(true) : undefined}
+        onOpenPool={isVenueOwnerLike(currentUser) && !isKiosk ? () => setIsPoolOpen(true) : undefined}
+        onOpenOwnerTeam={ownerMayAddManager(currentUser) && !isKiosk ? () => setIsOwnerTeamOpen(true) : undefined}
         onOpenKioskDevices={() => setIsKioskDevicesOpen(true)}
         onResetDailyBoard={handleResetDailyBoard}
         isRealtimeConnected={isRealtimeConnected}
@@ -2525,7 +2528,7 @@ export default function App() {
       />
 
       {/* Main Body */}
-      <main className={`flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-12 ${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:flex max-sm:flex-col' : ''}`}>
+      <main className={`flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-12 ${!isKiosk && !isVenueOwnerLike(currentUser) ? 'max-sm:flex max-sm:flex-col' : ''}`}>
         
         {/* QA2 #8: a non-admin with no venue (e.g. their venue was deleted) never
             sees the admin setup screen below; one plain message instead. */}
@@ -2646,7 +2649,7 @@ export default function App() {
           </div>
           )}
             {/* Live Progress Header / Owner Audit Banner (the kiosk shows its own progress ring) */}
-            {isKiosk ? null : currentUser?.role === 'owner' ? (
+            {isKiosk ? null : isVenueOwnerLike(currentUser) ? (
               <OwnerAuditBanner
                 totalTasks={totalTasks}
                 completedTasks={completedTasks}
@@ -2655,6 +2658,7 @@ export default function App() {
                 onSelectFilter={(f: any) => setActiveTabFilter(f)}
                 onOpenHistoryModal={() => setIsHistoryModalOpen(true)}
                 ownerName={currentUser.name}
+                isManager={currentUser.role === 'manager'}
               />
             ) : (
               <StatsProgressBar
@@ -2682,7 +2686,7 @@ export default function App() {
 
         {/* Factory & Airtable Ingredients Audit Quick Banner (Shown for Industrial Plant facilities) */}
         {SHOW_FACTORY_AUDIT && !isKiosk && (currentVenue?.category?.toLowerCase().includes('industrial') || currentVenue?.category?.toLowerCase().includes('plant') || currentVenue?.category?.toLowerCase().includes('factory')) && (
-          <div className={`${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:order-1' : ''} mb-4 px-4 py-3 rounded-[20px] bg-gold-wash border border-gold/30 tactile-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-fade-in`}>
+          <div className={`${!isKiosk && !isVenueOwnerLike(currentUser) ? 'max-sm:order-1' : ''} mb-4 px-4 py-3 rounded-[20px] bg-gold-wash border border-gold/30 tactile-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-fade-in`}>
             <div className="flex items-center gap-3 min-w-0">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center tactile-2 shrink-0">
                 <Factory className="w-4 h-4" />
@@ -2715,7 +2719,7 @@ export default function App() {
 
         {/* Compact Kosher Events Alert (Only shown when active events exist) */}
         {!isKiosk && events.length > 0 && (
-          <div className={`${!isKiosk && currentUser?.role !== 'owner' ? 'max-sm:order-2' : ''} mb-4 px-4 py-2.5 rounded-2xl bg-gold-wash border border-gold/40 tactile-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-fade-in`}>
+          <div className={`${!isKiosk && !isVenueOwnerLike(currentUser) ? 'max-sm:order-2' : ''} mb-4 px-4 py-2.5 rounded-2xl bg-gold-wash border border-gold/40 tactile-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-fade-in`}>
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="p-1.5 rounded-lg bg-gold/15 text-gold-deep shrink-0 border border-gold/30">
                 <Calendar className="w-4 h-4" />
@@ -2932,8 +2936,20 @@ export default function App() {
         onDeleteUser={handleDeleteUser}
       />
 
-      {currentUser.role === 'owner' && !isKiosk && (
+      {isVenueOwnerLike(currentUser) && !isKiosk && (
         <PoolModal isOpen={isPoolOpen} onClose={() => setIsPoolOpen(false)} currentUser={currentUser} venues={venues} refreshKey={knownUsers} />
+      )}
+
+      {ownerMayAddManager(currentUser) && !isKiosk && (
+        <OwnerTeamSheet
+          isOpen={isOwnerTeamOpen}
+          onClose={() => setIsOwnerTeamOpen(false)}
+          currentUser={currentUser}
+          roster={knownUsers}
+          venueName={venues.find((v) => v.id === currentUser.venueId)?.name}
+          onAddManager={handleAddUser}
+          onSetRole={(userId, role) => handleUpdateUser(userId, { role })}
+        />
       )}
 
       <MergeAccountsSheet
