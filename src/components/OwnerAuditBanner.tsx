@@ -16,6 +16,8 @@ interface OwnerAuditBannerProps {
   onSelectFilter: (filter: string) => void;
   onOpenHistoryModal: () => void;
   ownerName: string;
+  /** Manager role (Don 2026-10-27): a manager sees the owner's banner with their own title. */
+  isManager?: boolean;
 }
 
 export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
@@ -26,6 +28,7 @@ export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
   onSelectFilter,
   onOpenHistoryModal,
   ownerName,
+  isManager = false,
 }) => {
   const pendingTasks = totalTasks - completedTasks;
 
@@ -39,7 +42,7 @@ export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-base sm:text-lg font-bold tracking-tight text-[#f5efe4]">
-                Restaurant & Venue Owner Audit Portal
+                {isManager ? 'Restaurant & Venue Manager Audit Portal' : 'Restaurant & Venue Owner Audit Portal'}
               </h2>
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-gold/15 text-gold border border-gold/30">
                 <Eye className="w-3 h-3" /> Read-Only Inspector

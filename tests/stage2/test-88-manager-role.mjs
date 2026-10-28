@@ -7,7 +7,8 @@
  *     venue (two venues: 400); an unknown role still maps to mashgiach / 400.
  *  B  the venue OWNER adds a manager for their OWN venue (pending invite,
  *     role-default rights, accepted row role 'manager'); another venue, the
- *     Pool, role owner/admin/coordinator/mashgiach: 403; an email with a
+ *     Pool, role owner/admin/coordinator: 403 (test 91: owners may also add a
+ *     mashgiach, Don 2026-10-27 11:30 PM); an email with a
  *     pending invite: 409 INVITE_PENDING and that invite is left alone.
  *  C  the OWNER changes ONLY the role of a person at their own venue
  *     (mashgiach -> manager -> mashgiach); never another venue's person, an
@@ -157,7 +158,7 @@ export default {
         ['owner', { email: em('b3d'), name: 'x', role: 'owner', venueId: vA1 }],
         ['admin', { email: em('b3e'), name: 'x', role: 'admin' }],
         ['coordinator', { email: em('b3f'), name: 'x', role: 'coordinator', venueId: vA1 }],
-        ['mashgiach', { email: em('b3g'), name: 'x', role: 'mashgiach', venueId: vA1 }],
+        ['mashgiach at another venue', { email: em('b3g'), name: 'x', role: 'mashgiach', venueId: vA2 }],
         ['no role', { email: em('b3h'), name: 'x', venueId: vA1 }],
       ];
       for (const [label, body] of refusals) {

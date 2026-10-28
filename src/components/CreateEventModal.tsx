@@ -447,7 +447,7 @@ export const CreateEventModal: React.FC<CreateEventModalProps> = ({
                         locationTouched.current = false;
                       }
                     }}
-                    disabled={currentUser?.role === 'owner'}
+                    disabled={currentUser?.role === 'owner' || currentUser?.role === 'manager'}
                     className="w-full pl-8.5 pr-3 py-2 focus:outline-none disabled:opacity-70 min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                   >
                     {allVenues.map((v) => (

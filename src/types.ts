@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'coordinator' | 'mashgiach' | 'owner' | 'worker';
+export type UserRole = 'admin' | 'coordinator' | 'mashgiach' | 'owner' | 'manager' | 'worker';
 
 export interface UserPermissions {
   canFillTasks?: boolean; // Can complete, check off, and write notes on tasks

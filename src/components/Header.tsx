@@ -10,6 +10,7 @@ import {
   Wifi, 
   WifiOff, 
   Users, 
+  UserCog,
   Plus, 
   RotateCcw, 
   History, 
@@ -46,6 +47,7 @@ import { PWAInstallButton } from './PWAInstallButton';
 import { PushNotificationToggle } from './PushNotificationToggle';
 import { UpdateAppButton } from './UpdateAppButton';
 import { getRoleLabel, canUserAssignTasks } from '../lib/permissions';
+import { OWNER_TEAM_TEXT } from './OwnerTeamSheet';
 
 interface HeaderProps {
   /** 10g: shown only when the login has more than one agency (not on a kiosk). */
@@ -80,8 +82,10 @@ interface HeaderProps {
   /** 5a: the Updates bell, rendered beside the venue pill (App owns it). */
   updatesBell?: React.ReactNode;
   onOpenTeamModal: () => void;
-  /** 12b-c: owners only (admins/coordinators reach the Pool from Team). */
+  /** 12b-c: owners and managers only (admins/coordinators reach the Pool from Team). */
   onOpenPool?: () => void;
+  /** Manager role: the venue OWNER's Team sheet (add a manager, mashgiach <-> manager). Owners only. */
+  onOpenOwnerTeam?: () => void;
   onOpenKioskDevices?: () => void;
   onResetDailyBoard: () => void;
   isRealtimeConnected: boolean;
@@ -123,6 +127,7 @@ export const Header: React.FC<HeaderProps> = ({
   updatesBell,
   onOpenTeamModal,
   onOpenPool,
+  onOpenOwnerTeam,
   onOpenKioskDevices,
   onResetDailyBoard,
   isRealtimeConnected,
@@ -501,6 +506,19 @@ export const Header: React.FC<HeaderProps> = ({
                       </button>
                     )}
 
+                    {onOpenOwnerTeam && (
+                      <button
+                        type="button"
+                        data-open-owner-team
+                        onClick={() => { setUserMenuOpen(false); onOpenOwnerTeam(); }}
+                        aria-haspopup="dialog"
+                        className="w-full mb-2 min-h-11 flex items-center gap-2 px-2.5 py-2 text-xs font-semibold rounded-xl bg-sunken border border-line-control text-ink hover:bg-surface pressable cursor-pointer"
+                      >
+                        <UserCog className="w-4 h-4 shrink-0 text-gold-deep" />
+                        <span>{OWNER_TEAM_TEXT.menuRow}</span>
+                      </button>
+                    )}
+
                     {onOpenPool && (
                       <button
                         type="button"
@@ -767,6 +785,19 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="text-sm font-bold">{KQR_UI_TEXT.menuRow}</span>
                 <span className="text-xs text-ink-soft">{KQR_UI_TEXT.menuRowSub}</span>
               </span>
+            </button>
+          )}
+
+          {currentUser && onOpenOwnerTeam && (
+            <button
+              type="button"
+              data-open-owner-team-mobile
+              onClick={() => { setMobileMenuOpen(false); onOpenOwnerTeam(); }}
+              aria-haspopup="dialog"
+              className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-xl bg-sunken border border-line-control text-ink pressable cursor-pointer"
+            >
+              <UserCog className="w-4 h-4 shrink-0 text-gold-deep" />
+              <span>{OWNER_TEAM_TEXT.menuRow}</span>
             </button>
           )}
 

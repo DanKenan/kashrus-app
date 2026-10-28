@@ -17,6 +17,7 @@ import { TeamModal } from '../../src/components/TeamModal.tsx';
 import { CreateVenueModal } from '../../src/components/CreateVenueModal.tsx';
 import { InvitePage, INVITE_INVALID_TITLE } from '../../src/components/InvitePage.tsx';
 import { InviteLinkCard } from '../../src/components/InviteLinkCard.tsx';
+import { AddMemberForm } from '../../src/components/AddMemberForm.tsx';
 
 globalThis.document ??= { activeElement: null, addEventListener() {}, removeEventListener() {} };
 const store = new Map();
@@ -116,12 +117,22 @@ const teamHtml = (p) => decode(renderToStaticMarkup(React.createElement(TeamModa
   ok('T ON: name, email, phone kept', on.includes('new-member-name-input') && on.includes('new-member-email-input') && on.includes('new-member-phone-input'));
   ok('T ON: note + "Create invite link"', on.includes('data-invite-mode-note') && on.includes('No password needed') && on.includes('Create invite link'));
   const coord = teamHtml({ inviteMode: true, currentUser: { ...admin, role: 'coordinator', venueId: 'v1' } });
-  ok('T coordinator view: still no add form', !coord.includes('new-member-name-input'));
+  // MANAGERC4 (Don 2026-10-27 11:30 PM): a coordinator at their own venue gets the same add form, Mashgiach or Manager only, no rights.
+  ok('T coordinator view: add form, Mashgiach/Manager only, no rights', coord.includes('new-member-name-input') && coord.includes('Mashgiach (Field Inspector)') && coord.includes('Manager (Runs this venue)') && !coord.includes('Coordinator (Can Add Tasks)') && !coord.includes('Can Assign / Add New Tasks'));
+}
+// MANAGERC4: the add form is its own component (AddMemberForm, shared with owners and
+// coordinators). Mount TeamModal, then drive the form with exactly the props TeamModal gives it.
+async function addFormOf(props) {
+  const tm = mount(TeamModal, props); await tm.render();
+  const el = [...(function* walk(n) { if (!n || typeof n !== 'object') return; if (Array.isArray(n)) { for (const c of n) yield* walk(c); return; } if (!React.isValidElement(n)) return; yield n; yield* walk(n.props?.children); })(tm.tree())].find((e) => e.type === AddMemberForm);
+  if (!el) throw new Error('no add form in TeamModal');
+  const m = mount(AddMemberForm, el.props); await m.render();
+  return { tm, m };
 }
 async function team(p) {
   const adds = [];
-  const m = mount(TeamModal, { ...teamBase, onAddUser: async (u) => { adds.push(u); return p.answer; }, ...p.props });
-  await m.render();
+  const { tm, m } = await addFormOf({ ...teamBase, onAddUser: async (u) => { adds.push(u); return p.answer; }, ...p.props });
+  m.tm = tm;
   await m.type('Full name', 'Dana Cohen');
   await m.type('dcohen@', 'Dana@Example.org');
   return { m, adds };
@@ -158,8 +169,11 @@ async function team(p) {
   ok('T ON: card offers "Add another person"', cards[0].props.doneLabel === 'Add another person');
   await cards[0].props.onDone(); await m.render();
   ok('T ON: "Add another person" brings the empty form back', m.html().includes('new-member-name-input') && !m.html().includes('data-invite-link-card'));
-  await m.render({ isOpen: false }); await m.render({ isOpen: true });
-  ok('T: closing clears a shown link', !m.html().includes('data-invite-link-card'));
+  // Closing TeamModal unmounts the form (it renders nothing while closed), so a reopened one starts empty.
+  await m.tm.render({ isOpen: false });
+  ok('T: closing clears a shown link (the form is gone while closed)', m.tm.html() === '');
+  await m.tm.render({ isOpen: true });
+  ok('T: reopened Team shows the empty form, no link card', m.tm.html().includes('new-member-name-input') && !m.tm.html().includes('data-invite-link-card'));
 }
 {
   const { m, adds } = await team({ props: {}, answer: undefined });
@@ -171,8 +185,7 @@ async function team(p) {
 {
   // 409 INVITE_PERSON_NEEDS_CHECK: App throws the server's words; the form shows them as they are.
   const msg = "This person's account needs a check before they can be invited. Please contact Shutfey support.";
-  const m = mount(TeamModal, { ...teamBase, onAddUser: async () => { throw new Error(msg); } });
-  await m.render();
+  const { m } = await addFormOf({ ...teamBase, onAddUser: async () => { throw new Error(msg); } });
   await m.type('Full name', 'Dana Cohen');
   await m.type('dcohen@', 'dana@example.org');
   await m.submit();

@@ -10,7 +10,7 @@
 //   the venue must be in that list and belong to the person's agency; then
 //   admin: any such venue;
 //   coordinator: any such venue (the list IS their scope);
-//   owner: their own home venue only (extra venues never widen it);
+//   owner and manager (same style, server #169): their own home venue only (extra venues never widen it);
 //   everyone else (mashgiach, worker, unknown, kiosk): never.
 import type { User, Venue } from '../types';
 
@@ -39,7 +39,7 @@ export function mayManageEventAt(
   if (!user || typeof user.role !== 'string' || typeof venueId !== 'string' || !venueId) return false;
   if (!ownVenueIds(user, venues).has(venueId)) return false;
   if (user.role === 'admin' || user.role === 'coordinator') return true;
-  if (user.role === 'owner') return typeof user.venueId === 'string' && user.venueId === venueId;
+  if (user.role === 'owner' || user.role === 'manager') return typeof user.venueId === 'string' && user.venueId === venueId;
   return false;
 }
 
