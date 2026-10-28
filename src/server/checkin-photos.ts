@@ -103,7 +103,10 @@ interface StoreDeps {
 export function createCheckInPhotoStore(deps: StoreDeps) {
   const localDir = path.join(deps.dataDir, 'checkin-photos');
   const localFile = (key: string) => path.join(localDir, `${encodeURIComponent(key)}.json`);
-  const testHooks = { storeDelayMs: 0, storeTimeoutMs: 0, failStore: false }; // TEST ONLY (set through the test route)
+  // TEST ONLY (set through the test route). staleCheckInIds: the GET route acts as an
+  // instance whose cache has not seen these check-ins yet; failStoredRead: the
+  // authoritative read fails.
+  const testHooks = { storeDelayMs: 0, storeTimeoutMs: 0, failStore: false, staleCheckInIds: [] as string[], failStoredRead: false };
 
   async function put(key: string, doc: any): Promise<void> {
     if (testHooks.storeDelayMs > 0) await new Promise((r) => setTimeout(r, testHooks.storeDelayMs));
@@ -202,7 +205,26 @@ export function createCheckInPhotoStore(deps: StoreDeps) {
       return 0;
     }
   }
-  return { put, putBounded, get, remove, sweep, testHooks };
+  /**
+   * RV3: one task as the STORED document has it (another server instance may
+   * have committed a check-in this instance's cache has not seen yet). ok:false
+   * = the read failed (the caller answers "try again", never "no photo").
+   */
+  async function readStoredTask(taskId: string): Promise<{ ok: true; task: any | null } | { ok: false }> {
+    try {
+      if (testHooks.failStoredRead) throw new Error('test: stored read unavailable');
+      const db = deps.db();
+      if (!db) return { ok: true, task: deps.memoryTasks().find((t: any) => t && t.id === taskId) || null };
+      const snap = await db.doc(deps.stateDocPath).get();
+      const stored = snap && snap.exists ? snap.data() : null;
+      if (!stored || !Array.isArray(stored.tasks)) return { ok: false };
+      return { ok: true, task: stored.tasks.find((t: any) => t && t.id === taskId) || null };
+    } catch (e) {
+      deps.log.warn('[checkin-photo] stored read failed:', (e as any)?.message);
+      return { ok: false };
+    }
+  }
+  return { put, putBounded, get, remove, sweep, readStoredTask, testHooks };
 }
 
 export type CheckInPhotoStore = ReturnType<typeof createCheckInPhotoStore>;
@@ -228,11 +250,26 @@ export function registerCheckInPhotoRoutes(app: any, deps: RouteDeps): void {
     const caller = deps.requireAuthUser(req, res);
     if (!caller) return;
     const { id, checkInId } = req.params;
-    const task = deps.findTask(id);
-    if (!task) return res.status(404).json({ error: 'Task not found' });
-    if (!deps.gate(req, res, task, caller)) return;
-    const entry = (Array.isArray(task.checkIns) ? task.checkIns : []).find((c: any) => c && c.id === checkInId);
-    if (!entry) return res.status(404).json({ error: 'No photo' });
+    const entryOf = (t: any) => (t && Array.isArray(t.checkIns) ? t.checkIns : []).find((c: any) => c && c.id === checkInId);
+    const stale = deps.testMode && deps.store.testHooks.staleCheckInIds.includes(checkInId);
+    let task = deps.findTask(id);
+    if (task && !deps.gate(req, res, task, caller)) return;
+    let entry = task && !stale ? entryOf(task) : undefined;
+    if (!task || !entry) {
+      // RV3: this instance's cache may be behind another instance's commit
+      // (the task answer came from there). Confirm against the STORED document
+      // before a terminal "no photo"; a failed read is "try again" (503).
+      const stored = await deps.store.readStoredTask(id);
+      if (!stored.ok) return res.status(503).json({ error: 'Could not load the photo. Please try again.' });
+      if (!task) {
+        if (!stored.task) return res.status(404).json({ error: 'Task not found' });
+        task = stored.task;
+        if (!deps.gate(req, res, task, caller)) return;
+      }
+      const sameAgency = stored.task && (stored.task.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc');
+      entry = sameAgency ? entryOf(stored.task) : undefined;
+      if (!entry) return res.status(404).json({ error: 'No photo' });
+    }
     res.set('Cache-Control', 'private, no-store');
     const pid = checkInPhotoIdOf(entry);
     if (!pid) {
@@ -268,6 +305,8 @@ export function registerCheckInPhotoRoutes(app: any, deps: RouteDeps): void {
       h.storeDelayMs = num(req.body?.storeDelayMs);
       h.storeTimeoutMs = num(req.body?.storeTimeoutMs);
       h.failStore = req.body?.failStore === true;
+      h.staleCheckInIds = Array.isArray(req.body?.staleCheckInIds) ? req.body.staleCheckInIds.filter((x: any) => typeof x === 'string') : [];
+      h.failStoredRead = req.body?.failStoredRead === true;
       res.json({ ...h });
     });
   }

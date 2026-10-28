@@ -30,6 +30,9 @@
  *  R  (RV1) the commit re-checks the caller on FRESH data: lost fill permission,
  *     moved to another venue, removed, (RV2) tablet PIN cleared or changed →
  *     refused, nothing logged
+ *  V  (RV3) a photo read on an instance whose cache has not seen the check-in
+ *     yet is answered from the STORED document (gate still applies); a failed
+ *     stored read is 503 (the viewer retries), never a terminal "no photo"
  *  S  (RV1) a failing or stuck photo store never holds or loses the check-in:
  *     logged without the photo (bounded wait); late bytes swept after the grace
  */
@@ -346,6 +349,29 @@ export default {
     assert((await sweep(false)) === 0, 'S: late bytes kept inside the grace');
     assert((await sweep(true)) >= 1, 'S: late (unreferenced) bytes swept after the grace');
     out.push(`S store fail/stuck keep the check`);
+
+    // ---- V (RV3): an instance whose cache has not seen the check-in yet answers from the STORED doc ----
+    const pv = photos[0];
+    try {
+      await hooks({ staleCheckInIds: [pv.checkInId] });
+      const v1 = await getPhoto(T.ci.id, pv.checkInId, tok.mash);
+      assert(v1.status === 200 && v1.json?.photoData === pv.data, `V: cache behind → served from the stored document (${v1.status})`);
+      const vb = await getPhoto(T.ci.id, pv.checkInId, tok.adminb);
+      assert(vb.status === 403 || vb.status === 404, `V: the task gate still applies on that path (other agency ${vb.status})`);
+      await hooks({ staleCheckInIds: [pv.checkInId], failStoredRead: true });
+      const v2 = await getPhoto(T.ci.id, pv.checkInId, tok.mash);
+      assert(v2.status === 503, `V: cache behind and the stored read fails → 503 (try again), never "no photo" (${v2.status})`);
+      const v3 = await getPhoto(T.ci.id, 'checkin-nope', tok.mash);
+      assert(v3.status === 503, `V: unknown check-in while the stored read fails → 503 (${v3.status})`);
+      const v4 = await getPhoto(T.ci.id, photos[2].checkInId, tok.mash);
+      assert(v4.status === 200, `V: a check-in the cache has needs no stored read (${v4.status})`);
+      await hooks({});
+      const v5 = await getPhoto(T.ci.id, 'checkin-nope', tok.mash);
+      assert(v5.status === 404, `V: confirmed absent in the stored document → 404 (${v5.status})`);
+      const v6 = await getPhoto(T.ci.id, pv.checkInId, tok.mash);
+      assert(v6.status === 200 && v6.json?.photoData === pv.data, 'V: cache caught up → served as before');
+    } finally { await hooks({}); }
+    out.push('V stale cache → stored doc / 503');
 
     return out.join('; ');
   },
