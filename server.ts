@@ -13040,6 +13040,42 @@ function answerPhotoGate(req: any, res: any, task: any, caller: UserProfile, wri
   return true;
 }
 
+/**
+ * PHOTOALL (RV1): the whole write gate again on FRESH data, inside the
+ * mutator: the caller re-read from freshDoc.users (gone or moved agency →
+ * no), kiosk = the tablet's venue with the kiosk acting copy, then RULE T
+ * (fresh scope over the fresh venues), the private-task rule and
+ * canFillTasks. A task moved, made private or unassigned between the
+ * pre-check and the commit is refused. Fail closed.
+ */
+function answerPhotoMayWriteFresh(req: any, freshDoc: any, freshTask: any, caller: UserProfile): boolean {
+  if (!freshTask || !ANSWER_PHOTO_TYPES.has(freshTask.inputType)) return false;
+  const agencyId = caller.agencyId || 'agency-hkc';
+  if ((freshTask.agencyId || 'agency-hkc') !== agencyId) return false;
+  const row = (Array.isArray(freshDoc?.users) ? freshDoc.users : []).find((u: any) => u && u.id === (caller as any).id);
+  if (!row) return false;
+  let actor: any = normalizeStoredUser(row);
+  if ((actor.agencyId || 'agency-hkc') !== agencyId) return false;
+  if ((req as any).kiosk === true) {
+    const tv = (req as any).kioskVenueId;
+    if (!tv || freshTask.venueId !== tv) return false;
+    actor = kioskActingUser(actor, tv);
+  }
+  if (!canFillTasks(actor)) return false;
+  if (actor.role === 'admin') return true;
+  const scope = venueScopeOf(actor, Array.isArray(freshDoc.venues) ? freshDoc.venues : []);
+  if (scope !== 'agency' && !scope.includes(freshTask.venueId || '')) return false;
+  if (!freshTask.isPrivate || actor.role === 'coordinator') return true;
+  const email = String(actor.email || '').toLowerCase();
+  return email.length > 0 && (freshTask.assignedTo || []).some((a: any) => String(a).toLowerCase() === email);
+}
+
+/** PHOTOALL (RV1): a kiosk session may replace or remove only its own user's photo. */
+function kioskMayReplaceAnswerPhoto(req: any, current: AnswerPhotoRef | undefined | null, caller: UserProfile): boolean {
+  if ((req as any).kiosk !== true || !current?.id) return true;
+  return (current.byEmail || '').toLowerCase() === (caller.email || '').toLowerCase();
+}
+
 app.post('/api/tasks/:id/answer-photo', async (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
@@ -13049,6 +13085,9 @@ app.post('/api/tasks/:id/answer-photo', async (req, res) => {
   if (!answerPhotoGate(req, res, existing, caller, true)) return;
   if (!ANSWER_PHOTO_TYPES.has((existing as any).inputType)) {
     return res.status(400).json({ error: 'This kind of task does not take a photo here.', code: 'PHOTO_NOT_ALLOWED' });
+  }
+  if (!kioskMayReplaceAnswerPhoto(req, (existing as any).answerPhoto, caller)) {
+    return res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
   }
   const { photoData, photoCaption } = req.body || {};
   if (typeof photoData === 'string' && photoData.length > ANSWER_PHOTO_MAX_CHARS) {
@@ -13094,9 +13133,8 @@ app.post('/api/tasks/:id/answer-photo', async (req, res) => {
       const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
       const freshTask = freshTasks.find((t) => t.id === id);
       if (!freshTask) return { conflict: 'Task not found (it may have been deleted).' };
-      // K1: a kiosk write re-checks venue + private visibility on FRESH data.
-      if (!kioskMayTouchTask(req, freshTask)) return { conflict: 'This task changed. Please refresh and try again.' };
-      if (!ANSWER_PHOTO_TYPES.has(freshTask.inputType)) return { conflict: 'This task changed. Please refresh and try again.' };
+      if (!answerPhotoMayWriteFresh(req, freshDoc, freshTask, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
+      if (!kioskMayReplaceAnswerPhoto(req, freshTask.answerPhoto, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
       previousId = freshTask.answerPhoto?.id || null;
       const updated: TaskItem = { ...freshTask, answerPhoto: ref };
       const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
@@ -13106,10 +13144,11 @@ app.post('/api/tasks/:id/answer-photo', async (req, res) => {
     // anyone's answer, so a version gate would only cause spurious 409s.
     { label: 'task-answer-photo' }
   );
-  if (!committed) {
-    void deleteAnswerPhotoDoc(key);
-    return;
-  }
+  // Not committed here does NOT prove the bytes are unreferenced (a commit
+  // whose acknowledgement was lost answers from the idempotency record), so
+  // they are never deleted on this path: the sweep removes them only when the
+  // STORED document does not reference them, after the grace.
+  if (!committed) return;
   const updated = committed.result as TaskItem;
   // One photo per task: the replaced one's bytes go now (the sweep is the backstop).
   if (previousId && previousId !== photoId) void deleteAnswerPhotoDoc(answerPhotoKey(id, previousId));
@@ -13140,13 +13179,11 @@ app.delete('/api/tasks/:id/answer-photo', async (req, res) => {
       const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
       const freshTask = freshTasks.find((t) => t.id === id);
       if (!freshTask) return { conflict: 'Task not found (it may have been deleted).' };
-      if (!kioskMayTouchTask(req, freshTask)) return { conflict: 'This task changed. Please refresh and try again.' };
+      if (!answerPhotoMayWriteFresh(req, freshDoc, freshTask, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
       const cur = freshTask.answerPhoto;
       // Idempotent: nothing there (or already a different photo) → success, unchanged.
       if (!cur?.id || (onlyId && cur.id !== onlyId)) return { doc: freshDoc, result: freshTask };
-      if ((req as any).kiosk === true && (cur.byEmail || '').toLowerCase() !== (caller.email || '').toLowerCase()) {
-        return { conflict: 'This task changed. Please refresh and try again.' };
-      }
+      if (!kioskMayReplaceAnswerPhoto(req, cur, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
       removedId = cur.id;
       const updated: TaskItem = { ...freshTask, answerPhoto: undefined };
       const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));

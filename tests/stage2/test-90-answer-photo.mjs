@@ -252,6 +252,62 @@ export default {
     assert(kdo.status === 200 && !kdo.json.answerPhoto, `H: kiosk removes its own (${kdo.status})`);
     out.push('H kiosk');
 
+    // ---- I (RV1): kiosk replacement, fresh gate, orphans kept for the sweep, retries -----
+    // I1: a kiosk may not REPLACE someone else's photo either (it could not remove it).
+    const kr = await call('POST', T.status_select.id, K, { photoData: small });
+    assert(kr.status === 403 && kr.json?.code === 'KIOSK_SCOPE', `I1: kiosk replacing another's photo → 403 KIOSK_SCOPE, got ${kr.status}`);
+    assert((await taskInDoc(T.status_select.id)).answerPhoto?.id === m2.json.answerPhoto.id, 'I1: the other person\'s photo stays');
+    assert((await call('GET', T.status_select.id, tok.mash2)).status === 200, 'I1: and its bytes stay');
+    // I2: the whole write gate again on FRESH data inside the commit. The
+    // stored document changes, the server's cache does not (doc-set-users):
+    // the pre-check passes on the cache, the commit must still refuse.
+    const storedUsers = (await ctx.getDoc()).users;
+    const setUsers = async (users) => {
+      const r = await ctx.api('POST', '/api/__test__/doc-set-users', { users });
+      assert(r.status === 200, `doc-set-users: ${r.status}`);
+    };
+    const m2id = id('mash2');
+    const keepTask = (await taskInDoc(T.toggle.id)).answerPhoto?.id || null;
+    const fresh = [
+      ['lost fill permission', storedUsers.map((u) => (u.id === m2id ? { ...u, permissions: { ...(u.permissions || {}), canFillTasks: false } } : u))],
+      ['moved to another venue', storedUsers.map((u) => (u.id === m2id ? { ...u, venueId: v2, ...(u.venueAccess ? { venueAccess: [v2] } : {}) } : u))],
+      ['removed from the agency', storedUsers.filter((u) => u.id !== m2id)],
+    ];
+    let refusedWithBytes = 0;
+    for (const [why, users] of fresh) {
+      await setUsers(users);
+      const fp = await call('POST', T.toggle.id, tok.mash2, { photoData: small });
+      assert([401, 403, 409].includes(fp.status), `I2 ${why}: POST must be refused on fresh data, got ${fp.status} ${JSON.stringify(fp.json)}`);
+      if (fp.status === 409) refusedWithBytes++;
+      const fd = await call('DELETE', T.toggle.id, tok.mash2);
+      assert([401, 403, 409].includes(fd.status), `I2 ${why}: DELETE must be refused on fresh data, got ${fd.status}`);
+      assert(((await taskInDoc(T.toggle.id)).answerPhoto?.id || null) === keepTask, `I2 ${why}: the task's photo is unchanged`);
+    }
+    await setUsers(storedUsers);
+    assert(refusedWithBytes >= 1, `I2: at least one refusal came from the commit itself (409), got ${refusedWithBytes}`);
+    // I3: bytes of a save that did not commit are NOT deleted on that path (an
+    // unconfirmed commit could reference them); the sweep removes them only
+    // when the stored document does not, after the grace.
+    const sNow = await ctx.api('POST', '/api/__test__/answer-photo-sweep', { nowMs: Date.now() });
+    assert(sNow.status === 200 && sNow.json?.removed === 0, `I3: inside the grace nothing is swept (${JSON.stringify(sNow.json)})`);
+    const sLate = await ctx.api('POST', '/api/__test__/answer-photo-sweep', { nowMs: Date.now() + 60 * 60 * 1000 });
+    assert(sLate.status === 200 && sLate.json?.removed >= refusedWithBytes, `I3: after the grace the uncommitted bytes go (${JSON.stringify(sLate.json)} >= ${refusedWithBytes})`);
+    for (const type of ['toggle', 'status_select']) { // (the checkbox task was deleted in G)
+      const ref = (await taskInDoc(T[type].id))?.answerPhoto;
+      if (ref) assert((await call('GET', T[type].id, tok.mash)).status === 200, `I3: a referenced ${type} photo survives the sweep`);
+    }
+    // I4: a retried save (same operation id) answers the first save: same
+    // reference, and its bytes are intact (nothing deleted by the retry).
+    const op = `t90-op-${ts}`;
+    const r1 = await call('POST', T.yes_no.id, tok.mash, { photoData: jpeg(5000, 'retry'), operationId: op });
+    const r2 = await call('POST', T.yes_no.id, tok.mash, { photoData: jpeg(5000, 'retry'), operationId: op });
+    assert(r1.status === 200 && r2.status === 200, `I4: both answers 200 (${r1.status}, ${r2.status})`);
+    assert(r2.json.answerPhoto?.id === r1.json.answerPhoto?.id, `I4: the retry answers the first save (${r1.json.answerPhoto?.id} vs ${r2.json.answerPhoto?.id})`);
+    assert((await taskInDoc(T.yes_no.id)).answerPhoto?.id === r1.json.answerPhoto.id, 'I4: one reference in the document');
+    const g4 = await call('GET', T.yes_no.id, tok.mash);
+    assert(g4.status === 200 && g4.json.photoData === jpeg(5000, 'retry'), 'I4: the first save\'s bytes are intact');
+    out.push(`I kiosk replace 403; fresh gate ${fresh.length}x (commit refusals ${refusedWithBytes}); orphans swept only after grace; retry = first save`);
+
     return out.join('; ');
   },
 };

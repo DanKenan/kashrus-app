@@ -49,9 +49,32 @@ ok('saved photo: the person may remove or change it', withPhoto.includes('aria-l
 const roPhoto = html(h(TaskAnswerPhoto, { task: mk('yes_no', { answerPhoto: photo }), canAttach: false }));
 ok('read-only viewer sees the photo, cannot add or remove', roPhoto.includes('data-answer-photo-thumb') && !roPhoto.includes('Remove the photo') && !roPhoto.includes('data-answer-photo-add'));
 const kiosk = html(h(TaskAnswerPhoto, { task: mk('toggle'), canAttach: true, size: 'kiosk' }));
-ok('kiosk: 64 px targets, larger text', /<label data-answer-photo-add="true" class="[^"]*\bmin-h-16\b[^"]*\btext-base\b/.test(kiosk), kiosk.slice(0, 400));
+ok('kiosk: 64 px targets, larger text', /<button type="button" data-answer-photo-add="true"[^>]*class="[^"]*\bmin-h-16\b[^"]*\btext-base\b/.test(kiosk), kiosk.slice(0, 400));
 ok('phone: 44 px targets', withPhoto.includes('min-h-11') && withPhoto.includes('w-11 h-11'));
 ok('the photo row never asks for a photo before answering (optional)', !/required/.test(html(h(TaskAnswerPhoto, { task: mk('checkbox'), canAttach: true }))));
+
+
+// RV1 review fixes
+const addOut = html(h(TaskAnswerPhoto, { task: mk('yes_no'), canAttach: true }));
+ok('RV1 keyboard: "Add photo" is a real button (reachable with Tab), the file input is out of the tab order', /<button type="button" data-answer-photo-add="true"/.test(addOut) && /<input[^>]*type="file"[^>]*tabindex="-1"|<input[^>]*tabindex="-1"[^>]*type="file"/i.test(addOut) && !/<label[^>]*data-answer-photo-add/.test(addOut), addOut.slice(0, 500));
+const { reconcileAnswerPhotoOverride = null } = mod;
+ok('RV1 override: helper exported', typeof reconcileAnswerPhotoOverride === 'function');
+if (typeof reconcileAnswerPhotoOverride === 'function') {
+  const P = { id: 'aph-P', byName: 'Dana Demo', byEmail: 'dana@demo.test', at: '2026-10-27T23:40:00.000Z' };
+  // null -> save P (server answer kept while the task still shows null)
+  let ov = { basis: null, ref: P };
+  ok('RV1 override: the save shows at once while the task has not caught up', reconcileAnswerPhotoOverride(ov, null)?.ref?.id === 'aph-P');
+  // live update arrives: task now P -> the local answer is dropped
+  ov = reconcileAnswerPhotoOverride(ov, 'aph-P');
+  ok('RV1 override: dropped once the task shows the photo', ov === null);
+  // daily reset / someone else removes it: task back to null -> nothing comes back
+  ok('RV1 override: null -> saved -> null does not bring the old photo back', reconcileAnswerPhotoOverride(ov, null) === null);
+  ok('RV1 override: a remove answered while the task moved on is ignored', reconcileAnswerPhotoOverride({ basis: 'aph-P', ref: null }, 'aph-Q') === null);
+}
+ok('RV1 component drops a stale override in an effect and only sets one while the task is unchanged', /if \(override && !effective\) setOverride\(null\)/.test(src) && /if \(liveRef\.current === basis\) setOverride/.test(src));
+ok('RV1 save retries reuse ONE operation id (new photo or caption = new id)', /operationId: opId/.test(src) && /setCaption\(e\.target\.value\); setOpId\(newActionId\(\)\)/.test(src));
+ok('RV1 full size is modal: focus to Close, Escape closes, Tab stays, focus returns', /closeRef\.current\?\.focus\(\)/.test(src) && /e\.key === 'Escape'/.test(src) && /e\.key === 'Tab'/.test(src) && /thumbRef\.current\?\.focus\(\)/.test(src));
+ok('RV1 kiosk Close button is a 64 px target', /ref=\{closeRef\}[\s\S]{0,200}k \? 'min-h-16 text-base'/.test(src));
 
 // On the real board views
 const tasks = [...types.map((t) => mk(t)), mk('check_in'), mk('yes_no', { id: 't-yes-photo', title: 'Yes with photo', answerPhoto: photo })];
