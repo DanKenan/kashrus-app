@@ -1,7 +1,7 @@
 /**
  * Test 92 (CHECKINPHOTO, Don Oct 28 2026 "Sure do it"): check-in photos ("Log
  * check with photo evidence") go to the separate photo store (taskPhotos, as
- * the #176 answer photos), never inline in the shared document. The check-in
+ * the #176 answer photos; own collection checkInPhotos), never inline in the shared document. The check-in
  * keeps only a reference (photoId + who + when). Old check-ins that already
  * carry inline base64 still show exactly as before.
  * Proves:
@@ -25,6 +25,12 @@
  *     check-in still references
  *  H  kiosk: a tablet session logs a check with a photo on its venue and reads
  *     it back; another venue's task → 403 KIOSK_SCOPE
+ *  Q  (RV1) the answer-photo sweep — all an older server revision knows (rolling
+ *     deploy / rollback) — never removes a check-in photo (own collection)
+ *  R  (RV1) the commit re-checks the caller on FRESH data: lost fill permission,
+ *     moved to another venue, removed → refused, nothing logged
+ *  S  (RV1) a failing or stuck photo store never holds or loses the check-in:
+ *     logged without the photo (bounded wait); late bytes swept after the grace
  */
 import fs from 'node:fs';
 
@@ -132,7 +138,7 @@ export default {
       return { status: r.status, json };
     };
     const sweep = async (later) => {
-      const r = await ctx.api('POST', '/api/__test__/answer-photo-sweep', { nowMs: Date.now() + (later ? 60 * 60 * 1000 : 0) });
+      const r = await ctx.api('POST', '/api/__test__/checkin-photo-sweep', { nowMs: Date.now() + (later ? 60 * 60 * 1000 : 0) });
       assert(r.status === 200, `sweep: ${r.status}`);
       return r.json.removed;
     };
@@ -266,6 +272,59 @@ export default {
     assert(kgv2.status === 403, `H: kiosk cannot read another venue's check-in photo (${kgv2.status})`);
     assert(!JSON.stringify(await ctx.getDoc()).includes('/9j/4AAQSkZJRgCIa2lvc2s'), 'H: no kiosk photo bytes in the shared document');
     out.push('H kiosk');
+
+    // ---- Q: an older revision's sweep (answer photos only) leaves check-in photos alone ----
+    const oldSweep = await ctx.api('POST', '/api/__test__/answer-photo-sweep', { nowMs: Date.now() + 60 * 60 * 1000 });
+    assert(oldSweep.status === 200, `Q: answer-photo sweep ${oldSweep.status}`);
+    for (const p of [photos[0], photos[2]]) assert((await getPhoto(T.ci.id, p.checkInId, tok.mash)).json?.photoData === p.data, 'Q: check-in photos survive the answer-photo sweep');
+    assert((await getPhoto(T.ci.id, kc.id, tok.mash)).status === 200, 'Q: the kiosk photo survives too');
+    out.push('Q old sweep safe');
+
+    // ---- R: the commit re-checks the caller on FRESH data (stored doc changes, cache does not) ----
+    const storedUsers = (await ctx.getDoc()).users;
+    const setUsers = async (users) => {
+      const r = await ctx.api('POST', '/api/__test__/doc-set-users', { users });
+      assert(r.status === 200, `doc-set-users: ${r.status}`);
+    };
+    const mid = id('mash');
+    const fresh = [
+      ['lost fill permission', storedUsers.map((u) => (u.id === mid ? { ...u, permissions: { ...(u.permissions || {}), canFillTasks: false } } : u))],
+      ['moved to another venue', storedUsers.map((u) => (u.id === mid ? { ...u, venueId: v2, ...(u.venueAccess ? { venueAccess: [v2] } : {}) } : u))],
+      ['removed from the agency', storedUsers.filter((u) => u.id !== mid)],
+    ];
+    const rCodes = [];
+    try {
+      for (const [why, users] of fresh) {
+        const n0 = (await taskInDoc(T.prob.id)).checkIns.length;
+        await setUsers(users);
+        const r = await logCheck(T.prob.id, tok.mash, { photoData: jpeg(2200, `fresh-${why}`) });
+        rCodes.push(r.status);
+        assert([401, 403, 409].includes(r.status), `R ${why}: refused on fresh data, got ${r.status} ${JSON.stringify(r.json)?.slice(0, 160)}`);
+        await setUsers(storedUsers);
+        assert((await taskInDoc(T.prob.id)).checkIns.length === n0, `R ${why}: nothing logged`);
+      }
+    } finally { await setUsers(storedUsers); }
+    const rOk = await logCheck(T.prob.id, tok.mash, { photoData: jpeg(2200, 'fresh-ok') });
+    assert(rOk.status === 200 && newest(rOk.json)?.photoId, `R twin: restored → logs with a photo (${rOk.status})`);
+    out.push(`R fresh gate ${rCodes.join(',')}`);
+
+    // ---- S: a failing / stuck store: the check is logged without the photo, quickly ----
+    const hooks = async (h) => { const r = await ctx.api('POST', '/api/__test__/checkin-photo-hooks', h); assert(r.status === 200, `hooks ${r.status}`); };
+    try {
+      await hooks({ failStore: true });
+      const sf = await logCheck(T.prob.id, tok.mash, { photoData: jpeg(2400, 'fail') });
+      assert(sf.status === 200 && newest(sf.json) && !newest(sf.json).photoId && newest(sf.json).photoData === undefined, `S: store failing → check logged without the photo (${sf.status})`);
+      await hooks({ storeDelayMs: 1500, storeTimeoutMs: 300 });
+      const t0 = Date.now();
+      const ss = await logCheck(T.prob.id, tok.mash, { photoData: jpeg(2400, 'stuck') });
+      const took = Date.now() - t0;
+      assert(ss.status === 200 && newest(ss.json) && !newest(ss.json).photoId, `S: store stuck → check logged without the photo (${ss.status})`);
+      assert(took < 1400, `S: the check did not wait for the stuck store (${took} ms)`);
+    } finally { await hooks({}); }
+    await new Promise((r) => setTimeout(r, 1800)); // the stuck write lands late, unreferenced
+    assert((await sweep(false)) === 0, 'S: late bytes kept inside the grace');
+    assert((await sweep(true)) >= 1, 'S: late (unreferenced) bytes swept after the grace');
+    out.push(`S store fail/stuck keep the check`);
 
     return out.join('; ');
   },

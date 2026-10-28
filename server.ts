@@ -28,7 +28,7 @@ import {
 } from './src/server/agency-fields.js';
 import { classifySessionClaims, resolveSessionRow, resolveChooseOwner, chooseClaimsFor, credentialRowOfPerson, sessionClaimsFor, tokenEpochOf, type SessionClaims } from './src/server/session-token.ts';
 import { agencyIsCleared } from './src/server/agency-flags.ts';
-import { CHECKIN_PHOTO_ID_PREFIX, classifyCheckInPhoto, checkInPhotoIdOf, checkInPhotoKey, checkInPhotoKeys, expireCheckInPhoto, registerCheckInPhotoRead } from './src/server/checkin-photos.ts';
+import { CHECKIN_PHOTO_ID_PREFIX, classifyCheckInPhoto, checkInPhotoIdOf, checkInPhotoKey, expireCheckInPhoto, createCheckInPhotoStore, registerCheckInPhotoRoutes } from './src/server/checkin-photos.ts';
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
@@ -5492,6 +5492,7 @@ function deliverPush(
 const MEDIA_RETENTION_DAYS = 30;
 function cleanupExpiredMedia() {
   void sweepAnswerPhotos(); // PHOTOALL: unreferenced answer-photo bytes
+  void checkInPhotoStore.sweep(); // CHECKINPHOTO: unreferenced check-in photo bytes
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - MEDIA_RETENTION_DAYS);
   const cutoffIso = cutoff.toISOString();
@@ -12857,7 +12858,7 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
   if (!committed) return;
   const updated = committed.result as TaskItem;
   // CHECKINPHOTO: its stored bytes go now (best effort; the sweep is the backstop).
-  if (removedPhotoId) void deleteAnswerPhotoDoc(checkInPhotoKey(id, removedPhotoId));
+  if (removedPhotoId) void checkInPhotoStore.remove(checkInPhotoKey(id, removedPhotoId));
 
   broadcastTaskUpdated(updated, updated, caller.email);
   res.json(updated);
@@ -12920,20 +12921,17 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
   const photoVerdict = classifyCheckInPhoto(photoData, ANSWER_PHOTO_MAX_CHARS, ANSWER_PHOTO_DATA_RE);
   if (photoVerdict === 'ok') {
     const photoId = `${CHECKIN_PHOTO_ID_PREFIX}${crypto.randomUUID()}`;
-    try {
-      await putAnswerPhotoDoc(checkInPhotoKey(id, photoId), {
-        taskId: id,
-        checkInId,
-        agencyId: (existing as any).agencyId || 'agency-hkc',
-        venueId: (existing as any).venueId || null,
-        byEmail: caller.email || null,
-        createdAt: now,
-        photoData,
-      });
-      checkIn.photoId = photoId;
-    } catch (e) {
-      log.error('[checkin-photo] store failed; logging the check-in without it:', e);
-    }
+    // Bounded wait: a slow or stuck store never holds the check-in (logged without the photo).
+    const stored = await checkInPhotoStore.putBounded(checkInPhotoKey(id, photoId), {
+      taskId: id,
+      checkInId,
+      agencyId: (existing as any).agencyId || 'agency-hkc',
+      venueId: (existing as any).venueId || null,
+      byEmail: caller.email || null,
+      createdAt: now,
+      photoData,
+    });
+    if (stored) checkIn.photoId = photoId;
   } else if (photoVerdict !== 'none') {
     log.warn(`[checkin-photo] photo not kept (${photoVerdict}); logging the check-in without it`);
   }
@@ -12949,6 +12947,12 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
       }
       // K1: a kiosk write re-checks venue + private visibility on FRESH data.
       if (!kioskMayTouchTask(req, freshTask)) {
+        return { conflict: 'This task changed. Please refresh and try again.' };
+      }
+      // CHECKINPHOTO (RV1 P1): the caller may still log this check on FRESH
+      // data (row, agency, eligibility, venue scope, tablet pairing, fill
+      // permission) — the photo upload widens the gap since the pre-check.
+      if (!answerPhotoMayWriteFresh(req, freshDoc, freshTask, caller, CHECKIN_FRESH_RULE)) {
         return { conflict: 'This task changed. Please refresh and try again.' };
       }
       // Idempotency: if this check-in ID already exists, return the task as-is.
@@ -13065,8 +13069,6 @@ async function sweepAnswerPhotos(nowMs: number = Date.now()): Promise<number> {
     }
     const referenced = new Set<string>();
     for (const t of taskList) if (t?.answerPhoto?.id) referenced.add(answerPhotoKey(t.id, t.answerPhoto.id));
-    // CHECKINPHOTO: check-in photos share the store; a check-in still pointing at its bytes keeps them.
-    for (const t of taskList) for (const k of checkInPhotoKeys(t)) referenced.add(k);
     let entries: Array<{ key: string; createdAt?: string }> = [];
     if (!firestoreDb) {
       let names: string[] = [];
@@ -13127,8 +13129,15 @@ function answerPhotoGate(req: any, res: any, task: any, caller: UserProfile, wri
  * canFillTasks. A task moved, made private or unassigned between the
  * pre-check and the commit is refused. Fail closed.
  */
-function answerPhotoMayWriteFresh(req: any, freshDoc: any, freshTask: any, caller: UserProfile): boolean {
-  if (!freshTask || !ANSWER_PHOTO_TYPES.has(freshTask.inputType)) return false;
+/** CHECKINPHOTO: the same fresh gate for a check-in: any task type (as the
+ * check-in route itself); the private-task rule only for a tablet, as the
+ * check-in pre-check (K1). */
+const CHECKIN_FRESH_RULE = { types: null, privateRuleOnPhones: false };
+function answerPhotoMayWriteFresh(
+  req: any, freshDoc: any, freshTask: any, caller: UserProfile,
+  rule: { types: Set<string> | null; privateRuleOnPhones: boolean } = { types: ANSWER_PHOTO_TYPES, privateRuleOnPhones: true },
+): boolean {
+  if (!freshTask || (rule.types && !rule.types.has(freshTask.inputType))) return false;
   const agencyId = caller.agencyId || 'agency-hkc';
   if ((freshTask.agencyId || 'agency-hkc') !== agencyId) return false;
   const row = (Array.isArray(freshDoc?.users) ? freshDoc.users : []).find((u: any) => u && u.id === (caller as any).id);
@@ -13160,6 +13169,7 @@ function answerPhotoMayWriteFresh(req: any, freshDoc: any, freshTask: any, calle
   }
   if (!canFillTasks(actor)) return false;
   if (actor.role === 'admin') return true;
+  if (!rule.privateRuleOnPhones && (req as any).kiosk !== true) return true;
   if (!freshTask.isPrivate || actor.role === 'coordinator') return true;
   const email = String(actor.email || '').toLowerCase();
   return email.length > 0 && (freshTask.assignedTo || []).some((a: any) => String(a).toLowerCase() === email);
@@ -13324,13 +13334,25 @@ app.get('/api/tasks/:id/answer-photo', async (req, res) => {
   res.json({ id: ref.id, photoData: doc.photoData });
 });
 
-// CHECKINPHOTO: one check-in photo's bytes (stored or old inline), behind the task's own visibility.
-registerCheckInPhotoRead(app, {
+// CHECKINPHOTO: the check-in photo store (its own collection, the answer-photo
+// grace) and the read route: one photo's bytes (stored or old inline), behind
+// the task's own visibility.
+const checkInPhotoStore = createCheckInPhotoStore({
+  db: () => firestoreDb,
+  dataDir: DATA_DIR,
+  stateDocPath: FIRESTORE_STATE_DOC,
+  memoryTasks: () => tasks,
+  graceMs: ANSWER_PHOTO_SWEEP_GRACE_MS,
+  log,
+});
+registerCheckInPhotoRoutes(app, {
+  store: checkInPhotoStore,
   requireAuthUser,
   findTask: (taskId) => tasks.find((t) => t.id === taskId),
   gate: (req, res, task, caller) => answerPhotoGate(req, res, task, caller, false),
-  getPhotoDoc: getAnswerPhotoDoc,
   log,
+  testMode: isTestMode(),
+  requireAdmin,
 });
 
 if (isTestMode()) {
