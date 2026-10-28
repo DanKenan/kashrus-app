@@ -1029,6 +1029,8 @@ app.use('/api', async (req, res, next) => {
       (method === 'PUT' && /^\/tasks\/[^/]+$/.test(path)) ||
       (method === 'POST' && /^\/tasks\/[^/]+\/check-in$/.test(path)) ||
       (method === 'DELETE' && /^\/tasks\/[^/]+\/check-in\/[^/]+$/.test(path)) ||
+      // PHOTOALL: the optional answer photo (same task gate as check-in).
+      ((method === 'GET' || method === 'POST' || method === 'DELETE') && /^\/tasks\/[^/]+\/answer-photo$/.test(path)) ||
       (method === 'GET' && path === '/history') ||
       // 5a: the kiosk Updates sheet is READ-ONLY — no note writes, no read marks.
       (method === 'GET' && path === '/handoff-notes') ||
@@ -2257,8 +2259,18 @@ interface TaskItem {
   updatedAt: string | null;
   createdAt: string;
   checkIns?: TaskCheckInItem[];
+  /** PHOTOALL: the optional answer photo (reference only; bytes in taskPhotos). */
+  answerPhoto?: AnswerPhotoRef;
   sortOrder?: number;
   isPrivate?: boolean;
+}
+
+interface AnswerPhotoRef {
+  id: string;
+  byName: string | null;
+  byEmail: string | null;
+  at: string; // ISO timestamp
+  caption?: string;
 }
 
 interface TaskCheckInItem {
@@ -5475,6 +5487,7 @@ function deliverPush(
 // (keeps the text record, drops the base64 to save Firestore space/cost)
 const MEDIA_RETENTION_DAYS = 30;
 function cleanupExpiredMedia() {
+  void sweepAnswerPhotos(); // PHOTOALL: unreferenced answer-photo bytes
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - MEDIA_RETENTION_DAYS);
   const cutoffIso = cutoff.toISOString();
@@ -6699,6 +6712,7 @@ async function executeDailyReset(
       updatedByName: null,
       updatedAt: null,
       checkIns: [],
+      answerPhoto: undefined, // PHOTOALL: bytes are swept by sweepAnswerPhotos()
     };
   };
 
@@ -12922,6 +12936,361 @@ app.post('/api/tasks/:id/check-in', async (req, res) => {
   broadcastTaskUpdated(updated, updated, caller.email);
   res.json(updated);
 });
+
+// ---------------------------------------------------------------------------
+// PHOTOALL (Don, 8:04 PM Oct 27): ONE optional photo on a toggle / yes_no /
+// status_select / checkbox task, saved with who and when. The BYTES live
+// OUTSIDE app-state/main (the agency-logo pattern) in
+// taskPhotos/{taskId}__{photoId}; the task carries only a small reference
+// (answerPhoto: id, who, when, caption — about 200 bytes), so these photos
+// never count against the shared document's 900 KiB guard. The guard itself
+// is unchanged. Check-in photos ('check_in') are unchanged.
+// Who: exactly the people who may record the answer (same agency, kiosk
+// scope or RULE T + private-task visibility, canFillTasks). Fail closed.
+// ---------------------------------------------------------------------------
+const ANSWER_PHOTO_TYPES = new Set(['toggle', 'yes_no', 'status_select', 'checkbox']);
+const ANSWER_PHOTO_COLLECTION = 'taskPhotos';
+/** Base64 data-URL characters (≈ 290 KB JPEG). The client sends ≤ 800 px JPEG
+ * at 0.7 (the check-in compression), typically 60–200k characters. Over the
+ * cap = 413, never a silent truncation (a cut base64 string is a corrupt file). */
+const ANSWER_PHOTO_MAX_CHARS = 400_000;
+const ANSWER_PHOTO_CAPTION_MAX = 200;
+const ANSWER_PHOTO_DATA_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+/** An unreferenced photo doc younger than this is a save still in flight. */
+const ANSWER_PHOTO_SWEEP_GRACE_MS = 10 * 60 * 1000;
+// No-Firestore (local file) mode: one JSON file per photo under DATA_DIR, so
+// saved photos survive a restart like the task references do.
+const ANSWER_PHOTO_LOCAL_DIR = path.join(DATA_DIR, 'task-photos');
+const answerPhotoKey = (taskId: string, photoId: string) => `${taskId}__${photoId}`;
+const answerPhotoLocalFile = (key: string) => path.join(ANSWER_PHOTO_LOCAL_DIR, `${encodeURIComponent(key)}.json`);
+/** A save must publish its reference within this long of storing the bytes
+ * (checked inside every commit attempt), well inside the sweep's grace, so the
+ * sweep can never remove bytes a later commit would still point at. */
+const ANSWER_PHOTO_SAVE_DEADLINE_MS = 5 * 60 * 1000;
+const answerPhotoTestHooks = { clockSkewMs: 0 }; // TEST ONLY (isTestMode): time passing during a save
+const answerPhotoNow = () => Date.now() + (isTestMode() ? answerPhotoTestHooks.clockSkewMs : 0);
+
+async function putAnswerPhotoDoc(key: string, doc: any): Promise<void> {
+  if (!firestoreDb) {
+    await fs.promises.mkdir(ANSWER_PHOTO_LOCAL_DIR, { recursive: true });
+    const file = answerPhotoLocalFile(key);
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fs.promises.writeFile(tmp, JSON.stringify(doc));
+    await fs.promises.rename(tmp, file);
+    return;
+  }
+  await firestoreDb.collection(ANSWER_PHOTO_COLLECTION).doc(key).set(doc);
+}
+async function getAnswerPhotoDoc(key: string): Promise<any | null> {
+  if (!firestoreDb) {
+    try { return JSON.parse(await fs.promises.readFile(answerPhotoLocalFile(key), 'utf8')); }
+    catch (e: any) { if (e?.code === 'ENOENT') return null; throw e; }
+  }
+  const snap = await firestoreDb.collection(ANSWER_PHOTO_COLLECTION).doc(key).get();
+  return snap.exists ? snap.data() : null;
+}
+/** Best-effort: never throws (an orphan is removed by the next sweep). */
+async function deleteAnswerPhotoDoc(key: string): Promise<void> {
+  try {
+    if (!firestoreDb) {
+      await fs.promises.unlink(answerPhotoLocalFile(key)).catch((e: any) => { if (e?.code !== 'ENOENT') throw e; });
+      return;
+    }
+    await firestoreDb.collection(ANSWER_PHOTO_COLLECTION).doc(key).delete();
+  } catch (e) {
+    log.warn('[answer-photo] delete failed:', (e as any)?.message);
+  }
+}
+/** Removes photo docs no task references any more (replaced, removed, the
+ * daily reset, a deleted task), after the in-flight grace. Never throws. */
+async function sweepAnswerPhotos(nowMs: number = Date.now()): Promise<number> {
+  try {
+    // References from the STORED document when there is one (another server
+    // instance may have committed a photo this cache has not seen yet); a
+    // failed read aborts the sweep (nothing is deleted).
+    let taskList: any[] = tasks;
+    if (firestoreDb) {
+      const snap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
+      const stored = snap && snap.exists ? snap.data() : null;
+      if (!stored || !Array.isArray(stored.tasks)) return 0;
+      taskList = stored.tasks;
+    }
+    const referenced = new Set<string>();
+    for (const t of taskList) if (t?.answerPhoto?.id) referenced.add(answerPhotoKey(t.id, t.answerPhoto.id));
+    let entries: Array<{ key: string; createdAt?: string }> = [];
+    if (!firestoreDb) {
+      let names: string[] = [];
+      try { names = await fs.promises.readdir(ANSWER_PHOTO_LOCAL_DIR); } catch { names = []; }
+      for (const n of names) {
+        if (!n.endsWith('.json')) continue;
+        const key = decodeURIComponent(n.slice(0, -5));
+        const d = await getAnswerPhotoDoc(key).catch(() => null);
+        entries.push({ key, createdAt: d?.createdAt });
+      }
+    } else {
+      let q: any = firestoreDb.collection(ANSWER_PHOTO_COLLECTION);
+      if (typeof q.select === 'function') q = q.select('createdAt');
+      const snap = await q.get();
+      entries = (snap.docs || []).map((d: any) => ({ key: d.id, createdAt: d.data()?.createdAt }));
+    }
+    let removed = 0;
+    for (const e of entries) {
+      if (referenced.has(e.key)) continue;
+      const created = Date.parse(e.createdAt || '');
+      if (Number.isFinite(created) && nowMs - created < ANSWER_PHOTO_SWEEP_GRACE_MS) continue;
+      await deleteAnswerPhotoDoc(e.key);
+      removed++;
+    }
+    if (removed > 0) log.info(`[answer-photo] swept ${removed} unreferenced photo(s)`);
+    return removed;
+  } catch (e) {
+    log.warn('[answer-photo] sweep failed:', (e as any)?.message);
+    return 0;
+  }
+}
+
+/** The one gate for the three answer-photo routes. Answers the refusal itself. */
+function answerPhotoGate(req: any, res: any, task: any, caller: UserProfile, write: boolean): boolean {
+  if (!requireSameAgency(req, res, task, 'tasks')) return false;
+  if ((req as any).kiosk === true) {
+    if (!kioskMayTouchTask(req, task)) {
+      res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
+      return false;
+    }
+  } else if (!canSeeTaskServer(task, caller)) {
+    // RULE T (own venue) + the private-task rule, as the task list.
+    res.status(403).json({ error: 'You can only work on tasks at your own venue.' });
+    return false;
+  }
+  if (write && !canFillTasks(caller)) {
+    res.status(403).json({ error: 'You do not have permission to fill or update task statuses.' });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * PHOTOALL (RV1): the whole write gate again on FRESH data, inside the
+ * mutator: the caller re-read from freshDoc.users (gone or moved agency →
+ * no), kiosk = the tablet's venue with the kiosk acting copy, then RULE T
+ * (fresh scope over the fresh venues), the private-task rule and
+ * canFillTasks. A task moved, made private or unassigned between the
+ * pre-check and the commit is refused. Fail closed.
+ */
+function answerPhotoMayWriteFresh(req: any, freshDoc: any, freshTask: any, caller: UserProfile): boolean {
+  if (!freshTask || !ANSWER_PHOTO_TYPES.has(freshTask.inputType)) return false;
+  const agencyId = caller.agencyId || 'agency-hkc';
+  if ((freshTask.agencyId || 'agency-hkc') !== agencyId) return false;
+  const row = (Array.isArray(freshDoc?.users) ? freshDoc.users : []).find((u: any) => u && u.id === (caller as any).id);
+  if (!row) return false;
+  const base: any = normalizeStoredUser(row);
+  if ((base.agencyId || 'agency-hkc') !== agencyId) return false;
+  // RV3: the membership must still be eligible for a session at all (phone
+  // and kiosk alike): paused after a reset, venue removed, unknown role.
+  if (sessionIneligibleCode(row)) return false;
+  const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+  const venueLive = (vid: any) => freshVenues.some((v: any) => v && v.id === vid && (v.agencyId || 'agency-hkc') === agencyId);
+  // RULE T on the UNMODIFIED fresh row (RV2: never on a kiosk acting copy,
+  // which would rewrite the home venue to the tablet's).
+  if (base.role !== 'admin') {
+    if (!venueLive(freshTask.venueId)) return false;
+    const scope = venueScopeOf(base, freshVenues);
+    if (scope !== 'agency' && !scope.includes(freshTask.venueId || '')) return false;
+  }
+  let actor: any = base;
+  if ((req as any).kiosk === true) {
+    const tv = (req as any).kioskVenueId;
+    if (!tv || freshTask.venueId !== tv || !venueLive(tv)) return false;
+    // The tablet is still paired to this venue, and the person still fits it.
+    const devId = (req as any).kioskDeviceId;
+    const dev = (Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : []).find((d: any) => d && d.id === devId);
+    if (!devId || !dev || dev.venueId !== tv || (dev.agencyId || 'agency-hkc') !== agencyId) return false;
+    // Only now the acting copy (an admin acts as a mashgiach on a tablet).
+    actor = kioskActingUser(base, tv);
+  }
+  if (!canFillTasks(actor)) return false;
+  if (actor.role === 'admin') return true;
+  if (!freshTask.isPrivate || actor.role === 'coordinator') return true;
+  const email = String(actor.email || '').toLowerCase();
+  return email.length > 0 && (freshTask.assignedTo || []).some((a: any) => String(a).toLowerCase() === email);
+}
+
+/** PHOTOALL (RV1): a kiosk session may replace or remove only its own user's photo. */
+function kioskMayReplaceAnswerPhoto(req: any, current: AnswerPhotoRef | undefined | null, caller: UserProfile): boolean {
+  if ((req as any).kiosk !== true || !current?.id) return true;
+  return (current.byEmail || '').toLowerCase() === (caller.email || '').toLowerCase();
+}
+
+app.post('/api/tasks/:id/answer-photo', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { id } = req.params;
+  const existing = tasks.find((t) => t.id === id);
+  if (!existing) return res.status(404).json({ error: 'Task not found' });
+  if (!answerPhotoGate(req, res, existing, caller, true)) return;
+  if (!ANSWER_PHOTO_TYPES.has((existing as any).inputType)) {
+    return res.status(400).json({ error: 'This kind of task does not take a photo here.', code: 'PHOTO_NOT_ALLOWED' });
+  }
+  if (!kioskMayReplaceAnswerPhoto(req, (existing as any).answerPhoto, caller)) {
+    return res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
+  }
+  const { photoData, photoCaption } = req.body || {};
+  if (typeof photoData === 'string' && photoData.length > ANSWER_PHOTO_MAX_CHARS) {
+    return res.status(413).json({ error: 'The photo is too large.', code: 'MEDIA_TOO_LARGE' });
+  }
+  if (typeof photoData !== 'string' || !ANSWER_PHOTO_DATA_RE.test(photoData)) {
+    return res.status(400).json({ error: 'Unsupported attachment.', code: 'BAD_MEDIA' });
+  }
+  if (photoCaption !== undefined && photoCaption !== null && typeof photoCaption !== 'string') {
+    return res.status(400).json({ error: 'Unsupported caption.', code: 'BAD_CAPTION' });
+  }
+  const caption = typeof photoCaption === 'string' ? photoCaption.trim().slice(0, ANSWER_PHOTO_CAPTION_MAX) : '';
+  const at = new Date().toISOString();
+  // Stable id generated BEFORE the transaction so a retried mutator reuses it.
+  const photoId = `aph-${crypto.randomUUID()}`;
+  const key = answerPhotoKey(id, photoId);
+  const ref: AnswerPhotoRef = {
+    id: photoId,
+    byName: caller.name || null,
+    byEmail: caller.email || null,
+    at,
+    ...(caption ? { caption } : {}),
+  };
+  // Bytes first; the reference only after they are stored.
+  try {
+    await putAnswerPhotoDoc(key, {
+      taskId: id,
+      agencyId: (existing as any).agencyId || 'agency-hkc',
+      venueId: (existing as any).venueId || null,
+      byEmail: caller.email || null,
+      createdAt: at,
+      photoData,
+    });
+  } catch (e) {
+    log.error('[answer-photo] store failed:', e);
+    return res.status(503).json({ error: 'Could not save the photo. Please try again.' });
+  }
+  let previousId: string | null = null;
+  const committed = await commitOrRespond(
+    req,
+    res,
+    (freshDoc) => {
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      const freshTask = freshTasks.find((t) => t.id === id);
+      if (!freshTask) return { conflict: 'Task not found (it may have been deleted).' };
+      if (!answerPhotoMayWriteFresh(req, freshDoc, freshTask, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
+      if (!kioskMayReplaceAnswerPhoto(req, freshTask.answerPhoto, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
+      // RV2: a save that took longer than the deadline never publishes (the
+      // sweep may remove bytes older than its grace); checked on every attempt.
+      if (answerPhotoNow() - Date.parse(at) > ANSWER_PHOTO_SAVE_DEADLINE_MS) return { conflict: 'Saving the photo took too long. Please try again.' };
+      previousId = freshTask.answerPhoto?.id || null;
+      const updated: TaskItem = { ...freshTask, answerPhoto: ref };
+      const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
+      return { doc: { ...freshDoc, tasks: newTasks }, result: updated };
+    },
+    // NOTE: no requireVersion (as check-ins): adding a photo never overwrites
+    // anyone's answer, so a version gate would only cause spurious 409s.
+    { label: 'task-answer-photo' }
+  );
+  // Not committed here does NOT prove the bytes are unreferenced (a commit
+  // whose acknowledgement was lost answers from the idempotency record), so
+  // they are never deleted on this path: the sweep removes them only when the
+  // STORED document does not reference them, after the grace.
+  if (!committed) return;
+  const updated = committed.result as TaskItem;
+  // One photo per task: the replaced one's bytes go now (the sweep is the backstop).
+  if (previousId && previousId !== photoId) void deleteAnswerPhotoDoc(answerPhotoKey(id, previousId));
+  broadcastTaskUpdated(updated, updated, caller.email);
+  res.json(updated);
+});
+
+app.delete('/api/tasks/:id/answer-photo', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { id } = req.params;
+  const existing = tasks.find((t) => t.id === id);
+  if (!existing) return res.status(404).json({ error: 'Task not found' });
+  if (!answerPhotoGate(req, res, existing, caller, true)) return;
+  // Optional ?photoId: remove only that photo (never a newer one someone else added).
+  const onlyId = typeof req.query.photoId === 'string' ? req.query.photoId : null;
+  const current = (existing as any).answerPhoto as AnswerPhotoRef | undefined;
+  // A kiosk session may remove only its own user's photo (as check-ins).
+  if ((req as any).kiosk === true && current && (!onlyId || onlyId === current.id) &&
+      (current.byEmail || '').toLowerCase() !== (caller.email || '').toLowerCase()) {
+    return res.status(403).json({ error: 'This kiosk session can only clock in and out.', code: 'KIOSK_SCOPE' });
+  }
+  let removedId: string | null = null;
+  const committed = await commitOrRespond(
+    req,
+    res,
+    (freshDoc) => {
+      const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
+      const freshTask = freshTasks.find((t) => t.id === id);
+      if (!freshTask) return { conflict: 'Task not found (it may have been deleted).' };
+      if (!answerPhotoMayWriteFresh(req, freshDoc, freshTask, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
+      const cur = freshTask.answerPhoto;
+      // Idempotent: nothing there (or already a different photo) → success, unchanged.
+      if (!cur?.id || (onlyId && cur.id !== onlyId)) return { doc: freshDoc, result: freshTask };
+      if (!kioskMayReplaceAnswerPhoto(req, cur, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
+      removedId = cur.id;
+      const updated: TaskItem = { ...freshTask, answerPhoto: undefined };
+      const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
+      return { doc: { ...freshDoc, tasks: newTasks }, result: updated };
+    },
+    { label: 'task-answer-photo-remove' }
+  );
+  if (!committed) return;
+  const updated = committed.result as TaskItem;
+  if (removedId) {
+    void deleteAnswerPhotoDoc(answerPhotoKey(id, removedId));
+    broadcastTaskUpdated(updated, updated, caller.email);
+  }
+  res.json(updated);
+});
+
+// The bytes, on demand, behind the same visibility as the task itself.
+app.get('/api/tasks/:id/answer-photo', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { id } = req.params;
+  const existing = tasks.find((t) => t.id === id);
+  if (!existing) return res.status(404).json({ error: 'Task not found' });
+  if (!answerPhotoGate(req, res, existing, caller, false)) return;
+  const ref = (existing as any).answerPhoto as AnswerPhotoRef | undefined;
+  const wanted = typeof req.query.photoId === 'string' ? req.query.photoId : null;
+  if (!ref?.id || (wanted && wanted !== ref.id)) return res.status(404).json({ error: 'No photo' });
+  let doc: any = null;
+  try {
+    doc = await getAnswerPhotoDoc(answerPhotoKey(id, ref.id));
+  } catch (e) {
+    log.error('[answer-photo] read failed:', e);
+    return res.status(503).json({ error: 'Could not load the photo. Please try again.' });
+  }
+  const agencyId = (existing as any).agencyId || 'agency-hkc';
+  if (!doc || doc.taskId !== id || (doc.agencyId || 'agency-hkc') !== agencyId || typeof doc.photoData !== 'string') {
+    return res.status(404).json({ error: 'No photo' });
+  }
+  res.set('Cache-Control', 'private, no-store');
+  res.json({ id: ref.id, photoData: doc.photoData });
+});
+
+if (isTestMode()) {
+  // TEST ONLY: run the unreferenced-photo sweep now (nowMs optional) and
+  // report how many photo docs the store still holds.
+  app.post('/api/__test__/answer-photo-sweep', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const nowMs = typeof req.body?.nowMs === 'number' ? req.body.nowMs : Date.now();
+    const removed = await sweepAnswerPhotos(nowMs);
+    res.json({ removed });
+  });
+  // TEST ONLY: pretend time passes during a save (the commit's deadline check).
+  app.post('/api/__test__/answer-photo-hooks', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const skew = Number(req.body?.clockSkewMs);
+    answerPhotoTestHooks.clockSkewMs = Number.isFinite(skew) ? skew : 0;
+    res.json({ ...answerPhotoTestHooks });
+  });
+}
 
 app.delete('/api/tasks/:id', async (req, res) => {
   const { id } = req.params;

@@ -24,6 +24,7 @@ import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 import { TaskInstructions } from './TaskInstructions';
+import { TaskAnswerPhoto } from './TaskAnswerPhoto';
 
 interface TaskTableViewProps {
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
@@ -290,6 +291,8 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 
                   {/* Flexible Completion Input Column */}
                   <td className="py-3.5 px-4 align-top">
+                    {/* PHOTOALL: optional photo with the answer; the camera sits beside the answer */}
+                    <TaskAnswerPhoto task={task} canAttach={canFill} size="desk">
                     {!canFill ? (
                       <div className="space-y-1">
                         {task.isCompleted ? (
@@ -473,6 +476,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                         </div>
                       </div>
                     )}
+                    </TaskAnswerPhoto>
                   </td>
 
                   {/* Automated "Signed By" Attribution Column */}

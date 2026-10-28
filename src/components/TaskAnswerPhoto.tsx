@@ -1,0 +1,376 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Camera, X } from 'lucide-react';
+import { Task, TaskAnswerPhoto as AnswerPhotoRef } from '../types';
+import { apiFetch, apiWrite, newActionId } from '../lib/api';
+import { formatExactTime } from '../lib/utils';
+
+/** PHOTOALL (Don, Oct 27): every answer-type check can carry ONE optional photo. */
+export const ANSWER_PHOTO_TYPES = ['toggle', 'yes_no', 'status_select', 'checkbox'] as const;
+export const takesAnswerPhoto = (task: Pick<Task, 'inputType'>): boolean =>
+  (ANSWER_PHOTO_TYPES as readonly string[]).includes(task.inputType);
+/** The server's cap (base64 data-URL characters). */
+export const ANSWER_PHOTO_MAX_CHARS = 400_000;
+export const ANSWER_PHOTO_CAPTION_MAX = 200;
+
+/** The check-in compression (≤ 800 px, JPEG 0.7), stepping down only if a photo is still over the cap. */
+const STEPS: Array<[number, number]> = [[800, 0.7], [800, 0.55], [640, 0.5], [480, 0.45]];
+export function compressPhoto(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('read'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('decode'));
+      img.onload = () => {
+        let out = '';
+        for (const [max, q] of STEPS) {
+          const canvas = document.createElement('canvas');
+          const scale = Math.min(1, max / Math.max(img.width, img.height));
+          canvas.width = Math.round(img.width * scale);
+          canvas.height = Math.round(img.height * scale);
+          canvas.getContext('2d')?.drawImage(img, 0, 0, canvas.width, canvas.height);
+          out = canvas.toDataURL('image/jpeg', q);
+          if (out.length <= ANSWER_PHOTO_MAX_CHARS) break;
+        }
+        resolve(out);
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * RV1: the local answer of a save/remove counts only while the task is still
+ * where it was when that write started (basis); once the task moves on (the
+ * live update, a reset, someone else's change) it is dropped for good, so it
+ * can never come back when the task later returns to the same state.
+ */
+export type AnswerPhotoOverride = { basis: string | null; ref: AnswerPhotoRef | null };
+export function reconcileAnswerPhotoOverride(override: AnswerPhotoOverride | null, liveId: string | null): AnswerPhotoOverride | null {
+  return override && override.basis === liveId ? override : null;
+}
+
+// Bytes already fetched this session, by photo id (a photo never changes under its id).
+const bytesCache = new Map<string, string>();
+
+interface Props {
+  task: Task;
+  /** May this person record the answer (and so add or remove the photo)? */
+  canAttach: boolean;
+  /** 'kiosk' = the wall tablet's larger targets and text; 'desk' = a compact camera for the desk table. */
+  size?: 'phone' | 'desk' | 'kiosk';
+  /**
+   * Don (Oct 27): the camera is an icon-only button like the Log check one.
+   * When the answer control is passed as children, the camera sits beside it
+   * (same row); without children it stands on its own (kiosk).
+   */
+  children?: React.ReactNode;
+}
+
+/**
+ * The answer photo: an icon-only camera button ("Add photo", camera or
+ * gallery) for people who may answer, beside the answer control when it is
+ * passed as children; after a photo is saved, a thumbnail with who and when
+ * that opens full size on tap, and the same camera button changes it.
+ * Renders only the children for other task types, and for a read-only viewer
+ * when there is no photo.
+ */
+export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phone', children }) => {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [caption, setCaption] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // RV3: the full-size view is open for ONE photo id; it closes by itself when
+  // that photo is removed, replaced or reset (no dialog, no key trap).
+  const [fullId, setFullId] = useState<string | null>(null);
+  // The server's answer, until the task itself (live update) catches up.
+  const [override, setOverride] = useState<AnswerPhotoOverride | null>(null);
+  // RV1: ONE operation id per pending save (a retry after an unknown outcome
+  // reuses it, so the server answers the first save instead of replacing again);
+  // a new photo or a changed caption is a new operation.
+  const [opId, setOpId] = useState<string>(() => newActionId());
+  // RV3: the task's photo when THIS operation was first sent; a retry of the
+  // same operation keeps it (its answer may be the first attempt's photo).
+  const opBasisRef = useRef<{ opId: string; basis: string | null } | null>(null);
+  const live = task.answerPhoto || null;
+  const liveId = live?.id ?? null;
+  const effective = reconcileAnswerPhotoOverride(override, liveId);
+  const shown = effective ? effective.ref : live;
+  const [src, setSrc] = useState<string | null>(shown ? bytesCache.get(shown.id) || null : null);
+  const full = !!fullId && !!shown && shown.id === fullId && !!src;
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const liveRef = useRef<string | null>(liveId);
+  liveRef.current = liveId;
+  // Async work (reading a photo, a save, a remove) only lands on the task that started it.
+  const taskRef = useRef<string>(task.id);
+  taskRef.current = task.id;
+  const thumbRef = useRef<HTMLButtonElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  // RV1: once the task itself moves on (the live update, a reset, someone
+  // else's change), the task is the truth again: drop the local answer so it
+  // can never come back later. Transient state is per task.
+  useEffect(() => { if (override && !effective) setOverride(null); }, [override, effective]);
+  useEffect(() => { setOverride(null); setDraft(null); setCaption(''); setError(null); setFullId(null); }, [task.id]);
+
+  // RV1: the full-size view is modal: focus to Close, Escape closes, Tab stays
+  // inside, focus returns to the thumbnail.
+  useEffect(() => {
+    if (!full) { if (fullId) setFullId(null); return; }
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); setFullId(null); }
+      else if (e.key === 'Tab') { e.preventDefault(); closeRef.current?.focus(); }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      thumbRef.current?.focus();
+    };
+  }, [full, fullId]);
+
+  useEffect(() => {
+    if (!shown) { setSrc(null); return; }
+    const cached = bytesCache.get(shown.id);
+    if (cached) { setSrc(cached); return; }
+    setSrc(null);
+    let gone = false;
+    apiFetch(`/api/tasks/${encodeURIComponent(task.id)}/answer-photo?photoId=${encodeURIComponent(shown.id)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (gone || !j || typeof j.photoData !== 'string') return;
+        bytesCache.set(shown.id, j.photoData);
+        setSrc(j.photoData);
+      })
+      .catch(() => { /* the thumbnail stays a placeholder */ });
+    return () => { gone = true; };
+  }, [task.id, shown?.id]);
+
+  if (!takesAnswerPhoto(task)) return <>{children}</>;
+  if (!shown && !draft && !canAttach) return <>{children}</>;
+
+  const k = size === 'kiosk';
+  const desk = size === 'desk';
+  const btn = k
+    ? 'min-h-16 px-4 text-base gap-2 rounded-xl'
+    : 'min-h-11 px-3 text-xs gap-2 rounded-xl';
+  const icon = k ? 'w-6 h-6' : 'w-4 h-4';
+  const text = k ? 'text-base' : 'text-xs';
+
+  const pick = async (file: File) => {
+    setError(null);
+    const tid = task.id;
+    try {
+      const data = await compressPhoto(file);
+      if (taskRef.current !== tid) return;
+      if (data.length > ANSWER_PHOTO_MAX_CHARS) { setError('That photo is too large. Try another one.'); return; }
+      setDraft(data);
+      setCaption('');
+      setOpId(newActionId());
+    } catch {
+      if (taskRef.current !== tid) return;
+      setError('Could not read that photo. Try another one.');
+    }
+  };
+
+  const save = async () => {
+    if (!draft || busy) return;
+    setBusy(true);
+    setError(null);
+    if (opBasisRef.current?.opId !== opId) opBasisRef.current = { opId, basis: live?.id ?? null };
+    const basis = opBasisRef.current.basis;
+    const tid = task.id;
+    const result = await apiWrite(`/api/tasks/${encodeURIComponent(tid)}/answer-photo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photoData: draft, photoCaption: caption.trim() || undefined }),
+      operationId: opId,
+    });
+    setBusy(false);
+    if (taskRef.current !== tid) return;
+    if (result.ok && result.data?.answerPhoto?.id) {
+      bytesCache.set(result.data.answerPhoto.id, draft);
+      // Only while the task has not moved on meanwhile (else the task is the truth).
+      if (liveRef.current === basis) setOverride({ basis, ref: result.data.answerPhoto });
+      setDraft(null);
+      setCaption('');
+      setOpId(newActionId());
+    } else {
+      setError(result.error || 'The photo was not saved. Please try again.');
+    }
+  };
+
+  const remove = async () => {
+    if (!shown || busy) return;
+    setBusy(true);
+    setError(null);
+    const basis = live?.id ?? null;
+    const tid = task.id;
+    const result = await apiWrite(
+      `/api/tasks/${encodeURIComponent(tid)}/answer-photo?photoId=${encodeURIComponent(shown.id)}`,
+      { method: 'DELETE' }
+    );
+    setBusy(false);
+    if (taskRef.current !== tid) return;
+    if (result.ok) {
+      if (liveRef.current === basis) setOverride({ basis, ref: result.data?.answerPhoto || null });
+      setFullId(null);
+    } else {
+      setError(result.error || 'The photo was not removed. Please try again.');
+    }
+  };
+
+  const who = shown ? (shown.byName || shown.byEmail || 'Someone') : '';
+
+  // Icon only, the Log check camera's look (kiosk: a 64 px square).
+  const camera = canAttach && !draft ? (
+    <>
+      <button
+        type="button"
+        data-answer-photo-add
+        onClick={() => fileRef.current?.click()}
+        disabled={busy}
+        aria-label={shown ? 'Change photo' : 'Add photo'}
+        title={shown ? 'Change photo (replaces this one)' : 'Add photo (optional)'}
+        className={`pressable shrink-0 flex items-center justify-center border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30 ${k ? 'self-start min-h-16 min-w-16 rounded-xl' : desk ? 'w-8 h-8 rounded-lg' : 'min-h-11 min-w-11 px-3 rounded-xl'}`}
+      >
+        <Camera className={icon} aria-hidden />
+      </button>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        tabIndex={-1}
+        aria-hidden="true"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void pick(file);
+          e.target.value = '';
+        }}
+      />
+    </>
+  ) : null;
+
+  const rows = (
+    <div data-answer-photo className={`mt-2 flex flex-col gap-2 ${text}`}>
+      {shown && (
+        <div className="flex items-center gap-3 rounded-xl bg-sunken border border-line p-2">
+          <button
+            type="button"
+            data-answer-photo-thumb
+            ref={thumbRef}
+            onClick={() => src && shown && setFullId(shown.id)}
+            aria-label="Open the photo full size"
+            className={`pressable shrink-0 overflow-hidden rounded-lg border border-line bg-surface cursor-pointer ${k ? 'w-20 h-20' : 'w-14 h-14'}`}
+          >
+            {src ? (
+              <img src={src} alt={shown.caption || 'Photo'} className="w-full h-full object-cover" />
+            ) : (
+              <span className="w-full h-full flex items-center justify-center text-ink-faint">
+                <Camera className={icon} aria-hidden />
+              </span>
+            )}
+          </button>
+          <div className="min-w-0 flex-1">
+            {shown.caption && <p dir="auto" className="font-semibold text-ink break-words">{shown.caption}</p>}
+            <p className="text-ink-soft truncate">
+              Photo by <span className="font-semibold text-ink">{who}</span> · {formatExactTime(shown.at)}
+            </p>
+          </div>
+          {canAttach && (
+            <button
+              type="button"
+              onClick={remove}
+              disabled={busy}
+              title="Remove the photo"
+              aria-label="Remove the photo"
+              className={`pressable shrink-0 flex items-center justify-center rounded-lg text-ink-faint hover:text-bad cursor-pointer ${k ? 'w-16 h-16' : 'w-11 h-11'}`}
+            >
+              <X className={icon} aria-hidden />
+            </button>
+          )}
+        </div>
+      )}
+
+      {draft && (
+        <div className="flex flex-col gap-2 rounded-xl bg-sunken border border-line p-2">
+          <div className="flex items-center gap-3">
+            <img src={draft} alt="New photo" className={`shrink-0 rounded-lg border border-line object-cover ${k ? 'w-20 h-20' : 'w-14 h-14'}`} />
+            <input
+              type="text"
+              dir="auto"
+              value={caption}
+              maxLength={ANSWER_PHOTO_CAPTION_MAX}
+              onChange={(e) => { setCaption(e.target.value); setOpId(newActionId()); }}
+              placeholder="Caption (optional)"
+              aria-label="Photo caption (optional)"
+              className={`min-w-0 flex-1 rounded-lg bg-surface border border-line px-2 text-ink placeholder-ink-faint focus:outline-none focus:border-gold ${k ? 'min-h-16 text-base' : 'min-h-11 text-sm'}`}
+            />
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={save}
+              disabled={busy}
+              className={`pressable flex-1 flex items-center justify-center font-bold border border-gold-deep bg-gold-deep text-paper cursor-pointer ${btn}`}
+            >
+              {busy ? 'Saving…' : 'Save photo'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setDraft(null); setCaption(''); }}
+              disabled={busy}
+              className={`pressable flex items-center justify-center font-bold border border-line bg-surface text-ink-soft cursor-pointer ${btn}`}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {children === undefined && camera}
+
+      {error && <p role="alert" className="text-bad font-semibold">{error}</p>}
+
+      {full && shown && src && typeof document !== 'undefined' && createPortal(
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Photo"
+          data-answer-photo-full
+          onClick={() => setFullId(null)}
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-scrim backdrop-blur-sm p-4"
+        >
+          <img src={src} alt={shown.caption || 'Photo'} className="max-w-full max-h-[75vh] rounded-lg object-contain" />
+          <div className="max-w-md rounded-xl bg-surface border border-line px-3 py-2 text-sm text-ink text-center">
+            {shown.caption ? <p dir="auto" className="font-semibold break-words">{shown.caption}</p> : null}
+            <p className="text-ink-soft">Photo by {who} · {formatExactTime(shown.at)}</p>
+          </div>
+          <button
+            type="button"
+            ref={closeRef}
+            onClick={() => setFullId(null)}
+            className={`pressable px-4 rounded-xl border border-line bg-surface font-bold text-ink cursor-pointer ${k ? 'min-h-16 text-base' : 'min-h-11 text-sm'}`}
+          >
+            Close
+          </button>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+
+  if (children === undefined) return rows;
+  return (
+    <>
+      <div data-answer-photo-row className={desk ? 'flex items-start gap-3' : 'flex gap-2'}>
+        <div className={desk ? 'min-w-0' : 'min-w-0 flex-1 flex flex-col justify-center'}>{children}</div>
+        {camera}
+      </div>
+      {shown || draft || error ? rows : null}
+    </>
+  );
+};
