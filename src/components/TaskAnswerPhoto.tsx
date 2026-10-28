@@ -61,15 +61,23 @@ interface Props {
   canAttach: boolean;
   /** 'kiosk' = the wall tablet's larger targets and text. */
   size?: 'phone' | 'kiosk';
+  /**
+   * Don (Oct 27): the camera is an icon-only button like the Log check one.
+   * When the answer control is passed as children, the camera sits beside it
+   * (same row); without children it stands on its own (kiosk).
+   */
+  children?: React.ReactNode;
 }
 
 /**
- * The photo row under the answer: "Add photo" (camera or gallery) for people
- * who may answer; after a photo is saved, a thumbnail with who and when that
- * opens full size on tap. Renders nothing for other task types, and nothing
- * for a read-only viewer when there is no photo.
+ * The answer photo: an icon-only camera button ("Add photo", camera or
+ * gallery) for people who may answer, beside the answer control when it is
+ * passed as children; after a photo is saved, a thumbnail with who and when
+ * that opens full size on tap, and the same camera button changes it.
+ * Renders only the children for other task types, and for a read-only viewer
+ * when there is no photo.
  */
-export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phone' }) => {
+export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phone', children }) => {
   const [draft, setDraft] = useState<string | null>(null);
   const [caption, setCaption] = useState('');
   const [busy, setBusy] = useState(false);
@@ -140,8 +148,8 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
     return () => { gone = true; };
   }, [task.id, shown?.id]);
 
-  if (!takesAnswerPhoto(task)) return null;
-  if (!shown && !draft && !canAttach) return null;
+  if (!takesAnswerPhoto(task)) return <>{children}</>;
+  if (!shown && !draft && !canAttach) return <>{children}</>;
 
   const k = size === 'kiosk';
   const btn = k
@@ -215,7 +223,37 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
 
   const who = shown ? (shown.byName || shown.byEmail || 'Someone') : '';
 
-  return (
+  // Icon only, the Log check camera's look (kiosk: a 64 px square).
+  const camera = canAttach && !draft ? (
+    <>
+      <button
+        type="button"
+        data-answer-photo-add
+        onClick={() => fileRef.current?.click()}
+        disabled={busy}
+        aria-label={shown ? 'Change photo' : 'Add photo'}
+        title={shown ? 'Change photo (replaces this one)' : 'Add photo (optional)'}
+        className={`pressable shrink-0 flex items-center justify-center rounded-xl border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30 ${k ? 'self-start min-h-16 min-w-16' : 'min-h-11 px-3'}`}
+      >
+        <Camera className={icon} aria-hidden />
+      </button>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        tabIndex={-1}
+        aria-hidden="true"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void pick(file);
+          e.target.value = '';
+        }}
+      />
+    </>
+  ) : null;
+
+  const rows = (
     <div data-answer-photo className={`mt-2 flex flex-col gap-2 ${text}`}>
       {shown && (
         <div className="flex items-center gap-3 rounded-xl bg-sunken border border-line p-2">
@@ -292,34 +330,7 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
         </div>
       )}
 
-      {canAttach && !draft && (
-        <>
-          <button
-            type="button"
-            data-answer-photo-add
-            onClick={() => fileRef.current?.click()}
-            disabled={busy}
-            className={`pressable self-start flex items-center font-bold border border-line bg-sunken text-ink-soft hover:text-ink cursor-pointer ${btn}`}
-            title={shown ? 'Take or choose a new photo (replaces this one)' : 'Add a photo (optional)'}
-          >
-            <Camera className={icon} aria-hidden />
-            <span>{shown ? 'Change photo' : 'Add photo'}</span>
-          </button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            tabIndex={-1}
-            aria-hidden="true"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void pick(file);
-              e.target.value = '';
-            }}
-          />
-        </>
-      )}
+      {children === undefined && camera}
 
       {error && <p role="alert" className="text-bad font-semibold">{error}</p>}
 
@@ -349,5 +360,16 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
         document.body
       )}
     </div>
+  );
+
+  if (children === undefined) return rows;
+  return (
+    <>
+      <div data-answer-photo-row className="flex gap-2">
+        <div className="min-w-0 flex-1 flex flex-col justify-center">{children}</div>
+        {camera}
+      </div>
+      {shown || draft || error ? rows : null}
+    </>
   );
 };

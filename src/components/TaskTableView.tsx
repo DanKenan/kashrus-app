@@ -291,6 +291,8 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 
                   {/* Flexible Completion Input Column */}
                   <td className="py-3.5 px-4 align-top">
+                    {/* PHOTOALL: optional photo with the answer; the camera sits beside the answer */}
+                    <TaskAnswerPhoto task={task} canAttach={canFill}>
                     {!canFill ? (
                       <div className="space-y-1">
                         {task.isCompleted ? (
@@ -474,8 +476,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                         </div>
                       </div>
                     )}
-                    {/* PHOTOALL: optional photo with the answer */}
-                    <TaskAnswerPhoto task={task} canAttach={canFill} />
+                    </TaskAnswerPhoto>
                   </td>
 
                   {/* Automated "Signed By" Attribution Column */}
