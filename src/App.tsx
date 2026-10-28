@@ -4,7 +4,7 @@ import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgen
 import React, { useState, useEffect, useMemo, useRef, useCallback, lazy, Suspense } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue } from './lib/venueSelection';
-import { defaultScreen, forgetSavedScreens, isRestrictedSheet, readSavedScreen, restoreConfirmed, saveScreen, sheetAllowed, type SavedScreen } from './lib/screenMemory';
+import { defaultScreen, forgetSavedScreens, isRestrictedSheet, pendingOnAnswer, pendingOnScreen, readSavedScreen, saveScreen, sheetAllowed, startPendingRestore, type PendingRestore, type SavedScreen } from './lib/screenMemory';
 import { socketVenueScope, scopeListToVenue, inVenueScope } from './lib/socketVenueScope';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
 import { AgencySwitcherSheet } from './components/AgencySwitcherSheet';
@@ -550,14 +550,18 @@ export default function App() {
   const screenView = currentUser?.role === 'admin' && adminHome ? 'home' : 'board';
   const screenSheet = isVenuesDirectoryOpen ? 'venues' : isTeamModalOpen ? 'team' : isAgencyEventsOpen ? 'agency-events'
     : isHistoryModalOpen ? 'history' : isEventsModalOpen ? 'events' : null;
-  const screenSheetRef = useRef(screenSheet);
-  screenSheetRef.current = screenSheet;
-  useEffect(() => {
-    if (isKiosk || !currentUser) return;
-    saveScreen(currentUser, { view: screenView, sheet: screenSheet });
-  }, [isKiosk, currentUser, screenView, screenSheet]);
   // Team, Venues and agency Events reopen only once the server confirms who is
   // signed in and their role (the cached role may be stale); never on a kiosk.
+  // While that waits the stored target is kept; navigation or another
+  // person/agency/sign-out drops it (lib/screenMemory.ts PendingRestore).
+  const pendingRestore = useRef<PendingRestore | null>(startPendingRestore(currentUser, restoredScreen, isKiosk));
+  useEffect(() => {
+    const screen = { view: screenView, sheet: screenSheet } as SavedScreen;
+    const next = pendingOnScreen(pendingRestore.current, isKiosk ? null : currentUser, screen);
+    pendingRestore.current = next.pending;
+    if (isKiosk || !currentUser || !next.save) return;
+    saveScreen(currentUser, screen);
+  }, [isKiosk, currentUser, screenView, screenSheet]);
   useEffect(() => {
     const sheet = restoredScreen.sheet;
     const cached = currentUser;
@@ -565,13 +569,18 @@ export default function App() {
     let live = true;
     apiFetch('/api/auth/me', { cache: 'no-store' })
       .then((res) => (res.ok ? res.json() : null))
+      .catch(() => null)
       .then((me) => {
-        if (!live || screenSheetRef.current !== null || !restoreConfirmed(cached, me, sheet)) return;
+        if (!live) return;
+        const pending = pendingRestore.current;
+        const answer = pendingOnAnswer(pending, cached, me, sheet);
+        pendingRestore.current = answer.pending;
+        if (answer.saveDefault && pending) saveScreen(cached, { view: pending.at?.startsWith('home') ? 'home' : 'board', sheet: null });
+        if (!answer.open) return;
         if (sheet === 'venues') setIsVenuesDirectoryOpen(true);
         else if (sheet === 'team') setIsTeamModalOpen(true);
         else setIsAgencyEventsOpen(true);
-      })
-      .catch(() => {});
+      });
     return () => { live = false; };
     // Once, for the screen this page loaded with.
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -76,6 +76,56 @@ export function restoreConfirmed(cached: Pick<User, 'id'> | null | undefined, me
   return sheetAllowed({ role: u.role as User['role'] }, sheet);
 }
 
+/**
+ * A restricted sheet waiting for the server's word (see restoreConfirmed).
+ * `who` is the storage key of the person the page loaded as; `at` is the
+ * screen on show while waiting (filled on the first save). While it waits,
+ * the stored target is kept (a second reload tries again); any navigation or
+ * a change of person/agency/sign-out drops it, so a late answer never reopens
+ * a sheet over what the person chose, or for someone else.
+ */
+export interface PendingRestore {
+  sheet: ScreenSheet;
+  who: string;
+  at: string | null;
+}
+
+export function screenHere(screen: SavedScreen): string {
+  return `${screen.view}|${screen.sheet ?? ''}`;
+}
+
+/** The pending restore a page starts with (null when there is nothing restricted to restore, or on a kiosk). */
+export function startPendingRestore(user: ScreenUser | null | undefined, restored: SavedScreen, isKiosk: boolean): PendingRestore | null {
+  if (isKiosk || !user || !user.id || !isRestrictedSheet(restored.sheet)) return null;
+  return { sheet: restored.sheet as ScreenSheet, who: screenStorageKey(user), at: null };
+}
+
+/**
+ * Pure: the screen on show changed (or the person did). Returns the pending
+ * restore that survives, and whether the screen may be saved now (false while
+ * the restore still waits, so the stored target is not overwritten).
+ */
+export function pendingOnScreen(pending: PendingRestore | null, user: ScreenUser | null | undefined, screen: SavedScreen): { pending: PendingRestore | null; save: boolean } {
+  if (!pending) return { pending: null, save: !!user };
+  if (!user || !user.id || screenStorageKey(user) !== pending.who) return { pending: null, save: !!user };
+  const here = screenHere(screen);
+  if (pending.at === null) return { pending: { ...pending, at: here }, save: false };
+  if (pending.at === here) return { pending, save: false };
+  return { pending: null, save: true };
+}
+
+/**
+ * Pure: the server answered GET /api/auth/me (me = its JSON, or null when the
+ * call failed). open: reopen the sheet now. pending: what still waits.
+ * saveDefault: the server definitely said no, so the stored target is dropped.
+ */
+export function pendingOnAnswer(pending: PendingRestore | null, cached: ScreenUser | null | undefined, me: unknown, sheet: ScreenSheet | null): { open: boolean; pending: PendingRestore | null; saveDefault: boolean } {
+  if (!pending || !cached || pending.sheet !== sheet || pending.who !== screenStorageKey(cached)) return { open: false, pending, saveDefault: false };
+  if (me == null) return { open: false, pending, saveDefault: false };
+  if (restoreConfirmed(cached, me, sheet)) return { open: true, pending: null, saveDefault: false };
+  return { open: false, pending: null, saveDefault: true };
+}
+
 /** Pure: a stored value -> the screen to open, or the default when it is not allowed. */
 export function screenFromStored(user: Pick<User, 'role'> | null | undefined, raw: string | null | undefined): SavedScreen {
   const fallback = defaultScreen(user);
