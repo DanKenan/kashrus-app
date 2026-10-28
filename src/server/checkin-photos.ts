@@ -106,7 +106,8 @@ export function createCheckInPhotoStore(deps: StoreDeps) {
   // TEST ONLY (set through the test route). staleCheckInIds: the GET route acts as an
   // instance whose cache has not seen these check-ins yet; failStoredRead: the
   // authoritative read fails.
-  const testHooks = { storeDelayMs: 0, storeTimeoutMs: 0, failStore: false, staleCheckInIds: [] as string[], failStoredRead: false };
+  // storedTaskPatch: the stored document has this task changed (moved, made private) by another instance.
+  const testHooks = { storeDelayMs: 0, storeTimeoutMs: 0, failStore: false, staleCheckInIds: [] as string[], failStoredRead: false, storedTaskPatch: null as null | { taskId: string; patch: Record<string, any> } };
 
   async function put(key: string, doc: any): Promise<void> {
     if (testHooks.storeDelayMs > 0) await new Promise((r) => setTimeout(r, testHooks.storeDelayMs));
@@ -214,11 +215,17 @@ export function createCheckInPhotoStore(deps: StoreDeps) {
     try {
       if (testHooks.failStoredRead) throw new Error('test: stored read unavailable');
       const db = deps.db();
-      if (!db) return { ok: true, task: deps.memoryTasks().find((t: any) => t && t.id === taskId) || null };
-      const snap = await db.doc(deps.stateDocPath).get();
-      const stored = snap && snap.exists ? snap.data() : null;
-      if (!stored || !Array.isArray(stored.tasks)) return { ok: false };
-      return { ok: true, task: stored.tasks.find((t: any) => t && t.id === taskId) || null };
+      let task: any = null;
+      if (!db) task = deps.memoryTasks().find((t: any) => t && t.id === taskId) || null;
+      else {
+        const snap = await db.doc(deps.stateDocPath).get();
+        const stored = snap && snap.exists ? snap.data() : null;
+        if (!stored || !Array.isArray(stored.tasks)) return { ok: false };
+        task = stored.tasks.find((t: any) => t && t.id === taskId) || null;
+      }
+      const tp = testHooks.storedTaskPatch;
+      if (task && tp && tp.taskId === taskId) task = { ...task, ...tp.patch };
+      return { ok: true, task };
     } catch (e) {
       deps.log.warn('[checkin-photo] stored read failed:', (e as any)?.message);
       return { ok: false };
@@ -261,13 +268,13 @@ export function registerCheckInPhotoRoutes(app: any, deps: RouteDeps): void {
       // before a terminal "no photo"; a failed read is "try again" (503).
       const stored = await deps.store.readStoredTask(id);
       if (!stored.ok) return res.status(503).json({ error: 'Could not load the photo. Please try again.' });
-      if (!task) {
-        if (!stored.task) return res.status(404).json({ error: 'Task not found' });
-        task = stored.task;
-        if (!deps.gate(req, res, task, caller)) return;
-      }
-      const sameAgency = stored.task && (stored.task.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc');
-      entry = sameAgency ? entryOf(stored.task) : undefined;
+      if (!stored.task) return res.status(404).json({ error: task ? 'No photo' : 'Task not found' });
+      // RV4: the STORED task decides from here on (it may have moved venue or
+      // turned private since this cache saw it): its gate too, fail closed.
+      if (task && (stored.task.agencyId || 'agency-hkc') !== (task.agencyId || 'agency-hkc')) return res.status(404).json({ error: 'No photo' });
+      task = stored.task;
+      if (!deps.gate(req, res, task, caller)) return;
+      entry = entryOf(task);
       if (!entry) return res.status(404).json({ error: 'No photo' });
     }
     res.set('Cache-Control', 'private, no-store');
@@ -307,6 +314,8 @@ export function registerCheckInPhotoRoutes(app: any, deps: RouteDeps): void {
       h.failStore = req.body?.failStore === true;
       h.staleCheckInIds = Array.isArray(req.body?.staleCheckInIds) ? req.body.staleCheckInIds.filter((x: any) => typeof x === 'string') : [];
       h.failStoredRead = req.body?.failStoredRead === true;
+      const tp = req.body?.storedTaskPatch;
+      h.storedTaskPatch = tp && typeof tp.taskId === 'string' && tp.patch && typeof tp.patch === 'object' ? { taskId: tp.taskId, patch: tp.patch } : null;
       res.json({ ...h });
     });
   }

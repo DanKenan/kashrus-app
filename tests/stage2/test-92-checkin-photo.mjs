@@ -33,6 +33,8 @@
  *  V  (RV3) a photo read on an instance whose cache has not seen the check-in
  *     yet is answered from the STORED document (gate still applies); a failed
  *     stored read is 503 (the viewer retries), never a terminal "no photo"
+ *  W  (RV4) on that path the STORED task's gate decides: moved to another venue
+ *     or made private for someone else → V1 phone and tablet refused
  *  S  (RV1) a failing or stuck photo store never holds or loses the check-in:
  *     logged without the photo (bounded wait); late bytes swept after the grace
  */
@@ -372,6 +374,31 @@ export default {
       assert(v6.status === 200 && v6.json?.photoData === pv.data, 'V: cache caught up → served as before');
     } finally { await hooks({}); }
     out.push('V stale cache → stored doc / 503');
+
+    // ---- W (RV4): on that path the STORED task's gate decides (moved venue / made private elsewhere) ----
+    const wCases = [
+      ['moved to another venue', { venueId: v2 }, [['phone V1', tok.mash], ['tablet V1', K]], [['admin', tok.admin]]],
+      ['made private for someone else', { isPrivate: true, assignedTo: ['someone.else@t92.test'] }, [['phone V1', tok.mash], ['tablet V1', K]], [['coordinator', tok.coord], ['admin', tok.admin]]],
+    ];
+    const wOut = [];
+    try {
+      for (const [why, patch, refused, allowed] of wCases) {
+        await hooks({ staleCheckInIds: [pv.checkInId], storedTaskPatch: { taskId: T.ci.id, patch } });
+        for (const [who, h] of refused) {
+          const r = await getPhoto(T.ci.id, pv.checkInId, h);
+          wOut.push(r.status);
+          assert((r.status === 403 || r.status === 404) && r.json?.photoData === undefined, `W ${why}: ${who} refused by the stored task's gate (${r.status})`);
+        }
+        for (const [who, h] of allowed) {
+          const r = await getPhoto(T.ci.id, pv.checkInId, h);
+          assert(r.status === 200 && r.json?.photoData === pv.data, `W ${why}: ${who} still served (${r.status})`);
+        }
+      }
+      // Twin: the same stale path with an unchanged stored task serves the V1 phone and tablet.
+      await hooks({ staleCheckInIds: [pv.checkInId] });
+      for (const h of [tok.mash, K]) assert((await getPhoto(T.ci.id, pv.checkInId, h)).status === 200, 'W twin: unchanged stored task → served');
+    } finally { await hooks({}); }
+    out.push(`W stored gate ${wOut.join(',')}`);
 
     return out.join('; ');
   },
