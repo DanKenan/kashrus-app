@@ -4598,7 +4598,7 @@ function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
 import { dualWriteChangedEntities } from './src/server/dualwrite.js';
 import { pruneHistory, shouldSweep, HISTORY_RETENTION_DAYS } from './src/server/history-retention.js';
 import { enforceIdentityFields, identityGroups, groupIssues, stripServerOnlyUserFields, emailKey as identityEmailKey, identityOptionsFromOutcome, checkMembershipInvariants, legacyPushSubIsUnambiguous, isLegacyPushSub, applyOwnerTransfer, m4Successor, identityProjection, type IdentityOutcomeFields } from './src/server/identity.js';
-import { venueScope as venueScopeRaw, resolveTargetVenue, sharedVenues, mayManageEventAt, configureVenueScope } from './src/server/venue-scope.js';
+import { venueScope as venueScopeRaw, resolveTargetVenue, sharedVenues, mayManageEventAt, staffMayAddMemberAt, configureVenueScope } from './src/server/venue-scope.js';
 import { parsePoolContact, poolContactView, agencyContacts, isPoolContact, isPoolInvite, findPoolDuplicates, revokeLinkedInvite, dropContactsForAcceptedInvites, POOL_CONTACT_CAP } from './src/server/pool.js';
 import { applyGrantOps, endDatedGrants, historyNeedsPrune, retainedHistory, shedOldestHistory, moveToPoolFields, makeMainFields, lastVenueOf, historyEntry as grantHistoryEntry, withGrantFields, trimHistory, activeUntilMap, venueRevOf, isHomeless, validTimeZone as grantZoneValid, DEFAULT_TIME_ZONE as GRANT_DEFAULT_TZ, grantContainer, grantStateFor, type GrantOp, type GrantFields, type GrantFailure } from './src/server/venue-grants.js';
 /** QA2S2 #9: the one refusal of an event write by someone who may not manage events there. */
@@ -5401,7 +5401,7 @@ function ensureVapidKeys() {
 
 /** TEST ONLY (item 8t): every push target attempted, recorded BEFORE any
  * network send. Only written when isTestMode() (never on Cloud Run). */
-const testPushLog: Array<{ path: string; recipientUserId: string | null; email: string; endpoint: string; title: string }> = [];
+const testPushLog: Array<{ path: string; recipientUserId: string | null; email: string; endpoint: string; title: string; body?: string }> = [];
 
 /**
  * Item 10c (A1): push to ONE membership row (replaces the email-keyed
@@ -5452,7 +5452,7 @@ function deliverPush(
 ) {
   if (isTestMode()) {
     for (const sub of subs) {
-      testPushLog.push({ path, recipientUserId, email: sub.userEmail, endpoint: sub.endpoint, title });
+      testPushLog.push({ path, recipientUserId, email: sub.userEmail, endpoint: sub.endpoint, title, body });
     }
     if (testPushLog.length > 5000) testPushLog.splice(0, testPushLog.length - 5000);
   }
@@ -9608,22 +9608,32 @@ function inviteFreshGate(freshDoc: any, userId: string, agencyId: string): { con
 }
 
 /**
- * Manager role (Don 2026-10-27): the fresh gate for an OWNER adding a manager.
- * The caller row still exists, is still an OWNER of this agency, can still
- * sign in, has a home venue (not a Pool row) equal to `venueId`, and that
- * venue is an existing venue of the agency. Otherwise 403 (fail closed).
+ * Team adds (Don 2026-10-27; widened 11:30 PM to owners AND coordinators):
+ * the fresh gate for an OWNER or COORDINATOR adding a mashgiach or manager.
+ * The caller row still exists, still has the SAME role it had at the request
+ * (owner / coordinator), same agency, can still sign in, and may still add at
+ * `venueId` on the fresh venues (staffMayAddMemberAt: owner = own home venue,
+ * coordinator = a venue in their scope). Otherwise 403 (fail closed).
  */
-function ownerManagerFreshGate(freshDoc: any, userId: string, agencyId: string, venueId: string): { conflict: string; conflictStatus: number; conflictCode: string } | null {
+function staffAddFreshGate(freshDoc: any, userId: string, agencyId: string, venueId: string, callerRole: string): { conflict: string; conflictStatus: number; conflictCode: string } | null {
   const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
   const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
   const fc = freshUsers.find((u: any) => u && u.id === userId);
-  const ok = !!fc && fc.role === 'owner' && (fc.agencyId || 'agency-hkc') === agencyId && !sessionIneligibleCode(fc) &&
-    !isHomeless(fc) && typeof fc.venueId === 'string' && !!fc.venueId && fc.venueId === venueId &&
-    freshVenues.some((v: any) => v && v.id === venueId && (v.agencyId || 'agency-hkc') === agencyId);
-  if (!ok) return { conflict: 'Owners can only add a manager for their own venue.', conflictStatus: 403, conflictCode: 'NOT_ALLOWED' };
+  const ok = !!fc && (callerRole === 'owner' || callerRole === 'coordinator') && fc.role === callerRole &&
+    (fc.agencyId || 'agency-hkc') === agencyId && !sessionIneligibleCode(fc) &&
+    staffMayAddMemberAt(fc, venueId, freshVenues);
+  if (!ok) return { conflict: staffAddDeniedText(callerRole), conflictStatus: 403, conflictCode: 'NOT_ALLOWED' };
   const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
   if (!phaseCEnabled(freshAgencies.find((a: any) => a && a.id === agencyId))) return { conflict: 'Not found.', conflictStatus: 404, conflictCode: 'NOT_FOUND' };
   return null;
+}
+
+/** The roles an owner or coordinator may add (never owner, admin, coordinator or worker). */
+const STAFF_ADD_ROLES: readonly string[] = ['mashgiach', 'manager'];
+function staffAddDeniedText(callerRole: string): string {
+  return callerRole === 'coordinator'
+    ? 'Coordinators can only add a mashgiach or a manager at their own venues.'
+    : 'Owners can only add a mashgiach or a manager for their own venue.';
 }
 
 type InvitePre = { inviteId: string; token: { raw: string; hash: string }; createdAt: string; expiresAt: string };
@@ -9643,13 +9653,14 @@ function newInvitePre(): InvitePre {
  */
 function createMemberInviteInTx(
   docAfter: any, callerId: string, agencyId: string, body: any, pre: InvitePre,
-  opts: { allowOwner?: boolean; ownTeamText?: string; contactId?: string; ownerManagerVenueId?: string } = {}
+  opts: { allowOwner?: boolean; ownTeamText?: string; contactId?: string; staffAdd?: { venueId: string; callerRole: string } } = {}
 ): { conflict: string; conflictStatus: number; conflictCode: string; conflictExtra?: Record<string, unknown> } | { doc: any; invite: any; replaced: string[] } {
-  // Manager role (Don 2026-10-27): a venue OWNER may invite a MANAGER for
-  // their own home venue only; every other caller needs the admin gate.
-  const ownerManager = typeof opts.ownerManagerVenueId === 'string';
-  const denied = ownerManager
-    ? ownerManagerFreshGate(docAfter, callerId, agencyId, opts.ownerManagerVenueId as string)
+  // Team adds (Don 2026-10-27 11:30 PM): a venue OWNER (own home venue) or a
+  // COORDINATOR (a venue in their scope) may invite a MASHGIACH or MANAGER;
+  // every other caller needs the admin gate.
+  const staffAdd = opts.staffAdd && typeof opts.staffAdd.venueId === 'string' ? opts.staffAdd : null;
+  const denied = staffAdd
+    ? staffAddFreshGate(docAfter, callerId, agencyId, staffAdd.venueId, staffAdd.callerRole)
     : inviteFreshGate(docAfter, callerId, agencyId);
   if (denied) return denied;
   // 12b-s: a Pool invite (no main venue) is refused while the 5.9 freeze is set.
@@ -9661,13 +9672,13 @@ function createMemberInviteInTx(
   const parsed = parseMemberInvite(body, agencyVenueIds, { allowOwner: opts.allowOwner === true, normalizePhone: normalizePhoneNumber, phoneError: PHONE_NUMBER_ERROR });
   if (parsed.ok === false) return { conflict: parsed.error, conflictStatus: 400, conflictCode: parsed.code };
   const input = parsed.value;
-  if (ownerManager) {
-    // Owner path: role manager, exactly the owner's home venue, role-default
-    // permissions (an owner cannot grant more through the body).
-    if (input.role !== 'manager' || input.venueIds.length !== 1 || input.venueIds[0] !== opts.ownerManagerVenueId) {
-      return { conflict: 'Owners can only add a manager for their own venue.', conflictStatus: 403, conflictCode: 'NOT_ALLOWED' };
+  if (staffAdd) {
+    // Owner / coordinator path: role mashgiach or manager, exactly the one
+    // checked venue, role-default permissions (no rights through the body).
+    if (!STAFF_ADD_ROLES.includes(input.role) || input.venueIds.length !== 1 || input.venueIds[0] !== staffAdd.venueId) {
+      return { conflict: staffAddDeniedText(staffAdd.callerRole), conflictStatus: 403, conflictCode: 'NOT_ALLOWED' };
     }
-    input.permissions = defaultPermissionsFor('manager');
+    input.permissions = defaultPermissionsFor(input.role as any);
   }
   const users: any[] = Array.isArray(docAfter.users) ? docAfter.users : [];
   if (users.some((u: any) => u && normalizeInviteEmail(u.email) === input.email && (u.agencyId || 'agency-hkc') === agencyId)) {
@@ -9691,9 +9702,9 @@ function createMemberInviteInTx(
   }
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
-  // Owner path: never replaces (revokes) a pending invite someone else made
-  // for this email (it could be an admin's invite for another role).
-  if (ownerManager && existing.some((i: any) => i && i.kind !== 'setup' && i.agencyId === agencyId && i.email === input.email && isLiveInvite(i, nowMs))) {
+  // Owner / coordinator path: never replaces (revokes) a pending invite
+  // someone else made for this email (it could be an admin's invite for another role).
+  if (staffAdd && existing.some((i: any) => i && i.kind !== 'setup' && i.agencyId === agencyId && i.email === input.email && isLiveInvite(i, nowMs))) {
     return { conflict: 'This person already has a pending invite. Ask your agency admin.', conflictStatus: 409, conflictCode: 'INVITE_PENDING' };
   }
   const replaced: string[] = [];
@@ -14779,48 +14790,124 @@ app.get('/api/users', (req, res) => {
 });
 
 /**
- * Manager role (Don 2026-10-27): a venue OWNER adds a MANAGER for their own
- * home venue — a pending invite exactly like an admin's "Add team member",
- * with role 'manager', venueIds [home], role-default permissions. The body
- * cannot widen it (other venues, Pool, other roles: 403). Re-checked on fresh
- * data in the transaction (ownerManagerFreshGate). Never replaces another
- * pending invite for the same email.
+ * Team change notice (Don 2026-10-27 11:30 PM: "make the owner and
+ * coordinators able to add [a role], but that it will send a notification to
+ * the administrator and an announcement in the announcement box"). When an
+ * OWNER or COORDINATOR adds a team member, or an OWNER changes someone's role,
+ * the server (in the SAME transaction) posts ONE announcement for that venue
+ * ("Team change", the plain sentence below, every role at the venue and the
+ * agency's admins can read it) and, after the commit, pushes the same
+ * sentence to each admin of the agency. Admin-made changes post nothing.
  */
-async function ownerAddsManager(req: any, res: any, caller: UserProfile): Promise<any> {
+const TEAM_NOTICE_TITLE = 'Team change';
+function teamRoleWord(role: string): string {
+  return role === 'manager' ? 'Manager' : 'Mashgiach';
+}
+function teamNoticeName(x: unknown, fallback: string): string {
+  const t = typeof x === 'string' ? x.replace(/\s+/g, ' ').trim().slice(0, 80) : '';
+  return t || fallback;
+}
+function staffTeamNoticeText(kind: 'added' | 'changed', actor: unknown, person: unknown, role: string, venue: unknown): string {
+  const a = teamNoticeName(actor, 'Someone');
+  const p = teamNoticeName(person, 'someone');
+  const v = teamNoticeName(venue, 'their venue');
+  return kind === 'added'
+    ? `${a} added ${p} as ${teamRoleWord(role)} at ${v}`
+    : `${a} changed ${p} to ${teamRoleWord(role)} at ${v}`;
+}
+/** Build the announcement inside a mutator (id and time made BEFORE the transaction, so a retry stores one). */
+function teamNoticeAnnouncement(id: string, createdAt: string, agencyId: string, actor: { email?: string; name?: string }, text: string, venueId: string): Announcement {
+  return {
+    id, agencyId,
+    authorEmail: String(actor.email || ''),
+    authorName: teamNoticeName(actor.name, 'Someone'),
+    title: TEAM_NOTICE_TITLE,
+    body: text,
+    category: 'notice',
+    targetRoles: ['all'],
+    venueId,
+    createdAt,
+  };
+}
+/** Add the notice to a doc being committed (idempotent by id; keeps the last 100 like a posted one). */
+function withTeamNotice(doc: any, ann: Announcement): any {
+  const arr: any[] = Array.isArray(doc.announcements) ? doc.announcements : [];
+  if (arr.some((a: any) => a && a.id === ann.id)) return doc;
+  return { ...doc, announcements: [ann, ...arr].slice(0, 100) };
+}
+/** After the commit: one push per admin of the agency (never the actor), then the live announcement. */
+function sendTeamNotice(agencyId: string, ann: Announcement, actorId: string): void {
+  for (const u of users) {
+    if (!u || u.role !== 'admin' || (u.agencyId || 'agency-hkc') !== agencyId || u.id === actorId) continue;
+    sendPushToMember(u, `👥 ${TEAM_NOTICE_TITLE}`, ann.body, { announcementId: ann.id, type: 'announcement' });
+  }
+  broadcast('ANNOUNCEMENT', { announcement: publicUpdate(ann) }, undefined, agencyId);
+}
+
+/**
+ * Team adds (Don 2026-10-27; owners and coordinators, 11:30 PM): an OWNER
+ * (own home venue) or a COORDINATOR (a venue in their scope) adds a
+ * MASHGIACH or MANAGER — a pending invite exactly like an admin's "Add team
+ * member", one venue, role-default permissions. The body cannot widen it
+ * (other venues, the Pool, any other role: 403). Re-checked on fresh data in
+ * the transaction (staffAddFreshGate). Never replaces another pending invite
+ * for the same email. Posts the team-change notice (admins notified).
+ */
+async function staffAddsMember(req: any, res: any, caller: UserProfile): Promise<any> {
   const callerAgencyId = caller.agencyId || 'agency-hkc';
-  const deny = () => res.status(403).json({ error: 'Owners can only add a manager for their own venue.', code: 'NOT_ALLOWED' });
+  const callerRole = String((caller as any).role);
+  const deny = () => res.status(403).json({ error: staffAddDeniedText(callerRole), code: 'NOT_ALLOWED' });
   const raw = req.body || {};
-  const home = typeof (caller as any).venueId === 'string' ? (caller as any).venueId : '';
-  if (!home || isHomeless(caller as any) || raw.pool === true) return deny();
-  if (raw.venueId !== undefined && raw.venueId !== home) return deny();
-  if (raw.venueIds !== undefined && !(Array.isArray(raw.venueIds) && raw.venueIds.length === 1 && raw.venueIds[0] === home)) return deny();
+  if (callerRole !== 'owner' && callerRole !== 'coordinator') return deny();
+  if (!STAFF_ADD_ROLES.includes(raw.role) || raw.pool === true) return deny();
+  // The one venue: the owner's home (a different one asked for: 403); for a
+  // coordinator the venue asked for, else their home, and it must be in scope.
+  if (raw.venueId !== undefined && (typeof raw.venueId !== 'string' || !raw.venueId)) return deny();
+  if (raw.venueIds !== undefined && !(Array.isArray(raw.venueIds) && raw.venueIds.length === 1 && typeof raw.venueIds[0] === 'string' &&
+      (raw.venueId === undefined || raw.venueIds[0] === raw.venueId))) return deny();
+  const asked: string | undefined = raw.venueId !== undefined ? raw.venueId : (raw.venueIds !== undefined ? raw.venueIds[0] : undefined);
+  const home = typeof (caller as any).venueId === 'string' && !isHomeless(caller as any) ? (caller as any).venueId : '';
+  const venueId = asked !== undefined ? asked : home;
+  if (!venueId || !staffMayAddMemberAt(caller as any, venueId, venues as any)) return deny();
   if (!phaseCEnabled(agencies.find((a) => a && a.id === callerAgencyId))) return res.status(404).json({ error: 'Agency record not found.' });
   const body = stripServerOnlyUserFields(raw);
+  const role = String(raw.role);
   const pre = newInvitePre();
+  const noticeId = `announce-${crypto.randomUUID()}`;
+  const noticeAt = new Date().toISOString();
   const committed = await commitOrRespond(
     req, res,
     (freshDoc) => {
       const built = createMemberInviteInTx(freshDoc, caller.id, callerAgencyId,
-        { email: body.email, name: body.name, phoneNumber: body.phoneNumber, role: 'manager', venueIds: [home] },
-        pre, { ownTeamText: 'A team member with this email already exists', ownerManagerVenueId: home });
+        { email: body.email, name: body.name, phoneNumber: body.phoneNumber, role, venueIds: [venueId] },
+        pre, { ownTeamText: 'A team member with this email already exists', staffAdd: { venueId, callerRole } });
       if ('conflict' in built) return built;
-      return { doc: built.doc, result: { invite: built.invite, replaced: built.replaced } };
+      const freshUsers: any[] = Array.isArray(built.doc.users) ? built.doc.users : [];
+      const freshVenues: any[] = Array.isArray(built.doc.venues) ? built.doc.venues : [];
+      const fc = freshUsers.find((u: any) => u && u.id === caller.id) || caller;
+      const venueName = freshVenues.find((v: any) => v && v.id === venueId)?.name;
+      const text = staffTeamNoticeText('added', fc.name, built.invite.name || built.invite.email, built.invite.role, venueName);
+      const notice = teamNoticeAnnouncement(noticeId, noticeAt, callerAgencyId, { email: fc.email, name: fc.name }, text, venueId);
+      return { doc: withTeamNotice(built.doc, notice), result: { invite: built.invite, replaced: built.replaced, notice } };
     },
-    { label: 'owner-add-manager' }
+    { label: 'staff-add-member' }
   );
   if (!committed) return;
-  const { invite: rec } = committed.result as any;
-  console.log(`[audit] invite created: owner ${caller.id} agency ${callerAgencyId} invite ${rec.id} role manager`);
+  const { invite: rec, notice } = committed.result as any;
+  console.log(`[audit] invite created: ${callerRole} ${caller.id} agency ${callerAgencyId} invite ${rec.id} role ${rec.role}`);
+  sendTeamNotice(callerAgencyId, notice, caller.id);
   res.setHeader('Cache-Control', 'no-store');
   return res.status(201).json({ pending: true, invite: inviteCreatedView(rec), link: `/invite#t=${pre.token.raw}`, linkOrigin: inviteLinkOrigin(callerAgencyId) });
 }
 
 app.post('/api/users', async (req, res) => {
-  // Manager role (Don 2026-10-27): an OWNER may add a MANAGER (own venue only).
+  // Team adds (Don 2026-10-27, 11:30 PM): an OWNER or a COORDINATOR may add
+  // a MASHGIACH or MANAGER (owner: own venue; coordinator: own venues); any
+  // other role from them is refused there (fail closed). Admins go below.
   {
     const who = getAuthUser(req);
-    if (who && (req as any).kiosk !== true && (who as any).role === 'owner' && (req.body || {}).role === 'manager') {
-      return ownerAddsManager(req, res, who);
+    if (who && (req as any).kiosk !== true && ((who as any).role === 'owner' || (who as any).role === 'coordinator')) {
+      return staffAddsMember(req, res, who);
     }
   }
   // Only admins can create users — verified from the session token, never the body.
@@ -14978,6 +15065,11 @@ app.put('/api/users/:id', async (req, res) => {
   }
 
   const baseline = { name: existingUser.name, role: existingUser.role, venueId: existingUser.venueId };
+  // Team change notice (Don 2026-10-27 11:30 PM): an OWNER's role change posts
+  // one announcement in the same commit and pushes it to the agency's admins.
+  const ownerNoticeId = `announce-${crypto.randomUUID()}`;
+  const ownerNoticeAt = new Date().toISOString();
+  let ownerNotice: Announcement | null = null;
 
   const committed = await commitOrRespond(
     req, res,
@@ -15095,8 +15187,17 @@ app.put('/api/users/:id', async (req, res) => {
         delete users2[id];
         lockouts = { ...(lockouts as any), users: users2 };
       }
-      const doc: any = { ...freshDoc, users: newUsers };
+      let doc: any = { ...freshDoc, users: newUsers };
       if (lockouts !== freshDoc.kioskPinLockouts) doc.kioskPinLockouts = lockouts;
+      ownerNotice = null; // a retried mutator decides again on its own fresh data
+      if (callerIsOwner && updated.role !== freshUser.role) {
+        const freshCaller = freshUsers.find((u) => u.id === caller.id) || caller;
+        const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+        const venueName = freshVenues.find((v: any) => v && v.id === (freshUser as any).venueId)?.name;
+        const text = staffTeamNoticeText('changed', freshCaller.name, freshUser.name || freshUser.email, updated.role, venueName);
+        ownerNotice = teamNoticeAnnouncement(ownerNoticeId, ownerNoticeAt, callerAgencyId, { email: freshCaller.email, name: freshCaller.name }, text, String((freshUser as any).venueId));
+        doc = withTeamNotice(doc, ownerNotice);
+      }
       return { doc, result: updated };
     },
     { label: 'update-user', requireVersion: true }
@@ -15155,6 +15256,7 @@ app.put('/api/users/:id', async (req, res) => {
       }
     }
   }
+  if (ownerNotice) sendTeamNotice(callerAgencyId, ownerNotice, caller.id);
   res.json({ user: managerViewOf(updated, caller) });
 });
 

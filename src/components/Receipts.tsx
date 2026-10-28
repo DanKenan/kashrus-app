@@ -29,6 +29,7 @@ const ROLE_WORD: Record<string, string> = {
   mashgiach: 'Mashgiach',
   worker: 'Worker',
   owner: 'Owner',
+  manager: 'Manager',
 };
 
 /** The reader list, drawn over the sheet's body. Names and roles only. */

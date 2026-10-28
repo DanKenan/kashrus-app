@@ -117,6 +117,30 @@ export function mayManageEventAt(user: ScopeUser | null | undefined, venueId: un
 }
 
 /**
+ * Team adds (Don 2026-10-27 11:30 PM: "make the owner and coordinators able to
+ * add"): may this OWNER or COORDINATOR add a new team member (a mashgiach or a
+ * manager; the role rule lives in server.ts) at `venueId`? Fail closed. The
+ * venue must be an EXISTING venue of the person's own agency; then
+ *   owner       -> their own home venue only (never a Pool/homeless row;
+ *                  venueAccess never widens it);
+ *   coordinator -> a venue in their scope (home + active server-granted
+ *                  venueAccess, venueScope);
+ *   anyone else (admin included: admins use their own path; manager,
+ *   mashgiach, worker, unknown or missing role) -> false.
+ * Callers pass the CURRENT venues (fresh venues inside a commit).
+ */
+export function staffMayAddMemberAt(user: ScopeUser | null | undefined, venueId: unknown, venues: readonly VenueLite[], opts?: ScopeOpts): boolean {
+  if (!user || typeof user.role !== 'string' || typeof venueId !== 'string' || !venueId) return false;
+  if (!agencyVenueIds(venues, agencyOf(user)).has(venueId)) return false;
+  if (user.role === 'owner') return !isHomeless(user) && typeof user.venueId === 'string' && user.venueId === venueId;
+  if (user.role === 'coordinator') {
+    const scope = venueScope(user, venues, opts);
+    return scope !== 'agency' && scope.includes(venueId);
+  }
+  return false;
+}
+
+/**
  * Which venue a venue-taking request targets.
  * requested in scope -> it; requested outside -> forbidden; none -> home (if valid) else null.
  */

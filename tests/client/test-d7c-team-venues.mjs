@@ -19,6 +19,7 @@ import React from 'react';
 import fs from 'node:fs';
 import { mount, recordFetch } from './lib/mini-render.mjs';
 import { TeamModal } from '../../src/components/TeamModal.tsx';
+import { AddMemberForm } from '../../src/components/AddMemberForm.tsx';
 import { VenuesDirectoryModal } from '../../src/components/VenuesDirectoryModal.tsx';
 import { CreateVenueModal } from '../../src/components/CreateVenueModal.tsx';
 import { CreateEventModal } from '../../src/components/CreateEventModal.tsx';
@@ -59,10 +60,16 @@ async function scenario() {
   const tm = mount(TeamModal, { isOpen: true, onClose: () => cb.push('close'), users, tasks, currentUser: admin, currentVenue: venue,
     onAddUser: async (u) => { cb.push(['add', u]); }, onUpdateUser: async (id, up) => { cb.push(['update', id, up]); }, onDeleteUser: async (id) => { cb.push(['delete', id]); } });
   await tm.render(); out.team = { inv: inventory(tm.html()), html: tm.html() };
-  await tm.type(/Rabbi David Cohen|Full name/, 'Chaya Mushka Weiss');
-  await tm.type(/dcohen@/, 'Chaya@Test.Local ');
+  // MANAGERC4: the add form is its own component (AddMemberForm, shared with the owner and
+  // coordinator); drive it with exactly the props TeamModal gives it (same callback, same body).
+  const walkEls = function* (n) { if (!n || typeof n !== 'object') return; if (Array.isArray(n)) { for (const c of n) yield* walkEls(c); return; } if (!React.isValidElement(n)) return; yield n; yield* walkEls(n.props?.children); };
+  const addEl = [...walkEls(tm.tree())].find((e) => e.type === AddMemberForm);
+  if (!addEl) throw new Error('no add form in the admin Team view');
+  const af = mount(AddMemberForm, addEl.props); await af.render();
+  await af.type(/Rabbi David Cohen|Full name/, 'Chaya Mushka Weiss');
+  await af.type(/dcohen@/, 'Chaya@Test.Local ');
   // Invites always on: no password field.
-  await tm.submit().catch(() => {});
+  await af.submit().catch(() => {});
   const roleSel = tm.find((e) => e.type === 'select' && e.props.value === 'mashgiach' && typeof e.props.onChange === 'function');
   if (roleSel.length) {
     await roleSel[roleSel.length - 1].props.onChange({ target: { value: 'coordinator' } }); await tm.render();

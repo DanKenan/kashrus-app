@@ -18,11 +18,11 @@ const press = 'cursor-pointer focus-visible:outline-none focus-visible:ring-2 fo
 const menuHidden = '[[data-phone-layout]:has(header>div.border-t)_&]:invisible';
 
 export function getPhoneNavState(user: User | null | undefined, hasVenues: boolean): { showBar: boolean; showGold: boolean } {
-  if (!user || !['admin', 'coordinator', 'mashgiach', 'worker', 'owner'].includes(user.role)) {
+  if (!user || !['admin', 'coordinator', 'mashgiach', 'worker', 'owner', 'manager'].includes(user.role)) {
     return { showBar: false, showGold: false };
   }
   return {
-    showBar: user.role !== 'owner',
+    showBar: user.role !== 'owner' && user.role !== 'manager',
     showGold: hasVenues && (canUserAssignTasks(user) || ['coordinator', 'mashgiach', 'worker'].includes(user.role)),
   };
 }
