@@ -30,6 +30,8 @@ export const CHECKIN_PHOTO_ID_PREFIX = 'cph-';
 const CHECKIN_PHOTO_ID_RE = /^cph-[A-Za-z0-9-]{8,64}$/;
 export const CHECKIN_PHOTO_COLLECTION = 'checkInPhotos';
 /** How long a check-in waits for the photo store before it is logged without the photo. */
+/** RV5: one stored-document read is shared by the photo reads of this window. */
+export const CHECKIN_PHOTO_STORED_READ_TTL_MS = 1000;
 export const CHECKIN_PHOTO_STORE_TIMEOUT_MS = 15_000;
 
 export const checkInPhotoKey = (taskId: string, photoId: string): string => `${taskId}__${photoId}`;
@@ -103,11 +105,10 @@ interface StoreDeps {
 export function createCheckInPhotoStore(deps: StoreDeps) {
   const localDir = path.join(deps.dataDir, 'checkin-photos');
   const localFile = (key: string) => path.join(localDir, `${encodeURIComponent(key)}.json`);
-  // TEST ONLY (set through the test route). staleCheckInIds: the GET route acts as an
-  // instance whose cache has not seen these check-ins yet; failStoredRead: the
-  // authoritative read fails.
+  // TEST ONLY (set through the test route). failStoredRead: the authoritative
+  // read of the stored document fails.
   // storedTaskPatch: the stored document has this task changed (moved, made private) by another instance.
-  const testHooks = { storeDelayMs: 0, storeTimeoutMs: 0, failStore: false, staleCheckInIds: [] as string[], failStoredRead: false, storedTaskPatch: null as null | { taskId: string; patch: Record<string, any> } };
+  const testHooks = { storeDelayMs: 0, storeTimeoutMs: 0, failStore: false, failStoredRead: false, storedTaskPatch: null as null | { taskId: string; patch: Record<string, any> } };
 
   async function put(key: string, doc: any): Promise<void> {
     if (testHooks.storeDelayMs > 0) await new Promise((r) => setTimeout(r, testHooks.storeDelayMs));
@@ -211,17 +212,35 @@ export function createCheckInPhotoStore(deps: StoreDeps) {
    * have committed a check-in this instance's cache has not seen yet). ok:false
    * = the read failed (the caller answers "try again", never "no photo").
    */
-  async function readStoredTask(taskId: string): Promise<{ ok: true; task: any | null } | { ok: false }> {
+  // RV5: every photo read resolves the task from the stored document. One
+  // shared read serves the reads of the next CHECKIN_PHOTO_STORED_READ_TTL_MS
+  // (a board opening with many photos costs one document read, not one each).
+  let storedMemo: { at: number; tasks: Promise<any[] | null> } | null = null;
+  function storedTasks(fresh: boolean): Promise<any[] | null> {
+    const now = Date.now();
+    if (!fresh && storedMemo && now - storedMemo.at < CHECKIN_PHOTO_STORED_READ_TTL_MS) return storedMemo.tasks;
+    const db = deps.db();
+    const p: Promise<any[] | null> = (async () => {
+      const snap = await db.doc(deps.stateDocPath).get();
+      const stored = snap && snap.exists ? snap.data() : null;
+      return stored && Array.isArray(stored.tasks) ? stored.tasks : null;
+    })();
+    storedMemo = { at: now, tasks: p };
+    p.then((t) => { if (!t && storedMemo?.tasks === p) storedMemo = null; }, () => { if (storedMemo?.tasks === p) storedMemo = null; });
+    return p;
+  }
+  function forgetStoredRead(): void { storedMemo = null; }
+  /** fresh: skip the shared read (a check-in just committed may be newer than it). */
+  async function readStoredTask(taskId: string, fresh = false): Promise<{ ok: true; task: any | null } | { ok: false }> {
     try {
       if (testHooks.failStoredRead) throw new Error('test: stored read unavailable');
       const db = deps.db();
       let task: any = null;
       if (!db) task = deps.memoryTasks().find((t: any) => t && t.id === taskId) || null;
       else {
-        const snap = await db.doc(deps.stateDocPath).get();
-        const stored = snap && snap.exists ? snap.data() : null;
-        if (!stored || !Array.isArray(stored.tasks)) return { ok: false };
-        task = stored.tasks.find((t: any) => t && t.id === taskId) || null;
+        const list = await storedTasks(fresh);
+        if (!list) return { ok: false };
+        task = list.find((t: any) => t && t.id === taskId) || null;
       }
       const tp = testHooks.storedTaskPatch;
       if (task && tp && tp.taskId === taskId) task = { ...task, ...tp.patch };
@@ -231,7 +250,7 @@ export function createCheckInPhotoStore(deps: StoreDeps) {
       return { ok: false };
     }
   }
-  return { put, putBounded, get, remove, sweep, readStoredTask, testHooks };
+  return { put, putBounded, get, remove, sweep, readStoredTask, forgetStoredRead, testHooks };
 }
 
 export type CheckInPhotoStore = ReturnType<typeof createCheckInPhotoStore>;
@@ -258,25 +277,21 @@ export function registerCheckInPhotoRoutes(app: any, deps: RouteDeps): void {
     if (!caller) return;
     const { id, checkInId } = req.params;
     const entryOf = (t: any) => (t && Array.isArray(t.checkIns) ? t.checkIns : []).find((c: any) => c && c.id === checkInId);
-    const stale = deps.testMode && deps.store.testHooks.staleCheckInIds.includes(checkInId);
-    let task = deps.findTask(id);
-    if (task && !deps.gate(req, res, task, caller)) return;
-    let entry = task && !stale ? entryOf(task) : undefined;
-    if (!task || !entry) {
-      // RV3: this instance's cache may be behind another instance's commit
-      // (the task answer came from there). Confirm against the STORED document
-      // before a terminal "no photo"; a failed read is "try again" (503).
-      const stored = await deps.store.readStoredTask(id);
-      if (!stored.ok) return res.status(503).json({ error: 'Could not load the photo. Please try again.' });
-      if (!stored.task) return res.status(404).json({ error: task ? 'No photo' : 'Task not found' });
-      // RV4: the STORED task decides from here on (it may have moved venue or
-      // turned private since this cache saw it): its gate too, fail closed.
-      if (task && (stored.task.agencyId || 'agency-hkc') !== (task.agencyId || 'agency-hkc')) return res.status(404).json({ error: 'No photo' });
-      task = stored.task;
-      if (!deps.gate(req, res, task, caller)) return;
-      entry = entryOf(task);
-      if (!entry) return res.status(404).json({ error: 'No photo' });
-    }
+    // RV3-RV5: the STORED document decides every photo read (another instance
+    // may have committed the check-in, moved the task to another venue or made
+    // it private since this cache saw it). A failed read is "try again" (503),
+    // never "no photo"; this cache only cross-checks the agency.
+    const cached = deps.findTask(id);
+    let stored = await deps.store.readStoredTask(id);
+    // Not there in the shared read (up to a second old): read once more, fresh, before "no photo".
+    if (stored.ok && !entryOf(stored.task)) stored = await deps.store.readStoredTask(id, true);
+    if (!stored.ok) return res.status(503).json({ error: 'Could not load the photo. Please try again.' });
+    const task = stored.task;
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (cached && (cached.agencyId || 'agency-hkc') !== (task.agencyId || 'agency-hkc')) return res.status(404).json({ error: 'No photo' });
+    if (!deps.gate(req, res, task, caller)) return;
+    const entry = entryOf(task);
+    if (!entry) return res.status(404).json({ error: 'No photo' });
     res.set('Cache-Control', 'private, no-store');
     const pid = checkInPhotoIdOf(entry);
     if (!pid) {
@@ -312,8 +327,8 @@ export function registerCheckInPhotoRoutes(app: any, deps: RouteDeps): void {
       h.storeDelayMs = num(req.body?.storeDelayMs);
       h.storeTimeoutMs = num(req.body?.storeTimeoutMs);
       h.failStore = req.body?.failStore === true;
-      h.staleCheckInIds = Array.isArray(req.body?.staleCheckInIds) ? req.body.staleCheckInIds.filter((x: any) => typeof x === 'string') : [];
       h.failStoredRead = req.body?.failStoredRead === true;
+      deps.store.forgetStoredRead();
       const tp = req.body?.storedTaskPatch;
       h.storedTaskPatch = tp && typeof tp.taskId === 'string' && tp.patch && typeof tp.patch === 'object' ? { taskId: tp.taskId, patch: tp.patch } : null;
       res.json({ ...h });

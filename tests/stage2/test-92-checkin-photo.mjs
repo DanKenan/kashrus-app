@@ -30,11 +30,13 @@
  *  R  (RV1) the commit re-checks the caller on FRESH data: lost fill permission,
  *     moved to another venue, removed, (RV2) tablet PIN cleared or changed →
  *     refused, nothing logged
- *  V  (RV3) a photo read on an instance whose cache has not seen the check-in
- *     yet is answered from the STORED document (gate still applies); a failed
- *     stored read is 503 (the viewer retries), never a terminal "no photo"
- *  W  (RV4) on that path the STORED task's gate decides: moved to another venue
- *     or made private for someone else → V1 phone and tablet refused
+ *  V  (RV3/RV5) every photo read is answered from the STORED document: a
+ *     check-in only it has is served, one it no longer has is 404 even if this
+ *     cache shows it; a failed stored read is 503 (the viewer retries), never
+ *     a terminal "no photo"
+ *  W  (RV4/RV5) the STORED task's gate decides, with the check-in in this
+ *     cache: moved to another venue or made private for someone else → V1
+ *     phone and tablet refused
  *  S  (RV1) a failing or stuck photo store never holds or loses the check-in:
  *     logged without the photo (bounded wait); late bytes swept after the grace
  */
@@ -352,30 +354,35 @@ export default {
     assert((await sweep(true)) >= 1, 'S: late (unreferenced) bytes swept after the grace');
     out.push(`S store fail/stuck keep the check`);
 
-    // ---- V (RV3): an instance whose cache has not seen the check-in yet answers from the STORED doc ----
+    // ---- V (RV3/RV5): the STORED document decides every photo read; a failed read is 503 ----
     const pv = photos[0];
+    const INL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
     try {
-      await hooks({ staleCheckInIds: [pv.checkInId] });
-      const v1 = await getPhoto(T.ci.id, pv.checkInId, tok.mash);
-      assert(v1.status === 200 && v1.json?.photoData === pv.data, `V: cache behind → served from the stored document (${v1.status})`);
-      const vb = await getPhoto(T.ci.id, pv.checkInId, tok.adminb);
-      assert(vb.status === 403 || vb.status === 404, `V: the task gate still applies on that path (other agency ${vb.status})`);
-      await hooks({ staleCheckInIds: [pv.checkInId], failStoredRead: true });
-      const v2 = await getPhoto(T.ci.id, pv.checkInId, tok.mash);
-      assert(v2.status === 503, `V: cache behind and the stored read fails → 503 (try again), never "no photo" (${v2.status})`);
-      const v3 = await getPhoto(T.ci.id, 'checkin-nope', tok.mash);
-      assert(v3.status === 503, `V: unknown check-in while the stored read fails → 503 (${v3.status})`);
-      const v4 = await getPhoto(T.ci.id, photos[2].checkInId, tok.mash);
-      assert(v4.status === 200, `V: a check-in the cache has needs no stored read (${v4.status})`);
+      const cachedCis = (await taskInDoc(T.ci.id)).checkIns;
+      // Another instance committed a check-in this cache has not seen: still served (from the stored doc).
+      await hooks({ storedTaskPatch: { taskId: T.ci.id, patch: { checkIns: [...cachedCis, { id: 'checkin-t92-stored-only', byName: 'T92 Mash', byEmail: em('mash'), at: new Date().toISOString(), photoData: INL }] } } });
+      const v1 = await getPhoto(T.ci.id, 'checkin-t92-stored-only', tok.mash);
+      assert(v1.status === 200 && v1.json?.photoData === INL, `V: a check-in only the stored document has → served (${v1.status})`);
+      const vb = await getPhoto(T.ci.id, 'checkin-t92-stored-only', tok.adminb);
+      assert(vb.status === 403 || vb.status === 404, `V: the task gate still applies (other agency ${vb.status})`);
+      // The stored document no longer has a check-in this cache still shows: no photo.
+      await hooks({ storedTaskPatch: { taskId: T.ci.id, patch: { checkIns: cachedCis.filter((c) => c.id !== pv.checkInId) } } });
+      const vg = await getPhoto(T.ci.id, pv.checkInId, tok.mash);
+      assert(vg.status === 404 && vg.json?.photoData === undefined, `V: gone in the stored document → 404 even though this cache has it (${vg.status})`);
+      await hooks({ failStoredRead: true });
+      for (const [what, cid] of [['a cached check-in', pv.checkInId], ['another cached one', photos[2].checkInId], ['an unknown one', 'checkin-nope']]) {
+        const r = await getPhoto(T.ci.id, cid, tok.mash);
+        assert(r.status === 503 && r.json?.photoData === undefined, `V: stored read fails → 503 (try again) for ${what}, never "no photo" (${r.status})`);
+      }
       await hooks({});
       const v5 = await getPhoto(T.ci.id, 'checkin-nope', tok.mash);
       assert(v5.status === 404, `V: confirmed absent in the stored document → 404 (${v5.status})`);
       const v6 = await getPhoto(T.ci.id, pv.checkInId, tok.mash);
-      assert(v6.status === 200 && v6.json?.photoData === pv.data, 'V: cache caught up → served as before');
+      assert(v6.status === 200 && v6.json?.photoData === pv.data, 'V: back to normal → served');
     } finally { await hooks({}); }
-    out.push('V stale cache → stored doc / 503');
+    out.push('V stored doc decides / 503');
 
-    // ---- W (RV4): on that path the STORED task's gate decides (moved venue / made private elsewhere) ----
+    // ---- W (RV4/RV5): the STORED task's gate decides, even with the check-in in this cache ----
     const wCases = [
       ['moved to another venue', { venueId: v2 }, [['phone V1', tok.mash], ['tablet V1', K]], [['admin', tok.admin]]],
       ['made private for someone else', { isPrivate: true, assignedTo: ['someone.else@t92.test'] }, [['phone V1', tok.mash], ['tablet V1', K]], [['coordinator', tok.coord], ['admin', tok.admin]]],
@@ -383,7 +390,8 @@ export default {
     const wOut = [];
     try {
       for (const [why, patch, refused, allowed] of wCases) {
-        await hooks({ staleCheckInIds: [pv.checkInId], storedTaskPatch: { taskId: T.ci.id, patch } });
+        await hooks({ storedTaskPatch: { taskId: T.ci.id, patch } });
+        assert((await taskInDoc(T.ci.id)).checkIns.some((c) => c.id === pv.checkInId), `W ${why}: the check-in is in this cache`);
         for (const [who, h] of refused) {
           const r = await getPhoto(T.ci.id, pv.checkInId, h);
           wOut.push(r.status);
@@ -394,8 +402,8 @@ export default {
           assert(r.status === 200 && r.json?.photoData === pv.data, `W ${why}: ${who} still served (${r.status})`);
         }
       }
-      // Twin: the same stale path with an unchanged stored task serves the V1 phone and tablet.
-      await hooks({ staleCheckInIds: [pv.checkInId] });
+      // Twin: stored task unchanged → the V1 phone and tablet are served.
+      await hooks({});
       for (const h of [tok.mash, K]) assert((await getPhoto(T.ci.id, pv.checkInId, h)).status === 200, 'W twin: unchanged stored task → served');
     } finally { await hooks({}); }
     out.push(`W stored gate ${wOut.join(',')}`);
