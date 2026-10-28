@@ -26,6 +26,7 @@ import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 import { TaskInstructions } from './TaskInstructions';
+import { TaskAnswerPhoto } from './TaskAnswerPhoto';
 
 interface TaskCardViewProps {
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
@@ -280,6 +281,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
 
               {/* Completion Control Bar or Read-Only Audit Bar */}
               <div className="mt-3 pt-3 border-t border-line/70">
+                {/* PHOTOALL: optional photo with the answer (toggle / yes-no / status / checkbox); the camera sits beside the answer */}
+                <TaskAnswerPhoto task={task} canAttach={canFill}>
                 {!canFill ? (
                   <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-sunken border border-line tactile-1">
                     <div className="flex items-center gap-2.5">
@@ -531,6 +534,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                     )}
                   </div>
                 )}
+                </TaskAnswerPhoto>
               </div>
 
               {/* Attribution & Signature Banner */}

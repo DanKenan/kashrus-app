@@ -18,6 +18,17 @@ export interface TaskCheckIn {
   photoCaption?: string;
 }
 
+/** PHOTOALL: the optional answer photo on a toggle / yes_no / status_select /
+ * checkbox task. Only the reference rides the task; the bytes come from
+ * GET /api/tasks/:id/answer-photo. */
+export interface TaskAnswerPhoto {
+  id: string;
+  byName: string | null;
+  byEmail: string | null;
+  at: string; // ISO timestamp
+  caption?: string;
+}
+
 export interface KosherAgency {
   logoRev?: string | null;
   id: string;
@@ -118,6 +129,8 @@ export interface Task {
   createdAt: string;
   // Repeatable check-ins (inputType === 'check_in'): one record per tap
   checkIns?: TaskCheckIn[];
+  // Optional answer photo (PHOTOALL); cleared by the daily reset
+  answerPhoto?: TaskAnswerPhoto;
   // Manual board order (up/down arrows); initialized from target time
   sortOrder?: number;
   // When true, only assignees + admins/coordinators can see the task

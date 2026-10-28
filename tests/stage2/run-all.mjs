@@ -202,6 +202,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-87-logout-marker.mjs')).default,
     (await import('./test-88-manager-role.mjs')).default,
     (await import('./test-89-admin-not-in-all.mjs')).default,
+    (await import('./test-90-answer-photo.mjs')).default,
     // MERGE-FIX: merges into the operator row and re-signs the suite's admin session; keep it LAST, after its own fresh state.
     FRESH_STATE,
     (await import('./test-85-merge-operator.mjs')).default,
