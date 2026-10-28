@@ -12958,22 +12958,44 @@ const ANSWER_PHOTO_CAPTION_MAX = 200;
 const ANSWER_PHOTO_DATA_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
 /** An unreferenced photo doc younger than this is a save still in flight. */
 const ANSWER_PHOTO_SWEEP_GRACE_MS = 10 * 60 * 1000;
-const localAnswerPhotos = new Map<string, any>(); // no-Firestore (local file) mode
+// No-Firestore (local file) mode: one JSON file per photo under DATA_DIR, so
+// saved photos survive a restart like the task references do.
+const ANSWER_PHOTO_LOCAL_DIR = path.join(DATA_DIR, 'task-photos');
 const answerPhotoKey = (taskId: string, photoId: string) => `${taskId}__${photoId}`;
+const answerPhotoLocalFile = (key: string) => path.join(ANSWER_PHOTO_LOCAL_DIR, `${encodeURIComponent(key)}.json`);
+/** A save must publish its reference within this long of storing the bytes
+ * (checked inside every commit attempt), well inside the sweep's grace, so the
+ * sweep can never remove bytes a later commit would still point at. */
+const ANSWER_PHOTO_SAVE_DEADLINE_MS = 5 * 60 * 1000;
+const answerPhotoTestHooks = { clockSkewMs: 0 }; // TEST ONLY (isTestMode): time passing during a save
+const answerPhotoNow = () => Date.now() + (isTestMode() ? answerPhotoTestHooks.clockSkewMs : 0);
 
 async function putAnswerPhotoDoc(key: string, doc: any): Promise<void> {
-  if (!firestoreDb) { localAnswerPhotos.set(key, JSON.parse(JSON.stringify(doc))); return; }
+  if (!firestoreDb) {
+    await fs.promises.mkdir(ANSWER_PHOTO_LOCAL_DIR, { recursive: true });
+    const file = answerPhotoLocalFile(key);
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fs.promises.writeFile(tmp, JSON.stringify(doc));
+    await fs.promises.rename(tmp, file);
+    return;
+  }
   await firestoreDb.collection(ANSWER_PHOTO_COLLECTION).doc(key).set(doc);
 }
 async function getAnswerPhotoDoc(key: string): Promise<any | null> {
-  if (!firestoreDb) return localAnswerPhotos.get(key) || null;
+  if (!firestoreDb) {
+    try { return JSON.parse(await fs.promises.readFile(answerPhotoLocalFile(key), 'utf8')); }
+    catch (e: any) { if (e?.code === 'ENOENT') return null; throw e; }
+  }
   const snap = await firestoreDb.collection(ANSWER_PHOTO_COLLECTION).doc(key).get();
   return snap.exists ? snap.data() : null;
 }
 /** Best-effort: never throws (an orphan is removed by the next sweep). */
 async function deleteAnswerPhotoDoc(key: string): Promise<void> {
   try {
-    if (!firestoreDb) { localAnswerPhotos.delete(key); return; }
+    if (!firestoreDb) {
+      await fs.promises.unlink(answerPhotoLocalFile(key)).catch((e: any) => { if (e?.code !== 'ENOENT') throw e; });
+      return;
+    }
     await firestoreDb.collection(ANSWER_PHOTO_COLLECTION).doc(key).delete();
   } catch (e) {
     log.warn('[answer-photo] delete failed:', (e as any)?.message);
@@ -12997,7 +13019,14 @@ async function sweepAnswerPhotos(nowMs: number = Date.now()): Promise<number> {
     for (const t of taskList) if (t?.answerPhoto?.id) referenced.add(answerPhotoKey(t.id, t.answerPhoto.id));
     let entries: Array<{ key: string; createdAt?: string }> = [];
     if (!firestoreDb) {
-      entries = [...localAnswerPhotos.entries()].map(([key, d]) => ({ key, createdAt: d?.createdAt }));
+      let names: string[] = [];
+      try { names = await fs.promises.readdir(ANSWER_PHOTO_LOCAL_DIR); } catch { names = []; }
+      for (const n of names) {
+        if (!n.endsWith('.json')) continue;
+        const key = decodeURIComponent(n.slice(0, -5));
+        const d = await getAnswerPhotoDoc(key).catch(() => null);
+        entries.push({ key, createdAt: d?.createdAt });
+      }
     } else {
       let q: any = firestoreDb.collection(ANSWER_PHOTO_COLLECTION);
       if (typeof q.select === 'function') q = q.select('createdAt');
@@ -13054,17 +13083,31 @@ function answerPhotoMayWriteFresh(req: any, freshDoc: any, freshTask: any, calle
   if ((freshTask.agencyId || 'agency-hkc') !== agencyId) return false;
   const row = (Array.isArray(freshDoc?.users) ? freshDoc.users : []).find((u: any) => u && u.id === (caller as any).id);
   if (!row) return false;
-  let actor: any = normalizeStoredUser(row);
-  if ((actor.agencyId || 'agency-hkc') !== agencyId) return false;
+  const base: any = normalizeStoredUser(row);
+  if ((base.agencyId || 'agency-hkc') !== agencyId) return false;
+  const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+  const venueLive = (vid: any) => freshVenues.some((v: any) => v && v.id === vid && (v.agencyId || 'agency-hkc') === agencyId);
+  // RULE T on the UNMODIFIED fresh row (RV2: never on a kiosk acting copy,
+  // which would rewrite the home venue to the tablet's).
+  if (base.role !== 'admin') {
+    if (!venueLive(freshTask.venueId)) return false;
+    const scope = venueScopeOf(base, freshVenues);
+    if (scope !== 'agency' && !scope.includes(freshTask.venueId || '')) return false;
+  }
+  let actor: any = base;
   if ((req as any).kiosk === true) {
     const tv = (req as any).kioskVenueId;
-    if (!tv || freshTask.venueId !== tv) return false;
-    actor = kioskActingUser(actor, tv);
+    if (!tv || freshTask.venueId !== tv || !venueLive(tv)) return false;
+    // The tablet is still paired to this venue, and the person still fits it.
+    const devId = (req as any).kioskDeviceId;
+    const dev = (Array.isArray(freshDoc.kioskDevices) ? freshDoc.kioskDevices : []).find((d: any) => d && d.id === devId);
+    if (!devId || !dev || dev.venueId !== tv || (dev.agencyId || 'agency-hkc') !== agencyId) return false;
+    if (sessionIneligibleCode(row)) return false;
+    // Only now the acting copy (an admin acts as a mashgiach on a tablet).
+    actor = kioskActingUser(base, tv);
   }
   if (!canFillTasks(actor)) return false;
   if (actor.role === 'admin') return true;
-  const scope = venueScopeOf(actor, Array.isArray(freshDoc.venues) ? freshDoc.venues : []);
-  if (scope !== 'agency' && !scope.includes(freshTask.venueId || '')) return false;
   if (!freshTask.isPrivate || actor.role === 'coordinator') return true;
   const email = String(actor.email || '').toLowerCase();
   return email.length > 0 && (freshTask.assignedTo || []).some((a: any) => String(a).toLowerCase() === email);
@@ -13135,6 +13178,9 @@ app.post('/api/tasks/:id/answer-photo', async (req, res) => {
       if (!freshTask) return { conflict: 'Task not found (it may have been deleted).' };
       if (!answerPhotoMayWriteFresh(req, freshDoc, freshTask, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
       if (!kioskMayReplaceAnswerPhoto(req, freshTask.answerPhoto, caller)) return { conflict: 'This task changed. Please refresh and try again.' };
+      // RV2: a save that took longer than the deadline never publishes (the
+      // sweep may remove bytes older than its grace); checked on every attempt.
+      if (answerPhotoNow() - Date.parse(at) > ANSWER_PHOTO_SAVE_DEADLINE_MS) return { conflict: 'Saving the photo took too long. Please try again.' };
       previousId = freshTask.answerPhoto?.id || null;
       const updated: TaskItem = { ...freshTask, answerPhoto: ref };
       const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
@@ -13234,6 +13280,13 @@ if (isTestMode()) {
     const nowMs = typeof req.body?.nowMs === 'number' ? req.body.nowMs : Date.now();
     const removed = await sweepAnswerPhotos(nowMs);
     res.json({ removed });
+  });
+  // TEST ONLY: pretend time passes during a save (the commit's deadline check).
+  app.post('/api/__test__/answer-photo-hooks', (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const skew = Number(req.body?.clockSkewMs);
+    answerPhotoTestHooks.clockSkewMs = Number.isFinite(skew) ? skew : 0;
+    res.json({ ...answerPhotoTestHooks });
   });
 }
 

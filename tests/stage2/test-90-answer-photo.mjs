@@ -306,7 +306,51 @@ export default {
     assert((await taskInDoc(T.yes_no.id)).answerPhoto?.id === r1.json.answerPhoto.id, 'I4: one reference in the document');
     const g4 = await call('GET', T.yes_no.id, tok.mash);
     assert(g4.status === 200 && g4.json.photoData === jpeg(5000, 'retry'), 'I4: the first save\'s bytes are intact');
-    out.push(`I kiosk replace 403; fresh gate ${fresh.length}x (commit refusals ${refusedWithBytes}); orphans swept only after grace; retry = first save`);
+    // I5: the venue itself is gone from the STORED document (cache unchanged):
+    // the kiosk and the phone are refused by the commit; the photo stays.
+    const docV = await ctx.getDoc();
+    const keepYN = (await taskInDoc(T.yes_no.id)).answerPhoto?.id || null;
+    const sv = await ctx.api('POST', '/api/__test__/doc-set-users', { users: docV.users, venues: (docV.venues || []).filter((v) => v.id !== v1) });
+    assert(sv.status === 200, `I5 setup: ${sv.status}`);
+    const k5 = await call('POST', T.yes_no.id, K, { photoData: small });
+    const p5 = await call('POST', T.yes_no.id, tok.mash, { photoData: small });
+    const sr = await ctx.api('POST', '/api/__test__/doc-set-users', { users: docV.users, venues: docV.venues });
+    assert(sr.status === 200, `I5 restore: ${sr.status}`);
+    assert([401, 403, 409].includes(k5.status), `I5: kiosk refused when the venue is gone (got ${k5.status} ${JSON.stringify(k5.json)})`);
+    assert([401, 403, 409].includes(p5.status), `I5: phone refused when the venue is gone (got ${p5.status})`);
+    assert(((await taskInDoc(T.yes_no.id)).answerPhoto?.id || null) === keepYN, 'I5: the photo is unchanged');
+    // I6 (RV2): the kiosk's fresh gate checks the UNMODIFIED fresh row: the
+    // tablet user moved away / lost fill permission / removed (stored doc only).
+    const mid = id('mash');
+    const kFresh = [
+      ['moved to another venue', storedUsers.map((u) => (u.id === mid ? { ...u, venueId: v2, ...(u.venueAccess ? { venueAccess: [v2] } : {}) } : u))],
+      ['lost fill permission', storedUsers.map((u) => (u.id === mid ? { ...u, permissions: { ...(u.permissions || {}), canFillTasks: false } } : u))],
+      ['removed from the agency', storedUsers.filter((u) => u.id !== mid)],
+    ];
+    const keepYN6 = (await taskInDoc(T.yes_no.id)).answerPhoto?.id || null;
+    const kCodes = [];
+    for (const [why, users] of kFresh) {
+      await setUsers(users);
+      const kp6 = await call('POST', T.yes_no.id, K, { photoData: small });
+      const kd6 = await call('DELETE', T.yes_no.id, K);
+      kCodes.push(`${kp6.status}/${kd6.status}`);
+      assert([401, 403, 409].includes(kp6.status), `I6 kiosk ${why}: POST refused on fresh data, got ${kp6.status} ${JSON.stringify(kp6.json)}`);
+      assert([401, 403, 409].includes(kd6.status), `I6 kiosk ${why}: DELETE refused on fresh data, got ${kd6.status}`);
+      assert(((await taskInDoc(T.yes_no.id)).answerPhoto?.id || null) === keepYN6, `I6 kiosk ${why}: photo unchanged`);
+    }
+    await setUsers(storedUsers);
+    // I7 (RV2): a save that takes longer than the deadline never publishes its
+    // reference (the sweep may already have removed bytes past its grace).
+    const hk = await ctx.api('POST', '/api/__test__/answer-photo-hooks', { clockSkewMs: 6 * 60 * 1000 });
+    assert(hk.status === 200, `I7 hook: ${hk.status}`);
+    const slow = await call('POST', T.yes_no.id, tok.mash, { photoData: small });
+    await ctx.api('POST', '/api/__test__/answer-photo-hooks', { clockSkewMs: 0 });
+    assert(slow.status === 409, `I7: a save past the deadline → 409, got ${slow.status} ${JSON.stringify(slow.json)}`);
+    assert(((await taskInDoc(T.yes_no.id)).answerPhoto?.id || null) === keepYN6, 'I7: no reference published');
+    const s7 = await ctx.api('POST', '/api/__test__/answer-photo-sweep', { nowMs: Date.now() + 60 * 60 * 1000 });
+    assert(s7.status === 200 && s7.json?.removed >= 1, `I7: its bytes are swept after the grace (${JSON.stringify(s7.json)})`);
+    assert((await call('GET', T.yes_no.id, tok.mash)).status === 200, 'I7: the published photo is untouched');
+    out.push(`I kiosk replace 403; kiosk fresh gate ${kCodes.join(',')}; slow save 409; venue gone → kiosk ${k5.status}/phone ${p5.status}; fresh gate ${fresh.length}x (commit refusals ${refusedWithBytes}); orphans swept only after grace; retry = first save`);
 
     return out.join('; ');
   },

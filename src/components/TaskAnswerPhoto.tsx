@@ -89,6 +89,9 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
   const fileRef = useRef<HTMLInputElement | null>(null);
   const liveRef = useRef<string | null>(liveId);
   liveRef.current = liveId;
+  // Async work (reading a photo, a save, a remove) only lands on the task that started it.
+  const taskRef = useRef<string>(task.id);
+  taskRef.current = task.id;
   const thumbRef = useRef<HTMLButtonElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
@@ -143,13 +146,16 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
 
   const pick = async (file: File) => {
     setError(null);
+    const tid = task.id;
     try {
       const data = await compressPhoto(file);
+      if (taskRef.current !== tid) return;
       if (data.length > ANSWER_PHOTO_MAX_CHARS) { setError('That photo is too large. Try another one.'); return; }
       setDraft(data);
       setCaption('');
       setOpId(newActionId());
     } catch {
+      if (taskRef.current !== tid) return;
       setError('Could not read that photo. Try another one.');
     }
   };
@@ -159,13 +165,15 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
     setBusy(true);
     setError(null);
     const basis = live?.id ?? null;
-    const result = await apiWrite(`/api/tasks/${encodeURIComponent(task.id)}/answer-photo`, {
+    const tid = task.id;
+    const result = await apiWrite(`/api/tasks/${encodeURIComponent(tid)}/answer-photo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ photoData: draft, photoCaption: caption.trim() || undefined }),
       operationId: opId,
     });
     setBusy(false);
+    if (taskRef.current !== tid) return;
     if (result.ok && result.data?.answerPhoto?.id) {
       bytesCache.set(result.data.answerPhoto.id, draft);
       // Only while the task has not moved on meanwhile (else the task is the truth).
@@ -183,11 +191,13 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
     setBusy(true);
     setError(null);
     const basis = live?.id ?? null;
+    const tid = task.id;
     const result = await apiWrite(
-      `/api/tasks/${encodeURIComponent(task.id)}/answer-photo?photoId=${encodeURIComponent(shown.id)}`,
+      `/api/tasks/${encodeURIComponent(tid)}/answer-photo?photoId=${encodeURIComponent(shown.id)}`,
       { method: 'DELETE' }
     );
     setBusy(false);
+    if (taskRef.current !== tid) return;
     if (result.ok) {
       if (liveRef.current === basis) setOverride({ basis, ref: result.data?.answerPhoto || null });
       setFull(false);
