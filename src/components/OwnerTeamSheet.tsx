@@ -1,7 +1,11 @@
 // Manager role (Don 2026-10-27, "same style as the owner"; server #169): the
 // venue OWNER's Team sheet. An owner may add a manager for their own home venue
 // (a pending invite, like an admin's "Add team member") and switch a mashgiach
-// at that venue to manager, or a manager back to mashgiach. Nothing else: no
+// at that venue to manager, or a manager back to mashgiach, with the same role
+// dropdown the admin's Team screen uses (Don 2026-10-27 10:15 PM: "one of the
+// options as you toggle", not a button per person); for an owner it offers
+// only Mashgiach and Manager. Like the admin's picker, a change asks to
+// confirm first; a failed save puts the dropdown back. Nothing else: no
 // owner, admin or coordinator is listed, no other venue, no name, PIN or
 // rights. A manager never sees this sheet. Rule T, fail closed: the list and
 // the buttons follow ownerRoleSwitchFor / ownerMayAddManager (the client
@@ -10,7 +14,7 @@
 import React, { useRef, useState } from 'react';
 import { UserPlus } from 'lucide-react';
 import type { User } from '../types';
-import { getRoleLabel, ownerMayAddManager, ownerRoleSwitchFor } from '../lib/permissions';
+import { ownerMayAddManager, ownerRoleSwitchFor } from '../lib/permissions';
 import { normalizePhone } from '../lib/kioskCodeShare';
 import { Sheet } from './PoolPanel';
 import { InviteLinkCard } from './InviteLinkCard';
@@ -32,8 +36,9 @@ export const OWNER_TEAM_TEXT = {
   badPhone: "That phone number doesn't look right. Use digits, with + and the country code outside the US.",
   send: 'Make invite link',
   cancel: 'Cancel',
-  makeManager: 'Make manager',
-  makeMashgiach: 'Make mashgiach',
+  roleLabel: (name: string) => `Role for ${name}`,
+  optMashgiach: 'Mashgiach',
+  optManager: 'Manager',
   confirmManager: (name: string) => `Make ${name} a manager?`,
   confirmManagerBody: 'They will see and do what you do at this venue.',
   confirmMashgiach: (name: string) => `Make ${name} a mashgiach?`,
@@ -43,6 +48,25 @@ export const OWNER_TEAM_TEXT = {
   linkHint: (name: string) => `Send this link to ${name}.`,
   done: 'Done',
 } as const;
+
+/** The only roles an owner's dropdown ever offers (server: ownerMayChangeRole). Never owner, admin or coordinator. */
+export const OWNER_ROLE_OPTIONS = ['mashgiach', 'manager'] as const;
+export type OwnerRoleOption = typeof OWNER_ROLE_OPTIONS[number];
+
+/** What the owner's dropdown shows for this person now: a worker shows as Mashgiach (like the admin screen). */
+export function ownerRoleValue(user: { role?: string }): OwnerRoleOption {
+  return user.role === 'manager' ? 'manager' : 'mashgiach';
+}
+
+/**
+ * The change a dropdown pick asks for, or null when it is no change or not
+ * allowed (fail closed): only the one switch ownerRoleSwitchFor allows.
+ */
+export function ownerRolePick(switchTo: 'manager' | 'mashgiach', user: { role?: string }, picked: string): 'manager' | 'mashgiach' | null {
+  if (picked !== 'mashgiach' && picked !== 'manager') return null;
+  if (picked === ownerRoleValue(user)) return null;
+  return picked === switchTo ? picked : null;
+}
 
 /** The people an owner sees here, each with the one role they may switch to (never empty-handed rows). */
 export function ownerTeamRows(owner: User | null | undefined, roster: readonly User[] | null | undefined): { user: User; switchTo: 'manager' | 'mashgiach' }[] {
@@ -57,6 +81,8 @@ export function ownerTeamRows(owner: User | null | undefined, roster: readonly U
 
 const btn = 'min-h-11 px-3 rounded-xl bg-surface border border-line-control text-sm text-ink font-semibold hover:bg-sunken pressable cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed';
 const btnGold = 'min-h-11 px-4 rounded-xl bg-gold-deep text-paper text-sm font-semibold pressable cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed';
+// Same look as the admin Team screen's role picker (TeamModal).
+const roleSelect = 'text-base font-semibold px-2 py-0.5 rounded-lg uppercase tracking-wider cursor-pointer border border-line-control min-w-0 bg-sunken text-ink-soft focus:ring-2 focus:ring-gold/40 focus:border-gold disabled:opacity-50 disabled:cursor-not-allowed';
 const input = 'w-full min-h-11 px-3 rounded-lg bg-surface border border-line-control text-base text-ink placeholder-ink-faint focus:outline-none focus:ring-2 focus:ring-gold/40 focus:border-gold';
 
 interface OwnerTeamSheetProps {
@@ -117,7 +143,8 @@ export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName
       await onSetRole(asking.id, asking.to);
       if (gen === generation.current) setAsking(null);
     } catch (err: any) {
-      if (gen === generation.current) setError(err?.message || OWNER_TEAM_TEXT.failed);
+      // A failed save puts the dropdown back to the saved role and says why.
+      if (gen === generation.current) { setAsking(null); setError(err?.message || OWNER_TEAM_TEXT.failed); }
     } finally { if (gen === generation.current) setBusy(false); }
   };
 
@@ -167,16 +194,22 @@ export function OwnerTeamSheet({ isOpen, onClose, currentUser, roster, venueName
               return (
                 <li key={user.id} data-owner-team-row={user.id} className="p-3 space-y-2">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-base font-semibold text-ink truncate">{user.name}</p>
-                      <span data-owner-team-role className="text-sm text-ink-soft">{getRoleLabel(user.role)}</span>
-                    </div>
-                    {!open && (
-                      <button type="button" data-owner-switch={switchTo} className={`${btn} shrink-0`} disabled={busy}
-                        onClick={() => { setAsking({ id: user.id, to: switchTo }); setError(null); }}>
-                        {switchTo === 'manager' ? OWNER_TEAM_TEXT.makeManager : OWNER_TEAM_TEXT.makeMashgiach}
-                      </button>
-                    )}
+                    <p className="min-w-0 text-base font-semibold text-ink truncate">{user.name}</p>
+                    <select
+                      data-owner-role-select={user.id}
+                      aria-label={OWNER_TEAM_TEXT.roleLabel(user.name)}
+                      value={open ? asking!.to : ownerRoleValue(user)}
+                      disabled={busy}
+                      onChange={(e) => {
+                        const to = ownerRolePick(switchTo, user, e.target.value);
+                        setError(null);
+                        setAsking(to ? { id: user.id, to } : null);
+                      }}
+                      className={`${roleSelect} shrink-0`}
+                    >
+                      <option value="mashgiach">{OWNER_TEAM_TEXT.optMashgiach}</option>
+                      <option value="manager">{OWNER_TEAM_TEXT.optManager}</option>
+                    </select>
                   </div>
                   {open && (
                     <div data-owner-switch-confirm className="p-3 rounded-xl bg-sunken border border-line space-y-2">

@@ -100,14 +100,33 @@ const rows = (OT.ownerTeamRows?.(owner, roster) || []).map((r) => [r.user.id, r.
 check('owner team rows = mashgichim/managers at home, sorted', rows, [['u-mgr', 'mashgiach'], ['u-mash', 'manager'], ['u-wrk', 'manager']]);
 check('manager sees no owner team rows', OT.ownerTeamRows ? OT.ownerTeamRows(manager, roster) : 'missing', []);
 
+// A dropdown pick becomes a request only for the one switch the server allows (fail closed)
+const pick = OT.ownerRolePick || (() => 'missing');
+check('pick: mashgiach -> Manager', pick('manager', mash, 'manager'), 'manager');
+check('pick: worker -> Manager', pick('manager', worker, 'manager'), 'manager');
+check('pick: manager -> Mashgiach', pick('mashgiach', manager, 'mashgiach'), 'mashgiach');
+check('pick: same role is no change', pick('manager', mash, 'mashgiach'), null);
+check('pick: worker -> Mashgiach is no change', pick('manager', worker, 'mashgiach'), null);
+check('pick: owner never', pick('manager', mash, 'owner'), null);
+check('pick: admin never', pick('manager', mash, 'admin'), null);
+check('pick: coordinator never', pick('mashgiach', manager, 'coordinator'), null);
+check('owner role options', OT.OWNER_ROLE_OPTIONS ? [...OT.OWNER_ROLE_OPTIONS] : 'missing', ['mashgiach', 'manager']);
+
 const h = React.createElement;
 const noop = async () => {};
 if (OT.OwnerTeamSheet) {
   const html = renderToStaticMarkup(h(OT.OwnerTeamSheet, { isOpen: true, onClose: () => {}, currentUser: owner, roster, venueName: 'Demo Bistro', onAddManager: noop, onSetRole: noop }));
   check('owner sheet: Add manager button', html.includes('data-owner-add-manager') && html.includes('Add manager'), true);
-  check('owner sheet: Make manager on the mashgiach', /data-owner-team-row="u-mash"[\s\S]*?Make manager/.test(html), true);
-  check('owner sheet: Make mashgiach on the manager', /data-owner-team-row="u-mgr"[\s\S]*?Make mashgiach/.test(html), true);
-  check('owner sheet: Manager label shown', html.includes('>Manager<'), true);
+  // Don 10:15 PM Oct 27: the role is a dropdown option (like the admin Team screen), not a "Make manager" button per person.
+  check('owner sheet: no per-person Make manager / Make mashgiach buttons', /Make manager|Make mashgiach|data-owner-switch=/.test(html), false);
+  const selects = [...html.matchAll(/<select[^>]*data-owner-role-select="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)];
+  check('owner sheet: one role dropdown per listed person', selects.map((m) => m[1]), ['u-mgr', 'u-mash', 'u-wrk']);
+  const optsOf = (inner) => [...inner.matchAll(/<option value="([^"]+)"[^>]*>([^<]*)<\/option>/g)].map((o) => `${o[1]}:${o[2]}`);
+  check('owner dropdowns offer only Mashgiach and Manager', selects.map((m) => optsOf(m[2]).join(',')), Array(3).fill('mashgiach:Mashgiach,manager:Manager'));
+  check('owner dropdowns never offer owner/admin/coordinator', /<option value="(owner|admin|coordinator)"/.test(html), false);
+  const selected = (inner) => (inner.match(/<option value="([^"]+)" selected/) || [])[1];
+  check('owner dropdown shows the saved role (worker shows as Mashgiach)', selects.map((m) => selected(m[2])), ['manager', 'mashgiach', 'mashgiach']);
+  check('owner dropdown: same look as the admin role picker', /<select[^>]*data-owner-role-select="u-mash"[^>]*class="[^"]*uppercase tracking-wider[^"]*border-line-control/.test(html) || /<select[^>]*class="[^"]*uppercase tracking-wider[^"]*border-line-control[^"]*"[^>]*data-owner-role-select/.test(html), true);
   check('owner sheet: no owner/admin/coordinator/other-venue rows', ['u-own2', 'u-ad', 'u-co', 'u-mash2', 'u-f', 'u-pool', 'u-own"'].some((id) => html.includes(`data-owner-team-row="${id}`)), false);
   check('owner sheet: venue named', html.includes('Demo Bistro'), true);
   const mhtml = renderToStaticMarkup(h(OT.OwnerTeamSheet, { isOpen: true, onClose: () => {}, currentUser: manager, roster, onAddManager: noop, onSetRole: noop }));
@@ -135,6 +154,7 @@ const header = src('src/components/Header.tsx');
 check('Header: owner Team row (desk + phone menus)', header.includes('data-open-owner-team') && header.includes('data-open-owner-team-mobile'), true);
 const ots = src('src/components/OwnerTeamSheet.tsx');
 check('owner sheet: a late answer after close is dropped (generation guard, RV1 P3)', /generation\.current \+= 1/.test(ots) && (ots.match(/gen !== generation\.current|gen === generation\.current/g) || []).length >= 5, true);
+check('owner sheet: a failed save puts the dropdown back and shows the error', /catch \(err: any\) \{[\s\S]{0,160}setAsking\(null\); setError\(/.test(ots), true);
 check('Create event: manager venue fixed like owner', src('src/components/CreateEventModal.tsx').includes("currentUser?.role === 'owner' || currentUser?.role === 'manager'"), true);
 
 console.log(`\n${passes} passed, ${failures} failed`);
