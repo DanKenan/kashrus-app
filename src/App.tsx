@@ -4,6 +4,7 @@ import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgen
 import React, { useState, useEffect, useMemo, useRef, useCallback, lazy, Suspense } from 'react';
 import { PhoneNav, getPhoneNavState } from './components/PhoneNav';
 import { venueStorageKey, eligibleVenuesFor, resolveVenue } from './lib/venueSelection';
+import { defaultScreen, forgetSavedScreens, isRestrictedSheet, pendingOnAnswer, pendingOnInteraction, pendingOnScreen, readSavedScreen, saveScreen, sheetAllowed, startPendingRestore, type PendingRestore, type SavedScreen } from './lib/screenMemory';
 import { socketVenueScope, scopeListToVenue, inVenueScope } from './lib/socketVenueScope';
 import { VenueSwitcherSheet } from './components/VenueSwitcherSheet';
 import { AgencySwitcherSheet } from './components/AgencySwitcherSheet';
@@ -166,6 +167,7 @@ export default function App() {
         // Every signed-in key (current_user too), so a reload cannot bring the
         // previous person back.
         forgetSignedInUserForKiosk();
+        forgetSavedScreens();
         // A later reload must not enter again (it would sign out staff on the paired kiosk).
         stripKioskEntryFromUrl();
         return true;
@@ -187,7 +189,9 @@ export default function App() {
     }
   });
   const isKiosk = kioskMode;
-  const [adminHome, setAdminHome] = useState(() => !isKiosk && currentUser?.role === 'admin');
+  // Don 2026-10-27: a refresh puts back the main screen the person was on (lib/screenMemory.ts). Never on the kiosk.
+  const [restoredScreen] = useState<SavedScreen>(() => (isKiosk ? defaultScreen(null) : readSavedScreen(currentUser)));
+  const [adminHome, setAdminHome] = useState(() => !isKiosk && currentUser?.role === 'admin' && restoredScreen.view === 'home');
   const [adminHomeReloadKey, setAdminHomeReloadKey] = useState(0);
   const leaveHomeThen = (fn: () => void) => () => {
     if (adminHome) {
@@ -408,7 +412,7 @@ export default function App() {
   // 12a-c (RV2): the venue the task editor was opened for (the task's own
   // venue, else the venue on screen when a new task was started).
   const [taskEditorVenueId, setTaskEditorVenueId] = useState<string | null>(null);
-  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(restoredScreen.sheet === 'history');
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   // 11b-c: Face ID / passkeys.
   const [isPasskeysOpen, setIsPasskeysOpen] = useState(false);
@@ -532,7 +536,7 @@ export default function App() {
     evs.forEach((e) => window.addEventListener(e, arm, { passive: true }));
     return () => { clearTimeout(timer); evs.forEach((e) => window.removeEventListener(e, arm)); };
   }, [isKiosk, !!currentUser, kioskSignIn, kqrOnServer]);
-  const [isEventsModalOpen, setIsEventsModalOpen] = useState(false);
+  const [isEventsModalOpen, setIsEventsModalOpen] = useState(restoredScreen.sheet === 'events');
   const [isCreateEventModalOpen, setIsCreateEventModalOpen] = useState(false);
   // Item 7: the event being copied (dialog open while set) and the new copy to select.
   const [copySourceEvent, setCopySourceEvent] = useState<KosherEvent | null>(null);
@@ -541,6 +545,72 @@ export default function App() {
   const [isFactoryAuditOpen, setIsFactoryAuditOpen] = useState(false);
   // Don 2026-10-22: the admin's agency-wide Events screen (from the dashboard).
   const [isAgencyEventsOpen, setIsAgencyEventsOpen] = useState(false);
+
+  // Remember the main screen for a refresh (lib/screenMemory.ts): base view + main sheet only.
+  const screenView = currentUser?.role === 'admin' && adminHome ? 'home' : 'board';
+  const screenSheet = isVenuesDirectoryOpen ? 'venues' : isTeamModalOpen ? 'team' : isAgencyEventsOpen ? 'agency-events'
+    : isHistoryModalOpen ? 'history' : isEventsModalOpen ? 'events' : null;
+  // Team, Venues and agency Events reopen only once the server confirms who is
+  // signed in and their role (the cached role may be stale); never on a kiosk.
+  // While that waits the stored target is kept; navigation or another
+  // person/agency/sign-out drops it (lib/screenMemory.ts PendingRestore).
+  const pendingRestore = useRef<PendingRestore | null>(startPendingRestore(currentUser, restoredScreen, isKiosk));
+  const screenNow = useRef<{ user: User | null; screen: SavedScreen }>({ user: null, screen: restoredScreen });
+  screenNow.current = { user: isKiosk ? null : currentUser, screen: { view: screenView, sheet: screenSheet } };
+  // Any tap or key press while the restore waits: the person's own navigation wins.
+  useEffect(() => {
+    if (!pendingRestore.current) return;
+    const drop = () => {
+      const next = pendingOnInteraction(pendingRestore.current);
+      pendingRestore.current = next.pending;
+      const { user, screen } = screenNow.current;
+      if (next.save && user) saveScreen(user, screen);
+      off();
+    };
+    const off = () => { window.removeEventListener('pointerdown', drop, true); window.removeEventListener('keydown', drop, true); };
+    window.addEventListener('pointerdown', drop, true);
+    window.addEventListener('keydown', drop, true);
+    return off;
+  }, []);
+  useEffect(() => {
+    const screen = { view: screenView, sheet: screenSheet } as SavedScreen;
+    const next = pendingOnScreen(pendingRestore.current, isKiosk ? null : currentUser, screen);
+    pendingRestore.current = next.pending;
+    if (isKiosk || !currentUser || !next.save) return;
+    saveScreen(currentUser, screen);
+  }, [isKiosk, currentUser, screenView, screenSheet]);
+  useEffect(() => {
+    const sheet = restoredScreen.sheet;
+    const cached = currentUser;
+    if (isKiosk || !cached || !isRestrictedSheet(sheet)) return;
+    let live = true;
+    apiFetch('/api/auth/me', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .catch(() => null)
+      .then((me) => {
+        if (!live) return;
+        const pending = pendingRestore.current;
+        const answer = pendingOnAnswer(pending, cached, me, sheet);
+        pendingRestore.current = answer.pending;
+        if (answer.saveDefault && pending) saveScreen(cached, { view: pending.at?.startsWith('home') ? 'home' : 'board', sheet: null });
+        if (!answer.open) return;
+        if (sheet === 'venues') setIsVenuesDirectoryOpen(true);
+        else if (sheet === 'team') setIsTeamModalOpen(true);
+        else setIsAgencyEventsOpen(true);
+      });
+    return () => { live = false; };
+    // Once, for the screen this page loaded with.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Fail closed: a sheet the (refreshed) role cannot see never stays open.
+  useEffect(() => {
+    if (isKiosk || !screenSheet || sheetAllowed(currentUser, screenSheet)) return;
+    if (screenSheet === 'venues') setIsVenuesDirectoryOpen(false);
+    else if (screenSheet === 'team') setIsTeamModalOpen(false);
+    else if (screenSheet === 'agency-events') setIsAgencyEventsOpen(false);
+    else if (screenSheet === 'history') setIsHistoryModalOpen(false);
+    else setIsEventsModalOpen(false);
+  }, [isKiosk, currentUser, screenSheet]);
   const [agencyEventsReload, setAgencyEventsReload] = useState(0);
   const [createEventVenueId, setCreateEventVenueId] = useState<string | null>(null);
 
@@ -1838,6 +1908,7 @@ export default function App() {
     if (typeof window !== 'undefined') {
       localStorage.removeItem('current_user');
       localStorage.removeItem('selected_venue_id');
+      forgetSavedScreens();
     }
     clearSession();
     realtimeSocket.disconnect();
@@ -2848,7 +2919,7 @@ export default function App() {
       />
 
       <TeamModal
-        isOpen={isTeamModalOpen}
+        isOpen={isTeamModalOpen && sheetAllowed(currentUser, 'team')}
         onClose={() => setIsTeamModalOpen(false)}
         users={knownUsers}
         venues={venues}
@@ -2919,7 +2990,7 @@ export default function App() {
         agencyName={currentUser.agencyName}
         agencyShortCode={currentUser.agencyShortCode}
         agencyLogoSrc={agencyLogoSrc}
-        isOpen={isVenuesDirectoryOpen}
+        isOpen={isVenuesDirectoryOpen && sheetAllowed(currentUser, 'venues')}
         onClose={() => setIsVenuesDirectoryOpen(false)}
         venues={venues}
         currentVenue={currentVenue}
