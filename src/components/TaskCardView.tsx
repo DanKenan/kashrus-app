@@ -26,7 +26,8 @@ import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
 import { TaskInstructions } from './TaskInstructions';
-import { TaskAnswerPhoto } from './TaskAnswerPhoto';
+import { TaskAnswerPhoto, compressPhoto } from './TaskAnswerPhoto';
+import { CheckInPhoto } from './CheckInPhoto';
 
 interface TaskCardViewProps {
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
@@ -464,22 +465,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                               onChange={(e) => {
                                 const file = e.target.files?.[0];
                                 if (!file) return;
-                                const reader = new FileReader();
-                                reader.onload = () => {
-                                  const img = new Image();
-                                  img.onload = () => {
-                                    // Resize to max 800px to keep base64 reasonable
-                                    const canvas = document.createElement('canvas');
-                                    const scale = Math.min(1, 800 / Math.max(img.width, img.height));
-                                    canvas.width = img.width * scale;
-                                    canvas.height = img.height * scale;
-                                    canvas.getContext('2d')?.drawImage(img, 0, 0, canvas.width, canvas.height);
-                                    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-                                    onCheckIn(task.id, dataUrl);
-                                  };
-                                  img.src = reader.result as string;
-                                };
-                                reader.readAsDataURL(file);
+                                // Max 800 px JPEG 0.7 (stepping down only if still over the photo cap).
+                                compressPhoto(file).then((dataUrl) => onCheckIn(task.id, dataUrl)).catch(() => { /* unreadable file: nothing logged */ });
                                 e.target.value = '';
                               }}
                             />
@@ -513,19 +500,11 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                                     </button>
                                   )}
                                 </div>
-                                {c.photoData && (
-                                  <img
-                                    src={c.photoData}
-                                    alt={c.photoCaption || 'Check-in photo'}
-                                    className="mt-1.5 w-full rounded-lg border border-line object-cover max-h-40 cursor-pointer"
-                                    onClick={(e) => {
-                                      const w = window.open();
-                                      if (w) {
-                                        w.document.write(`<img src="${c.photoData}" style="max-width:100%"/>`);
-                                      }
-                                    }}
-                                  />
-                                )}
+                                <CheckInPhoto
+                                  taskId={task.id}
+                                  checkIn={c}
+                                  className="mt-1.5 w-full rounded-lg border border-line object-cover max-h-40 cursor-pointer"
+                                />
                               </li>
                             ))}
                           </ul>

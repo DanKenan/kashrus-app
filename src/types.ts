@@ -14,7 +14,11 @@ export interface TaskCheckIn {
   byName: string | null;
   byEmail: string | null;
   at: string; // ISO timestamp of the check-in
+  /** Older check-ins only: the photo inline (base64 data URL). */
   photoData?: string;
+  /** CHECKINPHOTO: the photo lives in the photo store; bytes come from
+   * GET /api/tasks/:id/check-in/:checkInId/photo. */
+  photoId?: string;
   photoCaption?: string;
 }
 

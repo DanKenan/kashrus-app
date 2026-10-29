@@ -204,7 +204,8 @@ export default {
     assert(ci.status === 400 && ci.json?.code === 'PHOTO_NOT_ALLOWED', `F: check_in answer-photo → 400, got ${ci.status}`);
     const cin = await fetch(`${baseUrl}/api/tasks/${T.check_in.id}/check-in`, { method: 'POST', headers: tok.mash, body: JSON.stringify({ photoData: small, photoCaption: 'door' }) });
     const cij = await cin.json();
-    assert(cin.status === 200 && cij.checkIns?.length === 1 && cij.checkIns[0].photoData === small && cij.checkIns[0].photoCaption === 'door' && !cij.answerPhoto, `F: check-in with photo unchanged (${cin.status})`);
+    // CHECKINPHOTO (test 92): the check-in photo now goes to the photo store too (reference only).
+    assert(cin.status === 200 && cij.checkIns?.length === 1 && cij.checkIns[0].photoData === undefined && /^cph-/.test(cij.checkIns[0].photoId || '') && cij.checkIns[0].photoCaption === 'door' && !cij.answerPhoto, `F: check-in with photo logged (${cin.status})`);
     out.push('F check-in unchanged');
 
     // ---- G: replace, remove, sweep ---------------------------------------------------
