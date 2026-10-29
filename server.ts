@@ -14201,6 +14201,63 @@ function mayCopyEvent(user: any, event: any, venueList: readonly any[] = venues)
   return mayManageEventAt(user, event.venueId, venueList as any);
 }
 
+/**
+ * EVENTEDIT (Don, Oct 28 2026: "When a task created in an event, it can't be
+ * edited. Fix it."): who may change an event task's WORDING (its title and
+ * details) — the same people who may edit an ordinary task's definition at
+ * that venue, from ONE place for the pre-check and the in-transaction
+ * re-check (pass the FRESH venues there):
+ *  - whoever may manage the event (mayManageEventAt: admin of the own agency,
+ *    coordinator at their own venues, owner/manager at their own venue); or
+ *  - a person who may edit task definitions (PUT /api/tasks/:id: admin,
+ *    coordinator, or canAssignTasks granted) whose own venue scope (rule T)
+ *    holds the event's venue. The assigned-elsewhere exception for checking
+ *    event tasks does NOT extend to wording.
+ * Everyone else, another agency, a missing venue and kiosk sessions (the
+ * callers refuse req.kiosk first) are refused. Fail closed.
+ */
+function mayEditEventTaskWording(user: any, event: any, venueList: readonly any[] = venues): boolean {
+  if (!user || !event || typeof user.role !== 'string') return false;
+  if ((user.agencyId || 'agency-hkc') !== (event.agencyId || 'agency-hkc')) return false;
+  const venueId = event.venueId;
+  if (typeof venueId !== 'string' || !venueId) return false;
+  if (mayManageEventAt(user, venueId, venueList as any)) return true;
+  const editsTaskDefinitions =
+    user.role === 'admin' || user.role === 'coordinator' || user.permissions?.canAssignTasks === true;
+  if (!editsTaskDefinitions) return false;
+  // Cached check: the canonical scope (venueScopeFor intersects the stored
+  // row); in a transaction: the fresh row's scope over the fresh venues.
+  const scope = venueList === venues ? venueScopeFor(user) : venueScopeOf(user, venueList);
+  return scope !== 'agency' && scope.includes(venueId);
+}
+
+/**
+ * EVENTEDIT: does a body's `tasks` list change the wording (title/details) of,
+ * or drop, any task of `prev`? A full-object event save (PUT /api/events/:id)
+ * carries the whole list, so the gate compares it with the stored one (rule
+ * AG) instead of trusting who sent it. Adding a task and checking one off are
+ * not wording changes (they keep today's gate). A list that is not a list is
+ * treated as a change (fail closed).
+ */
+function eventTaskWordingChanged(next: unknown, prev: unknown): boolean {
+  if (next === undefined) return false;
+  if (!Array.isArray(next)) return true;
+  const words = (v: unknown) => (typeof v === 'string' ? v : '');
+  const byId = new Map<string, any>();
+  for (const t of next) if (t && typeof t.id === 'string') byId.set(t.id, t);
+  for (const p of Array.isArray(prev) ? prev : []) {
+    if (!p || typeof p.id !== 'string') continue;
+    const n = byId.get(p.id);
+    if (!n) return true;
+    if (words(n.title) !== words(p.title) || words(n.description) !== words(p.description)) return true;
+  }
+  return false;
+}
+
+const EVENT_TASK_EDIT_FORBIDDEN_BODY = { code: 'EVENT_TASK_EDIT_FORBIDDEN', error: "You can't edit this event's tasks." } as const;
+const EVENT_TASK_TITLE_MAX = 200;
+const EVENT_TASK_DESCRIPTION_MAX = 1000;
+
 /** The event template the copy carries: definition fields + task names. */
 function buildEventCopy(
   src: any,
@@ -14383,6 +14440,13 @@ app.put('/api/events/:id', async (req, res) => {
   } else if (!mayFillEventTasks(caller, existing)) {
     return res.status(403).json({ error: 'You can only check event tasks at your own venue.' });
   }
+  // EVENTEDIT: renaming or dropping an existing event task through the
+  // full-object save needs the task-wording right (the same people as the
+  // PATCH below); adding a task or checking one keeps the gate above.
+  if (eventTaskWordingChanged((req.body as any).tasks, existing.tasks) &&
+      ((req as any).kiosk === true || !mayEditEventTaskWording(caller, existing))) {
+    return res.status(403).json(EVENT_TASK_EDIT_FORBIDDEN_BODY);
+  }
 
   const {
     title,
@@ -14487,6 +14551,12 @@ app.put('/api/events/:id', async (req, res) => {
       const freshTaskWorker = mayFillEventTasks(freshCaller, freshEvent);
       if (!freshPrivileged && !freshTaskWorker) {
         return { conflict: 'You are no longer assigned to this event.' };
+      }
+      // EVENTEDIT (rule AB): the task-wording right is re-checked on the
+      // FRESH caller, event and venues against the FRESH task list.
+      if (updatedTasks !== undefined && eventTaskWordingChanged(updatedTasks, freshEvent.tasks) &&
+          !mayEditEventTaskWording(freshCaller, freshEvent, freshVenuesForEvent)) {
+        return { conflict: EVENT_TASK_EDIT_FORBIDDEN_BODY.error, conflictStatus: 403, conflictCode: EVENT_TASK_EDIT_FORBIDDEN_BODY.code };
       }
       let updated: KosherEventItem;
       // Item 8s: re-resolve a changing assignment on FRESH data, with the
@@ -14753,6 +14823,101 @@ app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
     assignedMashgiachEmail: updatedEvent.assignedMashgiachEmail,
   }, undefined, updatedEvent.agencyId || 'agency-hkc');
 
+  res.json({ success: true, event: updatedEvent, task: updatedTask });
+});
+
+/**
+ * EVENTEDIT (Don, Oct 28 2026): change one event task's wording — its title
+ * and/or details. Who: mayEditEventTaskWording (the people who may edit an
+ * ordinary task at that venue; never a kiosk session — this route is also off
+ * the kiosk allowlist). Only `title` and `description` are read; completion,
+ * notes and who-checked-it stay exactly as stored. Conflict guard is the task
+ * itself (like the toggle): a field this edit changes that someone else
+ * changed first answers 409, nothing written. The caller, the event, the venue
+ * list and the task are re-read from the FRESH document inside the commit
+ * (rule AB); a refusal there writes nothing.
+ */
+app.patch('/api/events/:id/tasks/:taskId', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  if ((req as any).kiosk === true) return res.status(403).json(EVENT_TASK_EDIT_FORBIDDEN_BODY);
+  const { id, taskId } = req.params;
+  const event = events.find((e) => e.id === id);
+  if (!event) return res.status(404).json({ error: 'Event not found.' });
+  if (!requireSameAgency(req, res, event, 'events')) return;
+  if (!mayEditEventTaskWording(caller, event)) return res.status(403).json(EVENT_TASK_EDIT_FORBIDDEN_BODY);
+  const cachedTask = (Array.isArray(event.tasks) ? event.tasks : []).find((t: any) => t && t.id === taskId);
+  if (!cachedTask) return res.status(404).json({ error: 'Task not found in this event.' });
+
+  const body: any = req.body || {};
+  const titleGiven = body.title !== undefined;
+  const descriptionGiven = body.description !== undefined;
+  if (!titleGiven && !descriptionGiven) {
+    return res.status(400).json({ error: 'Nothing to change.', code: 'EVENT_TASK_EDIT_EMPTY' });
+  }
+  let nextTitle: string | undefined;
+  if (titleGiven) {
+    nextTitle = typeof body.title === 'string' ? body.title.trim() : '';
+    if (!nextTitle) return res.status(400).json({ error: 'Give the task a name.', code: 'EVENT_TASK_TITLE_REQUIRED' });
+    if (nextTitle.length > EVENT_TASK_TITLE_MAX) {
+      return res.status(400).json({ error: `Keep the task name under ${EVENT_TASK_TITLE_MAX} characters.`, code: 'EVENT_TASK_TITLE_TOO_LONG' });
+    }
+  }
+  let nextDescription: string | undefined;
+  if (descriptionGiven) {
+    if (body.description !== null && typeof body.description !== 'string') {
+      return res.status(400).json({ error: 'Task details must be text.', code: 'EVENT_TASK_DESCRIPTION_INVALID' });
+    }
+    nextDescription = typeof body.description === 'string' ? body.description.trim() : '';
+    if (nextDescription.length > EVENT_TASK_DESCRIPTION_MAX) {
+      return res.status(400).json({ error: `Keep the task details under ${EVENT_TASK_DESCRIPTION_MAX} characters.`, code: 'EVENT_TASK_DESCRIPTION_TOO_LONG' });
+    }
+  }
+  // Baseline: the wording as this server last saw it (the caller edited it).
+  const words = (v: unknown) => (typeof v === 'string' ? v : '');
+  const baseTitle = words(cachedTask.title);
+  const baseDescription = words(cachedTask.description);
+  const updatedAt = new Date().toISOString();
+
+  const committed = await commitOrRespond(
+    req, res,
+    (freshDoc) => {
+      const freshEvents: any[] = Array.isArray(freshDoc.events) ? freshDoc.events : [];
+      const freshEvent = freshEvents.find((e) => e && e.id === id);
+      if (!freshEvent) return { conflict: 'Event not found (it may have been deleted).' };
+      const freshCaller = freshEventManager(freshDoc, (caller as any).id, (caller as any).agencyId || 'agency-hkc');
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      if (!freshCaller || !mayEditEventTaskWording(freshCaller, freshEvent, freshVenues)) {
+        return { conflict: EVENT_TASK_EDIT_FORBIDDEN_BODY.error, conflictStatus: 403, conflictCode: EVENT_TASK_EDIT_FORBIDDEN_BODY.code };
+      }
+      const freshTasks: any[] = Array.isArray(freshEvent.tasks) ? freshEvent.tasks : [];
+      const freshTask = freshTasks.find((t) => t && t.id === taskId);
+      if (!freshTask) return { conflict: 'Task not found in this event (it may have been removed).' };
+      if ((nextTitle !== undefined && words(freshTask.title) !== baseTitle) ||
+          (nextDescription !== undefined && words(freshTask.description) !== baseDescription)) {
+        return { conflict: 'Conflict: this event task was changed by someone else. Please refresh and try again.' };
+      }
+      const updatedTask = {
+        ...freshTask,
+        ...(nextTitle !== undefined ? { title: nextTitle } : {}),
+        ...(nextDescription !== undefined ? { description: nextDescription } : {}),
+      };
+      const updatedEvent = {
+        ...freshEvent,
+        tasks: freshTasks.map((t) => (t && t.id === taskId ? updatedTask : t)),
+        updatedAt,
+      };
+      const newEvents = freshEvents.map((e) => (e && e.id === id ? updatedEvent : e));
+      return { doc: { ...freshDoc, events: newEvents }, result: { event: updatedEvent, task: updatedTask } };
+    },
+    // Like the toggle: the task's own baseline is the stale guard; a
+    // document-version gate would refuse an edit whenever anything else in
+    // the agency changed.
+    { label: 'edit-event-task' }
+  );
+  if (!committed) return;
+  const { event: updatedEvent, task: updatedTask } = committed.result as any;
+  broadcastEventUpdated(event, updatedEvent, caller.email);
   res.json({ success: true, event: updatedEvent, task: updatedTask });
 });
 
