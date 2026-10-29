@@ -16,7 +16,7 @@
  */
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { mentionQueryAt, applyMention, filterTeam, joinNames, privateNotice, seenLabel, splitMentions } from '../../src/lib/mentions.ts';
+import { mentionQueryAt, applyMention, filterTeam, joinNames, privateNotice, seenLabel, splitMentions, removeTagText } from '../../src/lib/mentions.ts';
 import { HandoffNotes } from '../../src/components/HandoffNotes.tsx';
 import { mount, recordFetch } from './lib/mini-render.mjs';
 import { setSessionToken } from '../../src/lib/api.ts';
@@ -71,6 +71,10 @@ ok('S6 split keeps all text', sp.map((p) => p.text).join('') === '@Moshe Cohen t
 ok('S7 untagged @name stays plain', splitMentions('@Rivka hi', ['Moshe'], false).every((p) => !p.mention));
 ok('S8 no partial-word tag', splitMentions('@Moshes', ['Moshe'], false).every((p) => !p.mention));
 
+ok('S9 removeTagText drops the tag and one space', removeTagText('@Moshe Gold keys here', 'Moshe Gold') === 'keys here');
+ok('S10 removeTagText keeps other text and email-like words', removeTagText('call a@Moshe Gold then @Moshe Gold now', 'Moshe Gold') === 'call a@Moshe Gold then now');
+ok('S11 removeTagText All', removeTagText('hi @All fridge', 'All') === 'hi fridge');
+ok('S12 removeTagText no match', removeTagText('hello', 'Moshe') === 'hello');
 // R
 const notes = [
   { id: 'n1', venueId: 'v1', authorEmail: 'a@x', authorName: 'Avi', content: '@Moshe Cohen keys in office', shift: 'Morning', createdAt: '2026-10-29T10:00:00.000Z', mentions: [{ id: 'u-moshe', name: 'Moshe Cohen' }], private: true },
@@ -125,6 +129,11 @@ await fm.type('type @ to tag', '@Mo');
 await fm.click((e) => e.props['data-mention-option'] === 'Moshe Gold');
 await fm.click((e) => e.props['data-private-toggle'] !== undefined);
 ok('F5 private draft is on before the switch', fm.text().includes('will see this'));
+await fm.click((e) => e.props['data-tag-chip'] === 'Moshe Gold');
+ok('F5b removing the chip removes "@Moshe Gold" from the text and turns Private off', fm.find((e) => e.type === 'textarea')[0].props.value === '' && !fm.text().includes('will see this'), fm.find((e) => e.type === 'textarea')[0].props.value);
+await fm.type('type @ to tag', '@Mo');
+await fm.click((e) => e.props['data-mention-option'] === 'Moshe Gold');
+await fm.click((e) => e.props['data-private-toggle'] !== undefined);
 await fm.render({ venueId: 'v2' });
 ok('F6 venue change drops tags and Private', fm.find((e) => e.props['data-tag-chip']).length === 0 && !fm.text().includes('will see this'));
 await fm.type('type @ to tag', '@ hello');

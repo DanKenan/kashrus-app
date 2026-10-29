@@ -732,11 +732,15 @@ export default function App() {
   // and an unsent draft is never cleared by it). Never on the kiosk.
   // TEAMNOTES: a tapped @mention push opens the Shift notes tab the same way
   // (?updates=notes&note=<id>).
-  const linkFrom = (q: URLSearchParams): { tab: 'alerts' | 'notes'; id: string } | null =>
+  // (RV2: the note's venue rides along, &venue=<id>; the app switches to it
+  // first when the person may select it, then opens the tab.)
+  type UpdatesLink = { tab: 'alerts' | 'notes'; id: string; venue?: string };
+  const linkFrom = (q: URLSearchParams): UpdatesLink | null =>
     q.get('updates') === 'alerts' ? { tab: 'alerts', id: q.get('alert') || '' }
-      : q.get('updates') === 'notes' ? { tab: 'notes', id: q.get('note') || '' }
+      : q.get('updates') === 'notes' ? { tab: 'notes', id: q.get('note') || '', venue: q.get('venue') || undefined }
         : null;
-  const [pendingAlertLink, setPendingAlertLink] = useState<{ tab: 'alerts' | 'notes'; id: string } | null>(() => {
+  const linkSwitchRef = useRef<string | null>(null);
+  const [pendingAlertLink, setPendingAlertLink] = useState<UpdatesLink | null>(() => {
     try {
       return linkFrom(new URLSearchParams(window.location.search));
     } catch { return null; }
@@ -757,6 +761,15 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (pendingAlertLink === null || !updatesCtx) return;
+    const linkVenue = pendingAlertLink.venue;
+    if (!isKiosk && linkVenue && linkVenue !== currentVenue?.id && currentUser &&
+        venues.some((v) => v.id === linkVenue) &&
+        (currentUser.role === 'admin' || eligibleVenues.some((v) => v.id === linkVenue))) {
+      // Switch once; this effect runs again when the new venue's context lands.
+      if (linkSwitchRef.current !== linkVenue) { linkSwitchRef.current = linkVenue; handleSelectVenue(linkVenue); }
+      return;
+    }
+    linkSwitchRef.current = null;
     if (!isKiosk) updates.setSheetOpen(true, pendingAlertLink.tab, pendingAlertLink.id || null);
     setPendingAlertLink(null);
     try {
@@ -764,6 +777,7 @@ export default function App() {
       u.searchParams.delete('updates');
       u.searchParams.delete('alert');
       u.searchParams.delete('note');
+      u.searchParams.delete('venue');
       window.history.replaceState(null, '', u.pathname + (u.search ? u.search : '') + u.hash);
     } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps

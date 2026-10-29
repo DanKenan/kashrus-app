@@ -223,6 +223,23 @@ export default {
       const gotIt = (c) => c.messages.some((m) => m.type === 'HANDOFF_NOTE' && JSON.stringify(m.payload).includes('PRIVATE-T94'));
       for (const k of ['mashA1b', 'coordA1', 'adminX']) if (!gotIt(socks[k])) throw new Error(`E socket reader ${k} did not get the private note`);
       for (const k of ['mashA1c', 'coordA2', 'ownerA1', 'mashA2', 'kiosk']) if (gotIt(socks[k])) throw new Error(`E socket non-reader ${k} received the private note`);
+      // RV2: a socket that connects AFTER the private note exists (INITIAL_STATE), staff + kiosk.
+      const late = { mashA1c: await connectWs(baseUrl, T.mashA1c), ownerA1: await connectWs(baseUrl, T.ownerA1), kiosk: await connectWs(baseUrl, await kioskLogin(baseUrl, id('mashA1b'), '9411'), true) };
+      await sleep(400);
+      for (const [k, c] of Object.entries(late)) {
+        if (JSON.stringify(c.messages).includes('PRIVATE-T94')) throw new Error(`E late socket ${k} (INITIAL_STATE etc.) carries the private note`);
+        c.ws.close();
+      }
+      // RV2: media attached to the private note follows the note's rule on download.
+      const seeded = await ctx.api('POST', '/api/__test__/media/seed-doc', { id: `media-t94-${ts}`, agencyId: AX, venueId: A1, state: 'COMMITTED', attachedTo: { entityType: 'handoff-note', entityId: privNote.id } });
+      if (seeded.status === 200) {
+        for (const k of ['mashA1c', 'ownerA1']) {
+          const md = await get(T[k], `/api/media/media-t94-${ts}/download`);
+          if (md.status !== 404) throw new Error(`E non-reader ${k} media download of a private note: ${md.status} (expected 404)`);
+        }
+        const mdB = await get(T.mashA1b, `/api/media/media-t94-${ts}/download`);
+        if (mdB.status === 404 || mdB.status === 403) throw new Error(`E tagged reader media download refused: ${mdB.status}`);
+      } else console.log(`  (media seed unavailable here: ${seeded.status})`);
       // F (part): marks + seen-by on the private note
       const mk = await fetch(`${baseUrl}/api/updates/seen`, { method: 'POST', headers: auth(T.mashA1c), body: JSON.stringify({ venueId: A1, noteIds: [privNote.id] }) });
       if (mk.status !== 200 || (await mk.json()).recorded !== 0) throw new Error('F a non-reader recorded a mark on a private note');
@@ -239,6 +256,11 @@ export default {
       const sp = await get(T.coordA1, `/api/handoff-notes/${privNote.id}/seen?venueId=${A1}`);
       if (sp.status !== 200 || !sp.body.seen.some((r) => r.name === 'Baruch Tagged')) throw new Error(`F coordinator private seen-by: ${JSON.stringify(sp.body)}`);
       if (sp.body.notYet.some((r) => r.name === 'Chaim Untagged')) throw new Error('F private seen-by lists a non-reader');
+      if (sp.body.total !== 1) throw new Error(`F private seen-by total must be the tagged people only (stable): ${sp.body.total}`);
+      await fetch(`${baseUrl}/api/updates/seen`, { method: 'POST', headers: auth(T.coordA1), body: JSON.stringify({ venueId: A1, noteIds: [privNote.id] }) });
+      const sp2 = await get(T.coordA1, `/api/handoff-notes/seen?venueId=${A1}`);
+      const r2 = sp2.body.counts.find((c) => c.id === privNote.id);
+      if (!r2 || r2.seen !== 1 || r2.total !== 1) throw new Error(`F a coordinator reading must not move the count: ${JSON.stringify(r2)}`);
       // delete (author): the delete event reaches readers only, stripped
       const dver = await ctx.getVersion();
       const del = await fetch(`${baseUrl}/api/handoff-notes/${privNote.id}?expectedVersion=${dver}`, { method: 'DELETE', headers: auth(T.mashA1) });
@@ -308,6 +330,25 @@ export default {
       const v2 = await ctx.getVersion();
       const dc = await fetch(`${baseUrl}/api/handoff-notes/${pv.id}?expectedVersion=${v2}`, { method: 'DELETE', headers: auth(T.coordA1) });
       if (dc.status !== 200) throw new Error(`G venue coordinator delete: ${dc.status}`);
+    }
+    // ---- H (RV2): tags and the author are re-checked on the FRESH document ----
+    {
+      const docUsers = (await ctx.getDoc()).users;
+      const moved = (uid) => docUsers.map((u) => (u && u.id === uid ? { ...u, venueId: A2 } : u));
+      // stored doc only: mashA1b moved to A2, the cache still has A1
+      let r = await ctx.api('POST', '/api/__test__/doc-set-users', { users: moved(id('mashA1b')) });
+      if (r.status !== 200) throw new Error(`H doc-set-users: ${r.status}`);
+      await clearPush();
+      const p1 = await post(T.mashA1, { venueId: A1, content: 'RACE-T94 tag', mentions: [id('mashA1b')], private: true });
+      const b1 = await p1.json();
+      if (p1.status !== 400 || b1.code !== 'MENTION_NOT_ON_TEAM') throw new Error(`H stale tag passed the commit: ${p1.status} ${JSON.stringify(b1)}`);
+      if ((await pushedTo()).length) throw new Error('H a refused note pushed someone');
+      r = await ctx.api('POST', '/api/__test__/doc-set-users', { users: moved(id('mashA1')) });
+      const p2 = await post(T.mashA1, { venueId: A1, content: 'RACE-T94 author' });
+      if (p2.status !== 403) throw new Error(`H author moved in the fresh doc still posted: ${p2.status}`);
+      await ctx.api('POST', '/api/__test__/doc-set-users', { users: docUsers });
+      const p3 = await post(T.mashA1, { venueId: A1, content: 'RACE-T94 ok', mentions: [id('mashA1b')] });
+      if (p3.status !== 200) throw new Error(`H restored roster: ${p3.status}`);
     }
     return 'tags push only the tagged; @All the venue team; private visible only to author/tagged/admins/coordinators on REST, socket, kiosk, push, delete; seen-by for the team';
   },

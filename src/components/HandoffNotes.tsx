@@ -1,9 +1,9 @@
 import { formatNoteTime, shiftForHour } from '../lib/dateText';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { MessageSquare, Trash2, Mic, Square, Play, Send, X, Lock, CheckCheck, AtSign } from 'lucide-react';
 import { apiWrite } from '../lib/api';
 import { HandoffNoteItem, MarkKind, NoteSeenCount, NoteSeenList, fetchNoteSeen, fetchNoteSeenCounts, fetchNoteTeam, useVisibleMarks } from '../lib/updates';
-import { TeamMember, applyMention, filterTeam, joinNames, mentionQueryAt, privateNotice, seenLabel, splitMentions } from '../lib/mentions';
+import { TeamMember, applyMention, filterTeam, joinNames, mentionQueryAt, privateNotice, removeTagText, seenLabel, splitMentions } from '../lib/mentions';
 
 // 5a — Shift notes as the Updates sheet's second tab body (was an
 // unrendered panel). The note box + mic are pinned at the bottom for
@@ -72,6 +72,15 @@ export function HandoffNotes({
   const [seenList, setSeenList] = useState<NoteSeenList | null>(null);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const seenReqRef = useRef(0);
+  const pendingCaretRef = useRef<{ text: string; caret: number } | null>(null);
+  useLayoutEffect(() => {
+    const p = pendingCaretRef.current;
+    if (!p) return;
+    pendingCaretRef.current = null;
+    const e = textRef.current;
+    if (!e || e.value !== p.text) return;
+    try { e.focus(); e.setSelectionRange(p.caret, p.caret); } catch { /* noop */ }
+  }, [content]);
 
   const listRef = useRef<HTMLDivElement | null>(null);
   // Mic lifecycle guards: nothing from an in-flight permission prompt, a
@@ -146,11 +155,9 @@ export function HandoffNotes({
     if (row.kind === 'all') setTagAll(true);
     else setTagged((t) => (t.some((x) => x.id === row.m.id) ? t : [...t, { id: row.m.id, name: row.m.name }]));
     setMentionQ(null);
-    const refocus = () => {
-      const e = textRef.current;
-      if (e) { e.focus(); try { e.setSelectionRange(next.caret, next.caret); } catch { /* noop */ } }
-    };
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(refocus); else refocus();
+    // The caret goes after the inserted tag in the SAME commit as the new text
+    // (layout effect below) — a later frame would move it under fast typing.
+    pendingCaretRef.current = { text: next.text, caret: next.caret };
   };
 
   const onComposerKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -529,7 +536,7 @@ export function HandoffNotes({
               onKeyDown={onComposerKey}
               onSelect={(e) => updateMentionQuery(e.currentTarget.value, e.currentTarget.selectionStart)}
               onBlur={() => setTimeout(() => { if (!disposedRef.current) setMentionQ(null); }, 150)}
-              placeholder="Note for the team… type @ to tag"
+              placeholder="Note… type @ to tag"
               aria-label="Note for the next shift"
               rows={1}
               className="flex-1 px-3 py-3 text-base rounded-lg bg-surface border border-line min-w-0 resize-none"
@@ -539,13 +546,13 @@ export function HandoffNotes({
           {(tagged.length > 0 || tagAll) && (
             <div className="flex flex-wrap gap-1.5" aria-label="Tagged">
               {tagAll && (
-                <button type="button" data-tag-chip="All" onClick={() => setTagAll(false)} aria-label="Remove All"
+                <button type="button" data-tag-chip="All" onClick={() => { setTagAll(false); setContent((c) => removeTagText(c, 'All')); }} aria-label="Remove All"
                   className="pressable inline-flex items-center gap-1 pl-2.5 pr-1.5 min-h-9 rounded-full bg-gold-wash text-gold-ink text-sm font-bold cursor-pointer">
                   @All <X className="w-3.5 h-3.5" />
                 </button>
               )}
               {tagged.map((t) => (
-                <button key={t.id} type="button" data-tag-chip={t.name} onClick={() => setTagged((list) => list.filter((x) => x.id !== t.id))} aria-label={`Remove ${t.name}`}
+                <button key={t.id} type="button" data-tag-chip={t.name} onClick={() => { setTagged((list) => list.filter((x) => x.id !== t.id)); setContent((c) => removeTagText(c, t.name)); }} aria-label={`Remove ${t.name}`}
                   className="pressable inline-flex items-center gap-1 pl-2.5 pr-1.5 min-h-9 rounded-full bg-gold-wash text-gold-ink text-sm font-bold cursor-pointer">
                   <span dir="auto">@{t.name}</span> <X className="w-3.5 h-3.5" />
                 </button>
@@ -567,7 +574,7 @@ export function HandoffNotes({
               </button>
             <span className="text-xs text-ink-faint" dir="auto">
               {canPrivate
-                ? (isPrivate ? 'On: only the tagged people, admins and coordinators' : 'Only the tagged people, admins and coordinators')
+                ? (isPrivate ? '' : 'Only the tagged people, admins and coordinators')
                 : tagAll ? '@All notes are for everyone' : 'Tag someone with @ to send privately'}
             </span>
           </div>

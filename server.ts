@@ -7868,6 +7868,15 @@ app.get('/api/media/:id/download', async (req, res) => {
         return;
       }
     }
+    // TEAMNOTES (RV2): media attached to a shift note follows the note's rule —
+    // a private note's media only for its readers; a missing note, non-admin: no.
+    if (mediaDoc?.attachedTo?.entityType === 'handoff-note') {
+      const n = handoffNotes.find((x) => x.id === mediaDoc.attachedTo.entityId);
+      if (user.role !== 'admin' ? !n || !noteVisibleTo(user, n, { kiosk: (req as any).kiosk === true }) : (!!n && !noteVisibleTo(user, n))) {
+        res.status(404).json({ error: 'Media not found.' });
+        return;
+      }
+    }
     const url = await media.getDownloadUrl(db, req.params.id);
     res.json({ downloadUrl: url });
   } catch (e: any) {
@@ -8441,6 +8450,29 @@ app.post('/api/handoff-notes', async (req, res) => {
       const arr: any[] = Array.isArray(freshDoc.handoffNotes) ? freshDoc.handoffNotes : [];
       const existing = arr.find((n) => n.id === noteId);
       if (existing) return { doc: freshDoc, result: existing };
+      // TEAMNOTES (RV2): the author's venue access and every tag are checked
+      // again on the FRESH document (a roster change between the cached check
+      // and this commit must not slip a stale tag or author through).
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const freshVenue = freshVenues.find((v: any) => v && v.id === venueId);
+      if (!freshVenue || (freshVenue.agencyId || 'agency-hkc') !== agencyId) {
+        return { conflict: 'This venue is no longer available.', conflictStatus: 403, conflictCode: 'VENUE_ACCESS' } as any;
+      }
+      const onFreshTeam = (row: any): boolean => {
+        if (!row || (row.agencyId || 'agency-hkc') !== agencyId) return false;
+        if (row.role === 'admin') return true;
+        const sc = venueScopeOf(normalizeStoredUser(row), freshVenues);
+        return sc !== 'agency' && sc.includes(venueId);
+      };
+      if ((req as any).kiosk !== true && !onFreshTeam(freshUsers.find((u: any) => u && u.id === caller.id))) {
+        return { conflict: 'You no longer have access to this venue.', conflictStatus: 403, conflictCode: 'VENUE_ACCESS' } as any;
+      }
+      for (const m of mentions) {
+        if (!onFreshTeam(freshUsers.find((u: any) => u && u.id === m.id))) {
+          return { conflict: 'You can only tag people on this venue\'s team.', conflictStatus: 400, conflictCode: 'MENTION_NOT_ON_TEAM' } as any;
+        }
+      }
       const note: HandoffNote = {
         id: noteId,
         agencyId,
@@ -8485,7 +8517,7 @@ app.post('/api/handoff-notes', async (req, res) => {
         : direct
           ? `💬 ${note.authorName} tagged you${venueName ? ` · ${venueName}` : ''}`
           : `💬 ${note.authorName} @All${venueName ? ` · ${venueName}` : ''}`;
-      sendPushToMember(u, title, preview, { type: 'shift-note', noteId: note.id, venueId: note.venueId, url: `/?updates=notes&note=${encodeURIComponent(note.id)}`, tag: `note-${note.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 70)}` });
+      sendPushToMember(u, title, preview, { type: 'shift-note', noteId: note.id, venueId: note.venueId, url: `/?updates=notes&note=${encodeURIComponent(note.id)}&venue=${encodeURIComponent(note.venueId)}`, tag: `note-${note.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 70)}` });
     }
   }
   res.json({ note: publicUpdate(note) });
@@ -8514,16 +8546,22 @@ function noteSeenRows(note: HandoffNote, marks: Map<string, UpdateReads>) {
   const readers = users.filter((u: any) =>
     (u.agencyId || 'agency-hkc') === agencyId && !noteAuthoredBy(note, u) && noteVisibleTo(u, note));
   const intended = (u: any) => named.has(u.id) || (!note.private && u.role !== 'admin' && personAtVenue(u, note.venueId));
+  // RV2 P3: a stable denominator — the count is over the people the note is
+  // FOR; anyone else who may read it (admins, a coordinator of a private
+  // note) is listed once they have seen it but never moves the count.
   const seen: { name: string; role: string; at: string }[] = [];
   const notYet: { name: string; role: string }[] = [];
+  let seenCount = 0; let total = 0;
   for (const u of readers) {
     const at = marks.get(u.id)?.n[note.id];
-    if (at) seen.push({ name: u.name, role: u.role, at });
-    else if (intended(u)) notYet.push({ name: u.name, role: u.role });
+    const forThem = intended(u);
+    if (forThem) total++;
+    if (at) { seen.push({ name: u.name, role: u.role, at }); if (forThem) seenCount++; }
+    else if (forThem) notYet.push({ name: u.name, role: u.role });
   }
   seen.sort((x, y) => x.at.localeCompare(y.at));
   notYet.sort((x, y) => x.name.localeCompare(y.name));
-  return { seen, notYet, total: seen.length + notYet.length };
+  return { seen, notYet, total, seenCount };
 }
 
 function noteReadersFor(notes: HandoffNote[]): UserProfile[] {
@@ -8546,7 +8584,7 @@ app.get('/api/handoff-notes/seen', async (req, res) => {
   try {
     const marks = await loadUpdateReadsMany(noteReadersFor(notes));
     res.set('Cache-Control', 'private, no-store');
-    res.json({ counts: notes.map((n) => { const r = noteSeenRows(n, marks); return { id: n.id, seen: r.seen.length, total: r.total }; }) });
+    res.json({ counts: notes.map((n) => { const r = noteSeenRows(n, marks); return { id: n.id, seen: r.seenCount, total: r.total }; }) });
   } catch (e: any) {
     console.warn(`[handoff-notes/seen] could not read marks: ${String(e?.message || e).slice(0, 120)}`);
     res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
@@ -8562,9 +8600,9 @@ app.get('/api/handoff-notes/:id/seen', async (req, res) => {
   if (!note) return res.status(404).json({ error: 'Not found.' });
   try {
     const marks = await loadUpdateReadsMany(noteReadersFor([note]));
-    const r = noteSeenRows(note, marks);
+    const { seen, notYet, total } = noteSeenRows(note, marks);
     res.set('Cache-Control', 'private, no-store');
-    res.json({ id: note.id, ...r });
+    res.json({ id: note.id, seen, notYet, total });
   } catch (e: any) {
     console.warn(`[handoff-notes/seen] could not read marks: ${String(e?.message || e).slice(0, 120)}`);
     res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
@@ -11112,6 +11150,8 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
       sha256: '0'.repeat(64),
       storagePath: `media/${agencyId}/${id}.jpg`,
       createdAt: new Date().toISOString(),
+      // TEAMNOTES test 94: an attachment target (test fixture only).
+      ...(req.body?.attachedTo && typeof req.body.attachedTo === 'object' ? { attachedTo: { entityType: String(req.body.attachedTo.entityType || ''), entityId: String(req.body.attachedTo.entityId || '') } } : {}),
     });
     res.json({ ok: true, id });
   });
