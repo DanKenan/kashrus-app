@@ -1,4 +1,4 @@
-import { apiFetch } from './api';
+import { apiFetch, sessionCredentialKey } from './api';
 /**
  * Web Push (phone notifications) — subscribe / unsubscribe this device.
  *
@@ -207,6 +207,18 @@ export async function setPushMode(mode: PushMode, userId?: string): Promise<bool
 export interface PushSetup { state: PushState; mode: PushMode | null }
 
 /**
+ * The person's own "Turn on" from the banner or the menu (review PARV3): the
+ * result plus the state to SHOW, confirmed by the server — after a failure a
+ * browser subscription the server does not hold is never shown as on.
+ */
+export async function turnOnPush(userEmail: string, userId: string): Promise<{ result: 'subscribed' | 'denied' | 'failed'; setup: PushSetup }> {
+  const result = await subscribeForPush(userEmail, 'all', userId);
+  if (result === 'subscribed') return { result, setup: { state: 'subscribed', mode: 'all' } };
+  if (result === 'denied') return { result, setup: { state: 'denied', mode: null } };
+  return { result, setup: await getPushSetup(userId) };
+}
+
+/**
  * PUSHALWAYS: run quietly when a person opens the app on a phone. Never asks
  * for permission. If the phone already allowed notifications but has no
  * subscription (it was turned off the old way, or the push service dropped
@@ -216,14 +228,18 @@ export interface PushSetup { state: PushState; mode: PushMode | null }
  * record), it is registered for them with their own last setting here, else
  * "Only when I'm tagged or assigned".
  */
-export async function syncPushQuietly(userEmail: string, userId: string): Promise<PushSetup> {
+export async function syncPushQuietly(userEmail: string, userId: string, isCurrent: () => boolean = () => true): Promise<PushSetup> {
   if (!pushSupported()) return { state: 'unsupported', mode: null };
   if (Notification.permission === 'denied') return { state: 'denied', mode: null };
   const g0 = explicitGen;
+  const cred0 = sessionCredentialKey();
   const tapInFlightAtStart = explicitPending > 0;
   // A tap since this sync started, or one still running when it started: the
   // tap's result is the truth and the quiet sync writes nothing (review PARV2).
-  const tapped = () => tapInFlightAtStart || explicitGen !== g0;
+  // The person it started for is no longer the one signed in here (sign-out,
+  // account switch: isCurrent() false): it writes nothing either — a write
+  // would go out under the NEW session's sign-in (review PARV3).
+  const tapped = () => tapInFlightAtStart || explicitGen !== g0 || !isCurrent() || sessionCredentialKey() !== cred0;
   try {
     const reg = await readyRegistration();
     if (!reg) return { state: Notification.permission === 'granted' ? 'granted' : 'default', mode: null };

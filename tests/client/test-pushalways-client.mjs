@@ -146,6 +146,51 @@ hold.resolve();
 await Promise.all([tap3, quiet3]);
 ok('R3 a quiet sync started after a tap writes nothing of its own', server.posts.length === nR3 + 1 && server.posts.at(-1).mode === 'all', JSON.stringify(server.posts.slice(nR3)));
 
+// F (review PARV3 F1): a failed Turn on with a browser subscription the server does not hold is never shown as on.
+browserSub = mkSub('https://push.example/dev1'); server.registered = false; server.failSubscribe = true; perm.value = 'granted';
+let to = await push.turnOnPush('f@x', 'u30');
+ok('F1 failed Turn on -> result failed, shown as not set up (Turn on offered again)', to.result === 'failed' && to.setup.state === 'granted' && to.setup.mode === null, JSON.stringify(to));
+server.failSubscribe = false;
+to = await push.turnOnPush('f@x', 'u30');
+ok('F2 retry works -> subscribed, all', to.result === 'subscribed' && to.setup.state === 'subscribed' && server.posts.at(-1).mode === 'all');
+// F3: the menu button itself (mini-render): not set up -> tap -> server refuses -> still "Off" with a retry hint, never "On".
+{
+  const { mount } = await import('./lib/mini-render.mjs');
+  const { PushNotificationToggle } = await import('../../src/components/PushNotificationToggle.tsx');
+  browserSub = mkSub('https://push.example/dev1'); server.registered = false; server.failSubscribe = true;
+  const vm = mount(PushNotificationToggle, { userEmail: 'g@x', userId: 'u31' });
+  await vm.render(); await new Promise((r) => setTimeout(r, 50)); await vm.render();
+  const btn = () => vm.find((e) => e.type === 'button' && e.props['data-push-toggle'])[0];
+  ok('F3a the button reads not set up (server has no record)', btn()?.props['data-push-toggle'] === 'off', btn()?.props['data-push-toggle']);
+  await btn().props.onClick(); await new Promise((r) => setTimeout(r, 50)); await vm.render();
+  ok('F3b after a refused Turn on it still reads not set up, never On', btn()?.props['data-push-toggle'] === 'off', btn()?.props['data-push-toggle']);
+  ok('F3c with a retry hint', /try again/.test(JSON.stringify(vm.tree?.() ?? vm.out ?? '')) || vm.html().includes('try again'));
+  server.failSubscribe = false;
+  await btn().props.onClick(); await new Promise((r) => setTimeout(r, 50)); await vm.render();
+  ok('F3d the retry turns it On', btn()?.props['data-push-toggle'] === 'on', btn()?.props['data-push-toggle']);
+}
+// A (review PARV3 F2): a quiet sync that started for A writes nothing once the session is B's.
+{
+  const api = await import('../../src/lib/api.ts');
+  api.setSessionToken('token-A');
+  browserSub = mkSub('https://push.example/dev1'); server.registered = false; store.set('shutfey_push_mode:uA', 'all');
+  const nA = server.posts.length;
+  const holdA = deferred(); server.hold = { '/api/push/status': holdA };
+  const qa = push.syncPushQuietly('a@x', 'uA');
+  await tick();
+  api.setSessionToken('token-B'); // A signed out, B signed in on this phone
+  holdA.resolve(); await qa;
+  ok('A1 A\'s paused quiet sync makes no write under B\'s session', server.posts.length === nA, JSON.stringify(server.posts.slice(nA)));
+  let live = true;
+  const holdB = deferred(); server.hold = { '/api/push/status': holdB };
+  const qb = push.syncPushQuietly('b@x', 'uB', () => live);
+  await tick(); live = false; holdB.resolve(); await qb;
+  ok('A2 a quiet sync whose screen is gone (isCurrent false) writes nothing', server.posts.length === nA);
+  const qb2 = await push.syncPushQuietly('b@x', 'uB');
+  ok('A3 B\'s own sync then sets B\'s own setting ("tagged", not A\'s "all")', qb2.mode === 'tagged' && server.posts.at(-1).mode === 'tagged');
+  api.setSessionToken(null);
+}
+
 // W (review PARV1 P3): no service worker ever becomes ready -> bounded, nothing hangs.
 Object.defineProperty(globalThis, 'navigator', { value: { serviceWorker: { ready: new Promise(() => {}) }, userAgent: 'x' }, configurable: true, writable: true });
 perm.value = 'granted';

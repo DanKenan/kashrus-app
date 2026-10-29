@@ -27,7 +27,7 @@ import { KioskTaskPanel } from './components/KioskTaskPanel';
 import { UpdatesBell } from './components/UpdatesBell';
 import { KioskPrivateNotice } from './components/KioskPrivateNotice';
 import { PushPrompt } from './components/PushPrompt';
-import { PUSH_CHANGED_EVENT, getPushSetup, getPushState, pushSupported, subscribeForPush, syncPushQuietly, type PushState } from './lib/push';
+import { PUSH_CHANGED_EVENT, getPushSetup, pushSupported, syncPushQuietly, turnOnPush as turnOnPushHere, type PushState } from './lib/push';
 import { pushPromptKind, pushPromptSnoozed, snoozePushPrompt } from './lib/pushPrompt';
 import { UpdatesSheet, announcementCanDelete } from './components/UpdatesSheet';
 import { UrgentBanner } from './components/UrgentBanner';
@@ -455,7 +455,7 @@ export default function App() {
     // Phones only (review PARV1): a desktop browser is never subscribed unasked.
     if (!pushUserId || isKiosk || !isPhoneLike()) return;
     let live = true;
-    void syncPushQuietly(pushUserEmail, pushUserId).then((r) => { if (live) setPushSetup({ forUser: pushUserId, state: r.state }); });
+    void syncPushQuietly(pushUserEmail, pushUserId, () => live).then((r) => { if (live) setPushSetup({ forUser: pushUserId, state: r.state }); });
     const onChange = () => { void getPushSetup(pushUserId).then((r) => { if (live) setPushSetup({ forUser: pushUserId, state: r.state }); }); };
     window.addEventListener(PUSH_CHANGED_EVENT, onChange);
     return () => { live = false; window.removeEventListener(PUSH_CHANGED_EVENT, onChange); };
@@ -480,9 +480,10 @@ export default function App() {
   const turnOnPush = async () => {
     if (pushBusy || !pushUserId) return;
     setPushBusy(true);
-    const r = await subscribeForPush(pushUserEmail, 'all', pushUserId);
+    const uid = pushUserId;
+    const { setup } = await turnOnPushHere(pushUserEmail, uid);
     setPushBusy(false);
-    setPushSetup({ forUser: pushUserId, state: r === 'subscribed' ? 'subscribed' : r === 'denied' ? 'denied' : await getPushState() });
+    setPushSetup({ forUser: uid, state: setup.state }); // server-confirmed (review PARV3)
   };
   // 10g: the agencies under this login (several = "Switch agency" in the menu).
   // Read for the signed-in phone session, including a restored one; never on a kiosk.

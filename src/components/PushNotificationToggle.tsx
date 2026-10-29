@@ -7,6 +7,7 @@ import {
   pushSupported,
   setPushMode,
   subscribeForPush,
+  turnOnPush,
   type PushMode,
   type PushState,
 } from '../lib/push';
@@ -54,17 +55,14 @@ export const PushNotificationToggle: React.FC<{ userEmail: string; userId?: stri
       if (await setPushMode(next, userId)) setMode(next);
       else setHint('Could not change it — try again.');
     } else {
-      const result = await subscribeForPush(userEmail, 'all', userId);
-      if (result === 'subscribed') {
-        setState('subscribed');
-        setMode('all');
-      } else if (result === 'denied') {
-        setState('denied');
-        setHint('Notifications are blocked — allow them in your browser settings.');
-      } else {
-        setState(await getPushState());
-        setHint('Could not enable — on iPhone, install the app to your Home Screen first.');
-      }
+      // Server-confirmed after a failure (review PARV3): never "On" unless the server holds this phone.
+      const { result, setup } = userId
+        ? await turnOnPush(userEmail, userId)
+        : await subscribeForPush(userEmail, 'all').then(async (r) => ({ result: r, setup: { state: r === 'subscribed' ? 'subscribed' as PushState : r === 'denied' ? 'denied' as PushState : 'default' as PushState, mode: r === 'subscribed' ? 'all' as PushMode : null } }));
+      setState(setup.state);
+      setMode(setup.state === 'subscribed' ? setup.mode ?? 'all' : null);
+      if (result === 'denied') setHint('Notifications are blocked — allow them in your browser settings.');
+      else if (result === 'failed') setHint('Could not turn on notifications — try again.');
     }
     setBusy(false);
   };
