@@ -2,9 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { Bell, BellOff } from 'lucide-react';
 import {
   PUSH_CHANGED_EVENT,
+  getPushSetup,
   getPushState,
   pushSupported,
-  rememberedPushMode,
   setPushMode,
   subscribeForPush,
   type PushMode,
@@ -29,11 +29,13 @@ export const PushNotificationToggle: React.FC<{ userEmail: string; userId?: stri
 
   useEffect(() => {
     let live = true;
+    // Server-confirmed (review PARV1): "On"/"Off" only when the server holds this phone for this person.
     const read = () => {
-      getPushState().then((s) => {
+      const p = userId ? getPushSetup(userId) : getPushState().then((s) => ({ state: s, mode: s === 'subscribed' ? ('all' as PushMode) : null }));
+      void p.then((r) => {
         if (!live) return;
-        setState(s);
-        setMode(s === 'subscribed' ? (userId ? rememberedPushMode(userId) : null) ?? 'all' : null);
+        setState(r.state);
+        setMode(r.state === 'subscribed' ? r.mode ?? 'all' : null);
       });
     };
     read();

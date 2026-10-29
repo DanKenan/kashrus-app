@@ -27,7 +27,7 @@ import { KioskTaskPanel } from './components/KioskTaskPanel';
 import { UpdatesBell } from './components/UpdatesBell';
 import { KioskPrivateNotice } from './components/KioskPrivateNotice';
 import { PushPrompt } from './components/PushPrompt';
-import { PUSH_CHANGED_EVENT, getPushState, pushSupported, subscribeForPush, syncPushQuietly, type PushState } from './lib/push';
+import { PUSH_CHANGED_EVENT, getPushSetup, getPushState, pushSupported, subscribeForPush, syncPushQuietly, type PushState } from './lib/push';
 import { pushPromptKind, pushPromptSnoozed, snoozePushPrompt } from './lib/pushPrompt';
 import { UpdatesSheet, announcementCanDelete } from './components/UpdatesSheet';
 import { UrgentBanner } from './components/UrgentBanner';
@@ -452,10 +452,11 @@ export default function App() {
   const pushUserId = currentUser?.id || '';
   const pushUserEmail = currentUser?.email || '';
   useEffect(() => {
-    if (!pushUserId || isKiosk) return;
+    // Phones only (review PARV1): a desktop browser is never subscribed unasked.
+    if (!pushUserId || isKiosk || !isPhoneLike()) return;
     let live = true;
     void syncPushQuietly(pushUserEmail, pushUserId).then((r) => { if (live) setPushSetup({ forUser: pushUserId, state: r.state }); });
-    const onChange = () => { void getPushState().then((s) => { if (live) setPushSetup({ forUser: pushUserId, state: s }); }); };
+    const onChange = () => { void getPushSetup(pushUserId).then((r) => { if (live) setPushSetup({ forUser: pushUserId, state: r.state }); }); };
     window.addEventListener(PUSH_CHANGED_EVENT, onChange);
     return () => { live = false; window.removeEventListener(PUSH_CHANGED_EVENT, onChange); };
   }, [pushUserId, pushUserEmail, isKiosk]);

@@ -57,13 +57,43 @@ export async function getPushState(): Promise<PushState> {
   if (!pushSupported()) return 'unsupported';
   if (Notification.permission === 'denied') return 'denied';
   try {
-    const reg = await navigator.serviceWorker.ready;
-    const sub = await reg.pushManager.getSubscription();
+    const reg = await readyRegistration();
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
     if (sub) return 'subscribed';
   } catch {
     return 'default';
   }
   return Notification.permission === 'granted' ? 'granted' : 'default';
+}
+
+/**
+ * PUSHALWAYS (review PARV1): the state the menu and banner show, confirmed by
+ * the server. A browser subscription the server does not hold for this person
+ * is NOT shown as on (nothing would reach them): it reads as 'granted' (not
+ * set up), so the banner/button offer Turn on, which registers it again.
+ * If the server cannot be asked, the browser's own state stands.
+ */
+export async function getPushSetup(userId: string): Promise<PushSetup> {
+  const state = await getPushState();
+  if (state !== 'subscribed') return { state, mode: null };
+  try {
+    const reg = await readyRegistration();
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (!sub) return { state: await getPushState(), mode: null };
+    const st = await apiFetch('/api/push/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: sub.endpoint }),
+    });
+    if (!st.ok) return { state: 'subscribed', mode: rememberedPushMode(userId) ?? 'all' };
+    const d = await st.json();
+    if (!d.registered) return { state: 'granted', mode: null };
+    const mode: PushMode = d.mode === 'tagged' ? 'tagged' : 'all';
+    rememberPushMode(userId, mode);
+    return { state: 'subscribed', mode };
+  } catch {
+    return { state: 'subscribed', mode: rememberedPushMode(userId) ?? 'all' };
+  }
 }
 
 export async function subscribeForPush(
@@ -78,7 +108,8 @@ export async function subscribeForPush(
     const keyRes = await apiFetch('/api/push/public-key');
     if (!keyRes.ok) return 'failed';
     const { publicKey } = await keyRes.json();
-    const reg = await navigator.serviceWorker.ready;
+    const reg = await readyRegistration();
+    if (!reg) return 'failed';
     const sub = await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(publicKey),
@@ -149,7 +180,9 @@ export interface PushSetup { state: PushState; mode: PushMode | null }
  * subscription (it was turned off the old way, or the push service dropped
  * it), it subscribes again — with the setting this phone last had, else
  * "Only when I'm tagged or assigned". If the phone is subscribed but the
- * server lost it for this person, it is registered again (setting kept).
+ * server has no record of it for this person (a shared phone, or a lost
+ * record), it is registered for them with their own last setting here, else
+ * "Only when I'm tagged or assigned".
  */
 export async function syncPushQuietly(userEmail: string, userId: string): Promise<PushSetup> {
   if (!pushSupported()) return { state: 'unsupported', mode: null };
@@ -176,14 +209,20 @@ export async function syncPushQuietly(userEmail: string, userId: string): Promis
       if (rememberedPushMode(userId) !== mode) { rememberPushMode(userId, mode); announce(); }
       return { state: 'subscribed', mode };
     }
-    const mode = rememberedPushMode(userId) ?? 'all';
+    // The server has no record of this phone for THIS person: the endpoint
+    // belongs to another account on a shared phone, or the record was lost.
+    // Never everything unasked (review PARV1): their own last setting on this
+    // phone, else "Only when tagged or assigned".
+    const mode = rememberedPushMode(userId) ?? 'tagged';
     const re = await apiFetch('/api/push/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userEmail, subscription: sub.toJSON(), mode }),
     });
-    if (re.ok) rememberPushMode(userId, mode);
-    return { state: 'subscribed', mode: re.ok ? mode : null };
+    if (!re.ok) return { state: 'granted', mode: null }; // not registered: offer Turn on, never show On
+    rememberPushMode(userId, mode);
+    announce();
+    return { state: 'subscribed', mode };
   } catch {
     return { state: Notification.permission === 'granted' ? 'granted' : 'default', mode: null };
   }

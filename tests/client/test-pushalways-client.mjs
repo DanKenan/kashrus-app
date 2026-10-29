@@ -24,7 +24,7 @@ globalThis.fetch = async (url, init = {}) => {
   const res = (status, j) => ({ ok: status < 300, status, json: async () => j, text: async () => JSON.stringify(j), headers: new Headers() });
   if (u.endsWith('/api/push/public-key')) return res(200, { publicKey: 'AAAA' });
   if (u.endsWith('/api/push/status')) return res(200, { registered: server.registered, mode: server.mode });
-  if (u.endsWith('/api/push/subscribe')) { server.posts.push(body); server.registered = true; if (body.mode) server.mode = body.mode; return res(200, { success: true, mode: server.mode }); }
+  if (u.endsWith('/api/push/subscribe')) { if (server.failSubscribe) return res(500, { error: 'x' }); server.posts.push(body); server.registered = true; if (body.mode) server.mode = body.mode; return res(200, { success: true, mode: server.mode }); }
   return res(404, {});
 };
 
@@ -78,6 +78,22 @@ ok('Q4b announces the change to the button', events.includes(push.PUSH_CHANGED_E
 server.registered = false; const nPosts = server.posts.length;
 r = await push.syncPushQuietly('a@x', 'u1');
 ok('Q5 the server lost this phone: registered again with its setting', r.state === 'subscribed' && server.posts.length === nPosts + 1 && server.posts.at(-1).mode === 'all' && subscribeCalls === 1);
+// Q5b (review PARV1): a shared phone — the browser subscription belongs to another account here; B has no setting on this phone.
+server.registered = false;
+r = await push.syncPushQuietly('c@x', 'u7');
+ok('Q5b another account\'s subscription is registered for this person as "tagged", never everything unasked', r.mode === 'tagged' && server.posts.at(-1).mode === 'tagged' && server.posts.at(-1).userEmail === 'c@x', JSON.stringify(server.posts.at(-1)));
+// Q5c: the server refuses the re-registration -> not shown as on.
+server.registered = false; server.failSubscribe = true;
+r = await push.syncPushQuietly('d@x', 'u8');
+ok('Q5c a failed re-registration reads as not set up (Turn on offered), never "subscribed"', r.state === 'granted' && r.mode === null, JSON.stringify(r));
+server.failSubscribe = false;
+// getPushSetup: the button's state is server-confirmed.
+server.registered = false;
+let g = await push.getPushSetup('u8');
+ok('G1 browser subscribed but the server has no record -> not set up', g.state === 'granted' && g.mode === null, JSON.stringify(g));
+server.registered = true; server.mode = 'tagged';
+g = await push.getPushSetup('u8');
+ok('G2 server holds it -> subscribed with the server\'s setting', g.state === 'subscribed' && g.mode === 'tagged', JSON.stringify(g));
 browserSub = null; store.delete('shutfey_push_mode:u9');
 r = await push.syncPushQuietly('b@x', 'u9');
 ok('Q6 a person with no remembered setting re-subscribes as "tagged" (never everything unasked)', r.mode === 'tagged' && server.posts.at(-1).mode === 'tagged');
@@ -91,6 +107,16 @@ perm.value = 'default'; perm.answer = 'denied';
 ok('S4 Turn on asks once; a no is "denied"', (await push.subscribeForPush('b@x', 'all', 'u9')) === 'denied' && perm.asked === 1);
 perm.value = 'default'; perm.answer = 'granted';
 ok('S5 Turn on -> subscribed with all', (await push.subscribeForPush('b@x', 'all', 'u9')) === 'subscribed' && server.posts.at(-1).mode === 'all');
+
+// W (review PARV1 P3): no service worker ever becomes ready -> bounded, nothing hangs.
+Object.defineProperty(globalThis, 'navigator', { value: { serviceWorker: { ready: new Promise(() => {}) }, userAgent: 'x' }, configurable: true, writable: true });
+perm.value = 'granted';
+let t0 = Date.now();
+const gs = await push.getPushState();
+ok('W1 getPushState settles without a service worker', gs === 'granted' && Date.now() - t0 < 9000, `${gs} ${Date.now() - t0}ms`);
+t0 = Date.now();
+const sf = await push.subscribeForPush('e@x', 'all', 'u10');
+ok('W2 Turn on settles as failed without a service worker', sf === 'failed' && Date.now() - t0 < 9000, `${sf} ${Date.now() - t0}ms`);
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
