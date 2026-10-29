@@ -89,11 +89,21 @@ export function HandoffNotes({
   const idsKey = items.map((n) => n.id).join(',');
   useVisibleMarks(listRef, active && !readOnly, idsKey, onMark);
 
+  // TEAMNOTES (RV1 P2): picker, tags, Private and seen-by belong to ONE venue —
+  // a venue change drops them at once (the draft text stays).
+  const tagVenueRef = useRef(venueId);
+  useEffect(() => {
+    if (tagVenueRef.current === venueId) return;
+    tagVenueRef.current = venueId;
+    setTeam([]); setTagged([]); setTagAll(false); setIsPrivate(false); setMentionQ(null);
+    setSeenCounts({}); setSeenOpen(null); setSeenList(null); seenReqRef.current += 1;
+  }, [venueId]);
+
   // TEAMNOTES: the venue team for the @ picker (not on the kiosk).
   useEffect(() => {
     if (!active || readOnly || !venueId) return;
     const ctl = new AbortController();
-    fetchNoteTeam(venueId, ctl.signal).then((t) => { if (!ctl.signal.aborted) setTeam(t); }).catch(() => {});
+    fetchNoteTeam(venueId, ctl.signal).then((t) => { if (!ctl.signal.aborted && tagVenueRef.current === venueId) setTeam(t); }).catch(() => {});
     return () => ctl.abort();
   }, [active, readOnly, venueId]);
 
@@ -136,10 +146,11 @@ export function HandoffNotes({
     if (row.kind === 'all') setTagAll(true);
     else setTagged((t) => (t.some((x) => x.id === row.m.id) ? t : [...t, { id: row.m.id, name: row.m.name }]));
     setMentionQ(null);
-    requestAnimationFrame(() => {
+    const refocus = () => {
       const e = textRef.current;
       if (e) { e.focus(); try { e.setSelectionRange(next.caret, next.caret); } catch { /* noop */ } }
-    });
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(refocus); else refocus();
   };
 
   const onComposerKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -243,6 +254,7 @@ export function HandoffNotes({
 
   const send = async () => {
     if (sending || (!content.trim() && !voiceNoteData)) return;
+    if (tagVenueRef.current !== venueId) return; // tags are re-made for the new venue first
     setSending(true);
     setErrorMsg(null);
     const result = await apiWrite('/api/handoff-notes', {

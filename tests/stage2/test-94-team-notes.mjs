@@ -97,7 +97,7 @@ export default {
     const people = {
       adminX: ['admin', AX, A1, 'Ada Admin'], coordA1: ['coordinator', AX, A1, 'Cora Coord'], coordA2: ['coordinator', AX, A2, 'Cal Coord'],
       mashA1: ['mashgiach', AX, A1, 'Moshe Author'], mashA1b: ['mashgiach', AX, A1, 'Baruch Tagged'], mashA1c: ['mashgiach', AX, A1, 'Chaim Untagged'],
-      ownerA1: ['owner', AX, A1, 'Ora Owner'], mashA2: ['mashgiach', AX, A2, 'Dov OtherVenue'], adminY: ['admin', AY, B1, 'Yael AdminY'],
+      ownerA1: ['owner', AX, A1, 'Ora Owner'], mashMov: ['mashgiach', AX, A1, 'Mo Mover'], mashA2: ['mashgiach', AX, A2, 'Dov OtherVenue'], adminY: ['admin', AY, B1, 'Yael AdminY'],
     };
     const id = (k) => U(k.toLowerCase());
     const inj = await ctx.api('POST', '/api/__test__/inject-fixture', {
@@ -167,7 +167,7 @@ export default {
       await clearPush();
       await created(await post(T.mashA1, { venueId: A1, content: '@All fridge is fixed', shift: 'Evening', mentionAll: true }), 'C');
       const who = (await pushedTo()).map((x) => x.who);
-      if (!sameSet(who, ['coordA1', 'mashA1b', 'mashA1c', 'ownerA1'])) throw new Error(`C @All push recipients ${JSON.stringify(who)}`);
+      if (!sameSet(who, ['coordA1', 'mashA1b', 'mashA1c', 'ownerA1', 'mashMov'])) throw new Error(`C @All push recipients ${JSON.stringify(who)}`);
       await clearPush();
       await created(await post(T.mashA1, { venueId: A1, content: 'no tags here', shift: 'Evening' }), 'C2');
       if ((await pushedTo()).length !== 0) throw new Error('C2 an untagged note pushed someone');
@@ -282,6 +282,32 @@ export default {
       if (o2.status !== 404) throw new Error(`F other venue via own venue: ${o2.status} (expected 404)`);
       const ks = await get(kTok, `/api/handoff-notes/seen?venueId=${A1}`, true);
       if (ks.status !== 403) throw new Error(`F kiosk seen-by: ${ks.status} (expected 403)`);
+    }
+    // ---- G (RV1): an author moved off the venue cannot delete; dashboard uses the note rule + public shape ----
+    {
+      const pv = await created(await post(T.mashMov, { venueId: A1, content: 'MOVER-PRIV-T94', mentions: [id('mashA1b')], private: true }), 'G1');
+      const pb = await created(await post(T.mashMov, { venueId: A1, content: 'MOVER-PUB-T94' }), 'G2');
+      const pushedPriv = (await pushedTo()).filter((x) => x.who === 'mashA1b').pop();
+      if (!pushedPriv || pushedPriv.body.includes('MOVER-PRIV-T94')) throw new Error(`G private push shows the private text: ${JSON.stringify(pushedPriv)}`);
+      const dash = await get(T.coordA1, '/api/admin/dashboard');
+      if (dash.status !== 200) throw new Error(`G dashboard: ${dash.status}`);
+      if (/"readBy"\s*:/.test(JSON.stringify(dash.body))) throw new Error('G dashboard leaked readBy');
+      if (!JSON.stringify(dash.body).includes('MOVER-PUB-T94')) throw new Error('G dashboard missing the A1 recent note for the A1 coordinator');
+      const dash2 = await get(T.coordA2, '/api/admin/dashboard');
+      if (JSON.stringify(dash2.body).includes('MOVER-')) throw new Error('G another venue coordinator sees A1 notes on the dashboard');
+      const ver = await ctx.getVersion();
+      const mv = await fetch(`${baseUrl}/api/users/${id('mashMov')}?expectedVersion=${ver}`, { method: 'PUT', headers: auth(T.adminX), body: JSON.stringify({ venueId: A2, expectedVersion: ver }) });
+      if (mv.status !== 200) throw new Error(`G move author to A2: ${mv.status} ${await mv.text()}`);
+      for (const n of [pv, pb]) {
+        const v = await ctx.getVersion();
+        const d = await fetch(`${baseUrl}/api/handoff-notes/${n.id}?expectedVersion=${v}`, { method: 'DELETE', headers: auth(T.mashMov) });
+        if (d.status !== 403) throw new Error(`G moved author deleted ${n.content}: ${d.status} (expected 403)`);
+      }
+      const l = await list(T.mashMov, '');
+      if (JSON.stringify(l.list).includes('MOVER-')) throw new Error('G moved author still reads the A1 notes');
+      const v2 = await ctx.getVersion();
+      const dc = await fetch(`${baseUrl}/api/handoff-notes/${pv.id}?expectedVersion=${v2}`, { method: 'DELETE', headers: auth(T.coordA1) });
+      if (dc.status !== 200) throw new Error(`G venue coordinator delete: ${dc.status}`);
     }
     return 'tags push only the tagged; @All the venue team; private visible only to author/tagged/admins/coordinators on REST, socket, kiosk, push, delete; seen-by for the team';
   },

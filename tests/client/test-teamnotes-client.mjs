@@ -9,12 +9,17 @@
  *  S  seenLabel; splitMentions bolds only real tags.
  *  R  HandoffNotes renders the private label on a private note, "Tagged you", tagged names, the composer
  *     with "type @ to tag" and the Private toggle (disabled with no tag); kiosk (readOnly) has no composer.
+ *  F  flow (mini-render): "@" opens the picker (@All + team minus me), picking a person makes a chip, Private
+ *     turns on, the banner names admins and coordinators, Send posts {mentions, private}; a venue change drops
+ *     the team, the tags and Private at once (RV1 P2) and a send then carries no stale tag.
  * Run: npx tsx tests/client/test-teamnotes-client.mjs
  */
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { mentionQueryAt, applyMention, filterTeam, joinNames, privateNotice, seenLabel, splitMentions } from '../../src/lib/mentions.ts';
 import { HandoffNotes } from '../../src/components/HandoffNotes.tsx';
+import { mount, recordFetch } from './lib/mini-render.mjs';
+import { setSessionToken } from '../../src/lib/api.ts';
 
 globalThis.document ??= { activeElement: null, addEventListener() {}, removeEventListener() {} };
 globalThis.window ??= { location: { origin: 'https://app.example', pathname: '/', hash: '' }, addEventListener() {}, removeEventListener() {}, dispatchEvent() {} };
@@ -85,6 +90,51 @@ const kiosk = renderToStaticMarkup(React.createElement(HandoffNotes, props({ rea
 ok('R9 kiosk: no composer, no toggle, no seen-by', !kiosk.includes('data-private-toggle') && !kiosk.includes('type @ to tag') && !kiosk.includes('data-seen-by'));
 const other = renderToStaticMarkup(React.createElement(HandoffNotes, props({ currentUserId: 'u-other', currentUserEmail: 'o@x' })));
 ok('R10 tagged-you only for @All when not tagged by name', (other.match(/data-tagged-you/g) || []).length === 1);
+
+// F
+const store = new Map();
+globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
+try { setSessionToken('t'); } catch {}
+const teams = { v1: [{ id: 'u-me', name: 'Rivka Levi', role: 'mashgiach' }, { id: 'u-moshe', name: 'Moshe Gold', role: 'mashgiach' }, { id: 'u-leah', name: 'Leah Katz', role: 'coordinator' }], v2: [{ id: 'u-me', name: 'Rivka Levi', role: 'mashgiach' }, { id: 'u-zev', name: 'Zev Adler', role: 'mashgiach' }] };
+const calls = recordFetch({
+  '/api/handoff-notes/team': (path) => ({ team: teams[new URLSearchParams(path.split('?')[1]).get('venueId')] || [] }),
+  '/api/handoff-notes/seen': { counts: [] },
+  'POST /api/handoff-notes': (path, body) => ({ note: { id: 'n9', venueId: body.venueId, authorEmail: 'r@x', authorName: 'Rivka Levi', content: body.content, shift: 'Morning', createdAt: '2026-10-29T10:00:00.000Z' } }),
+  '/api/health': { ok: true },
+});
+const posted = [];
+const fm = mount(HandoffNotes, props({ items: [], active: true, currentUserId: 'u-me', currentUserEmail: 'r@x', currentUserName: 'Rivka Levi', onPosted: (n) => posted.push(n) }));
+await fm.render();
+await fm.type('type @ to tag', '@');
+const optNames = fm.find((e) => e.props['data-mention-option']).map((e) => e.props['data-mention-option']);
+ok('F1 "@" opens the picker: @All first, team minus me', JSON.stringify(optNames) === JSON.stringify(['all', 'Moshe Gold', 'Leah Katz']), JSON.stringify(optNames));
+await fm.type('type @ to tag', '@Mo');
+await fm.click((e) => e.props['data-mention-option'] === 'Moshe Gold');
+ok('F2 the chip is made', fm.find((e) => e.props['data-tag-chip'] === 'Moshe Gold').length === 1);
+ok('F2b the text holds the tag', fm.find((e) => e.type === 'textarea')[0].props.value === '@Moshe Gold ');
+await fm.type('type @ to tag', '@Moshe Gold keys in the office');
+await fm.click((e) => e.props['data-private-toggle'] !== undefined);
+ok('F3 Private banner names admins and coordinators', fm.text().includes('Private: only Moshe Gold, admins and coordinators will see this'));
+ok('F3b the button says Send privately', fm.buttons().some((b) => b.label === 'Send privately'));
+await fm.click('Send privately');
+const post1 = calls.filter((c) => c[0] === 'POST' && c[1] === '/api/handoff-notes').pop();
+ok('F4 send carries the tag and private', post1 && JSON.stringify(post1[2].mentions) === JSON.stringify(['u-moshe']) && post1[2].private === true && post1[2].mentionAll === false, JSON.stringify(post1));
+ok('F4b composer is cleared after a send', fm.find((e) => e.props['data-tag-chip']).length === 0 && !fm.text().includes('will see this'));
+// venue switch with a private draft
+await fm.type('type @ to tag', '@Mo');
+await fm.click((e) => e.props['data-mention-option'] === 'Moshe Gold');
+await fm.click((e) => e.props['data-private-toggle'] !== undefined);
+ok('F5 private draft is on before the switch', fm.text().includes('will see this'));
+await fm.render({ venueId: 'v2' });
+ok('F6 venue change drops tags and Private', fm.find((e) => e.props['data-tag-chip']).length === 0 && !fm.text().includes('will see this'));
+await fm.type('type @ to tag', '@ hello');
+await fm.type('type @ to tag', '@');
+const opt2 = fm.find((e) => e.props['data-mention-option']).map((e) => e.props['data-mention-option']);
+ok('F7 the picker now shows the new venue team only', JSON.stringify(opt2) === JSON.stringify(['all', 'Zev Adler']), JSON.stringify(opt2));
+await fm.type('type @ to tag', 'plain note');
+await fm.click('Send note');
+const post2 = calls.filter((c) => c[0] === 'POST' && c[1] === '/api/handoff-notes').pop();
+ok('F8 a send after the switch carries no stale tag', post2 && post2[2].venueId === 'v2' && JSON.stringify(post2[2].mentions) === '[]' && post2[2].private === false, JSON.stringify(post2));
 
 console.log(`${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

@@ -8294,10 +8294,12 @@ app.get('/api/admin/dashboard', (req, res) => {
     });
 
     // Recent handoff notes (last 3)
+    // TEAMNOTES (RV1 P2): the one note rule + the public shape (no readBy).
     const recentNotes = handoffNotes
-      .filter((n) => n.venueId === venue.id)
+      .filter((n) => n.venueId === venue.id && noteVisibleTo(caller, n))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, 3);
+      .slice(0, 3)
+      .map(publicUpdate);
 
     // Mashgichim assigned to this venue (with phone numbers for tap-to-call).
     // D8s: `phone` is the real stored phoneNumber (K1), only through
@@ -8471,7 +8473,11 @@ app.post('/api/handoff-notes', async (req, res) => {
       (named.has(u.id) || (note.mentionAll === true && u.role !== 'admin')) &&
       !noteAuthoredBy(note, u) && noteVisibleTo(u, note));
     const venueName = String(venues.find((v: any) => v.id === note.venueId)?.name || '');
-    const preview = note.content ? note.content.slice(0, 100) : '🎤 Voice note';
+    // A private note's text stays off the lock screen (RV1 P3): the push says
+    // who and that it is private; the words are read in the app.
+    const preview = note.private
+      ? 'Private note. Open Shutfey to read it.'
+      : note.content ? note.content.slice(0, 100) : '🎤 Voice note';
     for (const u of recipients) {
       const direct = named.has(u.id);
       const title = note.private
@@ -8963,10 +8969,14 @@ app.delete('/api/handoff-notes/:id', async (req, res) => {
   if (!delCaller) {
     return res.status(401).json({ error: 'Sign in required. Please log in again.' });
   }
+  // TEAMNOTES (RV1 P1): every non-admin deletion needs CURRENT access to the
+  // note (noteVisibleTo: venue in scope; a private note's readers) — an author
+  // moved off the venue can no longer delete it.
   const mayDeleteNote =
     delCaller.role === 'admin' ||
-    (existing as any).authorEmail === delCaller.email ||
-    (delCaller.role === 'coordinator' && callerMaySeeVenue(delCaller, existing.venueId));
+    (noteVisibleTo(delCaller, existing) &&
+      (noteAuthoredBy(existing, delCaller) ||
+        (delCaller.role === 'coordinator' && callerMaySeeVenue(delCaller, existing.venueId))));
   if (!mayDeleteNote) {
     return res.status(403).json({ error: 'You can only delete your own notes.' });
   }
