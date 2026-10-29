@@ -59,6 +59,13 @@ interface HandoffNotesProps {
 }
 
 type RecordState = 'idle' | 'recording' | 'preview';
+interface NoteDraft {
+  content: string; shift: string; voiceNoteData: string;
+  tagged: { id: string; name: string }[]; tagAll: boolean; isPrivate: boolean;
+  replyId: string | null; rev: number;
+}
+const emptyDraft = (shift: string): NoteDraft => ({ content: '', shift, voiceNoteData: '', tagged: [], tagAll: false, isPrivate: false, replyId: null, rev: 0 });
+const draftSignature = (d: NoteDraft, state: RecordState) => [d.content, d.shift, d.voiceNoteData, d.tagged.map((t) => t.id).join(','), d.tagAll, d.isPrivate, d.replyId, state];
 
 export function HandoffNotes({
   items,
@@ -121,40 +128,55 @@ export function HandoffNotes({
 
   const listRef = useRef<HTMLDivElement | null>(null);
   // Mic lifecycle guards: nothing from an in-flight permission prompt, a
-  // recorder callback or a file read may set state after unmount or after
-  // the context moved on (the sheet unmounts on every context switch).
+  // recorder callback or a file read may escape its original venue/draft.
+  // Unmount invalidates all work; thread switches park completed media.
   const disposedRef = useRef(false);
   const recordSessionRef = useRef(0);
   const startedAtRef = useRef(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRefs = useRef(new Map<string, HTMLAudioElement>());
 
   const idsKey = `${threadId || 'main'}:` + items.map((n) => n.id).join(',');
   useVisibleMarks(listRef, active && !readOnly, idsKey, onMark);
 
-  // TEAMNOTES (RV1 P2): picker, tags, Private and seen-by belong to ONE venue —
-  // a venue change drops them at once (the draft text stays).
+  // Drafts live only in this sheet and venue. Each context retains its own
+  // revision, so a late send/recording can update only its original draft.
   const tagVenueRef = useRef(venueId);
-  // TEAMNOTES2 (RV4 P3, RV1 P2): the composer is ONE draft — venue, text,
-  // recording, tags, @All, Private. Any change bumps its revision (an edit
-  // that is later undone still counts), so a send that finishes clears the
-  // composer only when it still holds exactly the draft that was sent.
+  const venueEpochRef = useRef(0);
   const draftRevRef = useRef(0);
+  const draftsRef = useRef(new Map<string | null, NoteDraft>());
+  const draftContextRef = useRef<string | null>(null);
+  const voiceJobsRef = useRef(new Map<string | null, object>());
   const draftSigRef = useRef<unknown[] | null>(null);
-  const sig = [venueId, content, voiceNoteData, recordState, shift, tagged.map((t) => t.id).join(','), tagAll, isPrivate, replyId, threadId];
-  if (!draftSigRef.current || sig.some((v, i) => v !== draftSigRef.current![i])) {
+  const snapshot: NoteDraft = { content, shift, voiceNoteData, tagged, tagAll, isPrivate, replyId, rev: draftsRef.current.get(threadId)?.rev || 0 };
+  const sig = draftSignature(snapshot, recordState);
+  if (tagVenueRef.current === venueId) {
+    if (!draftSigRef.current || sig.some((v, i) => v !== draftSigRef.current![i])) snapshot.rev = ++draftRevRef.current;
     draftSigRef.current = sig;
-    draftRevRef.current += 1;
+    draftsRef.current.set(threadId, snapshot);
   }
+  const restoreDraft = (draft: NoteDraft) => {
+    const state = draft.voiceNoteData ? 'preview' : 'idle';
+    draftSigRef.current = draftSignature(draft, state);
+    setContent(draft.content); setShift(draft.shift); setVoiceNoteData(draft.voiceNoteData);
+    setTagged(draft.tagged); setTagAll(draft.tagAll); setIsPrivate(draft.isPrivate); setReplyId(draft.replyId);
+    setRecordState(state); setElapsed(0); setMentionQ(null); pendingCaretRef.current = null;
+  };
+  const touchDraft = (key: string | null) => {
+    const draft = draftsRef.current.get(key);
+    if (draft) draft.rev = ++draftRevRef.current;
+  };
   useEffect(() => {
     if (tagVenueRef.current === venueId) return;
-    tagVenueRef.current = venueId;
-    setReplyId(null); setThreadId(null);
-    setTeam([]); setTagged([]); setTagAll(false); setIsPrivate(false); setMentionQ(null);
-    setSeenCounts({}); setSeenOpen(null); setSeenList(null); seenReqRef.current += 1;
+    tagVenueRef.current = venueId; venueEpochRef.current += 1;
+    recordSessionRef.current += 1; stopTimer();
+    try { mediaRecorderRef.current?.stop(); } catch { /* already stopped */ }
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    draftsRef.current.clear(); voiceJobsRef.current.clear(); draftContextRef.current = null;
+    setThreadId(null); restoreDraft(emptyDraft(shift));
+    setTeam([]); setSeenCounts({}); setSeenOpen(null); setSeenList(null); seenReqRef.current += 1;
   }, [venueId]);
 
   // TEAMNOTES: the venue team for the @ picker (not on the kiosk).
@@ -255,38 +277,49 @@ export function HandoffNotes({
     // TEAMNOTES2 (RV2 P2): pressing the mic is a draft change at once — even
     // while the permission prompt is still open — so a send that finishes
     // meanwhile never clears the composer under a starting recording.
-    draftRevRef.current += 1;
+    const key = draftContextRef.current;
+    const epoch = venueEpochRef.current;
+    const job = {};
+    voiceJobsRef.current.set(key, job); touchDraft(key);
+    const validJob = () => !disposedRef.current && epoch === venueEpochRef.current && voiceJobsRef.current.get(key) === job && draftsRef.current.has(key);
     const session = ++recordSessionRef.current;
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
-      if (!disposedRef.current) setErrorMsg('Microphone is not available on this device.');
+      if (validJob() && draftContextRef.current === key) setErrorMsg('Microphone is not available on this device.');
+      if (voiceJobsRef.current.get(key) === job) voiceJobsRef.current.delete(key);
       return;
     }
     // The permission prompt can outlive the component (sheet closed, context
     // switched while it was open): a late stream is stopped on the spot and
     // never recorded from.
-    if (disposedRef.current || session !== recordSessionRef.current) {
+    if (!validJob() || session !== recordSessionRef.current) {
+      if (voiceJobsRef.current.get(key) === job) voiceJobsRef.current.delete(key);
       stream.getTracks().forEach((t) => t.stop());
       return;
     }
     streamRef.current = stream;
     const recorder = new MediaRecorder(stream);
-    chunksRef.current = [];
-    recorder.ondataavailable = (e) => chunksRef.current.push(e.data);
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => chunks.push(e.data);
+    const keepVoice = (data: string) => {
+      if (!validJob()) return;
+      const draft = draftsRef.current.get(key)!;
+      draftsRef.current.set(key, { ...draft, voiceNoteData: data, rev: ++draftRevRef.current });
+      voiceJobsRef.current.delete(key);
+      if (draftContextRef.current === key) {
+        setVoiceNoteData(data); setRecordState(data ? 'preview' : 'idle');
+      }
+    };
     recorder.onstop = () => {
       stream.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-      if (disposedRef.current || session !== recordSessionRef.current) return;
-      const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-      if (blob.size === 0) { setRecordState('idle'); return; }
+      if (mediaRecorderRef.current === recorder) { streamRef.current = null; mediaRecorderRef.current = null; stopTimer(); }
+      if (!validJob()) return;
+      const blob = new Blob(chunks, { type: 'audio/webm' });
+      if (blob.size === 0) { keepVoice(''); return; }
       const reader = new FileReader();
-      reader.onload = () => {
-        if (disposedRef.current || session !== recordSessionRef.current) return;
-        setVoiceNoteData(reader.result as string);
-        setRecordState('preview');
-      };
+      reader.onload = () => keepVoice(reader.result as string);
       reader.readAsDataURL(blob);
     };
     recorder.start();
@@ -309,6 +342,7 @@ export function HandoffNotes({
   };
 
   const discardRecording = () => {
+    voiceJobsRef.current.delete(draftContextRef.current); touchDraft(draftContextRef.current);
     setVoiceNoteData('');
     setRecordState('idle');
     setElapsed(0);
@@ -319,7 +353,7 @@ export function HandoffNotes({
     if (tagVenueRef.current !== venueId) return; // tags are re-made for the new venue first
     setSending(true);
     setErrorMsg(null);
-    const sent = { venueId, rev: draftRevRef.current };
+    const sent = { venueId, epoch: venueEpochRef.current, key: threadId, rev: draftsRef.current.get(threadId)!.rev };
     const result = await apiWrite('/api/handoff-notes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -339,7 +373,7 @@ export function HandoffNotes({
     setSending(false);
     // TEAMNOTES2 (RV4 P3): the venue changed while this was in flight — the
     // composer now belongs to the new venue and is never touched.
-    const venueMoved = tagVenueRef.current !== sent.venueId;
+    const venueMoved = tagVenueRef.current !== sent.venueId || venueEpochRef.current !== sent.epoch;
     if (!result.ok) {
       if (venueMoved) { setErrorMsg('Your last note was not sent. Check it and send again.'); return; }
       // Keep the text, the recording, the tags and Private so nothing is lost (plan Q5).
@@ -350,17 +384,15 @@ export function HandoffNotes({
       return;
     }
     if (result.data?.note) onPosted(result.data.note);
-    // Clear only the draft that was sent: same venue AND not one change since
-    // (and never under a live recording: its Stop control must stay).
-    if (venueMoved || draftRevRef.current !== sent.rev) return;
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') return;
-    setContent('');
-    setReplyId(null);
-    setTagged([]);
-    setTagAll(false);
-    setIsPrivate(false);
-    setMentionQ(null);
-    discardRecording();
+    // Clear only an unchanged draft in the original venue/context, including
+    // when it is parked while another draft is on screen.
+    const draft = draftsRef.current.get(sent.key);
+    if (venueMoved || !draft || draft.rev !== sent.rev) return;
+    if (voiceJobsRef.current.has(sent.key)) return;
+    const cleared = { ...emptyDraft(draft.shift), rev: ++draftRevRef.current };
+    draftsRef.current.set(sent.key, cleared);
+    voiceJobsRef.current.delete(sent.key);
+    if (draftContextRef.current === sent.key) restoreDraft(cleared);
   };
 
   const remove = async (id: string) => {
@@ -383,18 +415,20 @@ export function HandoffNotes({
   };
 
   const changeThread = (id: string | null) => {
-    draftRevRef.current += 1;
-    setThreadId(id); setReplyId(null); setTagged([]); setTagAll(false); setIsPrivate(false); setMentionQ(null);
-    setContent(''); discardRecording();
+    // Save the current snapshot (already tracked on render), stop its live
+    // recording, and let that recorder's callback finish into its own draft.
     recordSessionRef.current += 1; stopTimer();
     try { mediaRecorderRef.current?.stop(); } catch { /* already stopped */ }
     streamRef.current?.getTracks().forEach((t) => t.stop());
+    draftContextRef.current = id; setThreadId(id);
+    restoreDraft(draftsRef.current.get(id) || emptyDraft(shift));
+    setErrorMsg(null);
     audioRefs.current.forEach((a) => a.pause());
   };
   const startReply = (note: HandoffNoteItem) => {
     if (readOnly || note.deleted) return;
     if ((note.private || note.threadId) && !thread) return;
-    draftRevRef.current += 1; setReplyId(note.id); textRef.current?.focus();
+    touchDraft(threadId); setReplyId(note.id); textRef.current?.focus();
   };
   const jump = (id: string) => {
     const target = items.find((n) => n.id === id);
@@ -414,8 +448,13 @@ export function HandoffNotes({
     return () => clearTimeout(timer);
   }, [highlightId, threadId]);
   useEffect(() => {
-    if (!loading && threadId && !thread) changeThread(null);
-  }, [loading, threadId, !!thread]);
+    if (loading) return;
+    const roots = new Set(groups.filter((g) => g.kind === 'thread').map((g) => g.root.id));
+    for (const key of draftsRef.current.keys()) if (key !== null && !roots.has(key)) {
+      draftsRef.current.delete(key); voiceJobsRef.current.delete(key);
+    }
+    if (threadId && !thread) changeThread(null);
+  }, [loading, idsKey, !!thread]);
   const [linkRevision, setLinkRevision] = useState(0);
   useEffect(() => {
     const changed = () => setLinkRevision((n) => n + 1);
@@ -475,7 +514,7 @@ export function HandoffNotes({
               const taggedMe = root.authorEmail !== currentUserEmail && (root.mentions || []).some((m) => m.id === currentUserId);
               return <article key={root.id} data-thread-card data-note-private="1" className="p-3 rounded-xl border border-line-control bg-gold-wash text-gold-ink">
                 <button type="button" onClick={() => changeThread(root.id)} className="pressable w-full min-h-11 text-left space-y-1">
-                  <span className="flex items-center gap-2 text-base font-semibold"><Lock className="w-5 h-5 shrink-0" />Private conversation · {memberNames.join(', ')}{unread && <span className="w-2 h-2 rounded-full bg-gold shrink-0" aria-label="Unread" />}</span>
+                  <span className="flex items-center gap-2 text-base font-semibold"><Lock className="w-5 h-5 shrink-0" />Private conversation · {memberNames.join(', ')}{unread && <span className="inline-flex items-center gap-1 text-xs font-bold text-gold-deep" aria-label="Unread"><span className="w-2 h-2 rounded-full bg-gold shrink-0" />New</span>}</span>
                   {taggedMe && <span data-tagged-you className="inline-flex items-center gap-0.5 text-xs font-bold px-2 py-0.5 rounded-full bg-gold text-paper">
                     <AtSign className="w-3 h-3" /> Tagged you
                   </span>}
@@ -521,15 +560,6 @@ export function HandoffNotes({
                   <span className="block text-xs text-ink-soft truncate">{note.replyTo.authorName}</span><span className="block text-sm truncate">{quoteLine(quote(note))}</span>
                 </button>}
                 {note.deleted && <p className="text-base text-ink-soft italic">Message deleted</p>}
-                {note.private && (
-                  <p
-                    data-private-label
-                    className="flex items-center gap-1.5 -mx-1 mb-2 px-2 py-1.5 rounded-lg text-sm font-bold bg-gold-wash text-gold-ink"
-                  >
-                    <Lock className="w-4 h-4 shrink-0" />
-                    <span dir="auto">{privateNotice(tagNames, 'posted')}</span>
-                  </p>
-                )}
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-gold-wash text-gold-ink">
@@ -664,7 +694,7 @@ export function HandoffNotes({
         <div className="border-t border-line bg-surface px-4 py-3 space-y-2.5 shrink-0">
           {reply && <div data-replying-to className="flex items-center gap-2 p-2 bg-sunken rounded-lg">
             <div className="min-w-0 flex-1"><p className="text-sm font-semibold">Replying to {reply.authorName}</p><p className="text-sm truncate">{quoteLine({ id: reply.id, authorName: reply.authorName, deleted: reply.deleted, text: reply.content || '🎤 Voice note' })}</p></div>
-            <button type="button" aria-label="Cancel reply" onClick={() => { draftRevRef.current += 1; setReplyId(null); }} className="pressable w-11 h-11 flex items-center justify-center"><X className="w-5 h-5" /></button>
+            <button type="button" aria-label="Cancel reply" onClick={() => { touchDraft(threadId); setReplyId(null); }} className="pressable w-11 h-11 flex items-center justify-center"><X className="w-5 h-5" /></button>
           </div>}
           {newNames.length > 0 && <p data-add-warning className="p-2 rounded-lg bg-gold-wash text-gold-ink text-sm">{addWarning(newNames)}</p>}
           {errorMsg && (
