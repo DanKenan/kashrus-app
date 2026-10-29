@@ -22,10 +22,15 @@
  *  D  the commit re-checks on FRESH data (stored doc changes, cache does not):
  *     a name someone else changed first -> 409; the caller lost "can assign
  *     tasks" or moved venue, or the event moved venue -> 403; nothing written
+ *  D0 (RV1 P2) the edit carries the wording the editor saw: an editor who
+ *     saw older wording gets 409 and the newer save stays; a field nobody else
+ *     changed still saves (merge); a field sent without its base -> 400
  *  E  the full-object save (PUT /api/events/:id) applies the same wording
  *     rule: a check-only mashgiach renaming or dropping a task -> 403 EVENT_TASK_EDIT_FORBIDDEN,
- *     nothing written; adding a task (today's behaviour) still works; the
- *     coordinator renaming through PUT still works
+ *     nothing written; (RV1 P1) a duplicate id carrying a renamed copy (first or
+ *     last) -> 403, a manager adding a duplicate id -> 400; a legacy id-less
+ *     task renamed or dropped -> 403; adding a task (today's behaviour) still
+ *     works; the coordinator renaming through PUT still works
  */
 const A = 'agency-test93-a';
 const B = 'agency-test93-b';
@@ -107,10 +112,20 @@ export default {
       let json = null; try { json = await res.json(); } catch {}
       return { status: res.status, json };
     };
-    const edit = (token, body, taskId = 'etask-t93-1', eventId = evId, extra) =>
-      call('PATCH', `/api/events/${eventId}/tasks/${taskId}`, token, body, extra);
     const storedEvent = async () => (await ctx.getDoc()).events.find((e) => e.id === evId);
     const taskOf = (ev, tid) => (ev.tasks || []).find((t) => t.id === tid);
+    // The client sends, with each changed field, the wording the editor saw
+    // (baseTitle / baseDescription). Unless a case sets them, they are the
+    // stored wording (an editor who saw the current task).
+    const edit = async (token, body, taskId = 'etask-t93-1', eventId = evId, extra, { noBase = false } = {}) => {
+      const b = { ...body };
+      if (!noBase) {
+        const cur = taskOf((await storedEvent()) || { tasks: [] }, taskId) || {};
+        if (b.title !== undefined && !('baseTitle' in b)) b.baseTitle = cur.title || '';
+        if (b.description !== undefined && !('baseDescription' in b)) b.baseDescription = cur.description || '';
+      }
+      return call('PATCH', `/api/events/${eventId}/tasks/${taskId}`, token, b, extra);
+    };
     const out = [];
 
     // ---- A: allowed --------------------------------------------------------------------------
@@ -194,6 +209,14 @@ export default {
       assert(r.status === st && r.json?.code === code, `C ${why}: ${st} ${code}, got ${r.status} ${r.json?.code}`);
       assert(JSON.stringify(await storedEvent()) === before, `C ${why}: nothing written`);
     }
+    {
+      const before = JSON.stringify(await storedEvent());
+      const nb = await edit(tok.coord, { title: 'no base' }, 'etask-t93-1', evId, undefined, { noBase: true });
+      const nd = await edit(tok.coord, { description: 'no base' }, 'etask-t93-1', evId, undefined, { noBase: true });
+      assert(nb.status === 400 && nb.json?.code === 'EVENT_TASK_EDIT_BASE_MISSING' && nd.status === 400 && nd.json?.code === 'EVENT_TASK_EDIT_BASE_MISSING',
+        `C a field without the wording the editor saw -> 400 (${nb.status}/${nd.status})`);
+      assert(JSON.stringify(await storedEvent()) === before, 'C no base: nothing written');
+    }
     assert((await edit(tok.coord, { title: 'x' }, 'etask-nope')).status === 404, 'C unknown task -> 404');
     assert((await edit(tok.coord, { title: 'x' }, 'etask-t93-1', `${evId}-nope`)).status === 404, 'C unknown event -> 404');
     const exact = await edit(tok.coord, { title: '  Check the fish  ', isCompleted: true, completedByName: 'Forged', notes: 'forged note' });
@@ -204,6 +227,23 @@ export default {
     t1 = taskOf(await storedEvent(), 'etask-t93-1');
     assert(donly.status === 200 && t1.title === 'Check the fish' && t1.description === 'scales and fins', 'C details only: name kept');
     out.push('C input');
+
+    // ---- D0 (RV1 P2): an editor who saw older wording never overwrites a newer save ----------
+    {
+      const seen = taskOf(await storedEvent(), 'etask-t93-1');
+      const b1 = await edit(tok.admin, { title: 'Inspect all fish' });          // B saves first
+      assert(b1.status === 200, `D0 first editor saves (${b1.status})`);
+      const a1 = await edit(tok.coord, { title: 'Check every fish', baseTitle: seen.title }); // A saw the old name
+      assert(a1.status === 409, `D0 stale editor -> 409, got ${a1.status}`);
+      assert(taskOf(await storedEvent(), 'etask-t93-1').title === 'Inspect all fish', 'D0 the newer save stays');
+      const a2 = await edit(tok.coord, { description: 'only the details', baseDescription: seen.description });
+      assert(a2.status === 200, `D0 a field nobody else changed still saves (${a2.status})`);
+      const t1d = taskOf(await storedEvent(), 'etask-t93-1');
+      assert(t1d.title === 'Inspect all fish' && t1d.description === 'only the details', 'D0 merge: the other person\'s name kept, my details saved');
+      const r = await edit(tok.coord, { title: 'Check the fish', description: 'scales and fins' });
+      assert(r.status === 200, 'D0 restore');
+      out.push('D0 stale editor 409');
+    }
 
     // ---- D: fresh data -----------------------------------------------------------------------
     const storedDoc = await ctx.getDoc();
@@ -216,7 +256,7 @@ export default {
     try {
       // someone else renamed it first (stored only)
       await setEvents(withEvent((e) => ({ ...e, tasks: e.tasks.map((t) => (t.id === 'etask-t93-1' ? { ...t, title: 'Renamed elsewhere' } : t)) })));
-      const r1 = await edit(tok.coord, { title: 'My rename' });
+      const r1 = await edit(tok.coord, { title: 'My rename', baseTitle: 'Check the fish' }); // the editor saw the old name
       dCodes.push(r1.status);
       assert(r1.status === 409, `D renamed elsewhere -> 409, got ${r1.status}`);
       assert(taskOf(await storedEvent(), 'etask-t93-1').title === 'Renamed elsewhere', 'D the other rename stays');
@@ -268,13 +308,42 @@ export default {
       assert(r.status === 403 && r.json?.code === 'EVENT_TASK_EDIT_FORBIDDEN', `E check-only ${why} via PUT -> 403, got ${r.status} ${r.json?.code}`);
       assert(JSON.stringify(await storedEvent()) === before, `E check-only ${why}: nothing written`);
     }
+    // RV1 P1: a duplicate id cannot carry a renamed copy past the gate.
+    {
+      const before = JSON.stringify(await storedEvent());
+      const dup = await put('mashfill', (ts2) => [{ ...ts2[0], title: 'Skip the fish check' }, ...ts2]);
+      assert(dup.status === 403 && dup.json?.code === 'EVENT_TASK_EDIT_FORBIDDEN', `E check-only duplicate-id rename via PUT -> 403, got ${dup.status} ${dup.json?.code}`);
+      const dupLast = await put('mashfill', (ts2) => [...ts2, { ...ts2[0], title: 'Skip the fish check' }]);
+      assert(dupLast.status === 403, `E check-only duplicate id (renamed copy last) -> 403, got ${dupLast.status}`);
+      const dupSame = await put('mashfill', (ts2) => [...ts2, { ...ts2[0] }]);
+      assert(dupSame.status === 403, `E check-only exact duplicate -> 403, got ${dupSame.status}`);
+      const dupC = await put('coord', (ts2) => [...ts2, { ...ts2[0] }]);
+      assert(dupC.status === 400 && dupC.json?.code === 'EVENT_TASKS_DUPLICATE_ID', `E coordinator adding a duplicate id -> 400, got ${dupC.status} ${dupC.json?.code}`);
+      assert(JSON.stringify(await storedEvent()) === before, 'E duplicates: nothing written');
+    }
     const add = await put('mashfill', (ts2) => [...ts2, { id: 'etask-t93-3', title: 'Added by the mashgiach', isCompleted: false }]);
     assert(add.status === 200 && taskOf(await storedEvent(), 'etask-t93-3')?.title === 'Added by the mashgiach', `E check-only can still ADD a task (${add.status})`);
     const cren = await put('coord', (ts2) => ts2.map((t) => (t.id === 'etask-t93-3' ? { ...t, title: 'Added (fixed by coordinator)' } : t)));
     assert(cren.status === 200 && taskOf(await storedEvent(), 'etask-t93-3')?.title === 'Added (fixed by coordinator)', `E coordinator renames via PUT (${cren.status})`);
     const aren = await put('mashassign', (ts2) => ts2.map((t) => (t.id === 'etask-t93-3' ? { ...t, title: 'Added (fixed again)' } : t)));
     assert(aren.status === 200, `E can-assign mashgiach renames via PUT (${aren.status})`);
-    out.push('E PUT same rule');
+    // A legacy task stored WITHOUT an id: its wording is matched one to one.
+    {
+      const storedEvents2 = (await ctx.getDoc()).events;
+      await ctx.api('POST', '/api/__test__/doc-set-events', { events: storedEvents2.map((e) => (e.id === evId ? { ...e, tasks: [...e.tasks, { title: 'Legacy task', description: '', isCompleted: false }] } : e)) });
+      // make the cache match the stored doc (a harmless allowed write re-hydrates it)
+      const sync = await call('POST', `/api/events/${evId}/tasks/etask-t93-1/toggle`, tok.coord, { isCompleted: false });
+      assert(sync.status === 200 && (await storedEvent()).tasks.some((x) => !x.id && x.title === 'Legacy task'), `E legacy fixture (${sync.status})`);
+      const before = JSON.stringify(await storedEvent());
+      const lr = await put('mashfill', (ts2) => ts2.map((x) => (!x.id ? { ...x, title: 'Legacy renamed' } : x)));
+      assert(lr.status === 403, `E check-only renaming an id-less legacy task -> 403, got ${lr.status}`);
+      const ld = await put('mashfill', (ts2) => ts2.filter((x) => !!x.id));
+      assert(ld.status === 403, `E check-only dropping an id-less legacy task -> 403, got ${ld.status}`);
+      assert(JSON.stringify(await storedEvent()) === before, 'E legacy: nothing written');
+      const lk = await put('mashfill', (ts2) => [...ts2, { id: 'etask-t93-4', title: 'Another add', isCompleted: false }]);
+      assert(lk.status === 200, `E with a legacy task stored, a check-only add still works (${lk.status})`);
+    }
+    out.push('E PUT same rule (+duplicates, legacy id-less)');
 
     return out.join('; ');
   },

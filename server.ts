@@ -14236,21 +14236,64 @@ function mayEditEventTaskWording(user: any, event: any, venueList: readonly any[
  * or drop, any task of `prev`? A full-object event save (PUT /api/events/:id)
  * carries the whole list, so the gate compares it with the stored one (rule
  * AG) instead of trusting who sent it. Adding a task and checking one off are
- * not wording changes (they keep today's gate). A list that is not a list is
- * treated as a change (fail closed).
+ * not wording changes (they keep today's gate). Fail closed — each of these
+ * counts as a change:
+ *  - a list that is not a list;
+ *  - an id that appears more often than in the stored list (RV1 P1: a
+ *    duplicate entry could carry a renamed copy past a one-entry-per-id
+ *    comparison);
+ *  - a stored task (by id) missing, or with a different title/details;
+ *  - a stored task WITHOUT a usable id (legacy) whose wording is not matched
+ *    one-to-one by an id-less entry of the body.
  */
 function eventTaskWordingChanged(next: unknown, prev: unknown): boolean {
   if (next === undefined) return false;
   if (!Array.isArray(next)) return true;
   const words = (v: unknown) => (typeof v === 'string' ? v : '');
-  const byId = new Map<string, any>();
-  for (const t of next) if (t && typeof t.id === 'string') byId.set(t.id, t);
-  for (const p of Array.isArray(prev) ? prev : []) {
-    if (!p || typeof p.id !== 'string') continue;
-    const n = byId.get(p.id);
-    if (!n) return true;
-    if (words(n.title) !== words(p.title) || words(n.description) !== words(p.description)) return true;
+  const sig = (t: any) => JSON.stringify([words(t?.title), words(t?.description)]);
+  const hasId = (t: any) => !!t && typeof t.id === 'string' && t.id !== '';
+  const prevList: any[] = Array.isArray(prev) ? prev : [];
+  const count = (list: any[]) => {
+    const m = new Map<string, number>();
+    for (const t of list) if (hasId(t)) m.set(t.id, (m.get(t.id) || 0) + 1);
+    return m;
+  };
+  const nextCount = count(next);
+  const prevCount = count(prevList);
+  for (const [id, n] of nextCount) if (n > (prevCount.get(id) || 0) && n > 1) return true;
+  const byId = new Map<string, any[]>();
+  for (const t of next) if (hasId(t)) byId.set(t.id, [...(byId.get(t.id) || []), t]);
+  for (const p of prevList) {
+    if (!hasId(p)) continue;
+    const ns = byId.get(p.id);
+    if (!ns || ns.length === 0) return true;
+    if (ns.some((n) => sig(n) !== sig(p))) return true;
   }
+  // Legacy id-less stored tasks: each must be kept, unchanged, one to one.
+  const idless = new Map<string, number>();
+  for (const t of next) if (!hasId(t)) idless.set(sig(t), (idless.get(sig(t)) || 0) + 1);
+  for (const p of prevList) {
+    if (hasId(p)) continue;
+    const k = sig(p);
+    const n = idless.get(k) || 0;
+    if (n === 0) return true;
+    idless.set(k, n - 1);
+  }
+  return false;
+}
+
+/** EVENTEDIT (RV1 P1): a body's tasks list may not ADD a duplicate id (an id
+ * used more often than in the stored list). Stored legacy duplicates are left
+ * as they are so their events stay editable. */
+function eventTasksAddDuplicateId(next: unknown, prev: unknown): boolean {
+  if (!Array.isArray(next)) return false;
+  const count = (list: any[]) => {
+    const m = new Map<string, number>();
+    for (const t of list) if (t && typeof t.id === 'string' && t.id !== '') m.set(t.id, (m.get(t.id) || 0) + 1);
+    return m;
+  };
+  const prevCount = count(Array.isArray(prev) ? prev : []);
+  for (const [id, n] of count(next)) if (n > 1 && n > (prevCount.get(id) || 0)) return true;
   return false;
 }
 
@@ -14447,6 +14490,9 @@ app.put('/api/events/:id', async (req, res) => {
       ((req as any).kiosk === true || !mayEditEventTaskWording(caller, existing))) {
     return res.status(403).json(EVENT_TASK_EDIT_FORBIDDEN_BODY);
   }
+  if (eventTasksAddDuplicateId((req.body as any).tasks, existing.tasks)) {
+    return res.status(400).json({ error: 'Each event task needs its own id.', code: 'EVENT_TASKS_DUPLICATE_ID' });
+  }
 
   const {
     title,
@@ -14557,6 +14603,9 @@ app.put('/api/events/:id', async (req, res) => {
       if (updatedTasks !== undefined && eventTaskWordingChanged(updatedTasks, freshEvent.tasks) &&
           !mayEditEventTaskWording(freshCaller, freshEvent, freshVenuesForEvent)) {
         return { conflict: EVENT_TASK_EDIT_FORBIDDEN_BODY.error, conflictStatus: 403, conflictCode: EVENT_TASK_EDIT_FORBIDDEN_BODY.code };
+      }
+      if (updatedTasks !== undefined && eventTasksAddDuplicateId(updatedTasks, freshEvent.tasks)) {
+        return { conflict: 'Each event task needs its own id.', conflictStatus: 400, conflictCode: 'EVENT_TASKS_DUPLICATE_ID' };
       }
       let updated: KosherEventItem;
       // Item 8s: re-resolve a changing assignment on FRESH data, with the
@@ -14830,10 +14879,12 @@ app.post('/api/events/:id/tasks/:taskId/toggle', async (req, res) => {
  * EVENTEDIT (Don, Oct 28 2026): change one event task's wording — its title
  * and/or details. Who: mayEditEventTaskWording (the people who may edit an
  * ordinary task at that venue; never a kiosk session — this route is also off
- * the kiosk allowlist). Only `title` and `description` are read; completion,
+ * the kiosk allowlist). Only `title` and `description` (each with the wording
+ * the editor saw: `baseTitle` / `baseDescription`) are read; completion,
  * notes and who-checked-it stay exactly as stored. Conflict guard is the task
  * itself (like the toggle): a field this edit changes that someone else
- * changed first answers 409, nothing written. The caller, the event, the venue
+ * changed first (fresh stored value != the editor's base) answers 409,
+ * nothing written. The caller, the event, the venue
  * list and the task are re-read from the FRESH document inside the commit
  * (rule AB); a refusal there writes nothing.
  */
@@ -14873,10 +14924,18 @@ app.patch('/api/events/:id/tasks/:taskId', async (req, res) => {
       return res.status(400).json({ error: `Keep the task details under ${EVENT_TASK_DESCRIPTION_MAX} characters.`, code: 'EVENT_TASK_DESCRIPTION_TOO_LONG' });
     }
   }
-  // Baseline: the wording as this server last saw it (the caller edited it).
+  // RV1 P2: the baseline is the wording the EDITOR saw when they opened the
+  // form (baseTitle / baseDescription, required for each field sent), not this
+  // server's cache: the cache may already hold someone else's newer wording
+  // the editor never saw. Each field sent is compared with the FRESH stored
+  // value in the commit; a difference is someone else's edit -> 409.
   const words = (v: unknown) => (typeof v === 'string' ? v : '');
-  const baseTitle = words(cachedTask.title);
-  const baseDescription = words(cachedTask.description);
+  if ((titleGiven && typeof body.baseTitle !== 'string') ||
+      (descriptionGiven && body.baseDescription !== null && typeof body.baseDescription !== 'string')) {
+    return res.status(400).json({ error: 'Please refresh and try again.', code: 'EVENT_TASK_EDIT_BASE_MISSING' });
+  }
+  const baseTitle = words(body.baseTitle);
+  const baseDescription = words(body.baseDescription);
   const updatedAt = new Date().toISOString();
 
   const committed = await commitOrRespond(

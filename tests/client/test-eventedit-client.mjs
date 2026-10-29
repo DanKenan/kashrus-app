@@ -4,9 +4,12 @@
  *     venue — event managers (admin, coordinator in their list, owner/manager at home) and anyone
  *     granted "can assign tasks" whose venue list holds the event's venue; nobody else; fail closed.
  *  M  EventsModal: an "Edit task" pencil on every event task for those people only; tapping it opens
- *     the name + details form in place; Save sends ONE PATCH with exactly { title, description }
- *     (trimmed) and hands the saved event up; Cancel sends nothing; a blank name is not sent; a server
- *     refusal shows its own words by the form and keeps it open. Checking a task still works.
+ *     the name + details form in place; Save sends ONE PATCH with only the changed fields (trimmed),
+ *     each with the wording the form opened with (baseTitle / baseDescription, RV1 P2), and hands the
+ *     saved event up; nothing changed -> no request; Cancel / Escape (from any field) send nothing and
+ *     are ignored while saving; a blank name is not sent; a server refusal shows its own words by the
+ *     form and keeps it open; opening another event closes the draft, and a save that fails after
+ *     that reports through onEventTaskSaveError (RV1 #3). Checking a task still works.
  *  L  lib/eventTaskEdit.editEventTask: PATCH /api/events/:id/tasks/:taskId; refusal in the server's words.
  * Run: npx tsx tests/client/test-eventedit-client.mjs
  */
@@ -37,6 +40,7 @@ function stubFetch(routes) {
     calls.push([method, path, body ?? null]);
     let r = routes[`${method} ${path}`];
     if (typeof r === 'function') r = r(body);
+    if (r && typeof r.then === 'function') r = await r;
     r = r || { status: 200, body: {} };
     return { ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: () => null }, clone() { return this; }, json: async () => r.body, text: async () => JSON.stringify(r.body) };
   };
@@ -118,7 +122,9 @@ ok('M coordinator, event venue not in their list -> no Edit task', !html(coord, 
   const patches = calls.filter(([mm, p]) => mm === 'PATCH' && p === '/api/events/e1/tasks/et1');
   const b = patches[0]?.[2] || {};
   const keys = Object.keys(b).filter((k) => !['expectedVersion', 'operationId'].includes(k)).sort();
-  ok('M Save -> one PATCH with exactly { title, description }, trimmed', patches.length === 1 && calls.length === 1 && JSON.stringify(keys) === '["description","title"]' && b.title === 'Check every fish' && b.description === 'scales', JSON.stringify(calls));
+  ok('M Save -> one PATCH with the changed fields + the wording the form opened with, trimmed', patches.length === 1 && calls.length === 1 &&
+    JSON.stringify(keys) === '["baseDescription","baseTitle","description","title"]' && b.title === 'Check every fish' && b.description === 'scales' &&
+    b.baseTitle === 'Check the fish' && b.baseDescription === 'scales and fins', JSON.stringify(calls));
   h = decode(m.html());
   ok('M after Save the form closes and the saved event goes up', !h.includes('<form') && saved.length === 1 && saved[0].tasks[0].title === 'Check every fish');
 }
@@ -134,6 +140,63 @@ ok('M coordinator, event venue not in their list -> no Edit task', !html(coord, 
   ok('M refusal: the server\'s words by the form, form stays open, nothing handed up', calls.length === 1 && h.includes("You can't edit this event's tasks.") && h.includes('<form') && saved.length === before);
 }
 {
+  // only the name changed -> only the name (and its base) is sent; nothing changed -> no request
+  const calls = stubFetch({ 'PATCH /api/events/e1/tasks/et1': { status: 200, body: { success: true, event: ev } } });
+  const m = mount(EventsModal, base(coord));
+  await m.render();
+  await m.click('Edit task: Check the fish');
+  await m.type('etask-title-et1', 'Check the fish twice');
+  await m.submit();
+  const b = calls[0]?.[2] || {};
+  ok('M only the name changed -> { title, baseTitle } only', calls.length === 1 && JSON.stringify(Object.keys(b).filter((k) => !['expectedVersion', 'operationId'].includes(k)).sort()) === '["baseTitle","title"]', JSON.stringify(calls));
+  const before = saved.length;
+  await m.click('Edit task: Check the fish');
+  await m.type('etask-title-et1', ' Check the fish ');
+  await m.submit();
+  ok('M nothing changed -> no request, the form closes, nothing handed up', calls.length === 1 && !decode(m.html()).includes('<form') && saved.length === before);
+}
+{
+  // Escape from the details field closes; while saving, Escape and Cancel do nothing
+  let release;
+  const calls = stubFetch({ 'PATCH /api/events/e1/tasks/et1': () => new Promise((res) => { release = () => res({ status: 200, body: { success: true, event: ev } }); }) });
+  const m = mount(EventsModal, base(coord));
+  await m.render();
+  await m.click('Edit task: Check the fish');
+  const esc = () => m.find((e) => e.type === 'form')[0].props.onKeyDown({ key: 'Escape', preventDefault() {} });
+  esc(); await m.render();
+  ok('M Escape (from any field of the form) closes it, nothing sent', !decode(m.html()).includes('<form') && calls.length === 0);
+  await m.click('Edit task: Check the fish');
+  await m.type('etask-desc-et1', 'scales, fins and skin');
+  await m.submit();
+  let h = decode(m.html());
+  ok('M while saving: Saving… and the buttons are disabled', h.includes('Saving…') && /disabled=""[^>]*>Cancel|<button[^>]*disabled=""[^>]*>\s*Cancel/.test(h), h.slice(h.indexOf('<form'), h.indexOf('<form') + 300));
+  esc(); await m.render();
+  await m.click('Cancel');
+  ok('M while saving: Escape and Cancel do not close it', decode(m.html()).includes('<form') && calls.length === 1);
+  release(); await new Promise((r) => setTimeout(r, 10)); await m.render();
+  ok('M after the save the form closes', !decode(m.html()).includes('<form'));
+}
+{
+  // opening another event closes the draft; a save failing after that reports through onEventTaskSaveError
+  const errors = [];
+  let release;
+  const ev2 = { ...ev, id: 'e2', title: 'Rosen bar mitzvah', tasks: [{ id: 'et9', title: 'Kasher the grill', isCompleted: false }] };
+  stubFetch({ 'PATCH /api/events/e1/tasks/et1': () => new Promise((res) => { release = () => res({ status: 409, body: { error: 'Conflict: this event task was changed by someone else. Please refresh and try again.' } }); }) });
+  const m = mount(EventsModal, { ...base(coord), events: [ev, ev2], onEventTaskSaveError: (msg) => errors.push(msg) });
+  await m.render();
+  await m.click('Edit task: Check the fish');
+  await m.click('Rosen bar mitzvah');
+  ok('M opening another event closes the draft', !decode(m.html()).includes('<form'));
+  await m.click('Cohen wedding');
+  ok('M coming back: no stale draft', !decode(m.html()).includes('<form'));
+  await m.click('Edit task: Check the fish');
+  await m.type('etask-title-et1', 'Check every fish');
+  await m.submit();
+  await m.click('Rosen bar mitzvah');
+  release(); await new Promise((r) => setTimeout(r, 10)); await m.render();
+  ok('M a save that fails after its form closed reports through onEventTaskSaveError', errors.length === 1 && /changed by someone else/.test(errors[0]) && !decode(m.html()).includes('<form'), JSON.stringify(errors));
+}
+{
   toggles.length = 0;
   stubFetch({});
   const m = mount(EventsModal, base(coord));
@@ -145,9 +208,12 @@ ok('M coordinator, event venue not in their list -> no Edit task', !html(coord, 
 // ---- L: lib/eventTaskEdit ----
 {
   const calls = stubFetch({ 'PATCH /api/events/e%201/tasks/t%2F1': { status: 409, body: { error: 'Conflict: this event task was changed by someone else. Please refresh and try again.' } } });
-  const r = await editEventTask('e 1', 't/1', { title: ' A ', description: '' });
-  ok('L ids are encoded in the path; refusal in the server\'s words', calls.length === 1 && calls[0][0] === 'PATCH' && calls[0][1] === '/api/events/e%201/tasks/t%2F1' && r.ok === false && /changed by someone else/.test(r.message || ''), JSON.stringify(calls));
-  const blank = await editEventTask('e1', 't1', { title: '  ', description: 'x' });
+  const r = await editEventTask('e 1', 't/1', { title: ' A ', description: '' }, { title: 'B', description: '' });
+  ok('L ids are encoded in the path; base sent; refusal in the server\'s words', calls.length === 1 && calls[0][0] === 'PATCH' && calls[0][1] === '/api/events/e%201/tasks/t%2F1' &&
+    calls[0][2].title === 'A' && calls[0][2].baseTitle === 'B' && calls[0][2].description === undefined && r.ok === false && /changed by someone else/.test(r.message || ''), JSON.stringify(calls));
+  const same = await editEventTask('e1', 't1', { title: ' B ', description: '' }, { title: 'B', description: '' });
+  ok('L nothing changed -> no request', same.ok === true && same.unchanged === true && calls.length === 1);
+  const blank = await editEventTask('e1', 't1', { title: '  ', description: 'x' }, { title: 'B', description: '' });
   ok('L a blank name is never sent', blank.ok === false && blank.message === 'Give the task a name.' && calls.length === 1);
 }
 

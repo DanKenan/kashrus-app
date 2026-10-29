@@ -3054,6 +3054,7 @@ export default function App() {
           setEvents((prev) => prev.map((e) => (e.id === saved.id ? saved : e)));
           showToast('Task updated');
         }}
+        onEventTaskSaveError={(message) => showToast(message)}
       />
 
       {/* Item 7: Copy event dialog */}

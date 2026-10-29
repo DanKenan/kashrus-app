@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   X,
   Calendar,
@@ -46,6 +46,8 @@ interface EventsModalProps {
   focusEventId?: string | null;
   /** EVENTEDIT: an event task's wording was saved; the server's saved event. */
   onEventTaskSaved?: (event: KosherEvent) => void;
+  /** EVENTEDIT: a save finished with an error after its form was closed (another event was opened). */
+  onEventTaskSaveError?: (message: string) => void;
 }
 
 export const EventsModal: React.FC<EventsModalProps> = ({
@@ -63,6 +65,7 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   onCopyEvent,
   focusEventId,
   onEventTaskSaved,
+  onEventTaskSaveError,
 }) => {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(() => {
     return events[0]?.id || null;
@@ -70,10 +73,20 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   const [filterMode, setFilterMode] = useState<'all' | 'my_assigned' | 'upcoming'>('all');
   const [taskNotesInput, setTaskNotesInput] = useState<{ [taskId: string]: string }>({});
   const [newEventTaskTitle, setNewEventTaskTitle] = useState('');
-  // EVENTEDIT: one event task's wording is edited at a time, in place.
-  const [taskEdit, setTaskEdit] = useState<{ eventId: string; taskId: string; title: string; description: string } | null>(null);
-  const [taskEditBusy, setTaskEditBusy] = useState(false);
+  // EVENTEDIT: one event task's wording is edited at a time, in place. Each
+  // opening of the form is its own session (seq); a save answers only the
+  // session that sent it (RV1 #3), and the form closes when another event is
+  // opened, the filter changes or the sheet closes.
+  type TaskEditSession = { seq: number; eventId: string; taskId: string; title: string; description: string; baseTitle: string; baseDescription: string };
+  const [taskEdit, setTaskEditState] = useState<TaskEditSession | null>(null);
+  const [savingSeq, setSavingSeq] = useState<number | null>(null);
   const [taskEditError, setTaskEditError] = useState<string | null>(null);
+  const editSeqRef = useRef(0);
+  const openSeqRef = useRef<number | null>(null);
+  const setTaskEdit = (next: TaskEditSession | null) => {
+    openSeqRef.current = next ? next.seq : null;
+    setTaskEditState(next);
+  };
 
   // QA2 Q1: on a phone (below md) the sheet shows the list OR one event's
   // details (the two side-by-side panels did not fit: the list could not
@@ -94,6 +107,12 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   useEffect(() => {
     if (!isOpen) setPhoneDetail(false);
   }, [isOpen]);
+
+  // EVENTEDIT (RV1 #3): a draft never outlives the event it belongs to.
+  useEffect(() => {
+    setTaskEdit(null);
+    setTaskEditError(null);
+  }, [isOpen, selectedEventId, filterMode]);
 
   if (!isOpen) return null;
 
@@ -132,12 +151,17 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   // an ordinary task at that venue); the server decides.
   const canEditTaskWording = !!activeEvent && mayEditEventTaskWording(currentUser, activeEvent, allVenues);
 
+  const taskEditBusy = !!taskEdit && savingSeq === taskEdit.seq;
   const startTaskEdit = (task: EventTask) => {
     if (!activeEvent) return;
+    editSeqRef.current += 1;
     setTaskEditError(null);
-    setTaskEdit({ eventId: activeEvent.id, taskId: task.id, title: task.title || '', description: task.description || '' });
+    const title = task.title || '';
+    const description = task.description || '';
+    setTaskEdit({ seq: editSeqRef.current, eventId: activeEvent.id, taskId: task.id, title, description, baseTitle: title, baseDescription: description });
   };
   const cancelTaskEdit = () => {
+    if (taskEditBusy) return;
     setTaskEdit(null);
     setTaskEditError(null);
   };
@@ -147,16 +171,28 @@ export const EventsModal: React.FC<EventsModalProps> = ({
       setTaskEditError('Give the task a name.');
       return;
     }
-    setTaskEditBusy(true);
+    const session = taskEdit;
+    setSavingSeq(session.seq);
     setTaskEditError(null);
-    const r = await editEventTask(taskEdit.eventId, taskEdit.taskId, { title: taskEdit.title, description: taskEdit.description });
-    setTaskEditBusy(false);
-    if (!r.ok || !r.event) {
-      setTaskEditError(r.message || "Couldn't save the task. Please try again.");
+    const r = await editEventTask(
+      session.eventId,
+      session.taskId,
+      { title: session.title, description: session.description },
+      { title: session.baseTitle, description: session.baseDescription },
+    );
+    setSavingSeq((cur) => (cur === session.seq ? null : cur));
+    const stillOpen = openSeqRef.current === session.seq;
+    if (!r.ok) {
+      const message = r.message || "Couldn't save the task. Please try again.";
+      if (stillOpen) setTaskEditError(message);
+      else onEventTaskSaveError?.(message);
       return;
     }
-    setTaskEdit(null);
-    onEventTaskSaved?.(r.event);
+    if (r.event) onEventTaskSaved?.(r.event);
+    if (stillOpen) {
+      setTaskEdit(null);
+      setTaskEditError(null);
+    }
   };
 
   const handleNotifyAgain = async () => {
@@ -641,6 +677,12 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                                 e.preventDefault();
                                 void saveTaskEdit();
                               }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  cancelTaskEdit();
+                                }
+                              }}
                             >
                               <label htmlFor={`etask-title-${task.id}`} className="text-xs font-semibold text-ink-soft">
                                 Task name
@@ -652,9 +694,6 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                                 maxLength={EVENT_TASK_TITLE_MAX}
                                 autoFocus
                                 onChange={(e) => setTaskEdit({ ...taskEdit, title: e.target.value })}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Escape') cancelTaskEdit();
-                                }}
                                 className="w-full min-h-11 px-3 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                               />
                               <label htmlFor={`etask-desc-${task.id}`} className="text-xs font-semibold text-ink-soft">
