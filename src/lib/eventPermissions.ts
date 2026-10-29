@@ -14,7 +14,7 @@
 //   everyone else (mashgiach, worker, unknown, kiosk): never.
 import type { User, Venue } from '../types';
 
-type EventUser = Pick<User, 'role' | 'venueId'> & { agencyId?: string };
+type EventUser = Pick<User, 'role' | 'venueId'> & { agencyId?: string; permissions?: User['permissions'] };
 type VenueRef = Pick<Venue, 'id'> & { agencyId?: string };
 
 const DEFAULT_AGENCY = 'agency-hkc';
@@ -51,4 +51,33 @@ export function mayCreateEvents(
   if (!user) return false;
   for (const id of ownVenueIds(user, venues)) if (mayManageEventAt(user, id, venues)) return true;
   return false;
+}
+
+/**
+ * EVENTEDIT (Don, Oct 28 2026): may this person change an event task's wording
+ * (its title and details)? The client mirror of the server's
+ * mayEditEventTaskWording; the server decides. The people who may edit an
+ * ordinary task at that venue:
+ *   whoever may manage the event (above); or
+ *   someone who may edit task definitions (admin, coordinator, or "can assign
+ *   tasks" granted) when the event's venue is one of their own (the venue list
+ *   is already cut to their scope by the server).
+ * Everyone else (and a kiosk, whose acting user never gets here) never.
+ */
+export function mayEditEventTaskWording(
+  user: EventUser | null | undefined,
+  event: ({ venueId?: string | null } & { agencyId?: string }) | null | undefined,
+  venues: readonly VenueRef[] | null | undefined,
+): boolean {
+  if (!user || !event || typeof user.role !== 'string') return false;
+  const venueId = typeof event.venueId === 'string' ? event.venueId : '';
+  if (!venueId) return false;
+  if (event.agencyId && agencyOf(event) !== agencyOf(user)) return false;
+  // RV4: the event's venue must exist in the list and be the caller's agency's.
+  const venueRow = (venues || []).find((v) => v && v.id === venueId);
+  if (!venueRow || agencyOf(venueRow as any) !== agencyOf(user)) return false;
+  if (mayManageEventAt(user, venueId, venues)) return true;
+  const editsTaskDefinitions =
+    user.role === 'admin' || user.role === 'coordinator' || user.permissions?.canAssignTasks === true;
+  return editsTaskDefinitions && ownVenueIds(user, venues).has(venueId);
 }

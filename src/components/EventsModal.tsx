@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   X,
   Calendar,
@@ -18,12 +18,14 @@ import {
   Trash2,
   Bell,
   ChevronLeft,
+  Pencil,
 } from 'lucide-react';
 import { KosherEvent, EventTask, User as UserType, Venue } from '../types';
 import { venueTimeZone, workDateIn } from '../lib/workday';
 import { formatClockTime, formatTimeRange } from '../lib/clockTime';
 import { formatWorkDate } from '../lib/dateText';
-import { mayCreateEvents, mayManageEventAt } from '../lib/eventPermissions';
+import { mayCreateEvents, mayManageEventAt, mayEditEventTaskWording } from '../lib/eventPermissions';
+import { editEventTask, EVENT_TASK_TITLE_MAX, EVENT_TASK_DESCRIPTION_MAX } from '../lib/eventTaskEdit';
 import { notifyEventAssignee } from '../lib/eventNotify';
 
 interface EventsModalProps {
@@ -42,6 +44,10 @@ interface EventsModalProps {
   onCopyEvent?: (event: KosherEvent) => void;
   /** Item 7: select this event (for example, the copy just created). */
   focusEventId?: string | null;
+  /** EVENTEDIT: an event task's wording was saved; the server's saved event. */
+  onEventTaskSaved?: (event: KosherEvent) => void;
+  /** EVENTEDIT: a save finished with an error after its form was closed (another event was opened). */
+  onEventTaskSaveError?: (message: string) => void;
 }
 
 export const EventsModal: React.FC<EventsModalProps> = ({
@@ -58,6 +64,8 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   onDeleteEvent,
   onCopyEvent,
   focusEventId,
+  onEventTaskSaved,
+  onEventTaskSaveError,
 }) => {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(() => {
     return events[0]?.id || null;
@@ -65,6 +73,20 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   const [filterMode, setFilterMode] = useState<'all' | 'my_assigned' | 'upcoming'>('all');
   const [taskNotesInput, setTaskNotesInput] = useState<{ [taskId: string]: string }>({});
   const [newEventTaskTitle, setNewEventTaskTitle] = useState('');
+  // EVENTEDIT: one event task's wording is edited at a time, in place. Each
+  // opening of the form is its own session (seq); a save answers only the
+  // session that sent it (RV1 #3), and the form closes when another event is
+  // opened, the filter changes or the sheet closes.
+  type TaskEditSession = { seq: number; eventId: string; taskId: string; title: string; description: string; baseTitle: string; baseDescription: string };
+  const [taskEdit, setTaskEditState] = useState<TaskEditSession | null>(null);
+  const [savingSeq, setSavingSeq] = useState<number | null>(null);
+  const [taskEditError, setTaskEditError] = useState<string | null>(null);
+  const editSeqRef = useRef(0);
+  const openSeqRef = useRef<number | null>(null);
+  const setTaskEdit = (next: TaskEditSession | null) => {
+    openSeqRef.current = next ? next.seq : null;
+    setTaskEditState(next);
+  };
 
   // QA2 Q1: on a phone (below md) the sheet shows the list OR one event's
   // details (the two side-by-side panels did not fit: the list could not
@@ -85,6 +107,12 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   useEffect(() => {
     if (!isOpen) setPhoneDetail(false);
   }, [isOpen]);
+
+  // EVENTEDIT (RV1 #3): a draft never outlives the event it belongs to.
+  useEffect(() => {
+    setTaskEdit(null);
+    setTaskEditError(null);
+  }, [isOpen, selectedEventId, filterMode]);
 
   if (!isOpen) return null;
 
@@ -119,6 +147,53 @@ export const EventsModal: React.FC<EventsModalProps> = ({
   const canManageActive = !!activeEvent && mayManageEventAt(currentUser, activeEvent.venueId, allVenues);
   const canCopyActive = !!onCopyEvent && canManageActive;
   const canDeleteActive = !!onDeleteEvent && canManageActive;
+  // EVENTEDIT: who may change an event task's wording (the people who may edit
+  // an ordinary task at that venue); the server decides.
+  const canEditTaskWording = !!activeEvent && mayEditEventTaskWording(currentUser, activeEvent, allVenues);
+
+  const taskEditBusy = !!taskEdit && savingSeq === taskEdit.seq;
+  const startTaskEdit = (task: EventTask) => {
+    if (!activeEvent) return;
+    editSeqRef.current += 1;
+    setTaskEditError(null);
+    const title = task.title || '';
+    const description = task.description || '';
+    setTaskEdit({ seq: editSeqRef.current, eventId: activeEvent.id, taskId: task.id, title, description, baseTitle: title, baseDescription: description });
+  };
+  const cancelTaskEdit = () => {
+    if (taskEditBusy) return;
+    setTaskEdit(null);
+    setTaskEditError(null);
+  };
+  const saveTaskEdit = async () => {
+    if (!taskEdit || taskEditBusy) return;
+    if (!taskEdit.title.trim()) {
+      setTaskEditError('Give the task a name.');
+      return;
+    }
+    const session = taskEdit;
+    setSavingSeq(session.seq);
+    setTaskEditError(null);
+    const r = await editEventTask(
+      session.eventId,
+      session.taskId,
+      { title: session.title, description: session.description },
+      { title: session.baseTitle, description: session.baseDescription },
+    );
+    setSavingSeq((cur) => (cur === session.seq ? null : cur));
+    const stillOpen = openSeqRef.current === session.seq;
+    if (!r.ok) {
+      const message = r.message || "Couldn't save the task. Please try again.";
+      if (stillOpen) setTaskEditError(message);
+      else onEventTaskSaveError?.(message);
+      return;
+    }
+    if (r.event) onEventTaskSaved?.(r.event);
+    if (stillOpen) {
+      setTaskEdit(null);
+      setTaskEditError(null);
+    }
+  };
 
   const handleNotifyAgain = async () => {
     if (!activeEvent || notifyBusy) return;
@@ -594,6 +669,69 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                               : 'bg-surface border-line'
                           }`}
                         >
+                          {taskEdit && taskEdit.eventId === activeEvent.id && taskEdit.taskId === task.id ? (
+                            <form
+                              data-event-task-edit
+                              className="flex flex-col gap-2"
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                void saveTaskEdit();
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') {
+                                  e.preventDefault();
+                                  cancelTaskEdit();
+                                }
+                              }}
+                            >
+                              <label htmlFor={`etask-title-${task.id}`} className="text-xs font-semibold text-ink-soft">
+                                Task name
+                              </label>
+                              <input
+                                id={`etask-title-${task.id}`}
+                                type="text"
+                                value={taskEdit.title}
+                                maxLength={EVENT_TASK_TITLE_MAX}
+                                autoFocus
+                                onChange={(e) => setTaskEdit({ ...taskEdit, title: e.target.value })}
+                                className="w-full min-h-11 px-3 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
+                              />
+                              <label htmlFor={`etask-desc-${task.id}`} className="text-xs font-semibold text-ink-soft">
+                                Details (optional)
+                              </label>
+                              <textarea
+                                id={`etask-desc-${task.id}`}
+                                rows={2}
+                                value={taskEdit.description}
+                                maxLength={EVENT_TASK_DESCRIPTION_MAX}
+                                onChange={(e) => setTaskEdit({ ...taskEdit, description: e.target.value })}
+                                className="w-full px-3 py-2 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
+                              />
+                              {taskEditError && (
+                                <p role="alert" className="text-sm text-bad">
+                                  {taskEditError}
+                                </p>
+                              )}
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={cancelTaskEdit}
+                                  disabled={taskEditBusy}
+                                  className="min-h-11 px-4 text-sm font-semibold rounded-xl transition cursor-pointer pressable bg-surface border border-line-control text-ink hover:bg-sunken disabled:opacity-60"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="submit"
+                                  disabled={taskEditBusy}
+                                  className="min-h-11 px-4 text-sm font-bold rounded-xl transition cursor-pointer e1 pressable bg-gold-deep text-paper disabled:opacity-60"
+                                >
+                                  {taskEditBusy ? 'Saving…' : 'Save'}
+                                </button>
+                              </div>
+                            </form>
+                          ) : (
+                          <>
                           <div className="flex items-start justify-between gap-3">
                             <button
                               type="button"
@@ -635,6 +773,19 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                                 )}
                               </div>
                             )}
+
+                            {canEditTaskWording && (
+                              <button
+                                type="button"
+                                data-event-task-edit-button
+                                onClick={() => startTaskEdit(task)}
+                                aria-label={`Edit task: ${task.title}`}
+                                title="Edit task"
+                                className="shrink-0 -my-2 -mr-2 w-11 h-11 inline-flex items-center justify-center rounded-lg text-ink-soft hover:text-ink hover:bg-sunken cursor-pointer pressable"
+                              >
+                                <Pencil className="w-4 h-4" aria-hidden="true" />
+                              </button>
+                            )}
                           </div>
 
                           {/* Notes field */}
@@ -657,6 +808,8 @@ export const EventsModal: React.FC<EventsModalProps> = ({
                               className="flex-1 px-2.5 py-1 focus:outline-none min-w-0 bg-surface border border-line-control rounded-lg text-base text-ink focus:ring-2 focus:ring-gold/40 focus:border-gold"
                             />
                           </div>
+                          </>
+                          )}
                         </div>
                       ))
                     ) : (
