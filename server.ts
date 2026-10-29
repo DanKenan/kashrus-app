@@ -14242,13 +14242,16 @@ function mayEditEventTaskWording(user: any, event: any, venueList: readonly any[
  *    in the body is never applied (for anyone) and is not an error;
  *  - its other fields (check state, notes) come from the body, as today;
  *  - a new task in the body is added, as today;
- *  - a stored task missing from the body is KEPT unless the caller may edit
- *    event tasks (mayDrop) — a stale screen of someone who may only check
- *    tasks never removes a task;
- *  - legacy tasks stored without an id are matched one to one by wording.
+ *  - a stored task missing from the body is KEPT, for everyone (RV3 #1): a
+ *    stale screen never removes a task someone else added; removing an event
+ *    task is not a feature of this save;
+ *  - legacy tasks stored without an id are matched one to one by wording; one
+ *    that no body entry matches is KEPT as stored (RV3 #2), so its wording
+ *    cannot be replaced through this save either (a changed copy in the body
+ *    is just a new task).
  * The stored order is kept; new tasks follow in body order.
  */
-function mergeEventTasksForSave(next: any[], fresh: unknown, mayDrop: boolean): any[] {
+function mergeEventTasksForSave(next: any[], fresh: unknown): any[] {
   const freshList: any[] = Array.isArray(fresh) ? fresh : [];
   const hasId = (t: any) => !!t && typeof t.id === 'string' && t.id !== '';
   const words = (v: unknown) => (typeof v === 'string' ? v : '');
@@ -14275,7 +14278,7 @@ function mergeEventTasksForSave(next: any[], fresh: unknown, mayDrop: boolean): 
     if (match) {
       used.add(match);
       out.push(hasId(f) ? keepWording(match, f) : match);
-    } else if (!mayDrop) {
+    } else {
       out.push(f);
     }
   }
@@ -14485,8 +14488,8 @@ app.put('/api/events/:id', async (req, res) => {
     return res.status(403).json({ error: 'You can only check event tasks at your own venue.' });
   }
   // EVENTEDIT: a full-object save never changes an existing task's wording
-  // (mergeEventTasksForSave keeps the stored wording; renames go through the
-  // PATCH below) and only people who may edit event tasks may drop one.
+  // and never removes a task (mergeEventTasksForSave; renames go through the
+  // PATCH below).
   if ((req.body as any).tasks !== undefined && !Array.isArray((req.body as any).tasks)) {
     return res.status(400).json({ error: 'Event tasks must be a list.', code: 'EVENT_TASKS_INVALID' });
   }
@@ -14601,12 +14604,10 @@ app.put('/api/events/:id', async (req, res) => {
       if (updatedTasks !== undefined && eventTasksAddDuplicateId(updatedTasks, freshEvent.tasks)) {
         return { conflict: 'Each event task needs its own id.', conflictStatus: 400, conflictCode: 'EVENT_TASKS_DUPLICATE_ID' };
       }
-      // EVENTEDIT (rule AB, RV2 #1): the body's tasks are merged onto the
-      // FRESH list — stored wording kept; a stored task is dropped only by a
-      // FRESH caller who may edit event tasks (not a kiosk session).
+      // EVENTEDIT (rule AB, RV2 #1, RV3): the body's tasks are merged onto the
+      // FRESH list — stored wording kept, stored tasks kept.
       const tasksToStore = updatedTasks !== undefined
-        ? mergeEventTasksForSave(updatedTasks, freshEvent.tasks,
-            (req as any).kiosk !== true && mayEditEventTaskWording(freshCaller, freshEvent, freshVenuesForEvent))
+        ? mergeEventTasksForSave(updatedTasks, freshEvent.tasks)
         : freshEvent.tasks;
       let updated: KosherEventItem;
       // Item 8s: re-resolve a changing assignment on FRESH data, with the

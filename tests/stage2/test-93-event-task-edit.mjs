@@ -30,8 +30,9 @@
  *     through; renames go through the PATCH); a check-only mashgiach's save
  *     without a task keeps the task; (RV2 #1) a STALE save (old wording on
  *     screen, a newer task missing) by a check-only mashgiach is not refused,
- *     keeps the newer name and task and lands their check; the coordinator
- *     can still remove a task; (RV1 P1) a duplicate id -> 400 for everyone,
+ *     keeps the newer name and task and lands their check; (RV3) the save
+ *     never removes a task, not even a coordinator's stale save, and a legacy
+ *     id-less task cannot be replaced by a coordinator either; (RV1 P1) a duplicate id -> 400 for everyone,
  *     tasks not a list -> 400; legacy id-less tasks are matched by wording
  *     (kept, still checkable); (RV2 #2) a PATCH on an id stored twice ->
  *     409 EVENT_TASK_AMBIGUOUS, both untouched (cache or fresh doc)
@@ -361,10 +362,18 @@ export default {
       const rs = await edit(tok.coord, { title: 'Check the fish' });
       assert(rs.status === 200, 'E RV2 restore');
     }
-    // People who may edit event tasks can still remove one through the save (as today).
+    // RV3 #1: the save never removes a task — not even for a coordinator (a
+    // stale screen of an editor must not drop a task added meanwhile).
     {
-      const r = await put('coord', (ts2) => ts2.filter((t) => t.id !== 'etask-t93-6'));
-      assert(r.status === 200 && !taskOf(await storedEvent(), 'etask-t93-6'), `E coordinator removes a task via PUT (${r.status})`);
+      const stale = await storedEvent();                                   // coordinator A's screen
+      const ad = await put('admin', (ts2) => [...ts2, { id: 'etask-t93-7', title: 'Added by the admin', isCompleted: false }]);
+      assert(ad.status === 200, `E RV3 setup: admin adds a task (${ad.status})`);
+      const r = await call('PUT', `/api/events/${evId}`, tok.coord, { ...stale, status: 'confirmed', expectedVersion: await ctx.getVersion(), operationId: op() });
+      const ev = await storedEvent();
+      assert(r.status === 200 && ev.status === 'confirmed', `E RV3 coordinator's stale status save goes through (${r.status} ${ev.status})`);
+      assert(!!taskOf(ev, 'etask-t93-7'), 'E RV3 the task added meanwhile is KEPT');
+      const rm = await put('coord', (ts2) => ts2.filter((t) => t.id !== 'etask-t93-6'));
+      assert(rm.status === 200 && !!taskOf(await storedEvent(), 'etask-t93-6'), `E RV3 a coordinator save without a task keeps it (${rm.status})`);
     }
     // A legacy task stored WITHOUT an id: matched one to one by its wording.
     {
@@ -378,6 +387,13 @@ export default {
       assert(lr.status === 200 && legacy(await storedEvent()).length === 1, `E check-only "renaming" an id-less legacy task: the original stays (${lr.status})`);
       const ld = await put('mashfill', (ts2) => ts2.filter((x) => !!x.id));
       assert(ld.status === 200 && legacy(await storedEvent()).length === 1, `E check-only save without the legacy task: it is kept (${ld.status})`);
+      // RV3 #2: a coordinator cannot replace a legacy task's wording through the save either.
+      {
+        const before = legacy(await storedEvent());
+        const cr = await put('coord', (ts2) => ts2.map((x) => (!x.id && x.title === 'Legacy task' ? { ...x, title: 'Legacy renamed by coordinator', isCompleted: true } : x)));
+        const after = legacy(await storedEvent());
+        assert(cr.status === 200 && after.length === 1 && JSON.stringify(after) === JSON.stringify(before), `E RV3 coordinator "renaming" a legacy task: the stored one stays as it was (${cr.status})`);
+      }
       const lc = await put('mashfill', (ts2) => ts2.map((x) => (!x.id && x.title === 'Legacy task' ? { ...x, isCompleted: true } : x)));
       assert(lc.status === 200 && legacy(await storedEvent())[0]?.isCompleted === true, `E check-only can still check the legacy task (${lc.status})`);
     }
