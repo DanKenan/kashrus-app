@@ -111,18 +111,22 @@ function serialWrite<T>(fn: () => Promise<T>): Promise<T> {
   return p;
 }
 
-async function doSubscribe(userEmail: string, mode: PushMode, userId?: string): Promise<'subscribed' | 'failed'> {
+async function doSubscribe(userEmail: string, mode: PushMode, userId?: string, stillOk: () => boolean = () => true): Promise<'subscribed' | 'failed' | 'canceled'> {
+  // stillOk (review PARV4): a quiet write re-checks, right before each step that
+  // matters, that it is still for the person and session it started for.
   try {
     const keyRes = await apiFetch('/api/push/public-key');
     if (!keyRes.ok) return 'failed';
     const { publicKey } = await keyRes.json();
     const reg = await readyRegistration();
     if (!reg) return 'failed';
+    if (!stillOk()) return 'canceled';
     const existing = await reg.pushManager.getSubscription();
     const sub = existing ?? await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(publicKey),
     });
+    if (!stillOk()) return 'canceled'; // the browser subscription stays; the next sign-in's sync handles it
     const saveRes = await apiFetch('/api/push/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -132,6 +136,7 @@ async function doSubscribe(userEmail: string, mode: PushMode, userId?: string): 
       if (!existing) await sub.unsubscribe().catch(() => {});
       return 'failed';
     }
+    if (!stillOk()) return 'canceled'; // written under the session it started for; nothing recorded for a person who left
     rememberPushMode(userId, mode);
     announce();
     return 'subscribed';
@@ -154,7 +159,8 @@ export async function subscribeForPush(
   try {
     const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
     if (permission !== 'granted') return 'denied';
-    return await serialWrite(() => doSubscribe(userEmail, mode, userId));
+    const r = await serialWrite(() => doSubscribe(userEmail, mode, userId));
+    return r === 'canceled' ? 'failed' : r;
   } finally {
     explicitPending--;
   }
@@ -251,9 +257,9 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
         if (tapped()) return 'tapped' as const;
         // Re-read inside the write slot: a subscription made meanwhile is not ours to overwrite.
         if (await reg.pushManager.getSubscription()) return 'tapped' as const;
-        return doSubscribe(userEmail, mode, userId);
+        return doSubscribe(userEmail, mode, userId, () => !tapped());
       });
-      if (r === 'tapped') return getPushSetup(userId);
+      if (r === 'tapped' || r === 'canceled') return getPushSetup(userId);
       return r === 'subscribed' ? { state: 'subscribed', mode } : { state: 'granted', mode: null };
     }
     const st = await apiFetch('/api/push/status', {
@@ -283,7 +289,7 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
       });
       return re.ok;
     });
-    if (ok === 'tapped') return getPushSetup(userId);
+    if (ok === 'tapped' || tapped()) return getPushSetup(userId);
     if (!ok) return { state: 'granted', mode: null }; // not registered: offer Turn on, never show On
     rememberPushMode(userId, mode);
     announce();

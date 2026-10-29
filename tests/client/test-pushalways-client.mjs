@@ -134,7 +134,7 @@ const tap2 = push.subscribeForPush('s@x', 'all', 'u21');
 await tick();
 hold.resolve();
 const [q2, t2] = await Promise.all([quiet2, tap2]);
-ok('R2a the tap is written last ("all"), after the quiet write it waited for', server.posts.at(-1).mode === 'all' && server.posts.at(-2)?.mode === 'tagged' && t2 === 'subscribed', JSON.stringify(server.posts.slice(-2)));
+ok('R2a the tap is written last ("all"); the quiet write it interrupted stood down before writing', server.posts.at(-1).mode === 'all' && server.posts.at(-1).userEmail === 's@x' && !server.posts.slice(-3).some((p) => p.userEmail === 's@x' && p.mode === 'tagged') && t2 === 'subscribed', JSON.stringify(server.posts.slice(-2)));
 ok('R2b the setting this phone remembers is the tap\'s', push.rememberedPushMode('u21') === 'all');
 // R3: a tap before the quiet sync reaches its write -> no quiet write at all.
 browserSub = null; const nR3 = server.posts.length; store.delete('shutfey_push_mode:u22');
@@ -188,6 +188,25 @@ ok('F2 retry works -> subscribed, all', to.result === 'subscribed' && to.setup.s
   ok('A2 a quiet sync whose screen is gone (isCurrent false) writes nothing', server.posts.length === nA);
   const qb2 = await push.syncPushQuietly('b@x', 'uB');
   ok('A3 B\'s own sync then sets B\'s own setting ("tagged", not A\'s "all")', qb2.mode === 'tagged' && server.posts.at(-1).mode === 'tagged');
+  // A4 (review PARV4): the no-subscription path — A's quiet subscribe is paused on the key fetch, B signs in.
+  api.setSessionToken('token-A2');
+  browserSub = null; server.registered = false; store.set('shutfey_push_mode:uA2', 'all'); store.delete('shutfey_push_mode:uB2');
+  const nA4 = server.posts.length;
+  const holdK = deferred(); server.hold = { '/api/push/public-key': holdK };
+  const qa4 = push.syncPushQuietly('a2@x', 'uA2');
+  await tick();
+  api.setSessionToken('token-B2');
+  holdK.resolve(); await qa4;
+  ok('A4 A\'s paused quiet subscribe writes nothing under B\'s session', server.posts.length === nA4, JSON.stringify(server.posts.slice(nA4)));
+  ok('A4b nothing recorded for B from A\'s run', push.rememberedPushMode('uB2') === null);
+  // A5: same, paused inside the write slot after the browser subscription is created (status branch not involved).
+  browserSub = null; const nA5 = server.posts.length;
+  api.setSessionToken('token-A3');
+  let liveA5 = true;
+  const holdK2 = deferred(); server.hold = { '/api/push/public-key': holdK2 };
+  const qa5 = push.syncPushQuietly('a3@x', 'uA3', () => liveA5);
+  await tick(); liveA5 = false; holdK2.resolve(); await qa5;
+  ok('A5 a quiet subscribe whose screen is gone writes nothing', server.posts.length === nA5);
   api.setSessionToken(null);
 }
 
