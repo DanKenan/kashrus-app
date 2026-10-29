@@ -96,21 +96,30 @@ export async function getPushSetup(userId: string): Promise<PushSetup> {
   }
 }
 
-export async function subscribeForPush(
-  userEmail: string,
-  mode: PushMode = 'all',
-  userId?: string,
-): Promise<'subscribed' | 'denied' | 'failed'> {
-  if (!pushSupported()) return 'failed';
-  const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
-  if (permission !== 'granted') return 'denied';
+// PUSHALWAYS (review PARV2): every write of this phone's push setting runs
+// one at a time, and a person's own tap wins over the quiet app-open sync.
+// A tap bumps explicitGen the moment it happens; a quiet write checks the
+// generation it started under right before writing and stands down if a tap
+// came since. A tap that arrives while a quiet write is already running waits
+// for it and then writes, so the tap is always last.
+let explicitGen = 0;
+let explicitPending = 0;
+let writeChain: Promise<unknown> = Promise.resolve();
+function serialWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const p = writeChain.then(fn, fn);
+  writeChain = p.catch(() => undefined);
+  return p;
+}
+
+async function doSubscribe(userEmail: string, mode: PushMode, userId?: string): Promise<'subscribed' | 'failed'> {
   try {
     const keyRes = await apiFetch('/api/push/public-key');
     if (!keyRes.ok) return 'failed';
     const { publicKey } = await keyRes.json();
     const reg = await readyRegistration();
     if (!reg) return 'failed';
-    const sub = await reg.pushManager.subscribe({
+    const existing = await reg.pushManager.getSubscription();
+    const sub = existing ?? await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(publicKey),
     });
@@ -120,7 +129,7 @@ export async function subscribeForPush(
       body: JSON.stringify({ userEmail, subscription: sub.toJSON(), mode }),
     });
     if (!saveRes.ok) {
-      await sub.unsubscribe().catch(() => {});
+      if (!existing) await sub.unsubscribe().catch(() => {});
       return 'failed';
     }
     rememberPushMode(userId, mode);
@@ -129,6 +138,25 @@ export async function subscribeForPush(
   } catch (err) {
     console.warn('[Push] Subscribe failed:', err);
     return 'failed';
+  }
+}
+
+/** The person's own "Turn on" (banner or menu). Asks for permission right
+ * away (inside the tap — iPhone needs that), then registers this phone. */
+export async function subscribeForPush(
+  userEmail: string,
+  mode: PushMode = 'all',
+  userId?: string,
+): Promise<'subscribed' | 'denied' | 'failed'> {
+  if (!pushSupported()) return 'failed';
+  explicitGen++;
+  explicitPending++;
+  try {
+    const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+    if (permission !== 'granted') return 'denied';
+    return await serialWrite(() => doSubscribe(userEmail, mode, userId));
+  } finally {
+    explicitPending--;
   }
 }
 
@@ -154,22 +182,26 @@ export async function unsubscribeFromPush(): Promise<void> {
  * STAYS subscribed either way, so tags and assignments still reach it.
  */
 export async function setPushMode(mode: PushMode, userId?: string): Promise<boolean> {
-  try {
-    const reg = await readyRegistration();
-    const sub = reg ? await reg.pushManager.getSubscription() : null;
-    if (!sub) return false;
-    const res = await apiFetch('/api/push/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subscription: sub.toJSON(), mode }),
-    });
-    if (!res.ok) return false;
-    rememberPushMode(userId, mode);
-    announce();
-    return true;
-  } catch {
-    return false;
-  }
+  explicitGen++;
+  explicitPending++;
+  return serialWrite(async () => {
+    try {
+      const reg = await readyRegistration();
+      const sub = reg ? await reg.pushManager.getSubscription() : null;
+      if (!sub) return false;
+      const res = await apiFetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: sub.toJSON(), mode }),
+      });
+      if (!res.ok) return false;
+      rememberPushMode(userId, mode);
+      announce();
+      return true;
+    } catch {
+      return false;
+    }
+  }).finally(() => { explicitPending--; });
 }
 
 export interface PushSetup { state: PushState; mode: PushMode | null }
@@ -187,6 +219,11 @@ export interface PushSetup { state: PushState; mode: PushMode | null }
 export async function syncPushQuietly(userEmail: string, userId: string): Promise<PushSetup> {
   if (!pushSupported()) return { state: 'unsupported', mode: null };
   if (Notification.permission === 'denied') return { state: 'denied', mode: null };
+  const g0 = explicitGen;
+  const tapInFlightAtStart = explicitPending > 0;
+  // A tap since this sync started, or one still running when it started: the
+  // tap's result is the truth and the quiet sync writes nothing (review PARV2).
+  const tapped = () => tapInFlightAtStart || explicitGen !== g0;
   try {
     const reg = await readyRegistration();
     if (!reg) return { state: Notification.permission === 'granted' ? 'granted' : 'default', mode: null };
@@ -194,7 +231,13 @@ export async function syncPushQuietly(userEmail: string, userId: string): Promis
     if (!sub) {
       if (Notification.permission !== 'granted') return { state: 'default', mode: null };
       const mode = rememberedPushMode(userId) ?? 'tagged';
-      const r = await subscribeForPush(userEmail, mode, userId);
+      const r = await serialWrite(async () => {
+        if (tapped()) return 'tapped' as const;
+        // Re-read inside the write slot: a subscription made meanwhile is not ours to overwrite.
+        if (await reg.pushManager.getSubscription()) return 'tapped' as const;
+        return doSubscribe(userEmail, mode, userId);
+      });
+      if (r === 'tapped') return getPushSetup(userId);
       return r === 'subscribed' ? { state: 'subscribed', mode } : { state: 'granted', mode: null };
     }
     const st = await apiFetch('/api/push/status', {
@@ -202,11 +245,12 @@ export async function syncPushQuietly(userEmail: string, userId: string): Promis
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ endpoint: sub.endpoint }),
     });
+    if (tapped()) return getPushSetup(userId);
     if (!st.ok) return { state: 'subscribed', mode: rememberedPushMode(userId) };
     const d = await st.json();
     if (d.registered) {
       const mode: PushMode = d.mode === 'tagged' ? 'tagged' : 'all';
-      if (rememberedPushMode(userId) !== mode) { rememberPushMode(userId, mode); announce(); }
+      if (!tapped() && rememberedPushMode(userId) !== mode) { rememberPushMode(userId, mode); announce(); }
       return { state: 'subscribed', mode };
     }
     // The server has no record of this phone for THIS person: the endpoint
@@ -214,12 +258,17 @@ export async function syncPushQuietly(userEmail: string, userId: string): Promis
     // Never everything unasked (review PARV1): their own last setting on this
     // phone, else "Only when tagged or assigned".
     const mode = rememberedPushMode(userId) ?? 'tagged';
-    const re = await apiFetch('/api/push/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userEmail, subscription: sub.toJSON(), mode }),
+    const ok = await serialWrite(async () => {
+      if (tapped()) return 'tapped' as const;
+      const re = await apiFetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userEmail, subscription: sub.toJSON(), mode }),
+      });
+      return re.ok;
     });
-    if (!re.ok) return { state: 'granted', mode: null }; // not registered: offer Turn on, never show On
+    if (ok === 'tapped') return getPushSetup(userId);
+    if (!ok) return { state: 'granted', mode: null }; // not registered: offer Turn on, never show On
     rememberPushMode(userId, mode);
     announce();
     return { state: 'subscribed', mode };
