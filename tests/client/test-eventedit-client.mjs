@@ -69,6 +69,7 @@ ok('P owner / manager: own venue (they manage the event)', mayEditEventTaskWordi
 ok('P owner / manager: not another venue', !mayEditEventTaskWording(owner, ev2, vAll) && !mayEditEventTaskWording(manager, ev2, vAll));
 ok('P mashgiach granted "can assign tasks": own venue', mayEditEventTaskWording(mashAssign, ev1, vOne));
 ok('P mashgiach granted "can assign tasks": a venue not in their list -> no', !mayEditEventTaskWording(mashAssign, ev2, vOne));
+ok('P the event\'s venue missing from the list (deleted) -> no, for everyone (RV4)', !mayEditEventTaskWording(admin, ev2, vOne) && !mayEditEventTaskWording(mashAssign, ev1, []) && !mayEditEventTaskWording(coord, ev1, [{ id: 'v1', agencyId: 'ag2' }]) && !mayEditEventTaskWording(owner, ev1, null));
 ok('P check-only mashgiach / worker -> no', !mayEditEventTaskWording(mash, ev1, vOne) && !mayEditEventTaskWording(worker, ev1, vOne));
 ok('P owner granted "can assign tasks" at their own other venue', mayEditEventTaskWording(ownerAssign, ev2, [{ id: 'v2', agencyId: ag }]));
 ok('P another agency\'s event -> no (even an admin)', !mayEditEventTaskWording(admin, evB, vAll));

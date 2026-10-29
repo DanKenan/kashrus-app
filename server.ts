@@ -10814,6 +10814,21 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     await docRef.set({ ...doc, events });
     res.json({ ok: true });
   });
+  // TEST ONLY (EVENTEDIT RV4): write a full venues array into the stored doc
+  // WITHOUT committing (no version bump, no hydration). Lets test-93 delete an
+  // event's venue in the FRESH doc only. Same pattern as doc-set-events.
+  app.post('/api/__test__/doc-set-venues', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const db = firestoreDb;
+    if (!db) return res.status(503).json({ error: 'db unavailable' });
+    const { venues: nextVenues } = req.body || {};
+    if (!Array.isArray(nextVenues)) return res.status(400).json({ error: 'venues array required' });
+    const docRef = db.collection('app-state').doc('main');
+    const snap = await docRef.get();
+    const doc = (snap && snap.data && snap.data()) || {};
+    await docRef.set({ ...doc, venues: nextVenues });
+    res.json({ ok: true });
+  });
   // TEST ONLY: write a kioskPinLockouts object into the stored doc WITHOUT
   // committing (no version bump, no hydration). Lets test-27 seed STALE
   // lockout entries (fails older than the 15-minute window) so the next
@@ -14221,6 +14236,11 @@ function mayEditEventTaskWording(user: any, event: any, venueList: readonly any[
   if ((user.agencyId || 'agency-hkc') !== (event.agencyId || 'agency-hkc')) return false;
   const venueId = event.venueId;
   if (typeof venueId !== 'string' || !venueId) return false;
+  // RV4: the event's venue must exist (in the list given: the cache, or the
+  // fresh doc in a transaction) and belong to the caller's agency. A home
+  // venue id kept on a user row after its venue was deleted never authorizes.
+  const venueRow = (venueList || []).find((v: any) => v && v.id === venueId);
+  if (!venueRow || (venueRow.agencyId || 'agency-hkc') !== (user.agencyId || 'agency-hkc')) return false;
   if (mayManageEventAt(user, venueId, venueList as any)) return true;
   const editsTaskDefinitions =
     user.role === 'admin' || user.role === 'coordinator' || user.permissions?.canAssignTasks === true;

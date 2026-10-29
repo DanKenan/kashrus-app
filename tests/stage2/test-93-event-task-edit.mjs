@@ -25,6 +25,8 @@
  *  D0 (RV1 P2) the edit carries the wording the editor saw: an editor who
  *     saw older wording gets 409 and the newer save stays; a field nobody else
  *     changed still saves (merge); a field sent without its base -> 400
+ *  D' (RV4) the event's venue deleted (fresh doc only, then the cache too):
+ *     a can-assign mashgiach / coordinator at that venue -> 403, nothing written
  *  E  the full-object save (PUT /api/events/:id) never changes an existing
  *     task's wording, for anyone (the stored wording is kept, the save goes
  *     through; renames go through the PATCH); a check-only mashgiach's save
@@ -287,6 +289,31 @@ export default {
         assert([401, 403, 409].includes(r.status) && r.status !== 200, `D ${why}: refused, got ${r.status}`);
         await setUsers(storedUsers);
         assert(taskOf(await storedEvent(), 'etask-t93-1').title === 'Check the fish', `D ${why}: nothing written`);
+      }
+      // RV4: the event's venue was deleted (event and caller kept). A home
+      // venue id left on the caller's row must not authorize.
+      {
+        const storedVenues = (await ctx.getDoc()).venues;
+        const setVenues = async (vs) => { const r = await ctx.api('POST', '/api/__test__/doc-set-venues', { venues: vs }); assert(r.status === 200, `doc-set-venues ${r.status}`); };
+        try {
+          await setVenues(storedVenues.filter((v) => v.id !== v1));
+          // fresh doc only: the commit refuses
+          for (const who of ['mashassign', 'coord']) {
+            const r = await edit(tok[who], { title: `venue gone ${who}`, baseTitle: 'Check the fish' }, 'etask-t93-1', evId, undefined, { noBase: true });
+            dCodes.push(r.status);
+            assert(r.status === 403, `D venue deleted (fresh) ${who} -> 403, got ${r.status}`);
+          }
+          assert(taskOf(await storedEvent(), 'etask-t93-1').title === 'Check the fish', 'D venue deleted (fresh): nothing written');
+          // the cache too (an admin commit re-hydrates it without the venue): refused before the commit
+          const sync = await call('POST', `/api/events/${evId}/tasks/etask-t93-2/toggle`, tok.admin, { isCompleted: false });
+          const r3 = await edit(tok.mashassign, { title: 'venue gone cached', baseTitle: 'Check the fish' }, 'etask-t93-1', evId, undefined, { noBase: true });
+          dCodes.push(r3.status);
+          assert(r3.status === 403, `D venue deleted (cache, sync ${sync.status}) mashassign -> 403, got ${r3.status}`);
+          assert(taskOf(await storedEvent(), 'etask-t93-1').title === 'Check the fish', 'D venue deleted (cache): nothing written');
+        } finally {
+          await setVenues(storedVenues);
+          await call('POST', `/api/events/${evId}/tasks/etask-t93-2/toggle`, tok.admin, { isCompleted: false });
+        }
       }
     } finally {
       await setEvents(storedEvents);

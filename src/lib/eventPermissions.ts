@@ -73,6 +73,9 @@ export function mayEditEventTaskWording(
   const venueId = typeof event.venueId === 'string' ? event.venueId : '';
   if (!venueId) return false;
   if (event.agencyId && agencyOf(event) !== agencyOf(user)) return false;
+  // RV4: the event's venue must exist in the list and be the caller's agency's.
+  const venueRow = (venues || []).find((v) => v && v.id === venueId);
+  if (!venueRow || agencyOf(venueRow as any) !== agencyOf(user)) return false;
   if (mayManageEventAt(user, venueId, venues)) return true;
   const editsTaskDefinitions =
     user.role === 'admin' || user.role === 'coordinator' || user.permissions?.canAssignTasks === true;
