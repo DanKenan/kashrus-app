@@ -233,6 +233,30 @@ ok('F8 a send after the switch carries no stale tag', post2 && post2[2].venueId 
   p = await startSend(vm);
   await finish(vm, p);
   ok('V5 an untouched sent draft is cleared (text, tags, Private)', box(vm) === '' && vm.find((e) => e.props['data-tag-chip']).length === 0 && !vm.text().includes('will see this'), box(vm));
+  // V6 (RV2 P2): a recording started while a text-only send is pending keeps its Stop control and the draft.
+  let grant = null;
+  const fakeStream = { getTracks: () => [{ stop() {} }] };
+  const md = { getUserMedia: () => new Promise((r) => { grant = () => r(fakeStream); }) };
+  try { Object.defineProperty(globalThis.navigator, 'mediaDevices', { value: md, configurable: true }); } catch { globalThis.navigator = { mediaDevices: md }; }
+  class FakeRecorder {
+    state = 'inactive';
+    onstop = null;
+    ondataavailable = null;
+    start() { this.state = 'recording'; }
+    stop() { this.state = 'inactive'; if (this.onstop) this.onstop(); }
+  }
+  globalThis.MediaRecorder = FakeRecorder;
+  await vm.type('type @ to tag', 'text only');
+  p = await startSend(vm);
+  const mic = vm.find((e) => e.type === 'button' && /Voice note/.test(JSON.stringify(e.props.children ?? '')))[0];
+  const recP = mic.props.onClick({ preventDefault() {}, stopPropagation() {} });
+  await finish(vm, p); // the send lands while the microphone permission is still open
+  ok('V6a a send landing during the mic permission prompt keeps the draft', box(vm) === 'text only', box(vm));
+  grant(); await recP; await vm.render();
+  ok('V6b the recording then runs with its Stop control', vm.buttons().some((b) => /Stop/.test(b.label)), vm.buttons().map((b) => b.label).join('|'));
+  p = await startSend(vm);
+  await finish(vm, p);
+  ok('V6c a send during a live recording never detaches it (Stop stays, text stays)', vm.buttons().some((b) => /Stop/.test(b.label)) && box(vm) === 'text only', box(vm));
 }
 
 console.log(`${passed} passed, ${failures} failed`);

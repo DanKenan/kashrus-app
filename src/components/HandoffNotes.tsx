@@ -112,7 +112,7 @@ export function HandoffNotes({
   // composer only when it still holds exactly the draft that was sent.
   const draftRevRef = useRef(0);
   const draftSigRef = useRef<unknown[] | null>(null);
-  const sig = [venueId, content, voiceNoteData, tagged.map((t) => t.id).join(','), tagAll, isPrivate];
+  const sig = [venueId, content, voiceNoteData, recordState, tagged.map((t) => t.id).join(','), tagAll, isPrivate];
   if (!draftSigRef.current || sig.some((v, i) => v !== draftSigRef.current![i])) {
     draftSigRef.current = sig;
     draftRevRef.current += 1;
@@ -219,6 +219,10 @@ export function HandoffNotes({
 
   const startRecording = async () => {
     setErrorMsg(null);
+    // TEAMNOTES2 (RV2 P2): pressing the mic is a draft change at once — even
+    // while the permission prompt is still open — so a send that finishes
+    // meanwhile never clears the composer under a starting recording.
+    draftRevRef.current += 1;
     const session = ++recordSessionRef.current;
     let stream: MediaStream;
     try {
@@ -311,8 +315,10 @@ export function HandoffNotes({
       return;
     }
     if (result.data?.note) onPosted(result.data.note);
-    // Clear only the draft that was sent: same venue AND not one change since.
+    // Clear only the draft that was sent: same venue AND not one change since
+    // (and never under a live recording: its Stop control must stay).
     if (venueMoved || draftRevRef.current !== sent.rev) return;
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') return;
     setContent('');
     setTagged([]);
     setTagAll(false);
