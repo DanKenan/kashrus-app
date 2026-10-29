@@ -146,7 +146,8 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
       // The sheet is for THIS venue: agency-wide items plus this venue's.
       setAnnouncements(anns.filter((a) => !a.venueId || a.venueId === c.venueId));
       setNotes(nts.notes);
-      if (c.kiosk && nts.privateForYou !== null) setKioskPrivate(nts.privateForYou);
+      // RV3 P3: a count the server could not read is not shown as current.
+      if (c.kiosk) setKioskPrivate(nts.privateForYou ?? 0);
       setAlerts(alts);
       if (recs) setReceipts(recs);
     } catch {
@@ -165,10 +166,11 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     const k = updatesCtxKey(c);
     try {
       const r = await fetchNotesWithMeta(c.venueId);
-      if (isStale(k) || r.privateForYou === null) return;
-      setKioskPrivate(r.privateForYou);
+      if (isStale(k)) return;
+      // RV3 P3: a count the server could not read is not shown as current.
+      setKioskPrivate(r.privateForYou ?? 0);
     } catch {
-      /* keep the last number */
+      if (!isStale(k)) setKioskPrivate(0);
     }
   }, [isStale]);
   useEffect(() => {

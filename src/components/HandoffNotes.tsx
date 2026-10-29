@@ -112,7 +112,7 @@ export function HandoffNotes({
   // composer only when it still holds exactly the draft that was sent.
   const draftRevRef = useRef(0);
   const draftSigRef = useRef<unknown[] | null>(null);
-  const sig = [venueId, content, voiceNoteData, recordState, tagged.map((t) => t.id).join(','), tagAll, isPrivate];
+  const sig = [venueId, content, voiceNoteData, recordState, shift, tagged.map((t) => t.id).join(','), tagAll, isPrivate];
   if (!draftSigRef.current || sig.some((v, i) => v !== draftSigRef.current![i])) {
     draftSigRef.current = sig;
     draftRevRef.current += 1;

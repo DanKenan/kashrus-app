@@ -233,6 +233,23 @@ ok('F8 a send after the switch carries no stale tag', post2 && post2[2].venueId 
   p = await startSend(vm);
   await finish(vm, p);
   ok('V5 an untouched sent draft is cleared (text, tags, Private)', box(vm) === '' && vm.find((e) => e.props['data-tag-chip']).length === 0 && !vm.text().includes('will see this'), box(vm));
+  // V7 (RV3 P2): changing the Shift during the send (or changing it and back) keeps the draft.
+  const shiftSel = () => vm.find((e) => e.type === 'select' && e.props['aria-label'] === 'Shift')[0];
+  const setShiftTo = async (v) => { await shiftSel().props.onChange({ target: { value: v } }); await vm.render(); };
+  const shifts = shiftSel().props.children.map((o) => o.key);
+  const s0 = shiftSel().props.value; const s1 = shifts.find((x) => x !== s0);
+  await vm.type('type @ to tag', 'shift note');
+  p = await startSend(vm);
+  await setShiftTo(s1);
+  await finish(vm, p);
+  ok('V7a a Shift change during the send keeps the draft', box(vm) === 'shift note' && shiftSel().props.value === s1, box(vm));
+  p = await startSend(vm);
+  await setShiftTo(s0); await setShiftTo(s1);
+  await finish(vm, p);
+  ok('V7b a Shift changed and changed back during the send still keeps the draft', box(vm) === 'shift note', box(vm));
+  p = await startSend(vm);
+  await finish(vm, p);
+  ok('V7c untouched again -> cleared', box(vm) === '');
   // V6 (RV2 P2): a recording started while a text-only send is pending keeps its Stop control and the draft.
   let grant = null;
   const fakeStream = { getTracks: () => [{ stop() {} }] };
