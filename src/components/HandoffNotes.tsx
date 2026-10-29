@@ -3,7 +3,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { MessageSquare, Trash2, Mic, Square, Play, Send, X, Lock, CheckCheck, AtSign } from 'lucide-react';
 import { apiWrite } from '../lib/api';
 import { HandoffNoteItem, MarkKind, NoteSeenCount, NoteSeenList, fetchNoteSeen, fetchNoteSeenCounts, fetchNoteTeam, useVisibleMarks } from '../lib/updates';
-import { TeamMember, applyMention, filterTeam, joinNames, mentionQueryAt, privateNotice, removeTagText, seenLabel, splitMentions } from '../lib/mentions';
+import { TeamMember, applyMention, filterTeam, joinNames, mentionQueryAt, kioskPrivateNotice, privateNotice, removeTagText, seenLabel, splitMentions } from '../lib/mentions';
 
 // 5a — Shift notes as the Updates sheet's second tab body (was an
 // unrendered panel). The note box + mic are pinned at the bottom for
@@ -21,6 +21,8 @@ interface HandoffNotesProps {
   items: HandoffNoteItem[];
   loading: boolean;
   readOnly: boolean;
+  /** TEAMNOTES2 (kiosk only): private notes waiting for the signed-in person — a count, never the notes. */
+  privateForYou?: number;
   /** Mirrors the server: own notes, the admin, or this venue's coordinator. */
   canDelete: (note: HandoffNoteItem) => boolean;
   unreadIds: Set<string>;
@@ -41,6 +43,7 @@ export function HandoffNotes({
   items,
   loading,
   readOnly,
+  privateForYou = 0,
   canDelete,
   unreadIds,
   venueId,
@@ -103,6 +106,10 @@ export function HandoffNotes({
   // TEAMNOTES (RV1 P2): picker, tags, Private and seen-by belong to ONE venue —
   // a venue change drops them at once (the draft text stays).
   const tagVenueRef = useRef(venueId);
+  // TEAMNOTES2 (RV4 P3): what the composer holds NOW, read when a send
+  // finishes — only the draft that was sent is cleared, never a newer one.
+  const draftNowRef = useRef({ content: '', voice: '' });
+  draftNowRef.current = { content, voice: voiceNoteData };
   useEffect(() => {
     if (tagVenueRef.current === venueId) return;
     tagVenueRef.current = venueId;
@@ -268,6 +275,7 @@ export function HandoffNotes({
     if (tagVenueRef.current !== venueId) return; // tags are re-made for the new venue first
     setSending(true);
     setErrorMsg(null);
+    const sent = { venueId, content, voice: voiceNoteData };
     const result = await apiWrite('/api/handoff-notes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -281,8 +289,15 @@ export function HandoffNotes({
         private: isPrivate && canPrivate,
       }),
     });
+    if (disposedRef.current) return;
     setSending(false);
+    // TEAMNOTES2 (RV4 P3): the venue changed while this was in flight — the
+    // composer now belongs to the new venue. Its tags and Private are not
+    // this send's; the text is cleared only if it is still exactly the text
+    // that was sent (a new draft is never wiped).
+    const venueMoved = tagVenueRef.current !== sent.venueId;
     if (!result.ok) {
+      if (venueMoved) { setErrorMsg('Your last note was not sent. Check it and send again.'); return; }
       // Keep the text, the recording, the tags and Private so nothing is lost (plan Q5).
       const code = result.code || (result.data as any)?.code;
       setErrorMsg(code === 'PRIVATE_NEEDS_TAG' || code === 'MENTION_NOT_ON_TEAM' || code === 'NOTE_TOO_LONG'
@@ -291,12 +306,20 @@ export function HandoffNotes({
       return;
     }
     if (result.data?.note) onPosted(result.data.note);
-    setContent('');
-    setTagged([]);
-    setTagAll(false);
-    setIsPrivate(false);
-    setMentionQ(null);
-    discardRecording();
+    const now = draftNowRef.current;
+    const sameText = now.content === sent.content;
+    const sameVoice = now.voice === sent.voice;
+    if (venueMoved) {
+      if (sameText && sameVoice) { setContent(''); setMentionQ(null); discardRecording(); }
+      return;
+    }
+    if (sameText) { setContent(''); setMentionQ(null); }
+    if (sameVoice) discardRecording();
+    if (sameText && sameVoice) {
+      setTagged([]);
+      setTagAll(false);
+      setIsPrivate(false);
+    }
   };
 
   const remove = async (id: string) => {
@@ -319,6 +342,12 @@ export function HandoffNotes({
 
   return (
     <div className="flex flex-col min-h-0 flex-1">
+      {readOnly && privateForYou > 0 && (
+        <div data-kiosk-private-notice role="status" className="mx-4 mt-3 p-3 rounded-xl border border-line-control bg-sunken flex items-start gap-2.5 shrink-0">
+          <Lock className="w-5 h-5 shrink-0 text-ink-soft mt-0.5" />
+          <p className="text-base font-semibold text-ink">{kioskPrivateNotice(privateForYou)}</p>
+        </div>
+      )}
       <div ref={listRef} className="overflow-y-auto flex-1 px-4 py-3 space-y-2.5">
         {loading ? (
           <div className="space-y-2.5" aria-label="Loading shift notes">

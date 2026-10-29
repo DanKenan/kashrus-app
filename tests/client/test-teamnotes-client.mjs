@@ -12,12 +12,17 @@
  *  F  flow (mini-render): "@" opens the picker (@All + team minus me), picking a person makes a chip, Private
  *     turns on, the banner names admins and coordinators, Send posts {mentions, private}; a venue change drops
  *     the team, the tags and Private at once (RV1 P2) and a send then carries no stale tag.
+ *  K  (TEAMNOTES2) the kiosk notice: "You have a private message. Open Shutfey on your phone to read it."
+ *     (count only; nothing for 0); shown only on the read-only kiosk list and the kiosk banner.
+ *  V  (TEAMNOTES2, RV4 P3) a send that finishes after a venue switch (or after more typing) never wipes
+ *     the newer draft; an untouched sent draft is still cleared.
  * Run: npx tsx tests/client/test-teamnotes-client.mjs
  */
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { mentionQueryAt, applyMention, filterTeam, joinNames, privateNotice, seenLabel, splitMentions, removeTagText } from '../../src/lib/mentions.ts';
+import { mentionQueryAt, applyMention, filterTeam, joinNames, privateNotice, seenLabel, splitMentions, removeTagText, kioskPrivateNotice } from '../../src/lib/mentions.ts';
 import { HandoffNotes } from '../../src/components/HandoffNotes.tsx';
+import { KioskPrivateNotice } from '../../src/components/KioskPrivateNotice.tsx';
 import { mount, recordFetch } from './lib/mini-render.mjs';
 import { setSessionToken } from '../../src/lib/api.ts';
 
@@ -96,6 +101,19 @@ ok('R9 kiosk: no composer, no toggle, no seen-by', !kiosk.includes('data-private
 const other = renderToStaticMarkup(React.createElement(HandoffNotes, props({ currentUserId: 'u-other', currentUserEmail: 'o@x' })));
 ok('R10 tagged-you only for @All when not tagged by name', (other.match(/data-tagged-you/g) || []).length === 1);
 
+// K (TEAMNOTES2)
+ok('K1 one private message', kioskPrivateNotice(1) === 'You have a private message. Open Shutfey on your phone to read it.');
+ok('K2 several', kioskPrivateNotice(3) === 'You have 3 private messages. Open Shutfey on your phone to read them.');
+ok('K3 none / bad input says nothing', kioskPrivateNotice(0) === '' && kioskPrivateNotice(-1) === '' && kioskPrivateNotice(undefined) === '' && kioskPrivateNotice(1.5) === '');
+const kn = renderToStaticMarkup(React.createElement(HandoffNotes, props({ readOnly: true, privateForYou: 1, items: [notes[1]] })));
+ok('K4 kiosk list shows the notice', kn.includes('data-kiosk-private-notice') && kn.includes('You have a private message. Open Shutfey on your phone to read it.'));
+ok('K5 kiosk notice carries no note text', !kn.includes('keys in office'));
+ok('K6 no notice for 0', !renderToStaticMarkup(React.createElement(HandoffNotes, props({ readOnly: true, privateForYou: 0 }))).includes('data-kiosk-private-notice'));
+ok('K7 never on a phone (not read-only)', !renderToStaticMarkup(React.createElement(HandoffNotes, props({ readOnly: false, privateForYou: 2 }))).includes('data-kiosk-private-notice'));
+const kb = renderToStaticMarkup(React.createElement(KioskPrivateNotice, { count: 2 }));
+ok('K8 kiosk banner text', kb.includes('data-kiosk-private-banner') && kb.includes('You have 2 private messages. Open Shutfey on your phone to read them.'));
+ok('K9 kiosk banner empty for 0', renderToStaticMarkup(React.createElement(KioskPrivateNotice, { count: 0 })) === '');
+
 // F
 const store = new Map();
 globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
@@ -155,6 +173,40 @@ await fm.type('type @ to tag', 'plain note');
 await fm.click('Send note');
 const post2 = calls.filter((c) => c[0] === 'POST' && c[1] === '/api/handoff-notes').pop();
 ok('F8 a send after the switch carries no stale tag', post2 && post2[2].venueId === 'v2' && JSON.stringify(post2[2].mentions) === '[]' && post2[2].private === false, JSON.stringify(post2));
+
+// V (RV4 P3): an in-flight send never wipes a newer draft.
+{
+  let release = null;
+  recordFetch({
+    '/api/handoff-notes/team': (path) => ({ team: teams[new URLSearchParams(path.split('?')[1]).get('venueId')] || [] }),
+    '/api/handoff-notes/seen': { counts: [] },
+    'POST /api/handoff-notes': (path, body) => new Promise((r) => { release = () => r({ note: { id: 'nv', venueId: body.venueId, authorEmail: 'r@x', authorName: 'Rivka Levi', content: body.content, shift: 'Morning', createdAt: '2026-10-29T10:00:00.000Z' } }); }),
+    '/api/health': { ok: true },
+  });
+  const sendBtn = (m) => m.find((e) => e.type === 'button' && typeof e.props.onClick === 'function' && /Send/.test(JSON.stringify(e.props.children ?? '')))[0];
+  const vm = mount(HandoffNotes, props({ items: [], active: true, currentUserId: 'u-me', currentUserEmail: 'r@x', currentUserName: 'Rivka Levi' }));
+  await vm.render();
+  await vm.type('type @ to tag', 'note for venue one');
+  const p1 = sendBtn(vm).props.onClick({ preventDefault() {}, stopPropagation() {} });
+  for (let i = 0; i < 20 && !release; i++) await new Promise((r) => setTimeout(r, 5));
+  await vm.render({ venueId: 'v2' });
+  await vm.type('type @ to tag', 'new draft for venue two');
+  release(); await p1; await vm.render();
+  ok('V1 a send finishing after a venue switch keeps the new draft', vm.find((e) => e.type === 'textarea')[0].props.value === 'new draft for venue two', vm.find((e) => e.type === 'textarea')[0].props.value);
+  release = null;
+  await vm.type('type @ to tag', 'same venue');
+  const p2 = sendBtn(vm).props.onClick({ preventDefault() {}, stopPropagation() {} });
+  for (let i = 0; i < 20 && !release; i++) await new Promise((r) => setTimeout(r, 5));
+  await vm.type('type @ to tag', 'same venue and more typed');
+  release(); await p2; await vm.render();
+  ok('V2 text typed during the send is kept', vm.find((e) => e.type === 'textarea')[0].props.value === 'same venue and more typed');
+  release = null;
+  const p3 = sendBtn(vm).props.onClick({ preventDefault() {}, stopPropagation() {} });
+  for (let i = 0; i < 20 && !release; i++) await new Promise((r) => setTimeout(r, 5));
+  if (release) { release(); await p3; }
+  await vm.render();
+  ok('V3 an untouched sent draft is still cleared', vm.find((e) => e.type === 'textarea')[0].props.value === '');
+}
 
 console.log(`${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

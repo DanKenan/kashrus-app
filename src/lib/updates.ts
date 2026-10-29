@@ -105,10 +105,20 @@ export async function fetchAnnouncements(signal?: AbortSignal): Promise<Announce
 }
 
 export async function fetchNotes(venueId: string, signal?: AbortSignal): Promise<HandoffNoteItem[]> {
+  return (await fetchNotesWithMeta(venueId, signal)).notes;
+}
+
+/** TEAMNOTES2: the notes plus, on a kiosk only, how many private notes are
+ * tagged to the person signed in on the tablet and still unread (a number
+ * only; null = not a kiosk answer, or the server could not count). */
+export async function fetchNotesWithMeta(venueId: string, signal?: AbortSignal): Promise<{ notes: HandoffNoteItem[]; privateForYou: number | null }> {
   const res = await apiFetch(`/api/handoff-notes?venueId=${encodeURIComponent(venueId)}`, { signal });
-  if (!res.ok) return [];
+  if (!res.ok) return { notes: [], privateForYou: null };
   const d = await res.json();
-  return Array.isArray(d.notes) ? d.notes : [];
+  return {
+    notes: Array.isArray(d.notes) ? d.notes : [],
+    privateForYou: Number.isInteger(d.privateForYou) && d.privateForYou >= 0 ? d.privateForYou : null,
+  };
 }
 
 /** TEAMNOTES: the people the caller can tag at this venue (names + roles). */

@@ -54,6 +54,15 @@ export function privateNotice(names: string[], when: 'compose' | 'posted'): stri
     : `Private: only ${who}, admins and coordinators can see this`;
 }
 
+/** TEAMNOTES2: the kiosk notice for the person signed in on the tablet — how
+ * many private notes wait for them, never what they say. '' for none. */
+export function kioskPrivateNotice(count: number): string {
+  if (!Number.isInteger(count) || count <= 0) return '';
+  return count === 1
+    ? 'You have a private message. Open Shutfey on your phone to read it.'
+    : `You have ${count} private messages. Open Shutfey on your phone to read them.`;
+}
+
 /** "Seen by 2 of 5" · "Seen by everyone" · "" when nobody else can see it yet. */
 export function seenLabel(seen: number, total: number): string {
   if (!total || total <= 0) return seen > 0 ? `Seen by ${seen}` : '';

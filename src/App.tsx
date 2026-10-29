@@ -25,6 +25,7 @@ import { LoginPage } from './components/LoginPage';
 import { KioskLogin } from './components/KioskLogin';
 import { KioskTaskPanel } from './components/KioskTaskPanel';
 import { UpdatesBell } from './components/UpdatesBell';
+import { KioskPrivateNotice } from './components/KioskPrivateNotice';
 import { UpdatesSheet, announcementCanDelete } from './components/UpdatesSheet';
 import { UrgentBanner } from './components/UrgentBanner';
 import { Announcements } from './components/Announcements';
@@ -2465,6 +2466,13 @@ export default function App() {
         />
       )}
 
+      {/* TEAMNOTES2: the kiosk says a private note waits for the signed-in person (a count only) */}
+      {isKiosk && updates.kioskPrivate > 0 && (
+        <React.Fragment key={`${updatesCtxKey}|${updates.kioskPrivate}`}>
+          <KioskPrivateNotice count={updates.kioskPrivate} />
+        </React.Fragment>
+      )}
+
       {/* Updates sheet (Announcements | Shift notes | Alerts) */}
       <UpdatesSheet
         open={updates.sheetOpen}
@@ -2541,6 +2549,7 @@ export default function App() {
             items={updates.notes}
             loading={updates.listsLoading}
             readOnly={isKiosk}
+            privateForYou={isKiosk ? updates.kioskPrivate : 0}
             unreadIds={new Set(updates.unread.unreadNoteIds)}
             venueId={currentVenue?.id || ''}
             currentUserEmail={currentUser?.email || ''}

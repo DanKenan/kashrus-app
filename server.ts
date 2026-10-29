@@ -8380,7 +8380,7 @@ app.get('/api/admin/dashboard', (req, res) => {
 });
 
 // Shift handoff notes — mashgiach-to-mashgiach communication
-app.get('/api/handoff-notes', (req, res) => {
+app.get('/api/handoff-notes', async (req, res) => {
   const caller = requireAuthUser(req, res);
   if (!caller) return;
   const agencyId = caller.agencyId || 'agency-hkc';
@@ -8394,9 +8394,44 @@ app.get('/api/handoff-notes', (req, res) => {
   }
   // TEAMNOTES: private notes only for their readers (never on a kiosk).
   const kiosk = (req as any).kiosk === true;
+  // TEAMNOTES2 (Don, Oct 29: "if the mashgiach does have a private message,
+  // it should tell him that there's a private message for him to look at"):
+  // on a kiosk, the person signed in on the tablet learns only HOW MANY
+  // private notes at this tablet's venue are tagged to them and still unread
+  // (read = their own read mark, made when they open it on their phone).
+  // A number only — never a text, author, id or time.
+  let privateForYou: number | undefined;
+  if (kiosk) {
+    const kioskVenueId = String((req as any).kioskVenueId || '');
+    const mine = notes.filter((n) =>
+      n.private === true && n.venueId === kioskVenueId &&
+      Array.isArray(n.mentions) && n.mentions.some((m) => m && m.id === caller.id) &&
+      !noteAuthoredBy(n, caller) && noteVisibleTo(caller, n));
+    if (mine.length === 0) privateForYou = 0;
+    else {
+      try {
+        const rec = await loadUpdateReads(caller);
+        privateForYou = mine.filter((n) => !isRead(rec, 'n', n.id)).length;
+      } catch (e: any) {
+        // Fail quiet: no number rather than a wrong one (the list still loads).
+        console.warn(`[handoff-notes] kiosk private count: ${String(e?.message || e).slice(0, 120)}`);
+      }
+    }
+  }
   notes = notes.filter((n) => noteVisibleTo(caller, n, { kiosk }));
-  res.json({ notes: notes.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(publicUpdate) });
+  res.json({
+    notes: notes.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(publicUpdate),
+    ...(privateForYou !== undefined ? { privateForYou } : {}),
+  });
 });
+
+/** TEAMNOTES2: the push body for a tag — the note's words (one line, trimmed
+ * to 120 characters), or "🎤 Voice note" for a voice-only note. */
+function notePushPreview(note: { content?: string }): string {
+  const text = String(note.content || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '🎤 Voice note';
+  return text.length > 120 ? `${text.slice(0, 119).trimEnd()}…` : text;
+}
 
 const NOTE_MAX_CHARS = 4000;
 const NOTE_MAX_MENTIONS = 50;
@@ -8508,15 +8543,15 @@ app.post('/api/handoff-notes', async (req, res) => {
       (named.has(u.id) || (note.mentionAll === true && u.role !== 'admin')) &&
       !noteAuthoredBy(note, u) && noteVisibleTo(u, note));
     const venueName = String(venues.find((v: any) => v.id === note.venueId)?.name || '');
-    // A private note's text stays off the lock screen (RV1 P3): the push says
-    // who and that it is private; the words are read in the app.
-    const preview = note.private
-      ? 'Private note. Open Shutfey to read it.'
-      : note.content ? note.content.slice(0, 100) : '🎤 Voice note';
+    // TEAMNOTES2 (Don, Oct 29: "Do like whatsapp, it show you the message,
+    // but also show that it is as tagged to you, so maybe same just as
+    // private"): every tag push carries the note's words; a private one is
+    // marked private in the title. Only the note's readers get it (above).
+    const preview = notePushPreview(note);
     for (const u of recipients) {
       const direct = named.has(u.id);
       const title = note.private
-        ? `🔒 ${note.authorName} tagged you (private)`
+        ? `🔒 ${note.authorName} tagged you (private)${venueName ? ` · ${venueName}` : ''}`
         : direct
           ? `💬 ${note.authorName} tagged you${venueName ? ` · ${venueName}` : ''}`
           : `💬 ${note.authorName} @All${venueName ? ` · ${venueName}` : ''}`;

@@ -15,6 +15,12 @@
  *  E  private: REST list (every reader / non-reader), kiosk list, socket
  *     (staff + kiosk), push, delete event — only author, tagged, admins,
  *     the venue's coordinators.
+ *  K  (TEAMNOTES2) every tag push carries the note's text, like WhatsApp; a
+ *     private one is marked "(private)" in the title and still reaches only
+ *     its readers. The kiosk gets ONLY a number for the person signed in on
+ *     the tablet: unread private notes tagged to them at the tablet's venue
+ *     (privateForYou) — no text, id or author; 0 for an untagged person; the
+ *     number drops when they read it on their phone; phones get no field.
  *  F  seen-by: any team member sees names; private seen-by 404 to non-readers;
  *     marks on an invisible private note are not recorded; unread counts.
  * Every positive check has its negative twin (rule G).
@@ -154,6 +160,7 @@ export default {
       const p = await pushedTo();
       if (!sameSet(p.map((x) => x.who), ['mashA1b'])) throw new Error(`B push recipients ${JSON.stringify(p.map((x) => x.who))} (expected only mashA1b)`);
       if (!/Moshe Author tagged you/.test(p[0].title) || !/delivery came/.test(p[0].body)) throw new Error(`B push text: ${p[0].title} / ${p[0].body}`);
+      if (!p[0].title.includes(`· T94 A1 ${ts}`)) throw new Error(`B push title must name the venue: ${p[0].title}`);
       for (const k of ['mashA1c', 'ownerA1', 'coordA1', 'adminX']) {
         const l = await list(T[k], `?venueId=${A1}`);
         if (!ids(l.list).includes(pubNote.id)) throw new Error(`B untagged ${k} must still see the public note`);
@@ -191,7 +198,7 @@ export default {
 
     // ---- E: private ----
     // Kiosk on A1 with mashA1b (the TAGGED person) signed in — still never shown.
-    for (const [uid, pin] of [[id('mashA1b'), '9411']]) {
+    for (const [uid, pin] of [[id('mashA1b'), '9411'], [id('mashA1c'), '9412']]) {
       const ver = await ctx.getVersion();
       const r = await fetch(`${baseUrl}/api/users/${uid}?expectedVersion=${ver}`, { method: 'PUT', headers: auth(T.adminX), body: JSON.stringify({ kioskPin: pin, expectedVersion: ver }) });
       if (r.status !== 200) throw new Error(`E set PIN: ${r.status}`);
@@ -219,6 +226,22 @@ export default {
       if (!sameSet(who, ['mashA1b'])) throw new Error(`E private push recipients ${JSON.stringify(who)}`);
       const pp = (await pushedTo())[0];
       if (!/private/.test(pp.title)) throw new Error(`E private push title: ${pp.title}`);
+      // K (TEAMNOTES2): the private push shows the text (Don: "like whatsapp"), marked private, with the venue.
+      if (!pp.title.startsWith('🔒 Moshe Author tagged you (private) · T94 A1')) throw new Error(`K private push title: ${pp.title}`);
+      if (pp.body !== 'PRIVATE-T94 your keys are in the office') throw new Error(`K private push body must be the note text: ${pp.body}`);
+      // K: the kiosk count — the tagged person signed in on the tablet learns a number, nothing else.
+      const kb = await get(kTok, '/api/handoff-notes', true);
+      if (kb.status !== 200 || kb.body.privateForYou !== 1) throw new Error(`K kiosk privateForYou for the tagged person: ${kb.status} ${kb.body?.privateForYou} (expected 1)`);
+      if (!sameSet(Object.keys(kb.body), ['notes', 'privateForYou'])) throw new Error(`K kiosk answer carries extra fields: ${Object.keys(kb.body)}`);
+      const kbs = JSON.stringify(kb.body);
+      if (kbs.includes('PRIVATE-T94') || kbs.includes(privNote.id)) throw new Error('K kiosk answer leaks the private note');
+      const kTokC = await kioskLogin(baseUrl, id('mashA1c'), '9412');
+      const kc = await get(kTokC, '/api/handoff-notes', true);
+      if (kc.status !== 200 || kc.body.privateForYou !== 0) throw new Error(`K kiosk privateForYou for an untagged person: ${kc.body?.privateForYou} (expected 0)`);
+      for (const k of ['mashA1b', 'mashA1', 'coordA1', 'adminX']) {
+        const ph = await get(T[k], `/api/handoff-notes?venueId=${A1}`);
+        if (ph.status !== 200 || 'privateForYou' in ph.body) throw new Error(`K phone answer for ${k} must not carry privateForYou`);
+      }
       await sleep(600);
       const gotIt = (c) => c.messages.some((m) => m.type === 'HANDOFF_NOTE' && JSON.stringify(m.payload).includes('PRIVATE-T94'));
       for (const k of ['mashA1b', 'coordA1', 'adminX']) if (!gotIt(socks[k])) throw new Error(`E socket reader ${k} did not get the private note`);
@@ -253,6 +276,9 @@ export default {
       if (!(unreadB.body.unreadNoteIds || []).includes(privNote.id)) throw new Error('F private note missing from the tagged person\'s unread ids');
       const mkB = await fetch(`${baseUrl}/api/updates/seen`, { method: 'POST', headers: auth(T.mashA1b), body: JSON.stringify({ venueId: A1, noteIds: [privNote.id] }) });
       if ((await mkB.json()).recorded !== 1) throw new Error('F tagged reader mark not recorded');
+      // K: read on the phone -> the kiosk number for that person drops to 0.
+      const kAfter = await get(await kioskLogin(baseUrl, id('mashA1b'), '9411'), '/api/handoff-notes', true);
+      if (kAfter.status !== 200 || kAfter.body?.privateForYou !== 0) throw new Error(`K kiosk count after reading on the phone: ${kAfter.status} ${kAfter.body?.privateForYou} (expected 0)`);
       const sp = await get(T.coordA1, `/api/handoff-notes/${privNote.id}/seen?venueId=${A1}`);
       if (sp.status !== 200 || !sp.body.seen.some((r) => r.name === 'Baruch Tagged')) throw new Error(`F coordinator private seen-by: ${JSON.stringify(sp.body)}`);
       if (sp.body.notYet.some((r) => r.name === 'Chaim Untagged')) throw new Error('F private seen-by lists a non-reader');
@@ -283,6 +309,24 @@ export default {
       void pn;
     }
     Object.values(socks).forEach((c) => c.ws.close());
+    // K: a second private tag counts again for each tagged person; deleting it drops the number.
+    {
+      const kCount = async (uid, pin) => (await get(await kioskLogin(baseUrl, id(uid), pin), '/api/handoff-notes', true)).body?.privateForYou;
+      const priv2 = await created(await post(T.coordA1, { venueId: A1, content: 'PRIVATE2-T94', mentions: [id('mashA1b'), id('mashA1c')], private: true }), 'K2');
+      const k2 = await get(await kioskLogin(baseUrl, id('mashA1b'), '9411'), '/api/handoff-notes', true);
+      const k2c = await kCount('mashA1c', '9412');
+      if (k2.body?.privateForYou !== 1 || k2c !== 1) throw new Error(`K second private tag: ${k2.body?.privateForYou}/${k2c} (expected 1/1)`);
+      if (JSON.stringify(k2.body).includes('PRIVATE2-T94') || JSON.stringify(k2.body).includes(priv2.id)) throw new Error('K kiosk answer leaks the second private note');
+      const mk = await fetch(`${baseUrl}/api/updates/seen`, { method: 'POST', headers: auth(T.mashA1c), body: JSON.stringify({ venueId: A1, noteIds: [priv2.id] }) });
+      if (mk.status !== 200 || (await mk.json()).recorded !== 1) throw new Error('K tagged reader mark not recorded');
+      const after = [await kCount('mashA1c', '9412'), await kCount('mashA1b', '9411')];
+      if (after[0] !== 0 || after[1] !== 1) throw new Error(`K reading on the phone must drop only the reader's number: ${after} (expected 0,1)`);
+      const dv = await ctx.getVersion();
+      const del = await fetch(`${baseUrl}/api/handoff-notes/${priv2.id}?expectedVersion=${dv}`, { method: 'DELETE', headers: auth(T.coordA1) });
+      if (del.status !== 200) throw new Error(`K cleanup delete: ${del.status}`);
+      const k3 = await kCount('mashA1b', '9411');
+      if (k3 !== 0) throw new Error(`K deleted private note still counted: ${k3}`);
+    }
 
     // ---- F: seen-by on a public note, for any team member ----
     {
@@ -310,7 +354,9 @@ export default {
       const pv = await created(await post(T.mashMov, { venueId: A1, content: 'MOVER-PRIV-T94', mentions: [id('mashA1b')], private: true }), 'G1');
       const pb = await created(await post(T.mashMov, { venueId: A1, content: 'MOVER-PUB-T94' }), 'G2');
       const pushedPriv = (await pushedTo()).filter((x) => x.who === 'mashA1b').pop();
-      if (!pushedPriv || pushedPriv.body.includes('MOVER-PRIV-T94')) throw new Error(`G private push shows the private text: ${JSON.stringify(pushedPriv)}`);
+      // TEAMNOTES2: the private push now carries the text (Don: "like whatsapp"), to its reader only.
+      if (!pushedPriv || pushedPriv.body !== 'MOVER-PRIV-T94' || !/\(private\)/.test(pushedPriv.title)) throw new Error(`G private push: ${JSON.stringify(pushedPriv)}`);
+      if ((await pushedTo()).some((x) => x.body === 'MOVER-PRIV-T94' && x.who !== 'mashA1b')) throw new Error('G private text pushed to a non-reader');
       const dash = await get(T.coordA1, '/api/admin/dashboard');
       if (dash.status !== 200) throw new Error(`G dashboard: ${dash.status}`);
       if (/"readBy"\s*:/.test(JSON.stringify(dash.body))) throw new Error('G dashboard leaked readBy');
@@ -358,6 +404,6 @@ export default {
       const p3 = await post(T.mashA1, { venueId: A1, content: 'RACE-T94 ok', mentions: [id('mashA1b')] });
       if (p3.status !== 200) throw new Error(`H restored roster: ${p3.status}`);
     }
-    return 'tags push only the tagged; @All the venue team; private visible only to author/tagged/admins/coordinators on REST, socket, kiosk, push, delete; seen-by for the team';
+    return 'tags push only the tagged (with the text; private marked private); @All the venue team; private visible only to author/tagged/admins/coordinators on REST, socket, kiosk, push, delete; kiosk gets only an unread private count for its signed-in person; seen-by for the team';
   },
 };
