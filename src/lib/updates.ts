@@ -41,6 +41,11 @@ export interface HandoffNoteItem {
   mentions?: { id: string; name: string }[];
   mentionAll?: boolean;
   private?: boolean;
+  replyTo?: { id: string; authorId?: string; authorName: string; text?: string; deleted?: boolean };
+  threadId?: string;
+  members?: { id: string; name: string }[];
+  deleted?: true;
+  deletedAt?: string;
 }
 
 /** TEAMNOTES: seen-by for shift notes (any venue team member may look). */
