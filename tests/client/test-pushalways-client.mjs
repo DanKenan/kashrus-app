@@ -102,10 +102,10 @@ r = await push.syncPushQuietly('b@x', 'u9');
 ok('Q6 a person with no remembered setting re-subscribes as "tagged" (never everything unasked)', r.mode === 'tagged' && server.posts.at(-1).mode === 'tagged');
 
 // ---- switching ----
-ok('S1 Off keeps the phone subscribed (mode tagged, no unsubscribe)', (await push.setPushMode('tagged', 'u9')) && browserSub !== null && server.posts.at(-1).mode === 'tagged');
-ok('S2 On again', (await push.setPushMode('all', 'u9')) && server.posts.at(-1).mode === 'all' && push.rememberedPushMode('u9') === 'all');
+ok('S1 Off keeps the phone subscribed (mode tagged, no unsubscribe)', (await push.setPushMode('tagged', 'u9')) === 'done' && browserSub !== null && server.posts.at(-1).mode === 'tagged');
+ok('S2 On again', (await push.setPushMode('all', 'u9')) === 'done' && server.posts.at(-1).mode === 'all' && push.rememberedPushMode('u9') === 'all');
 browserSub = null;
-ok('S3 no subscription: setPushMode reports false', (await push.setPushMode('all', 'u9')) === false);
+ok('S3 no subscription: setPushMode reports failed', (await push.setPushMode('all', 'u9')) === 'failed');
 perm.value = 'default'; perm.answer = 'denied';
 ok('S4 Turn on asks once; a no is "denied"', (await push.subscribeForPush('b@x', 'all', 'u9')) === 'denied' && perm.asked === 1);
 perm.value = 'default'; perm.answer = 'granted';
@@ -121,7 +121,7 @@ let hold = deferred(); server.hold = { '/api/push/status': hold };
 const quiet1 = push.syncPushQuietly('r@x', 'u20');
 await tick();
 const tap1 = push.setPushMode('all', 'u20');
-ok('R1a the tap writes while the quiet sync still waits', (await tap1) === true && server.posts.at(-1).mode === 'all');
+ok('R1a the tap writes while the quiet sync still waits', (await tap1) === 'done' && server.posts.at(-1).mode === 'all');
 hold.resolve(); const q1 = await quiet1;
 ok('R1b the quiet sync stands down: no "tagged" write after the tap', server.posts.at(-1).mode === 'all' && server.mode === 'all', JSON.stringify(server.posts.slice(-2)));
 ok('R1c and reports the tap\'s result', q1.state === 'subscribed' && q1.mode === 'all', JSON.stringify(q1));
@@ -217,7 +217,7 @@ ok('F2 retry works -> subscribed, all', to.result === 'subscribed' && to.setup.s
   await tick();
   api.setSessionToken('token-E-B');
   holdP.resolve();
-  ok('E1 A\'s Turn on answered after B signed in writes nothing', (await e1) === 'failed' && server.posts.length === nE1, JSON.stringify(server.posts.slice(nE1)));
+  ok('E1 A\'s Turn on answered after B signed in writes nothing', (await e1) === 'superseded' && server.posts.length === nE1, JSON.stringify(server.posts.slice(nE1)));
   ok('E1b and records nothing for A', push.rememberedPushMode('uEA') === null);
   // E2: A's On/Off is queued behind a running write; B signs in before it runs.
   perm.value = 'granted';
@@ -232,19 +232,55 @@ ok('F2 retry works -> subscribed, all', to.result === 'subscribed' && to.setup.s
   api.setSessionToken('token-E-B2');
   holdW.resolve();
   const [rRun, rQ] = await Promise.all([running, queued]);
-  ok('E2 the running write stops too (session changed mid-write)', rRun === 'failed', rRun);
-  ok('E2b A\'s queued On/Off does not run under B\'s session', rQ === false && server.posts.length === nE2, JSON.stringify(server.posts.slice(nE2)));
+  ok('E2 the running write stops too (session changed mid-write)', rRun === 'superseded', rRun);
+  ok('E2b A\'s queued On/Off does not run under B\'s session', rQ === 'superseded' && server.posts.length === nE2, JSON.stringify(server.posts.slice(nE2)));
   // E4: the banner/menu Turn on across a switch shows nothing for the person who left and files nothing under them.
   api.setSessionToken('token-E-A4'); browserSub = null; perm.value = 'default'; store.delete('shutfey_push_mode:uEA4');
   const holdP4 = deferred(); perm.hold = holdP4;
   const e4 = push.turnOnPush('ea4@x', 'uEA4');
   await tick(); api.setSessionToken('token-E-B4'); holdP4.resolve();
   const r4 = await e4;
-  ok('E4 turnOnPush across a switch: failed, nothing shown, nothing remembered', r4.result === 'failed' && r4.setup.state === 'default' && push.rememberedPushMode('uEA4') === null, JSON.stringify(r4));
+  ok('E4 turnOnPush across a switch: superseded, nothing shown, nothing remembered', r4.result === 'superseded' && r4.setup.state === 'default' && r4.setup.stale === true && push.rememberedPushMode('uEA4') === null, JSON.stringify(r4));
   perm.value = 'granted';
   // E3: the same session -> the tap still works.
   api.setSessionToken('token-E-C'); browserSub = mkSub('https://push.example/dev1');
-  ok('E3 in the same session the tap writes', (await push.setPushMode('all', 'uEC')) === true && server.posts.at(-1).mode === 'all');
+  ok('E3 in the same session the tap writes', (await push.setPushMode('all', 'uEC')) === 'done' && server.posts.at(-1).mode === 'all');
+  // X (review PARV6): the newest explicit choice wins, and an old read never undoes it.
+  // X1: an older Turn on waits on its permission prompt; a newer Off is written; then the prompt is answered.
+  api.setSessionToken('token-X');
+  browserSub = mkSub('https://push.example/dev1'); server.registered = true; server.mode = 'all'; perm.value = 'default'; perm.answer = 'granted';
+  const holdX = deferred(); perm.hold = holdX;
+  const older = push.subscribeForPush('x@x', 'all', 'uX');
+  await tick();
+  const newer = await push.setPushMode('tagged', 'uX');
+  holdX.resolve();
+  const olderR = await older;
+  ok('X1 the newer Off is written; the older Turn on is superseded and writes nothing', newer === 'done' && olderR === 'superseded' && server.mode === 'tagged' && server.posts.at(-1).mode === 'tagged', `${newer} ${olderR} ${server.mode}`);
+  ok('X1b the remembered setting is the newer one', push.rememberedPushMode('uX') === 'tagged');
+  // X2: a status read started before a tap reports stale and keeps nothing.
+  perm.value = 'granted'; server.registered = true; server.mode = 'tagged';
+  const holdS = deferred(); server.hold = { '/api/push/status': holdS };
+  const oldRead = push.getPushSetup('uX');
+  await tick();
+  ok('X2a the tap writes On', (await push.setPushMode('all', 'uX')) === 'done' && push.rememberedPushMode('uX') === 'all');
+  holdS.resolve();
+  const or = await oldRead;
+  ok('X2b the older read ("tagged") comes back stale and is not kept', or.stale === true && push.rememberedPushMode('uX') === 'all', JSON.stringify(or));
+  // X3: the menu button: its first read is slow (server says "tagged"); the person taps Turn on meanwhile -> stays On.
+  {
+    const { mount } = await import('./lib/mini-render.mjs');
+    const { PushNotificationToggle } = await import('../../src/components/PushNotificationToggle.tsx');
+    browserSub = mkSub('https://push.example/dev1'); server.registered = false; server.mode = 'tagged'; store.delete('shutfey_push_mode:uX3');
+    const holdR = deferred(); server.hold = { '/api/push/status': holdR };
+    const vm = mount(PushNotificationToggle, { userEmail: 'x3@x', userId: 'uX3' });
+    await vm.render(); await tick();
+    const btn = () => vm.find((e) => e.type === 'button' && e.props['data-push-toggle'])[0];
+    await btn().props.onClick(); await tick(); await vm.render();
+    ok('X3a the tap turns it On', btn()?.props['data-push-toggle'] === 'on', btn()?.props['data-push-toggle']);
+    holdR.resolve(); await tick(); await tick(); await vm.render();
+    ok('X3b the slow first read (not registered, from before the tap) does not repaint it', btn()?.props['data-push-toggle'] === 'on', btn()?.props['data-push-toggle']);
+    ok('X3c remembered setting stays the tap\'s', push.rememberedPushMode('uX3') === 'all');
+  }
   api.setSessionToken(null);
 }
 

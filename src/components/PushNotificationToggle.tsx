@@ -1,14 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Bell, BellOff } from 'lucide-react';
 import {
   PUSH_CHANGED_EVENT,
   getPushSetup,
-  getPushState,
   pushSupported,
   setPushMode,
-  subscribeForPush,
   turnOnPush,
   type PushMode,
+  type PushSetup,
   type PushState,
 } from '../lib/push';
 import { pushToggleView } from '../lib/pushPrompt';
@@ -22,26 +21,34 @@ import { pushToggleView } from '../lib/pushPrompt';
  * on a mention. Off -> tapping turns everything on again.
  * iOS needs the app on the Home Screen (16.4+).
  */
-export const PushNotificationToggle: React.FC<{ userEmail: string; userId?: string }> = ({ userEmail, userId }) => {
+export const PushNotificationToggle: React.FC<{ userEmail: string; userId: string }> = ({ userEmail, userId }) => {
   const [state, setState] = useState<PushState>('default');
   const [mode, setMode] = useState<PushMode | null>(null);
   const [busy, setBusy] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
+  // Only the newest read may update the button, and never one that a tap or a
+  // sign-in change overtook (review PARV6).
+  const readSeq = useRef(0);
+  const readRef = useRef<() => void>(() => {});
+  const apply = (r: PushSetup) => {
+    setState(r.state);
+    setMode(r.state === 'subscribed' ? r.mode ?? 'all' : null);
+  };
 
   useEffect(() => {
     let live = true;
     // Server-confirmed (review PARV1): "On"/"Off" only when the server holds this phone for this person.
     const read = () => {
-      const p = userId ? getPushSetup(userId) : getPushState().then((s) => ({ state: s, mode: s === 'subscribed' ? ('all' as PushMode) : null }));
-      void p.then((r) => {
-        if (!live) return;
-        setState(r.state);
-        setMode(r.state === 'subscribed' ? r.mode ?? 'all' : null);
+      const seq = ++readSeq.current;
+      void getPushSetup(userId).then((r) => {
+        if (!live || seq !== readSeq.current || r.stale) return;
+        apply(r);
       });
     };
+    readRef.current = read;
     read();
     window.addEventListener(PUSH_CHANGED_EVENT, read);
-    return () => { live = false; window.removeEventListener(PUSH_CHANGED_EVENT, read); };
+    return () => { live = false; readRef.current = () => {}; window.removeEventListener(PUSH_CHANGED_EVENT, read); };
   }, [userId]);
 
   if (!pushSupported()) return null;
@@ -50,19 +57,23 @@ export const PushNotificationToggle: React.FC<{ userEmail: string; userId?: stri
     if (busy) return;
     setBusy(true);
     setHint(null);
+    readSeq.current++; // a read already in flight predates this tap: it may not repaint the button
     if (state === 'subscribed') {
       const next: PushMode = mode === 'tagged' ? 'all' : 'tagged';
-      if (await setPushMode(next, userId)) setMode(next);
-      else setHint('Could not change it — try again.');
+      const r = await setPushMode(next, userId);
+      if (r === 'done') setMode(next);
+      else if (r === 'failed') setHint('Could not change it — try again.');
+      else readRef.current(); // superseded by a newer tap: show what the server holds now
     } else {
       // Server-confirmed after a failure (review PARV3): never "On" unless the server holds this phone.
-      const { result, setup } = userId
-        ? await turnOnPush(userEmail, userId)
-        : await subscribeForPush(userEmail, 'all').then(async (r) => ({ result: r, setup: { state: r === 'subscribed' ? 'subscribed' as PushState : r === 'denied' ? 'denied' as PushState : 'default' as PushState, mode: r === 'subscribed' ? 'all' as PushMode : null } }));
-      setState(setup.state);
-      setMode(setup.state === 'subscribed' ? setup.mode ?? 'all' : null);
-      if (result === 'denied') setHint('Notifications are blocked — allow them in your browser settings.');
-      else if (result === 'failed') setHint('Could not turn on notifications — try again.');
+      const { result, setup } = await turnOnPush(userEmail, userId);
+      if (result === 'superseded') readRef.current();
+      else {
+        if (!setup.stale) apply(setup);
+        else readRef.current();
+        if (result === 'denied') setHint('Notifications are blocked — allow them in your browser settings.');
+        else if (result === 'failed') setHint('Could not turn on notifications — try again.');
+      }
     }
     setBusy(false);
   };

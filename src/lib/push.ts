@@ -75,34 +75,45 @@ export async function getPushState(): Promise<PushState> {
  */
 export async function getPushSetup(userId: string): Promise<PushSetup> {
   const cred0 = sessionCredentialKey();
+  const gen0 = explicitGen;
+  const isStale = () => explicitGen !== gen0 || sessionCredentialKey() !== cred0;
+  const done = (r: PushSetup): PushSetup => (isStale() ? { ...r, stale: true } : r);
   const state = await getPushState();
-  if (state !== 'subscribed') return { state, mode: null };
+  if (state !== 'subscribed') return done({ state, mode: null });
   try {
     const reg = await readyRegistration();
     const sub = reg ? await reg.pushManager.getSubscription() : null;
-    if (!sub) return { state: await getPushState(), mode: null };
+    if (!sub) return done({ state: await getPushState(), mode: null });
     const st = await apiFetch('/api/push/status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ endpoint: sub.endpoint }),
     });
-    if (!st.ok) return { state: 'subscribed', mode: rememberedPushMode(userId) ?? 'all' };
+    if (!st.ok) return done({ state: 'subscribed', mode: rememberedPushMode(userId) ?? 'all' });
     const d = await st.json();
-    if (!d.registered) return { state: 'granted', mode: null };
+    if (!d.registered) return done({ state: 'granted', mode: null });
     const mode: PushMode = d.mode === 'tagged' ? 'tagged' : 'all';
-    if (sessionCredentialKey() === cred0) rememberPushMode(userId, mode); // never file one person's answer under another
-    return { state: 'subscribed', mode };
+    // Never keep an answer older than a tap, or one person's answer under another (review PARV5/PARV6).
+    if (!isStale()) rememberPushMode(userId, mode);
+    return done({ state: 'subscribed', mode });
   } catch {
-    return { state: 'subscribed', mode: rememberedPushMode(userId) ?? 'all' };
+    return done({ state: 'subscribed', mode: rememberedPushMode(userId) ?? 'all' });
   }
 }
 
-// PUSHALWAYS (review PARV2): every write of this phone's push setting runs
-// one at a time, and a person's own tap wins over the quiet app-open sync.
-// A tap bumps explicitGen the moment it happens; a quiet write checks the
-// generation it started under right before writing and stands down if a tap
-// came since. A tap that arrives while a quiet write is already running waits
-// for it and then writes, so the tap is always last.
+// PUSHALWAYS — one rule for every asynchronous push operation (reviews
+// PARV2–PARV6): it may act only while it is still (a) for the session that
+// started it and (b) not older than the person's newest explicit choice.
+//  - Writes run one at a time (serialWrite).
+//  - Each explicit tap (Turn on, On/Off) takes a new generation the moment it
+//    happens. It writes only while it is still the newest tap AND its session
+//    is unchanged — checked inside its write slot, before the authenticated
+//    POST and again before anything is remembered or announced. A tap
+//    superseded by a newer tap (or a sign-out/sign-in) writes nothing.
+//  - The quiet app-open sync stands down when any tap happened since it
+//    started (or was in flight then), or the session/screen changed.
+//  - A status read reports `stale` when a tap or a session change happened
+//    while it was in flight; a stale read is never remembered or shown.
 let explicitGen = 0;
 let explicitPending = 0;
 let writeChain: Promise<unknown> = Promise.resolve();
@@ -111,11 +122,16 @@ function serialWrite<T>(fn: () => Promise<T>): Promise<T> {
   writeChain = p.catch(() => undefined);
   return p;
 }
+/** A guard for an explicit tap: true while it is the newest tap in the same session. */
+function explicitTicket(): () => boolean {
+  const myGen = ++explicitGen;
+  const cred0 = sessionCredentialKey();
+  return () => explicitGen === myGen && sessionCredentialKey() === cred0;
+}
 
-async function doSubscribe(userEmail: string, mode: PushMode, userId?: string, stillOk: () => boolean = () => true): Promise<'subscribed' | 'failed' | 'canceled'> {
-  // stillOk (review PARV4): a quiet write re-checks, right before each step that
-  // matters, that it is still for the person and session it started for.
+async function doSubscribe(userEmail: string, mode: PushMode, userId: string | undefined, stillOk: () => boolean): Promise<'subscribed' | 'failed' | 'canceled'> {
   try {
+    if (!stillOk()) return 'canceled';
     const keyRes = await apiFetch('/api/push/public-key');
     if (!keyRes.ok) return 'failed';
     const { publicKey } = await keyRes.json();
@@ -127,7 +143,7 @@ async function doSubscribe(userEmail: string, mode: PushMode, userId?: string, s
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(publicKey),
     });
-    if (!stillOk()) return 'canceled'; // the browser subscription stays; the next sign-in's sync handles it
+    if (!stillOk()) return 'canceled'; // the browser subscription stays; the next sync or tap registers it
     const saveRes = await apiFetch('/api/push/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -137,7 +153,7 @@ async function doSubscribe(userEmail: string, mode: PushMode, userId?: string, s
       if (!existing) await sub.unsubscribe().catch(() => {});
       return 'failed';
     }
-    if (!stillOk()) return 'canceled'; // written under the session it started for; nothing recorded for a person who left
+    if (!stillOk()) return 'canceled'; // nothing remembered/announced for a superseded or departed run
     rememberPushMode(userId, mode);
     announce();
     return 'subscribed';
@@ -147,74 +163,74 @@ async function doSubscribe(userEmail: string, mode: PushMode, userId?: string, s
   }
 }
 
+export type TurnOnResult = 'subscribed' | 'denied' | 'failed' | 'superseded';
+
 /** The person's own "Turn on" (banner or menu). Asks for permission right
- * away (inside the tap — iPhone needs that), then registers this phone. */
+ * away (inside the tap — iPhone needs that), then registers this phone.
+ * 'superseded': a newer tap or a sign-out/sign-in came first; nothing written. */
 export async function subscribeForPush(
   userEmail: string,
   mode: PushMode = 'all',
   userId?: string,
-): Promise<'subscribed' | 'denied' | 'failed'> {
+): Promise<TurnOnResult> {
   if (!pushSupported()) return 'failed';
-  explicitGen++;
+  const current = explicitTicket();
   explicitPending++;
-  // Bound to the session that tapped (review PARV5): if that person signs out
-  // and someone else signs in before the write, the tap is dropped — never
-  // written under the next person's sign-in.
-  const cred0 = sessionCredentialKey();
-  const sameSession = () => sessionCredentialKey() === cred0;
   try {
     const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
-    if (permission !== 'granted') return 'denied';
-    const r = await serialWrite(() => (sameSession() ? doSubscribe(userEmail, mode, userId, sameSession) : Promise.resolve('canceled' as const)));
-    return r === 'canceled' ? 'failed' : r;
+    if (permission !== 'granted') return current() ? 'denied' : 'superseded';
+    const r = await serialWrite(() => doSubscribe(userEmail, mode, userId, current));
+    return r === 'canceled' ? 'superseded' : r;
   } finally {
     explicitPending--;
   }
 }
 
+export type SetModeResult = 'done' | 'failed' | 'superseded';
 
 /**
  * PUSHALWAYS: switch this phone between 'all' and 'tagged' ("Off"). The phone
  * STAYS subscribed either way, so tags and assignments still reach it.
  */
-export async function setPushMode(mode: PushMode, userId?: string): Promise<boolean> {
-  explicitGen++;
+export async function setPushMode(mode: PushMode, userId?: string): Promise<SetModeResult> {
+  const current = explicitTicket();
   explicitPending++;
-  const cred0 = sessionCredentialKey(); // bound to the session that tapped (review PARV5)
-  const sameSession = () => sessionCredentialKey() === cred0;
-  return serialWrite(async () => {
+  return serialWrite(async (): Promise<SetModeResult> => {
     try {
-      if (!sameSession()) return false;
+      if (!current()) return 'superseded';
       const reg = await readyRegistration();
       const sub = reg ? await reg.pushManager.getSubscription() : null;
-      if (!sub || !sameSession()) return false;
+      if (!current()) return 'superseded';
+      if (!sub) return 'failed';
       const res = await apiFetch('/api/push/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subscription: sub.toJSON(), mode }),
       });
-      if (!res.ok || !sameSession()) return false;
+      if (!res.ok) return 'failed';
+      if (!current()) return 'superseded';
       rememberPushMode(userId, mode);
       announce();
-      return true;
+      return 'done';
     } catch {
-      return false;
+      return 'failed';
     }
   }).finally(() => { explicitPending--; });
 }
 
-export interface PushSetup { state: PushState; mode: PushMode | null }
+/** stale: a tap or a sign-out/sign-in happened while this was read — do not show or keep it. */
+export interface PushSetup { state: PushState; mode: PushMode | null; stale?: boolean }
 
 /**
  * The person's own "Turn on" from the banner or the menu (review PARV3): the
  * result plus the state to SHOW, confirmed by the server — after a failure a
  * browser subscription the server does not hold is never shown as on.
  */
-export async function turnOnPush(userEmail: string, userId: string): Promise<{ result: 'subscribed' | 'denied' | 'failed'; setup: PushSetup }> {
+export async function turnOnPush(userEmail: string, userId: string): Promise<{ result: TurnOnResult; setup: PushSetup }> {
   const cred0 = sessionCredentialKey();
   const result = await subscribeForPush(userEmail, 'all', userId);
   // The person who tapped is no longer signed in here: nothing about them to show.
-  if (sessionCredentialKey() !== cred0) return { result: result === 'subscribed' ? 'failed' : result, setup: { state: 'default', mode: null } };
+  if (sessionCredentialKey() !== cred0) return { result: 'superseded', setup: { state: 'default', mode: null, stale: true } };
   if (result === 'subscribed') return { result, setup: { state: 'subscribed', mode: 'all' } };
   if (result === 'denied') return { result, setup: { state: 'denied', mode: null } };
   return { result, setup: await getPushSetup(userId) };
@@ -242,12 +258,13 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
   // account switch: isCurrent() false): it writes nothing either — a write
   // would go out under the NEW session's sign-in (review PARV3).
   const tapped = () => tapInFlightAtStart || explicitGen !== g0 || !isCurrent() || sessionCredentialKey() !== cred0;
+  const fin = (r: PushSetup): PushSetup => (tapped() ? { ...r, stale: true } : r);
   try {
     const reg = await readyRegistration();
-    if (!reg) return { state: Notification.permission === 'granted' ? 'granted' : 'default', mode: null };
+    if (!reg) return fin({ state: Notification.permission === 'granted' ? 'granted' : 'default', mode: null });
     const sub = await reg.pushManager.getSubscription();
     if (!sub) {
-      if (Notification.permission !== 'granted') return { state: 'default', mode: null };
+      if (Notification.permission !== 'granted') return fin({ state: 'default', mode: null });
       const mode = rememberedPushMode(userId) ?? 'tagged';
       const r = await serialWrite(async () => {
         if (tapped()) return 'tapped' as const;
@@ -256,7 +273,7 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
         return doSubscribe(userEmail, mode, userId, () => !tapped());
       });
       if (r === 'tapped' || r === 'canceled') return getPushSetup(userId);
-      return r === 'subscribed' ? { state: 'subscribed', mode } : { state: 'granted', mode: null };
+      return fin(r === 'subscribed' ? { state: 'subscribed', mode } : { state: 'granted', mode: null });
     }
     const st = await apiFetch('/api/push/status', {
       method: 'POST',
@@ -264,12 +281,12 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
       body: JSON.stringify({ endpoint: sub.endpoint }),
     });
     if (tapped()) return getPushSetup(userId);
-    if (!st.ok) return { state: 'subscribed', mode: rememberedPushMode(userId) };
+    if (!st.ok) return fin({ state: 'subscribed', mode: rememberedPushMode(userId) });
     const d = await st.json();
     if (d.registered) {
       const mode: PushMode = d.mode === 'tagged' ? 'tagged' : 'all';
       if (!tapped() && rememberedPushMode(userId) !== mode) { rememberPushMode(userId, mode); announce(); }
-      return { state: 'subscribed', mode };
+      return fin({ state: 'subscribed', mode });
     }
     // The server has no record of this phone for THIS person: the endpoint
     // belongs to another account on a shared phone, or the record was lost.
@@ -286,11 +303,11 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
       return re.ok;
     });
     if (ok === 'tapped' || tapped()) return getPushSetup(userId);
-    if (!ok) return { state: 'granted', mode: null }; // not registered: offer Turn on, never show On
+    if (!ok) return fin({ state: 'granted', mode: null }); // not registered: offer Turn on, never show On
     rememberPushMode(userId, mode);
     announce();
-    return { state: 'subscribed', mode };
+    return fin({ state: 'subscribed', mode });
   } catch {
-    return { state: Notification.permission === 'granted' ? 'granted' : 'default', mode: null };
+    return fin({ state: Notification.permission === 'granted' ? 'granted' : 'default', mode: null });
   }
 }

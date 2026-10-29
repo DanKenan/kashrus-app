@@ -455,8 +455,11 @@ export default function App() {
     // Phones only (review PARV1): a desktop browser is never subscribed unasked.
     if (!pushUserId || isKiosk || !isPhoneLike()) return;
     let live = true;
-    void syncPushQuietly(pushUserEmail, pushUserId, () => live).then((r) => { if (live) setPushSetup({ forUser: pushUserId, state: r.state }); });
-    const onChange = () => { void getPushSetup(pushUserId).then((r) => { if (live) setPushSetup({ forUser: pushUserId, state: r.state }); }); };
+    // Only the newest read may update the banner, and never a stale one (review PARV6).
+    let seq = 0;
+    const take = (n: number) => (r: { state: PushState; stale?: boolean }) => { if (live && n === seq && !r.stale) setPushSetup({ forUser: pushUserId, state: r.state }); };
+    void syncPushQuietly(pushUserEmail, pushUserId, () => live).then(take(++seq));
+    const onChange = () => { void getPushSetup(pushUserId).then(take(++seq)); };
     window.addEventListener(PUSH_CHANGED_EVENT, onChange);
     return () => { live = false; window.removeEventListener(PUSH_CHANGED_EVENT, onChange); };
   }, [pushUserId, pushUserEmail, isKiosk]);
@@ -481,9 +484,10 @@ export default function App() {
     if (pushBusy || !pushUserId) return;
     setPushBusy(true);
     const uid = pushUserId;
-    const { setup } = await turnOnPushHere(pushUserEmail, uid);
+    const { result, setup } = await turnOnPushHere(pushUserEmail, uid);
     setPushBusy(false);
-    setPushSetup({ forUser: uid, state: setup.state }); // server-confirmed (review PARV3)
+    // Server-confirmed (review PARV3); a superseded/stale answer is not shown — the newer action's announce repaints (PARV6).
+    if (result !== 'superseded' && !setup.stale) setPushSetup({ forUser: uid, state: setup.state });
   };
   // 10g: the agencies under this login (several = "Switch agency" in the menu).
   // Read for the signed-in phone session, including a restored one; never on a kiosk.
