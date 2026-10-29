@@ -25,12 +25,16 @@
  *  D0 (RV1 P2) the edit carries the wording the editor saw: an editor who
  *     saw older wording gets 409 and the newer save stays; a field nobody else
  *     changed still saves (merge); a field sent without its base -> 400
- *  E  the full-object save (PUT /api/events/:id) applies the same wording
- *     rule: a check-only mashgiach renaming or dropping a task -> 403 EVENT_TASK_EDIT_FORBIDDEN,
- *     nothing written; (RV1 P1) a duplicate id carrying a renamed copy (first or
- *     last) -> 403, a manager adding a duplicate id -> 400; a legacy id-less
- *     task renamed or dropped -> 403; adding a task (today's behaviour) still
- *     works; the coordinator renaming through PUT still works
+ *  E  the full-object save (PUT /api/events/:id) never changes an existing
+ *     task's wording, for anyone (the stored wording is kept, the save goes
+ *     through; renames go through the PATCH); a check-only mashgiach's save
+ *     without a task keeps the task; (RV2 #1) a STALE save (old wording on
+ *     screen, a newer task missing) by a check-only mashgiach is not refused,
+ *     keeps the newer name and task and lands their check; the coordinator
+ *     can still remove a task; (RV1 P1) a duplicate id -> 400 for everyone,
+ *     tasks not a list -> 400; legacy id-less tasks are matched by wording
+ *     (kept, still checkable); (RV2 #2) a PATCH on an id stored twice ->
+ *     409 EVENT_TASK_AMBIGUOUS, both untouched (cache or fresh doc)
  */
 const A = 'agency-test93-a';
 const B = 'agency-test93-b';
@@ -298,52 +302,111 @@ export default {
       const body = { ...cur, tasks: mutate(cur.tasks.map((t) => ({ ...t }))), expectedVersion: await ctx.getVersion(), operationId: op() };
       return call('PUT', `/api/events/${evId}`, tok[who], body);
     };
-    for (const [why, mutate] of [
-      ['rename', (ts2) => ts2.map((t) => (t.id === 'etask-t93-1' ? { ...t, title: 'renamed via PUT' } : t))],
-      ['new details', (ts2) => ts2.map((t) => (t.id === 'etask-t93-1' ? { ...t, description: 'changed via PUT' } : t))],
-      ['drop a task', (ts2) => ts2.filter((t) => t.id !== 'etask-t93-2')],
+    const wordingOf = (ev) => JSON.stringify((ev.tasks || []).map((x) => [x.id || null, x.title, x.description ?? null]));
+    // A full-object save never changes an existing task's wording (for anyone):
+    // the stored wording is kept, the rest of the save goes through.
+    for (const [who, why, mutate] of [
+      ['mashfill', 'rename', (ts2) => ts2.map((t) => (t.id === 'etask-t93-1' ? { ...t, title: 'renamed via PUT' } : t))],
+      ['mashfill', 'new details', (ts2) => ts2.map((t) => (t.id === 'etask-t93-1' ? { ...t, description: 'changed via PUT' } : t))],
+      ['coord', 'rename', (ts2) => ts2.map((t) => (t.id === 'etask-t93-1' ? { ...t, title: 'coordinator renamed via PUT' } : t))],
     ]) {
-      const before = JSON.stringify(await storedEvent());
-      const r = await put('mashfill', mutate);
-      assert(r.status === 403 && r.json?.code === 'EVENT_TASK_EDIT_FORBIDDEN', `E check-only ${why} via PUT -> 403, got ${r.status} ${r.json?.code}`);
-      assert(JSON.stringify(await storedEvent()) === before, `E check-only ${why}: nothing written`);
+      const before = wordingOf(await storedEvent());
+      const r = await put(who, mutate);
+      assert(r.status === 200, `E ${who} ${why} via PUT -> 200 (the save goes through), got ${r.status} ${r.json?.code}`);
+      assert(wordingOf(await storedEvent()) === before && wordingOf(r.json?.event || {}) === before, `E ${who} ${why} via PUT: stored wording unchanged`);
     }
-    // RV1 P1: a duplicate id cannot carry a renamed copy past the gate.
+    {
+      const r = await put('mashfill', (ts2) => ts2.filter((t) => t.id !== 'etask-t93-2'));
+      assert(r.status === 200 && !!taskOf(await storedEvent(), 'etask-t93-2'), `E check-only save without a task: the task is KEPT (${r.status})`);
+    }
+    // RV1 P1: duplicate ids are refused for everyone, nothing written.
     {
       const before = JSON.stringify(await storedEvent());
-      const dup = await put('mashfill', (ts2) => [{ ...ts2[0], title: 'Skip the fish check' }, ...ts2]);
-      assert(dup.status === 403 && dup.json?.code === 'EVENT_TASK_EDIT_FORBIDDEN', `E check-only duplicate-id rename via PUT -> 403, got ${dup.status} ${dup.json?.code}`);
-      const dupLast = await put('mashfill', (ts2) => [...ts2, { ...ts2[0], title: 'Skip the fish check' }]);
-      assert(dupLast.status === 403, `E check-only duplicate id (renamed copy last) -> 403, got ${dupLast.status}`);
-      const dupSame = await put('mashfill', (ts2) => [...ts2, { ...ts2[0] }]);
-      assert(dupSame.status === 403, `E check-only exact duplicate -> 403, got ${dupSame.status}`);
-      const dupC = await put('coord', (ts2) => [...ts2, { ...ts2[0] }]);
-      assert(dupC.status === 400 && dupC.json?.code === 'EVENT_TASKS_DUPLICATE_ID', `E coordinator adding a duplicate id -> 400, got ${dupC.status} ${dupC.json?.code}`);
-      assert(JSON.stringify(await storedEvent()) === before, 'E duplicates: nothing written');
+      for (const [who, why, mutate] of [
+        ['mashfill', 'renamed copy first', (ts2) => [{ ...ts2[0], title: 'Skip the fish check' }, ...ts2]],
+        ['mashfill', 'renamed copy last', (ts2) => [...ts2, { ...ts2[0], title: 'Skip the fish check' }]],
+        ['mashfill', 'exact copy', (ts2) => [...ts2, { ...ts2[0] }]],
+        ['coord', 'exact copy', (ts2) => [...ts2, { ...ts2[0] }]],
+      ]) {
+        const r = await put(who, mutate);
+        assert(r.status === 400 && r.json?.code === 'EVENT_TASKS_DUPLICATE_ID', `E ${who} duplicate id (${why}) -> 400, got ${r.status} ${r.json?.code}`);
+      }
+      const bad = await put('coord', () => 'not a list');
+      assert(bad.status === 400 && bad.json?.code === 'EVENT_TASKS_INVALID', `E tasks not a list -> 400 (${bad.status})`);
+      assert(JSON.stringify(await storedEvent()) === before, 'E duplicates / not a list: nothing written');
     }
     const add = await put('mashfill', (ts2) => [...ts2, { id: 'etask-t93-3', title: 'Added by the mashgiach', isCompleted: false }]);
     assert(add.status === 200 && taskOf(await storedEvent(), 'etask-t93-3')?.title === 'Added by the mashgiach', `E check-only can still ADD a task (${add.status})`);
-    const cren = await put('coord', (ts2) => ts2.map((t) => (t.id === 'etask-t93-3' ? { ...t, title: 'Added (fixed by coordinator)' } : t)));
-    assert(cren.status === 200 && taskOf(await storedEvent(), 'etask-t93-3')?.title === 'Added (fixed by coordinator)', `E coordinator renames via PUT (${cren.status})`);
-    const aren = await put('mashassign', (ts2) => ts2.map((t) => (t.id === 'etask-t93-3' ? { ...t, title: 'Added (fixed again)' } : t)));
-    assert(aren.status === 200, `E can-assign mashgiach renames via PUT (${aren.status})`);
-    // A legacy task stored WITHOUT an id: its wording is matched one to one.
+    // RV2 #1: a STALE full-object save (old wording on screen, a task added
+    // meanwhile missing) by someone who may only check tasks: no refusal, the
+    // newer wording and the newer task stay, their own change lands.
+    {
+      const stale = await storedEvent();                                   // the mashgiach's screen
+      const pr = await edit(tok.coord, { title: 'Inspect all fish' });     // coordinator renames meanwhile
+      assert(pr.status === 200, `E RV2 setup: coordinator renames (${pr.status})`);
+      const ad = await put('coord', (ts2) => [...ts2, { id: 'etask-t93-5', title: 'Added by the coordinator', isCompleted: false }]);
+      assert(ad.status === 200, `E RV2 setup: coordinator adds a task (${ad.status})`);
+      const body = {
+        ...stale,
+        tasks: [...stale.tasks.map((x) => (x.id === 'etask-t93-1' ? { ...x, isCompleted: true, completedBy: 'Moshe' } : { ...x })),
+          { id: 'etask-t93-6', title: 'Added from the old screen', isCompleted: false }],
+        expectedVersion: await ctx.getVersion(), operationId: op(),
+      };
+      const r = await call('PUT', `/api/events/${evId}`, tok.mashfill, body);
+      const ev = await storedEvent();
+      assert(r.status === 200, `E RV2 stale tasks save by a check-only mashgiach -> 200, got ${r.status} ${r.json?.code}`);
+      assert(taskOf(ev, 'etask-t93-1')?.title === 'Inspect all fish', 'E RV2 the newer name is NOT overwritten by the old screen');
+      assert(taskOf(ev, 'etask-t93-1')?.isCompleted === true, 'E RV2 their check landed');
+      assert(!!taskOf(ev, 'etask-t93-5') && !!taskOf(ev, 'etask-t93-6'), 'E RV2 the task added meanwhile is kept, theirs is added');
+      const rs = await edit(tok.coord, { title: 'Check the fish' });
+      assert(rs.status === 200, 'E RV2 restore');
+    }
+    // People who may edit event tasks can still remove one through the save (as today).
+    {
+      const r = await put('coord', (ts2) => ts2.filter((t) => t.id !== 'etask-t93-6'));
+      assert(r.status === 200 && !taskOf(await storedEvent(), 'etask-t93-6'), `E coordinator removes a task via PUT (${r.status})`);
+    }
+    // A legacy task stored WITHOUT an id: matched one to one by its wording.
     {
       const storedEvents2 = (await ctx.getDoc()).events;
       await ctx.api('POST', '/api/__test__/doc-set-events', { events: storedEvents2.map((e) => (e.id === evId ? { ...e, tasks: [...e.tasks, { title: 'Legacy task', description: '', isCompleted: false }] } : e)) });
       // make the cache match the stored doc (a harmless allowed write re-hydrates it)
       const sync = await call('POST', `/api/events/${evId}/tasks/etask-t93-1/toggle`, tok.coord, { isCompleted: false });
       assert(sync.status === 200 && (await storedEvent()).tasks.some((x) => !x.id && x.title === 'Legacy task'), `E legacy fixture (${sync.status})`);
-      const before = JSON.stringify(await storedEvent());
+      const legacy = (ev) => (ev.tasks || []).filter((x) => !x.id && x.title === 'Legacy task');
       const lr = await put('mashfill', (ts2) => ts2.map((x) => (!x.id ? { ...x, title: 'Legacy renamed' } : x)));
-      assert(lr.status === 403, `E check-only renaming an id-less legacy task -> 403, got ${lr.status}`);
+      assert(lr.status === 200 && legacy(await storedEvent()).length === 1, `E check-only "renaming" an id-less legacy task: the original stays (${lr.status})`);
       const ld = await put('mashfill', (ts2) => ts2.filter((x) => !!x.id));
-      assert(ld.status === 403, `E check-only dropping an id-less legacy task -> 403, got ${ld.status}`);
-      assert(JSON.stringify(await storedEvent()) === before, 'E legacy: nothing written');
-      const lk = await put('mashfill', (ts2) => [...ts2, { id: 'etask-t93-4', title: 'Another add', isCompleted: false }]);
-      assert(lk.status === 200, `E with a legacy task stored, a check-only add still works (${lk.status})`);
+      assert(ld.status === 200 && legacy(await storedEvent()).length === 1, `E check-only save without the legacy task: it is kept (${ld.status})`);
+      const lc = await put('mashfill', (ts2) => ts2.map((x) => (!x.id && x.title === 'Legacy task' ? { ...x, isCompleted: true } : x)));
+      assert(lc.status === 200 && legacy(await storedEvent())[0]?.isCompleted === true, `E check-only can still check the legacy task (${lc.status})`);
     }
-    out.push('E PUT same rule (+duplicates, legacy id-less)');
+    // RV2 #2: two stored tasks under one id -> PATCH refuses, both untouched.
+    {
+      const dupA = { id: 'etask-t93-dup', title: 'Dup one', isCompleted: true, completedBy: 'Moshe', notes: 'first' };
+      const dupB = { id: 'etask-t93-dup', title: 'Dup two', isCompleted: false, notes: 'second' };
+      const setDocTasks = async (extra) => {
+        const evs = (await ctx.getDoc()).events;
+        await ctx.api('POST', '/api/__test__/doc-set-events', { events: evs.map((e) => (e.id === evId ? { ...e, tasks: [...e.tasks.filter((x) => x.id !== 'etask-t93-dup'), ...extra] } : e)) });
+      };
+      const dupsOf = async () => JSON.stringify((await storedEvent()).tasks.filter((x) => x.id === 'etask-t93-dup'));
+      // the server's cache holds ONE task under the id; the stored doc gets a second -> the commit refuses
+      await setDocTasks([dupA]);
+      const sync1 = await call('POST', `/api/events/${evId}/tasks/etask-t93-1/toggle`, tok.coord, { isCompleted: false });
+      assert(sync1.status === 200, 'E RV2 single fixture synced');
+      await setDocTasks([dupA, dupB]);
+      const before = await dupsOf();
+      const r1 = await edit(tok.coord, { title: 'Dup renamed', baseTitle: 'Dup one' }, 'etask-t93-dup', evId, undefined, { noBase: true });
+      assert(r1.status === 409 && r1.json?.code === 'EVENT_TASK_AMBIGUOUS', `E RV2 PATCH, duplicate only in the fresh doc -> 409 EVENT_TASK_AMBIGUOUS, got ${r1.status} ${r1.json?.code}`);
+      assert(await dupsOf() === before, 'E RV2 (fresh) both duplicates untouched');
+      // both in the cache too -> refused before the commit
+      const sync = await call('POST', `/api/events/${evId}/tasks/etask-t93-1/toggle`, tok.coord, { isCompleted: false });
+      assert(sync.status === 200, 'E RV2 dup fixture synced');
+      const r2 = await edit(tok.coord, { title: 'Dup renamed', baseTitle: 'Dup one' }, 'etask-t93-dup', evId, undefined, { noBase: true });
+      assert(r2.status === 409 && r2.json?.code === 'EVENT_TASK_AMBIGUOUS', `E RV2 PATCH on a duplicated id -> 409 EVENT_TASK_AMBIGUOUS, got ${r2.status} ${r2.json?.code}`);
+      assert(await dupsOf() === before, 'E RV2 both duplicates untouched');
+    }
+    out.push('E PUT keeps stored wording (+stale save, duplicates, legacy id-less, ambiguous PATCH)');
 
     return out.join('; ');
   },
