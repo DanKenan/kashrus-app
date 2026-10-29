@@ -1,9 +1,11 @@
 import { formatNoteTime, shiftForHour } from '../lib/dateText';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { MessageSquare, Trash2, Mic, Square, Play, Send, X, Lock, CheckCheck, AtSign } from 'lucide-react';
+import { MessageSquare, Trash2, Mic, Square, Play, Send, X, Lock, CheckCheck, AtSign, Reply, ArrowLeft } from 'lucide-react';
 import { apiWrite } from '../lib/api';
 import { HandoffNoteItem, MarkKind, NoteSeenCount, NoteSeenList, fetchNoteSeen, fetchNoteSeenCounts, fetchNoteTeam, useVisibleMarks } from '../lib/updates';
 import { TeamMember, applyMention, filterTeam, joinNames, mentionQueryAt, kioskPrivateNotice, privateNotice, removeTagText, seenLabel, splitMentions } from '../lib/mentions';
+
+import { groupNotes, conversationMembers, threadNotice, addWarning, quoteLine, swipeIntent } from '../lib/replyThread';
 
 // 5a — Shift notes as the Updates sheet's second tab body (was an
 // unrendered panel). The note box + mic are pinned at the bottom for
@@ -13,6 +15,25 @@ import { TeamMember, applyMention, filterTeam, joinNames, mentionQueryAt, kioskP
 // failed send keeps both the text and the recording. Nothing autoplays;
 // playback offers 1× / 1.5×. Unmount (context switch, kiosk idle sign-out)
 // stops the recorder, the mic stream and any playback.
+
+// App consumes the URL before mounting the sheet. Retain only the note/venue
+// ids here, including warm notification clicks; no content or media is copied.
+let pendingNoteLink: { id: string; venue: string | null } | null = null;
+function rememberNoteLink(search: string) {
+  const params = new URLSearchParams(search);
+  const id = params.get('note');
+  if (params.get('updates') === 'notes' && id) pendingNoteLink = { id, venue: params.get('venue') };
+}
+if (typeof window !== 'undefined') rememberNoteLink(window.location.search || '');
+if (typeof navigator !== 'undefined') navigator.serviceWorker?.addEventListener('message', (event) => {
+  if (event.data?.type !== 'OPEN_URL' || typeof event.data.url !== 'string') return;
+  try {
+    const url = new URL(event.data.url, window.location.origin);
+    if (url.origin !== window.location.origin) return;
+    rememberNoteLink(url.search);
+    window.dispatchEvent(new Event('replythread-link'));
+  } catch { /* ignore invalid links */ }
+});
 
 const MAX_RECORD_SECONDS = 120;
 const SHIFTS = ['Morning', 'Afternoon', 'Evening', 'General'];
@@ -54,6 +75,16 @@ export function HandoffNotes({
   onPosted,
   onDeleted,
 }: HandoffNotesProps) {
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const [replyId, setReplyId] = useState<string | null>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [swipe, setSwipe] = useState<{ id: string; dx: number } | null>(null);
+  const touchRef = useRef<{ id: string; x: number; y: number; dx: number; dy: number } | null>(null);
+  const groups = groupNotes(items);
+  const conversation = !readOnly ? groups.find((g) => g.kind === 'thread' && g.root.id === threadId) : undefined;
+  const thread = conversation?.kind === 'thread' ? conversation : null;
+  const reply = items.find((n) => n.id === replyId);
+  const members = thread ? conversationMembers(thread.root) : [];
   const [content, setContent] = useState('');
   const [shift, setShift] = useState<string>(() => shiftForHour(new Date().getHours())); // QA2 #30: from the clock, not always Morning
   const [recordState, setRecordState] = useState<RecordState>('idle');
@@ -70,6 +101,7 @@ export function HandoffNotes({
   const [mentionQ, setMentionQ] = useState<{ start: number; query: string } | null>(null);
   const [pickIndex, setPickIndex] = useState(0);
   const [tagged, setTagged] = useState<{ id: string; name: string }[]>([]);
+  const newNames = thread ? tagged.filter((t) => !members.some((m) => m.id === t.id)).map((t) => t.name) : [];
   const [tagAll, setTagAll] = useState(false);
   const [isPrivate, setIsPrivate] = useState(false);
   const [seenCounts, setSeenCounts] = useState<Record<string, NoteSeenCount>>({});
@@ -100,7 +132,7 @@ export function HandoffNotes({
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRefs = useRef(new Map<string, HTMLAudioElement>());
 
-  const idsKey = items.map((n) => n.id).join(',');
+  const idsKey = `${threadId || 'main'}:` + items.map((n) => n.id).join(',');
   useVisibleMarks(listRef, active && !readOnly, idsKey, onMark);
 
   // TEAMNOTES (RV1 P2): picker, tags, Private and seen-by belong to ONE venue —
@@ -112,7 +144,7 @@ export function HandoffNotes({
   // composer only when it still holds exactly the draft that was sent.
   const draftRevRef = useRef(0);
   const draftSigRef = useRef<unknown[] | null>(null);
-  const sig = [venueId, content, voiceNoteData, recordState, shift, tagged.map((t) => t.id).join(','), tagAll, isPrivate];
+  const sig = [venueId, content, voiceNoteData, recordState, shift, tagged.map((t) => t.id).join(','), tagAll, isPrivate, replyId, threadId];
   if (!draftSigRef.current || sig.some((v, i) => v !== draftSigRef.current![i])) {
     draftSigRef.current = sig;
     draftRevRef.current += 1;
@@ -120,6 +152,7 @@ export function HandoffNotes({
   useEffect(() => {
     if (tagVenueRef.current === venueId) return;
     tagVenueRef.current = venueId;
+    setReplyId(null); setThreadId(null);
     setTeam([]); setTagged([]); setTagAll(false); setIsPrivate(false); setMentionQ(null);
     setSeenCounts({}); setSeenOpen(null); setSeenList(null); seenReqRef.current += 1;
   }, [venueId]);
@@ -148,13 +181,13 @@ export function HandoffNotes({
   }, [active, readOnly, venueId, idsKey, unreadKey]);
 
   // Private needs at least one tagged PERSON and never goes to @All.
-  const canPrivate = tagged.length > 0 && !tagAll;
+  const canPrivate = (tagged.length > 0 || !!reply) && !tagAll;
   useEffect(() => { if (!canPrivate && isPrivate) setIsPrivate(false); }, [canPrivate, isPrivate]);
 
   const pickable = team.filter((m) => m.id !== currentUserId && !tagged.some((t) => t.id === m.id));
   const picker = mentionQ ? filterTeam(pickable, mentionQ.query) : null;
   const pickRows: Array<{ kind: 'all' } | { kind: 'person'; m: TeamMember }> = picker
-    ? [...(picker.all && !tagAll ? [{ kind: 'all' as const }] : []), ...picker.people.slice(0, 8).map((m) => ({ kind: 'person' as const, m }))]
+    ? [...(picker.all && !tagAll && !thread ? [{ kind: 'all' as const }] : []), ...picker.people.slice(0, 8).map((m) => ({ kind: 'person' as const, m }))]
     : [];
 
   const updateMentionQuery = (value: string, caret: number | null) => {
@@ -170,7 +203,7 @@ export function HandoffNotes({
     const label = row.kind === 'all' ? 'All' : row.m.name;
     const next = applyMention(content, caret, mentionQ, label);
     setContent(next.text);
-    if (row.kind === 'all') setTagAll(true);
+    if (row.kind === 'all') { if (!thread) setTagAll(true); }
     else setTagged((t) => (t.some((x) => x.id === row.m.id) ? t : [...t, { id: row.m.id, name: row.m.name }]));
     setMentionQ(null);
     // The caret goes after the inserted tag in the SAME commit as the new text
@@ -282,7 +315,7 @@ export function HandoffNotes({
   };
 
   const send = async () => {
-    if (sending || (!content.trim() && !voiceNoteData)) return;
+    if (readOnly || (threadId && !thread) || (replyId && !reply) || sending || (!content.trim() && !voiceNoteData)) return;
     if (tagVenueRef.current !== venueId) return; // tags are re-made for the new venue first
     setSending(true);
     setErrorMsg(null);
@@ -296,8 +329,10 @@ export function HandoffNotes({
         shift,
         voiceNoteData: voiceNoteData || undefined,
         mentions: tagged.map((t) => t.id),
-        mentionAll: tagAll,
-        private: isPrivate && canPrivate,
+        mentionAll: thread ? false : tagAll,
+        private: thread ? true : isPrivate && canPrivate,
+        threadId: thread ? thread.root.id : undefined,
+        replyToId: reply?.id,
       }),
     });
     if (disposedRef.current) return;
@@ -320,6 +355,7 @@ export function HandoffNotes({
     if (venueMoved || draftRevRef.current !== sent.rev) return;
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') return;
     setContent('');
+    setReplyId(null);
     setTagged([]);
     setTagAll(false);
     setIsPrivate(false);
@@ -334,7 +370,10 @@ export function HandoffNotes({
       setErrorMsg(result.error || 'Could not delete the note.');
       return;
     }
-    onDeleted(id);
+    const root = groups.find((g) => g.kind === 'thread' && g.root.id === id);
+    if (root?.kind === 'thread' && root.replies.length) {
+      onPosted({ ...root.root, deleted: true, content: '', voiceNoteData: undefined });
+    } else onDeleted(id);
   };
 
   const setRate = (id: string, rate: number) => {
@@ -343,10 +382,68 @@ export function HandoffNotes({
     if (el) el.playbackRate = rate;
   };
 
+  const changeThread = (id: string | null) => {
+    draftRevRef.current += 1;
+    setThreadId(id); setReplyId(null); setTagged([]); setTagAll(false); setIsPrivate(false); setMentionQ(null);
+    setContent(''); discardRecording();
+    recordSessionRef.current += 1; stopTimer();
+    try { mediaRecorderRef.current?.stop(); } catch { /* already stopped */ }
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    audioRefs.current.forEach((a) => a.pause());
+  };
+  const startReply = (note: HandoffNoteItem) => {
+    if (readOnly || note.deleted) return;
+    if ((note.private || note.threadId) && !thread) return;
+    draftRevRef.current += 1; setReplyId(note.id); textRef.current?.focus();
+  };
+  const jump = (id: string) => {
+    const target = items.find((n) => n.id === id);
+    if (!target) return;
+    if (!readOnly && (target.threadId || target.private)) {
+      const next = target.threadId || target.id;
+      if (next !== threadId) changeThread(next);
+    } else if (threadId) changeThread(null);
+    setHighlightId(id);
+  };
+  useEffect(() => {
+    if (!highlightId) return;
+    const elements: HTMLElement[] = listRef.current ? Array.from(listRef.current.querySelectorAll('[data-note-id]')) : [];
+    const el = elements.find((n) => n.dataset.noteId === highlightId);
+    el?.scrollIntoView({ block: 'center' });
+    const timer = setTimeout(() => setHighlightId(null), 1500);
+    return () => clearTimeout(timer);
+  }, [highlightId, threadId]);
+  useEffect(() => {
+    if (!loading && threadId && !thread) changeThread(null);
+  }, [loading, threadId, !!thread]);
+  const [linkRevision, setLinkRevision] = useState(0);
+  useEffect(() => {
+    const changed = () => setLinkRevision((n) => n + 1);
+    window.addEventListener('replythread-link', changed);
+    return () => window.removeEventListener('replythread-link', changed);
+  }, []);
+  useEffect(() => {
+    const link = pendingNoteLink;
+    if (!active || loading || !link || (link.venue && link.venue !== venueId) || !items.some((n) => n.id === link.id)) return;
+    pendingNoteLink = null; jump(link.id);
+  }, [active, loading, idsKey, linkRevision, venueId]);
+  const visibleGroups = thread
+    ? [thread.root, ...thread.replies].map((note) => ({ kind: 'note' as const, note }))
+    : groups.filter((g) => !readOnly || g.kind === 'note');
+  const quote = (note: HandoffNoteItem): HandoffNoteItem['replyTo'] => {
+    if (!note.replyTo) return undefined;
+    const target = items.find((n) => n.id === note.replyTo!.id);
+    return target?.deleted ? { ...note.replyTo, deleted: true, text: undefined } : note.replyTo;
+  };
+
   const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
   return (
-    <div className="flex flex-col min-h-0 flex-1">
+    <div data-thread-view={thread ? thread.root.id : undefined} className="flex flex-col min-h-0 flex-1">
+      {thread && <div className="px-4 py-3 border-b border-line">
+        <button type="button" data-thread-back aria-label="Back to Shift notes" onClick={() => changeThread(null)} className="pressable min-h-11 flex items-center gap-2 text-base font-semibold"><ArrowLeft className="w-5 h-5" />Shift notes</button>
+        <p className="p-2 rounded-lg bg-gold-wash text-gold-ink text-sm">{threadNotice(thread.memberNames)}</p>
+      </div>}
       {readOnly && privateForYou > 0 && (
         <div data-kiosk-private-notice role="status" className="mx-4 mt-3 p-3 rounded-xl border border-line-control bg-sunken flex items-start gap-2.5 shrink-0">
           <Lock className="w-5 h-5 shrink-0 text-ink-soft mt-0.5" />
@@ -370,7 +467,25 @@ export function HandoffNotes({
             <p className="text-sm text-ink-faint mt-1">Leave one for the next shift below.</p>
           </div>
         ) : (
-          items.map((note) => {
+          visibleGroups.map((group) => {
+            if (group.kind === 'thread') {
+              const { root, replies, memberNames } = group;
+              const latest = replies.at(-1);
+              const unread = [root, ...replies].some((n) => unreadIds.has(n.id));
+              const taggedMe = root.authorEmail !== currentUserEmail && (root.mentions || []).some((m) => m.id === currentUserId);
+              return <article key={root.id} data-thread-card data-note-private="1" className="p-3 rounded-xl border border-line-control bg-gold-wash text-gold-ink">
+                <button type="button" onClick={() => changeThread(root.id)} className="pressable w-full min-h-11 text-left space-y-1">
+                  <span className="flex items-center gap-2 text-base font-semibold"><Lock className="w-5 h-5 shrink-0" />Private conversation · {memberNames.join(', ')}{unread && <span className="w-2 h-2 rounded-full bg-gold shrink-0" aria-label="Unread" />}</span>
+                  {taggedMe && <span data-tagged-you className="inline-flex items-center gap-0.5 text-xs font-bold px-2 py-0.5 rounded-full bg-gold text-paper">
+                    <AtSign className="w-3 h-3" /> Tagged you
+                  </span>}
+                  <span className="block text-base truncate">{root.deleted ? 'Message deleted' : root.content || 'Voice note'}</span>
+                  <span className="block text-sm">{latest ? `${replies.length} replies · latest ${latest.authorName} ${new Date(latest.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'No replies yet'}</span>
+                </button>
+                <button type="button" data-reply-btn onClick={() => changeThread(root.id)} className="pressable min-h-11 flex items-center gap-2 text-sm font-semibold"><Reply className="w-4 h-4" />Reply</button>
+              </article>;
+            }
+            const note = group.note;
             const mine = note.authorEmail === currentUserEmail;
             const unread = !mine && unreadIds.has(note.id);
             const rate = rates[note.id] || 1;
@@ -381,11 +496,31 @@ export function HandoffNotes({
             return (
               <article
                 key={note.id}
+                onTouchStart={(e) => {
+                  if (readOnly || note.deleted || (e.target as HTMLElement).closest('button,a,audio,input,textarea,select') || e.touches.length !== 1) return;
+                  const t = e.touches[0]; touchRef.current = { id: note.id, x: t.clientX, y: t.clientY, dx: 0, dy: 0 };
+                }}
+                onTouchMove={(e) => {
+                  const t = touchRef.current; if (!t || t.id !== note.id) return;
+                  t.dx = e.touches[0].clientX - t.x; t.dy = e.touches[0].clientY - t.y;
+                  if (Math.abs(t.dy) >= 30) { touchRef.current = null; setSwipe(null); return; }
+                  setSwipe({ id: note.id, dx: Math.max(0, Math.min(t.dx, 96)) });
+                }}
+                onTouchEnd={() => {
+                  const t = touchRef.current; touchRef.current = null; setSwipe(null);
+                  if (t && t.id === note.id && swipeIntent(t.dx, t.dy) === 'reply') startReply(note);
+                }}
+                onTouchCancel={() => { touchRef.current = null; setSwipe(null); }}
                 {...(unread ? { 'data-mark-kind': 'n', 'data-mark-id': note.id } : {})}
                 data-note-id={note.id}
                 {...(note.private ? { 'data-note-private': '1' } : {})}
-                className="p-3 rounded-xl border border-line bg-surface"
+                className={`p-3 rounded-xl border border-line bg-surface ${highlightId === note.id ? 'ring-2 ring-gold' : ''}`}
               >
+                {swipe?.id === note.id && <Reply aria-hidden="true" className="w-5 h-5 text-gold-ink" style={{ transform: `translateX(${swipe.dx}px)` }} />}
+                {note.replyTo && <button type="button" data-quote onClick={() => jump(note.replyTo!.id)} className="pressable block w-full min-h-11 text-left border-l-2 border-gold px-2 mb-2 bg-sunken rounded-lg">
+                  <span className="block text-xs text-ink-soft truncate">{note.replyTo.authorName}</span><span className="block text-sm truncate">{quoteLine(quote(note))}</span>
+                </button>}
+                {note.deleted && <p className="text-base text-ink-soft italic">Message deleted</p>}
                 {note.private && (
                   <p
                     data-private-label
@@ -413,7 +548,7 @@ export function HandoffNotes({
                       </span>
                     )}
                   </div>
-                  {!readOnly && canDelete(note) && confirmId !== note.id && (
+                  {!readOnly && !note.deleted && canDelete(note) && confirmId !== note.id && (
                     <button
                       type="button"
                       onClick={() => setConfirmId(note.id)}
@@ -427,7 +562,7 @@ export function HandoffNotes({
                 <p className="text-xs text-ink-faint mt-0.5">
                   {formatNoteTime(note.createdAt)}
                 </p>
-                {confirmId === note.id && (
+                {!note.deleted && confirmId === note.id && (
                   <div className="flex items-center gap-2 mt-2 p-2 rounded-lg" style={{ backgroundColor: 'var(--bad-bg)' }}>
                     <span className="text-sm font-bold flex-1" style={{ color: 'var(--bad)' }}>Delete this note?</span>
                     <button
@@ -447,7 +582,7 @@ export function HandoffNotes({
                     </button>
                   </div>
                 )}
-                {note.content && (
+                {!note.deleted && note.content && (
                   <p dir="auto" className={`text-base whitespace-pre-wrap mt-1.5 ${unread ? 'font-semibold' : ''}`}>
                     {splitMentions(note.content, tagNames, !!note.mentionAll).map((part, i) =>
                       part.mention
@@ -461,7 +596,7 @@ export function HandoffNotes({
                     Tagged: {note.mentionAll ? (tagNames.length ? `All, ${joinNames(tagNames)}` : 'All (everyone at this venue)') : joinNames(tagNames)}
                   </p>
                 )}
-                {note.voiceNoteData && (
+                {!note.deleted && note.voiceNoteData && (
                   <div className="mt-2 flex items-center gap-2">
                     <audio
                       ref={(el) => {
@@ -487,7 +622,8 @@ export function HandoffNotes({
                     </div>
                   </div>
                 )}
-                {!readOnly && seenText && (
+                {!readOnly && !note.deleted && <button type="button" data-reply-btn onClick={() => startReply(note)} className="pressable min-h-11 px-2 flex items-center gap-2 text-sm font-semibold text-ink-soft"><Reply className="w-4 h-4" />Reply</button>}
+                {!readOnly && !note.deleted && seenText && (
                   <div className="mt-1.5">
                     <button
                       type="button"
@@ -526,6 +662,11 @@ export function HandoffNotes({
 
       {!readOnly && (
         <div className="border-t border-line bg-surface px-4 py-3 space-y-2.5 shrink-0">
+          {reply && <div data-replying-to className="flex items-center gap-2 p-2 bg-sunken rounded-lg">
+            <div className="min-w-0 flex-1"><p className="text-sm font-semibold">Replying to {reply.authorName}</p><p className="text-sm truncate">{quoteLine({ id: reply.id, authorName: reply.authorName, deleted: reply.deleted, text: reply.content || '🎤 Voice note' })}</p></div>
+            <button type="button" aria-label="Cancel reply" onClick={() => { draftRevRef.current += 1; setReplyId(null); }} className="pressable w-11 h-11 flex items-center justify-center"><X className="w-5 h-5" /></button>
+          </div>}
+          {newNames.length > 0 && <p data-add-warning className="p-2 rounded-lg bg-gold-wash text-gold-ink text-sm">{addWarning(newNames)}</p>}
           {errorMsg && (
             <p className="p-2 rounded-lg text-sm" style={{ backgroundColor: 'var(--bad-bg)', color: 'var(--bad)' }}>
               {errorMsg}
@@ -580,7 +721,7 @@ export function HandoffNotes({
               onKeyDown={onComposerKey}
               onSelect={(e) => updateMentionQuery(e.currentTarget.value, e.currentTarget.selectionStart)}
               onBlur={() => setTimeout(() => { if (!disposedRef.current) setMentionQ(null); }, 150)}
-              placeholder="Note… type @ to tag"
+              placeholder={thread ? "Your reply stays private" : "Note… type @ to tag"}
               aria-label="Note for the next shift"
               rows={1}
               className="flex-1 px-3 py-3 text-base rounded-lg bg-surface border border-line min-w-0 resize-none"
@@ -604,7 +745,7 @@ export function HandoffNotes({
             </div>
           )}
 
-          <div className="flex items-center gap-2">
+          {!thread && <div className="flex items-center gap-2">
               <button
                 type="button"
                 data-private-toggle
@@ -621,7 +762,7 @@ export function HandoffNotes({
                 ? (isPrivate ? '' : 'Only the tagged people, admins and coordinators')
                 : tagAll ? '@All notes are for everyone' : 'Tag someone with @ to send privately'}
             </span>
-          </div>
+          </div>}
 
           {recordState === 'recording' && (
             <div className="flex items-center gap-3">
@@ -675,13 +816,13 @@ export function HandoffNotes({
               className="pressable flex-1 flex items-center justify-center gap-2 h-12 rounded-xl bg-gold text-white text-base font-bold disabled:opacity-50 transition cursor-pointer"
             >
               {isPrivate ? <Lock className="w-5 h-5" /> : <Send className="w-5 h-5" />}
-              {sending ? 'Sending…' : isPrivate ? 'Send privately' : 'Send note'}
+              {sending ? 'Sending…' : newNames.length ? `Add ${joinNames(newNames)} and send` : thread || isPrivate ? 'Send privately' : 'Send note'}
             </button>
           </div>
-          {isPrivate && canPrivate ? (
+          {!thread && isPrivate && canPrivate ? (
             <p data-private-notice className="flex items-start gap-1.5 p-2 rounded-lg text-sm font-bold bg-gold-wash text-gold-ink">
               <Lock className="w-4 h-4 mt-0.5 shrink-0" />
-              <span dir="auto">{privateNotice(tagged.map((t) => t.name), 'compose')}</span>
+              <span dir="auto">{privateNotice([...new Set([...(reply ? [reply.authorName] : []), ...tagged.map((t) => t.name)])], 'compose')}</span>
             </p>
           ) : null}
         </div>

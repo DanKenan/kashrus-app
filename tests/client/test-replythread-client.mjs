@@ -1,0 +1,116 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import React from 'react';
+import { groupNotes, conversationMembers, threadNotice, addWarning, quoteLine, swipeIntent } from '../../src/lib/replyThread.ts';
+import { HandoffNotes } from '../../src/components/HandoffNotes.tsx';
+import { mount, recordFetch } from './lib/mini-render.mjs';
+import { setSessionToken } from '../../src/lib/api.ts';
+
+let checks = 0;
+const check = (condition, message) => { assert.ok(condition, message); checks++; };
+const note = (id, hour, extra = {}) => ({ id, venueId: 'v', authorId: 'r', authorEmail: 'r@x', authorName: 'Rivka', content: 'Keys here', shift: 'Morning', createdAt: `2026-10-29T${hour}:00:00Z`, ...extra });
+const root = note('root', '08', { private: true, mentions: [{ id: 'm', name: 'Moshe' }], members: [{ id: 'm', name: 'Duplicate' }, { id: 'd', name: 'Dov' }] });
+const reply = note('reply', '12', { private: true, threadId: 'root', authorId: 'm', authorName: 'Moshe' });
+const early = note('early', '09', { private: true, threadId: 'root' });
+const pub = note('public', '11');
+const grouped = groupNotes([pub, reply, root, early, note('old', '07')]);
+check(grouped[0].kind === 'thread' && grouped[0].root.id === 'root', 'latest conversation floats above public');
+check(grouped[0].lastAt === reply.createdAt, 'last activity');
+assert.deepEqual(grouped[0].replies.map((n) => n.id), ['early', 'reply']); checks++;
+assert.deepEqual(grouped.slice(1).map((g) => g.note.id), ['public', 'old']); checks++;
+assert.deepEqual(conversationMembers(root).map((m) => m.name), ['Rivka', 'Moshe', 'Dov']); checks++;
+check(groupNotes([root])[0].replies.length === 0, 'root without replies is a conversation');
+check(groupNotes([reply])[0].kind === 'thread' && groupNotes([reply])[0].root.deleted, 'orphan stays in a locked conversation');
+check(groupNotes([root, reply])[0].root === root, 'does not copy content');
+check(groupNotes([{ ...root, deleted: true, content: '' }, reply])[0].replies.length === 1, 'tombstone keeps replies');
+check(groupNotes([reply, { ...early, threadId: 'root' }])[0].replies.length === 2, 'orphans share one conversation');
+check(groupNotes([]).length === 0, 'empty list');
+assert.deepEqual(conversationMembers(note('no-tags', '08')).map((m) => m.id), ['r']); checks++;
+assert.deepEqual(conversationMembers(note('legacy', '08', { authorId: undefined })).map((m) => m.id), ['r@x']); checks++;
+check(threadNotice([]) === 'Only admins and coordinators can see this', 'missing-root notice');
+check(threadNotice(['Rivka', 'Moshe']) === 'Only Rivka, Moshe, admins and coordinators can see this', 'notice');
+check(addWarning(['Dov']) === 'Dov will be added and will see the whole conversation', 'one added name');
+check(addWarning(['Dov', 'Sara']) === 'Dov and Sara will be added and will see the whole conversation', 'two added names');
+check(addWarning([]) === '', 'no warning without additions');
+check(quoteLine({ deleted: true, text: 'secret' }) === 'Message deleted', 'deleted quote never leaks text');
+check(quoteLine(undefined) === 'Message deleted', 'missing quote');
+check(quoteLine({ text: ' hi\n there  ' }) === 'hi there', 'one line');
+check(quoteLine({ text: 'a'.repeat(141) }) === 'a'.repeat(139) + '…', 'quote cap');
+check(quoteLine({ text: 'a'.repeat(140) }).length === 140, 'exact cap');
+check(quoteLine({ text: '🎤 Voice note' }) === '🎤 Voice note', 'voice quote');
+for (const [dx, dy, expected] of [[56, 0, 'reply'], [55, 0, 'none'], [60, 29, 'reply'], [60, 30, 'none'], [58, -29, 'none'], [59, -29, 'reply'], [-70, 0, 'none'], [100, 60, 'none']]) check(swipeIntent(dx, dy) === expected, `swipe ${dx},${dy}`);
+
+const source = readFileSync(new URL('../../src/components/HandoffNotes.tsx', import.meta.url), 'utf8');
+check(source.includes('threadId: thread ? thread.root.id : undefined'), 'thread sends root id');
+check(source.includes('mentionAll: thread ? false : tagAll'), 'thread never sends All');
+check(source.includes('picker.all && !tagAll && !thread'), 'no All picker inside');
+check(source.includes('{!thread && <div') && source.includes('data-private-toggle'), 'Private toggle gated outside thread');
+for (const attr of ['data-reply-btn', 'data-quote', 'data-thread-card', 'data-thread-view', 'data-thread-back', 'data-add-warning', 'data-replying-to']) check(source.includes(attr), attr);
+
+globalThis.document ??= { activeElement: null, addEventListener() {}, removeEventListener() {} };
+globalThis.window ??= { location: { origin: 'https://app.example', search: '' }, addEventListener() {}, removeEventListener() {}, dispatchEvent() {} };
+globalThis.localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
+setSessionToken('test');
+const calls = recordFetch({
+  '/api/handoff-notes/team': { team: [{ id: 'd', name: 'Dov', role: 'worker' }, { id: 's', name: 'Sara', role: 'worker' }] },
+  '/api/handoff-notes/seen': { counts: [] },
+  'POST /api/handoff-notes': (_, body) => ({ note: note('sent', '13', body) }),
+});
+const props = { items: [root, reply, pub], loading: false, readOnly: false, canDelete: () => false, unreadIds: new Set(['reply']), venueId: 'v', currentUserId: 'r', currentUserEmail: 'r@x', currentUserName: 'Rivka', active: true, onMark() {}, onPosted() {}, onDeleted() {} };
+const m = mount(HandoffNotes, props);
+await m.render();
+check(m.find((e) => e.props['data-thread-card'] !== undefined).length === 1, 'one conversation card');
+check(m.find((e) => e.props['data-note-id'] === 'reply').length === 0, 'private reply absent from main');
+await m.click((e) => e.props['data-thread-card'] === undefined && e.type === 'button' && JSON.stringify(e.props.children).includes('Private conversation'));
+check(m.find((e) => e.props['data-thread-view'] === 'root').length === 1, 'conversation opens');
+check(m.find((e) => e.props['data-private-toggle'] !== undefined).length === 0, 'no private toggle inside');
+await m.type('Your reply stays private', '@');
+check(!m.find((e) => e.props['data-mention-option'] === 'all').length, 'All absent inside');
+await m.click((e) => e.props['data-mention-option'] === 'Sara');
+check(m.text().includes('Sara will be added and will see the whole conversation'), 'addition warning');
+await m.click((e) => e.props['data-reply-btn'] !== undefined);
+check(m.find((e) => e.props['data-replying-to'] !== undefined).length === 1, 'reply mode');
+await m.click('Add Sara and send');
+const body = calls.filter((c) => c[0] === 'POST' && c[1] === '/api/handoff-notes').at(-1)[2];
+check(body.threadId === 'root' && body.replyToId === 'root' && body.private && !body.mentionAll, 'private thread send contract');
+await m.click((e) => e.props['data-thread-back'] !== undefined);
+await m.click((e) => e.props['data-reply-btn'] !== undefined && !JSON.stringify(e.props.children).includes('Private conversation'), 1);
+await m.type('type @ to tag', 'Public reply');
+await m.click((e) => e.props['data-private-toggle'] !== undefined);
+check(m.text().includes('Private: only Rivka, admins and coordinators will see this'), 'quoted writer included without explicit tag');
+await m.click('Send privately');
+const privateReply = calls.filter((c) => c[0] === 'POST' && c[1] === '/api/handoff-notes').at(-1)[2];
+check(privateReply.replyToId === 'public' && !privateReply.threadId && privateReply.private, 'private reply starts new conversation');
+// A conversation that disappears returns to the main list and drops its private draft.
+await m.click((e) => e.type === 'button' && JSON.stringify(e.props.children).includes('Private conversation'));
+await m.type('Your reply stays private', 'private draft');
+await m.render({ items: [pub] });
+check(!m.find((e) => e.props['data-thread-view'] === 'root').length, 'lost access leaves conversation');
+check(m.find((e) => e.type === 'textarea')[0].props.value === '', 'lost access clears private draft');
+await m.click((e) => e.props['data-reply-btn'] !== undefined);
+await m.render({ venueId: 'other' });
+check(!m.find((e) => e.props['data-replying-to'] !== undefined).length, 'venue switch clears reply');
+await m.render({ readOnly: true });
+check(!m.find((e) => e.props['data-thread-card'] !== undefined).length && !m.find((e) => e.props['data-reply-btn'] !== undefined).length, 'kiosk no threads or replies');
+// Own messages retain the existing canDelete rule; tombstones have no controls,
+// including a delete confirmation or seen-count response left open before deletion.
+recordFetch({ '/api/handoff-notes/seen': { counts: [{ id: 'root', seen: 1, total: 1 }] } });
+const owner = mount(HandoffNotes, { ...props, canDelete: (n) => n.authorEmail === 'r@x' });
+await owner.render();
+await owner.click((e) => e.type === 'button' && JSON.stringify(e.props.children).includes('Private conversation'));
+await new Promise((resolve) => setTimeout(resolve, 350));
+await owner.render();
+const ownArticle = () => owner.find((e) => e.props['data-note-id'] === 'root')[0];
+check(JSON.stringify(ownArticle().props.children).includes('Delete this note'), 'own root has delete control');
+check(JSON.stringify(ownArticle().props.children).includes('data-seen-by'), 'root initially shows seen control');
+await owner.click((e) => e.props['aria-label'] === 'Delete this note');
+check(owner.text().includes('Delete this note?'), 'own root can request deletion');
+await owner.render({ items: [{ ...root, deleted: true, content: '', voiceNoteData: undefined }, reply] });
+const tombstone = JSON.stringify(ownArticle().props.children);
+check(tombstone.includes('italic') && tombstone.includes('Message deleted'), 'tombstone is italic');
+check(!tombstone.includes('Delete this note') && !tombstone.includes('data-reply-btn') && !tombstone.includes('data-seen-by'), 'tombstone has no delete, reply or seen controls');
+await owner.render({ items: [root, { ...reply, authorEmail: 'r@x' }] });
+check(JSON.stringify(owner.find((e) => e.props['data-note-id'] === 'reply')[0].props.children).includes('Delete this note'), 'own conversation reply has delete control');
+await owner.render({ canDelete: () => false });
+check(!JSON.stringify(owner.find((e) => e.props['data-note-id'] === 'reply')[0].props.children).includes('Delete this note'), 'reply respects canDelete');
+console.log(`REPLYTHREAD CLIENT: ${checks} checks passed`);
