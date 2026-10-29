@@ -730,10 +730,15 @@ export default function App() {
   // open, from the service worker's OPEN_URL message (A5/A10: only the two
   // params are read, from a same-origin URL; nothing navigates or reloads,
   // and an unsent draft is never cleared by it). Never on the kiosk.
-  const [pendingAlertLink, setPendingAlertLink] = useState<string | null>(() => {
+  // TEAMNOTES: a tapped @mention push opens the Shift notes tab the same way
+  // (?updates=notes&note=<id>).
+  const linkFrom = (q: URLSearchParams): { tab: 'alerts' | 'notes'; id: string } | null =>
+    q.get('updates') === 'alerts' ? { tab: 'alerts', id: q.get('alert') || '' }
+      : q.get('updates') === 'notes' ? { tab: 'notes', id: q.get('note') || '' }
+        : null;
+  const [pendingAlertLink, setPendingAlertLink] = useState<{ tab: 'alerts' | 'notes'; id: string } | null>(() => {
     try {
-      const q = new URLSearchParams(window.location.search);
-      return q.get('updates') === 'alerts' ? q.get('alert') || '' : null;
+      return linkFrom(new URLSearchParams(window.location.search));
     } catch { return null; }
   });
   useEffect(() => {
@@ -743,7 +748,8 @@ export default function App() {
       try {
         const u = new URL(d.url, window.location.origin);
         if (u.origin !== window.location.origin) return;
-        if (u.searchParams.get('updates') === 'alerts') setPendingAlertLink(u.searchParams.get('alert') || '');
+        const link = linkFrom(u.searchParams);
+        if (link) setPendingAlertLink(link);
       } catch { /* ignore */ }
     };
     navigator.serviceWorker?.addEventListener('message', onMsg);
@@ -751,12 +757,13 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (pendingAlertLink === null || !updatesCtx) return;
-    if (!isKiosk) updates.setSheetOpen(true, 'alerts', pendingAlertLink || null);
+    if (!isKiosk) updates.setSheetOpen(true, pendingAlertLink.tab, pendingAlertLink.id || null);
     setPendingAlertLink(null);
     try {
       const u = new URL(window.location.href);
       u.searchParams.delete('updates');
       u.searchParams.delete('alert');
+      u.searchParams.delete('note');
       window.history.replaceState(null, '', u.pathname + (u.search ? u.search : '') + u.hash);
     } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2524,6 +2531,7 @@ export default function App() {
             venueId={currentVenue?.id || ''}
             currentUserEmail={currentUser?.email || ''}
             currentUserName={currentUser?.name || ''}
+            currentUserId={currentUser?.id || ''}
             active={updates.sheetOpen && updates.activeTab === 'notes'}
             canDelete={(note) =>
               !!currentUser &&

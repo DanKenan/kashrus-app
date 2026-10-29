@@ -37,6 +37,19 @@ export interface HandoffNoteItem {
   shift: string;
   voiceNoteData?: string;
   createdAt: string;
+  /** TEAMNOTES: tagged people (ids + names), @All, and the private option. */
+  mentions?: { id: string; name: string }[];
+  mentionAll?: boolean;
+  private?: boolean;
+}
+
+/** TEAMNOTES: seen-by for shift notes (any venue team member may look). */
+export interface NoteSeenCount { id: string; seen: number; total: number }
+export interface NoteSeenList {
+  id: string;
+  seen: { name: string; role: string; at: string }[];
+  notYet: { name: string; role: string }[];
+  total: number;
 }
 
 export interface UnreadState {
@@ -96,6 +109,28 @@ export async function fetchNotes(venueId: string, signal?: AbortSignal): Promise
   if (!res.ok) return [];
   const d = await res.json();
   return Array.isArray(d.notes) ? d.notes : [];
+}
+
+/** TEAMNOTES: the people the caller can tag at this venue (names + roles). */
+export async function fetchNoteTeam(venueId: string, signal?: AbortSignal): Promise<{ id: string; name: string; role: string }[]> {
+  const res = await apiFetch(`/api/handoff-notes/team?venueId=${encodeURIComponent(venueId)}`, { signal });
+  if (!res.ok) return [];
+  const d = await res.json();
+  return Array.isArray(d.team) ? d.team : [];
+}
+
+export async function fetchNoteSeenCounts(venueId: string, signal?: AbortSignal): Promise<NoteSeenCount[] | null> {
+  const res = await apiFetch(`/api/handoff-notes/seen?venueId=${encodeURIComponent(venueId)}`, { signal });
+  if (!res.ok) return null;
+  const d = await res.json();
+  return Array.isArray(d.counts) ? d.counts : [];
+}
+
+export async function fetchNoteSeen(venueId: string, id: string, signal?: AbortSignal): Promise<NoteSeenList | null> {
+  const res = await apiFetch(`/api/handoff-notes/${encodeURIComponent(id)}/seen?venueId=${encodeURIComponent(venueId)}`, { signal });
+  if (!res.ok) return null;
+  const d = await res.json();
+  return { id: d.id, seen: Array.isArray(d.seen) ? d.seen : [], notYet: Array.isArray(d.notYet) ? d.notYet : [], total: d.total || 0 };
 }
 
 // ---------------------------------------------------------------------------

@@ -1950,6 +1950,47 @@ function publicUpdate<T extends { readBy?: string[] }>(item: T): Omit<T, 'readBy
   return rest;
 }
 
+/**
+ * TEAMNOTES — the ONE visibility rule for a shift note, used by every read
+ * path (GET list, unread/seen marks, seen-by, socket broadcasts, push,
+ * media attach):
+ * - same agency, and the note's venue is in the user's scope (admin: agency);
+ * - a public note: everyone in scope;
+ * - a private note: its author, the tagged people, the agency's admins and
+ *   the coordinators of that venue — nobody else, and never a kiosk screen
+ *   (a shared tablet), whoever is signed in on it. Fails closed.
+ */
+function noteVisibleTo(user: UserProfile | null | undefined, note: any, opts?: { kiosk?: boolean }): boolean {
+  if (!user || !note || typeof note !== 'object') return false;
+  if ((note.agencyId || 'agency-hkc') !== ((user as any).agencyId || 'agency-hkc')) return false;
+  if (typeof note.venueId !== 'string' || !note.venueId) return false;
+  const admin = (user as any).role === 'admin' && !opts?.kiosk;
+  if (!admin) {
+    const scope = venueScopeFor(user);
+    if (scope !== 'agency' && !scope.includes(note.venueId)) return false;
+  }
+  if (note.private !== true) return true;
+  if (opts?.kiosk) return false;
+  if (admin || (user as any).role === 'coordinator') return true;
+  if (noteAuthoredBy(note, user)) return true;
+  return Array.isArray(note.mentions) && note.mentions.some((m: any) => m && m.id === (user as any).id);
+}
+
+function noteAuthoredBy(note: any, user: UserProfile | null | undefined): boolean {
+  if (!note || !user) return false;
+  if (typeof note.authorId === 'string' && note.authorId) return note.authorId === (user as any).id;
+  return typeof note.authorEmail === 'string' && sameEmail(note.authorEmail, (user as any).email);
+}
+
+/** TEAMNOTES: the people of a venue's team — everyone whose venue scope covers
+ * it (mashgichim, owners, managers, coordinators) — plus, when asked, the
+ * agency's admins (taggable by name, not reached by @All). */
+function noteTeamAt(agencyId: string, venueId: string, withAdmins: boolean): UserProfile[] {
+  return users.filter((u: any) =>
+    u && (u.agencyId || 'agency-hkc') === agencyId &&
+    ((withAdmins && u.role === 'admin') || (u.role !== 'admin' && personAtVenue(u, venueId))));
+}
+
 const KNOWN_ANNOUNCEMENT_ROLES = ['all', 'admin', 'coordinator', 'owner', 'manager', 'mashgiach', 'worker'];
 
 /**
@@ -2345,6 +2386,15 @@ interface HandoffNote {
   createdAt: string;
   /** 5a: user ids that have SEEN this note (server-only; stripped from every response/broadcast). */
   readBy?: string[];
+  /** TEAMNOTES: the author's user id (notes before TEAMNOTES carry only authorEmail). */
+  authorId?: string;
+  /** TEAMNOTES: people tagged with @ (ids + the names they had when tagged). */
+  mentions?: Array<{ id: string; name: string }>;
+  /** TEAMNOTES: @All — the whole venue team is notified. */
+  mentionAll?: boolean;
+  /** TEAMNOTES: visible ONLY to the author, the tagged people, the agency's
+   * admins and the venue's coordinators (noteVisibleTo). Needs >= 1 tag. */
+  private?: boolean;
 }
 
 interface TaskTemplate {
@@ -5806,11 +5856,13 @@ function kioskMaySee(meta: SocketMeta, type: string, payload: any): boolean {
     }
     case 'HANDOFF_NOTE': {
       const note = payload?.note || payload;
-      return note?.venueId === venueId;
+      // TEAMNOTES: a private note never reaches a kiosk screen.
+      return note?.venueId === venueId && note?.private !== true;
     }
     case 'HANDOFF_NOTE_DELETED':
       // 5a: a deleted note must leave the tablet too (venueId rides the payload).
-      return payload?.venueId === venueId;
+      // TEAMNOTES: a private note's delete stays off the tablet (it never had it).
+      return payload?.venueId === venueId && payload?.private !== true;
     case 'ANNOUNCEMENT': {
       // 5a / RULE T: one rule for REST and WS — the tablet's venue + the
       // logged-in user's role targeting, whatever that role is.
@@ -6004,12 +6056,19 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
       return inScope(p.venueId) ? payload : null;
     case 'HANDOFF_NOTE': {
       const note = p.note || p;
-      return inScope(note?.venueId) ? payload : null;
+      // TEAMNOTES: one rule with REST — a private note only to its readers.
+      return inScope(note?.venueId) && noteVisibleTo(recipient, note) ? payload : null;
     }
     case 'HANDOFF_NOTE_DELETED':
       // Fail closed: a note delete without its venueId does not reach a
       // non-admin socket (the payload now carries venueId — see the handler).
-      return inScope(p.venueId) ? payload : null;
+      // TEAMNOTES: a private note's delete carries its readers' rule inputs
+      // (private, mentions, authorId) and goes only to those readers.
+      if (!inScope(p.venueId)) return null;
+      if (p.private === true) {
+        return noteVisibleTo(recipient, { ...p, agencyId: recipient.agencyId || 'agency-hkc' }) ? { id: p.id, venueId: p.venueId } : null;
+      }
+      return payload;
     case 'ANNOUNCEMENT_DELETED': {
       // Same audience as the item itself (venue + role targeting + author).
       const m = deletedAnnouncementMeta.get(p.id);
@@ -7762,6 +7821,11 @@ app.post('/api/media/:id/commit', async (req, res) => {
       res.status(403).json({ error: 'No access to this venue.' });
       return;
     }
+    // TEAMNOTES: a private shift note takes media only from its readers.
+    if (entityType === 'handoff-note' && !noteVisibleTo(user, targetEntity, { kiosk: (req as any).kiosk === true })) {
+      res.status(404).json({ error: 'Target entity not found.' });
+      return;
+    }
     // Phase 3A note: attachedTo is metadata recording the intended attachment.
     // The target entity lives in the monolith (app-state/main); Phase 3B's
     // per-entity collections will enforce referential integrity.
@@ -8314,8 +8378,14 @@ app.get('/api/handoff-notes', (req, res) => {
   if (venueScope !== 'agency') {
     notes = notes.filter((n) => venueScope.includes(n.venueId));
   }
+  // TEAMNOTES: private notes only for their readers (never on a kiosk).
+  const kiosk = (req as any).kiosk === true;
+  notes = notes.filter((n) => noteVisibleTo(caller, n, { kiosk }));
   res.json({ notes: notes.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(publicUpdate) });
 });
+
+const NOTE_MAX_CHARS = 4000;
+const NOTE_MAX_MENTIONS = 50;
 
 app.post('/api/handoff-notes', async (req, res) => {
   const caller = requireAuthUser(req, res);
@@ -8326,12 +8396,41 @@ app.post('/api/handoff-notes', async (req, res) => {
   if (!venueId || (!content?.trim() && !voiceNoteData)) {
     return res.status(400).json({ error: 'Venue and note content (or voice note) are required.' });
   }
+  if (content !== undefined && content !== null && typeof content !== 'string') {
+    return res.status(400).json({ error: 'Invalid note.' });
+  }
+  if (typeof content === 'string' && content.trim().length > NOTE_MAX_CHARS) {
+    return res.status(400).json({ error: `A note can be at most ${NOTE_MAX_CHARS} characters.`, code: 'NOTE_TOO_LONG' });
+  }
   const noteId = `handoff-${crypto.randomUUID()}`;
   // Notes belong to the caller's agency; the venue must be theirs too.
   // Attribution comes from the VERIFIED session user, never the body.
   const agencyId = caller.agencyId || 'agency-hkc';
   // RULE T: the note's venue must be the caller's own venue (admins: the agency).
   if (!requireVenueAccess(req, res, venueId)) return;
+  // TEAMNOTES: tags (@person, @All) and the private option. Every tagged id
+  // must be on this venue's team (noteTeamAt, admins included); private
+  // needs at least one tagged PERSON and cannot go to @All.
+  const rawMentions = req.body?.mentions ?? [];
+  const mentionAll = req.body?.mentionAll === true;
+  const isPrivate = req.body?.private === true;
+  if (!Array.isArray(rawMentions) || rawMentions.length > NOTE_MAX_MENTIONS ||
+      !rawMentions.every((x: any) => typeof x === 'string' && x.length > 0 && x.length <= 200) ||
+      (req.body?.mentionAll !== undefined && typeof req.body.mentionAll !== 'boolean') ||
+      (req.body?.private !== undefined && typeof req.body.private !== 'boolean')) {
+    return res.status(400).json({ error: 'Invalid tags.' });
+  }
+  const team = noteTeamAt(agencyId, venueId, true);
+  const mentionIds = [...new Set(rawMentions as string[])];
+  const mentions: Array<{ id: string; name: string }> = [];
+  for (const id of mentionIds) {
+    const u = team.find((x: any) => x.id === id);
+    if (!u) return res.status(400).json({ error: 'You can only tag people on this venue\'s team.', code: 'MENTION_NOT_ON_TEAM' });
+    mentions.push({ id: u.id, name: String(u.name || '').slice(0, 120) });
+  }
+  if (isPrivate && (mentions.length === 0 || mentionAll)) {
+    return res.status(400).json({ error: 'To send privately, tag at least one person (not @All).', code: 'PRIVATE_NEEDS_TAG' });
+  }
   const createdAt = new Date().toISOString();
 
   const committed = await commitOrRespond(
@@ -8347,9 +8446,13 @@ app.post('/api/handoff-notes', async (req, res) => {
         authorEmail: caller.email,
         authorName: caller.name,
         content: String(content || '').trim(),
-        shift: shift || 'General',
+        shift: typeof shift === 'string' && shift ? shift.slice(0, 40) : 'General',
         voiceNoteData: typeof voiceNoteData === 'string' && voiceNoteData.startsWith('data:audio/') ? voiceNoteData.slice(0, 1000000) : undefined,
         createdAt,
+        authorId: caller.id,
+        ...(mentions.length ? { mentions } : {}),
+        ...(mentionAll ? { mentionAll: true } : {}),
+        ...(isPrivate ? { private: true } : {}),
       };
       return { doc: { ...freshDoc, handoffNotes: [note, ...arr] }, result: note };
     },
@@ -8358,7 +8461,108 @@ app.post('/api/handoff-notes', async (req, res) => {
   if (!committed) return;
   const note = committed.result as HandoffNote;
   broadcast('HANDOFF_NOTE', { note: publicUpdate(note) }, undefined, note.agencyId);
+  // TEAMNOTES push, after the commit: the tagged people, plus the venue team
+  // (not the admins) for @All. Never the author; nobody who cannot see the
+  // note (a private note reaches only its tagged people). Untagged people get
+  // no push — they see the note in the sheet.
+  if (note.mentions?.length || note.mentionAll) {
+    const named = new Set((note.mentions || []).map((m) => m.id));
+    const recipients = noteTeamAt(agencyId, note.venueId, true).filter((u: any) =>
+      (named.has(u.id) || (note.mentionAll === true && u.role !== 'admin')) &&
+      !noteAuthoredBy(note, u) && noteVisibleTo(u, note));
+    const venueName = String(venues.find((v: any) => v.id === note.venueId)?.name || '');
+    const preview = note.content ? note.content.slice(0, 100) : '🎤 Voice note';
+    for (const u of recipients) {
+      const direct = named.has(u.id);
+      const title = note.private
+        ? `🔒 ${note.authorName} tagged you (private)`
+        : direct
+          ? `💬 ${note.authorName} tagged you${venueName ? ` · ${venueName}` : ''}`
+          : `💬 ${note.authorName} @All${venueName ? ` · ${venueName}` : ''}`;
+      sendPushToMember(u, title, preview, { type: 'shift-note', noteId: note.id, venueId: note.venueId, url: `/?updates=notes&note=${encodeURIComponent(note.id)}`, tag: `note-${note.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 70)}` });
+    }
+  }
   res.json({ note: publicUpdate(note) });
+});
+
+// TEAMNOTES: the people a caller can tag at one venue (WhatsApp-group style
+// picker): the venue team plus the agency's admins. Names + roles only.
+app.get('/api/handoff-notes/team', (req, res) => {
+  const g = updatesVenueGate(req, res);
+  if (!g) return;
+  const agencyId = (g.user as any).agencyId || 'agency-hkc';
+  const team = noteTeamAt(agencyId, g.venueId, true)
+    .map((u: any) => ({ id: u.id, name: String(u.name || ''), role: u.role }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  res.set('Cache-Control', 'private, no-store');
+  res.json({ team });
+});
+
+/** TEAMNOTES seen-by: who a note is for (minus its author) — the venue team
+ * (not the admins) for a public note, the tagged people for a private one
+ * (the admins/coordinators who may also read it count once they have seen
+ * it) — plus anyone else who can see it and has seen it. */
+function noteSeenRows(note: HandoffNote, marks: Map<string, UpdateReads>) {
+  const agencyId = note.agencyId || 'agency-hkc';
+  const named = new Set((note.mentions || []).map((m) => m.id));
+  const readers = users.filter((u: any) =>
+    (u.agencyId || 'agency-hkc') === agencyId && !noteAuthoredBy(note, u) && noteVisibleTo(u, note));
+  const intended = (u: any) => named.has(u.id) || (!note.private && u.role !== 'admin' && personAtVenue(u, note.venueId));
+  const seen: { name: string; role: string; at: string }[] = [];
+  const notYet: { name: string; role: string }[] = [];
+  for (const u of readers) {
+    const at = marks.get(u.id)?.n[note.id];
+    if (at) seen.push({ name: u.name, role: u.role, at });
+    else if (intended(u)) notYet.push({ name: u.name, role: u.role });
+  }
+  seen.sort((x, y) => x.at.localeCompare(y.at));
+  notYet.sort((x, y) => x.name.localeCompare(y.name));
+  return { seen, notYet, total: seen.length + notYet.length };
+}
+
+function noteReadersFor(notes: HandoffNote[]): UserProfile[] {
+  const out = new Map<string, UserProfile>();
+  for (const note of notes) {
+    const agencyId = note.agencyId || 'agency-hkc';
+    for (const u of users as any[]) {
+      if ((u.agencyId || 'agency-hkc') === agencyId && !out.has(u.id) && !noteAuthoredBy(note, u) && noteVisibleTo(u, note)) out.set(u.id, u);
+    }
+  }
+  return [...out.values()];
+}
+
+// Seen-by counts for every note the caller can see at this venue. Any member
+// of the venue team (not only admins) may see who saw a note (Don, Oct 29).
+app.get('/api/handoff-notes/seen', async (req, res) => {
+  const g = updatesVenueGate(req, res);
+  if (!g) return;
+  const notes = notesVisibleAt(g.user, g.venueId);
+  try {
+    const marks = await loadUpdateReadsMany(noteReadersFor(notes));
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ counts: notes.map((n) => { const r = noteSeenRows(n, marks); return { id: n.id, seen: r.seen.length, total: r.total }; }) });
+  } catch (e: any) {
+    console.warn(`[handoff-notes/seen] could not read marks: ${String(e?.message || e).slice(0, 120)}`);
+    res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
+  }
+});
+
+// Seen-by list for ONE note: names + roles + when (no emails, no ids).
+// Unknown, other-venue and not-visible notes answer the same 404.
+app.get('/api/handoff-notes/:id/seen', async (req, res) => {
+  const g = updatesVenueGate(req, res);
+  if (!g) return;
+  const note = notesVisibleAt(g.user, g.venueId).find((n) => n.id === req.params.id);
+  if (!note) return res.status(404).json({ error: 'Not found.' });
+  try {
+    const marks = await loadUpdateReadsMany(noteReadersFor([note]));
+    const r = noteSeenRows(note, marks);
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ id: note.id, ...r });
+  } catch (e: any) {
+    console.warn(`[handoff-notes/seen] could not read marks: ${String(e?.message || e).slice(0, 120)}`);
+    res.status(503).json({ error: 'Could not load. Please retry.', code: 'LOAD_FAILED' });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -8449,7 +8653,8 @@ function isRead(rec: UpdateReads, kind: 'a' | 'n' | 'i', id: string, _createdAt?
 /** Notes of ONE venue in the caller's agency (the venue gate below has already applied rule T). */
 function notesVisibleAt(user: UserProfile, venueId: string): HandoffNote[] {
   const agencyId = (user as any).agencyId || 'agency-hkc';
-  return handoffNotes.filter((n) => (n.agencyId || 'agency-hkc') === agencyId && n.venueId === venueId);
+  // TEAMNOTES: a private note only for its readers (noteVisibleTo).
+  return handoffNotes.filter((n) => (n.agencyId || 'agency-hkc') === agencyId && n.venueId === venueId && noteVisibleTo(user, n));
 }
 
 /** Shared venue gate for the two routes: kiosk → 403 (read-only, also not on the
@@ -8769,7 +8974,11 @@ app.delete('/api/handoff-notes/:id', async (req, res) => {
     label: 'delete-handoff-note',
     broadcastType: 'HANDOFF_NOTE_DELETED',
     // VenueId rides along so the WS staff filter can scope the delete.
-    getDeletePayload: () => ({ id: req.params.id, venueId: existing.venueId }),
+    // TEAMNOTES: a private note's delete carries what the WS filter needs to
+    // reach only its readers (the filter strips it before sending).
+    getDeletePayload: () => (existing.private === true
+      ? { id: req.params.id, venueId: existing.venueId, private: true, authorId: existing.authorId, authorEmail: existing.authorEmail, mentions: existing.mentions || [] }
+      : { id: req.params.id, venueId: existing.venueId }),
     getAgencyId: () => existing.agencyId,
   });
   return;
