@@ -26,6 +26,9 @@ import { KioskLogin } from './components/KioskLogin';
 import { KioskTaskPanel } from './components/KioskTaskPanel';
 import { UpdatesBell } from './components/UpdatesBell';
 import { KioskPrivateNotice } from './components/KioskPrivateNotice';
+import { PushPrompt } from './components/PushPrompt';
+import { PUSH_CHANGED_EVENT, getPushSetup, pushSupported, syncPushQuietly, turnOnPush as turnOnPushHere, type PushState } from './lib/push';
+import { pushPromptKind, pushPromptSnoozed, snoozePushPrompt } from './lib/pushPrompt';
 import { UpdatesSheet, announcementCanDelete } from './components/UpdatesSheet';
 import { UrgentBanner } from './components/UrgentBanner';
 import { Announcements } from './components/Announcements';
@@ -440,6 +443,52 @@ export default function App() {
       };
     } catch { return null; }
   }, [installGate, pwaInstall.isInstalled, pwaInstall.isInstallable]);
+  // PUSHALWAYS (Don, Oct 29): on a phone, quietly make sure this phone can get
+  // the alerts meant for this person (never asks), then offer one tap to
+  // turn them on where the phone has not allowed them yet. Never on a kiosk.
+  const [pushSetup, setPushSetup] = useState<{ forUser: string; state: PushState } | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushPromptGen, setPushPromptGen] = useState(0);
+  const pushUserId = currentUser?.id || '';
+  const pushUserEmail = currentUser?.email || '';
+  useEffect(() => {
+    // Phones only (review PARV1): a desktop browser is never subscribed unasked.
+    if (!pushUserId || isKiosk || !isPhoneLike()) return;
+    let live = true;
+    // Only the newest read may update the banner, and never a stale one (review PARV6).
+    let seq = 0;
+    const take = (n: number) => (r: { state: PushState; stale?: boolean }) => { if (live && n === seq && !r.stale) setPushSetup({ forUser: pushUserId, state: r.state }); };
+    void syncPushQuietly(pushUserEmail, pushUserId, () => live).then(take(++seq));
+    const onChange = () => { void getPushSetup(pushUserId).then(take(++seq)); };
+    window.addEventListener(PUSH_CHANGED_EVENT, onChange);
+    return () => { live = false; window.removeEventListener(PUSH_CHANGED_EVENT, onChange); };
+  }, [pushUserId, pushUserEmail, isKiosk]);
+  const pushPrompt = useMemo(() => {
+    try {
+      const ua = typeof window === 'undefined' ? '' : window.navigator?.userAgent ?? '';
+      return pushPromptKind({
+        signedIn: !!pushUserId,
+        kiosk: isKiosk,
+        phone: isPhoneLike(),
+        supported: pushSupported(),
+        state: pushSetup && pushSetup.forUser === pushUserId ? pushSetup.state : null,
+        ios: isIOSDevice(ua),
+        standalone: pwaInstall.isInstalled || isStandalone(),
+        snoozed: !pushUserId || pushPromptSnoozed(pushUserId),
+        otherCardOpen: !!installCardOpenFor || !!passkeyOfferFor,
+      });
+    } catch { return null; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pushUserId, isKiosk, pushSetup, pwaInstall.isInstalled, installCardOpenFor, passkeyOfferFor, pushPromptGen]);
+  const turnOnPush = async () => {
+    if (pushBusy || !pushUserId) return;
+    setPushBusy(true);
+    const uid = pushUserId;
+    const { result, setup } = await turnOnPushHere(pushUserEmail, uid);
+    setPushBusy(false);
+    // Server-confirmed (review PARV3); a superseded/stale answer is not shown — the newer action's announce repaints (PARV6).
+    if (result !== 'superseded' && !setup.stale) setPushSetup({ forUser: uid, state: setup.state });
+  };
   // 10g: the agencies under this login (several = "Switch agency" in the menu).
   // Read for the signed-in phone session, including a restored one; never on a kiosk.
   const [memberships, setMemberships] = useState<Membership[]>([]);
@@ -2463,6 +2512,16 @@ export default function App() {
           kicker="Alert"
           onView={(id) => updates.setSheetOpen(true, 'alerts', id)}
           onDismiss={(id) => updates.dismissAlertBanner(id)}
+        />
+      )}
+
+      {/* PUSHALWAYS: this phone gets no alerts yet -> one tap to turn them on (phones only, never a kiosk) */}
+      {!updates.topUrgent && !updates.topAlert && pushPrompt && (
+        <PushPrompt
+          kind={pushPrompt}
+          busy={pushBusy}
+          onTurnOn={() => void turnOnPush()}
+          onDismiss={() => { if (pushUserId) snoozePushPrompt(pushUserId); setPushPromptGen((g) => g + 1); }}
         />
       )}
 

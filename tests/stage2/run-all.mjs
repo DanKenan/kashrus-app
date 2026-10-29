@@ -207,6 +207,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-91-staff-add-team.mjs')).default,
     (await import('./test-93-event-task-edit.mjs')).default, // EVENTEDIT
     (await import('./test-94-team-notes.mjs')).default, // TEAMNOTES
+    (await import('./test-95-push-always.mjs')).default, // PUSHALWAYS
     // MERGE-FIX: merges into the operator row and re-signs the suite's admin session; keep it LAST, after its own fresh state.
     FRESH_STATE,
     (await import('./test-85-merge-operator.mjs')).default,
