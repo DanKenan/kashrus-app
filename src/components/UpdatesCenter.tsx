@@ -15,7 +15,7 @@ import {
   UnreadState,
   UpdatesContext,
   fetchAnnouncements,
-  fetchNotes,
+  fetchNotesWithMeta,
   fetchUnread,
   seenQueue,
   updatesCtxKey,
@@ -73,6 +73,9 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
   const [sheetOpen, setSheetOpenState] = useState(false);
   const [activeTab, setActiveTab] = useState<UpdatesTab>('announcements');
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  // TEAMNOTES2: kiosk only — how many private notes are tagged to the person
+  // signed in on the tablet and still unread (a number; never the notes).
+  const [kioskPrivate, setKioskPrivate] = useState(0);
 
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
@@ -133,7 +136,7 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     try {
       const [anns, nts, alts, recs] = await Promise.all([
         fetchAnnouncements(ctrl.signal),
-        fetchNotes(c.venueId, ctrl.signal),
+        fetchNotesWithMeta(c.venueId, ctrl.signal),
         c.kiosk ? Promise.resolve([] as AlertItem[]) : fetchAlerts(c.venueId, ctrl.signal),
         // Receipts are supplementary: a failed or thrown receipts read never
         // blocks the alerts, announcements or notes from showing.
@@ -142,7 +145,9 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
       if (isStale(k)) return;
       // The sheet is for THIS venue: agency-wide items plus this venue's.
       setAnnouncements(anns.filter((a) => !a.venueId || a.venueId === c.venueId));
-      setNotes(nts);
+      setNotes(nts.notes);
+      // RV3 P3: a count the server could not read is not shown as current.
+      if (c.kiosk) setKioskPrivate(nts.privateForYou ?? 0);
       setAlerts(alts);
       if (recs) setReceipts(recs);
     } catch {
@@ -151,6 +156,28 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
       if (!isStale(k)) setListsLoading(false);
     }
   }, [isStale, seesReceipts]);
+
+  // TEAMNOTES2: the kiosk's private-note count for the signed-in person —
+  // read at sign-in and once a minute while they stay signed in (a private
+  // note never reaches a kiosk socket, so there is no push signal for it).
+  const refreshKioskPrivate = useCallback(async () => {
+    const c = ctxRef.current;
+    if (!c || !c.kiosk) return;
+    const k = updatesCtxKey(c);
+    try {
+      const r = await fetchNotesWithMeta(c.venueId);
+      if (isStale(k)) return;
+      // RV3 P3: a count the server could not read is not shown as current.
+      setKioskPrivate(r.privateForYou ?? 0);
+    } catch {
+      if (!isStale(k)) setKioskPrivate(0);
+    }
+  }, [isStale]);
+  useEffect(() => {
+    if (!ctx?.kiosk) return;
+    const t = setInterval(() => void refreshKioskPrivate(), 60_000);
+    return () => clearInterval(t);
+  }, [ctxKey, ctx?.kiosk, refreshKioskPrivate]);
 
   // Context generation changed (or first mount): clear everything from the
   // previous context, close the sheet, and count fresh for the new one. The
@@ -168,7 +195,9 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
     setDraftGen((g) => g + 1);
     setSheetOpenState(false);
     setHighlightId(null);
+    setKioskPrivate(0);
     abortRef.current?.abort();
+    if (ctx?.kiosk) void refreshKioskPrivate();
     if (ctx && !ctx.kiosk) {
       void refreshUnread();
       // Warm the lists: the alert banner needs the open alerts, and the
@@ -303,6 +332,7 @@ export function useUpdatesCenter(ctx: UpdatesContext | null) {
   return {
     unread,
     bellCount,
+    kioskPrivate,
     topUrgent,
     topAlert,
     announcements,

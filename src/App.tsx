@@ -25,6 +25,7 @@ import { LoginPage } from './components/LoginPage';
 import { KioskLogin } from './components/KioskLogin';
 import { KioskTaskPanel } from './components/KioskTaskPanel';
 import { UpdatesBell } from './components/UpdatesBell';
+import { KioskPrivateNotice } from './components/KioskPrivateNotice';
 import { UpdatesSheet, announcementCanDelete } from './components/UpdatesSheet';
 import { UrgentBanner } from './components/UrgentBanner';
 import { Announcements } from './components/Announcements';
@@ -730,10 +731,19 @@ export default function App() {
   // open, from the service worker's OPEN_URL message (A5/A10: only the two
   // params are read, from a same-origin URL; nothing navigates or reloads,
   // and an unsent draft is never cleared by it). Never on the kiosk.
-  const [pendingAlertLink, setPendingAlertLink] = useState<string | null>(() => {
+  // TEAMNOTES: a tapped @mention push opens the Shift notes tab the same way
+  // (?updates=notes&note=<id>).
+  // (RV2: the note's venue rides along, &venue=<id>; the app switches to it
+  // first when the person may select it, then opens the tab.)
+  type UpdatesLink = { tab: 'alerts' | 'notes'; id: string; venue?: string };
+  const linkFrom = (q: URLSearchParams): UpdatesLink | null =>
+    q.get('updates') === 'alerts' ? { tab: 'alerts', id: q.get('alert') || '' }
+      : q.get('updates') === 'notes' ? { tab: 'notes', id: q.get('note') || '', venue: q.get('venue') || undefined }
+        : null;
+  const linkSwitchRef = useRef<string | null>(null);
+  const [pendingAlertLink, setPendingAlertLink] = useState<UpdatesLink | null>(() => {
     try {
-      const q = new URLSearchParams(window.location.search);
-      return q.get('updates') === 'alerts' ? q.get('alert') || '' : null;
+      return linkFrom(new URLSearchParams(window.location.search));
     } catch { return null; }
   });
   useEffect(() => {
@@ -743,7 +753,8 @@ export default function App() {
       try {
         const u = new URL(d.url, window.location.origin);
         if (u.origin !== window.location.origin) return;
-        if (u.searchParams.get('updates') === 'alerts') setPendingAlertLink(u.searchParams.get('alert') || '');
+        const link = linkFrom(u.searchParams);
+        if (link) setPendingAlertLink(link);
       } catch { /* ignore */ }
     };
     navigator.serviceWorker?.addEventListener('message', onMsg);
@@ -751,12 +762,23 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (pendingAlertLink === null || !updatesCtx) return;
-    if (!isKiosk) updates.setSheetOpen(true, 'alerts', pendingAlertLink || null);
+    const linkVenue = pendingAlertLink.venue;
+    if (!isKiosk && linkVenue && linkVenue !== currentVenue?.id && currentUser &&
+        venues.some((v) => v.id === linkVenue) &&
+        (currentUser.role === 'admin' || eligibleVenues.some((v) => v.id === linkVenue))) {
+      // Switch once; this effect runs again when the new venue's context lands.
+      if (linkSwitchRef.current !== linkVenue) { linkSwitchRef.current = linkVenue; handleSelectVenue(linkVenue); }
+      return;
+    }
+    linkSwitchRef.current = null;
+    if (!isKiosk) updates.setSheetOpen(true, pendingAlertLink.tab, pendingAlertLink.id || null);
     setPendingAlertLink(null);
     try {
       const u = new URL(window.location.href);
       u.searchParams.delete('updates');
       u.searchParams.delete('alert');
+      u.searchParams.delete('note');
+      u.searchParams.delete('venue');
       window.history.replaceState(null, '', u.pathname + (u.search ? u.search : '') + u.hash);
     } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2444,6 +2466,13 @@ export default function App() {
         />
       )}
 
+      {/* TEAMNOTES2: the kiosk says a private note waits for the signed-in person (a count only) */}
+      {isKiosk && updates.kioskPrivate > 0 && (
+        <React.Fragment key={`${updatesCtxKey}|${updates.kioskPrivate}`}>
+          <KioskPrivateNotice count={updates.kioskPrivate} />
+        </React.Fragment>
+      )}
+
       {/* Updates sheet (Announcements | Shift notes | Alerts) */}
       <UpdatesSheet
         open={updates.sheetOpen}
@@ -2520,10 +2549,12 @@ export default function App() {
             items={updates.notes}
             loading={updates.listsLoading}
             readOnly={isKiosk}
+            privateForYou={isKiosk ? updates.kioskPrivate : 0}
             unreadIds={new Set(updates.unread.unreadNoteIds)}
             venueId={currentVenue?.id || ''}
             currentUserEmail={currentUser?.email || ''}
             currentUserName={currentUser?.name || ''}
+            currentUserId={currentUser?.id || ''}
             active={updates.sheetOpen && updates.activeTab === 'notes'}
             canDelete={(note) =>
               !!currentUser &&
