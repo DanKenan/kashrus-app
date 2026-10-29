@@ -243,7 +243,7 @@ ok('F2 retry works -> subscribed, all', to.result === 'subscribed' && to.setup.s
   ok('E4 turnOnPush across a switch: failed, nothing shown, nothing remembered', r4.result === 'failed' && r4.setup.state === 'default' && push.rememberedPushMode('uEA4') === null, JSON.stringify(r4));
   perm.value = 'granted';
   // E3: the same session -> the tap still works.
-  api.setSessionToken('token-E-C');
+  api.setSessionToken('token-E-C'); browserSub = mkSub('https://push.example/dev1');
   ok('E3 in the same session the tap writes', (await push.setPushMode('all', 'uEC')) === true && server.posts.at(-1).mode === 'all');
   api.setSessionToken(null);
 }
