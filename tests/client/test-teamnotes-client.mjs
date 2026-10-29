@@ -73,6 +73,7 @@ ok('S8 no partial-word tag', splitMentions('@Moshes', ['Moshe'], false).every((p
 
 ok('S9 removeTagText drops the tag and one space', removeTagText('@Moshe Gold keys here', 'Moshe Gold') === 'keys here');
 ok('S10 removeTagText keeps other text and email-like words', removeTagText('call a@Moshe Gold then @Moshe Gold now', 'Moshe Gold') === 'call a@Moshe Gold then now');
+ok('S10b removeTagText removes every occurrence', removeTagText('@Moshe Gold hi @Moshe Gold bye', 'Moshe Gold') === 'hi bye');
 ok('S11 removeTagText All', removeTagText('hi @All fridge', 'All') === 'hi fridge');
 ok('S12 removeTagText no match', removeTagText('hello', 'Moshe') === 'hello');
 // R
@@ -100,6 +101,16 @@ const store = new Map();
 globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
 try { setSessionToken('t'); } catch {}
 const teams = { v1: [{ id: 'u-me', name: 'Rivka Levi', role: 'mashgiach' }, { id: 'u-moshe', name: 'Moshe Gold', role: 'mashgiach' }, { id: 'u-leah', name: 'Leah Katz', role: 'coordinator' }], v2: [{ id: 'u-me', name: 'Rivka Levi', role: 'mashgiach' }, { id: 'u-zev', name: 'Zev Adler', role: 'mashgiach' }] };
+// team fetch failure -> retry offer
+recordFetch({ '/api/handoff-notes/team': () => { throw new Error('offline'); }, '/api/handoff-notes/seen': { counts: [] } });
+const ff = mount(HandoffNotes, props({ items: [], active: true, currentUserId: 'u-me' }));
+await ff.render();
+await ff.type('type @ to tag', '@');
+ok('F0 a failed team load offers Retry instead of a silent empty picker', ff.text().includes("Couldn't load the team.") && ff.buttons().some((b) => b.label === 'Retry'));
+const calls2 = recordFetch({ '/api/handoff-notes/team': (path) => ({ team: teams[new URLSearchParams(path.split('?')[1]).get('venueId')] || [] }), '/api/handoff-notes/seen': { counts: [] } });
+await ff.click('Retry');
+ok('F0b Retry loads the team', ff.find((e) => e.props['data-mention-option']).length === 3 && !ff.text().includes("Couldn't load"), ff.text().slice(0, 200));
+void calls2;
 const calls = recordFetch({
   '/api/handoff-notes/team': (path) => ({ team: teams[new URLSearchParams(path.split('?')[1]).get('venueId')] || [] }),
   '/api/handoff-notes/seen': { counts: [] },

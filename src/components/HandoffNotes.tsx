@@ -62,6 +62,8 @@ export function HandoffNotes({
   const [confirmId, setConfirmId] = useState<string | null>(null);
   // TEAMNOTES: @ picker, tags, private, seen-by.
   const [team, setTeam] = useState<TeamMember[]>([]);
+  const [teamFailed, setTeamFailed] = useState(false);
+  const [teamTry, setTeamTry] = useState(0);
   const [mentionQ, setMentionQ] = useState<{ start: number; query: string } | null>(null);
   const [pickIndex, setPickIndex] = useState(0);
   const [tagged, setTagged] = useState<{ id: string; name: string }[]>([]);
@@ -112,9 +114,11 @@ export function HandoffNotes({
   useEffect(() => {
     if (!active || readOnly || !venueId) return;
     const ctl = new AbortController();
-    fetchNoteTeam(venueId, ctl.signal).then((t) => { if (!ctl.signal.aborted && tagVenueRef.current === venueId) setTeam(t); }).catch(() => {});
+    fetchNoteTeam(venueId, ctl.signal)
+      .then((t) => { if (!ctl.signal.aborted && tagVenueRef.current === venueId) { setTeam(t || []); setTeamFailed(t === null); } })
+      .catch(() => { if (!ctl.signal.aborted) setTeamFailed(true); });
     return () => ctl.abort();
-  }, [active, readOnly, venueId]);
+  }, [active, readOnly, venueId, teamTry]);
 
   // Seen-by counts: on open, when the list changes and when marks land.
   const unreadKey = [...unreadIds].join(',');
@@ -172,7 +176,7 @@ export function HandoffNotes({
   };
 
   const openSeen = async (id: string) => {
-    if (seenOpen === id) { setSeenOpen(null); setSeenList(null); return; }
+    if (seenOpen === id) { seenReqRef.current += 1; setSeenOpen(null); setSeenList(null); return; }
     setSeenOpen(id); setSeenList(null);
     const req = ++seenReqRef.current;
     const list = await fetchNoteSeen(venueId, id).catch(() => null);
@@ -492,6 +496,12 @@ export function HandoffNotes({
             <p className="p-2 rounded-lg text-sm" style={{ backgroundColor: 'var(--bad-bg)', color: 'var(--bad)' }}>
               {errorMsg}
             </p>
+          )}
+          {mentionQ && teamFailed && (
+            <div className="flex items-center gap-2 p-2 rounded-lg bg-sunken text-sm">
+              <span className="flex-1">Couldn't load the team.</span>
+              <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => setTeamTry((n) => n + 1)} className="pressable px-3 min-h-11 rounded-lg border border-line font-bold cursor-pointer">Retry</button>
+            </div>
           )}
           {pickRows.length > 0 && (
             <div data-mention-picker role="listbox" aria-label="Tag someone" className="rounded-xl border border-line bg-surface shadow-lg overflow-hidden max-h-64 overflow-y-auto">

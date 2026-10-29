@@ -346,7 +346,15 @@ export default {
       r = await ctx.api('POST', '/api/__test__/doc-set-users', { users: moved(id('mashA1')) });
       const p2 = await post(T.mashA1, { venueId: A1, content: 'RACE-T94 author' });
       if (p2.status !== 403) throw new Error(`H author moved in the fresh doc still posted: ${p2.status}`);
+      // RV3: DELETE re-checks on the fresh doc too — the author (moved in the stored doc only) cannot delete.
+      const own = (await (await fetch(`${baseUrl}/api/handoff-notes?venueId=${A1}`, { headers: auth(T.mashA1) })).json()).notes.find((n) => n.authorName === 'Moshe Author');
+      const dv = await ctx.getVersion();
+      const dd = await fetch(`${baseUrl}/api/handoff-notes/${own.id}?expectedVersion=${dv}`, { method: 'DELETE', headers: auth(T.mashA1) });
+      if (dd.status !== 403) throw new Error(`H author moved in the fresh doc still deleted: ${dd.status}`);
       await ctx.api('POST', '/api/__test__/doc-set-users', { users: docUsers });
+      const dv2 = await ctx.getVersion();
+      const dd2 = await fetch(`${baseUrl}/api/handoff-notes/${own.id}?expectedVersion=${dv2}`, { method: 'DELETE', headers: auth(T.mashA1) });
+      if (dd2.status !== 200) throw new Error(`H author delete after the roster is restored: ${dd2.status}`);
       const p3 = await post(T.mashA1, { venueId: A1, content: 'RACE-T94 ok', mentions: [id('mashA1b')] });
       if (p3.status !== 200) throw new Error(`H restored roster: ${p3.status}`);
     }

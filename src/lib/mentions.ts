@@ -88,16 +88,19 @@ export function splitMentions(text: string, names: string[], all: boolean): Arra
   return out;
 }
 
-/** RV2 P3: removing a tag chip also takes its "@Name" out of the text (the
- * first whole-word occurrence, with one following space), so the note never
- * shows a tag that notifies nobody. */
+/** RV2/RV3 P3: removing a tag chip also takes EVERY whole-word "@Name" out of
+ * the text (each with one following space), so the note never shows a tag
+ * that notifies nobody. */
 export function removeTagText(text: string, label: string): string {
   if (!text || !label) return text;
   const parts = splitMentions(text, [label], label === 'All');
-  const i = parts.findIndex((p) => p.mention && p.text.toLocaleLowerCase() === `@${label}`.toLocaleLowerCase());
-  if (i < 0) return text;
-  const next = parts[i + 1];
-  if (next && !next.mention && next.text.startsWith(' ')) parts[i + 1] = { ...next, text: next.text.slice(1) };
-  parts.splice(i, 1);
-  return parts.map((p) => p.text).join('');
+  const target = `@${label}`.toLocaleLowerCase();
+  const out: string[] = [];
+  let dropSpace = false;
+  for (const p of parts) {
+    if (p.mention && p.text.toLocaleLowerCase() === target) { dropSpace = true; continue; }
+    out.push(dropSpace && p.text.startsWith(' ') ? p.text.slice(1) : p.text);
+    dropSpace = false;
+  }
+  return out.join('');
 }

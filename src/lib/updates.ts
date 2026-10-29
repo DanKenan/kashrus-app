@@ -112,9 +112,10 @@ export async function fetchNotes(venueId: string, signal?: AbortSignal): Promise
 }
 
 /** TEAMNOTES: the people the caller can tag at this venue (names + roles). */
-export async function fetchNoteTeam(venueId: string, signal?: AbortSignal): Promise<{ id: string; name: string; role: string }[]> {
+/** null = could not load (the picker offers a retry). */
+export async function fetchNoteTeam(venueId: string, signal?: AbortSignal): Promise<{ id: string; name: string; role: string }[] | null> {
   const res = await apiFetch(`/api/handoff-notes/team?venueId=${encodeURIComponent(venueId)}`, { signal });
-  if (!res.ok) return [];
+  if (!res.ok) return null;
   const d = await res.json();
   return Array.isArray(d.team) ? d.team : [];
 }

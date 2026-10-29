@@ -5348,7 +5348,7 @@ async function crudDelete(
   res: any,
   arrayKey: string,
   id: string,
-  opts: CrudHelperOptions & { getDeletePayload?: (deleted: any) => any }
+  opts: CrudHelperOptions & { getDeletePayload?: (deleted: any) => any; freshGuard?: (freshDoc: any, found: any) => MutatorOutcome | null }
 ): Promise<boolean> {
   const committed = await commitOrRespond(
     req,
@@ -5357,6 +5357,9 @@ async function crudDelete(
       const freshArr: any[] = Array.isArray(freshDoc[arrayKey]) ? freshDoc[arrayKey] : [];
       const found = freshArr.find((x) => x && x.id === id);
       if (!found) return { doc: freshDoc, result: { success: true, deletedId: id, alreadyDeleted: true } };
+      // TEAMNOTES: an optional re-check of the caller's right on the FRESH doc.
+      const refused = opts.freshGuard ? opts.freshGuard(freshDoc, found) : null;
+      if (refused) return refused;
       const newArr = freshArr.filter((x) => !(x && x.id === id));
       return { doc: { ...freshDoc, [arrayKey]: newArr }, result: { success: true, deletedId: id, deleted: found } };
     },
@@ -9020,6 +9023,23 @@ app.delete('/api/handoff-notes/:id', async (req, res) => {
   }
   const ok = await crudDelete(req, res, 'handoffNotes', req.params.id, {
     label: 'delete-handoff-note',
+    // TEAMNOTES (RV3): the same right, re-checked on the fresh doc (a role or
+    // venue change between the cached check and this commit).
+    freshGuard: (freshDoc, found) => {
+      const freshUsers: any[] = Array.isArray(freshDoc.users) ? freshDoc.users : [];
+      const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
+      const row = freshUsers.find((u: any) => u && u.id === delCaller.id);
+      const agencyId = (delCaller as any).agencyId || 'agency-hkc';
+      const deny = { conflict: 'You can only delete your own notes.', conflictStatus: 403, conflictCode: 'NOTE_DELETE_FORBIDDEN' } as any;
+      if (!row || (row.agencyId || 'agency-hkc') !== agencyId || (found.agencyId || 'agency-hkc') !== agencyId) return deny;
+      if (row.role === 'admin') return null;
+      const sc = venueScopeOf(normalizeStoredUser(row), freshVenues);
+      if (sc === 'agency' || !sc.includes(found.venueId)) return deny;
+      const author = noteAuthoredBy(found, row);
+      const tagged = Array.isArray(found.mentions) && found.mentions.some((m: any) => m && m.id === row.id);
+      if (found.private === true && !(author || tagged || row.role === 'coordinator')) return deny;
+      return author || row.role === 'coordinator' ? null : deny;
+    },
     broadcastType: 'HANDOFF_NOTE_DELETED',
     // VenueId rides along so the WS staff filter can scope the delete.
     // TEAMNOTES: a private note's delete carries what the WS filter needs to
