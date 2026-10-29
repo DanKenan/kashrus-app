@@ -480,7 +480,7 @@ export function HandoffNotes({
                     <AtSign className="w-3 h-3" /> Tagged you
                   </span>}
                   <span className="block text-base truncate">{root.deleted ? 'Message deleted' : root.content || 'Voice note'}</span>
-                  <span className="block text-sm">{latest ? `${replies.length} replies · latest ${latest.authorName} ${new Date(latest.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'No replies yet'}</span>
+                  <span className="block text-sm">{latest ? `${replies.length} ${replies.length === 1 ? 'reply' : 'replies'} · latest ${latest.authorName} ${new Date(latest.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'No replies yet'}</span>
                 </button>
                 <button type="button" data-reply-btn onClick={() => changeThread(root.id)} className="pressable min-h-11 flex items-center gap-2 text-sm font-semibold"><Reply className="w-4 h-4" />Reply</button>
               </article>;

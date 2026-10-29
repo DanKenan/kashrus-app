@@ -60,6 +60,10 @@ const props = { items: [root, reply, pub], loading: false, readOnly: false, canD
 const m = mount(HandoffNotes, props);
 await m.render();
 check(m.find((e) => e.props['data-thread-card'] !== undefined).length === 1, 'one conversation card');
+check(m.text().includes('1 reply · latest Moshe') && !m.text().includes('1 replies'), 'singular reply label');
+await m.render({ items: [root, early, reply, pub] });
+check(m.text().includes('2 replies · latest Moshe') && !m.text().includes('2 reply ·'), 'plural replies label');
+await m.render({ items: [root, reply, pub] });
 check(m.find((e) => e.props['data-note-id'] === 'reply').length === 0, 'private reply absent from main');
 await m.click((e) => e.props['data-thread-card'] === undefined && e.type === 'button' && JSON.stringify(e.props.children).includes('Private conversation'));
 check(m.find((e) => e.props['data-thread-view'] === 'root').length === 1, 'conversation opens');
