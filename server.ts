@@ -3738,6 +3738,8 @@ interface PushSubscriptionRecord {
    * the phone's "Off": only pushes about the person themselves (a tag, @All,
    * a task/event assigned to them, overdue on their task, their alerts). */
   mode?: PushMode;
+  /** PUSHALWAYS: when the person chose `mode` (their tap time, ms) — the newest tap wins. */
+  modeAt?: number;
 }
 type PushMode = 'all' | 'tagged';
 /** PUSHALWAYS: 'personal' pushes reach every subscribed phone of the person,
@@ -5778,6 +5780,16 @@ app.post('/api/push/subscribe', async (req, res) => {
   if (rawMode !== undefined && rawMode !== 'all' && rawMode !== 'tagged') {
     return res.status(400).json({ error: 'Invalid notification setting.' });
   }
+  // PUSHALWAYS (review PARV8): choiceAt = when the person tapped (ms). The
+  // newest tap wins on the server, across tabs: a setting older than the one
+  // this person's record already holds is ignored (answered superseded), and
+  // a write with no tap time (the quiet app-open sync, an older app) never
+  // replaces a setting the person chose.
+  const rawChoiceAt = (req.body as any)?.choiceAt;
+  if (rawChoiceAt !== undefined && (typeof rawChoiceAt !== 'number' || !Number.isFinite(rawChoiceAt) || rawChoiceAt <= 0 || rawMode === undefined)) {
+    return res.status(400).json({ error: 'Invalid notification setting.' });
+  }
+  const choiceAt: number | undefined = rawChoiceAt;
   // Subscription ownership is keyed by the VERIFIED session user, never a
   // client-supplied email.
   const email = caller.email.trim().toLowerCase();
@@ -5792,17 +5804,31 @@ app.post('/api/push/subscribe', async (req, res) => {
       const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
       // Upsert by endpoint against FRESH data.
       const prior = arr.find((s) => s && s.endpoint === subscription.endpoint && s.userId === subUserId && s.agencyId === subAgencyId);
-      const mode: PushMode = rawMode !== undefined ? rawMode : (prior?.mode === 'tagged' ? 'tagged' : 'all');
+      const priorMode: PushMode = prior?.mode === 'tagged' ? 'tagged' : 'all';
+      const priorAt = typeof prior?.modeAt === 'number' ? prior.modeAt : 0;
+      let mode: PushMode;
+      let modeAt: number | undefined = priorAt || undefined;
+      let superseded = false;
+      if (rawMode === undefined) {
+        mode = priorMode; // a re-sync never changes the setting
+      } else if (choiceAt !== undefined) {
+        if (prior && choiceAt < priorAt) { mode = priorMode; superseded = true; } // an older tap
+        else { mode = rawMode; modeAt = choiceAt; }
+      } else if (prior && priorAt) {
+        mode = priorMode; superseded = true; // no tap time: never over the person's own choice
+      } else {
+        mode = rawMode;
+      }
       const newArr = [
         ...arr.filter((s) => s.endpoint !== subscription.endpoint),
-        { userEmail: email, userId: subUserId, agencyId: subAgencyId, endpoint: subscription.endpoint, keys: subscription.keys, createdAt, ...(mode === 'tagged' ? { mode } : {}) },
+        { userEmail: email, userId: subUserId, agencyId: subAgencyId, endpoint: subscription.endpoint, keys: subscription.keys, createdAt, ...(mode === 'tagged' ? { mode } : {}), ...(modeAt ? { modeAt } : {}) },
       ];
-      return { doc: { ...freshDoc, pushSubscriptions: newArr }, result: { success: true, mode } };
+      return { doc: { ...freshDoc, pushSubscriptions: newArr }, result: { success: true, mode, superseded } };
     },
     { label: 'push-subscribe' }
   );
   if (!committed) return;
-  res.json({ success: true, mode: (committed.result as any)?.mode === 'tagged' ? 'tagged' : 'all' });
+  res.json({ success: true, mode: (committed.result as any)?.mode === 'tagged' ? 'tagged' : 'all', ...((committed.result as any)?.superseded ? { superseded: true } : {}) });
 });
 
 // PUSHALWAYS: is THIS phone (its push endpoint) registered here for the

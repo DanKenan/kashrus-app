@@ -122,14 +122,20 @@ function serialWrite<T>(fn: () => Promise<T>): Promise<T> {
   writeChain = p.catch(() => undefined);
   return p;
 }
-/** A guard for an explicit tap: true while it is the newest tap in the same session. */
-function explicitTicket(): () => boolean {
+// Across tabs (review PARV8) the server orders taps by their time: each
+// explicit write carries choiceAt, and the server ignores a setting older than
+// the one it holds for this person (answering superseded).
+let lastChoiceAt = 0;
+interface ExplicitTicket { current: () => boolean; choiceAt: number }
+/** A guard for an explicit tap: current() is true while it is the newest tap in the same session. */
+function explicitTicket(): ExplicitTicket {
   const myGen = ++explicitGen;
   const cred0 = sessionCredentialKey();
-  return () => explicitGen === myGen && sessionCredentialKey() === cred0;
+  lastChoiceAt = Math.max(Date.now(), lastChoiceAt + 1);
+  return { current: () => explicitGen === myGen && sessionCredentialKey() === cred0, choiceAt: lastChoiceAt };
 }
 
-async function doSubscribe(userEmail: string, mode: PushMode, userId: string | undefined, stillOk: () => boolean): Promise<'subscribed' | 'failed' | 'canceled'> {
+async function doSubscribe(userEmail: string, mode: PushMode, userId: string | undefined, stillOk: () => boolean, choiceAt?: number): Promise<'subscribed' | 'failed' | 'canceled'> {
   try {
     if (!stillOk()) return 'canceled';
     const keyRes = await apiFetch('/api/push/public-key');
@@ -147,13 +153,14 @@ async function doSubscribe(userEmail: string, mode: PushMode, userId: string | u
     const saveRes = await apiFetch('/api/push/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userEmail, subscription: sub.toJSON(), mode }),
+      body: JSON.stringify({ userEmail, subscription: sub.toJSON(), mode, ...(choiceAt ? { choiceAt } : {}) }),
     });
-    if (!saveRes.ok) {
-      if (!existing) await sub.unsubscribe().catch(() => {});
-      return 'failed';
-    }
-    if (!stillOk()) return 'canceled'; // nothing remembered/announced for a superseded or departed run
+    // A failed registration leaves the browser subscription in place (review
+    // PARV8): it may be the one another tab or the next person just
+    // registered; the next sync or tap reconciles it.
+    if (!saveRes.ok) return 'failed';
+    const saved = await saveRes.json().catch(() => ({}));
+    if (!stillOk() || saved?.superseded) { announce(); return 'canceled'; } // nothing remembered for a superseded or departed run
     rememberPushMode(userId, mode);
     announce();
     return 'subscribed';
@@ -174,12 +181,12 @@ export async function subscribeForPush(
   userId?: string,
 ): Promise<TurnOnResult> {
   if (!pushSupported()) return 'failed';
-  const current = explicitTicket();
+  const { current, choiceAt } = explicitTicket();
   explicitPending++;
   try {
     const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
     if (permission !== 'granted') return current() ? 'denied' : 'superseded';
-    const r = await serialWrite(() => doSubscribe(userEmail, mode, userId, current));
+    const r = await serialWrite(() => doSubscribe(userEmail, mode, userId, current, choiceAt));
     return r === 'canceled' ? 'superseded' : r;
   } finally {
     explicitPending--;
@@ -193,7 +200,7 @@ export type SetModeResult = 'done' | 'failed' | 'superseded';
  * STAYS subscribed either way, so tags and assignments still reach it.
  */
 export async function setPushMode(mode: PushMode, userId?: string): Promise<SetModeResult> {
-  const current = explicitTicket();
+  const { current, choiceAt } = explicitTicket();
   explicitPending++;
   return serialWrite(async (): Promise<SetModeResult> => {
     try {
@@ -205,9 +212,11 @@ export async function setPushMode(mode: PushMode, userId?: string): Promise<SetM
       const res = await apiFetch('/api/push/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subscription: sub.toJSON(), mode }),
+        body: JSON.stringify({ subscription: sub.toJSON(), mode, choiceAt }),
       });
       if (!res.ok) return 'failed';
+      const saved = await res.json().catch(() => ({}));
+      if (saved?.superseded) { announce(); return 'superseded'; } // a newer tap (another tab) is what the server holds
       if (!current()) return 'superseded';
       rememberPushMode(userId, mode);
       announce();
@@ -304,13 +313,16 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userEmail, subscription: sub.toJSON(), mode }),
       });
-      return re.ok;
+      if (!re.ok) return false;
+      const saved = await re.json().catch(() => ({}));
+      // Another tab registered this person meanwhile with their own choice: that is the setting (review PARV8).
+      return { mode: (saved?.mode === 'tagged' ? 'tagged' : 'all') as PushMode };
     });
     if (ok === 'tapped' || tapped()) return STOOD_DOWN;
     if (!ok) return fin({ state: 'granted', mode: null }); // not registered: offer Turn on, never show On
-    rememberPushMode(userId, mode);
+    rememberPushMode(userId, ok.mode);
     announce();
-    return fin({ state: 'subscribed', mode });
+    return fin({ state: 'subscribed', mode: ok.mode });
   } catch {
     return fin({ state: Notification.permission === 'granted' ? 'granted' : 'default', mode: null });
   }

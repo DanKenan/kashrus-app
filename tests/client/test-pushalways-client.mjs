@@ -27,7 +27,15 @@ globalThis.fetch = async (url, init = {}) => {
   for (const [p, d] of Object.entries(server.hold || {})) if (u.endsWith(p)) { delete server.hold[p]; await d.promise; }
   if (u.endsWith('/api/push/public-key')) return res(200, { publicKey: 'AAAA' });
   if (u.endsWith('/api/push/status')) return res(200, snap);
-  if (u.endsWith('/api/push/subscribe')) { if (server.failSubscribe) return res(500, { error: 'x' }); server.posts.push(body); server.registered = true; if (body.mode) server.mode = body.mode; return res(200, { success: true, mode: server.mode }); }
+  if (u.endsWith('/api/push/subscribe')) {
+    if (server.failSubscribe) return res(500, { error: 'x' });
+    server.posts.push(body); server.registered = true;
+    // like the server: an older tap (choiceAt) than the one held is ignored, and no tap time never replaces a chosen setting
+    if (body.mode && body.choiceAt && server.modeAt && body.choiceAt < server.modeAt) return res(200, { success: true, mode: server.mode, superseded: true });
+    if (body.mode && !body.choiceAt && server.modeAt) return res(200, { success: true, mode: server.mode, superseded: true });
+    if (body.mode) { server.mode = body.mode; if (body.choiceAt) server.modeAt = body.choiceAt; }
+    return res(200, { success: true, mode: server.mode });
+  }
   return res(404, {});
 };
 
@@ -186,6 +194,7 @@ ok('F2 retry works -> subscribed, all', to.result === 'subscribed' && to.setup.s
   const qb = push.syncPushQuietly('b@x', 'uB', () => live);
   await tick(); live = false; holdB.resolve(); await qb;
   ok('A2 a quiet sync whose screen is gone (isCurrent false) writes nothing', server.posts.length === nA);
+  server.modeAt = 0; // B's record is a different record (the mock keeps one)
   const qb2 = await push.syncPushQuietly('b@x', 'uB');
   ok('A3 B\'s own sync then sets B\'s own setting ("tagged", not A\'s "all")', qb2.mode === 'tagged' && server.posts.at(-1).mode === 'tagged');
   // A4 (review PARV4): the no-subscription path — A's quiet subscribe is paused on the key fetch, B signs in.
@@ -273,6 +282,27 @@ ok('F2 retry works -> subscribed, all', to.result === 'subscribed' && to.setup.s
   api.setSessionToken('token-Y3-B'); setupB(); hY.resolve();
   const [rF, rS] = await Promise.all([qFirst, qSecond]);
   ok('Y3 both stood down in their slots: no write, both stale, A\'s setting untouched', server.posts.length === nY3 && rF.stale === true && rS.stale === true && push.rememberedPushMode('uYA') === 'all', `${server.posts.length - nY3} ${JSON.stringify([rF, rS])} ${push.rememberedPushMode('uYA')}`);
+
+  // Z (review PARV8)
+  // Z1: a failed registration leaves the browser subscription in place (it may be the one the next person / another tab registered).
+  api.setSessionToken('token-Z'); perm.value = 'granted'; browserSub = null; server.failSubscribe = true;
+  const z1 = await push.subscribeForPush('z@x', 'all', 'uZ');
+  ok('Z1 failed registration: result failed, browser subscription kept', z1 === 'failed' && browserSub !== null, `${z1} ${!!browserSub}`);
+  server.failSubscribe = false;
+  // Z2: explicit writes carry increasing tap times; quiet writes carry none.
+  server.modeAt = 0; server.registered = true;
+  await push.setPushMode('tagged', 'uZ'); const c1 = server.posts.at(-1).choiceAt;
+  await push.setPushMode('all', 'uZ'); const c2 = server.posts.at(-1).choiceAt;
+  ok('Z2 explicit writes carry increasing tap times', typeof c1 === 'number' && c2 > c1, `${c1} ${c2}`);
+  // Z3: another tab's NEWER tap is what the server holds -> this tab's older write is superseded and keeps nothing.
+  server.modeAt = Date.now() + 60_000; server.mode = 'tagged'; store.set('shutfey_push_mode:uZ', 'tagged');
+  const z3 = await push.setPushMode('all', 'uZ');
+  ok('Z3 server says superseded -> superseded, remembered setting unchanged', z3 === 'superseded' && push.rememberedPushMode('uZ') === 'tagged' && server.mode === 'tagged', `${z3} ${push.rememberedPushMode('uZ')}`);
+  // Z4: a quiet re-register that meets another tab's choice takes the server's setting.
+  server.registered = false; server.mode = 'tagged'; store.delete('shutfey_push_mode:uZ4');
+  const z4 = await push.syncPushQuietly('z4@x', 'uZ4');
+  ok('Z4 quiet re-register: no tap time sent; the server\'s chosen setting wins', server.posts.at(-1).choiceAt === undefined && z4.mode === 'tagged' && push.rememberedPushMode('uZ4') === 'tagged', JSON.stringify(z4));
+  server.modeAt = 0;
 
   // X (review PARV6): the newest explicit choice wins, and an old read never undoes it.
   // X1: an older Turn on waits on its permission prompt; a newer Off is written; then the prompt is answered.

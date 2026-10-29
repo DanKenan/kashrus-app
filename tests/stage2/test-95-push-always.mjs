@@ -229,6 +229,29 @@ export default {
         must(p.includes('mashT') && p.includes('mashA'), `M1 back on all, announcements reach mashT again: ${JSON.stringify(p)}`);
         must(!p.includes('coord'), 'M1 coord is still tagged-only');
       }
+
+      // ---- O: the newest tap wins on the server, across tabs (review PARV8) ----
+      {
+        const sub = (k, extra, endpoint = ep(k)) => fetch(`${baseUrl}/api/push/subscribe`, { method: 'POST', headers: auth(T[k]), body: JSON.stringify({ subscription: { endpoint, keys: { p256dh: 'p', auth: 'a' } }, ...extra }) }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+        const t2 = Date.now(), t1 = t2 - 5000, t3 = t2 + 5000;
+        const o1 = await sub('mashT', { mode: 'tagged', choiceAt: t2 });
+        must(o1.status === 200 && o1.body.mode === 'tagged' && !o1.body.superseded && (await stored(ep('mashT')))?.modeAt === t2, `O1 a tap is stored with its time: ${JSON.stringify(o1.body)}`);
+        const o2 = await sub('mashT', { mode: 'all', choiceAt: t1 });
+        must(o2.status === 200 && o2.body.superseded === true && o2.body.mode === 'tagged' && (await stored(ep('mashT')))?.mode === 'tagged', `O2 an OLDER tap (another tab's late write) is ignored: ${JSON.stringify(o2.body)}`);
+        const o3 = await sub('mashT', { mode: 'all' });
+        must(o3.body?.superseded === true && (await stored(ep('mashT')))?.mode === 'tagged', `O3 a write with no tap time never replaces a chosen setting: ${JSON.stringify(o3.body)}`);
+        const o4 = await sub('mashT', { mode: 'all', choiceAt: t3 });
+        const r4 = await stored(ep('mashT'));
+        must(o4.body?.mode === 'all' && !o4.body.superseded && !('mode' in r4) && r4.modeAt === t3, `O4 a newer tap applies: ${JSON.stringify(r4)}`);
+        const o4b = await sub('mashT', {});
+        must(o4b.body?.mode === 'all' && (await stored(ep('mashT')))?.modeAt === t3, 'O4b a re-sync keeps the setting and its time');
+        for (const bad of [{ mode: 'all', choiceAt: 'x' }, { mode: 'all', choiceAt: -1 }, { choiceAt: t3 + 1 }]) {
+          must((await sub('mashT', bad)).status === 400, `O5 invalid tap time ${JSON.stringify(bad)} -> 400`);
+        }
+        const o6 = await sub('mash2', { mode: 'tagged', choiceAt: t1 }, ep('mashT'));
+        const r6 = await stored(ep('mashT'));
+        must(o6.body?.mode === 'tagged' && !o6.body.superseded && r6.userId === id('mash2') && r6.modeAt === t1, `O6 another person taking the endpoint is not blocked by the first person's tap time: ${JSON.stringify(r6)}`);
+      }
     } finally {
       await ctx.api('POST', '/api/__test__/clock', { iso: null }).catch(() => {});
       try {
