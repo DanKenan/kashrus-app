@@ -259,6 +259,10 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
   // would go out under the NEW session's sign-in (review PARV3).
   const tapped = () => tapInFlightAtStart || explicitGen !== g0 || !isCurrent() || sessionCredentialKey() !== cred0;
   const fin = (r: PushSetup): PushSetup => (tapped() ? { ...r, stale: true } : r);
+  // Stood down (a tap, or the person/session changed): report nothing and read
+  // nothing — a read now would run under whoever is signed in NOW and could be
+  // filed under this person (review PARV7). The tap's own announce repaints.
+  const STOOD_DOWN: PushSetup = { state: 'default', mode: null, stale: true };
   try {
     const reg = await readyRegistration();
     if (!reg) return fin({ state: Notification.permission === 'granted' ? 'granted' : 'default', mode: null });
@@ -272,7 +276,7 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
         if (await reg.pushManager.getSubscription()) return 'tapped' as const;
         return doSubscribe(userEmail, mode, userId, () => !tapped());
       });
-      if (r === 'tapped' || r === 'canceled') return getPushSetup(userId);
+      if (r === 'tapped' || r === 'canceled') return STOOD_DOWN;
       return fin(r === 'subscribed' ? { state: 'subscribed', mode } : { state: 'granted', mode: null });
     }
     const st = await apiFetch('/api/push/status', {
@@ -280,7 +284,7 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ endpoint: sub.endpoint }),
     });
-    if (tapped()) return getPushSetup(userId);
+    if (tapped()) return STOOD_DOWN;
     if (!st.ok) return fin({ state: 'subscribed', mode: rememberedPushMode(userId) });
     const d = await st.json();
     if (d.registered) {
@@ -302,7 +306,7 @@ export async function syncPushQuietly(userEmail: string, userId: string, isCurre
       });
       return re.ok;
     });
-    if (ok === 'tapped' || tapped()) return getPushSetup(userId);
+    if (ok === 'tapped' || tapped()) return STOOD_DOWN;
     if (!ok) return fin({ state: 'granted', mode: null }); // not registered: offer Turn on, never show On
     rememberPushMode(userId, mode);
     announce();

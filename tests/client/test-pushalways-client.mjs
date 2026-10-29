@@ -124,7 +124,7 @@ const tap1 = push.setPushMode('all', 'u20');
 ok('R1a the tap writes while the quiet sync still waits', (await tap1) === 'done' && server.posts.at(-1).mode === 'all');
 hold.resolve(); const q1 = await quiet1;
 ok('R1b the quiet sync stands down: no "tagged" write after the tap', server.posts.at(-1).mode === 'all' && server.mode === 'all', JSON.stringify(server.posts.slice(-2)));
-ok('R1c and reports the tap\'s result', q1.state === 'subscribed' && q1.mode === 'all', JSON.stringify(q1));
+ok('R1c and reports nothing of its own (stale; the tap repaints)', q1.stale === true, JSON.stringify(q1));
 // R2: no browser subscription; the quiet subscribe is already writing (key fetch held) when the person taps Turn on.
 browserSub = null; server.registered = false; store.delete('shutfey_push_mode:u21');
 hold = deferred(); server.hold = { '/api/push/public-key': hold };
@@ -245,6 +245,35 @@ ok('F2 retry works -> subscribed, all', to.result === 'subscribed' && to.setup.s
   // E3: the same session -> the tap still works.
   api.setSessionToken('token-E-C'); browserSub = mkSub('https://push.example/dev1');
   ok('E3 in the same session the tap writes', (await push.setPushMode('all', 'uEC')) === 'done' && server.posts.at(-1).mode === 'all');
+  // Y (review PARV7): a stood-down quiet sync never reads under the next person's session and files it under the first.
+  const setupB = () => { server.registered = true; server.mode = 'tagged'; }; // B registered the shared endpoint as "tagged"
+  // Y1 (no-subscription branch, canceled in its write slot)
+  api.setSessionToken('token-Y1-A'); browserSub = null; server.registered = false; store.set('shutfey_push_mode:uYA', 'all');
+  let hY = deferred(); server.hold = { '/api/push/public-key': hY };
+  let qY = push.syncPushQuietly('ya@x', 'uYA');
+  await tick(); api.setSessionToken('token-Y1-B'); browserSub = mkSub('https://push.example/dev1'); setupB(); hY.resolve();
+  let rY = await qY;
+  ok('Y1 canceled quiet subscribe: stale, and A\'s remembered setting is still "all"', rY.stale === true && push.rememberedPushMode('uYA') === 'all', `${JSON.stringify(rY)} ${push.rememberedPushMode('uYA')}`);
+  // Y2 (after the status read)
+  api.setSessionToken('token-Y2-A'); server.registered = false; store.set('shutfey_push_mode:uYA', 'all');
+  hY = deferred(); server.hold = { '/api/push/status': hY };
+  qY = push.syncPushQuietly('ya@x', 'uYA');
+  await tick(); api.setSessionToken('token-Y2-B'); setupB(); hY.resolve();
+  rY = await qY;
+  ok('Y2 stood down after its status read: stale, A\'s setting untouched', rY.stale === true && push.rememberedPushMode('uYA') === 'all', `${JSON.stringify(rY)} ${push.rememberedPushMode('uYA')}`);
+  // Y3 (inside the re-register write slot, queued behind another write)
+  api.setSessionToken('token-Y3-A'); browserSub = null; server.registered = false; store.set('shutfey_push_mode:uYA', 'all');
+  hY = deferred(); server.hold = { '/api/push/public-key': hY };
+  const qFirst = push.syncPushQuietly('ya@x', 'uYA'); // holds the write slot
+  await tick();
+  browserSub = mkSub('https://push.example/dev1');
+  const nY3 = server.posts.length;
+  const qSecond = push.syncPushQuietly('ya@x', 'uYA'); // status says not registered -> waits for the slot
+  await tick(); await tick();
+  api.setSessionToken('token-Y3-B'); setupB(); hY.resolve();
+  const [rF, rS] = await Promise.all([qFirst, qSecond]);
+  ok('Y3 both stood down in their slots: no write, both stale, A\'s setting untouched', server.posts.length === nY3 && rF.stale === true && rS.stale === true && push.rememberedPushMode('uYA') === 'all', `${server.posts.length - nY3} ${JSON.stringify([rF, rS])} ${push.rememberedPushMode('uYA')}`);
+
   // X (review PARV6): the newest explicit choice wins, and an old read never undoes it.
   // X1: an older Turn on waits on its permission prompt; a newer Off is written; then the prompt is answered.
   api.setSessionToken('token-X');
