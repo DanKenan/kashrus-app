@@ -74,6 +74,7 @@ export async function getPushState(): Promise<PushState> {
  * If the server cannot be asked, the browser's own state stands.
  */
 export async function getPushSetup(userId: string): Promise<PushSetup> {
+  const cred0 = sessionCredentialKey();
   const state = await getPushState();
   if (state !== 'subscribed') return { state, mode: null };
   try {
@@ -89,7 +90,7 @@ export async function getPushSetup(userId: string): Promise<PushSetup> {
     const d = await st.json();
     if (!d.registered) return { state: 'granted', mode: null };
     const mode: PushMode = d.mode === 'tagged' ? 'tagged' : 'all';
-    rememberPushMode(userId, mode);
+    if (sessionCredentialKey() === cred0) rememberPushMode(userId, mode); // never file one person's answer under another
     return { state: 'subscribed', mode };
   } catch {
     return { state: 'subscribed', mode: rememberedPushMode(userId) ?? 'all' };
@@ -156,32 +157,21 @@ export async function subscribeForPush(
   if (!pushSupported()) return 'failed';
   explicitGen++;
   explicitPending++;
+  // Bound to the session that tapped (review PARV5): if that person signs out
+  // and someone else signs in before the write, the tap is dropped — never
+  // written under the next person's sign-in.
+  const cred0 = sessionCredentialKey();
+  const sameSession = () => sessionCredentialKey() === cred0;
   try {
     const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
     if (permission !== 'granted') return 'denied';
-    const r = await serialWrite(() => doSubscribe(userEmail, mode, userId));
+    const r = await serialWrite(() => (sameSession() ? doSubscribe(userEmail, mode, userId, sameSession) : Promise.resolve('canceled' as const)));
     return r === 'canceled' ? 'failed' : r;
   } finally {
     explicitPending--;
   }
 }
 
-export async function unsubscribeFromPush(): Promise<void> {
-  try {
-    const reg = await navigator.serviceWorker.ready;
-    const sub = await reg.pushManager.getSubscription();
-    if (sub) {
-      await apiFetch('/api/push/unsubscribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ endpoint: sub.endpoint }),
-      }).catch(() => {});
-      await sub.unsubscribe();
-    }
-  } catch (err) {
-    console.warn('[Push] Unsubscribe failed:', err);
-  }
-}
 
 /**
  * PUSHALWAYS: switch this phone between 'all' and 'tagged' ("Off"). The phone
@@ -190,17 +180,20 @@ export async function unsubscribeFromPush(): Promise<void> {
 export async function setPushMode(mode: PushMode, userId?: string): Promise<boolean> {
   explicitGen++;
   explicitPending++;
+  const cred0 = sessionCredentialKey(); // bound to the session that tapped (review PARV5)
+  const sameSession = () => sessionCredentialKey() === cred0;
   return serialWrite(async () => {
     try {
+      if (!sameSession()) return false;
       const reg = await readyRegistration();
       const sub = reg ? await reg.pushManager.getSubscription() : null;
-      if (!sub) return false;
+      if (!sub || !sameSession()) return false;
       const res = await apiFetch('/api/push/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subscription: sub.toJSON(), mode }),
       });
-      if (!res.ok) return false;
+      if (!res.ok || !sameSession()) return false;
       rememberPushMode(userId, mode);
       announce();
       return true;
@@ -218,7 +211,10 @@ export interface PushSetup { state: PushState; mode: PushMode | null }
  * browser subscription the server does not hold is never shown as on.
  */
 export async function turnOnPush(userEmail: string, userId: string): Promise<{ result: 'subscribed' | 'denied' | 'failed'; setup: PushSetup }> {
+  const cred0 = sessionCredentialKey();
   const result = await subscribeForPush(userEmail, 'all', userId);
+  // The person who tapped is no longer signed in here: nothing about them to show.
+  if (sessionCredentialKey() !== cred0) return { result: result === 'subscribed' ? 'failed' : result, setup: { state: 'default', mode: null } };
   if (result === 'subscribed') return { result, setup: { state: 'subscribed', mode: 'all' } };
   if (result === 'denied') return { result, setup: { state: 'denied', mode: null } };
   return { result, setup: await getPushSetup(userId) };

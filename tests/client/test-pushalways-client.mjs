@@ -11,7 +11,7 @@ const events = [];
 const fakeWindow = { dispatchEvent: (e) => { events.push(e.type); return true; }, addEventListener() {}, removeEventListener() {}, atob: (s) => Buffer.from(s, 'base64').toString('binary'), PushManager: function () {}, Notification: {} };
 Object.defineProperty(globalThis, 'window', { value: fakeWindow, configurable: true, writable: true });
 const perm = { value: 'default', asked: 0, answer: 'granted' };
-globalThis.Notification = { get permission() { return perm.value; }, requestPermission: async () => { perm.asked++; perm.value = perm.answer; return perm.value; } };
+globalThis.Notification = { get permission() { return perm.value; }, requestPermission: async () => { perm.asked++; if (perm.hold) { const h = perm.hold; perm.hold = null; await h.promise; } perm.value = perm.answer; return perm.value; } };
 let browserSub = null; let subscribeCalls = 0;
 const mkSub = (endpoint) => ({ endpoint, toJSON: () => ({ endpoint, keys: { p256dh: 'p', auth: 'a' } }), unsubscribe: async () => { browserSub = null; } });
 const reg = { pushManager: { getSubscription: async () => browserSub, subscribe: async () => { subscribeCalls++; browserSub = mkSub('https://push.example/dev1'); return browserSub; } } };
@@ -207,6 +207,44 @@ ok('F2 retry works -> subscribed, all', to.result === 'subscribed' && to.setup.s
   const qa5 = push.syncPushQuietly('a3@x', 'uA3', () => liveA5);
   await tick(); liveA5 = false; holdK2.resolve(); await qa5;
   ok('A5 a quiet subscribe whose screen is gone writes nothing', server.posts.length === nA5);
+  // E (review PARV5): an explicit tap is bound to the session that tapped.
+  // E1: A taps Turn on; the permission prompt is still open; A signs out and B signs in; A's prompt is answered.
+  api.setSessionToken('token-E-A');
+  browserSub = null; perm.value = 'default'; perm.answer = 'granted'; store.delete('shutfey_push_mode:uEB');
+  const nE1 = server.posts.length;
+  const holdP = deferred(); perm.hold = holdP;
+  const e1 = push.subscribeForPush('ea@x', 'all', 'uEA');
+  await tick();
+  api.setSessionToken('token-E-B');
+  holdP.resolve();
+  ok('E1 A\'s Turn on answered after B signed in writes nothing', (await e1) === 'failed' && server.posts.length === nE1, JSON.stringify(server.posts.slice(nE1)));
+  ok('E1b and records nothing for A', push.rememberedPushMode('uEA') === null);
+  // E2: A's On/Off is queued behind a running write; B signs in before it runs.
+  perm.value = 'granted';
+  api.setSessionToken('token-E-A2');
+  browserSub = mkSub('https://push.example/dev1');
+  const holdW = deferred(); server.hold = { '/api/push/public-key': holdW };
+  const running = push.subscribeForPush('ea2@x', 'tagged', 'uEA2'); // a write in progress (held on the key fetch)
+  await tick();
+  const nE2 = server.posts.length;
+  const queued = push.setPushMode('all', 'uEA2');
+  await tick();
+  api.setSessionToken('token-E-B2');
+  holdW.resolve();
+  const [rRun, rQ] = await Promise.all([running, queued]);
+  ok('E2 the running write stops too (session changed mid-write)', rRun === 'failed', rRun);
+  ok('E2b A\'s queued On/Off does not run under B\'s session', rQ === false && server.posts.length === nE2, JSON.stringify(server.posts.slice(nE2)));
+  // E4: the banner/menu Turn on across a switch shows nothing for the person who left and files nothing under them.
+  api.setSessionToken('token-E-A4'); browserSub = null; perm.value = 'default'; store.delete('shutfey_push_mode:uEA4');
+  const holdP4 = deferred(); perm.hold = holdP4;
+  const e4 = push.turnOnPush('ea4@x', 'uEA4');
+  await tick(); api.setSessionToken('token-E-B4'); holdP4.resolve();
+  const r4 = await e4;
+  ok('E4 turnOnPush across a switch: failed, nothing shown, nothing remembered', r4.result === 'failed' && r4.setup.state === 'default' && push.rememberedPushMode('uEA4') === null, JSON.stringify(r4));
+  perm.value = 'granted';
+  // E3: the same session -> the tap still works.
+  api.setSessionToken('token-E-C');
+  ok('E3 in the same session the tap writes', (await push.setPushMode('all', 'uEC')) === true && server.posts.at(-1).mode === 'all');
   api.setSessionToken(null);
 }
 
