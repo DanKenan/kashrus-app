@@ -106,10 +106,17 @@ export function HandoffNotes({
   // TEAMNOTES (RV1 P2): picker, tags, Private and seen-by belong to ONE venue —
   // a venue change drops them at once (the draft text stays).
   const tagVenueRef = useRef(venueId);
-  // TEAMNOTES2 (RV4 P3): what the composer holds NOW, read when a send
-  // finishes — only the draft that was sent is cleared, never a newer one.
-  const draftNowRef = useRef({ content: '', voice: '' });
-  draftNowRef.current = { content, voice: voiceNoteData };
+  // TEAMNOTES2 (RV4 P3, RV1 P2): the composer is ONE draft — venue, text,
+  // recording, tags, @All, Private. Any change bumps its revision (an edit
+  // that is later undone still counts), so a send that finishes clears the
+  // composer only when it still holds exactly the draft that was sent.
+  const draftRevRef = useRef(0);
+  const draftSigRef = useRef<unknown[] | null>(null);
+  const sig = [venueId, content, voiceNoteData, tagged.map((t) => t.id).join(','), tagAll, isPrivate];
+  if (!draftSigRef.current || sig.some((v, i) => v !== draftSigRef.current![i])) {
+    draftSigRef.current = sig;
+    draftRevRef.current += 1;
+  }
   useEffect(() => {
     if (tagVenueRef.current === venueId) return;
     tagVenueRef.current = venueId;
@@ -275,7 +282,7 @@ export function HandoffNotes({
     if (tagVenueRef.current !== venueId) return; // tags are re-made for the new venue first
     setSending(true);
     setErrorMsg(null);
-    const sent = { venueId, content, voice: voiceNoteData };
+    const sent = { venueId, rev: draftRevRef.current };
     const result = await apiWrite('/api/handoff-notes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -292,9 +299,7 @@ export function HandoffNotes({
     if (disposedRef.current) return;
     setSending(false);
     // TEAMNOTES2 (RV4 P3): the venue changed while this was in flight — the
-    // composer now belongs to the new venue. Its tags and Private are not
-    // this send's; the text is cleared only if it is still exactly the text
-    // that was sent (a new draft is never wiped).
+    // composer now belongs to the new venue and is never touched.
     const venueMoved = tagVenueRef.current !== sent.venueId;
     if (!result.ok) {
       if (venueMoved) { setErrorMsg('Your last note was not sent. Check it and send again.'); return; }
@@ -306,20 +311,14 @@ export function HandoffNotes({
       return;
     }
     if (result.data?.note) onPosted(result.data.note);
-    const now = draftNowRef.current;
-    const sameText = now.content === sent.content;
-    const sameVoice = now.voice === sent.voice;
-    if (venueMoved) {
-      if (sameText && sameVoice) { setContent(''); setMentionQ(null); discardRecording(); }
-      return;
-    }
-    if (sameText) { setContent(''); setMentionQ(null); }
-    if (sameVoice) discardRecording();
-    if (sameText && sameVoice) {
-      setTagged([]);
-      setTagAll(false);
-      setIsPrivate(false);
-    }
+    // Clear only the draft that was sent: same venue AND not one change since.
+    if (venueMoved || draftRevRef.current !== sent.rev) return;
+    setContent('');
+    setTagged([]);
+    setTagAll(false);
+    setIsPrivate(false);
+    setMentionQ(null);
+    discardRecording();
   };
 
   const remove = async (id: string) => {

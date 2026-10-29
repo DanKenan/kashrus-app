@@ -14,8 +14,9 @@
  *     the team, the tags and Private at once (RV1 P2) and a send then carries no stale tag.
  *  K  (TEAMNOTES2) the kiosk notice: "You have a private message. Open Shutfey on your phone to read it."
  *     (count only; nothing for 0); shown only on the read-only kiosk list and the kiosk banner.
- *  V  (TEAMNOTES2, RV4 P3) a send that finishes after a venue switch (or after more typing) never wipes
- *     the newer draft; an untouched sent draft is still cleared.
+ *  V  (TEAMNOTES2, RV4 P3, RV1 P2) a send that finishes after a venue switch (even to an identical draft),
+ *     more typing, an undone edit, or a Private/tag change never wipes the newer draft; an untouched sent
+ *     draft is still cleared.
  * Run: npx tsx tests/client/test-teamnotes-client.mjs
  */
 import React from 'react';
@@ -174,38 +175,64 @@ await fm.click('Send note');
 const post2 = calls.filter((c) => c[0] === 'POST' && c[1] === '/api/handoff-notes').pop();
 ok('F8 a send after the switch carries no stale tag', post2 && post2[2].venueId === 'v2' && JSON.stringify(post2[2].mentions) === '[]' && post2[2].private === false, JSON.stringify(post2));
 
-// V (RV4 P3): an in-flight send never wipes a newer draft.
+// V (RV4 P3, RV1 P2/P3): an in-flight send never wipes a newer draft — the composer is ONE draft (venue, text,
+// recording, tags, @All, Private) and is cleared only when it is still exactly the draft that was sent.
 {
   let release = null;
+  const bodies = [];
   recordFetch({
     '/api/handoff-notes/team': (path) => ({ team: teams[new URLSearchParams(path.split('?')[1]).get('venueId')] || [] }),
     '/api/handoff-notes/seen': { counts: [] },
-    'POST /api/handoff-notes': (path, body) => new Promise((r) => { release = () => r({ note: { id: 'nv', venueId: body.venueId, authorEmail: 'r@x', authorName: 'Rivka Levi', content: body.content, shift: 'Morning', createdAt: '2026-10-29T10:00:00.000Z' } }); }),
+    'POST /api/handoff-notes': (path, body) => { bodies.push(body); return new Promise((r) => { release = () => r({ note: { id: 'nv', venueId: body.venueId, authorEmail: 'r@x', authorName: 'Rivka Levi', content: body.content, shift: 'Morning', createdAt: '2026-10-29T10:00:00.000Z' } }); }); },
     '/api/health': { ok: true },
   });
   const sendBtn = (m) => m.find((e) => e.type === 'button' && typeof e.props.onClick === 'function' && /Send/.test(JSON.stringify(e.props.children ?? '')))[0];
+  const box = (m) => m.find((e) => e.type === 'textarea')[0].props.value;
+  const startSend = async (m) => { release = null; const p = sendBtn(m).props.onClick({ preventDefault() {}, stopPropagation() {} }); for (let i = 0; i < 40 && !release; i++) await new Promise((r) => setTimeout(r, 5)); return { p }; };
+  const finish = async (m, h) => { if (release) { release(); await h.p; } await m.render(); };
   const vm = mount(HandoffNotes, props({ items: [], active: true, currentUserId: 'u-me', currentUserEmail: 'r@x', currentUserName: 'Rivka Levi' }));
   await vm.render();
+  // V1: switch venue, type a DIFFERENT draft there
   await vm.type('type @ to tag', 'note for venue one');
-  const p1 = sendBtn(vm).props.onClick({ preventDefault() {}, stopPropagation() {} });
-  for (let i = 0; i < 20 && !release; i++) await new Promise((r) => setTimeout(r, 5));
+  let p = await startSend(vm);
   await vm.render({ venueId: 'v2' });
   await vm.type('type @ to tag', 'new draft for venue two');
-  release(); await p1; await vm.render();
-  ok('V1 a send finishing after a venue switch keeps the new draft', vm.find((e) => e.type === 'textarea')[0].props.value === 'new draft for venue two', vm.find((e) => e.type === 'textarea')[0].props.value);
-  release = null;
+  await finish(vm, p);
+  ok('V1 a send finishing after a venue switch keeps the new draft', box(vm) === 'new draft for venue two', box(vm));
+  // V1b: switch venue, the new venue's draft is IDENTICAL text -> still kept (RV1 P2)
+  await vm.type('type @ to tag', 'Check refrigerator');
+  p = await startSend(vm);
+  await vm.render({ venueId: 'v1' });
+  await vm.type('type @ to tag', 'Check refrigerator');
+  await finish(vm, p);
+  ok('V1b an identical draft in the new venue is kept', box(vm) === 'Check refrigerator', box(vm));
+  // V2: more typing during the send is kept
   await vm.type('type @ to tag', 'same venue');
-  const p2 = sendBtn(vm).props.onClick({ preventDefault() {}, stopPropagation() {} });
-  for (let i = 0; i < 20 && !release; i++) await new Promise((r) => setTimeout(r, 5));
+  p = await startSend(vm);
   await vm.type('type @ to tag', 'same venue and more typed');
-  release(); await p2; await vm.render();
-  ok('V2 text typed during the send is kept', vm.find((e) => e.type === 'textarea')[0].props.value === 'same venue and more typed');
-  release = null;
-  const p3 = sendBtn(vm).props.onClick({ preventDefault() {}, stopPropagation() {} });
-  for (let i = 0; i < 20 && !release; i++) await new Promise((r) => setTimeout(r, 5));
-  if (release) { release(); await p3; }
-  await vm.render();
-  ok('V3 an untouched sent draft is still cleared', vm.find((e) => e.type === 'textarea')[0].props.value === '');
+  await finish(vm, p);
+  ok('V2 text typed during the send is kept', box(vm) === 'same venue and more typed');
+  // V3: edit then restore the same text during the send -> still a newer draft, kept
+  await vm.type('type @ to tag', 'restore me');
+  p = await startSend(vm);
+  await vm.type('type @ to tag', 'restore me!');
+  await vm.type('type @ to tag', 'restore me');
+  await finish(vm, p);
+  ok('V3 an edit that is undone during the send still keeps the draft', box(vm) === 'restore me', box(vm));
+  // V4: tags/Private changed during the send (same text) -> kept (RV1 P2)
+  await vm.type('type @ to tag', '');
+  await vm.type('type @ to tag', '@Mo');
+  await vm.click((e) => e.props['data-mention-option'] === 'Moshe Gold');
+  await vm.type('type @ to tag', '@Moshe Gold keys');
+  p = await startSend(vm);
+  ok('V4 setup: the send carried Moshe, not private', JSON.stringify(bodies[bodies.length - 1]?.mentions) === '["u-moshe"]' && bodies[bodies.length - 1]?.private === false, JSON.stringify(bodies[bodies.length - 1]));
+  await vm.click((e) => e.props['data-private-toggle'] !== undefined);
+  await finish(vm, p);
+  ok('V4 a Private switched on during the send is kept, with its tag and text', vm.text().includes('will see this') && vm.find((e) => e.props['data-tag-chip'] === 'Moshe Gold').length === 1 && box(vm) === '@Moshe Gold keys', box(vm));
+  // V5: untouched -> cleared (text, tag, Private)
+  p = await startSend(vm);
+  await finish(vm, p);
+  ok('V5 an untouched sent draft is cleared (text, tags, Private)', box(vm) === '' && vm.find((e) => e.props['data-tag-chip']).length === 0 && !vm.text().includes('will see this'), box(vm));
 }
 
 console.log(`${passed} passed, ${failures} failed`);
