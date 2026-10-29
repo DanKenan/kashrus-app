@@ -22,9 +22,11 @@ globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
   const body = init.body ? JSON.parse(init.body) : null;
   const res = (status, j) => ({ ok: status < 300, status, json: async () => j, text: async () => JSON.stringify(j), headers: new Headers() });
+  // The server answers status at the moment the request arrives; a hold only delays the reply.
+  const snap = { registered: server.registered, mode: server.mode };
   for (const [p, d] of Object.entries(server.hold || {})) if (u.endsWith(p)) { delete server.hold[p]; await d.promise; }
   if (u.endsWith('/api/push/public-key')) return res(200, { publicKey: 'AAAA' });
-  if (u.endsWith('/api/push/status')) return res(200, { registered: server.registered, mode: server.mode });
+  if (u.endsWith('/api/push/status')) return res(200, snap);
   if (u.endsWith('/api/push/subscribe')) { if (server.failSubscribe) return res(500, { error: 'x' }); server.posts.push(body); server.registered = true; if (body.mode) server.mode = body.mode; return res(200, { success: true, mode: server.mode }); }
   return res(404, {});
 };
