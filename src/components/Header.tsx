@@ -567,7 +567,7 @@ export const Header: React.FC<HeaderProps> = ({
 
                       {/* Phone push notifications */}
                       <div className="px-1 py-0.5 border-t border-line/60 mt-1 pt-1">
-                        <PushNotificationToggle userEmail={currentUser.email} />
+                        <PushNotificationToggle userEmail={currentUser.email} userId={currentUser.id} />
                       </div>
 
                       {/* Force-update: clear caches and load the newest version */}
@@ -895,7 +895,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* App updates & phone notifications on Mobile */}
           {currentUser && (
             <div className="rounded-xl bg-sunken px-1 py-1">
-              <PushNotificationToggle userEmail={currentUser.email} />
+              <PushNotificationToggle userEmail={currentUser.email} userId={currentUser.id} />
               <UpdateAppButton />
               {canEnterKiosk && (isTabletWidth || canManageKiosks) && (
                 <>

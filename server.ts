@@ -3733,7 +3733,18 @@ interface PushSubscriptionRecord {
   endpoint: string;
   keys: { p256dh: string; auth: string };
   createdAt: string;
+  /** PUSHALWAYS (Don, Oct 29): this phone's notification setting. Absent or
+   * 'all' = every push (unchanged for everyone subscribed today); 'tagged' =
+   * the phone's "Off": only pushes about the person themselves (a tag, @All,
+   * a task/event assigned to them, overdue on their task, their alerts). */
+  mode?: PushMode;
 }
+type PushMode = 'all' | 'tagged';
+/** PUSHALWAYS: 'personal' pushes reach every subscribed phone of the person,
+ * even one set to "Only when I'm tagged or assigned"; 'general' pushes skip
+ * those phones. A push that does not say is 'general'. */
+type PushLevel = 'personal' | 'general';
+const pushModeAllows = (s: { mode?: PushMode }, level: PushLevel) => level === 'personal' || s.mode !== 'tagged';
 let pushSubscriptions: PushSubscriptionRecord[] = [];
 let vapidKeys: { publicKey: string; privateKey: string } | null = null;
 
@@ -5464,16 +5475,16 @@ const testPushLog: Array<{ path: string; recipientUserId: string | null; email: 
  * email is unambiguous across all rows. Fire-and-forget.
  */
 /** QA2S2 #31 ([DS2] B3): returns how many subscriptions it handed to deliverPush (attempted, not delivered). */
-function sendPushToMember(row: any, title: string, body: string, data?: any, onError?: (err: any) => void): number {
+function sendPushToMember(row: any, title: string, body: string, data?: any, onError?: (err: any) => void, level: PushLevel = 'general'): number {
   if (!row || !row.id || typeof row.email !== 'string') return 0;
   const agencyId = normalizeStoredUser(row).agencyId || 'agency-hkc';
-  const bound = pushSubscriptions.filter((s) => s.userId === row.id && s.agencyId === agencyId);
+  const bound = pushSubscriptions.filter((s) => s.userId === row.id && s.agencyId === agencyId && pushModeAllows(s, level));
   deliverPush(bound, 'identity', row.id, title, body, data, onError);
   let attempted = bound.length;
   if (legacyPushSubIsUnambiguous(row.email, users)) {
     const email = row.email.trim().toLowerCase();
     const legacy = pushSubscriptions.filter(
-      (s) => isLegacyPushSub(s) && typeof s.userEmail === 'string' && s.userEmail.trim().toLowerCase() === email
+      (s) => isLegacyPushSub(s) && typeof s.userEmail === 'string' && s.userEmail.trim().toLowerCase() === email && pushModeAllows(s, level)
     );
     deliverPush(legacy, 'legacy-email', row.id, title, body, data, onError);
     attempted += legacy.length;
@@ -5488,10 +5499,10 @@ function sendPushToMember(row: any, title: string, body: string, data?: any, onE
  * (ChatGPT 8t v2 must-fix); those devices get these pushes again after the
  * user re-subscribes through the normal toggle.
  */
-function sendPushToRecipient(user: any, title: string, body: string, data?: any, onError?: (err: any) => void) {
+function sendPushToRecipient(user: any, title: string, body: string, data?: any, onError?: (err: any) => void, level: PushLevel = 'general') {
   if (!user || !user.id) return;
   const agencyId = normalizeStoredUser(user).agencyId || 'agency-hkc';
-  const subs = pushSubscriptions.filter((s) => s.userId === user.id && s.agencyId === agencyId);
+  const subs = pushSubscriptions.filter((s) => s.userId === user.id && s.agencyId === agencyId && pushModeAllows(s, level));
   deliverPush(subs, 'identity', user.id, title, body, data, onError);
 }
 
@@ -5719,12 +5730,21 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
     // Item 8t: recipients are resolved inside the TASK'S agency and must be
     // able to see the task (canSeeTaskServer); delivery is identity-bound.
     // ('all' = the agency's users at the venue; admins only when named.)
+    // PUSHALWAYS: overdue on a task NAMED for the person is theirs (reaches a
+    // phone set to "Only when I'm tagged or assigned"); an 'all' task's overdue is general.
+    const namedEmails = new Set(
+      (Array.isArray(task.assignedTo) ? task.assignedTo : [])
+        .filter((a: any) => typeof a === 'string' && a.toLowerCase() !== 'all')
+        .map((a: string) => a.trim().toLowerCase())
+    );
     for (const recipient of taskPushRecipients(task, users, venues)) {
       sendPushToRecipient(
         recipient,
         `Overdue: ${task.title}`,
         `${venueName} — was due at ${task.targetTime}`,
-        { taskId: task.id, venueId: task.venueId, type: 'overdue' }
+        { taskId: task.id, venueId: task.venueId, type: 'overdue' },
+        undefined,
+        namedEmails.has(String(recipient.email || '').trim().toLowerCase()) ? 'personal' : 'general'
       );
     }
   }
@@ -5751,6 +5771,13 @@ app.post('/api/push/subscribe', async (req, res) => {
   if (!subscription?.endpoint || !subscription?.keys) {
     return res.status(400).json({ error: 'subscription required' });
   }
+  // PUSHALWAYS: an optional setting for this phone ('all' | 'tagged'). Absent:
+  // the phone keeps the setting it already has here (a quiet re-sync never
+  // changes it), else 'all' — what every subscription meant before.
+  const rawMode = (req.body as any)?.mode;
+  if (rawMode !== undefined && rawMode !== 'all' && rawMode !== 'tagged') {
+    return res.status(400).json({ error: 'Invalid notification setting.' });
+  }
   // Subscription ownership is keyed by the VERIFIED session user, never a
   // client-supplied email.
   const email = caller.email.trim().toLowerCase();
@@ -5764,16 +5791,34 @@ app.post('/api/push/subscribe', async (req, res) => {
     (freshDoc) => {
       const arr: any[] = Array.isArray(freshDoc.pushSubscriptions) ? freshDoc.pushSubscriptions : [];
       // Upsert by endpoint against FRESH data.
+      const prior = arr.find((s) => s && s.endpoint === subscription.endpoint && s.userId === subUserId && s.agencyId === subAgencyId);
+      const mode: PushMode = rawMode !== undefined ? rawMode : (prior?.mode === 'tagged' ? 'tagged' : 'all');
       const newArr = [
         ...arr.filter((s) => s.endpoint !== subscription.endpoint),
-        { userEmail: email, userId: subUserId, agencyId: subAgencyId, endpoint: subscription.endpoint, keys: subscription.keys, createdAt },
+        { userEmail: email, userId: subUserId, agencyId: subAgencyId, endpoint: subscription.endpoint, keys: subscription.keys, createdAt, ...(mode === 'tagged' ? { mode } : {}) },
       ];
-      return { doc: { ...freshDoc, pushSubscriptions: newArr }, result: { success: true } };
+      return { doc: { ...freshDoc, pushSubscriptions: newArr }, result: { success: true, mode } };
     },
     { label: 'push-subscribe' }
   );
   if (!committed) return;
-  res.json({ success: true });
+  res.json({ success: true, mode: (committed.result as any)?.mode === 'tagged' ? 'tagged' : 'all' });
+});
+
+// PUSHALWAYS: is THIS phone (its push endpoint) registered here for the
+// caller, and with which setting? The app asks on open so the button shows
+// the truth and a phone the server lost can re-register quietly.
+app.post('/api/push/status', (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const endpoint = (req.body as any)?.endpoint;
+  if (typeof endpoint !== 'string' || !endpoint || endpoint.length > 2000) {
+    return res.status(400).json({ error: 'endpoint required' });
+  }
+  const agencyId = normalizeStoredUser(caller).agencyId || 'agency-hkc';
+  const rec = pushSubscriptions.find((s) => s.endpoint === endpoint && s.userId === caller.id && s.agencyId === agencyId);
+  res.set('Cache-Control', 'private, no-store');
+  res.json({ registered: !!rec, mode: rec?.mode === 'tagged' ? 'tagged' : 'all' });
 });
 
 app.post('/api/push/unsubscribe', async (req, res) => {
@@ -7516,7 +7561,8 @@ app.post('/api/incidents', async (req, res) => {
         tag: `alert-${incident.id}`,
         silent,
       },
-      onPushError
+      onPushError,
+      'personal' // PUSHALWAYS: an alert routed to this person always reaches their phone
     );
   }
   if (isTestMode()) { testAlertRouting.set(incident.id, routing); testAlertAttempts.set(incident.id, (testAlertAttempts.get(incident.id) || 0) + 1); }
@@ -8555,7 +8601,8 @@ app.post('/api/handoff-notes', async (req, res) => {
         : direct
           ? `💬 ${note.authorName} tagged you${venueName ? ` · ${venueName}` : ''}`
           : `💬 ${note.authorName} @All${venueName ? ` · ${venueName}` : ''}`;
-      sendPushToMember(u, title, preview, { type: 'shift-note', noteId: note.id, venueId: note.venueId, url: `/?updates=notes&note=${encodeURIComponent(note.id)}&venue=${encodeURIComponent(note.venueId)}`, tag: `note-${note.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 70)}` });
+      // PUSHALWAYS (Don: tags and @All come through "Off", like WhatsApp mentions).
+      sendPushToMember(u, title, preview, { type: 'shift-note', noteId: note.id, venueId: note.venueId, url: `/?updates=notes&note=${encodeURIComponent(note.id)}&venue=${encodeURIComponent(note.venueId)}`, tag: `note-${note.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 70)}` }, undefined, 'personal');
     }
   }
   res.json({ note: publicUpdate(note) });
@@ -12867,7 +12914,9 @@ app.post('/api/tasks', async (req, res) => {
       recipient,
       '📋 New task assigned to you',
       `${created.title}${created.targetTime ? ` — ${created.targetTime}` : ''}`,
-      { url: '/', taskId: created.id }
+      { url: '/', taskId: created.id },
+      undefined,
+      'personal'
     );
   }
 
@@ -13012,6 +13061,9 @@ app.put('/api/tasks/:id', async (req, res) => {
     ['targetTime', targetTime], ['scheduleType', scheduleType],
   ];
 
+  // PUSHALWAYS: the task as stored right before this write (the last commit
+  // attempt's fresh copy), to tell who was ADDED to the assignees.
+  const baselineFresh: { task: any } = { task: existing };
   const committed = await commitOrRespond(
     req,
     res,
@@ -13021,6 +13073,7 @@ app.put('/api/tasks/:id', async (req, res) => {
       if (!freshTask) {
         return { conflict: 'Task not found (it may have been deleted).' };
       }
+      baselineFresh.task = freshTask;
       // K1: a kiosk write re-checks venue + private visibility on FRESH data.
       if (!kioskMayTouchTask(req, freshTask)) {
         return { conflict: 'This task changed. Please refresh and try again.' };
@@ -13103,6 +13156,35 @@ app.put('/api/tasks/:id', async (req, res) => {
 
   const updated = committed.result as TaskItem;
   broadcastTaskUpdated(oldTaskVisibility, updated, caller.email);
+  // PUSHALWAYS (Don, Oct 29): a person ADDED to an existing task's assignees
+  // hears it like a new task (people already on it, the editor, and an
+  // 'all' task get nothing new). Same recipient rule as task create.
+  if (assignedTo !== undefined && committed.result !== baselineFresh.task) {
+    const named = (t: any) => new Set(
+      (Array.isArray(t?.assignedTo) ? t.assignedTo : [])
+        .filter((a: any) => typeof a === 'string' && a.toLowerCase() !== 'all')
+        .map((a: string) => a.trim().toLowerCase())
+    );
+    const before = named(baselineFresh.task);
+    const after = named(updated);
+    const added = [...after].filter((e) => !before.has(e));
+    if (added.length) {
+      const addedSet = new Set(added);
+      const callerEmail = String(caller.email || '').trim().toLowerCase();
+      for (const recipient of taskPushRecipients(updated, users, venues, { explicitOnly: true })) {
+        const em = String(recipient.email || '').trim().toLowerCase();
+        if (!addedSet.has(em) || em === callerEmail) continue;
+        sendPushToRecipient(
+          recipient,
+          '📋 New task assigned to you',
+          `${updated.title}${updated.targetTime ? ` — ${updated.targetTime}` : ''}`,
+          { url: '/', taskId: updated.id },
+          undefined,
+          'personal'
+        );
+      }
+    }
+  }
   res.json(updated);
 });
 
@@ -14485,7 +14567,9 @@ app.post('/api/events', async (req, res) => {
       assigneeRow,
       '⭐ New event assignment',
       `${event.title}${when} at ${event.location}`,
-      { url: '/', eventId: event.id }
+      { url: '/', eventId: event.id },
+      undefined,
+      'personal'
     );
   }
 
@@ -15131,7 +15215,7 @@ app.post('/api/events/:id/notify', (req, res) => {
     return res.status(409).json({ error: "The assigned mashgiach can't be notified right now.", code: 'EVENT_ASSIGNEE_UNAVAILABLE' });
   }
   const when = ev.date ? ` — ${ev.date}` : '';
-  const attempted = sendPushToMember(row, '⭐ New event assignment', `${ev.title}${when} at ${ev.location}`, { url: '/', eventId: ev.id });
+  const attempted = sendPushToMember(row, '⭐ New event assignment', `${ev.title}${when} at ${ev.location}`, { url: '/', eventId: ev.id }, undefined, 'personal');
   res.json({ notified: true, attempted });
 });
 
@@ -18983,7 +19067,11 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       admin,
       `🔑 Password reset code for ${user.name}`,
       `Code: ${code} (expires in 15 min)`,
-      { type: 'password-reset', email: normalizedEmail }
+      { type: 'password-reset', email: normalizedEmail },
+      undefined,
+      // PUSHALWAYS: the code reaches the person ONLY by this push (never a
+      // socket), so it comes through "Only when I'm tagged or assigned" too.
+      'personal'
     );
   }
   // (No WebSocket broadcast: reset codes must never travel in plaintext
