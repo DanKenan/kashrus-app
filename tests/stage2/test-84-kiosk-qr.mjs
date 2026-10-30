@@ -694,7 +694,7 @@ export default {
       // The deadline passes while the record is being read: refused, never marked.
       const w3 = await claimOn(T3, 'deadline during read');
       await sessionHook({ action: 'kqr-pickup-age', sid: w3.sid, ageMs: 60000 - 400 });
-      await sessionHook({ action: 'cache-age', sid: w3.sid, ageMs: 60000 });
+      await sessionHook({ action: 'cache-age', sid: w3.sid, ageMs: 300001 });
       await sessionHook({ action: 'read-delay-once', ms: 1500 });
       assert((await board(T3, w3.k)).status === 401, 'X the deadline passed during the record read -> refused');
       assert((await recOf(w3.sid))?.qrPickedUpAtMs === undefined, 'X ...and nothing is marked');
@@ -710,7 +710,7 @@ export default {
       // An older read of the record (no pick-up in it) after the deadline never signs a picked-up tablet out.
       await sessionHook({ action: 'kqr-pickup-age', sid: w4.sid, ageMs: 61000 });
       assert((await sessionHook({ action: 'kqr-store-older', sid: w4.sid })).ok === true, 'X the store copy reads older');
-      await sessionHook({ action: 'cache-age', sid: w4.sid, ageMs: 60000 });
+      await sessionHook({ action: 'cache-age', sid: w4.sid, ageMs: 300001 });
       assert((await board(T3, w4.k)).status === 200, 'X an older read does not erase the known pick-up (the tablet keeps working)');
       const cd2 = await sessionHook({ action: 'cache-doc', sid: w4.sid });
       assert(cd2.doc?.qrPickedUpAtMs === cd.doc.qrPickedUpAtMs - 61000, `X the copy keeps the original pick-up moment: ${J([cd2.doc?.qrPickedUpAtMs, cd.doc.qrPickedUpAtMs])}`);

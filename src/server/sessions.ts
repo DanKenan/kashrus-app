@@ -17,8 +17,21 @@
 
 /** Plan 15.1 (Don): a phone/browser session lives 30 days from sign-in, hard. No idle limit, no refresh. */
 export const USER_SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
-/** Plan 10.1: a cached session entry older than this is re-read from the store before a GET is served. */
-export const SESSION_CACHE_FRESH_MS = 15 * 1000;
+/**
+ * Plan 10.1, READCUT (Oct 29 2026): a cached session entry older than this is
+ * re-read from the store before a GET is served or a socket gets a delivery.
+ * Was 15 s: every phone socket re-read its session (and passkey) on nearly
+ * every broadcast, which helped exhaust the free daily read quota. A sign-out
+ * or revocation on this (single) instance updates the map at once, so only a
+ * revocation made by ANOTHER instance (a deploy overlap) waits for this bound.
+ */
+export const SESSION_CACHE_FRESH_MS = 5 * 60 * 1000;
+/**
+ * READCUT: a saving (non-GET) request or a new socket uses the cached entry
+ * only while it is fresher than this; older -> a store read first. (Was: a
+ * store read on every saving request.) Same single-instance reasoning.
+ */
+export const SESSION_WRITE_FRESH_MS = 60 * 1000;
 /** Upper bound on cached entries (oldest dropped first; a dropped entry is simply re-read). */
 export const SESSION_CACHE_MAX = 20000;
 
@@ -300,7 +313,7 @@ export function cachePut(cache: Map<string, SessionCacheEntry>, sid: string, ent
   }
 }
 
-/** A cached entry is used without a store read only while it is fresher than SESSION_CACHE_FRESH_MS. */
-export function cacheFresh(entry: SessionCacheEntry | undefined, nowMs: number): entry is SessionCacheEntry {
-  return !!entry && nowMs - entry.readAtMs < SESSION_CACHE_FRESH_MS && entry.readAtMs <= nowMs;
+/** A cached entry is used without a store read only while it is fresher than maxAgeMs (default SESSION_CACHE_FRESH_MS). */
+export function cacheFresh(entry: SessionCacheEntry | undefined, nowMs: number, maxAgeMs: number = SESSION_CACHE_FRESH_MS): entry is SessionCacheEntry {
+  return !!entry && nowMs - entry.readAtMs < maxAgeMs && entry.readAtMs <= nowMs;
 }

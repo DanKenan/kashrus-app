@@ -474,7 +474,7 @@ export default {
       assert((await sock.waitClose(4000)) === 4401, `E its socket closes 4401 (${sock.closeCode})`);
       const cE1 = claimsOf(c1.json.token);
       await hook({ action: 'drop-cache', personId: a.personId });
-      await shook({ action: 'cache-age', sid: cE1.sid, ageMs: 60000 });
+      await shook({ action: 'cache-age', sid: cE1.sid, ageMs: 300001 });
       assert((await getProbe(c1.json.token)).status === 401, 'E an older passkey session, re-read as another instance would: refused');
       assert(okPost(await postProbe(s3.token)) && okPost(await postProbe(s4.token)), 'E password sessions keep working');
       const s4op = await regOptions(s4.token);
