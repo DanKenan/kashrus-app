@@ -28,7 +28,7 @@ import { UpdatesBell } from './components/UpdatesBell';
 import { KioskPrivateNotice } from './components/KioskPrivateNotice';
 import { PushPrompt } from './components/PushPrompt';
 import { PUSH_CHANGED_EVENT, getPushSetup, pushSupported, syncPushQuietly, turnOnPush as turnOnPushHere, type PushState } from './lib/push';
-import { pushPromptKind, pushPromptSnoozed, snoozePushPrompt } from './lib/pushPrompt';
+import { pushPromptKind, pushPromptDismissedThisOpen, dismissPushPromptForThisOpen } from './lib/pushPrompt';
 import { UpdatesSheet, announcementCanDelete } from './components/UpdatesSheet';
 import { UrgentBanner } from './components/UrgentBanner';
 import { Announcements } from './components/Announcements';
@@ -448,7 +448,8 @@ export default function App() {
   // turn them on where the phone has not allowed them yet. Never on a kiosk.
   const [pushSetup, setPushSetup] = useState<{ forUser: string; state: PushState } | null>(null);
   const [pushBusy, setPushBusy] = useState(false);
-  const [pushPromptGen, setPushPromptGen] = useState(0);
+  const [pushDismissedFor, setPushDismissedFor] = useState<string | null>(null);
+  const [pushFailedFor, setPushFailedFor] = useState<string | null>(null);
   const pushUserId = currentUser?.id || '';
   const pushUserEmail = currentUser?.email || '';
   useEffect(() => {
@@ -463,31 +464,21 @@ export default function App() {
     window.addEventListener(PUSH_CHANGED_EVENT, onChange);
     return () => { live = false; window.removeEventListener(PUSH_CHANGED_EVENT, onChange); };
   }, [pushUserId, pushUserEmail, isKiosk]);
-  const pushPrompt = useMemo(() => {
-    try {
-      const ua = typeof window === 'undefined' ? '' : window.navigator?.userAgent ?? '';
-      return pushPromptKind({
-        signedIn: !!pushUserId,
-        kiosk: isKiosk,
-        phone: isPhoneLike(),
-        supported: pushSupported(),
-        state: pushSetup && pushSetup.forUser === pushUserId ? pushSetup.state : null,
-        ios: isIOSDevice(ua),
-        standalone: pwaInstall.isInstalled || isStandalone(),
-        snoozed: !pushUserId || pushPromptSnoozed(pushUserId),
-        otherCardOpen: !!installCardOpenFor || !!passkeyOfferFor,
-      });
-    } catch { return null; }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pushUserId, isKiosk, pushSetup, pwaInstall.isInstalled, installCardOpenFor, passkeyOfferFor, pushPromptGen]);
   const turnOnPush = async () => {
     if (pushBusy || !pushUserId) return;
     setPushBusy(true);
+    setPushFailedFor(null);
     const uid = pushUserId;
     const { result, setup } = await turnOnPushHere(pushUserEmail, uid);
     setPushBusy(false);
     // Server-confirmed (review PARV3); a superseded/stale answer is not shown — the newer action's announce repaints (PARV6).
-    if (result !== 'superseded' && !setup.stale) setPushSetup({ forUser: uid, state: setup.state });
+    if (result === 'superseded' || setup.stale) return;
+    if (result === 'denied') {
+      dismissPushPromptForThisOpen(uid);
+      setPushDismissedFor(uid);
+    }
+    if (result === 'failed') setPushFailedFor(uid);
+    setPushSetup({ forUser: uid, state: setup.state });
   };
   // 10g: the agencies under this login (several = "Switch agency" in the menu).
   // Read for the signed-in phone session, including a restored one; never on a kiosk.
@@ -532,6 +523,26 @@ export default function App() {
   const [kqrCode, setKqrCode] = useState<string | null>(() => (kqrPage ? readPendingKqr() : null));
   /** "Sign in to a tablet" (scanner) / "Tablets you're signed in on": open on which view, or closed. */
   const [tabletSheet, setTabletSheet] = useState<null | 'scan' | 'tablets'>(null);
+  const firstRunBusy = passkeyOfferPending || passkeyCheckFor !== currentUser?.id
+    || !!passkeyOfferFor || !!installCardOpenFor || kqrPage || !!tabletSheet
+    || !!(installGate && installEnv && installCardPath(installEnv));
+  const pushPrompt = useMemo(() => {
+    try {
+      const ua = typeof window === 'undefined' ? '' : window.navigator?.userAgent ?? '';
+      return pushPromptKind({
+        signedIn: !!pushUserId,
+        kiosk: isKiosk,
+        phone: isPhoneLike(),
+        supported: pushSupported(),
+        state: pushSetup && pushSetup.forUser === pushUserId ? pushSetup.state : null,
+        ios: isIOSDevice(ua),
+        standalone: pwaInstall.isInstalled || isStandalone(),
+        dismissed: pushDismissedFor === pushUserId || pushPromptDismissedThisOpen(pushUserId),
+        firstRunBusy,
+      });
+    } catch { return null; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pushUserId, isKiosk, pushSetup, pwaInstall.isInstalled, firstRunBusy, pushDismissedFor]);
   useEffect(() => {
     if (!freshInstallFor || freshInstallFor !== currentUser?.id || isKiosk) {
       installWindow.current = null;
@@ -2515,16 +2526,6 @@ export default function App() {
         />
       )}
 
-      {/* PUSHALWAYS: this phone gets no alerts yet -> one tap to turn them on (phones only, never a kiosk) */}
-      {!updates.topUrgent && !updates.topAlert && pushPrompt && (
-        <PushPrompt
-          kind={pushPrompt}
-          busy={pushBusy}
-          onTurnOn={() => void turnOnPush()}
-          onDismiss={() => { if (pushUserId) snoozePushPrompt(pushUserId); setPushPromptGen((g) => g + 1); }}
-        />
-      )}
-
       {/* TEAMNOTES2: the kiosk says a private note waits for the signed-in person (a count only) */}
       {isKiosk && updates.kioskPrivate > 0 && (
         <React.Fragment key={`${updatesCtxKey}|${updates.kioskPrivate}`}>
@@ -3001,6 +3002,16 @@ export default function App() {
           }}
         />
       )}
+      {pushPrompt && (
+        <PushPrompt
+          kind={pushPrompt}
+          busy={pushBusy}
+          failed={pushFailedFor === pushUserId}
+          onTurnOn={() => void turnOnPush()}
+          onDismiss={() => { dismissPushPromptForThisOpen(pushUserId); setPushDismissedFor(pushUserId); }}
+        />
+      )}
+
       {!isKiosk && passkeyOfferFor && currentUser?.id === passkeyOfferFor && (
         <PasskeyOffer userId={passkeyOfferFor} onClose={() => setPasskeyOfferFor(null)} onAdded={() => setPasskeyMenu(true)} />
       )}

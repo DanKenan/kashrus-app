@@ -1,45 +1,63 @@
-import React from 'react';
-import { BellRing, X } from 'lucide-react';
+import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { BellRing } from 'lucide-react';
 import { PUSH_PROMPT_TEXT, type PushPromptKind } from '../lib/pushPrompt';
 
-// PUSHALWAYS: the phone banner for people whose phone gets no alerts yet.
-// "Turn on" is the one tap the phone needs (its permission prompt); the
-// iPhone browser and a blocked phone get a short how-to instead.
-export function PushPrompt({
-  kind,
-  busy,
-  onTurnOn,
-  onDismiss,
-}: {
+export function PushPrompt({ kind, busy, failed, onTurnOn, onDismiss }: {
   kind: PushPromptKind;
   busy: boolean;
+  failed: boolean;
   onTurnOn: () => void;
   onDismiss: () => void;
 }) {
-  return (
-    <div data-push-prompt={kind} role="status" className="bg-sunken border-b border-line-control text-ink">
-      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-2.5 flex items-center gap-3">
-        <BellRing className="w-5 h-5 shrink-0 text-gold-deep" />
-        <p className="text-sm font-semibold flex-1 min-w-0 leading-snug">{PUSH_PROMPT_TEXT[kind]}</p>
-        {kind === 'turn-on' && (
-          <button
-            type="button"
-            onClick={onTurnOn}
-            disabled={busy}
-            className="pressable shrink-0 px-3 h-11 flex items-center rounded-lg bg-gold-deep text-surface dark:text-paper text-sm font-bold cursor-pointer disabled:opacity-60"
-          >
-            {busy ? '…' : 'Turn on'}
+  const root = useRef<HTMLDivElement>(null);
+  const title = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const appRoot = document.getElementById('root');
+    const previousInert = appRoot?.getAttribute('inert') ?? null;
+    appRoot?.setAttribute('inert', '');
+    title.current?.focus();
+    return () => {
+      if (previousInert === null) appRoot?.removeAttribute('inert');
+      else appRoot?.setAttribute('inert', previousInert);
+      if (previous && document.contains(previous)) previous.focus();
+    };
+  }, []);
+  useEffect(() => { title.current?.focus(); }, [busy]);
+  const primary = 'min-h-12 w-full rounded-xl bg-gold-deep text-paper text-base font-semibold pressable disabled:opacity-50';
+  return createPortal(
+    <div ref={root} data-push-prompt={kind} role="dialog" aria-modal="true" aria-labelledby="push-prompt-title"
+      aria-describedby="push-prompt-body"
+      className="fixed inset-0 z-50 flex items-center justify-center px-4 bg-scrim"
+      style={{ paddingTop: 'max(1rem, env(safe-area-inset-top))', paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') { event.preventDefault(); onDismiss(); }
+        if (event.key === 'Tab') {
+          const targets = Array.from(root.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
+          const first = targets[0] ?? title.current;
+          const last = targets[targets.length - 1] ?? title.current;
+          if (!first || !last) return;
+          const active = document.activeElement;
+          if (active === title.current || !root.current?.contains(active)) {
+            event.preventDefault(); (event.shiftKey ? last : first).focus();
+          } else if (event.shiftKey && active === first) { event.preventDefault(); last.focus(); }
+          else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
+        }
+      }}>
+      <div className="w-full max-w-sm max-h-full overflow-y-auto rounded-2xl bg-surface border border-line p-6 e3 space-y-4 text-ink">
+        <BellRing aria-hidden="true" className="w-6 h-6 text-ink-soft" />
+        <h2 ref={title} id="push-prompt-title" tabIndex={-1} className="text-xl font-semibold outline-none">
+          {kind === 'turn-on' ? 'Turn on notifications' : kind === 'blocked' ? 'Notifications are blocked' : 'Add to Home Screen'}
+        </h2>
+        <p id="push-prompt-body" className="text-base text-ink-soft">{PUSH_PROMPT_TEXT[kind]}</p>
+        {kind === 'turn-on' ? <>
+          <button type="button" onClick={onTurnOn} disabled={busy} className={primary}>
+            {busy ? 'Turning on…' : 'Turn on notifications'}
           </button>
-        )}
-        <button
-          type="button"
-          onClick={onDismiss}
-          aria-label="Not now"
-          className="pressable shrink-0 w-11 h-11 flex items-center justify-center rounded-lg bg-surface border border-line-control text-ink hover:bg-sunken cursor-pointer"
-        >
-          <X className="w-5 h-5" />
-        </button>
+          <button type="button" onClick={onDismiss} className="min-h-11 w-full rounded-xl text-base text-ink-soft pressable">Not now</button>
+        </> : <button type="button" onClick={onDismiss} className={primary}>OK</button>}
+        {failed && <p role="alert" className="text-base text-bad">Couldn't turn them on. Try again.</p>}
       </div>
-    </div>
-  );
+    </div>, document.body);
 }
