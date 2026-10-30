@@ -12,6 +12,8 @@
  *  R4 a session signed out on this instance stays refused (401) during the outage;
  *  R5 a session this instance never held answers 503 (never 401);
  *  R6 after the outage the store decides again (a store-only revoke -> 401).
+ *  R7 the outage is not a retry storm: the store is asked a bounded number of
+ *     times (a held socket's deliveries once re-read the same record in a loop).
  */
 const J = JSON.stringify;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -56,6 +58,7 @@ export default {
     if (lo.status !== 200) throw new Error(`logout C: ${lo.status}`);
     const sockets = [wA.ws];
     try {
+      await ctx.api('POST', '/api/__test__/reads', { reset: true });
       if ((await hook({ action: 'quota', on: true }))?.quota !== true) throw new Error('quota hook');
       for (const s of [A, B, C]) await hook({ action: 'cache-age', sid: s.sid, ageMs: 300001 });
       // R1
@@ -78,6 +81,12 @@ export default {
       // use a fresh token whose record this instance never read: mint then forget via cache-age is still "held", so check a NEW sign-in fails closed.
       const m = await fetch(`${baseUrl}/api/__test__/mint-token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: J({ userId: uid('d'), session: true }) });
       if (m.status !== 503) throw new Error(`R5 a new sign-in during the outage answers 503 (the record cannot be written): ${m.status}`);
+      // R7: two more seconds of presence traffic to the held sockets, then count the store's out-of-quota answers.
+      const wC = await connectWs(B.token); sockets.push(wC.ws);
+      await sleep(2000);
+      const meter = (await ctx.api('POST', '/api/__test__/reads', {})).json;
+      if (!(meter && typeof meter.exhausted === 'number' && meter.exhausted > 0 && meter.exhausted < 40)) throw new Error(`R7 the outage must not become a retry storm: ${meter && meter.exhausted} out-of-quota answers`);
+      if (wA.closeCode !== null) throw new Error(`R7 the held socket stays open (closed ${wA.closeCode})`);
     } finally {
       await hook({ action: 'quota', on: false });
     }
@@ -88,6 +97,6 @@ export default {
     if (g6.status !== 401) throw new Error(`R6 after the outage a store-only revoke is seen: ${g6.status}`);
     for (const s of sockets) { try { s.close(); } catch {} }
     void D;
-    return 'held sessions keep GETs and sockets during an out-of-quota store; saves 503 (never 401); signed-out stays 401; new sign-in 503; store decides again after';
+    return 'held sessions keep GETs and sockets during an out-of-quota store; saves 503 (never 401); signed-out stays 401; new sign-in 503; bounded store asks (no retry storm); store decides again after';
   },
 };
