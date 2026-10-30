@@ -8957,8 +8957,13 @@ async function loadUpdateReads(user: UserProfile): Promise<UpdateReads> {
   const gen = updateReadsGen.get(key) || 0;
   const snap = await firestoreDb.collection('updateReads').doc(key).get();
   const raw = snap.exists ? snap.data() : null;
-  // A mark written on this instance meanwhile wins over this (older) read.
+  // A mark written on this instance meanwhile wins over this (older) read,
+  // for the cache AND for this answer ([READCUT-RV2] P3).
   if ((updateReadsGen.get(key) || 0) === gen) updateReadsCachePut(key, raw);
+  else {
+    const newer = updateReadsCache.get(key);
+    if (newer) return sanitizeUpdateReads(user, newer.raw === null ? null : JSON.parse(JSON.stringify(newer.raw)));
+  }
   return sanitizeUpdateReads(user, raw);
 }
 
@@ -9287,6 +9292,10 @@ async function loadAlertMuteUntil(user: UserProfile): Promise<string | null> {
       if ((alertMuteGen.get(key) || 0) === gen) {
         if (alertMuteCache.size > 2000) alertMuteCache.clear();
         alertMuteCache.set(key, { raw: d, readAtMs: Date.now() });
+      } else {
+        // A mute written on this instance meanwhile wins for this answer too ([READCUT-RV2] P3).
+        const newer = alertMuteCache.get(key);
+        if (newer) d = newer.raw;
       }
     }
     // Fail closed toward LOUD: a doc that is not this user's means no mute.

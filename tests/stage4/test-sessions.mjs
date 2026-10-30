@@ -1,7 +1,7 @@
 /**
  * Item 11, 11a-s1: server session record rules + sid claims (unit, pure).
  */
-import { buildUserSession as B, sessionBacksClaims as OK, cachePut, cacheFresh, isSid, USER_SESSION_TTL_MS, SESSION_CACHE_FRESH_MS } from '../../src/server/sessions.ts';
+import { buildUserSession as B, sessionBacksClaims as OK, cachePut, cacheFresh, isSid, USER_SESSION_TTL_MS, SESSION_CACHE_FRESH_MS, SESSION_WRITE_FRESH_MS } from '../../src/server/sessions.ts';
 import { classifySessionClaims as C, sessionClaimsFor as S } from '../../src/server/session-token.ts';
 
 function assert(c, m) { if (!c) throw new Error(m); }
@@ -9,7 +9,7 @@ const J = (o) => JSON.stringify(o);
 
 export default {
   name: 'Item 11 (11a-s1): server session records + sid claims (unit)',
-  whatItProves: 'A sid token is backed only by a matching, unrevoked, unexpired record (row, person, epoch, kind); sid is accepted only well-formed and only on v1/v2/kiosk (never choose); the 30-day end never moves; the cache freshness bound is 15 s.',
+  whatItProves: 'A sid token is backed only by a matching, unrevoked, unexpired record (row, person, epoch, kind); sid is accepted only well-formed and only on v1/v2/kiosk (never choose); the 30-day end never moves; the cache freshness bound is 5 min (60 s for saves and new sockets, READCUT).',
   async run() {
     const sid = 'AAAAAAAAAAAAAAAAAAAAAA';
     const sid2 = 'BBBBBBBBBBBBBBBBBBBBB_';
@@ -67,8 +67,10 @@ export default {
     console.log('  ✓ record rule');
 
     // ---- cache
-    assert(SESSION_CACHE_FRESH_MS === 15000, 'fresh bound 15 s');
-    assert(cacheFresh({ doc: d, readAtMs: now - 14999 }, now) && !cacheFresh({ doc: d, readAtMs: now - 15000 }, now), 'fresh < 15 s only');
+    assert(SESSION_CACHE_FRESH_MS === 300000, 'fresh bound 5 min (READCUT)');
+    assert(SESSION_WRITE_FRESH_MS === 60000, 'write bound 60 s (READCUT)');
+    assert(cacheFresh({ doc: d, readAtMs: now - 299999 }, now) && !cacheFresh({ doc: d, readAtMs: now - 300000 }, now), 'fresh < 5 min only');
+    assert(cacheFresh({ doc: d, readAtMs: now - 59999 }, now, SESSION_WRITE_FRESH_MS) && !cacheFresh({ doc: d, readAtMs: now - 60000 }, now, SESSION_WRITE_FRESH_MS), 'write: fresh < 60 s only');
     assert(!cacheFresh(undefined, now) && !cacheFresh({ doc: d, readAtMs: now + 5 }, now), 'missing / future read -> not fresh');
     const m = new Map();
     for (let i = 0; i < 5; i++) cachePut(m, `s${i}`, { doc: null, readAtMs: i }, 3);
