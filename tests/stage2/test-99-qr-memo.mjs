@@ -10,6 +10,9 @@
  *     the polls before it);
  *  M3 an approval landing while a read-only poll is between its read and
  *     keeping its memo: the next poll still sees the approval.
+ *  M4 [READCUT-RV3 P2] a slow request whose transaction SETTLES after a newer
+ *     request (Cancel) wrote and finished: it cannot take back the last-writer
+ *     title, so the next poll does not answer with the older code.
  */
 const J = JSON.stringify;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -17,7 +20,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export default {
   name: 'Test 99: the kiosk QR memo never hides a newer state',
   whatItProves:
-    'A slow QR request cannot keep an older code after a newer request replaced it; a phone approval is seen by the next poll even when the polls before it were answered from memory, and even when it lands while a poll is keeping its memo.',
+    'A slow QR request (late memo or late settlement) cannot keep an older code after a newer request replaced it; a phone approval is seen by the next poll even when the polls before it were answered from memory, and even when it lands while a poll is keeping its memo.',
   async run(baseUrl, ctx) {
     const ts = Date.now();
     const port = Number(new URL(baseUrl).port);
@@ -104,6 +107,21 @@ export default {
       const p = await qr(dev, 'poll');
       if (p.state !== 'signed-in') throw new Error(`M3 the next poll must sign the tablet in: ${J(p)}`);
       details.push('M3 approve during a poll keeping its memo -> the next poll signs in');
+    }
+    // ---- M4: a slow 'start' whose transaction settles after Cancel's
+    {
+      const dev = await pairTablet();
+      if ((await hook({ action: 'pk-settle-delay-once', ms: 1500 }))?.ok !== true) throw new Error('M4 settle-delay hook');
+      const slow = qr(dev, 'start');
+      await sleep(500);
+      const cancel = await qr(dev, 'cancel');
+      const a = await slow;
+      if (!a.link || typeof a.codeIssuedAtMs !== 'number') throw new Error(`M4 start issued no code: ${J(a)}`);
+      const p = await qr(dev, 'poll');
+      if (p.state !== 'waiting') throw new Error(`M4 poll state: ${J(p)}`);
+      if (p.codeIssuedAtMs === a.codeIssuedAtMs) throw new Error(`M4 the poll answered with the code Cancel replaced (the slower start settled last and kept its memo): ${J(p)} start ${J(a)} cancel ${J(cancel)}`);
+      if (cancel.link && p.codeIssuedAtMs !== cancel.codeIssuedAtMs) throw new Error(`M4 the poll must show the code Cancel issued: ${J(p)} cancel ${J(cancel)}`);
+      details.push('M4 slow start settling after Cancel -> the poll never shows the replaced code');
     }
     return details.join('; ');
   },

@@ -1510,7 +1510,11 @@ async function pkTransaction<T>(fn: (tx: PkTx) => Promise<T>, writer: object = {
         });
       });
     } finally {
-      for (const [col, id, doc] of touched) kqrMemoTouch(col, id, doc, writer);
+      if (isTestMode() && pkSettleDelayOnceForTests && touched.some(([col]) => col === 'kioskQrDevices' || col === 'kioskQr')) {
+        const ms = pkSettleDelayOnceForTests; pkSettleDelayOnceForTests = 0;
+        await new Promise((r) => setTimeout(r, ms));
+      }
+      for (const [col, id, doc] of touched) kqrMemoTouch(col, id, doc, writer, true);
     }
   }
   // Local mode: one transaction at a time; writes apply only when fn finishes.
@@ -1522,8 +1526,8 @@ async function pkTransaction<T>(fn: (tx: PkTx) => Promise<T>, writer: object = {
         const v = localPkDocs.get(`${col}/${id}`);
         return v === undefined ? null : JSON.parse(JSON.stringify(v));
       },
-      set: (col, id, doc) => { kqrMemoTouch(col, id, doc, writer); const v = JSON.parse(JSON.stringify(doc)); writes.push(() => { kqrMemoTouch(col, id, v, writer); if (col === 'sessions') localSessions.set(id, v); else localPkDocs.set(`${col}/${id}`, v); }); },
-      del: (col, id) => { kqrMemoTouch(col, id, null, writer); writes.push(() => { kqrMemoTouch(col, id, null, writer); if (col === 'sessions') localSessions.delete(id); else localPkDocs.delete(`${col}/${id}`); }); },
+      set: (col, id, doc) => { kqrMemoTouch(col, id, doc, writer); const v = JSON.parse(JSON.stringify(doc)); writes.push(() => { kqrMemoTouch(col, id, v, writer, true); if (col === 'sessions') localSessions.set(id, v); else localPkDocs.set(`${col}/${id}`, v); }); },
+      del: (col, id) => { kqrMemoTouch(col, id, null, writer); writes.push(() => { kqrMemoTouch(col, id, null, writer, true); if (col === 'sessions') localSessions.delete(id); else localPkDocs.delete(`${col}/${id}`); }); },
     });
     for (const w of writes) w();
     return out;
@@ -12215,6 +12219,7 @@ if (isTestMode()) {
     try {
       if (action === 'fault') { sessionStoreFaultForTests = req.body?.on === true; return res.json({ ok: true, fault: sessionStoreFaultForTests }); }
       if (action === 'quota') { sessionStoreQuotaForTests = req.body?.on === true; if (!sessionStoreQuotaForTests) setQuotaErrorAtForTests(0); return res.json({ ok: true, quota: sessionStoreQuotaForTests }); }
+      if (action === 'pk-settle-delay-once') { pkSettleDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
       if (action === 'kqr-memo-publish-delay-once') { kqrMemoPublishDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
       if (action === 'revokeFault') { sessionRevokeFaultForTests = req.body?.on === true; return res.json({ ok: true, revokeFault: sessionRevokeFaultForTests }); }
       if (action === 'read-delay-once') { sessionReadDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
@@ -18642,19 +18647,30 @@ const kqrMemoGen = new Map<string, number>();
 const kqrMemoLastWriter = new Map<string, object>();
 /** Test mode only: the NEXT tablet step waits this long between its transaction and keeping the memo. */
 let kqrMemoPublishDelayOnceForTests = 0;
+/** Test mode only: the NEXT transaction that wrote QR documents waits this long after it settles, before its settle-time memo drops. */
+let pkSettleDelayOnceForTests = 0;
 function kqrMemoGenOf(deviceId: string): number { return kqrMemoGen.get(deviceId) || 0; }
-function kqrMemoDrop(deviceId: string, writer?: object): void {
+/**
+ * A write queued (settled=false) makes its transaction the tablet's last
+ * writer. A transaction settling (settled=true) never makes itself the last
+ * writer again ([READCUT-RV3] P2: settlement can come after a newer
+ * transaction's): it keeps the title only if nobody else wrote since its own
+ * queued write, else nobody holds it, so no memo is kept from either.
+ */
+function kqrMemoDrop(deviceId: string, writer?: object, settled = false): void {
   kqrMemoGen.set(deviceId, kqrMemoGenOf(deviceId) + 1);
-  if (writer) kqrMemoLastWriter.set(deviceId, writer); else kqrMemoLastWriter.delete(deviceId);
+  if (!writer) kqrMemoLastWriter.delete(deviceId);
+  else if (!settled) kqrMemoLastWriter.set(deviceId, writer);
+  else if (kqrMemoLastWriter.get(deviceId) !== writer) kqrMemoLastWriter.delete(deviceId);
   kqrLiveMemo.delete(deviceId);
 }
-/** Called for every write in a passkey/QR transaction (queued and finished), with that transaction's writer token. */
-function kqrMemoTouch(col: string, id: string, doc: any, writer?: object): void {
-  if (col === 'kioskQrDevices') { kqrMemoDrop(String(id), writer); return; }
+/** Called for every write in a passkey/QR transaction (queued and settled), with that transaction's writer token. */
+function kqrMemoTouch(col: string, id: string, doc: any, writer?: object, settled = false): void {
+  if (col === 'kioskQrDevices') { kqrMemoDrop(String(id), writer, settled); return; }
   if (col !== 'kioskQr') return;
-  if (doc && typeof doc.deviceId === 'string') kqrMemoDrop(doc.deviceId, writer);
+  if (doc && typeof doc.deviceId === 'string') kqrMemoDrop(doc.deviceId, writer, settled);
   // A code document by its hash (a delete carries no device): every memo that names it.
-  for (const [devId, m] of Array.from(kqrLiveMemo.entries())) if (m.codeHash === id) kqrMemoDrop(devId, writer);
+  for (const [devId, m] of Array.from(kqrLiveMemo.entries())) if (m.codeHash === id) kqrMemoDrop(devId, writer, settled);
 }
 /** The memo's answer for this poll, or null (then the transaction runs). */
 function kqrMemoAnswer(device: KioskDevice, nowMs: number): KqrTabletAnswer | null {
