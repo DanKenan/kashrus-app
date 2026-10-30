@@ -32,7 +32,8 @@ import { CHECKIN_PHOTO_ID_PREFIX, classifyCheckInPhoto, checkInPhotoIdOf, checkI
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
-import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState, kqrPickupVerdict, keepKnownSessionFacts, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
+import { installReadMeter, readMeterSnapshot, resetReadMeter, readMeterWindowLine, isQuotaError, noteQuotaError, quotaBackoffActive, setQuotaErrorAtForTests } from './src/server/read-meter.ts';
+import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState, kqrPickupVerdict, keepKnownSessionFacts, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, SESSION_WRITE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import {
   PASSKEYS_MAX, CHALLENGE_TTL_MS, RECENT_AUTH_MS, CREDENTIAL_ID_RE, CHALLENGE_ID_RE, credentialIdHash, newPersonCredentials, asPersonCredentials, findPasskey,
@@ -788,6 +789,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'GET', path: '/__test__/route-table' },
         { method: 'POST', path: '/__test__/phase-c' },
         { method: 'POST', path: '/__test__/invites-client-ready' },
+        { method: 'POST', path: '/__test__/reads' },
       ]
     : []),
 ];
@@ -937,7 +939,7 @@ app.use('/api', async (req, res, next) => {
   }
   // 11a-s1 (plan 9.1 / 10.1): a token carrying sid is valid only while its
   // server session record backs it. Mutating requests read the record from the
-  // store (no cache); GET/HEAD may use an entry read in the last 15 s. A store
+  // store unless read in the last 60 s (READCUT); GET/HEAD may use an entry read in the last 5 min. A store
   // error is 503 (never 401: an outage signs nobody out). Tokens without sid
   // (issued before this release) skip this and keep today's rules.
   // Runs BEFORE the row is resolved, so the row below is read after the await.
@@ -1290,6 +1292,13 @@ const localSessions = new Map<string, SessionDoc>();
 const sessionCache = new Map<string, SessionCacheEntry>();
 /** Test mode only: make the session store fail (proves 503, never a sign-out). */
 let sessionStoreFaultForTests = false;
+/** Test mode only (READCUT): make the session/passkey store answer like Firestore out of quota. */
+let sessionStoreQuotaForTests = false;
+function quotaErrorForTests(): Error {
+  const e: any = new Error('8 RESOURCE_EXHAUSTED: Quota exceeded. (test)');
+  e.code = 8;
+  return e;
+}
 /** Test mode only: make only the sign-out revoke write fail (the request has already passed the auth check). */
 let sessionRevokeFaultForTests = false;
 /** Test mode only: the NEXT store read / write returns this many ms late (forced interleavings). */
@@ -1305,6 +1314,7 @@ async function sessionTestDelay(kind: 'read' | 'write'): Promise<void> {
 
 async function sessionStoreGet(sid: string): Promise<SessionDoc | null> {
   if (isTestMode() && sessionStoreFaultForTests) throw new Error('session store fault (test)');
+  if (isTestMode() && sessionStoreQuotaForTests) throw quotaErrorForTests();
   let out: SessionDoc | null;
   if (!firestoreDb) out = localSessions.has(sid) ? { ...localSessions.get(sid)! } : null;
   else {
@@ -1317,6 +1327,7 @@ async function sessionStoreGet(sid: string): Promise<SessionDoc | null> {
 /** Writes a session record in a transaction. create=true refuses an existing sid (never overwrite another session). */
 async function sessionStorePut(doc: SessionDoc, create = true): Promise<void> {
   if (isTestMode() && sessionStoreFaultForTests) throw new Error('session store fault (test)');
+  if (isTestMode() && sessionStoreQuotaForTests) throw quotaErrorForTests();
   if (!firestoreDb) {
     if (create && localSessions.has(doc.sid)) throw new Error('session id already exists');
     localSessions.set(doc.sid, { ...doc });
@@ -1336,6 +1347,7 @@ async function sessionStorePut(doc: SessionDoc, create = true): Promise<void> {
 /** Marks a session revoked in the store (read-modify-write in a transaction); returns the stored record or null when there is none. */
 async function sessionStoreRevoke(sid: string, reason: string, nowIso: string): Promise<SessionDoc | null> {
   if (isTestMode() && sessionStoreFaultForTests) throw new Error('session store fault (test)');
+  if (isTestMode() && sessionStoreQuotaForTests) throw quotaErrorForTests();
   if (!firestoreDb) {
     const cur = localSessions.get(sid);
     if (!cur) return null;
@@ -1480,15 +1492,25 @@ type PkTx = {
 /** One transaction over the passkey collections and sessions (every read before any write; Firestore retries on conflict). */
 async function pkTransaction<T>(fn: (tx: PkTx) => Promise<T>): Promise<T> {
   if (isTestMode() && sessionStoreFaultForTests) throw new Error('session store fault (test)');
+  if (isTestMode() && sessionStoreQuotaForTests) throw quotaErrorForTests();
   if (firestoreDb) {
-    return firestoreDb.runTransaction(async (tx: any) => {
-      const ref = (col: PkCollection, id: string) => firestoreDb.collection(col).doc(id);
-      return fn({
-        get: async (col, id) => { const snap = await tx.get(ref(col, id)); return snap.exists ? snap.data() : null; },
-        set: (col, id, doc) => { tx.set(ref(col, id), JSON.parse(JSON.stringify(doc))); },
-        del: (col, id) => { tx.delete(ref(col, id)); },
+    // READCUT: a write to a tablet's QR documents drops this instance's memo of
+    // that tablet's live code, when the write is queued AND again once the
+    // transaction has finished (committed or not), so a poll never answers
+    // from a memo older than a write it could have missed.
+    const touched: Array<[PkCollection, string, any]> = [];
+    try {
+      return await firestoreDb.runTransaction(async (tx: any) => {
+        const ref = (col: PkCollection, id: string) => firestoreDb.collection(col).doc(id);
+        return fn({
+          get: async (col, id) => { const snap = await tx.get(ref(col, id)); return snap.exists ? snap.data() : null; },
+          set: (col, id, doc) => { kqrMemoTouch(col, id, doc); touched.push([col, id, doc]); tx.set(ref(col, id), JSON.parse(JSON.stringify(doc))); },
+          del: (col, id) => { kqrMemoTouch(col, id, null); touched.push([col, id, null]); tx.delete(ref(col, id)); },
+        });
       });
-    });
+    } finally {
+      for (const [col, id, doc] of touched) kqrMemoTouch(col, id, doc);
+    }
   }
   // Local mode: one transaction at a time; writes apply only when fn finishes.
   const run = async () => {
@@ -1499,8 +1521,8 @@ async function pkTransaction<T>(fn: (tx: PkTx) => Promise<T>): Promise<T> {
         const v = localPkDocs.get(`${col}/${id}`);
         return v === undefined ? null : JSON.parse(JSON.stringify(v));
       },
-      set: (col, id, doc) => { const v = JSON.parse(JSON.stringify(doc)); writes.push(() => { if (col === 'sessions') localSessions.set(id, v); else localPkDocs.set(`${col}/${id}`, v); }); },
-      del: (col, id) => { writes.push(() => { if (col === 'sessions') localSessions.delete(id); else localPkDocs.delete(`${col}/${id}`); }); },
+      set: (col, id, doc) => { kqrMemoTouch(col, id, doc); const v = JSON.parse(JSON.stringify(doc)); writes.push(() => { kqrMemoTouch(col, id, v); if (col === 'sessions') localSessions.set(id, v); else localPkDocs.set(`${col}/${id}`, v); }); },
+      del: (col, id) => { kqrMemoTouch(col, id, null); writes.push(() => { kqrMemoTouch(col, id, null); if (col === 'sessions') localSessions.delete(id); else localPkDocs.delete(`${col}/${id}`); }); },
     });
     for (const w of writes) w();
     return out;
@@ -1533,18 +1555,27 @@ async function personCredentialsRead(personId: string): Promise<PersonCredential
   personCredCache.set(personId, { doc, readAtMs: Date.now() });
   return doc;
 }
-/** Is this session's passkey (if it came from one) still there? authoritative: a store read; else the 15 s copy. */
+/**
+ * Is this session's passkey (if it came from one) still there? The copy on
+ * this instance is used while fresher than the check's bound (READCUT: 60 s for
+ * a saving request or a new socket, 5 min otherwise; a removal on this instance
+ * updates the copy at once); older -> a store read. A store that answers "out
+ * of quota" keeps the copy's answer (never a sign-out over a quota error).
+ */
 async function passkeySessionCheck(doc: SessionDoc | null, authoritative: boolean): Promise<'ok' | 'refused' | 'down'> {
   if (!doc || doc.authMethod === undefined) return 'ok';
   if (!isPasskeyAuthMethod(doc.authMethod) || doc.authMethod.personId !== doc.personId) return 'refused';
   const { personId, credentialId } = doc.authMethod;
   const cached = personCredCache.get(personId);
-  if (!authoritative && cached && Date.now() - cached.readAtMs < SESSION_CACHE_FRESH_MS) return findPasskey(cached.doc, credentialId) ? 'ok' : 'refused';
+  const maxAge = authoritative ? SESSION_WRITE_FRESH_MS : SESSION_CACHE_FRESH_MS;
+  const age = cached ? Date.now() - cached.readAtMs : Infinity;
+  if (cached && age >= 0 && age < maxAge) return findPasskey(cached.doc, credentialId) ? 'ok' : 'refused';
   let pc: PersonCredentialsDoc | null;
   try {
     pc = await personCredentialsRead(personId);
   } catch (err: any) {
     log.warn(`[passkey] credentials read failed: ${err?.message || err}`);
+    if (cached && isQuotaError(err)) return findPasskey(cached.doc, credentialId) ? 'ok' : 'refused';
     return 'down';
   }
   return findPasskey(pc, credentialId) ? 'ok' : 'refused';
@@ -1563,13 +1594,19 @@ function sessionLive(doc: unknown, claims: SessionBackedClaims | null | undefine
 }
 
 /**
- * Plan 10.1. authoritative=true (every mutating request, WS upgrade): a direct
- * store read, no cache. authoritative=false (GET/HEAD): the cached entry when
- * it was read less than 15 s ago, else a store read. A store error is 'down'
- * (the caller answers 503 — never a 401, so nobody is signed out by an outage).
+ * Plan 10.1 (READCUT bounds). authoritative=true (a saving request, a new
+ * socket, a held socket's re-check): the cached entry when it was read less
+ * than SESSION_WRITE_FRESH_MS (60 s) ago, else a store read.
+ * authoritative=false (GET/HEAD): the cached entry while it is fresher than
+ * SESSION_CACHE_FRESH_MS (5 min), else a store read. A revocation on this
+ * instance updates the map at once (refused at once, whatever the bound).
+ * A store error is 'down' (the caller answers 503 — never a 401, so nobody is
+ * signed out by an outage). READCUT: when the store answers "out of quota",
+ * a cached entry that still backs the token keeps the person signed in for a
+ * GET or a socket (quotaFallback); a saving request still answers 503.
  */
-async function checkSession(claims: SessionBackedClaims & { sid: string }, authoritative: boolean): Promise<'ok' | 'refused' | 'down'> {
-  const { verdict, doc } = await checkSessionRecord(claims, authoritative);
+async function checkSession(claims: SessionBackedClaims & { sid: string }, authoritative: boolean, quotaFallback = !authoritative): Promise<'ok' | 'refused' | 'down'> {
+  const { verdict, doc } = await checkSessionRecord(claims, authoritative, quotaFallback);
   if (verdict !== 'ok') return verdict;
   if (isTestMode() && kqrVerdictDelayOnceForTests) { const ms = kqrVerdictDelayOnceForTests; kqrVerdictDelayOnceForTests = 0; await new Promise((r) => setTimeout(r, ms)); }
   // Kiosk QR cleanup (item 4): the tablet's first use of a new QR session marks
@@ -1617,18 +1654,32 @@ async function kqrMarkPickedUp(sid: string): Promise<SessionDoc | null> {
   return sessionCachePublish(sid, doc);
 }
 /** The record check behind checkSession; returns the record it decided on. */
-async function checkSessionRecord(claims: SessionBackedClaims & { sid: string }, authoritative: boolean): Promise<{ verdict: 'ok' | 'refused' | 'down'; doc: SessionDoc | null }> {
+async function checkSessionRecord(claims: SessionBackedClaims & { sid: string }, authoritative: boolean, quotaFallback = false): Promise<{ verdict: 'ok' | 'refused' | 'down'; doc: SessionDoc | null }> {
   const nowMs = Date.now();
   const cached = sessionCache.get(claims.sid);
-  if (!authoritative && cacheFresh(cached, nowMs)) {
+  // A revocation this instance knows is final, whatever the entry's age.
+  if (cached && cached.doc && cached.doc.revokedAt) return { verdict: 'refused', doc: cached.doc };
+  if (cacheFresh(cached, nowMs, authoritative ? SESSION_WRITE_FRESH_MS : SESSION_CACHE_FRESH_MS)) {
     if (!sessionBacksClaims(cached.doc, claims, nowMs)) return { verdict: 'refused', doc: cached.doc };
-    return { verdict: await passkeySessionCheck(cached.doc, false), doc: cached.doc };
+    return { verdict: await passkeySessionCheck(cached.doc, authoritative), doc: cached.doc };
   }
   let doc: SessionDoc | null;
   try {
     doc = await sessionStoreGet(claims.sid);
   } catch (err: any) {
     log.warn(`[session] read failed: ${err?.message || err}`);
+    // READCUT: out of quota is not a sign-out. The entry this instance holds
+    // (revocations on this instance included) keeps answering; nothing is
+    // republished, so the next read once the quota is back decides afresh.
+    const held = sessionCache.get(claims.sid);
+    const cachedDoc: SessionDoc | null = held ? held.doc : null;
+    if (quotaFallback && isQuotaError(err) && cachedDoc) {
+      const now2 = Date.now();
+      const during = sessionCache.get(claims.sid);
+      const d: SessionDoc = during && during.doc ? during.doc : cachedDoc;
+      if (!sessionBacksClaims(d, claims, now2)) return { verdict: 'refused', doc: d };
+      return { verdict: passkeyCachedOk(d) ? 'ok' : 'refused', doc: d };
+    }
     return { verdict: 'down', doc: null };
   }
   // A local revocation that landed while this read was in flight wins.
@@ -1707,7 +1758,7 @@ async function revokeSession(sid: string, reason: string): Promise<boolean> {
 }
 
 /**
- * WS deliveries (plan 10.1): a sid socket whose entry is older than 15 s gets
+ * WS deliveries (plan 10.1): a sid socket whose entry is older than SESSION_CACHE_FRESH_MS (5 min, READCUT) gets
  * nothing until the record is re-read (authorizeSocket holds its deliveries).
  * ok -> each held socket is re-authorized and gets a fresh INITIAL_STATE;
  * refused -> its sockets close 4401; store down -> they close 1013.
@@ -1718,7 +1769,7 @@ const sessionPendingSockets = new WeakSet<WebSocket>();
 function refreshSessionInBackground(claims: SessionBackedClaims & { sid: string }): void {
   if (sessionRefreshInFlight.has(claims.sid)) return;
   sessionRefreshInFlight.add(claims.sid);
-  checkSession(claims, true)
+  checkSession(claims, true, true)
     .catch(() => 'down' as const)
     .then((r) => {
       sessionRefreshInFlight.delete(claims.sid);
@@ -3620,7 +3671,7 @@ function authorizeSocket(client: WebSocket): SocketMeta | null {
   }
   // 11a-s1 (plan 10.1): a sid socket is delivered to only while its session
   // is backed in the map (revocation on this instance updates the map and
-  // closes the socket at once). An entry older than 15 s is re-read in the
+  // closes the socket at once). An entry older than 5 min (READCUT) is re-read in the
   // background (a revision overlapping a deploy); a refusal closes it 4401.
   // 11a-s3: kiosk sockets carrying a sid too (kiosk session record).
   {
@@ -4221,6 +4272,7 @@ async function initFirestore() {
       }
       const mockMod = await import('./tests/stage2/firestore-mock.mjs');
       firestoreDb = mockMod.getMockFirestore();
+      installReadMeter(firestoreDb);
       firestoreInitStatus = 'connected';
       console.log('[Firestore] Using in-memory mock (FIRESTORE_MOCK=true).');
       return;
@@ -4252,6 +4304,7 @@ async function initFirestore() {
     }
     const app = getApps().length > 0 ? getApp() : initializeApp({ projectId });
     firestoreDb = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+    installReadMeter(firestoreDb);
     firestoreInitStatus = 'connected';
     console.log(`[Firestore] Durable persistence enabled (db: ${databaseId || '(default)'}).`);
   } catch (err: any) {
@@ -5112,6 +5165,11 @@ async function commitState(
       // Firestore errors (unavailable, deadline exceeded, etc.)
       log.warn(`[commitState:${label}] Transaction failed (attempt ${attempt}/${maxAttempts}):`, err?.message);
       lastError = err;
+      // READCUT: out of quota is not a blip — retrying only spends more of the
+      // quota that is gone. Fail at once (nothing was saved).
+      if (noteQuotaError(err)) {
+        throw new FirestoreUnavailableError('Save failed: the database is over its daily limit right now. Your data was NOT saved — please retry later.');
+      }
       if (attempt < maxAttempts) continue;
       throw new FirestoreUnavailableError(`Save failed after ${maxAttempts} attempts: ${err?.message || 'unknown error'}. Your data was NOT saved — please retry.`);
     }
@@ -5797,10 +5855,14 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
   return sentKeys;
 }
 
+// READCUT: one log line an hour with this instance's database reads by collection.
+setInterval(() => { try { const line = readMeterWindowLine(); if (line) log.info(line); } catch {} }, 60 * 60 * 1000).unref?.();
+
 // Run overdue check every 15 minutes (skipped in maintenance mode /
 // FORCE_LOCAL_MODE; never on a staged revision — staged revisions must not write at all)
 setInterval(() => {
   if (process.env.MAINTENANCE_MODE === 'true' || process.env.FORCE_LOCAL_MODE === 'true' || isStagedRevision()) return;
+  if (quotaBackoffActive()) return; // READCUT
   checkOverdueTasks();
 }, 15 * 60 * 1000);
 
@@ -6568,7 +6630,7 @@ wss.on('connection', (ws, req) => {
     sessionCheckStarted = true;
     if (!wsSession) return finishConnect();
     sessionPendingSockets.add(ws);
-    checkSession(wsSession, true)
+    checkSession(wsSession, true, true)
       .then((verdict) => {
         sessionPendingSockets.delete(ws);
         if (ws.readyState !== WebSocket.OPEN) return;
@@ -7100,6 +7162,9 @@ function runRolloverTick(
     return Promise.resolve({ reset: [], version: null, skipped: 'no-background-writes' });
   }
   if (rolloverInFlight) return rolloverInFlight;
+  // READCUT: the minute tick stands down while the store answers "out of
+  // quota" (a failed sweep used to retry every minute); it resumes on its own.
+  if (quotaBackoffActive()) return Promise.resolve({ reset: [], version: null, skipped: 'quota-backoff' });
   const { due, legacyDue } = venuesDueAt(now);
   // 8r: the hourly retention sweep rides the same serialized tick (never
   // overlaps a reset; runs only after durable state loaded, as resets do).
@@ -8855,12 +8920,36 @@ function emptyUpdateReads(user: UserProfile): UpdateReads {
 }
 
 /** Read the caller's marks. Identity = the authenticated server-side user, never request fields. */
+// READCUT: this instance's copy of each person's read marks. Every mark is
+// written through this instance (addUpdateReads updates the copy after its
+// commit), so the copy is current here; it is re-read after
+// UPDATE_READS_CACHE_MS in case another instance wrote (a deploy overlap).
+// Marks only drive unread counts and "Seen by" (display, never access).
+const UPDATE_READS_CACHE_MS = 5 * 60 * 1000;
+const updateReadsCache = new Map<string, { raw: any; readAtMs: number }>();
+const updateReadsGen = new Map<string, number>();
+function updateReadsCacheBump(key: string): number {
+  const g = (updateReadsGen.get(key) || 0) + 1;
+  updateReadsGen.set(key, g);
+  return g;
+}
+function updateReadsCachePut(key: string, raw: any): void {
+  if (updateReadsCache.size > 2000) updateReadsCache.clear();
+  updateReadsCache.set(key, { raw: raw === null ? null : JSON.parse(JSON.stringify(raw)), readAtMs: Date.now() });
+}
 async function loadUpdateReads(user: UserProfile): Promise<UpdateReads> {
   const key = updateReadsKey(user);
   const empty = emptyUpdateReads(user);
   if (!firestoreDb) return localUpdateReads.get(key) || empty;
+  const c = updateReadsCache.get(key);
+  const age = c ? Date.now() - c.readAtMs : Infinity;
+  if (c && age >= 0 && age < UPDATE_READS_CACHE_MS) return sanitizeUpdateReads(user, c.raw === null ? null : JSON.parse(JSON.stringify(c.raw)));
+  const gen = updateReadsGen.get(key) || 0;
   const snap = await firestoreDb.collection('updateReads').doc(key).get();
-  return sanitizeUpdateReads(user, snap.exists ? snap.data() : null);
+  const raw = snap.exists ? snap.data() : null;
+  // A mark written on this instance meanwhile wins over this (older) read.
+  if ((updateReadsGen.get(key) || 0) === gen) updateReadsCachePut(key, raw);
+  return sanitizeUpdateReads(user, raw);
 }
 
 function sanitizeUpdateReads(user: UserProfile, d: any): UpdateReads {
@@ -8908,11 +8997,24 @@ async function addUpdateReads(user: UserProfile, annIds: string[], noteIds: stri
     return recorded;
   }
   const ref = firestoreDb.collection('updateReads').doc(key);
-  await firestoreDb.runTransaction(async (tx: any) => {
-    const snap = await tx.get(ref);
-    const rec = apply(sanitizeUpdateReads(user, snap.exists ? snap.data() : null));
-    if (recorded > 0) tx.set(ref, JSON.parse(JSON.stringify(rec)));
-  });
+  updateReadsCacheBump(key);
+  let stored: any = undefined;
+  try {
+    await firestoreDb.runTransaction(async (tx: any) => {
+      stored = undefined;
+      const snap = await tx.get(ref);
+      const raw = snap.exists ? snap.data() : null;
+      const rec = apply(sanitizeUpdateReads(user, raw));
+      if (recorded > 0) { tx.set(ref, JSON.parse(JSON.stringify(rec))); stored = rec; } else stored = raw;
+    });
+  } catch (e) {
+    updateReadsCacheBump(key);
+    updateReadsCache.delete(key);
+    throw e;
+  }
+  // READCUT: the committed marks are this instance's copy (write-through).
+  updateReadsCacheBump(key);
+  if (stored !== undefined) updateReadsCachePut(key, stored);
   return recorded;
 }
 
@@ -9155,13 +9257,28 @@ app.get('/api/updates/receipts/:kind/:id', async (req, res) => {
 const localAlertMute = new Map<string, string>();
 const ALERT_MUTE_MAX_MINUTES = 24 * 60;
 
+// READCUT: this instance's copy of each person's alert mute (written through
+// PUT /api/updates/alert-mute on this instance), re-read after 5 min.
+const alertMuteCache = new Map<string, { raw: any; readAtMs: number }>();
+const alertMuteGen = new Map<string, number>();
 async function loadAlertMuteUntil(user: UserProfile): Promise<string | null> {
   const key = updateReadsKey(user);
   let until: any = null;
   if (!firestoreDb) until = localAlertMute.get(key) || null;
   else {
-    const snap = await firestoreDb.collection('alertMute').doc(key).get();
-    const d = snap.exists ? snap.data() : null;
+    const c = alertMuteCache.get(key);
+    const age = c ? Date.now() - c.readAtMs : Infinity;
+    let d: any;
+    if (c && age >= 0 && age < UPDATE_READS_CACHE_MS) d = c.raw;
+    else {
+      const gen = alertMuteGen.get(key) || 0;
+      const snap = await firestoreDb.collection('alertMute').doc(key).get();
+      d = snap.exists ? snap.data() : null;
+      if ((alertMuteGen.get(key) || 0) === gen) {
+        if (alertMuteCache.size > 2000) alertMuteCache.clear();
+        alertMuteCache.set(key, { raw: d, readAtMs: Date.now() });
+      }
+    }
     // Fail closed toward LOUD: a doc that is not this user's means no mute.
     if (d && d.userId === user.id && d.agencyId === ((user as any).agencyId || 'agency-hkc')) until = d.until || null;
   }
@@ -9213,9 +9330,16 @@ app.put('/api/updates/alert-mute', async (req, res) => {
     if (!firestoreDb) {
       if (until) localAlertMute.set(key, until); else localAlertMute.delete(key);
     } else {
-      await firestoreDb.collection('alertMute').doc(key).set({
-        agencyId: (user as any).agencyId || 'agency-hkc', userId: user.id, until, updatedAt: new Date().toISOString(),
-      });
+      const doc = { agencyId: (user as any).agencyId || 'agency-hkc', userId: user.id, until, updatedAt: new Date().toISOString() };
+      alertMuteGen.set(key, (alertMuteGen.get(key) || 0) + 1);
+      alertMuteCache.delete(key);
+      try {
+        await firestoreDb.collection('alertMute').doc(key).set(doc);
+      } finally {
+        alertMuteGen.set(key, (alertMuteGen.get(key) || 0) + 1);
+      }
+      // READCUT: write-through (this instance's copy is the saved mute).
+      alertMuteCache.set(key, { raw: doc, readAtMs: Date.now() });
     }
     res.json({ mutedUntil: until });
   } catch (e: any) {
@@ -12071,6 +12195,7 @@ if (isTestMode()) {
     const { action, sid } = req.body || {};
     try {
       if (action === 'fault') { sessionStoreFaultForTests = req.body?.on === true; return res.json({ ok: true, fault: sessionStoreFaultForTests }); }
+      if (action === 'quota') { sessionStoreQuotaForTests = req.body?.on === true; return res.json({ ok: true, quota: sessionStoreQuotaForTests }); }
       if (action === 'revokeFault') { sessionRevokeFaultForTests = req.body?.on === true; return res.json({ ok: true, revokeFault: sessionRevokeFaultForTests }); }
       if (action === 'read-delay-once') { sessionReadDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
       if (action === 'write-delay-once') { sessionWriteDelayOnceForTests = Math.max(0, Math.min(5000, Number(req.body?.ms) || 0)); return res.json({ ok: true }); }
@@ -12200,6 +12325,11 @@ if (isTestMode()) {
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
     }
+  });
+  // READCUT: the read meter (reset: true zeroes it first and answers the zeroed counts).
+  app.post('/api/__test__/reads', (req, res) => {
+    if (req.body?.reset === true) resetReadMeter();
+    res.json(readMeterSnapshot());
   });
   app.post('/api/__test__/mint-token', async (req, res) => {
     const { userId } = req.body || {};
@@ -16439,6 +16569,8 @@ async function runGrantSweep(source: string): Promise<{ committed: boolean; rows
 let grantTimersStarted = false;
 /** One 15 s tick: a read only while temporary (end-dated) access exists. */
 async function freshnessTick(): Promise<string> {
+  // READCUT: no background read while the store answers "out of quota".
+  if (quotaBackoffActive()) return 'quota-backoff';
   if (!freshnessNeedRecompute()) {
     if (monoNowMs() - freshnessLastIdleReadMono < FRESHNESS_IDLE_READ_MS) return 'idle';
     freshnessLastIdleReadMono = monoNowMs();
@@ -18470,13 +18602,65 @@ function kqrNewCodeIsExtra(code: KqrCodeDoc | null, nowMs: number): boolean {
   return nowMs < until;
 }
 
+
+// ---------------------------------------------------------------------------
+// READCUT (Oct 29 2026): the QR tablet's 2-second poll. Each poll used to be a
+// transaction reading 3 documents (tablet, current code, previous code), about
+// 130,000 reads a day for ONE tablet left on the QR screen — the free daily
+// quota ran out. While a code is simply live (nobody has scanned it), the
+// answer is fully decided by those documents, so this instance keeps a memo of
+// them and answers the poll from it. The memo is dropped by any write to that
+// tablet's QR documents on this instance (approve, start, cancel, claim,
+// rotation, a test hook), and it ends with its code (<= KQR_CODE_TTL_MS), so a
+// scan is seen on the very next poll and rotation works as before.
+// ---------------------------------------------------------------------------
+type KqrLiveMemo = { codeHash: string; g: number; createdAtMs: number; expiresAtMs: number; secretHash: string; agencyId: string; venueId: string; gen: number };
+const kqrLiveMemo = new Map<string, KqrLiveMemo>();
+/** Per tablet: bumped by every write to its QR documents (the memo is only kept when nothing was written meanwhile). */
+const kqrMemoGen = new Map<string, number>();
+let kqrMemoDisabledForTests = false;
+function kqrMemoGenOf(deviceId: string): number { return kqrMemoGen.get(deviceId) || 0; }
+function kqrMemoDrop(deviceId: string): void {
+  kqrMemoGen.set(deviceId, kqrMemoGenOf(deviceId) + 1);
+  kqrLiveMemo.delete(deviceId);
+}
+/** Called for every write in a passkey/QR transaction (queued and finished). */
+function kqrMemoTouch(col: string, id: string, doc: any): void {
+  if (col === 'kioskQrDevices') { kqrMemoDrop(String(id)); return; }
+  if (col !== 'kioskQr') return;
+  if (doc && typeof doc.deviceId === 'string') kqrMemoDrop(doc.deviceId);
+  // A code document by its hash (a delete carries no device): every memo that names it.
+  for (const [devId, m] of Array.from(kqrLiveMemo.entries())) if (m.codeHash === id) kqrMemoDrop(devId);
+}
+/** The memo's answer for this poll, or null (then the transaction runs). */
+function kqrMemoAnswer(device: KioskDevice, nowMs: number): KqrTabletAnswer | null {
+  if (kqrMemoDisabledForTests) return null;
+  const m = kqrLiveMemo.get(device.id);
+  if (!m) return null;
+  if (m.gen !== kqrMemoGenOf(device.id) || !(nowMs < m.expiresAtMs) ||
+      m.secretHash !== device.secretHash || m.agencyId !== device.agencyId || m.venueId !== device.venueId) {
+    kqrLiveMemo.delete(device.id);
+    return null;
+  }
+  return { kind: 'waiting', code: null, codeIssuedAtMs: m.createdAtMs, expiresAtMs: m.expiresAtMs };
+}
 /**
  * The tablet's one step (start / cancel / poll), in ONE transaction over the
  * device doc, its current code and (claim only) the approving session and the
  * person's tablet list. Every read happens before any write.
  */
 async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDevice, userAgent: unknown): Promise<KqrTabletAnswer> {
-  return pkTransaction(async (tx) => {
+  if (mode === 'poll') {
+    const memo = kqrMemoAnswer(device, Date.now());
+    if (memo) return memo;
+  }
+  // READCUT: the live code this transaction saw (or issued), kept as the memo
+  // only when no write to this tablet's QR documents happened meanwhile.
+  let memoCandidate: Omit<KqrLiveMemo, 'gen'> | null = null;
+  let genBefore = kqrMemoGenOf(device.id);
+  const answer = await pkTransaction<KqrTabletAnswer>(async (tx): Promise<KqrTabletAnswer> => {
+    memoCandidate = null;
+    genBefore = kqrMemoGenOf(device.id);
     const nowMs = Date.now();
     const dev = asKqrDevice(await tx.get('kioskQrDevices', device.id), device.id);
     const code = dev.codeHash ? asKqrCode(await tx.get('kioskQr', dev.codeHash), dev.codeHash) : null;
@@ -18537,6 +18721,7 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
       }
       const issued = kqrIssue(tx, dev, device, nowMs, extra, prevCode);
       tx.set('kioskQrDevices', device.id, dev);
+      memoCandidate = { codeHash: issued.doc.hash, g: issued.doc.g, createdAtMs: issued.doc.createdAtMs, expiresAtMs: issued.doc.expiresAtMs, secretHash: device.secretHash, agencyId: device.agencyId, venueId: device.venueId, issued: true } as any;
       return { kind: 'waiting', code: issued.code, codeIssuedAtMs: issued.doc.createdAtMs, expiresAtMs: issued.doc.expiresAtMs, ...(notFinished ? { notFinished } : {}) };
     };
 
@@ -18551,11 +18736,13 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
       }
       const issued = kqrIssue(tx, dev, device, nowMs, extraNeeded, prevCode);
       tx.set('kioskQrDevices', device.id, dev);
+      memoCandidate = { codeHash: issued.doc.hash, g: issued.doc.g, createdAtMs: issued.doc.createdAtMs, expiresAtMs: issued.doc.expiresAtMs, secretHash: device.secretHash, agencyId: device.agencyId, venueId: device.venueId, issued: true } as any;
       return { kind: 'waiting', code: issued.code, codeIssuedAtMs: issued.doc.createdAtMs, expiresAtMs: issued.doc.expiresAtMs };
     }
 
     // ---- poll
     if (view.kind === 'live' && code) {
+      memoCandidate = { codeHash: code.hash, g: code.g, createdAtMs: code.createdAtMs, expiresAtMs: code.expiresAtMs, secretHash: code.deviceSecretHash, agencyId: code.agencyId, venueId: code.venueId };
       return { kind: 'waiting', code: null, codeIssuedAtMs: code.createdAtMs, expiresAtMs: code.expiresAtMs };
     }
     if (view.kind === 'claimed' && code) {
@@ -18622,6 +18809,15 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
     if (code && code.state === 'approved') end(view.kind === 'approved-late' ? 'expired' : 'cancelled', view.kind);
     return fresh(true, view.kind === 'approved-late');
   });
+  // READCUT: keep the memo. A code this transaction ISSUED is the committed
+  // state (any later write to it bumps the generation after this line runs);
+  // a code it only READ is kept only if nothing wrote meanwhile.
+  const cand: any = memoCandidate;
+  if (cand && answer.kind === 'waiting' && (cand.issued || kqrMemoGenOf(device.id) === genBefore)) {
+    const { issued: _issued, ...m } = cand;
+    kqrLiveMemo.set(device.id, { ...m, gen: kqrMemoGenOf(device.id) });
+  }
+  return answer;
 }
 
 async function kqrTabletRoute(mode: 'start' | 'cancel' | 'poll', req: any, res: any) {

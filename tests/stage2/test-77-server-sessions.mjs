@@ -197,16 +197,20 @@ export default {
         const s = await signIn(a, 'E1');
         assert((await getProbe(s.token)).status === 200, 'E1 primes the map');
         assert((await hook({ action: 'revoke-silent', sid: s.sid })).json?.ok === true, 'E1 store-only revoke');
-        assert((await postProbe(s.token)).status === 401, 'E1 mutating request reads the store -> 401 at once');
+        // READCUT: a saving request uses this instance's entry while it is younger than 60 s (bounded window) ...
+        assert((await postProbe(s.token)).status !== 401, 'E1 mutating request inside 60 s is served from this instance\'s map (bounded window)');
+        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 60001 })).json?.ok === true, 'E1 age the entry past 60 s');
+        // ... and reads the store once it is older -> 401.
+        assert((await postProbe(s.token)).status === 401, 'E1 mutating request once the entry is older than 60 s reads the store -> 401');
       }
       {
         const s = await signIn(a, 'E2');
         assert((await getProbe(s.token)).status === 200, 'E2 primes the map');
         assert((await hook({ action: 'revoke-silent', sid: s.sid })).json?.ok === true, 'E2 store-only revoke');
         const fresh = await getProbe(s.token);
-        assert(fresh.status === 200, `E2 GET inside 15 s is served from this instance's map (bounded window): ${fresh.status}`);
-        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 15001 })).json?.ok === true, 'E2 age the entry');
-        assert((await getProbe(s.token)).status === 401, 'E2 GET once the entry is older than 15 s -> re-read -> 401');
+        assert(fresh.status === 200, `E2 GET inside 5 min is served from this instance's map (bounded window): ${fresh.status}`);
+        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 300001 })).json?.ok === true, 'E2 age the entry');
+        assert((await getProbe(s.token)).status === 401, 'E2 GET once the entry is older than 5 min -> re-read -> 401');
       }
       {
         const s = await signIn(a, 'E3');
@@ -218,7 +222,7 @@ export default {
         const w2 = await connectWs(baseUrl, other.token); // USER_PRESENCE delivery to the agency
         await sleep(400);
         assert(w.closeCode === null, `E3 fresh entry: not closed yet (got ${w.closeCode})`);
-        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 15001 })).json?.ok === true, 'E3 age the entry');
+        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 300001 })).json?.ok === true, 'E3 age the entry');
         w2.close(); // presence delivery again -> background re-read -> refused -> 4401
         const code = await w.waitClose(5000);
         assert(code === 4401, `E3 open WS closed 4401 after the next delivery (got ${code})`);
@@ -228,7 +232,7 @@ export default {
         const s = await signIn(a, 'E4');
         assert((await getProbe(s.token)).status === 200, 'E4 primes the map');
         assert((await hook({ action: 'revoke-silent', sid: s.sid })).json?.ok === true, 'E4 store-only revoke');
-        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 15001 })).json?.ok === true, 'E4 age the entry');
+        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 300001 })).json?.ok === true, 'E4 age the entry');
         const w = await connectWs(baseUrl, s.token);
         assert(!w.initial && w.closeCode === 4401, `E4 new WS after another instance's revoke -> 4401 (got ${w.closeCode}, initial ${w.initial})`);
       }
@@ -238,7 +242,7 @@ export default {
         // the map is not put back to "valid".
         const s = await signIn(a, 'E5');
         assert((await getProbe(s.token)).status === 200, 'E5 primes the map');
-        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 15001 })).json?.ok === true, 'E5 age the entry');
+        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 300001 })).json?.ok === true, 'E5 age the entry');
         assert((await hook({ action: 'read-delay-once', ms: 900 })).json?.ok === true, 'E5 delay the next read');
         const slowGet = getProbe(s.token);
         await sleep(200);
@@ -248,7 +252,7 @@ export default {
         assert(g5.status === 401, `E5 the slow GET sees the local revocation -> 401 (got ${g5.status})`);
         assert((await getProbe(s.token)).status === 401, 'E5 the map still says revoked');
       }
-      details.push('E other-instance revoke: POST 401 at once, GET 401 after 15 s, WS 4401 at next delivery / on connect; a late read never undoes a local logout');
+      details.push('E other-instance revoke: POST 401 after 60 s, GET 401 after 5 min, WS 4401 at next delivery / on connect; a late read never undoes a local logout');
 
       // ---- W: WebSocket deliveries never outrun the 15 s bound ([11AS1-RV1] B1/B2).
       // Deliveries are triggered by OLD-token sockets (no store reads of their own),
@@ -260,7 +264,7 @@ export default {
         const s = await signIn(a, 'W1');
         const w = await connectWs(baseUrl, s.token);
         assert(w.initial, 'W1 WS open');
-        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 15001 })).json?.ok === true, 'W1 age');
+        assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 300001 })).json?.ok === true, 'W1 age');
         const before = w.messages.length;
         await poke();
         await sleep(800);
@@ -272,7 +276,7 @@ export default {
         const w2 = await connectWs(baseUrl, s2w.token);
         assert(w2.initial, 'W2 WS open');
         assert((await hook({ action: 'revoke-silent', sid: s2w.sid })).json?.ok === true, 'W2 store-only revoke');
-        assert((await hook({ action: 'cache-age', sid: s2w.sid, ageMs: 15001 })).json?.ok === true, 'W2 age');
+        assert((await hook({ action: 'cache-age', sid: s2w.sid, ageMs: 300001 })).json?.ok === true, 'W2 age');
         assert((await hook({ action: 'read-delay-once', ms: 1500 })).json?.ok === true, 'W2 delay');
         const b2 = w2.messages.length;
         await Promise.all([poke(), poke(), poke()]);
@@ -282,7 +286,7 @@ export default {
         const s3w = await signIn(a, 'W3');
         const w3 = await connectWs(baseUrl, s3w.token);
         assert(w3.initial, 'W3 WS open');
-        assert((await hook({ action: 'cache-age', sid: s3w.sid, ageMs: 15001 })).json?.ok === true, 'W3 age');
+        assert((await hook({ action: 'cache-age', sid: s3w.sid, ageMs: 300001 })).json?.ok === true, 'W3 age');
         const b3 = w3.messages.length;
         try {
           assert((await hook({ action: 'fault', on: true })).json?.fault === true, 'W3 fault on');
@@ -313,34 +317,37 @@ export default {
           try {
             const B = second.url;
             const s = await signIn(a, 'E6a');
+            const hookB = async (body) => (await req(B, 'POST', '/api/__test__/session-hooks', { body })).json;
             assert((await getProbe(s.token)).status === 200, 'E6a A GET');
             assert((await req(B, 'GET', '/api/agencies/current', { token: s.token })).status === 200, 'E6a B GET (B caches it)');
             assert((await logout(s.token)).json?.revoked === true, 'E6a logout on A');
+            // READCUT (maxScale=1: two instances only overlap during a deploy): B serves a write from
+            // its own record for at most 60 s, then reads the store and refuses.
+            const pb0 = await req(B, 'POST', '/api/updates/seen', { token: s.token, body: { announcementIds: [], noteIds: [], alertIds: [] } });
+            assert(pb0.status !== 401, `E6a B write inside 60 s is served from B's record (bounded window; got ${pb0.status})`);
+            assert((await hookB({ action: 'cache-age', sid: s.sid, ageMs: 60001 }))?.ok === true, 'E6a age B\'s entry past 60 s');
             const pb = await req(B, 'POST', '/api/updates/seen', { token: s.token, body: { announcementIds: [], noteIds: [], alertIds: [] } });
-            assert(pb.status === 401, `E6a B mutating request right after A's logout -> 401 (got ${pb.status})`);
+            assert(pb.status === 401, `E6a B mutating request once B's entry is older than 60 s -> 401 (got ${pb.status})`);
             const s2 = await signIn(a, 'E6b');
             assert((await req(B, 'GET', '/api/agencies/current', { token: s2.token })).status === 200, 'E6b B GET (B caches it)');
-            const t0 = Date.now();
             assert((await logout(s2.token)).json?.revoked === true, 'E6b logout on A');
-            let gs = 200;
-            while (gs === 200 && Date.now() - t0 < 17000) { await sleep(500); gs = (await req(B, 'GET', '/api/agencies/current', { token: s2.token })).status; }
-            assert(gs === 401, `E6b B GET -> 401 within 15 s of A's logout (+2 s polling slack; got ${gs} after ${Date.now() - t0} ms)`);
+            assert((await req(B, 'GET', '/api/agencies/current', { token: s2.token })).status === 200, 'E6b B GET inside 5 min is served from B\'s record (bounded window)');
+            assert((await hookB({ action: 'cache-age', sid: s2.sid, ageMs: 300001 }))?.ok === true, 'E6b age B\'s entry past 5 min');
+            const gs = (await req(B, 'GET', '/api/agencies/current', { token: s2.token })).status;
+            assert(gs === 401, `E6b B GET once B's entry is older than 5 min -> 401 (got ${gs})`);
             const s3 = await signIn(a, 'E6c');
             const wb = await connectWs(B, s3.token);
             assert(wb.initial, 'E6c WS open on B');
             const b6 = wb.messages.length;
-            const t1 = Date.now();
             assert((await logout(s3.token)).json?.revoked === true, 'E6c logout on A');
+            assert((await hookB({ action: 'cache-age', sid: s3.sid, ageMs: 300001 }))?.ok === true, 'E6c age B\'s entry past 5 min');
             const oldTok = await mintOld(a.id);
-            while (wb.closeCode === null && Date.now() - t1 < 20000) { const x = await connectWs(B, oldTok); x.close(); await sleep(1000); }
+            const t1 = Date.now();
+            while (wb.closeCode === null && Date.now() - t1 < 8000) { const x = await connectWs(B, oldTok); x.close(); await sleep(500); }
             const leaked = wb.messages.slice(b6).filter((m) => m !== 'USER_PRESENCE');
-            assert(wb.closeCode === 4401, `E6c B's open WS closed 4401 after A's logout (got ${wb.closeCode} after ${Date.now() - t1} ms)`);
+            assert(wb.closeCode === 4401, `E6c B's open WS closed 4401 at its next delivery once B's entry is older than 5 min (got ${wb.closeCode} after ${Date.now() - t1} ms)`);
             assert(leaked.length === 0, `E6c no data frame reached the revoked socket on B (${J(leaked)})`);
-            // B keeps broadcasting (a presence frame every second) the whole time: past the 15 s bound
-            // (+1 s for the re-read) NOTHING reaches the revoked socket, whatever its type.
-            const late = wb.times.slice(b6).filter((ts) => ts > t1 + 16000);
-            assert(late.length === 0, `E6c no frame of any kind after 15 s (+1 s) on B (${late.length} late)`);
-            details.push('E6 two instances: B refuses a write at once, a GET within 15 s, and closes the open WS after A\'s logout');
+            details.push('E6 two instances (deploy overlap): B refuses a write once its record is 60 s old, a GET once 5 min old, and closes the open WS at the next delivery after that; nothing but presence frames meanwhile');
           } finally {
             await second.stop();
           }
@@ -392,13 +399,17 @@ export default {
           assert((await hook({ action: 'fault', on: true })).json?.fault === true, 'G fault on');
           const l = await login(a.email, a.pw);
           assert(l.status === 503 && l.json?.code === 'SESSION_STORE_UNAVAILABLE' && !l.json?.token, `G login during outage: ${l.status} ${J(l.json)}`);
+          // READCUT: an entry read in the last 60 s serves a saving request without a store read;
+          // older than that, the store is read (outage -> 503, never 401).
+          assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 60001 })).json?.ok === true, 'G age the entry past 60 s');
           const p = await postProbe(s.token);
           assert(p.status === 503 && p.json?.code === 'SESSION_STORE_UNAVAILABLE', `G sid POST during outage -> 503: ${p.status}`);
           assert((await logout(s.token)).status === 503, 'G logout during outage -> 503 (nothing revoked)');
           assert((await getProbe(o)).status === 200 && accepted(await postProbe(o)), 'G old token unaffected by the outage');
-          // A new WS reads the store at connect even when this instance's map holds a valid entry: outage -> 1013, never registered.
+          // A new WS reads the store at connect when this instance's entry is older than 60 s (READCUT): outage -> 1013, never registered.
+          assert((await hook({ action: 'cache-age', sid: s.sid, ageMs: 60001 })).json?.ok === true, 'G age the entry past 60 s (WS)');
           const wg = await connectWs(baseUrl, s.token);
-          assert(!wg.initial && wg.closeCode === 1013, `G new WS during outage (map entry valid) -> 1013 (got ${wg.closeCode}, initial ${wg.initial})`);
+          assert(!wg.initial && wg.closeCode === 1013, `G new WS during outage (map entry older than 60 s) -> 1013 (got ${wg.closeCode}, initial ${wg.initial})`);
         } finally {
           await hook({ action: 'fault', on: false });
         }

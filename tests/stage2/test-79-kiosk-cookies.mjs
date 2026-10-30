@@ -361,7 +361,7 @@ export default {
       assert(okStatus(await board({ bearer: l6.json.token, device: t1.cred })), 'D fresh kiosk session works');
       const ex = await hook({ action: 'expire', sid: c6.sid });
       assert(ex.status === 200 && ex.json?.ok === true, `D expire hook: ${ex.status}`);
-      await hook({ action: 'cache-age', sid: c6.sid, ageMs: 60000 });
+      await hook({ action: 'cache-age', sid: c6.sid, ageMs: 300001 });
       const d6 = await board({ bearer: l6.json.token, device: t1.cred });
       assert(d6.status === 401, `D an ended kiosk record is refused on HTTP: ${d6.status}`);
       const ws6 = await connectWs(baseUrl, { query: `?token=${encodeURIComponent(l6.json.token)}`, frame: t1.cred });
@@ -374,7 +374,7 @@ export default {
       opened.push(ws9);
       assert(ws9.initial, 'D kiosk socket open');
       assert((await hook({ action: 'revoke-silent', sid: c9.sid })).json?.ok === true, 'D store-only revoke');
-      assert((await hook({ action: 'cache-age', sid: c9.sid, ageMs: 15001 })).json?.ok === true, 'D age the entry');
+      assert((await hook({ action: 'cache-age', sid: c9.sid, ageMs: 300001 })).json?.ok === true, 'D age the entry');
       const wsA = await connectWs(baseUrl, { query: `?token=${encodeURIComponent(tAdmin)}` }); // USER_PRESENCE delivery to the agency
       opened.push(wsA);
       wsA.close();
@@ -383,7 +383,7 @@ export default {
       const l10 = await kioskLogin({ device: t1.cred });
       const c10 = claimsOf(l10.json.token);
       assert((await hook({ action: 'revoke-silent', sid: c10.sid })).json?.ok === true, 'D store-only revoke (cookie socket)');
-      assert((await hook({ action: 'cache-age', sid: c10.sid, ageMs: 15001 })).json?.ok === true, 'D age the entry (cookie socket)');
+      assert((await hook({ action: 'cache-age', sid: c10.sid, ageMs: 300001 })).json?.ok === true, 'D age the entry (cookie socket)');
       const ws10 = await connectWs(baseUrl, { query: '?auth=cookie', cookies: [`${K}=${l10.json.token}`, `${D}=${t1.cred}`], origin: ORIGIN });
       opened.push(ws10);
       assert(!ws10.initial && ws10.closeCode === 4401, `D a K + D socket on a record revoked elsewhere -> 4401 (got ${ws10.closeCode})`);
