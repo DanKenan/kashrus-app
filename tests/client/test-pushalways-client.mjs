@@ -2,11 +2,14 @@
 // quiet re-sync on app open (never asks; re-subscribes a phone that already
 // allowed notifications; re-registers a phone the server lost).
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => { if (cond) { pass++; } else { fail++; console.log('FAIL', name, extra); } };
 
-const store = new Map();
-globalThis.localStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
+const store = new Map([['shutfey_push_prompt_snooze_until:old', '9999999999999']]);
+let storageWrites = 0;
+globalThis.sessionStorage = { setItem() { storageWrites++; } };
+globalThis.localStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => { storageWrites++; store.set(k, String(v)); }, get length() { return store.size; }, key: (i) => [...store.keys()][i] ?? null, removeItem: (k) => store.delete(k) };
 const events = [];
 const fakeWindow = { dispatchEvent: (e) => { events.push(e.type); return true; }, addEventListener() {}, removeEventListener() {}, atob: (s) => Buffer.from(s, 'base64').toString('binary'), PushManager: function () {}, Notification: {} };
 Object.defineProperty(globalThis, 'window', { value: fakeWindow, configurable: true, writable: true });
@@ -43,10 +46,10 @@ const P = await import('../../src/lib/pushPrompt.ts');
 const push = await import('../../src/lib/push.ts');
 
 // ---- banner decision ----
-const base = { signedIn: true, kiosk: false, phone: true, supported: true, state: 'default', ios: false, standalone: false, snoozed: false, otherCardOpen: false };
+const base = { signedIn: true, kiosk: false, phone: true, supported: true, state: 'default', ios: false, standalone: false, dismissed: false, firstRunBusy: false };
 ok('B1 a phone that never allowed notifications gets "Turn on"', P.pushPromptKind(base) === 'turn-on');
 ok('B1b granted but no subscription -> Turn on', P.pushPromptKind({ ...base, state: 'granted' }) === 'turn-on');
-for (const [k, v] of [['signedIn', false], ['kiosk', true], ['phone', false], ['snoozed', true], ['otherCardOpen', true]]) ok(`B2 no banner when ${k}=${v}`, P.pushPromptKind({ ...base, [k]: v }) === null);
+for (const [k, v] of [['signedIn', false], ['kiosk', true], ['phone', false], ['dismissed', true], ['firstRunBusy', true]]) ok(`B2 no banner when ${k}=${v}`, P.pushPromptKind({ ...base, [k]: v }) === null);
 ok('B3 no banner once subscribed', P.pushPromptKind({ ...base, state: 'subscribed' }) === null);
 ok('B3b no banner while the quiet check runs', P.pushPromptKind({ ...base, state: null }) === null);
 ok('B4 blocked phone gets the settings how-to', P.pushPromptKind({ ...base, state: 'denied' }) === 'blocked');
@@ -55,13 +58,22 @@ ok('B5b never a Turn-on button there', P.pushPromptKind({ ...base, supported: fa
 ok('B6 an unsupported non-iPhone browser gets nothing', P.pushPromptKind({ ...base, supported: false, state: 'unsupported' }) === null);
 ok('B6b Home-Screen iPhone without push (old iOS) gets nothing', P.pushPromptKind({ ...base, supported: false, state: 'unsupported', ios: true, standalone: true }) === null);
 ok('B7 wording', P.PUSH_PROMPT_TEXT['turn-on'] === "Turn on notifications so you know when you're tagged or assigned.");
-const now = 1_000_000;
-ok('B8 not snoozed at first', !P.pushPromptSnoozed('u1', now));
-P.snoozePushPrompt('u1', now);
-ok('B8b "Not now" snoozes for this person', P.pushPromptSnoozed('u1', now + 1000) && !P.pushPromptSnoozed('u2', now + 1000));
-ok('B8c the snooze ends after 7 days', !P.pushPromptSnoozed('u1', now + P.PUSH_PROMPT_SNOOZE_MS + 1));
-store.set('shutfey_push_prompt_snooze_until:u3', 'garbage');
-ok('B8d a corrupt snooze stays quiet', P.pushPromptSnoozed('u3', now));
+ok('B8 old snooze keys removed on load', !store.has('shutfey_push_prompt_snooze_until:old'));
+const writesBeforeDismiss = storageWrites;
+P.dismissPushPromptForThisOpen('u1');
+ok('B8b dismissal is per user', P.pushPromptDismissedThisOpen('u1') && !P.pushPromptDismissedThisOpen('u2'));
+ok('B8c dismissal hides this open', P.pushPromptKind({ ...base, dismissed: P.pushPromptDismissedThisOpen('u1') }) === null);
+ok('B8d no storage writes', storageWrites === writesBeforeDismiss);
+const fresh = await import('../../src/lib/pushPrompt.ts?reload=1');
+ok('B8e reload shows it again', !fresh.pushPromptDismissedThisOpen('u1') && fresh.pushPromptKind(base) === 'turn-on');
+ok('B3c tagged is still subscribed', P.pushPromptKind({ ...base, state: 'subscribed', mode: 'tagged' }) === null);
+ok('B5c even iPhone waits for quiet check', P.pushPromptKind({ ...base, supported: false, state: null, ios: true }) === null);
+const promptSource = readFileSync(new URL('../../src/components/PushPrompt.tsx', import.meta.url), 'utf8');
+const appSource = readFileSync(new URL('../../src/App.tsx', import.meta.url), 'utf8');
+ok('B9 modal semantics', promptSource.includes('role="dialog"') && promptSource.includes('aria-modal="true"'));
+ok('B9b no old snooze import', !appSource.includes('snoozePushPrompt'));
+ok('B9c turn-on handler is synchronous', promptSource.includes('onClick={onTurnOn}') && appSource.includes('onTurnOn={() => void turnOnPush()}'));
+ok('B9d permission flow begins before first await', /await turnOnPushHere/.test(appSource) && !/await[\s\S]*await turnOnPushHere/.test(appSource.slice(appSource.indexOf('const turnOnPush ='), appSource.indexOf('// 10g:'))));
 
 // ---- button words ----
 const vOn = P.pushToggleView('subscribed', 'all'), vTag = P.pushToggleView('subscribed', 'tagged'), vOff = P.pushToggleView('default', null);
