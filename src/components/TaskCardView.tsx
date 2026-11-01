@@ -1,4 +1,4 @@
-import { shiftDisplayWeekday } from '../lib/shiftTaskDay';
+import { shiftDisplayWeekday, shiftAssigneeLabel } from '../lib/shiftTaskDay';
 import type { Shift } from '../types';
 import { shiftLabel, shiftTaskAppliesAt, shiftTaskOverdueAt } from '../lib/shifts';
 import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
@@ -34,6 +34,7 @@ import { CheckInPhoto } from './CheckInPhoto';
 
 interface TaskCardViewProps {
   shiftsById?: Map<string, Shift>;
+  isKiosk?: boolean;
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
   timeZone?: string;
   tasks: Task[];
@@ -60,6 +61,7 @@ const getInitials = (nameOrEmail: string) => {
 
 export const TaskCardView: React.FC<TaskCardViewProps> = ({
   shiftsById = new Map(),
+  isKiosk = false,
   tasks,
   sections,
   currentUser,
@@ -145,6 +147,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
         const canFill = canUserFillTasks(currentUser);
         const canAssign = canUserAssignTasks(currentUser);
         const mine = isDirectlyAssigned(task, currentUser);
+        const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+        const assignee = shift ? shiftAssigneeLabel(shift, canAssign && !isKiosk, todayYmd, todayWeekday) : null;
         const done = task.isCompleted;
 
         return (
@@ -240,7 +244,9 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
               {/* Mashgiach Assignment & Schedule Meta */}
               <div className="flex items-center justify-between text-xs text-ink-soft mt-3 pt-2.5 border-t border-line/70">
                 <div className="flex items-center gap-2">
-                  {mine ? (
+                  {assignee ? (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-ink-soft"><Users className="w-4 h-4 shrink-0" aria-hidden="true" /><span>{assignee}</span></span>
+                  ) : mine ? (
                     <div
                       className="inline-flex items-center gap-1.5 text-[11px] text-gold-ink font-bold bg-gold-wash border border-gold/40 rounded-full pl-1 pr-2.5 py-0.5"
                       title={task.assignedTo.join(', ')}
@@ -306,7 +312,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                         <p className="text-[10px] text-ink-faint">
                           {task.isCompleted
                             ? (task.updatedByName || task.updatedByEmail ? `By ${task.updatedByName || task.updatedByEmail}` : 'Verified completed')
-                            : `Assigned: ${task.assignedTo.includes('all') ? 'Team (All)' : task.assignedTo.join(', ')}`}
+                            : `Assigned: ${assignee || (task.assignedTo.includes('all') ? 'Team (All)' : task.assignedTo.join(', '))}`}
                         </p>
                       </div>
                     </div>

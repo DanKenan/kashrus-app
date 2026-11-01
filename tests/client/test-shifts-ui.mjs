@@ -246,3 +246,31 @@ const kindToggle = oncePanel.find((e) => e.props['aria-label'] === 'Save for nex
 assert.equal(kindToggle.props.disabled, true);
 assert.equal(kindToggle.props['aria-checked'], false);
 console.log('Shifts UI: immutable kind and compact weekday-person summary passed');
+
+const { shiftAssigneeLabel } = await import('../../src/lib/shiftTaskDay.ts');
+assert.equal(shiftAssigneeLabel(shift, false, '2026-11-08', 0), 'Deli day shift');
+assert.equal(shiftAssigneeLabel(shift, true, '2026-11-08', 0), 'Deli day · today: Moshe L.');
+assert.equal(shiftAssigneeLabel(namedWeek, true, '2026-11-09', 1), 'Deli day · today: Dovid R.');
+assert.equal(shiftAssigneeLabel(namedWeek, true, '2026-11-11', 3), 'Deli day · today: Nobody');
+assert.equal(shiftAssigneeLabel({ ...shift, overrides: [{ date: '2026-11-08', userId: 'd', userName: 'Dovid R.' }] }, true, '2026-11-08', 0), 'Deli day · today: Dovid R.');
+assert.equal(shiftAssigneeLabel(shift, true, '2026-11-14', 6), 'Deli day shift');
+try {
+  globalThis.Date = class extends RealDate {
+    constructor(...args) { super(...(args.length ? args : ['2026-11-08T15:00:00Z'])); }
+    static now() { return new RealDate('2026-11-08T15:00:00Z').getTime(); }
+  };
+  for (const View of [TaskCardView, TaskTableView]) {
+    const view = mount(View, { tasks: [{ ...baseTask, shiftId: shift.id }], shiftsById: new Map([[shift.id, shift]]), currentUser: user, timeZone: 'America/New_York', onUpdateStatus: noop, onUpdateNotes: noop, onCheckIn: noop, onEditTask: noop, onDeleteTask: noop });
+    await view.render();
+    assert.match(view.text(), /Deli day shift/);
+    assert.doesNotMatch(view.text(), /Team Roster|Assigned: Team/);
+    await view.render({ currentUser: { ...user, role: 'coordinator' } });
+    assert.match(view.text(), /Deli day · today: Moshe L\./);
+    await view.render({ isKiosk: true });
+    assert.match(view.text(), /Deli day shift/);
+    assert.doesNotMatch(view.text(), /today: Moshe/);
+    await view.render({ tasks: [baseTask] });
+    assert.match(view.text(), /Team Roster/);
+  }
+} finally { globalThis.Date = RealDate; }
+console.log('Shifts UI: shift assignees, weekday/date names, Nobody, kiosk and ordinary team fallback passed');

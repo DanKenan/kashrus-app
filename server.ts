@@ -13128,6 +13128,17 @@ function validatedShift(body: any, previous: Shift | undefined, venueId: string,
     if (ownHours && (![d.startMinutes, d.endMinutes].every((m) => Number.isInteger(m) && m >= 0 && m < 1440) || d.startMinutes === d.endMinutes)) bad('Weekday hours require both start and end, different integer minutes from 0 to 1439.');
     return { on: d.on, ...(d.userId !== undefined ? { userId: d.userId } : {}), ...(ownHours ? { startMinutes: d.startMinutes, endMinutes: d.endMinutes } : {}) };
   });
+  if (!oneTimeDate) {
+    const labels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    for (let w = 0; w < 7; w++) {
+      const day = days[w], next = days[(w + 1) % 7];
+      const start = day.startMinutes ?? startMinutes;
+      const end = day.endMinutes ?? endMinutes;
+      if (day.on && next.on && end < start && end > (next.startMinutes ?? startMinutes)) {
+        bad(`Two days of this shift overlap: ${labels[w]} ends after ${labels[(w + 1) % 7]} starts.`);
+      }
+    }
+  }
   const overrides = input.overrides === undefined ? [] : input.overrides;
   if (!Array.isArray(overrides) || overrides.length > 60) bad('At most 60 overrides are allowed.');
   const dates = new Set<string>();
@@ -13198,6 +13209,13 @@ for (const method of ['post', 'put', 'delete'] as const) {
           groups.get(key)!.days.push(weekday);
         }
         const ordered = [...groups.values()].sort((a, b) => b.days.length - a.days.length || a.days[0] - b.days[0]);
+        const attachedCount = (doc.tasks || []).filter((t: TaskItem) => t.shiftId === id && t.venueId === venueId).length;
+        const copyCount = previous!.oneTimeDate ? 0 : attachedCount * Math.max(0, ordered.length - 1);
+        if (copyCount > 200) {
+          throw new OperationConflictError('This shift has too many tasks with different hours per day. Move some tasks to another shift first.', 409, 'SHIFT_SPLIT_TOO_LARGE');
+        }
+        // commitState's 900 KiB guard also rejects oversized splits atomically
+        // (503 SIZE_LIMIT), before any shift/task changes are persisted.
         const detachedIds: string[] = [];
         const createdIds: string[] = [];
         const detachedTasks = (doc.tasks || []).flatMap((task: TaskItem) => {

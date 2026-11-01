@@ -87,6 +87,7 @@ export function shiftRunsOn(shift: Shift, ymd: string, weekday: number): boolean
 
 export function shiftOccurrenceDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number): string | null {
   if (!validHours(shift)) return null;
+  // Writes reject overlapping weekdays. For legacy overlaps, yesterday wins.
   const yesterday = addDays(ymd, -1);
   const hours = shiftHoursOn(shift, (weekday + 6) % 7);
   if (hours.endMinutes < hours.startMinutes && nowMinutes >= 0 && nowMinutes < hours.endMinutes

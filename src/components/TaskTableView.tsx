@@ -1,4 +1,4 @@
-import { shiftDisplayWeekday } from '../lib/shiftTaskDay';
+import { shiftDisplayWeekday, shiftAssigneeLabel } from '../lib/shiftTaskDay';
 import type { Shift } from '../types';
 import { shiftLabel, shiftTaskAppliesAt, shiftTaskOverdueAt } from '../lib/shifts';
 import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
@@ -31,6 +31,7 @@ import { TaskAnswerPhoto } from './TaskAnswerPhoto';
 
 interface TaskTableViewProps {
   shiftsById?: Map<string, Shift>;
+  isKiosk?: boolean;
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
   timeZone?: string;
   tasks: Task[];
@@ -57,6 +58,7 @@ const getInitials = (nameOrEmail: string) => {
 
 export const TaskTableView: React.FC<TaskTableViewProps> = ({
   shiftsById = new Map(),
+  isKiosk = false,
   tasks,
   sections,
   currentUser,
@@ -190,6 +192,8 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
               const canFill = canUserFillTasks(currentUser);
               const canAssign = canUserAssignTasks(currentUser);
               const mine = isDirectlyAssigned(task, currentUser);
+              const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+              const assignee = shift ? shiftAssigneeLabel(shift, canAssign && !isKiosk, todayYmd, todayWeekday) : null;
 
               return (
                 <React.Fragment key={task.id}>
@@ -275,7 +279,9 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 
                   {/* Assigned To with Avatar Monogram */}
                   <td className="py-3.5 px-3 align-top">
-                    {mine ? (
+                    {assignee ? (
+                      <span className="inline-flex items-center gap-1.5 text-xs text-ink-soft"><Users className="w-4 h-4 shrink-0" aria-hidden="true" /><span>{assignee}</span></span>
+                    ) : mine ? (
                       <span
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-gold-wash text-gold-ink border border-gold/40 tactile-1"
                         title={task.assignedTo.join(', ')}

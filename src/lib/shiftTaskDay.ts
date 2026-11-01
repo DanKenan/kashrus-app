@@ -1,5 +1,5 @@
 import type { Shift, Task } from '../types';
-import { shiftOccurrenceDay, taskWithShiftTimes } from './shifts';
+import { shiftOccurrenceDay, taskWithShiftTimes, shiftRunsOn, shiftPersonOn, shiftDayOf } from './shifts';
 
 type Weekday = number | ((task: Task) => number | undefined);
 /** A weekday section wins; today's list uses the occurrence's start day,
@@ -20,4 +20,17 @@ export function shiftSortProjection(tasks: Task[], shiftsById: Map<string, Shift
 }
 export function restoreShiftWindows(tasks: Task[], shiftsById: Map<string, Shift>, weekday?: Weekday): Task[] {
   return tasks.map((task) => taskWithShiftTimes(task, shiftsById, typeof weekday === 'function' ? weekday(task) : weekday));
+}
+
+/** Presentation only: shift assignments keep the stored team fallback out of the label. */
+export function shiftAssigneeLabel(shift: Shift, editor: boolean, ymd: string | null, weekday: number | null): string {
+  const label = `${shift.name} shift`;
+  if (!editor || ymd === null || weekday === null || !shiftRunsOn(shift, ymd, weekday)) return label;
+  const person = shiftPersonOn(shift, ymd);
+  if (person === null) return `${shift.name} · today: Nobody`;
+  const override = shift.overrides?.find((o) => o.date === ymd) as { userId: string | null; userName?: string; name?: string } | undefined;
+  const day = shiftDayOf(shift, weekday);
+  const name = override?.userName || override?.name ||
+    (day.userId === person ? shift.dayUserNames?.[weekday] : undefined) || shift.userName;
+  return `${shift.name} · today: ${name || 'Unavailable person'}`;
 }

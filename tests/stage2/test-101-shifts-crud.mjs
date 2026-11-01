@@ -58,6 +58,23 @@ export default {
       assert.equal((await api('admin', 'POST', '/api/shifts', { ...body, days: invalid })).status, 400);
       assert.equal((await api('admin', 'PUT', `/api/shifts/${id}`, { days: invalid })).status, 400);
     }
+    for (const w of [0, 6]) {
+      const overlapDays = Array.from({ length: 7 }, (_, i) => ({ on: i === w || i === (w + 1) % 7,
+        ...(i === w ? { startMinutes: 1320, endMinutes: 120 } : { startMinutes: 30, endMinutes: 240 }) }));
+      const error = `Two days of this shift overlap: ${w === 0 ? 'Sun' : 'Sat'} ends after ${w === 0 ? 'Mon' : 'Sun'} starts.`;
+      const beforeOverlap = (await ctx.getDoc()).shifts;
+      for (const [method, path, payload] of [['POST', '/api/shifts', { ...body, days: overlapDays }], ['PUT', `/api/shifts/${id}`, { days: overlapDays }]]) {
+        const denied = await api('admin', method, path, payload);
+        assert.equal(denied.status, 400);
+        assert.equal(denied.json.error, error);
+      }
+      assert.deepEqual((await ctx.getDoc()).shifts, beforeOverlap);
+      overlapDays[(w + 1) % 7].startMinutes = 120;
+      const touching = await api('admin', 'POST', '/api/shifts', { ...body, days: overlapDays });
+      assert.equal(touching.status, 201, JSON.stringify(touching.json));
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${touching.json.id}`, { days: overlapDays })).status, 200);
+      assert.equal((await api('admin', 'DELETE', `/api/shifts/${touching.json.id}`)).status, 200);
+    }
     const { startMinutes: _start, endMinutes: _end, ...withoutGeneral } = body;
     assert.equal((await api('admin', 'POST', '/api/shifts', { ...withoutGeneral, days })).status, 400);
     const ownDays = days.map((d, w) => w === 0 ? { ...d, userId: people.assign.id, startMinutes: 600, endMinutes: 900 } : d);
@@ -324,6 +341,18 @@ export default {
       after = await ctx.getDoc();
       assert.equal(after.shifts.some((s) => s.id === rolloverShift.json.id), false);
     } finally { for (const ws of connections) ws.close(); await clock(null); }
+    // 34 attached tasks with seven hour groups would create 204 new copies.
+    const boundedShift = await api('admin', 'POST', '/api/shifts', { ...body, overrides: [], days: Array.from({ length: 7 }, (_, w) => ({ on: true, startMinutes: 480 + w, endMinutes: 1080 })) });
+    assert.equal(boundedShift.status, 201);
+    const attachedBatch = Array.from({ length: 34 }, (_, i) => ({ id: `${venueId}-bounded-${i}`, agencyId: people.admin.agencyId, venueId, title: 'Bounded split', shiftId: boundedShift.json.id, assignedTo: ['all'], scheduleType: 'recurring' }));
+    assert.equal((await ctx.api('POST', '/api/__test__/inject-fixture', { tasks: attachedBatch })).status, 200);
+    const beforeBound = await ctx.getDoc();
+    const bounded = await api('admin', 'DELETE', `/api/shifts/${boundedShift.json.id}`);
+    assert.equal(bounded.status, 409);
+    assert.deepEqual(bounded.json, { code: 'SHIFT_SPLIT_TOO_LARGE', error: 'This shift has too many tasks with different hours per day. Move some tasks to another shift first.' });
+    const afterBound = await ctx.getDoc();
+    assert.deepEqual(afterBound.shifts, beforeBound.shifts);
+    assert.deepEqual(afterBound.tasks, beforeBound.tasks);
     return 'CRUD, permission/validation denials, safe cached payloads, task binding, atomic detach, scoped websocket updates and identity-bound shift pushes passed';
   },
 };

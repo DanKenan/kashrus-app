@@ -1,5 +1,5 @@
 import { DEFAULT_TIME_ZONE, workDateIn, weekdayIn, minutesIn } from '../lib/workday';
-import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday } from '../lib/shiftTaskDay';
+import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday, shiftAssigneeLabel } from '../lib/shiftTaskDay';
 import type { Shift } from '../types';
 import { shiftLabel } from '../lib/shifts';
 import { isNoTimeTask, sortTasksByTime } from '../lib/taskDay';
@@ -667,6 +667,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                 const st = phase ? { word: 'Saving…', tone: 'open' as const } : rowStatus(task);
                 const isOpen = !!open[task.id];
                 const mine = isDirectlyAssigned(task, currentUser);
+                const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
                 const currentNote = notesState[task.id] !== undefined ? notesState[task.id] : task.notes;
                 const control = rowControl(task);
                 const rowId = `kiosk-row-${task.id}`;
@@ -749,7 +750,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                               {cat}
                             </span>
                           ))}
-                          {mine && (
+                          {shift ? <span>{shiftAssigneeLabel(shift, false, null, null)}</span> : mine && (
                             <span className="inline-flex items-center gap-1 text-gold-ink font-semibold">
                               <Star className="w-4 h-4 fill-current" aria-hidden /> For you
                             </span>

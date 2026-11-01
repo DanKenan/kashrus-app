@@ -2341,6 +2341,7 @@ export default function App() {
 
   const taskTableView = (
     <TaskTableView
+      isKiosk={isKiosk}
       shiftsById={shiftsById}
       tasks={sortedTasks}
       sections={sections}
@@ -2363,6 +2364,7 @@ export default function App() {
   );
   const taskCardView = (
     <TaskCardView
+      isKiosk={isKiosk}
       shiftsById={shiftsById}
       tasks={sortedTasks}
       sections={sections}
