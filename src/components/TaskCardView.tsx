@@ -132,7 +132,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
 
         return (
           <React.Fragment key={task.id}>
-          {i > 0 && isNoTimeTask(task) && !isNoTimeTask(section.tasks[i - 1]) && <p className="pt-2 text-xs font-semibold text-ink-soft">{ANY_TIME_LABEL}</p>}
+          {isNoTimeTask(task) && (i === 0 || !isNoTimeTask(section.tasks[i - 1])) && <p className="pt-2 text-xs font-semibold text-ink-soft">{ANY_TIME_LABEL}</p>}
           <motion.div
             key={task.id}
             layout

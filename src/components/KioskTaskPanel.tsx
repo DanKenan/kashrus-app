@@ -664,7 +664,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
 
                 return (
                   <React.Fragment key={task.id}>
-                    {i > 0 && isNoTimeTask(task) && !isNoTimeTask(shown[i - 1]) && <li className="pt-4 text-base font-semibold text-ink-soft">{ANY_TIME_LABEL}</li>}
+                    {isNoTimeTask(task) && (i === 0 || !isNoTimeTask(shown[i - 1])) && <li className="pt-4 text-base font-semibold text-ink-soft">{ANY_TIME_LABEL}</li>}
                   <li
                     key={task.id}
                     data-kiosk-row

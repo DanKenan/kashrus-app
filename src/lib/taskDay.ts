@@ -19,8 +19,10 @@ interface SortableTask extends TimeTask {
 export interface TaskDaySection<T> { key: string; label: string; tasks: T[] }
 
 export function taskAppliesOn(task: DayTask, ymd: string, weekday: number): boolean {
-  if (task.scheduleType === 'specific_dates') return !!task.specificDates?.includes(ymd);
-  return !task.daysOfWeek?.length || task.daysOfWeek.includes(weekday);
+  // Defensive on stored data: a non-array dates field matches no date; a non-array days field means every day.
+  if (task.scheduleType === 'specific_dates') return Array.isArray(task.specificDates) && task.specificDates.includes(ymd);
+  const days = Array.isArray(task.daysOfWeek) ? task.daysOfWeek : [];
+  return days.length === 0 || days.includes(weekday);
 }
 
 /**
@@ -80,7 +82,7 @@ export function groupTasksByDay<T extends DayTask & SortableTask>(list: readonly
   }));
   const dated = list.filter((t) => t.scheduleType === 'specific_dates');
   const isYmd = (d: unknown): d is string => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d);
-  const datesOf = (t: T) => (t.specificDates || []).filter(isYmd);
+  const datesOf = (t: T) => (Array.isArray(t.specificDates) ? t.specificDates : []).filter(isYmd);
   const dates = [...new Set(dated.flatMap(datesOf).filter((d) => d >= todayYmd))].sort();
   for (const date of dates) sections.push({
     key: date,

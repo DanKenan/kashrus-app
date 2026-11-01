@@ -98,4 +98,13 @@ eq('Mine tab: own task in another case counts', isMyTask({ assignedTo: ['NOA@hkc
 eq('Mine tab: All counts for staff', isMyTask({ assignedTo: ['all'] }, { email: 'noa@hkc.test', role: 'mashgiach' }), true);
 eq('Mine tab: All does not count for the admin (unchanged)', isMyTask({ assignedTo: ['all'] }, { email: 'a@hkc.test', role: 'admin' }), false);
 eq('Mine tab: someone else is not mine', isMyTask({ assignedTo: ['eli@hkc.test'] }, { email: 'noa@hkc.test', role: 'mashgiach' }), false);
+// RV1 P2: malformed stored dates/days never crash and stay findable.
+const badStr = { id: 'badstr', createdAt: '2026-11-01', scheduleType: 'specific_dates', specificDates: '2026-11-08', daysOfWeek: [] };
+const badObj = { id: 'badobj', createdAt: '2026-11-01', scheduleType: 'specific_dates', specificDates: { a: 1 }, daysOfWeek: [] };
+const badDays = { id: 'baddays', createdAt: '2026-11-01', daysOfWeek: '5' };
+eq('string dates: not today, no crash', taskAppliesOn(badStr, '2026-11-08', 0), false);
+eq('object dates: not today, no crash', taskAppliesOn(badObj, '2026-11-08', 0), false);
+eq('non-array days = every day', taskAppliesOn(badDays, today, 0), true);
+eq('malformed dates land in No dates set', groupTasksByDay([badStr, badObj], today).map((s) => [s.key, ids(s.tasks)]), [['nodate', ['badobj', 'badstr']]]);
+eq('RV1 P3: "Any time" label also when the first task has no time', ['TaskCardView', 'TaskTableView'].every((n) => /isNoTimeTask\(task\) && \(i === 0 \|\| !isNoTimeTask\(section\.tasks\[i - 1\]\)\)/.test(read(`src/components/${n}.tsx`))) && /isNoTimeTask\(task\) && \(i === 0 \|\| !isNoTimeTask\(shown\[i - 1\]\)\)/.test(read('src/components/KioskTaskPanel.tsx')), true);
 console.log(`TODAYSORT client: ${passed} passed`);

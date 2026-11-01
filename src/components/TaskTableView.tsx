@@ -176,7 +176,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 
               return (
                 <React.Fragment key={task.id}>
-          {i > 0 && isNoTimeTask(task) && !isNoTimeTask(section.tasks[i - 1]) && <tr><td colSpan={canUserAssignTasks(currentUser) ? 7 : 6} className="px-4 py-3 text-xs font-semibold text-ink-soft">{ANY_TIME_LABEL}</td></tr>}
+          {isNoTimeTask(task) && (i === 0 || !isNoTimeTask(section.tasks[i - 1])) && <tr><td colSpan={canUserAssignTasks(currentUser) ? 7 : 6} className="px-4 py-3 text-xs font-semibold text-ink-soft">{ANY_TIME_LABEL}</td></tr>}
           <tr
                   key={task.id}
                   style={categoryVars(task.category)}
