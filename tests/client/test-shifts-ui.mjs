@@ -223,3 +223,26 @@ const expiredPanel = mount(ShiftsPanel, { shifts: [{ ...shift, name: 'Past one-t
 await expiredPanel.render();
 assert.doesNotMatch(expiredPanel.text(), /Past one-time/);
 assert.match(expiredPanel.text(), /One-time.*Future one-time/);
+
+// Existing saved and one-time shifts cannot change kind; new shifts can.
+const namedWeek = { ...shift, days: shift.days.map((d, w) => w === 1 ? { ...d, userId: 'd' } : w === 3 ? { ...d, userId: null } : d), dayUserNames: [null, 'Dovid R.', null, null, null, null, null] };
+const reviewPanel = mount(ShiftsPanel, { shifts: [namedWeek], venueId: 'v', timeZone: 'America/New_York', people: [], onChange: noop });
+await reviewPanel.render();
+assert.match(reviewPanel.text(), /Mon: Dovid R\. · Wed: Nobody/);
+const peopleLine = reviewPanel.find((e) => e.type === 'span' && e.props.title === 'Mon: Dovid R. · Wed: Nobody')[0];
+assert.ok(peopleLine.props.className.includes('truncate'));
+await reviewPanel.click('Deli day');
+assert.equal(reviewPanel.find((e) => e.props['aria-label'] === 'Save for next weeks')[0].props.disabled, true);
+assert.match(reviewPanel.text(), /Can't change after the shift is created\./);
+await reviewPanel.click((e) => e.props['aria-label'] === 'Close');
+await reviewPanel.click('+ New shift');
+assert.equal(reviewPanel.find((e) => e.props['aria-label'] === 'Save for next weeks')[0].props.disabled, false);
+assert.doesNotMatch(reviewPanel.text(), /Can't change after the shift is created/);
+const oncePanel = mount(ShiftsPanel, { shifts: [{ ...namedWeek, oneTimeDate: '2099-01-01' }], venueId: 'v', timeZone: 'America/New_York', people: [], onChange: noop });
+await oncePanel.render();
+assert.doesNotMatch(oncePanel.text(), /Mon: Dovid/);
+await oncePanel.click('Deli day');
+const kindToggle = oncePanel.find((e) => e.props['aria-label'] === 'Save for next weeks')[0];
+assert.equal(kindToggle.props.disabled, true);
+assert.equal(kindToggle.props['aria-checked'], false);
+console.log('Shifts UI: immutable kind and compact weekday-person summary passed');

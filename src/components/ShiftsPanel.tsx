@@ -16,6 +16,15 @@ function dayLabel(values: number[]) {
   return ordered.length > 2 && ordered.every((d, i) => !i || d === ordered[i - 1] + 1)
     ? `${days[ordered[0]]}–${days[ordered[ordered.length - 1]]}` : ordered.map((d) => days[d]).join(', ');
 }
+function weekdayPeople(shift: Shift): string {
+  if (shift.oneTimeDate) return '';
+  return days.flatMap((label, weekday) => {
+    const day = shiftDayOf(shift, weekday);
+    if (!day.on || day.userId === undefined) return [];
+    const name = day.userId === null ? 'Nobody' : shift.dayUserNames?.[weekday] || 'Unavailable person';
+    return [`${label}: ${name}`];
+  }).join(' · ');
+}
 const dateLabel = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
 interface Props {
   shifts: Shift[];
@@ -103,6 +112,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
         <span className="block text-sm text-ink-soft">{s.oneTimeDate ? dateLabel(s.oneTimeDate) : dayLabel(shiftWeekdays(s))} · {formatShiftHours(s)}</span>
         {!s.oneTimeDate && shiftVariesByDay(s) && <span className="block text-xs text-ink-soft">Varies by day</span>}
         <span className="block text-sm text-ink-soft">{s.oneTimeDate ? 'Person' : 'Usually'}: {s.userName || personName(s.userId)}</span>
+        {weekdayPeople(s) && <span className="block truncate text-sm text-ink-soft" title={weekdayPeople(s)}>{weekdayPeople(s)}</span>}
         {s.overrides.filter((o) => o.date >= today).sort((a, b) => a.date.localeCompare(b.date)).map((o) => <span key={o.date} className="block text-sm text-ink-soft">{dateLabel(o.date)}: {personName(o.userId)}</span>)}
       </button></React.Fragment>)}
       <button type="button" className="min-h-12 w-full rounded-lg bg-gold-deep text-paper text-base font-semibold pressable cursor-pointer" onClick={() => open('new')}>+ New shift</button>
@@ -158,7 +168,8 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
           {addingDate && <div className="space-y-2"><label className="block text-sm text-ink-soft">Date<input type="date" min={today} value={date} onChange={(e) => setDate(e.target.value)} className={`block w-full ${control}`} /></label><label className="block text-sm text-ink-soft">Person{picker(datePerson, setDatePerson)}</label><button type="button" disabled={!date || date < today || overrides.length >= 60} className={button} onClick={() => { setOverrides((old) => [...old.filter((o) => o.date !== date), { date, userId: datePerson || null }].sort((a, b) => a.date.localeCompare(b.date))); setAddingDate(false); }}>Add change</button></div>}
           {!addingDate && <button type="button" disabled={overrides.length >= 60} className={button} onClick={() => setAddingDate(true)}>+ Change for a date</button>}
         </div>}
-        <button type="button" role="switch" aria-label="Save for next weeks" aria-checked={savedWeekly} onClick={() => setSavedWeekly((v) => !v)} className={`w-full flex items-center gap-2 ${button}`}><span aria-hidden="true">{savedWeekly ? '✓' : '○'}</span>Save for next weeks<span className="ml-auto text-sm">{savedWeekly ? 'On' : 'Off'}</span></button>
+        <button type="button" role="switch" aria-label="Save for next weeks" disabled={editing !== 'new'} aria-checked={savedWeekly} onClick={() => setSavedWeekly((v) => !v)} className={`w-full flex items-center gap-2 ${button}`}><span aria-hidden="true">{savedWeekly ? '✓' : '○'}</span>Save for next weeks<span className="ml-auto text-sm">{savedWeekly ? 'On' : 'Off'}</span></button>
+        {editing !== 'new' && <p className="text-sm text-ink-soft">Can't change after the shift is created.</p>}
       </fieldset>
       {error && <p role="alert" className="text-base text-bad">{error}</p>}
       <button type="submit" disabled={busy} className="min-h-12 w-full rounded-lg bg-gold-deep text-paper text-base font-semibold pressable disabled:opacity-50 cursor-pointer">{busy ? 'Saving…' : 'Save'}</button>

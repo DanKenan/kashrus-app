@@ -139,7 +139,8 @@ export type RewriteResult =
  * limited to records owned by `agencyIds` (recordOwnerAgency). A record whose
  * owner is AMBIGUOUS and that holds fromEmail in a schema field fails the
  * whole rewrite (fail closed); one that does not hold it is left alone.
- * userIds maps retired membership row ids to the kept user id. Its named
+ * userIds is only for actually removed rows, mapped to a surviving row in
+ * the same agency. Retained membership row ids must never be redirected. Its named
  * references use the same ownership checks and immutable path walker, with
  * exact matching (never email normalization).
  */

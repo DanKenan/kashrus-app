@@ -1,5 +1,5 @@
 import type { Shift } from './src/types.ts';
-import { normalizeShifts, shiftDayOf, shiftHoursOn, shiftPersonOn, shiftRunsOn, shiftTaskOverdueAt, taskWithShiftTimes } from './src/lib/shifts.ts';
+import { normalizeShifts, shiftDayOf, shiftHoursOn, shiftOccurrenceDay, shiftPersonOn, shiftRunsOn, shiftWeekdays, shiftTaskOverdueAt, taskWithShiftTimes } from './src/lib/shifts.ts';
 import { logoutAckSetCookie } from './src/server/logout-marker.ts';
 import express from 'express';
 import http from 'http';
@@ -5830,9 +5830,12 @@ function newTaskPushRecipients(task: TaskItem): any[] {
   const shift = shifts.find((s) => s.id === task.shiftId && s.venueId === task.venueId && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
   if (!shift) return [];
   const venue = venues.find((v) => v.id === task.venueId);
-  const today = workDateIn(venueTimeZoneIn(venue, agencies), serverNow());
-  if (!shiftRunsOn(shift, today, new Date(`${today}T12:00:00Z`).getUTCDay())) return [];
-  const person = users.find((u) => u.id === shiftPersonOn(shift, today) && (u.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
+  const now = serverNow();
+  const tz = venueTimeZoneIn(venue, agencies);
+  const today = workDateIn(tz, now);
+  const occurrence = shiftOccurrenceDay(shift, today, new Date(`${today}T12:00:00Z`).getUTCDay(), minutesIn(tz, now));
+  if (!occurrence) return [];
+  const person = users.find((u) => u.id === shiftPersonOn(shift, occurrence) && (u.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
   return person ? taskPushRecipients({ ...task, assignedTo: [person.email] }, [person], venues, { explicitOnly: true }) : [];
 }
 
@@ -13171,6 +13174,7 @@ for (const method of ['post', 'put', 'delete'] as const) {
     const id = old?.id || `shift-${crypto.randomUUID()}`;
     const now = serverNow().toISOString();
     const prunedTaskIds = new Set<string>();
+    const detachedCopyIds = new Map<string, string>();
     const committed = await commitOrRespond(req, res, (doc) => {
       shiftEditor(caller, venueId, doc);
       const pruned = pruneOneTimeShifts(doc, serverNow(), new Set([venueId]));
@@ -13186,15 +13190,42 @@ for (const method of ['post', 'put', 'delete'] as const) {
       if (req.body?.venueId !== undefined && req.body.venueId !== venueId) throw new OperationConflictError('A shift cannot be moved to another venue.', 400);
       if (method === 'delete') {
         const byId = new Map([[id, previous!]]);
-        const attached = (t: TaskItem) => t.shiftId === id && t.venueId === venueId;
+        const groups = new Map<string, { days: number[]; startMinutes: number; endMinutes: number }>();
+        for (const weekday of shiftWeekdays(previous!)) {
+          const hours = shiftHoursOn(previous!, weekday);
+          const key = `${hours.startMinutes}:${hours.endMinutes}`;
+          if (!groups.has(key)) groups.set(key, { ...hours, days: [] });
+          groups.get(key)!.days.push(weekday);
+        }
+        const ordered = [...groups.values()].sort((a, b) => b.days.length - a.days.length || a.days[0] - b.days[0]);
+        const detachedIds: string[] = [];
+        const createdIds: string[] = [];
+        const detachedTasks = (doc.tasks || []).flatMap((task: TaskItem) => {
+          if (task.shiftId !== id || task.venueId !== venueId) return [task];
+          if (previous!.oneTimeDate || !ordered.length) {
+            detachedIds.push(task.id);
+            return [{ ...taskWithShiftTimes(task, byId), shiftId: null }];
+          }
+          return ordered.map((group, index) => {
+            const detached = { ...taskWithShiftTimes(task, byId, group.days[0]), shiftId: null, daysOfWeek: group.days };
+            if (index === 0) { detachedIds.push(task.id); return detached; }
+            // Stable across transaction retries; never reuse another task's history id.
+            const key = `${task.id}:${group.startMinutes}:${group.endMinutes}`;
+            if (!detachedCopyIds.has(key)) detachedCopyIds.set(key, `task-${crypto.randomUUID()}`);
+            const copyId = detachedCopyIds.get(key)!;
+            detachedIds.push(copyId);
+            createdIds.push(copyId);
+            return {
+              ...detached, id: copyId,
+              currentStatus: task.inputType === 'status_select' && task.customStatusOptions?.length ? task.customStatusOptions[0] : 'pending',
+              isCompleted: false, notes: '', updatedByEmail: null, updatedByName: null, updatedAt: null,
+              checkIns: [], answerPhoto: undefined,
+            };
+          });
+        });
         return {
-          doc: {
-            ...doc,
-            shifts: list.filter((s) => s.id !== id),
-            tasks: (doc.tasks || []).map((t: TaskItem) => attached(t)
-              ? { ...taskWithShiftTimes(t, byId), shiftId: null } : t),
-          },
-          result: { ok: true, detachedIds: (doc.tasks || []).filter(attached).map((t: TaskItem) => t.id) },
+          doc: { ...doc, shifts: list.filter((s) => s.id !== id), tasks: detachedTasks },
+          result: { ok: true, detachedIds, createdIds },
         };
       }
       const shift = validatedShift(req.body || {}, previous, venueId, agencyId, doc, id, now);
@@ -13213,7 +13244,10 @@ for (const method of ['post', 'put', 'delete'] as const) {
     for (const task of tasks.filter((t) => prunedTaskIds.has(t.id))) broadcastTaskUpdated(task, task);
     if (method === 'delete') {
       for (const task of tasks.filter((t) => ((committed.result as any).detachedIds || []).includes(t.id))) {
-        broadcastTaskUpdated(task, task);
+        if (((committed.result as any).createdIds || []).includes(task.id)) {
+          broadcast('TASK_CREATED', task, undefined, task.agencyId || 'agency-hkc',
+            (meta, payload) => canSeeTaskServer(payload, recipientForMeta(meta)) ? payload : null);
+        } else broadcastTaskUpdated(task, task);
       }
       return res.json({ ok: true });
     }
@@ -20220,9 +20254,9 @@ async function accountMergeRoute(req: any, res: any, via: MergeVia) {
       const bAgencyIds = new Set<string>(bRows.map((u: any) => u.agencyId || 'agency-hkc'));
       // M6a: B rows take A's personId + email (the identity writer strips their credential fields).
       const newUsers = fu.map((u: any) => (u && bIds.has(String(u.id)) ? { ...u, personId: A, email: survivorEmail } : u));
-      // M6c: B's email and shift-user references inside B's agencies become A's.
-      const userIds = new Map([...bIds].map((id) => [id, String(fSurvivor.id)]));
-      const rw = rewriteEmailRefs(freshDoc, bAgencyIds, retiredEmail, survivorEmail, userIds);
+      // M6c: emails change, but every B membership row keeps its own agency's id.
+      // No rows are removed here, so shift user-id references must stay intact.
+      const rw = rewriteEmailRefs(freshDoc, bAgencyIds, retiredEmail, survivorEmail);
       if (rw.ok !== true) {
         const bad: any = rw;
         log.warn(`[account-merge] refused: an ambiguous legacy record holds the retired email (${bad.collection} ${bad.recordId})`);

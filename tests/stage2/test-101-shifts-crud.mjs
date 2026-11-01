@@ -144,11 +144,51 @@ export default {
     assert.equal(doc.shifts.some((s) => s.id === id), false);
     const detached = doc.tasks.find((t) => t.id === taskId);
     assert.equal(detached.shiftId, null);
-    assert.deepEqual(detached.daysOfWeek, [1, 3]);
-    assert.equal(detached.targetTime, '9:00 AM');
-    assert.equal(detached.targetTime2, '8:00 PM');
-    assert.equal(detached.targetTimeMinutes, 540);
-    assert.equal(detached.targetTime2Minutes, 1200);
+    assert.deepEqual(detached.daysOfWeek, [1]);
+    assert.equal(detached.targetTime, '10:00 AM');
+    assert.equal(detached.targetTime2, '11:00 AM');
+    assert.equal(detached.targetTimeMinutes, 600);
+    assert.equal(detached.targetTime2Minutes, 660);
+    const otherDay = doc.tasks.find((t) => t.title === detached.title && t.venueId === venueId && t.id !== detached.id);
+    assert.deepEqual(otherDay.daysOfWeek, [3]);
+    assert.equal(otherDay.targetTimeMinutes, 540);
+    assert.equal(otherDay.targetTime2Minutes, 1200);
+    const splitShift = await api('admin', 'POST', '/api/shifts', { ...body, overrides: [], days: Array.from({ length: 7 }, (_, w) => ({ on: w < 3, ...(w === 0 ? { startMinutes: 420, endMinutes: 780 } : w === 1 ? { startMinutes: 600, endMinutes: 1020 } : {}) })) });
+    assert.equal(splitShift.status, 201);
+    const answered = { ...detached, id: `split-${venueId}`, title: 'Split weekday schedule', shiftId: splitShift.json.id, daysOfWeek: [0, 1, 2], isCompleted: true, currentStatus: 'completed', notes: 'Original answer', checkIns: [{ id: 'visit', at: new Date().toISOString(), byName: 'Original', byEmail: null }], answerPhoto: { id: 'original-photo', at: new Date().toISOString(), byName: 'Original', byEmail: null } };
+    assert.equal((await ctx.api('POST', '/api/__test__/inject-fixture', { tasks: [answered] })).status, 200);
+    assert.equal((await api('admin', 'DELETE', `/api/shifts/${splitShift.json.id}`)).status, 200);
+    let split = (await ctx.getDoc()).tasks.filter((t) => t.title === answered.title);
+    assert.equal(split.length, 3);
+    const expectedWindows = [[0, 420, 780], [1, 600, 1020], [2, 480, 1080]];
+    for (const [weekday, start, end] of expectedWindows) {
+      const t = split.find((t) => t.daysOfWeek.includes(weekday));
+      assert.deepEqual(t.daysOfWeek, [weekday]);
+      assert.equal(t.shiftId, null);
+      assert.equal(t.targetTimeMinutes, start);
+      assert.equal(t.targetTime2Minutes, end);
+      if (weekday === 0) {
+        assert.equal(t.id, answered.id, 'earliest weekday wins equal-size groups');
+        assert.equal(t.isCompleted, true);
+        assert.equal(t.checkIns.length, 1);
+      } else {
+        assert.notEqual(t.id, answered.id);
+        assert.equal(t.isCompleted, false);
+        assert.equal(t.currentStatus, 'pending');
+        assert.equal(t.notes, '');
+        assert.deepEqual(t.checkIns, []);
+        assert.equal(t.answerPhoto, undefined);
+        assert.equal(t.updatedAt, null);
+      }
+    }
+    // The original id stays with the largest group, even if it starts later.
+    const groupedShift = await api('admin', 'POST', '/api/shifts', { ...body, overrides: [], days: Array.from({ length: 7 }, (_, w) => ({ on: w < 3, ...(w === 0 ? { startMinutes: 420, endMinutes: 780 } : {}) })) });
+    const groupedTask = await api('admin', 'POST', '/api/tasks', { venueId, title: 'Largest weekday group', shiftId: groupedShift.json.id });
+    assert.equal(groupedTask.status, 201);
+    assert.equal((await api('admin', 'DELETE', `/api/shifts/${groupedShift.json.id}`)).status, 200);
+    split = (await ctx.getDoc()).tasks.filter((t) => t.title === 'Largest weekday group');
+    assert.equal(split.length, 2);
+    assert.deepEqual(split.find((t) => t.id === groupedTask.json.id).daysOfWeek, [1, 2]);
     // Existing websocket channels must deliver shift changes to this venue
     // and drop them for another venue and another agency.
     const connections = [];

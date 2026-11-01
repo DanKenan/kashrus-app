@@ -120,6 +120,21 @@ export default {
       await new Promise((resolve) => setTimeout(resolve, 150));
       pushes = (await ctx.api('GET', '/api/__test__/push-log')).json.log;
       assert.equal(pushes.some((e) => e.title === '📋 New task assigned to you'), false);
+      await clock(sunday, '22:00');
+      const overnight = await api('admin', 'POST', '/api/shifts', { venueId, name: 'Overnight new task', startMinutes: 1320, endMinutes: 120, userId: null, days: Array.from({ length: 7 }, (_, w) => ({ on: w < 2, userId: w === 0 ? people.assign.id : people.mash.id })) });
+      assert.equal(overnight.status, 201);
+      const newPush = async (time, expected) => {
+        await clock(nextDay(1), time);
+        await ctx.api('POST', '/api/__test__/push-log/clear', {});
+        assert.equal((await api('admin', 'POST', '/api/tasks', { venueId, title: 'New overnight assignment', shiftId: overnight.json.id })).status, 201);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const log = (await ctx.api('GET', '/api/__test__/push-log')).json.log;
+        assert.deepEqual(log.filter((e) => e.title === '📋 New task assigned to you').map((e) => e.endpoint), [endpoints[expected]]);
+      };
+      await newPush('01:00', 'assign');
+      await newPush('15:00', 'mash');
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${overnight.json.id}`, { days: Array.from({ length: 7 }, (_, w) => ({ on: w === 0, userId: w === 0 ? people.assign.id : people.mash.id })) })).status, 200);
+      await newPush('01:00', 'assign');
       return 'window end boundaries, non-shift days, overnight start-date keys and live shift edits agree across push and dashboard';
     } finally {
       await ctx.api('POST', '/api/__test__/clock', { iso: null });

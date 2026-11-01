@@ -86,6 +86,16 @@ check('shift weekday person source -> target', s1.days[0].userId === 'target' &&
 check('shift references counted', shifted.replaced === 3);
 const ambiguousShift = rewriteEmailRefs({ shifts: [{ id: 'ambiguous', venueId: 'missing', userId: null, overrides: [{ date: '2026-11-01', userId: 'source' }] }] }, new Set(['ag-b']), 'b@x.io', 'a@x.io', userIds);
 check('ambiguous shift holding source id -> refused', ambiguousShift.ok === false && ambiguousShift.collection === 'shifts');
-check('merge route supplies retired row ids and the kept user id', /new Map\(\[\.\.\.bIds\]\.map\(\(id\) => \[id, String\(fSurvivor\.id\)\]\)\)/.test(fn) && /rewriteEmailRefs\(freshDoc, bAgencyIds, retiredEmail, survivorEmail, userIds\)/.test(fn));
+// The real merge keeps B's agency memberships, changing only personId/email.
+const membershipDoc = {
+  users: [{ id: 'row-a', agencyId: 'ag-a', personId: 'A', email: 'a@x.io' }, { id: 'row-b', agencyId: 'ag-b', personId: 'B', email: 'b@x.io' }],
+  shifts: [{ id: 'b-shift', agencyId: 'ag-b', userId: 'row-b', days: [{ on: true, userId: 'row-b' }], overrides: [{ date: '2026-11-01', userId: 'row-b' }] }],
+};
+const keptUsers = membershipDoc.users.map((u) => u.personId === 'B' ? { ...u, personId: 'A', email: 'a@x.io' } : u);
+const keptRewrite = rewriteEmailRefs(membershipDoc, new Set(['ag-b']), 'b@x.io', 'a@x.io');
+const keptShift = (keptRewrite.patch.shifts || membershipDoc.shifts)[0];
+check('cross-agency merge keeps the source membership id on every shift reference', keptShift.userId === 'row-b' && keptShift.days[0].userId === 'row-b' && keptShift.overrides[0].userId === 'row-b');
+check('kept shift person resolves to the merged person in its own agency', keptUsers.some((u) => u.id === keptShift.userId && u.agencyId === keptShift.agencyId && u.personId === 'A'));
+check('merge route retains membership ids and supplies no row-id redirection', /const newUsers = fu\.map/.test(fn) && /\{ \.\.\.u, personId: A, email: survivorEmail \}/.test(fn) && /rewriteEmailRefs\(freshDoc, bAgencyIds, retiredEmail, survivorEmail\)/.test(fn) && !/bIds\]\.map\(\(id\) => \[id, String\(fSurvivor\.id\)\]/.test(fn));
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
