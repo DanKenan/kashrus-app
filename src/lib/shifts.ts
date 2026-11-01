@@ -1,47 +1,95 @@
-import type { Shift } from '../types.ts';
-import { addDays } from './workday.ts';
+import type { Shift, ShiftDay } from '../types.ts';
+import { addDays, isWorkDate } from './workday.ts';
 
 type ShiftTask = {
   shiftId?: string | null; venueId?: string; assignedTo?: unknown;
+  scheduleType?: 'recurring' | 'specific_dates'; specificDates?: string[];
   daysOfWeek?: number[]; targetTime?: string; targetTime2?: string;
   targetTimeMinutes?: number; targetTime2Minutes?: number;
 };
 
-function validHours(shift: Shift): boolean {
+function validHours(shift: { startMinutes?: number; endMinutes?: number } | null | undefined): boolean {
   return !!shift && [shift.startMinutes, shift.endMinutes].every((m) => Number.isInteger(m) && m >= 0 && m < 1440)
     && shift.startMinutes !== shift.endMinutes;
+}
+
+/** Safe weekday access, including the old draft daysOfWeek shape. */
+export function shiftDayOf(shift: Shift, weekday: number): ShiftDay {
+  if (shift?.oneTimeDate) return { on: false };
+  if (!shift || !Number.isInteger(weekday) || weekday < 0 || weekday > 6) return { on: false };
+  if (shift.days === undefined) {
+    const old = (shift as any).daysOfWeek;
+    return { on: Array.isArray(old) && old.every((d) => Number.isInteger(d) && d >= 0 && d <= 6) && old.includes(weekday) };
+  }
+  if (!Array.isArray(shift.days) || shift.days.length !== 7) return { on: false };
+  const day = shift.days[weekday];
+  if (!day || typeof day.on !== 'boolean') return { on: false };
+  const ownHours = day.startMinutes !== undefined || day.endMinutes !== undefined;
+  if (ownHours && !validHours(day)) return { on: false };
+  return {
+    on: day.on,
+    ...(day.userId !== undefined ? { userId: typeof day.userId === 'string' ? day.userId : null } : {}),
+    ...(ownHours ? { startMinutes: day.startMinutes, endMinutes: day.endMinutes } : {}),
+  };
+}
+
+export function shiftIsUpcoming(shift: Shift, todayYmd: string): boolean {
+  return !shift.oneTimeDate || shift.oneTimeDate >= todayYmd;
+}
+
+export function shiftWeekdays(shift: Shift): number[] {
+  return Array.from({ length: 7 }, (_, w) => w).filter((w) => shiftDayOf(shift, w).on);
+}
+
+export function shiftHoursOn(shift: Shift, weekday: number): { startMinutes: number; endMinutes: number } {
+  const day = shiftDayOf(shift, weekday);
+  return { startMinutes: day.startMinutes ?? shift?.startMinutes, endMinutes: day.endMinutes ?? shift?.endMinutes };
+}
+
+export function shiftVariesByDay(shift: Shift): boolean {
+  return shiftWeekdays(shift).some((w) => {
+    const day = shiftDayOf(shift, w);
+    return day.userId !== undefined || day.startMinutes !== undefined;
+  });
+}
+
+function weekdayOf(ymd: string): number {
+  return new Date(`${ymd}T12:00:00Z`).getUTCDay();
 }
 
 /** Normalize old main-document records without weakening write validation. */
 export function normalizeShifts(input: unknown): Shift[] {
   if (!Array.isArray(input)) return [];
-  return input.filter((s) => s && typeof s.id === 'string' && typeof s.venueId === 'string' && validHours(s)).map((s) => ({
-    ...s,
-    name: typeof s.name === 'string' ? s.name : '',
-    area: typeof s.area === 'string' ? s.area : '',
-    userId: typeof s.userId === 'string' ? s.userId : null,
-    daysOfWeek: Array.isArray(s.daysOfWeek) && s.daysOfWeek.length > 0 && s.daysOfWeek.every((d: unknown) => Number.isInteger(d) && Number(d) >= 0 && Number(d) <= 6)
-      ? [...new Set<number>(s.daysOfWeek)] : [],
-    overrides: Array.isArray(s.overrides) ? s.overrides.filter((o: any) => o && typeof o.date === 'string' && (o.userId === null || typeof o.userId === 'string')) : [],
-  }));
+  return input.filter((s) => (s?.oneTimeDate == null || (isWorkDate(s.oneTimeDate) && addDays(s.oneTimeDate, 0) === s.oneTimeDate)) && s && typeof s.id === 'string' && typeof s.venueId === 'string' && validHours(s)).map((s) => {
+    const { daysOfWeek: _old, userName: _name, dayUserNames: _names, ...rest } = s;
+    return {
+      ...rest,
+      name: typeof s.name === 'string' ? s.name : '',
+      area: typeof s.area === 'string' ? s.area : '',
+      userId: typeof s.userId === 'string' ? s.userId : null,
+      days: Array.from({ length: 7 }, (_, w) => shiftDayOf(s, w)),
+      overrides: Array.isArray(s.overrides) ? s.overrides.filter((o: any) => o && typeof o.date === 'string' && (o.userId === null || typeof o.userId === 'string')) : [],
+    };
+  });
 }
 
 export function shiftPersonOn(shift: Shift, ymd: string): string | null {
   const override = Array.isArray(shift?.overrides) ? shift.overrides.find((o) => o && o.date === ymd) : undefined;
-  const person = override ? override.userId : shift?.userId;
+  const day = shiftDayOf(shift, weekdayOf(ymd));
+  const person = override ? override.userId : day.userId !== undefined ? day.userId : shift?.userId;
   return typeof person === 'string' ? person : null;
 }
 
 // Overnight shifts always belong to their START day.
-export function shiftRunsOn(shift: Shift, _ymd: string, weekday: number): boolean {
-  return validHours(shift) && Array.isArray(shift.daysOfWeek) && shift.daysOfWeek.length > 0
-    && shift.daysOfWeek.every((d) => Number.isInteger(d) && d >= 0 && d <= 6) && shift.daysOfWeek.includes(weekday);
+export function shiftRunsOn(shift: Shift, ymd: string, weekday: number): boolean {
+  return validHours(shift) && (shift.oneTimeDate ? shift.oneTimeDate === ymd : shiftDayOf(shift, weekday).on);
 }
 
 export function shiftOccurrenceDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number): string | null {
   if (!validHours(shift)) return null;
   const yesterday = addDays(ymd, -1);
-  if (shift.endMinutes < shift.startMinutes && nowMinutes >= 0 && nowMinutes < shift.endMinutes
+  const hours = shiftHoursOn(shift, (weekday + 6) % 7);
+  if (hours.endMinutes < hours.startMinutes && nowMinutes >= 0 && nowMinutes < hours.endMinutes
       && shiftRunsOn(shift, yesterday, (weekday + 6) % 7)) return yesterday;
   return shiftRunsOn(shift, ymd, weekday) ? ymd : null;
 }
@@ -52,17 +100,20 @@ export function shiftTaskAppliesAt(shift: Shift, ymd: string, weekday: number, n
 
 export function shiftTaskOverdueAt(shift: Shift, ymd: string, weekday: number, nowMinutes: number): boolean {
   if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return false;
-  if (shift.endMinutes < shift.startMinutes) {
-    return nowMinutes > shift.endMinutes && nowMinutes < shift.startMinutes
-      && shiftRunsOn(shift, addDays(ymd, -1), (weekday + 6) % 7);
-  }
-  return shiftRunsOn(shift, ymd, weekday) && nowMinutes > shift.endMinutes;
+  const previous = shiftHoursOn(shift, (weekday + 6) % 7);
+  const hours = shiftHoursOn(shift, weekday);
+  // Once today's own window starts, its deadline supersedes yesterday's.
+  const nextStart = shiftRunsOn(shift, ymd, weekday) ? Math.min(previous.startMinutes, hours.startMinutes) : previous.startMinutes;
+  if (previous.endMinutes < previous.startMinutes && nowMinutes > previous.endMinutes && nowMinutes < nextStart
+      && shiftRunsOn(shift, addDays(ymd, -1), (weekday + 6) % 7)) return true;
+  return hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, ymd, weekday) && nowMinutes > hours.endMinutes;
 }
 
 export function activeShiftsForUserAt(shifts: Shift[], userId: string, ymd: string, weekday: number, nowMinutes: number): Shift[] {
   const yesterday = addDays(ymd, -1);
   return shifts.filter((s) => {
-    const continuing = validHours(s) && s.endMinutes < s.startMinutes && nowMinutes >= 0 && nowMinutes < s.endMinutes
+    const hours = shiftHoursOn(s, (weekday + 6) % 7);
+    const continuing = validHours(s) && hours.endMinutes < hours.startMinutes && nowMinutes >= 0 && nowMinutes < hours.endMinutes
       && shiftRunsOn(s, yesterday, (weekday + 6) % 7);
     return (continuing && shiftPersonOn(s, yesterday) === userId)
       || (shiftRunsOn(s, ymd, weekday) && shiftPersonOn(s, ymd) === userId);
@@ -78,39 +129,43 @@ function clock(minutes: number): string {
   return `${hour % 12 || 12}:${String(minutes % 60).padStart(2, '0')} ${hour < 12 ? 'AM' : 'PM'}`;
 }
 
-export function formatShiftHours(shift: Shift): string {
+export function formatShiftHours(shift: Shift, weekday?: number): string {
   if (!validHours(shift)) return '';
-  return `${clock(shift.startMinutes)} – ${clock(shift.endMinutes)}${shift.endMinutes < shift.startMinutes ? ' (next day)' : ''}`;
+  const hours = weekday === undefined ? shift : shiftHoursOn(shift, weekday);
+  return `${clock(hours.startMinutes)} – ${clock(hours.endMinutes)}${hours.endMinutes < hours.startMinutes ? ' (next day)' : ''}`;
 }
 
-export function shiftLabel(shift: Shift): string {
-  return `${shift.name} · ${formatShiftHours(shift)}`;
+export function shiftLabel(shift: Shift, weekday?: number): string {
+  return `${shift.name} · ${formatShiftHours(shift, weekday)}`;
 }
 
-export function minutesInShift(shift: Shift, minutes: number): boolean {
+export function minutesInShift(shift: Shift, minutes: number, weekday?: number): boolean {
   if (!validHours(shift) || !Number.isFinite(minutes) || minutes < 0 || minutes >= 1440) return false;
-  return shift.endMinutes < shift.startMinutes
-    ? minutes >= shift.startMinutes || minutes <= shift.endMinutes
-    : minutes >= shift.startMinutes && minutes <= shift.endMinutes;
+  const hours = weekday === undefined ? shift : shiftHoursOn(shift, weekday);
+  return hours.endMinutes < hours.startMinutes
+    ? minutes >= hours.startMinutes || minutes <= hours.endMinutes
+    : minutes >= hours.startMinutes && minutes <= hours.endMinutes;
 }
 
-export function taskWithShiftTimes<T extends ShiftTask>(task: T, shiftsById: ReadonlyMap<string, Shift> | Record<string, Shift>): T {
+export function taskWithShiftTimes<T extends ShiftTask>(task: T, shiftsById: ReadonlyMap<string, Shift> | Record<string, Shift>, weekday?: number): T {
   const shift = task.shiftId
     ? (shiftsById instanceof Map ? shiftsById.get(task.shiftId)
       : Object.prototype.hasOwnProperty.call(shiftsById, task.shiftId) ? (shiftsById as Record<string, Shift>)[task.shiftId] : undefined)
     : undefined;
   if (!validHours(shift) || (task.venueId && shift.venueId !== task.venueId)) return task;
+  const hours = weekday === undefined ? shift : shiftHoursOn(shift, weekday);
   return {
-    ...task, daysOfWeek: normalizeShifts([shift])[0]?.daysOfWeek || [],
-    targetTime: clock(shift.startMinutes), targetTime2: clock(shift.endMinutes),
-    targetTimeMinutes: shift.startMinutes, targetTime2Minutes: shift.endMinutes,
+    ...task, daysOfWeek: shiftWeekdays(shift),
+    ...(shift.oneTimeDate ? { scheduleType: 'specific_dates' as const, specificDates: [shift.oneTimeDate] } : {}),
+    targetTime: clock(hours.startMinutes), targetTime2: clock(hours.endMinutes),
+    targetTimeMinutes: hours.startMinutes, targetTime2Minutes: hours.endMinutes,
   };
 }
 
 function timeMinutes(task: ShiftTask): number | null {
+  if (Number.isInteger(task.targetTimeMinutes) && task.targetTimeMinutes! >= 0 && task.targetTimeMinutes! < 1440) return task.targetTimeMinutes!;
   const text = typeof task.targetTime === 'string' ? task.targetTime.trim() : '';
   if (!text || /^(any time|end of day)$/i.test(text)) return null;
-  if (Number.isInteger(task.targetTimeMinutes)) return task.targetTimeMinutes!;
   const match = text.match(/^(\d{1,2}):(\d{2})(?:\s*([AP])M)?$/i);
   if (!match) return null;
   let hour = Number(match[1]);
@@ -131,11 +186,21 @@ export function tasksVisibleOnShift<T extends ShiftTask>(tasks: T[], shifts: Shi
     const personal = assigned.includes(typeof user.email === 'string' ? user.email.trim().toLowerCase() : '');
     const team = assigned.length === 0 || assigned.includes('all');
     if (!mine.length) return personal || team;
-    if (personal) return true;
     const shift = task.shiftId ? known.get(task.shiftId) : undefined;
-    if (shift && (!task.venueId || shift.venueId === task.venueId)) return mine.some((s) => s.id === shift.id);
+    if (shift && (!task.venueId || shift.venueId === task.venueId)) {
+      const occurrence = shiftOccurrenceDay(shift, ymd, weekday, nowMinutes ?? 0);
+      return occurrence !== null && shiftPersonOn(shift, occurrence) === user.id;
+    }
+    if (personal) return true;
     if (!team) return false;
     const minutes = timeMinutes(task);
-    return minutes === null || mine.some((s) => (!task.venueId || s.venueId === task.venueId) && minutesInShift(s, minutes));
+    return minutes === null || mine.some((s) => {
+      if (task.venueId && s.venueId !== task.venueId) return false;
+      if (shiftRunsOn(s, ymd, weekday) && shiftPersonOn(s, ymd) === user.id && minutesInShift(s, minutes, weekday)) return true;
+      const yesterday = addDays(ymd, -1), w = (weekday + 6) % 7;
+      const hours = shiftHoursOn(s, w);
+      return nowMinutes !== undefined && hours.endMinutes < hours.startMinutes && nowMinutes < hours.endMinutes
+        && shiftRunsOn(s, yesterday, w) && shiftPersonOn(s, yesterday) === user.id && minutesInShift(s, minutes, w);
+    });
   });
 }

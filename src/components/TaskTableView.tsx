@@ -1,3 +1,4 @@
+import { shiftDisplayWeekday } from '../lib/shiftTaskDay';
 import type { Shift } from '../types';
 import { shiftLabel, shiftTaskAppliesAt, shiftTaskOverdueAt } from '../lib/shifts';
 import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
@@ -256,7 +257,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                     <div className="space-y-1">
                       <div className="tnum inline-flex items-center gap-1 font-bold text-ink">
                         <Clock className="w-3.5 h-3.5 text-ink-faint shrink-0" />
-                        <span>{(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!) : formatTaskTimes(task))}</span>
+                        <span>{(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, shiftDisplayWeekday(shiftsById.get(task.shiftId)!, todayYmd, todayWeekday, nowMinutes, sections ? section.key : undefined)) : formatTaskTimes(task))}</span>
                       </div>
                   {isOverdue(task) && (
                     <span data-overdue className={OVERDUE_CHIP_CLASS} style={{ color: 'var(--bad)', backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}>

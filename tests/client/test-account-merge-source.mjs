@@ -66,7 +66,7 @@ check('ambiguous record holding B -> refused', bad.ok === false && bad.collectio
 // Shift assignments use user row ids, including dated replacements.
 const shiftDoc = {
   shifts: [
-    { id: 's1', agencyId: 'ag-b', userId: 'source', overrides: [{ date: '2026-11-01', userId: 'source' }, { date: '2026-11-02', userId: null }, { date: '2026-11-03', userId: 'other' }], name: 'source', area: 'source' },
+    { id: 's1', agencyId: 'ag-b', userId: 'source', days: Array.from({ length: 7 }, (_, w) => ({ on: w === 0, userId: w === 0 ? 'source' : null })), overrides: [{ date: '2026-11-01', userId: 'source' }, { date: '2026-11-02', userId: null }, { date: '2026-11-03', userId: 'other' }], name: 'source', area: 'source' },
     { id: 's2', agencyId: 'ag-x', userId: 'source', overrides: [{ date: '2026-11-01', userId: 'source' }] },
     { id: 's3', agencyId: 'ag-b', userId: 'Source', overrides: [] },
   ],
@@ -82,7 +82,8 @@ check('shift free text unchanged', s1.name === 'source' && s1.area === 'source')
 check('other agency shift unchanged', shifted.patch.shifts[1] === shiftDoc.shifts[1]);
 check('user ids match exactly, case-sensitive', shifted.patch.shifts[2] === shiftDoc.shifts[2]);
 check('shift input not mutated', shiftDoc.shifts[0].userId === 'source' && shiftDoc.shifts[0].overrides[0].userId === 'source');
-check('shift references counted', shifted.replaced === 2);
+check('shift weekday person source -> target', s1.days[0].userId === 'target' && s1.days[1].userId === null);
+check('shift references counted', shifted.replaced === 3);
 const ambiguousShift = rewriteEmailRefs({ shifts: [{ id: 'ambiguous', venueId: 'missing', userId: null, overrides: [{ date: '2026-11-01', userId: 'source' }] }] }, new Set(['ag-b']), 'b@x.io', 'a@x.io', userIds);
 check('ambiguous shift holding source id -> refused', ambiguousShift.ok === false && ambiguousShift.collection === 'shifts');
 check('merge route supplies retired row ids and the kept user id', /new Map\(\[\.\.\.bIds\]\.map\(\(id\) => \[id, String\(fSurvivor\.id\)\]\)\)/.test(fn) && /rewriteEmailRefs\(freshDoc, bAgencyIds, retiredEmail, survivorEmail, userIds\)/.test(fn));

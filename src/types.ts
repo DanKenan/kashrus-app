@@ -106,17 +106,26 @@ export interface ShiftOverride {
   userId: string | null;
 }
 
+export interface ShiftDay {
+  on: boolean;
+  userId?: string | null; // undefined inherits the general person
+  startMinutes?: number;
+  endMinutes?: number; // both missing inherits the general hours
+}
+
 export interface Shift {
   id: string;
   agencyId?: string;
   venueId: string;
   name: string;
   area: string;
-  daysOfWeek: number[];
+  days: ShiftDay[]; // exactly seven entries, Sunday first
+  oneTimeDate?: string | null; // venue day; absent/null repeats weekly
   startMinutes: number;
   endMinutes: number;
   userId: string | null;
   userName?: string; // server-derived; never accepted from a client
+  dayUserNames?: (string | null)[]; // server-derived weekday names, no emails
   overrides: ShiftOverride[];
   createdAt: string;
   updatedAt?: string;

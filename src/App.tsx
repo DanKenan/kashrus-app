@@ -1,6 +1,6 @@
 import type { Shift } from './types';
 import { taskWithShiftTimes, tasksVisibleOnShift, shiftTaskAppliesAt } from './lib/shifts';
-import { shiftSortProjection, restoreShiftWindows } from './lib/shiftTaskDay';
+import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday } from './lib/shiftTaskDay';
 import { AgencyLogoSheet } from './components/AgencyLogoSheet';
 import { AgencySettingsSheet } from './components/AgencySettingsSheet';
 import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgencyFields } from './lib/agencyLogo';
@@ -771,9 +771,13 @@ export default function App() {
   // Don (Nov 1): a mashgiach sees only the tasks assigned to them or to everyone.
   // People who can create/edit tasks, and the venue kiosk, still see the whole venue.
   const onlyOwnTasks = !isKiosk && seesOnlyOwnTasks(currentUser, canUserAssignTasks(currentUser));
+  const taskWeekday = useCallback((task: Task) => {
+    const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+    return shift ? shiftDisplayWeekday(shift, todayYmd, todayWeekday, nowMinutes) : todayWeekday;
+  }, [shiftsById, todayYmd, todayWeekday, nowMinutes]);
   // Today's list (the venue's day; for a mashgiach only their own + everyone's tasks).
   const todayTasks = useMemo(() => {
-    const applicable = tasks.map((task) => taskWithShiftTimes(task, shiftsById)).filter((task) => {
+    const applicable = tasks.map((task) => taskWithShiftTimes(task, shiftsById, taskWeekday(task))).filter((task) => {
       const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
       if (shift) return shiftTaskAppliesAt(shift, todayYmd, todayWeekday, nowMinutes) &&
         (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email));
@@ -783,7 +787,7 @@ export default function App() {
     return onlyOwnTasks && currentUser
       ? tasksVisibleOnShift(applicable, venueShifts, currentUser, todayYmd, todayWeekday, nowMinutes)
       : applicable;
-  }, [tasks, shiftsById, venueShifts, todayYmd, todayWeekday, nowMinutes, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser]);
+  }, [tasks, shiftsById, venueShifts, todayYmd, todayWeekday, nowMinutes, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser, taskWeekday]);
   // The list on screen: today's, or every task when an editor picks "All days".
   const dayTasks = effectiveDayView === 'all' ? tasks : todayTasks;
 
@@ -1891,7 +1895,7 @@ export default function App() {
 
   // Filter tasks
   const filteredTasks = useMemo(() => {
-    return dayTasks.map((task) => taskWithShiftTimes(task, shiftsById)).filter((task) => {
+    return dayTasks.map((task) => taskWithShiftTimes(task, shiftsById, effectiveDayView === 'all' ? undefined : taskWeekday(task))).filter((task) => {
       // Search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
@@ -1921,14 +1925,19 @@ export default function App() {
 
       return true;
     });
-  }, [dayTasks, shiftsById, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
+  }, [dayTasks, shiftsById, effectiveDayView, taskWeekday, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
 
   // #185 sorts two independent task times by their earliest time. A shift is
   // one window: use its start for ordering, then restore its full display window.
-  const sortProjection = useMemo(() => shiftSortProjection(filteredTasks, shiftsById), [filteredTasks, shiftsById]);
-  const sortedTasks = useMemo(() => restoreShiftWindows(sortTasksByTime<Task>(sortProjection), shiftsById), [sortProjection, shiftsById]);
+  const displayWeekday = effectiveDayView === 'all' ? undefined : taskWeekday;
+  const sortProjection = useMemo(() => shiftSortProjection(filteredTasks, shiftsById, displayWeekday), [filteredTasks, shiftsById, displayWeekday]);
+  const sortedTasks = useMemo(() => restoreShiftWindows(sortTasksByTime<Task>(sortProjection), shiftsById, displayWeekday), [sortProjection, shiftsById, displayWeekday]);
   const sections = useMemo(() => effectiveDayView === 'all'
-    ? groupTasksByDay<Task>(sortProjection, todayYmd).map((section) => ({ ...section, tasks: restoreShiftWindows(section.tasks, shiftsById) })) : undefined,
+    ? groupTasksByDay<Task>(sortProjection, todayYmd).map((section) => {
+      const weekday = /^weekday-[0-6]$/.test(section.key) ? Number(section.key.slice(-1)) : undefined;
+      const projected = shiftSortProjection(section.tasks, shiftsById, weekday);
+      return { ...section, tasks: restoreShiftWindows(sortTasksByTime(projected), shiftsById, weekday) };
+    }) : undefined,
   [sortProjection, shiftsById, effectiveDayView, todayYmd]);
 
   // Open Task Modal
@@ -2946,6 +2955,8 @@ export default function App() {
         }}
         onSave={handleSaveTask}
         taskToEdit={taskToEdit}
+        venueId={taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || ''}
+        onShiftCreated={(shift) => setShiftsByVenue((prev) => ({ ...prev, [shift.venueId]: [...(prev[shift.venueId] || []).filter((s) => s.id !== shift.id), shift] }))}
         knownWorkers={knownUsers}
         shifts={shiftsByVenue[taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || ''] || []}
         currentUserEmail={currentUser?.email}

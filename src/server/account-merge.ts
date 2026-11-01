@@ -36,7 +36,7 @@ export const MERGE_EMAIL_FIELDS: Readonly<Record<string, readonly string[]>> = {
 };
 /** User row ids are exact and case-sensitive, unlike email references. */
 export const MERGE_USER_ID_FIELDS: Readonly<Record<string, readonly string[]>> = {
-  shifts: ['userId', 'overrides[].userId'],
+  shifts: ['userId', 'days[].userId', 'overrides[].userId'],
 };
 export const MERGE_REWRITE_COLLECTIONS = [...new Set([
   ...Object.keys(MERGE_EMAIL_FIELDS), ...Object.keys(MERGE_USER_ID_FIELDS),

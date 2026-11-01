@@ -46,6 +46,29 @@ export default {
     assert.equal(r.json.userName, people.mash.name);
     assert.deepEqual(r.json.overrides, [{ date: today, userId: people.assign.id }]);
     assert.equal('email' in r.json, false);
+    assert.equal('daysOfWeek' in r.json, false);
+    assert.deepEqual(r.json.days, Array.from({ length: 7 }, (_, w) => ({ on: [0, 2].includes(w) })));
+    const days = Array.from({ length: 7 }, (_, w) => ({ on: w === 0 }));
+    for (const badDay of [{ on: 'yes' }, { on: true, userId: 'missing' }, { on: true, userId: people.foreign.id }, { on: true, userId: people.elsewhere.id }, { on: true, startMinutes: 600 }, { on: true, startMinutes: 600, endMinutes: 600 }, { on: true, startMinutes: -1, endMinutes: 600 }, { on: true, startMinutes: 600, endMinutes: 1440 }]) {
+      const invalid = { days: [badDay, ...days.slice(1)] };
+      assert.equal((await api('admin', 'POST', '/api/shifts', { ...body, ...invalid })).status, 400);
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${id}`, invalid)).status, 400);
+    }
+    for (const invalid of [[], days.slice(1), [...days, { on: false }], Array.from({ length: 7 }, () => ({ on: false })), [null, ...days.slice(1)]]) {
+      assert.equal((await api('admin', 'POST', '/api/shifts', { ...body, days: invalid })).status, 400);
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${id}`, { days: invalid })).status, 400);
+    }
+    const { startMinutes: _start, endMinutes: _end, ...withoutGeneral } = body;
+    assert.equal((await api('admin', 'POST', '/api/shifts', { ...withoutGeneral, days })).status, 400);
+    const ownDays = days.map((d, w) => w === 0 ? { ...d, userId: people.assign.id, startMinutes: 600, endMinutes: 900 } : d);
+    const varied = await api('admin', 'POST', '/api/shifts', { ...body, days: ownDays, overrides: [], dayUserNames: ['Untrusted'] });
+    assert.equal(varied.status, 201, JSON.stringify(varied.json));
+    assert.equal(varied.json.dayUserNames.length, 7);
+    assert.equal(varied.json.dayUserNames[0], people.assign.name);
+    assert.equal(varied.json.dayUserNames[1], null);
+    assert.deepEqual(varied.json.days, ownDays);
+    assert.equal(JSON.stringify(varied.json).includes('@'), false);
+    assert.equal((await api('admin', 'DELETE', `/api/shifts/${varied.json.id}`)).status, 200);
     const loaded = await api('mash', 'GET', `/api/tasks?venueId=${venueId}`);
     assert.equal(loaded.status, 200);
     assert.deepEqual(loaded.json.shifts.map((s) => s.id), [id]);
@@ -113,6 +136,7 @@ export default {
     assert.deepEqual(live.daysOfWeek, [1, 3]);
     assert.equal(live.targetTimeMinutes, 540);
     assert.equal(live.targetTime2Minutes, 1200);
+    assert.equal((await api('admin', 'PUT', `/api/shifts/${id}`, { days: Array.from({ length: 7 }, (_, w) => ({ on: [1, 3].includes(w), ...(w === 1 ? { userId: people.assign.id, startMinutes: 600, endMinutes: 660 } : {}) })) })).status, 200);
     r = await api('admin', 'DELETE', `/api/shifts/${id}`);
     assert.equal(r.status, 200);
     assert.deepEqual(r.json, { ok: true });
@@ -174,6 +198,9 @@ export default {
       assert.deepEqual(log.filter((e) => e.title === '📋 New task assigned to you').map((e) => e.endpoint).sort(), expected.map((who) => endpoints[who]).sort());
     };
     await pushTask(['mash']);
+    const todayWeekday = new Date(`${today}T12:00:00Z`).getUTCDay();
+    await api('admin', 'PUT', `/api/shifts/${pushShift.json.id}`, { days: Array.from({ length: 7 }, (_, w) => ({ on: true, ...(w === todayWeekday ? { userId: people.assign.id } : {}) })) });
+    await pushTask(['assign']);
     await api('admin', 'PUT', `/api/shifts/${pushShift.json.id}`, { overrides: [{ date: today, userId: people.assign.id }] });
     await pushTask(['assign']);
     await api('admin', 'PUT', `/api/shifts/${pushShift.json.id}`, { overrides: [{ date: today, userId: null }] });
@@ -181,6 +208,82 @@ export default {
     await api('admin', 'PUT', `/api/shifts/${pushShift.json.id}`, { overrides: [], daysOfWeek: [(new Date(`${today}T12:00:00Z`).getUTCDay() + 1) % 7] });
     await pushTask([]);
     assert.equal((await api('admin', 'DELETE', `/api/shifts/${pushShift.json.id}`)).status, 200);
+    const datePlus = (n) => new Date(Date.parse(`${today}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+    const clock = (ymd) => ctx.api('POST', '/api/__test__/clock', { iso: ymd ? `${ymd}T12:00:00Z` : null });
+    try {
+      await clock(today);
+      const expiryMessages = await connect(tokens.admin);
+      const onceBody = { venueId, name: 'One time', area: '', oneTimeDate: today, startMinutes: 480, endMinutes: 600, userId: people.mash.id };
+      for (const oneTimeDate of [datePlus(-1), datePlus(61), '2026-02-30', 'bad']) {
+        assert.equal((await api('admin', 'POST', '/api/shifts', { ...onceBody, oneTimeDate })).status, 400);
+      }
+      const saved = await api('admin', 'POST', '/api/shifts', { ...body, overrides: [] });
+      assert.equal(saved.status, 201);
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${saved.json.id}`, { oneTimeDate: today })).status, 400);
+      const ignoredDays = await api('admin', 'POST', '/api/shifts', { ...onceBody, days: [], daysOfWeek: [] });
+      assert.equal(ignoredDays.status, 201);
+      assert.deepEqual(ignoredDays.json.days, Array.from({ length: 7 }, () => ({ on: false })));
+      assert.equal((await api('admin', 'DELETE', `/api/shifts/${ignoredDays.json.id}`)).status, 200);
+      const once = await api('admin', 'POST', '/api/shifts', onceBody);
+      assert.equal(once.status, 201, JSON.stringify(once.json));
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${once.json.id}`, { oneTimeDate: null })).status, 400);
+      const createOnceTask = async (shiftId) => {
+        const t = await api('admin', 'POST', '/api/tasks', { venueId, title: 'Dated shift task', shiftId });
+        assert.equal(t.status, 201, JSON.stringify(t.json));
+        assert.equal(t.json.scheduleType, 'specific_dates');
+        assert.deepEqual(t.json.specificDates, [today]);
+        assert.deepEqual(t.json.assignedTo, ['all']);
+        assert.equal(t.json.targetTimeMinutes, 480);
+        assert.equal(t.json.targetTime2Minutes, 600);
+        return t.json;
+      };
+      const onceTask = await createOnceTask(once.json.id);
+      const rebound = await api('admin', 'PUT', `/api/tasks/${onceTask.id}`, { scheduleType: 'recurring', expectedVersion: await ctx.getVersion() });
+      assert.equal(rebound.status, 200);
+      assert.equal(rebound.json.scheduleType, 'specific_dates');
+      const moved = await api('admin', 'POST', '/api/shifts', { ...onceBody, oneTimeDate: datePlus(5) });
+      assert.equal(moved.status, 201);
+      const movedTask = await api('admin', 'POST', '/api/tasks', { venueId, title: 'Moved dated shift', shiftId: moved.json.id });
+      assert.equal(movedTask.status, 201);
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${moved.json.id}`, { oneTimeDate: today })).status, 200);
+      const toDelete = await api('admin', 'POST', '/api/shifts', onceBody);
+      const deletedTask = await createOnceTask(toDelete.json.id);
+      assert.equal((await api('admin', 'DELETE', `/api/shifts/${toDelete.json.id}`)).status, 200);
+      let stored = (await ctx.getDoc()).tasks.find((t) => t.id === deletedTask.id);
+      assert.equal(stored.shiftId, null);
+      assert.deepEqual(stored.specificDates, [today]);
+      assert.equal(stored.scheduleType, 'specific_dates');
+      assert.equal(stored.targetTime2Minutes, 600);
+      // Keep yesterday for overnight work; prune before-yesterday on a write.
+      await clock(datePlus(1));
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${saved.json.id}`, { area: 'Yesterday retained' })).status, 200);
+      assert.ok((await ctx.getDoc()).shifts.some((s) => s.id === once.json.id));
+      await clock(datePlus(2));
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${saved.json.id}`, { area: 'Prune now' })).status, 200);
+      let after = await ctx.getDoc();
+      assert.equal(after.shifts.some((s) => s.id === once.json.id), false);
+      stored = after.tasks.find((t) => t.id === onceTask.id);
+      assert.equal(stored.shiftId, null);
+      assert.equal(stored.scheduleType, 'specific_dates');
+      assert.deepEqual(stored.specificDates, [today]);
+      assert.equal(stored.targetTime2Minutes, 600);
+      assert.deepEqual(after.tasks.find((t) => t.id === movedTask.json.id).specificDates, [today], 'pruning a rescheduled shift cannot resurrect its original future date');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const expiryEvent = expiryMessages.find((m) => m.type === 'TASK_UPDATED' && (m.payload.task || m.payload).id === movedTask.json.id);
+      assert.ok(expiryEvent, 'the pruning caller also receives the dated task update');
+      assert.equal(expiryEvent.senderEmail, undefined);
+      assert.deepEqual((expiryEvent.payload.task || expiryEvent.payload).specificDates, [today]);
+      const rolloverShift = await api('admin', 'POST', '/api/shifts', { ...onceBody, oneTimeDate: datePlus(2) });
+      assert.equal(rolloverShift.status, 201);
+      // An upcoming cap cannot be bypassed by creating many dated records.
+      const fixture = Array.from({ length: 60 }, (_, i) => ({ ...onceBody, venueId: venue2, userId: null, id: `${venueId}-cap-${i}`, oneTimeDate: datePlus(3), days: Array.from({ length: 7 }, () => ({ on: false })), agencyId: people.admin.agencyId }));
+      assert.equal((await ctx.api('POST', '/api/__test__/inject-fixture', { shifts: fixture, venueWorkDates: { [venueId]: datePlus(2) } })).status, 200);
+      assert.equal((await api('admin', 'POST', '/api/shifts', { ...onceBody, venueId: venue2, userId: null, oneTimeDate: datePlus(3) })).status, 400);
+      await clock(datePlus(4));
+      assert.equal((await ctx.api('POST', '/api/__test__/rollover-tick', {})).status, 200);
+      after = await ctx.getDoc();
+      assert.equal(after.shifts.some((s) => s.id === rolloverShift.json.id), false);
+    } finally { for (const ws of connections) ws.close(); await clock(null); }
     return 'CRUD, permission/validation denials, safe cached payloads, task binding, atomic detach, scoped websocket updates and identity-bound shift pushes passed';
   },
 };
