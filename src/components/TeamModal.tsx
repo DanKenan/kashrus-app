@@ -787,8 +787,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 
         </div>
 
-        {/* Modal Footer */}
-        <div className="px-6 py-3 border-t border-line bg-sunken flex items-center justify-between shrink-0">
+        {/* People-only footer; shift screens have their own actions. */}
+        {!showShifts && <div className="px-6 py-3 border-t border-line bg-sunken flex items-center justify-between shrink-0">
           <p className="text-sm text-ink-soft">
             Changes to roles and permissions apply immediately across all live connected sessions.
           </p>
@@ -798,7 +798,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           >
             Close
           </button>
-        </div>
+        </div>}
       </div>
 
       {venueTarget && currentUser?.role === 'admin' && (

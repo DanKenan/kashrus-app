@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { shiftPersonOn, shiftRunsOn, shiftsForUserOn, formatShiftHours, shiftLabel, minutesInShift, taskWithShiftTimes, tasksVisibleOnShift } from '../../src/lib/shifts.ts';
+import { normalizeShifts, activeShiftsForUserAt, shiftTaskAppliesAt, shiftOccurrenceDay, shiftTaskOverdueAt, shiftPersonOn, shiftRunsOn, shiftsForUserOn, formatShiftHours, shiftLabel, minutesInShift, taskWithShiftTimes, tasksVisibleOnShift } from '../../src/lib/shifts.ts';
 const day = '2026-11-01'; // Sunday
 const user = { id: 'u1', email: 'one@example.test' };
 const shift = { id: 's1', agencyId: 'a', venueId: 'v', name: 'Deli day', area: 'Deli', daysOfWeek: [0], startMinutes: 480, endMinutes: 1080, userId: 'u1', overrides: [], createdAt: day };
@@ -47,3 +47,47 @@ const unbound = task('normal');
 assert.equal(taskWithShiftTimes(unbound, { s1: shift }), unbound);
 assert.equal(taskWithShiftTimes(raw, { s1: { ...shift, daysOfWeek: [5], startMinutes: 600 } }).targetTimeMinutes, 600);
 console.log('PASS shifts: person, overrides, start-day semantics, hours, visibility, fallback, and live task projection');
+
+const overnight = { ...night, endMinutes: 360 };
+const monday = '2026-11-02';
+assert.equal(formatShiftHours(overnight), '10:00 PM – 6:00 AM (next day)');
+assert.equal(shiftTaskAppliesAt(overnight, monday, 1, 60), true);
+assert.equal(shiftOccurrenceDay(overnight, monday, 1, 60), day);
+assert.equal(shiftOccurrenceDay(overnight, monday, 1, 360), null);
+assert.equal(shiftTaskAppliesAt(overnight, monday, 1, 360), false);
+assert.deepEqual(activeShiftsForUserAt([overnight], user.id, monday, 1, 60), [overnight]);
+assert.deepEqual(activeShiftsForUserAt([overnight], user.id, monday, 1, 360), []);
+const overnightTasks = [task('shift', { shiftId: 's1' }), task('outside', { targetTime: '3:00 PM' })];
+const at = (shifts, viewer, minutes) => tasksVisibleOnShift(overnightTasks, shifts, viewer, monday, 1, minutes).map((t) => t.id);
+assert.deepEqual(at([overnight], user, 60), ['shift']);
+assert.deepEqual(at([overnight], user, 360), ['shift', 'outside']);
+assert.deepEqual(at([overnight], user, 420), ['shift', 'outside']);
+const sundayOverride = { ...overnight, overrides: [{ date: day, userId: 'u2' }, { date: monday, userId: 'u1' }] };
+assert.deepEqual(at([sundayOverride], { id: 'u2', email: 'two@example.test' }, 60), ['shift']);
+assert.deepEqual(at([sundayOverride], user, 60), ['shift', 'outside']);
+assert.equal(shiftTaskOverdueAt(shift, day, 0, 540), false);
+assert.equal(shiftTaskOverdueAt(shift, day, 0, 1080), false);
+assert.equal(shiftTaskOverdueAt(shift, day, 0, 1081), true);
+assert.equal(shiftTaskOverdueAt(shift, monday, 1, 1081), false);
+assert.equal(shiftTaskOverdueAt(overnight, day, 0, 1410), false);
+assert.equal(shiftTaskOverdueAt(overnight, monday, 1, 60), false);
+assert.equal(shiftTaskOverdueAt(overnight, monday, 1, 360), false);
+assert.equal(shiftTaskOverdueAt(overnight, monday, 1, 361), true);
+assert.equal(shiftTaskOverdueAt(overnight, monday, 1, 1320), false);
+for (const assignedTo of ['all', null, [], [null, 42, {}, ' ALL ']]) {
+  assert.deepEqual(tasksVisibleOnShift([task('legacy', { assignedTo })], [], user, day, 0).map((t) => t.id), ['legacy']);
+}
+assert.equal(tasksVisibleOnShift([task('personal', { assignedTo: ' ONE@example.test ' })], [overnight], user, day, 0).length, 1);
+assert.equal(tasksVisibleOnShift([task('other', { assignedTo: [null, 'other@example.test', 42] })], [], user, day, 0).length, 0);
+const missing = { ...shift, overrides: undefined, daysOfWeek: undefined };
+assert.equal(shiftPersonOn(missing, day), user.id);
+assert.equal(shiftRunsOn(missing, day, 0), false);
+assert.equal(shiftTaskAppliesAt(missing, day, 0, 600), false);
+assert.deepEqual(normalizeShifts([missing])[0].overrides, []);
+assert.deepEqual(normalizeShifts([missing])[0].daysOfWeek, []);
+assert.deepEqual(normalizeShifts([{ ...shift, daysOfWeek: [0, '1'] }])[0].daysOfWeek, []);
+assert.deepEqual(normalizeShifts([null, { ...shift, startMinutes: -1 }, { ...shift, endMinutes: 1440 }]), []);
+assert.equal(shiftRunsOn({ ...shift, startMinutes: NaN }, day, 0), false);
+assert.equal(taskWithShiftTimes(raw, { s1: { ...shift, startMinutes: NaN } }), raw);
+assert.deepEqual(tasksVisibleOnShift([task('fallback', { shiftId: 's1' })], [{ ...shift, startMinutes: NaN }], user, day, 0).map((t) => t.id), ['fallback']);
+console.log('PASS shift review: overnight occurrence/override/end boundary, shared overdue, legacy assignees, and malformed persisted shifts');

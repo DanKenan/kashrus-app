@@ -1,5 +1,5 @@
 import type { Shift } from '../types';
-import { shiftLabel } from '../lib/shifts';
+import { shiftLabel, shiftTaskAppliesAt, shiftTaskOverdueAt } from '../lib/shifts';
 import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
 import { ANY_TIME_LABEL } from '../lib/anyTime';
 import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
@@ -72,11 +72,23 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   timeZone,
 }) => {
   // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
-  const nowMinutes = timeZone ? minutesIn(timeZone) : null;
+  const now = new Date();
+  const nowMinutes = timeZone ? minutesIn(timeZone, now) : null;
   // Overdue only means something on a task that is due today ("All days" lists other days too).
-  const todayYmd = timeZone ? workDateIn(timeZone) : null;
-  const todayWeekday = timeZone ? weekdayIn(timeZone) : null;
-  const dueToday = (t: Task) => todayYmd === null || todayWeekday === null || taskAppliesOn(t, todayYmd, todayWeekday);
+  const todayYmd = timeZone ? workDateIn(timeZone, now) : null;
+  const todayWeekday = timeZone ? weekdayIn(timeZone, now) : null;
+  const dueToday = (t: Task) => {
+    if (todayYmd === null || todayWeekday === null || nowMinutes === null) return true;
+    const shift = t.shiftId ? shiftsById.get(t.shiftId) : undefined;
+    return shift ? shiftTaskAppliesAt(shift, todayYmd, todayWeekday, nowMinutes)
+      : taskAppliesOn(t, todayYmd, todayWeekday);
+  };
+  const isOverdue = (task: Task) => {
+    const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+    if (shift) return !task.isCompleted && todayYmd !== null && todayWeekday !== null && nowMinutes !== null &&
+      shiftTaskOverdueAt(shift, todayYmd, todayWeekday, nowMinutes);
+    return isTaskOverdue(task, nowMinutes) && dueToday(task);
+  };
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
   const [notesState, setNotesState] = useState<Record<string, string>>({});
   // ROUND 5 — write baseline per task, captured when the notes editor OPENS
@@ -138,6 +150,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
           <React.Fragment key={task.id}>
           {isNoTimeTask(task) && (i === 0 || !isNoTimeTask(section.tasks[i - 1])) && <p className="pt-2 text-xs font-semibold text-ink-soft">{ANY_TIME_LABEL}</p>}
           <motion.div
+            data-task-id={task.id}
             key={task.id}
             layout
             initial={{ opacity: 0, y: 10 }}
@@ -180,7 +193,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                     <Clock className="w-3 h-3" />
                     {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!) : formatTaskTimes(task))}
                   </span>
-                  {isTaskOverdue(task, nowMinutes) && dueToday(task) && (
+                  {isOverdue(task) && (
                     <span data-overdue className={OVERDUE_CHIP_CLASS} style={{ color: 'var(--bad)', backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}>
                       Overdue
                     </span>

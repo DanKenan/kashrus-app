@@ -43,7 +43,7 @@ ok('#25 before the time -> not overdue', !isTaskOverdue(t({}), 7 * 60));
 ok('#25 End of Day / no time / any time -> never', !isTaskOverdue(t({ targetTime: 'End of Day' }), 1439) && !isTaskOverdue(t({ targetTime: '' }), 1439) && !isTaskOverdue(t({ targetTime: 'Any time' }), 1439));
 ok('#25 picker minutes win', isTaskOverdue(t({ targetTime: 'Morning rounds', targetTimeMinutes: 600 }), 601) && targetMinutesOf({ targetTime: '14:30' }) === 870 && targetMinutesOf({ targetTime: '12:15 AM' }) === 15);
 ok('#25 no zone -> no chip', !isTaskOverdue(t({}), null));
-ok('#25 both board views show the chip in the venue zone', [card, table].every((s) => s.includes('isTaskOverdue(task, nowMinutes)') && s.includes('minutesIn(timeZone)') && /\n\s+Overdue\n/.test(s)) && (app.match(/timeZone=\{currentVenueTimeZone\}/g) || []).length >= 2);
+ok('#25 both board views show the chip in the venue zone', [card, table].every((s) => s.includes('isTaskOverdue(task, nowMinutes)') && /minutesIn\(timeZone(?:,\s*now)?\)/.test(s) && /\n\s+Overdue\n/.test(s)) && (app.match(/timeZone=\{currentVenueTimeZone\}/g) || []).length >= 2);
 
 // #26
 const ce = rd('src/components/CreateEventModal.tsx');

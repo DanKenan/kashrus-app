@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { X } from 'lucide-react';
+import { Check, X } from 'lucide-react';
 import type { Shift, ShiftOverride } from '../types';
 import { formatShiftHours } from '../lib/shifts';
 import { apiWrite, captureEditBaseline, newActionId } from '../lib/api';
@@ -71,6 +71,9 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange }: Pro
       });
       if (!result.ok) { setError(result.error || "Couldn't save. Please try again."); operation.current = undefined; setConfirm(false); return; }
       onChange(remove ? existing! : result.data, remove); setEditing(null); setConfirm(false);
+    } catch {
+      setError(remove ? "Couldn't delete the shift. Check the connection and try again." : "Couldn't save the shift. Check the connection and try again.");
+      setConfirm(false);
     } finally { lock.current = false; setBusy(false); }
   };
   const picker = (value: string, onChangeValue: (v: string) => void) => <select className={`w-full ${control}`} value={value} onChange={(e) => onChangeValue(e.target.value)}>
@@ -96,7 +99,20 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange }: Pro
       <fieldset disabled={busy} className="space-y-4 disabled:opacity-50">
         <label className="block text-sm text-ink-soft">Name<input required maxLength={40} value={name} onChange={(e) => setName(e.target.value)} className={`block w-full ${control}`} /></label>
         <label className="block text-sm text-ink-soft">Area (type anything)<input maxLength={40} value={area} onChange={(e) => setArea(e.target.value)} className={`block w-full ${control}`} /></label>
-        <div><p className="text-sm text-ink-soft mb-2">Days</p><div className="flex flex-wrap gap-2">{days.map((d, i) => <button type="button" key={d} aria-pressed={selectedDays.includes(i)} onClick={() => setDays((old) => old.includes(i) ? old.filter((v) => v !== i) : [...old, i])} className={`${button} ${selectedDays.includes(i) ? 'border-gold bg-sunken' : ''}`}>{d}</button>)}</div></div>
+        <div>
+          <p className="text-sm text-ink-soft mb-2">Days</p>
+          <div className="flex flex-wrap gap-2">
+            {days.map((d, i) => {
+              const selected = selectedDays.includes(i);
+              return <button type="button" key={d} aria-pressed={selected}
+                onClick={() => setDays((old) => old.includes(i) ? old.filter((v) => v !== i) : [...old, i])}
+                className={`min-h-11 inline-flex items-center justify-center gap-2 rounded-full border px-3 text-base pressable cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold ${selected ? 'bg-ink text-paper border-ink font-semibold tactile-1' : 'bg-surface text-ink-soft border-line-control hover:bg-sunken'}`}>
+                {selected && <Check aria-hidden="true" className="w-4 h-4" />}
+                <span>{d}</span>
+              </button>;
+            })}
+          </div>
+        </div>
         <div className="grid grid-cols-2 gap-3"><label className="text-sm text-ink-soft">From<input required type="time" value={start} onChange={(e) => setStart(e.target.value)} className={`block w-full ${control}`} /></label><label className="text-sm text-ink-soft">Until<input required type="time" value={end} onChange={(e) => setEnd(e.target.value)} className={`block w-full ${control}`} /></label></div>
         {end < start && <p className="text-sm text-ink-soft">Ends next day</p>}
         <label className="block text-sm text-ink-soft">Usually on this shift{picker(person, setPerson)}</label>
@@ -108,7 +124,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange }: Pro
       </fieldset>
       {error && <p role="alert" className="text-base text-bad">{error}</p>}
       <button type="submit" disabled={busy} className="min-h-12 w-full rounded-lg bg-gold-deep text-paper text-base font-semibold pressable disabled:opacity-50 cursor-pointer">{busy ? 'Saving…' : 'Save'}</button>
-      {editing !== 'new' && <button type="button" disabled={busy} onClick={() => { operation.current = undefined; setConfirm(true); }} className="min-h-11 px-3 rounded-lg border border-bad text-bad text-base pressable cursor-pointer">Delete shift</button>}
+      {editing !== 'new' && <button type="button" disabled={busy} onClick={() => { operation.current = undefined; setConfirm(true); }} className="min-h-11 px-3 rounded-lg border border-bad bg-surface text-bad text-base font-semibold hover:bg-bad-bg pressable disabled:opacity-50 cursor-pointer">Delete shift</button>}
     </form>
     <ConfirmModal isOpen={confirm} onClose={() => { if (!busy) setConfirm(false); }} onConfirm={() => void save(true)} title="Delete shift?" message="Its tasks will keep the shift’s hours and days as their own schedule." confirmText="Delete shift" isLoading={busy} />
   </section>;

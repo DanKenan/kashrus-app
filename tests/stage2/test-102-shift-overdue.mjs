@@ -5,7 +5,18 @@ export default {
   name: 'Test 102: shift overdue uses live days and window end',
   whatItProves: 'Both overdue push checks and dashboard use the shift end and start weekday, including a midnight-crossing shift; editing the shift changes task deadlines immediately.',
   async run(baseUrl, ctx) {
-    const { api, venueId, people } = await shiftFixture(baseUrl, ctx, '102');
+    const { api, venueId, agencyId, people } = await shiftFixture(baseUrl, ctx, '102');
+    const legacy = { agencyId, venueId, name: 'Legacy', startMinutes: 480, endMinutes: 1080, userId: people.mash.id };
+    assert.equal((await ctx.api('POST', '/api/__test__/inject-fixture', { shifts: [
+      { ...legacy, id: `${venueId}-no-overrides`, daysOfWeek: [0] },
+      { ...legacy, id: `${venueId}-no-days` },
+      { ...legacy, id: `${venueId}-bad-hours`, startMinutes: -1 },
+    ] })).status, 200);
+    const hydrated = await api('mash', 'GET', `/api/tasks?venueId=${venueId}`);
+    assert.equal(hydrated.status, 200, 'legacy shifts do not crash task loading');
+    assert.deepEqual(hydrated.json.shifts.find((s) => s.id.endsWith('-no-overrides')).overrides, []);
+    assert.deepEqual(hydrated.json.shifts.find((s) => s.id.endsWith('-no-days')).daysOfWeek, []);
+    assert.equal(hydrated.json.shifts.some((s) => s.id.endsWith('-bad-hours')), false);
     // Pick Sunday within the next week; all boundaries are venue-local UTC.
     const date = new Date();
     date.setUTCDate(date.getUTCDate() + (7 - date.getUTCDay()) % 7);
@@ -23,12 +34,23 @@ export default {
       assert.equal(t.json.enableOverdueAlert, true);
       return { shift: r.json, task: t.json };
     };
+    const endpoints = {};
+    for (const who of ['mash', 'assign', 'coord']) {
+      endpoints[who] = `https://push.example/overdue-${people[who].id}`;
+      assert.equal((await api(who, 'POST', '/api/push/subscribe', { subscription: { endpoint: endpoints[who], keys: { p256dh: 'p', auth: 'a' } }, mode: 'tagged' })).status, 200);
+    }
     const ids = [];
+    const expectedPeople = new Map();
     const check = async (expected, expectedDay = sunday) => {
+      await ctx.api('POST', '/api/__test__/push-log/clear', {});
       const r = await ctx.api('POST', '/api/__test__/overdue-check', { clear: true });
       assert.equal(r.status, 200);
       const keys = r.json.notified.filter((k) => ids.some((id) => k.startsWith(`${id}:`))).sort();
       assert.deepEqual(keys, expected.map((id) => `${id}:${expectedDay}`).sort(), 'overdue push keys');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const log = (await ctx.api('GET', '/api/__test__/push-log')).json.log;
+      const pushes = log.filter((e) => e.title === 'Overdue: Day' || e.title === 'Overdue: Night');
+      assert.deepEqual(pushes.map((e) => e.endpoint).sort(), expected.map((id) => expectedPeople.get(id)).filter(Boolean).sort(), 'only the occurrence person receives overdue push');
       const dash = await api('admin', 'GET', '/api/admin/dashboard');
       assert.equal(dash.status, 200);
       const venue = dash.json.venues.find((v) => v.venue.id === venueId);
@@ -44,12 +66,20 @@ export default {
       const day = await create('Day', 480, 1080);
       const night = await create('Night', 1320, 120);
       ids.push(day.task.id, night.task.id);
+      expectedPeople.set(day.task.id, endpoints.mash);
+      expectedPeople.set(night.task.id, endpoints.assign);
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${night.shift.id}`, { overrides: [{ date: sunday, userId: people.assign.id }] })).status, 200);
       await check([]); // Day has started but its end has not passed.
       await clock(sunday, '18:00'); await check([]);
       await clock(sunday, '18:01'); await check([day.task.id]);
       await clock(sunday, '23:30'); await check([day.task.id]);
       await clock(nextDay(1), '01:00'); await check([]);
       await clock(nextDay(1), '02:00'); await check([]);
+      await clock(nextDay(1), '02:01'); await check([night.task.id]);
+      // Writing on Sunday keeps its override; it still decides Monday's push.
+      await clock(sunday, '23:30');
+      assert.equal((await api('admin', 'PUT', `/api/shifts/${night.shift.id}`, { overrides: [{ date: sunday, userId: null }] })).status, 200);
+      expectedPeople.set(night.task.id, null);
       await clock(nextDay(1), '02:01'); await check([night.task.id]);
       await clock(nextDay(2), '19:00'); await check([]);
       // Change live days and hours; the task's saved Sunday window is stale.

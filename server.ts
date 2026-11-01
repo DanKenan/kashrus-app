@@ -1,5 +1,5 @@
 import type { Shift } from './src/types.ts';
-import { shiftPersonOn, shiftRunsOn, taskWithShiftTimes } from './src/lib/shifts.ts';
+import { normalizeShifts, shiftOccurrenceDay, shiftPersonOn, shiftRunsOn, shiftTaskOverdueAt, taskWithShiftTimes } from './src/lib/shifts.ts';
 import { logoutAckSetCookie } from './src/server/logout-marker.ts';
 import express from 'express';
 import http from 'http';
@@ -3877,7 +3877,7 @@ function hydrateState(parsed: any) {
 }
 function hydrateStateInner(parsed: any) {
   try {
-      shifts = Array.isArray(parsed.shifts) ? parsed.shifts : [];
+      shifts = normalizeShifts(parsed.shifts);
       {
         const c: typeof carriedDocFields = {};
         if (parsed && parsed.datedGrantsFrozen === true) c.datedGrantsFrozen = true;
@@ -5844,10 +5844,12 @@ function taskOverdueDay(task: TaskItem, now: Date): string | null {
   const today = workDateIn(tz, now), minutes = minutesIn(tz, now);
   const shift = shifts.find((s) => s.id === task.shiftId && s.venueId === task.venueId && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
   if (shift) {
-    const overnight = shift.endMinutes < shift.startMinutes;
-    const day = overnight ? addDays(today, -1) : today;
-    if (!shiftRunsOn(shift, day, new Date(`${day}T12:00:00Z`).getUTCDay())) return null;
-    return minutes > shift.endMinutes && (!overnight || minutes < shift.startMinutes) ? day : null;
+    const weekday = new Date(`${today}T12:00:00Z`).getUTCDay();
+    if (!shiftTaskOverdueAt(shift, today, weekday, minutes)) return null;
+    // An overnight deadline belongs to yesterday even after its active window.
+    return shift.endMinutes < shift.startMinutes
+      ? shiftOccurrenceDay(shift, addDays(today, -1), (weekday + 6) % 7, shift.startMinutes)
+      : shiftOccurrenceDay(shift, today, weekday, minutes);
   }
   // TODAYSORT (Don, Nov 1): a Friday-only task is not overdue on a Sunday.
   if (!taskAppliesOn(task, today, weekdayIn(tz, now))) return null;
@@ -5887,14 +5889,19 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
         .filter((a: any) => typeof a === 'string' && a.toLowerCase() !== 'all')
         .map((a: string) => a.trim().toLowerCase())
     );
-    for (const recipient of taskPushRecipients(task, users, venues)) {
+    const shift = shifts.find((s) => s.id === task.shiftId && s.venueId === task.venueId && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
+    const person = shift ? users.find((u) => u.id === shiftPersonOn(shift, today) && (u.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc')) : undefined;
+    const recipients = shift
+      ? (person ? taskPushRecipients({ ...task, assignedTo: [person.email] }, [person], venues, { explicitOnly: true }) : [])
+      : taskPushRecipients(task, users, venues);
+    for (const recipient of recipients) {
       sendPushToRecipient(
         recipient,
         `Overdue: ${task.title}`,
         `${venueName} — was due at ${deadline}`,
         { taskId: task.id, venueId: task.venueId, type: 'overdue' },
         undefined,
-        namedEmails.has(String(recipient.email || '').trim().toLowerCase()) ? 'personal' : 'general'
+        shift || namedEmails.has(String(recipient.email || '').trim().toLowerCase()) ? 'personal' : 'general'
       );
     }
   }
@@ -11761,7 +11768,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 
   app.post('/api/__test__/inject-fixture', async (req, res) => {
     const {
-      venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [],
+      venues = [], tasks = [], shifts: newShifts = [], agencies: newAgencies = [], users: newUsers = [],
       events = [], incidents = [], handoffNotes = [], announcements = [],
       taskTemplates = [], eventTaskTemplates = [], approvedIngredients = [], factoryReports = [],
       kioskDevices: newKioskDevices = [], historyLogs = [],
@@ -11780,7 +11787,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
           return {
             doc: {
               ...freshDoc,
-              venues: newVenues, tasks: newTasks, agencies: mergedAgencies, users: mergedUsers,
+              venues: newVenues, tasks: newTasks, shifts: [...(freshDoc.shifts || []), ...newShifts], agencies: mergedAgencies, users: mergedUsers,
               events: [...(freshDoc.events || []), ...events],
               incidents: [...(freshDoc.incidents || []), ...incidents],
               handoffNotes: [...(freshDoc.handoffNotes || []), ...handoffNotes],
@@ -13013,7 +13020,7 @@ function publicShift(shift: Shift): Shift {
     name: shift.name, area: shift.area, daysOfWeek: shift.daysOfWeek,
     startMinutes: shift.startMinutes, endMinutes: shift.endMinutes,
     userId: shift.userId, ...(person ? { userName: person.name } : {}),
-    overrides: shift.overrides.map(({ date, userId }) => ({ date, userId })),
+    overrides: (normalizeShifts([shift])[0]?.overrides || []).map(({ date, userId }) => ({ date, userId })),
     createdAt: shift.createdAt, ...(shift.updatedAt ? { updatedAt: shift.updatedAt } : {}),
   };
 }

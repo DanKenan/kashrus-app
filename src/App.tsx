@@ -1,5 +1,5 @@
 import type { Shift } from './types';
-import { taskWithShiftTimes, tasksVisibleOnShift } from './lib/shifts';
+import { taskWithShiftTimes, tasksVisibleOnShift, shiftTaskAppliesAt } from './lib/shifts';
 import { shiftSortProjection, restoreShiftWindows } from './lib/shiftTaskDay';
 import { AgencyLogoSheet } from './components/AgencyLogoSheet';
 import { AgencySettingsSheet } from './components/AgencySettingsSheet';
@@ -77,7 +77,7 @@ import { taskCategories } from './lib/utils';
 import { taskAppliesOn, sortTasksByTime, groupTasksByDay, taskIsForViewer, seesOnlyOwnTasks } from './lib/taskDay';
 import { toggleCategory, matchesCategories, pruneCategories } from './lib/categoryFilter';
 import { isMyTask } from './lib/myTasks';
-import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
+import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn, minutesIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { InvitePage } from './components/InvitePage';
 import { ResetPage } from './components/ResetPage';
@@ -754,32 +754,36 @@ export default function App() {
   const currentVenueTimeZone = venueTimeZone(currentVenue, currentUser);
   const venueShifts = shiftsByVenue[currentVenue?.id || ''] || [];
   const shiftsById = useMemo(() => new Map<string, Shift>(Object.values<Shift[]>(shiftsByVenue).flat().map((s) => [s.id, s])), [shiftsByVenue]);
-  const [dayKey, setDayKey] = useState(() => workDateIn(currentVenueTimeZone));
+  const [dayKey, setDayKey] = useState(() => Date.now());
   useEffect(() => {
-    const updateDay = () => setDayKey((prev) => {
-      const next = workDateIn(currentVenueTimeZone);
-      return prev === next ? prev : next;
-    });
+    // Tick even within the same day: shift continuations and overdue badges
+    // change at minute boundaries, without a task or websocket update.
+    const updateDay = () => setDayKey(Date.now());
     updateDay();
     const timer = window.setInterval(updateDay, 60_000);
     return () => window.clearInterval(timer);
   }, [currentVenueTimeZone]);
-  const todayYmd = workDateIn(currentVenueTimeZone);
+  const venueNow = new Date(dayKey);
+  const todayYmd = workDateIn(currentVenueTimeZone, venueNow);
+  const todayWeekday = weekdayIn(currentVenueTimeZone, venueNow);
+  const nowMinutes = minutesIn(currentVenueTimeZone, venueNow);
   const effectiveDayView = canUserAssignTasks(currentUser) && !isKiosk ? dayView : 'today';
   // Don (Nov 1): a mashgiach sees only the tasks assigned to them or to everyone.
   // People who can create/edit tasks, and the venue kiosk, still see the whole venue.
   const onlyOwnTasks = !isKiosk && seesOnlyOwnTasks(currentUser, canUserAssignTasks(currentUser));
   // Today's list (the venue's day; for a mashgiach only their own + everyone's tasks).
   const todayTasks = useMemo(() => {
-    const todayWeekday = weekdayIn(currentVenueTimeZone);
-    const applicable = tasks.map((task) => taskWithShiftTimes(task, shiftsById)).filter((task) =>
-      taskAppliesOn(task, todayYmd, todayWeekday) &&
-      (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email)),
-    );
+    const applicable = tasks.map((task) => taskWithShiftTimes(task, shiftsById)).filter((task) => {
+      const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+      if (shift) return shiftTaskAppliesAt(shift, todayYmd, todayWeekday, nowMinutes) &&
+        (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email));
+      return taskAppliesOn(task, todayYmd, todayWeekday) &&
+        (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email));
+    });
     return onlyOwnTasks && currentUser
-      ? tasksVisibleOnShift(applicable, venueShifts, currentUser, todayYmd, todayWeekday)
+      ? tasksVisibleOnShift(applicable, venueShifts, currentUser, todayYmd, todayWeekday, nowMinutes)
       : applicable;
-  }, [tasks, shiftsById, venueShifts, todayYmd, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser]);
+  }, [tasks, shiftsById, venueShifts, todayYmd, todayWeekday, nowMinutes, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser]);
   // The list on screen: today's, or every task when an editor picks "All days".
   const dayTasks = effectiveDayView === 'all' ? tasks : todayTasks;
 
