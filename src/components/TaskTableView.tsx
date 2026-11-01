@@ -1,10 +1,10 @@
+import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
+import { ANY_TIME_LABEL } from '../lib/anyTime';
 import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
-import { minutesIn } from '../lib/workday';
+import { minutesIn, workDateIn, weekdayIn } from '../lib/workday';
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ChevronDown,
   ArrowRight,
-  ChevronUp,
   Clock,
   Users,
   Check,
@@ -19,7 +19,7 @@ import {
   Star,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
-import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories, boardTier } from '../lib/utils';
+import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
@@ -30,6 +30,7 @@ interface TaskTableViewProps {
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
   timeZone?: string;
   tasks: Task[];
+  sections?: TaskDaySection<Task>[];
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
   onUpdateNotes: (taskId: string, notes: string, baselineVersion?: number) => void;
@@ -38,8 +39,6 @@ interface TaskTableViewProps {
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
-  onMoveTask?: (taskId: string, direction: 'up' | 'down') => void;
-  canReorder?: boolean;
 }
 
 const getInitials = (nameOrEmail: string) => {
@@ -54,6 +53,7 @@ const getInitials = (nameOrEmail: string) => {
 
 export const TaskTableView: React.FC<TaskTableViewProps> = ({
   tasks,
+  sections,
   currentUser,
   onUpdateStatus,
   onUpdateNotes,
@@ -62,12 +62,14 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
-  onMoveTask,
-  canReorder,
   timeZone,
 }) => {
   // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
   const nowMinutes = timeZone ? minutesIn(timeZone) : null;
+  // Overdue only means something on a task that is due today ("All days" lists other days too).
+  const todayYmd = timeZone ? workDateIn(timeZone) : null;
+  const todayWeekday = timeZone ? weekdayIn(timeZone) : null;
+  const dueToday = (t: Task) => todayYmd === null || todayWeekday === null || taskAppliesOn(t, todayYmd, todayWeekday);
   const [editingNotes, setEditingNotes] = useState<Record<string, string>>({});
   // ROUND 5 — write baseline per task, captured when the user FOCUSES the
   // notes field (the inline editor's "open" moment). The save carries the
@@ -162,21 +164,20 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
               )}
             </tr>
           </thead>
-          <tbody className="divide-y divide-line/60 text-xs text-ink-soft">
-            {tasks.map((task, i) => {
+          {(sections ?? [{ key: 'list', label: '', tasks }]).map((section) => (
+        <tbody key={section.key} data-day-section={sections ? section.key : undefined} className="divide-y divide-line/60 text-xs text-ink-soft">
+          {section.label && <tr><th colSpan={canUserAssignTasks(currentUser) ? 7 : 6} className="px-4 py-3 text-left text-xs font-semibold text-ink-soft bg-sunken">{section.label}</th></tr>}
+          {section.tasks.map((task, i) => {
               const noteValue = editingNotes[task.id] !== undefined ? editingNotes[task.id] : task.notes;
               const isSaved = saveIndicator[task.id];
               const canFill = canUserFillTasks(currentUser);
               const canAssign = canUserAssignTasks(currentUser);
               const mine = isDirectlyAssigned(task, currentUser);
-              const tier = boardTier(task, currentUser?.email);
-              const upBlocked =
-                i === 0 || boardTier(tasks[i - 1], currentUser?.email) !== tier;
-              const downBlocked =
-                i === tasks.length - 1 || boardTier(tasks[i + 1], currentUser?.email) !== tier;
 
               return (
-                <tr
+                <React.Fragment key={task.id}>
+          {isNoTimeTask(task) && (i === 0 || !isNoTimeTask(section.tasks[i - 1])) && <tr><td colSpan={canUserAssignTasks(currentUser) ? 7 : 6} className="px-4 py-3 text-xs font-semibold text-ink-soft">{ANY_TIME_LABEL}</td></tr>}
+          <tr
                   key={task.id}
                   style={categoryVars(task.category)}
                   className={`transition-colors group hover:bg-sunken/50 ${
@@ -240,7 +241,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                         <Clock className="w-3.5 h-3.5 text-ink-faint shrink-0" />
                         <span>{formatTaskTimes(task)}</span>
                       </div>
-                  {isTaskOverdue(task, nowMinutes) && (
+                  {isTaskOverdue(task, nowMinutes) && dueToday(task) && (
                     <span data-overdue className={OVERDUE_CHIP_CLASS} style={{ color: 'var(--bad)', backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}>
                       Overdue
                     </span>
@@ -548,26 +549,6 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                   {canAssign && (
                     <td className="py-3.5 px-3 align-top text-right pr-4">
                       <div className="flex items-center justify-end gap-1">
-                        {canReorder && onMoveTask && (
-                          <>
-                            <button
-                              onClick={() => onMoveTask(task.id, 'up')}
-                              disabled={upBlocked}
-                              className="pressable p-1.5 rounded-lg text-ink-faint hover:text-gold-deep hover:bg-sunken transition cursor-pointer disabled:opacity-25 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-ink-faint"
-                              title={upBlocked ? 'Top of its section' : 'Move up'}
-                            >
-                              <ChevronUp className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => onMoveTask(task.id, 'down')}
-                              disabled={downBlocked}
-                              className="pressable p-1.5 rounded-lg text-ink-faint hover:text-gold-deep hover:bg-sunken transition cursor-pointer disabled:opacity-25 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-ink-faint"
-                              title={downBlocked ? 'Bottom of its section' : 'Move down'}
-                            >
-                              <ChevronDown className="w-3.5 h-3.5" />
-                            </button>
-                          </>
-                        )}
                         <button
                           onClick={() => onEditTask(task)}
                           className="pressable p-1.5 rounded-lg text-ink-faint hover:text-gold-deep hover:bg-sunken transition cursor-pointer"
@@ -586,9 +567,11 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                     </td>
                   )}
                 </tr>
+          </React.Fragment>
               );
             })}
-          </tbody>
+        </tbody>
+      ))}
         </table>
       </div>
       {moreRight && (

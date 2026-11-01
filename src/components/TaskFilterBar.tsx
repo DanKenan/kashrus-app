@@ -14,8 +14,8 @@ interface TaskFilterBarProps {
   categoryCounts?: Record<string, number>;
   viewMode: 'table' | 'cards';
   onViewModeChange: (mode: 'table' | 'cards') => void;
-  showOnlyTodaySchedule: boolean;
-  onToggleScheduleFilter: () => void;
+  dayView: 'today' | 'all';
+  onDayViewChange: (view: 'today' | 'all') => void;
   onOpenTaskModal: () => void;
   isAdmin: boolean;
 }
@@ -29,8 +29,8 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
   categoryCounts,
   viewMode,
   onViewModeChange,
-  showOnlyTodaySchedule,
-  onToggleScheduleFilter,
+  dayView,
+  onDayViewChange,
   onOpenTaskModal,
   isAdmin,
 }) => {
@@ -66,19 +66,25 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
 
         {/* Filters, View Switcher & New Assignment Button */}
         <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0 flex-wrap sm:flex-nowrap">
-          {/* Today's Schedule Only Toggle */}
-          <button
-            id="today-schedule-toggle"
-            onClick={onToggleScheduleFilter}
-            className={`pressable shrink-0 px-3.5 py-2.5 text-xs font-bold rounded-2xl border transition cursor-pointer tactile-1 ${
-              showOnlyTodaySchedule
-                ? 'bg-gold-wash text-gold-ink border-gold/50'
-                : 'bg-surface text-ink-soft border-line hover:border-line-strong'
-            }`}
-            title="Filter tasks scheduled for today's active shift"
-          >
-            {showOnlyTodaySchedule ? '✓ Active Today' : 'All Shift Days'}
-          </button>
+          {isAdmin && (
+            <div className="flex items-center gap-2" role="group" aria-label="Task days">
+              {(['today', 'all'] as const).map((view) => (
+                <button
+                  key={view}
+                  id={view === 'today' ? 'day-view-today' : 'day-view-all'}
+                  onClick={() => onDayViewChange(view)}
+                  aria-pressed={dayView === view}
+                  className={`pressable min-h-11 shrink-0 px-3 py-2 rounded-full text-xs font-semibold border transition cursor-pointer ${
+                    dayView === view
+                      ? 'bg-gold-wash text-gold-ink border-gold/50'
+                      : 'bg-surface text-ink-soft border-line hover:border-line-strong tactile-1'
+                  }`}
+                >
+                  {view === 'today' ? 'Today' : 'All days'}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* View Switcher: Table vs Cards */}
           <div className="flex items-center bg-sunken p-1 rounded-2xl border border-line shrink-0">

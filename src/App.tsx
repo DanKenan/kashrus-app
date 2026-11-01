@@ -70,7 +70,8 @@ import { VenueTabs } from './components/VenueTabs';
 import { AgencyEventsScreen } from './components/AgencyEventsScreen';
 import { SHOW_FACTORY_AUDIT } from './lib/features';
 import { signoffUndoBy, signoffUndoTitle, SIGNOFF_UNDO_TEXT } from './lib/signoffUndo';
-import { taskCategories, sortTasksForBoard, boardTier } from './lib/utils';
+import { taskCategories } from './lib/utils';
+import { taskAppliesOn, sortTasksByTime, groupTasksByDay, taskIsForViewer, seesOnlyOwnTasks } from './lib/taskDay';
 import { toggleCategory, matchesCategories, pruneCategories } from './lib/categoryFilter';
 import { isMyTask } from './lib/myTasks';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
@@ -410,7 +411,7 @@ export default function App() {
   };
   // Kiosk only (D3a): the kiosk list is the default; table and cards stay one tap away.
   const [kioskView, setKioskView] = useState<'list' | 'table' | 'cards'>('list');
-  const [showOnlyTodaySchedule, setShowOnlyTodaySchedule] = useState(false);
+  const [dayView, setDayView] = useState<'today' | 'all'>('today');
 
   // Modals
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
@@ -746,6 +747,32 @@ export default function App() {
   // Item 6: the active venue's IANA zone (venue -> agency -> America/New_York).
   // "Today" in the app is the venue's local day, never the device zone or UTC.
   const currentVenueTimeZone = venueTimeZone(currentVenue, currentUser);
+  const [dayKey, setDayKey] = useState(() => workDateIn(currentVenueTimeZone));
+  useEffect(() => {
+    const updateDay = () => setDayKey((prev) => {
+      const next = workDateIn(currentVenueTimeZone);
+      return prev === next ? prev : next;
+    });
+    updateDay();
+    const timer = window.setInterval(updateDay, 60_000);
+    return () => window.clearInterval(timer);
+  }, [currentVenueTimeZone]);
+  const todayYmd = workDateIn(currentVenueTimeZone);
+  const effectiveDayView = canUserAssignTasks(currentUser) && !isKiosk ? dayView : 'today';
+  // Don (Nov 1): a mashgiach sees only the tasks assigned to them or to everyone.
+  // People who can create/edit tasks, and the venue kiosk, still see the whole venue.
+  const onlyOwnTasks = !isKiosk && seesOnlyOwnTasks(currentUser, canUserAssignTasks(currentUser));
+  // Today's list (the venue's day; for a mashgiach only their own + everyone's tasks).
+  const todayTasks = useMemo(() => {
+    const todayWeekday = weekdayIn(currentVenueTimeZone);
+    return tasks.filter((task) =>
+      taskAppliesOn(task, todayYmd, todayWeekday) &&
+      (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email)),
+    );
+  }, [tasks, todayYmd, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser?.email]);
+  // The list on screen: today's, or every task when an editor picks "All days".
+  const dayTasks = effectiveDayView === 'all' ? tasks : todayTasks;
+
 
   // 5a — Updates panel context. The generation bumps whenever the signed-in
   // context changes (user, agency, venue, kiosk session): the Updates center
@@ -1809,29 +1836,30 @@ export default function App() {
   };
 
   // Statistics calculation
-  const totalTasks = tasks.length;
-  const completedTasks = tasks.filter((t) => t.isCompleted).length;
+  // The progress header reads "Today": it always counts today's tasks, also while an editor browses "All days".
+  const totalTasks = todayTasks.length;
+  const completedTasks = todayTasks.filter((t) => t.isCompleted).length;
   const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
-  const myTasks = tasks.filter((t) => isMyTask(t, currentUser));
+  const myTasks = todayTasks.filter((t) => isMyTask(t, currentUser));
   const myTotal = myTasks.length;
   const myCompleted = myTasks.filter((t) => t.isCompleted).length;
 
   const categories = useMemo(() => {
     const set = new Set<string>();
-    tasks.forEach((t) => {
+    dayTasks.forEach((t) => {
       for (const c of taskCategories(t)) set.add(c);
     });
     return Array.from(set);
-  }, [tasks]);
+  }, [dayTasks]);
 
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    tasks.forEach((t) => {
+    dayTasks.forEach((t) => {
       for (const c of taskCategories(t)) counts[c] = (counts[c] || 0) + 1;
     });
     return counts;
-  }, [tasks]);
+  }, [dayTasks]);
 
   // A picked category that vanished from the board (e.g. after a venue switch) would hide everything with no chip lit.
   useEffect(() => {
@@ -1840,10 +1868,7 @@ export default function App() {
 
   // Filter tasks
   const filteredTasks = useMemo(() => {
-    const nowForToday = new Date();
-    const todayIndex = weekdayIn(currentVenueTimeZone, nowForToday);
-
-    return tasks.filter((task) => {
+    return dayTasks.filter((task) => {
       // Search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
@@ -1862,18 +1887,6 @@ export default function App() {
         return false;
       }
 
-      // Schedule filter (today only)
-      if (showOnlyTodaySchedule) {
-        if (task.scheduleType === 'specific_dates') {
-          const todayIso = workDateIn(currentVenueTimeZone, nowForToday);
-          if (!task.specificDates || !task.specificDates.includes(todayIso)) {
-            return false;
-          }
-        } else if (!task.daysOfWeek || !task.daysOfWeek.includes(todayIndex)) {
-          return false;
-        }
-      }
-
       // Tab filter
       if (activeTabFilter === 'mine') {
         if (!isMyTask(task, currentUser)) return false;
@@ -1885,68 +1898,12 @@ export default function App() {
 
       return true;
     });
-  }, [tasks, searchQuery, selectedCategories, showOnlyTodaySchedule, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
+  }, [dayTasks, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
 
-  // Smart board order: urgent first, then the viewer's own assignments,
-  // then the manual order (up/down arrows; initialized from target time).
-  const sortedTasks = useMemo(
-    () => sortTasksForBoard(filteredTasks, currentUser?.email),
-    [filteredTasks, currentUser?.email]
-  );
-
-  // Manual reorder (up/down arrows, assigners only): swap the two tasks'
-  // positions within their board section. Pinned sections (urgent / mine)
-  // keep their order rules — the arrows fine-tune inside each group.
-  const handleMoveTask = async (taskId: string, direction: 'up' | 'down') => {
-    if (!currentUser || !canUserAssignTasks(currentUser)) {
-      showToast('Only admins and coordinators can reorder tasks.');
-      return;
-    }
-    const list = sortTasksForBoard(filteredTasks, currentUser.email);
-    const idx = list.findIndex((t) => t.id === taskId);
-    if (idx === -1) return;
-    const nIdx = direction === 'up' ? idx - 1 : idx + 1;
-    if (nIdx < 0 || nIdx >= list.length) return;
-    if (boardTier(list[idx], currentUser.email) !== boardTier(list[nIdx], currentUser.email)) {
-      showToast('Pinned tasks stay in their section — reorder inside the group.');
-      return;
-    }
-    const a = list[idx];
-    const b = list[nIdx];
-    const aOrder = a.sortOrder ?? 0;
-    const bOrder = b.sortOrder ?? 0;
-    // Optimistic swap
-    setTasks((prev) =>
-      prev.map((t) =>
-        t.id === a.id ? { ...t, sortOrder: bOrder } : t.id === b.id ? { ...t, sortOrder: aOrder } : t
-      )
-    );
-    const headers = { 'Content-Type': 'application/json' };
-    const payload = (sortOrder: number) =>
-      JSON.stringify({ userEmail: currentUser.email, sortOrder });
-    const ra = await apiWrite(`/api/tasks/${a.id}`, { method: 'PUT', headers, body: payload(bOrder) });
-    if (!ra.ok) {
-      // Nothing persisted — roll the whole swap back.
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.id === a.id ? { ...t, sortOrder: aOrder } : t.id === b.id ? { ...t, sortOrder: bOrder } : t
-        )
-      );
-      console.warn('Could not persist task order:', ra.error);
-      showToast(ra.error || 'Could not save the new order — please try again.');
-      return;
-    }
-    const rb = await apiWrite(`/api/tasks/${b.id}`, { method: 'PUT', headers, body: payload(aOrder) });
-    if (!rb.ok) {
-      // The first write committed but the second did not: keep `a` at its new
-      // order (matches the server) and roll back only `b`.
-      setTasks((prev) =>
-        prev.map((t) => (t.id === b.id ? { ...t, sortOrder: bOrder } : t))
-      );
-      console.warn('Could not persist task order:', rb.error);
-      showToast(rb.error || 'Could not save the new order — please try again.');
-    }
-  };
+  const sortedTasks = useMemo(() => sortTasksByTime(filteredTasks), [filteredTasks]);
+  const sections = useMemo(() => effectiveDayView === 'all'
+    ? groupTasksByDay(filteredTasks, todayYmd) : undefined,
+  [filteredTasks, effectiveDayView, todayYmd]);
 
   // Open Task Modal
   // 12a-c (RV2): every way into the task editor records the venue it is for.
@@ -2348,6 +2305,7 @@ export default function App() {
   const taskTableView = (
     <TaskTableView
       tasks={sortedTasks}
+      sections={sections}
       currentUser={currentUser}
       onUpdateStatus={handleBoardUpdateStatus}
       timeZone={currentVenueTimeZone}
@@ -2363,21 +2321,18 @@ export default function App() {
       onOpenTaskModal={handleOpenCreateTask}
       onCheckIn={handleCheckIn}
       onRemoveCheckIn={handleRemoveCheckIn}
-      onMoveTask={handleMoveTask}
-      canReorder={canUserAssignTasks(currentUser)}
     />
   );
   const taskCardView = (
     <TaskCardView
       tasks={sortedTasks}
+      sections={sections}
       currentUser={currentUser}
       onUpdateStatus={handleBoardUpdateStatus}
       timeZone={currentVenueTimeZone}
       onUpdateNotes={handleUpdateNotes}
       onCheckIn={handleCheckIn}
       onRemoveCheckIn={handleRemoveCheckIn}
-      onMoveTask={handleMoveTask}
-      canReorder={canUserAssignTasks(currentUser)}
       onEditTask={(task) => {
         if (!canUserAssignTasks(currentUser)) {
           showToast('You do not have permission to edit task definitions.');
@@ -2860,16 +2815,12 @@ export default function App() {
             onCategoryChange={changeCategory}
             categories={categories}
             categoryCounts={categoryCounts}
-            showOnlyTodaySchedule={showOnlyTodaySchedule}
-            onToggleScheduleFilter={() => setShowOnlyTodaySchedule(!showOnlyTodaySchedule)}
             view={kioskView}
             onViewChange={setKioskView}
             onUpdateStatus={handleUpdateStatus}
             onUpdateNotes={handleUpdateNotes}
             onCheckIn={handleCheckIn}
             onRemoveCheckIn={handleRemoveCheckIn}
-            onMoveTask={handleMoveTask}
-            canReorder={canUserAssignTasks(currentUser)}
             onEditTask={(task) => {
               if (!canUserAssignTasks(currentUser)) {
                 showToast('You do not have permission to edit task definitions.');
@@ -2899,10 +2850,10 @@ export default function App() {
             onCategoryChange={changeCategory}
             categories={categories}
             categoryCounts={categoryCounts}
+            dayView={dayView}
+            onDayViewChange={setDayView}
             viewMode={viewMode}
             onViewModeChange={changeViewMode}
-            showOnlyTodaySchedule={showOnlyTodaySchedule}
-            onToggleScheduleFilter={() => setShowOnlyTodaySchedule(!showOnlyTodaySchedule)}
             onOpenTaskModal={handleOpenCreateTask}
             isAdmin={canUserAssignTasks(currentUser)}
           />

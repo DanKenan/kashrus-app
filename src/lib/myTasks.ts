@@ -11,6 +11,11 @@ export function isMyTask(
   task: Pick<Task, 'assignedTo'>,
   user: Pick<User, 'email' | 'role'> | null | undefined
 ): boolean {
-  if (user && task.assignedTo.includes(user.email)) return true;
-  return task.assignedTo.includes('all') && user?.role !== 'admin';
+  // TODAYSORT: emails compare case-insensitively, as on the server (canSeeTaskServer).
+  // (Older rows may hold one email as a plain string.)
+  const raw: unknown = task.assignedTo;
+  const list = (Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []).filter((a): a is string => typeof a === 'string');
+  const me = (user?.email || '').trim().toLowerCase();
+  if (me && list.some((a) => a.trim().toLowerCase() === me)) return true;
+  return list.some((a) => a.trim().toLowerCase() === 'all') && user?.role !== 'admin';
 }

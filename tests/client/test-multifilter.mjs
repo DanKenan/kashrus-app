@@ -75,7 +75,7 @@ try {
   const base = {
     searchQuery: '', onSearchChange() {}, onCategoryChange() {},
     categories: [OPEN, BAKERY, MEAT], categoryCounts: { [OPEN]: 4, [BAKERY]: 3, [MEAT]: 1 },
-    viewMode: 'cards', onViewModeChange() {}, showOnlyTodaySchedule: false, onToggleScheduleFilter() {},
+    viewMode: 'cards', onViewModeChange() {}, dayView: 'today', onDayViewChange() {},
     onOpenTaskModal() {}, isAdmin: false,
   };
   const render = (selectedCategories) => renderToStaticMarkup(React.createElement(TaskFilterBar, { ...base, selectedCategories }));
