@@ -15,11 +15,11 @@ import { SHOW_FACTORY_AUDIT } from '../lib/features';
  */
 export type VenueTab = 'board' | 'events' | 'factory' | 'team' | 'history';
 
-export function venueTabsFor(user: Pick<User, 'role'> | null): VenueTab[] {
+export function venueTabsFor(user: Pick<User, 'role' | 'permissions'> | null): VenueTab[] {
   if (!user) return [];
   const tabs: VenueTab[] = ['board', 'events'];
   if (SHOW_FACTORY_AUDIT) tabs.push('factory');
-  if (user.role === 'admin' || user.role === 'coordinator') tabs.push('team');
+  if (user.role === 'admin' || user.role === 'coordinator' || canUserAssignTasks(user as User)) tabs.push('team');
   tabs.push('history');
   return tabs;
 }

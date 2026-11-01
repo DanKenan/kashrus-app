@@ -101,7 +101,29 @@ export interface User {
   needsInvite?: boolean;
 }
 
+export interface ShiftOverride {
+  date: string; // venue day YYYY-MM-DD
+  userId: string | null;
+}
+
+export interface Shift {
+  id: string;
+  agencyId?: string;
+  venueId: string;
+  name: string;
+  area: string;
+  daysOfWeek: number[];
+  startMinutes: number;
+  endMinutes: number;
+  userId: string | null;
+  userName?: string; // server-derived; never accepted from a client
+  overrides: ShiftOverride[];
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export interface Task {
+  shiftId?: string | null;
   id: string;
   agencyId?: string;
   venueId?: string;

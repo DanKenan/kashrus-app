@@ -22,7 +22,7 @@ export function getPhoneNavState(user: User | null | undefined, hasVenues: boole
     return { showBar: false, showGold: false };
   }
   return {
-    showBar: user.role !== 'owner' && user.role !== 'manager',
+    showBar: (user.role !== 'owner' && user.role !== 'manager') || canUserAssignTasks(user),
     showGold: hasVenues && (canUserAssignTasks(user) || ['coordinator', 'mashgiach', 'worker'].includes(user.role)),
   };
 }
@@ -38,7 +38,7 @@ export function PhoneNav({ user, hasVenues, onOpenTaskModal, onOpenShiftNote, on
     ...(role === 'admin'
       ? [{ label: 'Venues', icon: Building2, action: onOpenVenues }]
       : [{ label: 'Events', icon: CalendarDays, action: onOpenEvents }]),
-    ...(['admin', 'coordinator'].includes(role) ? [{ label: 'Team', icon: Users, action: onOpenTeam }] : []),
+    ...(['admin', 'coordinator'].includes(role) || canAssign ? [{ label: 'Team', icon: Users, action: onOpenTeam }] : []),
     { label: 'History', icon: History, action: onOpenHistory },
   ];
 

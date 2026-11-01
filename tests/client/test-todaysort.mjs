@@ -92,8 +92,10 @@ eq('App: "All days" only for editors, else today', /const dayTasks = effectiveDa
 eq('App: progress header counts today', /const totalTasks = todayTasks\.length;/.test(app) && /const myTasks = todayTasks\.filter/.test(app), true);
 for (const name of ['TaskCardView', 'TaskTableView']) eq(`${name}: overdue chip only on a task due today`, /isTaskOverdue\(task, nowMinutes\) && dueToday\(task\)/.test(read(`src/components/${name}.tsx`)), true);
 const srv = read('server.ts');
-eq('server: overdue push skips tasks not scheduled today', /if \(!taskAppliesOn\(task, today, weekdayIn\(tz, now\)\)\) continue;/.test(srv), true);
-eq('server: dashboard overdue skips tasks not scheduled today', /if \(!taskAppliesOn\(t, venueToday, venueWeekday\)\) return false;/.test(srv), true);
+// SHIFTS: push and dashboard share taskOverdueDay(), which keeps the TODAYSORT day rule.
+eq('server: overdue day rule skips tasks not scheduled today', /if \(!taskAppliesOn\(task, today, weekdayIn\(tz, now\)\)\) return null;/.test(srv), true);
+eq('server: overdue push uses the day rule', /const today = taskOverdueDay\(task, now\);\s*if \(!today\) continue;/.test(srv), true);
+eq('server: dashboard overdue uses the day rule', /venueTasks\.filter\(\(t\) => taskOverdueDay\(t, dashNow\) !== null\)/.test(srv), true);
 eq('Mine tab: own task in another case counts', isMyTask({ assignedTo: ['NOA@hkc.test'] }, { email: 'noa@hkc.test', role: 'mashgiach' }), true);
 eq('Mine tab: All counts for staff', isMyTask({ assignedTo: ['all'] }, { email: 'noa@hkc.test', role: 'mashgiach' }), true);
 eq('Mine tab: All does not count for the admin (unchanged)', isMyTask({ assignedTo: ['all'] }, { email: 'a@hkc.test', role: 'admin' }), false);

@@ -1,3 +1,5 @@
+import type { Shift } from '../types';
+import { shiftLabel } from '../lib/shifts';
 import { ANY_TIME_LABEL, isAnyTimeTask, isAnyTimeText } from '../lib/anyTime';
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Clock, Calendar, CheckSquare, Users, Plus, Trash2, CalendarDays, CheckCircle2, ListFilter } from 'lucide-react';
@@ -122,6 +124,7 @@ function TimePickerRow({
 }
 
 interface TaskModalProps {
+  shifts?: Shift[];
   isOpen: boolean;
   onClose: () => void;
   onSave: (taskData: Partial<Task>, opts?: { baselineVersion?: number }) => Promise<boolean> | void;
@@ -161,6 +164,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   onSave,
   taskToEdit,
   knownWorkers,
+  shifts = [],
   currentUserEmail,
   timeZone = DEFAULT_TIME_ZONE,
 }) => {
@@ -257,6 +261,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [newOptionInput, setNewOptionInput] = useState('');
 
   // Schedule State: Recurring Days vs Specific Calendar Dates
+  const [shiftId, setShiftId] = useState<string | null>(null);
+  const [shiftMode, setShiftMode] = useState(false);
   const [scheduleType, setScheduleType] = useState<'recurring' | 'specific_dates'>('recurring');
   const [selectedDays, setSelectedDays] = useState<number[]>([0, 1, 2, 3, 4, 5, 6]);
   const [selectedDates, setSelectedDates] = useState<string[]>([]);
@@ -271,6 +277,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   useEffect(() => {
     submitGuard.current = false;
+    setShiftId(taskToEdit?.shiftId || null);
+    setShiftMode(!!taskToEdit?.shiftId);
     const todayStr = workDateIn(timeZone, new Date());
 
     // Load this user's saved custom categories ("Other" entries).
@@ -362,7 +370,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     }
   }, [taskToEdit, isOpen]);
 
-  const isAny = anyTime || (customTimeText !== null && isAnyTimeText(customTimeText));
+  const chosenShift = scheduleType === 'recurring' && shiftMode ? shifts.find((s) => s.id === shiftId) : undefined;
+  const usingShift = !!chosenShift;
+  const isAny = !usingShift && (anyTime || (customTimeText !== null && isAnyTimeText(customTimeText)));
   useEffect(() => {
     if (isAny) setEnableOverdueAlert(false);
   }, [isAny]);
@@ -471,20 +481,21 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       description: description.trim(),
       category: (selectedCategories[0] || 'General').trim(),
       categories: selectedCategories.length > 0 ? selectedCategories.map((c) => c.trim()) : ['General'],
-      isPrivate: assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
+      shiftId: usingShift ? chosenShift.id : null,
+      isPrivate: !usingShift && assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
       inputType,
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
       // Structured times when set via picker; custom text clears the minutes.
-      targetTime: isAny ? ANY_TIME_LABEL : customTimeText !== null ? customTimeText.trim() : formatPickerTime(time1),
-      targetTimeMinutes: isAny || customTimeText !== null ? null : pickerTimeToMinutes(time1),
-      targetTime2: !isAny && time2 ? formatPickerTime(time2) : '',
-      targetTime2Minutes: !isAny && time2 ? pickerTimeToMinutes(time2) : null,
+      targetTime: usingShift ? '' : isAny ? ANY_TIME_LABEL : customTimeText !== null ? customTimeText.trim() : formatPickerTime(time1),
+      targetTimeMinutes: usingShift || isAny || customTimeText !== null ? null : pickerTimeToMinutes(time1),
+      targetTime2: !usingShift && !isAny && time2 ? formatPickerTime(time2) : '',
+      targetTime2Minutes: !usingShift && !isAny && time2 ? pickerTimeToMinutes(time2) : null,
       priority,
       enableOverdueAlert: isAny ? false : enableOverdueAlert,
-      assignedTo,
-      scheduleType,
-      daysOfWeek: selectedDays,
+      assignedTo: usingShift ? ['all'] : assignedTo,
+      scheduleType: usingShift ? 'recurring' : scheduleType,
+      daysOfWeek: usingShift ? chosenShift.daysOfWeek : selectedDays,
       specificDates: scheduleType === 'specific_dates' ? finalDates : undefined,
     }, { baselineVersion: baselineRef.current });
 
@@ -828,9 +839,19 @@ export const TaskModal: React.FC<TaskModalProps> = ({
             </div>
           )}
 
+          {shifts.length > 0 && scheduleType === 'recurring' && <section className="space-y-2" aria-label="When">
+            <p className="text-sm text-ink-soft">When</p>
+            <div role="group" aria-label="Time or Shift" className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-sunken">
+              {(['Time', 'Shift'] as const).map((mode) => <button key={mode} type="button" aria-pressed={mode === 'Shift' ? usingShift : !usingShift} onClick={() => { setShiftMode(mode === 'Shift'); if (mode === 'Shift' && !shifts.some((s) => s.id === shiftId)) setShiftId(shifts[0].id); }} className={`min-h-11 text-base text-ink rounded-lg pressable cursor-pointer ${(mode === 'Shift') === usingShift ? 'bg-surface border border-line' : ''}`}>{mode}</button>)}
+            </div>
+            {usingShift && <div className="space-y-2">
+              {shifts.map((shift) => <button key={shift.id} type="button" aria-pressed={shift.id === shiftId} onClick={() => setShiftId(shift.id)} className={`w-full min-h-11 p-3 text-left rounded-lg border text-base text-ink bg-surface pressable cursor-pointer ${shift.id === shiftId ? 'border-gold' : 'border-line-control'}`}>{shiftLabel(shift)}</button>)}
+              <p className="text-sm text-ink-soft">Goes to whoever is on {chosenShift.name} that day{chosenShift.userName ? ` (usually ${chosenShift.userName})` : ''}.</p>
+            </div>}
+          </section>}
           {/* 2-Column: Target Time & Priority */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
+            <div hidden={usingShift}>
               <label className="block font-semibold text-ink-soft mb-1 flex items-center gap-1">
                 <Clock className="w-3.5 h-3.5 text-ink-faint" /> Target Time
               </label>
@@ -939,7 +960,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </label>
 
           {/* SCHEDULE SECTION: Recurring Days vs One-Time / Monthly Calendar */}
-          <div className="space-y-2">
+          <div hidden={usingShift} className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="block font-semibold text-ink-soft flex items-center gap-1">
                 <Calendar className="w-3.5 h-3.5 text-ink-faint" /> Schedule Mode
@@ -1026,7 +1047,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </div>
 
           {/* Mashgiach & Staff Assignment */}
-          <div>
+          <div hidden={usingShift}>
             <label className="block font-semibold text-ink-soft mb-1 flex items-center gap-1">
               <Users className="w-3.5 h-3.5 text-ink-faint" /> Assigned Mashgiach / Staff Visibility
             </label>

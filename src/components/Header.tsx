@@ -362,7 +362,7 @@ export const Header: React.FC<HeaderProps> = ({
                     </button>
                   )}
 
-                  {(currentUser?.role === 'admin' || currentUser?.role === 'coordinator') && (
+                  {(currentUser?.role === 'admin' || currentUser?.role === 'coordinator' || canUserAssignTasks(currentUser)) && (
                     <button
                       onClick={() => { setToolsMenuOpen(false); onOpenTeamModal(); }}
                       className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold hover:bg-sunken transition text-left cursor-pointer"

@@ -1,3 +1,5 @@
+import type { Shift } from '../types';
+import { shiftLabel } from '../lib/shifts';
 import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
 import { ANY_TIME_LABEL } from '../lib/anyTime';
 import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
@@ -27,6 +29,7 @@ import { TaskInstructions } from './TaskInstructions';
 import { TaskAnswerPhoto } from './TaskAnswerPhoto';
 
 interface TaskTableViewProps {
+  shiftsById?: Map<string, Shift>;
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
   timeZone?: string;
   tasks: Task[];
@@ -52,6 +55,7 @@ const getInitials = (nameOrEmail: string) => {
 };
 
 export const TaskTableView: React.FC<TaskTableViewProps> = ({
+  shiftsById = new Map(),
   tasks,
   sections,
   currentUser,
@@ -239,7 +243,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                     <div className="space-y-1">
                       <div className="tnum inline-flex items-center gap-1 font-bold text-ink">
                         <Clock className="w-3.5 h-3.5 text-ink-faint shrink-0" />
-                        <span>{formatTaskTimes(task)}</span>
+                        <span>{(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!) : formatTaskTimes(task))}</span>
                       </div>
                   {isTaskOverdue(task, nowMinutes) && dueToday(task) && (
                     <span data-overdue className={OVERDUE_CHIP_CLASS} style={{ color: 'var(--bad)', backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}>

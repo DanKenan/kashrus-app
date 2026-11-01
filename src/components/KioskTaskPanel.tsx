@@ -1,3 +1,6 @@
+import { shiftSortProjection, restoreShiftWindows } from '../lib/shiftTaskDay';
+import type { Shift } from '../types';
+import { shiftLabel } from '../lib/shifts';
 import { isNoTimeTask, sortTasksByTime } from '../lib/taskDay';
 import { ANY_TIME_LABEL, isAnyTimeTask } from '../lib/anyTime';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -51,6 +54,7 @@ import { CheckInPhoto } from './CheckInPhoto';
 type TabFilter = 'all' | 'mine' | 'pending' | 'completed';
 
 interface KioskTaskPanelProps {
+  shiftsById?: Map<string, Shift>;
   tasks: Task[];
   currentUser: UserType;
   venueName?: string;
@@ -191,6 +195,7 @@ const sealEase = [0.22, 1, 0.36, 1] as const;
 const btn64 = 'min-h-11 min-w-11 sm:min-h-16 sm:min-w-16';
 
 export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
+  shiftsById = new Map(),
   tasks,
   currentUser,
   venueName,
@@ -331,7 +336,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
       .forEach(({ task, at }) => out.splice(Math.min(at, out.length), 0, task));
     return out;
   })();
-  const timeSorted = sortTasksByTime<Task>(listed);
+  const timeSorted = restoreShiftWindows(sortTasksByTime<Task>(shiftSortProjection(listed, shiftsById)), shiftsById);
   const todoTasks = timeSorted.filter((t) => !shownDone(t));
   const doneTasks = timeSorted.filter((t) => shownDone(t));
   const shown = half === 'todo' ? todoTasks : doneTasks;
@@ -708,7 +713,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                               <span data-kiosk-anytime className="tnum inline-flex items-center gap-1 rounded-full bg-sunken border border-line px-2 text-base text-ink-soft font-medium shrink-0">{ANY_TIME_LABEL}</span>
                             ) : task.targetTime && /\d{1,2}:\d{2}/.test(task.targetTime) && (
                               <span data-kiosk-due className="tnum inline-flex items-center gap-1 rounded-full bg-sunken border border-line px-2 text-base text-ink font-medium shrink-0">
-                                <Clock className="w-4 h-4" aria-hidden /> Due {formatTaskTimes(task)}
+                                <Clock className="w-4 h-4" aria-hidden /> Due {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!) : formatTaskTimes(task))}
                               </span>
                             )}
                             <span dir="auto" className={`min-w-0 max-w-full text-base text-ink-soft break-words ${isOpen ? '' : 'line-clamp-2'}`}>
@@ -746,7 +751,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                             </span>
                           )}
                           <span className="tnum inline-flex items-center gap-1">
-                            <Clock className="w-4 h-4" aria-hidden /> {formatTaskTimes(task)}
+                            <Clock className="w-4 h-4" aria-hidden /> {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!) : formatTaskTimes(task))}
                           </span>
                           <span>{formatTaskSchedule(task)}</span>
                         </div>
