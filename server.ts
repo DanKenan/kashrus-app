@@ -58,7 +58,10 @@ import {
   minutesIn,
   addDays,
   nextResetDate,
+  weekdayIn,
 } from './src/lib/workday.ts';
+// TODAYSORT: a task only counts on the days it is scheduled for (one rule with the board).
+import { taskAppliesOn } from './src/lib/taskDay.ts';
 // 6c: shared any-time recognition and write normalization.
 import { isAnyTimeTask, normalizeAnyTimeTask } from './src/lib/anyTime.ts';
 import { certificationLabel } from './src/lib/certOptions.ts';
@@ -5834,6 +5837,8 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
     const tz = venueTimeZoneIn(venue || { agencyId: task.agencyId }, agencies);
     const nowMinutes = minutesIn(tz, now);
     const today = workDateIn(tz, now);
+    // TODAYSORT (Don, Nov 1): a Friday-only task is not overdue on a Sunday.
+    if (!taskAppliesOn(task, today, weekdayIn(tz, now))) continue;
 
     const taskMinutes = taskSortMinutes(task);
     if (taskMinutes >= nowMinutes) continue; // Not overdue yet
@@ -8488,11 +8493,16 @@ app.get('/api/admin/dashboard', (req, res) => {
   const dashNow = serverNow();
   const venueStats = agencyVenues.map((venue) => {
     const venueTasks = tasks.filter((t) => t.venueId === venue.id);
-    const venueNowMinutes = minutesIn(venueTimeZoneIn(venue, agencies), dashNow);
+    const venueTz = venueTimeZoneIn(venue, agencies);
+    const venueNowMinutes = minutesIn(venueTz, dashNow);
+    const venueToday = workDateIn(venueTz, dashNow);
+    const venueWeekday = weekdayIn(venueTz, dashNow);
     const completed = venueTasks.filter((t) => t.isCompleted).length;
     const total = venueTasks.length;
     const overdueList = venueTasks.filter((t) => {
       if (t.isCompleted) return false;
+      // TODAYSORT: only tasks scheduled for the venue's today can be overdue.
+      if (!taskAppliesOn(t, venueToday, venueWeekday)) return false;
       // 6c: exclude any-time tasks before time maths.
       if (isAnyTimeTask(t)) return false;
       // Overdue if target time has passed today — in the VENUE's own zone

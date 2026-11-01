@@ -1,5 +1,7 @@
+import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
+import { ANY_TIME_LABEL } from '../lib/anyTime';
 import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
-import { minutesIn } from '../lib/workday';
+import { minutesIn, workDateIn, weekdayIn } from '../lib/workday';
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import {
@@ -8,8 +10,6 @@ import {
   Users,
   Check,
   X,
-  ChevronDown,
-  ChevronUp,
   MessageSquare,
   Edit3,
   Trash2,
@@ -21,7 +21,7 @@ import {
   Camera,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
-import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories, boardTier } from '../lib/utils';
+import { formatTimeAgo, formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
@@ -33,6 +33,7 @@ interface TaskCardViewProps {
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
   timeZone?: string;
   tasks: Task[];
+  sections?: TaskDaySection<Task>[];
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
   onUpdateNotes: (taskId: string, notes: string, baselineVersion?: number) => void;
@@ -41,8 +42,6 @@ interface TaskCardViewProps {
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
-  onMoveTask?: (taskId: string, direction: 'up' | 'down') => void;
-  canReorder?: boolean;
 }
 
 const getInitials = (nameOrEmail: string) => {
@@ -57,6 +56,7 @@ const getInitials = (nameOrEmail: string) => {
 
 export const TaskCardView: React.FC<TaskCardViewProps> = ({
   tasks,
+  sections,
   currentUser,
   onUpdateStatus,
   onUpdateNotes,
@@ -65,12 +65,14 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
-  onMoveTask,
-  canReorder,
   timeZone,
 }) => {
   // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
   const nowMinutes = timeZone ? minutesIn(timeZone) : null;
+  // Overdue only means something on a task that is due today ("All days" lists other days too).
+  const todayYmd = timeZone ? workDateIn(timeZone) : null;
+  const todayWeekday = timeZone ? weekdayIn(timeZone) : null;
+  const dueToday = (t: Task) => todayYmd === null || todayWeekday === null || taskAppliesOn(t, todayYmd, todayWeekday);
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});
   const [notesState, setNotesState] = useState<Record<string, string>>({});
   // ROUND 5 — write baseline per task, captured when the notes editor OPENS
@@ -117,21 +119,20 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
 
   return (
     <div className="space-y-3.5">
-      {tasks.map((task, i) => {
+      {(sections ?? [{ key: 'list', label: '', tasks }]).map((section) => (
+        <div key={section.key} data-day-section={sections ? section.key : undefined} className="space-y-3.5">
+          {section.label && <h3 className="pt-4 text-xs font-semibold text-ink-soft">{section.label}</h3>}
+          {section.tasks.map((task, i) => {
         const isNotesOpen = expandedNotes[task.id];
         const currentNote = notesState[task.id] !== undefined ? notesState[task.id] : task.notes;
         const canFill = canUserFillTasks(currentUser);
         const canAssign = canUserAssignTasks(currentUser);
         const mine = isDirectlyAssigned(task, currentUser);
         const done = task.isCompleted;
-        // Reorder arrows move within the task's board section (urgent / mine / rest)
-        const tier = boardTier(task, currentUser?.email);
-        const upBlocked =
-          i === 0 || boardTier(tasks[i - 1], currentUser?.email) !== tier;
-        const downBlocked =
-          i === tasks.length - 1 || boardTier(tasks[i + 1], currentUser?.email) !== tier;
 
         return (
+          <React.Fragment key={task.id}>
+          {i > 0 && isNoTimeTask(task) && !isNoTimeTask(section.tasks[i - 1]) && <p className="pt-2 text-xs font-semibold text-ink-soft">{ANY_TIME_LABEL}</p>}
           <motion.div
             key={task.id}
             layout
@@ -175,7 +176,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                     <Clock className="w-3 h-3" />
                     {formatTaskTimes(task)}
                   </span>
-                  {isTaskOverdue(task, nowMinutes) && (
+                  {isTaskOverdue(task, nowMinutes) && dueToday(task) && (
                     <span data-overdue className={OVERDUE_CHIP_CLASS} style={{ color: 'var(--bad)', backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}>
                       Overdue
                     </span>
@@ -184,26 +185,6 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
 
                 {canAssign && (
                   <div className="flex items-center gap-1">
-                    {canReorder && onMoveTask && (
-                      <>
-                        <button
-                          onClick={() => onMoveTask(task.id, 'up')}
-                          disabled={upBlocked}
-                          className="pressable p-1.5 text-ink-faint hover:text-gold-deep hover:bg-sunken rounded-lg transition cursor-pointer disabled:opacity-25 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-ink-faint"
-                          title={upBlocked ? 'Top of its section' : 'Move up'}
-                        >
-                          <ChevronUp className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          onClick={() => onMoveTask(task.id, 'down')}
-                          disabled={downBlocked}
-                          className="pressable p-1.5 text-ink-faint hover:text-gold-deep hover:bg-sunken rounded-lg transition cursor-pointer disabled:opacity-25 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-ink-faint"
-                          title={downBlocked ? 'Bottom of its section' : 'Move down'}
-                        >
-                          <ChevronDown className="w-3.5 h-3.5" />
-                        </button>
-                      </>
-                    )}
                     <button
                       onClick={() => onEditTask(task)}
                       className="pressable p-1.5 text-ink-faint hover:text-gold-deep hover:bg-sunken rounded-lg transition cursor-pointer"
@@ -590,8 +571,11 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
               )}
             </div>
           </motion.div>
+          </React.Fragment>
         );
       })}
+        </div>
+      ))}
     </div>
   );
 };

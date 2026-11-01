@@ -1,3 +1,4 @@
+import { isNoTimeTask, sortTasksByTime } from '../lib/taskDay';
 import { ANY_TIME_LABEL, isAnyTimeTask } from '../lib/anyTime';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
@@ -9,7 +10,6 @@ import {
   Check,
   X,
   ChevronDown,
-  ChevronUp,
   Camera,
   Edit3,
   Trash2,
@@ -24,7 +24,7 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
-import { formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories, boardTier } from '../lib/utils';
+import { formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
 import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
@@ -44,7 +44,7 @@ import { CheckInPhoto } from './CheckInPhoto';
  * Table and Cards render the existing views unchanged).
  * Every control calls the SAME App handler with the SAME arguments as
  * TaskCardView/TaskTableView; nothing here fetches, writes or reorders.
- * The list is App's own sortedTasks (same filters, same board order).
+ * The list is App's own sortedTasks (same filters, same time order).
  * Expand/collapse is local presentation state.
  */
 
@@ -66,8 +66,6 @@ interface KioskTaskPanelProps {
   onUpdateNotes: (taskId: string, notes: string, baselineVersion?: number) => void;
   onCheckIn: (taskId: string, photoData?: string, photoCaption?: string) => void;
   onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
-  onMoveTask?: (taskId: string, direction: 'up' | 'down') => void;
-  canReorder?: boolean;
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
@@ -83,8 +81,6 @@ interface KioskTaskPanelProps {
   onCategoryChange: (cat: string) => void;
   categories: string[];
   categoryCounts?: Record<string, number>;
-  showOnlyTodaySchedule: boolean;
-  onToggleScheduleFilter: () => void;
   view: 'list' | 'table' | 'cards';
   onViewChange: (v: 'list' | 'table' | 'cards') => void;
   /** The existing table or cards view, rendered when that view is chosen. */
@@ -208,8 +204,6 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   onUpdateNotes,
   onCheckIn,
   onRemoveCheckIn,
-  onMoveTask,
-  canReorder,
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
@@ -222,8 +216,6 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   onCategoryChange,
   categories,
   categoryCounts,
-  showOnlyTodaySchedule,
-  onToggleScheduleFilter,
   view,
   onViewChange,
   children,
@@ -339,21 +331,20 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
       .forEach(({ task, at }) => out.splice(Math.min(at, out.length), 0, task));
     return out;
   })();
-  const todoTasks = listed.filter((t) => !shownDone(t));
-  const doneTasks = listed.filter((t) => shownDone(t));
+  const timeSorted = sortTasksByTime<Task>(listed);
+  const todoTasks = timeSorted.filter((t) => !shownDone(t));
+  const doneTasks = timeSorted.filter((t) => shownDone(t));
   const shown = half === 'todo' ? todoTasks : doneTasks;
   // Anything the closed "Find a task" block is narrowing, so nothing is hidden silently.
   const isFiltered =
     searchQuery !== '' ||
     selectedCategories.length > 0 ||
-    showOnlyTodaySchedule ||
     activeFilter === 'pending' ||
     activeFilter === 'completed' ||
     view !== 'list';
   const showAll = () => {
     if (searchQuery !== '') onSearchChange('');
     if (selectedCategories.length > 0) onCategoryChange('all');
-    if (showOnlyTodaySchedule) onToggleScheduleFilter();
     if (activeFilter === 'pending' || activeFilter === 'completed') onSelectFilter('all');
     if (view !== 'list') onViewChange('list');
   };
@@ -565,16 +556,6 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                     )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-                    <button
-                      onClick={onToggleScheduleFilter}
-                      aria-pressed={showOnlyTodaySchedule}
-                      title="Filter tasks scheduled for today's active shift"
-                      className={`pressable ${btn64} px-4 rounded-xl text-base font-semibold border ${
-                        showOnlyTodaySchedule ? 'bg-gold-wash text-gold-ink border-gold' : 'bg-surface text-ink-soft border-line'
-                      }`}
-                    >
-                      {showOnlyTodaySchedule ? '✓ Active Today' : 'All Shift Days'}
-                    </button>
                     <div className="flex items-center gap-1 p-1 rounded-xl bg-sunken border border-line" role="group" aria-label="View">
                       {([
                         ['list', 'List', ListIcon],
@@ -672,21 +653,18 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
             </div>
           ) : (
             <ul className="flex flex-col gap-2.5">
-              {shown.map((task) => {
+              {shown.map((task, i) => {
                 const phase = saving[task.id];
                 const st = phase ? { word: 'Saving…', tone: 'open' as const } : rowStatus(task);
                 const isOpen = !!open[task.id];
                 const mine = isDirectlyAssigned(task, currentUser);
-                const tier = boardTier(task, currentUser?.email);
-                // Reorder limits read the full list (the halves are presentation only).
-                const at = tasks.indexOf(task);
-                const upBlocked = at <= 0 || boardTier(tasks[at - 1], currentUser?.email) !== tier;
-                const downBlocked = at < 0 || at === tasks.length - 1 || boardTier(tasks[at + 1], currentUser?.email) !== tier;
                 const currentNote = notesState[task.id] !== undefined ? notesState[task.id] : task.notes;
                 const control = rowControl(task);
                 const rowId = `kiosk-row-${task.id}`;
 
                 return (
+                  <React.Fragment key={task.id}>
+                    {i > 0 && isNoTimeTask(task) && !isNoTimeTask(shown[i - 1]) && <li className="pt-4 text-base font-semibold text-ink-soft">{ANY_TIME_LABEL}</li>}
                   <li
                     key={task.id}
                     data-kiosk-row
@@ -911,28 +889,6 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
 
                         {canAssign && (
                           <div className="flex flex-wrap items-center gap-3">
-                            {canReorder && onMoveTask && (
-                              <>
-                                <button
-                                  onClick={() => onMoveTask(task.id, 'up')}
-                                  disabled={upBlocked}
-                                  title={upBlocked ? 'Top of its section' : 'Move up'}
-                                  aria-label="Move up"
-                                  className={`pressable ${btn64} rounded-xl border border-line bg-surface flex items-center justify-center disabled:opacity-30`}
-                                >
-                                  <ChevronUp className="w-6 h-6" aria-hidden />
-                                </button>
-                                <button
-                                  onClick={() => onMoveTask(task.id, 'down')}
-                                  disabled={downBlocked}
-                                  title={downBlocked ? 'Bottom of its section' : 'Move down'}
-                                  aria-label="Move down"
-                                  className={`pressable ${btn64} rounded-xl border border-line bg-surface flex items-center justify-center disabled:opacity-30`}
-                                >
-                                  <ChevronDown className="w-6 h-6" aria-hidden />
-                                </button>
-                              </>
-                            )}
                             <button
                               onClick={() => onEditTask(task)}
                               className={`pressable ${btn64} px-4 rounded-xl border border-line bg-surface text-base font-semibold flex items-center gap-2`}
@@ -950,6 +906,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                       </div>
                     )}
                   </li>
+                  </React.Fragment>
                 );
               })}
             </ul>

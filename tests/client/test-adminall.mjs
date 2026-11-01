@@ -78,7 +78,7 @@ ok('V2 only the Mine tab narrows by assignee (no isMyTask outside activeTabFilte
 ok('V3 filteredTasks re-runs when the role changes', /currentUser\?\.role[^\]]*\]\);\s*$/.test(filterBlock) || /currentUser\?\.email, currentUser\?\.role/.test(filterBlock));
 
 // S: every "assigned to me" place uses the one rule
-ok('S1 App myTasks uses isMyTask', /const myTasks = tasks\.filter\(\(t\) => isMyTask\(t, currentUser\)\);/.test(app));
+ok('S1 App myTasks uses isMyTask over today\'s tasks', /const myTasks = todayTasks\.filter\(\(t\) => isMyTask\(t, currentUser\)\);/.test(app));
 ok('S2 App imports isMyTask', /import \{ isMyTask \} from '\.\/lib\/myTasks';/.test(app));
 ok('S3 Kiosk savingMine uses isMyTask', /savingMine\.current\[taskId\] = !!task && isMyTask\(task, currentUser\);/.test(kiosk));
 ok('S4 TeamModal assignedCount uses isMyTask', /const assignedCount = tasks\.filter\(\(t\) => isMyTask\(t, user\)\)\.length;/.test(team));

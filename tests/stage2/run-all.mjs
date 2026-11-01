@@ -212,6 +212,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-97-read-budget.mjs')).default, // READCUT
     (await import('./test-98-quota-no-signout.mjs')).default, // READCUT
     (await import('./test-99-qr-memo.mjs')).default, // READCUT
+    (await import('./test-100-overdue-days.mjs')).default, // TODAYSORT
     // MERGE-FIX: merges into the operator row and re-signs the suite's admin session; keep it LAST, after its own fresh state.
     FRESH_STATE,
     (await import('./test-85-merge-operator.mjs')).default,
