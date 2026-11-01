@@ -750,7 +750,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                               {cat}
                             </span>
                           ))}
-                          {shift ? <span>{shiftAssigneeLabel(shift, false, null, null)}</span> : mine && (
+                          {shift ? <span>{shiftAssigneeLabel(shift, false, null, null, null)}</span> : mine && (
                             <span className="inline-flex items-center gap-1 text-gold-ink font-semibold">
                               <Star className="w-4 h-4 fill-current" aria-hidden /> For you
                             </span>

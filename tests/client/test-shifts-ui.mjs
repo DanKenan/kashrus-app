@@ -248,12 +248,12 @@ assert.equal(kindToggle.props['aria-checked'], false);
 console.log('Shifts UI: immutable kind and compact weekday-person summary passed');
 
 const { shiftAssigneeLabel } = await import('../../src/lib/shiftTaskDay.ts');
-assert.equal(shiftAssigneeLabel(shift, false, '2026-11-08', 0), 'Deli day shift');
-assert.equal(shiftAssigneeLabel(shift, true, '2026-11-08', 0), 'Deli day · today: Moshe L.');
-assert.equal(shiftAssigneeLabel(namedWeek, true, '2026-11-09', 1), 'Deli day · today: Dovid R.');
-assert.equal(shiftAssigneeLabel(namedWeek, true, '2026-11-11', 3), 'Deli day · today: Nobody');
-assert.equal(shiftAssigneeLabel({ ...shift, overrides: [{ date: '2026-11-08', userId: 'd', userName: 'Dovid R.' }] }, true, '2026-11-08', 0), 'Deli day · today: Dovid R.');
-assert.equal(shiftAssigneeLabel(shift, true, '2026-11-14', 6), 'Deli day shift');
+assert.equal(shiftAssigneeLabel(shift, false, '2026-11-08', 0, 600), 'Deli day shift');
+assert.equal(shiftAssigneeLabel(shift, true, '2026-11-08', 0, 600), 'Deli day · today: Moshe L.');
+assert.equal(shiftAssigneeLabel(namedWeek, true, '2026-11-09', 1, 600), 'Deli day · today: Dovid R.');
+assert.equal(shiftAssigneeLabel(namedWeek, true, '2026-11-11', 3, 600), 'Deli day · today: Nobody');
+assert.equal(shiftAssigneeLabel({ ...shift, overrides: [{ date: '2026-11-08', userId: 'd', userName: 'Dovid R.' }] }, true, '2026-11-08', 0, 600), 'Deli day · today: Dovid R.');
+assert.equal(shiftAssigneeLabel(shift, true, '2026-11-14', 6, 600), 'Deli day shift');
 try {
   globalThis.Date = class extends RealDate {
     constructor(...args) { super(...(args.length ? args : ['2026-11-08T15:00:00Z'])); }
@@ -274,3 +274,34 @@ try {
   }
 } finally { globalThis.Date = RealDate; }
 console.log('Shifts UI: shift assignees, weekday/date names, Nobody, kiosk and ordinary team fallback passed');
+
+// RV5: names must belong to the occurrence's resolved ID, including overnight.
+const rivkaOverride = { ...shift, days: shift.days.map((d) => ({ ...d, userId: shift.userId })), dayUserNames: Array(7).fill('Moshe L.'), overrides: [{ date: '2026-11-09', userId: 'rivka', userName: 'Rivka Cohen' }] };
+assert.equal(shiftAssigneeLabel(rivkaOverride, true, '2026-11-09', 1, 60), 'Deli day · today: Rivka Cohen');
+const unnamedOverride = { ...rivkaOverride, overrides: [{ date: '2026-11-09', userId: 'rivka' }] };
+assert.equal(shiftAssigneeLabel(unnamedOverride, true, '2026-11-09', 1, 60, [{ id: 'rivka', name: 'Rivka Cohen' }]), 'Deli day · today: Rivka Cohen');
+assert.equal(shiftAssigneeLabel(unnamedOverride, true, '2026-11-09', 1, 60), 'Deli day · today: someone else');
+const overnightPeople = { ...shift, days: Array.from({ length: 7 }, (_, w) => w === 0 ? { on: true, userId: 'u', startMinutes: 1320, endMinutes: 120 } : w === 1 ? { on: true, userId: 'rivka', startMinutes: 480, endMinutes: 960 } : { on: false }), dayUserNames: ['Moshe Levin', 'Rivka Cohen', null, null, null, null, null], overrides: [] };
+assert.equal(shiftAssigneeLabel(overnightPeople, true, '2026-11-09', 1, 60), 'Deli day · today: Moshe Levin');
+const mondayOff = { ...overnightPeople, days: overnightPeople.days.map((d, w) => w === 1 ? { on: false } : d) };
+assert.equal(shiftAssigneeLabel(mondayOff, true, '2026-11-09', 1, 60), 'Deli day · today: Moshe Levin');
+assert.equal(shiftAssigneeLabel(mondayOff, true, '2026-11-10', 2, 600), 'Deli day shift');
+assert.equal(shiftAssigneeLabel({ ...mondayOff, overrides: [{ date: '2026-11-08', userId: null }] }, true, '2026-11-09', 1, 60), 'Deli day · today: Nobody');
+try {
+  globalThis.Date = class extends RealDate {
+    constructor(...args) { super(...(args.length ? args : ['2026-11-09T06:00:00Z'])); }
+    static now() { return new RealDate('2026-11-09T06:00:00Z').getTime(); }
+  };
+  for (const View of [TaskCardView, TaskTableView]) {
+    const view = mount(View, { tasks: [{ ...baseTask, shiftId: shift.id }], shiftsById: new Map([[shift.id, overnightPeople]]), currentUser: { ...user, role: 'coordinator' }, timeZone: 'America/New_York', onUpdateStatus: noop, onUpdateNotes: noop, onCheckIn: noop, onEditTask: noop, onDeleteTask: noop });
+    await view.render();
+    assert.match(view.text(), /Deli day · today: Moshe Levin/);
+    assert.doesNotMatch(view.text(), /today: Rivka/);
+    await view.render({ shiftsById: new Map([[shift.id, mondayOff]]) });
+    assert.match(view.text(), /Deli day · today: Moshe Levin/);
+    await view.render({ shiftsById: new Map([[shift.id, unnamedOverride]]), roster: [{ id: 'rivka', name: 'Rivka Cohen' }] });
+    assert.match(view.text(), /Deli day · today: Rivka Cohen/);
+    assert.doesNotMatch(view.text(), /today: Moshe/);
+  }
+} finally { globalThis.Date = RealDate; }
+console.log('Shifts UI: RV5 occurrence person, ID-bound names, roster and unknown-person fallback passed');

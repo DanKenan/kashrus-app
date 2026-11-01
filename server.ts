@@ -13066,7 +13066,10 @@ function publicShift(shift: Shift): Shift {
     }),
     startMinutes: shift.startMinutes, endMinutes: shift.endMinutes,
     userId: shift.userId, ...(person ? { userName: person.name } : {}),
-    overrides: (normalizeShifts([shift])[0]?.overrides || []).map(({ date, userId }) => ({ date, userId })),
+    overrides: (normalizeShifts([shift])[0]?.overrides || []).map(({ date, userId }) => {
+      const person = userId === null ? undefined : users.find((u) => u.id === userId && (u.agencyId || 'agency-hkc') === (shift.agencyId || 'agency-hkc'));
+      return { date, userId, ...(person ? { userName: person.name } : {}) };
+    }),
     createdAt: shift.createdAt, ...(shift.updatedAt ? { updatedAt: shift.updatedAt } : {}),
   };
 }

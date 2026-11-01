@@ -104,6 +104,7 @@ export interface User {
 export interface ShiftOverride {
   date: string; // venue day YYYY-MM-DD
   userId: string | null;
+  userName?: string; // server-filled from users; never trusted on writes
 }
 
 export interface ShiftDay {

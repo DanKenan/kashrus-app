@@ -1,5 +1,5 @@
 import type { Shift, Task } from '../types';
-import { shiftOccurrenceDay, taskWithShiftTimes, shiftRunsOn, shiftPersonOn, shiftDayOf } from './shifts';
+import { shiftOccurrenceDay, taskWithShiftTimes, shiftPersonOn, shiftDayOf } from './shifts';
 
 type Weekday = number | ((task: Task) => number | undefined);
 /** A weekday section wins; today's list uses the occurrence's start day,
@@ -23,14 +23,18 @@ export function restoreShiftWindows(tasks: Task[], shiftsById: Map<string, Shift
 }
 
 /** Presentation only: shift assignments keep the stored team fallback out of the label. */
-export function shiftAssigneeLabel(shift: Shift, editor: boolean, ymd: string | null, weekday: number | null): string {
+export function shiftAssigneeLabel(shift: Shift, editor: boolean, ymd: string | null, weekday: number | null, nowMinutes: number | null, roster: ReadonlyArray<{ id?: string; name: string }> = []): string {
   const label = `${shift.name} shift`;
-  if (!editor || ymd === null || weekday === null || !shiftRunsOn(shift, ymd, weekday)) return label;
-  const person = shiftPersonOn(shift, ymd);
+  if (!editor || ymd === null || weekday === null || nowMinutes === null) return label;
+  const occ = shiftOccurrenceDay(shift, ymd, weekday, nowMinutes);
+  if (!occ) return label;
+  const person = shiftPersonOn(shift, occ);
   if (person === null) return `${shift.name} · today: Nobody`;
-  const override = shift.overrides?.find((o) => o.date === ymd) as { userId: string | null; userName?: string; name?: string } | undefined;
-  const day = shiftDayOf(shift, weekday);
-  const name = override?.userName || override?.name ||
-    (day.userId === person ? shift.dayUserNames?.[weekday] : undefined) || shift.userName;
-  return `${shift.name} · today: ${name || 'Unavailable person'}`;
+  const occWeekday = new Date(`${occ}T12:00:00Z`).getUTCDay();
+  const override = shift.overrides?.find((o) => o.date === occ && o.userId === person);
+  const day = shiftDayOf(shift, occWeekday);
+  const name = override?.userName ||
+    (day.userId === person ? shift.dayUserNames?.[occWeekday] : undefined) ||
+    (shift.userId === person ? shift.userName : undefined) || roster.find((p) => p.id === person)?.name;
+  return `${shift.name} · today: ${name || 'someone else'}`;
 }

@@ -2342,6 +2342,7 @@ export default function App() {
   const taskTableView = (
     <TaskTableView
       isKiosk={isKiosk}
+      roster={isKiosk || !canUserAssignTasks(currentUser) ? [] : knownUsers}
       shiftsById={shiftsById}
       tasks={sortedTasks}
       sections={sections}
@@ -2365,6 +2366,7 @@ export default function App() {
   const taskCardView = (
     <TaskCardView
       isKiosk={isKiosk}
+      roster={isKiosk || !canUserAssignTasks(currentUser) ? [] : knownUsers}
       shiftsById={shiftsById}
       tasks={sortedTasks}
       sections={sections}

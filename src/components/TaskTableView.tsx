@@ -32,6 +32,7 @@ import { TaskAnswerPhoto } from './TaskAnswerPhoto';
 interface TaskTableViewProps {
   shiftsById?: Map<string, Shift>;
   isKiosk?: boolean;
+  roster?: ReadonlyArray<{ id?: string; name: string }>;
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
   timeZone?: string;
   tasks: Task[];
@@ -59,6 +60,7 @@ const getInitials = (nameOrEmail: string) => {
 export const TaskTableView: React.FC<TaskTableViewProps> = ({
   shiftsById = new Map(),
   isKiosk = false,
+  roster = [],
   tasks,
   sections,
   currentUser,
@@ -193,7 +195,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
               const canAssign = canUserAssignTasks(currentUser);
               const mine = isDirectlyAssigned(task, currentUser);
               const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
-              const assignee = shift ? shiftAssigneeLabel(shift, canAssign && !isKiosk, todayYmd, todayWeekday) : null;
+              const assignee = shift ? shiftAssigneeLabel(shift, canAssign && !isKiosk, todayYmd, todayWeekday, nowMinutes, roster) : null;
 
               return (
                 <React.Fragment key={task.id}>
