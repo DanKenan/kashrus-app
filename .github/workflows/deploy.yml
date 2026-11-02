@@ -289,5 +289,5 @@ jobs:
             echo "=== container logs (last 30m) ==="
             gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$SVC\" AND resource.labels.revision_name=\"$NEWEST_REV\"" \
               --project="$PROJECT" --limit 100 --freshness 30m \
-              --format "value(timestamp,severity,textPayload)" || echo "LOGGING READ FAILED (check IAM: roles/logging.viewer for github-deploy@)"
+              --format "value(timestamp,severity,textPayload,jsonPayload.message)" || echo "LOGGING READ FAILED (check IAM: roles/logging.viewer for github-deploy@)"
           fi

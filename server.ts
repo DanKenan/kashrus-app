@@ -53,7 +53,7 @@ import { credentialMayLink, newInviteToken, phaseCEnabled, isLiveInvite, inviteL
 import { buildAdminExport } from './src/server/admin-export.js';
 import { isPlatformOperator, PLATFORM_OPERATOR_FORBIDDEN, PLATFORM_OPERATOR_USER_ID } from './src/server/platform-auth.js';
 import { rewriteEmailRefs, isOperatorSurvivor, mergeOriginOperatorOk } from './src/server/account-merge.js';
-import { log } from './src/server/log.ts';
+import { log, scrubLogText } from './src/server/log.ts';
 import {
   DEFAULT_TIME_ZONE,
   effectiveTimeZone,
@@ -4446,9 +4446,23 @@ async function loadStateFromFirestore(): Promise<boolean> {
     }
     return true;
   } catch (err: any) {
-    log.warn('[Firestore] Could not load state:', err?.message);
+    // One plain string: Cloud Run shows it in the log line itself, and the
+    // boot failure below repeats it, so a refused boot always names its cause.
+    bootLoadError = describeBootLoadError(err);
+    const frames = typeof err?.stack === 'string'
+      ? err.stack.split('\n').filter((line: string) => /^\s+at /.test(line)).slice(0, 3).map((line: string) => line.trim()).join(' | ')
+      : '';
+    log.warn(`[Firestore] Could not load state: ${bootLoadError}${frames ? ` (${frames})` : ''}`);
     return false;
   }
+}
+
+// The boot load's last failure, e.g. "8 RESOURCE_EXHAUSTED: Quota exceeded…".
+let bootLoadError = '';
+function describeBootLoadError(err: any): string {
+  const message = typeof err?.message === 'string' && err.message ? err.message : String(err);
+  const code = err?.code !== undefined && !message.startsWith(`${err.code} `) ? ` [code ${err.code}]` : '';
+  return `${message}${code}`;
 }
 
 // Fire-and-forget durable write. RETIRED in Stage 2 — DO NOT CALL.
@@ -21944,7 +21958,7 @@ async function startServer() {
   if (firestoreDb) {
     const loaded = await loadStateFromFirestore();
     if (!loaded && !durableStateLoaded) {
-      throw new Error('[Firestore] Could not load durable state at boot — refusing to start with empty state.');
+      throw new Error(`[Firestore] Could not load durable state at boot — refusing to start with empty state. Cause: ${scrubLogText(bootLoadError || 'unknown (no error recorded)')}`);
     }
     // 12a-s (4.7): the boot load is this process's first confirmed install.
     freshnessEnabled = true;
