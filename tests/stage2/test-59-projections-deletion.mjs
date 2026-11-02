@@ -114,6 +114,8 @@ export default {
       const users = (cur.users || []).map((u) => (u.id === U('x') ? { ...u, credentialOwner: true, credentialOrigin: 'self-registered' } : u));
       const p = await hook('doc-set-users', { users });
       assert(p.status === 200, `plant owner ${p.status}`);
+      // WRITECUT: plant both copies; unrelated commits no longer rewrite unchanged users.
+      assert((await hook('doc-set-users', { users, mirrorUserIds: [U('x')] })).status === 200, 'mirror planted owner');
       const h = await hook('inject-fixture', { venues: [{ id: `venue-t59-h-${ts}-${Math.random().toString(36).slice(2, 6)}`, name: 'T59 hydrate', agencyId: A }] });
       assert(h.status === 200, `rehydrate ${h.status} ${J(h.json)}`);
     };

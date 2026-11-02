@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { shiftFixture } from './test-101-shifts-crud.mjs';
 
 export default {
-  name: 'Test 105: overnight own-time occurrence deadlines and explicit opt-in',
+  name: 'Test 107: overnight own-time occurrence deadlines and explicit opt-in',
   whatItProves: 'Two people receive identity-bound overdue alerts for the start-date occurrence, including first checks after midnight; next-morning deadlines wait until that morning; enabling own time requires an explicit primary clock value.',
   async run(baseUrl, ctx) {
-    const { api, venueId, people } = await shiftFixture(baseUrl, ctx, '105');
+    const { api, venueId, people } = await shiftFixture(baseUrl, ctx, '107');
     const sunday = '2026-11-08', monday = '2026-11-09';
     const clock = async (date, time) => assert.equal((await ctx.api('POST', '/api/__test__/clock', { iso: `${date}T${time}:00Z` })).status, 200);
     try {

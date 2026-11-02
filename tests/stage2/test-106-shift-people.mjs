@@ -3,10 +3,10 @@ import { shiftFixture } from './test-101-shifts-crud.mjs';
 import { rewriteEmailRefs } from '../../src/server/account-merge.ts';
 
 export default {
-  name: 'Test 104: multiple people on a shift, legacy reads and merge remapping',
+  name: 'Test 106: multiple people on a shift, legacy reads and merge remapping',
   whatItProves: 'Usual, weekday and date lists are validated and name-safe; both occurrence people receive identity-bound new-task and overdue pushes; legacy clients and records remain compatible; the merge helper rewrites and deduplicates all ID lists.',
   async run(baseUrl, ctx) {
-    const { api, venueId, agencyId, people } = await shiftFixture(baseUrl, ctx, '104');
+    const { api, venueId, agencyId, people } = await shiftFixture(baseUrl, ctx, '106');
     const sunday = '2026-11-08';
     const clock = async (time) => assert.equal((await ctx.api('POST', '/api/__test__/clock', { iso: `${sunday}T${time}:00Z` })).status, 200);
     const usual = [people.mash.id, people.assign.id], replacement = [people.coord.id, people.admin.id];

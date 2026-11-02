@@ -150,6 +150,8 @@ export default {
     {
       const users = (await rows()).map((u) => (u.id === X ? { ...u, credentialOwner: true, credentialOrigin: 'self-registered' } : u));
       assert((await hook('doc-set-users', { users })).status === 200, 'plant owner');
+      // WRITECUT: plant both copies; unrelated commits no longer rewrite unchanged users.
+      assert((await hook('doc-set-users', { users, mirrorUserIds: [X] })).status === 200, 'mirror planted owner');
       assert((await hook('inject-fixture', { venues: [{ id: `venue-t60-h-${ts}`, name: 'T60 hydrate', agencyId: A }] })).status === 200, 'rehydrate');
     }
     const pid = (await rowOf(X)).personId;

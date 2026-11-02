@@ -197,6 +197,7 @@ async function body(res: Response): Promise<any> { return res.json().catch(() =>
 
 /** A server answer -> plain words. A 5xx (503 = store down) is "try again", never a sign-out. */
 export function errorFromAnswer(status: number, data: any, fallback: PasskeyError): PasskeyError {
+  if (data?.code === 'DAILY_LIMIT' && typeof data.error === 'string') return new PasskeyError('offline', data.error);
   if (status >= 500) return new PasskeyError('offline', PASSKEY_TEXT.offline);
   const code = data && typeof data === 'object' ? data.code : undefined;
   if (code === 'RECENT_AUTH_REQUIRED') return new PasskeyError('needPassword', PASSKEY_TEXT.needPassword);

@@ -34,7 +34,10 @@ import { CHECKIN_PHOTO_ID_PREFIX, classifyCheckInPhoto, checkInPhotoIdOf, checkI
 import { sanitizeCertOptions, effectiveCertOptions, sameCertOptions } from './src/server/cert-options.ts';
 import { decodeLogo, newLogoRev, logoDocId, logoDocDeletable, LOGO_REV_RE, LOGO_INFLIGHT_MAX_MS } from './src/server/agency-logo.ts';
 import { createWindowLimiter } from './src/server/window-limiter.ts';
+import { installWriteMeter, writeMeterSnapshot, resetWriteMeter, writeMeterWindowLine, writeMeterMiddleware, withWriteLabel } from './src/server/write-meter.ts';
 import { installReadMeter, readMeterSnapshot, resetReadMeter, readMeterWindowLine, isQuotaError, noteQuotaError, quotaBackoffActive, setQuotaErrorAtForTests } from './src/server/read-meter.ts';
+import { installNoQuotaRetry } from './src/server/firestore-no-quota-retry.ts';
+import { runFirestoreTransaction as runFirestoreTx } from './src/server/firestore-tx.ts';
 import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState, kqrPickupVerdict, keepKnownSessionFacts, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, SESSION_WRITE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import {
@@ -512,6 +515,8 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '2mb' }));
+// WRITECUT: every database write below is attributed to the route that caused it.
+app.use(writeMeterMiddleware);
 
 
 // ---------------------------------------------------------------------------
@@ -795,6 +800,7 @@ const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
         { method: 'POST', path: '/__test__/phase-c' },
         { method: 'POST', path: '/__test__/invites-client-ready' },
         { method: 'POST', path: '/__test__/reads' },
+        { method: 'POST', path: '/__test__/write-quota' },
       ]
     : []),
 ];
@@ -1286,11 +1292,31 @@ const VENUE_REMOVED_AFTER_PASSWORD = { error: 'Your password was changed, but yo
  * 503 SESSION_STORE_UNAVAILABLE and never a token. The ineligibility rule
  * (sessionIneligibleCode) is unchanged and runs before anything is written.
  */
-type MintResult = { token: string; sid: string; absoluteExpMs: number } | { ineligible: true } | { down: true };
+type MintResult = { token: string; sid: string; absoluteExpMs: number } | { ineligible: true } | { down: true; quota?: boolean };
 const SESSION_STORE_DOWN_BODY = {
   error: 'Could not check your sign-in right now. Please try again in a moment.',
   code: 'SESSION_STORE_UNAVAILABLE',
 };
+const DAILY_LIMIT_BODY = {
+  error: 'The app is over its daily limit. Try again after 3 AM.',
+  code: 'DAILY_LIMIT',
+};
+function sessionStoreFailureBody(minted: { quota?: boolean }) {
+  return minted.quota ? DAILY_LIMIT_BODY : SESSION_STORE_DOWN_BODY;
+}
+/** WRITECUT: disable the SDK's minute-long quota retries; retry only short blips.
+ * The injected fault is INSIDE the callback, so the SDK sees it too.
+ */
+let writeQuotaCommitsForTests = 0;
+let kioskPinComparesForTests = 0;
+async function runFirestoreTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {
+  return runFirestoreTx(firestoreDb, fn, { beforeAttempt: () => {
+    if (isTestMode() && writeQuotaCommitsForTests > 0) {
+      writeQuotaCommitsForTests--;
+      throw Object.assign(new Error('8 RESOURCE_EXHAUSTED: Quota exceeded. Free daily write units'), { code: 8 });
+    }
+  } });
+}
 /** In-process store used when Firestore is off (local dev without Firestore). */
 const localSessions = new Map<string, SessionDoc>();
 /** Plan 10.1: the per-instance map; authoritative on the single production instance (revocation updates it synchronously). */
@@ -1341,7 +1367,7 @@ async function sessionStorePut(doc: SessionDoc, create = true): Promise<void> {
     return;
   }
   const ref = firestoreDb.collection('sessions').doc(doc.sid);
-  await firestoreDb.runTransaction(async (tx: any) => {
+  await runFirestoreTransaction(async (tx: any) => {
     if (create) {
       const snap = await tx.get(ref);
       if (snap.exists) throw new Error('session id already exists');
@@ -1363,7 +1389,7 @@ async function sessionStoreRevoke(sid: string, reason: string, nowIso: string): 
   }
   const ref = firestoreDb.collection('sessions').doc(sid);
   let out: SessionDoc | null = null;
-  await firestoreDb.runTransaction(async (tx: any) => {
+  await runFirestoreTransaction(async (tx: any) => {
     const snap = await tx.get(ref);
     if (!snap.exists) { out = null; return; }
     const cur = snap.data() as SessionDoc;
@@ -1409,6 +1435,7 @@ async function issueSessionToken(row: any, req: any, via: SessionVia, opts: User
       await sessionStorePut(doc);
       stored = true;
     } catch (err: any) {
+      if (noteQuotaError(err)) return { down: true, quota: true };
       log.warn(`[session] create failed (attempt ${attempt + 1}): ${err?.message || err}`);
     }
   }
@@ -1426,7 +1453,7 @@ async function issueKioskSessionToken(
   row: any,
   req: any,
   k: { agencyId: string; venueId: string; deviceId: string; pv: string; via: SessionVia; deviceCredential?: string; times?: { iat: number; exp: number } }
-): Promise<{ token: string; sid: string; absoluteExpMs: number } | { down: true }> {
+): Promise<{ token: string; sid: string; absoluteExpMs: number } | { down: true; quota?: boolean }> {
   const sid = base64url(crypto.randomBytes(16));
   const nowMs = Date.now();
   const doc = buildKioskSession({
@@ -1441,6 +1468,7 @@ async function issueKioskSessionToken(
       await kqrPutKioskSessionForDevice(doc);
       stored = true;
     } catch (err: any) {
+      if (noteQuotaError(err)) return { down: true, quota: true };
       log.warn(`[session] kiosk create failed (attempt ${attempt + 1}): ${err?.message || err}`);
     }
   }
@@ -1506,7 +1534,7 @@ async function pkTransaction<T>(fn: (tx: PkTx) => Promise<T>, writer: object = {
     // from a memo older than a write it could have missed.
     const touched: Array<[PkCollection, string, any]> = [];
     try {
-      return await firestoreDb.runTransaction(async (tx: any) => {
+      return await runFirestoreTransaction(async (tx: any) => {
         const ref = (col: PkCollection, id: string) => firestoreDb.collection(col).doc(id);
         return fn({
           get: async (col, id) => { const snap = await tx.get(ref(col, id)); return snap.exists ? snap.data() : null; },
@@ -1743,7 +1771,7 @@ async function revokeSessionsAtomic(sids: string[], reason: string): Promise<Set
     for (const [sid, doc] of stored) if (doc) localSessions.set(sid, { ...doc });
   } else {
     const refs = list.map((sid) => firestoreDb.collection('sessions').doc(sid));
-    await firestoreDb.runTransaction(async (tx: any) => {
+    await runFirestoreTransaction(async (tx: any) => {
       stored.clear();
       const snaps = [];
       for (const ref of refs) snaps.push(await tx.get(ref)); // every read before any write
@@ -1821,7 +1849,7 @@ function resyncHeldSockets(sid: string): void {
 function sendMintFailure(res: any, minted: MintResult, row: any, passwordChanged = false): boolean {
   if ('token' in minted) return false;
   if ('down' in minted) {
-    res.status(503).json(passwordChanged ? { ...SESSION_STORE_DOWN_BODY, passwordChanged: true } : SESSION_STORE_DOWN_BODY);
+    res.status(503).json(passwordChanged ? { ...sessionStoreFailureBody(minted), passwordChanged: true } : sessionStoreFailureBody(minted));
     return true;
   }
   res.status(403).json(passwordChanged ? ineligibleBody(row, true) : ineligibleBody(row));
@@ -4297,6 +4325,7 @@ async function initFirestore() {
       const mockMod = await import('./tests/stage2/firestore-mock.mjs');
       firestoreDb = mockMod.getMockFirestore();
       installReadMeter(firestoreDb);
+      installWriteMeter(firestoreDb);
       firestoreInitStatus = 'connected';
       console.log('[Firestore] Using in-memory mock (FIRESTORE_MOCK=true).');
       return;
@@ -4329,6 +4358,8 @@ async function initFirestore() {
     const app = getApps().length > 0 ? getApp() : initializeApp({ projectId });
     firestoreDb = databaseId ? getFirestore(app, databaseId) : getFirestore(app);
     installReadMeter(firestoreDb);
+    installWriteMeter(firestoreDb);
+    installNoQuotaRetry(firestoreDb);
     firestoreInitStatus = 'connected';
     console.log(`[Firestore] Durable persistence enabled (db: ${databaseId || '(default)'}).`);
   } catch (err: any) {
@@ -4532,6 +4563,7 @@ class StaleClientError extends Error {
 
 class FirestoreUnavailableError extends Error {
   code = 'FIRESTORE_UNAVAILABLE';
+  quota = false;
   constructor(message: string) {
     super(message);
     this.name = 'FirestoreUnavailableError';
@@ -4742,6 +4774,17 @@ const NOOP_IGNORED_KEYS = new Set(['_v', 'savedAt']);
  * or cost a Firestore write. No new dependencies — plain recursion over
  * JSON-shaped data.
  */
+/** Test mode only (WRITECUT): read the state document with its map keys sorted, as production Firestore answers. */
+let testProdKeyOrder = false;
+function sortKeysDeep(v: any): any {
+  if (Array.isArray(v)) return v.map(sortKeysDeep);
+  if (v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
+    const out: any = {};
+    for (const k of Object.keys(v).sort()) out[k] = sortKeysDeep(v[k]);
+    return out;
+  }
+  return v;
+}
 function docsEqualIgnoring(a: any, b: any, isTopLevel = true): boolean {
   if (a === b) return true;
   if (typeof a !== typeof b) return false;
@@ -4972,10 +5015,12 @@ async function commitState(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const committed = await firestoreDb.runTransaction(async (tx: any) => {
+      const committed = await withWriteLabel(`commit:${label}`, () => runFirestoreTransaction(async (tx: any) => {
         const docRef = firestoreDb.doc(FIRESTORE_STATE_DOC);
         const snap = await tx.get(docRef);
-        const currentDoc = snap.exists ? snap.data() : null;
+        // WRITECUT: production Firestore answers map keys in sorted order (the emulator and the
+        // mock keep insertion order); test 103 turns this on to measure what production writes.
+        const currentDoc = snap.exists ? (isTestMode() && testProdKeyOrder ? sortKeysDeep(snap.data()) : snap.data()) : null;
         const currentVersion = typeof currentDoc?._v === 'number' ? currentDoc._v : 0;
 
         // ---- Idempotency check-and-set (durable, inside the transaction) ----
@@ -5133,7 +5178,7 @@ async function commitState(
         }
         tx.set(docRef, payload);
         return { result: outcome.result, version: currentVersion + 1, doc: payload };
-      });
+      }));
 
       // ---- Commit succeeded: NOW update in-memory cache ----
       // BLOCKER 3 fix: guard against out-of-order transaction completion.
@@ -5192,7 +5237,7 @@ async function commitState(
       // READCUT: out of quota is not a blip — retrying only spends more of the
       // quota that is gone. Fail at once (nothing was saved).
       if (noteQuotaError(err)) {
-        throw new FirestoreUnavailableError('Save failed: the database is over its daily limit right now. Your data was NOT saved — please retry later.');
+        throw Object.assign(new FirestoreUnavailableError('Save failed: the database is over its daily limit right now. Your data was NOT saved — please retry later.'), { quota: true });
       }
       if (attempt < maxAttempts) continue;
       throw new FirestoreUnavailableError(`Save failed after ${maxAttempts} attempts: ${err?.message || 'unknown error'}. Your data was NOT saved — please retry.`);
@@ -5361,7 +5406,7 @@ async function commitOrRespond(
     if (err instanceof FirestoreUnavailableError) {
       log.error(`[commitOrRespond:${options.label || 'unnamed'}] ${err.message}`);
       res.status(503).json({
-        error: 'Could not save — the database is unreachable. Your changes were NOT saved. Please try again.',
+        error: err.quota ? err.message : 'Could not save — the database is unreachable. Your changes were NOT saved. Please try again.',
         code: 'SAVE_FAILED',
       });
       return null;
@@ -5917,7 +5962,8 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
 }
 
 // READCUT: one log line an hour with this instance's database reads by collection.
-setInterval(() => { try { const line = readMeterWindowLine(); if (line) log.info(line); } catch {} }, 60 * 60 * 1000).unref?.();
+// WRITECUT: the same line carries the hour's database writes (by collection and caller).
+setInterval(() => { try { const line = [readMeterWindowLine(), writeMeterWindowLine()].filter(Boolean).join(' '); if (line) log.info(line); } catch {} }, 60 * 60 * 1000).unref?.();
 
 // Run overdue check every 15 minutes (skipped in maintenance mode /
 // FORCE_LOCAL_MODE; never on a staged revision — staged revisions must not write at all)
@@ -9076,7 +9122,7 @@ async function addUpdateReads(user: UserProfile, annIds: string[], noteIds: stri
   updateReadsCacheBump(key);
   let stored: any = undefined;
   try {
-    await firestoreDb.runTransaction(async (tx: any) => {
+    await runFirestoreTransaction(async (tx: any) => {
       stored = undefined;
       const snap = await tx.get(ref);
       const raw = snap.exists ? snap.data() : null;
@@ -10233,7 +10279,7 @@ async function cleanupLogoDocs(agencyId: string): Promise<number> {
       }
       return n;
     }
-    return await firestoreDb.runTransaction(async (tx: any) => {
+    return await runFirestoreTransaction(async (tx: any) => {
       const stateSnap = await tx.get(firestoreDb.doc(FIRESTORE_STATE_DOC));
       const state = stateSnap.exists ? stateSnap.data() : null;
       const fresh = (Array.isArray(state?.agencies) ? state.agencies : []).find((a: any) => a && a.id === agencyId);
@@ -11227,7 +11273,7 @@ app.post('/api/reset-links/accept', async (req, res) => {
   // [DS1 N5]: the password changed either way; no token for an ineligible row.
   if (!row) return res.status(403).json({ ...ineligibleBody(row, true), passwordChanged: true });
   const linkMint = await issueSessionToken(row, req, 'reset-link');
-  if ('down' in linkMint) return res.status(503).json({ ...SESSION_STORE_DOWN_BODY, passwordChanged: true });
+  if ('down' in linkMint) return res.status(503).json({ ...sessionStoreFailureBody(linkMint), passwordChanged: true });
   if (!('token' in linkMint)) return res.status(403).json({ ...ineligibleBody(row, true), passwordChanged: true });
   const token = linkMint.token;
   res.json({ success: true, user: getSelfUser(row as UserProfile), token });
@@ -11578,6 +11624,15 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
     if (b.poolFrozen === true) doc.poolFrozen = true;
     if (b.poolFrozen === false) delete doc.poolFrozen;
     await docRef.set({ ...doc, users, ...(Array.isArray(newAgencies) ? { agencies: newAgencies } : {}), ...(Array.isArray(newVenues) ? { venues: newVenues } : {}), ...(Array.isArray(newInvites) ? { invites: newInvites } : {}), ...(Array.isArray(newResetLinks) ? { resetLinks: newResetLinks } : {}) });
+    // WRITECUT: explicit fixture repair; unchanged rows no longer get incidentally
+    // mirrored by an unrelated commit. Opt in only for raw owner fixtures.
+    for (const id of Array.isArray(req.body?.mirrorUserIds) ? req.body.mirrorUserIds : []) {
+      const row = users.find((u: any) => u?.id === id);
+      if (!row) continue;
+      const ref = db.collection('users').doc(id);
+      const stored = await ref.get();
+      await ref.set(JSON.parse(JSON.stringify({ ...row, _v: (stored.data()?._v || 0) + 1 })));
+    }
     res.json({ ok: true });
   });
   // TEST ONLY: seed a media doc directly into the `media` collection so the
@@ -12271,6 +12326,12 @@ if (isTestMode()) {
   //  move absoluteExp into the past everywhere (time passing); fault {on}:
   //  make every session store read/write fail; read-delay-once / write-delay-once
   //  {ms}: the next store read / write answers ms late (forced interleavings).
+  app.post('/api/__test__/write-quota', (req, res) => {
+    const remaining = writeQuotaCommitsForTests;
+    writeQuotaCommitsForTests = Math.max(0, Math.min(100, Math.floor(Number(req.body?.commits) || 0)));
+    if (!writeQuotaCommitsForTests) setQuotaErrorAtForTests(0);
+    res.json({ commits: writeQuotaCommitsForTests, remaining, pinCompares: kioskPinComparesForTests });
+  });
   app.post('/api/__test__/session-hooks', async (req, res) => {
     const { action, sid } = req.body || {};
     try {
@@ -12413,6 +12474,16 @@ if (isTestMode()) {
     if (req.body?.reset === true) resetReadMeter();
     res.json(readMeterSnapshot());
   });
+  // WRITECUT: { on } reads the state document with sorted map keys inside commits (production Firestore's order).
+  app.post('/api/__test__/prod-key-order', (req, res) => {
+    testProdKeyOrder = req.body?.on === true;
+    res.json({ on: testProdKeyOrder });
+  });
+  // WRITECUT: the write meter (reset: true zeroes it first and answers the zeroed counts).
+  app.post('/api/__test__/writes', (req, res) => {
+    if (req.body?.reset === true) resetWriteMeter();
+    res.json(writeMeterSnapshot());
+  });
   app.post('/api/__test__/mint-token', async (req, res) => {
     const { userId } = req.body || {};
     try {
@@ -12424,7 +12495,7 @@ if (isTestMode()) {
       // 11a-s1: { session: true } = the token a sign-in issues now (server session + sid).
       if (req.body?.session === true) {
         const m = await issueSessionToken(user, req, 'test');
-        if ('down' in m) return res.status(503).json(SESSION_STORE_DOWN_BODY);
+        if ('down' in m) return res.status(503).json(sessionStoreFailureBody(m));
         if (!('token' in m)) return res.status(403).json(ineligibleBody(user));
         return res.json({ token: m.token, sid: m.sid });
       }
@@ -14801,7 +14872,7 @@ app.post('/api/admin/identity-migration', async (req, res) => {
         } else {
           // ONE transaction: monolith + this batch's people/emails read first,
           // re-planned on fresh data; writes ONLY people/emails (never the monolith).
-          const txRes = await firestoreDb.runTransaction(async (tx: any) => {
+          const txRes = await runFirestoreTransaction(async (tx: any) => {
             const ms = await tx.get(firestoreDb.doc(FIRESTORE_STATE_DOC));
             const freshDoc = ms.exists ? ms.data() : {};
             const c = mig.nextCandidates(freshDoc, agencyId, 'repair', cursor);
@@ -18630,7 +18701,9 @@ app.post('/api/kiosk/login', async (req, res) => {
         res.set('Retry-After', String(retrySec));
         return res.status(429).json({ error: `Too many wrong codes. Try again in ${Math.ceil(retrySec / 60)} minutes.` });
       }
-    } catch {}
+    } catch (err: any) {
+      if (err?.quota || noteQuotaError(err)) return res.status(503).json(DAILY_LIMIT_BODY);
+    }
     // Don't reveal whether the user exists.
     return res.status(401).json({ error: 'Wrong code. Try again.' });
   }
@@ -18706,7 +18779,7 @@ app.post('/api/kiosk/login', async (req, res) => {
     // Reservation failed (version conflict, Firestore unavailable): fail closed.
     // Never compare a PIN for an attempt that couldn't be counted.
     log.warn('[kiosk] attempt reservation failed (fail closed):', (err as any)?.message);
-    return res.status(503).json({ error: 'Please try again in a moment.' });
+    return res.status(503).json((err as any)?.quota || noteQuotaError(err) ? DAILY_LIMIT_BODY : { error: 'Please try again in a moment.' });
   }
 
   if (!reservation.allowed) {
@@ -18723,6 +18796,7 @@ app.post('/api/kiosk/login', async (req, res) => {
   if (!userMatchesDevice) {
     return res.status(401).json({ error: 'Wrong code. Try again.' });
   }
+  if (isTestMode()) kioskPinComparesForTests++;
   const pinStr = String(pin).trim();
   let pinValid = false;
   let needsUpgrade = false;
@@ -18866,7 +18940,7 @@ app.post('/api/kiosk/login', async (req, res) => {
     const kioskMint = await issueKioskSessionToken(user, req, {
       agencyId, venueId, deviceId: device.id, pv: String(pv), via: 'kiosk-login', deviceCredential: deviceProof.credential,
     });
-    if ('down' in kioskMint) return res.status(503).json(SESSION_STORE_DOWN_BODY);
+    if ('down' in kioskMint) return res.status(503).json(sessionStoreFailureBody(kioskMint));
     kioskToken = kioskMint.token;
   } catch (err) {
     // Success requires the committed transition (counter reset / rehash).
@@ -18876,7 +18950,7 @@ app.post('/api/kiosk/login', async (req, res) => {
     }
     if (freshPaused) return res.status(403).json(RESET_CONFIRM_NEEDED);
     log.warn('[kiosk] login success write failed:', (err as any)?.message);
-    return res.status(503).json({ error: 'Please try again in a moment.' });
+    return res.status(503).json((err as any)?.quota || noteQuotaError(err) ? DAILY_LIMIT_BODY : { error: 'Please try again in a moment.' });
   }
   // K1: the tablet receives the ACTING user — an admin arrives as a
   // mashgiach at this venue, so the kiosk client renders no admin UI.
@@ -19279,7 +19353,7 @@ async function kqrTabletRoute(mode: 'start' | 'cancel' | 'poll', req: any, res: 
     out = await kqrTabletStep(mode, device, req.headers['user-agent']);
   } catch (err: any) {
     log.warn(`[kiosk-qr] ${mode} failed: ${err?.message || err}`);
-    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+    return res.status(503).json(noteQuotaError(err) ? DAILY_LIMIT_BODY : { error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
   }
   if (out.kind === 'waiting') {
     const origin = kqrEmitOrigin(inviteLinkOrigin(device.agencyId), SHARED_ORIGIN);
@@ -19349,7 +19423,7 @@ app.get('/api/kiosk/qr/info/:code', async (req, res) => {
     doc = got.c; dev = got.d;
   } catch (err: any) {
     log.warn(`[kiosk-qr] info read failed: ${err?.message || err}`);
-    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+    return res.status(503).json(noteQuotaError(err) ? DAILY_LIMIT_BODY : { error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
   }
   const device = doc ? liveKioskDevice(doc.deviceId) : null;
   if (!doc || !dev || !device || device.secretHash !== doc.deviceSecretHash || device.venueId !== doc.venueId || device.agencyId !== doc.agencyId) return unusable();
@@ -19417,7 +19491,7 @@ app.post('/api/kiosk/qr/approve', async (req, res) => {
     });
   } catch (err: any) {
     log.warn(`[kiosk-qr] approve failed: ${err?.message || err}`);
-    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+    return res.status(503).json(noteQuotaError(err) ? DAILY_LIMIT_BODY : { error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
   }
   if (result.kind === 'refused') {
     if (result.wrongSite) { kqrCountRefusal(me.personId, me.sid, ip, Date.now()); return sendWrongSite(res); }
@@ -19448,7 +19522,7 @@ app.get('/api/kiosk/qr/approval/:id', async (req, res) => {
     });
   } catch (err: any) {
     log.warn(`[kiosk-qr] approval read failed: ${err?.message || err}`);
-    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+    return res.status(503).json(noteQuotaError(err) ? DAILY_LIMIT_BODY : { error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
   }
   const { a, c, s } = got;
   if (!a || !c || a.personId !== me.personId || !c.approval || c.approval.id !== id || c.approval.personId !== me.personId) return notFound();
@@ -19490,7 +19564,7 @@ app.get('/api/kiosk/qr/tablets', async (req, res) => {
   let list: Array<{ item: any; s: SessionDoc }>;
   try { list = await kqrPersonSessions(me.personId, req); } catch (err: any) {
     log.warn(`[kiosk-qr] tablets read failed: ${err?.message || err}`);
-    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+    return res.status(503).json(noteQuotaError(err) ? DAILY_LIMIT_BODY : { error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
   }
   return res.json({
     tablets: list.map(({ s }) => {
@@ -19514,7 +19588,7 @@ app.post('/api/kiosk/qr/tablets/signout', async (req, res) => {
   let list: Array<{ item: any; s: SessionDoc }>;
   try { list = await kqrPersonSessions(me.personId, req); } catch (err: any) {
     log.warn(`[kiosk-qr] signout read failed: ${err?.message || err}`);
-    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+    return res.status(503).json(noteQuotaError(err) ? DAILY_LIMIT_BODY : { error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
   }
   const hit = list.find((x) => x.s.qrRef === ref);
   if (!hit) return notFound();
@@ -19522,7 +19596,7 @@ app.post('/api/kiosk/qr/tablets/signout', async (req, res) => {
     await revokeSessionsAtomic([hit.s.sid], 'kiosk-qr-phone-signout');
   } catch (err: any) {
     log.warn(`[kiosk-qr] signout failed: ${err?.message || err}`);
-    return res.status(503).json({ error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
+    return res.status(503).json(noteQuotaError(err) ? DAILY_LIMIT_BODY : { error: 'Please try again in a moment.', code: 'KIOSK_QR_UNAVAILABLE' });
   }
   return res.json({ ok: true });
 });
@@ -20606,7 +20680,7 @@ app.post('/api/kiosk/session/adopt', async (req, res) => {
       agencyId: claims.agencyId, venueId: claims.venueId, deviceId: claims.dev, pv: claims.pv, via: 'kiosk-adopt',
       times: { iat, exp: Math.floor(endsAtMs / 1000) },
     });
-    if ('down' in minted) return res.status(503).json(SESSION_STORE_DOWN_BODY);
+    if ('down' in minted) return res.status(503).json(sessionStoreFailureBody(minted));
     if (!setKioskCookie(res, minted.token, minted.absoluteExpMs)) return refused();
   }
   clearUserCookie(res);
@@ -20719,7 +20793,7 @@ function personMayEnroll(personId: string): boolean {
 }
 function storeDown(res: any, err: any, what: string): void {
   log.warn(`[passkey] ${what} store error: ${err?.message || err}`);
-  res.status(503).json(SESSION_STORE_DOWN_BODY);
+  res.status(503).json(noteQuotaError(err) ? DAILY_LIMIT_BODY : SESSION_STORE_DOWN_BODY);
 }
 /** Closes the open sockets of every session that came from this passkey (this instance; others refuse at their next check). */
 function closeSocketsOfPasskey(personId: string, credentialId: string): void {

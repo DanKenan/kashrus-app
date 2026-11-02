@@ -168,6 +168,7 @@ export function kqrErrorFor(status: number, body: any): KqrError {
   const T = KQR_UI_TEXT;
   if (code === 'WRONG_SITE' || code === 'SITE_NOT_SET_UP') return { kind: 'site', title: T.siteTitle, body: T.siteBody, again: 'scan' };
   if (code === 'KIOSK_QR_EXPIRED' || status === 410) return { kind: 'expired', title: T.expiredTitle, body: T.expiredBody, again: 'scan' };
+  if (code === 'DAILY_LIMIT') return { kind: 'unavailable', title: T.unavailableTitle, body: msg, again: 'retry' };
   if (code === 'KIOSK_QR_NOT_HERE') {
     // "You can't sign in on this tablet. Ask your administrator for a code at <venue>." -> the second sentence.
     const rest = msg.startsWith("You can't sign in on this tablet.") ? msg.slice("You can't sign in on this tablet.".length).trim() : msg;
