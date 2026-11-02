@@ -9,10 +9,10 @@ import { fileURLToPath } from 'node:url';
 
 // BOOTFIX (Nov 2): #187's first Cloud Run boot died with "Could not load
 // durable state at boot" and an empty log line: the boot read's error was
-// only in a JSON field, never in the fatal line. This test boots the server
+// only in a JSON field, never in the boot-refusal line. This test boots the server
 // the way Cloud Run does (the esbuild bundle, K_SERVICE set, production,
 // READ_FROM_PER_ENTITY=true) in two situations:
-//   A. the boot read fails with a quota error -> the fatal line names it;
+//   A. the boot read fails with a quota error -> the refusal line names it;
 //   B. the stored document holds shifts in every shape older code wrote
 //      (#186 single person, per-day people/hours, null-person days and
 //      overrides, the daysOfWeek draft, short/garbled days, no overrides,
@@ -57,18 +57,24 @@ async function boot(args, env, port, timeoutMs = 120000) {
   child.stdout.on('data', (d) => { output += d; });
   child.stderr.on('data', (d) => { output += d; });
   let exitCode = null;
-  const exited = new Promise((resolve) => child.once('exit', (code, signal) => { exitCode = code ?? signal; resolve(); }));
-  const deadline = Date.now() + timeoutMs;
+  const exited = new Promise((resolve) => {
+    child.once('exit', (code, signal) => { exitCode = code ?? signal; resolve(); });
+    child.once('error', (err) => { output += `\n[spawn error] ${err.message}`; exitCode = exitCode ?? 'spawn-error'; resolve(); });
+  });
   let healthy = false;
-  while (Date.now() < deadline && exitCode === null) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2000) });
-      if (r.status === 200) { healthy = true; break; }
-    } catch {}
-    await Promise.race([exited, sleep(500)]);
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && exitCode === null) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2000) });
+        if (r.status === 200) { healthy = true; break; }
+      } catch {}
+      await Promise.race([exited, sleep(500)]);
+    }
+  } finally {
+    if (exitCode === null) { try { child.kill('SIGKILL'); } catch {} await Promise.race([exited, sleep(10000)]); }
+    rmSync(dataDir, { recursive: true, force: true });
   }
-  if (exitCode === null) { child.kill('SIGKILL'); await Promise.race([exited, sleep(10000)]); }
-  rmSync(dataDir, { recursive: true, force: true });
   return { healthy, exitCode, output };
 }
 
@@ -90,7 +96,7 @@ const sortKeys = (v) => Array.isArray(v) ? v.map(sortKeys)
 
 export default {
   name: 'Test 109: Cloud Run boot from live-shaped data; a refused boot names its cause',
-  whatItProves: 'The production bundle boots in Cloud Run mode from shifts stored by older code without a hydrate warning, and when the boot read fails (quota) the fatal boot line itself carries the Firestore error.',
+  whatItProves: 'The production bundle boots in Cloud Run mode from shifts stored by older code without a hydrate warning, and when the boot read fails (quota) the boot-refusal line itself carries the Firestore error.',
   async run(baseUrl, ctx) {
     const realEmulator = !!process.env.FIRESTORE_EMULATOR_HOST;
     const bundle = await buildBundle();
@@ -106,9 +112,9 @@ export default {
       } finally { await quota.close(); }
       assert.equal(a.healthy, false, 'boot must be refused when the state read fails');
       assert.notEqual(a.exitCode, 0, `exit code ${a.exitCode}`);
-      const fatal = a.output.split('\n').find((l) => l.startsWith('Error: [Firestore] Could not load durable state at boot'));
-      assert(fatal, `no fatal boot line:\n${a.output.slice(-3000)}`);
-      assert.match(fatal, /Cause: 8 RESOURCE_EXHAUSTED: Quota exceeded\. Free daily read units per project/, fatal);
+      const refusal = a.output.split('\n').find((l) => l.startsWith('Error: [Firestore] Could not load durable state at boot'));
+      assert(refusal, `no boot-refusal line:\n${a.output.slice(-3000)}`);
+      assert.match(refusal, /Cause: 8 RESOURCE_EXHAUSTED: Quota exceeded\. Free daily read units per project/, refusal);
       const warn = a.output.split('\n').find((l) => l.includes('Could not load state'));
       assert(warn && JSON.parse(warn).message.includes('RESOURCE_EXHAUSTED'), `warning line lacks the error: ${warn}`);
 
