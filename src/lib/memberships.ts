@@ -1,4 +1,3 @@
-import { signInRequest, SIGN_IN_TIMEOUT_TEXT } from './signInRequest';
 // 10g client: a person with several agencies (memberships) under one login.
 // The server (#105) answers sign-in with { chooseMembership, token, memberships }
 // when the email has more than one agency; GET /api/auth/memberships lists them
@@ -76,22 +75,20 @@ export async function activateMembership(token: string | null, membershipId: str
   try {
     // A choose token is not this device's sign-in (screen only); a session token is.
     const sentKey = deviceCredentialKeyFor(token);
-    const { res, data } = await signInRequest('/api/auth/activate', {
+    const res = await fetch('/api/auth/activate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...sessionAuthHeaders(token) },
       credentials: 'same-origin',
       cache: 'no-store',
       body: JSON.stringify({ membershipId }),
-    }, async (input, init) => {
-      const res = await fetch(input, init);
-      if (!res.ok) await noticeSiteRefusalFor(res, sentKey);
-      return res;
     });
+    if (!res.ok) await noticeSiteRefusalFor(res, sentKey);
+    const data = await res.json().catch(() => ({} as any));
     if (res.ok && data && typeof data.token === 'string' && data.token && data.user) {
       return { ok: true, token: data.token, user: data.user };
     }
     return { ok: false, error: typeof data?.error === 'string' && data.error ? data.error : MEMBERSHIP_ERROR_TEXT };
-  } catch (err: any) {
-    return { ok: false, error: err?.message === SIGN_IN_TIMEOUT_TEXT ? SIGN_IN_TIMEOUT_TEXT : MEMBERSHIP_NETWORK_TEXT };
+  } catch {
+    return { ok: false, error: MEMBERSHIP_NETWORK_TEXT };
   }
 }

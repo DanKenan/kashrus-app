@@ -1,4 +1,3 @@
-import { signInRequest } from '../lib/signInRequest';
 import React, { useEffect, useRef, useState } from 'react';
 import { 
   Mail, 
@@ -32,10 +31,6 @@ import { activateMembership, cleanMemberships, isChooseAnswer, Membership } from
 import { getRoleLabel } from '../lib/permissions';
 import { type SiteAgency } from '../lib/site';
 import { SiteSignInHeader } from './SiteRefusedScreen';
-
-// Keep apiFetch's pending-auth guard until the real answer arrives, even if
-// the UI timeout fires. Aborting would release that guard before the outcome.
-const signInFetch: typeof fetch = (input, init) => apiFetch(String(input), { ...init, signal: undefined });
 
 interface LoginPageProps {
   onLoginSuccess: (user: UserType) => void;
@@ -142,11 +137,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
     try {
       setIsLoading(true);
-      const { res, data } = await signInRequest('/api/auth/login', {
+      const res = await apiFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: trimmedEmail, password: trimmedPassword }),
-      }, signInFetch);
+      });
+
+      const data = await res.json();
 
       if (!res.ok) {
         throw new Error(signInErrorText(data, 'Authentication failed. Please check your email and password.'));
@@ -219,11 +216,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     }
     setIsLoading(true);
     try {
-      const { res, data } = await signInRequest('/api/auth/setup', {
+      const res = await apiFetch('/api/auth/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim(), newPassword: setupPassword.trim() }),
-      }, signInFetch);
+      });
+      const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Setup failed. Please try again.');
       if (data.token) setSessionToken(data.token);
       if (data.user) onLoginSuccess(data.user);
