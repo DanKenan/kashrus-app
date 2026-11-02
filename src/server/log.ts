@@ -140,6 +140,9 @@ function emit(severity: LogSeverity, args: unknown[]): void {
   else process.stdout.write(line + '\n');
 }
 
+/** The same credential scrub, for text that leaves without log (e.g. a fatal boot error). */
+export const scrubLogText = (text: string): string => scrubText(text);
+
 export const log = {
   error: (...args: unknown[]): void => emit('ERROR', args),
   warn: (...args: unknown[]): void => emit('WARNING', args),
