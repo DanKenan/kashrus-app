@@ -133,9 +133,20 @@ export function shiftTimeOffset(shift: Shift, minutes: number, weekday?: number)
   return clockMinutes + (hours.endMinutes < hours.startMinutes && clockMinutes < hours.startMinutes ? 1440 : 0);
 }
 
+/** Yesterday remains the overdue occurrence until the next window starts. */
+function previousOvernightOverdueDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number): string | null {
+  const previous = shiftHoursOn(shift, (weekday + 6) % 7);
+  const hours = shiftHoursOn(shift, weekday);
+  const nextStart = shiftRunsOn(shift, ymd, weekday) ? Math.min(previous.startMinutes, hours.startMinutes) : previous.startMinutes;
+  const yesterday = addDays(ymd, -1);
+  return previous.endMinutes < previous.startMinutes && nowMinutes < nextStart
+    && shiftRunsOn(shift, yesterday, (weekday + 6) % 7) ? yesterday : null;
+}
+
 export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task: ShiftTask): string | null {
   if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return null;
-  const occurrence = shiftOccurrenceDay(shift, ymd, weekday, nowMinutes);
+  const occurrence = previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)
+    || shiftOccurrenceDay(shift, ymd, weekday, nowMinutes);
   if (!occurrence) return null;
   const startWeekday = weekdayOf(occurrence);
   const deadline = shiftTimeOffset(shift, targetMinutesOf(task), startWeekday);
@@ -148,10 +159,7 @@ export function shiftTaskOverdueAt(shift: Shift, ymd: string, weekday: number, n
   if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return false;
   const previous = shiftHoursOn(shift, (weekday + 6) % 7);
   const hours = shiftHoursOn(shift, weekday);
-  // Once today's own window starts, its deadline supersedes yesterday's.
-  const nextStart = shiftRunsOn(shift, ymd, weekday) ? Math.min(previous.startMinutes, hours.startMinutes) : previous.startMinutes;
-  if (previous.endMinutes < previous.startMinutes && nowMinutes > previous.endMinutes && nowMinutes < nextStart
-      && shiftRunsOn(shift, addDays(ymd, -1), (weekday + 6) % 7)) return true;
+  if (nowMinutes > previous.endMinutes && previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)) return true;
   return hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, ymd, weekday) && nowMinutes > hours.endMinutes;
 }
 

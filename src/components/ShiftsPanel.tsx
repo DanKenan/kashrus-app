@@ -102,8 +102,8 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
     } finally { lock.current = false; setBusy(false); }
   };
   const picker = (label: string, value: string[], onChangeValue: (v: string[]) => void) => <div role="group" aria-label={label} className="flex flex-wrap gap-2 max-h-48 overflow-y-auto">
-    <button type="button" aria-pressed={!value.length} className={button} onClick={() => onChangeValue([])}>Nobody</button>
-    {people.filter((p) => p.id).map((p) => <button key={p.id} type="button" aria-pressed={value.includes(p.id!)} className={button}
+    <button type="button" aria-pressed={!value.length} className={!value.length ? button.replace('border-line-control', 'border-gold') : button} onClick={() => onChangeValue([])}>Nobody</button>
+    {people.filter((p) => p.id).map((p) => <button key={p.id} type="button" aria-pressed={value.includes(p.id!)} className={value.includes(p.id!) ? button.replace('border-line-control', 'border-gold') : button}
       onClick={() => onChangeValue(value.includes(p.id!) ? value.filter((id) => id !== p.id) : [...value, p.id!])}>
       {value.includes(p.id!) && <Check aria-hidden="true" className="inline w-4 h-4 mr-1" />}{p.name}
     </button>)}

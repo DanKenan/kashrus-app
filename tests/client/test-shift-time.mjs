@@ -104,7 +104,8 @@ const early = { ...own, id: 'early', targetTime: '1:00 AM', targetTimeMinutes: 6
 for (const [date, weekday, minute, lateDue, earlyDue] of [
   ['2026-11-08', 0, 1380, false, false], ['2026-11-08', 0, 1425, true, false],
   ['2026-11-09', 1, 30, true, false], ['2026-11-09', 1, 90, true, true],
-  ['2026-11-09', 1, 120, false, false], ['2026-11-09', 1, 720, false, false],
+  ['2026-11-09', 1, 120, true, true], ['2026-11-09', 1, 121, true, true],
+  ['2026-11-09', 1, 720, true, true], ['2026-11-09', 1, 1320, false, false],
 ]) {
   for (const [task, due] of [[late, lateDue], [early, earlyDue]]) {
     assert.equal(shiftTaskOverdueAt(night, date, weekday, minute, task), due);
@@ -126,3 +127,9 @@ assert.deepEqual(projected.map((t) => t.id), ['late', 'early']);
 assert.equal(restoreShiftWindows(projected, nightMap, 0)[1].targetTimeMinutes, 60);
 assert.equal(shiftLabel(night, 0, early), 'Deli day · 1:00 AM (next day)');
 console.log('Overnight own times: start-date deadlines, boundaries, ordering and clock restoration passed');
+
+// A Monday occurrence supersedes Sunday at its start, not at midnight or Sunday’s end.
+const consecutiveNights = { ...night, days: Array.from({ length: 7 }, (_, w) => ({ on: w < 2 })) };
+assert.equal(shiftOwnTimeOverdueDay(consecutiveNights, '2026-11-09', 1, 121, early), '2026-11-08');
+assert.equal(shiftOwnTimeOverdueDay(consecutiveNights, '2026-11-09', 1, 1380, early), null);
+assert.equal(shiftOwnTimeOverdueDay(consecutiveNights, '2026-11-10', 2, 90, early), '2026-11-09');

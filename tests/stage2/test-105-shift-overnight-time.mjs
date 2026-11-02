@@ -61,7 +61,9 @@ export default {
       await check(monday, '00:30', [0]); // clear=true models the first poll after midnight
       await check(monday, '00:31', [], false); // Sunday key deduplicates the same occurrence
       await check(monday, '01:30', [0, 1]);
-      await check(monday, '12:00', []);
+      await check(monday, '02:01', [0, 1]); // first tick after the shift ends
+      await check(monday, '12:00', [0, 1]);
+      await check(monday, '22:00', []);
       // Monday has a different person; both overdue paths must use Sunday.
       await clock(sunday, '22:00');
       const varied = await api('admin', 'POST', '/api/shifts', { venueId, name: 'Occurrence people', startMinutes: 1320, endMinutes: 120, userIds: [people.coord.id],
@@ -82,6 +84,27 @@ export default {
         assert.deepEqual(log.filter((e) => e.title === `Overdue: ${title}`).map((e) => e.endpoint).sort(), [...endpoints].sort());
         assert.equal(log.some((e) => e.title === `Overdue: ${title}` && e.endpoint === mondayEndpoint), false);
         await clock(sunday, '22:00');
+      }
+      // Consecutive night shifts: Sunday's missed morning deadline survives its end.
+      await clock(sunday, '22:00');
+      const consecutive = await api('admin', 'POST', '/api/shifts', { venueId, name: 'Consecutive nights', startMinutes: 1320, endMinutes: 120,
+        days: Array.from({ length: 7 }, (_, w) => ({ on: w < 2, userIds: w === 0 ? [people.mash.id, people.assign.id] : [people.coord.id] })) });
+      assert.equal(consecutive.status, 201);
+      const morning = await api('admin', 'POST', '/api/tasks', { venueId, title: 'Consecutive morning deadline', shiftId: consecutive.json.id, shiftTime: true, targetTime: '1:00 AM', enableOverdueAlert: true });
+      assert.equal(morning.status, 201);
+      for (const [date, time, occurrence, recipients] of [
+        [monday, '02:01', sunday, endpoints], [monday, '23:00', null, []],
+        ['2026-11-10', '01:30', monday, [mondayEndpoint]],
+      ]) {
+        await clock(date, time);
+        await ctx.api('POST', '/api/__test__/push-log/clear', {});
+        const checked = await ctx.api('POST', '/api/__test__/overdue-check', { clear: true });
+        assert.deepEqual(checked.json.notified.filter((key) => key.startsWith(`${morning.json.id}:`)), occurrence ? [`${morning.json.id}:${occurrence}`] : []);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const log = (await ctx.api('GET', '/api/__test__/push-log')).json.log;
+        assert.deepEqual(log.filter((e) => e.title === `Overdue: ${morning.json.title}`).map((e) => e.endpoint).sort(), [...recipients].sort());
+        const dashboard = await api('admin', 'GET', '/api/admin/dashboard');
+        assert.equal(dashboard.json.venues.find((v) => v.venue.id === venueId).overdueTaskList.some((t) => t.id === morning.json.id), !!occurrence);
       }
       return 'overnight deadlines and occurrence recipients for own-time and shift-window tasks passed';
     } finally {

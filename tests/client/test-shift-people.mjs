@@ -54,6 +54,7 @@ const chip = async (label, name) => {
   const group = panel.find((e) => e.props.role === 'group' && e.props['aria-label'] === label)[0];
   const button = group.props.children.flat(Infinity).find((e) => e?.type === 'button' && (e.props.children === name || Array.isArray(e.props.children) && e.props.children.includes(name)));
   assert.ok(button, `${label}: ${name}`); assert.match(button.props.className, /min-h-11/);
+  assert.equal(/\bborder-gold\b/.test(button.props.className), button.props['aria-pressed'], `${label}: selected border`);
   await button.props.onClick(); await panel.render();
 };
 assert.equal(panel.find((e) => e.type === 'select').length, 0);
