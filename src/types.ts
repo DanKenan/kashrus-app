@@ -103,13 +103,17 @@ export interface User {
 
 export interface ShiftOverride {
   date: string; // venue day YYYY-MM-DD
-  userId: string | null;
+  userIds: string[];
+  userNames?: string[]; // server-derived, aligned with userIds
+  userId: string | null; // first id, for older clients
   userName?: string; // server-filled from users; never trusted on writes
 }
 
 export interface ShiftDay {
   on: boolean;
-  userId?: string | null; // undefined inherits the general person
+  userIds?: string[] | null; // absent inherits; empty/null means nobody
+  userNames?: string[]; // server-derived weekday names
+  userId?: string | null; // legacy first id; absent inherits
   startMinutes?: number;
   endMinutes?: number; // both missing inherits the general hours
 }
@@ -124,7 +128,9 @@ export interface Shift {
   oneTimeDate?: string | null; // venue day; absent/null repeats weekly
   startMinutes: number;
   endMinutes: number;
-  userId: string | null;
+  userIds: string[];
+  userNames?: string[]; // server-derived, aligned with userIds
+  userId: string | null; // first id, for older clients
   userName?: string; // server-derived; never accepted from a client
   dayUserNames?: (string | null)[]; // server-derived weekday names, no emails
   overrides: ShiftOverride[];
@@ -134,6 +140,7 @@ export interface Shift {
 
 export interface Task {
   shiftId?: string | null;
+  shiftTime?: boolean; // true: target times belong to the task, not the shift window
   id: string;
   agencyId?: string;
   venueId?: string;

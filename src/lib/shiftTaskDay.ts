@@ -1,5 +1,5 @@
 import type { Shift, Task } from '../types';
-import { shiftOccurrenceDay, taskWithShiftTimes, shiftPersonOn, shiftDayOf } from './shifts';
+import { shiftOccurrenceDay, taskWithShiftTimes, shiftPeopleOn, shiftUserIds, shiftDayOf } from './shifts';
 
 type Weekday = number | ((task: Task) => number | undefined);
 /** A weekday section wins; today's list uses the occurrence's start day,
@@ -14,7 +14,7 @@ export function shiftDisplayWeekday(shift: Shift, ymd: string | null, weekday: n
 export function shiftSortProjection(tasks: Task[], shiftsById: Map<string, Shift>, weekday?: Weekday): Task[] {
   return tasks.map((task) => {
     const effective = taskWithShiftTimes(task, shiftsById, typeof weekday === 'function' ? weekday(task) : weekday);
-    return task.shiftId && shiftsById.has(task.shiftId)
+    return task.shiftId && !task.shiftTime && shiftsById.has(task.shiftId)
       ? { ...effective, targetTime2: '', targetTime2Minutes: undefined } : effective;
   });
 }
@@ -28,13 +28,19 @@ export function shiftAssigneeLabel(shift: Shift, editor: boolean, ymd: string | 
   if (!editor || ymd === null || weekday === null || nowMinutes === null) return label;
   const occ = shiftOccurrenceDay(shift, ymd, weekday, nowMinutes);
   if (!occ) return label;
-  const person = shiftPersonOn(shift, occ);
-  if (person === null) return `${shift.name} · today: Nobody`;
+  const ids = shiftPeopleOn(shift, occ);
+  if (!ids.length) return `${shift.name} · today: Nobody`;
   const occWeekday = new Date(`${occ}T12:00:00Z`).getUTCDay();
-  const override = shift.overrides?.find((o) => o.date === occ && o.userId === person);
+  const override = shift.overrides?.find((o) => o.date === occ);
   const day = shiftDayOf(shift, occWeekday);
-  const name = override?.userName ||
-    (day.userId === person ? shift.dayUserNames?.[occWeekday] : undefined) ||
-    (shift.userId === person ? shift.userName : undefined) || roster.find((p) => p.id === person)?.name;
-  return `${shift.name} · today: ${name || 'someone else'}`;
+  const source = override || (day.userIds !== undefined ? shift.days?.[occWeekday] : shift);
+  const names = ids.map((id) => {
+    const index = shiftUserIds(source).indexOf(id);
+    const generalIndex = shiftUserIds(shift).indexOf(id);
+    return source?.userNames?.[index] || (override?.userId === id ? override.userName : undefined) ||
+      (day.userId === id ? shift.dayUserNames?.[occWeekday] : undefined) ||
+      shift.userNames?.[generalIndex] || (shift.userId === id ? shift.userName : undefined) ||
+      roster.find((p) => p.id === id)?.name || 'someone else';
+  });
+  return `${shift.name} · today: ${names.join(', ')}`;
 }

@@ -3037,7 +3037,11 @@ export default function App() {
         timeZone={currentVenueTimeZone}
         onShiftChange={(shift, deleted) => {
           setShiftsByVenue((prev) => ({ ...prev, [shift.venueId]: deleted ? (prev[shift.venueId] || []).filter((s) => s.id !== shift.id) : [...(prev[shift.venueId] || []).filter((s) => s.id !== shift.id), shift] }));
-          if (deleted) setTasks((prev) => prev.map((t) => t.shiftId === shift.id ? { ...taskWithShiftTimes(t, new Map([[shift.id, shift]])), shiftId: null } : t));
+          if (deleted) setTasks((prev) => prev.map((t) => {
+            if (t.shiftId !== shift.id) return t;
+            const { shiftTime: _ownTime, ...detached } = taskWithShiftTimes(t, new Map([[shift.id, shift]]));
+            return { ...detached, shiftId: null };
+          }));
         }}
         isOpen={isTeamModalOpen && sheetAllowed(currentUser, 'team')}
         onClose={() => setIsTeamModalOpen(false)}

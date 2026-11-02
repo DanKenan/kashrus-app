@@ -215,6 +215,8 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-100-overdue-days.mjs')).default, // TODAYSORT
     (await import('./test-101-shifts-crud.mjs')).default, // SHIFTS
     (await import('./test-102-shift-overdue.mjs')).default, // SHIFTS
+    (await import('./test-103-shift-time.mjs')).default, // SHIFTTIME
+    (await import('./test-104-shift-people.mjs')).default, // SHIFTTIME
     // MERGE-FIX: merges into the operator row and re-signs the suite's admin session; keep it LAST, after its own fresh state.
     FRESH_STATE,
     (await import('./test-85-merge-operator.mjs')).default,

@@ -44,14 +44,14 @@ export default {
     assert.equal(r.status, 201, JSON.stringify(r.json));
     const id = r.json.id;
     assert.equal(r.json.userName, people.mash.name);
-    assert.deepEqual(r.json.overrides, [{ date: today, userId: people.assign.id, userName: people.assign.name }]);
+    assert.deepEqual(r.json.overrides, [{ date: today, userIds: [people.assign.id], userNames: [people.assign.name], userId: people.assign.id, userName: people.assign.name }]);
     assert.equal(JSON.stringify(r.json.overrides).includes('@'), false);
-    assert.deepEqual((await ctx.getDoc()).shifts.find((s) => s.id === id).overrides, [{ date: today, userId: people.assign.id }]);
+    assert.deepEqual((await ctx.getDoc()).shifts.find((s) => s.id === id).overrides, [{ date: today, userIds: [people.assign.id], userId: people.assign.id }]);
     const nobody = await api('admin', 'PUT', `/api/shifts/${id}`, { overrides: [{ date: today, userId: null, userName: 'Forged' }] });
     assert.equal(nobody.status, 200);
-    assert.deepEqual(nobody.json.overrides, [{ date: today, userId: null }]);
+    assert.deepEqual(nobody.json.overrides, [{ date: today, userIds: [], userNames: [], userId: null }]);
     assert.equal((await api('admin', 'PUT', `/api/shifts/${id}`, { overrides: body.overrides })).status, 200);
-    assert.deepEqual((await ctx.getDoc()).shifts.find((s) => s.id === id).overrides, [{ date: today, userId: people.assign.id }]);
+    assert.deepEqual((await ctx.getDoc()).shifts.find((s) => s.id === id).overrides, [{ date: today, userIds: [people.assign.id], userId: people.assign.id }]);
     assert.equal('email' in r.json, false);
     assert.equal('daysOfWeek' in r.json, false);
     assert.deepEqual(r.json.days, Array.from({ length: 7 }, (_, w) => ({ on: [0, 2].includes(w) })));
@@ -90,13 +90,13 @@ export default {
     assert.equal(varied.json.dayUserNames.length, 7);
     assert.equal(varied.json.dayUserNames[0], people.assign.name);
     assert.equal(varied.json.dayUserNames[1], null);
-    assert.deepEqual(varied.json.days, ownDays);
+    assert.deepEqual(varied.json.days, ownDays.map((d) => d.userId ? { ...d, userIds: [d.userId], userNames: [people.assign.name] } : d));
     assert.equal(JSON.stringify(varied.json).includes('@'), false);
     assert.equal((await api('admin', 'DELETE', `/api/shifts/${varied.json.id}`)).status, 200);
     const loaded = await api('mash', 'GET', `/api/tasks?venueId=${venueId}`);
     assert.equal(loaded.status, 200);
     assert.deepEqual(loaded.json.shifts.map((s) => s.id), [id]);
-    assert.deepEqual(loaded.json.shifts[0].overrides, [{ date: today, userId: people.assign.id, userName: people.assign.name }]);
+    assert.deepEqual(loaded.json.shifts[0].overrides, [{ date: today, userIds: [people.assign.id], userNames: [people.assign.name], userId: people.assign.id, userName: people.assign.name }]);
     assert.equal(JSON.stringify(loaded.json.shifts).includes('@'), false);
     assert.equal((await api('foreign', 'GET', `/api/tasks?venueId=${venueId}`)).status, 403);
     for (const who of ['mash', 'foreign', 'elsewhere']) {
@@ -240,7 +240,7 @@ export default {
       assert.equal(updates.length, 3, 'venue receives create/edit/delete');
       assert.equal(updates[0].payload.venueId, venueId);
       assert.equal(updates[0].payload.shifts[0].userName, people.mash.name);
-      assert.deepEqual(updates[0].payload.shifts[0].overrides, [{ date: today, userId: people.assign.id, userName: people.assign.name }]);
+      assert.deepEqual(updates[0].payload.shifts[0].overrides, [{ date: today, userIds: [people.assign.id], userNames: [people.assign.name], userId: people.assign.id, userName: people.assign.name }]);
       assert.equal(updates[1].payload.shifts[0].area, 'Live edit');
       assert.deepEqual(updates[2].payload.shifts, []);
       assert.equal(JSON.stringify(updates).includes('@'), false);

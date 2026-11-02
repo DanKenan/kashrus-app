@@ -130,9 +130,9 @@ const weekPanel = mount(ShiftsPanel, { shifts: [shift], venueId: 'v', timeZone: 
 await weekPanel.render(); await weekPanel.click('Deli day');
 const change = async (aria, value) => {
   const input = weekPanel.find((e) => e.props['aria-label'] === aria && typeof e.props.onChange === 'function')[0];
-  assert.ok(input, aria); input.props.onChange({ target: { value } }); await weekPanel.render();
+  assert.ok(input, aria); input.props.onChange({ target: { value, selectedOptions: [{ value }] } }); await weekPanel.render();
 };
-await change('Mon person', 'd'); await change('Tue person', '__nobody__');
+await change('Mon people', 'd'); await change('Tue people', '__nobody__');
 await weekPanel.click((e) => e.props['aria-label'] === 'Wed hours');
 await change('Wed From', '10:00'); await change('Wed Until', '16:00');
 await weekPanel.submit();
@@ -154,7 +154,7 @@ assert.equal(shiftPersonOn({ ...varying, overrides: [] }, '2026-11-10'), null);
 assert.equal(shiftPersonOn({ ...varying, overrides: [{ date: '2026-11-09', userId: null }] }, '2026-11-09'), null);
 await weekPanel.render({ shifts: [varying] }); await weekPanel.click('Deli day');
 await weekPanel.click('Same as general');
-assert.equal(weekPanel.find((e) => e.props['aria-label'] === 'Mon person')[0].props.value, '');
+assert.deepEqual(weekPanel.find((e) => e.props['aria-label'] === 'Mon people')[0].props.value, ['__inherit__']);
 await weekPanel.submit();
 assert.equal(weekPayload.days[1].userId, undefined);
 assert.equal(shiftVariesByDay(varying), true);
