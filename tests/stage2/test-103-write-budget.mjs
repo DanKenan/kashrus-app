@@ -109,8 +109,17 @@ export default {
       console.log(`[writes] ${label}: ${costs[label]}${dels ? ` (+${dels} deletes)` : ''} ${J(by)} ${J(who)}`);
       return costs[label];
     };
-    const get = (tok, path, headers = {}) => fetch(`${baseUrl}${path}`, { headers: { ...auth(tok), ...headers } }).then((r) => r.status);
-    const post = (tok, path, body = {}) => fetch(`${baseUrl}${path}`, { method: 'POST', headers: auth(tok), body: J(body) }).then((r) => r.status);
+    // A measured request must succeed: an endpoint that errors writes nothing and would
+    // make the budget look better than it is (a failed subject is a failure).
+    const ok2xx = async (r, what) => {
+      if (r.status < 200 || r.status > 299) {
+        let body = ''; try { body = (await r.text()).slice(0, 200); } catch {}
+        throw new Error(`${what}: ${r.status} ${body}`);
+      }
+      return r.status;
+    };
+    const get = (tok, path, headers = {}) => fetch(`${baseUrl}${path}`, { headers: { ...auth(tok), ...headers } }).then((r) => ok2xx(r, `GET ${path}`));
+    const post = (tok, path, body = {}) => fetch(`${baseUrl}${path}`, { method: 'POST', headers: auth(tok), body: J(body) }).then((r) => ok2xx(r, `POST ${path}`));
     const call = async (tok, method, path, body) => {
       const r = await fetch(`${baseUrl}${path}`, { method, headers: auth(tok), ...(body !== undefined ? { body: J(body) } : {}) });
       let j = null; try { j = await r.json(); } catch {}
@@ -155,20 +164,32 @@ export default {
         ['GET /api/updates/receipts', () => get(T.don, `/api/updates/receipts?venueId=${V[0]}`)],
         ['GET /api/updates/alert-mute', () => get(T.don, '/api/updates/alert-mute')],
         ['GET /api/passkeys', () => get(T.don, '/api/passkeys')],
-        ['GET /api/kiosk/qr/tablets', () => get(T.don, '/api/kiosk/qr/tablets')],
         ['GET /api/shifts', () => get(T.don, `/api/shifts?venueId=${V[0]}`)],
         ['POST /api/push/status', () => post(T.don, '/api/push/status', { endpoint: 'https://push.example/t103' })],
-        ['GET /api/health', () => fetch(`${baseUrl}/api/health`).then((r) => r.status)],
+        ['GET /api/health', () => fetch(`${baseUrl}/api/health`).then((r) => ok2xx(r, 'GET /api/health'))],
       ]) await measure(`P ${label}`, async () => { await fn(); });
-      const readPathWrites = Object.entries(costs).filter(([k, v]) => k.startsWith('P GET') && v > 0);
 
       // ---- L: a password sign-in ----
       const pw = await ctx.api('POST', '/api/__test__/set-password', { userId: uid('coord1'), password: 't103-sign-in-pw' });
       if (pw.status !== 200) throw new Error(`L set-password: ${pw.status}`);
+      let loginCookie = '';
       await measure('L password sign-in', async () => {
         const r = await fetch(`${baseUrl}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: J({ email: email('coord1'), password: 't103-sign-in-pw' }) });
         const j = await r.json().catch(() => ({}));
         if (r.status !== 200 || !j.token) throw new Error(`L login: ${r.status} ${J(j)}`);
+      });
+      // The QR tablet list is a cookie-session read: a phone signed in with its password,
+      // cookie opt-in + its own Origin (not measured; the sign-in above is).
+      {
+        const origin = new URL(baseUrl).origin;
+        const r = await fetch(`${baseUrl}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, 'X-Shutfey-Auth': 'cookie' }, body: J({ email: email('coord1'), password: 't103-sign-in-pw' }) });
+        if (r.status !== 200) throw new Error(`cookie login: ${r.status}`);
+        loginCookie = (r.headers.getSetCookie?.() || []).map((c) => c.split(';')[0]).filter((c) => c.startsWith('shutfey_s=')).join('; ');
+        if (!loginCookie) throw new Error('cookie login: no session cookie');
+      }
+      await measure('P GET /api/kiosk/qr/tablets', async () => {
+        const r = await fetch(`${baseUrl}/api/kiosk/qr/tablets`, { headers: { Cookie: loginCookie, Origin: new URL(baseUrl).origin, 'X-Shutfey-Auth': 'cookie' } });
+        await ok2xx(r, 'GET /api/kiosk/qr/tablets');
       });
 
       // ---- A / B ----
@@ -225,10 +246,18 @@ export default {
         const v0 = await ctx.getVersion();
         const r = await fetch(`${baseUrl}/api/users/${uid('m2')}?expectedVersion=${v0}`, { method: 'PUT', headers: auth(T.don), body: J({ kioskPin: '9713', expectedVersion: v0 }) });
         if (r.status !== 200) throw new Error(`D set PIN: ${r.status}`);
-        const s = await (await fetch(`${baseUrl}/api/kiosk/pairing/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
-        const pair = await fetch(`${baseUrl}/api/kiosk/devices/pair`, { method: 'POST', headers: auth(T.don), body: J({ code: s.code, venueId: V[0] }) });
-        if (pair.status !== 201) throw new Error(`D pair: ${pair.status}`);
-        const sb = await (await fetch(`${baseUrl}/api/kiosk/pairing/status`, { headers: { 'X-Kiosk-Pairing': `${s.pairingId}.${s.deviceSecret}` } })).json();
+        // Earlier suite tests pair many tablets from this IP: start from clean pairing limits.
+        const cl = await call(T.don, 'POST', '/api/__test__/kiosk-clear-lockouts', {});
+        if (cl.status !== 200) throw new Error(`D clear lockouts: ${cl.status} ${J(cl.json)}`);
+        const str = await fetch(`${baseUrl}/api/kiosk/pairing/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const s = await str.json().catch(() => null);
+        if (str.status !== 200 || !s?.code) throw new Error(`D pairing start: ${str.status} ${J(s)}`);
+        const pair = await call(T.don, 'POST', '/api/kiosk/devices/pair', { code: s.code, venueId: V[0] });
+        if (pair.status !== 201) throw new Error(`D pair: ${pair.status} ${J(pair.json)}`);
+        const sbr = await fetch(`${baseUrl}/api/kiosk/pairing/status`, { headers: { 'X-Kiosk-Pairing': `${s.pairingId}.${s.deviceSecret}` } });
+        if (sbr.status !== 200) throw new Error(`D pairing status: ${sbr.status}`);
+        const sb = await sbr.json();
+        if (!sb?.device?.id) throw new Error(`D pairing status: no device ${J(sb)}`);
         deviceHeader = `${sb.device.id}.${s.deviceSecret}`;
       }
       let kTok = null;
@@ -306,6 +335,7 @@ export default {
       console.log(`[writes] QR screen per hour: ${qrPerHour.toFixed(0)}`);
       console.log(`[writes] idle per socket-hour: ${perSocketHour.toFixed(1)}`);
       console.log(`[writes] scripted HKC day: ${day} writes without QR tablets (budget ${DAY_BUDGET}); + ${qrDay} for ${DAY.qrScreenHours} QR tablet-hours = ${day + qrDay} (budget ${DAY_WITH_QR_BUDGET}; free quota 20000)`);
+      const readPathWrites = Object.entries(costs).filter(([k, v]) => k.startsWith('P GET') && v > 0);
       if (readPathWrites.length) throw new Error(`read paths wrote: ${J(readPathWrites)}`);
       const bigSaves = Object.entries(costs).filter(([k, v]) => /^(C|H|G)\b/.test(k) && !/3 task edits/.test(k) && v > SAVE_MAX);
       if (c['H 3 task edits'] > 3 * SAVE_MAX) bigSaves.push(['H 3 task edits', c['H 3 task edits']]);

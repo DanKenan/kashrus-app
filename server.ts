@@ -37,6 +37,7 @@ import { createWindowLimiter } from './src/server/window-limiter.ts';
 import { installWriteMeter, writeMeterSnapshot, resetWriteMeter, writeMeterWindowLine, writeMeterMiddleware, withWriteLabel } from './src/server/write-meter.ts';
 import { installReadMeter, readMeterSnapshot, resetReadMeter, readMeterWindowLine, isQuotaError, noteQuotaError, quotaBackoffActive, setQuotaErrorAtForTests } from './src/server/read-meter.ts';
 import { installNoQuotaRetry } from './src/server/firestore-no-quota-retry.ts';
+import { runFirestoreTransaction as runFirestoreTx } from './src/server/firestore-tx.ts';
 import { buildUserSession, buildKioskSession, sessionBacksClaims, kqrPickupState, kqrPickupVerdict, keepKnownSessionFacts, cachePut, cacheFresh, isSid, SESSION_CACHE_FRESH_MS, SESSION_WRITE_FRESH_MS, type SessionDoc, type SessionCacheEntry, type SessionVia, type SessionBackedClaims } from './src/server/sessions.ts';
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import {
@@ -1309,25 +1310,12 @@ function sessionStoreFailureBody(minted: { quota?: boolean }) {
 let writeQuotaCommitsForTests = 0;
 let kioskPinComparesForTests = 0;
 async function runFirestoreTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await firestoreDb.runTransaction(async (tx: any) => {
-        if (isTestMode() && writeQuotaCommitsForTests > 0) {
-          writeQuotaCommitsForTests--;
-          throw Object.assign(new Error('8 RESOURCE_EXHAUSTED: Quota exceeded. Free daily write units'), { code: 8 });
-        }
-        return fn(tx);
-      }, { maxAttempts: 1 });
-    } catch (err: any) {
-      if (noteQuotaError(err)) throw err;
-      const code = String(err?.code ?? err?.status ?? '').toUpperCase().replaceAll('_', '-');
-      const retryable = ['10', '409', '14', '4', '13', '1', '2', 'ABORTED', 'UNAVAILABLE',
-        'DEADLINE-EXCEEDED', 'INTERNAL', 'CANCELLED', 'UNKNOWN'].includes(code) ||
-        (['3', 'INVALID-ARGUMENT'].includes(code) && /transaction has expired/i.test(String(err?.message)));
-      if (!retryable || attempt >= 4) throw err;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(2000, 100 * 1.5 ** attempt * (0.5 + Math.random()))));
+  return runFirestoreTx(firestoreDb, fn, { beforeAttempt: () => {
+    if (isTestMode() && writeQuotaCommitsForTests > 0) {
+      writeQuotaCommitsForTests--;
+      throw Object.assign(new Error('8 RESOURCE_EXHAUSTED: Quota exceeded. Free daily write units'), { code: 8 });
     }
-  }
+  } });
 }
 /** In-process store used when Firestore is off (local dev without Firestore). */
 const localSessions = new Map<string, SessionDoc>();

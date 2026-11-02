@@ -53,6 +53,8 @@ const SERIF = '"Shutfey Home Serif", Georgia, "Times New Roman", serif';
 export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode, onUnavailable, onUnpaired, onExitKiosk }: KioskQrScreenProps) {
   const [shown, setShown] = useState<Shown>({ kind: 'loading' });
   const [line, setLine] = useState<string | null>(null);
+  const [quotaPaused, setQuotaPaused] = useState(false);
+  const [pollAttempt, setPollAttempt] = useState(0);
   const [device, setDevice] = useState<{ name: string; venueName: string } | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const site = useSite();
@@ -157,7 +159,12 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
       }
       if (!live) return;
       if (!r.ok) {
-        if (d.code === 'DAILY_LIMIT') { setLine(d.error); return later(30000, first); }
+        if (d.code === 'DAILY_LIMIT') {
+          if (lineTimer) clearTimeout(lineTimer);
+          setLine(d.error);
+          setQuotaPaused(true);
+          return;
+        }
         if (r.status === 404 && !d.code) { cb.current.onUnavailable(); return; }
         if (d.code === 'KIOSK_UNPAIRED') { cb.current.onUnpaired?.(); return; }
         const retry = Number(r.headers.get('Retry-After'));
@@ -217,7 +224,7 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
       if (timer) clearTimeout(timer);
       if (lineTimer) clearTimeout(lineTimer);
     };
-  }, []);
+  }, [pollAttempt]);
 
   // The countdown.
   useEffect(() => {
@@ -340,6 +347,15 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
                   ))}
                 </ol>
                 {line && <p data-kqr-line role="alert" className="mt-5 text-base font-semibold text-bad">{line}</p>}
+                {quotaPaused && (
+                  <button type="button" data-kqr-retry onClick={() => {
+                    setLine(null);
+                    setQuotaPaused(false);
+                    setPollAttempt((n) => n + 1);
+                  }} className="mt-3 min-h-[44px] px-4 rounded-xl border border-line-strong text-ink font-semibold pressable">
+                    Try again
+                  </button>
+                )}
               </div>
               <div className="flex flex-col items-center shrink-0">
                 <div className="p-[18px] rounded-[22px] border border-line bg-white">
