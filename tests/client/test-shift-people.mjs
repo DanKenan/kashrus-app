@@ -77,3 +77,13 @@ const form = mount(TaskModal, { isOpen: true, onClose: () => {}, onSave: () => f
 await form.render(); await form.click((e) => e.props.children === 'Shift');
 assert.match(form.text(), /usually Moshe Levin \+ 1/);
 console.log('Shift people: lists, precedence, legacy reads, overnight visibility, names, multi-selects and merge remapping passed');
+
+// Unchanged legacy records, including expired overrides, close without a request.
+const noopCalls = recordFetch({});
+let changedCount = 0;
+const unchangedPanel = mount(ShiftsPanel, { shifts: [legacy], venueId: 'v', timeZone: 'UTC', people, onChange: () => { changedCount++; } });
+await unchangedPanel.render(); await unchangedPanel.click('Deli day'); await unchangedPanel.submit();
+assert.equal(noopCalls.length, 0);
+assert.equal(changedCount, 0);
+assert.match(unchangedPanel.text(), /Optional — without shifts/);
+console.log('Unchanged shift editor closes without PUT or change callback');

@@ -84,6 +84,18 @@ export function normalizeShifts(input: unknown): Shift[] {
   });
 }
 
+/** Canonical editable content, without IDs, timestamps or server-derived names. */
+export function shiftEditableFields(shift: Shift, today?: string) {
+  const normalized = normalizeShifts([shift])[0];
+  return {
+    name: normalized.name.trim(), area: normalized.area.trim(),
+    oneTimeDate: normalized.oneTimeDate || null,
+    startMinutes: normalized.startMinutes, endMinutes: normalized.endMinutes,
+    userIds: normalized.userIds, days: normalized.days.map(({ on, userIds, startMinutes, endMinutes }) => ({ on, userIds, startMinutes, endMinutes })),
+    overrides: normalized.overrides.filter((o) => !today || o.date >= today).sort((a, b) => a.date.localeCompare(b.date)).map(({ date, userIds }) => ({ date, userIds })),
+  };
+}
+
 export function shiftPeopleOn(shift: Shift, ymd: string): string[] {
   const override = Array.isArray(shift?.overrides) ? shift.overrides.find((o) => o && o.date === ymd) : undefined;
   const day = shiftDayOf(shift, weekdayOf(ymd));

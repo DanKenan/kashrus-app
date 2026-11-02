@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, X } from 'lucide-react';
 import type { Shift, ShiftDay, ShiftOverride } from '../types';
-import { formatShiftHours, shiftDayOf, shiftWeekdays, shiftVariesByDay, shiftIsUpcoming, shiftUserIds, shiftPeopleSummary } from '../lib/shifts';
+import { formatShiftHours, shiftDayOf, shiftWeekdays, shiftVariesByDay, shiftIsUpcoming, shiftUserIds, shiftPeopleSummary, shiftEditableFields } from '../lib/shifts';
 import { apiWrite, captureEditBaseline, newActionId } from '../lib/api';
 import { addDays, workDateIn } from '../lib/workday';
 import { ConfirmModal } from './ConfirmModal';
@@ -79,16 +79,20 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
     if (!remove && (!name.trim() || (savedWeekly && !week.some((d) => d.on)) || (!savedWeekly && (!oneTimeDate || oneTimeDate < today)) || start === end || (savedWeekly && week.some((d) => d.on && d.startMinutes !== undefined && d.startMinutes === d.endMinutes)))) {
       setError('Enter a name, select at least one day, and choose different From and Until times.'); return;
     }
+    const existing = editing === 'new' ? null : editing;
+    const definition = { venueId, name: name.trim(), area: area.trim(), days: week, oneTimeDate: savedWeekly ? null : oneTimeDate,
+      startMinutes: minutes(start), endMinutes: minutes(end), userIds: person, userId: person[0] || null,
+      overrides: savedWeekly ? overrides.filter((o) => o.date >= today) : [] };
+    if (!remove && existing && JSON.stringify(shiftEditableFields({ ...existing, ...definition }, today)) === JSON.stringify(shiftEditableFields(existing, today))) {
+      close(); return;
+    }
     lock.current = true; setBusy(true); setError('');
     try {
       operation.current ||= newActionId();
-      const existing = editing === 'new' ? null : editing;
       const result = await apiWrite<Shift>(existing ? `/api/shifts/${encodeURIComponent(existing.id)}` : '/api/shifts', {
         method: remove ? 'DELETE' : existing ? 'PUT' : 'POST',
         expectedVersion: existing ? baseline.current : undefined, operationId: operation.current,
-        body: remove ? undefined : JSON.stringify({ venueId, name: name.trim(), area: area.trim(), days: week, oneTimeDate: savedWeekly ? null : oneTimeDate,
-          startMinutes: minutes(start), endMinutes: minutes(end), userIds: person, userId: person[0] || null,
-          overrides: savedWeekly ? overrides.filter((o) => o.date >= today) : [] }),
+        body: remove ? undefined : JSON.stringify(definition),
       });
       if (!result.ok) { setError(result.error || "Couldn't save. Please try again."); operation.current = undefined; setConfirm(false); return; }
       onChange(remove ? existing! : result.data, remove); setEditing(null); setConfirm(false);

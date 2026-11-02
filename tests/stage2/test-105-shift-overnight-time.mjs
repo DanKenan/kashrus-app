@@ -62,7 +62,28 @@ export default {
       await check(monday, '00:31', [], false); // Sunday key deduplicates the same occurrence
       await check(monday, '01:30', [0, 1]);
       await check(monday, '12:00', []);
-      return 'overnight start-date keys, both recipients, morning deadlines, daytime exclusion and explicit primary-time opt-in passed';
+      // Monday has a different person; both overdue paths must use Sunday.
+      await clock(sunday, '22:00');
+      const varied = await api('admin', 'POST', '/api/shifts', { venueId, name: 'Occurrence people', startMinutes: 1320, endMinutes: 120, userIds: [people.coord.id],
+        days: Array.from({ length: 7 }, (_, w) => ({ on: w < 2, ...(w === 0 ? { userIds: [people.mash.id, people.assign.id] } : w === 1 ? { userIds: [people.coord.id], startMinutes: 600, endMinutes: 1080 } : {}) })) });
+      assert.equal(varied.status, 201);
+      const mondayEndpoint = `https://push.example/monday-${people.coord.id}`;
+      assert.equal((await api('coord', 'POST', '/api/push/subscribe', { subscription: { endpoint: mondayEndpoint, keys: { p256dh: 'p', auth: 'a' } }, mode: 'tagged' })).status, 200);
+      for (const ownTime of [true, false]) {
+        const title = ownTime ? 'Sunday own deadline' : 'Sunday window deadline';
+        const made = await api('admin', 'POST', '/api/tasks', { venueId, title, shiftId: varied.json.id, enableOverdueAlert: true, ...(ownTime ? { shiftTime: true, targetTime: '11:30 PM' } : {}) });
+        assert.equal(made.status, 201);
+        await clock(monday, ownTime ? '00:30' : '02:01');
+        await ctx.api('POST', '/api/__test__/push-log/clear', {});
+        const checked = await ctx.api('POST', '/api/__test__/overdue-check', { clear: true });
+        assert.ok(checked.json.notified.includes(`${made.json.id}:${sunday}`));
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const log = (await ctx.api('GET', '/api/__test__/push-log')).json.log;
+        assert.deepEqual(log.filter((e) => e.title === `Overdue: ${title}`).map((e) => e.endpoint).sort(), [...endpoints].sort());
+        assert.equal(log.some((e) => e.title === `Overdue: ${title}` && e.endpoint === mondayEndpoint), false);
+        await clock(sunday, '22:00');
+      }
+      return 'overnight deadlines and occurrence recipients for own-time and shift-window tasks passed';
     } finally {
       await ctx.api('POST', '/api/__test__/clock', { iso: null });
       await ctx.api('POST', '/api/__test__/overdue-check', { clear: true });

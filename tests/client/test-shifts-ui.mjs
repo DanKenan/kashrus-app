@@ -46,6 +46,7 @@ for (const role of ['mashgiach', 'owner', 'manager']) {
 }
 console.log('Shifts UI: task payload, edit mode, list, and permission checks passed');
 // The server's refusal stays in the editor; a successful response supplies local state.
+await panel.find((e) => e.type === 'input' && e.props.maxLength === 40)[0].props.onChange({ target: { value: 'Edited deli' } }); await panel.render();
 globalThis.fetch = async () => new Response(JSON.stringify({ error: 'This venue is outside your scope.' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
 await panel.submit();
 assert.match(panel.text(), /This venue is outside your scope\./);
@@ -60,6 +61,7 @@ console.log('Shifts UI: inline refusal and confirmed-save checks passed');
 
 // Rejected writes keep the edit sheet and expose a retryable inline message.
 await panel.click('Deli day');
+await panel.find((e) => e.type === 'input' && e.props.maxLength === 40)[0].props.onChange({ target: { value: 'Retry deli' } }); await panel.render();
 globalThis.fetch = async () => {
   const response = new Response('{}', { status: 200 });
   response.json = () => { throw new TypeError('Connection interrupted'); };

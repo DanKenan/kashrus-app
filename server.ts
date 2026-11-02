@@ -1,5 +1,5 @@
 import type { Shift } from './src/types.ts';
-import { normalizeShifts, shiftDayOf, shiftHoursOn, shiftOccurrenceDay, shiftPeopleOn, shiftUserIds, shiftRunsOn, shiftWeekdays, shiftTaskOverdueAt, shiftOwnTimeOverdueDay, taskWithShiftTimes } from './src/lib/shifts.ts';
+import { normalizeShifts, shiftDayOf, shiftHoursOn, shiftOccurrenceDay, shiftPeopleOn, shiftUserIds, shiftRunsOn, shiftWeekdays, shiftTaskOverdueAt, shiftOwnTimeOverdueDay, taskWithShiftTimes, shiftEditableFields } from './src/lib/shifts.ts';
 import { logoutAckSetCookie } from './src/server/logout-marker.ts';
 import express from 'express';
 import http from 'http';
@@ -5875,17 +5875,17 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
 
   for (const task of tasks) {
     if (!task.enableOverdueAlert) continue;
-    const today = taskOverdueDay(task, now);
-    if (!today) continue;
+    const occurrence = taskOverdueDay(task, now);
+    if (!occurrence) continue;
     const venue = venues.find((v) => v.id === task.venueId);
 
-    const notifyKey = `${task.id}:${today}`;
-    if (overdueNotified.has(notifyKey)) continue; // Already notified today (venue-local)
+    const notifyKey = `${task.id}:${occurrence}`;
+    if (overdueNotified.has(notifyKey)) continue; // Already notified for this occurrence
     overdueNotified.set(notifyKey, nowMs + OVERDUE_KEY_RETENTION_MS);
     sentKeys.push(notifyKey);
 
     const venueName = venue?.name || 'your venue';
-    const effective = taskWithShiftTimes(task, new Map(shifts.map((s) => [s.id, s])), new Date(`${today}T12:00:00Z`).getUTCDay());
+    const effective = taskWithShiftTimes(task, new Map(shifts.map((s) => [s.id, s])), new Date(`${occurrence}T12:00:00Z`).getUTCDay());
     const deadline = effective !== task && !task.shiftTime ? effective.targetTime2 : task.targetTime;
 
     // Item 8t: recipients are resolved inside the TASK'S agency and must be
@@ -5900,7 +5900,7 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
     );
     const shift = shifts.find((s) => s.id === task.shiftId && s.venueId === task.venueId && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
     const recipients = shift
-      ? shiftTaskPushRecipients(task, shift, today)
+      ? shiftTaskPushRecipients(task, shift, occurrence)
       : taskPushRecipients(task, users, venues);
     for (const recipient of recipients) {
       sendPushToRecipient(
@@ -13257,8 +13257,22 @@ for (const method of ['post', 'put', 'delete'] as const) {
     const now = serverNow().toISOString();
     const prunedTaskIds = new Set<string>();
     const detachedCopyIds = new Map<string, string>();
+    let unchanged = false;
     const committed = await commitOrRespond(req, res, (doc) => {
+      unchanged = false;
       shiftEditor(caller, venueId, doc);
+      if (method === 'put') {
+        const stored = (doc.shifts || []).find((s: Shift) => s.id === id);
+        if (!stored) throw new OperationConflictError('Shift not found', 404);
+        if (stored.venueId !== venueId || (stored.agencyId || 'agency-hkc') !== agencyId) throw new OperationConflictError('Shift is not in your agency or venue.', 403);
+        if (req.body?.venueId !== undefined && req.body.venueId !== venueId) throw new OperationConflictError('A shift cannot be moved to another venue.', 400);
+        const candidate = validatedShift(req.body || {}, stored, venueId, agencyId, doc, id, now);
+        const today = workDateIn(venueTimeZoneIn((doc.venues || []).find((v: any) => v.id === venueId), doc.agencies || []), serverNow());
+        if (JSON.stringify(shiftEditableFields(candidate, today)) === JSON.stringify(shiftEditableFields(stored, today))) {
+          unchanged = true;
+          return { doc, result: stored }; // commitState's existing no-op path skips all writes, including idempotency.
+        }
+      }
       const pruned = pruneOneTimeShifts(doc, serverNow(), new Set([venueId]));
       prunedTaskIds.clear();
       if (pruned !== doc) for (let i = 0; i < (doc.tasks || []).length; i++) {
@@ -13328,6 +13342,7 @@ for (const method of ['post', 'put', 'delete'] as const) {
       };
     }, { label: `${method}-shift` });
     if (!committed) return;
+    if (unchanged) return res.json(publicShift(committed.result as Shift));
     log.info(`[audit] ${method}-shift: user ${caller.id} shift ${id} venue ${venueId} agency ${agencyId}`);
     broadcastShifts(venueId, agencyId);
     for (const task of tasks.filter((t) => prunedTaskIds.has(t.id))) broadcastTaskUpdated(task, task);
