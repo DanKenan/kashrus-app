@@ -15,9 +15,11 @@ export function installNoQuotaRetry(db: any): void {
   if (!prototype || Object.prototype.hasOwnProperty.call(prototype, INSTALLED)) return;
   const previous = prototype._commit;
   prototype._commit = function (this: any, commitOptions?: any, ...args: any[]) {
-    const retryCodes = Array.isArray(commitOptions?.retryCodes)
-      ? commitOptions.retryCodes.filter((code: number) => code !== 8)
-      : [14];
+    // Transaction.commit supplies this key even for write-only transactions
+    // with no ID. Do not let GAX replay an ambiguously applied transaction.
+    const transaction = Object.prototype.hasOwnProperty.call(commitOptions ?? {}, 'transactionId');
+    const retryCodes = (Array.isArray(commitOptions?.retryCodes) ? commitOptions.retryCodes : [14])
+      .filter((code: number) => code !== 8 && !(transaction && code === 14));
     return previous.call(this, { ...commitOptions, retryCodes }, ...args);
   };
   Object.defineProperty(prototype, INSTALLED, { value: true });
