@@ -1,4 +1,3 @@
-import { signInRequest, SIGN_IN_TIMEOUT_TEXT } from './signInRequest';
 // Kiosk QR sign-in, client part (server #154; Don Oct 24 7:58 PM: "Just the
 // mashgiach logged in to his account, can scan QR code. That's it. Simple.").
 // A signed-in phone opens the tablet's link (/k/<code>), the page asks the
@@ -169,7 +168,7 @@ export function kqrErrorFor(status: number, body: any): KqrError {
   const T = KQR_UI_TEXT;
   if (code === 'WRONG_SITE' || code === 'SITE_NOT_SET_UP') return { kind: 'site', title: T.siteTitle, body: T.siteBody, again: 'scan' };
   if (code === 'KIOSK_QR_EXPIRED' || status === 410) return { kind: 'expired', title: T.expiredTitle, body: T.expiredBody, again: 'scan' };
-  if (code === 'DAILY_LIMIT' || code === 'SIGN_IN_TIMEOUT') return { kind: 'unavailable', title: T.unavailableTitle, body: msg, again: 'retry' };
+  if (code === 'DAILY_LIMIT') return { kind: 'unavailable', title: T.unavailableTitle, body: msg, again: 'retry' };
   if (code === 'KIOSK_QR_NOT_HERE') {
     // "You can't sign in on this tablet. Ask your administrator for a code at <venue>." -> the second sentence.
     const rest = msg.startsWith("You can't sign in on this tablet.") ? msg.slice("You can't sign in on this tablet.".length).trim() : msg;
@@ -189,20 +188,14 @@ export function kqrErrorFor(status: number, body: any): KqrError {
 export async function kqrPhoneFetch(path: string, init: { method?: 'GET' | 'POST'; body?: unknown } = {}): Promise<{ status: number; body: any }> {
   const headers: Record<string, string> = { [COOKIE_AUTH_HEADER]: COOKIE_AUTH_VALUE };
   if (init.body !== undefined) headers['Content-Type'] = 'application/json';
-  let answer: { res: Response; data: any };
-  try {
-    answer = await signInRequest(path, {
-      method: init.method || 'GET',
-      headers,
-      credentials: 'same-origin',
-      cache: 'no-store',
-      ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
-    });
-  } catch (err: any) {
-    if (err?.message === SIGN_IN_TIMEOUT_TEXT) return { status: 503, body: { code: 'SIGN_IN_TIMEOUT', error: SIGN_IN_TIMEOUT_TEXT } };
-    throw err;
-  }
-  const { res, data: body } = answer;
+  const res = await fetch(path, {
+    method: init.method || 'GET',
+    headers,
+    credentials: 'same-origin',
+    cache: 'no-store',
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+  });
+  const body = await res.json().catch(() => ({}));
   // Never a sign-out from a QR answer itself (a site refusal here can be about the tablet's
   // address, not this phone's sign-in). Signed out for real? GET /api/auth/me decides, with the
   // app's usual rules.

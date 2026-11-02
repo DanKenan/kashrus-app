@@ -1,4 +1,3 @@
-import { signInRequest, SIGN_IN_TIMEOUT_TEXT } from './signInRequest';
 // Item 11b-c: Face ID / fingerprint sign-in (passkeys), client side.
 // Server: #138 (routes below). Browser side: @simplewebauthn/browser (B13).
 import {
@@ -222,13 +221,7 @@ const post = (b: unknown): RequestInit => ({ method: 'POST', headers: { 'Content
 const netError = () => new PasskeyError('offline', PASSKEY_TEXT.offline);
 async function call(input: string, init?: RequestInit): Promise<{ res: Response; data: any }> {
   let res: Response;
-  try {
-    if (input.startsWith('/api/passkeys/login/')) return await signInRequest(input, init, apiFetch);
-    res = await apiFetch(input, init);
-  } catch (err: any) {
-    if (err?.message === SIGN_IN_TIMEOUT_TEXT) throw new PasskeyError('offline', SIGN_IN_TIMEOUT_TEXT);
-    throw netError();
-  }
+  try { res = await apiFetch(input, init); } catch { throw netError(); }
   return { res, data: await body(res) };
 }
 

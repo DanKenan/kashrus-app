@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { sameJsonValue, dualWriteChangedEntities } from '../../src/server/dualwrite.ts';
-import { signInRequest, SIGN_IN_TIMEOUT_TEXT } from '../../src/lib/signInRequest.ts';
+import { kqrErrorFor } from '../../src/lib/kioskQr.ts';
+import { errorFromAnswer } from '../../src/lib/passkeys.ts';
 
 assert(sameJsonValue({ a: 1, b: 2 }, { b: 2, a: 1 }));
 assert(sameJsonValue({ map: { a: 1, b: { x: 2, y: 3 } } }, { map: { b: { y: 3, x: 2 }, a: 1 } }));
@@ -27,22 +28,10 @@ await dualWriteChangedEntities(tx, db, { users: [user] }, { users: [reorderedUse
 assert.equal(writes.length, 0);
 await dualWriteChangedEntities(tx, db, { tasks: [sorted] }, { tasks: [{ ...rebuilt, title: 'Changed' }] });
 assert.deepEqual(writes, [{ ref: 'tasks/task', data: { ...rebuilt, title: 'Changed', _v: 1 } }]);
-// A stalled response body is bounded too; even a fetcher ignoring abort cannot hang.
-let signal;
-await assert.rejects(signInRequest('/login', {}, async (_, init) => {
-  signal = init.signal;
-  return { json: () => new Promise(() => {}) };
-}, 10), { message: SIGN_IN_TIMEOUT_TEXT });
-assert(signal.aborted);
-const answer = await signInRequest('/login', {}, async () => new Response(JSON.stringify({ code: 'DAILY_LIMIT', error: 'Daily limit' }), { status: 503 }));
-assert.equal(answer.data.error, 'Daily limit');
-assert.equal(answer.res.status, 503);
-const html = await signInRequest('/login', {}, async () => new Response('<html>Bad gateway</html>', {
-  status: 502, headers: { 'Content-Type': 'text/html' },
-}));
-assert.equal(html.res.status, 502);
-assert.deepEqual(html.data, {}, 'HTML error pages must leave generic wording to the caller');
-const empty = await signInRequest('/login', {}, async () => new Response(null, { status: 204 }));
-assert.equal(empty.res.status, 204);
-assert.deepEqual(empty.data, {}, 'empty responses must not throw a JSON parse error');
-console.log('PASS WRITECUT: JSON equality, unchanged writes, exact changed payload, bounded sign-in');
+// The server's fast DAILY_LIMIT answer reaches the person in its own words (no client timer).
+const DAILY = { code: 'DAILY_LIMIT', error: 'The app is over its daily limit. Try again after 3 AM.' };
+const qrErr = kqrErrorFor(503, DAILY);
+assert.equal(qrErr.kind, 'unavailable');
+assert.equal(qrErr.body, DAILY.error);
+assert.equal(errorFromAnswer(503, DAILY, new Error('fallback')).message, DAILY.error);
+console.log('PASS WRITECUT: JSON equality, unchanged writes, exact changed payload, daily-limit words');
