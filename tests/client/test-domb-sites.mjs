@@ -269,6 +269,13 @@ globalThis.fetch = origFetch;
   api.setSessionToken('tok-keep2'); events.length = 0; handler = () => refused;
   const act = await M.activateMembership('choose-tok', 'm1');
   check('activate (choose token) refused: error, screen only, sign-in kept', act.ok === false && api.getSessionToken() === 'tok-keep2' && siteEvents().length === 1 && siteEvents()[0].detail.signedOut === false);
+  const mockedFetch = globalThis.fetch;
+  try {
+    events.length = 0;
+    globalThis.fetch = async () => new Response(JSON.stringify(refused.body), { status: refused.status });
+    const realAct = await M.activateMembership('choose-tok', 'm1');
+    check('activate inspects a real refusal response before its body is consumed', !realAct.ok && api.getSessionToken() === 'tok-keep2' && siteEvents().length === 1);
+  } finally { globalThis.fetch = mockedFetch; }
   // merge with the device token
   events.length = 0; handler = () => refused;
   const mr = await AM.mergeAccounts('merge-into', { email: 'a@b.test', password: 'p', currentPassword: 'c' }, 'op-1', 'tok-keep2');
