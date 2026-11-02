@@ -858,8 +858,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               {(['Time', 'Shift'] as const).map((mode) => <button key={mode} type="button" aria-pressed={mode === 'Shift' ? shiftMode : !shiftMode} onClick={() => { setShiftMode(mode === 'Shift'); if (mode === 'Shift' && shiftTime) { setAnyTime(false); setCustomTimeText(null); } if (mode === 'Shift' && !pickerShifts.some((s) => s.id === shiftId)) setShiftId(pickerShifts[0]?.id || null); }} className={`min-h-11 text-base text-ink rounded-lg pressable cursor-pointer ${(mode === 'Shift') === shiftMode ? 'bg-surface border border-line' : ''}`}>{mode}</button>)}
             </div>
             {shiftMode && <div className="space-y-2">
+              <div role="group" aria-label="Shift list" className="space-y-2">
               {pickerShifts.map((shift) => <button key={shift.id} type="button" aria-pressed={shift.id === shiftId} onClick={() => setShiftId(shift.id)} className={`w-full min-h-11 p-3 text-left rounded-lg border text-base text-ink bg-surface pressable cursor-pointer ${shift.id === shiftId ? 'border-gold' : 'border-line-control'}`}>{shiftLabel(shift)}{!shift.oneTimeDate && shiftVariesByDay(shift) && <span className="block text-xs text-ink-soft">Varies by day</span>}</button>)}
               <button type="button" onClick={() => setCreatingShift(true)} className="w-full min-h-11 p-3 text-left rounded-lg border border-line-control text-base text-ink bg-surface pressable cursor-pointer">+ New shift</button>
+              </div>
               {chosenShift && <p className="text-sm text-ink-soft">Goes to whoever is on {chosenShift.name} that day{chosenShift.userNames?.length || chosenShift.userName ? ` (usually ${shiftPeopleSummary(chosenShift.userNames || [chosenShift.userName!])})` : ''}.</p>}
               {chosenShift && !shiftTime && <button type="button" onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); setTime1({ hour: 9, minute: 0, ampm: 'AM' }); setTime2(null); }} className="min-h-11 text-sm text-gold-deep underline pressable cursor-pointer">+ Add time</button>}
             </div>}

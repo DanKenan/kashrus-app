@@ -3,8 +3,8 @@ import { mount, recordFetch } from './lib/mini-render.mjs';
 import { TaskModal } from '../../src/components/TaskModal.tsx';
 import { TaskCardView } from '../../src/components/TaskCardView.tsx';
 import { TaskTableView } from '../../src/components/TaskTableView.tsx';
-import { taskWithShiftTimes, shiftLabel, shiftTaskOverdueAt, tasksVisibleOnShift } from '../../src/lib/shifts.ts';
-import { shiftSortProjection } from '../../src/lib/shiftTaskDay.ts';
+import { taskWithShiftTimes, shiftOwnTimeOverdueDay, shiftLabel, shiftTaskOverdueAt, tasksVisibleOnShift } from '../../src/lib/shifts.ts';
+import { shiftSortProjection, restoreShiftWindows } from '../../src/lib/shiftTaskDay.ts';
 import { sortTasksByTime } from '../../src/lib/taskDay.ts';
 const noop = () => {};
 const shift = { id: 'deli', venueId: 'v', name: 'Deli day', area: '', days: Array.from({ length: 7 }, (_, w) => ({ on: w === 0 })), startMinutes: 480, endMinutes: 1080, userId: 'moshe', overrides: [], createdAt: '' };
@@ -96,3 +96,33 @@ try {
   }
 } finally { globalThis.Date = RealDate; }
 console.log('SHIFTTIME: own-time projection, schedule, sorting, labels, visibility, overdue and shared form passed');
+
+// Overnight own times belong to the start-date occurrence, including its morning.
+const night = { ...shift, startMinutes: 1320, endMinutes: 120, userIds: ['moshe', 'yossi'] };
+const late = { ...own, id: 'late', targetTime: '11:30 PM', targetTimeMinutes: 1410 };
+const early = { ...own, id: 'early', targetTime: '1:00 AM', targetTimeMinutes: 60 };
+for (const [date, weekday, minute, lateDue, earlyDue] of [
+  ['2026-11-08', 0, 1380, false, false], ['2026-11-08', 0, 1425, true, false],
+  ['2026-11-09', 1, 30, true, false], ['2026-11-09', 1, 90, true, true],
+  ['2026-11-09', 1, 120, false, false], ['2026-11-09', 1, 720, false, false],
+]) {
+  for (const [task, due] of [[late, lateDue], [early, earlyDue]]) {
+    assert.equal(shiftTaskOverdueAt(night, date, weekday, minute, task), due);
+    assert.equal(shiftOwnTimeOverdueDay(night, date, weekday, minute, task), due ? '2026-11-08' : null);
+    const at = `${date}T${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}:00Z`;
+    try {
+      globalThis.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : [at])); } static now() { return new RealDate(at).getTime(); } };
+      for (const View of [TaskCardView, TaskTableView]) {
+        const view = mount(View, { tasks: [task], shiftsById: new Map([[night.id, night]]), timeZone: 'UTC', currentUser: { id: 'moshe', role: 'mashgiach' }, onUpdateStatus: noop, onUpdateNotes: noop, onCheckIn: noop, onEditTask: noop, onDeleteTask: noop });
+        await view.render();
+        assert.equal(view.html().includes('data-overdue'), due, `${View.name} ${task.title} ${at}`);
+      }
+    } finally { globalThis.Date = RealDate; }
+  }
+}
+const nightMap = new Map([[night.id, night]]);
+const projected = sortTasksByTime(shiftSortProjection([early, late], nightMap, 0));
+assert.deepEqual(projected.map((t) => t.id), ['late', 'early']);
+assert.equal(restoreShiftWindows(projected, nightMap, 0)[1].targetTimeMinutes, 60);
+assert.equal(shiftLabel(night, 0, early), 'Deli day · 1:00 AM (next day)');
+console.log('Overnight own times: start-date deadlines, boundaries, ordering and clock restoration passed');

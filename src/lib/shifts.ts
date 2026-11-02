@@ -1,5 +1,5 @@
 import type { Shift, ShiftDay } from '../types.ts';
-import { isTaskOverdue } from './overdue.ts';
+import { isTaskOverdue, targetMinutesOf } from './overdue.ts';
 import { addDays, isWorkDate } from './workday.ts';
 
 type ShiftTask = {
@@ -113,8 +113,26 @@ export function shiftTaskAppliesAt(shift: Shift, ymd: string, weekday: number, n
   return shiftOccurrenceDay(shift, ymd, weekday, nowMinutes) !== null;
 }
 
+/** Own clock times before an overnight start belong to its next morning. */
+export function shiftTimeOffset(shift: Shift, minutes: number, weekday?: number): number {
+  if (!Number.isFinite(minutes)) return minutes;
+  const clockMinutes = minutes % 1440;
+  const hours = weekday === undefined ? shift : shiftHoursOn(shift, weekday);
+  return clockMinutes + (hours.endMinutes < hours.startMinutes && clockMinutes < hours.startMinutes ? 1440 : 0);
+}
+
+export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task: ShiftTask): string | null {
+  if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return null;
+  const occurrence = shiftOccurrenceDay(shift, ymd, weekday, nowMinutes);
+  if (!occurrence) return null;
+  const startWeekday = weekdayOf(occurrence);
+  const deadline = shiftTimeOffset(shift, targetMinutesOf(task), startWeekday);
+  const elapsed = nowMinutes + (occurrence !== ymd ? 1440 : 0);
+  return isTaskOverdue({ ...task, targetTimeMinutes: deadline }, elapsed) ? occurrence : null;
+}
+
 export function shiftTaskOverdueAt(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task?: ShiftTask): boolean {
-  if (task?.shiftTime) return shiftRunsOn(shift, ymd, weekday) && isTaskOverdue(task, nowMinutes);
+  if (task?.shiftTime) return shiftOwnTimeOverdueDay(shift, ymd, weekday, nowMinutes, task) !== null;
   if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return false;
   const previous = shiftHoursOn(shift, (weekday + 6) % 7);
   const hours = shiftHoursOn(shift, weekday);
@@ -152,7 +170,7 @@ export function formatShiftHours(shift: Shift, weekday?: number): string {
 }
 
 export function shiftLabel(shift: Shift, weekday?: number, task?: ShiftTask): string {
-  const time = task?.shiftTime ? [task.targetTime, task.targetTime2].filter(Boolean).join(' · ') : formatShiftHours(shift, weekday);
+  const time = task?.shiftTime ? [task.targetTime, task.targetTime2].filter(Boolean).map((text, i) => `${text}${shiftTimeOffset(shift, targetMinutesOf(i ? { targetTime: task.targetTime2, targetTimeMinutes: task.targetTime2Minutes } : task), weekday) >= 1440 ? ' (next day)' : ''}`).join(' · ') : formatShiftHours(shift, weekday);
   return `${shift.name} · ${time}`;
 }
 

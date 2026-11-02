@@ -50,20 +50,29 @@ const panel = mount(ShiftsPanel, { shifts: [shift], venueId: 'v', timeZone: 'UTC
 await panel.render();
 assert.match(panel.text(), /Usually\s*: Moshe Levin \+ 1/);
 await panel.click('Deli day');
-const select = async (input, ids) => { input.props.onChange({ target: { selectedOptions: ids.map((value) => ({ value })) } }); await panel.render(); };
-const usual = () => panel.find((e) => e.type === 'select' && !e.props['aria-label'])[0];
-assert.deepEqual(usual().props.value, ['m', 'y']);
-await select(usual(), ['d', 'm']); // DOM order must not displace the existing first person
-await select(panel.find((e) => e.props['aria-label'] === 'Mon people')[0], ['y', 'd']);
+const chip = async (label, name) => {
+  const group = panel.find((e) => e.props.role === 'group' && e.props['aria-label'] === label)[0];
+  const button = group.props.children.flat(Infinity).find((e) => e?.type === 'button' && (e.props.children === name || Array.isArray(e.props.children) && e.props.children.includes(name)));
+  assert.ok(button, `${label}: ${name}`); assert.match(button.props.className, /min-h-11/);
+  await button.props.onClick(); await panel.render();
+};
+assert.equal(panel.find((e) => e.type === 'select').length, 0);
+await chip('Usual people', 'Yossi Katz');
+await chip('Usual people', 'Dovid Rosen');
+await panel.click((e) => e.props['aria-label'] === 'Mon people');
+await chip('Mon people choices', 'Nobody');
+await chip('Mon people choices', 'Yossi Katz');
+await chip('Mon people choices', 'Dovid Rosen');
 await panel.click('+ Change for a date');
-await select(panel.find((e) => e.type === 'select' && !e.props['aria-label'])[1], ['m', 'y']);
+await chip('People for date', 'Moshe Levin');
+await chip('People for date', 'Yossi Katz');
 await panel.click('Add change');
 await panel.submit();
 assert.deepEqual(saved.userIds, ['m', 'd']);
 assert.deepEqual(saved.days[1].userIds, ['y', 'd']);
 assert.deepEqual(saved.overrides[0].userIds, ['m', 'y']);
 await panel.render({ createOnly: true });
-assert.deepEqual(usual().props.value, []);
+assert.equal(panel.find((e) => e.props.role === 'group' && e.props['aria-label'] === 'Usual people')[0].props.children[0].props['aria-pressed'], true);
 const form = mount(TaskModal, { isOpen: true, onClose: () => {}, onSave: () => false, knownWorkers: people, shifts: [shift], timeZone: 'UTC' });
 await form.render(); await form.click((e) => e.props.children === 'Shift');
 assert.match(form.text(), /usually Moshe Levin \+ 1/);

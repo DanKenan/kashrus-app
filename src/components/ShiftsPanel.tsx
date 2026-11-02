@@ -44,6 +44,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
   const [area, setArea] = useState('');
   const [week, setWeek] = useState<ShiftDay[]>(Array.from({ length: 7 }, () => ({ on: true })));
   const [hoursDay, setHoursDay] = useState<number | null>(null);
+  const [peopleDay, setPeopleDay] = useState<number | null>(null);
   const changeDay = (i: number, update: Partial<ShiftDay>) => setWeek((old) => old.map((d, w) => w === i ? { ...d, ...update } : d));
   const [start, setStart] = useState('08:00');
   const [end, setEnd] = useState('18:00');
@@ -61,13 +62,11 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
   const today = workDateIn(timeZone, new Date());
   const personName = (id: string | null) => !id ? 'Nobody' : people.find((p) => p.id === id)?.name || 'Unavailable person';
   const peopleNames = (ids: string[]) => ids.map(personName);
-  const selected = (e: React.ChangeEvent<HTMLSelectElement>) => Array.from(e.target.selectedOptions as HTMLCollectionOf<HTMLOptionElement>, (o) => o.value);
-  const keepOrder = (previous: string[], next: string[]) => [...previous.filter((id) => next.includes(id)), ...next.filter((id) => !previous.includes(id))];
   const open = (shift: Shift | 'new') => {
     const s = shift === 'new' ? null : shift;
     setSavedWeekly(!s?.oneTimeDate); setOneTimeDate(s?.oneTimeDate || today);
     setEditing(shift); setName(s?.name || ''); setArea(s?.area || '');
-    setWeek(Array.from({ length: 7 }, (_, i) => s ? shiftDayOf(s, i) : { on: true })); setHoursDay(null);
+    setWeek(Array.from({ length: 7 }, (_, i) => s ? shiftDayOf(s, i) : { on: true })); setHoursDay(null); setPeopleDay(null);
     setStart(timeValue(s?.startMinutes ?? 480)); setEnd(timeValue(s?.endMinutes ?? 1080));
     setPerson(shiftUserIds(s)); setOverrides((s?.overrides || []).filter((o) => o.date >= today));
     setDate(addDays(today, 1)); setDatePerson([]); setAddingDate(false); setError('');
@@ -98,9 +97,13 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
       setConfirm(false);
     } finally { lock.current = false; setBusy(false); }
   };
-  const picker = (value: string[], onChangeValue: (v: string[]) => void) => <select multiple size={3} className={`w-full ${control}`} value={value} onChange={(e) => onChangeValue(keepOrder(value, selected(e)))}>
-    {people.filter((p) => p.id).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-  </select>;
+  const picker = (label: string, value: string[], onChangeValue: (v: string[]) => void) => <div role="group" aria-label={label} className="flex flex-wrap gap-2 max-h-48 overflow-y-auto">
+    <button type="button" aria-pressed={!value.length} className={button} onClick={() => onChangeValue([])}>Nobody</button>
+    {people.filter((p) => p.id).map((p) => <button key={p.id} type="button" aria-pressed={value.includes(p.id!)} className={button}
+      onClick={() => onChangeValue(value.includes(p.id!) ? value.filter((id) => id !== p.id) : [...value, p.id!])}>
+      {value.includes(p.id!) && <Check aria-hidden="true" className="inline w-4 h-4 mr-1" />}{p.name}
+    </button>)}
+  </div>;
   const upcoming = shifts.filter((s) => shiftIsUpcoming(s, today));
   const ordered = [...upcoming.filter((s) => !s.oneTimeDate), ...upcoming.filter((s) => s.oneTimeDate).sort((a, b) => a.oneTimeDate!.localeCompare(b.oneTimeDate!))];
   if (!editing && createOnly) return null;
@@ -131,7 +134,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
         <p className="text-sm text-ink-soft">General hours</p>
         <div className="grid grid-cols-2 gap-3"><label className="text-sm text-ink-soft">From<input required type="time" value={start} onChange={(e) => setStart(e.target.value)} className={`block w-full ${control}`} /></label><label className="text-sm text-ink-soft">Until<input required type="time" value={end} onChange={(e) => setEnd(e.target.value)} className={`block w-full ${control}`} /></label></div>
         {end < start && <p className="text-sm text-ink-soft">Ends next day</p>}
-        <label className="block text-sm text-ink-soft">Usually on this shift{picker(person, setPerson)}</label>
+        <div className="space-y-2"><p className="text-sm text-ink-soft">Usually on this shift</p>{picker('Usual people', person, setPerson)}</div>
         {savedWeekly ? <section aria-label="Week" className="space-y-2">
           <h4 className="text-sm font-semibold text-ink">Week</h4>
           {days.map((name, i) => {
@@ -146,25 +149,17 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
                   {day.on && <Check aria-hidden="true" className="w-4 h-4" />}{name}
                 </button>
                 {day.on && <>
-                  <select multiple size={2} aria-label={`${name} people`} value={day.userIds === undefined ? ['__inherit__'] : shiftUserIds(day).length ? shiftUserIds(day) : ['__nobody__']}
-                    onChange={(e) => {
-                      const values = selected(e);
-                      const inherit = values.includes('__inherit__') && (day.userIds !== undefined || values.length === 1);
-                      const nobody = values.includes('__nobody__') && (shiftUserIds(day).length > 0 || values.length === 1);
-                      const userIds = inherit ? undefined : nobody ? [] : keepOrder(shiftUserIds(day), values.filter((id) => id !== '__inherit__' && id !== '__nobody__'));
-                      changeDay(i, { userIds, userId: userIds === undefined ? undefined : userIds[0] || null });
-                    }}
-                    className={`w-full min-w-0 ${control}`}>
-                    <option value="__inherit__">Usual: {shiftPeopleSummary(peopleNames(person))}</option><option value="__nobody__">Nobody</option>
-                    {people.filter((p) => p.id).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                  </select>
+                  <button type="button" aria-label={`${name} people`} aria-expanded={peopleDay === i} onClick={() => setPeopleDay(peopleDay === i ? null : i)} className={`w-full min-w-0 text-left ${button}`}>
+                    {day.userIds === undefined ? 'Usual: ' : ''}{shiftPeopleSummary(peopleNames(day.userIds === undefined ? person : shiftUserIds(day)))}
+                  </button>
                   <button type="button" aria-label={`${name} hours`} aria-expanded={hoursDay === i} onClick={() => setHoursDay(hoursDay === i ? null : i)}
                     className={`col-start-2 row-start-2 min-h-11 px-2 rounded-lg border border-line-control text-left text-sm pressable cursor-pointer hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold ${ownHours ? 'text-ink font-semibold' : 'text-ink-soft'}`}>
                     {formatShiftHours({ startMinutes: a, endMinutes: b } as Shift)}
                   </button>
                 </>}
-                {day.on && differs && <button type="button" onClick={() => { setWeek((old) => old.map((d, w) => w === i ? { on: d.on } : d)); setHoursDay(null); }} className="col-start-1 row-start-2 w-16 min-h-11 px-1 text-xs text-ink-soft underline pressable cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold">Same as general</button>}
+                {day.on && differs && <button type="button" onClick={() => { setWeek((old) => old.map((d, w) => w === i ? { on: d.on } : d)); setHoursDay(null); setPeopleDay(null); }} className="col-start-1 row-start-2 w-16 min-h-11 px-1 text-xs text-ink-soft underline pressable cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold">Same as general</button>}
               </div>
+              {day.on && peopleDay === i && <div className="mt-2">{picker(`${name} people choices`, day.userIds === undefined ? person : shiftUserIds(day), (userIds) => changeDay(i, { userIds, userId: userIds[0] || null }))}</div>}
               {day.on && hoursDay === i && <div className="grid grid-cols-2 gap-2 mt-2">
                 <label className="text-xs text-ink-soft">From<input aria-label={`${name} From`} required type="time" value={timeValue(a)} onChange={(e) => { if (e.target.value) changeDay(i, { startMinutes: minutes(e.target.value), endMinutes: b }); }} className={`block w-full ${control}`} /></label>
                 <label className="text-xs text-ink-soft">Until<input aria-label={`${name} Until`} required type="time" value={timeValue(b)} onChange={(e) => { if (e.target.value) changeDay(i, { startMinutes: a, endMinutes: minutes(e.target.value) }); }} className={`block w-full ${control}`} /></label>
@@ -175,7 +170,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
         </section> : <label className="block text-sm text-ink-soft">Date<input required type="date" min={today} value={oneTimeDate} onChange={(e) => setOneTimeDate(e.target.value)} className={`block w-full ${control}`} /></label>}
         {savedWeekly && <div className="space-y-2"><p className="text-sm text-ink-soft">Changes for a date</p>
           {overrides.map((o) => <div key={o.date} className="flex items-center justify-between gap-2 text-base text-ink"><span>{dateLabel(o.date)} → {shiftPeopleSummary(peopleNames(shiftUserIds(o)))}</span><button type="button" aria-label={`Remove change for ${dateLabel(o.date)}`} className={button} onClick={() => setOverrides((old) => old.filter((v) => v.date !== o.date))}>×</button></div>)}
-          {addingDate && <div className="space-y-2"><label className="block text-sm text-ink-soft">Date<input type="date" min={today} value={date} onChange={(e) => setDate(e.target.value)} className={`block w-full ${control}`} /></label><label className="block text-sm text-ink-soft">People{picker(datePerson, setDatePerson)}</label><button type="button" disabled={!date || date < today || overrides.length >= 60} className={button} onClick={() => { setOverrides((old) => [...old.filter((o) => o.date !== date), { date, userIds: datePerson, userId: datePerson[0] || null }].sort((a, b) => a.date.localeCompare(b.date))); setAddingDate(false); }}>Add change</button></div>}
+          {addingDate && <div className="space-y-2"><label className="block text-sm text-ink-soft">Date<input type="date" min={today} value={date} onChange={(e) => setDate(e.target.value)} className={`block w-full ${control}`} /></label><div className="space-y-2"><p className="text-sm text-ink-soft">People</p>{picker('People for date', datePerson, setDatePerson)}</div><button type="button" disabled={!date || date < today || overrides.length >= 60} className={button} onClick={() => { setOverrides((old) => [...old.filter((o) => o.date !== date), { date, userIds: datePerson, userId: datePerson[0] || null }].sort((a, b) => a.date.localeCompare(b.date))); setAddingDate(false); }}>Add change</button></div>}
           {!addingDate && <button type="button" disabled={overrides.length >= 60} className={button} onClick={() => setAddingDate(true)}>+ Change for a date</button>}
         </div>}
         <button type="button" role="switch" aria-label="Save for next weeks" disabled={editing !== 'new'} aria-checked={savedWeekly} onClick={() => setSavedWeekly((v) => !v)} className={`w-full flex items-center gap-2 ${button}`}><span aria-hidden="true">{savedWeekly ? '✓' : '○'}</span>Save for next weeks<span className="ml-auto text-sm">{savedWeekly ? 'On' : 'Off'}</span></button>

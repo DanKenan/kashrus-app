@@ -1,5 +1,5 @@
 import type { Shift } from './src/types.ts';
-import { normalizeShifts, shiftDayOf, shiftHoursOn, shiftOccurrenceDay, shiftPeopleOn, shiftUserIds, shiftRunsOn, shiftWeekdays, shiftTaskOverdueAt, taskWithShiftTimes } from './src/lib/shifts.ts';
+import { normalizeShifts, shiftDayOf, shiftHoursOn, shiftOccurrenceDay, shiftPeopleOn, shiftUserIds, shiftRunsOn, shiftWeekdays, shiftTaskOverdueAt, shiftOwnTimeOverdueDay, taskWithShiftTimes } from './src/lib/shifts.ts';
 import { logoutAckSetCookie } from './src/server/logout-marker.ts';
 import express from 'express';
 import http from 'http';
@@ -5853,8 +5853,8 @@ function taskOverdueDay(task: TaskItem, now: Date): string | null {
   const shift = shifts.find((s) => s.id === task.shiftId && s.venueId === task.venueId && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
   if (shift) {
     const weekday = new Date(`${today}T12:00:00Z`).getUTCDay();
+    if (task.shiftTime) return shiftOwnTimeOverdueDay(shift, today, weekday, minutes, task);
     if (!shiftTaskOverdueAt(shift, today, weekday, minutes, task)) return null;
-    if (task.shiftTime) return today;
     // An overnight deadline belongs to yesterday even after its active window.
     const hours = shiftHoursOn(shift, weekday);
     if (hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, today, weekday) && minutes > hours.endMinutes) return today;
@@ -13196,6 +13196,9 @@ function ownShiftTime(task: TaskItem, input: any, previous?: TaskItem): TaskItem
   if (!own) {
     const { shiftTime: _ownTime, ...rest } = task;
     return rest;
+  }
+  if (!previous?.shiftTime && input.targetTime === undefined && input.targetTimeMinutes === undefined) {
+    throw new OperationConflictError('Supply a primary time when adding time to a shift task.', 400);
   }
   const validated = (textKey: 'targetTime' | 'targetTime2', minutesKey: 'targetTimeMinutes' | 'targetTime2Minutes', required: boolean) => {
     let text = task[textKey], minutes = task[minutesKey];
