@@ -1,3 +1,6 @@
+import type { Shift } from './types';
+import { taskWithShiftTimes, tasksVisibleOnShift, shiftTaskAppliesAt } from './lib/shifts';
+import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday } from './lib/shiftTaskDay';
 import { AgencyLogoSheet } from './components/AgencyLogoSheet';
 import { AgencySettingsSheet } from './components/AgencySettingsSheet';
 import { clearLogoCache, isLogoFeatureOn, useAgencyLogo, validRev, withFreshAgencyFields } from './lib/agencyLogo';
@@ -74,7 +77,7 @@ import { taskCategories } from './lib/utils';
 import { taskAppliesOn, sortTasksByTime, groupTasksByDay, taskIsForViewer, seesOnlyOwnTasks } from './lib/taskDay';
 import { toggleCategory, matchesCategories, pruneCategories } from './lib/categoryFilter';
 import { isMyTask } from './lib/myTasks';
-import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn } from './lib/workday';
+import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn, minutesIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { InvitePage } from './components/InvitePage';
 import { ResetPage } from './components/ResetPage';
@@ -329,6 +332,7 @@ export default function App() {
 
   // Main tasks & history states
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [shiftsByVenue, setShiftsByVenue] = useState<Record<string, Shift[]>>({});
   const [historyLogs, setHistoryLogs] = useState<DailySnapshot[]>([]);
   const [knownUsers, setKnownUsers] = useState<User[]>(DEFAULT_USERS);
   const [isRealtimeConnected, setIsRealtimeConnected] = useState<boolean>(false);
@@ -739,6 +743,7 @@ export default function App() {
   if (requestContext.current.key !== requestKey) {
     requestContext.current = { key: requestKey, generation: requestContext.current.generation + 1 };
     setTasks([]);
+    setShiftsByVenue({});
     setHistoryLogs([]);
     setEvents([]);
     setKnownUsers([]);
@@ -747,29 +752,42 @@ export default function App() {
   // Item 6: the active venue's IANA zone (venue -> agency -> America/New_York).
   // "Today" in the app is the venue's local day, never the device zone or UTC.
   const currentVenueTimeZone = venueTimeZone(currentVenue, currentUser);
-  const [dayKey, setDayKey] = useState(() => workDateIn(currentVenueTimeZone));
+  const venueShifts = shiftsByVenue[currentVenue?.id || ''] || [];
+  const shiftsById = useMemo(() => new Map<string, Shift>(Object.values<Shift[]>(shiftsByVenue).flat().map((s) => [s.id, s])), [shiftsByVenue]);
+  const [dayKey, setDayKey] = useState(() => Date.now());
   useEffect(() => {
-    const updateDay = () => setDayKey((prev) => {
-      const next = workDateIn(currentVenueTimeZone);
-      return prev === next ? prev : next;
-    });
+    // Tick even within the same day: shift continuations and overdue badges
+    // change at minute boundaries, without a task or websocket update.
+    const updateDay = () => setDayKey(Date.now());
     updateDay();
     const timer = window.setInterval(updateDay, 60_000);
     return () => window.clearInterval(timer);
   }, [currentVenueTimeZone]);
-  const todayYmd = workDateIn(currentVenueTimeZone);
+  const venueNow = new Date(dayKey);
+  const todayYmd = workDateIn(currentVenueTimeZone, venueNow);
+  const todayWeekday = weekdayIn(currentVenueTimeZone, venueNow);
+  const nowMinutes = minutesIn(currentVenueTimeZone, venueNow);
   const effectiveDayView = canUserAssignTasks(currentUser) && !isKiosk ? dayView : 'today';
   // Don (Nov 1): a mashgiach sees only the tasks assigned to them or to everyone.
   // People who can create/edit tasks, and the venue kiosk, still see the whole venue.
   const onlyOwnTasks = !isKiosk && seesOnlyOwnTasks(currentUser, canUserAssignTasks(currentUser));
+  const taskWeekday = useCallback((task: Task) => {
+    const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+    return shift ? shiftDisplayWeekday(shift, todayYmd, todayWeekday, nowMinutes) : todayWeekday;
+  }, [shiftsById, todayYmd, todayWeekday, nowMinutes]);
   // Today's list (the venue's day; for a mashgiach only their own + everyone's tasks).
   const todayTasks = useMemo(() => {
-    const todayWeekday = weekdayIn(currentVenueTimeZone);
-    return tasks.filter((task) =>
-      taskAppliesOn(task, todayYmd, todayWeekday) &&
-      (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email)),
-    );
-  }, [tasks, todayYmd, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser?.email]);
+    const applicable = tasks.map((task) => taskWithShiftTimes(task, shiftsById, taskWeekday(task))).filter((task) => {
+      const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+      if (shift) return shiftTaskAppliesAt(shift, todayYmd, todayWeekday, nowMinutes) &&
+        (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email));
+      return taskAppliesOn(task, todayYmd, todayWeekday) &&
+        (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email));
+    });
+    return onlyOwnTasks && currentUser
+      ? tasksVisibleOnShift(applicable, venueShifts, currentUser, todayYmd, todayWeekday, nowMinutes)
+      : applicable;
+  }, [tasks, shiftsById, venueShifts, todayYmd, todayWeekday, nowMinutes, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser, taskWeekday]);
   // The list on screen: today's, or every task when an editor picks "All days".
   const dayTasks = effectiveDayView === 'all' ? tasks : todayTasks;
 
@@ -981,6 +999,7 @@ export default function App() {
       .then((res) => res.json())
       .then((data) => {
         if (!isCurrent()) return;
+        if (activeVenueId) setShiftsByVenue((prev) => ({ ...prev, [activeVenueId]: Array.isArray(data.shifts) ? data.shifts.filter((s: Shift) => s.venueId === activeVenueId) : [] }));
         if (Array.isArray(data.tasks)) {
           setTasks(data.tasks.filter((t: Task) => canSeeTask(t, currentUser)));
         }
@@ -1028,7 +1047,7 @@ export default function App() {
     });
 
     const generation = requestContext.current.generation;
-    const unsubMsg = realtimeSocket.onMessage((msg: ServerBroadcastMessage) => {
+    const unsubMsg = realtimeSocket.onMessage((msg: Omit<ServerBroadcastMessage, 'type'> & { type: ServerBroadcastMessage['type'] | 'SHIFTS_UPDATED' }) => {
       const { currentUser, venues, eligibleVenues, currentVenueId, currentVenue } = socketContext.current;
       if (requestContext.current.generation !== generation || !currentUser) return;
       // 12a-c (5.8): a person's scope changed (a tick, an end date, an untick).
@@ -1070,6 +1089,12 @@ export default function App() {
         return;
       }
 
+      if (msg.type === 'SHIFTS_UPDATED' && msg.payload?.venueId && Array.isArray(msg.payload.shifts)) {
+        const venueId = msg.payload.venueId;
+        if (inVenueScope({ venueId }, venueScope)) {
+          setShiftsByVenue((prev) => ({ ...prev, [venueId]: msg.payload.shifts.filter((s: Shift) => s.venueId === venueId) }));
+        }
+      }
       if (msg.type === 'INITIAL_STATE' && msg.payload) {
         // A session restored from before #97 has no agencyLogoRev: take the fresh
         // agency fields from the user's own roster row (runs before any early return).
@@ -1089,6 +1114,7 @@ export default function App() {
           const nextVenue = resolveVenue(currentUser, snapshotVenues, saved);
           if (!nextVenue || nextVenue.id !== currentVenue?.id) {
             setTasks([]);
+            setShiftsByVenue({});
             setHistoryLogs([]);
             setEvents([]);
             setKnownUsers([]);
@@ -1449,6 +1475,7 @@ export default function App() {
     if (venueId !== currentVenue?.id) {
       requestContext.current.generation += 1;
       setTasks([]);
+      setShiftsByVenue({});
       setHistoryLogs([]);
       setEvents([]);
       setKnownUsers([]);
@@ -1868,7 +1895,7 @@ export default function App() {
 
   // Filter tasks
   const filteredTasks = useMemo(() => {
-    return dayTasks.filter((task) => {
+    return dayTasks.map((task) => taskWithShiftTimes(task, shiftsById, effectiveDayView === 'all' ? undefined : taskWeekday(task))).filter((task) => {
       // Search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
@@ -1898,12 +1925,20 @@ export default function App() {
 
       return true;
     });
-  }, [dayTasks, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
+  }, [dayTasks, shiftsById, effectiveDayView, taskWeekday, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
 
-  const sortedTasks = useMemo(() => sortTasksByTime(filteredTasks), [filteredTasks]);
+  // #185 sorts two independent task times by their earliest time. A shift is
+  // one window: use its start for ordering, then restore its full display window.
+  const displayWeekday = effectiveDayView === 'all' ? undefined : taskWeekday;
+  const sortProjection = useMemo(() => shiftSortProjection(filteredTasks, shiftsById, displayWeekday), [filteredTasks, shiftsById, displayWeekday]);
+  const sortedTasks = useMemo(() => restoreShiftWindows(sortTasksByTime<Task>(sortProjection), shiftsById, displayWeekday), [sortProjection, shiftsById, displayWeekday]);
   const sections = useMemo(() => effectiveDayView === 'all'
-    ? groupTasksByDay(filteredTasks, todayYmd) : undefined,
-  [filteredTasks, effectiveDayView, todayYmd]);
+    ? groupTasksByDay<Task>(sortProjection, todayYmd).map((section) => {
+      const weekday = /^weekday-[0-6]$/.test(section.key) ? Number(section.key.slice(-1)) : undefined;
+      const projected = shiftSortProjection(section.tasks, shiftsById, weekday);
+      return { ...section, tasks: restoreShiftWindows(sortTasksByTime(projected), shiftsById, weekday) };
+    }) : undefined,
+  [sortProjection, shiftsById, effectiveDayView, todayYmd]);
 
   // Open Task Modal
   // 12a-c (RV2): every way into the task editor records the venue it is for.
@@ -1956,6 +1991,7 @@ export default function App() {
     setCurrentVenueId(null);
     setVenues([]);
     setTasks([]);
+    setShiftsByVenue({});
     setHistoryLogs([]);
     if (typeof window !== 'undefined') {
       localStorage.removeItem('current_user');
@@ -2027,6 +2063,7 @@ export default function App() {
     requestContext.current.generation += 1;
     setVenues([]);
     setTasks([]);
+    setShiftsByVenue({});
     setHistoryLogs([]);
     setEvents([]);
     setKnownUsers([]);
@@ -2304,6 +2341,9 @@ export default function App() {
 
   const taskTableView = (
     <TaskTableView
+      isKiosk={isKiosk}
+      roster={isKiosk || !canUserAssignTasks(currentUser) ? [] : knownUsers}
+      shiftsById={shiftsById}
       tasks={sortedTasks}
       sections={sections}
       currentUser={currentUser}
@@ -2325,6 +2365,9 @@ export default function App() {
   );
   const taskCardView = (
     <TaskCardView
+      isKiosk={isKiosk}
+      roster={isKiosk || !canUserAssignTasks(currentUser) ? [] : knownUsers}
+      shiftsById={shiftsById}
       tasks={sortedTasks}
       sections={sections}
       currentUser={currentUser}
@@ -2799,6 +2842,7 @@ export default function App() {
 
         {isKiosk ? (
           <KioskTaskPanel
+            shiftsById={shiftsById}
             tasks={sortedTasks}
             currentUser={currentUser}
             venueName={currentVenue?.name}
@@ -2915,7 +2959,10 @@ export default function App() {
         }}
         onSave={handleSaveTask}
         taskToEdit={taskToEdit}
+        venueId={taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || ''}
+        onShiftCreated={(shift) => setShiftsByVenue((prev) => ({ ...prev, [shift.venueId]: [...(prev[shift.venueId] || []).filter((s) => s.id !== shift.id), shift] }))}
         knownWorkers={knownUsers}
+        shifts={shiftsByVenue[taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || ''] || []}
         currentUserEmail={currentUser?.email}
         timeZone={
           taskToEdit?.venueId
@@ -2986,6 +3033,12 @@ export default function App() {
       />
 
       <TeamModal
+        shifts={venueShifts}
+        timeZone={currentVenueTimeZone}
+        onShiftChange={(shift, deleted) => {
+          setShiftsByVenue((prev) => ({ ...prev, [shift.venueId]: deleted ? (prev[shift.venueId] || []).filter((s) => s.id !== shift.id) : [...(prev[shift.venueId] || []).filter((s) => s.id !== shift.id), shift] }));
+          if (deleted) setTasks((prev) => prev.map((t) => t.shiftId === shift.id ? { ...taskWithShiftTimes(t, new Map([[shift.id, shift]])), shiftId: null } : t));
+        }}
         isOpen={isTeamModalOpen && sheetAllowed(currentUser, 'team')}
         onClose={() => setIsTeamModalOpen(false)}
         users={knownUsers}

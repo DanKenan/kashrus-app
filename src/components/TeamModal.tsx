@@ -23,6 +23,9 @@ import { END_DATE_TEXT, rosterUntilLines } from '../lib/venueEndDates';
 import { InviteLinkCard } from './InviteLinkCard';
 import { sendMemberInvite, loadMemberForInvite, inviteChip, SEND_CHANGED_TEXT } from '../lib/inviteActions';
 import { canMakeResetLink, makeResetLink, loadResetRequests, confirmPausedMember, type ResetRequest } from '../lib/resetLinks';
+import { ShiftsPanel } from './ShiftsPanel';
+import type { Shift } from '../types';
+import { DEFAULT_TIME_ZONE } from '../lib/workday';
 import { isMyTask } from '../lib/myTasks';
 
 /** Roles the admin's role picker knows (worker shows as Mashgiach). An unknown role gets the plain badge, never a picker (fail closed). */
@@ -33,6 +36,9 @@ export type { AddMemberInvite } from './AddMemberForm';
 import type { AddMemberInvite } from './AddMemberForm';
 
 interface TeamModalProps {
+  shifts?: Shift[];
+  onShiftChange?: (shift: Shift, deleted?: boolean) => void;
+  timeZone?: string;
   isOpen: boolean;
   onClose: () => void;
   users: UserType[];
@@ -61,6 +67,7 @@ interface TeamModalProps {
 
 export const TeamModal: React.FC<TeamModalProps> = ({
   isOpen,
+  shifts = [], onShiftChange, timeZone = DEFAULT_TIME_ZONE,
   onClose,
   users,
   tasks,
@@ -76,6 +83,10 @@ export const TeamModal: React.FC<TeamModalProps> = ({
   const [venueNotice, setVenueNotice] = useState<string | null>(null);
   // K1: whose kiosk-code sheet is open (looked up fresh from `users`).
   const [codeTargetId, setCodeTargetId] = useState<string | null>(null);
+  const [section, setSection] = useState<'people' | 'shifts'>('people');
+  const hasPeople = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
+  const showShifts = canUserAssignTasks(currentUser) && (!hasPeople || section === 'shifts');
+  useEffect(() => { if (!isOpen) setSection('people'); }, [isOpen]);
   const [searchQuery, setSearchQuery] = useState('');
   const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
   const [userToDelete, setUserToDelete] = useState<UserType | null>(null);
@@ -336,14 +347,14 @@ export const TeamModal: React.FC<TeamModalProps> = ({
             </div>
             <div className="flex-1 min-w-0">
               <h2 className="text-base font-bold text-ink flex flex-wrap items-center gap-2">
-                <span className="basis-full sm:basis-auto min-w-0">Mashgiach Team & Access Permissions</span>
+                <span className="basis-full sm:basis-auto min-w-0">{showShifts ? 'Shifts' : 'Mashgiach Team & Access Permissions'}</span>
                 {/* QA2 #22: the list is the whole agency, not one venue: say so (no venue chip). */}
                 <span className="text-xs px-2 py-0.5 rounded-full bg-sunken text-ink-soft font-semibold shrink-0">
-                  All team · {users.length}
+                  {showShifts ? currentVenue?.name : <>All team · {users.length}</>}
                 </span>
               </h2>
               <p className="text-sm text-ink-soft">
-                Manage Mashgichim, Coordinators, and Venue Owners. Toggle permissions to fill tasks and/or assign new tasks.
+                {showShifts ? 'Create and manage the venue’s shifts.' : 'Manage Mashgichim, Coordinators, and Venue Owners. Toggle permissions to fill tasks and/or assign new tasks.'}
               </p>
             </div>
           </div>
@@ -355,8 +366,12 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           </button>
         </div>
 
+        {hasPeople && canUserAssignTasks(currentUser) && <div className="grid grid-cols-2 gap-1 p-1 mx-6 mt-4 rounded-xl bg-sunken" role="group" aria-label="People or Shifts">
+          {(['people', 'shifts'] as const).map((value) => <button type="button" key={value} aria-pressed={section === value} onClick={() => setSection(value)} className={`min-h-11 rounded-lg text-base font-semibold text-ink pressable cursor-pointer ${section === value ? 'bg-surface border border-line' : ''}`}>{value === 'people' ? 'People' : 'Shifts'}</button>)}
+        </div>}
+        {showShifts && <div key={currentVenue?.id || 'none'} className="p-6 overflow-y-auto"><ShiftsPanel shifts={shifts} venueId={currentVenue?.id || ''} people={users} timeZone={timeZone} onChange={(shift, deleted) => onShiftChange?.(shift, deleted)} /></div>}
         {/* Modal Body */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div hidden={showShifts || !hasPeople} className="flex-1 overflow-y-auto p-6 space-y-6">
           {showPoolTab && (
             <div role="tablist" aria-label="Team or Pool" className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-sunken border border-line">
               {(['team', 'pool'] as const).map((t) => (
@@ -772,8 +787,8 @@ export const TeamModal: React.FC<TeamModalProps> = ({
 
         </div>
 
-        {/* Modal Footer */}
-        <div className="px-6 py-3 border-t border-line bg-sunken flex items-center justify-between shrink-0">
+        {/* People-only footer; shift screens have their own actions. */}
+        {!showShifts && <div className="px-6 py-3 border-t border-line bg-sunken flex items-center justify-between shrink-0">
           <p className="text-sm text-ink-soft">
             Changes to roles and permissions apply immediately across all live connected sessions.
           </p>
@@ -783,7 +798,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
           >
             Close
           </button>
-        </div>
+        </div>}
       </div>
 
       {venueTarget && currentUser?.role === 'admin' && (

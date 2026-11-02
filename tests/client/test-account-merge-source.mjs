@@ -5,7 +5,7 @@
  * checked before the commit; the person merge is the only identity change.
  */
 import fs from 'node:fs';
-import { MERGE_EMAIL_FIELDS, MERGE_REWRITE_COLLECTIONS, MERGE_SKIP_KEYS, rewriteEmailRefs, recordOwnerAgency } from '../../src/server/account-merge.ts';
+import { MERGE_EMAIL_FIELDS, MERGE_USER_ID_FIELDS, MERGE_REWRITE_COLLECTIONS, MERGE_SKIP_KEYS, rewriteEmailRefs, recordOwnerAgency } from '../../src/server/account-merge.ts';
 let pass = 0, fail = 0;
 const check = (name, ok) => { if (ok) { pass++; console.log(`  ✅ ${name}`); } else { fail++; console.log(`  ❌ FAILED: ${name}`); } };
 const src = fs.readFileSync(new URL('../../server.ts', import.meta.url), 'utf8');
@@ -20,7 +20,8 @@ check('every stateSnapshot key is in the rewrite or the skip list', keys.every((
 check('no key is in both lists', [...rw].every((k) => !sk.has(k)));
 check('every listed key exists in stateSnapshot', [...rw, ...sk].every((k) => keys.includes(k)));
 check('users, invites, resetLinks, passwordResets, pushSubscriptions are never rewritten by the schema', ['users', 'invites', 'resetLinks', 'passwordResets', 'pushSubscriptions'].every((k) => sk.has(k) && !rw.has(k)));
-check('every schema collection names at least one email field', MERGE_REWRITE_COLLECTIONS.every((c) => (MERGE_EMAIL_FIELDS[c] || []).length > 0));
+check('every schema collection names at least one email or user-id field', MERGE_REWRITE_COLLECTIONS.every((c) => (MERGE_EMAIL_FIELDS[c] || []).length + (MERGE_USER_ID_FIELDS[c] || []).length > 0));
+check('shifts are rewritten, never skipped', rw.has('shifts') && !sk.has('shifts'));
 // routes
 const fnAt = src.indexOf('async function accountMergeRoute(');
 const fn = src.slice(fnAt, src.indexOf("\napp.post('/api/account/merge-into'", fnAt));
@@ -62,5 +63,39 @@ check('ambiguous record without B untouched', !out.patch.handoffNotes);
 check('input not mutated', doc.tasks[0].createdByEmail === ' b@x.io ');
 const bad = rewriteEmailRefs({ ...doc, handoffNotes: [{ id: 'n2', venueId: 'v-x', authorEmail: 'B@x.io' }] }, new Set(['ag-b']), 'b@x.io', 'a@x.io');
 check('ambiguous record holding B -> refused', bad.ok === false && bad.collection === 'handoffNotes' && bad.recordId === 'n2');
+// Shift assignments use user row ids, including dated replacements.
+const shiftDoc = {
+  shifts: [
+    { id: 's1', agencyId: 'ag-b', userId: 'source', days: Array.from({ length: 7 }, (_, w) => ({ on: w === 0, userId: w === 0 ? 'source' : null })), overrides: [{ date: '2026-11-01', userId: 'source' }, { date: '2026-11-02', userId: null }, { date: '2026-11-03', userId: 'other' }], name: 'source', area: 'source' },
+    { id: 's2', agencyId: 'ag-x', userId: 'source', overrides: [{ date: '2026-11-01', userId: 'source' }] },
+    { id: 's3', agencyId: 'ag-b', userId: 'Source', overrides: [] },
+  ],
+};
+const userIds = new Map([['source', 'target']]);
+const shifted = rewriteEmailRefs(shiftDoc, new Set(['ag-b']), 'b@x.io', 'a@x.io', userIds);
+check('shift rewrite succeeds', shifted.ok === true);
+const s1 = shifted.patch.shifts[0];
+check('shift usual person source -> target', s1.userId === 'target');
+check('shift override source -> target', s1.overrides[0].userId === 'target');
+check('shift null and unrelated override unchanged', s1.overrides[1].userId === null && s1.overrides[2].userId === 'other');
+check('shift free text unchanged', s1.name === 'source' && s1.area === 'source');
+check('other agency shift unchanged', shifted.patch.shifts[1] === shiftDoc.shifts[1]);
+check('user ids match exactly, case-sensitive', shifted.patch.shifts[2] === shiftDoc.shifts[2]);
+check('shift input not mutated', shiftDoc.shifts[0].userId === 'source' && shiftDoc.shifts[0].overrides[0].userId === 'source');
+check('shift weekday person source -> target', s1.days[0].userId === 'target' && s1.days[1].userId === null);
+check('shift references counted', shifted.replaced === 3);
+const ambiguousShift = rewriteEmailRefs({ shifts: [{ id: 'ambiguous', venueId: 'missing', userId: null, overrides: [{ date: '2026-11-01', userId: 'source' }] }] }, new Set(['ag-b']), 'b@x.io', 'a@x.io', userIds);
+check('ambiguous shift holding source id -> refused', ambiguousShift.ok === false && ambiguousShift.collection === 'shifts');
+// The real merge keeps B's agency memberships, changing only personId/email.
+const membershipDoc = {
+  users: [{ id: 'row-a', agencyId: 'ag-a', personId: 'A', email: 'a@x.io' }, { id: 'row-b', agencyId: 'ag-b', personId: 'B', email: 'b@x.io' }],
+  shifts: [{ id: 'b-shift', agencyId: 'ag-b', userId: 'row-b', days: [{ on: true, userId: 'row-b' }], overrides: [{ date: '2026-11-01', userId: 'row-b' }] }],
+};
+const keptUsers = membershipDoc.users.map((u) => u.personId === 'B' ? { ...u, personId: 'A', email: 'a@x.io' } : u);
+const keptRewrite = rewriteEmailRefs(membershipDoc, new Set(['ag-b']), 'b@x.io', 'a@x.io');
+const keptShift = (keptRewrite.patch.shifts || membershipDoc.shifts)[0];
+check('cross-agency merge keeps the source membership id on every shift reference', keptShift.userId === 'row-b' && keptShift.days[0].userId === 'row-b' && keptShift.overrides[0].userId === 'row-b');
+check('kept shift person resolves to the merged person in its own agency', keptUsers.some((u) => u.id === keptShift.userId && u.agencyId === keptShift.agencyId && u.personId === 'A'));
+check('merge route retains membership ids and supplies no row-id redirection', /const newUsers = fu\.map/.test(fn) && /\{ \.\.\.u, personId: A, email: survivorEmail \}/.test(fn) && /rewriteEmailRefs\(freshDoc, bAgencyIds, retiredEmail, survivorEmail\)/.test(fn) && !/bIds\]\.map\(\(id\) => \[id, String\(fSurvivor\.id\)\]/.test(fn));
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

@@ -1,3 +1,6 @@
+import { ShiftsPanel } from './ShiftsPanel';
+import type { Shift } from '../types';
+import { shiftLabel, shiftVariesByDay, shiftWeekdays, shiftIsUpcoming } from '../lib/shifts';
 import { ANY_TIME_LABEL, isAnyTimeTask, isAnyTimeText } from '../lib/anyTime';
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Clock, Calendar, CheckSquare, Users, Plus, Trash2, CalendarDays, CheckCircle2, ListFilter } from 'lucide-react';
@@ -122,6 +125,9 @@ function TimePickerRow({
 }
 
 interface TaskModalProps {
+  shifts?: Shift[];
+  venueId?: string;
+  onShiftCreated?: (shift: Shift) => void;
   isOpen: boolean;
   onClose: () => void;
   onSave: (taskData: Partial<Task>, opts?: { baselineVersion?: number }) => Promise<boolean> | void;
@@ -161,6 +167,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   onSave,
   taskToEdit,
   knownWorkers,
+  shifts = [],
+  venueId = '',
+  onShiftCreated,
   currentUserEmail,
   timeZone = DEFAULT_TIME_ZONE,
 }) => {
@@ -257,6 +266,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [newOptionInput, setNewOptionInput] = useState('');
 
   // Schedule State: Recurring Days vs Specific Calendar Dates
+  const [creatingShift, setCreatingShift] = useState(false);
+  const [createdShifts, setCreatedShifts] = useState<Shift[]>([]);
+  const pickerShifts = [...shifts, ...createdShifts.filter((s) => !shifts.some((v) => v.id === s.id))].filter((s) => shiftIsUpcoming(s, workDateIn(timeZone)));
+  const [shiftId, setShiftId] = useState<string | null>(null);
+  const [shiftMode, setShiftMode] = useState(false);
   const [scheduleType, setScheduleType] = useState<'recurring' | 'specific_dates'>('recurring');
   const [selectedDays, setSelectedDays] = useState<number[]>([0, 1, 2, 3, 4, 5, 6]);
   const [selectedDates, setSelectedDates] = useState<string[]>([]);
@@ -271,6 +285,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   useEffect(() => {
     submitGuard.current = false;
+    setCreatingShift(false); setCreatedShifts([]);
+    setShiftId(taskToEdit?.shiftId || null);
+    setShiftMode(!!taskToEdit?.shiftId);
     const todayStr = workDateIn(timeZone, new Date());
 
     // Load this user's saved custom categories ("Other" entries).
@@ -362,7 +379,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     }
   }, [taskToEdit, isOpen]);
 
-  const isAny = anyTime || (customTimeText !== null && isAnyTimeText(customTimeText));
+  const canPickShift = scheduleType === 'recurring' || (shiftMode && pickerShifts.some((s) => s.id === shiftId && !!s.oneTimeDate));
+  const chosenShift = canPickShift && shiftMode ? pickerShifts.find((s) => s.id === shiftId) : undefined;
+  const usingShift = !!chosenShift;
+  const isAny = !usingShift && (anyTime || (customTimeText !== null && isAnyTimeText(customTimeText)));
   useEffect(() => {
     if (isAny) setEnableOverdueAlert(false);
   }, [isAny]);
@@ -452,7 +472,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() || (shifts.length > 0 && canPickShift && shiftMode && !chosenShift)) return;
     if (submitGuard.current) return;
     submitGuard.current = true;
 
@@ -471,21 +491,22 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       description: description.trim(),
       category: (selectedCategories[0] || 'General').trim(),
       categories: selectedCategories.length > 0 ? selectedCategories.map((c) => c.trim()) : ['General'],
-      isPrivate: assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
+      shiftId: usingShift ? chosenShift.id : null,
+      isPrivate: !usingShift && assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
       inputType,
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
       // Structured times when set via picker; custom text clears the minutes.
-      targetTime: isAny ? ANY_TIME_LABEL : customTimeText !== null ? customTimeText.trim() : formatPickerTime(time1),
-      targetTimeMinutes: isAny || customTimeText !== null ? null : pickerTimeToMinutes(time1),
-      targetTime2: !isAny && time2 ? formatPickerTime(time2) : '',
-      targetTime2Minutes: !isAny && time2 ? pickerTimeToMinutes(time2) : null,
+      targetTime: usingShift ? '' : isAny ? ANY_TIME_LABEL : customTimeText !== null ? customTimeText.trim() : formatPickerTime(time1),
+      targetTimeMinutes: usingShift || isAny || customTimeText !== null ? null : pickerTimeToMinutes(time1),
+      targetTime2: !usingShift && !isAny && time2 ? formatPickerTime(time2) : '',
+      targetTime2Minutes: !usingShift && !isAny && time2 ? pickerTimeToMinutes(time2) : null,
       priority,
       enableOverdueAlert: isAny ? false : enableOverdueAlert,
-      assignedTo,
-      scheduleType,
-      daysOfWeek: selectedDays,
-      specificDates: scheduleType === 'specific_dates' ? finalDates : undefined,
+      assignedTo: usingShift ? ['all'] : assignedTo,
+      scheduleType: usingShift ? chosenShift.oneTimeDate ? 'specific_dates' : 'recurring' : scheduleType,
+      daysOfWeek: usingShift ? shiftWeekdays(chosenShift) : selectedDays,
+      specificDates: usingShift && chosenShift.oneTimeDate ? [chosenShift.oneTimeDate] : scheduleType === 'specific_dates' ? finalDates : undefined,
     }, { baselineVersion: baselineRef.current });
 
     // Only close on a confirmed save — on failure the modal stays open with
@@ -499,7 +520,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-sm overflow-y-auto">
-      <div className="bg-surface rounded-3xl w-full max-w-xl tactile-5 animate-pop-in border border-line my-8 overflow-hidden transition-colors max-h-[90vh] flex flex-col">
+      <div style={creatingShift ? { display: 'none' } : undefined} className="bg-surface rounded-3xl w-full max-w-xl tactile-5 animate-pop-in border border-line my-8 overflow-hidden transition-colors max-h-[90vh] flex flex-col">
         
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-line/70 shrink-0">
@@ -828,9 +849,20 @@ export const TaskModal: React.FC<TaskModalProps> = ({
             </div>
           )}
 
+          {shifts.length > 0 && canPickShift && <section className="space-y-2" aria-label="When">
+            <p className="text-sm text-ink-soft">When</p>
+            <div role="group" aria-label="Time or Shift" className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-sunken">
+              {(['Time', 'Shift'] as const).map((mode) => <button key={mode} type="button" aria-pressed={mode === 'Shift' ? shiftMode : !shiftMode} onClick={() => { setShiftMode(mode === 'Shift'); if (mode === 'Shift' && !pickerShifts.some((s) => s.id === shiftId)) setShiftId(pickerShifts[0]?.id || null); }} className={`min-h-11 text-base text-ink rounded-lg pressable cursor-pointer ${(mode === 'Shift') === shiftMode ? 'bg-surface border border-line' : ''}`}>{mode}</button>)}
+            </div>
+            {shiftMode && <div className="space-y-2">
+              {pickerShifts.map((shift) => <button key={shift.id} type="button" aria-pressed={shift.id === shiftId} onClick={() => setShiftId(shift.id)} className={`w-full min-h-11 p-3 text-left rounded-lg border text-base text-ink bg-surface pressable cursor-pointer ${shift.id === shiftId ? 'border-gold' : 'border-line-control'}`}>{shiftLabel(shift)}{!shift.oneTimeDate && shiftVariesByDay(shift) && <span className="block text-xs text-ink-soft">Varies by day</span>}</button>)}
+              <button type="button" onClick={() => setCreatingShift(true)} className="w-full min-h-11 p-3 text-left rounded-lg border border-line-control text-base text-ink bg-surface pressable cursor-pointer">+ New shift</button>
+              {chosenShift && <p className="text-sm text-ink-soft">Goes to whoever is on {chosenShift.name} that day{chosenShift.userName ? ` (usually ${chosenShift.userName})` : ''}.</p>}
+            </div>}
+          </section>}
           {/* 2-Column: Target Time & Priority */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
+            <div hidden={shifts.length > 0 && canPickShift && shiftMode}>
               <label className="block font-semibold text-ink-soft mb-1 flex items-center gap-1">
                 <Clock className="w-3.5 h-3.5 text-ink-faint" /> Target Time
               </label>
@@ -939,7 +971,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </label>
 
           {/* SCHEDULE SECTION: Recurring Days vs One-Time / Monthly Calendar */}
-          <div className="space-y-2">
+          <div hidden={shifts.length > 0 && canPickShift && shiftMode} className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="block font-semibold text-ink-soft flex items-center gap-1">
                 <Calendar className="w-3.5 h-3.5 text-ink-faint" /> Schedule Mode
@@ -1026,7 +1058,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </div>
 
           {/* Mashgiach & Staff Assignment */}
-          <div>
+          <div hidden={shifts.length > 0 && canPickShift && shiftMode}>
             <label className="block font-semibold text-ink-soft mb-1 flex items-center gap-1">
               <Users className="w-3.5 h-3.5 text-ink-faint" /> Assigned Mashgiach / Staff Visibility
             </label>
@@ -1133,6 +1165,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               Cancel
             </button>
             <button
+              disabled={shifts.length > 0 && canPickShift && shiftMode && !usingShift}
               id="save-task-submit-btn"
               type="submit"
               className="px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white tactile-2"
@@ -1142,6 +1175,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </div>
         </form>
       </div>
+      {creatingShift && <div role="dialog" aria-modal="true" aria-label="New shift" className="fixed inset-0 z-50 bg-scrim flex items-center justify-center p-3" onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setCreatingShift(false); } }}>
+        <div className="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-2xl bg-surface p-4">
+          <ShiftsPanel createOnly shifts={pickerShifts} venueId={venueId} timeZone={timeZone} people={knownWorkers} onCancel={() => setCreatingShift(false)} onChange={(shift) => { setCreatedShifts((old) => [...old, shift]); onShiftCreated?.(shift); setShiftId(shift.id); setShiftMode(true); setCreatingShift(false); }} />
+        </div>
+      </div>}
     </div>
   );
 };

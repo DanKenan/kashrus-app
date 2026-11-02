@@ -1,3 +1,5 @@
+import type { Shift } from './src/types.ts';
+import { normalizeShifts, shiftDayOf, shiftHoursOn, shiftOccurrenceDay, shiftPersonOn, shiftRunsOn, shiftWeekdays, shiftTaskOverdueAt, taskWithShiftTimes } from './src/lib/shifts.ts';
 import { logoutAckSetCookie } from './src/server/logout-marker.ts';
 import express from 'express';
 import http from 'http';
@@ -2382,6 +2384,7 @@ interface Venue {
 }
 
 interface TaskItem {
+  shiftId?: string | null;
   id: string;
   agencyId?: string;
   venueId: string;
@@ -3747,6 +3750,7 @@ const INITIAL_HISTORY: HistoryLog[] = [];
 let agencies: Agency[] = [...DEFAULT_AGENCIES];
 let venues: Venue[] = [...DEFAULT_VENUES];
 let tasks: TaskItem[] = [...INITIAL_TASKS];
+let shifts: Shift[] = [];
 let historyLogs: HistoryLog[] = [...INITIAL_HISTORY];
 let users: UserProfile[] = [...DEFAULT_USERS];
 let handoffNotes: HandoffNote[] = [];
@@ -3873,6 +3877,7 @@ function hydrateState(parsed: any) {
 }
 function hydrateStateInner(parsed: any) {
   try {
+      shifts = normalizeShifts(parsed.shifts);
       {
         const c: typeof carriedDocFields = {};
         if (parsed && parsed.datedGrantsFrozen === true) c.datedGrantsFrozen = true;
@@ -4178,6 +4183,7 @@ function stateSnapshot() {
     agencies,
     venues,
     tasks,
+    shifts,
     historyLogs,
     handoffNotes,
     taskTemplates,
@@ -5819,6 +5825,41 @@ function taskPushRecipients(task: any, usersList: any[], venuesList: any[], opts
   return out;
 }
 
+function newTaskPushRecipients(task: TaskItem): any[] {
+  if (!task.shiftId) return taskPushRecipients(task, users, venues, { explicitOnly: true });
+  const shift = shifts.find((s) => s.id === task.shiftId && s.venueId === task.venueId && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
+  if (!shift) return [];
+  const venue = venues.find((v) => v.id === task.venueId);
+  const now = serverNow();
+  const tz = venueTimeZoneIn(venue, agencies);
+  const today = workDateIn(tz, now);
+  const occurrence = shiftOccurrenceDay(shift, today, new Date(`${today}T12:00:00Z`).getUTCDay(), minutesIn(tz, now));
+  if (!occurrence) return [];
+  const person = users.find((u) => u.id === shiftPersonOn(shift, occurrence) && (u.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
+  return person ? taskPushRecipients({ ...task, assignedTo: [person.email] }, [person], venues, { explicitOnly: true }) : [];
+}
+
+// Return the START date of the overdue occurrence, including overnight ends.
+function taskOverdueDay(task: TaskItem, now: Date): string | null {
+  if (task.isCompleted) return null;
+  const venue = venues.find((v) => v.id === task.venueId);
+  const tz = venueTimeZoneIn(venue || { agencyId: task.agencyId }, agencies);
+  const today = workDateIn(tz, now), minutes = minutesIn(tz, now);
+  const shift = shifts.find((s) => s.id === task.shiftId && s.venueId === task.venueId && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
+  if (shift) {
+    const weekday = new Date(`${today}T12:00:00Z`).getUTCDay();
+    if (!shiftTaskOverdueAt(shift, today, weekday, minutes)) return null;
+    // An overnight deadline belongs to yesterday even after its active window.
+    const hours = shiftHoursOn(shift, weekday);
+    if (hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, today, weekday) && minutes > hours.endMinutes) return today;
+    return addDays(today, -1);
+  }
+  // TODAYSORT (Don, Nov 1): a Friday-only task is not overdue on a Sunday.
+  if (!taskAppliesOn(task, today, weekdayIn(tz, now))) return null;
+  if (isAnyTimeTask(task) || !task.targetTime || task.targetTime === 'End of Day') return null;
+  return taskSortMinutes(task) < minutes ? today : null;
+}
+
 function checkOverdueTasks(now: Date = serverNow()): string[] {
   const nowMs = now.getTime();
   const sentKeys: string[] = [];
@@ -5827,21 +5868,10 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
   }
 
   for (const task of tasks) {
-    if (task.isCompleted) continue;
-    // 6c: no target time can become overdue.
-    if (isAnyTimeTask(task)) continue;
-    if (!task.enableOverdueAlert) continue; // Only alert for tasks with alerts enabled
-    if (!task.targetTime || task.targetTime === 'End of Day') continue;
-
+    if (!task.enableOverdueAlert) continue;
+    const today = taskOverdueDay(task, now);
+    if (!today) continue;
     const venue = venues.find((v) => v.id === task.venueId);
-    const tz = venueTimeZoneIn(venue || { agencyId: task.agencyId }, agencies);
-    const nowMinutes = minutesIn(tz, now);
-    const today = workDateIn(tz, now);
-    // TODAYSORT (Don, Nov 1): a Friday-only task is not overdue on a Sunday.
-    if (!taskAppliesOn(task, today, weekdayIn(tz, now))) continue;
-
-    const taskMinutes = taskSortMinutes(task);
-    if (taskMinutes >= nowMinutes) continue; // Not overdue yet
 
     const notifyKey = `${task.id}:${today}`;
     if (overdueNotified.has(notifyKey)) continue; // Already notified today (venue-local)
@@ -5849,6 +5879,8 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
     sentKeys.push(notifyKey);
 
     const venueName = venue?.name || 'your venue';
+    const effective = taskWithShiftTimes(task, new Map(shifts.map((s) => [s.id, s])), new Date(`${today}T12:00:00Z`).getUTCDay());
+    const deadline = effective !== task ? effective.targetTime2 : task.targetTime;
 
     // Item 8t: recipients are resolved inside the TASK'S agency and must be
     // able to see the task (canSeeTaskServer); delivery is identity-bound.
@@ -5860,14 +5892,19 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
         .filter((a: any) => typeof a === 'string' && a.toLowerCase() !== 'all')
         .map((a: string) => a.trim().toLowerCase())
     );
-    for (const recipient of taskPushRecipients(task, users, venues)) {
+    const shift = shifts.find((s) => s.id === task.shiftId && s.venueId === task.venueId && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
+    const person = shift ? users.find((u) => u.id === shiftPersonOn(shift, today) && (u.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc')) : undefined;
+    const recipients = shift
+      ? (person ? taskPushRecipients({ ...task, assignedTo: [person.email] }, [person], venues, { explicitOnly: true }) : [])
+      : taskPushRecipients(task, users, venues);
+    for (const recipient of recipients) {
       sendPushToRecipient(
         recipient,
         `Overdue: ${task.title}`,
-        `${venueName} — was due at ${task.targetTime}`,
+        `${venueName} — was due at ${deadline}`,
         { taskId: task.id, venueId: task.venueId, type: 'overdue' },
         undefined,
-        namedEmails.has(String(recipient.email || '').trim().toLowerCase()) ? 'personal' : 'general'
+        shift || namedEmails.has(String(recipient.email || '').trim().toLowerCase()) ? 'personal' : 'general'
       );
     }
   }
@@ -6049,6 +6086,7 @@ function kioskMaySee(meta: SocketMeta, type: string, payload: any): boolean {
       const task = payload?.task || payload;
       return task?.venueId === venueId;
     }
+    case 'SHIFTS_UPDATED':
     case 'TASKS_UPDATED': {
       // Broadcast as { venueId } — pass through only for the kiosk venue.
       return payload?.venueId === venueId;
@@ -6254,6 +6292,7 @@ function staffVenueFilterPayload(meta: SocketMeta, type: string, payload: any): 
       if (!vid) return null; // fail closed: venue-less delete payloads drop
       return inScope(vid) ? payload : null;
     }
+    case 'SHIFTS_UPDATED':
     case 'TASKS_UPDATED':
       return inScope(p.venueId) ? payload : null;
     case 'HANDOFF_NOTE': {
@@ -6896,6 +6935,8 @@ async function executeDailyReset(
   // 8r: history retention counts from the committed mutator run (logged after commit).
   let resetHistoryRemoved = 0;
   let resetHistoryUndated = 0;
+  const resetPrunedShifts = new Map<string, Shift>();
+  const resetPrunedTaskIds = new Set<string>();
 
   // Build a single history snapshot from a venue + its tasks (pure function).
   // archiveDate is the workday being closed; tz formats check-in times in
@@ -6994,6 +7035,16 @@ async function executeDailyReset(
         orphanAgencyIds = new Set<string>();
         const freshVenues: any[] = Array.isArray(freshDoc.venues) ? freshDoc.venues : [];
         const freshAgencies: any[] = Array.isArray(freshDoc.agencies) ? freshDoc.agencies : [];
+        resetPrunedShifts.clear();
+        resetPrunedTaskIds.clear();
+        const beforePruneTasks = freshDoc.tasks || [];
+        freshDoc = pruneOneTimeShifts(freshDoc, now, new Set(freshVenues
+          .filter((v) => (!scopeAgencyId || (v.agencyId || 'agency-hkc') === scopeAgencyId) && (!targetVenueId || v.id === targetVenueId))
+          .map((v) => v.id)), (shift) => resetPrunedShifts.set(shift.id, shift));
+        if (resetPrunedShifts.size) for (const task of beforePruneTasks) {
+          const source = resetPrunedShifts.get(task.shiftId);
+          if (source && source.venueId === task.venueId) resetPrunedTaskIds.add(task.id);
+        }
         const freshTasks: any[] = Array.isArray(freshDoc.tasks) ? freshDoc.tasks : [];
         const freshHistory: any[] = Array.isArray(freshDoc.historyLogs) ? freshDoc.historyLogs : [];
         // B2: markers for every venue, missing ones from the legacy date as
@@ -7076,6 +7127,9 @@ async function executeDailyReset(
   if (committed && committed.result && resetHistoryRemoved > 0) {
     log.info(`[history-retention] reset removed ${resetHistoryRemoved} snapshot(s) older than ${HISTORY_RETENTION_DAYS} days (undated kept: ${resetHistoryUndated})`);
   }
+  // Expiry can also affect a scoped venue whose work-date marker was ahead.
+  for (const [venueId, agencyId] of new Map([...resetPrunedShifts.values()].map((s) => [s.venueId, s.agencyId || 'agency-hkc']))) broadcastShifts(venueId, agencyId);
+  for (const task of tasks.filter((t) => resetPrunedTaskIds.has(t.id))) broadcastTaskUpdated(task, task);
   // Broadcast per-agency ONLY after commit (in-memory cache is now fresh).
   // AGENCY SCOPING: each agency receives ONLY its own snapshots, and only
   // agencies that had a due venue (or reset orphan tasks) hear anything.
@@ -8493,25 +8547,9 @@ app.get('/api/admin/dashboard', (req, res) => {
   const dashNow = serverNow();
   const venueStats = agencyVenues.map((venue) => {
     const venueTasks = tasks.filter((t) => t.venueId === venue.id);
-    const venueTz = venueTimeZoneIn(venue, agencies);
-    const venueNowMinutes = minutesIn(venueTz, dashNow);
-    const venueToday = workDateIn(venueTz, dashNow);
-    const venueWeekday = weekdayIn(venueTz, dashNow);
     const completed = venueTasks.filter((t) => t.isCompleted).length;
     const total = venueTasks.length;
-    const overdueList = venueTasks.filter((t) => {
-      if (t.isCompleted) return false;
-      // TODAYSORT: only tasks scheduled for the venue's today can be overdue.
-      if (!taskAppliesOn(t, venueToday, venueWeekday)) return false;
-      // 6c: exclude any-time tasks before time maths.
-      if (isAnyTimeTask(t)) return false;
-      // Overdue if target time has passed today — in the VENUE's own zone
-      // (D8s: the same helper as the board/rollover/checkOverdueTasks; the
-      // server clock zone is UTC on Cloud Run and never decided "today").
-      if (!t.targetTime || t.targetTime === 'End of Day') return false;
-      const minutes = taskSortMinutes(t);
-      return minutes < venueNowMinutes;
-    });
+    const overdueList = venueTasks.filter((t) => taskOverdueDay(t, dashNow) !== null);
 
     // Recent handoff notes (last 3)
     // TEAMNOTES (RV1 P2): the one note rule + the public shape (no readBy).
@@ -8554,7 +8592,11 @@ app.get('/api/admin/dashboard', (req, res) => {
       completedTasks: completed,
       completionRate: total > 0 ? Math.round((completed / total) * 100) : 0,
       overdueTasks: overdueList.length,
-      overdueTaskList: overdueList.map((t) => ({ id: t.id, title: t.title, targetTime: t.targetTime })),
+      overdueTaskList: overdueList.map((t) => {
+        const occurrence = taskOverdueDay(t, dashNow)!;
+        const effective = taskWithShiftTimes(t, new Map(shifts.map((s) => [s.id, s])), new Date(`${occurrence}T12:00:00Z`).getUTCDay());
+        return { id: t.id, title: t.title, targetTime: effective !== t ? effective.targetTime2 : t.targetTime };
+      }),
       recentNotes,
       mashgichim: venueUsers,
       openIncidents: openIncidents.map((i) => ({
@@ -11745,7 +11787,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
 
   app.post('/api/__test__/inject-fixture', async (req, res) => {
     const {
-      venues = [], tasks = [], agencies: newAgencies = [], users: newUsers = [],
+      venues = [], tasks = [], shifts: newShifts = [], agencies: newAgencies = [], users: newUsers = [],
       events = [], incidents = [], handoffNotes = [], announcements = [],
       taskTemplates = [], eventTaskTemplates = [], approvedIngredients = [], factoryReports = [],
       kioskDevices: newKioskDevices = [], historyLogs = [],
@@ -11764,7 +11806,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
           return {
             doc: {
               ...freshDoc,
-              venues: newVenues, tasks: newTasks, agencies: mergedAgencies, users: mergedUsers,
+              venues: newVenues, tasks: newTasks, shifts: [...(freshDoc.shifts || []), ...newShifts], agencies: mergedAgencies, users: mergedUsers,
               events: [...(freshDoc.events || []), ...events],
               incidents: [...(freshDoc.incidents || []), ...incidents],
               handoffNotes: [...(freshDoc.handoffNotes || []), ...handoffNotes],
@@ -12988,6 +13030,252 @@ app.delete('/api/venues/:id', async (req, res) => {
 // TASKS ENDPOINTS (Filtered by Venue)
 // -------------------------------------------------------------
 
+/** Keep yesterday's one-time shifts for overnight occurrences; no extra reads. */
+function pruneOneTimeShifts(doc: any, now: Date, venueIds: Set<string>, onPruned?: (shift: Shift) => void): any {
+  const expired = new Map<string, Shift>();
+  for (const shift of doc.shifts || []) {
+    if (!shift?.oneTimeDate || !venueIds.has(shift.venueId)) continue;
+    const venue = (doc.venues || []).find((v: any) => v.id === shift.venueId);
+    const yesterday = addDays(workDateIn(venueTimeZoneIn(venue || { agencyId: shift.agencyId }, doc.agencies || []), now), -1);
+    if (shift.oneTimeDate < yesterday) { expired.set(shift.id, shift); onPruned?.(shift); }
+  }
+  if (!expired.size) return doc;
+  return {
+    ...doc,
+    shifts: (doc.shifts || []).filter((s: Shift) => !expired.has(s.id)),
+    tasks: (doc.tasks || []).map((t: TaskItem) => {
+      const shift = t.shiftId ? expired.get(t.shiftId) : undefined;
+      return shift && shift.venueId === t.venueId
+        ? { ...taskWithShiftTimes(t, expired), shiftId: null } : t;
+    }),
+  };
+}
+
+// SHIFTS: all reads use the existing main-document cache.
+function publicShift(shift: Shift): Shift {
+  const person = users.find((u) => u.id === shift.userId && (u.agencyId || 'agency-hkc') === (shift.agencyId || 'agency-hkc'));
+  // Allowlist the wire shape: no roster emails or client-supplied userName.
+  return {
+    id: shift.id, agencyId: shift.agencyId, venueId: shift.venueId,
+    name: shift.name, area: shift.area,
+    oneTimeDate: shift.oneTimeDate || null,
+    days: Array.from({ length: 7 }, (_, w) => shiftDayOf(shift, w)),
+    dayUserNames: Array.from({ length: 7 }, (_, w) => {
+      const id = shiftDayOf(shift, w).userId;
+      return users.find((u) => u.id === id && (u.agencyId || 'agency-hkc') === (shift.agencyId || 'agency-hkc'))?.name || null;
+    }),
+    startMinutes: shift.startMinutes, endMinutes: shift.endMinutes,
+    userId: shift.userId, ...(person ? { userName: person.name } : {}),
+    overrides: (normalizeShifts([shift])[0]?.overrides || []).map(({ date, userId }) => {
+      const person = userId === null ? undefined : users.find((u) => u.id === userId && (u.agencyId || 'agency-hkc') === (shift.agencyId || 'agency-hkc'));
+      return { date, userId, ...(person ? { userName: person.name } : {}) };
+    }),
+    createdAt: shift.createdAt, ...(shift.updatedAt ? { updatedAt: shift.updatedAt } : {}),
+  };
+}
+function publicShifts(venueId: string, agencyId: string): Shift[] {
+  return shifts.filter((s) => s.venueId === venueId && (s.agencyId || 'agency-hkc') === agencyId).map(publicShift);
+}
+function broadcastShifts(venueId: string, agencyId: string) {
+  broadcast('SHIFTS_UPDATED', { venueId, shifts: publicShifts(venueId, agencyId) }, undefined, agencyId,
+    (meta, payload) => callerMaySeeVenue(recipientForMeta(meta), venueId) ? payload : null);
+}
+function shiftEditor(caller: UserProfile, venueId: string, doc: any): UserProfile {
+  const agencyId = caller.agencyId || 'agency-hkc';
+  const fresh = (doc.users || []).find((u: any) => u.id === caller.id && (u.agencyId || 'agency-hkc') === agencyId);
+  const venue = (doc.venues || []).find((v: any) => v.id === venueId && (v.agencyId || 'agency-hkc') === agencyId);
+  const scope = venueScopeOf(fresh, doc.venues || []);
+  // Match POST /api/tasks, including its coordinator rule.
+  if (!fresh || !venue || !(scope === 'agency' || scope.includes(venueId)) ||
+      !(fresh.role === 'admin' || fresh.role === 'coordinator' || fresh.permissions?.canAssignTasks === true)) {
+    throw new OperationConflictError('You do not have permission to manage shifts in this venue.', 403);
+  }
+  return fresh;
+}
+function validatedShift(body: any, previous: Shift | undefined, venueId: string, agencyId: string, doc: any, id: string, now: string): Shift {
+  const input = { ...(previous ? normalizeShifts([previous])[0] : {}), ...body };
+  const bad = (message: string): never => { throw new OperationConflictError(message, 400); };
+  const plain = (value: unknown, min: number, max: number, field: string): string => {
+    if (typeof value !== 'string' || value.trim().length < min || value.trim().length > max || /[<>\x00-\x1f\x7f]/.test(value)) bad(`${field} must be plain text, ${min}–${max} characters.`);
+    return (value as string).trim();
+  };
+  const name = plain(input.name, 1, 40, 'Name');
+  const area = plain(input.area === undefined ? '' : input.area, 0, 40, 'Area');
+  if (!input.oneTimeDate && body.days === undefined && body.daysOfWeek !== undefined) {
+    const old = body.daysOfWeek;
+    if (!Array.isArray(old) || !old.length || old.some((d: any) => !Number.isInteger(d) || d < 0 || d > 6) || new Set(old).size !== old.length) bad('Days must be unique integers from 0 to 6, with at least one day.');
+    input.days = Array.from({ length: 7 }, (_, w) => ({ on: old.includes(w) }));
+  }
+  const { startMinutes, endMinutes } = input;
+  if (![startMinutes, endMinutes].every((m) => Number.isInteger(m) && m >= 0 && m <= 1439) || startMinutes === endMinutes) bad('Shift hours must be different minutes from 0 to 1439.');
+  const validPerson = (id: any) => {
+    if (id === null) return;
+    const person = typeof id === 'string' && (doc.users || []).find((u: any) => u.id === id && (u.agencyId || 'agency-hkc') === agencyId);
+    const scope = venueScopeOf(person || null, doc.venues || []);
+    if (!person || !(scope === 'agency' || scope.includes(venueId))) bad('User must belong to this agency and be allowed to work in this venue.');
+  };
+  const userId = input.userId === undefined ? null : input.userId;
+  validPerson(userId);
+  const venue = (doc.venues || []).find((v: any) => v.id === venueId);
+  const today = workDateIn(venueTimeZoneIn(venue, doc.agencies || []), serverNow());
+  const oneTimeDate = input.oneTimeDate ?? null;
+  if (previous && Boolean(previous.oneTimeDate) !== Boolean(oneTimeDate)) bad('A saved shift cannot be converted to or from a one-time shift.');
+  if (oneTimeDate !== null && (!isWorkDate(oneTimeDate) || addDays(oneTimeDate, 0) !== oneTimeDate ||
+      ((oneTimeDate !== previous?.oneTimeDate) && (oneTimeDate < today || oneTimeDate > addDays(today, 60))))) bad('One-time date must be a valid venue date from today through 60 days ahead.');
+  if (oneTimeDate) input.days = Array.from({ length: 7 }, () => ({ on: false }));
+  if (!Array.isArray(input.days) || input.days.length !== 7 || (!oneTimeDate && !input.days.some((d: any) => d?.on === true))) bad('Days must have seven entries and at least one enabled day.');
+  const days = input.days.map((d: any) => {
+    if (!d || typeof d.on !== 'boolean') bad('Each day must have an on boolean.');
+    if (d.userId !== undefined) validPerson(d.userId);
+    const ownHours = d.startMinutes !== undefined || d.endMinutes !== undefined;
+    if (ownHours && (![d.startMinutes, d.endMinutes].every((m) => Number.isInteger(m) && m >= 0 && m < 1440) || d.startMinutes === d.endMinutes)) bad('Weekday hours require both start and end, different integer minutes from 0 to 1439.');
+    return { on: d.on, ...(d.userId !== undefined ? { userId: d.userId } : {}), ...(ownHours ? { startMinutes: d.startMinutes, endMinutes: d.endMinutes } : {}) };
+  });
+  if (!oneTimeDate) {
+    const labels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    for (let w = 0; w < 7; w++) {
+      const day = days[w], next = days[(w + 1) % 7];
+      const start = day.startMinutes ?? startMinutes;
+      const end = day.endMinutes ?? endMinutes;
+      if (day.on && next.on && end < start && end > (next.startMinutes ?? startMinutes)) {
+        bad(`Two days of this shift overlap: ${labels[w]} ends after ${labels[(w + 1) % 7]} starts.`);
+      }
+    }
+  }
+  const overrides = input.overrides === undefined ? [] : input.overrides;
+  if (!Array.isArray(overrides) || overrides.length > 60) bad('At most 60 overrides are allowed.');
+  const dates = new Set<string>();
+  const clean = [];
+  for (const o of overrides) {
+    if (!o || !isWorkDate(o.date) || addDays(o.date, 0) !== o.date || dates.has(o.date)) bad('Override dates must be valid, unique YYYY-MM-DD dates.');
+    dates.add(o.date);
+    if (o.date < today) continue;
+    validPerson(o.userId);
+    clean.push({ date: o.date, userId: o.userId });
+  }
+  return {
+    id, agencyId, venueId, name, area, days, oneTimeDate,
+    startMinutes, endMinutes, userId, overrides: clean,
+    createdAt: previous?.createdAt || now, ...(previous ? { updatedAt: now } : {}),
+  };
+}
+function taskShift(id: unknown, venueId: string, agencyId: string, list: Shift[]): Shift | undefined {
+  if (id === undefined || id === null) return undefined;
+  const shift = typeof id === 'string' && list.find((s) => s.id === id && s.venueId === venueId && (s.agencyId || 'agency-hkc') === agencyId);
+  if (!shift) throw new OperationConflictError('Shift must belong to the task venue.', 400);
+  return shift;
+}
+function bindTaskShift<T extends TaskItem>(task: T, list: Shift[], strict = true): T {
+  if (!strict && !list.some((s) => s.id === task.shiftId && s.venueId === task.venueId && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'))) return task;
+  const shift = taskShift(task.shiftId, task.venueId, task.agencyId || 'agency-hkc', list);
+  if (!shift) return task;
+  // Persist a useful fallback too; live reads always use the current shift.
+  return { ...taskWithShiftTimes(task, new Map([[shift.id, shift]])), assignedTo: ['all'], scheduleType: shift.oneTimeDate ? 'specific_dates' : 'recurring', specificDates: shift.oneTimeDate ? [shift.oneTimeDate] : [] };
+}
+
+for (const method of ['post', 'put', 'delete'] as const) {
+  app[method](method === 'post' ? '/api/shifts' : '/api/shifts/:id', async (req, res) => {
+    const caller = requireAuthUser(req, res);
+    if (!caller) return;
+    if ((req as any).kiosk) return res.status(403).json({ error: 'This kiosk session can only clock in and out.' });
+    const agencyId = caller.agencyId || 'agency-hkc';
+    const old = method === 'post' ? undefined : shifts.find((s) => s.id === (req.params as { id?: string }).id);
+    if (method !== 'post' && !old) return res.status(404).json({ error: 'Shift not found' });
+    const venueId = old?.venueId || req.body?.venueId;
+    // Preflight gives authorization errors before validating client data.
+    try { shiftEditor(caller, venueId, stateSnapshot()); }
+    catch (e: any) { return res.status(e.status || 403).json({ error: e.message }); }
+    const id = old?.id || `shift-${crypto.randomUUID()}`;
+    const now = serverNow().toISOString();
+    const prunedTaskIds = new Set<string>();
+    const detachedCopyIds = new Map<string, string>();
+    const committed = await commitOrRespond(req, res, (doc) => {
+      shiftEditor(caller, venueId, doc);
+      const pruned = pruneOneTimeShifts(doc, serverNow(), new Set([venueId]));
+      prunedTaskIds.clear();
+      if (pruned !== doc) for (let i = 0; i < (doc.tasks || []).length; i++) {
+        if (pruned.tasks[i] !== doc.tasks[i]) prunedTaskIds.add(doc.tasks[i].id);
+      }
+      doc = pruned;
+      const list: Shift[] = doc.shifts || [];
+      const previous = list.find((s) => s.id === id);
+      if (method !== 'post' && !previous) throw new OperationConflictError('Shift not found', 404);
+      if (previous && (previous.venueId !== venueId || (previous.agencyId || 'agency-hkc') !== agencyId)) throw new OperationConflictError('Shift is not in your agency or venue.', 403);
+      if (req.body?.venueId !== undefined && req.body.venueId !== venueId) throw new OperationConflictError('A shift cannot be moved to another venue.', 400);
+      if (method === 'delete') {
+        const byId = new Map([[id, previous!]]);
+        const groups = new Map<string, { days: number[]; startMinutes: number; endMinutes: number }>();
+        for (const weekday of shiftWeekdays(previous!)) {
+          const hours = shiftHoursOn(previous!, weekday);
+          const key = `${hours.startMinutes}:${hours.endMinutes}`;
+          if (!groups.has(key)) groups.set(key, { ...hours, days: [] });
+          groups.get(key)!.days.push(weekday);
+        }
+        const ordered = [...groups.values()].sort((a, b) => b.days.length - a.days.length || a.days[0] - b.days[0]);
+        const attachedCount = (doc.tasks || []).filter((t: TaskItem) => t.shiftId === id && t.venueId === venueId).length;
+        const copyCount = previous!.oneTimeDate ? 0 : attachedCount * Math.max(0, ordered.length - 1);
+        if (copyCount > 200) {
+          throw new OperationConflictError('This shift has too many tasks with different hours per day. Move some tasks to another shift first.', 409, 'SHIFT_SPLIT_TOO_LARGE');
+        }
+        // commitState's 900 KiB guard also rejects oversized splits atomically
+        // (503 SIZE_LIMIT), before any shift/task changes are persisted.
+        const detachedIds: string[] = [];
+        const createdIds: string[] = [];
+        const detachedTasks = (doc.tasks || []).flatMap((task: TaskItem) => {
+          if (task.shiftId !== id || task.venueId !== venueId) return [task];
+          if (previous!.oneTimeDate || !ordered.length) {
+            detachedIds.push(task.id);
+            return [{ ...taskWithShiftTimes(task, byId), shiftId: null }];
+          }
+          return ordered.map((group, index) => {
+            const detached = { ...taskWithShiftTimes(task, byId, group.days[0]), shiftId: null, daysOfWeek: group.days };
+            if (index === 0) { detachedIds.push(task.id); return detached; }
+            // Stable across transaction retries; never reuse another task's history id.
+            const key = `${task.id}:${group.startMinutes}:${group.endMinutes}`;
+            if (!detachedCopyIds.has(key)) detachedCopyIds.set(key, `task-${crypto.randomUUID()}`);
+            const copyId = detachedCopyIds.get(key)!;
+            detachedIds.push(copyId);
+            createdIds.push(copyId);
+            return {
+              ...detached, id: copyId,
+              currentStatus: task.inputType === 'status_select' && task.customStatusOptions?.length ? task.customStatusOptions[0] : 'pending',
+              isCompleted: false, notes: '', updatedByEmail: null, updatedByName: null, updatedAt: null,
+              checkIns: [], answerPhoto: undefined,
+            };
+          });
+        });
+        return {
+          doc: { ...doc, shifts: list.filter((s) => s.id !== id), tasks: detachedTasks },
+          result: { ok: true, detachedIds, createdIds },
+        };
+      }
+      const shift = validatedShift(req.body || {}, previous, venueId, agencyId, doc, id, now);
+      const today = workDateIn(venueTimeZoneIn((doc.venues || []).find((v: any) => v.id === venueId), doc.agencies || []), serverNow());
+      if (shift.oneTimeDate && shift.oneTimeDate >= today && list.filter((s) => s.id !== id && s.venueId === venueId && s.oneTimeDate && s.oneTimeDate >= today).length >= 60) {
+        throw new OperationConflictError('At most 60 upcoming one-time shifts are allowed per venue.', 400);
+      }
+      return {
+        doc: { ...doc, shifts: method === 'post' ? [...list, shift] : list.map((s) => s.id === id ? shift : s) },
+        result: shift,
+      };
+    }, { label: `${method}-shift` });
+    if (!committed) return;
+    log.info(`[audit] ${method}-shift: user ${caller.id} shift ${id} venue ${venueId} agency ${agencyId}`);
+    broadcastShifts(venueId, agencyId);
+    for (const task of tasks.filter((t) => prunedTaskIds.has(t.id))) broadcastTaskUpdated(task, task);
+    if (method === 'delete') {
+      for (const task of tasks.filter((t) => ((committed.result as any).detachedIds || []).includes(t.id))) {
+        if (((committed.result as any).createdIds || []).includes(task.id)) {
+          broadcast('TASK_CREATED', task, undefined, task.agencyId || 'agency-hkc',
+            (meta, payload) => canSeeTaskServer(payload, recipientForMeta(meta)) ? payload : null);
+        } else broadcastTaskUpdated(task, task);
+      }
+      return res.json({ ok: true });
+    }
+    res.status(method === 'post' ? 201 : 200).json(publicShift(committed.result as Shift));
+  });
+}
+
 app.get('/api/tasks', (req, res) => {
   const { venueId } = req.query;
 
@@ -13008,10 +13296,10 @@ app.get('/api/tasks', (req, res) => {
   if (!isCallerAdmin) {
     const ownScope = venueScopeFor(caller);
     if (ownScope.length === 0) {
-      return res.json({ tasks: [], venue: null, venueId: null });
+      return res.json({ tasks: [], shifts: [], venue: null, venueId: null });
     }
     if (venueId && !ownScope.includes(String(venueId))) {
-      return res.json({ tasks: [], venue: null, venueId: null });
+      return res.json({ tasks: [], shifts: [], venue: null, venueId: null });
     }
   }
 
@@ -13039,12 +13327,16 @@ app.get('/api/tasks', (req, res) => {
   const filteredTasks = tasks.filter(
     (t) => t.venueId === targetVenueId && (t.agencyId || 'agency-hkc') === callerAgencyId
   );
+  const venueShifts = publicShifts(targetVenueId, callerAgencyId);
+  const shiftsById = new Map(venueShifts.map((s) => [s.id, s]));
   // Private assignments: shared helper with the WS paths (checklist C).
-  const visibleTasks = filteredTasks.filter((t) => canSeeTaskServer(t, caller));
+  const visibleTasks = filteredTasks.filter((t) => canSeeTaskServer(t, caller))
+    .map((t) => taskWithShiftTimes(t, shiftsById));
   const activeVenue = agencyVenues.find((v) => v.id === targetVenueId) || agencyVenues[0] || venues[0];
 
   res.json({
     tasks: visibleTasks,
+    shifts: venueShifts,
     venue: activeVenue,
     venueId: targetVenueId,
     currentWorkDate,
@@ -13056,6 +13348,7 @@ app.get('/api/tasks', (req, res) => {
 app.post('/api/tasks', async (req, res) => {
   const {
     venueId,
+    shiftId,
     title,
     description,
     category,
@@ -13125,11 +13418,10 @@ app.post('/api/tasks', async (req, res) => {
   // (idempotent: a retried transaction creates the same task, not a duplicate).
   const newTaskId = `task-${crypto.randomUUID()}`;
   const nowIso = new Date().toISOString();
-  const newTimeKey = targetTimeMinutes(targetTime);
 
-  // 6c: canonical any-time tasks have no clock fields or overdue alert.
-  const newTask: TaskItem = normalizeAnyTimeTask({
+  const newTask: TaskItem = {
     id: newTaskId,
+    shiftId,
     agencyId: callerAgencyId,
     venueId: targetVenueId,
     title,
@@ -13159,7 +13451,7 @@ app.post('/api/tasks', async (req, res) => {
     updatedAt: null,
     checkIns: [],
     createdAt: nowIso,
-  });
+  };
 
   // STAGE 2: transactional commit. The mutator runs against FRESH Firestore
   // data (not in-memory). Sort-order slotting is recomputed inside so
@@ -13177,6 +13469,11 @@ app.post('/api/tasks', async (req, res) => {
         return { doc: freshDoc, result: existing };
       }
 
+      // Bind before any-time normalization: the shift owns the time window.
+      const boundTask = normalizeAnyTimeTask(bindTaskShift(newTask, freshDoc.shifts || []));
+      const newTimeKey = targetTimeMinutes(boundTask.targetTime);
+      const byId = new Map<string, Shift>((freshDoc.shifts || []).map((s: Shift) => [s.id, s]));
+      const siblingMinutes = (t: TaskItem) => targetTimeMinutes(taskWithShiftTimes(t, byId).targetTime);
       // Slot into manual board order by target time (earliest first).
       const siblings = freshTasks
         .filter((t) => t.venueId === targetVenueId)
@@ -13186,7 +13483,7 @@ app.post('/api/tasks', async (req, res) => {
             String(a.createdAt || '').localeCompare(String(b.createdAt || ''))
         );
       let insertAt = siblings.findIndex(
-        (t) => targetTimeMinutes(t.targetTime) > newTimeKey || (targetTimeMinutes(t.targetTime) === newTimeKey && t.createdAt > nowIso)
+        (t) => siblingMinutes(t) > newTimeKey || (siblingMinutes(t) === newTimeKey && t.createdAt > nowIso)
       );
       if (insertAt === -1) insertAt = siblings.length;
 
@@ -13197,7 +13494,7 @@ app.post('/api/tasks', async (req, res) => {
         return t;
       });
 
-      const taskToInsert = { ...newTask, sortOrder: insertAt };
+      const taskToInsert = { ...boundTask, sortOrder: insertAt };
       updatedTasks.push(taskToInsert);
       return { doc: { ...freshDoc, tasks: updatedTasks }, result: taskToInsert };
     },
@@ -13219,7 +13516,7 @@ app.post('/api/tasks', async (req, res) => {
   // Phone push to specifically-assigned mashgichim (not for global 'all' tasks).
   // Item 8t: only explicit assignees of the task's agency who may see it;
   // identity-bound delivery.
-  for (const recipient of taskPushRecipients(created, users, venues, { explicitOnly: true })) {
+  for (const recipient of newTaskPushRecipients(created)) {
     if (createdByEmail && recipient.email.toLowerCase() === createdByEmail.toLowerCase()) continue;
     sendPushToRecipient(
       recipient,
@@ -13291,6 +13588,7 @@ app.put('/api/tasks/:id', async (req, res) => {
   };
 
   const {
+    shiftId,
     currentStatus,
     isCompleted,
     notes,
@@ -13317,6 +13615,7 @@ app.put('/api/tasks/:id', async (req, res) => {
 
   const hasStatusChange = currentStatus !== undefined || isCompleted !== undefined || notes !== undefined;
   const isDefinitionEdit =
+    shiftId !== undefined ||
     title !== undefined ||
     description !== undefined ||
     category !== undefined ||
@@ -13367,7 +13666,7 @@ app.put('/api/tasks/:id', async (req, res) => {
   // someone else edited it concurrently → 409 (not silent overwrite).
   const baseline = { ...existing };
   const definitionFields: Array<[string, any]> = [
-    ['title', title], ['description', description], ['category', category],
+    ['shiftId', shiftId], ['title', title], ['description', description], ['category', category],
     ['inputType', inputType], ['assignedTo', assignedTo], ['priority', priority],
     ['targetTime', targetTime], ['scheduleType', scheduleType],
   ];
@@ -13429,8 +13728,9 @@ app.put('/api/tasks/:id', async (req, res) => {
         : answeredNotDone ? (answeredNow ? new Date().toISOString() : (freshTask.updatedAt ?? null)) : null;
 
       // 6c: normalize the effective merged time, including partial edits.
-      const updated: TaskItem = normalizeAnyTimeTask({
+      const updated: TaskItem = normalizeAnyTimeTask(bindTaskShift({
         ...freshTask,
+        shiftId: shiftId !== undefined ? shiftId : freshTask.shiftId,
         title: title !== undefined ? title : freshTask.title,
         description: description !== undefined ? description : freshTask.description,
         category: category !== undefined ? category : freshTask.category,
@@ -13456,7 +13756,7 @@ app.put('/api/tasks/:id', async (req, res) => {
         updatedByEmail,
         updatedByName,
         updatedAt,
-      });
+      }, freshDoc.shifts || [], shiftId !== undefined));
 
       const newTasks = freshTasks.map((t) => (t.id === id ? updated : t));
       return { doc: { ...freshDoc, tasks: newTasks }, result: updated };
@@ -19975,7 +20275,8 @@ async function accountMergeRoute(req: any, res: any, via: MergeVia) {
       const bAgencyIds = new Set<string>(bRows.map((u: any) => u.agencyId || 'agency-hkc'));
       // M6a: B rows take A's personId + email (the identity writer strips their credential fields).
       const newUsers = fu.map((u: any) => (u && bIds.has(String(u.id)) ? { ...u, personId: A, email: survivorEmail } : u));
-      // M6c: B's email references inside B's agencies become A's.
+      // M6c: emails change, but every B membership row keeps its own agency's id.
+      // No rows are removed here, so shift user-id references must stay intact.
       const rw = rewriteEmailRefs(freshDoc, bAgencyIds, retiredEmail, survivorEmail);
       if (rw.ok !== true) {
         const bad: any = rw;

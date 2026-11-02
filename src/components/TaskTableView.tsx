@@ -1,3 +1,6 @@
+import { shiftDisplayWeekday, shiftAssigneeLabel } from '../lib/shiftTaskDay';
+import type { Shift } from '../types';
+import { shiftLabel, shiftTaskAppliesAt, shiftTaskOverdueAt } from '../lib/shifts';
 import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
 import { ANY_TIME_LABEL } from '../lib/anyTime';
 import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
@@ -27,6 +30,9 @@ import { TaskInstructions } from './TaskInstructions';
 import { TaskAnswerPhoto } from './TaskAnswerPhoto';
 
 interface TaskTableViewProps {
+  shiftsById?: Map<string, Shift>;
+  isKiosk?: boolean;
+  roster?: ReadonlyArray<{ id?: string; name: string }>;
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
   timeZone?: string;
   tasks: Task[];
@@ -52,6 +58,9 @@ const getInitials = (nameOrEmail: string) => {
 };
 
 export const TaskTableView: React.FC<TaskTableViewProps> = ({
+  shiftsById = new Map(),
+  isKiosk = false,
+  roster = [],
   tasks,
   sections,
   currentUser,
@@ -65,11 +74,23 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   timeZone,
 }) => {
   // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
-  const nowMinutes = timeZone ? minutesIn(timeZone) : null;
+  const now = new Date();
+  const nowMinutes = timeZone ? minutesIn(timeZone, now) : null;
   // Overdue only means something on a task that is due today ("All days" lists other days too).
-  const todayYmd = timeZone ? workDateIn(timeZone) : null;
-  const todayWeekday = timeZone ? weekdayIn(timeZone) : null;
-  const dueToday = (t: Task) => todayYmd === null || todayWeekday === null || taskAppliesOn(t, todayYmd, todayWeekday);
+  const todayYmd = timeZone ? workDateIn(timeZone, now) : null;
+  const todayWeekday = timeZone ? weekdayIn(timeZone, now) : null;
+  const dueToday = (t: Task) => {
+    if (todayYmd === null || todayWeekday === null || nowMinutes === null) return true;
+    const shift = t.shiftId ? shiftsById.get(t.shiftId) : undefined;
+    return shift ? shiftTaskAppliesAt(shift, todayYmd, todayWeekday, nowMinutes)
+      : taskAppliesOn(t, todayYmd, todayWeekday);
+  };
+  const isOverdue = (task: Task) => {
+    const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+    if (shift) return !task.isCompleted && todayYmd !== null && todayWeekday !== null && nowMinutes !== null &&
+      shiftTaskOverdueAt(shift, todayYmd, todayWeekday, nowMinutes);
+    return isTaskOverdue(task, nowMinutes) && dueToday(task);
+  };
   const [editingNotes, setEditingNotes] = useState<Record<string, string>>({});
   // ROUND 5 — write baseline per task, captured when the user FOCUSES the
   // notes field (the inline editor's "open" moment). The save carries the
@@ -173,11 +194,14 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
               const canFill = canUserFillTasks(currentUser);
               const canAssign = canUserAssignTasks(currentUser);
               const mine = isDirectlyAssigned(task, currentUser);
+              const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+              const assignee = shift ? shiftAssigneeLabel(shift, canAssign && !isKiosk, todayYmd, todayWeekday, nowMinutes, roster) : null;
 
               return (
                 <React.Fragment key={task.id}>
           {isNoTimeTask(task) && (i === 0 || !isNoTimeTask(section.tasks[i - 1])) && <tr><td colSpan={canUserAssignTasks(currentUser) ? 7 : 6} className="px-4 py-3 text-xs font-semibold text-ink-soft">{ANY_TIME_LABEL}</td></tr>}
           <tr
+                  data-task-id={task.id}
                   key={task.id}
                   style={categoryVars(task.category)}
                   className={`transition-colors group hover:bg-sunken/50 ${
@@ -239,9 +263,9 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                     <div className="space-y-1">
                       <div className="tnum inline-flex items-center gap-1 font-bold text-ink">
                         <Clock className="w-3.5 h-3.5 text-ink-faint shrink-0" />
-                        <span>{formatTaskTimes(task)}</span>
+                        <span>{(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, shiftDisplayWeekday(shiftsById.get(task.shiftId)!, todayYmd, todayWeekday, nowMinutes, sections ? section.key : undefined)) : formatTaskTimes(task))}</span>
                       </div>
-                  {isTaskOverdue(task, nowMinutes) && dueToday(task) && (
+                  {isOverdue(task) && (
                     <span data-overdue className={OVERDUE_CHIP_CLASS} style={{ color: 'var(--bad)', backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}>
                       Overdue
                     </span>
@@ -257,7 +281,9 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 
                   {/* Assigned To with Avatar Monogram */}
                   <td className="py-3.5 px-3 align-top">
-                    {mine ? (
+                    {assignee ? (
+                      <span className="inline-flex items-center gap-1.5 text-xs text-ink-soft"><Users className="w-4 h-4 shrink-0" aria-hidden="true" /><span>{assignee}</span></span>
+                    ) : mine ? (
                       <span
                         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-gold-wash text-gold-ink border border-gold/40 tactile-1"
                         title={task.assignedTo.join(', ')}

@@ -45,12 +45,12 @@ export function screenStorageKey(user: ScreenUser): string {
 }
 
 /** The screen a person lands on when nothing (allowed) is remembered. */
-export function defaultScreen(user: Pick<User, 'role'> | null | undefined): SavedScreen {
+export function defaultScreen(user: Pick<User, 'role' | 'permissions'> | null | undefined): SavedScreen {
   return { view: user?.role === 'admin' ? 'home' : 'board', sheet: null };
 }
 
 /** May this role see this sheet? Mirrors the menus that open them. */
-export function sheetAllowed(user: Pick<User, 'role'> | null | undefined, sheet: unknown): sheet is ScreenSheet {
+export function sheetAllowed(user: Pick<User, 'role' | 'permissions'> | null | undefined, sheet: unknown): sheet is ScreenSheet {
   if (!user) return false;
   if (sheet === 'venues' || sheet === 'agency-events') return user.role === 'admin';
   if (sheet === 'events' || sheet === 'team' || sheet === 'history') return venueTabsFor(user).includes(sheet);
@@ -138,7 +138,7 @@ export function pendingOnAnswer(pending: PendingRestore | null, cached: ScreenUs
 }
 
 /** Pure: a stored value -> the screen to open, or the default when it is not allowed. */
-export function screenFromStored(user: Pick<User, 'role'> | null | undefined, raw: string | null | undefined): SavedScreen {
+export function screenFromStored(user: Pick<User, 'role' | 'permissions'> | null | undefined, raw: string | null | undefined): SavedScreen {
   const fallback = defaultScreen(user);
   if (!user || !raw) return fallback;
   let parsed: unknown;

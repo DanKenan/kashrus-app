@@ -8,7 +8,8 @@
  * note, own check-in, template creator, ingredient verifier, primary admin,
  * venue owner, event assignee, task assignment, announcements, alerts) keeps
  * working for the survivor and nothing points at the retired email. Only the
- * named fields are touched; object keys are never renamed (no email-keyed map
+ * named fields are touched; shift user ids are rewritten through the explicit
+ * source-to-target row id map. Object keys are never renamed (no email-keyed map
  * exists in these collections).
  */
 
@@ -33,7 +34,13 @@ export const MERGE_EMAIL_FIELDS: Readonly<Record<string, readonly string[]>> = {
   approvedIngredients: ['verifiedByEmail'],
   factoryReports: ['mashgiachEmail', 'discrepancies[].reportedByEmail'],
 };
-export const MERGE_REWRITE_COLLECTIONS = Object.keys(MERGE_EMAIL_FIELDS);
+/** User row ids are exact and case-sensitive, unlike email references. */
+export const MERGE_USER_ID_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  shifts: ['userId', 'days[].userId', 'overrides[].userId'],
+};
+export const MERGE_REWRITE_COLLECTIONS = [...new Set([
+  ...Object.keys(MERGE_EMAIL_FIELDS), ...Object.keys(MERGE_USER_ID_FIELDS),
+])];
 
 /**
  * Every other key of the persisted state, and why it is not rewritten:
@@ -77,7 +84,7 @@ export function recordOwnerAgency(collection: string, rec: any, venueAgencies: R
 }
 
 /** Applies one parsed path to v; returns the new value (same reference when nothing changed). */
-function applyPath(v: any, segs: string[], fromKey: string, to: string, box: { n: number }): any {
+function applyPath(v: any, segs: string[], fromKey: string, to: string, box: { n: number }, key: (v: unknown) => string = mergeEmailKey): any {
   if (!segs.length || v === null || typeof v !== 'object') return v;
   const [seg, ...rest] = segs;
   const isList = seg.endsWith('[]');
@@ -88,13 +95,13 @@ function applyPath(v: any, segs: string[], fromKey: string, to: string, box: { n
   if (isList) {
     if (!Array.isArray(cur)) return v;
     if (!rest.length) {
-      if (!cur.some((x: any) => typeof x === 'string' && mergeEmailKey(x) === fromKey)) return v;
+      if (!cur.some((x: any) => typeof x === 'string' && key(x) === fromKey)) return v;
       const seen = new Set<string>();
       next = [];
       for (const x of cur) {
         let y = x;
-        if (typeof x === 'string' && mergeEmailKey(x) === fromKey) { y = to; box.n++; }
-        if (typeof y === 'string' && mergeEmailKey(y) === mergeEmailKey(to)) {
+        if (typeof x === 'string' && key(x) === fromKey) { y = to; box.n++; }
+        if (typeof y === 'string' && key(y) === key(to)) {
           if (seen.has('to')) continue;
           seen.add('to');
         }
@@ -102,15 +109,15 @@ function applyPath(v: any, segs: string[], fromKey: string, to: string, box: { n
       }
     } else {
       let changed = false;
-      next = cur.map((x: any) => { const y = applyPath(x, rest, fromKey, to, box); if (y !== x) changed = true; return y; });
+      next = cur.map((x: any) => { const y = applyPath(x, rest, fromKey, to, box, key); if (y !== x) changed = true; return y; });
       if (!changed) return v;
     }
   } else if (!rest.length) {
-    if (typeof cur !== 'string' || mergeEmailKey(cur) !== fromKey) return v;
+    if (typeof cur !== 'string' || key(cur) !== fromKey) return v;
     next = to;
     box.n++;
   } else {
-    next = applyPath(cur, rest, fromKey, to, box);
+    next = applyPath(cur, rest, fromKey, to, box, key);
     if (next === cur) return v;
   }
   return { ...v, [name]: next };
@@ -132,8 +139,12 @@ export type RewriteResult =
  * limited to records owned by `agencyIds` (recordOwnerAgency). A record whose
  * owner is AMBIGUOUS and that holds fromEmail in a schema field fails the
  * whole rewrite (fail closed); one that does not hold it is left alone.
+ * userIds is only for actually removed rows, mapped to a surviving row in
+ * the same agency. Retained membership row ids must never be redirected. Its named
+ * references use the same ownership checks and immutable path walker, with
+ * exact matching (never email normalization).
  */
-export function rewriteEmailRefs(doc: any, agencyIds: ReadonlySet<string>, fromEmail: string, toEmail: string): RewriteResult {
+export function rewriteEmailRefs(doc: any, agencyIds: ReadonlySet<string>, fromEmail: string, toEmail: string, userIds: ReadonlyMap<string, string> = new Map()): RewriteResult {
   const patch: Record<string, any[]> = {};
   const fromKey = mergeEmailKey(fromEmail);
   const to = mergeEmailKey(toEmail);
@@ -146,18 +157,24 @@ export function rewriteEmailRefs(doc: any, agencyIds: ReadonlySet<string>, fromE
     list.push((typeof v.agencyId === 'string' && v.agencyId) || 'agency-hkc');
     venueAgencies.set(v.id, list);
   }
+  const idKey = (v: unknown) => typeof v === 'string' ? v : '';
   for (const c of MERGE_REWRITE_COLLECTIONS) {
     const list = doc[c];
     if (!Array.isArray(list)) continue;
-    const paths = MERGE_EMAIL_FIELDS[c].map((p) => p.split('.'));
+    const paths = (MERGE_EMAIL_FIELDS[c] || []).map((p) => p.split('.'));
+    const idPaths = (MERGE_USER_ID_FIELDS[c] || []).map((p) => p.split('.'));
     let changed = false;
     const next: any[] = [];
     for (const rec of list) {
       if (!rec || typeof rec !== 'object') { next.push(rec); continue; }
       const owner = recordOwnerAgency(c, rec, venueAgencies);
       if (owner === null) {
-        // Ownership can't be established: fail closed when it holds the retired email.
-        if (recordHoldsEmail(c, rec, fromKey)) return { ok: false, collection: c, recordId: typeof rec.id === 'string' ? rec.id : '' };
+        // Ownership can't be established: fail closed for retired email or user ids.
+        const heldIds = { n: 0 };
+        for (const [fromId] of userIds) {
+          if (fromId) for (const path of idPaths) applyPath(rec, path, fromId, '\u0000', heldIds, idKey);
+        }
+        if (recordHoldsEmail(c, rec, fromKey) || heldIds.n) return { ok: false, collection: c, recordId: typeof rec.id === 'string' ? rec.id : '' };
         next.push(rec);
         continue;
       }
@@ -165,6 +182,10 @@ export function rewriteEmailRefs(doc: any, agencyIds: ReadonlySet<string>, fromE
       const box = { n: 0 };
       let out = rec;
       for (const segs of paths) out = applyPath(out, segs, fromKey, to, box);
+      for (const [fromId, toId] of userIds) {
+        if (!fromId || !toId || fromId === toId) continue;
+        for (const path of idPaths) out = applyPath(out, path, fromId, toId, box, idKey);
+      }
       if (box.n) { changed = true; replaced += box.n; }
       next.push(out);
     }
