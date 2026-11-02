@@ -82,8 +82,11 @@ export async function activateMembership(token: string | null, membershipId: str
       credentials: 'same-origin',
       cache: 'no-store',
       body: JSON.stringify({ membershipId }),
+    }, async (input, init) => {
+      const res = await fetch(input, init);
+      if (!res.ok) await noticeSiteRefusalFor(res, sentKey);
+      return res;
     });
-    if (!res.ok) await noticeSiteRefusalFor(res, sentKey);
     if (res.ok && data && typeof data.token === 'string' && data.token && data.user) {
       return { ok: true, token: data.token, user: data.user };
     }

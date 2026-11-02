@@ -31,10 +31,18 @@ assert.deepEqual(writes, [{ ref: 'tasks/task', data: { ...rebuilt, title: 'Chang
 let signal;
 await assert.rejects(signInRequest('/login', {}, async (_, init) => {
   signal = init.signal;
-  return { clone: () => ({ json: () => new Promise(() => {}) }) };
+  return { json: () => new Promise(() => {}) };
 }, 10), { message: SIGN_IN_TIMEOUT_TEXT });
 assert(signal.aborted);
 const answer = await signInRequest('/login', {}, async () => new Response(JSON.stringify({ code: 'DAILY_LIMIT', error: 'Daily limit' }), { status: 503 }));
 assert.equal(answer.data.error, 'Daily limit');
 assert.equal(answer.res.status, 503);
+const html = await signInRequest('/login', {}, async () => new Response('<html>Bad gateway</html>', {
+  status: 502, headers: { 'Content-Type': 'text/html' },
+}));
+assert.equal(html.res.status, 502);
+assert.deepEqual(html.data, {}, 'HTML error pages must leave generic wording to the caller');
+const empty = await signInRequest('/login', {}, async () => new Response(null, { status: 204 }));
+assert.equal(empty.res.status, 204);
+assert.deepEqual(empty.data, {}, 'empty responses must not throw a JSON parse error');
 console.log('PASS WRITECUT: JSON equality, unchanged writes, exact changed payload, bounded sign-in');

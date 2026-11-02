@@ -1,4 +1,4 @@
-import { signInRequest } from '../lib/signInRequest';
+import { signInRequest, SIGN_IN_TIMEOUT_TEXT } from '../lib/signInRequest';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { KeyRound, RefreshCw, Tablet } from 'lucide-react';
 import type { User } from '../types';
@@ -154,7 +154,7 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
       try {
         ({ res: r, body: d } = await sent);
       } catch (err: any) {
-        if (live) setLine(err?.message || 'Please try again in a moment.');
+        if (live && err?.message === SIGN_IN_TIMEOUT_TEXT) setLine(SIGN_IN_TIMEOUT_TEXT);
         return later(KQR_POLL_MS * 2, first);
       }
       if (!live) return;

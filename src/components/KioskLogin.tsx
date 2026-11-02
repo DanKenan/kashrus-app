@@ -109,7 +109,7 @@ export function KioskLogin({ notice, onNoticeDone, onLoginSuccess, onExitKiosk, 
           body: JSON.stringify({ userId: selected.id, pin }),
           signal,
         });
-        return { r, d: await r.json() };
+        return { r, d: await r.json().catch(() => ({})) };
       });
       if (!r.ok) throw new Error(d.error || 'Wrong code. Try again.');
       if (d.token) setSessionToken(d.token);

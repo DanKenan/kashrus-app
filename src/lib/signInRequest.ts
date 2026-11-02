@@ -30,7 +30,7 @@ export function signInRequest(
 ): Promise<{ res: Response; data: any }> {
   return withSignInTimeout(async (signal) => {
     const res = await fetcher(input, { ...init, signal: init.signal ? AbortSignal.any([init.signal, signal]) : signal });
-    const data = await res.clone().json();
+    const data = await res.json().catch(() => ({}));
     return { res, data };
   }, timeoutMs);
 }
