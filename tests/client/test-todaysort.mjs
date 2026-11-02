@@ -94,7 +94,7 @@ for (const name of ['TaskCardView', 'TaskTableView']) eq(`${name}: overdue chip 
 const srv = read('server.ts');
 // SHIFTS: push and dashboard share taskOverdueDay(), which keeps the TODAYSORT day rule.
 eq('server: overdue day rule skips tasks not scheduled today', /if \(!taskAppliesOn\(task, today, weekdayIn\(tz, now\)\)\) return null;/.test(srv), true);
-eq('server: overdue push uses the day rule', /const today = taskOverdueDay\(task, now\);\s*if \(!today\) continue;/.test(srv), true);
+eq('server: overdue push uses the day rule', /const occurrence = taskOverdueDay\(task, now\);\s*if \(!occurrence\) continue;/.test(srv), true);
 eq('server: dashboard overdue uses the day rule', /venueTasks\.filter\(\(t\) => taskOverdueDay\(t, dashNow\) !== null\)/.test(srv), true);
 eq('Mine tab: own task in another case counts', isMyTask({ assignedTo: ['NOA@hkc.test'] }, { email: 'noa@hkc.test', role: 'mashgiach' }), true);
 eq('Mine tab: All counts for staff', isMyTask({ assignedTo: ['all'] }, { email: 'noa@hkc.test', role: 'mashgiach' }), true);

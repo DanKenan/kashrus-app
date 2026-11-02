@@ -718,7 +718,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                               <span data-kiosk-anytime className="tnum inline-flex items-center gap-1 rounded-full bg-sunken border border-line px-2 text-base text-ink-soft font-medium shrink-0">{ANY_TIME_LABEL}</span>
                             ) : task.targetTime && /\d{1,2}:\d{2}/.test(task.targetTime) && (
                               <span data-kiosk-due className="tnum inline-flex items-center gap-1 rounded-full bg-sunken border border-line px-2 text-base text-ink font-medium shrink-0">
-                                <Clock className="w-4 h-4" aria-hidden /> Due {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, taskWeekday(task)) : formatTaskTimes(task))}
+                                <Clock className="w-4 h-4" aria-hidden /> Due {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, taskWeekday(task), task) : formatTaskTimes(task))}
                               </span>
                             )}
                             <span dir="auto" className={`min-w-0 max-w-full text-base text-ink-soft break-words ${isOpen ? '' : 'line-clamp-2'}`}>
@@ -756,7 +756,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                             </span>
                           )}
                           <span className="tnum inline-flex items-center gap-1">
-                            <Clock className="w-4 h-4" aria-hidden /> {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, taskWeekday(task)) : formatTaskTimes(task))}
+                            <Clock className="w-4 h-4" aria-hidden /> {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, taskWeekday(task), task) : formatTaskTimes(task))}
                           </span>
                           <span>{formatTaskSchedule(task)}</span>
                         </div>

@@ -88,7 +88,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   const isOverdue = (task: Task) => {
     const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
     if (shift) return !task.isCompleted && todayYmd !== null && todayWeekday !== null && nowMinutes !== null &&
-      shiftTaskOverdueAt(shift, todayYmd, todayWeekday, nowMinutes);
+      shiftTaskOverdueAt(shift, todayYmd, todayWeekday, nowMinutes, task);
     return isTaskOverdue(task, nowMinutes) && dueToday(task);
   };
   const [editingNotes, setEditingNotes] = useState<Record<string, string>>({});
@@ -263,7 +263,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                     <div className="space-y-1">
                       <div className="tnum inline-flex items-center gap-1 font-bold text-ink">
                         <Clock className="w-3.5 h-3.5 text-ink-faint shrink-0" />
-                        <span>{(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, shiftDisplayWeekday(shiftsById.get(task.shiftId)!, todayYmd, todayWeekday, nowMinutes, sections ? section.key : undefined)) : formatTaskTimes(task))}</span>
+                        <span>{(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, shiftDisplayWeekday(shiftsById.get(task.shiftId)!, todayYmd, todayWeekday, nowMinutes, sections ? section.key : undefined), task) : formatTaskTimes(task))}</span>
                       </div>
                   {isOverdue(task) && (
                     <span data-overdue className={OVERDUE_CHIP_CLASS} style={{ color: 'var(--bad)', backgroundColor: 'var(--bad-bg)', borderColor: 'var(--bad)' }}>

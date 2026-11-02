@@ -46,6 +46,7 @@ for (const role of ['mashgiach', 'owner', 'manager']) {
 }
 console.log('Shifts UI: task payload, edit mode, list, and permission checks passed');
 // The server's refusal stays in the editor; a successful response supplies local state.
+await panel.find((e) => e.type === 'input' && e.props.maxLength === 40)[0].props.onChange({ target: { value: 'Edited deli' } }); await panel.render();
 globalThis.fetch = async () => new Response(JSON.stringify({ error: 'This venue is outside your scope.' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
 await panel.submit();
 assert.match(panel.text(), /This venue is outside your scope\./);
@@ -60,6 +61,7 @@ console.log('Shifts UI: inline refusal and confirmed-save checks passed');
 
 // Rejected writes keep the edit sheet and expose a retryable inline message.
 await panel.click('Deli day');
+await panel.find((e) => e.type === 'input' && e.props.maxLength === 40)[0].props.onChange({ target: { value: 'Retry deli' } }); await panel.render();
 globalThis.fetch = async () => {
   const response = new Response('{}', { status: 200 });
   response.json = () => { throw new TypeError('Connection interrupted'); };
@@ -130,9 +132,13 @@ const weekPanel = mount(ShiftsPanel, { shifts: [shift], venueId: 'v', timeZone: 
 await weekPanel.render(); await weekPanel.click('Deli day');
 const change = async (aria, value) => {
   const input = weekPanel.find((e) => e.props['aria-label'] === aria && typeof e.props.onChange === 'function')[0];
-  assert.ok(input, aria); input.props.onChange({ target: { value } }); await weekPanel.render();
+  assert.ok(input, aria); input.props.onChange({ target: { value, selectedOptions: [{ value }] } }); await weekPanel.render();
 };
-await change('Mon person', 'd'); await change('Tue person', '__nobody__');
+await weekPanel.click((e) => e.props['aria-label'] === 'Mon people');
+await weekPanel.find((e) => e.props['aria-label'] === 'Mon people choices')[0].props.children[0].props.onClick(); await weekPanel.render();
+await weekPanel.find((e) => e.props['aria-label'] === 'Mon people choices')[0].props.children.flat(Infinity).find((e) => Array.isArray(e?.props?.children) && e.props.children.includes('Dovid R.')).props.onClick(); await weekPanel.render();
+await weekPanel.click((e) => e.props['aria-label'] === 'Tue people');
+await weekPanel.find((e) => e.props['aria-label'] === 'Tue people choices')[0].props.children[0].props.onClick(); await weekPanel.render();
 await weekPanel.click((e) => e.props['aria-label'] === 'Wed hours');
 await change('Wed From', '10:00'); await change('Wed Until', '16:00');
 await weekPanel.submit();
@@ -154,7 +160,7 @@ assert.equal(shiftPersonOn({ ...varying, overrides: [] }, '2026-11-10'), null);
 assert.equal(shiftPersonOn({ ...varying, overrides: [{ date: '2026-11-09', userId: null }] }, '2026-11-09'), null);
 await weekPanel.render({ shifts: [varying] }); await weekPanel.click('Deli day');
 await weekPanel.click('Same as general');
-assert.equal(weekPanel.find((e) => e.props['aria-label'] === 'Mon person')[0].props.value, '');
+assert.equal(weekPanel.find((e) => e.props['aria-label'] === 'Mon people')[0].props['aria-expanded'], false);
 await weekPanel.submit();
 assert.equal(weekPayload.days[1].userId, undefined);
 assert.equal(shiftVariesByDay(varying), true);
