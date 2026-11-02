@@ -33,6 +33,10 @@ import { getRoleLabel } from '../lib/permissions';
 import { type SiteAgency } from '../lib/site';
 import { SiteSignInHeader } from './SiteRefusedScreen';
 
+// Keep apiFetch's pending-auth guard until the real answer arrives, even if
+// the UI timeout fires. Aborting would release that guard before the outcome.
+const signInFetch: typeof fetch = (input, init) => apiFetch(String(input), { ...init, signal: undefined });
+
 interface LoginPageProps {
   onLoginSuccess: (user: UserType) => void;
   darkMode: boolean;
@@ -142,7 +146,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: trimmedEmail, password: trimmedPassword }),
-      }, apiFetch);
+      }, signInFetch);
 
       if (!res.ok) {
         throw new Error(signInErrorText(data, 'Authentication failed. Please check your email and password.'));
@@ -219,7 +223,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim(), newPassword: setupPassword.trim() }),
-      }, apiFetch);
+      }, signInFetch);
       if (!res.ok) throw new Error(data.error || 'Setup failed. Please try again.');
       if (data.token) setSessionToken(data.token);
       if (data.user) onLoginSuccess(data.user);

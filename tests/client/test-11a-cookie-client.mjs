@@ -760,5 +760,30 @@ const last = () => FakeWS.all[FakeWS.all.length - 1];
   ok('X4 no client file builds a Bearer header from storage by hand', offenders.length === 0, offenders.join());
 }
 
+// LoginPage's UI timeout must not abort apiFetch and release main's pending-auth guard.
+{
+  const fs = await import('node:fs');
+  const source = fs.readFileSync(new URL('../../src/components/LoginPage.tsx', import.meta.url), 'utf8');
+  const fetcherSource = source.match(/const signInFetch: typeof fetch = (.+);/);
+  ok('T1 login and setup use the non-aborting fetcher', !!fetcherSource && (source.match(/}, signInFetch\);/g) || []).length === 2);
+  // Execute the screen's actual fetch adapter against the real apiFetch below.
+  const signInFetch = new Function('apiFetch', `return (${fetcherSource[1]});`)(apiFetch);
+  const { signInRequest, SIGN_IN_TIMEOUT_TEXT } = await import('../../src/lib/signInRequest.ts');
+  for (const path of ['/api/auth/login', '/api/auth/setup']) {
+    reset();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const calls = stubFetch({ [`POST ${path}`]: { status: 200, body: {}, gate } });
+    let error;
+    try { await signInRequest(path, { method: 'POST' }, signInFetch, 5); } catch (err) { error = err; }
+    ok(`T2 ${path} UI timeout still stops the spinner`, error?.message === SIGN_IN_TIMEOUT_TEXT);
+    ok(`T3 ${path} underlying request is not aborted`, calls.length === 1 && !calls[0].opts.signal && !calls[0].aborted);
+    ok(`T4 ${path} pending-auth guard survives UI timeout`, api.signInChangePending());
+    release();
+    await tick();
+    ok(`T5 ${path} pending-auth guard ends only after the real answer`, !api.signInChangePending());
+  }
+}
+
 console.log(`${failures ? 'FAIL' : 'PASS'} test-11a-cookie-client: ${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

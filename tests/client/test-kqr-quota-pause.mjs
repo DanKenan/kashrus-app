@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { build } from 'esbuild';
 import { mount } from './lib/mini-render.mjs';
-import { SIGN_IN_TIMEOUT_TEXT } from '../../src/lib/signInRequest.ts';
 
 // Render the real screen; isolate device/session plumbing from this polling test.
 const bundled = await build({
@@ -84,13 +83,19 @@ try {
   await advance(KQR_POLL_MS);
   assert.equal(polls, 2, 'automatic polling resumes after manual retry');
   console.log('PASS: QR quota pauses requests, keeps the message beyond 65 s, and Try again resumes polling');
-  for (const timeout of [false, true]) {
+  for (const hanging of [false, true]) {
     timers.clear(); // Isolate this screen from the previous screen's pending poll.
     let attempts = 0;
-    globalThis.fetch = async (path) => {
+    let pollSignal;
+    let aborted = false;
+    globalThis.fetch = async (path, init = {}) => {
       if (path === '/api/kiosk/device') return new Response('{}');
       if (path === '/api/kiosk/qr/poll' && ++attempts === 1) {
-        if (timeout) return new Promise(() => {});
+        if (hanging) {
+          pollSignal = init.signal;
+          pollSignal?.addEventListener('abort', () => { aborted = true; });
+          return new Promise(() => {});
+        }
         throw new TypeError('Failed to fetch');
       }
       return new Response(JSON.stringify({ state: 'waiting', retryInMs: KQR_POLL_MS }));
@@ -101,20 +106,22 @@ try {
     await advance(KQR_POLL_MS, screen);
     assert.equal(attempts, 1);
     assert.equal(lines().length, 0, 'a network blip must not show an error line');
-    if (timeout) {
-      await advance(25000, screen);
-      assert.equal(lines().length, 1);
-      assert(screen.text().includes(SIGN_IN_TIMEOUT_TEXT));
-    } else {
-      assert(!screen.text().includes('Failed to fetch'));
+    if (hanging) {
+      await advance(65000, screen); // Beyond both the old 25 s abort and the 40 s held answer.
+      assert.equal(aborted, false, 'a pending claim must not be aborted');
+      assert.notEqual(pollSignal?.aborted, true);
+      assert.equal(attempts, 1, 'keep waiting for the tracked claim answer');
+      assert.equal(lines().length, 0, 'a hanging poll must not show a timeout line');
+      continue;
     }
+    assert(!screen.text().includes('Failed to fetch'));
     await advance(KQR_POLL_MS * 2 - 1, screen);
     assert.equal(attempts, 1, 'keep the existing 2x backoff');
     await advance(1, screen);
     assert.equal(attempts, 2, 'polling continues after the failure');
-    if (!timeout) assert.equal(lines().length, 0);
+    assert.equal(lines().length, 0);
   }
-  console.log('PASS: network blips stay silent; only timeouts show a line; both retry with 2x backoff');
+  console.log('PASS: network blips stay silent; hanging claims stay pending without aborts; network errors retry with 2x backoff');
 } finally {
   Object.assign(globalThis, original);
 }
