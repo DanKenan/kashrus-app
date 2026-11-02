@@ -1,3 +1,4 @@
+import { withSignInTimeout } from '../lib/signInRequest';
 import { useState, useEffect, useRef } from 'react';
 import { AlertCircle, Delete, LogIn, QrCode } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
@@ -101,12 +102,15 @@ export function KioskLogin({ notice, onNoticeDone, onLoginSuccess, onExitKiosk, 
         setError(KIOSK_FINISHING_SIGN_IN);
         return;
       }
-      const r = await apiFetch('/api/kiosk/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: selected.id, pin }),
+      const { r, d } = await withSignInTimeout(async (signal) => {
+        const r = await apiFetch('/api/kiosk/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: selected.id, pin }),
+          signal,
+        });
+        return { r, d: await r.json() };
       });
-      const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Wrong code. Try again.');
       if (d.token) setSessionToken(d.token);
       onLoginSuccess(d.user);

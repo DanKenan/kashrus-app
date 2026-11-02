@@ -1,3 +1,4 @@
+import { signInRequest, SIGN_IN_TIMEOUT_TEXT } from './signInRequest';
 // Item 11b-c: Face ID / fingerprint sign-in (passkeys), client side.
 // Server: #138 (routes below). Browser side: @simplewebauthn/browser (B13).
 import {
@@ -197,6 +198,7 @@ async function body(res: Response): Promise<any> { return res.json().catch(() =>
 
 /** A server answer -> plain words. A 5xx (503 = store down) is "try again", never a sign-out. */
 export function errorFromAnswer(status: number, data: any, fallback: PasskeyError): PasskeyError {
+  if (data?.code === 'DAILY_LIMIT' && typeof data.error === 'string') return new PasskeyError('offline', data.error);
   if (status >= 500) return new PasskeyError('offline', PASSKEY_TEXT.offline);
   const code = data && typeof data === 'object' ? data.code : undefined;
   if (code === 'RECENT_AUTH_REQUIRED') return new PasskeyError('needPassword', PASSKEY_TEXT.needPassword);
@@ -220,7 +222,13 @@ const post = (b: unknown): RequestInit => ({ method: 'POST', headers: { 'Content
 const netError = () => new PasskeyError('offline', PASSKEY_TEXT.offline);
 async function call(input: string, init?: RequestInit): Promise<{ res: Response; data: any }> {
   let res: Response;
-  try { res = await apiFetch(input, init); } catch { throw netError(); }
+  try {
+    if (input.startsWith('/api/passkeys/login/')) return await signInRequest(input, init, apiFetch);
+    res = await apiFetch(input, init);
+  } catch (err: any) {
+    if (err?.message === SIGN_IN_TIMEOUT_TEXT) throw new PasskeyError('offline', SIGN_IN_TIMEOUT_TEXT);
+    throw netError();
+  }
   return { res, data: await body(res) };
 }
 

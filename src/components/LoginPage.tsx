@@ -1,3 +1,4 @@
+import { signInRequest } from '../lib/signInRequest';
 import React, { useEffect, useRef, useState } from 'react';
 import { 
   Mail, 
@@ -137,13 +138,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
     try {
       setIsLoading(true);
-      const res = await apiFetch('/api/auth/login', {
+      const { res, data } = await signInRequest('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: trimmedEmail, password: trimmedPassword }),
-      });
-
-      const data = await res.json();
+      }, apiFetch);
 
       if (!res.ok) {
         throw new Error(signInErrorText(data, 'Authentication failed. Please check your email and password.'));
@@ -216,12 +215,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     }
     setIsLoading(true);
     try {
-      const res = await apiFetch('/api/auth/setup', {
+      const { res, data } = await signInRequest('/api/auth/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim(), newPassword: setupPassword.trim() }),
-      });
-      const data = await res.json();
+      }, apiFetch);
       if (!res.ok) throw new Error(data.error || 'Setup failed. Please try again.');
       if (data.token) setSessionToken(data.token);
       if (data.user) onLoginSuccess(data.user);

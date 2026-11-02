@@ -1,3 +1,4 @@
+import { signInRequest } from '../lib/signInRequest';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { KeyRound, RefreshCw, Tablet } from 'lucide-react';
 import type { User } from '../types';
@@ -137,7 +138,7 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
         return later(KQR_POLL_MS, first);
       }
       if (!live || leaving.current) return;
-      const sent = apiFetch(first ? '/api/kiosk/qr/start' : '/api/kiosk/qr/poll', { method: 'POST' }).then(async (res) => ({ res, body: (await res.json().catch(() => ({}))) as any }));
+      const sent = signInRequest(first ? '/api/kiosk/qr/start' : '/api/kiosk/qr/poll', { method: 'POST' }, apiFetch).then(({ res, data }) => ({ res, body: data }));
       // Its answer can sign the tablet in. If it does after this screen is gone, nobody uses that
       // sign-in: end it before anything else may sign in (tracked until then).
       const settled = trackCookieSignInRequest(
@@ -150,11 +151,13 @@ export function KioskQrScreen({ notice, onNoticeDone, onLoginSuccess, onUseCode,
       let d: any;
       try {
         ({ res: r, body: d } = await sent);
-      } catch {
+      } catch (err: any) {
+        if (live) setLine(err?.message || 'Please try again in a moment.');
         return later(KQR_POLL_MS * 2, first);
       }
       if (!live) return;
       if (!r.ok) {
+        if (d.code === 'DAILY_LIMIT') { setLine(d.error); return later(30000, first); }
         if (r.status === 404 && !d.code) { cb.current.onUnavailable(); return; }
         if (d.code === 'KIOSK_UNPAIRED') { cb.current.onUnpaired?.(); return; }
         const retry = Number(r.headers.get('Retry-After'));

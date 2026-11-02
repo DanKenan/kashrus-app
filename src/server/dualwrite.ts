@@ -20,6 +20,26 @@ import { identityProjection, newProjectionProblems, emailKey } from './identity.
  * tx.set()/tx.delete() calls. Never interleave them.
  */
 
+/** Compare JSON-normalized values without depending on Firestore map key order.
+ * Normalization preserves JSON's undefined, array, Date and toJSON semantics.
+ * Only the comparison is canonicalized; write payloads stay untouched.
+ */
+export function sameJsonValue(a: unknown, b: unknown): boolean {
+  const canonical = (value: unknown): string | undefined => {
+    const json = JSON.stringify(value);
+    if (json === undefined) return undefined;
+    const sort = (v: any): any => {
+      if (Array.isArray(v)) return v.map(sort);
+      if (v && typeof v === 'object') {
+        return Object.fromEntries(Object.keys(v).sort().map((key) => [key, sort(v[key])]));
+      }
+      return v;
+    };
+    return JSON.stringify(sort(JSON.parse(json)));
+  };
+  return canonical(a) === canonical(b);
+}
+
 /**
  * Dual-write changed entities. Must be called with the active Firestore
  * transaction (tx) and the firestoreDb instance.
@@ -46,7 +66,7 @@ export async function dualWriteChangedEntities(
 
     for (const [id, entity] of afterMap) {
       const prev = beforeMap.get(id);
-      if (!prev || JSON.stringify(prev) !== JSON.stringify(entity)) {
+      if (!prev || !sameJsonValue(prev, entity)) {
         pendingWrites.push({ collection: collectionName, id, data: entity });
       }
     }
