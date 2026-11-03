@@ -139,6 +139,10 @@ export interface Shift {
 }
 
 export interface Task {
+  /** Present only for task-owned people; absent preserves legacy shift roster assignment. */
+  assignmentMode?: 'task';
+  dayAssignees?: Partial<Record<'0' | '1' | '2' | '3' | '4' | '5' | '6', string[]>>;
+  assigneeSwaps?: { date: string; assignedTo: string[] }[];
   shiftId?: string | null;
   shiftTime?: boolean; // true: target times belong to the task, not the shift window
   id: string;

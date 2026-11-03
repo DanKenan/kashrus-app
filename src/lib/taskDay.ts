@@ -1,3 +1,4 @@
+import { taskAssigneesOn, type TaskPeople } from './taskAssignees';
 import { targetMinutesOf } from './overdue';
 
 interface DayTask {
@@ -30,8 +31,8 @@ export function taskAppliesOn(task: DayTask, ymd: string, weekday: number): bool
  * A task is for the viewer when it is for everyone ('all', any case), names the
  * viewer's email (any case), or names nobody at all (older data).
  */
-export function taskIsForViewer(task: { assignedTo?: string[] }, email: string | null | undefined): boolean {
-  const raw: unknown = task.assignedTo; // older rows may hold one email as a plain string
+export function taskIsForViewer(task: TaskPeople, email: string | null | undefined, occurrenceDay?: string): boolean {
+  const raw: unknown = occurrenceDay ? taskAssigneesOn(task, occurrenceDay) : task.assignedTo; // older rows may hold one email as a plain string
   const list = (Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []).filter((a): a is string => typeof a === 'string' && a.trim() !== '');
   if (list.length === 0) return true;
   const me = (email || '').trim().toLowerCase();
