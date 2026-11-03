@@ -1,4 +1,5 @@
 import React from 'react';
+import { filterChipClass, FilterCheck } from '../lib/filterChip';
 import { CertificationBadge } from './CertificationBadge';
 import { ProgressRing } from './ProgressRing';
 import { zoneCityLabel } from '../lib/workday';
@@ -164,41 +165,38 @@ export const StatsProgressBar: React.FC<StatsProgressBarProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             id="filter-all-btn"
+            aria-pressed={activeFilter === 'all'}
             onClick={() => onSelectFilter('all')}
             className={`max-sm:min-h-11 max-sm:max-w-full max-sm:whitespace-normal pressable inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
-              activeFilter === 'all'
-                ? 'bg-ink text-paper tactile-2'
-                : 'bg-sunken text-ink-soft border border-line hover:border-line-strong'
+              filterChipClass(activeFilter === 'all')
             }`}
           >
-            <ListChecks className="w-3.5 h-3.5" />
+            <FilterCheck on={activeFilter === 'all'} /><ListChecks className="w-3.5 h-3.5" />
             <span className="tnum">All Tasks ({totalTasks})</span>
           </button>
 
           <button
             id="filter-mine-btn"
+            aria-pressed={activeFilter === 'mine'}
             onClick={() => onSelectFilter('mine')}
             className={`max-sm:min-h-11 max-sm:max-w-full max-sm:whitespace-normal pressable inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
-              activeFilter === 'mine'
-                ? 'bg-gradient-to-b from-gold to-gold-deep text-white tactile-2'
-                : 'bg-gold-wash text-gold-ink border border-gold/40 hover:border-gold'
+              filterChipClass(activeFilter === 'mine')
             }`}
             title="Show tasks designated for you"
           >
-            <UserCheck className="w-3.5 h-3.5" />
+            <FilterCheck on={activeFilter === 'mine'} /><UserCheck className="w-3.5 h-3.5" />
             <span className="tnum">Assigned to Me ({myCompleted}/{myTotal})</span>
           </button>
 
           <button
             id="filter-pending-btn"
+            aria-pressed={activeFilter === 'pending'}
             onClick={() => onSelectFilter('pending')}
             className={`max-sm:min-h-11 max-sm:max-w-full max-sm:whitespace-normal pressable inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer ${
-              activeFilter === 'pending'
-                ? 'bg-ink text-paper tactile-2'
-                : 'bg-sunken text-ink-soft border border-line hover:border-line-strong'
+              filterChipClass(activeFilter === 'pending')
             }`}
           >
-            <Clock className="w-3.5 h-3.5" />
+            <FilterCheck on={activeFilter === 'pending'} /><Clock className="w-3.5 h-3.5" />
             <span className="tnum">Pending ({remainingTasks})</span>
           </button>
         </div>

@@ -1,4 +1,5 @@
 import React from 'react';
+import { filterChipClass, FilterCheck } from '../lib/filterChip';
 import {
   Building2,
   CheckCircle2,
@@ -44,8 +45,8 @@ export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
               <h2 className="text-base sm:text-lg font-bold tracking-tight text-[#f5efe4]">
                 {isManager ? 'Restaurant & Venue Manager Audit Portal' : 'Restaurant & Venue Owner Audit Portal'}
               </h2>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-gold/15 text-gold border border-gold/30">
-                <Eye className="w-3 h-3" /> Read-Only Inspector
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-gold/15 text-gold border border-gold/30">
+                <Eye className="w-3 h-3" /> View only
               </span>
             </div>
             <p className="text-xs text-[#cbbfa8] mt-0.5">
@@ -69,13 +70,13 @@ export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-5">
         {/* Card 1: Shift Compliance Score */}
         <button
+          aria-pressed={activeFilter === 'all'}
           onClick={() => onSelectFilter('all')}
           className={`pressable text-left p-4 rounded-2xl border transition-all ${
-            activeFilter === 'all'
-              ? 'bg-white/10 border-gold/50 tactile-2'
-              : 'bg-white/[0.03] hover:bg-white/[0.07] border-[#4a3a24]/60'
+            activeFilter === 'all' ? 'ring-2 ring-gold border-gold' : 'border-line-control'
           }`}
         >
+          {activeFilter === 'all' && <span className={`inline-flex items-center gap-1 px-2 py-1 mb-2 rounded-full text-xs ${filterChipClass(true)}`}><FilterCheck on />Showing</span>}
           <div className="flex items-center justify-between text-xs text-[#a99a7d] mb-1 font-medium">
             <span>Overall Shift Progress</span>
             <span className="tnum font-bold text-[#f5efe4] text-xs">{totalTasks} Total Tasks</span>
@@ -100,13 +101,13 @@ export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
         {/* Card 2: "Who Did What & When" */}
         <button
           id="owner-filter-completed-btn"
+          aria-pressed={activeFilter === 'completed'}
           onClick={() => onSelectFilter('completed')}
           className={`pressable text-left p-4 rounded-2xl border transition-all ${
-            activeFilter === 'completed'
-              ? 'bg-emerald-950/50 border-emerald-500/60 tactile-2'
-              : 'bg-white/[0.03] hover:bg-white/[0.07] border-[#4a3a24]/60'
+            activeFilter === 'completed' ? 'ring-2 ring-gold border-gold' : 'border-line-control'
           }`}
         >
+          {activeFilter === 'completed' && <span className={`inline-flex items-center gap-1 px-2 py-1 mb-2 rounded-full text-xs ${filterChipClass(true)}`}><FilterCheck on />Showing</span>}
           <div className="flex items-center justify-between text-xs text-emerald-400 mb-1 font-medium">
             <span className="flex items-center gap-1.5">
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />
@@ -128,13 +129,13 @@ export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
         {/* Card 3: "What Wasn't Done" */}
         <button
           id="owner-filter-pending-btn"
+          aria-pressed={activeFilter === 'pending'}
           onClick={() => onSelectFilter('pending')}
           className={`pressable text-left p-4 rounded-2xl border transition-all ${
-            activeFilter === 'pending'
-              ? 'bg-gold/10 border-gold/50 tactile-2'
-              : 'bg-white/[0.03] hover:bg-white/[0.07] border-[#4a3a24]/60'
+            activeFilter === 'pending' ? 'ring-2 ring-gold border-gold' : 'border-line-control'
           }`}
         >
+          {activeFilter === 'pending' && <span className={`inline-flex items-center gap-1 px-2 py-1 mb-2 rounded-full text-xs ${filterChipClass(true)}`}><FilterCheck on />Showing</span>}
           <div className="flex items-center justify-between text-xs text-gold mb-1 font-medium">
             <span className="flex items-center gap-1.5">
               <AlertCircle className="w-4 h-4 text-gold" />

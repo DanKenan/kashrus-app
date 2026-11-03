@@ -1,7 +1,10 @@
-import { shiftDisplayWeekday, shiftAssigneeLabel } from '../lib/shiftTaskDay';
+import { whoSeesLabel } from '../lib/whoSees';
+import { WhoSeesTag } from './WhoSeesTag';
+import { shiftDisplayWeekday } from '../lib/shiftTaskDay';
 import type { Shift } from '../types';
 import { shiftLabel, shiftTaskAppliesAt, shiftTaskOverdueAt } from '../lib/shifts';
 import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
+import { seesOnlyOwnTasks } from '../lib/taskDay';
 import { ANY_TIME_LABEL } from '../lib/anyTime';
 import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
 import { minutesIn, workDateIn, weekdayIn } from '../lib/workday';
@@ -9,8 +12,6 @@ import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import {
   Clock,
-  User,
-  Users,
   Check,
   X,
   MessageSquare,
@@ -35,7 +36,7 @@ import { CheckInPhoto } from './CheckInPhoto';
 interface TaskCardViewProps {
   shiftsById?: Map<string, Shift>;
   isKiosk?: boolean;
-  roster?: ReadonlyArray<{ id?: string; name: string }>;
+  roster?: ReadonlyArray<{ id?: string; email?: string; name: string }>;
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
   timeZone?: string;
   tasks: Task[];
@@ -123,15 +124,15 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
         <div className="w-12 h-12 rounded-2xl bg-gold-wash border border-gold/30 text-gold-deep flex items-center justify-center mx-auto mb-3">
           <AlertCircle className="w-6 h-6" />
         </div>
-        <p className="text-sm font-bold text-ink">No tasks match your active criteria</p>
-        <p className="text-xs text-ink-soft mt-1 mb-4">Try clearing filters or register a new kosher assignment for the team.</p>
-        {onOpenTaskModal && (
+        <p className="text-sm font-bold text-ink">{onOpenTaskModal && canUserAssignTasks(currentUser) ? 'Nothing here' : 'Nothing for you right now.'}</p>
+        <p className="text-xs text-ink-soft mt-1 mb-4">{onOpenTaskModal && canUserAssignTasks(currentUser) ? 'If the list looks short, a filter is on.' : 'New tasks show up here.'}</p>
+        {onOpenTaskModal && canUserAssignTasks(currentUser) && (
           <button
             onClick={onOpenTaskModal}
             className="pressable inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 transition cursor-pointer"
           >
             <span className="text-base font-bold leading-none">+</span>
-            <span>Create New Assignment</span>
+            <span>New task</span>
           </button>
         )}
       </div>
@@ -149,8 +150,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
         const canFill = canUserFillTasks(currentUser);
         const canAssign = canUserAssignTasks(currentUser);
         const mine = isDirectlyAssigned(task, currentUser);
-        const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
-        const assignee = shift ? shiftAssigneeLabel(shift, canAssign && !isKiosk, todayYmd, todayWeekday, nowMinutes, roster) : null;
+        const audience = whoSeesLabel(task, { viewer: currentUser, mode: isKiosk ? 'kiosk' : seesOnlyOwnTasks(currentUser, canAssign) ? 'own' : 'editor', shiftsById, roster, todayYmd, todayWeekday, nowMinutes });
         const done = task.isCompleted;
 
         return (
@@ -246,37 +246,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
               {/* Mashgiach Assignment & Schedule Meta */}
               <div className="flex items-center justify-between text-xs text-ink-soft mt-3 pt-2.5 border-t border-line/70">
                 <div className="flex items-center gap-2">
-                  {assignee ? (
-                    <span className="inline-flex items-center gap-1.5 text-xs text-ink-soft"><Users className="w-4 h-4 shrink-0" aria-hidden="true" /><span>{assignee}</span></span>
-                  ) : mine ? (
-                    <div
-                      className="inline-flex items-center gap-1.5 text-[11px] text-gold-ink font-bold bg-gold-wash border border-gold/40 rounded-full pl-1 pr-2.5 py-0.5"
-                      title={task.assignedTo.join(', ')}
-                    >
-                      <div className="w-5 h-5 rounded-full bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center text-[9px] font-black tactile-1">
-                        {getInitials(currentUser?.email || 'MK')}
-                      </div>
-                      <span className="truncate max-w-[180px] sm:max-w-[240px]">
-                        You{task.assignedTo.length > 1 ? ` + ${task.assignedTo.length - 1} other${task.assignedTo.length > 2 ? 's' : ''}` : ''} — designated
-                      </span>
-                    </div>
-                  ) : task.assignedTo.includes('all') ? (
-                    <div className="inline-flex items-center gap-1.5 text-[11px] text-ink-soft font-bold">
-                      <div className="w-5 h-5 rounded-full bg-sunken border border-line text-ink-faint flex items-center justify-center text-[9px] font-black">
-                        <Users className="w-3 h-3" />
-                      </div>
-                      <span>Team Roster (All Mashgichim)</span>
-                    </div>
-                  ) : (
-                    <div className="inline-flex items-center gap-1.5 text-[11px] text-ink-soft font-bold">
-                      <div className="w-5 h-5 rounded-full bg-sunken border border-line text-ink-soft flex items-center justify-center text-[9px] font-black">
-                        {getInitials(task.assignedTo[0] || 'MK')}
-                      </div>
-                      <span className="truncate max-w-[160px] sm:max-w-[220px]">
-                        {task.assignedTo.join(', ')}
-                      </span>
-                    </div>
-                  )}
+                  <WhoSeesTag label={audience} kiosk={isKiosk} />
                 </div>
 
                 <span className="text-[11px] flex items-center gap-1 font-medium text-ink-faint">
@@ -308,13 +278,13 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                           task.isCompleted ? 'text-emerald-900 dark:text-emerald-300' : 'text-gold-ink'
                         }`}>
                           {task.isCompleted
-                            ? `Inspected & Signed: ${task.currentStatus ? (task.currentStatus.charAt(0).toUpperCase() + task.currentStatus.slice(1)) : 'Done'}`
-                            : 'Pending On-Site Inspection'}
+                            ? `Done: ${task.currentStatus ? (task.currentStatus.charAt(0).toUpperCase() + task.currentStatus.slice(1)) : 'Done'}`
+                            : 'Not done yet'}
                         </p>
                         <p className="text-[10px] text-ink-faint">
                           {task.isCompleted
                             ? (task.updatedByName || task.updatedByEmail ? `By ${task.updatedByName || task.updatedByEmail}` : 'Verified completed')
-                            : `Assigned: ${assignee || (task.assignedTo.includes('all') ? 'Team (All)' : task.assignedTo.join(', '))}`}
+                            : `Assigned: ${audience.text}`}
                         </p>
                       </div>
                     </div>
@@ -323,7 +293,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                         ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border-emerald-300/80'
                         : 'bg-gold-wash text-gold-ink border-gold/40'
                     }`}>
-                      {task.isCompleted ? 'VERIFIED' : 'PENDING'}
+                      {task.isCompleted ? 'Done' : 'Not done'}
                     </span>
                   </div>
                 ) : (
@@ -368,9 +338,9 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                               ? 'bg-gradient-to-b from-emerald-600 to-emerald-700 text-white'
                               : 'bg-sunken text-ink-soft hover:text-emerald-800 dark:hover:text-emerald-300 border border-line'
                           }`}
-                          title={task.currentStatus === 'yes' ? 'Tap to undo the sign-off' : 'Mark as Yes (Verified)'}
+                          title={task.currentStatus === 'yes' ? 'Tap to undo the sign-off' : 'Mark Yes'}
                         >
-                          <Check className="w-4 h-4" /> Yes (Verified)
+                          <Check className="w-4 h-4" /> Yes
                         </button>
                         <button
                           id={`mobile-task-no-${task.id}`}
@@ -386,9 +356,9 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                               ? 'bg-gradient-to-b from-rose-600 to-rose-700 text-white'
                               : 'bg-sunken text-ink-soft hover:text-rose-800 dark:hover:text-rose-300 border border-line'
                           }`}
-                          title={task.currentStatus === 'no' ? 'Tap to clear the answer' : 'Mark as No (Pending)'}
+                          title={task.currentStatus === 'no' ? 'Tap to clear the answer' : 'Mark No'}
                         >
-                          <X className="w-4 h-4" /> No (Pending)
+                          <X className="w-4 h-4" /> No
                         </button>
                       </div>
                     )}
@@ -463,7 +433,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                             className="pressable min-h-[44px] px-3 flex items-center justify-center rounded-xl text-xs font-bold border transition cursor-pointer tactile-1 bg-sunken border-line text-ink-soft hover:bg-line/30"
                             title="Log check with photo evidence"
                           >
-                            <Camera className="w-4 h-4" />
+                            <Camera className="w-4 h-4" /><span className="ml-2">Photo</span>
                             <input
                               type="file"
                               accept="image/*"

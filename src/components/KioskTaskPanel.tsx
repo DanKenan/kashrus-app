@@ -1,5 +1,7 @@
+import { whoSeesLabel } from '../lib/whoSees';
+import { WhoSeesTag } from './WhoSeesTag';
 import { DEFAULT_TIME_ZONE, workDateIn, weekdayIn, minutesIn } from '../lib/workday';
-import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday, shiftAssigneeLabel } from '../lib/shiftTaskDay';
+import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday } from '../lib/shiftTaskDay';
 import type { Shift } from '../types';
 import { shiftLabel } from '../lib/shifts';
 import { isNoTimeTask, sortTasksByTime } from '../lib/taskDay';
@@ -31,7 +33,7 @@ import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
 import { formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
-import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
+import { categoryVars } from '../lib/categoryStyle';
 import { isMyTask } from '../lib/myTasks';
 import { TaskAnswerPhoto, compressPhoto } from './TaskAnswerPhoto';
 import { CheckInPhoto } from './CheckInPhoto';
@@ -666,8 +668,6 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                 const phase = saving[task.id];
                 const st = phase ? { word: 'Saving…', tone: 'open' as const } : rowStatus(task);
                 const isOpen = !!open[task.id];
-                const mine = isDirectlyAssigned(task, currentUser);
-                const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
                 const currentNote = notesState[task.id] !== undefined ? notesState[task.id] : task.notes;
                 const control = rowControl(task);
                 const rowId = `kiosk-row-${task.id}`;
@@ -750,11 +750,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                               {cat}
                             </span>
                           ))}
-                          {shift ? <span>{shiftAssigneeLabel(shift, false, null, null, null)}</span> : mine && (
-                            <span className="inline-flex items-center gap-1 text-gold-ink font-semibold">
-                              <Star className="w-4 h-4 fill-current" aria-hidden /> For you
-                            </span>
-                          )}
+                          <WhoSeesTag kiosk label={whoSeesLabel(task, { viewer: currentUser, mode: 'kiosk', shiftsById, roster: [], todayYmd: null, todayWeekday: null, nowMinutes: null })} />
                           <span className="tnum inline-flex items-center gap-1">
                             <Clock className="w-4 h-4" aria-hidden /> {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, taskWeekday(task), task) : formatTaskTimes(task))}
                           </span>
@@ -773,7 +769,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                                 else onUpdateStatus(task.id, 'yes', true);
                               }}
                               aria-pressed={task.currentStatus === 'yes'}
-                              title={task.currentStatus === 'yes' ? 'Click to cancel verification' : 'Mark as Yes (Verified)'}
+                              title={task.currentStatus === 'yes' ? 'Click to cancel verification' : 'Mark Yes'}
                               className={choiceBtn(task.currentStatus === 'yes', 'ok')}
                             >
                               <Check className="w-6 h-6" aria-hidden /> Yes
@@ -784,7 +780,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                                 else onUpdateStatus(task.id, 'no', false);
                               }}
                               aria-pressed={task.currentStatus === 'no'}
-                              title={task.currentStatus === 'no' ? 'Click to cancel choice' : 'Mark as No (Pending)'}
+                              title={task.currentStatus === 'no' ? 'Click to cancel choice' : 'Mark No'}
                               className={choiceBtn(task.currentStatus === 'no', 'bad')}
                             >
                               <X className="w-6 h-6" aria-hidden /> No
