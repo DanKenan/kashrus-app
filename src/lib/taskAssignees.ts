@@ -22,6 +22,10 @@ export function taskAssigneesOn(task: TaskPeople, occurrenceDay: string): string
 }
 /** Visibility includes all recurring people and upcoming one-time replacements. */
 export function taskPotentialAssignees(task: TaskPeople, today: string): string[] {
-  return [...new Set([...assigneeEmails(task.assignedTo), ...Object.values(task.dayAssignees || {}).flatMap(assigneeEmails),
+  const recurring = Array.from({ length: 7 }, (_, w) => {
+    const key = String(w) as keyof NonNullable<TaskPeople['dayAssignees']>;
+    return assigneeEmails(task.dayAssignees?.[key] ?? task.assignedTo);
+  }).flat();
+  return [...new Set([...recurring,
     ...(task.assigneeSwaps || []).filter((s) => s.date >= today).flatMap((s) => assigneeEmails(s.assignedTo))])];
 }

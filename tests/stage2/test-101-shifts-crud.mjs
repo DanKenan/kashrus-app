@@ -98,7 +98,7 @@ export default {
     const savedShifts = loaded.json.shifts.filter((s) => !s.id.startsWith('builtin-'));
     assert.deepEqual(savedShifts.map((s) => s.id), [id]);
     assert.deepEqual(savedShifts[0].overrides, [{ date: today, userIds: [people.assign.id], userNames: [people.assign.name], userId: people.assign.id, userName: people.assign.name }]);
-    assert.deepEqual(loaded.json.shifts.filter((s) => s.id.startsWith('builtin-')).map((s) => s.id).sort(), ['builtin-afternoon', 'builtin-morning', 'builtin-night']);
+    assert.deepEqual(loaded.json.shifts.filter((s) => s.id.startsWith('builtin-')).map((s) => s.id).sort(), ['builtin-afternoon', 'builtin-morning', 'builtin-night'].map((key) => `${key}:${encodeURIComponent(venueId)}`));
     assert.equal(JSON.stringify(loaded.json.shifts).includes('@'), false);
     assert.equal((await api('foreign', 'GET', `/api/tasks?venueId=${venueId}`)).status, 403);
     for (const who of ['mash', 'foreign', 'elsewhere']) {

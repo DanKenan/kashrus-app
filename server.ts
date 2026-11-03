@@ -13418,6 +13418,7 @@ for (const method of ['post', 'put', 'delete'] as const) {
     // Preflight gives authorization errors before validating client data.
     try { shiftEditor(caller, venueId, stateSnapshot()); }
     catch (e: any) { return res.status(e.status || 403).json({ error: e.message }); }
+    // Resolve aliases once; every edit, tombstone and detachment uses this stored id.
     const id = old?.id || `shift-${crypto.randomUUID()}`;
     const now = serverNow().toISOString();
     const prunedTaskIds = new Set<string>();
@@ -13749,18 +13750,30 @@ app.post('/api/tasks', async (req, res) => {
         // Fractional positions preserve the same insertion point without dirtying siblings.
         const left = insertAt > 0 ? (siblings[insertAt - 1].sortOrder ?? 0) : undefined;
         const right = insertAt < siblings.length ? (siblings[insertAt].sortOrder ?? 0) : undefined;
-        const order = left === undefined ? (right === undefined ? 0 : right - 1)
-          : right === undefined ? left + 1 : left + (right - left) / 2;
+        let order = left === undefined ? (right === undefined ? 0 : right - Math.max(1, Math.abs(right) * Number.EPSILON))
+          : right === undefined ? left + Math.max(1, Math.abs(left) * Number.EPSILON) : left / 2 + right / 2;
+        if (!Number.isFinite(order) && (left === undefined || right === undefined)) {
+          order = left === undefined ? -Number.MAX_VALUE : Number.MAX_VALUE;
+        }
         if (!Number.isFinite(order) || (left !== undefined && order <= left) || (right !== undefined && order >= right)) {
-          throw new OperationConflictError('There is no room at this position. Choose another task order.', 409);
+          // Legacy equal positions or exhausted floating-point gaps: retain today's
+          // renumbering fallback. Ordering must never prevent task creation.
+          const positions = new Map(siblings.map((s, index) => [s.id, index < insertAt ? index : index + 1]));
+          working = working.map((t) => positions.has(t.id) && t.sortOrder !== positions.get(t.id)
+            ? { ...t, sortOrder: positions.get(t.id)! } : t);
+          order = insertAt;
         }
         const taskToInsert = { ...boundTask, sortOrder: order };
         working = [...working, taskToInsert];
         created.push(taskToInsert);
       }
-      return { doc: { ...freshDoc, tasks: working }, result: batch === undefined ? created[0] : { tasks: created } };
+      const byCreatedId = new Map(working.map((task) => [task.id, task]));
+      const finalCreated = created.map((task) => byCreatedId.get(task.id)!);
+      return { doc: { ...freshDoc, tasks: working }, result: batch === undefined ? finalCreated[0] : { tasks: finalCreated } };
 
     },
+    // commitOrRespond carries the request operationId, scoped key and payload
+    // hash into commitState's durable idempotencyRecords (including batches).
     { label: 'create-task' }
   );
   if (!committed) return; // error response already sent

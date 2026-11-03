@@ -41,7 +41,7 @@ export function resolveTaskShift(task: { shiftId?: unknown; venueId?: string; ag
   const stored = records.find((s) => matches(s.id) && s.venueId === task.venueId
     && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
   if (stored) return 'deleted' in stored && stored.deleted ? undefined : stored as Shift;
-  return venueShifts([], task.venueId, task.agencyId).find((s) => matches(s.id));
+  return venueShifts(records, task.venueId, task.agencyId).find((s) => matches(s.id));
 }
 
 function validHours(shift: { startMinutes?: number; endMinutes?: number } | null | undefined): boolean {

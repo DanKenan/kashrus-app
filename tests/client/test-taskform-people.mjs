@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { taskAssigneesOn, taskOwnsPeople } from '../../src/lib/taskAssignees.ts';
-import { venueShifts, shiftOccurrenceDay, tasksVisibleOnShift } from '../../src/lib/shifts.ts';
+import { taskAssigneesOn, taskOwnsPeople, taskPotentialAssignees } from '../../src/lib/taskAssignees.ts';
+import { venueShifts, resolveTaskShift, shiftOccurrenceDay, tasksVisibleOnShift } from '../../src/lib/shifts.ts';
 import { isMyTask } from '../../src/lib/myTasks.ts';
 import { taskIsForViewer } from '../../src/lib/taskDay.ts';
 const task = { assignedTo: ['BASE@test.local'], dayAssignees: { '5': ['friday@test.local'] }, assigneeSwaps: [{ date: '2026-11-06', assignedTo: ['swap@test.local'] }] };
@@ -30,3 +30,14 @@ assert.deepEqual(tasksVisibleOnShift([team], [dayShift], viewer, '2026-11-06', 5
 assert.deepEqual(tasksVisibleOnShift([{ ...team, targetTimeMinutes: 600 }], [dayShift], viewer, '2026-11-06', 5, 600).length, 1);
 assert.deepEqual(tasksVisibleOnShift([{ ...team, assignedTo: [viewer.email] }], [dayShift], viewer, '2026-11-06', 5, 600).length, 1);
 assert.deepEqual(tasksVisibleOnShift([team], [dayShift], { ...viewer, id: 'off-roster' }, '2026-11-06', 5, 600), []);
+
+const allDays = Object.fromEntries(Array.from({ length: 7 }, (_, w) => [String(w), ['daily@test.local']]));
+const covered = { assignedTo: ['base@test.local'], dayAssignees: allDays, assigneeSwaps: [{ date: '2026-11-08', assignedTo: ['swap@test.local'] }] };
+assert.deepEqual(taskPotentialAssignees(covered, '2026-11-07').sort(), ['daily@test.local', 'swap@test.local']);
+const { '0': _day, ...sixDays } = allDays;
+assert.ok(taskPotentialAssignees({ ...covered, dayAssignees: sixDays }, '2026-11-07').includes('base@test.local'));
+assert.deepEqual(taskPotentialAssignees({ assignedTo: ['base@test.local'], dayAssignees: Object.fromEntries(Array.from({ length: 7 }, (_, w) => [String(w), []])) }, '2026-11-07'), []);
+const customNight = { ...night, id: 'custom-night', name: 'Night' };
+assert.equal(resolveTaskShift({ shiftId: 'builtin-night', venueId: 'v' }, [customNight]), undefined);
+assert.equal(resolveTaskShift({ shiftId: night.id, venueId: 'v' }, [customNight]), undefined);
+assert.equal(resolveTaskShift({ shiftId: night.id, venueId: 'v' }, [{ id: night.id, venueId: 'v', deleted: true }]), undefined);
