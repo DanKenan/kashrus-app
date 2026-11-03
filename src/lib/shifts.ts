@@ -1,9 +1,10 @@
 import { taskAssigneesOn, taskOwnsPeople, type TaskPeople } from './taskAssignees.ts';
 import type { Shift, ShiftDay } from '../types.ts';
 import { isTaskOverdue, targetMinutesOf } from './overdue.ts';
-import { addDays, isWorkDate } from './workday.ts';
+import { addDays, isWorkDate, DEFAULT_TIME_ZONE, workDateIn, minutesIn } from './workday.ts';
 
 type ShiftTask = TaskPeople & {
+  createdAt?: string;
   shiftTime?: boolean;
   shiftId?: string | null; venueId?: string; assignedTo?: unknown;
   scheduleType?: 'recurring' | 'specific_dates'; specificDates?: string[];
@@ -183,7 +184,27 @@ export function shiftPeopleOccurrenceDay(shift: Shift, ymd: string, weekday: num
     || shiftOccurrenceDay(shift, ymd, weekday, nowMinutes) || ymd;
 }
 
-export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task: ShiftTask): string | null {
+/** A task cannot inherit a deadline that passed before it existed. No I/O.
+ * deadlineMinutes is relative to the occurrence START date (may exceed 1440).
+ * Missing/invalid legacy creation dates preserve the existing overdue rule.
+ */
+export function shiftDeadlineExisted(task: { createdAt?: string } | undefined, occurrenceDay: string, deadlineMinutes: number, timeZone = DEFAULT_TIME_ZONE): boolean {
+  const created = Date.parse(task?.createdAt || '');
+  if (!Number.isFinite(created) || !Number.isFinite(deadlineMinutes)) return true;
+  const wallDeadline = Date.parse(`${occurrenceDay}T00:00:00Z`) + deadlineMinutes * 60_000;
+  const localClock = (at: number) => Date.parse(`${workDateIn(timeZone, at)}T00:00:00Z`) + minutesIn(timeZone, at) * 60_000;
+  // Nearby offsets cover either side of a DST transition. For repeated clock
+  // times use the first deadline; a skipped clock time rolls forward.
+  const candidates = [...new Set([-1, 0, 1].map((day) => {
+    const sample = wallDeadline + day * 86_400_000;
+    return wallDeadline - (localClock(sample) - sample);
+  }))];
+  const exact = candidates.filter((at) => localClock(at) === wallDeadline);
+  const deadline = exact.length ? Math.min(...exact) : Math.max(...candidates);
+  return created <= deadline;
+}
+
+export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task: ShiftTask, timeZone = DEFAULT_TIME_ZONE): string | null {
   if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return null;
   const occurrence = previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)
     || shiftOccurrenceDay(shift, ymd, weekday, nowMinutes);
@@ -191,16 +212,20 @@ export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: numbe
   const startWeekday = weekdayOf(occurrence);
   const deadline = shiftTimeOffset(shift, targetMinutesOf(task), startWeekday);
   const elapsed = nowMinutes + (occurrence !== ymd ? 1440 : 0);
-  return isTaskOverdue({ ...task, targetTimeMinutes: deadline }, elapsed) ? occurrence : null;
+  return isTaskOverdue({ ...task, targetTimeMinutes: deadline }, elapsed)
+    && shiftDeadlineExisted(task, occurrence, deadline, timeZone) ? occurrence : null;
 }
 
-export function shiftTaskOverdueAt(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task?: ShiftTask): boolean {
-  if (task?.shiftTime) return shiftOwnTimeOverdueDay(shift, ymd, weekday, nowMinutes, task) !== null;
+export function shiftTaskOverdueAt(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task?: ShiftTask, timeZone = DEFAULT_TIME_ZONE): boolean {
+  if (task?.shiftTime) return shiftOwnTimeOverdueDay(shift, ymd, weekday, nowMinutes, task, timeZone) !== null;
   if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return false;
   const previous = shiftHoursOn(shift, (weekday + 6) % 7);
   const hours = shiftHoursOn(shift, weekday);
-  if (nowMinutes > previous.endMinutes && previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)) return true;
-  return hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, ymd, weekday) && nowMinutes > hours.endMinutes;
+  if (nowMinutes > previous.endMinutes && previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)) {
+    return shiftDeadlineExisted(task, addDays(ymd, -1), previous.endMinutes + 1440, timeZone);
+  }
+  return hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, ymd, weekday) && nowMinutes > hours.endMinutes
+    && shiftDeadlineExisted(task, ymd, hours.endMinutes, timeZone);
 }
 
 export function activeShiftsForUserAt(shifts: Shift[], userId: string, ymd: string, weekday: number, nowMinutes: number): Shift[] {

@@ -5926,8 +5926,8 @@ function taskOverdueDay(task: TaskItem, now: Date): string | null {
   const shift = resolveTaskShift(task, shifts);
   if (shift) {
     const weekday = new Date(`${today}T12:00:00Z`).getUTCDay();
-    if (task.shiftTime) return shiftOwnTimeOverdueDay(shift, today, weekday, minutes, task);
-    if (!shiftTaskOverdueAt(shift, today, weekday, minutes, task)) return null;
+    if (task.shiftTime) return shiftOwnTimeOverdueDay(shift, today, weekday, minutes, task, tz);
+    if (!shiftTaskOverdueAt(shift, today, weekday, minutes, task, tz)) return null;
     // An overnight deadline belongs to yesterday even after its active window.
     const hours = shiftHoursOn(shift, weekday);
     if (hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, today, weekday) && minutes > hours.endMinutes) return today;
