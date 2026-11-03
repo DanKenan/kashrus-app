@@ -1,6 +1,6 @@
 import { assigneeEmails, taskAssigneesOn, taskPotentialAssignees, taskOwnsPeople, type TaskPeople } from './src/lib/taskAssignees.ts';
 import type { Shift } from './src/types.ts';
-import { venueShifts, resolveTaskShift, isBuiltinShiftId, normalizeShifts, shiftDayOf, shiftHoursOn, shiftOccurrenceDay, shiftPeopleOn, shiftUserIds, shiftRunsOn, shiftWeekdays, shiftTaskOverdueAt, shiftOwnTimeOverdueDay, taskWithShiftTimes, shiftEditableFields } from './src/lib/shifts.ts';
+import { venueShifts, resolveTaskShift, isBuiltinShiftId, builtinShiftVenue, shiftPeopleOccurrenceDay, normalizeShifts, shiftDayOf, shiftHoursOn, shiftOccurrenceDay, shiftPeopleOn, shiftUserIds, shiftRunsOn, shiftWeekdays, shiftTaskOverdueAt, shiftOwnTimeOverdueDay, taskWithShiftTimes, shiftEditableFields } from './src/lib/shifts.ts';
 import { logoutAckSetCookie } from './src/server/logout-marker.ts';
 import express from 'express';
 import http from 'http';
@@ -3508,7 +3508,8 @@ function recipientForMeta(meta: { userId: string; agencyId: string; kiosk?: bool
  */
 function canSeeTaskServer(
   task: TaskPeople & { isPrivate?: boolean; venueId?: string; shiftId?: string | null; agencyId?: string },
-  recipient: UserProfile | undefined
+  recipient: UserProfile | undefined,
+  occurrenceDay?: string
 ): boolean {
   if (!recipient) return false;
   if (recipient.role === 'admin') return true;
@@ -3517,12 +3518,7 @@ function canSeeTaskServer(
   if (recipient.role === 'coordinator') return true;
   const email = recipient.email.toLowerCase();
   if (!taskOwnsPeople(task)) return ((task.assignedTo || []) as string[]).some((a) => a.toLowerCase() === email);
-  const venue = venues.find((v) => v.id === task.venueId);
-  const now = serverNow(), tz = venueTimeZoneIn(venue, agencies);
-  const today = workDateIn(tz, now);
-  const shift = resolveTaskShift(task, shifts);
-  const occurrence = shift && shiftOccurrenceDay(shift, today, weekdayIn(tz, now), minutesIn(tz, now));
-  return taskPotentialAssignees(task, occurrence || today).includes(email);
+  return taskPotentialAssignees(task, occurrenceDay || taskPeopleCutoff(task, stateSnapshot())).includes(email);
 }
 
 /** Tasks of an agency visible to a specific recipient (private-task rule). */
@@ -5873,7 +5869,7 @@ const overdueNotified = new Map<string, number>();
  * Unknown / other-agency / invisible emails are silently omitted; the task's
  * stored assignedTo is never rewritten. De-duplicated by user id.
  */
-function taskPushRecipients(task: any, usersList: any[], venuesList: any[], opts: { explicitOnly?: boolean } = {}): any[] {
+function taskPushRecipients(task: any, usersList: any[], venuesList: any[], opts: { explicitOnly?: boolean; occurrenceDay?: string } = {}): any[] {
   if (!task) return [];
   const venue = (venuesList || []).find((v: any) => v && v.id === task.venueId);
   const taskAgency = task.agencyId || venue?.agencyId || 'agency-hkc';
@@ -5888,7 +5884,7 @@ function taskPushRecipients(task: any, usersList: any[], venuesList: any[], opts
     if (!raw || !raw.id || typeof raw.email !== 'string' || seen.has(raw.id)) continue;
     const u = normalizeStoredUser(raw);
     if ((u.agencyId || 'agency-hkc') !== taskAgency) continue;
-    if (!canSeeTaskServer(task, u as any)) continue;
+    if (!canSeeTaskServer(task, u as any, opts.occurrenceDay)) continue;
     const named = explicit.has(raw.email.trim().toLowerCase());
     const inAll = toAll && personAtVenue(raw, task.venueId);
     if (!named && !inAll) continue;
@@ -5900,7 +5896,7 @@ function taskPushRecipients(task: any, usersList: any[], venuesList: any[], opts
 
 function newTaskPushRecipients(task: TaskItem): any[] {
   if (taskOwnsPeople(task)) {
-    const today = workDateIn(venueTimeZoneIn(venues.find((v) => v.id === task.venueId), agencies), serverNow());
+    const today = taskPeopleCutoff(task, stateSnapshot());
     return taskPushRecipients({ ...task, assignedTo: taskPotentialAssignees(task, today) }, users, venues, { explicitOnly: true });
   }
   if (!task.shiftId) return taskPushRecipients(task, users, venues, { explicitOnly: true });
@@ -5915,10 +5911,10 @@ function newTaskPushRecipients(task: TaskItem): any[] {
   return shiftTaskPushRecipients(task, shift, occurrence);
 }
 function shiftTaskPushRecipients(task: TaskItem, shift: Shift, occurrence: string): any[] {
-  if (taskOwnsPeople(task)) return taskPushRecipients({ ...task, assignedTo: taskAssigneesOn(task, occurrence) }, users, venues);
+  if (taskOwnsPeople(task)) return taskPushRecipients({ ...task, assignedTo: taskAssigneesOn(task, occurrence) }, users, venues, { occurrenceDay: occurrence });
   const ids = new Set(shiftPeopleOn(shift, occurrence));
   const people = users.filter((u) => ids.has(u.id) && (u.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
-  return taskPushRecipients({ ...task, assignedTo: people.map((p) => p.email) }, people, venues, { explicitOnly: true });
+  return taskPushRecipients({ ...task, assignedTo: people.map((p) => p.email) }, people, venues, { explicitOnly: true, occurrenceDay: occurrence });
 }
 
 // Return the START date of the overdue occurrence, including overnight ends.
@@ -5978,7 +5974,7 @@ function checkOverdueTasks(now: Date = serverNow()): string[] {
     const shift = resolveTaskShift(task, shifts);
     const recipients = shift
       ? shiftTaskPushRecipients(task, shift, occurrence)
-      : taskPushRecipients({ ...task, assignedTo: taskAssigneesOn(task, occurrence) }, users, venues);
+      : taskPushRecipients(taskOwnsPeople(task) ? { ...task, assignedTo: taskAssigneesOn(task, occurrence) } : task, users, venues, { occurrenceDay: occurrence });
     for (const recipient of recipients) {
       sendPushToRecipient(
         recipient,
@@ -13283,14 +13279,22 @@ function taskShift(id: unknown, venueId: string, agencyId: string, list: Shift[]
   if (!shift) throw new OperationConflictError('Shift must belong to the task venue.', 400);
   return shift;
 }
+/** Earliest live assignment date, including an overnight occurrence's overdue tail. */
+function taskPeopleCutoff(task: { venueId?: string; agencyId?: string; shiftId?: string | null }, doc: any): string {
+  const now = serverNow();
+  const venue = (doc.venues || []).find((v: any) => v.id === task.venueId);
+  const tz = venueTimeZoneIn(venue, doc.agencies || []), today = workDateIn(tz, now);
+  const shift = resolveTaskShift(task, doc.shifts || []);
+  return shift ? shiftPeopleOccurrenceDay(shift, today, weekdayIn(tz, now), minutesIn(tz, now)) : today;
+}
+
 function pruneChangedTaskSwaps(before: any, after: any): void {
   const previous = new Map<string, TaskItem>((before.tasks || []).map((t: TaskItem) => [t.id, t]));
   for (const task of after.tasks || []) {
     // Pruning piggybacks ONLY on a real task write (including check-ins/reset).
     // Never dirty a task merely because another entity was saved.
     if (!task.assigneeSwaps?.length || sameJsonValue(task, previous.get(task.id))) continue;
-    const venue = (after.venues || []).find((v: any) => v.id === task.venueId);
-    const today = workDateIn(venueTimeZoneIn(venue, after.agencies || []), serverNow());
+    const today = taskPeopleCutoff(task, after);
     task.assigneeSwaps = task.assigneeSwaps.filter((swap: { date: string }) => swap.date >= today);
   }
 }
@@ -13298,8 +13302,7 @@ function pruneChangedTaskSwaps(before: any, after: any): void {
 /** Validate against the commit's already loaded state; no Firestore reads. */
 function validatedTaskPeople<T extends TaskItem>(task: T, input: any, doc: any): T {
   const bad = (message: string): never => { throw new OperationConflictError(message, 400); };
-  const venue = (doc.venues || []).find((v: any) => v.id === task.venueId);
-  const today = workDateIn(venueTimeZoneIn(venue, doc.agencies || []), serverNow());
+  const today = taskPeopleCutoff(task, doc);
   const people = (value: any): string[] => {
     if (!Array.isArray(value) || value.length > 100 || value.some((a) => typeof a !== 'string' || !a.trim())) bad('Assignees must be a list of venue people or all.');
     const emails = assigneeEmails(value);
@@ -13396,7 +13399,7 @@ function bindTaskShift<T extends TaskItem>(task: T, list: Shift[], strict = true
     task = ownShiftTime(task, input, previous) as T;
   }
   // Persist a useful fallback too; live reads always use the current shift.
-  return { ...taskWithShiftTimes(task, new Map([[shift.id, shift]])), assignedTo: taskOwnsPeople(task) ? task.assignedTo : ['all'], scheduleType: shift.oneTimeDate ? 'specific_dates' : 'recurring', specificDates: shift.oneTimeDate ? [shift.oneTimeDate] : [] };
+  return { ...taskWithShiftTimes({ ...task, shiftId: shift.id }, new Map([[shift.id, shift]])), assignedTo: taskOwnsPeople(task) ? task.assignedTo : ['all'], scheduleType: shift.oneTimeDate ? 'specific_dates' : 'recurring', specificDates: shift.oneTimeDate ? [shift.oneTimeDate] : [] };
 }
 
 for (const method of ['post', 'put', 'delete'] as const) {
@@ -13406,7 +13409,7 @@ for (const method of ['post', 'put', 'delete'] as const) {
     if ((req as any).kiosk) return res.status(403).json({ error: 'This kiosk session can only clock in and out.' });
     const agencyId = caller.agencyId || 'agency-hkc';
     const requestedId = (req.params as { id?: string }).id;
-    const builtinVenue = req.body?.venueId || req.query.venueId;
+    const builtinVenue = req.body?.venueId || req.query.venueId || builtinShiftVenue(requestedId);
     const old = method === 'post' ? undefined : isBuiltinShiftId(requestedId)
       ? resolveTaskShift({ shiftId: requestedId, venueId: builtinVenue, agencyId }, shifts)
       : shifts.find((s) => s.id === requestedId);
@@ -13743,16 +13746,16 @@ app.post('/api/tasks', async (req, res) => {
         );
         if (insertAt === -1) insertAt = siblings.length;
 
-        const updatedTasks = working.map((t) => {
-          if (t.venueId !== targetVenueId) return t;
-          const idx = siblings.findIndex((s) => s.id === t.id);
-          if (idx >= insertAt) return { ...t, sortOrder: (t.sortOrder ?? idx) + 1 };
-          return t;
-        });
-
-        const taskToInsert = { ...boundTask, sortOrder: insertAt };
-        updatedTasks.push(taskToInsert);
-        working = updatedTasks;
+        // Fractional positions preserve the same insertion point without dirtying siblings.
+        const left = insertAt > 0 ? (siblings[insertAt - 1].sortOrder ?? 0) : undefined;
+        const right = insertAt < siblings.length ? (siblings[insertAt].sortOrder ?? 0) : undefined;
+        const order = left === undefined ? (right === undefined ? 0 : right - 1)
+          : right === undefined ? left + 1 : left + (right - left) / 2;
+        if (!Number.isFinite(order) || (left !== undefined && order <= left) || (right !== undefined && order >= right)) {
+          throw new OperationConflictError('There is no room at this position. Choose another task order.', 409);
+        }
+        const taskToInsert = { ...boundTask, sortOrder: order };
+        working = [...working, taskToInsert];
         created.push(taskToInsert);
       }
       return { doc: { ...freshDoc, tasks: working }, result: batch === undefined ? created[0] : { tasks: created } };
@@ -13962,11 +13965,21 @@ app.put('/api/tasks/:id', async (req, res) => {
         return { conflict: 'This task changed. Please refresh and try again.' };
       }
 
+      const assignmentUnaware = taskOwnsPeople(freshTask)
+        && !['assignmentMode', 'dayAssignees', 'assigneeSwaps'].some((key) => req.body[key] !== undefined);
+      if (assignmentUnaware && assignedTo !== undefined
+          && !sameJsonValue(assigneeEmails(assignedTo), assigneeEmails(freshTask.assignedTo))
+          && !(freshTask.shiftId && sameJsonValue(assigneeEmails(assignedTo), ['all']))) {
+        throw new OperationConflictError('Update the app to change who does this task', 409);
+      }
+      const peopleInput = assignmentUnaware ? { ...req.body, assignedTo: undefined, isPrivate: undefined } : req.body;
+
       // Semantic conflict check for definition edits: if the caller is
       // changing a field that someone else already changed, refuse rather
       // than silently overwriting their edit.
       if (isDefinitionEdit) {
         for (const [field, newValue] of definitionFields) {
+          if (assignmentUnaware && field === 'assignedTo') continue;
           if (newValue !== undefined && JSON.stringify((freshTask as any)[field]) !== JSON.stringify((baseline as any)[field])) {
             return { conflict: `Conflict: "${field}" was changed by someone else. Please refresh and try again.` };
           }
@@ -14008,12 +14021,12 @@ app.put('/api/tasks/:id', async (req, res) => {
         description: description !== undefined ? description : freshTask.description,
         category: category !== undefined ? category : freshTask.category,
         categories: categories !== undefined ? categories : freshTask.categories,
-        isPrivate: isPrivate !== undefined ? isPrivate === true : freshTask.isPrivate,
+        isPrivate: !assignmentUnaware && isPrivate !== undefined ? isPrivate === true : freshTask.isPrivate,
         sortOrder: sortOrder !== undefined ? Number(sortOrder) : freshTask.sortOrder,
         inputType: inputType !== undefined ? inputType : freshTask.inputType,
         customStatusOptions: customStatusOptions !== undefined ? customStatusOptions : freshTask.customStatusOptions,
         completedStatusValues: completedStatusValues !== undefined ? completedStatusValues : freshTask.completedStatusValues,
-        assignedTo: assignedTo !== undefined ? assignedTo : freshTask.assignedTo,
+        assignedTo: !assignmentUnaware && assignedTo !== undefined ? assignedTo : freshTask.assignedTo,
         scheduleType: scheduleType !== undefined ? scheduleType : freshTask.scheduleType,
         daysOfWeek: daysOfWeek !== undefined ? daysOfWeek : freshTask.daysOfWeek,
         specificDates: specificDates !== undefined ? specificDates : freshTask.specificDates,
@@ -14029,7 +14042,7 @@ app.put('/api/tasks/:id', async (req, res) => {
         updatedByEmail,
         updatedByName,
         updatedAt,
-      }, req.body, freshDoc), freshDoc.shifts || [], shiftId !== undefined, req.body, freshTask));
+      }, peopleInput, freshDoc), freshDoc.shifts || [], shiftId !== undefined, req.body, freshTask));
 
       const prunedFresh = validatedTaskPeople(freshTask, {}, freshDoc);
       if (sameJsonValue(updated, prunedFresh)) return { doc: freshDoc, result: freshTask };
@@ -14047,7 +14060,7 @@ app.put('/api/tasks/:id', async (req, res) => {
   // hears it like a new task (people already on it, the editor, and an
   // 'all' task get nothing new). Same recipient rule as task create.
   if ((assignedTo !== undefined || req.body.dayAssignees !== undefined || req.body.assigneeSwaps !== undefined || req.body.assignmentMode !== undefined) && committed.result !== baselineFresh.task) {
-    const venueToday = workDateIn(venueTimeZoneIn(venues.find((v) => v.id === updated.venueId), agencies), serverNow());
+    const venueToday = taskPeopleCutoff(updated, stateSnapshot());
     const named = (t: any) => new Set(taskPotentialAssignees(t, venueToday).filter((a) => a !== 'all'));
     const before = named(baselineFresh.task);
     const after = named(updated);
@@ -14472,8 +14485,8 @@ function answerPhotoMayWriteFresh(
   if (!rule.privateRuleOnPhones && (req as any).kiosk !== true) return true;
   if (!freshTask.isPrivate || actor.role === 'coordinator') return true;
   const email = String(actor.email || '').toLowerCase();
-  const venue = freshVenues.find((v: any) => v.id === freshTask.venueId);
-  const today = workDateIn(venueTimeZoneIn(venue, freshDoc.agencies || []), serverNow());
+  if (!taskOwnsPeople(freshTask)) return email.length > 0 && (freshTask.assignedTo || []).some((a: any) => String(a).toLowerCase() === email);
+  const today = taskPeopleCutoff(freshTask, freshDoc);
   return email.length > 0 && taskPotentialAssignees(freshTask, today).includes(email);
 }
 

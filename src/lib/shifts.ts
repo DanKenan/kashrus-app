@@ -13,26 +13,35 @@ type ShiftTask = TaskPeople & {
 
 /** Built-ins are code defaults. Only a venue edit or tombstone is persisted. */
 export type ShiftRecord = Shift | { id: string; venueId: string; agencyId?: string; deleted: true };
+export function builtinShiftVenue(id: unknown): string | undefined {
+  if (typeof id !== 'string' || !/^builtin-(morning|afternoon|night):/.test(id)) return undefined;
+  try { return decodeURIComponent(id.slice(id.indexOf(':') + 1)) || undefined; } catch { return undefined; }
+}
 export function isBuiltinShiftId(id: unknown): boolean {
-  return ['builtin-morning', 'builtin-afternoon', 'builtin-night'].includes(id as string);
+  return typeof id === 'string' && (/^builtin-(morning|afternoon|night)$/.test(id) || builtinShiftVenue(id) !== undefined);
 }
 export function venueShifts(records: readonly ShiftRecord[], venueId: string, agencyId = 'agency-hkc'): Shift[] {
   const own = records.filter((s) => s.venueId === venueId && (s.agencyId || 'agency-hkc') === agencyId);
   const live = own.filter((s): s is Shift => !('deleted' in s && s.deleted));
   const defaults = [['morning', 'Morning', 360, 840], ['afternoon', 'Afternoon', 840, 1320], ['night', 'Night', 1320, 360]] as const;
-  return [...live, ...defaults.filter(([key, name]) => !own.some((s) => s.id === `builtin-${key}`)
+  return [...live, ...defaults.filter(([key, name]) => !own.some((s) => s.id.split(':')[0] === `builtin-${key}`)
     && !live.some((s) => s.name.trim().toLowerCase() === name.toLowerCase())).map(([key, name, startMinutes, endMinutes]) => ({
-      id: `builtin-${key}`, venueId, agencyId, name, area: '', startMinutes, endMinutes,
+      // The venue travels in the id so installed clients can send a bodyless DELETE.
+      id: `builtin-${key}:${encodeURIComponent(venueId)}`, venueId, agencyId, name, area: '', startMinutes, endMinutes,
       days: Array.from({ length: 7 }, () => ({ on: true })), userIds: [], userId: null, overrides: [], createdAt: '',
     }))];
 }
-/** The single scoped lookup for stored and built-in task shifts. */
+/** The single scoped lookup for stored and built-in task shifts. Bare ids remain accepted with a venue. */
 export function resolveTaskShift(task: { shiftId?: unknown; venueId?: string; agencyId?: string }, records: readonly ShiftRecord[]): Shift | undefined {
-  if (!task.shiftId || !task.venueId) return undefined;
-  const stored = records.find((s) => s.id === task.shiftId && s.venueId === task.venueId
+  if (typeof task.shiftId !== 'string' || !task.venueId) return undefined;
+  const encodedVenue = builtinShiftVenue(task.shiftId);
+  if (encodedVenue && encodedVenue !== task.venueId) return undefined;
+  const shiftId = task.shiftId;
+  const matches = (id: string) => id === shiftId || (isBuiltinShiftId(shiftId) && isBuiltinShiftId(id) && id.split(':')[0] === shiftId.split(':')[0]);
+  const stored = records.find((s) => matches(s.id) && s.venueId === task.venueId
     && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
   if (stored) return 'deleted' in stored && stored.deleted ? undefined : stored as Shift;
-  return venueShifts([], task.venueId, task.agencyId).find((s) => s.id === task.shiftId);
+  return venueShifts([], task.venueId, task.agencyId).find((s) => matches(s.id));
 }
 
 function validHours(shift: { startMinutes?: number; endMinutes?: number } | null | undefined): boolean {
@@ -168,6 +177,12 @@ function previousOvernightOverdueDay(shift: Shift, ymd: string, weekday: number,
     && shiftRunsOn(shift, yesterday, (weekday + 6) % 7) ? yesterday : null;
 }
 
+/** Keep start-day assignments through an overnight window AND its overdue tail. */
+export function shiftPeopleOccurrenceDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number): string {
+  return previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)
+    || shiftOccurrenceDay(shift, ymd, weekday, nowMinutes) || ymd;
+}
+
 export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task: ShiftTask): string | null {
   if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return null;
   const occurrence = previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)
@@ -269,9 +284,11 @@ export function tasksVisibleOnShift<T extends ShiftTask>(tasks: T[], shifts: Shi
     const assigned = taskAssigneesOn(task, occurrence || ymd);
     const personal = assigned.includes(typeof user.email === 'string' ? user.email.trim().toLowerCase() : '');
     const team = assigned.length === 0 || assigned.includes('all');
-    if (taskOwnsPeople(task)) return occurrence !== null && (personal || team);
+    if (taskOwnsPeople(task) && (occurrence === null || (!personal && !team))) return false;
+    if (taskOwnsPeople(task) && personal) return true;
+    if (taskOwnsPeople(task) && team && timeMinutes(task) !== null && !mine.length) return false;
     if (!mine.length) return personal || team;
-    if (shift && (!task.venueId || shift.venueId === task.venueId)) {
+    if (!taskOwnsPeople(task) && shift && (!task.venueId || shift.venueId === task.venueId)) {
       const occurrence = shiftOccurrenceDay(shift, ymd, weekday, nowMinutes ?? 0);
       return occurrence !== null && shiftPeopleOn(shift, occurrence).includes(user.id);
     }

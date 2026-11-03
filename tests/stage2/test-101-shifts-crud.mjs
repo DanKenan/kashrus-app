@@ -244,7 +244,7 @@ export default {
       assert.equal(updates[0].payload.shifts[0].userName, people.mash.name);
       assert.deepEqual(updates[0].payload.shifts[0].overrides, [{ date: today, userIds: [people.assign.id], userNames: [people.assign.name], userId: people.assign.id, userName: people.assign.name }]);
       assert.equal(updates[1].payload.shifts[0].area, 'Live edit');
-      assert.deepEqual(updates[2].payload.shifts, []);
+      assert.deepEqual(updates[2].payload.shifts.filter((s) => !s.id.startsWith('builtin')), []);
       assert.equal(JSON.stringify(updates).includes('@'), false);
       for (const messages of [elsewhere, foreign]) assert.equal(messages.some((m) => m.type === 'SHIFTS_UPDATED'), false);
     } finally { for (const ws of connections) ws.close(); }

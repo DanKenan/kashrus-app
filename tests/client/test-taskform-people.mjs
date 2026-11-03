@@ -11,7 +11,7 @@ assert.deepEqual(taskAssigneesOn({ ...task, dayAssignees: { '5': [] }, assigneeS
 assert.equal(taskOwnsPeople({ assignedTo: ['all'] }), false);
 assert.equal(isMyTask(task, { email: 'swap@test.local', role: 'worker' }, '2026-11-06'), true);
 assert.equal(taskIsForViewer(task, 'swap@test.local', '2026-11-13'), false);
-const night = venueShifts([], 'v').find((s) => s.id === 'builtin-night');
+const night = venueShifts([], 'v').find((s) => s.id.startsWith('builtin-night:'));
 const start = shiftOccurrenceDay(night, '2026-11-07', 6, 60);
 assert.equal(start, '2026-11-06');
 assert.deepEqual(taskAssigneesOn(task, start), ['swap@test.local']);
@@ -21,3 +21,12 @@ assert.deepEqual(tasksVisibleOnShift([attached], [night], { id: 'someone', email
 assert.equal(venueShifts([{ id: night.id, venueId: 'v', deleted: true }], 'v').length, 2);
 assert.equal(venueShifts([{ ...night, id: 'custom', name: ' night ' }], 'v').filter((s) => s.name.trim().toLowerCase() === 'night').length, 1);
 console.log('PASS taskform people: fallbacks, swaps, shared client filters, Night start day, built-ins');
+
+// A task-owned team task still obeys the viewer's timed team-task window.
+const dayShift = { ...night, id: 'day', startMinutes: 480, endMinutes: 960, userIds: ['viewer'], userId: 'viewer' };
+const team = { venueId: 'v', assignmentMode: 'task', assignedTo: ['all'], targetTimeMinutes: 1200 };
+const viewer = { id: 'viewer', email: 'viewer@test.local' };
+assert.deepEqual(tasksVisibleOnShift([team], [dayShift], viewer, '2026-11-06', 5, 600), []);
+assert.deepEqual(tasksVisibleOnShift([{ ...team, targetTimeMinutes: 600 }], [dayShift], viewer, '2026-11-06', 5, 600).length, 1);
+assert.deepEqual(tasksVisibleOnShift([{ ...team, assignedTo: [viewer.email] }], [dayShift], viewer, '2026-11-06', 5, 600).length, 1);
+assert.deepEqual(tasksVisibleOnShift([team], [dayShift], { ...viewer, id: 'off-roster' }, '2026-11-06', 5, 600), []);
