@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import { formatClockTime, formatTimeRange } from '../../src/lib/clockTime.ts';
 import { venueEdits, VENUE_TYPES } from '../../src/components/EditVenueSheet.tsx';
 import { reportFailText } from '../../src/components/SubmitAuditReportModal.tsx';
-import { noVenueMessage, signInErrorText, VENUE_REMOVED_TEXT, NO_VENUE_TEXT } from '../../src/lib/venueRemoved.ts';
+import { noVenueMessage, signInErrorText, VENUE_REMOVED_TEXT, NO_VENUE_TEXT, NO_ACCESS_TEXT } from '../../src/lib/venueRemoved.ts';
 
 let passed = 0; let failures = 0;
 const ok = (label, cond, info = '') => { if (cond) passed++; else { failures++; console.error(`FAIL ${label}${info ? ': ' + info : ''}`); } };
@@ -53,8 +53,8 @@ ok('R network -> connection hint', /connection/.test(reportFailText(0)));
 
 // N — no venue
 eq('N admin -> null (setup screen)', noVenueMessage({ role: 'admin', venueId: 'v1' }), null);
-eq('N owner whose venue is gone', noVenueMessage({ role: 'owner', venueId: 'gone' }), VENUE_REMOVED_TEXT);
-eq('N staff with venueIds', noVenueMessage({ role: 'mashgiach', venueIds: ['gone'] }), VENUE_REMOVED_TEXT);
+eq('N owner whose venue is gone', noVenueMessage({ role: 'owner', venueId: 'gone' }), NO_ACCESS_TEXT);
+eq('N staff with venueIds', noVenueMessage({ role: 'mashgiach', venueIds: ['gone'] }), NO_ACCESS_TEXT);
 eq('N staff never given a venue', noVenueMessage({ role: 'worker' }), NO_VENUE_TEXT);
 eq('N no user -> null', noVenueMessage(null), null);
 eq('N sign-in VENUE_REMOVED', signInErrorText({ code: 'VENUE_REMOVED', error: 'x' }, 'fb'), VENUE_REMOVED_TEXT);

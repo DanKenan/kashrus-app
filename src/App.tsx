@@ -91,7 +91,8 @@ import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles,
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel, isVenueOwnerLike, ownerMayAddManager } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry, syncCookieSession, isCookieSession } from './lib/api';
-import { noVenueMessage, NO_VENUE_TEXT } from './lib/venueRemoved';
+import { noVenueMessage, NO_VENUE_TEXT, VENUE_LOADING_TEXT, VENUE_LOAD_FAILED_TEXT } from './lib/venueRemoved';
+import { venueListKey, deliveredVenueListKey, venueListPending, venueRetryDelayMs } from './lib/venueLoad';
 import { forgetSignedInUserForKiosk, isKioskEntryUrl, stripKioskEntryFromUrl } from './lib/kioskSetup';
 import { effectiveViewportWidth } from './lib/desktopMode';
 import { SITE_REFUSED_EVENT, sharedOriginFor, siteRefusalAction, useSite, type SiteRefusal, type SiteRefusalEvent, homePageAllowed } from './lib/site';
@@ -373,6 +374,12 @@ export default function App() {
 
   // Venues state
   const [venues, setVenues] = useState<Venue[]>([]);
+  // NOVENUE: the scope the venue list was last delivered for (venueLoad.ts),
+  // whether the last load failed, and a retry tick.
+  const [venuesLoadedKey, setVenuesLoadedKey] = useState<string | null>(null);
+  const [venuesLoadFailed, setVenuesLoadFailed] = useState(false);
+  const [venuesRetry, setVenuesRetry] = useState(0);
+  const venuesFailures = useRef(0);
   const [currentVenueId, setCurrentVenueId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem(currentUser ? venueStorageKey(currentUser) : 'selected_venue_id');
@@ -954,12 +961,23 @@ export default function App() {
     setTimeout(() => setToastMessage(null), ms);
   };
 
-  // 1. Fetch Venues whenever user changes
+  // 1. Fetch Venues whenever user changes, and (NOVENUE) whenever the
+  // person's own scope changes, so a new venue is never missing from the list.
+  // A failed load is tried again (2 s, 4 s, ... up to 30 s, and when back online).
+  const ownVenueListKey = venueListKey(currentUser);
   useEffect(() => {
     if (!currentUser) return;
     const generation = userRequestContext.current.generation;
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const isCurrent = () => !cancelled && userRequestContext.current.generation === generation;
+    const key = ownVenueListKey;
+    const failed = () => {
+      if (!isCurrent()) return;
+      venuesFailures.current += 1;
+      setVenuesLoadFailed(true);
+      retryTimer = setTimeout(() => { if (isCurrent()) setVenuesRetry((n) => n + 1); }, venueRetryDelayMs(venuesFailures.current));
+    };
     const url = `/api/venues?userEmail=${encodeURIComponent(currentUser.email)}`;
     apiFetch(url)
       .then((res) => res.json())
@@ -970,6 +988,9 @@ export default function App() {
         }
         if (Array.isArray(data.venues)) {
           setVenues(data.venues);
+          venuesFailures.current = 0;
+          setVenuesLoadFailed(false);
+          setVenuesLoadedKey(key);
           if (currentUser.role !== 'admin') {
             // currentVenue and the reconcile effect resolve this fresh list.
           } else if (!currentVenueId && data.venues.length > 0) {
@@ -977,11 +998,20 @@ export default function App() {
           } else if (data.venues.length === 0) {
             setCurrentVenueId(null);
           }
+        } else {
+          failed();
         }
       })
-      .catch((err) => console.warn('Could not fetch /api/venues:', err));
-    return () => { cancelled = true; };
-  }, [currentUser?.id, currentUser?.email, currentUser?.role]);
+      .catch((err) => { console.warn('Could not fetch /api/venues:', err); failed(); });
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
+  }, [currentUser?.id, currentUser?.email, currentUser?.role, ownVenueListKey, venuesRetry]);
+  useEffect(() => {
+    if (!venuesLoadFailed || typeof window === 'undefined') return;
+    const online = () => setVenuesRetry((n) => n + 1);
+    window.addEventListener('online', online);
+    return () => window.removeEventListener('online', online);
+  }, [venuesLoadFailed]);
+  const venueListLoading = venueListPending(currentUser, isKiosk, venuesLoadedKey);
 
   // 2. Fetch Tasks, History, and Users scoped to the active venue
   useEffect(() => {
@@ -1106,6 +1136,8 @@ export default function App() {
             myVenueUntil: msg.payload.myVenueUntil,
             myVenueRev: msg.payload.myVenueRev,
           }));
+          // NOVENUE: this list IS the delivered scope.
+          setVenuesLoadedKey(deliveredVenueListKey(currentUser, msg.payload.myVenueRev, (msg.payload.venues as Venue[]).map((v) => v.id)));
         }
         if (currentUser.role !== 'admin') {
           if (Array.isArray(msg.payload.venues)) setVenues(msg.payload.venues);
@@ -1990,6 +2022,7 @@ export default function App() {
     setCurrentUser(null);
     setCurrentVenueId(null);
     setVenues([]);
+    setVenuesLoadedKey(null);
     setTasks([]);
     setShiftsByVenue({});
     setHistoryLogs([]);
@@ -2062,6 +2095,7 @@ export default function App() {
     userRequestContext.current.generation += 1;
     requestContext.current.generation += 1;
     setVenues([]);
+    setVenuesLoadedKey(null);
     setTasks([]);
     setShiftsByVenue({});
     setHistoryLogs([]);
@@ -2632,7 +2666,22 @@ export default function App() {
         
         {/* QA2 #8: a non-admin with no venue (e.g. their venue was deleted) never
             sees the admin setup screen below; one plain message instead. */}
-        {(venues.length === 0 || noVenueInScope) && !isKiosk && noVenueMessage(currentUser) ? (
+        {(venues.length === 0 || noVenueInScope) && !isKiosk && noVenueMessage(currentUser) ? (venueListLoading ? (
+          // NOVENUE: the venue list for this scope is not here yet (loading, or a
+          // failed load being tried again): never the no-venue line meanwhile.
+          <div data-venue-loading role="status" className="my-10 p-8 sm:p-10 rounded-3xl bg-surface border border-line tactile-2 text-center max-w-md mx-auto animate-fade-in">
+            <p className="text-base text-ink-soft">{venuesLoadFailed ? VENUE_LOAD_FAILED_TEXT : VENUE_LOADING_TEXT}</p>
+            {venuesLoadFailed && (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="pressable mt-6 min-h-11 px-6 rounded-xl bg-surface border border-line-control text-ink font-semibold text-sm hover:bg-sunken focus:outline-none focus:ring-2 focus:ring-gold"
+              >
+                Sign out
+              </button>
+            )}
+          </div>
+        ) : (
           <div data-no-venue-notice role="status" className="my-10 p-8 sm:p-10 rounded-3xl bg-surface border border-line tactile-2 text-center max-w-md mx-auto animate-fade-in">
             <div className="w-14 h-14 rounded-2xl bg-sunken text-ink-soft mx-auto flex items-center justify-center mb-4 border border-line">
               <Building2 className="w-7 h-7" />
@@ -2657,6 +2706,7 @@ export default function App() {
               Sign out
             </button>
           </div>
+        )
         ) : venues.length === 0 && isKiosk ? (
           // Never the admin setup screen on a kiosk (Don, Oct 26): one plain line; End shift sits bottom-left.
           <div data-kiosk-no-venue role="status" className="my-10 p-8 sm:p-10 rounded-3xl bg-surface border border-line tactile-2 text-center max-w-md mx-auto animate-fade-in">
