@@ -1,3 +1,4 @@
+import { filterChipClass, FilterCheck } from '../lib/filterChip';
 import { whoSeesLabel } from '../lib/whoSees';
 import { WhoSeesTag } from './WhoSeesTag';
 import { DEFAULT_TIME_ZONE, workDateIn, weekdayIn, minutesIn } from '../lib/workday';
@@ -92,6 +93,7 @@ interface KioskTaskPanelProps {
   onViewChange: (v: 'list' | 'table' | 'cards') => void;
   /** The existing table or cards view, rendered when that view is chosen. */
   children?: React.ReactNode;
+  filterSummary?: React.ReactNode;
   // D3c: what the (hidden) Header gave the kiosk, carried by KioskTopBar.
   updatesBell?: React.ReactNode;
   darkMode?: boolean;
@@ -227,6 +229,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   view,
   onViewChange,
   children,
+  filterSummary,
   updatesBell,
   darkMode,
   onToggleDarkMode,
@@ -606,11 +609,11 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                       key={f.key}
                       onClick={() => onSelectFilter(f.key)}
                       aria-pressed={activeFilter === f.key}
-                      className={`pressable ${btn64} px-4 sm:px-5 rounded-xl text-base font-semibold tnum border ${
-                        activeFilter === f.key ? 'bg-ink text-paper border-ink' : 'bg-surface text-ink-soft border-line'
+                      className={`pressable ${btn64} px-4 sm:px-5 rounded-xl text-base font-semibold tnum border inline-flex items-center gap-2 ${
+                        filterChipClass(activeFilter === f.key)
                       }`}
                     >
-                      {f.label}
+                      <FilterCheck on={activeFilter === f.key} />{f.label}
                     </button>
                   ))}
                 </div>
@@ -622,10 +625,10 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                       onClick={() => onCategoryChange('all')}
                       aria-pressed={selectedCategories.length === 0}
                       className={`pressable shrink-0 ${btn64} px-4 rounded-full text-base font-semibold border flex items-center gap-2 ${
-                        selectedCategories.length === 0 ? 'bg-ink text-paper border-ink' : 'bg-surface text-ink-soft border-line'
+                        filterChipClass(selectedCategories.length === 0)
                       }`}
                     >
-                      <Layers className="w-5 h-5" aria-hidden />
+                      <FilterCheck on={selectedCategories.length === 0} /><Layers className="w-5 h-5" aria-hidden />
                       <span>All</span>
                       {categoryCounts && <span className="tnum">{totalCount}</span>}
                     </button>
@@ -640,10 +643,10 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                           style={categoryVars(c)}
                           title={active ? `Unselect ${c}` : `Filter by ${c}`}
                           className={`pressable shrink-0 ${btn64} px-4 rounded-full text-base font-semibold border flex items-center gap-2 ${
-                            active ? 'cat-chip cat-ring cat-text ring-2' : 'bg-surface text-ink-soft border-line'
+                            filterChipClass(active)
                           }`}
                         >
-                          <span className="cat-dot w-3 h-3 rounded-full shrink-0" aria-hidden />
+                          <FilterCheck on={active} />{!active && <span className="cat-dot w-3 h-3 rounded-full shrink-0" aria-hidden />}
                           <span dir="auto" className="max-w-[220px] truncate">{c}</span>
                           {typeof count === 'number' && <span className="tnum">{count}</span>}
                         </button>
@@ -654,6 +657,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
               </div>
           )}
 
+          {filterSummary}
           {view !== 'list' ? (
             children
           ) : shown.length === 0 ? (

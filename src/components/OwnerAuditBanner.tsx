@@ -73,7 +73,7 @@ export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
           aria-pressed={activeFilter === 'all'}
           onClick={() => onSelectFilter('all')}
           className={`pressable text-left p-4 rounded-2xl border transition-all ${
-            activeFilter === 'all' ? 'ring-2 ring-gold border-gold' : 'border-line-control'
+            activeFilter === 'all' ? `${filterChipClass(true)} owner-metric-on ring-2 ring-gold` : 'border-line-control'
           }`}
         >
           {activeFilter === 'all' && <span className={`inline-flex items-center gap-1 px-2 py-1 mb-2 rounded-full text-xs ${filterChipClass(true)}`}><FilterCheck on />Showing</span>}
@@ -104,7 +104,7 @@ export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
           aria-pressed={activeFilter === 'completed'}
           onClick={() => onSelectFilter('completed')}
           className={`pressable text-left p-4 rounded-2xl border transition-all ${
-            activeFilter === 'completed' ? 'ring-2 ring-gold border-gold' : 'border-line-control'
+            activeFilter === 'completed' ? `${filterChipClass(true)} owner-metric-on ring-2 ring-gold` : 'border-line-control'
           }`}
         >
           {activeFilter === 'completed' && <span className={`inline-flex items-center gap-1 px-2 py-1 mb-2 rounded-full text-xs ${filterChipClass(true)}`}><FilterCheck on />Showing</span>}
@@ -132,7 +132,7 @@ export const OwnerAuditBanner: React.FC<OwnerAuditBannerProps> = ({
           aria-pressed={activeFilter === 'pending'}
           onClick={() => onSelectFilter('pending')}
           className={`pressable text-left p-4 rounded-2xl border transition-all ${
-            activeFilter === 'pending' ? 'ring-2 ring-gold border-gold' : 'border-line-control'
+            activeFilter === 'pending' ? `${filterChipClass(true)} owner-metric-on ring-2 ring-gold` : 'border-line-control'
           }`}
         >
           {activeFilter === 'pending' && <span className={`inline-flex items-center gap-1 px-2 py-1 mb-2 rounded-full text-xs ${filterChipClass(true)}`}><FilterCheck on />Showing</span>}

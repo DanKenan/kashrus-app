@@ -1,4 +1,5 @@
-import { activeFilterChips, clearActiveFilter, type FilterDefaults } from './lib/activeFilters';
+import { type FilterDefaults, type FilterState } from './lib/activeFilters';
+import { ActiveFilters } from './components/ActiveFilters';
 import type { Shift } from './types';
 import { taskWithShiftTimes, tasksVisibleOnShift, shiftTaskAppliesAt } from './lib/shifts';
 import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday } from './lib/shiftTaskDay';
@@ -803,28 +804,13 @@ export default function App() {
     quickFilter: !isKiosk && (currentUser?.role === 'mashgiach' || currentUser?.role === 'worker') ? 'mine' : 'all',
   };
   const filterState = { dayView: effectiveDayView, quickFilter: activeTabFilter, categories: selectedCategories, search: searchQuery };
-  const showingChips = activeFilterChips(filterState, filterDefaults);
-  const clearFilter = (key: string) => {
-    const next = clearActiveFilter(filterState, filterDefaults, key);
+  const changeFilters = (next: FilterState) => {
     setDayView(next.dayView);
     setActiveTabFilter(next.quickFilter);
     setSelectedCategories(next.categories);
     setSearchQuery(next.search);
   };
-  const showingFilters = showingChips.length > 0 ? (
-    <div className="max-sm:-order-1 flex flex-wrap items-center gap-2 mb-4 text-xs text-ink-soft" aria-label="Active filters">
-      <span>Showing:</span>
-      {showingChips.map((chip) => (
-        <React.Fragment key={chip.key}>
-          <button type="button" onClick={() => clearFilter(chip.key)} aria-label={`Turn off ${chip.label}`} className="pressable min-h-11 inline-flex items-center gap-2 rounded-full border border-line-control px-3">
-            {chip.label}<span aria-hidden="true">✕</span>
-          </button>
-          <span aria-hidden="true">·</span>
-        </React.Fragment>
-      ))}
-      <button type="button" onClick={() => clearFilter('all')} className="pressable min-h-11 underline">Clear all</button>
-    </div>
-  ) : null;
+  const showingFilters = <ActiveFilters state={filterState} defaults={filterDefaults} onChange={changeFilters} kiosk={isKiosk} />;
 
   // 5a — Updates panel context. The generation bumps whenever the signed-in
   // context changes (user, agency, venue, kiosk session): the Updates center
@@ -2944,6 +2930,7 @@ export default function App() {
             onCategoryChange={changeCategory}
             categories={categories}
             categoryCounts={categoryCounts}
+            filterSummary={showingFilters}
             view={kioskView}
             onViewChange={setKioskView}
             onUpdateStatus={handleUpdateStatus}

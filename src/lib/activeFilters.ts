@@ -6,6 +6,7 @@ export interface FilterState {
 }
 export type FilterDefaults = Pick<FilterState, 'dayView' | 'quickFilter'>;
 const quickLabels = { all: 'All Tasks', mine: 'Assigned to Me', pending: 'Pending', completed: 'Completed' };
+// Cards/Table is a display preference, not a task filter; Clear all preserves it.
 export function activeFilterChips(state: FilterState, defaults: FilterDefaults): { key: string; label: string }[] {
   return [
     ...(state.dayView !== defaults.dayView ? [{ key: 'day', label: state.dayView === 'today' ? 'Today' : 'All days' }] : []),

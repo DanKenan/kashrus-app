@@ -362,3 +362,8 @@
   background-color: var(--gold-deep);
   color: var(--color-white);
 }
+
+/* The selected owner metric keeps all its words, status badges and icons readable. */
+.owner-metric-on :where(div, span, p, svg) {
+  color: inherit;
+}
