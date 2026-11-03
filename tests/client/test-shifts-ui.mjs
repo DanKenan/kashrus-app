@@ -4,6 +4,13 @@ import { ShiftsPanel } from '../../src/components/ShiftsPanel.tsx';
 import { TaskModal } from '../../src/components/TaskModal.tsx';
 import { getPhoneNavState, PhoneNav } from '../../src/components/PhoneNav.tsx';
 import { sheetAllowed } from '../../src/lib/screenMemory.ts';
+const HostDate = globalThis.Date;
+// Noon in New York keeps the default form selection inside Deli day hours.
+globalThis.Date = class extends HostDate {
+  constructor(...args) { super(...(args.length ? args : ['2026-11-03T17:00:00Z'])); }
+  static now() { return new HostDate('2026-11-03T17:00:00Z').getTime(); }
+};
+try {
 const storage = new Map();
 globalThis.localStorage = { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v), removeItem: (k) => storage.delete(k) };
 const shift = { id: 's', venueId: 'v', name: 'Deli day', area: 'Deli', days: Array.from({ length: 7 }, (_, w) => ({ on: w < 6 })), startMinutes: 480, endMinutes: 1080, userId: 'u', userName: 'Moshe L.', overrides: [], createdAt: '' };
@@ -316,3 +323,4 @@ try {
   }
 } finally { globalThis.Date = RealDate; }
 console.log('Shifts UI: RV5 occurrence person, ID-bound names, roster and unknown-person fallback passed');
+} finally { globalThis.Date = HostDate; }
