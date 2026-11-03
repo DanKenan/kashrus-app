@@ -20,6 +20,7 @@ const read = (p) => fs.readFileSync(new URL(`../../${p}`, import.meta.url), 'utf
 const noop = () => {};
 const saveForm = async (view) => {
   for (let i = 0; i < 2 && view.find((e) => e.props['aria-current'] === 'step')[0]?.props.children[2] !== 'Who'; i++) await view.submit();
+  if (view.find((e) => e.props.id === 'save-task-submit-btn')[0].props.disabled) await view.click((e) => e.props['aria-label'] === 'Everyone at the venue');
   await view.submit();
 };
 const render = (component, props) => renderToStaticMarkup(React.createElement(component, props));
@@ -122,7 +123,7 @@ ok('alert state wording', modal.includes("On: a push alert when it's late") && m
 ok('visibility wording', modal.includes('Owner and managers can see it too') && modal.includes('Off: only the people you picked, admins and coordinators see it.'));
 const modalHtml = render(TaskModal, { isOpen: true, onClose: noop, onSave: noop, knownWorkers: roster, timeZone: 'America/New_York' });
 ok('new task shows off alert hint', modalHtml.includes('Off: no alert if it&#x27;s late'));
-ok('everyone clock hint rendered', modalHtml.includes('People with a shift today'));
+ok('unassigned form makes no everyone claim', !modalHtml.includes('People with a shift today'));
 const app = read('src/App.tsx');
 ok('board and kiosk share clear controls', app.includes('<ActiveFilters state={filterState}') && app.includes('filterSummary={showingFilters}') && app.includes('{showingFilters}'));
 ok('App preserves Cards/Table when clearing', !/setViewMode|changeViewMode|setKioskView/.test(app.split('const changeFilters =')[1]?.split('const showingFilters')[0] || ''));
@@ -249,7 +250,9 @@ await privacy.click((e) => e.props['aria-label'] === 'Pick Yossi');
 ok('removing last person disables checkbox again', visibility().props.disabled === true);
 ok('removing last person replaces privacy promise', privacy.text().includes('Pick at least one person first.') && !privacy.text().includes('Off: only the people you picked'));
 await privacy.submit();
-eq('empty-person save fallback unchanged', [privacySaved.assignedTo, privacySaved.isPrivate], [['all'], false]);
+ok('empty-person save is disabled', privacy.find((e) => e.props.id === 'save-task-submit-btn')[0].props.disabled);
+ok('empty-person note is visible', privacy.text().includes('Pick who does it'));
+eq('empty-person submit does not replace the last saved assignment', [privacySaved.assignedTo, privacySaved.isPrivate], [['yossi@example.com'], true]);
 // RV3: an empty venue is distinct from a list narrowed by active filters.
 for (const View of [TaskCardView, TaskTableView]) {
   for (const role of ['admin', 'mashgiach']) {

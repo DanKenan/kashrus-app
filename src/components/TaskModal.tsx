@@ -1,5 +1,5 @@
 import { ShiftHoursBar } from './ShiftHoursBar';
-import { detectTimeShift, differingDays, nextWeekday, peopleFields } from '../lib/taskForm';
+import { detectTimeShift, detectTimeShiftDay, differingDays, nextWeekday, peopleFields } from '../lib/taskForm';
 import { nextFullHour } from '../lib/nextFullHour';
 import { ShiftsPanel } from './ShiftsPanel';
 import type { Shift } from '../types';
@@ -8,7 +8,7 @@ import { ANY_TIME_LABEL, isAnyTimeTask, isAnyTimeText } from '../lib/anyTime';
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Pencil, Clock, Plus, Trash2, CheckCircle2, ListFilter } from 'lucide-react';
 import { Task, TaskInputType } from '../types';
-import { captureEditBaseline } from '../lib/api';
+import { captureEditBaseline, newActionId } from '../lib/api';
 import { DAYS_MAP } from '../lib/utils';
 import { DEFAULT_TIME_ZONE, addDays, workDateIn, minutesIn } from '../lib/workday';
 import {
@@ -23,7 +23,7 @@ import {
   type CustomCategory,
 } from '../lib/categoryStyle';
 import { MonthlyCalendarPicker } from './MonthlyCalendarPicker';
-import { rosterDisplayHandle, rosterKey } from '../lib/rosterDisplay';
+import { rosterKey } from '../lib/rosterDisplay';
 
 /** Structured time value: 12-hour clock the app can reliably process. */
 export interface PickerTime {
@@ -132,7 +132,7 @@ interface TaskModalProps {
   venueId?: string;
   onShiftCreated?: (shift: Shift, deleted?: boolean) => void;
   agencyId?: string;
-  onSaveMany?: (tasks: Partial<Task>[]) => Promise<boolean>;
+  onSaveMany?: (tasks: Partial<Task>[], operationId?: string) => Promise<boolean>;
   isOpen: boolean;
   onClose: () => void;
   onSave: (taskData: Partial<Task>, opts?: { baselineVersion?: number }) => Promise<boolean> | void;
@@ -205,7 +205,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [customTimeText, setCustomTimeText] = useState<string | null>(null);
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
   const [enableOverdueAlert, setEnableOverdueAlert] = useState(false);
-  const [assignType, setAssignType] = useState<'all' | 'specific'>('all');
+  const [assignType, setAssignType] = useState<'all' | 'specific'>('specific');
   const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
   const [visibleToTeam, setVisibleToTeam] = useState(true);
 
@@ -300,13 +300,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   // handleSubmit twice before the modal unmounts).
   const pickedShiftRef = useRef<HTMLButtonElement | null>(null);
   const submitGuard = useRef(false);
+  const batchAttempt = useRef<{ payload: string; operationId: string } | null>(null);
   // ROUND 5 — write baseline for this edit form. Captured when the modal
   // loads taskToEdit (what the user sees), NOT at save time (by then a
   // WebSocket update may have bumped the tracked version past the form).
   const baselineRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
-    submitGuard.current = false;
+    submitGuard.current = false; batchAttempt.current = null;
     setStep(0); setExtras([]); setPeopleTouched(false); setDayPeople(taskToEdit?.dayAssignees || {});
     setSwaps(taskToEdit?.assigneeSwaps || []); setPeopleDay(null); setJustOnce(false);
     setShowPeople(false); setPeopleSearch(''); setSaving(false); setSaveError(''); setRemovedShifts([]);
@@ -394,7 +395,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setCustomTimeText(null);
       setPriority('medium');
       setEnableOverdueAlert(false);
-      setAssignType('all');
+      setAssignType('specific');
       setSelectedWorkers([]);
       setVisibleToTeam(true);
       setScheduleType('recurring');
@@ -421,13 +422,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     setShiftId(shift.id); setShiftMode(true);
     if (!taskToEdit && !peopleTouched) {
       const emails = knownWorkers.filter((w) => w.id && shiftUserIds(shift).includes(w.id) && w.email).map((w) => w.email!);
-      setSelectedWorkers(emails); setAssignType(emails.length ? 'specific' : 'all');
+      setSelectedWorkers(emails); setAssignType('specific');
     }
   };
-  const mainPeople = assignType === 'all' || !selectedWorkers.length ? ['all'] : selectedWorkers;
+  const mainPeople = assignType === 'all' ? ['all'] : selectedWorkers;
   const today = workDateIn(timeZone);
   const todayWeekday = new Date(`${today}T12:00:00Z`).getUTCDay();
-  const detectedShift = detectTimeShift(pickerShifts, pickerTimeToMinutes(time1), selectedDays.includes(todayWeekday) ? todayWeekday : selectedDays[0] ?? todayWeekday);
+  const detectionDay = selectedDays.includes(todayWeekday) ? todayWeekday : selectedDays[0] ?? todayWeekday;
+  const detectedShift = detectTimeShift(pickerShifts, pickerTimeToMinutes(time1), detectionDay);
+  const detectedDay = detectedShift ? detectTimeShiftDay(detectedShift, pickerTimeToMinutes(time1), detectionDay)! : detectionDay;
   const dayDate = peopleDay === null ? today : nextWeekday(today, peopleDay);
   const dayKey = String(peopleDay) as keyof NonNullable<Task['dayAssignees']>;
   const dayValue = peopleDay === null ? mainPeople : justOnce ? swaps.find((s) => s.date === dayDate)?.assignedTo ?? dayPeople[dayKey] ?? mainPeople : dayPeople[dayKey] ?? mainPeople;
@@ -439,6 +442,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     } else { setAssignType(emails.includes('all') ? 'all' : 'specific'); setSelectedWorkers(emails.filter((e) => e !== 'all')); }
   };
   const namesFor = (emails: string[]) => emails.includes('all') ? 'Everyone at the venue' : emails.map((email) => knownWorkers.find((w) => w.email === email)?.name || email).join(', ');
+  const dayDifferences = differingDays(dayPeople, mainPeople);
+  const peopleReady = mainPeople.length > 0 && (scheduleType !== 'recurring' || selectedDays.every((day) => (dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople).length > 0)) && swaps.every((swap) => swap.date < today || swap.assignedTo.length > 0);
+  const choice = (on: boolean) => `min-h-11 px-3 rounded-lg border pressable ${on ? 'bg-gold-deep text-paper border-gold-deep' : 'border-line-control bg-surface text-ink'}`;
   const shiftChanged = (shift: Shift, deleted = false) => {
     if (deleted) { setRemovedShifts((old) => [...old, shift.id]); if (shiftId === shift.id) { setShiftId(null); setShiftMode(false); } }
     else { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); chooseShift(shift); }
@@ -519,18 +525,18 @@ export const TaskModal: React.FC<TaskModalProps> = ({
         if (step === 1 && !taskToEdit && !peopleTouched) {
           const shift = chosenShift || (!shiftMode && !isAny && customTimeText === null ? detectedShift : undefined);
           const emails = shift ? knownWorkers.filter((w) => w.id && shiftUserIds(shift).includes(w.id) && w.email).map((w) => w.email!) : [];
-          setSelectedWorkers(emails); setAssignType(emails.length ? 'specific' : 'all');
+          setSelectedWorkers(emails); setAssignType('specific');
         }
         setStep(step + 1);
       }
       return;
     }
-    if (!title.trim() || extras.some((t) => !t.name.trim()) || (shiftMode && !chosenShift)) return;
+    if (!peopleReady || !title.trim() || extras.some((t) => !t.name.trim()) || (shiftMode && !chosenShift)) return;
     if (submitGuard.current) return;
     submitGuard.current = true;
 
     if (extras.length && !onSaveMany) { submitGuard.current = false; setSaveError("Couldn't save these tasks. Please try again."); return; }
-    const assignedTo = assignType === 'all' || selectedWorkers.length === 0 ? ['all'] : selectedWorkers;
+    const assignedTo = assignType === 'all' ? ['all'] : selectedWorkers;
 
     // Validate dates if specific_dates is chosen
     let finalDates = selectedDates;
@@ -547,7 +553,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       categories: selectedCategories.length > 0 ? selectedCategories.map((c) => c.trim()) : ['General'],
       shiftId: usingShift ? chosenShift.id : null,
       shiftTime: usingShift && shiftTime,
-      isPrivate: (!usingShift || !taskToEdit || peopleTouched || !!taskToEdit.assignmentMode) && assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
+      isPrivate: taskToEdit && !peopleTouched ? taskToEdit.isPrivate : (!usingShift || !taskToEdit || peopleTouched || !!taskToEdit.assignmentMode) && assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
       inputType,
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
@@ -567,8 +573,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     setSaving(true); setSaveError('');
     let saved: boolean | void;
     try {
+      const tasks = [payload, ...extras.map((t) => ({ ...payload, title: t.name.trim(), description: t.note.trim() }))];
+      const fingerprint = JSON.stringify(tasks);
+      if (!batchAttempt.current || batchAttempt.current.payload !== fingerprint) batchAttempt.current = { payload: fingerprint, operationId: newActionId() };
       saved = extras.length && onSaveMany
-        ? await onSaveMany([payload, ...extras.map((t) => ({ ...payload, title: t.name.trim(), description: t.note.trim() }))])
+        ? await onSaveMany(tasks, batchAttempt.current.operationId)
         : await onSave(payload, { baselineVersion: baselineRef.current });
     } catch { saved = false; }
     setSaving(false);
@@ -585,7 +594,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-scrim backdrop-blur-sm overflow-y-auto">
-      <div style={creatingShift ? { display: 'none' } : undefined} className="bg-surface rounded-2xl w-full max-w-xl tactile-4 animate-pop-in border border-line my-8 overflow-hidden transition-colors max-h-[90vh] flex flex-col">
+      <div style={creatingShift ? { display: 'none' } : undefined} role="dialog" aria-modal="true" aria-label={taskToEdit ? 'Edit task' : 'New task'} className="bg-surface rounded-2xl w-full max-w-xl tactile-4 animate-pop-in border border-line overflow-hidden transition-colors max-h-[90dvh] min-h-0 flex flex-col">
         
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-line/70 shrink-0">
@@ -607,7 +616,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
         </div>
 
         {/* Form Body - Scrollable */}
-        <form onSubmit={handleSubmit} className="task-form p-6 space-y-4 text-base overflow-y-auto flex-1">
+        <form onSubmit={handleSubmit} className="task-form flex min-h-0 flex-1 flex-col text-base">
+          <div className="min-h-0 flex-1 overflow-y-auto p-6 space-y-4" data-task-form-body>
           
           <nav aria-label="Task steps" className="flex gap-2 text-base text-ink">
             {['What', 'When', 'Who'].map((name, i) => <span key={name} aria-current={step === i ? 'step' : undefined} className={step === i ? 'font-semibold' : 'text-ink-soft'}>{i + 1} {name}{i < 2 ? ' ·' : ''}</span>)}
@@ -966,8 +976,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </div>
           <section hidden={step !== 1} aria-label="When" className="space-y-4">
             <div role="group" aria-label="Time or Shift" className="grid grid-cols-2 gap-2">
-              <button type="button" aria-pressed={shiftMode} onClick={() => { const shift = pickerShifts.find((s) => s.id === shiftId) || detectedShift || pickerShifts[0]; if (shift) chooseShift(shift); }} className="min-h-11 rounded-lg border border-line-control bg-surface text-ink pressable">A shift</button>
-              <button type="button" aria-pressed={!shiftMode} onClick={() => setShiftMode(false)} className="min-h-11 rounded-lg border border-line-control bg-surface text-ink pressable">A time</button>
+              <button type="button" aria-label="A shift" aria-pressed={shiftMode} onClick={() => { const shift = pickerShifts.find((s) => s.id === shiftId) || detectedShift || pickerShifts[0]; if (shift) chooseShift(shift); }} className={choice(shiftMode)}>{shiftMode ? '✓ ' : ''}A shift</button>
+              <button type="button" aria-label="A time" aria-pressed={!shiftMode} onClick={() => setShiftMode(false)} className={choice(!shiftMode)}>{!shiftMode ? '✓ ' : ''}A time</button>
             </div>
             {shiftMode && <div className="space-y-3">
               <div className="flex gap-2 min-w-0">
@@ -981,8 +991,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               </div>
               {chosenShift && <ShiftHoursBar shift={chosenShift} pinMinutes={shiftTime ? pickerTimeToMinutes(time1) : undefined} onSaved={(shift) => { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); onShiftCreated?.(shift); }} />}
               <div role="group" aria-label="Shift target time" className="space-y-2">
-                <button type="button" aria-pressed={!shiftTime} onClick={() => setShiftTime(false)} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Any time during the shift</button>
-                <button type="button" aria-pressed={shiftTime} onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">By a set time</button>
+                <button type="button" aria-label="Any time during the shift" aria-pressed={!shiftTime} onClick={() => setShiftTime(false)} className={choice(!shiftTime)}>{!shiftTime ? '✓ ' : ''}Any time during the shift</button>
+                <button type="button" aria-label="By a set time" aria-pressed={shiftTime} onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); }} className={choice(shiftTime)}>{shiftTime ? '✓ ' : ''}By a set time</button>
               </div>
             </div>}
             {(!shiftMode || shiftTime) && <div className="space-y-2">
@@ -990,52 +1000,56 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               {anyTime ? <div className="text-base text-ink-soft">Any time · no target time <button type="button" onClick={() => setAnyTime(false)} className="min-h-11 px-3 underline pressable">Set a time</button></div>
                 : customTimeText !== null ? <div className="flex gap-2"><input aria-label="Custom time" value={customTimeText} onChange={(e) => setCustomTimeText(e.target.value)} className="min-h-11 min-w-0 flex-1 px-3 rounded-lg border border-line-control bg-sunken text-base text-ink" /><button type="button" onClick={() => setCustomTimeText(null)} className="min-h-11 px-3 text-ink underline pressable">Use clock</button></div>
                 : <TimePickerRow value={time1} onChange={setTime1} />}
-              {!shiftMode && !anyTime && customTimeText === null && <p className="text-base text-ink-soft">{detectedShift ? `During the ${detectedShift.name} shift (${formatShiftHours(detectedShift)})` : 'Not during a shift'}</p>}
+              {!shiftMode && !anyTime && customTimeText === null && <p className="text-base text-ink-soft">{detectedShift ? `During the ${detectedShift.name} shift on ${DAYS_MAP[detectedDay]} (${formatShiftHours(detectedShift, detectedDay)})` : 'Not during a shift'}</p>}
               {time2 && !anyTime && <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />}
               {!usingShift && assignType === 'all' && !isAny && (customTimeText === null || parseTimeText(customTimeText) !== null) && <p className="text-xs text-ink-soft mt-2">People with a shift today (including an overnight shift still running) see it only if this time is inside their shift. People with no shift see it too.</p>}
               <div className="flex flex-wrap gap-2">
-                {!shiftMode && <button type="button" aria-pressed={anyTime} onClick={() => { setAnyTime(true); setTime2(null); setCustomTimeText(null); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Any time</button>}
+                {!shiftMode && <button type="button" aria-label="Any time" aria-pressed={anyTime} onClick={() => { setAnyTime(true); setTime2(null); setCustomTimeText(null); }} className={choice(anyTime)}>{anyTime ? '✓ ' : ''}Any time</button>}
                 {!anyTime && !time2 && <button type="button" onClick={() => setTime2({ hour: 3, minute: 0, ampm: 'PM' })} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">+ Second time</button>}
               </div>
             </div>}
             <div role="group" aria-label="Repeat" className="space-y-2">
               <p className="text-sm text-ink-soft">Repeat</p>
-              <div className="flex flex-wrap gap-2">{['One time', 'Every day', 'Some days', 'Every week'].map((label) => <button key={label} type="button" aria-pressed={repeat === label} onClick={() => { setRepeat(label); setScheduleType(label === 'One time' ? 'specific_dates' : 'recurring'); if (label === 'Every day') setSelectedDays([0, 1, 2, 3, 4, 5, 6]); if (label === 'Every week') setSelectedDays([new Date(`${today}T12:00:00Z`).getUTCDay()]); }} className={`min-h-11 px-3 rounded-lg border border-line-control text-ink pressable ${repeat === label ? 'bg-sunken font-semibold' : 'bg-surface'}`}>{label}</button>)}</div>
-              {(repeat === 'Some days' || repeat === 'Every week') && <div className="flex flex-wrap gap-2">{DAYS_MAP.map((name, day) => <button key={day} type="button" aria-pressed={selectedDays.includes(day)} onClick={() => repeat === 'Every week' ? setSelectedDays([day]) : toggleDay(day)} className="min-h-11 min-w-11 px-3 rounded-lg border border-line-control text-ink pressable">{name}</button>)}</div>}
+              <div className="flex flex-wrap gap-2">{['One time', 'Every day', 'Some days', 'Every week'].map((label) => <button key={label} type="button" aria-pressed={repeat === label} onClick={() => { setRepeat(label); setScheduleType(label === 'One time' ? 'specific_dates' : 'recurring'); if (label === 'Every day') setSelectedDays([0, 1, 2, 3, 4, 5, 6]); if (label === 'Every week') setSelectedDays([new Date(`${today}T12:00:00Z`).getUTCDay()]); }} className={choice(repeat === label)}>{repeat === label ? '✓ ' : ''}{label}</button>)}</div>
+              {(repeat === 'Some days' || repeat === 'Every week') && <div className="flex flex-wrap gap-2">{DAYS_MAP.map((name, day) => <button key={day} type="button" aria-pressed={selectedDays.includes(day)} onClick={() => repeat === 'Every week' ? setSelectedDays([day]) : toggleDay(day)} className={choice(selectedDays.includes(day))}>{selectedDays.includes(day) ? '✓ ' : ''}{name}</button>)}</div>}
               {scheduleType === 'specific_dates' && <MonthlyCalendarPicker selectedDates={selectedDates} onToggleDate={handleToggleDate} onClearAll={() => setSelectedDates([])} onSelectToday={handleSelectToday} onSelectTomorrow={handleSelectTomorrow} timeZone={timeZone} />}
             </div>
           </section>
 
           <section hidden={step !== 2} aria-label="Who" className="space-y-4">
-            <p className="text-base text-ink">{namesFor(mainPeople)}</p>
             {(chosenShift || (!shiftMode && !isAny && customTimeText === null && detectedShift)) && <p className="text-sm text-ink-soft">Usual for {(chosenShift || detectedShift)!.name}</p>}
-            <div className="flex flex-wrap gap-2">{selectedWorkers.map((email) => <button key={email} type="button" onClick={() => { setPeopleTouched(true); const next = selectedWorkers.filter((e) => e !== email); setSelectedWorkers(next); setAssignType(next.length ? 'specific' : 'all'); }} className="min-h-11 px-3 rounded-full border border-line-control text-ink pressable">{namesFor([email])} ×</button>)}</div>
+            <div className="flex flex-wrap gap-2">{selectedWorkers.map((email) => <button key={email} type="button" onClick={() => { setPeopleTouched(true); const next = selectedWorkers.filter((e) => e !== email); setSelectedWorkers(next); setAssignType('specific'); }} className="min-h-11 px-3 rounded-full border border-gold-deep bg-gold-deep text-paper pressable">✓ {namesFor([email])} ×</button>)}</div>
             <button type="button" onClick={() => { setPeopleDay(null); setShowPeople(!showPeople); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">+ Add people</button>
-            <button type="button" aria-pressed={assignType === 'all'} onClick={() => { setPeopleTouched(true); setAssignType('all'); setSelectedWorkers([]); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Everyone at the venue</button>
+            <button type="button" aria-label="Everyone at the venue" aria-pressed={assignType === 'all'} onClick={() => { setPeopleTouched(true); setAssignType('all'); setSelectedWorkers([]); }} className={choice(assignType === 'all')}>{assignType === 'all' ? '✓ ' : ''}Everyone at the venue</button>
             {scheduleType === 'recurring' && (repeat === 'Every day' || repeat === 'Some days') && <div role="group" aria-label="People by day" className="space-y-2">
               {selectedDays.map((day) => <button key={day} type="button" onClick={() => { setPeopleDay(day); setJustOnce(false); setShowPeople(true); }} className="flex items-center gap-2 w-full min-h-11 px-3 text-left rounded-lg border border-line-control text-ink pressable"><span>{DAYS_MAP[day]}</span><span className="rounded-full bg-sunken w-8 h-8 flex items-center justify-center" aria-hidden="true">{namesFor(dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople).slice(0, 1)}</span><span className="truncate">{namesFor(swaps.find((s) => s.date === nextWeekday(today, day))?.assignedTo ?? dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople)}</span></button>)}
+              {Object.keys(dayDifferences).length > 0 && <div className="space-y-2 text-sm text-ink-soft">
+                <p>{Object.entries(dayDifferences).map(([day, emails]) => `${DAYS_MAP[Number(day)]}: ${namesFor(emails)}`).join(' · ')}</p>
+                <button type="button" onClick={() => { setPeopleTouched(true); setDayPeople({}); }} className={choice(false)}>Use {namesFor(mainPeople) || 'these people'} every day</button>
+              </div>}
               <p className="text-sm text-ink-soft">You can change this later from the task.</p>
             </div>}
             {showPeople && <div role="group" aria-label="Choose people" className="space-y-2 p-3 rounded-xl border border-line bg-sunken">
               {peopleDay !== null && <div className="space-y-2">
                 <p className="text-base text-ink">{DAYS_MAP[peopleDay]}</p>
                 {taskToEdit && <div className="flex flex-wrap gap-2">
-                  <button type="button" aria-pressed={!justOnce} onClick={() => setJustOnce(false)} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Every {new Date(`${dayDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' })}</button>
-                  <button type="button" aria-pressed={justOnce} onClick={() => setJustOnce(true)} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Just this {new Date(`${dayDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' })}</button>
+                  <button type="button" aria-pressed={!justOnce} onClick={() => setJustOnce(false)} className={choice(!justOnce)}>{!justOnce ? '✓ ' : ''}Every {new Date(`${dayDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' })}</button>
+                  <button type="button" aria-pressed={justOnce} onClick={() => setJustOnce(true)} className={choice(justOnce)}>{justOnce ? '✓ ' : ''}Just this {new Date(`${dayDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' })}</button>
                 </div>}
               </div>}
               <label className="block text-sm text-ink-soft">Search people<input value={peopleSearch} onChange={(e) => setPeopleSearch(e.target.value)} className="block w-full min-h-11 px-3 rounded-lg border border-line-control bg-surface text-base text-ink" /></label>
               <div className="flex flex-wrap gap-2">
-                <button type="button" aria-pressed={dayValue.includes('all')} onClick={() => pickPeople(['all'])} className="min-h-11 px-3 rounded-lg border border-line-control bg-surface text-ink pressable">Everyone at the venue</button>
-                {knownWorkers.filter((w) => `${w.name} ${w.email || ''}`.toLowerCase().includes(peopleSearch.toLowerCase())).map((w) => <button key={rosterKey(w)} type="button" aria-label={`Pick ${w.name}`} disabled={!w.email} aria-pressed={!!w.email && dayValue.includes(w.email)} onClick={() => { const email = w.email!; const next = dayValue.includes(email) ? dayValue.filter((e) => e !== email) : [...dayValue.filter((e) => e !== 'all'), email]; pickPeople(next.length ? next : ['all']); }} className="flex items-center gap-2 min-h-11 px-3 rounded-lg border border-line-control bg-surface text-ink pressable disabled:opacity-50"><span className="w-8 h-8 rounded-full bg-sunken flex items-center justify-center" aria-hidden="true">{w.name.slice(0, 1)}</span>{w.email && dayValue.includes(w.email) ? '✓ ' : ''}{w.name} ({rosterDisplayHandle(w)})</button>)}
+                <button type="button" aria-pressed={dayValue.includes('all')} onClick={() => pickPeople(['all'])} className={choice(dayValue.includes('all'))}>{dayValue.includes('all') ? '✓ ' : ''}Everyone at the venue</button>
+                {knownWorkers.filter((w) => `${w.name} ${w.email || ''}`.toLowerCase().includes(peopleSearch.toLowerCase())).map((w) => <button key={rosterKey(w)} type="button" aria-label={`Pick ${w.name}`} disabled={!w.email} aria-pressed={!!w.email && dayValue.includes(w.email)} onClick={() => { const email = w.email!; const next = dayValue.includes(email) ? dayValue.filter((e) => e !== email) : [...dayValue.filter((e) => e !== 'all'), email]; pickPeople(next); }} className={`flex items-center gap-2 disabled:opacity-50 ${choice(!!w.email && dayValue.includes(w.email))}`}><span className="w-8 h-8 rounded-full bg-sunken flex items-center justify-center" aria-hidden="true">{w.name.slice(0, 1)}</span>{w.email && dayValue.includes(w.email) ? '✓ ' : ''}{w.name}</button>)}
               </div>
               <button type="button" onClick={() => { setShowPeople(false); setPeopleDay(null); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Done choosing</button>
             </div>}
-            <label className="flex items-center gap-2 min-h-11 text-sm text-ink-soft"><input id="task-team-visibility" type="checkbox" checked={visibleToTeam} disabled={assignType === 'all' || selectedWorkers.length === 0} onChange={(e) => setVisibleToTeam(e.target.checked)} /><span>Owner and managers can see it too<span className="block">{assignType === 'all' || selectedWorkers.length === 0 ? 'Pick at least one person first.' : 'Off: only the people you picked, admins and coordinators see it.'}</span></span></label>
+            <label className="flex items-center gap-2 min-h-11 text-sm text-ink-soft"><input id="task-team-visibility" type="checkbox" checked={visibleToTeam} disabled={assignType === 'all' || selectedWorkers.length === 0} onChange={(e) => { setPeopleTouched(true); setVisibleToTeam(e.target.checked); }} /><span>Owner and managers can see it too<span className="block">{assignType === 'all' || selectedWorkers.length === 0 ? 'Pick at least one person first.' : 'Off: only the people you picked, admins and coordinators see it.'}</span></span></label>
           </section>
 
+          </div>
           {/* Footer Actions */}
-          <div className="sticky bottom-0 flex flex-wrap items-center justify-end gap-2 py-3 border-t border-line bg-surface shrink-0">
+          <div className="flex flex-wrap items-center justify-end gap-2 px-6 py-3 border-t border-line bg-surface shrink-0">
             <button
               type="button"
               onClick={onClose}
@@ -1044,9 +1058,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               Cancel
             </button>
             {step > 0 && <button type="button" onClick={() => setStep(step - 1)} className="min-h-12 px-4 rounded-lg border border-line-control text-base text-ink pressable">Back</button>}
-            <button disabled={saving || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 2 && shiftMode && !usingShift)} id="save-task-submit-btn" type="submit" className="min-h-12 px-4 rounded-lg bg-gold-deep text-paper text-base font-semibold pressable disabled:opacity-50">
+            <button disabled={saving || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 2 && (!peopleReady || (shiftMode && !usingShift)))} id="save-task-submit-btn" type="submit" className="min-h-12 px-4 rounded-lg bg-gold-deep text-paper text-base font-semibold pressable disabled:opacity-50">
               {saving ? 'Saving…' : step < 2 ? 'Next' : extras.length ? `Save ${extras.length + 1} tasks` : 'Save task'}
             </button>
+            {step === 2 && !peopleReady && <p className="w-full text-sm text-ink-soft" role="status">Pick who does it</p>}
             {saveError && <p role="alert" className="text-base text-bad">{saveError}</p>}
           </div>
         </form>

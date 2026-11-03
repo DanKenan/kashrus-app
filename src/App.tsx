@@ -1665,9 +1665,9 @@ export default function App() {
     return true;
   };
 
-  const handleSaveManyTasks = async (drafts: Partial<Task>[]): Promise<boolean> => {
+  const handleSaveManyTasks = async (drafts: Partial<Task>[], operationId?: string): Promise<boolean> => {
     if (!currentUser || !canUserAssignTasks(currentUser)) return false;
-    const result = await saveTaskBatch(drafts, taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || '', currentUser.email);
+    const result = await saveTaskBatch(drafts, taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || '', currentUser.email, operationId);
     if (!result.ok) { showToast(result.error || 'Could not create the assignments.'); return false; }
     const created = result.data;
     setTasks((prev) => [...prev, ...created.filter((task) => !prev.some((t) => t.id === task.id))]);

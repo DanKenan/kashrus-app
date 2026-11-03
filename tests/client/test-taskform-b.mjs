@@ -50,7 +50,7 @@ try {
   const daily = await make({ onSave: (task) => { saved = task; return false; } });
   await daily.type('task-title-input', 'Check'); await goWho(daily);
   assert.match(daily.text(), /Usual for Afternoon/);
-  await daily.click((e) => e.props.children === 'Everyone at the venue');
+  await daily.click((e) => e.props['aria-label'] === 'Everyone at the venue');
   await daily.click((e) => e.type === 'button' && e.props.children?.[0]?.props?.children === 'Fri');
   await daily.click((e) => e.props['aria-label'] === 'Pick Eli');
   await daily.submit();
@@ -68,7 +68,7 @@ try {
 
   const legacy = await make({ taskToEdit: base, onSave: (t) => { saved = t; return false; } });
   await goWho(legacy); await legacy.submit();
-  assert.deepEqual(saved, { id: 't', title: 'Check', description: '', category: 'General', categories: ['General'], shiftId: null, shiftTime: false, isPrivate: false, inputType: 'yes_no', customStatusOptions: undefined, completedStatusValues: undefined, targetTime: '2:00 PM', targetTimeMinutes: 840, targetTime2: '', targetTime2Minutes: null, priority: 'medium', enableOverdueAlert: false, assignedTo: ['yossi@test'], scheduleType: 'recurring', daysOfWeek: [0,1,2,3,4,5,6], specificDates: undefined });
+  assert.deepEqual(saved, { id: 't', title: 'Check', description: '', category: 'General', categories: ['General'], shiftId: null, shiftTime: false, isPrivate: undefined, inputType: 'yes_no', customStatusOptions: undefined, completedStatusValues: undefined, targetTime: '2:00 PM', targetTimeMinutes: 840, targetTime2: '', targetTime2Minutes: null, priority: 'medium', enableOverdueAlert: false, assignedTo: ['yossi@test'], scheduleType: 'recurring', daysOfWeek: [0,1,2,3,4,5,6], specificDates: undefined });
 
   const taskOwned = { ...base, shiftId: afternoon.id, assignmentMode: 'task', dayAssignees: { '5': ['eli@test'] } };
   const unchangedOwned = await make({ taskToEdit: taskOwned, onSave: (t) => { saved = t; return false; } });
