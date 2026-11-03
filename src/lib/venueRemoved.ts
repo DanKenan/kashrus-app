@@ -8,6 +8,15 @@
  */
 export const VENUE_REMOVED_TEXT = 'Your venue was removed. Contact your agency.';
 export const NO_VENUE_TEXT = "You aren't added to a venue yet. Contact your agency.";
+/**
+ * NOVENUE: the in-app line for a person who had a venue but has none in view
+ * now. The app cannot tell a deleted venue from an ended or changed access
+ * (a deleted venue is refused at sign-in with VENUE_REMOVED_TEXT), so it does
+ * not say "removed".
+ */
+export const NO_ACCESS_TEXT = "You don't have access to a venue right now. Contact your agency.";
+export const VENUE_LOADING_TEXT = 'Loading your venue…';
+export const VENUE_LOAD_FAILED_TEXT = "Couldn't load your venue. Trying again…";
 
 /** The sign-in error to show, preferring our plain words for VENUE_REMOVED. */
 export function signInErrorText(data: { error?: unknown; code?: unknown } | null | undefined, fallback: string): string {
@@ -19,5 +28,5 @@ export function signInErrorText(data: { error?: unknown; code?: unknown } | null
 export function noVenueMessage(user: { role?: string; venueId?: string | null; venueIds?: string[] | null } | null | undefined): string | null {
   if (!user || user.role === 'admin') return null;
   const hadVenue = !!user.venueId || (Array.isArray(user.venueIds) && user.venueIds.length > 0);
-  return hadVenue ? VENUE_REMOVED_TEXT : NO_VENUE_TEXT;
+  return hadVenue ? NO_ACCESS_TEXT : NO_VENUE_TEXT;
 }
