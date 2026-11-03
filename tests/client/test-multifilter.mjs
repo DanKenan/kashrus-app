@@ -79,13 +79,13 @@ try {
     onOpenTaskModal() {}, isAdmin: false,
   };
   const render = (selectedCategories) => renderToStaticMarkup(React.createElement(TaskFilterBar, { ...base, selectedCategories }));
-  const pressed = (html) => [...html.matchAll(/<button[^>]*aria-pressed="true"[^>]*>[\s\S]*?<\/button>/g)]
+  const pressed = (html) => [...(html.match(/<div[^>]*aria-label="Filter by category"[^>]*>([\s\S]*?)<\/div>/)?.[1] || '').matchAll(/<button[^>]*aria-pressed="true"[^>]*>[\s\S]*?<\/button>/g)]
     .map((m) => (m[0].match(/<span class="max-w-\[140px\] truncate">([^<]*)<\/span>/) || [null, 'All'])[1].replace(/&amp;/g, '&'));
   eq('R1 nothing picked: only All is marked', pressed(render([])), ['All']);
   eq('R2 one picked: that chip is marked, All is not', pressed(render([OPEN])), [OPEN]);
   eq('R3 two picked: both chips are marked', pressed(render([OPEN, BAKERY])), [OPEN, BAKERY]);
   const html2 = render([OPEN, BAKERY]);
-  ok('R4 picked chips keep the chip look (cat-chip ring)', (html2.match(/cat-chip cat-ring cat-text ring-2/g) || []).length === 2);
+  ok('R4 picked category chips use the solid selected look', (html2.match(/aria-pressed="true"[^>]*class="[^"]*chip-on/g) || []).length === 3);
 } catch (e) {
   ok('R0 TaskFilterBar renders with selectedCategories', false, String(e && e.message || e).split('\n')[0]);
 }

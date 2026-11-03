@@ -268,15 +268,15 @@ try {
   for (const View of [TaskCardView, TaskTableView]) {
     const view = mount(View, { tasks: [{ ...baseTask, shiftId: shift.id }], shiftsById: new Map([[shift.id, shift]]), currentUser: user, timeZone: 'America/New_York', onUpdateStatus: noop, onUpdateNotes: noop, onCheckIn: noop, onEditTask: noop, onDeleteTask: noop });
     await view.render();
-    assert.match(view.text(), /Deli day shift/);
-    assert.doesNotMatch(view.text(), /Team Roster|Assigned: Team/);
+    assert.match(view.html(), /Because you&#x27;re on Deli day/);
+    assert.doesNotMatch(view.html(), /Team Roster|Assigned: Team/);
     await view.render({ currentUser: { ...user, role: 'coordinator' } });
-    assert.match(view.text(), /Deli day · today: Moshe L\./);
+    assert.match(view.html(), /Deli day shift · today: Moshe L\./);
     await view.render({ isKiosk: true });
-    assert.match(view.text(), /Deli day shift/);
-    assert.doesNotMatch(view.text(), /today: Moshe/);
+    assert.match(view.html(), /Deli day shift/);
+    assert.doesNotMatch(view.html(), /today: Moshe/);
     await view.render({ tasks: [baseTask] });
-    assert.match(view.text(), /Team Roster/);
+    assert.match(view.html(), /Assigned to everyone/);
   }
 } finally { globalThis.Date = RealDate; }
 console.log('Shifts UI: shift assignees, weekday/date names, Nobody, kiosk and ordinary team fallback passed');
@@ -301,13 +301,13 @@ try {
   for (const View of [TaskCardView, TaskTableView]) {
     const view = mount(View, { tasks: [{ ...baseTask, shiftId: shift.id }], shiftsById: new Map([[shift.id, overnightPeople]]), currentUser: { ...user, role: 'coordinator' }, timeZone: 'America/New_York', onUpdateStatus: noop, onUpdateNotes: noop, onCheckIn: noop, onEditTask: noop, onDeleteTask: noop });
     await view.render();
-    assert.match(view.text(), /Deli day · today: Moshe Levin/);
-    assert.doesNotMatch(view.text(), /today: Rivka/);
+    assert.match(view.html(), /Deli day shift · today: Moshe Levin/);
+    assert.doesNotMatch(view.html(), /today: Rivka/);
     await view.render({ shiftsById: new Map([[shift.id, mondayOff]]) });
-    assert.match(view.text(), /Deli day · today: Moshe Levin/);
+    assert.match(view.html(), /Deli day shift · today: Moshe Levin/);
     await view.render({ shiftsById: new Map([[shift.id, unnamedOverride]]), roster: [{ id: 'rivka', name: 'Rivka Cohen' }] });
-    assert.match(view.text(), /Deli day · today: Rivka Cohen/);
-    assert.doesNotMatch(view.text(), /today: Moshe/);
+    assert.match(view.html(), /Deli day shift · today: Rivka Cohen/);
+    assert.doesNotMatch(view.html(), /today: Moshe/);
   }
 } finally { globalThis.Date = RealDate; }
 console.log('Shifts UI: RV5 occurrence person, ID-bound names, roster and unknown-person fallback passed');

@@ -1,3 +1,4 @@
+import { nextFullHour } from '../lib/nextFullHour';
 import { ShiftsPanel } from './ShiftsPanel';
 import type { Shift } from '../types';
 import { shiftLabel, shiftVariesByDay, shiftWeekdays, shiftIsUpcoming, shiftPeopleSummary } from '../lib/shifts';
@@ -7,7 +8,7 @@ import { X, Clock, Calendar, CheckSquare, Users, Plus, Trash2, CalendarDays, Che
 import { Task, TaskInputType } from '../types';
 import { captureEditBaseline } from '../lib/api';
 import { DAYS_MAP } from '../lib/utils';
-import { DEFAULT_TIME_ZONE, addDays, workDateIn } from '../lib/workday';
+import { DEFAULT_TIME_ZONE, addDays, workDateIn, minutesIn } from '../lib/workday';
 import {
   categoryVars,
   categoryVarsForHue,
@@ -178,7 +179,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [selectedCategories, setSelectedCategories] = useState<string[]>([PRESET_CATEGORIES[0]]);
   const [inputType, setInputType] = useState<TaskInputType>('yes_no');
   // Structured times — the app can reliably sort and process these.
-  const [time1, setTime1] = useState<PickerTime>({ hour: 9, minute: 0, ampm: 'AM' });
+  const [time1, setTime1] = useState<PickerTime>(() => nextFullHour(minutesIn(timeZone, new Date())));
   const [anyTime, setAnyTime] = useState(false);
   const [time2, setTime2] = useState<PickerTime | null>(null);
   // Free-text fallback for non-clock times like "End of Shift".
@@ -364,7 +365,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setDescription('');
       setSelectedCategories([PRESET_CATEGORIES[0]]);
       setInputType('yes_no');
-      setTime1({ hour: 9, minute: 0, ampm: 'AM' });
+      setTime1(nextFullHour(minutesIn(timeZone, new Date())));
       setTime2(null);
       setCustomTimeText(null);
       setPriority('medium');
@@ -581,7 +582,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block font-semibold text-ink-soft mb-1">
-                Categories <span className="text-[10px] font-normal text-ink-faint">(tap to add / remove — pick as many as fit)</span>
+                Type of check (pick any)
               </label>
               <div className="flex flex-wrap gap-1.5">
                 {categoryOptions.map((c) => {
@@ -721,7 +722,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
             <div>
               <label className="block font-semibold text-ink-soft mb-1">
-                Completion Input Type
+                How is it marked done?
               </label>
               <select
                 id="task-input-type-select"
@@ -729,11 +730,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 onChange={(e) => setInputType(e.target.value as TaskInputType)}
                 className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink"
               >
-                <option value="yes_no">Yes / No Button Pair</option>
-                <option value="toggle">On / Off Toggle Switch</option>
-                <option value="status_select">Status Select (Customizable Values)</option>
-                <option value="checkbox">Standard Checkbox</option>
-                <option value="check_in">Repeatable Check-in — log who + when on every tap</option>
+                <option value="yes_no">Yes or No</option>
+                <option value="toggle">On / Off switch</option>
+                <option value="status_select">Your own options</option>
+                <option value="checkbox">One tick</option>
+                <option value="check_in">Check many times (logs who and when)</option>
               </select>
             </div>
           </div>
@@ -901,6 +902,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                   {time2 && <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />}
                 </div>
               )}
+              {!usingShift && assignType === 'all' && !isAny && (customTimeText === null || parseTimeText(customTimeText) !== null) && <p className="text-xs text-ink-soft mt-2">People with a shift today (including an overnight shift still running) see it only if this time is inside their shift. People with no shift see it too.</p>}
               <div className="flex items-center gap-2 flex-wrap mt-2">
                 <button
                   type="button"
@@ -972,9 +974,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               className="w-4 h-4 rounded accent-gold"
             />
             <div>
-              <div className="text-xs font-bold">Overdue push alert</div>
-              <div className="text-[11px] text-ink-faint">
-                {isAny ? "Off for any-time tasks: there's no target time to pass." : 'Notify assigned mashgichim if this task passes its target time'}
+              <div className="text-xs font-bold">Alert if it's late</div>
+              <div className="text-xs text-ink-soft">
+                {!isAny && enableOverdueAlert ? "On: a push alert when it's late" : "Off: no alert if it's late"}
               </div>
             </div>
           </label>
@@ -1012,7 +1014,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 }`}
               >
                 <CalendarDays className="w-3.5 h-3.5" />
-                <span>One-Time / Calendar Dates</span>
+                <span>One-Time / Specific dates</span>
               </button>
             </div>
 
@@ -1080,7 +1082,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                   onChange={() => setAssignType('all')}
                   className="text-emerald-600 focus:ring-emerald-500"
                 />
-                <span className="font-medium text-ink-soft">All Mashgichim & Team (Global Task)</span>
+                <span className="font-medium text-ink-soft">Everyone at this venue</span>
               </label>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
@@ -1150,14 +1152,16 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 <label className="flex items-start gap-2 pt-2 cursor-pointer">
                   <input
                     type="checkbox"
+                    id="task-team-visibility"
                     checked={visibleToTeam}
+                    disabled={selectedWorkers.length === 0}
+                    aria-describedby="task-team-visibility-hint"
                     onChange={(e) => setVisibleToTeam(e.target.checked)}
                     className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
                   />
-                  <span className="text-[11px] text-ink-soft leading-snug">
-                    <span className="font-bold">Visible to the rest of the team.</span>{' '}
-                    Uncheck to keep it private — only the selected mashgichim (plus admins
-                    and coordinators) will see this assignment.
+                  <span className="text-xs text-ink-soft leading-snug">
+                    <span className="font-bold">Owner and managers can see it too</span>
+                    <span id="task-team-visibility-hint" className="block">{selectedWorkers.length === 0 ? 'Pick at least one person first.' : 'Off: only the people you picked, admins and coordinators see it.'}</span>
                   </span>
                 </label>
               </div>
