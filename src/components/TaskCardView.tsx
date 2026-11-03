@@ -1,3 +1,4 @@
+import { TaskEmptyState } from './TaskEmptyState';
 import { whoSeesLabel } from '../lib/whoSees';
 import { WhoSeesTag } from './WhoSeesTag';
 import { shiftDisplayWeekday } from '../lib/shiftTaskDay';
@@ -49,6 +50,8 @@ interface TaskCardViewProps {
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
+  hasActiveFilters?: boolean;
+  onClearFilters?: () => void;
 }
 
 const getInitials = (nameOrEmail: string) => {
@@ -75,6 +78,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
+  hasActiveFilters = false,
+  onClearFilters,
   timeZone,
 }) => {
   // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
@@ -119,24 +124,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   };
 
   if (tasks.length === 0) {
-    return (
-      <div className="bg-surface rounded-3xl p-10 text-center border border-line tactile-1 animate-fade-in">
-        <div className="w-12 h-12 rounded-2xl bg-gold-wash border border-gold/30 text-gold-deep flex items-center justify-center mx-auto mb-3">
-          <AlertCircle className="w-6 h-6" />
-        </div>
-        <p className="text-sm font-bold text-ink">{onOpenTaskModal && canUserAssignTasks(currentUser) ? 'Nothing here' : 'Nothing for you right now.'}</p>
-        <p className="text-xs text-ink-soft mt-1 mb-4">{onOpenTaskModal && canUserAssignTasks(currentUser) ? 'If the list looks short, a filter is on.' : 'New tasks show up here.'}</p>
-        {onOpenTaskModal && canUserAssignTasks(currentUser) && (
-          <button
-            onClick={onOpenTaskModal}
-            className="pressable inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 transition cursor-pointer"
-          >
-            <span className="text-base font-bold leading-none">+</span>
-            <span>New task</span>
-          </button>
-        )}
-      </div>
-    );
+    return <TaskEmptyState hasActiveFilters={hasActiveFilters} onClearFilters={onClearFilters} canCreate={!!onOpenTaskModal && canUserAssignTasks(currentUser)} onCreate={onOpenTaskModal} kiosk={isKiosk} />;
   }
 
   return (

@@ -99,7 +99,7 @@ for (const component of [TaskCardView, TaskTableView]) {
     ok('non assigner no create button', !buttons(html).some((b) => /New task|Create/.test(b)));
   }
   const html = render(component, { ...viewProps, currentUser: { ...user, role: 'admin' }, onOpenTaskModal: noop });
-  ok('assigner empty explanation and button', html.includes('If the list looks short, a filter is on.') && buttons(html).some((b) => b.includes('New task')));
+  ok('assigner empty title and button', html.includes('Nothing here yet') && !html.includes('A filter is on.') && buttons(html).some((b) => b.includes('New task')));
 }
 const task = { id: 'check', venueId: 'crown', title: 'Crown Market', category: 'Temperature', assignedTo: ['yossi@example.com'], inputType: 'yes_no', currentStatus: 'pending', isCompleted: false, createdAt: '2026-11-03T12:00:00Z', updatedAt: '2026-11-03T12:00:00Z', notes: '' };
 for (const component of [TaskCardView, TaskTableView]) {
@@ -246,5 +246,45 @@ ok('removing last person disables checkbox again', visibility().props.disabled =
 ok('removing last person replaces privacy promise', privacy.text().includes('Pick at least one person first.') && !privacy.text().includes('Off: only the people you picked'));
 await privacy.submit();
 eq('empty-person save fallback unchanged', [privacySaved.assignedTo, privacySaved.isPrivate], [['all'], false]);
+// RV3: an empty venue is distinct from a list narrowed by active filters.
+for (const View of [TaskCardView, TaskTableView]) {
+  for (const role of ['admin', 'mashgiach']) {
+    const props = { ...viewProps, currentUser: { ...user, role }, onOpenTaskModal: noop };
+    const plain = render(View, { ...props, hasActiveFilters: false });
+    ok(`${role} default empty state makes no filter claim`, !plain.includes('filter is on') && !plain.includes('Nothing matches these filters') && !plain.includes('Clear all'));
+    ok(`${role} default empty title`, plain.includes(role === 'admin' ? 'Nothing here yet' : 'Nothing for you right now.'));
+    eq(`${role} default create action`, buttons(plain).some((b) => b.includes('New task')), role === 'admin');
+    const filtered = render(View, { ...props, hasActiveFilters: true, onClearFilters: noop });
+    ok(`${role} filtered empty explanation`, filtered.includes('Nothing matches these filters') && filtered.includes('A filter is on. Tap Clear all to see everything.'));
+    ok(`${role} filtered empty clear action`, buttons(filtered).some((b) => b.includes('Clear all')));
+    ok(`${role} filtered empty hides create action`, !buttons(filtered).some((b) => b.includes('New task')));
+  }
+}
+const { TaskEmptyState } = await import('../../src/components/TaskEmptyState.tsx');
+let cleared = 0;
+const empty = mount(TaskEmptyState, { hasActiveFilters: true, canCreate: false, onClearFilters: () => { cleared++; } });
+await empty.render();
+await empty.click('Clear all');
+eq('empty state calls shared clear-all action', cleared, 1);
+const { ActiveFilters } = await import('../../src/components/ActiveFilters.tsx');
+const summary = mount(ActiveFilters, { state: { ...base, categories: ['Temperature'] }, defaults, onChange: noop, onClearAll: () => { cleared++; } });
+await summary.render();
+ok('active filters is a named group', /role="group" aria-label="Active filters"/.test(summary.html()));
+await summary.click('Clear all');
+eq('summary calls the same clear-all action', cleared, 2);
+for (const hasActiveFilters of [false, true]) {
+  const kioskEmpty = render(KioskTaskPanel, { ...kioskProps, isAdmin: false, hasActiveFilters, onClearFilters: noop });
+  ok('kiosk empty state follows filter state', kioskEmpty.includes(hasActiveFilters ? 'Nothing matches these filters' : 'Nothing for you right now.'));
+  eq('kiosk empty clear action only for active filters', buttons(kioskEmpty).some((b) => b.includes('Clear all')), hasActiveFilters);
+}
+for (const assignedTo of [[], ['all'], ['ALL']]) {
+  for (const mode of ['editor', 'kiosk', 'own']) {
+    eq(`${mode} private global is never Everyone`, label({ isPrivate: true, assignedTo }, mode), { text: 'Private', icon: 'private', title: 'Private: only admins and coordinators' });
+  }
+}
+eq('own explicitly assigned private global keeps own wording', label({ isPrivate: true, assignedTo: ['all', 'YOSSI@example.com'] }, 'own').text, 'Assigned to you');
+ok('App uses same active-filter computation for empty states', app.includes('activeFilterChips(filterState, filterDefaults).length > 0') && (app.match(/hasActiveFilters=\{hasActiveFilters\}/g) || []).length === 3);
+ok('App shares clear-all with summary and all task views', app.includes('onClearAll={clearAllFilters}') && (app.match(/onClearFilters=\{clearAllFilters\}/g) || []).length === 3);
+eq('mixed private legacy title retains explicit people', label({ isPrivate: true, assignedTo: ['all', 'yossi@example.com'] }).title, 'Private: only them, admins and coordinators');
 console.log(`${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

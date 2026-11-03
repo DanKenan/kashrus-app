@@ -1,3 +1,4 @@
+import { TaskEmptyState } from './TaskEmptyState';
 import { filterChipClass, FilterCheck } from '../lib/filterChip';
 import { whoSeesLabel } from '../lib/whoSees';
 import { WhoSeesTag } from './WhoSeesTag';
@@ -94,6 +95,8 @@ interface KioskTaskPanelProps {
   /** The existing table or cards view, rendered when that view is chosen. */
   children?: React.ReactNode;
   filterSummary?: React.ReactNode;
+  hasActiveFilters?: boolean;
+  onClearFilters?: () => void;
   // D3c: what the (hidden) Header gave the kiosk, carried by KioskTopBar.
   updatesBell?: React.ReactNode;
   darkMode?: boolean;
@@ -230,6 +233,8 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   onViewChange,
   children,
   filterSummary,
+  hasActiveFilters = false,
+  onClearFilters,
   updatesBell,
   darkMode,
   onToggleDarkMode,
@@ -661,11 +666,13 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
           {view !== 'list' ? (
             children
           ) : shown.length === 0 ? (
-            <div className="rounded-2xl bg-surface border border-line p-8 text-center">
-              <p className="text-k-body text-ink-soft">
-                {tasks.length === 0 ? 'No tasks to show here.' : half === 'todo' ? 'Nothing left to do here.' : 'Nothing done yet.'}
-              </p>
-            </div>
+            tasks.length === 0 ? (
+              <TaskEmptyState hasActiveFilters={hasActiveFilters} onClearFilters={onClearFilters} canCreate={!!onOpenTaskModal && isAdmin} onCreate={onOpenTaskModal} kiosk />
+            ) : (
+              <div className="rounded-2xl bg-surface border border-line p-8 text-center">
+                <p className="text-k-body text-ink-soft">{half === 'todo' ? 'Nothing left to do here.' : 'Nothing done yet.'}</p>
+              </div>
+            )
           ) : (
             <ul className="flex flex-col gap-2.5">
               {shown.map((task, i) => {
