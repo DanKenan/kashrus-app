@@ -34,8 +34,9 @@ await zero.click('+ Add people'); await zero.click(pick('Yossi')); expectOn(zero
 assert.equal(save(zero).props.disabled, false);
 await zero.click(pick('Yossi')); assert.equal(save(zero).props.disabled, true);
 await zero.click((e) => e.props['aria-label'] === 'Everyone at the venue'); assert.equal(save(zero).props.disabled, false);
+await zero.click(pick('Yossi'));
 await zero.click((e) => e.type === 'button' && e.props.children?.[0]?.props?.children === 'Fri');
-await zero.click(pick('Eli')); await zero.click(pick('Eli'));
+await zero.click(pick('Yossi')); await zero.click(pick('Eli')); await zero.click(pick('Eli'));
 assert.equal(save(zero).props.disabled, true, 'empty weekday cannot silently become Everyone');
 
 // Legacy private shift edits keep their exact privacy value until Who changes.

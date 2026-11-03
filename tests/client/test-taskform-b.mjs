@@ -49,9 +49,9 @@ try {
   let saved;
   const daily = await make({ onSave: (task) => { saved = task; return false; } });
   await daily.type('task-title-input', 'Check'); await goWho(daily);
-  assert.match(daily.text(), /Usual for Afternoon/);
-  await daily.click((e) => e.props['aria-label'] === 'Everyone at the venue');
+  assert.doesNotMatch(daily.text(), /Usual for Afternoon/);
   await daily.click((e) => e.type === 'button' && e.props.children?.[0]?.props?.children === 'Fri');
+  await daily.click((e) => e.props['aria-label'] === 'Pick Yossi');
   await daily.click((e) => e.props['aria-label'] === 'Pick Eli');
   await daily.submit();
   assert.deepEqual(saved.dayAssignees, { '5': ['eli@test'] });

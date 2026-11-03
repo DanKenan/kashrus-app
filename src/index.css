@@ -411,3 +411,12 @@
   border: 2px solid var(--paper);
   cursor: ew-resize;
 }
+
+.shift-hours-handle::-webkit-slider-runnable-track {
+  height: 44px;
+  background: linear-gradient(var(--line-control), var(--line-control)) center / 100% 2px no-repeat;
+}
+.shift-hours-handle::-moz-range-track {
+  height: 2px;
+  background: var(--line-control);
+}
