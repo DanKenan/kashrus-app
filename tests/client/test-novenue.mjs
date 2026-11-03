@@ -13,7 +13,7 @@
  * Run: npx tsx tests/client/test-novenue.mjs
  */
 import fs from 'node:fs';
-import { venueListKey, deliveredVenueListKey, venueListPending, venueRetryDelayMs } from '../../src/lib/venueLoad.ts';
+import { venueListKey, deliveredVenueListKey, venueListPending, venueRetryDelayMs, VENUE_LOAD_TIMEOUT_MS } from '../../src/lib/venueLoad.ts';
 import { noVenueMessage, signInErrorText, VENUE_REMOVED_TEXT, NO_VENUE_TEXT, NO_ACCESS_TEXT } from '../../src/lib/venueRemoved.ts';
 
 let passed = 0; let failures = 0;
@@ -46,6 +46,7 @@ eq('D first retry 2 s', venueRetryDelayMs(1), 2000);
 eq('D then 4 s', venueRetryDelayMs(2), 4000);
 eq('D then 8 s', venueRetryDelayMs(3), 8000);
 eq('D capped at 30 s', venueRetryDelayMs(20), 30000);
+eq('D a request that never answers is abandoned after 15 s', VENUE_LOAD_TIMEOUT_MS, 15000);
 
 // W
 eq('W had a venue, none in view: accurate words', noVenueMessage({ role: 'mashgiach', venueId: 'v-crown' }), NO_ACCESS_TEXT);
@@ -58,13 +59,14 @@ eq('W sign-in refusal for a deleted venue: unchanged', signInErrorText({ code: '
 const app = fs.readFileSync(new URL('../../src/App.tsx', import.meta.url), 'utf8');
 ok('S the venue list effect runs again on a scope change and on a retry', app.includes('[currentUser?.id, currentUser?.email, currentUser?.role, ownVenueListKey, venuesRetry]'));
 ok('S a successful load records the scope it was loaded for', /setVenues\(data\.venues\);\s*venuesFailures\.current = 0;\s*setVenuesLoadFailed\(false\);\s*setVenuesLoadedKey\(key\);/.test(app));
-ok('S a failed load schedules a retry', app.includes('venueRetryDelayMs(venuesFailures.current)') && app.includes(".catch((err) => { console.warn('Could not fetch /api/venues:', err); failed(); });"));
+ok('S a failed load schedules a retry', app.includes('venueRetryDelayMs(venuesFailures.current)') && app.includes(".catch((err) => { console.warn('Could not fetch /api/venues:', err); failed(); })"));
+ok('S a request that never answers is aborted at the deadline and counts as failed (RV1 P2-1)', app.includes('apiFetch(url, { signal: abort.signal })') && app.includes('setTimeout(() => abort.abort(), VENUE_LOAD_TIMEOUT_MS)') && app.includes('clearTimeout(deadline); abort.abort();'));
 ok('S back online retries', app.includes("window.addEventListener('online', online);"));
 ok('S an INITIAL_STATE list counts as loaded for its scope', app.includes('setVenuesLoadedKey(deliveredVenueListKey(currentUser, msg.payload.myVenueRev,'));
 const loadingAt = app.indexOf('noVenueMessage(currentUser) ? (venueListLoading ? (');
 ok('S the loading line is chosen before the no-venue line', loadingAt > 0 && loadingAt < app.indexOf('<div data-no-venue-notice'));
 ok('S the loading line offers Sign out after a failed load', /data-venue-loading[\s\S]{0,600}venuesLoadFailed && \([\s\S]{0,400}onClick=\{handleLogout\}/.test(app));
-eq('S sign-in and sign-out forget the loaded scope', (app.match(/setVenues\(\[\]\);\n\s*setVenuesLoadedKey\(null\);/g) || []).length, 2);
+eq('S sign-in and sign-out forget the loaded scope and the failures (RV1 P3-1)', (app.match(/setVenues\(\[\]\);\n\s*setVenuesLoadedKey\(null\);\n\s*setVenuesLoadFailed\(false\);\n\s*venuesFailures\.current = 0;/g) || []).length, 2);
 
 console.log(failures ? `${passed} passed, ${failures} failed.` : `ALL PASS: ${passed} passed, 0 failed`);
 process.exit(failures ? 1 : 0);

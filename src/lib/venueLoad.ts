@@ -33,6 +33,9 @@ export function venueListPending(user: ScopeUser, isKiosk: boolean, loadedKey: s
   return loadedKey !== venueListKey(user);
 }
 
+/** A venue-list request that has not answered by then is abandoned and retried. */
+export const VENUE_LOAD_TIMEOUT_MS = 15000;
+
 /** Wait before the next try after `failures` failed loads in a row: 2 s, 4 s, 8 s, ... up to 30 s. */
 export function venueRetryDelayMs(failures: number): number {
   const n = Math.max(1, Math.floor(failures));

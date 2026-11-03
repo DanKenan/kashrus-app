@@ -92,7 +92,7 @@ import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel, isVenue
 import { refreshCustomCategories } from './lib/categoryStyle';
 import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry, syncCookieSession, isCookieSession } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT, VENUE_LOADING_TEXT, VENUE_LOAD_FAILED_TEXT } from './lib/venueRemoved';
-import { venueListKey, deliveredVenueListKey, venueListPending, venueRetryDelayMs } from './lib/venueLoad';
+import { venueListKey, deliveredVenueListKey, venueListPending, venueRetryDelayMs, VENUE_LOAD_TIMEOUT_MS } from './lib/venueLoad';
 import { forgetSignedInUserForKiosk, isKioskEntryUrl, stripKioskEntryFromUrl } from './lib/kioskSetup';
 import { effectiveViewportWidth } from './lib/desktopMode';
 import { SITE_REFUSED_EVENT, sharedOriginFor, siteRefusalAction, useSite, type SiteRefusal, type SiteRefusalEvent, homePageAllowed } from './lib/site';
@@ -979,7 +979,10 @@ export default function App() {
       retryTimer = setTimeout(() => { if (isCurrent()) setVenuesRetry((n) => n + 1); }, venueRetryDelayMs(venuesFailures.current));
     };
     const url = `/api/venues?userEmail=${encodeURIComponent(currentUser.email)}`;
-    apiFetch(url)
+    // A request that never answers counts as a failed one (and is retried).
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), VENUE_LOAD_TIMEOUT_MS);
+    apiFetch(url, { signal: abort.signal })
       .then((res) => res.json())
       .then((data) => {
         if (!isCurrent()) return;
@@ -1002,8 +1005,9 @@ export default function App() {
           failed();
         }
       })
-      .catch((err) => { console.warn('Could not fetch /api/venues:', err); failed(); });
-    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
+      .catch((err) => { console.warn('Could not fetch /api/venues:', err); failed(); })
+      .finally(() => clearTimeout(deadline));
+    return () => { cancelled = true; clearTimeout(deadline); abort.abort(); if (retryTimer) clearTimeout(retryTimer); };
   }, [currentUser?.id, currentUser?.email, currentUser?.role, ownVenueListKey, venuesRetry]);
   useEffect(() => {
     if (!venuesLoadFailed || typeof window === 'undefined') return;
@@ -2023,6 +2027,8 @@ export default function App() {
     setCurrentVenueId(null);
     setVenues([]);
     setVenuesLoadedKey(null);
+    setVenuesLoadFailed(false);
+    venuesFailures.current = 0;
     setTasks([]);
     setShiftsByVenue({});
     setHistoryLogs([]);
@@ -2096,6 +2102,8 @@ export default function App() {
     requestContext.current.generation += 1;
     setVenues([]);
     setVenuesLoadedKey(null);
+    setVenuesLoadFailed(false);
+    venuesFailures.current = 0;
     setTasks([]);
     setShiftsByVenue({});
     setHistoryLogs([]);
