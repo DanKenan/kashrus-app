@@ -1,4 +1,5 @@
 import React from 'react';
+import { filterChipClass, FilterCheck } from '../lib/filterChip';
 import { motion } from 'motion/react';
 import { Search, LayoutGrid, Table as TableIcon, X, Plus, Layers } from 'lucide-react';
 import { categoryVars } from '../lib/categoryStyle';
@@ -74,13 +75,11 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
                   id={view === 'today' ? 'day-view-today' : 'day-view-all'}
                   onClick={() => onDayViewChange(view)}
                   aria-pressed={dayView === view}
-                  className={`pressable min-h-11 shrink-0 px-3 py-2 rounded-full text-xs font-semibold border transition cursor-pointer ${
-                    dayView === view
-                      ? 'bg-gold-wash text-gold-ink border-gold/50'
-                      : 'bg-surface text-ink-soft border-line hover:border-line-strong tactile-1'
+                  className={`pressable inline-flex items-center gap-1.5 min-h-11 shrink-0 px-3 py-2 rounded-full text-xs font-semibold border transition cursor-pointer ${
+                    filterChipClass(dayView === view)
                   }`}
                 >
-                  {view === 'today' ? 'Today' : 'All days'}
+                  <FilterCheck on={dayView === view} />{view === 'today' ? 'Today' : 'All days'}
                 </button>
               ))}
             </div>
@@ -90,27 +89,25 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
           <div className="flex items-center bg-sunken p-1 rounded-2xl border border-line shrink-0">
             <button
               id="view-cards-btn"
+              aria-pressed={viewMode === 'cards'}
               onClick={() => onViewModeChange('cards')}
-              className={`max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center pressable p-1.5 rounded-xl transition cursor-pointer ${
-                viewMode === 'cards'
-                  ? 'bg-surface text-gold-deep tactile-1 font-bold'
-                  : 'text-ink-faint hover:text-ink-soft'
+              className={`max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center pressable inline-flex items-center gap-1.5 text-xs p-2 rounded-xl transition cursor-pointer ${
+                filterChipClass(viewMode === 'cards')
               }`}
               title="Card Dossier View"
             >
-              <LayoutGrid className="w-4 h-4" />
+              <FilterCheck on={viewMode === 'cards'} /><LayoutGrid className="w-4 h-4" /> Cards
             </button>
             <button
               id="view-table-btn"
+              aria-pressed={viewMode === 'table'}
               onClick={() => onViewModeChange('table')}
-              className={`max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center pressable p-1.5 rounded-xl transition cursor-pointer ${
-                viewMode === 'table'
-                  ? 'bg-surface text-gold-deep tactile-1 font-bold'
-                  : 'text-ink-faint hover:text-ink-soft'
+              className={`max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center pressable inline-flex items-center gap-1.5 text-xs p-2 rounded-xl transition cursor-pointer ${
+                filterChipClass(viewMode === 'table')
               }`}
               title="Grid Audit Table View"
             >
-              <TableIcon className="w-4 h-4" />
+              <FilterCheck on={viewMode === 'table'} /><TableIcon className="w-4 h-4" /> Table
             </button>
           </div>
 
@@ -138,16 +135,14 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
             whileTap={{ scale: 0.94 }}
             onClick={() => onCategoryChange('all')}
             aria-pressed={allActive}
-            className={`shrink-0 inline-flex items-center gap-1.5 pl-2.5 pr-3 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer ${
-              allActive
-                ? 'bg-ink text-paper border-ink tactile-1'
-                : 'bg-surface text-ink-soft border-line hover:border-line-strong tactile-1'
+            className={`min-h-11 shrink-0 inline-flex items-center gap-1.5 pl-2.5 pr-3 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer ${
+              filterChipClass(allActive)
             }`}
           >
-            <Layers className="w-3.5 h-3.5" />
+            <FilterCheck on={allActive} /><Layers className="w-3.5 h-3.5" />
             <span>All</span>
             {categoryCounts && (
-              <span className={`tnum text-[10px] font-black px-1.5 py-0.5 rounded-full ${allActive ? 'bg-white/20' : 'bg-sunken'}`}>
+              <span className={`tnum text-xs font-black px-1.5 py-0.5 rounded-full ${allActive ? '' : 'bg-sunken'}`}>
                 {totalCount}
               </span>
             )}
@@ -163,15 +158,15 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
                 onClick={() => onCategoryChange(c)}
                 aria-pressed={active}
                 style={categoryVars(c)}
-                className={`shrink-0 inline-flex items-center gap-1.5 pl-2 pr-3 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer ${
-                  active ? 'cat-chip cat-ring cat-text ring-2 tactile-2' : 'bg-surface text-ink-soft border-line hover:border-line-strong tactile-1'
+                className={`min-h-11 shrink-0 inline-flex items-center gap-1.5 pl-2 pr-3 py-1.5 rounded-full text-xs font-bold border transition cursor-pointer ${
+                  filterChipClass(active)
                 }`}
                 title={active ? `Unselect ${c}` : `Filter by ${c}`}
               >
-                <span className="cat-dot w-2.5 h-2.5 rounded-full shrink-0" />
+                <FilterCheck on={active} />{!active && <span className="cat-dot w-2.5 h-2.5 rounded-full shrink-0" />}
                 <span className="max-w-[140px] truncate">{c}</span>
                 {typeof count === 'number' && (
-                  <span className={`tnum text-[10px] font-black px-1.5 py-0.5 rounded-full ${active ? 'bg-black/10 dark:bg-white/15' : 'bg-sunken'}`}>
+                  <span className={`tnum text-xs font-black px-1.5 py-0.5 rounded-full ${active ? '' : 'bg-sunken'}`}>
                     {count}
                   </span>
                 )}

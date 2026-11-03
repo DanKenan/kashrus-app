@@ -1,7 +1,11 @@
-import { shiftDisplayWeekday, shiftAssigneeLabel } from '../lib/shiftTaskDay';
+import { TaskEmptyState } from './TaskEmptyState';
+import { whoSeesLabel } from '../lib/whoSees';
+import { WhoSeesTag } from './WhoSeesTag';
+import { shiftDisplayWeekday } from '../lib/shiftTaskDay';
 import type { Shift } from '../types';
 import { shiftLabel, shiftTaskAppliesAt, shiftTaskOverdueAt } from '../lib/shifts';
 import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
+import { seesOnlyOwnTasks } from '../lib/taskDay';
 import { ANY_TIME_LABEL } from '../lib/anyTime';
 import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
 import { minutesIn, workDateIn, weekdayIn } from '../lib/workday';
@@ -9,7 +13,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowRight,
   Clock,
-  Users,
   Check,
   X,
   MessageSquare,
@@ -32,7 +35,7 @@ import { TaskAnswerPhoto } from './TaskAnswerPhoto';
 interface TaskTableViewProps {
   shiftsById?: Map<string, Shift>;
   isKiosk?: boolean;
-  roster?: ReadonlyArray<{ id?: string; name: string }>;
+  roster?: ReadonlyArray<{ id?: string; email?: string; name: string }>;
   /** QA2 #25: the venue's time zone, for the Overdue chip. */
   timeZone?: string;
   tasks: Task[];
@@ -45,6 +48,8 @@ interface TaskTableViewProps {
   onEditTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenTaskModal?: () => void;
+  hasActiveFilters?: boolean;
+  onClearFilters?: () => void;
 }
 
 const getInitials = (nameOrEmail: string) => {
@@ -71,6 +76,8 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   onEditTask,
   onDeleteTask,
   onOpenTaskModal,
+  hasActiveFilters = false,
+  onClearFilters,
   timeZone,
 }) => {
   // QA2 #25: the same overdue rule as the dashboard, in the venue's zone.
@@ -144,24 +151,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   }, [tasks.length]);
 
   if (tasks.length === 0) {
-    return (
-      <div className="bg-surface rounded-3xl p-12 text-center border border-line tactile-1 animate-fade-in">
-        <div className="w-12 h-12 rounded-2xl bg-gold-wash border border-gold/30 text-gold-deep flex items-center justify-center mx-auto mb-3">
-          <AlertCircle className="w-6 h-6" />
-        </div>
-        <h3 className="text-base font-bold text-ink">No tasks match your filter</h3>
-        <p className="text-xs text-ink-soft mt-1 mb-4">Try clearing search filters or add a new assignment.</p>
-        {onOpenTaskModal && (
-          <button
-            onClick={onOpenTaskModal}
-            className="pressable inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 transition cursor-pointer"
-          >
-            <span className="text-base font-bold leading-none">+</span>
-            <span>Create New Assignment</span>
-          </button>
-        )}
-      </div>
-    );
+    return <TaskEmptyState hasActiveFilters={hasActiveFilters} onClearFilters={onClearFilters} canCreate={!!onOpenTaskModal && canUserAssignTasks(currentUser)} onCreate={onOpenTaskModal} kiosk={isKiosk} />;
   }
 
   return (
@@ -194,8 +184,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
               const canFill = canUserFillTasks(currentUser);
               const canAssign = canUserAssignTasks(currentUser);
               const mine = isDirectlyAssigned(task, currentUser);
-              const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
-              const assignee = shift ? shiftAssigneeLabel(shift, canAssign && !isKiosk, todayYmd, todayWeekday, nowMinutes, roster) : null;
+              const audience = whoSeesLabel(task, { viewer: currentUser, mode: isKiosk ? 'kiosk' : seesOnlyOwnTasks(currentUser, canAssign) ? 'own' : 'editor', shiftsById, roster, todayYmd, todayWeekday, nowMinutes });
 
               return (
                 <React.Fragment key={task.id}>
@@ -281,39 +270,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 
                   {/* Assigned To with Avatar Monogram */}
                   <td className="py-3.5 px-3 align-top">
-                    {assignee ? (
-                      <span className="inline-flex items-center gap-1.5 text-xs text-ink-soft"><Users className="w-4 h-4 shrink-0" aria-hidden="true" /><span>{assignee}</span></span>
-                    ) : mine ? (
-                      <span
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-gold-wash text-gold-ink border border-gold/40 tactile-1"
-                        title={task.assignedTo.join(', ')}
-                      >
-                        <span className="w-4 h-4 rounded-full bg-gradient-to-b from-gold to-gold-deep text-white flex items-center justify-center text-[8px] font-black shrink-0">
-                          {getInitials(currentUser?.email || 'MK')}
-                        </span>
-                        <span>You — designated</span>
-                      </span>
-                    ) : task.assignedTo.includes('all') ? (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-sunken text-ink-soft border border-line">
-                        <Users className="w-3.5 h-3.5 text-ink-faint" />
-                        <span>Team Roster</span>
-                      </span>
-                    ) : (
-                      <div className="flex flex-col gap-1">
-                        {task.assignedTo.map((email) => (
-                          <span
-                            key={email}
-                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-bold bg-sunken text-ink-soft border border-line truncate max-w-[140px]"
-                            title={email}
-                          >
-                            <span className="w-4 h-4 rounded-full bg-ink-faint text-paper flex items-center justify-center text-[8px] font-black shrink-0">
-                              {getInitials(email)}
-                            </span>
-                            <span className="truncate">{email.split('@')[0]}</span>
-                          </span>
-                        ))}
-                      </div>
-                    )}
+                  <WhoSeesTag label={audience} kiosk={isKiosk} />
                   </td>
 
                   {/* Flexible Completion Input Column */}
@@ -373,7 +330,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                                   ? 'bg-emerald-600 text-white tactile-1'
                                   : 'text-ink-soft hover:text-emerald-700 dark:hover:text-emerald-400'
                               }`}
-                              title={task.currentStatus === 'yes' ? 'Tap to undo the sign-off' : 'Mark as Yes (Verified)'}
+                              title={task.currentStatus === 'yes' ? 'Tap to undo the sign-off' : 'Mark Yes'}
                             >
                               Yes
                             </button>
@@ -391,7 +348,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
                                   ? 'bg-rose-600 text-white tactile-1'
                                   : 'text-ink-soft hover:text-rose-700 dark:hover:text-rose-400'
                               }`}
-                              title={task.currentStatus === 'no' ? 'Tap to clear the answer' : 'Mark as No (Pending)'}
+                              title={task.currentStatus === 'no' ? 'Tap to clear the answer' : 'Mark No'}
                             >
                               No
                             </button>

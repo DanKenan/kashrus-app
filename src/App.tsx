@@ -1,3 +1,5 @@
+import { activeFilterChips, clearActiveFilter, type FilterDefaults, type FilterState } from './lib/activeFilters';
+import { ActiveFilters } from './components/ActiveFilters';
 import type { Shift } from './types';
 import { taskWithShiftTimes, tasksVisibleOnShift, shiftTaskAppliesAt } from './lib/shifts';
 import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday } from './lib/shiftTaskDay';
@@ -797,7 +799,20 @@ export default function App() {
   }, [tasks, shiftsById, venueShifts, todayYmd, todayWeekday, nowMinutes, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser, taskWeekday]);
   // The list on screen: today's, or every task when an editor picks "All days".
   const dayTasks = effectiveDayView === 'all' ? tasks : todayTasks;
-
+  const filterDefaults: FilterDefaults = {
+    dayView: 'today',
+    quickFilter: !isKiosk && (currentUser?.role === 'mashgiach' || currentUser?.role === 'worker') ? 'mine' : 'all',
+  };
+  const filterState = { dayView: effectiveDayView, quickFilter: activeTabFilter, categories: selectedCategories, search: searchQuery };
+  const hasActiveFilters = activeFilterChips(filterState, filterDefaults).length > 0;
+  const changeFilters = (next: FilterState) => {
+    setDayView(next.dayView);
+    setActiveTabFilter(next.quickFilter);
+    setSelectedCategories(next.categories);
+    setSearchQuery(next.search);
+  };
+  const clearAllFilters = () => changeFilters(clearActiveFilter(filterState, filterDefaults, 'all'));
+  const showingFilters = <ActiveFilters state={filterState} defaults={filterDefaults} onChange={changeFilters} onClearAll={clearAllFilters} kiosk={isKiosk} />;
 
   // 5a — Updates panel context. The generation bumps whenever the signed-in
   // context changes (user, agency, venue, kiosk session): the Updates center
@@ -1662,8 +1677,8 @@ export default function App() {
     setConfirmModalConfig({
       isOpen: true,
       title: `Reset Daily Board for "${venueName}"?`,
-      message: `Current shift completion marks and inspection notes will be archived into the History Log and cleared for a fresh shift.`,
-      confirmText: 'Reset Board Now',
+      message: `Start a fresh day. Current shift completion marks and inspection notes will be archived into the History Log and cleared for a fresh shift.`,
+      confirmText: 'Reset board now',
       cancelText: 'Keep Current Shift',
       variant: 'warning',
       icon: 'rotate',
@@ -2384,7 +2399,9 @@ export default function App() {
   const taskTableView = (
     <TaskTableView
       isKiosk={isKiosk}
-      roster={isKiosk || !canUserAssignTasks(currentUser) ? [] : knownUsers}
+      hasActiveFilters={hasActiveFilters}
+      onClearFilters={clearAllFilters}
+      roster={knownUsers}
       shiftsById={shiftsById}
       tasks={sortedTasks}
       sections={sections}
@@ -2400,7 +2417,7 @@ export default function App() {
         openTaskEditor(task);
       }}
       onDeleteTask={handleDeleteTask}
-      onOpenTaskModal={handleOpenCreateTask}
+      onOpenTaskModal={canUserAssignTasks(currentUser) ? handleOpenCreateTask : undefined}
       onCheckIn={handleCheckIn}
       onRemoveCheckIn={handleRemoveCheckIn}
     />
@@ -2408,7 +2425,9 @@ export default function App() {
   const taskCardView = (
     <TaskCardView
       isKiosk={isKiosk}
-      roster={isKiosk || !canUserAssignTasks(currentUser) ? [] : knownUsers}
+      hasActiveFilters={hasActiveFilters}
+      onClearFilters={clearAllFilters}
+      roster={knownUsers}
       shiftsById={shiftsById}
       tasks={sortedTasks}
       sections={sections}
@@ -2426,7 +2445,7 @@ export default function App() {
         openTaskEditor(task);
       }}
       onDeleteTask={handleDeleteTask}
-      onOpenTaskModal={handleOpenCreateTask}
+      onOpenTaskModal={canUserAssignTasks(currentUser) ? handleOpenCreateTask : undefined}
     />
   );
 
@@ -2917,6 +2936,9 @@ export default function App() {
             onCategoryChange={changeCategory}
             categories={categories}
             categoryCounts={categoryCounts}
+            filterSummary={showingFilters}
+            hasActiveFilters={hasActiveFilters}
+            onClearFilters={clearAllFilters}
             view={kioskView}
             onViewChange={setKioskView}
             onUpdateStatus={handleUpdateStatus}
@@ -2960,6 +2982,7 @@ export default function App() {
             isAdmin={canUserAssignTasks(currentUser)}
           />
 
+            {showingFilters}
             {/* Dynamic View Mode: Excel-like Table View vs Responsive Card View */}
             {viewMode === 'table' ? taskTableView : taskCardView}
           </>

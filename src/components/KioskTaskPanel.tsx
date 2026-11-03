@@ -1,5 +1,9 @@
+import { TaskEmptyState } from './TaskEmptyState';
+import { filterChipClass, FilterCheck } from '../lib/filterChip';
+import { whoSeesLabel } from '../lib/whoSees';
+import { WhoSeesTag } from './WhoSeesTag';
 import { DEFAULT_TIME_ZONE, workDateIn, weekdayIn, minutesIn } from '../lib/workday';
-import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday, shiftAssigneeLabel } from '../lib/shiftTaskDay';
+import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday } from '../lib/shiftTaskDay';
 import type { Shift } from '../types';
 import { shiftLabel } from '../lib/shifts';
 import { isNoTimeTask, sortTasksByTime } from '../lib/taskDay';
@@ -31,7 +35,7 @@ import { Task, TaskStatus, TaskCheckIn, User as UserType } from '../types';
 import { formatExactTime, formatTaskSchedule, formatTaskTimes, taskCategories } from '../lib/utils';
 import { canUserFillTasks, canUserAssignTasks } from '../lib/permissions';
 import { captureEditBaseline } from '../lib/api';
-import { categoryVars, isDirectlyAssigned } from '../lib/categoryStyle';
+import { categoryVars } from '../lib/categoryStyle';
 import { isMyTask } from '../lib/myTasks';
 import { TaskAnswerPhoto, compressPhoto } from './TaskAnswerPhoto';
 import { CheckInPhoto } from './CheckInPhoto';
@@ -90,6 +94,9 @@ interface KioskTaskPanelProps {
   onViewChange: (v: 'list' | 'table' | 'cards') => void;
   /** The existing table or cards view, rendered when that view is chosen. */
   children?: React.ReactNode;
+  filterSummary?: React.ReactNode;
+  hasActiveFilters?: boolean;
+  onClearFilters?: () => void;
   // D3c: what the (hidden) Header gave the kiosk, carried by KioskTopBar.
   updatesBell?: React.ReactNode;
   darkMode?: boolean;
@@ -225,6 +232,9 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   view,
   onViewChange,
   children,
+  filterSummary,
+  hasActiveFilters = false,
+  onClearFilters,
   updatesBell,
   darkMode,
   onToggleDarkMode,
@@ -604,11 +614,11 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                       key={f.key}
                       onClick={() => onSelectFilter(f.key)}
                       aria-pressed={activeFilter === f.key}
-                      className={`pressable ${btn64} px-4 sm:px-5 rounded-xl text-base font-semibold tnum border ${
-                        activeFilter === f.key ? 'bg-ink text-paper border-ink' : 'bg-surface text-ink-soft border-line'
+                      className={`pressable ${btn64} px-4 sm:px-5 rounded-xl text-base font-semibold tnum border inline-flex items-center gap-2 ${
+                        filterChipClass(activeFilter === f.key)
                       }`}
                     >
-                      {f.label}
+                      <FilterCheck on={activeFilter === f.key} />{f.label}
                     </button>
                   ))}
                 </div>
@@ -620,10 +630,10 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                       onClick={() => onCategoryChange('all')}
                       aria-pressed={selectedCategories.length === 0}
                       className={`pressable shrink-0 ${btn64} px-4 rounded-full text-base font-semibold border flex items-center gap-2 ${
-                        selectedCategories.length === 0 ? 'bg-ink text-paper border-ink' : 'bg-surface text-ink-soft border-line'
+                        filterChipClass(selectedCategories.length === 0)
                       }`}
                     >
-                      <Layers className="w-5 h-5" aria-hidden />
+                      <FilterCheck on={selectedCategories.length === 0} /><Layers className="w-5 h-5" aria-hidden />
                       <span>All</span>
                       {categoryCounts && <span className="tnum">{totalCount}</span>}
                     </button>
@@ -638,10 +648,10 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                           style={categoryVars(c)}
                           title={active ? `Unselect ${c}` : `Filter by ${c}`}
                           className={`pressable shrink-0 ${btn64} px-4 rounded-full text-base font-semibold border flex items-center gap-2 ${
-                            active ? 'cat-chip cat-ring cat-text ring-2' : 'bg-surface text-ink-soft border-line'
+                            filterChipClass(active)
                           }`}
                         >
-                          <span className="cat-dot w-3 h-3 rounded-full shrink-0" aria-hidden />
+                          <FilterCheck on={active} />{!active && <span className="cat-dot w-3 h-3 rounded-full shrink-0" aria-hidden />}
                           <span dir="auto" className="max-w-[220px] truncate">{c}</span>
                           {typeof count === 'number' && <span className="tnum">{count}</span>}
                         </button>
@@ -652,22 +662,23 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
               </div>
           )}
 
+          {filterSummary}
           {view !== 'list' ? (
             children
           ) : shown.length === 0 ? (
-            <div className="rounded-2xl bg-surface border border-line p-8 text-center">
-              <p className="text-k-body text-ink-soft">
-                {tasks.length === 0 ? 'No tasks to show here.' : half === 'todo' ? 'Nothing left to do here.' : 'Nothing done yet.'}
-              </p>
-            </div>
+            tasks.length === 0 ? (
+              <TaskEmptyState hasActiveFilters={hasActiveFilters} onClearFilters={onClearFilters} canCreate={!!onOpenTaskModal && isAdmin} onCreate={onOpenTaskModal} kiosk />
+            ) : (
+              <div className="rounded-2xl bg-surface border border-line p-8 text-center">
+                <p className="text-k-body text-ink-soft">{half === 'todo' ? 'Nothing left to do here.' : 'Nothing done yet.'}</p>
+              </div>
+            )
           ) : (
             <ul className="flex flex-col gap-2.5">
               {shown.map((task, i) => {
                 const phase = saving[task.id];
                 const st = phase ? { word: 'Saving…', tone: 'open' as const } : rowStatus(task);
                 const isOpen = !!open[task.id];
-                const mine = isDirectlyAssigned(task, currentUser);
-                const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
                 const currentNote = notesState[task.id] !== undefined ? notesState[task.id] : task.notes;
                 const control = rowControl(task);
                 const rowId = `kiosk-row-${task.id}`;
@@ -750,11 +761,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                               {cat}
                             </span>
                           ))}
-                          {shift ? <span>{shiftAssigneeLabel(shift, false, null, null, null)}</span> : mine && (
-                            <span className="inline-flex items-center gap-1 text-gold-ink font-semibold">
-                              <Star className="w-4 h-4 fill-current" aria-hidden /> For you
-                            </span>
-                          )}
+                          <WhoSeesTag kiosk label={whoSeesLabel(task, { viewer: currentUser, mode: 'kiosk', shiftsById, roster: [], todayYmd: null, todayWeekday: null, nowMinutes: null })} />
                           <span className="tnum inline-flex items-center gap-1">
                             <Clock className="w-4 h-4" aria-hidden /> {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, taskWeekday(task), task) : formatTaskTimes(task))}
                           </span>
@@ -773,7 +780,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                                 else onUpdateStatus(task.id, 'yes', true);
                               }}
                               aria-pressed={task.currentStatus === 'yes'}
-                              title={task.currentStatus === 'yes' ? 'Click to cancel verification' : 'Mark as Yes (Verified)'}
+                              title={task.currentStatus === 'yes' ? 'Click to cancel verification' : 'Mark Yes'}
                               className={choiceBtn(task.currentStatus === 'yes', 'ok')}
                             >
                               <Check className="w-6 h-6" aria-hidden /> Yes
@@ -784,7 +791,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                                 else onUpdateStatus(task.id, 'no', false);
                               }}
                               aria-pressed={task.currentStatus === 'no'}
-                              title={task.currentStatus === 'no' ? 'Click to cancel choice' : 'Mark as No (Pending)'}
+                              title={task.currentStatus === 'no' ? 'Click to cancel choice' : 'Mark No'}
                               className={choiceBtn(task.currentStatus === 'no', 'bad')}
                             >
                               <X className="w-6 h-6" aria-hidden /> No
