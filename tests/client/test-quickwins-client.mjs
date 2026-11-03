@@ -77,9 +77,9 @@ eq('own shift without occurrence is neutral', label({ shiftId: shift.id }, 'own'
 eq('kiosk shift', label({ shiftId: shift.id }, 'kiosk').text, 'Evening shift');
 eq('shift preserves today names', label({ shiftId: shift.id }, 'editor', { todayYmd: '2026-11-03', todayWeekday: 2, nowMinutes: 1000 }).text, 'Evening shift · today: Yossi, Eli');
 for (const assignedTo of [[], ['all'], ['ALL']]) {
-  eq('editor everyone', label({ assignedTo }).text, 'Everyone');
+  eq('editor everyone', label({ assignedTo }).text, 'Assigned to everyone');
   eq('own everyone', label({ assignedTo }, 'own').text, 'For everyone');
-  eq('kiosk everyone', label({ assignedTo }, 'kiosk').text, 'Everyone');
+  eq('kiosk everyone', label({ assignedTo }, 'kiosk').text, 'Assigned to everyone');
 }
 eq('one person case insensitive', label({ assignedTo: ['YOSSI@example.com'] }).text, 'Assigned to Yossi');
 eq('own direct', label({ assignedTo: ['yossi@example.com'] }, 'own').text, 'Assigned to you');
@@ -88,7 +88,7 @@ eq('three people', label({ assignedTo: roster.map((p) => p.email) }).text, 'Assi
 eq('kiosk person', label({ assignedTo: ['yossi@example.com'] }, 'kiosk').text, 'Yossi');
 eq('unknown email local part', label({ assignedTo: ['moshe@example.com'] }).text, 'Assigned to Moshe');
 ok('unknown never full email', !JSON.stringify(label({ assignedTo: ['moshe@example.com'] })).includes('@'));
-eq('private icon and title', label({ assignedTo: ['yossi@example.com'], isPrivate: true }), { text: 'Only Yossi', icon: 'private', title: 'Private: only them, admins and coordinators' });
+eq('private icon and title', label({ assignedTo: ['yossi@example.com'], isPrivate: true }), { text: 'Private · Yossi', icon: 'private', title: 'Private: only them, admins and coordinators' });
 for (const [minutes, hour, ampm] of [[0, 1, 'AM'], [840, 3, 'PM'], [841, 3, 'PM'], [1410, 12, 'AM'], [719, 12, 'PM']]) eq(`next hour ${minutes}`, nextFullHour(minutes), { hour, minute: 0, ampm });
 const user = { id: 'y', email: 'yossi@example.com', name: 'Yossi', role: 'mashgiach' };
 const viewProps = { tasks: [], currentUser: user, onUpdateStatus: noop, onUpdateNotes: noop, onCheckIn: noop, onEditTask: noop, onDeleteTask: noop };
@@ -173,9 +173,9 @@ for (const assignedTo of [['yossi@example.com'], ['yossi@example.com', 'eli@exam
   const ordinary = label({ assignedTo });
   const privateLabel = label({ assignedTo, isPrivate: true });
   ok('non-private says Assigned to, User icon', ordinary.text.startsWith('Assigned to ') && ordinary.icon === 'person' && ordinary.title === undefined);
-  ok('private says Only, lock and exact title', privateLabel.text.startsWith('Only ') && privateLabel.icon === 'private' && privateLabel.title === 'Private: only them, admins and coordinators');
+  ok('private says Private, lock and exact title', privateLabel.text.startsWith('Private · ') && privateLabel.icon === 'private' && privateLabel.title === 'Private: only them, admins and coordinators');
   eq('own private still assigned to you', label({ assignedTo, isPrivate: true }, 'own').text, 'Assigned to you');
-  ok('kiosk private has lock but no prefix', label({ assignedTo, isPrivate: true }, 'kiosk').icon === 'private' && !/Only|Assigned to/.test(label({ assignedTo, isPrivate: true }, 'kiosk').text));
+  ok('kiosk private has lock and Private prefix', label({ assignedTo, isPrivate: true }, 'kiosk').icon === 'private' && label({ assignedTo, isPrivate: true }, 'kiosk').text.startsWith('Private · '));
 }
 for (const activeFilter of ['all', 'completed', 'pending']) {
   const cards = buttons(render(OwnerAuditBanner, { totalTasks: 5, completedTasks: 2, completionRate: 40, activeFilter, onSelectFilter: noop, onOpenHistoryModal: noop, ownerName: 'David' })).filter((b) => b.includes('aria-pressed='));
@@ -286,5 +286,15 @@ eq('own explicitly assigned private global keeps own wording', label({ isPrivate
 ok('App uses same active-filter computation for empty states', app.includes('activeFilterChips(filterState, filterDefaults).length > 0') && (app.match(/hasActiveFilters=\{hasActiveFilters\}/g) || []).length === 3);
 ok('App shares clear-all with summary and all task views', app.includes('onClearAll={clearAllFilters}') && (app.match(/onClearFilters=\{clearAllFilters\}/g) || []).length === 3);
 eq('mixed private legacy title retains explicit people', label({ isPrivate: true, assignedTo: ['all', 'yossi@example.com'] }).title, 'Private: only them, admins and coordinators');
+// RV4: assignment wording does not imply exclusive visibility.
+for (const mode of ['editor', 'kiosk']) {
+  for (const [assignedTo, people] of [[['yossi@example.com'], 'Yossi'], [['yossi@example.com', 'eli@example.com'], 'Yossi, Eli'], [roster.map((p) => p.email), 'Yossi, Eli +1']]) {
+    eq(`${mode} private person wording`, label({ assignedTo, isPrivate: true }, mode).text, `Private · ${people}`);
+  }
+}
+const { WhoSeesTag } = await import('../../src/components/WhoSeesTag.tsx');
+const privateTag = render(WhoSeesTag, { label: label({ assignedTo: ['yossi@example.com'], isPrivate: true }) });
+ok('private explanation is screen-reader text', privateTag.includes('<span class="sr-only">Private: only them, admins and coordinators</span>'));
+ok('private explanation keeps tooltip and lock', privateTag.includes('title="Private: only them, admins and coordinators"') && privateTag.includes('lucide-lock'));
 console.log(`${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

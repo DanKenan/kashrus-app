@@ -33,7 +33,7 @@ export function whoSeesLabel(task: { venueId?: string; shiftId?: string | null; 
     const today = label.indexOf(' · today:');
     return { text: ctx.mode === 'own' && onShift ? `Because you're on ${name}` : `${name} shift${today >= 0 ? label.slice(today) : ''}`, icon: 'shift' };
   }
-  if (globalAssignment) return { text: ctx.mode === 'own' ? 'For everyone' : 'Everyone', icon: 'everyone' };
+  if (globalAssignment) return { text: ctx.mode === 'own' ? 'For everyone' : 'Assigned to everyone', icon: 'everyone' };
   const names = assigned.map((email) => {
     const name = ctx.roster.find((p) => p.email?.trim().toLowerCase() === email.toLowerCase())?.name;
     if (name) return name.split('@')[0];
@@ -42,6 +42,6 @@ export function whoSeesLabel(task: { venueId?: string; shiftId?: string | null; 
   });
   const people = names.slice(0, 2).join(', ') + (names.length > 2 ? ` +${names.length - 2}` : '');
   const text = ctx.mode === 'own' && assigned.some((s) => s.toLowerCase() === me) ? 'Assigned to you'
-    : ctx.mode === 'kiosk' ? people : task.isPrivate ? `Only ${people}` : `Assigned to ${people}`;
+    : task.isPrivate ? `Private · ${people}` : ctx.mode === 'kiosk' ? people : `Assigned to ${people}`;
   return { text, icon: task.isPrivate ? 'private' : 'person', ...(task.isPrivate ? { title: 'Private: only them, admins and coordinators' } : {}) };
 }

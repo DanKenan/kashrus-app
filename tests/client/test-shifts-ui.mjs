@@ -276,7 +276,7 @@ try {
     assert.match(view.html(), /Deli day shift/);
     assert.doesNotMatch(view.html(), /today: Moshe/);
     await view.render({ tasks: [baseTask] });
-    assert.match(view.html(), /Everyone/);
+    assert.match(view.html(), /Assigned to everyone/);
   }
 } finally { globalThis.Date = RealDate; }
 console.log('Shifts UI: shift assignees, weekday/date names, Nobody, kiosk and ordinary team fallback passed');
