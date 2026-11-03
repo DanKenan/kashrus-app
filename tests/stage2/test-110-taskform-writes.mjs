@@ -23,9 +23,13 @@ export default {
       assert.equal(readDelta, expectedReads, `${label} reads`);
       assert.equal(delta, expectedWrites, `${label} writes`); return result;
     };
-    const save = async (id, body) => {
-      const r = await api('admin', 'PUT', `/api/tasks/${id}`, { ...body, expectedVersion: await ctx.getVersion() });
+    const save = async (id, body, expectedVersion) => {
+      const r = await api('admin', 'PUT', `/api/tasks/${id}`, { ...body, expectedVersion });
       assert.equal(r.status, 200, JSON.stringify(r.json)); return r.json;
+    };
+    const measureSave = async (label, expectedReads, expectedWrites, id, body) => {
+      const expectedVersion = await ctx.getVersion();
+      return measure(label, expectedReads, expectedWrites, () => save(id, body, expectedVersion));
     };
     const endpoints = {};
     try {
@@ -70,9 +74,9 @@ export default {
       let pushes = (await ctx.api('GET', '/api/__test__/push-log')).json.log;
       assert.deepEqual(pushes.filter((p) => p.title === '📋 New task assigned to you').map((p) => p.endpoint), [endpoints.mash]);
       const id = created[0].id;
-      await measure('change one weekday', 2, 2, () => save(id, { dayAssignees: { '5': [people.assign.email] } }));
-      await measure('one-time swap', 2, 2, () => save(id, { assigneeSwaps: [{ date: '2026-11-06', assignedTo: [people.coord.email] }] }));
-      await measure('unchanged task save', 1, 0, () => save(id, { dayAssignees: { '5': [people.assign.email] }, assigneeSwaps: [{ date: '2026-11-06', assignedTo: [people.coord.email] }] }));
+      await measureSave('change one weekday', 2, 2, id, { dayAssignees: { '5': [people.assign.email] } });
+      await measureSave('one-time swap', 2, 2, id, { assigneeSwaps: [{ date: '2026-11-06', assignedTo: [people.coord.email] }] });
+      await measureSave('unchanged task save', 1, 0, id, { dayAssignees: { '5': [people.assign.email] }, assigneeSwaps: [{ date: '2026-11-06', assignedTo: [people.coord.email] }] });
       assert.ok((await read('assign')).tasks.some((t) => t.id === id), 'weekday assignee can see private task');
       assert.equal((await read('elsewhere')).tasks.some((t) => t.id === id), false);
       const edit = await measure('first built-in edit', 1, 1, async () => {
@@ -87,17 +91,19 @@ export default {
       });
       const beforeOld = (await read()).tasks.find((t) => t.id === id);
       const oldPayload = { title: 'Taskform 0 old client', assignedTo: ['all'], isPrivate: false };
+      const oldTitleVersion = await ctx.getVersion();
       await measure('old-client title edit', 2, 2, async () => {
-        const r = await save(id, oldPayload);
+        const r = await save(id, oldPayload, oldTitleVersion);
         assert.deepEqual(r.assignedTo, beforeOld.assignedTo); assert.equal(r.isPrivate, true);
         assert.deepEqual(r.dayAssignees, beforeOld.dayAssignees); assert.deepEqual(r.assigneeSwaps, beforeOld.assigneeSwaps);
       });
-      await measure('unchanged old-client save', 1, 0, () => save(id, oldPayload));
+      await measureSave('unchanged old-client save', 1, 0, id, oldPayload);
+      const refusedVersion = await ctx.getVersion();
       await measure('old-client people change refused', 1, 0, async () => {
-        const r = await api('admin', 'PUT', `/api/tasks/${id}`, { assignedTo: [people.coord.email], expectedVersion: await ctx.getVersion() });
+        const r = await api('admin', 'PUT', `/api/tasks/${id}`, { assignedTo: [people.coord.email], expectedVersion: refusedVersion });
         assert.equal(r.status, 409); assert.equal(r.json.error, 'Update the app to change who does this task');
       });
-      await save(id, { title: 'Taskform 0' });
+      await save(id, { title: 'Taskform 0' }, await ctx.getVersion());
       // Legacy shift tasks still follow shift people; their assignedTo fallback is all.
       const legacy = await api('admin', 'POST', '/api/tasks', { venueId, title: 'Taskform legacy', shiftId: edit.id, assignedTo: [people.assign.email], enableOverdueAlert: true });
       assert.equal(legacy.status, 201); assert.deepEqual(legacy.json.assignedTo, ['all']);
@@ -118,25 +124,25 @@ export default {
       assert.ok((await read('assign')).tasks.some((t) => t.id === swapOnly.json.id));
       await clock('2026-11-08T12:00:00Z');
       assert.equal((await read('assign')).tasks.some((t) => t.id === swapOnly.json.id), false);
-      await measure('unchanged with expired swap', 1, 0, () => save(swapOnly.json.id, { title: 'Swap visibility' }));
-      const pruned = await save(swapOnly.json.id, { title: 'Swap visibility edited' });
+      await measureSave('unchanged with expired swap', 1, 0, swapOnly.json.id, { title: 'Swap visibility' });
+      const pruned = await save(swapOnly.json.id, { title: 'Swap visibility edited' }, await ctx.getVersion());
       assert.deepEqual(pruned.assigneeSwaps, []);
       await clock('2026-11-06T22:00:00Z');
       const night = await api('admin', 'POST', '/api/tasks', { venueId, title: 'Taskform Night', shiftId: 'builtin-night', assignmentMode: 'task', assignedTo: [people.mash.email], dayAssignees: { '5': [people.coord.email] }, assigneeSwaps: [{ date: '2026-11-06', assignedTo: [people.assign.email] }], isPrivate: true, enableOverdueAlert: true });
       assert.equal(night.status, 201);
       await clock('2026-11-07T01:00:00Z');
-      const nightEdited = await save(night.json.id, { title: 'Taskform Night edited', assignedTo: ['all'], isPrivate: false });
+      const nightEdited = await save(night.json.id, { title: 'Taskform Night edited', assignedTo: ['all'], isPrivate: false }, await ctx.getVersion());
       assert.equal(nightEdited.isPrivate, true);
       assert.deepEqual(nightEdited.assigneeSwaps, [{ date: '2026-11-06', assignedTo: [people.assign.email] }]);
       assert.ok((await read('assign')).tasks.some((t) => t.id === night.json.id));
       await clock('2026-11-07T06:01:00Z');
-      const tailEdit = await save(night.json.id, { description: 'Edit during overdue tail' });
+      const tailEdit = await save(night.json.id, { description: 'Edit during overdue tail' }, await ctx.getVersion());
       assert.deepEqual(tailEdit.assigneeSwaps, nightEdited.assigneeSwaps);
       assert.ok((await read('assign')).tasks.some((t) => t.id === night.json.id), 'private swap person remains visible after overnight end');
       await check('2026-11-07T06:01:00Z', 'Taskform Night edited', ['assign']);
       await clock('2026-11-07T22:00:00Z');
       assert.equal((await read('assign')).tasks.some((t) => t.id === night.json.id), false, 'expired swap no longer grants private access');
-      assert.deepEqual((await save(night.json.id, { description: 'Next occurrence' })).assigneeSwaps, []);
+      assert.deepEqual((await save(night.json.id, { description: 'Next occurrence' }, await ctx.getVersion())).assigneeSwaps, []);
 
       const everyDay = Object.fromEntries(Array.from({ length: 7 }, (_, w) => [String(w), [people.coord.email]]));
       const privateAllDays = await api('admin', 'POST', '/api/tasks', { venueId, title: 'All weekdays overridden', assignmentMode: 'task', assignedTo: [people.mash.email], dayAssignees: everyDay, assigneeSwaps: [{ date: '2026-11-08', assignedTo: [people.assign.email] }], isPrivate: true });
@@ -144,7 +150,7 @@ export default {
       assert.equal((await read('mash')).tasks.some((t) => t.id === privateAllDays.json.id), false, 'fully overridden base person has no private access');
       assert.ok((await read('assign')).tasks.some((t) => t.id === privateAllDays.json.id), 'upcoming swap still grants access');
       const { '0': _sunday, ...sixDays } = everyDay;
-      await save(privateAllDays.json.id, { dayAssignees: sixDays });
+      await save(privateAllDays.json.id, { dayAssignees: sixDays }, await ctx.getVersion());
       assert.ok((await read('mash')).tasks.some((t) => t.id === privateAllDays.json.id), 'an uncovered weekday restores base fallback');
 
       const beforeBad = await read();
