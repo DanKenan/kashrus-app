@@ -9,7 +9,7 @@ interface Props {
 }
 export function TaskEmptyState({ hasActiveFilters = false, onClearFilters, canCreate, onCreate, kiosk = false }: Props) {
   const title = hasActiveFilters ? 'Nothing matches these filters' : canCreate ? 'Nothing here yet' : 'Nothing for you right now.';
-  const line = hasActiveFilters ? 'A filter is on. Tap Clear all to see everything.' : canCreate ? null : 'New tasks show up here.';
+  const line = hasActiveFilters ? 'A filter is on. Tap Clear all to remove these filters.' : canCreate ? null : 'New tasks show up here.';
   const control = kiosk ? 'min-h-16 text-base' : 'min-h-11 text-sm';
   return (
     <div className="rounded-xl bg-surface border border-line p-8 text-center">

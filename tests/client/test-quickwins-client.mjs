@@ -255,7 +255,7 @@ for (const View of [TaskCardView, TaskTableView]) {
     ok(`${role} default empty title`, plain.includes(role === 'admin' ? 'Nothing here yet' : 'Nothing for you right now.'));
     eq(`${role} default create action`, buttons(plain).some((b) => b.includes('New task')), role === 'admin');
     const filtered = render(View, { ...props, hasActiveFilters: true, onClearFilters: noop });
-    ok(`${role} filtered empty explanation`, filtered.includes('Nothing matches these filters') && filtered.includes('A filter is on. Tap Clear all to see everything.'));
+    ok(`${role} filtered empty explanation`, filtered.includes('Nothing matches these filters') && filtered.includes('A filter is on. Tap Clear all to remove these filters.'));
     ok(`${role} filtered empty clear action`, buttons(filtered).some((b) => b.includes('Clear all')));
     ok(`${role} filtered empty hides create action`, !buttons(filtered).some((b) => b.includes('New task')));
   }
