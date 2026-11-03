@@ -363,6 +363,11 @@
   color: var(--color-white);
 }
 
+/* Night gold is lighter; the dark surface token keeps selected text and icons legible. */
+.dark .chip-on {
+  color: var(--sunken);
+}
+
 /* The selected owner metric keeps all its words, status badges and icons readable. */
 .owner-metric-on :where(div, span, p, svg) {
   color: inherit;

@@ -29,7 +29,9 @@ export function whoSeesLabel(task: { venueId?: string; shiftId?: string | null; 
   if (!assigned.length || assigned.some((s) => s.toLowerCase() === 'all')) return { text: ctx.mode === 'own' ? 'For everyone' : 'Everyone', icon: 'everyone' };
   const names = assigned.map((email) => {
     const name = ctx.roster.find((p) => p.email?.trim().toLowerCase() === email.toLowerCase())?.name;
-    return (name || email).split('@')[0];
+    if (name) return name.split('@')[0];
+    const fallback = email.split('@')[0];
+    return fallback.charAt(0).toUpperCase() + fallback.slice(1);
   });
   const people = names.slice(0, 2).join(', ') + (names.length > 2 ? ` +${names.length - 2}` : '');
   const me = ctx.viewer?.email?.trim().toLowerCase();

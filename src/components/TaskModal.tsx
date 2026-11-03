@@ -1152,13 +1152,16 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 <label className="flex items-start gap-2 pt-2 cursor-pointer">
                   <input
                     type="checkbox"
+                    id="task-team-visibility"
                     checked={visibleToTeam}
+                    disabled={selectedWorkers.length === 0}
+                    aria-describedby="task-team-visibility-hint"
                     onChange={(e) => setVisibleToTeam(e.target.checked)}
                     className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
                   />
                   <span className="text-xs text-ink-soft leading-snug">
                     <span className="font-bold">Owner and managers can see it too</span>
-                    <span className="block">Off: only the people you picked, admins and coordinators see it.</span>
+                    <span id="task-team-visibility-hint" className="block">{selectedWorkers.length === 0 ? 'Pick at least one person first.' : 'Off: only the people you picked, admins and coordinators see it.'}</span>
                   </span>
                 </label>
               </div>

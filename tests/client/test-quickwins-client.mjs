@@ -86,7 +86,7 @@ eq('own direct', label({ assignedTo: ['yossi@example.com'] }, 'own').text, 'Assi
 eq('two people', label({ assignedTo: ['yossi@example.com', 'eli@example.com'] }).text, 'Assigned to Yossi, Eli');
 eq('three people', label({ assignedTo: roster.map((p) => p.email) }).text, 'Assigned to Yossi, Eli +1');
 eq('kiosk person', label({ assignedTo: ['yossi@example.com'] }, 'kiosk').text, 'Yossi');
-eq('unknown email local part', label({ assignedTo: ['moshe@example.com'] }).text, 'Assigned to moshe');
+eq('unknown email local part', label({ assignedTo: ['moshe@example.com'] }).text, 'Assigned to Moshe');
 ok('unknown never full email', !JSON.stringify(label({ assignedTo: ['moshe@example.com'] })).includes('@'));
 eq('private icon and title', label({ assignedTo: ['yossi@example.com'], isPrivate: true }), { text: 'Only Yossi', icon: 'private', title: 'Private: only them, admins and coordinators' });
 for (const [minutes, hour, ampm] of [[0, 1, 'AM'], [840, 3, 'PM'], [841, 3, 'PM'], [1410, 12, 'AM'], [719, 12, 'PM']]) eq(`next hour ${minutes}`, nextFullHour(minutes), { hour, minute: 0, ampm });
@@ -188,7 +188,7 @@ for (const activeFilter of ['all', 'completed', 'pending']) {
   }
   ok('owner preserves status words', cards.some((b) => b.includes('Verified')) && cards.some((b) => b.includes('Needs Attention')));
 }
-ok('owner selected descendants inherit white text', /\.owner-metric-on :where\(div, span, p, svg\)\s*\{\s*color: inherit;/.test(read('src/index.css')));
+ok('owner selected descendants inherit the selected foreground', /\.owner-metric-on :where\(div, span, p, svg\)\s*\{\s*color: inherit;/.test(read('src/index.css')));
 const kioskProps = { ...filterProps, tasks: [], currentUser: user, activeFilter: 'all', onSelectFilter: noop, totalTasks: 0, completedTasks: 0, myTotal: 0, myCompleted: 0, onUpdateStatus: async () => true, onUpdateNotes: noop, onCheckIn: noop, onEditTask: noop, onDeleteTask: noop, onEndShift: noop, view: 'list', onViewChange: noop };
 const kiosk = mount(KioskTaskPanel, kioskProps);
 await kiosk.render();
@@ -220,5 +220,31 @@ try {
     eq(`${role} default summary hidden`, summary.html(), '');
   }
 } catch (e) { ok('shared clear controls mount', false, e.message); }
+// RV2: both selected-filter themes keep the inherited icon/count foreground.
+const css = read('src/index.css');
+ok('night selected filters use a dark token', /\.dark \.chip-on\s*\{\s*color: var\(--sunken\);\s*\}/.test(css));
+eq('fallback capitalises only its first letter', label({ assignedTo: ['moshe@example.com'] }).text, 'Assigned to Moshe');
+eq('roster name is preserved beside capitalised fallback', label({ assignedTo: ['yossi@example.com', 'moshe@example.com'] }).text, 'Assigned to Yossi, Moshe');
+const privacy = mount(TaskModal, { isOpen: true, onClose: noop, onSave: (value) => { privacySaved = value; return false; }, knownWorkers: roster, timeZone: 'America/New_York' });
+let privacySaved;
+await privacy.render();
+await privacy.find((e) => e.type === 'input' && e.props.required)[0].props.onChange({ target: { value: 'Crown Market' } });
+await privacy.find((e) => e.type === 'input' && e.props.name === 'assignType' && !e.props.checked)[0].props.onChange();
+await privacy.render();
+const visibility = () => privacy.find((e) => e.props.id === 'task-team-visibility')[0];
+ok('no picked people disables privacy checkbox', visibility().props.disabled === true);
+ok('no picked people gets truthful hint', privacy.text().includes('Pick at least one person first.') && !privacy.text().includes('Off: only the people you picked'));
+await privacy.click('Yossi');
+ok('picked person enables privacy checkbox', visibility().props.disabled === false);
+ok('picked person restores existing hint', privacy.text().includes('Off: only the people you picked, admins and coordinators see it.') && !privacy.text().includes('Pick at least one person first.'));
+await visibility().props.onChange({ target: { checked: false } });
+await privacy.render();
+await privacy.submit();
+eq('picked person private save unchanged', [privacySaved.assignedTo, privacySaved.isPrivate], [['yossi@example.com'], true]);
+await privacy.click('Yossi');
+ok('removing last person disables checkbox again', visibility().props.disabled === true);
+ok('removing last person replaces privacy promise', privacy.text().includes('Pick at least one person first.') && !privacy.text().includes('Off: only the people you picked'));
+await privacy.submit();
+eq('empty-person save fallback unchanged', [privacySaved.assignedTo, privacySaved.isPrivate], [['all'], false]);
 console.log(`${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
