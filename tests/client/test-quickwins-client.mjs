@@ -18,6 +18,10 @@ const ok = (label, condition, info = '') => { if (condition) passed++; else { fa
 const eq = (label, a, b) => ok(label, JSON.stringify(a) === JSON.stringify(b), `${JSON.stringify(a)} !== ${JSON.stringify(b)}`);
 const read = (p) => fs.readFileSync(new URL(`../../${p}`, import.meta.url), 'utf8');
 const noop = () => {};
+const saveForm = async (view) => {
+  for (let i = 0; i < 2 && view.find((e) => e.props['aria-current'] === 'step')[0]?.props.children[2] !== 'Who'; i++) await view.submit();
+  await view.submit();
+};
 const render = (component, props) => renderToStaticMarkup(React.createElement(component, props));
 const buttons = (html) => [...html.matchAll(/<button\b[^>]*>[\s\S]*?<\/button>/g)].map((m) => m[0]);
 const checkChip = (label, html, on) => {
@@ -141,10 +145,10 @@ try {
   const title = form.find((e) => e.type === 'input' && e.props.required)[0];
   await title.props.onChange({ target: { value: 'Crown Market' } });
   await form.render();
-  await form.submit();
+  await saveForm(form);
   eq('new form saves next venue hour', [saved.targetTime, saved.targetTimeMinutes], ['4:00 PM', 960]);
   await form.render({ taskToEdit: { ...task, targetTime: '9:30 AM', targetTimeMinutes: 570 } });
-  await form.submit();
+  await saveForm(form);
   eq('editing saves stored time', [saved.targetTime, saved.targetTimeMinutes], ['9:30 AM', 570]);
   await form.render({ taskToEdit: null, isOpen: false });
   await form.render({ isOpen: true });
@@ -229,19 +233,19 @@ const privacy = mount(TaskModal, { isOpen: true, onClose: noop, onSave: (value) 
 let privacySaved;
 await privacy.render();
 await privacy.find((e) => e.type === 'input' && e.props.required)[0].props.onChange({ target: { value: 'Crown Market' } });
-await privacy.find((e) => e.type === 'input' && e.props.name === 'assignType' && !e.props.checked)[0].props.onChange();
+await privacy.render(); await privacy.submit(); await privacy.submit(); await privacy.click('+ Add people');
 await privacy.render();
 const visibility = () => privacy.find((e) => e.props.id === 'task-team-visibility')[0];
 ok('no picked people disables privacy checkbox', visibility().props.disabled === true);
 ok('no picked people gets truthful hint', privacy.text().includes('Pick at least one person first.') && !privacy.text().includes('Off: only the people you picked'));
-await privacy.click('Yossi');
+await privacy.click((e) => e.props['aria-label'] === 'Pick Yossi');
 ok('picked person enables privacy checkbox', visibility().props.disabled === false);
 ok('picked person restores existing hint', privacy.text().includes('Off: only the people you picked, admins and coordinators see it.') && !privacy.text().includes('Pick at least one person first.'));
 await visibility().props.onChange({ target: { checked: false } });
 await privacy.render();
 await privacy.submit();
 eq('picked person private save unchanged', [privacySaved.assignedTo, privacySaved.isPrivate], [['yossi@example.com'], true]);
-await privacy.click('Yossi');
+await privacy.click((e) => e.props['aria-label'] === 'Pick Yossi');
 ok('removing last person disables checkbox again', visibility().props.disabled === true);
 ok('removing last person replaces privacy promise', privacy.text().includes('Pick at least one person first.') && !privacy.text().includes('Off: only the people you picked'));
 await privacy.submit();

@@ -1,5 +1,6 @@
+import { taskWithOccurrenceTimes as taskWithShiftTimes } from './taskOccurrences';
 import type { Shift, Task } from '../types';
-import { shiftOccurrenceDay, taskWithShiftTimes, shiftPeopleOn, shiftUserIds, shiftDayOf, shiftTimeOffset } from './shifts';
+import { shiftOccurrenceDay, shiftPeopleOn, shiftUserIds, shiftDayOf, shiftTimeOffset } from './shifts';
 
 import { targetMinutesOf } from './overdue';
 

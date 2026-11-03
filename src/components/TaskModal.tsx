@@ -1,10 +1,12 @@
+import { ShiftHoursBar } from './ShiftHoursBar';
+import { detectTimeShift, differingDays, nextWeekday, peopleFields } from '../lib/taskForm';
 import { nextFullHour } from '../lib/nextFullHour';
 import { ShiftsPanel } from './ShiftsPanel';
 import type { Shift } from '../types';
-import { shiftLabel, shiftVariesByDay, shiftWeekdays, shiftIsUpcoming, shiftPeopleSummary } from '../lib/shifts';
+import { shiftWeekdays, shiftIsUpcoming, venueShifts, shiftUserIds, formatShiftHours } from '../lib/shifts';
 import { ANY_TIME_LABEL, isAnyTimeTask, isAnyTimeText } from '../lib/anyTime';
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Clock, Calendar, CheckSquare, Users, Plus, Trash2, CalendarDays, CheckCircle2, ListFilter } from 'lucide-react';
+import { X, Pencil, Clock, Plus, Trash2, CheckCircle2, ListFilter } from 'lucide-react';
 import { Task, TaskInputType } from '../types';
 import { captureEditBaseline } from '../lib/api';
 import { DAYS_MAP } from '../lib/utils';
@@ -104,7 +106,7 @@ function TimePickerRow({
             type="button"
             onClick={() => onChange({ ...value, ampm: ap })}
             className={`px-3 py-2 text-sm font-black transition-colors ${
-              value.ampm === ap ? 'bg-gold-deep text-white' : 'bg-sunken text-ink-soft'
+              value.ampm === ap ? 'bg-gold-deep text-paper' : 'bg-sunken text-ink-soft'
             }`}
           >
             {ap}
@@ -115,7 +117,7 @@ function TimePickerRow({
         <button
           type="button"
           onClick={onRemove}
-          className="p-2 rounded-xl text-ink-faint hover:text-red-600"
+          className="p-2 rounded-xl text-ink-faint hover:text-bad"
           aria-label="Remove second time"
         >
           <X className="w-4 h-4" />
@@ -128,7 +130,9 @@ function TimePickerRow({
 interface TaskModalProps {
   shifts?: Shift[];
   venueId?: string;
-  onShiftCreated?: (shift: Shift) => void;
+  onShiftCreated?: (shift: Shift, deleted?: boolean) => void;
+  agencyId?: string;
+  onSaveMany?: (tasks: Partial<Task>[]) => Promise<boolean>;
   isOpen: boolean;
   onClose: () => void;
   onSave: (taskData: Partial<Task>, opts?: { baselineVersion?: number }) => Promise<boolean> | void;
@@ -171,9 +175,24 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   shifts = [],
   venueId = '',
   onShiftCreated,
+  onSaveMany,
+  agencyId = 'agency-hkc',
   currentUserEmail,
   timeZone = DEFAULT_TIME_ZONE,
 }) => {
+  const [step, setStep] = useState(0);
+  const [extras, setExtras] = useState<Array<{ name: string; note: string }>>([]);
+  const [peopleTouched, setPeopleTouched] = useState(false);
+  const [dayPeople, setDayPeople] = useState<NonNullable<Task['dayAssignees']>>({});
+  const [swaps, setSwaps] = useState<NonNullable<Task['assigneeSwaps']>>([]);
+  const [peopleDay, setPeopleDay] = useState<number | null>(null);
+  const [justOnce, setJustOnce] = useState(false);
+  const [showPeople, setShowPeople] = useState(false);
+  const [peopleSearch, setPeopleSearch] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [repeat, setRepeat] = useState('Every day');
+  const [editingShift, setEditingShift] = useState<Shift | undefined>();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [selectedCategories, setSelectedCategories] = useState<string[]>([PRESET_CATEGORIES[0]]);
@@ -188,7 +207,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [enableOverdueAlert, setEnableOverdueAlert] = useState(false);
   const [assignType, setAssignType] = useState<'all' | 'specific'>('all');
   const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
-  const [customWorkerEmail, setCustomWorkerEmail] = useState('');
   const [visibleToTeam, setVisibleToTeam] = useState(true);
 
   // Category picker state — presets + the user's own saved customs.
@@ -269,7 +287,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   // Schedule State: Recurring Days vs Specific Calendar Dates
   const [creatingShift, setCreatingShift] = useState(false);
   const [createdShifts, setCreatedShifts] = useState<Shift[]>([]);
-  const pickerShifts = [...shifts, ...createdShifts.filter((s) => !shifts.some((v) => v.id === s.id))].filter((s) => shiftIsUpcoming(s, workDateIn(timeZone)));
+  const [removedShifts, setRemovedShifts] = useState<string[]>([]);
+  const pickerShifts = venueShifts([...shifts.filter((s) => !createdShifts.some((v) => v.id === s.id)), ...createdShifts], venueId, agencyId).filter((s) => !removedShifts.includes(s.id) && shiftIsUpcoming(s, workDateIn(timeZone)));
   const [shiftId, setShiftId] = useState<string | null>(null);
   const [shiftMode, setShiftMode] = useState(false);
   const [shiftTime, setShiftTime] = useState(false);
@@ -279,6 +298,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   // Synchronous guard against double-submit (double-click / Enter+click firing
   // handleSubmit twice before the modal unmounts).
+  const pickedShiftRef = useRef<HTMLButtonElement | null>(null);
   const submitGuard = useRef(false);
   // ROUND 5 — write baseline for this edit form. Captured when the modal
   // loads taskToEdit (what the user sees), NOT at save time (by then a
@@ -287,6 +307,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   useEffect(() => {
     submitGuard.current = false;
+    setStep(0); setExtras([]); setPeopleTouched(false); setDayPeople(taskToEdit?.dayAssignees || {});
+    setSwaps(taskToEdit?.assigneeSwaps || []); setPeopleDay(null); setJustOnce(false);
+    setShowPeople(false); setPeopleSearch(''); setSaving(false); setSaveError(''); setRemovedShifts([]);
+    setRepeat(taskToEdit?.scheduleType === 'specific_dates' ? 'One time' : taskToEdit?.daysOfWeek?.length === 1 ? 'Every week' : taskToEdit?.daysOfWeek?.length && taskToEdit.daysOfWeek.length < 7 ? 'Some days' : 'Every day');
     setCreatingShift(false); setCreatedShifts([]);
     setShiftId(taskToEdit?.shiftId || null);
     setShiftMode(!!taskToEdit?.shiftId);
@@ -382,14 +406,44 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     }
   }, [taskToEdit, isOpen]);
 
-  const canPickShift = scheduleType === 'recurring' || (shiftMode && pickerShifts.some((s) => s.id === shiftId && !!s.oneTimeDate));
-  const chosenShift = canPickShift && shiftMode ? pickerShifts.find((s) => s.id === shiftId) : undefined;
+  const chosenShift = shiftMode ? pickerShifts.find((s) => s.id === shiftId) : undefined;
   const usingShift = !!chosenShift;
   const isAny = !usingShift && (anyTime || (customTimeText !== null && isAnyTimeText(customTimeText)));
   useEffect(() => {
     if (isAny) setEnableOverdueAlert(false);
   }, [isAny]);
 
+  useEffect(() => {
+    if (step === 1 && shiftMode) pickedShiftRef.current?.parentElement?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [step, shiftMode, shiftId]);
+
+  const chooseShift = (shift: Shift) => {
+    setShiftId(shift.id); setShiftMode(true);
+    if (!taskToEdit && !peopleTouched) {
+      const emails = knownWorkers.filter((w) => w.id && shiftUserIds(shift).includes(w.id) && w.email).map((w) => w.email!);
+      setSelectedWorkers(emails); setAssignType(emails.length ? 'specific' : 'all');
+    }
+  };
+  const mainPeople = assignType === 'all' || !selectedWorkers.length ? ['all'] : selectedWorkers;
+  const today = workDateIn(timeZone);
+  const todayWeekday = new Date(`${today}T12:00:00Z`).getUTCDay();
+  const detectedShift = detectTimeShift(pickerShifts, pickerTimeToMinutes(time1), selectedDays.includes(todayWeekday) ? todayWeekday : selectedDays[0] ?? todayWeekday);
+  const dayDate = peopleDay === null ? today : nextWeekday(today, peopleDay);
+  const dayKey = String(peopleDay) as keyof NonNullable<Task['dayAssignees']>;
+  const dayValue = peopleDay === null ? mainPeople : justOnce ? swaps.find((s) => s.date === dayDate)?.assignedTo ?? dayPeople[dayKey] ?? mainPeople : dayPeople[dayKey] ?? mainPeople;
+  const pickPeople = (emails: string[]) => {
+    setPeopleTouched(true);
+    if (peopleDay !== null) {
+      if (justOnce) setSwaps((old) => [...old.filter((s) => s.date !== dayDate), { date: dayDate, assignedTo: emails }]);
+      else setDayPeople((old) => ({ ...old, [dayKey]: emails }));
+    } else { setAssignType(emails.includes('all') ? 'all' : 'specific'); setSelectedWorkers(emails.filter((e) => e !== 'all')); }
+  };
+  const namesFor = (emails: string[]) => emails.includes('all') ? 'Everyone at the venue' : emails.map((email) => knownWorkers.find((w) => w.email === email)?.name || email).join(', ');
+  const shiftChanged = (shift: Shift, deleted = false) => {
+    if (deleted) { setRemovedShifts((old) => [...old, shift.id]); if (shiftId === shift.id) { setShiftId(null); setShiftMode(false); } }
+    else { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); chooseShift(shift); }
+    onShiftCreated?.(shift, deleted); setCreatingShift(false);
+  };
   if (!isOpen) return null;
 
   const toggleDay = (dayIndex: number) => {
@@ -398,21 +452,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setSelectedDays(selectedDays.filter((d) => d !== dayIndex));
     } else {
       setSelectedDays([...selectedDays, dayIndex].sort());
-    }
-  };
-
-  const toggleWorker = (email: string) => {
-    if (selectedWorkers.includes(email)) {
-      setSelectedWorkers(selectedWorkers.filter((w) => w !== email));
-    } else {
-      setSelectedWorkers([...selectedWorkers, email]);
-    }
-  };
-
-  const handleAddCustomWorker = () => {
-    if (customWorkerEmail && customWorkerEmail.includes('@') && !selectedWorkers.includes(customWorkerEmail)) {
-      setSelectedWorkers([...selectedWorkers, customWorkerEmail.trim()]);
-      setCustomWorkerEmail('');
     }
   };
 
@@ -475,10 +514,22 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || (shifts.length > 0 && canPickShift && shiftMode && !chosenShift)) return;
+    if (step !== 2) {
+      if (title.trim() && extras.every((t) => t.name.trim())) {
+        if (step === 1 && !taskToEdit && !peopleTouched) {
+          const shift = chosenShift || (!shiftMode && !isAny && customTimeText === null ? detectedShift : undefined);
+          const emails = shift ? knownWorkers.filter((w) => w.id && shiftUserIds(shift).includes(w.id) && w.email).map((w) => w.email!) : [];
+          setSelectedWorkers(emails); setAssignType(emails.length ? 'specific' : 'all');
+        }
+        setStep(step + 1);
+      }
+      return;
+    }
+    if (!title.trim() || extras.some((t) => !t.name.trim()) || (shiftMode && !chosenShift)) return;
     if (submitGuard.current) return;
     submitGuard.current = true;
 
+    if (extras.length && !onSaveMany) { submitGuard.current = false; setSaveError("Couldn't save these tasks. Please try again."); return; }
     const assignedTo = assignType === 'all' || selectedWorkers.length === 0 ? ['all'] : selectedWorkers;
 
     // Validate dates if specific_dates is chosen
@@ -488,7 +539,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       finalDates = [todayStr];
     }
 
-    const saved = await onSave({
+    const payload: Partial<Task> = {
       ...(taskToEdit ? { id: taskToEdit.id } : {}),
       title: title.trim(),
       description: description.trim(),
@@ -496,7 +547,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       categories: selectedCategories.length > 0 ? selectedCategories.map((c) => c.trim()) : ['General'],
       shiftId: usingShift ? chosenShift.id : null,
       shiftTime: usingShift && shiftTime,
-      isPrivate: !usingShift && assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
+      isPrivate: (!usingShift || !taskToEdit || peopleTouched || !!taskToEdit.assignmentMode) && assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
       inputType,
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
@@ -507,11 +558,21 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       targetTime2Minutes: (!usingShift || shiftTime) && !isAny && time2 ? pickerTimeToMinutes(time2) : null,
       priority,
       enableOverdueAlert: isAny ? false : enableOverdueAlert,
-      assignedTo: usingShift ? ['all'] : assignedTo,
-      scheduleType: usingShift ? chosenShift.oneTimeDate ? 'specific_dates' : 'recurring' : scheduleType,
-      daysOfWeek: usingShift ? shiftWeekdays(chosenShift) : selectedDays,
+      assignedTo: taskToEdit && !peopleTouched && usingShift && !taskToEdit.assignmentMode && !taskToEdit.dayAssignees && !taskToEdit.assigneeSwaps ? ['all'] : assignedTo,
+      ...peopleFields(taskToEdit, peopleTouched, differingDays(dayPeople, assignedTo), swaps),
+      scheduleType: usingShift && chosenShift.oneTimeDate ? 'specific_dates' : scheduleType,
+      daysOfWeek: taskToEdit && !peopleTouched && usingShift && !taskToEdit.assignmentMode && !taskToEdit.dayAssignees && !taskToEdit.assigneeSwaps ? shiftWeekdays(chosenShift) : selectedDays,
       specificDates: usingShift && chosenShift.oneTimeDate ? [chosenShift.oneTimeDate] : scheduleType === 'specific_dates' ? finalDates : undefined,
-    }, { baselineVersion: baselineRef.current });
+    };
+    setSaving(true); setSaveError('');
+    let saved: boolean | void;
+    try {
+      saved = extras.length && onSaveMany
+        ? await onSaveMany([payload, ...extras.map((t) => ({ ...payload, title: t.name.trim(), description: t.note.trim() }))])
+        : await onSave(payload, { baselineVersion: baselineRef.current });
+    } catch { saved = false; }
+    setSaving(false);
+    if (saved === false) setSaveError("Couldn't save. Check the connection and try again.");
 
     // Only close on a confirmed save — on failure the modal stays open with
     // the user's input intact so they can review and retry.
@@ -523,34 +584,40 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-sm overflow-y-auto">
-      <div style={creatingShift ? { display: 'none' } : undefined} className="bg-surface rounded-3xl w-full max-w-xl tactile-5 animate-pop-in border border-line my-8 overflow-hidden transition-colors max-h-[90vh] flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-scrim backdrop-blur-sm overflow-y-auto">
+      <div style={creatingShift ? { display: 'none' } : undefined} className="bg-surface rounded-2xl w-full max-w-xl tactile-4 animate-pop-in border border-line my-8 overflow-hidden transition-colors max-h-[90vh] flex flex-col">
         
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-line/70 shrink-0">
           <div>
             <h2 className="text-base font-bold text-ink">
-              {taskToEdit ? 'Edit Task Assignment' : 'Create New Task Assignment'}
+              {taskToEdit ? 'Edit task' : 'New task'}
             </h2>
             <p className="text-xs text-ink-faint">
-              Configure fields, completion input options, visibility, and schedule.
+              {taskToEdit ? 'Only this task changes' : extras.length ? `${extras.length + 1} tasks` : 'Create a task'}
             </p>
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-lg text-ink-faint hover:text-ink hover:bg-sunken"
+            aria-label="Close"
+            className="min-h-11 min-w-11 rounded-lg text-ink-faint hover:text-ink hover:bg-sunken"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Form Body - Scrollable */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-4 text-xs overflow-y-auto flex-1">
+        <form onSubmit={handleSubmit} className="task-form p-6 space-y-4 text-base overflow-y-auto flex-1">
           
+          <nav aria-label="Task steps" className="flex gap-2 text-base text-ink">
+            {['What', 'When', 'Who'].map((name, i) => <span key={name} aria-current={step === i ? 'step' : undefined} className={step === i ? 'font-semibold' : 'text-ink-soft'}>{i + 1} {name}{i < 2 ? ' ·' : ''}</span>)}
+          </nav>
+          {step > 0 && extras.length > 0 && <p className="p-3 rounded-lg bg-sunken text-base text-ink">Applies to all {extras.length + 1} tasks</p>}
+          <div hidden={step !== 0} className="space-y-4">
           {/* Task Title */}
           <div>
             <label className="block font-semibold text-ink-soft mb-1">
-              Task Title <span className="text-rose-500">*</span>
+              Name <span className="text-bad">*</span>
             </label>
             <input
               id="task-title-input"
@@ -558,15 +625,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               required
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Check temperature logs in refrigeration unit"
-              className="w-full text-xs sm:text-sm px-3.5 py-2.5 rounded-xl border border-line bg-sunken text-ink focus:outline-none focus:border-gold"
+              className="w-full text-xs sm:text-sm px-3 py-3 rounded-xl border border-line bg-sunken text-ink focus:outline-none focus:border-gold"
             />
           </div>
 
           {/* Description / Instructions */}
           <div>
             <label className="block font-semibold text-ink-soft mb-1">
-              Instructions / Description
+              Notes
             </label>
             <textarea
               id="task-desc-input"
@@ -574,10 +640,21 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Step-by-step guidance for mashgichim when completing this daily assignment..."
-              className="w-full text-xs px-3.5 py-2 rounded-xl border border-line bg-sunken text-ink focus:outline-none focus:border-gold"
+              className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink focus:outline-none focus:border-gold"
             />
           </div>
 
+          {!taskToEdit && <div className="space-y-2">
+            {extras.map((extra, i) => <div key={i} className="flex gap-2 items-start">
+              <span className="pt-3 text-base text-ink-soft">{i + 2}</span>
+              <div className="flex-1 min-w-0 space-y-2">
+                <label className="block text-sm text-ink-soft">Name<input aria-label={`Task ${i + 2} name`} required value={extra.name} onChange={(e) => setExtras((old) => old.map((t, n) => n === i ? { ...t, name: e.target.value } : t))} className="w-full min-h-11 rounded-lg border border-line-control bg-sunken text-ink px-3 text-base" /></label>
+                <label className="block text-sm text-ink-soft">Optional note<input value={extra.note} onChange={(e) => setExtras((old) => old.map((t, n) => n === i ? { ...t, note: e.target.value } : t))} className="w-full min-h-11 rounded-lg border border-line-control bg-sunken text-ink px-3 text-base" /></label>
+              </div>
+              <button type="button" aria-label={`Remove task ${i + 2}`} onClick={() => setExtras((old) => old.filter((_, n) => n !== i))} className="min-h-11 min-w-11 text-ink-soft pressable">×</button>
+            </div>)}
+            <button type="button" onClick={() => setExtras((old) => [...old, { name: '', note: '' }])} className="min-h-11 px-3 rounded-lg border border-line-control text-base text-ink pressable">+ Add another task</button>
+          </div>}
           {/* 2-Column: Category & Input Type */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -594,7 +671,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                       style={categoryVars(c)}
                       className={`inline-flex items-center gap-1 pl-2 ${
                         custom ? 'pr-1' : 'pr-2.5'
-                      } py-1 rounded-full text-[11px] font-bold border transition tactile-1 pressable ${
+                      } py-1 rounded-full text-xs font-bold border transition tactile-1 pressable ${
                         selected
                           ? 'cat-chip-selected ring-2 ring-offset-1 cat-ring scale-[1.03]'
                           : 'cat-chip hover:border-line-strong'
@@ -608,7 +685,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                         aria-pressed={selected}
                       >
                         {selected ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
                         ) : (
                           <span className="cat-dot w-2 h-2 rounded-full shrink-0" />
                         )}
@@ -619,10 +696,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                           type="button"
                           onClick={() => removeCustomCategory(c)}
                           title={confirmDeleteCat === c ? 'Tap again to delete' : 'Delete this category'}
-                          className={`shrink-0 w-4.5 h-4.5 p-0.5 rounded-full inline-flex items-center justify-center transition cursor-pointer ${
+                          className={`shrink-0 min-w-11 min-h-11 rounded-full inline-flex items-center justify-center transition cursor-pointer ${
                             confirmDeleteCat === c
-                              ? 'bg-red-500 text-white'
-                              : 'text-ink-faint hover:text-red-600 hover:bg-red-500/10'
+                              ? 'bg-bad text-paper'
+                              : 'text-ink-faint hover:text-bad hover:bg-bad/10'
                           }`}
                         >
                           {confirmDeleteCat === c ? (
@@ -641,7 +718,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                     setShowOtherForm((v) => !v);
                     setConfirmDeleteCat(null);
                   }}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold border border-dashed transition cursor-pointer tactile-1 ${
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border border-dashed transition cursor-pointer tactile-1 ${
                     showOtherForm
                       ? 'border-gold bg-gold-wash text-gold-ink'
                       : 'border-line-strong text-ink-soft hover:border-gold hover:text-gold-ink'
@@ -654,7 +731,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
               {showOtherForm && (
                 <div className="mt-2 p-3 rounded-2xl bg-sunken border border-line tactile-1 animate-fade-in">
-                  <label className="block text-[11px] font-bold text-ink-soft mb-1">
+                  <label className="block text-xs font-bold text-ink-soft mb-1">
                     Name your category
                   </label>
                   <input
@@ -667,10 +744,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                         addCustomCategory();
                       }
                     }}
-                    placeholder="e.g. Pesach Prep"
+                    placeholder="Category name"
                     className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-surface text-ink placeholder:text-ink-faint focus:outline-none focus:border-gold"
                   />
-                  <label className="block text-[11px] font-bold text-ink-soft mt-2.5 mb-1.5">
+                  <label className="block text-xs font-bold text-ink-soft mt-2.5 mb-1.5">
                     Pick its color
                   </label>
                   <div className="flex flex-wrap gap-2">
@@ -689,7 +766,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                   </div>
                   <div className="flex items-center justify-between mt-3">
                     <span
-                      className="cat-chip inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border"
+                      className="cat-chip inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border"
                       style={categoryVarsForHue(otherHue)}
                     >
                       <span className="cat-dot w-2 h-2 rounded-full" />
@@ -699,7 +776,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                       <button
                         type="button"
                         onClick={() => setShowOtherForm(false)}
-                        className="px-3 py-1.5 rounded-xl text-[11px] font-bold text-ink-soft hover:text-ink transition cursor-pointer"
+                        className="px-3 py-1.5 rounded-xl text-xs font-bold text-ink-soft hover:text-ink transition cursor-pointer"
                       >
                         Cancel
                       </button>
@@ -707,7 +784,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                         type="button"
                         onClick={addCustomCategory}
                         disabled={!otherName.trim()}
-                        className="px-3.5 py-1.5 rounded-xl text-[11px] font-black bg-gradient-to-b from-gold to-gold-deep text-white tactile-2 pressable transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="px-3 py-1.5 rounded-xl text-xs font-black bg-gold-deep text-paper tactile-2 pressable transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         Save category
                       </button>
@@ -715,7 +792,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                   </div>
                 </div>
               )}
-              <p className="text-[10px] text-ink-faint mt-1.5 leading-snug">
+              <p className="text-xs text-ink-faint mt-1.5 leading-snug">
                 Your <em>Other</em> categories are saved for next time — tap the × on one to remove it.
               </p>
             </div>
@@ -741,7 +818,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
           {/* CUSTOM STATUS VALUES BUILDER (When inputType === 'status_select') */}
           {inputType === 'status_select' && (
-            <div className="p-3.5 bg-sunken rounded-2xl border border-gold/30 space-y-3 animate-fade-in">
+            <div className="p-4 bg-sunken rounded-2xl border border-gold/30 space-y-3 animate-fade-in">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                   <ListFilter className="w-4 h-4 text-gold-deep" />
@@ -749,14 +826,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                     Custom Status Values
                   </span>
                 </div>
-                <span className="text-[11px] text-ink-faint">
+                <span className="text-xs text-ink-faint">
                   Staff choose from these values
                 </span>
               </div>
 
               {/* Preset Quick Select */}
               <div>
-                <div className="text-[10px] font-semibold text-ink-faint uppercase tracking-wider mb-1">
+                <div className="text-xs font-semibold text-ink-faint uppercase tracking-wider mb-1">
                   Quick Presets:
                 </div>
                 <div className="flex flex-wrap gap-1.5">
@@ -765,7 +842,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                       key={preset.name}
                       type="button"
                       onClick={() => applyStatusPreset(preset)}
-                      className="px-2 py-0.5 text-[11px] font-medium rounded-lg bg-surface text-ink-soft border border-line hover:border-gold hover:text-gold-deep transition"
+                      className="px-2 py-0.5 text-xs font-medium rounded-lg bg-surface text-ink-soft border border-line hover:border-gold hover:text-gold-deep transition"
                     >
                       {preset.name}
                     </button>
@@ -775,7 +852,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
               {/* Current Status Options List */}
               <div className="space-y-1.5">
-                <div className="text-[10px] font-semibold text-ink-faint flex items-center justify-between">
+                <div className="text-xs font-semibold text-ink-faint flex items-center justify-between">
                   <span>Current Options (Click checkmark to toggle &quot;Counts as Done&quot;):</span>
                   <span>{customStatusOptions.length} values</span>
                 </div>
@@ -788,7 +865,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                         key={opt}
                         className={`inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-xl text-xs font-semibold border transition ${
                           isCompleted
-                            ? 'bg-emerald-50 dark:bg-emerald-950/70 border-emerald-300 dark:border-emerald-700 text-emerald-900 dark:text-emerald-200'
+                            ? 'bg-ok-bg border-ok text-ok'
                             : 'bg-surface border-line text-ink-soft'
                         }`}
                       >
@@ -798,14 +875,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                           className="flex items-center gap-1 hover:opacity-80"
                           title={isCompleted ? 'Marked as completed status (click to toggle)' : 'Not completed (click to mark as completed)'}
                         >
-                          <span className={`w-3.5 h-3.5 rounded-full flex items-center justify-center text-[9px] ${
-                            isCompleted ? 'bg-emerald-600 text-white' : 'border border-line-strong'
+                          <span className={`w-4 h-4 rounded-full flex items-center justify-center text-xs ${
+                            isCompleted ? 'bg-ok text-paper' : 'border border-line-strong'
                           }`}>
                             {isCompleted ? '✓' : ''}
                           </span>
                           <span>{opt}</span>
                           {isCompleted && (
-                            <span className="text-[9px] px-1 py-0.2 rounded bg-emerald-200 dark:bg-emerald-800 text-emerald-900 dark:text-emerald-100 font-bold uppercase">
+                            <span className="text-xs px-1 py-0.2 rounded bg-ok-bg text-ok font-bold uppercase">
                               Done
                             </span>
                           )}
@@ -815,7 +892,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                           type="button"
                           onClick={() => handleRemoveStatusOption(opt)}
                           disabled={customStatusOptions.length <= 1}
-                          className="p-1 text-ink-faint hover:text-rose-500 rounded hover:bg-sunken disabled:opacity-30"
+                          className="p-1 text-ink-faint hover:text-bad rounded hover:bg-sunken disabled:opacity-30"
                           title="Delete status option"
                         >
                           <Trash2 className="w-3 h-3" />
@@ -838,114 +915,20 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                       handleAddStatusOption();
                     }
                   }}
-                  placeholder="Type new status value (e.g. Needs Manager Sign-off)..."
+                  placeholder="New status value"
                   className="flex-1 px-3 py-1.5 text-xs rounded-xl border border-line bg-sunken text-ink"
                 />
                 <button
                   type="button"
                   onClick={handleAddStatusOption}
-                  className="px-3 py-1.5 text-xs font-semibold rounded-xl bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white transition tactile-1 flex items-center gap-1"
+                  className="px-3 py-1.5 text-xs font-semibold rounded-xl bg-gold-deep hover:brightness-105 text-paper transition tactile-1 flex items-center gap-1"
                 >
-                  <Plus className="w-3.5 h-3.5" />
+                  <Plus className="w-4 h-4" />
                   <span>Add Value</span>
                 </button>
               </div>
             </div>
           )}
-
-          {shifts.length > 0 && canPickShift && <section className="space-y-2" aria-label="When">
-            <p className="text-sm text-ink-soft">When</p>
-            <div role="group" aria-label="Time or Shift" className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-sunken">
-              {(['Time', 'Shift'] as const).map((mode) => <button key={mode} type="button" aria-pressed={mode === 'Shift' ? shiftMode : !shiftMode} onClick={() => { setShiftMode(mode === 'Shift'); if (mode === 'Shift' && shiftTime) { setAnyTime(false); setCustomTimeText(null); } if (mode === 'Shift' && !pickerShifts.some((s) => s.id === shiftId)) setShiftId(pickerShifts[0]?.id || null); }} className={`min-h-11 text-base text-ink rounded-lg pressable cursor-pointer ${(mode === 'Shift') === shiftMode ? 'bg-surface border border-line' : ''}`}>{mode}</button>)}
-            </div>
-            {shiftMode && <div className="space-y-2">
-              <div role="group" aria-label="Shift list" className="space-y-2">
-              {pickerShifts.map((shift) => <button key={shift.id} type="button" aria-pressed={shift.id === shiftId} onClick={() => setShiftId(shift.id)} className={`w-full min-h-11 p-3 text-left rounded-lg border text-base text-ink bg-surface pressable cursor-pointer ${shift.id === shiftId ? 'border-gold' : 'border-line-control'}`}>{shiftLabel(shift)}{!shift.oneTimeDate && shiftVariesByDay(shift) && <span className="block text-xs text-ink-soft">Varies by day</span>}</button>)}
-              <button type="button" onClick={() => setCreatingShift(true)} className="w-full min-h-11 p-3 text-left rounded-lg border border-line-control text-base text-ink bg-surface pressable cursor-pointer">+ New shift</button>
-              </div>
-              {chosenShift && <p className="text-sm text-ink-soft">Goes to whoever is on {chosenShift.name} that day{chosenShift.userNames?.length || chosenShift.userName ? ` (usually ${shiftPeopleSummary(chosenShift.userNames || [chosenShift.userName!])})` : ''}.</p>}
-              {chosenShift && !shiftTime && <button type="button" onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); setTime1({ hour: 9, minute: 0, ampm: 'AM' }); setTime2(null); }} className="min-h-11 text-sm text-gold-deep underline pressable cursor-pointer">+ Add time</button>}
-            </div>}
-          </section>}
-          {/* 2-Column: Target Time & Priority */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div hidden={shifts.length > 0 && canPickShift && shiftMode && !shiftTime}>
-              {usingShift && shiftTime && <button type="button" aria-label="Remove time" onClick={() => { setShiftTime(false); setTime1({ hour: 9, minute: 0, ampm: 'AM' }); setTime2(null); setAnyTime(false); setCustomTimeText(null); }} className="float-right min-h-11 min-w-11 text-ink-soft rounded-lg pressable cursor-pointer">×</button>}
-              <label className="block font-semibold text-ink-soft mb-1 flex items-center gap-1">
-                <Clock className="w-3.5 h-3.5 text-ink-faint" /> Target Time
-              </label>
-              {anyTime ? (
-                <div className="flex flex-wrap items-center gap-2 text-ink-soft">
-                  <span>Any time · no target time</span>
-                  <button type="button" onClick={() => { setAnyTime(false); setTime1({ hour: 9, minute: 0, ampm: 'AM' }); }} className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold">Set a time</button>
-                </div>
-              ) : customTimeText !== null ? (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={customTimeText}
-                    onChange={(e) => setCustomTimeText(e.target.value)}
-                    placeholder="e.g. End of Shift"
-                    className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setCustomTimeText(null)}
-                    className="text-xs font-bold text-gold-deep whitespace-nowrap"
-                  >
-                    Use clock
-                  </button>
-                </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  <TimePickerRow value={time1} onChange={setTime1} />
-                  {time2 && <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />}
-                </div>
-              )}
-              {!usingShift && assignType === 'all' && !isAny && (customTimeText === null || parseTimeText(customTimeText) !== null) && <p className="text-xs text-ink-soft mt-2">People with a shift today (including an overnight shift still running) see it only if this time is inside their shift. People with no shift see it too.</p>}
-              <div className="flex items-center gap-2 flex-wrap mt-2">
-                <button
-                  type="button"
-                  onClick={() => { setAnyTime(false); setCustomTimeText(null); setTime1({ hour: 9, minute: 0, ampm: 'AM' }); }}
-                  className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold"
-                >
-                  ☀️ Morning
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setAnyTime(false); setCustomTimeText(null); setTime1({ hour: 3, minute: 0, ampm: 'PM' }); }}
-                  className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-line bg-sunken text-ink hover:border-gold"
-                >
-                  🌤️ Afternoon
-                </button>
-                <button
-                  type="button"
-                  hidden={usingShift}
-                  aria-pressed={anyTime}
-                  onClick={() => { setAnyTime(true); setTime2(null); setCustomTimeText(null); setEnableOverdueAlert(false); }}
-                  className={`text-xs font-bold px-2.5 py-1.5 rounded-xl border ${anyTime ? 'border-gold' : 'border-line'} bg-sunken text-ink hover:border-gold`}
-                >
-                  Any time
-                </button>
-                {!anyTime && customTimeText === null && !time2 && <>
-                  <button
-                    type="button"
-                    onClick={() => setTime2({ hour: 3, minute: 0, ampm: 'PM' })}
-                    className="text-xs font-bold px-2.5 py-1.5 rounded-xl border border-dashed border-gold/60 text-gold-deep"
-                  >
-                    + Second time
-                  </button>
-                  <button
-                    type="button"
-                    hidden={usingShift}
-                    onClick={() => setCustomTimeText('')}
-                    className="text-xs text-ink-faint underline"
-                  >
-                    Custom text
-                  </button>
-                </>}
-              </div>
-            </div>
 
             <div>
               <label className="block font-semibold text-ink-soft mb-1">
@@ -962,7 +945,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 <option value="high">High (Urgent)</option>
               </select>
             </div>
-          </div>
 
           {/* Overdue Alert Toggle */}
           <label className={`flex items-center gap-2.5 p-3 rounded-xl border border-line bg-sunken ${isAny ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}>
@@ -981,195 +963,79 @@ export const TaskModal: React.FC<TaskModalProps> = ({
             </div>
           </label>
 
-          {/* SCHEDULE SECTION: Recurring Days vs One-Time / Monthly Calendar */}
-          <div hidden={shifts.length > 0 && canPickShift && shiftMode} className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="block font-semibold text-ink-soft flex items-center gap-1">
-                <Calendar className="w-3.5 h-3.5 text-ink-faint" /> Schedule Mode
-              </label>
-            </div>
-
-            {/* Switcher Tabs */}
-            <div className="grid grid-cols-2 gap-2 p-1 bg-sunken rounded-xl border border-line">
-              <button
-                type="button"
-                onClick={() => setScheduleType('recurring')}
-                className={`py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
-                  scheduleType === 'recurring'
-                    ? 'bg-surface text-ink tactile-1'
-                    : 'text-ink-faint hover:text-ink'
-                }`}
-              >
-                <Clock className="w-3.5 h-3.5" />
-                <span>Weekly Recurrence</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setScheduleType('specific_dates')}
-                className={`py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
-                  scheduleType === 'specific_dates'
-                    ? 'bg-surface text-emerald-600 dark:text-emerald-400 tactile-1'
-                    : 'text-ink-faint hover:text-ink'
-                }`}
-              >
-                <CalendarDays className="w-3.5 h-3.5" />
-                <span>One-Time / Specific dates</span>
-              </button>
-            </div>
-
-            {/* Mode 1: Days of Week Recurrence */}
-            {scheduleType === 'recurring' && (
-              <div className="pt-1">
-                <div className="flex items-center justify-between text-[11px] text-ink-faint mb-1.5">
-                  <span>Repeats on every selected day of week:</span>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedDays([0, 1, 2, 3, 4, 5, 6])}
-                    className="text-emerald-600 dark:text-emerald-400 hover:underline font-semibold"
-                  >
-                    Select All (Daily)
-                  </button>
-                </div>
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {DAYS_MAP.map((dayName, idx) => {
-                    const isSelected = selectedDays.includes(idx);
-                    return (
-                      <button
-                        key={dayName}
-                        type="button"
-                        onClick={() => toggleDay(idx)}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
-                          isSelected
-                            ? 'bg-emerald-600 text-white shadow-xs'
-                            : 'bg-sunken text-ink-soft hover:text-ink border border-transparent hover:border-line-strong'
-                        }`}
-                      >
-                        {dayName}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Mode 2: Monthly Calendar Date Picker */}
-            {scheduleType === 'specific_dates' && (
-              <div className="pt-1 animate-fade-in">
-                <MonthlyCalendarPicker
-                  selectedDates={selectedDates}
-                  onToggleDate={handleToggleDate}
-                  onClearAll={() => setSelectedDates([])}
-                  onSelectToday={handleSelectToday}
-                  onSelectTomorrow={handleSelectTomorrow}
-                  timeZone={timeZone}
-                />
-              </div>
-            )}
           </div>
-
-          {/* Mashgiach & Staff Assignment */}
-          <div hidden={shifts.length > 0 && canPickShift && shiftMode}>
-            <label className="block font-semibold text-ink-soft mb-1 flex items-center gap-1">
-              <Users className="w-3.5 h-3.5 text-ink-faint" /> Assigned Mashgiach / Staff Visibility
-            </label>
-            <div className="flex items-center gap-3 mb-2">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="assignType"
-                  checked={assignType === 'all'}
-                  onChange={() => setAssignType('all')}
-                  className="text-emerald-600 focus:ring-emerald-500"
-                />
-                <span className="font-medium text-ink-soft">Everyone at this venue</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="assignType"
-                  checked={assignType === 'specific'}
-                  onChange={() => setAssignType('specific')}
-                  className="text-emerald-600 focus:ring-emerald-500"
-                />
-                <span className="font-medium text-ink-soft">Specific Mashgiach Only</span>
-              </label>
+          <section hidden={step !== 1} aria-label="When" className="space-y-4">
+            <div role="group" aria-label="Time or Shift" className="grid grid-cols-2 gap-2">
+              <button type="button" aria-pressed={shiftMode} onClick={() => { const shift = pickerShifts.find((s) => s.id === shiftId) || detectedShift || pickerShifts[0]; if (shift) chooseShift(shift); }} className="min-h-11 rounded-lg border border-line-control bg-surface text-ink pressable">A shift</button>
+              <button type="button" aria-pressed={!shiftMode} onClick={() => setShiftMode(false)} className="min-h-11 rounded-lg border border-line-control bg-surface text-ink pressable">A time</button>
             </div>
-
-            {assignType === 'specific' && (
-              <div className="p-3 bg-sunken rounded-xl border border-line/70 space-y-2">
-                <p className="text-[11px] text-ink-faint">
-                  Select Mashgiach / staff members who should see and execute this assignment:
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {knownWorkers.map((w) => {
-                    const workerEmail = w.email || '';
-                    // Without an email the worker cannot be assigned (assignments
-                    // are keyed by email) — disable rather than toggling ''.
-                    const noEmail = !w.email;
-                    const isChecked = !noEmail && selectedWorkers.includes(workerEmail);
-                    return (
-                      <button
-                        key={rosterKey(w)}
-                        type="button"
-                        disabled={noEmail}
-                        title={noEmail ? 'No contact email — cannot be assigned' : undefined}
-                        onClick={() => toggleWorker(workerEmail)}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition ${
-                          noEmail
-                            ? 'bg-sunken border-line text-ink-faint opacity-60 cursor-not-allowed'
-                            : isChecked
-                            ? 'bg-emerald-50 border-emerald-300 text-emerald-800 dark:bg-emerald-950/70 dark:border-emerald-700 dark:text-emerald-300'
-                            : 'bg-surface border-line text-ink-soft'
-                        }`}
-                      >
-                        {isChecked ? '✓ ' : '+ '}
-                        {w.name} ({rosterDisplayHandle(w)})
-                      </button>
-                    );
-                  })}
+            {shiftMode && <div className="space-y-3">
+              <div className="flex gap-2 min-w-0">
+                <div className="task-shift-scroll flex flex-1 gap-2 overflow-x-auto min-w-0" role="group" aria-label="Shift list">
+                  {pickerShifts.map((shift) => <div key={shift.id} className={`flex shrink-0 items-center rounded-full border ${shift.id === shiftId ? 'bg-gold-deep text-paper border-gold-deep' : 'bg-surface text-ink border-line-control'}`}>
+                    <button ref={shift.id === shiftId ? pickedShiftRef : undefined} type="button" aria-pressed={shift.id === shiftId} onClick={() => chooseShift(shift)} className="min-h-11 px-3 py-2 rounded-full text-base whitespace-nowrap pressable"><span className="block max-w-40 truncate">{shift.id === shiftId ? '✓ ' : ''}{shift.name}</span><span className="block text-xs">{formatShiftHours(shift).replaceAll(':00', '').replace(' – ', '–').replace(' (next day)', '')}</span></button>
+                    {shift.id === shiftId && <button type="button" aria-label={`Edit ${shift.name} shift`} onClick={() => { setEditingShift(shift); setCreatingShift(true); }} className="min-h-11 min-w-11 rounded-full pressable"><Pencil aria-hidden="true" className="w-4 h-4 mx-auto" /></button>}
+                  </div>)}
                 </div>
-
-                {/* Custom email add */}
-                <div className="flex items-center gap-2 pt-1">
-                  <input
-                    type="email"
-                    value={customWorkerEmail}
-                    onChange={(e) => setCustomWorkerEmail(e.target.value)}
-                    placeholder="Or type Mashgiach email (e.g. mashgiach@company.com)..."
-                    className="flex-1 px-2.5 py-1 text-xs rounded-lg border border-line bg-sunken text-ink"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleAddCustomWorker}
-                    className="px-2.5 py-1 text-xs font-semibold rounded-lg bg-sunken border border-line hover:border-line-strong text-ink-soft"
-                  >
-                    Add
-                  </button>
-                </div>
-
-                {/* Visibility: who else can see this assignment */}
-                <label className="flex items-start gap-2 pt-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    id="task-team-visibility"
-                    checked={visibleToTeam}
-                    disabled={selectedWorkers.length === 0}
-                    aria-describedby="task-team-visibility-hint"
-                    onChange={(e) => setVisibleToTeam(e.target.checked)}
-                    className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
-                  />
-                  <span className="text-xs text-ink-soft leading-snug">
-                    <span className="font-bold">Owner and managers can see it too</span>
-                    <span id="task-team-visibility-hint" className="block">{selectedWorkers.length === 0 ? 'Pick at least one person first.' : 'Off: only the people you picked, admins and coordinators see it.'}</span>
-                  </span>
-                </label>
+                <button type="button" onClick={() => { setEditingShift(undefined); setCreatingShift(true); }} className="shrink-0 min-h-11 px-3 rounded-full border border-line-control text-ink bg-surface pressable">+ New</button>
               </div>
-            )}
-          </div>
+              {chosenShift && <ShiftHoursBar shift={chosenShift} pinMinutes={shiftTime ? pickerTimeToMinutes(time1) : undefined} onSaved={(shift) => { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); onShiftCreated?.(shift); }} />}
+              <div role="group" aria-label="Shift target time" className="space-y-2">
+                <button type="button" aria-pressed={!shiftTime} onClick={() => setShiftTime(false)} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Any time during the shift</button>
+                <button type="button" aria-pressed={shiftTime} onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">By a set time</button>
+              </div>
+            </div>}
+            {(!shiftMode || shiftTime) && <div className="space-y-2">
+              <label className="block text-sm text-ink-soft">Target Time</label>
+              {anyTime ? <div className="text-base text-ink-soft">Any time · no target time <button type="button" onClick={() => setAnyTime(false)} className="min-h-11 px-3 underline pressable">Set a time</button></div>
+                : customTimeText !== null ? <div className="flex gap-2"><input aria-label="Custom time" value={customTimeText} onChange={(e) => setCustomTimeText(e.target.value)} className="min-h-11 min-w-0 flex-1 px-3 rounded-lg border border-line-control bg-sunken text-base text-ink" /><button type="button" onClick={() => setCustomTimeText(null)} className="min-h-11 px-3 text-ink underline pressable">Use clock</button></div>
+                : <TimePickerRow value={time1} onChange={setTime1} />}
+              {!shiftMode && !anyTime && customTimeText === null && <p className="text-base text-ink-soft">{detectedShift ? `During the ${detectedShift.name} shift (${formatShiftHours(detectedShift)})` : 'Not during a shift'}</p>}
+              {time2 && !anyTime && <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />}
+              {!usingShift && assignType === 'all' && !isAny && (customTimeText === null || parseTimeText(customTimeText) !== null) && <p className="text-xs text-ink-soft mt-2">People with a shift today (including an overnight shift still running) see it only if this time is inside their shift. People with no shift see it too.</p>}
+              <div className="flex flex-wrap gap-2">
+                {!shiftMode && <button type="button" aria-pressed={anyTime} onClick={() => { setAnyTime(true); setTime2(null); setCustomTimeText(null); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Any time</button>}
+                {!anyTime && !time2 && <button type="button" onClick={() => setTime2({ hour: 3, minute: 0, ampm: 'PM' })} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">+ Second time</button>}
+              </div>
+            </div>}
+            <div role="group" aria-label="Repeat" className="space-y-2">
+              <p className="text-sm text-ink-soft">Repeat</p>
+              <div className="flex flex-wrap gap-2">{['One time', 'Every day', 'Some days', 'Every week'].map((label) => <button key={label} type="button" aria-pressed={repeat === label} onClick={() => { setRepeat(label); setScheduleType(label === 'One time' ? 'specific_dates' : 'recurring'); if (label === 'Every day') setSelectedDays([0, 1, 2, 3, 4, 5, 6]); if (label === 'Every week') setSelectedDays([new Date(`${today}T12:00:00Z`).getUTCDay()]); }} className={`min-h-11 px-3 rounded-lg border border-line-control text-ink pressable ${repeat === label ? 'bg-sunken font-semibold' : 'bg-surface'}`}>{label}</button>)}</div>
+              {(repeat === 'Some days' || repeat === 'Every week') && <div className="flex flex-wrap gap-2">{DAYS_MAP.map((name, day) => <button key={day} type="button" aria-pressed={selectedDays.includes(day)} onClick={() => repeat === 'Every week' ? setSelectedDays([day]) : toggleDay(day)} className="min-h-11 min-w-11 px-3 rounded-lg border border-line-control text-ink pressable">{name}</button>)}</div>}
+              {scheduleType === 'specific_dates' && <MonthlyCalendarPicker selectedDates={selectedDates} onToggleDate={handleToggleDate} onClearAll={() => setSelectedDates([])} onSelectToday={handleSelectToday} onSelectTomorrow={handleSelectTomorrow} timeZone={timeZone} />}
+            </div>
+          </section>
+
+          <section hidden={step !== 2} aria-label="Who" className="space-y-4">
+            <p className="text-base text-ink">{namesFor(mainPeople)}</p>
+            {(chosenShift || (!shiftMode && !isAny && customTimeText === null && detectedShift)) && <p className="text-sm text-ink-soft">Usual for {(chosenShift || detectedShift)!.name}</p>}
+            <div className="flex flex-wrap gap-2">{selectedWorkers.map((email) => <button key={email} type="button" onClick={() => { setPeopleTouched(true); const next = selectedWorkers.filter((e) => e !== email); setSelectedWorkers(next); setAssignType(next.length ? 'specific' : 'all'); }} className="min-h-11 px-3 rounded-full border border-line-control text-ink pressable">{namesFor([email])} ×</button>)}</div>
+            <button type="button" onClick={() => { setPeopleDay(null); setShowPeople(!showPeople); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">+ Add people</button>
+            <button type="button" aria-pressed={assignType === 'all'} onClick={() => { setPeopleTouched(true); setAssignType('all'); setSelectedWorkers([]); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Everyone at the venue</button>
+            {scheduleType === 'recurring' && (repeat === 'Every day' || repeat === 'Some days') && <div role="group" aria-label="People by day" className="space-y-2">
+              {selectedDays.map((day) => <button key={day} type="button" onClick={() => { setPeopleDay(day); setJustOnce(false); setShowPeople(true); }} className="flex items-center gap-2 w-full min-h-11 px-3 text-left rounded-lg border border-line-control text-ink pressable"><span>{DAYS_MAP[day]}</span><span className="rounded-full bg-sunken w-8 h-8 flex items-center justify-center" aria-hidden="true">{namesFor(dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople).slice(0, 1)}</span><span className="truncate">{namesFor(swaps.find((s) => s.date === nextWeekday(today, day))?.assignedTo ?? dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople)}</span></button>)}
+              <p className="text-sm text-ink-soft">You can change this later from the task.</p>
+            </div>}
+            {showPeople && <div role="group" aria-label="Choose people" className="space-y-2 p-3 rounded-xl border border-line bg-sunken">
+              {peopleDay !== null && <div className="space-y-2">
+                <p className="text-base text-ink">{DAYS_MAP[peopleDay]}</p>
+                {taskToEdit && <div className="flex flex-wrap gap-2">
+                  <button type="button" aria-pressed={!justOnce} onClick={() => setJustOnce(false)} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Every {new Date(`${dayDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' })}</button>
+                  <button type="button" aria-pressed={justOnce} onClick={() => setJustOnce(true)} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Just this {new Date(`${dayDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' })}</button>
+                </div>}
+              </div>}
+              <label className="block text-sm text-ink-soft">Search people<input value={peopleSearch} onChange={(e) => setPeopleSearch(e.target.value)} className="block w-full min-h-11 px-3 rounded-lg border border-line-control bg-surface text-base text-ink" /></label>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" aria-pressed={dayValue.includes('all')} onClick={() => pickPeople(['all'])} className="min-h-11 px-3 rounded-lg border border-line-control bg-surface text-ink pressable">Everyone at the venue</button>
+                {knownWorkers.filter((w) => `${w.name} ${w.email || ''}`.toLowerCase().includes(peopleSearch.toLowerCase())).map((w) => <button key={rosterKey(w)} type="button" aria-label={`Pick ${w.name}`} disabled={!w.email} aria-pressed={!!w.email && dayValue.includes(w.email)} onClick={() => { const email = w.email!; const next = dayValue.includes(email) ? dayValue.filter((e) => e !== email) : [...dayValue.filter((e) => e !== 'all'), email]; pickPeople(next.length ? next : ['all']); }} className="flex items-center gap-2 min-h-11 px-3 rounded-lg border border-line-control bg-surface text-ink pressable disabled:opacity-50"><span className="w-8 h-8 rounded-full bg-sunken flex items-center justify-center" aria-hidden="true">{w.name.slice(0, 1)}</span>{w.email && dayValue.includes(w.email) ? '✓ ' : ''}{w.name} ({rosterDisplayHandle(w)})</button>)}
+              </div>
+              <button type="button" onClick={() => { setShowPeople(false); setPeopleDay(null); }} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">Done choosing</button>
+            </div>}
+            <label className="flex items-center gap-2 min-h-11 text-sm text-ink-soft"><input id="task-team-visibility" type="checkbox" checked={visibleToTeam} disabled={assignType === 'all' || selectedWorkers.length === 0} onChange={(e) => setVisibleToTeam(e.target.checked)} /><span>Owner and managers can see it too<span className="block">{assignType === 'all' || selectedWorkers.length === 0 ? 'Pick at least one person first.' : 'Off: only the people you picked, admins and coordinators see it.'}</span></span></label>
+          </section>
 
           {/* Footer Actions */}
-          <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-line/70 shrink-0">
+          <div className="sticky bottom-0 flex flex-wrap items-center justify-end gap-2 py-3 border-t border-line bg-surface shrink-0">
             <button
               type="button"
               onClick={onClose}
@@ -1177,20 +1043,17 @@ export const TaskModal: React.FC<TaskModalProps> = ({
             >
               Cancel
             </button>
-            <button
-              disabled={shifts.length > 0 && canPickShift && shiftMode && !usingShift}
-              id="save-task-submit-btn"
-              type="submit"
-              className="px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-b from-gold to-gold-deep hover:brightness-105 text-white tactile-2"
-            >
-              {taskToEdit ? 'Save Changes' : 'Create Assignment'}
+            {step > 0 && <button type="button" onClick={() => setStep(step - 1)} className="min-h-12 px-4 rounded-lg border border-line-control text-base text-ink pressable">Back</button>}
+            <button disabled={saving || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 2 && shiftMode && !usingShift)} id="save-task-submit-btn" type="submit" className="min-h-12 px-4 rounded-lg bg-gold-deep text-paper text-base font-semibold pressable disabled:opacity-50">
+              {saving ? 'Saving…' : step < 2 ? 'Next' : extras.length ? `Save ${extras.length + 1} tasks` : 'Save task'}
             </button>
+            {saveError && <p role="alert" className="text-base text-bad">{saveError}</p>}
           </div>
         </form>
       </div>
-      {creatingShift && <div role="dialog" aria-modal="true" aria-label="New shift" className="fixed inset-0 z-50 bg-scrim flex items-center justify-center p-3" onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setCreatingShift(false); } }}>
+      {creatingShift && <div role="dialog" aria-modal="true" aria-label={editingShift ? 'Edit shift' : 'New shift'} className="fixed inset-0 z-50 bg-scrim flex items-center justify-center p-3" onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setCreatingShift(false); } }}>
         <div className="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-2xl bg-surface p-4">
-          <ShiftsPanel createOnly shifts={pickerShifts} venueId={venueId} timeZone={timeZone} people={knownWorkers} onCancel={() => setCreatingShift(false)} onChange={(shift) => { setCreatedShifts((old) => [...old, shift]); onShiftCreated?.(shift); setShiftId(shift.id); setShiftMode(true); setCreatingShift(false); }} />
+          <ShiftsPanel createOnly initialShift={editingShift} agencyId={agencyId} shifts={pickerShifts} venueId={venueId} timeZone={timeZone} people={knownWorkers} onCancel={() => setCreatingShift(false)} onChange={shiftChanged} />
         </div>
       </div>}
     </div>

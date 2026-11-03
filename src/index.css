@@ -372,3 +372,45 @@
 .owner-metric-on :where(div, span, p, svg) {
   color: inherit;
 }
+
+/* Task form controls retain a finger-sized target through all three steps. */
+.task-form input:not([type='checkbox']):not([type='radio']),
+.task-form select,
+.task-form button {
+  min-height: 44px;
+}
+.task-form input:not([type='checkbox']):not([type='radio']),
+.task-form textarea,
+.task-form select {
+  font-size: 1rem;
+}
+.task-shift-scroll {
+  mask-image: linear-gradient(to right, var(--ink) 90%, transparent);
+  scroll-snap-type: x proximity;
+}
+.task-shift-scroll > * { scroll-snap-align: start; }
+
+.shift-hours-track input[type='range'] {
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+.shift-hours-track input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  pointer-events: auto;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-lg);
+  background: var(--gold-deep);
+  border: 2px solid var(--paper);
+  cursor: ew-resize;
+}
+.shift-hours-track input[type='range']::-moz-range-thumb {
+  pointer-events: auto;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-lg);
+  background: var(--gold-deep);
+  border: 2px solid var(--paper);
+  cursor: ew-resize;
+}

@@ -1,3 +1,6 @@
+import { taskOccurrenceDate } from '../lib/taskOccurrences';
+import { venueShifts } from '../lib/shifts';
+import { minutesIn, weekdayIn, workDateIn } from '../lib/workday';
 import React, { useEffect, useState } from 'react';
 import { 
   X, 
@@ -369,7 +372,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
         {hasPeople && canUserAssignTasks(currentUser) && <div className="grid grid-cols-2 gap-1 p-1 mx-6 mt-4 rounded-xl bg-sunken" role="group" aria-label="People or Shifts">
           {(['people', 'shifts'] as const).map((value) => <button type="button" key={value} aria-pressed={section === value} onClick={() => setSection(value)} className={`min-h-11 rounded-lg text-base font-semibold text-ink pressable cursor-pointer ${section === value ? 'bg-surface border border-line' : ''}`}>{value === 'people' ? 'People' : 'Shifts'}</button>)}
         </div>}
-        {showShifts && <div key={currentVenue?.id || 'none'} className="p-6 overflow-y-auto"><ShiftsPanel shifts={shifts} venueId={currentVenue?.id || ''} people={users} timeZone={timeZone} onChange={(shift, deleted) => onShiftChange?.(shift, deleted)} /></div>}
+        {showShifts && <div key={currentVenue?.id || 'none'} className="p-6 overflow-y-auto"><ShiftsPanel agencyId={currentUser?.agencyId} shifts={shifts} venueId={currentVenue?.id || ''} people={users} timeZone={timeZone} onChange={(shift, deleted) => onShiftChange?.(shift, deleted)} /></div>}
         {/* Modal Body */}
         <div hidden={showShifts || !hasPeople} className="flex-1 overflow-y-auto p-6 space-y-6">
           {showPoolTab && (
@@ -477,7 +480,7 @@ export const TeamModal: React.FC<TeamModalProps> = ({
                 const isBusy = updatingUserId === user.id;
                 
                 // Tasks that count as this user's own (an admin's: only those naming them)
-                const assignedCount = tasks.filter((t) => isMyTask(t, user)).length;
+                const assignedCount = tasks.filter((t) => isMyTask(t, user, taskOccurrenceDate(t, new Map(venueShifts(shifts, t.venueId || '', t.agencyId).map((s) => [s.id, s])), workDateIn(timeZone), weekdayIn(timeZone), minutesIn(timeZone)))).length;
 
                 const canSendInvite = isAdminView && !isCurrent && !isPrimaryAdmin;
                 const wasSent = sentIds.includes(user.id) || user.invitePending === true;

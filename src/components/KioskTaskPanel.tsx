@@ -1,3 +1,4 @@
+import { taskOccurrenceDate } from '../lib/taskOccurrences';
 import { TaskEmptyState } from './TaskEmptyState';
 import { filterChipClass, FilterCheck } from '../lib/filterChip';
 import { whoSeesLabel } from '../lib/whoSees';
@@ -59,6 +60,7 @@ import { CheckInPhoto } from './CheckInPhoto';
 type TabFilter = 'all' | 'mine' | 'pending' | 'completed';
 
 interface KioskTaskPanelProps {
+  roster?: Array<{ id?: string; email?: string; name: string }>;
   shiftsById?: Map<string, Shift>;
   tasks: Task[];
   currentUser: UserType;
@@ -204,6 +206,7 @@ const btn64 = 'min-h-11 min-w-11 sm:min-h-16 sm:min-w-16';
 
 export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   shiftsById = new Map(),
+  roster = [],
   tasks,
   currentUser,
   venueName,
@@ -281,7 +284,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
     const firstName = currentUser.name.split(' ')[0];
     savingRef.current = { ...savingRef.current, [taskId]: { op, toDone } };
     const task = tasks.find((t) => t.id === taskId);
-    savingMine.current[taskId] = !!task && isMyTask(task, currentUser);
+    savingMine.current[taskId] = !!task && isMyTask(task, currentUser, taskOccurrenceDate(task, shiftsById, workDateIn(timeZone || DEFAULT_TIME_ZONE), weekdayIn(timeZone || DEFAULT_TIME_ZONE), minutesIn(timeZone || DEFAULT_TIME_ZONE)));
     setSaving(savingRef.current);
     if (toDone) primeChime();
     if (isBarUndo) {
@@ -761,7 +764,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                               {cat}
                             </span>
                           ))}
-                          <WhoSeesTag kiosk label={whoSeesLabel(task, { viewer: currentUser, mode: 'kiosk', shiftsById, roster: [], todayYmd: null, todayWeekday: null, nowMinutes: null })} />
+                          <WhoSeesTag kiosk label={whoSeesLabel(task, { viewer: currentUser, mode: 'kiosk', shiftsById, roster, todayYmd: workDateIn(zone, venueNow), todayWeekday: weekdayIn(zone, venueNow), nowMinutes: minutesIn(zone, venueNow) })} />
                           <span className="tnum inline-flex items-center gap-1">
                             <Clock className="w-4 h-4" aria-hidden /> {(task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, taskWeekday(task), task) : formatTaskTimes(task))}
                           </span>

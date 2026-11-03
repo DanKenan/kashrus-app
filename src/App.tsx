@@ -1,7 +1,9 @@
+import { venueShifts as clientVenueShifts, resolveTaskShift, shiftPeopleOccurrenceDay } from './lib/shifts';
+import { saveTaskBatch } from './lib/taskForm';
 import { activeFilterChips, clearActiveFilter, type FilterDefaults, type FilterState } from './lib/activeFilters';
 import { ActiveFilters } from './components/ActiveFilters';
 import type { Shift } from './types';
-import { taskWithShiftTimes, tasksVisibleOnShift, shiftTaskAppliesAt } from './lib/shifts';
+import { taskWithOccurrenceTimes as taskWithShiftTimes, tasksVisibleOnOccurrence as tasksVisibleOnShift, taskOccursToday } from './lib/taskOccurrences';
 import { shiftSortProjection, restoreShiftWindows, shiftDisplayWeekday } from './lib/shiftTaskDay';
 import { AgencyLogoSheet } from './components/AgencyLogoSheet';
 import { AgencySettingsSheet } from './components/AgencySettingsSheet';
@@ -761,8 +763,14 @@ export default function App() {
   // Item 6: the active venue's IANA zone (venue -> agency -> America/New_York).
   // "Today" in the app is the venue's local day, never the device zone or UTC.
   const currentVenueTimeZone = venueTimeZone(currentVenue, currentUser);
-  const venueShifts = shiftsByVenue[currentVenue?.id || ''] || [];
-  const shiftsById = useMemo(() => new Map<string, Shift>(Object.values<Shift[]>(shiftsByVenue).flat().map((s) => [s.id, s])), [shiftsByVenue]);
+  const venueShifts = clientVenueShifts(shiftsByVenue[currentVenue?.id || ''] || [], currentVenue?.id || '', currentUser?.agencyId);
+  const shiftsById = useMemo(() => {
+    const records = Object.values<Shift[]>(shiftsByVenue).flat();
+    const all = venues.flatMap((v) => clientVenueShifts(records, v.id, v.agencyId || currentUser?.agencyId));
+    const map = new Map<string, Shift>(all.map((s) => [s.id, s]));
+    tasks.forEach((task) => { const shift = resolveTaskShift(task, records); if (shift && task.shiftId) map.set(task.shiftId, shift); });
+    return map;
+  }, [shiftsByVenue, venues, tasks, currentUser?.agencyId]);
   const [dayKey, setDayKey] = useState(() => Date.now());
   useEffect(() => {
     // Tick even within the same day: shift continuations and overdue badges
@@ -780,23 +788,41 @@ export default function App() {
   // Don (Nov 1): a mashgiach sees only the tasks assigned to them or to everyone.
   // People who can create/edit tasks, and the venue kiosk, still see the whole venue.
   const onlyOwnTasks = !isKiosk && seesOnlyOwnTasks(currentUser, canUserAssignTasks(currentUser));
+  const visibilityContext = useRef({ shiftsByVenue, venues, currentVenue, currentUser });
+  visibilityContext.current = { shiftsByVenue, venues, currentVenue, currentUser };
+  const taskVenueZone = (task: Task) => {
+    const ctx = visibilityContext.current;
+    return venueTimeZone(ctx.venues.find((v) => v.id === task.venueId) || ctx.currentVenue, ctx.currentUser);
+  };
+  const taskVenueToday = (task: Task) => workDateIn(taskVenueZone(task));
+  // A private replacement must survive midnight while its Night occurrence continues.
+  const visibilityOccurrence = (task: Task, records?: Shift[]) => {
+    const zone = taskVenueZone(task);
+    const now = new Date(), today = workDateIn(zone, now);
+    const shift = resolveTaskShift(task, records || Object.values<Shift[]>(visibilityContext.current.shiftsByVenue).flat());
+    return shift ? shiftPeopleOccurrenceDay(shift, today, weekdayIn(zone, now), minutesIn(zone, now)) : today;
+  };
   const taskWeekday = useCallback((task: Task) => {
     const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
     return shift ? shiftDisplayWeekday(shift, todayYmd, todayWeekday, nowMinutes) : todayWeekday;
+  }, [shiftsById, todayYmd, todayWeekday, nowMinutes]);
+  const taskOccurrenceDate = useCallback((task: Task) => {
+    const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
+    return shift ? shiftPeopleOccurrenceDay(shift, todayYmd, todayWeekday, nowMinutes) : todayYmd;
   }, [shiftsById, todayYmd, todayWeekday, nowMinutes]);
   // Today's list (the venue's day; for a mashgiach only their own + everyone's tasks).
   const todayTasks = useMemo(() => {
     const applicable = tasks.map((task) => taskWithShiftTimes(task, shiftsById, taskWeekday(task))).filter((task) => {
       const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
-      if (shift) return shiftTaskAppliesAt(shift, todayYmd, todayWeekday, nowMinutes) &&
-        (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email));
+      if (shift) return taskOccursToday(task, shiftsById, todayYmd, todayWeekday, nowMinutes) &&
+        (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email, taskOccurrenceDate(task)));
       return taskAppliesOn(task, todayYmd, todayWeekday) &&
-        (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email));
+        (!onlyOwnTasks || taskIsForViewer(task, currentUser?.email, taskOccurrenceDate(task)));
     });
     return onlyOwnTasks && currentUser
       ? tasksVisibleOnShift(applicable, venueShifts, currentUser, todayYmd, todayWeekday, nowMinutes)
       : applicable;
-  }, [tasks, shiftsById, venueShifts, todayYmd, todayWeekday, nowMinutes, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser, taskWeekday]);
+  }, [tasks, shiftsById, venueShifts, todayYmd, todayWeekday, nowMinutes, dayKey, currentVenueTimeZone, onlyOwnTasks, currentUser, taskWeekday, taskOccurrenceDate]);
   // The list on screen: today's, or every task when an editor picks "All days".
   const dayTasks = effectiveDayView === 'all' ? tasks : todayTasks;
   const filterDefaults: FilterDefaults = {
@@ -1050,7 +1076,7 @@ export default function App() {
         if (!isCurrent()) return;
         if (activeVenueId) setShiftsByVenue((prev) => ({ ...prev, [activeVenueId]: Array.isArray(data.shifts) ? data.shifts.filter((s: Shift) => s.venueId === activeVenueId) : [] }));
         if (Array.isArray(data.tasks)) {
-          setTasks(data.tasks.filter((t: Task) => canSeeTask(t, currentUser)));
+          setTasks(data.tasks.filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t, Array.isArray(data.shifts) ? data.shifts : []))));
         }
       })
       .catch((err) => console.warn('Could not fetch /api/tasks:', err));
@@ -1174,7 +1200,7 @@ export default function App() {
         }
         if (Array.isArray(msg.payload.tasks))
           setTasks(scopeListToVenue<Task>(msg.payload.tasks, venueScope)
-            .filter((t: Task) => canSeeTask(t, currentUser)));
+            .filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t))));
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
         if (Array.isArray(msg.payload.events)) setEvents(scopeListToVenue(msg.payload.events, eventScope));
         if (Array.isArray(msg.payload.users)) setKnownUsers(msg.payload.users);
@@ -1186,7 +1212,7 @@ export default function App() {
         // Shown here only if this person may see it AND it belongs to the venue
         // on screen; otherwise it leaves the list (e.g. moved to another venue)
         // and no toast names it.
-        const shownHere = canSeeTask(updated, currentUser) && inVenueScope(updated, venueScope)
+        const shownHere = canSeeTask(updated, currentUser, taskVenueToday(updated), visibilityOccurrence(updated)) && inVenueScope(updated, venueScope)
           && !(updated.venueId && currentVenue?.id && updated.venueId !== currentVenue.id);
         setTasks((prev) =>
           shownHere
@@ -1198,7 +1224,7 @@ export default function App() {
         }
       } else if (msg.type === 'TASK_CREATED' && msg.payload) {
         const created = msg.payload as Task;
-        if (!canSeeTask(created, currentUser) || !inVenueScope(created, venueScope)) return;
+        if (!canSeeTask(created, currentUser, taskVenueToday(created), visibilityOccurrence(created)) || !inVenueScope(created, venueScope)) return;
         setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
         if (msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
           showToast(`New assignment added: "${created.title}"`);
@@ -1208,7 +1234,7 @@ export default function App() {
       } else if (msg.type === 'DAILY_RESET' && msg.payload) {
         if (Array.isArray(msg.payload.tasks))
           setTasks(scopeListToVenue<Task>(msg.payload.tasks, venueScope)
-            .filter((t: Task) => canSeeTask(t, currentUser)));
+            .filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t))));
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
         showToast('Daily board has refreshed for the day! Previous records archived.');
       } else if (msg.type === 'HISTORY_PRUNED' && msg.payload) {
@@ -1639,6 +1665,16 @@ export default function App() {
     return true;
   };
 
+  const handleSaveManyTasks = async (drafts: Partial<Task>[]): Promise<boolean> => {
+    if (!currentUser || !canUserAssignTasks(currentUser)) return false;
+    const result = await saveTaskBatch(drafts, taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || '', currentUser.email);
+    if (!result.ok) { showToast(result.error || 'Could not create the assignments.'); return false; }
+    const created = result.data;
+    setTasks((prev) => [...prev, ...created.filter((task) => !prev.some((t) => t.id === task.id))]);
+    showToast(`Created ${created.length} tasks`);
+    return true;
+  };
+
   // Delete Task
   const handleDeleteTask = async (taskId: string) => {
     if (!currentUser || !canUserAssignTasks(currentUser)) {
@@ -1919,7 +1955,7 @@ export default function App() {
   const completedTasks = todayTasks.filter((t) => t.isCompleted).length;
   const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
-  const myTasks = todayTasks.filter((t) => isMyTask(t, currentUser));
+  const myTasks = todayTasks.filter((t) => isMyTask(t, currentUser, taskOccurrenceDate(t)));
   const myTotal = myTasks.length;
   const myCompleted = myTasks.filter((t) => t.isCompleted).length;
 
@@ -1967,7 +2003,7 @@ export default function App() {
 
       // Tab filter
       if (activeTabFilter === 'mine') {
-        if (!isMyTask(task, currentUser)) return false;
+        if (!isMyTask(task, currentUser, taskOccurrenceDate(task))) return false;
       } else if (activeTabFilter === 'pending') {
         if (task.isCompleted) return false;
       } else if (activeTabFilter === 'completed') {
@@ -1976,7 +2012,7 @@ export default function App() {
 
       return true;
     });
-  }, [dayTasks, shiftsById, effectiveDayView, taskWeekday, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone]);
+  }, [dayTasks, shiftsById, effectiveDayView, taskWeekday, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone, taskOccurrenceDate]);
 
   // #185 sorts two independent task times by their earliest time. A shift is
   // one window: use its start for ordering, then restore its full display window.
@@ -2919,6 +2955,7 @@ export default function App() {
 
         {isKiosk ? (
           <KioskTaskPanel
+            roster={knownUsers}
             shiftsById={shiftsById}
             tasks={sortedTasks}
             currentUser={currentUser}
@@ -3039,9 +3076,11 @@ export default function App() {
           setTaskEditorVenueId(null);
         }}
         onSave={handleSaveTask}
+        onSaveMany={handleSaveManyTasks}
+        agencyId={currentUser?.agencyId}
         taskToEdit={taskToEdit}
         venueId={taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || ''}
-        onShiftCreated={(shift) => setShiftsByVenue((prev) => ({ ...prev, [shift.venueId]: [...(prev[shift.venueId] || []).filter((s) => s.id !== shift.id), shift] }))}
+        onShiftCreated={(shift, deleted) => setShiftsByVenue((prev) => ({ ...prev, [shift.venueId]: [...(prev[shift.venueId] || []).filter((s) => s.id !== shift.id), deleted ? { id: shift.id, venueId: shift.venueId, agencyId: shift.agencyId, deleted: true } as unknown as Shift : shift] }))}
         knownWorkers={knownUsers}
         shifts={shiftsByVenue[taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || ''] || []}
         currentUserEmail={currentUser?.email}
@@ -3114,10 +3153,10 @@ export default function App() {
       />
 
       <TeamModal
-        shifts={venueShifts}
+        shifts={shiftsByVenue[currentVenue?.id || ''] || []}
         timeZone={currentVenueTimeZone}
         onShiftChange={(shift, deleted) => {
-          setShiftsByVenue((prev) => ({ ...prev, [shift.venueId]: deleted ? (prev[shift.venueId] || []).filter((s) => s.id !== shift.id) : [...(prev[shift.venueId] || []).filter((s) => s.id !== shift.id), shift] }));
+          setShiftsByVenue((prev) => ({ ...prev, [shift.venueId]: [...(prev[shift.venueId] || []).filter((s) => s.id !== shift.id), deleted ? { id: shift.id, venueId: shift.venueId, agencyId: shift.agencyId, deleted: true } as unknown as Shift : shift] }));
           if (deleted) setTasks((prev) => prev.map((t) => {
             if (t.shiftId !== shift.id) return t;
             const { shiftTime: _ownTime, ...detached } = taskWithShiftTimes(t, new Map([[shift.id, shift]]));

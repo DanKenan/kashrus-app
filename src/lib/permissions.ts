@@ -1,3 +1,5 @@
+import { taskPotentialAssignees, taskAssigneesOn, type TaskPeople } from './taskAssignees';
+import { workDateIn, DEFAULT_TIME_ZONE } from './workday';
 import { User, UserRole } from '../types';
 
 /**
@@ -81,8 +83,10 @@ export function canUserAssignTasks(user: User | null | undefined): boolean {
  */
 // Server-side mirror: canSeeTaskServer (server.ts). RULE T: venue first.
 export function canSeeTask(
-  task: { isPrivate?: boolean; assignedTo?: string[]; venueId?: string },
-  user: User | null | undefined
+  task: TaskPeople & { isPrivate?: boolean; venueId?: string },
+  user: User | null | undefined,
+  venueToday = workDateIn(DEFAULT_TIME_ZONE),
+  occurrenceDay = venueToday
 ): boolean {
   if (!user) return false;
   if (user.role === 'admin') return true;
@@ -93,8 +97,9 @@ export function canSeeTask(
       (user as any).venueId !== task.venueId) return false;
   if (!task.isPrivate) return true;
   if (user.role === 'coordinator') return true;
-  const email = user.email.toLowerCase();
-  return (task.assignedTo || []).some((a) => a.toLowerCase() === email);
+  const email = user.email.trim().toLowerCase();
+  return taskPotentialAssignees(task, venueToday).includes(email)
+    || (occurrenceDay < venueToday && taskAssigneesOn(task, occurrenceDay).includes(email));
 }
 
 export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, { canFillTasks: boolean; canAssignTasks: boolean }> = {
