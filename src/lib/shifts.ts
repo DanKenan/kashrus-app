@@ -1,14 +1,49 @@
+import { taskAssigneesOn, taskOwnsPeople, type TaskPeople } from './taskAssignees.ts';
 import type { Shift, ShiftDay } from '../types.ts';
 import { isTaskOverdue, targetMinutesOf } from './overdue.ts';
-import { addDays, isWorkDate } from './workday.ts';
+import { addDays, isWorkDate, DEFAULT_TIME_ZONE, workDateIn, minutesIn } from './workday.ts';
 
-type ShiftTask = {
+type ShiftTask = TaskPeople & {
+  createdAt?: string;
   shiftTime?: boolean;
   shiftId?: string | null; venueId?: string; assignedTo?: unknown;
   scheduleType?: 'recurring' | 'specific_dates'; specificDates?: string[];
   daysOfWeek?: number[]; targetTime?: string; targetTime2?: string;
   targetTimeMinutes?: number; targetTime2Minutes?: number;
 };
+
+/** Built-ins are code defaults. Only a venue edit or tombstone is persisted. */
+export type ShiftRecord = Shift | { id: string; venueId: string; agencyId?: string; deleted: true };
+export function builtinShiftVenue(id: unknown): string | undefined {
+  if (typeof id !== 'string' || !/^builtin-(morning|afternoon|night):/.test(id)) return undefined;
+  try { return decodeURIComponent(id.slice(id.indexOf(':') + 1)) || undefined; } catch { return undefined; }
+}
+export function isBuiltinShiftId(id: unknown): boolean {
+  return typeof id === 'string' && (/^builtin-(morning|afternoon|night)$/.test(id) || builtinShiftVenue(id) !== undefined);
+}
+export function venueShifts(records: readonly ShiftRecord[], venueId: string, agencyId = 'agency-hkc'): Shift[] {
+  const own = records.filter((s) => s.venueId === venueId && (s.agencyId || 'agency-hkc') === agencyId);
+  const live = own.filter((s): s is Shift => !('deleted' in s && s.deleted));
+  const defaults = [['morning', 'Morning', 360, 840], ['afternoon', 'Afternoon', 840, 1320], ['night', 'Night', 1320, 360]] as const;
+  return [...live, ...defaults.filter(([key, name]) => !own.some((s) => s.id.split(':')[0] === `builtin-${key}`)
+    && !live.some((s) => s.name.trim().toLowerCase() === name.toLowerCase())).map(([key, name, startMinutes, endMinutes]) => ({
+      // The venue travels in the id so installed clients can send a bodyless DELETE.
+      id: `builtin-${key}:${encodeURIComponent(venueId)}`, venueId, agencyId, name, area: '', startMinutes, endMinutes,
+      days: Array.from({ length: 7 }, () => ({ on: true })), userIds: [], userId: null, overrides: [], createdAt: '',
+    }))];
+}
+/** The single scoped lookup for stored and built-in task shifts. Bare ids remain accepted with a venue. */
+export function resolveTaskShift(task: { shiftId?: unknown; venueId?: string; agencyId?: string }, records: readonly ShiftRecord[]): Shift | undefined {
+  if (typeof task.shiftId !== 'string' || !task.venueId) return undefined;
+  const encodedVenue = builtinShiftVenue(task.shiftId);
+  if (encodedVenue && encodedVenue !== task.venueId) return undefined;
+  const shiftId = task.shiftId;
+  const matches = (id: string) => id === shiftId || (isBuiltinShiftId(shiftId) && isBuiltinShiftId(id) && id.split(':')[0] === shiftId.split(':')[0]);
+  const stored = records.find((s) => matches(s.id) && s.venueId === task.venueId
+    && (s.agencyId || 'agency-hkc') === (task.agencyId || 'agency-hkc'));
+  if (stored) return 'deleted' in stored && stored.deleted ? undefined : stored as Shift;
+  return venueShifts(records, task.venueId, task.agencyId).find((s) => matches(s.id));
+}
 
 function validHours(shift: { startMinutes?: number; endMinutes?: number } | null | undefined): boolean {
   return !!shift && [shift.startMinutes, shift.endMinutes].every((m) => Number.isInteger(m) && m >= 0 && m < 1440)
@@ -143,7 +178,33 @@ function previousOvernightOverdueDay(shift: Shift, ymd: string, weekday: number,
     && shiftRunsOn(shift, yesterday, (weekday + 6) % 7) ? yesterday : null;
 }
 
-export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task: ShiftTask): string | null {
+/** Keep start-day assignments through an overnight window AND its overdue tail. */
+export function shiftPeopleOccurrenceDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number): string {
+  return previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)
+    || shiftOccurrenceDay(shift, ymd, weekday, nowMinutes) || ymd;
+}
+
+/** A task cannot inherit a deadline that passed before it existed. No I/O.
+ * deadlineMinutes is relative to the occurrence START date (may exceed 1440).
+ * Missing/invalid legacy creation dates preserve the existing overdue rule.
+ */
+export function shiftDeadlineExisted(task: { createdAt?: string } | undefined, occurrenceDay: string, deadlineMinutes: number, timeZone = DEFAULT_TIME_ZONE): boolean {
+  const created = Date.parse(task?.createdAt || '');
+  if (!Number.isFinite(created) || !Number.isFinite(deadlineMinutes)) return true;
+  const wallDeadline = Date.parse(`${occurrenceDay}T00:00:00Z`) + deadlineMinutes * 60_000;
+  const localClock = (at: number) => Date.parse(`${workDateIn(timeZone, at)}T00:00:00Z`) + minutesIn(timeZone, at) * 60_000;
+  // Nearby offsets cover either side of a DST transition. For repeated clock
+  // times use the first deadline; a skipped clock time rolls forward.
+  const candidates = [...new Set([-1, 0, 1].map((day) => {
+    const sample = wallDeadline + day * 86_400_000;
+    return wallDeadline - (localClock(sample) - sample);
+  }))];
+  const exact = candidates.filter((at) => localClock(at) === wallDeadline);
+  const deadline = exact.length ? Math.min(...exact) : Math.max(...candidates);
+  return created <= deadline;
+}
+
+export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task: ShiftTask, timeZone = DEFAULT_TIME_ZONE): string | null {
   if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return null;
   const occurrence = previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)
     || shiftOccurrenceDay(shift, ymd, weekday, nowMinutes);
@@ -151,16 +212,20 @@ export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: numbe
   const startWeekday = weekdayOf(occurrence);
   const deadline = shiftTimeOffset(shift, targetMinutesOf(task), startWeekday);
   const elapsed = nowMinutes + (occurrence !== ymd ? 1440 : 0);
-  return isTaskOverdue({ ...task, targetTimeMinutes: deadline }, elapsed) ? occurrence : null;
+  return isTaskOverdue({ ...task, targetTimeMinutes: deadline }, elapsed)
+    && shiftDeadlineExisted(task, occurrence, deadline, timeZone) ? occurrence : null;
 }
 
-export function shiftTaskOverdueAt(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task?: ShiftTask): boolean {
-  if (task?.shiftTime) return shiftOwnTimeOverdueDay(shift, ymd, weekday, nowMinutes, task) !== null;
+export function shiftTaskOverdueAt(shift: Shift, ymd: string, weekday: number, nowMinutes: number, task?: ShiftTask, timeZone = DEFAULT_TIME_ZONE): boolean {
+  if (task?.shiftTime) return shiftOwnTimeOverdueDay(shift, ymd, weekday, nowMinutes, task, timeZone) !== null;
   if (!validHours(shift) || !Number.isFinite(nowMinutes) || nowMinutes < 0 || nowMinutes >= 1440) return false;
   const previous = shiftHoursOn(shift, (weekday + 6) % 7);
   const hours = shiftHoursOn(shift, weekday);
-  if (nowMinutes > previous.endMinutes && previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)) return true;
-  return hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, ymd, weekday) && nowMinutes > hours.endMinutes;
+  if (nowMinutes > previous.endMinutes && previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)) {
+    return shiftDeadlineExisted(task, addDays(ymd, -1), previous.endMinutes + 1440, timeZone);
+  }
+  return hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, ymd, weekday) && nowMinutes > hours.endMinutes
+    && shiftDeadlineExisted(task, ymd, hours.endMinutes, timeZone);
 }
 
 export function activeShiftsForUserAt(shifts: Shift[], userId: string, ymd: string, weekday: number, nowMinutes: number): Shift[] {
@@ -238,13 +303,17 @@ export function tasksVisibleOnShift<T extends ShiftTask>(tasks: T[], shifts: Shi
     : activeShiftsForUserAt(safeShifts, user.id, ymd, weekday, nowMinutes);
   const known = new Map(safeShifts.map((s) => [s.id, s]));
   return tasks.filter((task) => {
-    const raw = Array.isArray(task.assignedTo) ? task.assignedTo : typeof task.assignedTo === 'string' ? [task.assignedTo] : [];
-    const assigned = raw.filter((a): a is string => typeof a === 'string').map((a) => a.trim().toLowerCase()).filter(Boolean);
+    const shift = task.shiftId ? known.get(task.shiftId) : undefined;
+    const occurrence = shift && (!task.venueId || shift.venueId === task.venueId)
+      ? shiftOccurrenceDay(shift, ymd, weekday, nowMinutes ?? 0) : ymd;
+    const assigned = taskAssigneesOn(task, occurrence || ymd);
     const personal = assigned.includes(typeof user.email === 'string' ? user.email.trim().toLowerCase() : '');
     const team = assigned.length === 0 || assigned.includes('all');
+    if (taskOwnsPeople(task) && (occurrence === null || (!personal && !team))) return false;
+    if (taskOwnsPeople(task) && personal) return true;
+    if (taskOwnsPeople(task) && team && timeMinutes(task) !== null && !mine.length) return false;
     if (!mine.length) return personal || team;
-    const shift = task.shiftId ? known.get(task.shiftId) : undefined;
-    if (shift && (!task.venueId || shift.venueId === task.venueId)) {
+    if (!taskOwnsPeople(task) && shift && (!task.venueId || shift.venueId === task.venueId)) {
       const occurrence = shiftOccurrenceDay(shift, ymd, weekday, nowMinutes ?? 0);
       return occurrence !== null && shiftPeopleOn(shift, occurrence).includes(user.id);
     }

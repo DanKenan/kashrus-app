@@ -222,6 +222,8 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-107-shift-overnight-time.mjs')).default, // SHIFTTIME
     (await import('./test-108-shift-noop.mjs')).default, // SHIFTTIME
     (await import('./test-109-boot-upgrade.mjs')).default, // BOOTFIX
+    (await import('./test-110-taskform-writes.mjs')).default, // TASKFORM-A
+    (await import('./test-111-night-created-at.mjs')).default, // NIGHTFIX
     // MERGE-FIX: merges into the operator row and re-signs the suite's admin session; keep it LAST, after its own fresh state.
     FRESH_STATE,
     (await import('./test-85-merge-operator.mjs')).default,

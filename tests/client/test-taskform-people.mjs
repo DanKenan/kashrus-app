@@ -1,0 +1,43 @@
+import assert from 'node:assert/strict';
+import { taskAssigneesOn, taskOwnsPeople, taskPotentialAssignees } from '../../src/lib/taskAssignees.ts';
+import { venueShifts, resolveTaskShift, shiftOccurrenceDay, tasksVisibleOnShift } from '../../src/lib/shifts.ts';
+import { isMyTask } from '../../src/lib/myTasks.ts';
+import { taskIsForViewer } from '../../src/lib/taskDay.ts';
+const task = { assignedTo: ['BASE@test.local'], dayAssignees: { '5': ['friday@test.local'] }, assigneeSwaps: [{ date: '2026-11-06', assignedTo: ['swap@test.local'] }] };
+assert.deepEqual(taskAssigneesOn(task, '2026-11-05'), ['base@test.local']);
+assert.deepEqual(taskAssigneesOn(task, '2026-11-06'), ['swap@test.local']);
+assert.deepEqual(taskAssigneesOn(task, '2026-11-13'), ['friday@test.local']);
+assert.deepEqual(taskAssigneesOn({ ...task, dayAssignees: { '5': [] }, assigneeSwaps: [] }, '2026-11-06'), []);
+assert.equal(taskOwnsPeople({ assignedTo: ['all'] }), false);
+assert.equal(isMyTask(task, { email: 'swap@test.local', role: 'worker' }, '2026-11-06'), true);
+assert.equal(taskIsForViewer(task, 'swap@test.local', '2026-11-13'), false);
+const night = venueShifts([], 'v').find((s) => s.id.startsWith('builtin-night:'));
+const start = shiftOccurrenceDay(night, '2026-11-07', 6, 60);
+assert.equal(start, '2026-11-06');
+assert.deepEqual(taskAssigneesOn(task, start), ['swap@test.local']);
+const attached = { ...task, venueId: 'v', shiftId: night.id };
+assert.deepEqual(tasksVisibleOnShift([attached], [night], { id: 'someone', email: 'swap@test.local' }, '2026-11-07', 6, 60), [attached]);
+assert.deepEqual(tasksVisibleOnShift([attached], [night], { id: 'someone', email: 'friday@test.local' }, '2026-11-07', 6, 60), []);
+assert.equal(venueShifts([{ id: night.id, venueId: 'v', deleted: true }], 'v').length, 2);
+assert.equal(venueShifts([{ ...night, id: 'custom', name: ' night ' }], 'v').filter((s) => s.name.trim().toLowerCase() === 'night').length, 1);
+console.log('PASS taskform people: fallbacks, swaps, shared client filters, Night start day, built-ins');
+
+// A task-owned team task still obeys the viewer's timed team-task window.
+const dayShift = { ...night, id: 'day', startMinutes: 480, endMinutes: 960, userIds: ['viewer'], userId: 'viewer' };
+const team = { venueId: 'v', assignmentMode: 'task', assignedTo: ['all'], targetTimeMinutes: 1200 };
+const viewer = { id: 'viewer', email: 'viewer@test.local' };
+assert.deepEqual(tasksVisibleOnShift([team], [dayShift], viewer, '2026-11-06', 5, 600), []);
+assert.deepEqual(tasksVisibleOnShift([{ ...team, targetTimeMinutes: 600 }], [dayShift], viewer, '2026-11-06', 5, 600).length, 1);
+assert.deepEqual(tasksVisibleOnShift([{ ...team, assignedTo: [viewer.email] }], [dayShift], viewer, '2026-11-06', 5, 600).length, 1);
+assert.deepEqual(tasksVisibleOnShift([team], [dayShift], { ...viewer, id: 'off-roster' }, '2026-11-06', 5, 600), []);
+
+const allDays = Object.fromEntries(Array.from({ length: 7 }, (_, w) => [String(w), ['daily@test.local']]));
+const covered = { assignedTo: ['base@test.local'], dayAssignees: allDays, assigneeSwaps: [{ date: '2026-11-08', assignedTo: ['swap@test.local'] }] };
+assert.deepEqual(taskPotentialAssignees(covered, '2026-11-07').sort(), ['daily@test.local', 'swap@test.local']);
+const { '0': _day, ...sixDays } = allDays;
+assert.ok(taskPotentialAssignees({ ...covered, dayAssignees: sixDays }, '2026-11-07').includes('base@test.local'));
+assert.deepEqual(taskPotentialAssignees({ assignedTo: ['base@test.local'], dayAssignees: Object.fromEntries(Array.from({ length: 7 }, (_, w) => [String(w), []])) }, '2026-11-07'), []);
+const customNight = { ...night, id: 'custom-night', name: 'Night' };
+assert.equal(resolveTaskShift({ shiftId: 'builtin-night', venueId: 'v' }, [customNight]), undefined);
+assert.equal(resolveTaskShift({ shiftId: night.id, venueId: 'v' }, [customNight]), undefined);
+assert.equal(resolveTaskShift({ shiftId: night.id, venueId: 'v' }, [{ id: night.id, venueId: 'v', deleted: true }]), undefined);

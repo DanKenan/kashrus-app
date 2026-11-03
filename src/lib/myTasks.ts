@@ -1,3 +1,4 @@
+import { taskAssigneesOn, type TaskPeople } from './taskAssignees';
 import type { Task, User } from '../types';
 
 /**
@@ -8,12 +9,13 @@ import type { Task, User } from '../types';
  * the admin still sees and controls every task in the venue's list.
  */
 export function isMyTask(
-  task: Pick<Task, 'assignedTo'>,
-  user: Pick<User, 'email' | 'role'> | null | undefined
+  task: TaskPeople,
+  user: Pick<User, 'email' | 'role'> | null | undefined,
+  occurrenceDay?: string
 ): boolean {
   // TODAYSORT: emails compare case-insensitively, as on the server (canSeeTaskServer).
   // (Older rows may hold one email as a plain string.)
-  const raw: unknown = task.assignedTo;
+  const raw: unknown = occurrenceDay ? taskAssigneesOn(task, occurrenceDay) : task.assignedTo;
   const list = (Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []).filter((a): a is string => typeof a === 'string');
   const me = (user?.email || '').trim().toLowerCase();
   if (me && list.some((a) => a.trim().toLowerCase() === me)) return true;

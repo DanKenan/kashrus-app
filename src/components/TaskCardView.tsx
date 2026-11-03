@@ -97,7 +97,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   const isOverdue = (task: Task) => {
     const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
     if (shift) return !task.isCompleted && todayYmd !== null && todayWeekday !== null && nowMinutes !== null &&
-      shiftTaskOverdueAt(shift, todayYmd, todayWeekday, nowMinutes, task);
+      shiftTaskOverdueAt(shift, todayYmd, todayWeekday, nowMinutes, task, timeZone);
     return isTaskOverdue(task, nowMinutes) && dueToday(task);
   };
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});

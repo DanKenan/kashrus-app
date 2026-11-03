@@ -95,8 +95,10 @@ export default {
     assert.equal((await api('admin', 'DELETE', `/api/shifts/${varied.json.id}`)).status, 200);
     const loaded = await api('mash', 'GET', `/api/tasks?venueId=${venueId}`);
     assert.equal(loaded.status, 200);
-    assert.deepEqual(loaded.json.shifts.map((s) => s.id), [id]);
-    assert.deepEqual(loaded.json.shifts[0].overrides, [{ date: today, userIds: [people.assign.id], userNames: [people.assign.name], userId: people.assign.id, userName: people.assign.name }]);
+    const savedShifts = loaded.json.shifts.filter((s) => !s.id.startsWith('builtin-'));
+    assert.deepEqual(savedShifts.map((s) => s.id), [id]);
+    assert.deepEqual(savedShifts[0].overrides, [{ date: today, userIds: [people.assign.id], userNames: [people.assign.name], userId: people.assign.id, userName: people.assign.name }]);
+    assert.deepEqual(loaded.json.shifts.filter((s) => s.id.startsWith('builtin-')).map((s) => s.id).sort(), ['builtin-afternoon', 'builtin-morning', 'builtin-night'].map((key) => `${key}:${encodeURIComponent(venueId)}`));
     assert.equal(JSON.stringify(loaded.json.shifts).includes('@'), false);
     assert.equal((await api('foreign', 'GET', `/api/tasks?venueId=${venueId}`)).status, 403);
     for (const who of ['mash', 'foreign', 'elsewhere']) {
@@ -242,7 +244,7 @@ export default {
       assert.equal(updates[0].payload.shifts[0].userName, people.mash.name);
       assert.deepEqual(updates[0].payload.shifts[0].overrides, [{ date: today, userIds: [people.assign.id], userNames: [people.assign.name], userId: people.assign.id, userName: people.assign.name }]);
       assert.equal(updates[1].payload.shifts[0].area, 'Live edit');
-      assert.deepEqual(updates[2].payload.shifts, []);
+      assert.deepEqual(updates[2].payload.shifts.filter((s) => !s.id.startsWith('builtin')), []);
       assert.equal(JSON.stringify(updates).includes('@'), false);
       for (const messages of [elsewhere, foreign]) assert.equal(messages.some((m) => m.type === 'SHIFTS_UPDATED'), false);
     } finally { for (const ws of connections) ws.close(); }
