@@ -420,3 +420,74 @@
   height: 2px;
   background: var(--line-control);
 }
+
+/* Task form: shared app palette, type floor, and finger-sized hit areas. */
+:root {
+  --task-form-nav-height: 50px;
+  --task-form-field-height: 46px;
+  --task-form-primary-height: 52px;
+  --task-form-gold-start: var(--gold);
+  --task-form-gold-end: var(--gold-deep);
+}
+.task-form-overlay { padding: 24px; }
+.task-form-nav {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  align-items: center;
+  min-height: var(--task-form-nav-height);
+  padding: 4px 12px;
+}
+.task-form-nav-title { font-size: 16px; font-weight: 640; line-height: 20px; color: var(--ink); }
+.task-form-venue { font-size: 12px; line-height: 16px; color: var(--ink-soft); }
+.task-form-close { min-width: 44px; min-height: 44px; display: grid; place-items: center; }
+.task-form-close-face { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 12px; background: var(--surface); color: var(--ink-soft); }
+.task-form-body { padding: 16px 16px 24px; }
+.task-form-progress { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.task-form-step { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--ink-soft); }
+.task-form-step-name { font-size: 14px; line-height: 20px; font-weight: 600; white-space: nowrap; }
+.task-form-step-number { width: 24px; height: 24px; flex-shrink: 0; display: grid; place-items: center; border-radius: 50%; border: 1.5px solid var(--line-control); background: var(--surface); font-size: 12px; font-weight: 600; }
+.task-form-step.is-current .task-form-step-number,
+.task-form-heading-number,
+.task-form-count,
+.task-form-primary { background: linear-gradient(to bottom, var(--task-form-gold-start), var(--task-form-gold-end)); color: var(--paper); }
+.task-form-step.is-current .task-form-step-number { border-color: transparent; }
+.task-form-step.is-current .task-form-step-name { color: var(--ink); font-weight: 690; }
+.task-form-step.is-done .task-form-step-number { border-color: transparent; background: var(--gold-wash); color: var(--gold-deep); }
+.task-form-connector { flex: 1; min-width: 8px; height: 2px; background: var(--line); }
+.task-form-connector.is-done { background: var(--gold-wash); }
+.task-form-summary { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); text-align: left; }
+.task-form-summary-number,
+.task-form-mini-number { display: inline-grid; place-items: center; flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; background: var(--gold-wash); color: var(--gold-deep); font-size: 12px; font-weight: 600; }
+.task-form-summary-name { color: var(--ink-soft); font-size: 12px; }
+.task-form-summary-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 14px; font-weight: 620; }
+.task-form-current-card { padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.task-form-card-header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+.task-form-heading-number { width: 32px; height: 32px; flex-shrink: 0; border-radius: 50%; display: grid; place-items: center; font-size: 16px; font-weight: 600; }
+.task-form-card-header h3 { color: var(--ink); font-size: 20px; font-weight: 690; line-height: 28px; }
+.task-form-card-header p { color: var(--ink-soft); font-size: 12px; line-height: 16px; }
+.task-form-count { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.task-form-what label { color: var(--ink-soft); font-size: 12px; font-weight: 650; }
+.task-form-optional { float: right; font-weight: 400; }
+.task-form-what input:not([type='checkbox']):not([type='radio']),
+.task-form-what select,
+.task-form-what textarea { min-height: var(--task-form-field-height); border: 1px solid var(--line-control); border-radius: 12px; background: var(--paper); padding: 8px 12px; color: var(--ink); font-size: 16px; font-weight: 400; }
+.task-form-what textarea { height: var(--task-form-field-height); resize: vertical; }
+.task-form-what input:focus,
+.task-form-what select:focus,
+.task-form-what textarea:focus { outline: 1.5px solid var(--gold); outline-offset: -1px; box-shadow: 0 0 0 2px var(--gold-wash); }
+.task-form-extra { display: flex; align-items: flex-start; gap: 8px; min-height: 54px; padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+.task-form-extra > .task-form-mini-number { margin-top: 12px; }
+.task-form-what .task-form-extra-name { border-color: transparent; background: transparent; font-weight: 620; }
+.task-form-extra-note summary { color: var(--ink-soft); font-size: 12px; font-weight: 400; list-style: none; }
+.task-form-extra-note summary::-webkit-details-marker { display: none; }
+.task-form-remove { min-height: 44px; min-width: 44px; display: grid; place-items: center; color: var(--ink-soft); }
+.task-form-remove > span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--surface); }
+.task-form-add { display: flex; align-items: center; gap: 8px; min-height: var(--task-form-field-height); width: 100%; padding: 8px 12px; border: 1.5px dashed var(--gold); border-radius: 12px; background: var(--gold-wash); color: var(--gold-ink); text-align: left; font-size: 14px; font-weight: 660; }
+.task-form-add-hint { margin-left: auto; max-width: 40%; font-size: 12px; font-weight: 400; color: var(--ink-soft); }
+.task-form-footer { padding: 16px; background: linear-gradient(to bottom, transparent, var(--paper) 16px); }
+.task-form-primary { width: 100%; min-height: var(--task-form-primary-height); border-radius: 12px; font-size: 16px; font-weight: 660; }
+.task-form-saved-notice { position: fixed; z-index: 60; top: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: calc(100% - 32px); padding: 4px 4px 4px 16px; border: 1px solid var(--ok); border-radius: 999px; background: var(--ok-bg); color: var(--ok); font-size: 16px; }
+@media (max-width: 639px) {
+  .task-form-overlay { padding: 0; background: var(--paper); }
+  .task-form-shell { height: 100dvh; max-height: 100dvh; max-width: none; border: 0; border-radius: 0; box-shadow: none; }
+}

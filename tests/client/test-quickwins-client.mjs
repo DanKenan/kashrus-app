@@ -19,7 +19,7 @@ const eq = (label, a, b) => ok(label, JSON.stringify(a) === JSON.stringify(b), `
 const read = (p) => fs.readFileSync(new URL(`../../${p}`, import.meta.url), 'utf8');
 const noop = () => {};
 const saveForm = async (view) => {
-  for (let i = 0; i < 2 && view.find((e) => e.props['aria-current'] === 'step')[0]?.props.children[2] !== 'Who'; i++) await view.submit();
+  for (let i = 0; i < 2 && view.find((e) => e.props['data-task-form-current-step'])[0]?.props['data-task-form-current-step'] !== 'Who'; i++) await view.submit();
   if (view.find((e) => e.props.id === 'save-task-submit-btn')[0].props.disabled) await view.click((e) => e.props['aria-label'] === 'Everyone at the venue');
   await view.submit();
 };

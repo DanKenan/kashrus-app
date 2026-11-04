@@ -44,7 +44,7 @@ try {
   await view.click('A time');
   assert.match(view.text(), /During the Afternoon shift/);
   await view.click('Back');
-  assert.equal(view.find((e) => e.props['aria-current'] === 'step')[0].props.children[2], 'What');
+  assert.equal(view.find((e) => e.props['data-task-form-current-step'])[0].props['data-task-form-current-step'], 'What');
 
   let saved;
   const daily = await make({ onSave: (task) => { saved = task; return false; } });

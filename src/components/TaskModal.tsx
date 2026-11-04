@@ -1,3 +1,4 @@
+import { TaskFormProgress } from './TaskFormProgress';
 import { ShiftHoursBar } from './ShiftHoursBar';
 import { detectTimeShift, detectTimeShiftDay, differingDays, nextWeekday, peopleFields } from '../lib/taskForm';
 import { nextFullHour } from '../lib/nextFullHour';
@@ -6,7 +7,7 @@ import type { Shift } from '../types';
 import { shiftWeekdays, shiftIsUpcoming, venueShifts, shiftUserIds, formatShiftHours } from '../lib/shifts';
 import { ANY_TIME_LABEL, isAnyTimeTask, isAnyTimeText } from '../lib/anyTime';
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Pencil, Clock, Plus, Trash2, CheckCircle2, ListFilter } from 'lucide-react';
+import { X, Pencil, Clock, Plus, CirclePlus, List, Trash2, CheckCircle2, ListFilter } from 'lucide-react';
 import { Task, TaskInputType } from '../types';
 import { captureEditBaseline, newActionId } from '../lib/api';
 import { DAYS_MAP } from '../lib/utils';
@@ -130,6 +131,7 @@ function TimePickerRow({
 interface TaskModalProps {
   shifts?: Shift[];
   venueId?: string;
+  venueName?: string;
   onShiftCreated?: (shift: Shift, deleted?: boolean) => void;
   agencyId?: string;
   onSaveMany?: (tasks: Partial<Task>[], operationId?: string) => Promise<boolean>;
@@ -174,6 +176,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   knownWorkers,
   shifts = [],
   venueId = '',
+  venueName = '',
   onShiftCreated,
   onSaveMany,
   agencyId = 'agency-hkc',
@@ -193,6 +196,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [saveError, setSaveError] = useState('');
   const [repeat, setRepeat] = useState('Every day');
   const [editingShift, setEditingShift] = useState<Shift | undefined>();
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [selectedCategories, setSelectedCategories] = useState<string[]>([PRESET_CATEGORIES[0]]);
@@ -308,6 +312,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   useEffect(() => {
     submitGuard.current = false; batchAttempt.current = null;
+    if (isOpen) setSavedNotice(null);
     setStep(0); setExtras([]); setPeopleTouched(false); setDayPeople(taskToEdit?.dayAssignees || {});
     setSwaps(taskToEdit?.assigneeSwaps || []); setPeopleDay(null); setJustOnce(false);
     setShowPeople(false); setPeopleSearch(''); setSaving(false); setSaveError(''); setRemovedShifts([]);
@@ -452,7 +457,13 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     else { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); chooseShift(shift); }
     onShiftCreated?.(shift, deleted); setCreatingShift(false);
   };
-  if (!isOpen) return null;
+  const count = extras.length + 1;
+  const stepName = ['What', 'When', 'Who'][step];
+  const whatSummary = `${count > 1 ? `${count} tasks · ` : ''}${[title, ...extras.map((t) => t.name)].filter(Boolean).join(', ')}`;
+  const whenSummary = `${shiftMode && chosenShift ? `${chosenShift.name} · ${formatShiftHours(chosenShift)}` : isAny ? ANY_TIME_LABEL : customTimeText ?? formatPickerTime(time1)} · ${repeat.toLowerCase()}`;
+  const notice = savedNotice && <div role="status" className="task-form-saved-notice"><span aria-hidden="true">✓</span><span>{savedNotice}</span><button type="button" aria-label="Dismiss saved notification" onClick={() => setSavedNotice(null)} className="min-h-11 min-w-11 rounded-full pressable"><X className="w-4 h-4 mx-auto" /></button></div>;
+  if (!isOpen) return notice;
+
 
   const toggleDay = (dayIndex: number) => {
     if (selectedDays.includes(dayIndex)) {
@@ -592,45 +603,41 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       submitGuard.current = false;
       return;
     }
+    setSavedNotice(extras.length ? `${extras.length + 1} tasks saved` : 'Task saved');
     onClose();
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-scrim backdrop-blur-sm overflow-y-auto">
-      <div style={creatingShift ? { display: 'none' } : undefined} role="dialog" aria-modal="true" aria-label={taskToEdit ? 'Edit task' : 'New task'} className="bg-surface rounded-2xl w-full max-w-xl tactile-4 animate-pop-in border border-line overflow-hidden transition-colors max-h-[90dvh] min-h-0 flex flex-col">
+    <div className="task-form-overlay fixed inset-0 z-50 flex items-center justify-center bg-scrim">
+      <div style={creatingShift ? { display: 'none' } : undefined} role="dialog" aria-modal="true" aria-label={taskToEdit ? 'Edit task' : 'New task'} className="task-form-shell bg-paper rounded-2xl w-full max-w-xl tactile-4 border border-line overflow-hidden max-h-[90dvh] min-h-0 flex flex-col">
         
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-line/70 shrink-0">
-          <div>
-            <h2 className="text-base font-bold text-ink">
-              {taskToEdit ? 'Edit task' : 'New task'}
-            </h2>
-            <p className="text-xs text-ink-faint">
-              {taskToEdit ? 'Only this task changes' : extras.length ? `${extras.length + 1} tasks` : 'Create a task'}
-            </p>
+        <div className="task-form-nav shrink-0">
+          <button type="button" onClick={onClose} aria-label="Close" className="task-form-close pressable"><span className="task-form-close-face tactile-1"><X className="w-5 h-5" /></span></button>
+          <div className="min-w-0 text-center">
+            <h2 className="task-form-nav-title">{taskToEdit ? 'Edit task' : count > 1 ? 'New tasks' : 'New task'}</h2>
+            {venueName && <p className="task-form-venue truncate">{venueName}</p>}
           </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="min-h-11 min-w-11 rounded-lg text-ink-faint hover:text-ink hover:bg-sunken"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <span aria-hidden="true" />
         </div>
 
         {/* Form Body - Scrollable */}
         <form onSubmit={handleSubmit} className="task-form flex min-h-0 flex-1 flex-col text-base">
-          <div className="min-h-0 flex-1 overflow-y-auto p-6 space-y-4" data-task-form-body>
+          <div className="task-form-body min-h-0 flex-1 overflow-y-auto space-y-4" data-task-form-body>
           
-          <nav aria-label="Task steps" className="flex gap-2 text-base text-ink">
-            {['What', 'When', 'Who'].map((name, i) => <span key={name} aria-current={step === i ? 'step' : undefined} className={step === i ? 'font-semibold' : 'text-ink-soft'}>{i + 1} {name}{i < 2 ? ' ·' : ''}</span>)}
-          </nav>
-          {step > 0 && extras.length > 0 && <p className="p-3 rounded-lg bg-sunken text-base text-ink">Applies to all {extras.length + 1} tasks</p>}
-          <div hidden={step !== 0} className="space-y-4">
+          <TaskFormProgress step={step} count={count} summaries={[whatSummary, whenSummary]} onEdit={setStep} />
+          {taskToEdit && <p className="text-xs text-ink-soft">Only this task changes</p>}
+          <div className="task-form-current-card">
+            <div className="task-form-card-header">
+              <span aria-hidden="true" className="task-form-heading-number">{step + 1}</span>
+              <div className="min-w-0 flex-1"><h3 data-task-form-current-step={stepName}>{stepName}</h3>{step === 0 && <p>{count > 1 ? 'Name the tasks' : 'Name the task'}</p>}</div>
+              {step === 0 && count > 1 && <span className="task-form-count" data-task-count><List aria-hidden="true" className="w-4 h-4" />{count} tasks</span>}
+            </div>
+          {step > 0 && extras.length > 0 && <p className="p-3 rounded-lg bg-sunken text-base text-ink">Applies to all {count} tasks</p>}
+          <div hidden={step !== 0} className="task-form-what space-y-4">
           {/* Task Title */}
           <div>
             <label className="block font-semibold text-ink-soft mb-1">
-              Name <span className="text-bad">*</span>
+              <span className="inline-flex items-center gap-2">{count > 1 && <span className="task-form-mini-number">1</span>}Name <span className="text-bad">*</span></span>
             </label>
             <input
               id="task-title-input"
@@ -645,11 +652,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           {/* Description / Instructions */}
           <div>
             <label className="block font-semibold text-ink-soft mb-1">
-              Notes
+              Notes <span className="task-form-optional">optional</span>
             </label>
             <textarea
               id="task-desc-input"
-              rows={2}
+              rows={1}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Step-by-step guidance for mashgichim when completing this daily assignment..."
@@ -658,15 +665,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </div>
 
           {!taskToEdit && <div className="space-y-2">
-            {extras.map((extra, i) => <div key={i} className="flex gap-2 items-start">
-              <span className="pt-3 text-base text-ink-soft">{i + 2}</span>
+            {extras.map((extra, i) => <div key={i} className="task-form-extra">
+              <span className="task-form-mini-number">{i + 2}</span>
               <div className="flex-1 min-w-0 space-y-2">
-                <label className="block text-sm text-ink-soft">Name<input aria-label={`Task ${i + 2} name`} required value={extra.name} onChange={(e) => setExtras((old) => old.map((t, n) => n === i ? { ...t, name: e.target.value } : t))} className="w-full min-h-11 rounded-lg border border-line-control bg-sunken text-ink px-3 text-base" /></label>
-                <label className="block text-sm text-ink-soft">Optional note<input value={extra.note} onChange={(e) => setExtras((old) => old.map((t, n) => n === i ? { ...t, note: e.target.value } : t))} className="w-full min-h-11 rounded-lg border border-line-control bg-sunken text-ink px-3 text-base" /></label>
+                <label className="block"><span className="sr-only">Name</span><input aria-label={`Task ${i + 2} name`} required value={extra.name} onChange={(e) => setExtras((old) => old.map((t, n) => n === i ? { ...t, name: e.target.value } : t))} className="task-form-extra-name w-full" /></label>
+                <details className="task-form-extra-note"><summary className="min-h-11 flex items-center cursor-pointer">+ Add a note · optional</summary><label className="block"><span className="sr-only">Optional note</span><input value={extra.note} onChange={(e) => setExtras((old) => old.map((t, n) => n === i ? { ...t, note: e.target.value } : t))} className="w-full" /></label></details>
               </div>
-              <button type="button" aria-label={`Remove task ${i + 2}`} onClick={() => setExtras((old) => old.filter((_, n) => n !== i))} className="min-h-11 min-w-11 text-ink-soft pressable">×</button>
+              <button type="button" aria-label={`Remove task ${i + 2}`} onClick={() => setExtras((old) => old.filter((_, n) => n !== i))} className="task-form-remove pressable"><span>×</span></button>
             </div>)}
-            <button type="button" onClick={() => setExtras((old) => [...old, { name: '', note: '' }])} className="min-h-11 px-3 rounded-lg border border-line-control text-base text-ink pressable">+ Add another task</button>
+            <button type="button" onClick={() => setExtras((old) => [...old, { name: '', note: '' }])} className="task-form-add pressable"><CirclePlus aria-hidden="true" className="w-5 h-5 shrink-0" /><span>+ Add another task</span>{count > 1 && <span className="task-form-add-hint">When &amp; Who apply to all</span>}</button>
           </div>}
           {/* 2-Column: Category & Input Type */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1067,18 +1074,19 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </section>
 
           </div>
+          </div>
           {/* Footer Actions */}
-          <div className="flex flex-wrap items-center justify-end gap-2 px-6 py-3 border-t border-line bg-surface shrink-0">
+          <div className="task-form-footer shrink-0">
             <button
               type="button"
               onClick={onClose}
-              className="min-h-12 px-4 py-2 text-base font-semibold rounded-xl text-ink-soft hover:bg-sunken"
+              className="sr-only focus:not-sr-only min-h-12 px-4 py-2 text-base font-semibold rounded-xl text-ink-soft hover:bg-sunken"
             >
               Cancel
             </button>
-            {step > 0 && <button type="button" onClick={() => setStep(step - 1)} className="min-h-12 px-4 rounded-lg border border-line-control text-base text-ink pressable">Back</button>}
-            <button disabled={saving || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 2 && (!peopleReady || (shiftMode && !usingShift)))} id="save-task-submit-btn" type="submit" className="min-h-12 px-4 rounded-lg bg-gold-deep text-paper text-base font-semibold pressable disabled:opacity-50">
-              {saving ? 'Saving…' : step < 2 ? 'Next' : extras.length ? `Save ${extras.length + 1} tasks` : 'Save task'}
+            {step > 0 && <button type="button" onClick={() => setStep(step - 1)} className="sr-only focus:not-sr-only min-h-12 px-4 rounded-lg border border-line-control text-base text-ink pressable">Back</button>}
+            <button disabled={saving || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 2 && (!peopleReady || (shiftMode && !usingShift)))} id="save-task-submit-btn" type="submit" className="task-form-primary pressable disabled:opacity-50">
+              {saving ? 'Saving…' : step === 0 ? 'Next: When →' : step === 1 ? 'Next: Who does it →' : extras.length ? `✓ Save ${extras.length + 1} tasks` : '✓ Save task'}
             </button>
             {step === 2 && !peopleReady && <p className="w-full text-sm text-ink-soft" role="status">Pick who does it</p>}
             {saveError && <p role="alert" className="text-base text-bad">{saveError}</p>}

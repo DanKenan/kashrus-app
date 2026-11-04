@@ -16,7 +16,7 @@ globalThis.localStorage = { getItem: (k) => storage.get(k) ?? null, setItem: (k,
 const shift = { id: 's', venueId: 'v', name: 'Deli day', area: 'Deli', days: Array.from({ length: 7 }, (_, w) => ({ on: w < 6 })), startMinutes: 480, endMinutes: 1080, userId: 'u', userName: 'Moshe L.', overrides: [], createdAt: '' };
 const noop = () => {};
 const saveForm = async (view) => {
-  for (let i = 0; i < 2 && view.find((e) => e.props['aria-current'] === 'step')[0]?.props.children[2] !== 'Who'; i++) await view.submit();
+  for (let i = 0; i < 2 && view.find((e) => e.props['data-task-form-current-step'])[0]?.props['data-task-form-current-step'] !== 'Who'; i++) await view.submit();
   if (view.find((e) => e.props.id === 'save-task-submit-btn')[0].props.disabled) await view.click((e) => e.props['aria-label'] === 'Everyone at the venue');
   await view.submit();
 };
