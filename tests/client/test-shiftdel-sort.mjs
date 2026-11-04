@@ -39,6 +39,7 @@ try {
     assert.match(view.html(), /shift-editor-sheet/);
     assert.match(view.html(), /task-people-grabber/);
     assert.match(view.html(), /task-form-current-card task-form-what/);
+    assert.match(view.find((e) => e.type === 'fieldset')[0].props.className, /\bmin-w-0\b/);
     assert.match(view.html(), /shift-editor-footer task-form-footer/);
     const remove = view.buttons().find((b) => b.label === 'Delete shift');
     assert.ok(remove); assert.match(remove.el.props.className, /min-h-11/);
@@ -91,6 +92,9 @@ try {
   await sheet.render(); checkEditor(sheet);
   assert.match(sheet.text(), /Edit Morning shift/);
   assert.match(sheet.text(), /Built in · used by 2 tasks/);
+  await sheet.render({ tasks: headerTasks.slice(0, 1) });
+  assert.match(sheet.text(), /Built in · used by 1 task\b/);
+  assert.doesNotMatch(sheet.text(), /used by 1 tasks/);
   assert.equal(sheet.find((e) => e.type === 'details' && e.props.className === 'shift-editor-differences')[0].props.open, false);
   const dayStrip = sheet.find((e) => e.props.className === 'shift-editor-days')[0];
   assert.deepEqual(dayStrip.props.children.map((e) => e.props.children), ['S', 'M', 'T', 'W', 'T', 'F', 'S']);

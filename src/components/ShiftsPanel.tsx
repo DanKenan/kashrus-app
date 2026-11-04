@@ -144,12 +144,12 @@ export function ShiftsPanel({ shifts, tasks = [], venueId, timeZone, people, onC
     <div className="shift-editor-sheet">
     <header className="shift-editor-header">
       <div aria-hidden="true" className="task-people-grabber" />
-      <div className="shift-editor-heading"><div className="min-w-0"><h3>{existing ? `Edit ${existing.name} shift` : 'New shift'}</h3><p>{existing && isBuiltinShiftId(existing.id) ? 'Built in' : 'Custom'} · used by {usedBy} tasks</p></div><button type="button" aria-label="Close" disabled={busy} onClick={close} className="shift-editor-close pressable disabled:opacity-50"><X aria-hidden="true" className="w-5 h-5" /></button></div>
+      <div className="shift-editor-heading"><div className="min-w-0"><h3>{existing ? `Edit ${existing.name} shift` : 'New shift'}</h3><p>{existing && isBuiltinShiftId(existing.id) ? 'Built in' : 'Custom'} · used by {usedBy} {usedBy === 1 ? 'task' : 'tasks'}</p></div><button type="button" aria-label="Close" disabled={busy} onClick={close} className="shift-editor-close pressable disabled:opacity-50"><X aria-hidden="true" className="w-5 h-5" /></button></div>
       {editing !== 'new' && <button type="button" disabled={busy} onClick={() => { operation.current = undefined; setConfirm(true); }} className="min-h-11 px-3 rounded-lg border border-bad bg-surface text-bad text-sm font-semibold hover:bg-bad-bg pressable disabled:opacity-50 cursor-pointer">Delete shift</button>}
     </header>
     <form className="shift-editor-form" onSubmit={(e) => { e.preventDefault(); void save(); }}>
       <div className="shift-editor-body task-form-body">
-      <fieldset disabled={busy} className="task-form-current-card task-form-what space-y-4 disabled:opacity-50">
+      <fieldset disabled={busy} className="task-form-current-card task-form-what min-w-0 space-y-4 disabled:opacity-50">
         <label className="block text-sm text-ink-soft">Name<input required maxLength={40} value={name} onChange={(e) => setName(e.target.value)} className={`block w-full ${control}`} /></label>
         <label className="block text-sm text-ink-soft">Area (type anything)<input maxLength={40} value={area} onChange={(e) => setArea(e.target.value)} className={`block w-full ${control}`} /></label>
         <section aria-label="General hours" className="space-y-2">
