@@ -74,9 +74,9 @@ assert.deepEqual(saved.days[1].userIds, ['y', 'd']);
 assert.deepEqual(saved.overrides[0].userIds, ['m', 'y']);
 await panel.render({ createOnly: true });
 assert.equal(panel.find((e) => e.props.role === 'group' && e.props['aria-label'] === 'Usual people')[0].props.children[0].props['aria-pressed'], true);
-const form = mount(TaskModal, { isOpen: true, onClose: () => {}, onSave: () => false, knownWorkers: people, shifts: [shift], timeZone: 'UTC' });
-await form.render(); await form.click((e) => e.props.children === 'Shift');
-assert.match(form.text(), /usually Moshe Levin \+ 1/);
+const form = mount(TaskModal, { isOpen: true, onClose: () => {}, onSave: () => false, knownWorkers: people, shifts: [shift], venueId: 'v', agencyId: 'a', timeZone: 'UTC' });
+await form.render(); await form.click((e) => e.props['aria-label'] === 'A shift'); await form.click('Deli day');
+assert.ok(form.buttons().some((button) => button.el.props['aria-pressed'] === true && button.label.includes('Deli day')));
 console.log('Shift people: lists, precedence, legacy reads, overnight visibility, names, multi-selects and merge remapping passed');
 
 // Unchanged legacy records, including expired overrides, close without a request.

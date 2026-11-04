@@ -1,3 +1,4 @@
+import { taskOccursToday } from '../lib/taskOccurrences';
 import { TaskEmptyState } from './TaskEmptyState';
 import { whoSeesLabel } from '../lib/whoSees';
 import { WhoSeesTag } from './WhoSeesTag';
@@ -89,7 +90,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
   const dueToday = (t: Task) => {
     if (todayYmd === null || todayWeekday === null || nowMinutes === null) return true;
     const shift = t.shiftId ? shiftsById.get(t.shiftId) : undefined;
-    return shift ? shiftTaskAppliesAt(shift, todayYmd, todayWeekday, nowMinutes)
+    return shift ? taskOccursToday(t, shiftsById, todayYmd, todayWeekday, nowMinutes)
       : taskAppliesOn(t, todayYmd, todayWeekday);
   };
   const isOverdue = (task: Task) => {

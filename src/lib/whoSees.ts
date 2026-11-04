@@ -1,3 +1,5 @@
+import { taskOwnsPeople, taskAssigneesOn, assigneeEmails, type TaskPeople } from './taskAssignees';
+import { shiftPeopleOccurrenceDay } from './shifts';
 import type { Shift } from '../types';
 import { shiftOccurrenceDay, shiftPeopleOn } from './shifts';
 import { shiftAssigneeLabel } from './shiftTaskDay';
@@ -12,7 +14,17 @@ export interface WhoSeesContext {
   todayWeekday: number | null;
   nowMinutes: number | null;
 }
-export function whoSeesLabel(task: { venueId?: string; shiftId?: string | null; assignedTo?: string[]; isPrivate?: boolean }, ctx: WhoSeesContext): { text: string; icon: 'shift' | 'everyone' | 'person' | 'private'; title?: string } {
+export function whoSeesLabel(task: TaskPeople & { venueId?: string; shiftId?: string | null; assignedTo?: string[]; isPrivate?: boolean }, ctx: WhoSeesContext): { text: string; icon: 'shift' | 'everyone' | 'person' | 'private'; title?: string } {
+  if (taskOwnsPeople(task)) {
+    const shift = task.shiftId ? ctx.shiftsById.get(task.shiftId) : undefined;
+    const occurrence = shift && (!task.venueId || shift.venueId === task.venueId) && ctx.todayYmd && ctx.todayWeekday !== null && ctx.nowMinutes !== null
+      ? shiftPeopleOccurrenceDay(shift, ctx.todayYmd, ctx.todayWeekday, ctx.nowMinutes) : ctx.todayYmd;
+    const names = (emails: string[]) => emails.includes('all') || !emails.length ? 'Everyone' : emails.map((email) => ctx.roster.find((p) => p.email?.trim().toLowerCase() === email)?.name || (email.charAt(0).toUpperCase() + email.split('@')[0].slice(1))).join(', ');
+    const main = names(assigneeEmails(task.assignedTo));
+    const actual = occurrence ? names(taskAssigneesOn(task, occurrence)) : main;
+    const day = occurrence ? new Date(`${occurrence}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' }) : '';
+    return { text: `${task.isPrivate ? 'Private · ' : ''}${main}${actual !== main ? ` · ${day}: ${actual}` : ''}`, icon: task.isPrivate ? 'private' : 'person' };
+  }
   const assigned = (task.assignedTo || []).map((s) => s.trim()).filter(Boolean);
   const me = ctx.viewer?.email?.trim().toLowerCase();
   const directlyAssigned = assigned.some((s) => s.toLowerCase() === me);

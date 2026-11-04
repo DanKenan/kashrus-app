@@ -87,7 +87,7 @@ eq('mashgiach WITH edit rights sees all', seesOnlyOwnTasks({ role: 'mashgiach' }
 for (const role of ['admin', 'coordinator', 'owner', 'manager']) eq(`${role} not limited`, seesOnlyOwnTasks({ role }, role === 'admin' || role === 'coordinator'), false);
 eq('signed out not limited (nothing to show anyway)', seesOnlyOwnTasks(null, false), false);
 eq('App: own-tasks rule never on the kiosk', /const onlyOwnTasks = !isKiosk && seesOnlyOwnTasks\(currentUser, canUserAssignTasks\(currentUser\)\)/.test(app), true);
-eq('App: today list = today rule AND own-tasks rule', /taskAppliesOn\(task, todayYmd, todayWeekday\) &&\s*\(!onlyOwnTasks \|\| taskIsForViewer\(task, currentUser\?\.email\)\)/.test(app), true);
+eq('App: today list = today rule AND own-tasks rule', /taskAppliesOn\(task, todayYmd, todayWeekday\) &&\s*\(!onlyOwnTasks \|\| taskIsForViewer\(task, currentUser\?\.email, taskOccurrenceDate\(task\)\)\)/.test(app), true);
 eq('App: "All days" only for editors, else today', /const dayTasks = effectiveDayView === 'all' \? tasks : todayTasks;/.test(app), true);
 eq('App: progress header counts today', /const totalTasks = todayTasks\.length;/.test(app) && /const myTasks = todayTasks\.filter/.test(app), true);
 for (const name of ['TaskCardView', 'TaskTableView']) eq(`${name}: overdue chip only on a task due today`, /isTaskOverdue\(task, nowMinutes\) && dueToday\(task\)/.test(read(`src/components/${name}.tsx`)), true);

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, X } from 'lucide-react';
 import type { Shift, ShiftDay, ShiftOverride } from '../types';
-import { formatShiftHours, shiftDayOf, shiftWeekdays, shiftVariesByDay, shiftIsUpcoming, shiftUserIds, shiftPeopleSummary, shiftEditableFields } from '../lib/shifts';
+import { formatShiftHours, shiftDayOf, shiftWeekdays, shiftVariesByDay, shiftIsUpcoming, shiftUserIds, shiftPeopleSummary, shiftEditableFields, venueShifts } from '../lib/shifts';
 import { apiWrite, captureEditBaseline, newActionId } from '../lib/api';
 import { addDays, workDateIn } from '../lib/workday';
 import { ConfirmModal } from './ConfirmModal';
@@ -33,10 +33,12 @@ interface Props {
   timeZone: string;
   people: Array<{ id?: string; name: string }>;
   createOnly?: boolean;
+  initialShift?: Shift;
+  agencyId?: string;
   onCancel?: () => void;
   onChange: (shift: Shift, deleted?: boolean) => void;
 }
-export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, createOnly = false, onCancel }: Props) {
+export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, createOnly = false, initialShift, agencyId = shifts.find((s) => s.venueId === venueId)?.agencyId || 'agency-hkc', onCancel }: Props) {
   const [editing, setEditing] = useState<Shift | 'new' | null>(null);
   const [savedWeekly, setSavedWeekly] = useState(true);
   const [oneTimeDate, setOneTimeDate] = useState('');
@@ -72,7 +74,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
     setDate(addDays(today, 1)); setDatePerson([]); setAddingDate(false); setError('');
     baseline.current = captureEditBaseline(); operation.current = undefined;
   };
-  useEffect(() => { if (createOnly) open('new'); }, [createOnly]);
+  useEffect(() => { if (createOnly) open(initialShift || 'new'); }, [createOnly, initialShift]);
   const close = () => { setEditing(null); onCancel?.(); };
   const save = async (remove = false) => {
     if (lock.current || !editing) return;
@@ -92,7 +94,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
       const result = await apiWrite<Shift>(existing ? `/api/shifts/${encodeURIComponent(existing.id)}` : '/api/shifts', {
         method: remove ? 'DELETE' : existing ? 'PUT' : 'POST',
         expectedVersion: existing ? baseline.current : undefined, operationId: operation.current,
-        body: remove ? undefined : JSON.stringify(definition),
+        body: JSON.stringify(remove ? { venueId } : definition),
       });
       if (!result.ok) { setError(result.error || "Couldn't save. Please try again."); operation.current = undefined; setConfirm(false); return; }
       onChange(remove ? existing! : result.data, remove); setEditing(null); setConfirm(false);
@@ -108,7 +110,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
       {value.includes(p.id!) && <Check aria-hidden="true" className="inline w-4 h-4 mr-1" />}{p.name}
     </button>)}
   </div>;
-  const upcoming = shifts.filter((s) => shiftIsUpcoming(s, today));
+  const upcoming = venueShifts(shifts, venueId, agencyId).filter((s) => shiftIsUpcoming(s, today));
   const ordered = [...upcoming.filter((s) => !s.oneTimeDate), ...upcoming.filter((s) => s.oneTimeDate).sort((a, b) => a.oneTimeDate!.localeCompare(b.oneTimeDate!))];
   if (!editing && createOnly) return null;
   if (!editing) return <section className="space-y-4">
@@ -138,7 +140,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
         <p className="text-sm text-ink-soft">General hours</p>
         <div className="grid grid-cols-2 gap-3"><label className="text-sm text-ink-soft">From<input required type="time" value={start} onChange={(e) => setStart(e.target.value)} className={`block w-full ${control}`} /></label><label className="text-sm text-ink-soft">Until<input required type="time" value={end} onChange={(e) => setEnd(e.target.value)} className={`block w-full ${control}`} /></label></div>
         {end < start && <p className="text-sm text-ink-soft">Ends next day</p>}
-        <div className="space-y-2"><p className="text-sm text-ink-soft">Usually on this shift</p>{picker('Usual people', person, setPerson)}</div>
+        <div className="space-y-2"><p className="text-sm text-ink-soft">Usual mashgiach (optional)</p>{picker('Usual people', person, setPerson)}</div>
         {savedWeekly ? <section aria-label="Week" className="space-y-2">
           <h4 className="text-sm font-semibold text-ink">Week</h4>
           {days.map((name, i) => {

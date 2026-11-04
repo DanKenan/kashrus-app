@@ -4,21 +4,34 @@ import { ShiftsPanel } from '../../src/components/ShiftsPanel.tsx';
 import { TaskModal } from '../../src/components/TaskModal.tsx';
 import { getPhoneNavState, PhoneNav } from '../../src/components/PhoneNav.tsx';
 import { sheetAllowed } from '../../src/lib/screenMemory.ts';
+const HostDate = globalThis.Date;
+// Noon in New York keeps the default form selection inside Deli day hours.
+globalThis.Date = class extends HostDate {
+  constructor(...args) { super(...(args.length ? args : ['2026-11-03T17:00:00Z'])); }
+  static now() { return new HostDate('2026-11-03T17:00:00Z').getTime(); }
+};
+try {
 const storage = new Map();
 globalThis.localStorage = { getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v), removeItem: (k) => storage.delete(k) };
 const shift = { id: 's', venueId: 'v', name: 'Deli day', area: 'Deli', days: Array.from({ length: 7 }, (_, w) => ({ on: w < 6 })), startMinutes: 480, endMinutes: 1080, userId: 'u', userName: 'Moshe L.', overrides: [], createdAt: '' };
 const noop = () => {};
+const saveForm = async (view) => {
+  if (view.find((e) => e.props['aria-label'] === 'Go to Who').length) await view.click('Go to Who');
+  for (let i = 0; i < 2 && view.find((e) => e.props['data-task-form-current-step'])[0]?.props['data-task-form-current-step'] !== 'Who'; i++) await view.submit();
+  if (view.find((e) => e.props.id === 'save-task-submit-btn')[0].props.disabled) await view.click((e) => e.props['aria-label'] === 'Everyone at the venue');
+  await view.submit();
+};
 let saved;
 recordFetch({});
-const form = mount(TaskModal, { isOpen: true, onClose: noop, onSave: (t) => { saved = t; }, knownWorkers: [{ id: 'u', name: 'Moshe L.' }], shifts: [shift], timeZone: 'America/New_York' });
+const form = mount(TaskModal, { isOpen: true, onClose: noop, onSave: (t) => { saved = t; }, knownWorkers: [{ id: 'u', name: 'Moshe L.' }], venueId: 'v', shifts: [shift], timeZone: 'America/New_York' });
 await form.render();
-await form.click((e) => e.props.children === 'Shift');
-assert.match(form.text(), /Goes to whoever is on Deli day that day \(usually Moshe L\.\)/);
+await form.click((e) => e.props['aria-label'] === 'A shift');
+assert.ok(form.buttons().some((button) => button.el.props['aria-pressed'] === true && button.label.includes('Deli day')));
 const title = form.find((e) => e.type === 'input' && e.props.required)[0];
 assert.ok(title);
 await title.props.onChange({ target: { value: 'Check deli' } });
 await form.render();
-await form.submit();
+await saveForm(form);
 assert.equal(saved.shiftId, 's');
 assert.deepEqual(saved.assignedTo, ['all']);
 assert.equal(saved.scheduleType, 'recurring');
@@ -26,9 +39,9 @@ assert.equal(saved.targetTime, '');
 assert.equal(saved.targetTime2, '');
 assert.equal(saved.isPrivate, false);
 await form.render({ taskToEdit: { ...saved, id: 't', shiftId: 's' } });
-assert.equal(form.buttons().find((b) => b.label === 'Shift').el.props['aria-pressed'], true);
+assert.equal(form.buttons().find((b) => b.el.props['aria-label'] === 'A shift').el.props['aria-pressed'], true);
 await form.render({ shifts: [] });
-assert.equal(form.buttons().some((b) => b.label === 'Shift'), false);
+assert.equal(form.buttons().some((b) => b.el.props['aria-label'] === 'A shift'), true, 'built-in shifts remain available');
 const panel = mount(ShiftsPanel, { shifts: [shift], venueId: 'v', timeZone: 'America/New_York', people: [{ id: 'u', name: 'Moshe L.' }], onChange: noop });
 await panel.render();
 assert.match(panel.text(), /Sun–Fri · 8:00 AM – 6:00 PM/);
@@ -208,10 +221,10 @@ assert.equal(oneTimeBody.oneTimeDate, datedInput.props.value);
 assert.deepEqual(oneTimeBody.overrides, []);
 assert.equal(changed.id, 'once');
 await form.render({ taskToEdit: null, shifts: [shift, { ...shift, id: 'past', name: 'Expired shift', oneTimeDate: '2000-01-01' }], venueId: 'v' });
-await form.click((e) => e.props.children === 'Shift');
+await form.click((e) => e.props['aria-label'] === 'A shift');
 assert.doesNotMatch(form.text(), /Expired shift/);
-assert.ok(form.buttons().some((b) => b.label === '+ New shift'));
-await form.click('+ New shift');
+assert.ok(form.buttons().some((b) => b.label === '+ New'));
+await form.click('+ New');
 assert.ok(form.find((e) => e.props.role === 'dialog' && e.props['aria-label'] === 'New shift').length);
 const child = (() => { const walk = (e) => { if (!e || typeof e !== 'object') return null; if (Array.isArray(e)) { for (const c of e) { const v = walk(c); if (v) return v; } return null; } if (e.type === ShiftsPanel) return e; return walk(e.props?.children); }; return walk(form.tree()); })();
 assert.ok(child);
@@ -219,7 +232,7 @@ await child.props.onChange({ ...shift, id: 'newly-created', name: 'Catering setu
 await form.render();
 await form.find((e) => e.type === 'input' && e.props.required)[0].props.onChange({ target: { value: 'Set up catering' } });
 await form.render();
-await form.submit();
+await saveForm(form);
 assert.equal(saved.shiftId, 'newly-created');
 console.log('Shifts UI: one-time payload, expiry, shared sheet and automatic task selection passed');
 
@@ -311,3 +324,4 @@ try {
   }
 } finally { globalThis.Date = RealDate; }
 console.log('Shifts UI: RV5 occurrence person, ID-bound names, roster and unknown-person fallback passed');
+} finally { globalThis.Date = HostDate; }

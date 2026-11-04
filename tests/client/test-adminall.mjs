@@ -74,14 +74,14 @@ const team = fs.readFileSync(new URL('../../src/components/TeamModal.tsx', impor
 const filterBlock = (app.match(/const filteredTasks = useMemo\(\(\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/) || [''])[0];
 ok('V1 filteredTasks block found', filterBlock.length > 0);
 ok('V2 only the Mine tab narrows by assignee (no isMyTask outside activeTabFilter === \'mine\')',
-  (filterBlock.match(/isMyTask\(/g) || []).length === 1 && /activeTabFilter === 'mine'\) \{\s*if \(!isMyTask\(task, currentUser\)\) return false;/.test(filterBlock));
+  (filterBlock.match(/isMyTask\(/g) || []).length === 1 && /activeTabFilter === 'mine'\) \{\s*if \(!isMyTask\(task, currentUser, taskOccurrenceDate\(task\)\)\) return false;/.test(filterBlock));
 ok('V3 filteredTasks re-runs when the role changes', /currentUser\?\.role[^\]]*\]\);\s*$/.test(filterBlock) || /currentUser\?\.email, currentUser\?\.role/.test(filterBlock));
 
 // S: every "assigned to me" place uses the one rule
-ok('S1 App myTasks uses isMyTask over today\'s tasks', /const myTasks = todayTasks\.filter\(\(t\) => isMyTask\(t, currentUser\)\);/.test(app));
+ok('S1 App myTasks uses isMyTask over today\'s tasks', /const myTasks = todayTasks\.filter\(\(t\) => isMyTask\(t, currentUser, taskOccurrenceDate\(t\)\)\);/.test(app));
 ok('S2 App imports isMyTask', /import \{ isMyTask \} from '\.\/lib\/myTasks';/.test(app));
-ok('S3 Kiosk savingMine uses isMyTask', /savingMine\.current\[taskId\] = !!task && isMyTask\(task, currentUser\);/.test(kiosk));
-ok('S4 TeamModal assignedCount uses isMyTask', /const assignedCount = tasks\.filter\(\(t\) => isMyTask\(t, user\)\)\.length;/.test(team));
+ok('S3 Kiosk savingMine uses isMyTask', /savingMine\.current\[taskId\] = !!task && isMyTask\(task, currentUser, taskOccurrenceDate\(task, shiftsById,/.test(kiosk));
+ok('S4 TeamModal assignedCount uses isMyTask', /const assignedCount = tasks\.filter\(\(t\) => isMyTask\(t, user, taskOccurrenceDate\(t,/.test(team));
 const leftover = /assignedTo\.includes\('all'\)\s*\|\|/;
 for (const [name, src] of [['App.tsx', app], ['KioskTaskPanel.tsx', kiosk], ['TeamModal.tsx', team]]) {
   ok(`S5 no "'all' || mine" shortcut left in ${name}`, !leftover.test(src));
