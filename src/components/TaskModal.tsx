@@ -110,7 +110,12 @@ function TimePickerRow({
       <span className="font-black text-ink-soft">:</span>
       <input type="number" min={0} max={59} step={1}
         value={value.minute}
-        onChange={(e) => onChange({ ...value, minute: Number(e.target.value) })}
+        onChange={(e) => {
+          const text = e.target.value.trim();
+          const minute = Number(text);
+          if (text && Number.isInteger(minute) && minute >= 0 && minute <= 59) onChange({ ...value, minute });
+          else e.target.value = String(value.minute);
+        }}
         className="task-minute-input text-sm font-bold px-2 py-2 rounded-xl border border-line bg-sunken text-ink"
         aria-label="Minute"
       />
@@ -465,12 +470,19 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     } else { setAssignType(emails.includes('all') ? 'all' : 'specific'); setSelectedWorkers(emails.filter((e) => e !== 'all')); }
   };
   const namesFor = (emails: string[]) => emails.includes('all') ? 'Everyone at the venue' : emails.map((email) => knownWorkers.find((w) => w.email === email)?.name || email).join(', ');
+  const firstNames = (emails: string[]) => emails.includes('all') ? namesFor(emails) : emails.map((email) => namesFor([email]).split(' ')[0]).join(', ');
   const swapDate = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   const usualEmails = chosenShift ? knownWorkers.filter((person) => person.id && shiftUserIds(chosenShift).includes(person.id) && person.email).map((person) => person.email!) : [];
   const venuePeople = knownWorkers.filter((person) => person.myVenueIds?.length ? person.myVenueIds.includes(venueId) : !person.venueId || person.venueId === venueId);
   const peopleDayName = new Date(`${dayDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
   const upcomingSwaps = swaps.filter((swap) => swap.date >= today);
   const dayDifferences = differingDays(dayPeople, mainPeople);
+  const daySummary = selectedDays.flatMap((day) => {
+    const usual = dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople;
+    const swap = swaps.find((entry) => entry.date === nextWeekday(today, day));
+    if (swap) return [`${DAYS_MAP[day]} ${swapDate(swap.date)}: ${firstNames(swap.assignedTo)}, just this once (usually ${firstNames(usual)})`];
+    return dayDifferences[String(day) as keyof typeof dayDifferences] ? [`${DAYS_MAP[day]}: ${firstNames(usual)}`] : [];
+  }).join(' · ');
   const peopleReady = mainPeople.length > 0 && (scheduleType !== 'recurring' || selectedDays.every((day) => (dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople).length > 0)) && swaps.every((swap) => swap.date < today || swap.assignedTo.length > 0);
   const choice = (on: boolean) => `min-h-11 px-3 rounded-lg border pressable ${on ? 'bg-gold-deep text-paper border-gold-deep' : 'border-line-control bg-surface text-ink'}`;
   const shiftChanged = (shift: Shift, deleted = false) => {
@@ -1087,14 +1099,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 const usual = dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople;
                 const swap = swaps.find((s) => s.date === nextWeekday(today, day));
                 const shown = swap?.assignedTo ?? usual;
-                return <button key={day} type="button" onClick={() => { setPeopleDay(day); setJustOnce(!!swap); setShowPeople(true); }} aria-pressed={showPeople && peopleDay === day} className={`task-who-day pressable ${dayDifferences[String(day) as keyof typeof dayDifferences] || swap ? 'is-different' : ''}`}>
+                return <button key={day} type="button" onClick={() => { setPeopleDay(day); setJustOnce(!!swap); setShowPeople(true); }} aria-label={`${DAYS_MAP[day]}: ${namesFor(shown)}${swap ? `, just ${swapDate(swap.date)}, usually ${namesFor(usual)}` : ''}`} aria-pressed={showPeople && peopleDay === day} className={`task-who-day pressable ${dayDifferences[String(day) as keyof typeof dayDifferences] || swap ? 'is-different' : ''} ${swap ? 'has-swap' : ''}`}>
                   <span className="w-10 shrink-0">{DAYS_MAP[day]}</span>
                   <span className="rounded-full bg-sunken w-8 h-8 shrink-0 flex items-center justify-center" style={personAvatar(shown[0] || 'all')} aria-hidden="true">{namesFor(shown).slice(0, 1)}</span>
-                  <span className="min-w-0 py-2"><span className="block truncate" title={namesFor(shown)}>{shown.includes('all') ? namesFor(shown) : shown.map((email) => namesFor([email]).split(' ')[0]).join(', ')}{swap ? ` · just ${swapDate(swap.date)}` : ''}</span>{swap && <span className="block truncate text-sm text-ink-soft">usually {namesFor(usual)}</span>}</span>
+                  <span className="min-w-0 py-2"><span className="block truncate" title={namesFor(shown)}>{firstNames(shown)}</span></span>
+                  {swap && <span aria-hidden="true" className="task-day-swap-badge">1×</span>}
                 </button>;
               })}
               </div>
-              {Object.keys(dayDifferences).length > 0 && <p className="task-day-short-summary">{Object.entries(dayDifferences).map(([day, emails]) => `${DAYS_MAP[Number(day)]}: ${emails.map((email) => namesFor([email]).split(' ')[0]).join(', ')}`).join(' · ')}</p>}
+              {daySummary && <p className="task-day-short-summary">{daySummary}</p>}
             </div>}
             {upcomingSwaps.length > 0 && <div aria-label="Single-date swaps" className="space-y-2 text-sm text-ink-soft">
               <p>Swaps for single dates stay:</p>

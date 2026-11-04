@@ -764,3 +764,22 @@
 .task-form-what { display: flex; flex-direction: column; }
 .task-form-what[hidden] { display: none; }
 .task-when-shift.is-picked .task-shift-icon { display: none; }
+
+/* Equal day tiles; full dated-swap context stays outside the grid. */
+.task-who-day { height: 84px; min-height: 84px; max-height: 84px; padding-block: 6px; overflow: hidden; }
+.task-who-day > span:last-child, .task-who-day > span:nth-child(3) { padding-block: 0; }
+.task-who-day > span:nth-child(3) > span, .task-who-day.is-different > span:nth-child(3) > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-who-day.has-swap::after { display: none; }
+.task-day-swap-badge { position: absolute; top: 2px; right: 2px; padding: 0 2px; border-radius: 6px; background: var(--gold-deep); color: var(--task-avatar-letter); font-size: 12px; line-height: 16px; }
+.shift-hours-hint { white-space: normal; line-height: 16px; }
+.shift-hours-hint > span { overflow: visible; text-overflow: clip; }
+.task-when > :not([hidden]) ~ :not([hidden]) { margin-block: 4px 0; }
+.task-change-shift > :not(summary) { margin-top: 2px; }
+.task-form-card-header { margin-bottom: 8px; }
+.task-edit-overlay .task-edit-sheet { min-height: 0; }
+.task-edit-sheet .task-form, .task-edit-sheet .task-form-body { flex: 0 1 auto; min-height: 0; }
+.task-edit-sheet .task-form-body { padding-bottom: 0; }
+.task-edit-sheet .task-form-footer { padding-top: 8px; }
+.task-form-current-card { padding-block: 8px; }
+.shift-hours-well { height: 68px; }
+.task-who-day > span.task-day-swap-badge { width: auto; padding: 0 2px; }
