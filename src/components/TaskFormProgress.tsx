@@ -22,7 +22,7 @@ export function TaskFormProgress({ step, count, summaries, onEdit }: Props) {
     {names.slice(0, step).map((name, i) => <button key={name} type="button" aria-label={`Edit ${name}`} onClick={() => onEdit(i)} className="task-form-summary pressable">
       <span aria-hidden="true" className="task-form-summary-number">{i + 1}</span>
       <span className="task-form-summary-name">{name}</span>
-      <span className="task-form-summary-value">{summaries[i]}</span>
+      <span className="task-form-summary-value">{i === 1 && <span aria-hidden="true" className="task-when-summary-dot" />}{summaries[i]}</span>
       <Pencil aria-hidden="true" className="w-4 h-4 shrink-0 text-ink-soft" />
     </button>)}
   </>;

@@ -1,10 +1,13 @@
+import { Info } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import type { Shift } from '../types';
 import { apiWrite, captureEditBaseline } from '../lib/api';
 import { formatShiftHours, shiftEditableFields } from '../lib/shifts';
 
+const barPosition = (minutes: number, end = false) => end && minutes === 360 ? 1 : ((minutes - 360 + 1440) % 1440) / 1440;
+
 /** Draft locally while moving. Commit a changed gesture once, on release. */
-export const ShiftHoursBar: React.FC<{ shift: Shift; pinMinutes?: number; onSaved: (shift: Shift) => void }> = ({ shift, pinMinutes, onSaved }) => {
+export const ShiftHoursBar: React.FC<{ shift: Shift; pinMinutes?: number; readOnly?: boolean; onSaved: (shift: Shift) => void }> = ({ shift, pinMinutes, readOnly = false, onSaved }) => {
   const [hours, setHours] = useState({ startMinutes: shift.startMinutes, endMinutes: shift.endMinutes });
   const draft = useRef(hours);
   const original = useRef(hours);
@@ -33,30 +36,31 @@ export const ShiftHoursBar: React.FC<{ shift: Shift; pinMinutes?: number; onSave
     finally { lock.current = false; setBusy(false); }
   };
   const handle = (key: 'startMinutes' | 'endMinutes') => <>
-    <input type="range" aria-label={key === 'startMinutes' ? 'Shift start' : 'Shift end'} min={0} max={1439} step={30} value={hours[key]} disabled={busy}
-      onPointerDown={begin} onFocus={begin} onChange={(e) => { const next = { ...draft.current, [key]: Number(e.target.value) }; draft.current = next; setHours(next); }}
+    <input type="range" aria-label={key === 'startMinutes' ? 'Shift start' : 'Shift end'} min={360} max={1800} step={30} value={hours[key] < 360 || (key === 'endMinutes' && hours[key] === 360) ? hours[key] + 1440 : hours[key]} disabled={busy}
+      onPointerDown={begin} onFocus={begin} onChange={(e) => { const next = { ...draft.current, [key]: Number(e.target.value) % 1440 }; draft.current = next; setHours(next); }}
       onPointerUp={() => void commit()} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void commit(); } }} onBlur={() => void commit()}
       className="shift-hours-handle block w-full min-h-11 accent-gold" />
-    <span className="relative block w-max -translate-x-1/2 text-center" style={{ left: `clamp(48px, calc(44px / 2 + (100% - 44px) * ${hours[key] / 1439}), calc(100% - 48px))` }}>{key === 'startMinutes' ? 'From' : 'Until'} {Math.floor(hours[key] / 60) % 12 || 12}:{String(hours[key] % 60).padStart(2, '0')} {hours[key] < 720 ? 'AM' : 'PM'}</span>
+    <span className="shift-hours-bubble relative block w-max -translate-x-1/2 text-center" style={{ left: `clamp(48px, calc(44px / 2 + (100% - 44px) * ${barPosition(hours[key], key === 'endMinutes')}), calc(100% - 48px))` }}>{key === 'startMinutes' ? 'From' : 'Until'} {Math.floor(hours[key] / 60) % 12 || 12}:{String(hours[key] % 60).padStart(2, '0')} {hours[key] < 720 ? 'AM' : 'PM'}</span>
   </>;
-  return <div className="space-y-2" aria-label="Shift hours">
-    <p className="text-base text-ink">{formatShiftHours({ ...shift, ...hours })}</p>
-    <div className="rounded-lg bg-sunken p-3 space-y-2">
-      <label className="block text-sm text-ink-soft">
+  return <div className={`shift-hours-visual space-y-2 ${readOnly ? 'is-readonly' : ''}`} aria-label="Shift hours">
+    <p className="sr-only">{formatShiftHours({ ...shift, ...hours })}</p>
+    <div className="shift-hours-well space-y-2">
+      <label hidden={readOnly} className="shift-hours-start block text-sm text-ink-soft">
         {handle('startMinutes')}
       </label>
-      <div aria-label="24-hour shift range" className="relative mx-6 h-3 rounded-full bg-line-control" data-shift-track>
-        {(hours.startMinutes < hours.endMinutes ? [[hours.startMinutes, hours.endMinutes]] : [[0, hours.endMinutes], [hours.startMinutes, 1440]]).map(([start, end]) => <span key={start} aria-hidden="true" data-shift-band className="absolute inset-y-0 rounded-full bg-gold-deep" style={{ left: `${start / 1440 * 100}%`, width: `${(end - start) / 1440 * 100}%` }} />)}
-        {pinMinutes !== undefined && <span role="img" aria-label="Target time pin" className="absolute bottom-full text-gold-deep" style={{ left: `${pinMinutes / 1440 * 100}%` }}>▼</span>}
+      <div aria-label="24-hour shift range" className="shift-hours-track relative mx-6 rounded-lg bg-line-control" data-shift-track>
+        <span aria-hidden="true" className="shift-hours-default shift-hours-morning" /><span aria-hidden="true" className="shift-hours-default shift-hours-afternoon" /><span aria-hidden="true" className="shift-hours-default shift-hours-night" />
+        {(barPosition(hours.startMinutes) < barPosition(hours.endMinutes, true) ? [[barPosition(hours.startMinutes), barPosition(hours.endMinutes, true)]] : [[0, barPosition(hours.endMinutes, true)], [barPosition(hours.startMinutes), 1]]).filter(([start, end]) => end > start).map(([start, end]) => <span key={start} aria-hidden="true" data-shift-band className="absolute inset-y-0 rounded-full bg-gold-deep" style={{ left: `${start * 100}%`, width: `${(end - start) * 100}%` }} />)}
+        {pinMinutes !== undefined && <span role="img" aria-label="Target time pin" className="shift-hours-pin absolute bottom-full text-ink" style={{ left: `${barPosition(pinMinutes) * 100}%` }}>by {Math.floor(pinMinutes / 60) % 12 || 12}:{String(pinMinutes % 60).padStart(2, '0')} {pinMinutes < 720 ? 'AM' : 'PM'}<span className="block">▼</span></span>}
       </div>
       <div className="relative mx-6 h-4 text-xs text-ink-soft" aria-hidden="true">
-        {[['6a', 25], ['12p', 50], ['6p', 75], ['12a', 100]].map(([label, left]) => <span key={label} className="absolute -translate-x-full" style={{ left: `${left}%` }}>{label}</span>)}
+        {[['6a', 0], ['10a', 100 / 6], ['2p', 100 / 3], ['6p', 50], ['10p', 200 / 3], ['2a', 500 / 6], ['6a', 100]].map(([label, left]) => <span key={left} className="absolute -translate-x-1/2" style={{ left: `${left}%` }}>{label}</span>)}
       </div>
-      <label className="block text-sm text-ink-soft">
+      <label hidden={readOnly} className="shift-hours-end block text-sm text-ink-soft">
         {handle('endMinutes')}
       </label>
     </div>
-    <p className="text-sm text-ink-soft">Changes the {shift.name} shift's hours for every task on it, every week</p>
+    <p className="shift-hours-hint text-xs text-ink-soft"><Info aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{!readOnly && <>Drag the ends to adjust. <strong>Changes the {shift.name} shift's hours for every task on it, every week</strong></>}</span></p>
     {busy && <p className="text-sm text-ink-soft">Saving…</p>}
     {error && <p role="alert" className="text-base text-bad">{error} <button type="button" onClick={() => { attempted.current = null; void commit(); }} className="min-h-11 px-3 underline pressable">Try again</button></p>}
   </div>;

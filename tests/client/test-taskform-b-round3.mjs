@@ -87,12 +87,12 @@ try {
   const cancel = retained.buttons().find((b) => b.label === 'Cancel');
   assert.match(cancel.el.props.className, /min-h-12/); assert.match(cancel.el.props.className, /text-base/);
 
-  for (const [name, intervals] of [['Afternoon', [[840,1320]]], ['Night', [[0,360],[1320,1440]]]]) {
+  for (const [name, intervals] of [['Afternoon', [[480,960]]], ['Night', [[960,1440]]]]) {
     const bar = mount(ShiftHoursBar, { shift: shifts.find((s) => s.name === name), onSaved: noop }); await bar.render();
     const track = bar.find((e) => e.props['data-shift-track'])[0]; assert.ok(track);
     const bands = bar.find((e) => e.props['data-shift-band']); assert.equal(bands.length, intervals.length);
-    bands.forEach((band, i) => { const [a,b] = intervals[i]; assert.equal(band.props.style.left, `${a / 1440 * 100}%`); assert.equal(band.props.style.width, `${(b-a) / 1440 * 100}%`); assert.match(band.props.className, /bg-gold-deep/); });
-    assert.match(bar.text(), /6a 12p 6p 12a/);
+    bands.forEach((band, i) => { const [a,b] = intervals[i]; assert.equal(band.props.style.left, `${a / 1440 * 100}%`); assert.equal(band.props.style.width, `${(b / 1440 - a / 1440) * 100}%`); assert.match(band.props.className, /bg-gold-deep/); });
+    assert.match(bar.text(), /6a 10a 2p 6p 10p 2a 6a/);
     const handles = bar.find((e) => e.props.type === 'range'); assert.equal(handles.length, 2);
     assert.ok(handles.every((e) => e.props.className.includes('min-h-11') && !e.props.className.includes('absolute')));
   }

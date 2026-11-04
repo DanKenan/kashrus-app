@@ -98,14 +98,14 @@ assert.equal(writes.length, 6); assert.equal(lastSaved.startMinutes, 960); asser
 assert.match(bar.text(), /4:00 PM – 11:00 PM/);
 assert.ok(bar.find((e) => e.props.type === 'range').every((e) => !e.props.className.includes('absolute')));
 
-// Selected controls have both a check and the app's solid ON appearance.
+// When controls expose selection through aria-pressed; Who keeps its solid ON appearance.
 const choices = await make({ taskToEdit: { ...task, assignmentMode: 'task' } });
 await choices.submit();
-expectOn(choices, (e) => e.props['aria-label'] === 'A time');
-await choices.click((e) => e.props['aria-label'] === 'A shift'); expectOn(choices, (e) => e.props['aria-label'] === 'A shift');
-expectOn(choices, (e) => e.props['aria-label'] === 'Any time during the shift');
-await choices.click('By a set time'); expectOn(choices, (e) => e.props['aria-label'] === 'By a set time');
-await choices.click('Some days'); expectOn(choices, (e) => e.props['aria-pressed'] === true && e.props.children?.includes?.('Some days'));
+assert.equal(choices.find((e) => e.props['aria-label'] === 'A time')[0].props['aria-pressed'], true);
+await choices.click((e) => e.props['aria-label'] === 'A shift'); assert.equal(choices.find((e) => e.props['aria-label'] === 'A shift')[0].props['aria-pressed'], true);
+assert.equal(choices.find((e) => e.props['aria-label'] === 'Any time during the shift')[0].props['aria-pressed'], true);
+await choices.click('By a set time'); assert.equal(choices.find((e) => e.props['aria-label'] === 'By a set time')[0].props['aria-pressed'], true);
+await choices.click('Some days'); assert.ok(choices.find((e) => e.props['aria-pressed'] === true && e.props.children?.includes?.('Some days')).length);
 await choices.submit(); await choices.click((e) => e.type === 'button' && e.props.children?.[0]?.props?.children === 'Fri');
 expectOn(choices, (e) => e.props.children?.includes?.('Every '));
 await choices.click('Just this'); expectOn(choices, (e) => e.props.children?.includes?.('Just this '));

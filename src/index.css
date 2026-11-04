@@ -491,3 +491,90 @@
   .task-form-overlay { padding: 0; background: var(--paper); }
   .task-form-shell { height: 100dvh; max-height: 100dvh; max-width: none; border: 0; border-radius: 0; box-shadow: none; }
 }
+
+/* When: compact controls retain 44px hit areas and the shared type floor. */
+.task-when-label { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--ink-soft); font-size: 12px; font-weight: 650; }
+.task-when-label > span { font-weight: 400; }
+.task-when-banner { display: flex; align-items: center; gap: 8px; min-height: 36px; margin-bottom: 16px; padding: 8px; border: 1px solid var(--gold); border-radius: 12px; background: var(--gold-wash); color: var(--gold-ink); font-size: 12px; }
+.task-when-short-names { min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-when-banner > span:first-of-type { flex-shrink: 0; }
+.task-when-segment { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 4px; border-radius: 12px; background: var(--sunken); }
+.task-when-segment > button { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; border-radius: 8px; color: var(--ink-soft); font-size: 14px; font-weight: 600; }
+.task-when-segment > button[aria-pressed='true'] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px var(--line); }
+.task-when-shift { display: flex; align-items: center; flex-shrink: 0; min-height: 46px; border: 1px solid var(--line-control); border-radius: 12px; background: var(--paper); color: var(--ink); }
+.task-when-shift-pick { min-width: 86px; min-height: 44px; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 650; }
+.task-when-shift-pick > span:first-child { display: flex; align-items: center; justify-content: center; gap: 4px; max-width: 144px; overflow: hidden; white-space: nowrap; }
+.task-when-shift-hours { display: block; font-size: 12px; font-weight: 400; color: var(--ink-soft); white-space: nowrap; }
+.task-when-shift.is-picked { background: linear-gradient(var(--task-form-gold-start), var(--task-form-gold-end)); border-color: var(--gold-deep); color: var(--paper); }
+.task-when-shift.is-picked .task-when-shift-hours { color: inherit; }
+.task-shift-icon { color: var(--ink-soft); }
+.task-shift-morning { color: var(--gold-deep); }
+.task-shift-afternoon { color: var(--warn); }
+.task-shift-night { color: var(--ink-soft); }
+.task-when-shift.is-picked .task-shift-icon { color: inherit; }
+.task-when-pencil { min-width: 44px; min-height: 44px; display: grid; place-items: center; }
+.task-when-pencil > span { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; background: var(--surface); color: var(--gold-deep); }
+.task-when-new-wrap { display: flex; align-items: center; padding-left: 8px; border-left: 1px solid var(--line); }
+.task-when-new { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 52px; min-height: 52px; border: 1.5px solid var(--gold); border-radius: 12px; background: var(--gold-wash); color: var(--gold-ink); font-size: 12px; }
+.task-when-deadline { border-top: 1px solid var(--line); padding-top: 12px; }
+.task-when-radio { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px; border: 1px solid var(--line-control); border-radius: 12px; text-align: left; color: var(--ink); font-size: 14px; }
+.task-when-radio small { display: block; color: var(--ink-soft); font-size: 12px; }
+.task-when-radio[aria-pressed='true'] { border: 1.5px solid var(--gold); background: var(--gold-wash); }
+.task-when-radio-ring { width: 16px; height: 16px; flex-shrink: 0; border: 1px solid var(--line-control); border-radius: 50%; }
+.task-when-radio[aria-pressed='true'] .task-when-radio-ring { border: 5px solid var(--gold-deep); }
+.task-when-time-pill { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 4px; border-radius: 6px; background: var(--sunken); font-size: 12px; white-space: nowrap; }
+.task-when-clock { display: flex; gap: 8px; align-items: center; }
+.task-when-clock > button { display: grid; place-items: center; flex-shrink: 0; width: 44px; height: 52px; border-radius: 12px; background: var(--sunken); color: var(--ink-soft); }
+.task-when-clock-inputs { flex: 1; min-width: 0; border: 1.5px solid var(--gold); border-radius: 12px; padding: 4px; }
+.task-when-clock-inputs > div { gap: 0; justify-content: center; }
+.task-when-clock-inputs select { min-height: 44px; padding: 0; border: 0; background: transparent; font-size: 24px; font-weight: 700; }
+.task-when-clock-inputs button { min-width: 44px; min-height: 44px; padding: 0 4px; font-size: 12px; }
+.task-when-clock-inputs > div > div { border: 0; }
+.task-when-clock-inputs > div > div button { min-height: 44px; }
+.task-when-detected { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 8px; border-radius: 8px; background: var(--gold-wash); color: var(--gold-ink); font-size: 12px; }
+.task-when-repeat { border-top: 1px solid var(--line); padding-top: 12px; }
+.task-when-repeat-pills { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.task-when-repeat-pills button, .task-when-weekday { min-height: 44px; padding: 4px; border: 1px solid var(--line-control); border-radius: 8px; color: var(--ink-soft); font-size: 12px; }
+.task-when-repeat-pills button[aria-pressed='true'], .task-when-weekday[aria-pressed='true'] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.task-when-note { display: flex; align-items: flex-start; gap: 8px; color: var(--ink-soft); font-size: 12px; }
+.shift-hours-well { padding: 8px 0; }
+.shift-hours-track { height: 28px; background: repeating-linear-gradient(to right, transparent 0, transparent calc(100% / 24 - 1px), var(--line) calc(100% / 24 - 1px), var(--line) calc(100% / 24)), var(--sunken); }
+.shift-hours-track [data-shift-band] { border-radius: 8px; }
+.shift-hours-default { position: absolute; top: 0; bottom: 0; opacity: 0.15; }
+.shift-hours-morning { left: 0; width: 33.333%; background: var(--gold); }
+.shift-hours-afternoon { left: 33.333%; width: 33.333%; background: var(--warn); }
+.shift-hours-night { left: 66.666%; width: 33.334%; background: var(--ink-soft); }
+.shift-hours-bubble { padding: 2px 8px; border-radius: 6px; background: var(--gold-wash); color: var(--gold-ink); font-size: 12px; }
+.shift-hours-handle:active + .shift-hours-bubble { background: var(--ink); color: var(--paper); }
+.shift-hours-hint { display: flex; align-items: flex-start; gap: 4px; }
+.shift-hours-hint strong { font-weight: 600; }
+.shift-hours-pin { z-index: 1; transform: translateX(-50%); width: max-content; padding: 2px 4px; border-radius: 6px; background: var(--ink); color: var(--paper); text-align: center; font-size: 12px; }
+.shift-hours-visual.is-readonly .shift-hours-well { padding-top: 36px; }
+.shift-hours-visual.is-readonly .shift-hours-hint { display: none; }
+.shift-hours-visual .shift-hours-handle::-webkit-slider-thumb { width: 44px; height: 44px; border: 0; border-radius: 50%; background: radial-gradient(circle, var(--surface) 0 9px, var(--gold-deep) 10px 12px, transparent 13px); }
+.shift-hours-visual .shift-hours-handle::-moz-range-thumb { width: 44px; height: 44px; border: 0; border-radius: 50%; background: radial-gradient(circle, var(--surface) 0 9px, var(--gold-deep) 10px 12px, transparent 13px); }
+.shift-hours-visual .shift-hours-handle::-webkit-slider-runnable-track { background: transparent; }
+.shift-hours-visual .shift-hours-handle::-moz-range-track { background: transparent; }
+@media (max-width: 359px) {
+  .task-when-clock { display: grid; grid-template-columns: 1fr 1fr; }
+  .task-when-clock-inputs { grid-column: 1 / -1; grid-row: 1; }
+  .task-when-clock > button { width: 100%; }
+  .task-when-radio { flex-wrap: wrap; }
+}
+.shift-hours-visual label[hidden] { display: none; }
+.task-when-summary-dot { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--gold); }
+.task-detected-afternoon { background: var(--warn-bg); color: var(--warn); }
+.task-detected-night { background: var(--sunken); color: var(--ink); }
+.shift-hours-well { position: relative; padding-top: 32px; padding-bottom: 8px; }
+.shift-hours-start, .shift-hours-end { position: absolute; inset: 24px 0 auto; height: 44px; pointer-events: none; }
+.shift-hours-visual .shift-hours-handle { pointer-events: none; }
+.shift-hours-visual .shift-hours-handle::-webkit-slider-thumb { pointer-events: auto; cursor: ew-resize; }
+.shift-hours-visual .shift-hours-handle::-moz-range-thumb { pointer-events: auto; cursor: ew-resize; }
+.shift-hours-visual .shift-hours-bubble { position: absolute; top: -20px; pointer-events: none; }
+.shift-hours-visual .shift-hours-track { pointer-events: none; }
+.shift-hours-visual.is-readonly .shift-hours-well { padding-top: 36px; }
+.task-when-weekday { min-width: 44px; }
+.shift-hours-visual .shift-hours-handle::-webkit-slider-thumb { background: linear-gradient(var(--gold-deep), var(--gold-deep)) center / 2px 8px no-repeat, radial-gradient(circle, var(--surface) 0 9px, var(--gold-deep) 10px 12px, transparent 13px); }
+.shift-hours-visual .shift-hours-handle::-moz-range-thumb { background: linear-gradient(var(--gold-deep), var(--gold-deep)) center / 2px 8px no-repeat, radial-gradient(circle, var(--surface) 0 9px, var(--gold-deep) 10px 12px, transparent 13px); }
+.shift-hours-start, .shift-hours-end { z-index: 2; }
+.shift-hours-start:focus-within, .shift-hours-end:focus-within { z-index: 3; }

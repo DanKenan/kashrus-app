@@ -7,7 +7,7 @@ import type { Shift } from '../types';
 import { shiftWeekdays, shiftIsUpcoming, venueShifts, shiftUserIds, formatShiftHours } from '../lib/shifts';
 import { ANY_TIME_LABEL, isAnyTimeTask, isAnyTimeText } from '../lib/anyTime';
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Pencil, Clock, Plus, CirclePlus, List, Trash2, CheckCircle2, ListFilter } from 'lucide-react';
+import { X, Pencil, Clock, Plus, CirclePlus, List, Layers, Sun, Sunset, Moon, Circle, Info, Repeat2, Minus, Trash2, CheckCircle2, ListFilter } from 'lucide-react';
 import { Task, TaskInputType } from '../types';
 import { captureEditBaseline, newActionId } from '../lib/api';
 import { DAYS_MAP } from '../lib/utils';
@@ -63,6 +63,11 @@ export function pickerTimeToMinutes(t: PickerTime): number {
   let h = t.hour % 12;
   if (t.ampm === 'PM') h += 12;
   return h * 60 + t.minute;
+}
+
+/** Compact presentation only; task and shift time values stay unchanged. */
+function compactShiftHours(shift: Shift): string {
+  return formatShiftHours(shift).replaceAll(':00', '').replace(/ (AM|PM) – (.+) \1/, '–$2 $1').replace(' – ', '–').replace(' (next day)', '');
 }
 
 const MINUTE_OPTIONS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
@@ -460,7 +465,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const count = extras.length + 1;
   const stepName = ['What', 'When', 'Who'][step];
   const whatSummary = `${count > 1 ? `${count} tasks · ` : ''}${[title, ...extras.map((t) => t.name)].filter(Boolean).join(', ')}`;
-  const whenSummary = `${shiftMode && chosenShift ? `${chosenShift.name} · ${formatShiftHours(chosenShift)}` : isAny ? ANY_TIME_LABEL : customTimeText ?? formatPickerTime(time1)} · ${repeat.toLowerCase()}`;
+  const whenSummary = `${shiftMode && chosenShift ? `${chosenShift.name} ${compactShiftHours(chosenShift)}` : isAny ? ANY_TIME_LABEL : customTimeText ?? formatPickerTime(time1)} · ${repeat.toLowerCase()}`;
   const notice = savedNotice && <div role="status" className="task-form-saved-notice"><span aria-hidden="true">✓</span><span>{savedNotice}</span><button type="button" aria-label="Dismiss saved notification" onClick={() => setSavedNotice(null)} className="min-h-11 min-w-11 rounded-full pressable"><X className="w-4 h-4 mx-auto" /></button></div>;
   if (!isOpen) return notice;
 
@@ -629,10 +634,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           <div className="task-form-current-card">
             <div className="task-form-card-header">
               <span aria-hidden="true" className="task-form-heading-number">{step + 1}</span>
-              <div className="min-w-0 flex-1"><h3 data-task-form-current-step={stepName}>{stepName}</h3>{step === 0 && <p>{count > 1 ? 'Name the tasks' : 'Name the task'}</p>}</div>
+              <div className="min-w-0 flex-1"><h3 data-task-form-current-step={stepName}>{stepName}</h3>{step === 0 && <p>{count > 1 ? 'Name the tasks' : 'Name the task'}</p>}{step === 1 && <p>Pick a shift, or a set time</p>}</div>
               {step === 0 && count > 1 && <span className="task-form-count" data-task-count><List aria-hidden="true" className="w-4 h-4" />{count} tasks</span>}
             </div>
-          {step > 0 && extras.length > 0 && <p className="p-3 rounded-lg bg-sunken text-base text-ink">Applies to all {count} tasks</p>}
+          {step > 0 && extras.length > 0 && <div className="task-when-banner"><Layers aria-hidden="true" className="w-4 h-4 shrink-0" /><span>Applies to all {count} tasks</span><span className="task-when-short-names">{[title, ...extras.map((t) => t.name)].map((name) => name.trim().split(/\s+/).slice(0, 2).join(' ')).join(' · ')}</span></div>}
           <div hidden={step !== 0} className="task-form-what space-y-4">
           {/* Task Title */}
           <div>
@@ -984,33 +989,40 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </label>
 
           </div>
-          <section hidden={step !== 1} aria-label="When" className="space-y-4">
-            <div role="group" aria-label="Time or Shift" className="grid grid-cols-2 gap-2">
-              <button type="button" aria-label="A shift" aria-pressed={shiftMode} onClick={() => { const shift = pickerShifts.find((s) => s.id === shiftId) || detectedShift || pickerShifts[0]; if (shift) chooseShift(shift); }} className={choice(shiftMode)}>{shiftMode ? '✓ ' : ''}A shift</button>
-              <button type="button" aria-label="A time" aria-pressed={!shiftMode} onClick={() => setShiftMode(false)} className={choice(!shiftMode)}>{!shiftMode ? '✓ ' : ''}A time</button>
+          <section hidden={step !== 1} aria-label="When" className="task-when space-y-4">
+            <div role="group" aria-label="Time or Shift" className="task-when-segment">
+              <button type="button" aria-label="A shift" aria-pressed={shiftMode} onClick={() => { const shift = pickerShifts.find((s) => s.id === shiftId) || detectedShift || pickerShifts[0]; if (shift) chooseShift(shift); }} className="pressable"><Layers aria-hidden="true" className="w-4 h-4" />A shift</button>
+              <button type="button" aria-label="A time" aria-pressed={!shiftMode} onClick={() => setShiftMode(false)} className="pressable"><Clock aria-hidden="true" className="w-4 h-4" />A time</button>
             </div>
             {shiftMode && <div className="space-y-3">
+              <div className="task-when-label">Which shift?<span>tap one</span></div>
               <div className="flex gap-2 min-w-0">
                 <div className="task-shift-scroll flex flex-1 gap-2 overflow-x-auto min-w-0" role="group" aria-label="Shift list">
-                  {pickerShifts.map((shift) => <div key={shift.id} className={`flex shrink-0 items-center rounded-full border ${shift.id === shiftId ? 'bg-gold-deep text-paper border-gold-deep' : 'bg-surface text-ink border-line-control'}`}>
-                    <button ref={shift.id === shiftId ? pickedShiftRef : undefined} type="button" aria-pressed={shift.id === shiftId} onClick={() => chooseShift(shift)} className="min-h-11 px-3 py-2 rounded-full text-base whitespace-nowrap pressable"><span className="block max-w-40 truncate">{shift.id === shiftId ? '✓ ' : ''}{shift.name}</span><span className="block text-xs">{formatShiftHours(shift).replaceAll(':00', '').replace(' – ', '–').replace(' (next day)', '')}</span></button>
-                    {shift.id === shiftId && <button type="button" aria-label={`Edit ${shift.name} shift`} onClick={() => { setEditingShift(shift); setCreatingShift(true); }} className="min-h-11 min-w-11 rounded-full pressable"><Pencil aria-hidden="true" className="w-4 h-4 mx-auto" /></button>}
-                  </div>)}
+                  {pickerShifts.map((shift) => {
+                    const Icon = shift.name.toLowerCase() === 'morning' ? Sun : shift.name.toLowerCase() === 'afternoon' ? Sunset : shift.name.toLowerCase() === 'night' ? Moon : Circle;
+                    return <div key={shift.id} className={`task-when-shift ${shift.id === shiftId ? 'is-picked' : ''}`}>
+                      <button ref={shift.id === shiftId ? pickedShiftRef : undefined} type="button" aria-pressed={shift.id === shiftId} onClick={() => chooseShift(shift)} className="task-when-shift-pick pressable"><span><Icon aria-hidden="true" className={`w-4 h-4 task-shift-icon task-shift-${shift.name.toLowerCase()}`} />{shift.id === shiftId ? '✓ ' : ''}{shift.name}</span><span className="task-when-shift-hours">{compactShiftHours(shift)}</span></button>
+                      {shift.id === shiftId && <button type="button" aria-label={`Edit ${shift.name} shift`} onClick={() => { setEditingShift(shift); setCreatingShift(true); }} className="task-when-pencil pressable"><span><Pencil aria-hidden="true" className="w-4 h-4" /></span></button>}
+                    </div>;
+                  })}
                 </div>
-                <button type="button" onClick={() => { setEditingShift(undefined); setCreatingShift(true); }} className="shrink-0 min-h-11 px-3 rounded-full border border-line-control text-ink bg-surface pressable">+ New</button>
+                <div className="task-when-new-wrap"><button type="button" onClick={() => { setEditingShift(undefined); setCreatingShift(true); }} className="task-when-new pressable"><Plus aria-hidden="true" className="w-4 h-4" /><span>+ New</span></button></div>
               </div>
+              {!chosenShift && <p className="task-when-note"><Info aria-hidden="true" className="w-4 h-4" />Tap a shift. Morning, Afternoon and Night come built in.</p>}
               {chosenShift && <ShiftHoursBar shift={chosenShift} pinMinutes={shiftTime ? pickerTimeToMinutes(time1) : undefined} onSaved={(shift) => { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); onShiftCreated?.(shift); }} />}
-              <div role="group" aria-label="Shift target time" className="space-y-2">
-                <button type="button" aria-label="Any time during the shift" aria-pressed={!shiftTime} onClick={() => setShiftTime(false)} className={choice(!shiftTime)}>{!shiftTime ? '✓ ' : ''}Any time during the shift</button>
-                <button type="button" aria-label="By a set time" aria-pressed={shiftTime} onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); }} className={choice(shiftTime)}>{shiftTime ? '✓ ' : ''}By a set time</button>
+              <p className="task-when-label">When during the shift?</p>
+              <div role="group" aria-label="Shift target time" className="task-when-deadline space-y-2">
+                <button type="button" aria-label="Any time during the shift" aria-pressed={!shiftTime} onClick={() => setShiftTime(false)} className="task-when-radio pressable"><span aria-hidden="true" className="task-when-radio-ring" /><span>Any time during the shift<small>Done any time {chosenShift ? compactShiftHours(chosenShift) : ''}</small></span></button>
+                <button type="button" aria-label="By a set time" aria-pressed={shiftTime} onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); }} className="task-when-radio pressable"><span aria-hidden="true" className="task-when-radio-ring" /><span>By a set time<small>A deadline inside the shift</small></span><span className="task-when-time-pill"><Clock aria-hidden="true" className="w-4 h-4" />{formatPickerTime(time1)}</span></button>
               </div>
             </div>}
             {(!shiftMode || shiftTime) && <div className="space-y-2">
-              <label className="block text-sm text-ink-soft">Target Time</label>
+              <label className="task-when-label">{shiftMode ? 'Target Time' : 'At what time?'}</label>
               {anyTime ? <div className="text-base text-ink-soft">Any time · no target time <button type="button" onClick={() => setAnyTime(false)} className="min-h-11 px-3 underline pressable">Set a time</button></div>
                 : customTimeText !== null ? <div className="flex gap-2"><input aria-label="Custom time" value={customTimeText} onChange={(e) => setCustomTimeText(e.target.value)} className="min-h-11 min-w-0 flex-1 px-3 rounded-lg border border-line-control bg-sunken text-base text-ink" /><button type="button" onClick={() => setCustomTimeText(null)} className="min-h-11 px-3 text-ink underline pressable">Use clock</button></div>
-                : <TimePickerRow value={time1} onChange={setTime1} />}
-              {!shiftMode && !anyTime && customTimeText === null && <p className="text-base text-ink-soft">{detectedShift ? `During the ${detectedShift.name} shift on ${DAYS_MAP[detectedDay]} (${formatShiftHours(detectedShift, detectedDay)})` : 'Not during a shift'}</p>}
+                : <div className="task-when-clock"><button type="button" aria-label="Earlier time" onClick={() => { const m = (pickerTimeToMinutes(time1) + 1410) % 1440; setTime1({ hour: Math.floor(m / 60) % 12 || 12, minute: m % 60, ampm: m < 720 ? 'AM' : 'PM' }); }} className="pressable"><Minus className="w-5 h-5" /></button><div className="task-when-clock-inputs"><TimePickerRow value={time1} onChange={setTime1} /></div><button type="button" aria-label="Later time" onClick={() => { const m = (pickerTimeToMinutes(time1) + 30) % 1440; setTime1({ hour: Math.floor(m / 60) % 12 || 12, minute: m % 60, ampm: m < 720 ? 'AM' : 'PM' }); }} className="pressable"><Plus className="w-5 h-5" /></button></div>}
+              {!shiftMode && !anyTime && customTimeText === null && <p className={`task-when-detected task-detected-${detectedShift?.name.toLowerCase()}`}><Clock aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{detectedShift ? `During the ${detectedShift.name} shift on ${DAYS_MAP[detectedDay]} (${formatShiftHours(detectedShift, detectedDay)})` : 'Not during a shift'}</span><span className="ml-auto">auto</span></p>}
+              {!shiftMode && !anyTime && customTimeText === null && detectedShift && <><ShiftHoursBar shift={detectedShift} pinMinutes={pickerTimeToMinutes(time1)} readOnly onSaved={() => {}} /><p className="task-when-note">Due at {formatPickerTime(time1)}, inside the {detectedShift.name} shift.</p></>}
               {time2 && !anyTime && <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />}
               {!usingShift && assignType === 'all' && !isAny && (customTimeText === null || parseTimeText(customTimeText) !== null) && <p className="text-xs text-ink-soft mt-2">People with a shift today (including an overnight shift still running) see it only if this time is inside their shift. People with no shift see it too.</p>}
               <div className="flex flex-wrap gap-2">
@@ -1018,10 +1030,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 {!anyTime && !time2 && <button type="button" onClick={() => setTime2({ hour: 3, minute: 0, ampm: 'PM' })} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">+ Second time</button>}
               </div>
             </div>}
-            <div role="group" aria-label="Repeat" className="space-y-2">
-              <p className="text-sm text-ink-soft">Repeat</p>
-              <div className="flex flex-wrap gap-2">{['One time', 'Every day', 'Some days', 'Every week'].map((label) => <button key={label} type="button" aria-pressed={repeat === label} onClick={() => { setRepeat(label); setScheduleType(label === 'One time' ? 'specific_dates' : 'recurring'); if (label === 'Every day') setSelectedDays([0, 1, 2, 3, 4, 5, 6]); if (label === 'Every week') setSelectedDays([new Date(`${today}T12:00:00Z`).getUTCDay()]); }} className={choice(repeat === label)}>{repeat === label ? '✓ ' : ''}{label}</button>)}</div>
-              {(repeat === 'Some days' || repeat === 'Every week') && <div className="flex flex-wrap gap-2">{DAYS_MAP.map((name, day) => <button key={day} type="button" aria-pressed={selectedDays.includes(day)} onClick={() => repeat === 'Every week' ? setSelectedDays([day]) : toggleDay(day)} className={choice(selectedDays.includes(day))}>{selectedDays.includes(day) ? '✓ ' : ''}{name}</button>)}</div>}
+            <div role="group" aria-label="Repeat" className="task-when-repeat space-y-2">
+              <p className="task-when-label">Repeat</p>
+              <div className="task-when-repeat-pills">{['One time', 'Every day', 'Some days', 'Every week'].map((label) => <button key={label} type="button" aria-pressed={repeat === label} onClick={() => { setRepeat(label); setScheduleType(label === 'One time' ? 'specific_dates' : 'recurring'); if (label === 'Every day') setSelectedDays([0, 1, 2, 3, 4, 5, 6]); if (label === 'Every week') setSelectedDays([new Date(`${today}T12:00:00Z`).getUTCDay()]); }} className="pressable">{repeat === label ? '✓ ' : ''}{label}</button>)}</div>
+              {(repeat === 'Some days' || repeat === 'Every week') && <div className="flex flex-wrap gap-2">{DAYS_MAP.map((name, day) => <button key={day} type="button" aria-pressed={selectedDays.includes(day)} onClick={() => repeat === 'Every week' ? setSelectedDays([day]) : toggleDay(day)} className="task-when-weekday pressable">{selectedDays.includes(day) ? '✓ ' : ''}{name}</button>)}</div>}
+              <p className="task-when-note"><Repeat2 aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{repeat === 'One time' ? `Once: ${selectedDates.length ? selectedDates.map((date) => new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })).join(', ') : 'Pick a date'}` : repeat === 'Every week' ? `Every ${new Date(`${nextWeekday(today, selectedDays[0] ?? todayWeekday)}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' })}` : `${repeat}, ${selectedDays.map((d) => DAYS_MAP[d]).join(' · ')}`}</span></p>
               {scheduleType === 'specific_dates' && <MonthlyCalendarPicker selectedDates={selectedDates} onToggleDate={handleToggleDate} onClearAll={() => setSelectedDates([])} onSelectToday={handleSelectToday} onSelectTomorrow={handleSelectTomorrow} timeZone={timeZone} />}
             </div>
           </section>
