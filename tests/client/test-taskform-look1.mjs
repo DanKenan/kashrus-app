@@ -10,7 +10,7 @@ assert.match(view.html(), /aria-label="Task steps"/);
 assert.match(view.html(), /aria-current="step" data-step-name="What"/);
 assert.match(view.html(), /Kitchen/);
 await view.type('task-title-input', 'Check eggs');
-await view.click('+ Add another task');
+await view.click('Add another task');
 assert.match(view.html(), /data-task-count="true"/);
 assert.match(view.html(), /2 tasks/);
 const secondName = view.find((e) => e.props['aria-label'] === 'Task 2 name')[0];

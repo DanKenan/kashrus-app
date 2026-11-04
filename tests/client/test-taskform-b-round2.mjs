@@ -56,7 +56,7 @@ await days.click('Use Yossi every day'); await days.submit(); assert.deepEqual(s
 
 // Batch validation sees the real envelope and one stable ID per unchanged retry.
 const batch = await make({ onSaveMany: (tasks, operationId) => saveTaskBatch(tasks, 'v', 'yossi@test', operationId).then((r) => r.ok) });
-await batch.type('task-title-input', 'One'); await batch.click('+ Add another task');
+await batch.type('task-title-input', 'One'); await batch.click('Add another task');
 await batch.find((e) => e.props['aria-label'] === 'Task 2 name')[0].props.onChange({ target: { value: 'Two' } }); await batch.render();
 await who(batch); await batch.click((e) => e.props['aria-label'] === 'Everyone at the venue');
 const envelopes = [];
@@ -113,12 +113,12 @@ expectOn(choices, pick('Yossi'));
 assert.doesNotMatch(choices.text(), /Yossi \(yossi\)/);
 const varying = { ...shift, days: shift.days.map((d, day) => ({ ...d, startMinutes: day === 5 ? 900 : 840, endMinutes: day === 5 ? 1290 : 1320 })) };
 const when = await make({ taskToEdit: { ...task, targetTime: '4:00 PM', targetTimeMinutes: 960, daysOfWeek: [5] }, shifts: [varying] }); await when.click('Go to When');
-assert.match(when.text(), /During the Afternoon shift on Fri \(3:00 PM – 9:30 PM\)/);
+assert.match(when.find((e) => e.props['aria-label']?.startsWith?.('During the Afternoon'))[0].props['aria-label'], /During the Afternoon shift on Fri \(3:00 PM – 9:30 PM\)/);
 
 const night = venueShifts([], 'v').find((s) => s.name === 'Night');
 assert.equal(detectTimeShiftDay(night, 60, 5), 4, 'Friday after midnight belongs to Thursday Night');
 const overnight = await make({ taskToEdit: { ...task, targetTime: '1:00 AM', targetTimeMinutes: 60, daysOfWeek: [5] }, shifts: [night] }); await overnight.click('Go to When');
-assert.match(overnight.text(), /During the Night shift on Thu/);
+assert.match(overnight.find((e) => e.props['aria-label']?.startsWith?.('During the Night'))[0].props['aria-label'], /During the Night shift on Thu/);
 
 // Footer is a sibling of the one scrolling body inside the submitting form.
 const form = choices.find((e) => e.type === 'form')[0];

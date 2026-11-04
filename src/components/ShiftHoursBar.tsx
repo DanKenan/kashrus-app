@@ -40,7 +40,7 @@ export const ShiftHoursBar: React.FC<{ shift: Shift; pinMinutes?: number; readOn
       onPointerDown={begin} onFocus={begin} onChange={(e) => { const next = { ...draft.current, [key]: Number(e.target.value) % 1440 }; draft.current = next; setHours(next); }}
       onPointerUp={() => void commit()} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void commit(); } }} onBlur={() => void commit()}
       className="shift-hours-handle block w-full min-h-11 accent-gold" />
-    <span className="shift-hours-bubble relative block w-max -translate-x-1/2 text-center" style={{ left: `clamp(48px, calc(44px / 2 + (100% - 44px) * ${barPosition(hours[key], key === 'endMinutes')}), calc(100% - 48px))` }}>{key === 'startMinutes' ? 'From' : 'Until'} {Math.floor(hours[key] / 60) % 12 || 12}:{String(hours[key] % 60).padStart(2, '0')} {hours[key] < 720 ? 'AM' : 'PM'}</span>
+    <span className="shift-hours-bubble relative block w-max -translate-x-1/2 text-center" style={{ left: `clamp(48px, calc(44px / 2 + (100% - 44px) * ${barPosition(hours[key], key === 'endMinutes')}), calc(100% - 48px))` }}><span className="sr-only">{key === 'startMinutes' ? 'From' : 'Until'} </span>{Math.floor(hours[key] / 60) % 12 || 12}:{String(hours[key] % 60).padStart(2, '0')} {hours[key] < 720 ? 'AM' : 'PM'}</span>
   </>;
   return <div className={`shift-hours-visual space-y-2 ${readOnly ? 'is-readonly' : ''}`} aria-label="Shift hours">
     <p className="sr-only">{formatShiftHours({ ...shift, ...hours })}</p>

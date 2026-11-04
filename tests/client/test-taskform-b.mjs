@@ -82,8 +82,8 @@ try {
 
   const batch = await make({ onSaveMany: (tasks) => saveTaskBatch(tasks, 'v', 'owner@test').then((r) => r.ok) });
   await batch.type('task-title-input', 'One');
-  await batch.click('+ Add another task'); await change(batch, (e) => e.props['aria-label'] === 'Task 2 name', 'Two');
-  await batch.click('+ Add another task'); await change(batch, (e) => e.props['aria-label'] === 'Task 3 name', 'Three');
+  await batch.click('Add another task'); await change(batch, (e) => e.props['aria-label'] === 'Task 2 name', 'Two');
+  await batch.click('Add another task'); await change(batch, (e) => e.props['aria-label'] === 'Task 3 name', 'Three');
   await goWho(batch); assert.match(batch.text(), /Applies to all 3 tasks/);
   const calls = recordFetch({ 'POST /api/tasks': (_path, body) => body.tasks.map((t, i) => ({ ...t, id: String(i) })) });
   await batch.submit();

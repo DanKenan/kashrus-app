@@ -61,7 +61,7 @@ try {
 
   let batches = 0;
   const batch = await make({ onSaveMany: async () => { batches++; return true; } });
-  await batch.type('task-title-input', 'Check eggs'); await batch.click('+ Add another task');
+  await batch.type('task-title-input', 'Check eggs'); await batch.click('Add another task');
   await batch.find((e) => e.props['aria-label'] === 'Task 2 name')[0].props.onChange({ target: { value: 'Check sink' } });
   await batch.render(); await batch.submit(); await batch.submit(); await batch.click((e) => e.props['aria-label'] === 'Everyone at the venue'); await batch.submit(); await batch.render({ isOpen: false });
   assert.equal(batches, 1); assert.match(batch.html(), /2 tasks saved/);

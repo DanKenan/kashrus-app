@@ -636,3 +636,79 @@
 @media (max-width: 400px) {
   .task-who-day-grid { gap: 0; padding: 0; }
 }
+
+/* Review density: disclosures keep secondary controls reachable. */
+:root { --task-shift-night: oklch(from var(--gold) l c 280); }
+.task-edit-overlay { align-items: flex-end; padding: 0; background: var(--scrim); }
+.task-edit-overlay .task-edit-sheet { height: 90dvh; max-height: 90dvh; border-radius: 24px 24px 0 0; border: 0; background: var(--surface); }
+.task-edit-grabber { align-self: center; flex-shrink: 0; width: 36px; height: 4px; margin-top: 12px; border-radius: 999px; background: var(--line-strong); }
+.task-edit-sheet .task-form-nav { grid-template-columns: minmax(0, 1fr) 44px; }
+.task-edit-sheet .task-form-nav > div { grid-column: 1; grid-row: 1; text-align: left; }
+.task-edit-sheet .task-form-close { grid-column: 2; grid-row: 1; }
+.task-edit-sheet .task-form-nav > span { display: none; }
+.task-edit-sheet .task-form-close-face { width: 30px; height: 30px; border-radius: 8px; background: var(--sunken); box-shadow: none; }
+.task-form-body { padding-top: 8px; padding-bottom: 12px; }
+.task-form-body > :not([hidden]) ~ :not([hidden]) { margin-top: 7px; }
+.task-form-summary { height: 44px; padding: 4px 8px; }
+.task-form-current-card { padding: 12px; }
+.task-form-card-header { margin-bottom: 12px; }
+.task-form-progress { min-height: 36px; }
+.task-form-what > :not([hidden]) ~ :not([hidden]), .task-when > :not([hidden]) ~ :not([hidden]), .task-who > :not([hidden]) ~ :not([hidden]) { margin-top: 12px; }
+.task-form-what textarea:focus, .task-form-what textarea[data-has-notes='true'] { height: 80px; }
+.task-form-extra { padding: 4px 8px; align-items: center; }
+.task-form-extra:focus-within { border-color: var(--gold); box-shadow: inset 0 0 0 0.5px var(--gold); }
+.task-form-extra > .task-form-mini-number { margin-top: 0; }
+.task-form-extra > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; }
+.task-form-extra > div > * { margin: 0; }
+.task-form-what input.task-form-extra-name { padding: 4px; border-color: transparent; background: transparent; font-size: 14px; }
+.task-form-extra-note summary { max-width: 72px; line-height: 16px; }
+.task-form-extra-note[open] { grid-column: 1 / -1; }
+.task-done-disclosure, .task-type-time, .task-time-options { border-top: 1px solid var(--line); }
+.task-done-disclosure > summary, .task-type-time > summary, .task-time-options > summary, .task-change-shift > summary, .task-mode-switch > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; list-style: none; cursor: pointer; color: var(--ink-soft); font-size: 12px; }
+.task-done-disclosure > summary strong { margin-left: auto; text-align: right; font-size: 12px; font-weight: 500; color: var(--ink); }
+.task-done-disclosure > summary svg, .task-change-shift > summary svg, .task-type-time > summary svg, .task-time-options > summary svg, .task-mode-switch > summary svg { margin-left: auto; }
+.task-done-disclosure > summary::-webkit-details-marker, .task-change-shift > summary::-webkit-details-marker, .task-type-time > summary::-webkit-details-marker, .task-time-options > summary::-webkit-details-marker, .task-mode-switch > summary::-webkit-details-marker { display: none; }
+.task-form-shell:not(.task-edit-sheet) .task-change-shift > summary, .task-form-shell:not(.task-edit-sheet) .task-mode-switch > summary { display: none; }
+.task-change-shift > :not(summary) { margin-top: 8px; }
+.task-edit-sheet .task-when, .task-edit-sheet .task-shift-mode { display: flex; flex-direction: column; gap: 12px; }
+.task-edit-sheet .task-when[hidden] { display: none; }
+.task-edit-sheet .task-mode-switch { order: 3; }
+.task-edit-sheet .task-change-shift { order: 2; }
+.task-edit-sheet .task-shift-mode > * { margin-top: 0; }
+.task-when-label { margin-top: 12px; }
+.task-when-shift { position: relative; width: 86px; }
+.task-when-shift-pick { width: 84px; min-width: 0; padding: 4px; }
+.task-when-shift-pick > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.task-when-shift-hours { font-size: 12px; }
+.task-when-pencil { position: absolute; right: 0; bottom: 0; width: 44px; height: 44px; transform: translate(12px, 10px); }
+.task-when-pencil > span { width: 20px; height: 20px; }
+.task-when-shift.is-picked { margin-right: 12px; }
+.task-when-radio[aria-pressed='true'] { border-width: 1px; background: color-mix(in srgb, var(--gold-wash) 45%, var(--surface)); }
+.task-when-radio { padding: 6px 8px; }
+.task-time-readout { flex: 1; min-width: 0; display: grid; place-items: center; height: 52px; border: 1.5px solid var(--gold); border-radius: 12px; color: var(--ink); font-size: 27px; font-weight: 700; white-space: nowrap; }
+.task-type-time > div { padding-bottom: 8px; }
+.task-type-time select, .task-type-time button { min-width: 44px; min-height: 44px; }
+.task-when-detected { flex-wrap: nowrap; min-height: 32px; padding: 4px 8px; }
+.task-when-detected > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-time-options > div { margin-top: 8px; }
+.shift-hours-well { height: 78px; padding-top: 28px; padding-bottom: 0; }
+.shift-hours-start, .shift-hours-end { top: 20px; }
+.shift-hours-visual .shift-hours-bubble { top: -20px; padding: 0 4px; }
+.shift-hours-track { margin-inline: 22px; }
+.shift-hours-night { background: var(--task-shift-night); }
+.task-shift-night { color: var(--task-shift-night); }
+.task-who-person { min-height: 58px; padding: 6px 8px; }
+.task-who-person-name { gap: 2px; }
+.task-who-person-name .task-who-usual { padding-block: 0; }
+.task-who-day-grid { gap: 5px; padding: 0; }
+.task-who-day { min-height: 84px; }
+.task-who-day > span:last-child > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-who-day.is-different > span:last-child > span { white-space: normal; }
+.task-form-body { padding-inline: 8px; }
+.task-form-current-card { padding-inline: 8px; }
+.shift-hours-well > :not([hidden]) ~ :not([hidden]) { margin-block-start: 0; margin-block-end: 0; }
+.task-form-body > :not([hidden]) { margin-block: 0; }
+.task-form-body > :not([hidden]) ~ :not([hidden]) { margin-block: 7px 0; }
+.task-form-what > :not([hidden]), .task-when > :not([hidden]), .task-who > :not([hidden]) { margin-block: 0; }
+.task-form-what > :not([hidden]) ~ :not([hidden]), .task-when > :not([hidden]) ~ :not([hidden]), .task-who > :not([hidden]) ~ :not([hidden]) { margin-block: 12px 0; }
+.task-edit-sheet [data-task-step='When'] .task-form-card-header { display: none; }
