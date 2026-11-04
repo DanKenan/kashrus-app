@@ -126,6 +126,35 @@ try {
   assert.equal(sheet.find((e) => e.type === 'input' && e.props.type === 'time')[0].props.value, '09:30');
   assert.equal(calls.length, 0, 'sheet draft edits never issue requests');
 
+  const namedShifts = [
+    custom('david-long', 450, { name: 'David Aguirre', endMinutes: 1175 }),
+    custom('david-short', 435, { name: 'David Aguirre', endMinutes: 445 }),
+    { ...morning, name: 'Morning Kitchen' },
+    custom('deli', 420, { name: 'Deli Morning', endMinutes: 840 }),
+    ...defaults.slice(1).map((shift) => ({ ...shift, deleted: true })),
+  ];
+  const chips = mount(TaskModal, { isOpen: true, onClose: noop, onSave: noop, knownWorkers: [], venueId: 'v', timeZone: 'UTC', shifts: namedShifts });
+  await chips.render(); await chips.click((e) => e.props['aria-label'] === 'A shift');
+  const checkNames = () => {
+    const names = chips.find((e) => e.props.className === 'task-when-shift-name');
+    assert.deepEqual(names.map((e) => e.props.children.at(-1)), ['Morning Kitchen', 'Deli Morning', 'David Aguirre', 'David Aguirre']);
+    for (const name of names) assert.doesNotMatch(name.props.className, /truncate|nowrap|ellipsis|line-clamp/);
+    assert.deepEqual(chips.find((e) => e.props.className === 'task-when-shift-hours').map((e) => e.props.children), ['6 AM–2 PM', '7 AM–2 PM', '7:15–7:25 AM', '7:30 AM–7:35 PM']);
+    const picked = chips.find((e) => e.props.className === 'task-when-shift is-picked')[0];
+    const [label, pencil] = picked.props.children;
+    assert.match(label.props.className, /task-when-shift-pick/);
+    assert.equal(pencil.props['aria-label'], `Edit ${label.props.children[0].props.children.at(-1)} shift`);
+    assert.match(pencil.props.className, /task-when-pencil/);
+  };
+  await chips.click((e) => e.props.className === 'task-when-shift-pick pressable' && e.props.children[0].props.children.at(-1) === 'Morning Kitchen');
+  checkNames();
+  await chips.click((e) => e.props.className === 'task-when-shift-pick pressable' && e.props.children[1].props.children === '7:30 AM–7:35 PM');
+  checkNames();
+  const chipCss = readFileSync(new URL('../../src/index.css', import.meta.url), 'utf8');
+  assert.match(chipCss, /\.task-when-shift-name \{[^}]*white-space: normal/);
+  assert.match(chipCss, /\.task-when-pencil \{[^}]*position: static/);
+  assert.doesNotMatch(chipCss, /\.task-when-shift-pick[^{}]*\{[^}]*(?:nowrap|ellipsis|overflow: hidden)/);
+
   const task = (id, more = {}) => ({ id, createdAt: '2026-11-05T10:00:00Z', sortOrder: 0, venueId: 'v', ...more });
   const tasks = [task('2 PM', { targetTime: '2:00 PM' }),
     task('7 AM', { targetTime: '7:00 AM', createdAt: '2026-11-06T10:00:00Z' }),

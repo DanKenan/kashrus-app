@@ -503,8 +503,9 @@
 .task-when-segment > button[aria-pressed='true'] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px var(--line); }
 .task-when-shift { display: flex; align-items: center; flex-shrink: 0; min-height: 46px; border: 1px solid var(--line-control); border-radius: 12px; background: var(--paper); color: var(--ink); }
 .task-when-shift-pick { min-width: 86px; min-height: 44px; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 650; }
-.task-when-shift-pick > span:first-child { display: flex; align-items: center; justify-content: center; gap: 4px; max-width: 144px; overflow: hidden; white-space: nowrap; }
-.task-when-shift-hours { display: block; font-size: 12px; font-weight: 400; color: var(--ink-soft); white-space: nowrap; }
+.task-when-shift-pick > span:first-child { display: flex; align-items: center; justify-content: center; gap: 4px; white-space: normal; }
+.task-when-shift-name { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+.task-when-shift-hours { display: block; font-size: 12px; font-weight: 400; color: var(--ink-soft); white-space: normal; }
 .task-when-shift.is-picked { background: linear-gradient(var(--task-form-gold-start), var(--task-form-gold-end)); border-color: var(--gold-deep); color: var(--paper); }
 .task-when-shift.is-picked .task-when-shift-hours { color: inherit; }
 .task-shift-icon { color: var(--ink-soft); }
@@ -676,13 +677,11 @@
 .task-edit-sheet .task-change-shift { order: 2; }
 .task-edit-sheet .task-shift-mode > * { margin-top: 0; }
 .task-when-label { margin-top: 12px; }
-.task-when-shift { position: relative; width: 86px; }
-.task-when-shift-pick { width: 84px; min-width: 0; padding: 4px; }
-.task-when-shift-pick > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.task-when-shift { width: auto; }
+.task-when-shift-pick { width: 144px; min-width: 0; padding: 8px; }
 .task-when-shift-hours { font-size: 12px; }
-.task-when-pencil { position: absolute; right: 0; bottom: 0; width: 44px; height: 44px; transform: translate(12px, 10px); }
+.task-when-pencil { position: static; flex-shrink: 0; align-self: stretch; width: 44px; }
 .task-when-pencil > span { width: 20px; height: 20px; }
-.task-when-shift.is-picked { margin-right: 12px; }
 .task-when-radio[aria-pressed='true'] { border-width: 1px; background: color-mix(in srgb, var(--gold-wash) 45%, var(--surface)); }
 .task-when-radio { padding: 6px 8px; }
 .task-time-readout { flex: 1; min-width: 0; display: grid; place-items: center; height: 52px; border: 1.5px solid var(--gold); border-radius: 12px; color: var(--ink); font-size: 27px; font-weight: 700; white-space: nowrap; }
@@ -757,8 +756,6 @@
 .task-who-day { border-color: var(--line); }
 .task-who-day.is-different { border-color: var(--gold); }
 .task-who-day[aria-pressed='true'] { border-color: var(--ink); }
-.task-when-shift.is-picked .task-when-shift-pick { padding-right: 22px; }
-.task-when-pencil { right: -10px; bottom: 0; transform: none; }
 .task-when-pencil > span { width: 20px; height: 20px; background: var(--surface); border-radius: 6px; }
 .task-form-primary { background: linear-gradient(var(--task-action-start), var(--task-action-end)); box-shadow: 0 4px 12px color-mix(in srgb, var(--gold) 25%, transparent); }
 .task-form-what { display: flex; flex-direction: column; }

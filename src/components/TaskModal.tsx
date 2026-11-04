@@ -1039,7 +1039,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                   {displayShifts.map((shift) => {
                     const Icon = shift.name.toLowerCase() === 'morning' ? Sun : shift.name.toLowerCase() === 'afternoon' ? Sunset : shift.name.toLowerCase() === 'night' ? Moon : Circle;
                     return <div key={shift.id} className={`task-when-shift ${shift.id === shiftId ? 'is-picked' : ''}`}>
-                      <button ref={shift.id === shiftId ? pickedShiftRef : undefined} type="button" aria-pressed={shift.id === shiftId} onClick={() => chooseShift(shift)} className="task-when-shift-pick pressable"><span><Icon aria-hidden="true" className={`w-4 h-4 task-shift-icon task-shift-${shift.name.toLowerCase()}`} />{shift.id === shiftId ? '✓ ' : ''}{shift.name}</span><span className="task-when-shift-hours">{compactShiftHours(shift)}</span></button>
+                      <button ref={shift.id === shiftId ? pickedShiftRef : undefined} type="button" aria-pressed={shift.id === shiftId} onClick={() => chooseShift(shift)} className="task-when-shift-pick pressable"><span className="task-when-shift-name"><Icon aria-hidden="true" className={`w-4 h-4 task-shift-icon task-shift-${shift.name.toLowerCase()}`} />{shift.id === shiftId ? '✓ ' : ''}{shift.name}</span><span className="task-when-shift-hours">{compactShiftHours(shift)}</span></button>
                       {shift.id === shiftId && <button type="button" aria-label={`Edit ${shift.name} shift`} onClick={() => { setEditingShift(shift); setCreatingShift(true); }} className="task-when-pencil pressable"><span><Pencil aria-hidden="true" className="w-4 h-4" /></span></button>}
                     </div>;
                   })}
