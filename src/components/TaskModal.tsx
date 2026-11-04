@@ -74,18 +74,16 @@ function compactShiftHours(shift: Shift): string {
 }
 
 function personAvatar(email: string): React.CSSProperties {
-  const palette = [['var(--ok-bg)', 'var(--ok)'], ['var(--gold-wash)', 'var(--gold-ink)'], ['var(--sunken)', 'var(--ink)'], ['var(--warn-bg)', 'var(--warn)']];
+  const palette = ['var(--task-avatar-teal)', 'var(--task-avatar-slate)', 'var(--task-avatar-plum)', 'var(--task-avatar-green)', 'var(--task-avatar-amber)'];
   const index = Array.from(email.toLowerCase()).reduce((sum, char) => sum + char.charCodeAt(0), 0) % palette.length;
-  return { background: palette[index][0], color: palette[index][1] };
+  return { background: palette[index], color: 'var(--task-avatar-letter)' };
 }
 function shortTaskName(name: string): string {
   const words = name.trim().split(/\s+/);
   if (words.length > 1 && /^(kasher|check|inspect|clean)$/i.test(words[0])) words.shift();
   if (words.length > 1 && /^(the|a|an)$/i.test(words[0])) words.shift();
-  return words[0] || '';
+  return words[0] ? words[0][0].toUpperCase() + words[0].slice(1) : '';
 }
-
-const MINUTE_OPTIONS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
 
 /** One row: hour : minute + AM/PM toggle. Big enough for fingers. */
 function TimePickerRow({
@@ -110,16 +108,12 @@ function TimePickerRow({
         ))}
       </select>
       <span className="font-black text-ink-soft">:</span>
-      <select
+      <input type="number" min={0} max={59} step={1}
         value={value.minute}
         onChange={(e) => onChange({ ...value, minute: Number(e.target.value) })}
-        className="text-sm font-bold px-2 py-2 rounded-xl border border-line bg-sunken text-ink focus:border-gold focus:outline-none"
+        className="task-minute-input text-sm font-bold px-2 py-2 rounded-xl border border-line bg-sunken text-ink"
         aria-label="Minute"
-      >
-        {MINUTE_OPTIONS.map((m) => (
-          <option key={m} value={m}>{String(m).padStart(2, '0')}</option>
-        ))}
-      </select>
+      />
       <div className="flex rounded-xl border border-line overflow-hidden">
         {(['AM', 'PM'] as const).map((ap) => (
           <button
@@ -217,6 +211,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [repeat, setRepeat] = useState('Every day');
   const [editingShift, setEditingShift] = useState<Shift | undefined>();
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  const [showEditTime, setShowEditTime] = useState(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [selectedCategories, setSelectedCategories] = useState<string[]>([PRESET_CATEGORIES[0]]);
@@ -333,6 +328,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   useEffect(() => {
     submitGuard.current = false; batchAttempt.current = null;
     if (isOpen) setSavedNotice(null);
+    setShowEditTime(false);
     setStep(0); setExtras([]); setPeopleTouched(false); setDayPeople(taskToEdit?.dayAssignees || {});
     setSwaps(taskToEdit?.assigneeSwaps || []); setPeopleDay(null); setJustOnce(false);
     setShowPeople(false); setPeopleSearch(''); setSaving(false); setSaveError(''); setRemovedShifts([]);
@@ -686,7 +682,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               rows={1}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Step-by-step guidance for mashgichim when completing this daily assignment..."
+              placeholder="Anything the mashgiach should know"
               className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink focus:outline-none focus:border-gold"
             />
           </div>
@@ -702,6 +698,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
             </div>)}
             <button type="button" onClick={() => setExtras((old) => [...old, { name: '', note: '' }])} className="task-form-add pressable"><CirclePlus aria-hidden="true" className="w-5 h-5 shrink-0" /><span>Add another task</span></button>
           </div>}
+          <details className="task-what-more"><summary>More: type of check, photo, alert if late<ChevronDown aria-hidden="true" className="w-4 h-4" /></summary>
           {/* 2-Column: Category & Input Type */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -845,8 +842,41 @@ export const TaskModal: React.FC<TaskModalProps> = ({
             </div>
 
           </div>
+            <div>
+              <label className="block font-semibold text-ink-soft mb-1">
+                Priority
+              </label>
+              <select
+                id="task-priority-select"
+                value={priority}
+                onChange={(e) => setPriority(e.target.value as any)}
+                className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink"
+              >
+                <option value="low">Low Priority</option>
+                <option value="medium">Medium Priority</option>
+                <option value="high">High (Urgent)</option>
+              </select>
+            </div>
+
+          {/* Overdue Alert Toggle */}
+          <label className={`flex items-center gap-2.5 p-3 rounded-xl border border-line bg-sunken ${isAny ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}>
+            <input
+              type="checkbox"
+              checked={!isAny && enableOverdueAlert}
+              disabled={isAny}
+              onChange={(e) => setEnableOverdueAlert(e.target.checked)}
+              className="w-4 h-4 rounded accent-gold"
+            />
+            <div>
+              <div className="text-xs font-bold">Alert if it's late</div>
+              <div className="text-xs text-ink-soft">
+                {!isAny && enableOverdueAlert ? "On: a push alert when it's late" : "Off: no alert if it's late"}
+              </div>
+            </div>
+          </label>
+          </details>
           <details className="task-done-disclosure">
-            <summary><span>How is it marked done?</span><strong>{({ yes_no: 'Yes or No', toggle: 'On / Off switch', status_select: 'Your own options', checkbox: 'Big check · one tap', check_in: 'Check many times' })[inputType]}{count > 1 ? ` · all ${count}` : ''}</strong><ChevronDown aria-hidden="true" className="w-4 h-4 shrink-0" /></summary>
+            <summary><span className="task-done-icon"><CheckCircle2 aria-hidden="true" className="w-5 h-5" /></span><span className="task-done-copy"><span>How is it marked done?</span><strong>{({ yes_no: 'Yes or No', toggle: 'On / Off switch', status_select: 'Your own options', checkbox: 'Big check · one tap', check_in: 'Check many times' })[inputType]}{count > 1 ? ` · all ${count}` : ''}</strong></span><ChevronDown aria-hidden="true" className="w-4 h-4 shrink-0" /></summary>
             <div>
               <label className="block font-semibold text-ink-soft mb-1">
                 How is it marked done?
@@ -980,38 +1010,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           )}
 
           </details>
-            <div>
-              <label className="block font-semibold text-ink-soft mb-1">
-                Priority
-              </label>
-              <select
-                id="task-priority-select"
-                value={priority}
-                onChange={(e) => setPriority(e.target.value as any)}
-                className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink"
-              >
-                <option value="low">Low Priority</option>
-                <option value="medium">Medium Priority</option>
-                <option value="high">High (Urgent)</option>
-              </select>
-            </div>
 
-          {/* Overdue Alert Toggle */}
-          <label className={`flex items-center gap-2.5 p-3 rounded-xl border border-line bg-sunken ${isAny ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}>
-            <input
-              type="checkbox"
-              checked={!isAny && enableOverdueAlert}
-              disabled={isAny}
-              onChange={(e) => setEnableOverdueAlert(e.target.checked)}
-              className="w-4 h-4 rounded accent-gold"
-            />
-            <div>
-              <div className="text-xs font-bold">Alert if it's late</div>
-              <div className="text-xs text-ink-soft">
-                {!isAny && enableOverdueAlert ? "On: a push alert when it's late" : "Off: no alert if it's late"}
-              </div>
-            </div>
-          </label>
 
           </div>
           <section hidden={step !== 1} aria-label="When" className="task-when space-y-4">
@@ -1040,25 +1039,17 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               <div className="task-during-shift space-y-2"><p className="task-when-label">{taskToEdit && chosenShift ? `When during the ${chosenShift.name} shift?` : 'When during the shift?'}{taskToEdit && chosenShift && <span>{compactShiftHours(chosenShift)}</span>}</p>
               <div role="group" aria-label="Shift target time" className="task-when-deadline space-y-2">
                 <button type="button" aria-label="Any time during the shift" aria-pressed={!shiftTime} onClick={() => setShiftTime(false)} className="task-when-radio pressable"><span aria-hidden="true" className="task-when-radio-ring" /><span>Any time during the shift<small>Done any time {chosenShift ? compactShiftHours(chosenShift) : ''}</small></span></button>
-                <button type="button" aria-label="By a set time" aria-pressed={shiftTime} onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); }} className="task-when-radio pressable"><span aria-hidden="true" className="task-when-radio-ring" /><span>By a set time<small>A deadline inside the shift</small></span><span className="task-when-time-pill"><Clock aria-hidden="true" className="w-4 h-4" />{formatPickerTime(time1)}</span></button>
+                <div className="task-deadline-choice"><button type="button" aria-label="By a set time" aria-pressed={shiftTime} onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); }} className="task-when-radio pressable"><span aria-hidden="true" className="task-when-radio-ring" /><span>By a set time<small>A deadline inside the shift</small></span></button><button type="button" aria-label="Change time" onClick={() => { setShiftTime(true); setAnyTime(false); setCustomTimeText(null); setShowEditTime(true); }} className="task-when-time-pill pressable"><Clock aria-hidden="true" className="w-4 h-4" />{formatPickerTime(time1)}</button></div>
               </div></div>
             </div>}
-            {(!shiftMode || shiftTime) && <div className="space-y-2">
+            {(!shiftMode || (shiftTime && showEditTime)) && <div className="task-time-main space-y-2">
               <label className="task-when-label">{shiftMode ? 'Target Time' : 'At what time?'}</label>
               {anyTime ? <div className="text-base text-ink-soft">Any time · no target time <button type="button" onClick={() => setAnyTime(false)} className="min-h-11 px-3 underline pressable">Set a time</button></div>
                 : customTimeText !== null ? <div className="flex gap-2"><input aria-label="Custom time" value={customTimeText} onChange={(e) => setCustomTimeText(e.target.value)} className="min-h-11 min-w-0 flex-1 px-3 rounded-lg border border-line-control bg-sunken text-base text-ink" /><button type="button" onClick={() => setCustomTimeText(null)} className="min-h-11 px-3 text-ink underline pressable">Use clock</button></div>
-                : <div className="task-when-clock"><button type="button" aria-label="Earlier time" onClick={() => { const m = (pickerTimeToMinutes(time1) + 1410) % 1440; setTime1({ hour: Math.floor(m / 60) % 12 || 12, minute: m % 60, ampm: m < 720 ? 'AM' : 'PM' }); }} className="pressable"><Minus className="w-5 h-5" /></button><output className="task-time-readout" aria-live="polite">{formatPickerTime(time1)}</output><button type="button" aria-label="Later time" onClick={() => { const m = (pickerTimeToMinutes(time1) + 30) % 1440; setTime1({ hour: Math.floor(m / 60) % 12 || 12, minute: m % 60, ampm: m < 720 ? 'AM' : 'PM' }); }} className="pressable"><Plus className="w-5 h-5" /></button></div>}
-              {!anyTime && customTimeText === null && <details className="task-type-time"><summary>Type a time<ChevronDown aria-hidden="true" className="w-4 h-4" /></summary><TimePickerRow value={time1} onChange={setTime1} /></details>}
+                : <div className="task-when-clock"><button type="button" aria-label="Earlier time" onClick={() => { const m = (pickerTimeToMinutes(time1) + 1410) % 1440; setTime1({ hour: Math.floor(m / 60) % 12 || 12, minute: m % 60, ampm: m < 720 ? 'AM' : 'PM' }); }} className="pressable"><Minus className="w-5 h-5" /></button><output className="task-time-readout" aria-label="Selected task time" aria-live="polite">{formatPickerTime(time1)}</output><button type="button" aria-label="Later time" onClick={() => { const m = (pickerTimeToMinutes(time1) + 30) % 1440; setTime1({ hour: Math.floor(m / 60) % 12 || 12, minute: m % 60, ampm: m < 720 ? 'AM' : 'PM' }); }} className="pressable"><Plus className="w-5 h-5" /></button></div>}
               {!shiftMode && !anyTime && customTimeText === null && <p aria-label={detectedShift ? `During the ${detectedShift.name} shift on ${DAYS_MAP[detectedDay]} (${formatShiftHours(detectedShift, detectedDay)})` : 'Not during a shift'} className={`task-when-detected task-detected-${detectedShift?.name.toLowerCase()}`}><Clock aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{detectedShift ? `During the ${detectedShift.name} shift (${compactShiftHours(detectedShift)})` : 'Not during a shift'}</span><span className="ml-auto">auto</span></p>}
               {!shiftMode && !anyTime && customTimeText === null && detectedShift && <><ShiftHoursBar shift={detectedShift} pinMinutes={pickerTimeToMinutes(time1)} readOnly onSaved={() => {}} /><p className="task-when-note">Due at {formatPickerTime(time1)}, inside the {detectedShift.name} shift.</p></>}
-              <details className="task-time-options"><summary>More time options<ChevronDown aria-hidden="true" className="w-4 h-4" /></summary>
-              {time2 && !anyTime && <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />}
-              {!usingShift && assignType === 'all' && !isAny && (customTimeText === null || parseTimeText(customTimeText) !== null) && <p className="text-xs text-ink-soft mt-2">People with a shift today (including an overnight shift still running) see it only if this time is inside their shift. People with no shift see it too.</p>}
-              <div className="flex flex-wrap gap-2">
-                {!shiftMode && <button type="button" aria-label="Any time" aria-pressed={anyTime} onClick={() => { setAnyTime(true); setTime2(null); setCustomTimeText(null); }} className={choice(anyTime)}>{anyTime ? '✓ ' : ''}Any time</button>}
-                {!anyTime && !time2 && <button type="button" onClick={() => setTime2({ hour: 3, minute: 0, ampm: 'PM' })} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">+ Second time</button>}
-              </div>
-              </details>
+
             </div>}
             <div role="group" aria-label="Repeat" className="task-when-repeat space-y-2">
               <p className="task-when-label">Repeat</p>
@@ -1067,6 +1058,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               <p className="task-when-note"><Repeat2 aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{repeat === 'One time' ? `Once: ${selectedDates.length ? selectedDates.map((date) => new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })).join(', ') : 'Pick a date'}` : repeat === 'Every week' ? `Every ${new Date(`${nextWeekday(today, selectedDays[0] ?? todayWeekday)}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' })}` : `${repeat}, ${selectedDays.map((d) => DAYS_MAP[d]).join(' · ')}`}</span></p>
               {scheduleType === 'specific_dates' && <MonthlyCalendarPicker selectedDates={selectedDates} onToggleDate={handleToggleDate} onClearAll={() => setSelectedDates([])} onSelectToday={handleSelectToday} onSelectTomorrow={handleSelectTomorrow} timeZone={timeZone} />}
             </div>
+              <details className="task-time-options"><summary>More time options<ChevronDown aria-hidden="true" className="w-4 h-4" /></summary>
+              {!anyTime && customTimeText === null && (!taskToEdit || !shiftMode || showEditTime) && <TimePickerRow value={time1} onChange={setTime1} />}
+              {time2 && !anyTime && <TimePickerRow value={time2} onChange={setTime2} onRemove={() => setTime2(null)} />}
+              {!usingShift && assignType === 'all' && !isAny && (customTimeText === null || parseTimeText(customTimeText) !== null) && <p className="text-xs text-ink-soft mt-2">People with a shift today (including an overnight shift still running) see it only if this time is inside their shift. People with no shift see it too.</p>}
+              <div className="flex flex-wrap gap-2">
+                {!shiftMode && <button type="button" aria-label="Any time" aria-pressed={anyTime} onClick={() => { setAnyTime(true); setTime2(null); setCustomTimeText(null); }} className={choice(anyTime)}>{anyTime ? '✓ ' : ''}Any time</button>}
+                {!anyTime && !time2 && <button type="button" onClick={() => setTime2({ hour: 3, minute: 0, ampm: 'PM' })} className="min-h-11 px-3 rounded-lg border border-line-control text-ink pressable">+ Second time</button>}
+              </div>
+              </details>
           </section>
 
           <section hidden={step !== 2} aria-label="Who" className="task-who space-y-4">
@@ -1094,14 +1094,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 </button>;
               })}
               </div>
-              {Object.keys(dayDifferences).length > 0 && <div className="space-y-2 text-sm text-ink-soft">
-                <p>{Object.entries(dayDifferences).map(([day, emails]) => {
-                  const swap = swaps.find((s) => s.date === nextWeekday(today, Number(day)));
-                  return swap ? `${DAYS_MAP[Number(day)]}: ${namesFor(swap.assignedTo)} · just ${swapDate(swap.date)} (usually ${namesFor(emails)})` : `${DAYS_MAP[Number(day)]}: ${namesFor(emails)}`;
-                }).join(' · ')}</p>
-                <button type="button" onClick={() => { setPeopleTouched(true); setDayPeople({}); }} className={choice(false)}>Use {namesFor(mainPeople) || 'these people'} every day</button>
-              </div>}
-              <p className="task-who-later"><Pencil aria-hidden="true" className="w-4 h-4 shrink-0" />You can change this later from the task.</p>
+              {Object.keys(dayDifferences).length > 0 && <p className="task-day-short-summary">{Object.entries(dayDifferences).map(([day, emails]) => `${DAYS_MAP[Number(day)]}: ${emails.map((email) => namesFor([email]).split(' ')[0]).join(', ')}`).join(' · ')}</p>}
             </div>}
             {upcomingSwaps.length > 0 && <div aria-label="Single-date swaps" className="space-y-2 text-sm text-ink-soft">
               <p>Swaps for single dates stay:</p>
@@ -1125,6 +1118,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 </div>}
               </div>}
               <div className="task-people-body space-y-3"><label className="block text-sm text-ink-soft">Search people<input autoFocus value={peopleSearch} onChange={(e) => setPeopleSearch(e.target.value)} className="block w-full min-h-11 px-3 rounded-lg border border-line-control bg-surface text-base text-ink" /></label>
+              {Object.keys(dayDifferences).length > 0 && <div className="space-y-2 text-sm text-ink-soft">
+                <p>{Object.entries(dayDifferences).map(([day, emails]) => {
+                  const swap = swaps.find((s) => s.date === nextWeekday(today, Number(day)));
+                  return swap ? `${DAYS_MAP[Number(day)]}: ${namesFor(swap.assignedTo)} · just ${swapDate(swap.date)} (usually ${namesFor(emails)})` : `${DAYS_MAP[Number(day)]}: ${namesFor(emails)}`;
+                }).join(' · ')}</p>
+                <button type="button" onClick={() => { setPeopleTouched(true); setDayPeople({}); }} className={choice(false)}>Use {namesFor(mainPeople) || 'these people'} every day</button>
+              </div>}
+              <p className="task-who-later"><Pencil aria-hidden="true" className="w-4 h-4 shrink-0" />You can change this later from the task.</p>
               <div className="task-people-list space-y-2">
                 <button type="button" aria-pressed={dayValue.includes('all')} onClick={() => pickPeople(['all'])} className="task-people-choice pressable">{dayValue.includes('all') ? '✓ ' : ''}Everyone at the venue</button>
                 {knownWorkers.filter((w) => `${w.name} ${w.email || ''}`.toLowerCase().includes(peopleSearch.toLowerCase())).map((w) => <button key={rosterKey(w)} type="button" aria-label={`Pick ${w.name}`} disabled={!w.email} aria-pressed={!!w.email && dayValue.includes(w.email)} onClick={() => { const email = w.email!; const next = dayValue.includes(email) ? dayValue.filter((e) => e !== email) : [...dayValue.filter((e) => e !== 'all'), email]; pickPeople(next); }} className="task-people-choice disabled:opacity-50 pressable"><span className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${w.email && dayValue.includes(w.email) ? 'bg-paper text-gold-deep' : 'bg-sunken text-ink'}`} style={personAvatar(w.email || w.name)} aria-hidden="true">{w.name.slice(0, 1)}</span><span className="task-people-name">{w.name}{chosenShift && w.email && usualEmails.includes(w.email) && <small>usual for {chosenShift.name}</small>}</span><span aria-hidden="true" className="task-people-check">{w.email && dayValue.includes(w.email) ? '✓' : ''}</span></button>)}
@@ -1132,7 +1133,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               </div><button type="button" onClick={() => { setShowPeople(false); setPeopleDay(null); }} className="task-people-done pressable">Done</button>
               </div>
             </div>}
-            <label className="flex items-center gap-2 min-h-11 text-sm text-ink-soft"><input id="task-team-visibility" type="checkbox" checked={visibleToTeam} disabled={assignType === 'all' || selectedWorkers.length === 0} onChange={(e) => { setPeopleTouched(true); setVisibleToTeam(e.target.checked); }} /><span>Owner and managers can see it too<span className="block">{assignType === 'all' || selectedWorkers.length === 0 ? 'Pick at least one person first.' : 'Off: only the people you picked, admins and coordinators see it.'}</span></span></label>
+            <details className="task-who-visibility"><summary>Who can see it<ChevronDown aria-hidden="true" className="w-4 h-4" /></summary><label className="flex items-center gap-2 min-h-11 text-sm text-ink-soft"><input id="task-team-visibility" type="checkbox" checked={visibleToTeam} disabled={assignType === 'all' || selectedWorkers.length === 0} onChange={(e) => { setPeopleTouched(true); setVisibleToTeam(e.target.checked); }} /><span>Owner and managers can see it too<span className="block">{assignType === 'all' || selectedWorkers.length === 0 ? 'Pick at least one person first.' : 'Off: only the people you picked, admins and coordinators see it.'}</span></span></label></details>
           </section>
 
           </div>

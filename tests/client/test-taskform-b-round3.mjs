@@ -76,7 +76,9 @@ try {
   await swap.submit(); assert.deepEqual(saved.assigneeSwaps, [{ date: '2026-11-06', assignedTo: ['moshe@test'] }]);
 
   const retained = await make({ taskToEdit: { ...recurring, assigneeSwaps: saved.assigneeSwaps }, onSave: (payload) => { saved = payload; return false; } }); await who(retained);
+  await retained.click((e) => e === friday(retained));
   await retained.click('Use Yossi every day');
+  await retained.click((e) => e.props.className === 'task-people-done pressable');
   assert.match(retained.text(), /Swaps for single dates stay: Fri Nov 6 Moshe/);
   assert.equal(friday(retained).props.children[1].props.children, 'M');
   assert.match(renderToStaticMarkup(friday(retained)), /usually Yossi/);
