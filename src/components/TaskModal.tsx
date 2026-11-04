@@ -1,10 +1,11 @@
+import { personAvatar } from '../lib/personAvatar';
 import { TaskFormProgress } from './TaskFormProgress';
 import { ShiftHoursBar } from './ShiftHoursBar';
 import { detectTimeShift, detectTimeShiftDay, differingDays, nextWeekday, peopleFields } from '../lib/taskForm';
 import { nextFullHour } from '../lib/nextFullHour';
 import { ShiftsPanel } from './ShiftsPanel';
 import type { Shift } from '../types';
-import { shiftWeekdays, shiftIsUpcoming, venueShifts, shiftUserIds, formatShiftHours } from '../lib/shifts';
+import { shiftWeekdays, shiftIsUpcoming, sortShiftsByStart, venueShifts, shiftUserIds, formatShiftHours } from '../lib/shifts';
 import { ANY_TIME_LABEL, isAnyTimeTask, isAnyTimeText } from '../lib/anyTime';
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Pencil, Clock, Plus, CirclePlus, List, Layers, Sun, Sunset, Moon, Circle, Info, Repeat2, Minus, Users, ChevronDown, Trash2, CheckCircle2, ListFilter } from 'lucide-react';
@@ -73,11 +74,6 @@ function compactShiftHours(shift: Shift): string {
   return `${clock(shift.startMinutes)}${startPeriod === endPeriod ? '' : ` ${startPeriod}`}–${clock(shift.endMinutes)} ${endPeriod}`;
 }
 
-function personAvatar(email: string): React.CSSProperties {
-  const palette = ['var(--task-avatar-teal)', 'var(--task-avatar-slate)', 'var(--task-avatar-plum)', 'var(--task-avatar-green)', 'var(--task-avatar-amber)'];
-  const index = Array.from(email.toLowerCase()).reduce((sum, char) => sum + char.charCodeAt(0), 0) % palette.length;
-  return { background: palette[index], color: 'var(--task-avatar-letter)' };
-}
 function shortTaskName(name: string): string {
   const words = name.trim().split(/\s+/);
   if (words.length > 1 && /^(kasher|check|inspect|clean)$/i.test(words[0])) words.shift();
@@ -149,6 +145,7 @@ function TimePickerRow({
 
 interface TaskModalProps {
   shifts?: Shift[];
+  tasks?: Task[];
   venueId?: string;
   venueName?: string;
   onShiftCreated?: (shift: Shift, deleted?: boolean) => void;
@@ -194,6 +191,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   taskToEdit,
   knownWorkers,
   shifts = [],
+  tasks = [],
   venueId = '',
   venueName = '',
   onShiftCreated,
@@ -311,8 +309,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   // Schedule State: Recurring Days vs Specific Calendar Dates
   const [creatingShift, setCreatingShift] = useState(false);
   const [createdShifts, setCreatedShifts] = useState<Shift[]>([]);
-  const [removedShifts, setRemovedShifts] = useState<string[]>([]);
-  const pickerShifts = venueShifts([...shifts.filter((s) => !createdShifts.some((v) => v.id === s.id)), ...createdShifts], venueId, agencyId).filter((s) => !removedShifts.includes(s.id) && shiftIsUpcoming(s, workDateIn(timeZone)));
+  const [removedShifts, setRemovedShifts] = useState<Shift[]>([]);
+  // Preserve deletion markers through the nested editor's own resolution.
+  const shiftRecords = [...shifts.filter((s) => !createdShifts.some((v) => v.id === s.id)), ...createdShifts]
+    .filter((s) => !removedShifts.some((removed) => removed.id === s.id))
+    .concat(removedShifts.map((s) => ({ ...s, deleted: true as const })));
+  const pickerShifts = venueShifts(shiftRecords, venueId, agencyId).filter((s) => shiftIsUpcoming(s, workDateIn(timeZone)));
   const [shiftId, setShiftId] = useState<string | null>(null);
   const [shiftMode, setShiftMode] = useState(false);
   const [shiftTime, setShiftTime] = useState(false);
@@ -433,8 +435,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     }
   }, [taskToEdit, isOpen]);
 
-  const shiftOrder = (shift: Shift) => { const index = ['morning', 'afternoon', 'night'].indexOf(shift.name.toLowerCase()); return index < 0 ? 3 : index; };
-  const displayShifts = [...pickerShifts].sort((a, b) => shiftOrder(a) - shiftOrder(b));
+  const displayShifts = sortShiftsByStart(pickerShifts);
   const chosenShift = shiftMode ? pickerShifts.find((s) => s.id === shiftId) : undefined;
   const usingShift = !!chosenShift;
   const isAny = !usingShift && (anyTime || (customTimeText !== null && isAnyTimeText(customTimeText)));
@@ -486,7 +487,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const peopleReady = mainPeople.length > 0 && (scheduleType !== 'recurring' || selectedDays.every((day) => (dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople).length > 0)) && swaps.every((swap) => swap.date < today || swap.assignedTo.length > 0);
   const choice = (on: boolean) => `min-h-11 px-3 rounded-lg border pressable ${on ? 'bg-gold-deep text-paper border-gold-deep' : 'border-line-control bg-surface text-ink'}`;
   const shiftChanged = (shift: Shift, deleted = false) => {
-    if (deleted) { setRemovedShifts((old) => [...old, shift.id]); if (shiftId === shift.id) { setShiftId(null); setShiftMode(false); } }
+    if (deleted) { setRemovedShifts((old) => [...old, shift]); if (shiftId === shift.id) { setShiftId(null); setShiftMode(false); } }
     else { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); chooseShift(shift); }
     onShiftCreated?.(shift, deleted); setCreatingShift(false);
   };
@@ -1169,9 +1170,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </div>
         </form>
       </div>
-      {creatingShift && <div role="dialog" aria-modal="true" aria-label={editingShift ? 'Edit shift' : 'New shift'} className="fixed inset-0 z-50 bg-scrim flex items-center justify-center p-3" onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setCreatingShift(false); } }}>
-        <div className="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-2xl bg-surface p-4">
-          <ShiftsPanel createOnly initialShift={editingShift} agencyId={agencyId} shifts={pickerShifts} venueId={venueId} timeZone={timeZone} people={knownWorkers} onCancel={() => setCreatingShift(false)} onChange={shiftChanged} />
+      {creatingShift && <div role="dialog" aria-modal="true" aria-label={editingShift ? 'Edit shift' : 'New shift'} className="contents" onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setCreatingShift(false); } }}>
+        <div className="contents">
+          <ShiftsPanel tasks={tasks} createOnly initialShift={editingShift} agencyId={agencyId} shifts={shiftRecords} venueId={venueId} timeZone={timeZone} people={knownWorkers} onCancel={() => setCreatingShift(false)} onChange={shiftChanged} />
         </div>
       </div>}
     </div>

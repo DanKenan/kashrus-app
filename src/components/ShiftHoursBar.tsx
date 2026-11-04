@@ -7,7 +7,7 @@ import { formatShiftHours, shiftEditableFields } from '../lib/shifts';
 const barPosition = (minutes: number, end = false) => end && minutes === 360 ? 1 : ((minutes - 360 + 1440) % 1440) / 1440;
 
 /** Draft locally while moving. Commit a changed gesture once, on release. */
-export const ShiftHoursBar: React.FC<{ shift: Shift; pinMinutes?: number; readOnly?: boolean; onSaved: (shift: Shift) => void }> = ({ shift, pinMinutes, readOnly = false, onSaved }) => {
+export const ShiftHoursBar: React.FC<{ shift: Shift; pinMinutes?: number; readOnly?: boolean; onSaved: (shift: Shift) => void; onDraftChange?: (hours: { startMinutes: number; endMinutes: number }) => void }> = ({ shift, pinMinutes, readOnly = false, onSaved, onDraftChange }) => {
   const [hours, setHours] = useState({ startMinutes: shift.startMinutes, endMinutes: shift.endMinutes });
   const draft = useRef(hours);
   const original = useRef(hours);
@@ -25,6 +25,8 @@ export const ShiftHoursBar: React.FC<{ shift: Shift; pinMinutes?: number; readOn
     const snapshot = JSON.stringify(draft.current);
     if (lock.current || snapshot === JSON.stringify(original.current) || snapshot === attempted.current) return;
     if (draft.current.startMinutes === draft.current.endMinutes) { setError('Choose different start and end times.'); return; }
+    // The full shift editor owns its save; gestures only update its draft.
+    if (onDraftChange) { original.current = { ...draft.current }; onDraftChange({ ...draft.current }); return; }
     attempted.current = snapshot; lock.current = true; setBusy(true); setError('');
     try {
       const definition = { ...shiftEditableFields(shift), ...draft.current, venueId: shift.venueId };
@@ -60,7 +62,7 @@ export const ShiftHoursBar: React.FC<{ shift: Shift; pinMinutes?: number; readOn
         {handle('endMinutes')}
       </label>
     </div>
-    <p className="shift-hours-hint text-xs text-ink-soft"><Info aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{!readOnly && <>Drag the ends to adjust. <strong>Changes the {shift.name} shift's hours for every task on it, every week</strong></>}</span></p>
+    <p className="shift-hours-hint text-xs text-ink-soft"><Info aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{!readOnly && <>Drag the ends to adjust. {!onDraftChange && <strong>Changes the {shift.name} shift's hours for every task on it, every week</strong>}</>}</span></p>
     {busy && <p className="text-sm text-ink-soft">Saving…</p>}
     {error && <p role="alert" className="text-base text-bad">{error} <button type="button" onClick={() => { attempted.current = null; void commit(); }} className="min-h-11 px-3 underline pressable">Try again</button></p>}
   </div>;

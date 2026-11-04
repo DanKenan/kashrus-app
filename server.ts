@@ -13179,7 +13179,19 @@ function publicShift(shift: Shift): Shift {
   };
 }
 function publicShifts(venueId: string, agencyId: string): Shift[] {
-  return venueShifts(shifts, venueId, agencyId).map(publicShift);
+  const live = venueShifts(shifts, venueId, agencyId).map(publicShift);
+  // Keep deletion markers on the wire: clients resolve these defaults again.
+  // Use a distinct wire ID so live-ID consumers never mistake a marker for a
+  // usable shift. Installed resolvers match built-ins by the prefix before ':'.
+  // A complete, inert Shift shape also keeps older normalizers/renderers safe.
+  const deleted = shifts.filter((s) => s.venueId === venueId
+    && (s.agencyId || 'agency-hkc') === agencyId && 'deleted' in s && s.deleted && isBuiltinShiftId(s.id));
+  return [...live, ...deleted.map((s) => ({
+    id: `${s.id}:deleted`, venueId, agencyId, deleted: true,
+    name: '', area: '', startMinutes: 0, endMinutes: 1,
+    days: Array.from({ length: 7 }, () => ({ on: false })),
+    userIds: [], userId: null, overrides: [], createdAt: '',
+  }))];
 }
 function broadcastShifts(venueId: string, agencyId: string) {
   broadcast('SHIFTS_UPDATED', { venueId, shifts: publicShifts(venueId, agencyId) }, undefined, agencyId,
