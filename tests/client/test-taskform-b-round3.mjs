@@ -20,7 +20,7 @@ const afternoon = shifts.find((s) => s.name === 'Afternoon');
 const task = { id: 't', venueId: 'v', title: 'Check', assignedTo: ['yossi@test'], assignmentMode: 'task', daysOfWeek: [0,1,2,3,4,5,6], scheduleType: 'recurring', targetTime: '12:00 PM', targetTimeMinutes: 720 };
 const noop = () => {};
 const make = async (props = {}) => { recordFetch({}); const view = mount(TaskModal, { isOpen: true, onClose: noop, onSave: () => false, knownWorkers: people, shifts, venueId: 'v', timeZone: 'UTC', ...props }); await view.render(); return view; };
-const who = async (view) => { await view.submit(); await view.submit(); };
+const who = async (view) => { if (view.find((e) => e.props['aria-label'] === 'Go to Who').length) await view.click('Go to Who'); else { await view.submit(); await view.submit(); } };
 const pick = (name) => (e) => e.props['aria-label'] === `Pick ${name}`;
 const friday = (view) => view.find((e) => e.type === 'button' && e.props.children?.[0]?.props?.children === 'Fri')[0];
 const timeFields = (body) => Object.fromEntries(['shiftTime','targetTime','targetTimeMinutes','targetTime2','targetTime2Minutes'].map((key) => [key, body[key]]));

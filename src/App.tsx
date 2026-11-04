@@ -1638,7 +1638,6 @@ export default function App() {
       }
       const updated = result.data;
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
-      showToast(`Updated assignment: "${updated.title}"`);
       return true;
     }
     // Create
@@ -1661,7 +1660,6 @@ export default function App() {
     // Dedupe by id: the TASK_CREATED broadcast can arrive before the
     // POST resolves, in which case the task is already in state.
     setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
-    showToast(`Created assignment: "${created.title}"`);
     return true;
   };
 
@@ -1671,7 +1669,6 @@ export default function App() {
     if (!result.ok) { showToast(result.error || 'Could not create the assignments.'); return false; }
     const created = result.data;
     setTasks((prev) => [...prev, ...created.filter((task) => !prev.some((t) => t.id === task.id))]);
-    showToast(`Created ${created.length} tasks`);
     return true;
   };
 

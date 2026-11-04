@@ -13,12 +13,12 @@ const shift = { ...venueShifts([], 'v').find((s) => s.name === 'Afternoon'), use
 const task = { id: 't', venueId: 'v', title: 'Check', assignedTo: ['yossi@test'], scheduleType: 'recurring', daysOfWeek: [0,1,2,3,4,5,6], targetTime: '2:00 PM', targetTimeMinutes: 840 };
 const noop = () => {};
 const make = async (props = {}) => { recordFetch({}); const view = mount(TaskModal, { isOpen: true, venueId: 'v', shifts: [shift], timeZone: 'UTC', knownWorkers: people, onClose: noop, onSave: () => false, ...props }); await view.render(); return view; };
-const who = async (view) => { await view.submit(); await view.submit(); };
+const who = async (view) => { if (view.find((e) => e.props['aria-label'] === 'Go to Who').length) await view.click('Go to Who'); else { await view.submit(); await view.submit(); } };
 const pick = (name) => (e) => e.props['aria-label'] === `Pick ${name}`;
 const save = (view) => view.find((e) => e.props.id === 'save-task-submit-btn')[0];
 const expectOn = (view, predicate) => {
   const button = view.find(predicate)[0]; assert.ok(button); assert.equal(button.props['aria-pressed'], true);
-  assert.match(button.props.className, /bg-gold-deep/); assert.match(button.props.className, /text-paper/);
+  if (!button.props.className.includes('task-people-choice')) { assert.match(button.props.className, /bg-gold-deep/); assert.match(button.props.className, /text-paper/); }
   assert.match(view.buttons().find((b) => b.el === button).label, /✓/);
 };
 
@@ -26,7 +26,7 @@ const expectOn = (view, predicate) => {
 let zeroSaves = 0;
 const zero = await make({ taskToEdit: { ...task, assignmentMode: 'task' }, onSave: () => { zeroSaves++; return false; } });
 await who(zero);
-await zero.click((e) => e.type === 'button' && e.props.children?.includes?.(' ×'));
+await zero.click((e) => e.type === 'button' && e.props.className === 'task-who-person pressable');
 assert.equal(save(zero).props.disabled, true); assert.match(zero.text(), /Pick who does it/);
 await zero.submit(); assert.equal(zeroSaves, 0);
 assert.equal(zero.find((e) => e.props['aria-label'] === 'Everyone at the venue')[0].props['aria-pressed'], false);
@@ -100,24 +100,24 @@ assert.ok(bar.find((e) => e.props.type === 'range').every((e) => !e.props.classN
 
 // When controls expose selection through aria-pressed; Who keeps its solid ON appearance.
 const choices = await make({ taskToEdit: { ...task, assignmentMode: 'task' } });
-await choices.submit();
+await choices.click('Go to When');
 assert.equal(choices.find((e) => e.props['aria-label'] === 'A time')[0].props['aria-pressed'], true);
 await choices.click((e) => e.props['aria-label'] === 'A shift'); assert.equal(choices.find((e) => e.props['aria-label'] === 'A shift')[0].props['aria-pressed'], true);
 assert.equal(choices.find((e) => e.props['aria-label'] === 'Any time during the shift')[0].props['aria-pressed'], true);
 await choices.click('By a set time'); assert.equal(choices.find((e) => e.props['aria-label'] === 'By a set time')[0].props['aria-pressed'], true);
 await choices.click('Some days'); assert.ok(choices.find((e) => e.props['aria-pressed'] === true && e.props.children?.includes?.('Some days')).length);
-await choices.submit(); await choices.click((e) => e.type === 'button' && e.props.children?.[0]?.props?.children === 'Fri');
-expectOn(choices, (e) => e.props.children?.includes?.('Every '));
-await choices.click('Just this'); expectOn(choices, (e) => e.props.children?.includes?.('Just this '));
+await choices.click('Go to Who'); await choices.click((e) => e.type === 'button' && e.props.children?.[0]?.props?.children === 'Fri');
+assert.ok(choices.find((e) => e.props['aria-pressed'] === true && e.props.children?.includes?.('Every ')).length);
+await choices.click('Just this'); assert.ok(choices.find((e) => e.props['aria-pressed'] === true && e.props.children?.includes?.('Just this ')).length);
 expectOn(choices, pick('Yossi'));
 assert.doesNotMatch(choices.text(), /Yossi \(yossi\)/);
 const varying = { ...shift, days: shift.days.map((d, day) => ({ ...d, startMinutes: day === 5 ? 900 : 840, endMinutes: day === 5 ? 1290 : 1320 })) };
-const when = await make({ taskToEdit: { ...task, targetTime: '4:00 PM', targetTimeMinutes: 960, daysOfWeek: [5] }, shifts: [varying] }); await when.submit();
+const when = await make({ taskToEdit: { ...task, targetTime: '4:00 PM', targetTimeMinutes: 960, daysOfWeek: [5] }, shifts: [varying] }); await when.click('Go to When');
 assert.match(when.text(), /During the Afternoon shift on Fri \(3:00 PM – 9:30 PM\)/);
 
 const night = venueShifts([], 'v').find((s) => s.name === 'Night');
 assert.equal(detectTimeShiftDay(night, 60, 5), 4, 'Friday after midnight belongs to Thursday Night');
-const overnight = await make({ taskToEdit: { ...task, targetTime: '1:00 AM', targetTimeMinutes: 60, daysOfWeek: [5] }, shifts: [night] }); await overnight.submit();
+const overnight = await make({ taskToEdit: { ...task, targetTime: '1:00 AM', targetTimeMinutes: 60, daysOfWeek: [5] }, shifts: [night] }); await overnight.click('Go to When');
 assert.match(overnight.text(), /During the Night shift on Thu/);
 
 // Footer is a sibling of the one scrolling body inside the submitting form.

@@ -578,3 +578,61 @@
 .shift-hours-visual .shift-hours-handle::-moz-range-thumb { background: linear-gradient(var(--gold-deep), var(--gold-deep)) center / 2px 8px no-repeat, radial-gradient(circle, var(--surface) 0 9px, var(--gold-deep) 10px 12px, transparent 13px); }
 .shift-hours-start, .shift-hours-end { z-index: 2; }
 .shift-hours-start:focus-within, .shift-hours-end:focus-within { z-index: 3; }
+
+/* Who and edit share the form's palette, type floor, and touch targets. */
+.task-edit-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; border-radius: 12px; background: var(--sunken); }
+.task-edit-tabs button { min-height: 44px; border-radius: 8px; font-size: 14px; font-weight: 600; color: var(--ink-soft); }
+.task-edit-tabs button[aria-pressed='true'] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px var(--line); }
+.task-edit-note { display: flex; gap: 8px; align-items: flex-start; padding: 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--ink-soft); font-size: 12px; }
+.task-edit-note strong { color: var(--ink); font-weight: 650; }
+.task-who-person { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 58px; padding: 12px; border-radius: 12px; background: linear-gradient(var(--paper), var(--gold-wash)); box-shadow: inset 0 0 0 1.5px var(--gold); text-align: left; color: var(--ink); }
+.task-who-avatar { display: grid; place-items: center; flex-shrink: 0; width: 36px; height: 36px; border-radius: 50%; background: var(--surface); color: var(--gold-deep); font-size: 16px; font-weight: 650; }
+.task-who-person-name { display: flex; flex: 1; flex-direction: column; align-items: flex-start; min-width: 0; gap: 4px; }
+.task-who-person-name strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-size: 14px; font-weight: 650; }
+.task-who-person-name small { font-size: 12px; color: var(--ink-soft); }
+.task-who-person-name .task-who-usual { padding: 2px 6px; border: 1px solid var(--gold); border-radius: 6px; background: var(--surface); color: var(--gold-ink); }
+.task-who-remove-hint { max-width: 44px; font-size: 12px; line-height: 16px; color: var(--ink-soft); }
+.task-who-check { display: grid; place-items: center; flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; background: var(--gold-deep); color: var(--paper); }
+.task-who-add { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px; border: 1.5px dashed var(--line-control); border-radius: 12px; color: var(--gold-ink); font-size: 14px; font-weight: 650; }
+.task-who-avatar-stack { display: flex; margin-left: auto; padding-left: 8px; }
+.task-who-avatar-stack > span { display: grid; place-items: center; width: 24px; height: 24px; margin-left: -8px; border: 2px solid var(--surface); border-radius: 50%; background: var(--sunken); color: var(--ink-soft); font-size: 12px; }
+.task-who-everyone { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 50px; padding: 8px 12px; border: 1px solid var(--line-control); border-radius: 12px; background: var(--paper); color: var(--ink); text-align: left; font-size: 14px; }
+.task-who-everyone small { display: block; font-size: 12px; color: var(--ink-soft); }
+.task-who-toggle { width: 40px; height: 24px; margin-left: auto; padding: 2px; flex-shrink: 0; border-radius: 999px; background: var(--line-control); }
+.task-who-toggle > span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--surface); color: var(--gold-deep); font-size: 12px; }
+.task-who-everyone[aria-pressed='true'] .task-who-toggle { background: var(--gold-deep); }
+.task-who-everyone[aria-pressed='true'] .task-who-toggle > span { margin-left: 16px; }
+.task-who-days { border-top: 1px solid var(--line); padding-top: 16px; }
+.task-who-day-label { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px; color: var(--ink-soft); font-size: 12px; font-weight: 650; }
+.task-who-day-label > span { font-weight: 400; }
+.task-who-day-grid { display: grid; gap: 2px; overflow-x: auto; padding: 2px; }
+.task-who-day { position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 44px; min-height: 84px; padding: 8px 0; border: 1px solid var(--line-control); border-radius: 12px; background: var(--paper); color: var(--ink-soft); font-size: 12px; }
+.task-who-day > span:first-child { font-weight: 680; }
+.task-who-day > span:nth-child(2) { width: 30px; height: 30px; font-size: 14px; }
+.task-who-day > span:last-child { width: 100%; padding: 0 2px; font-size: 12px; }
+.task-who-day > span:last-child > span { white-space: normal; overflow-wrap: anywhere; }
+.task-who-day.is-different { border: 1.5px solid var(--gold); background: var(--gold-wash); color: var(--gold-ink); }
+.task-who-day.is-different::after { content: ''; position: absolute; top: 4px; right: 4px; width: 4px; height: 4px; border-radius: 50%; background: var(--gold-deep); }
+.task-who-day[aria-pressed='true'] { border: 2px solid var(--ink); background: var(--surface); }
+.task-who-later { display: flex; align-items: flex-start; gap: 4px; color: var(--ink-soft); font-size: 12px; }
+.task-people-scrim { position: fixed; inset: 0; z-index: 60; display: flex; justify-content: center; align-items: flex-end; background: var(--scrim); }
+.task-people-sheet { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 576px; max-height: 90dvh; padding: 12px 16px 16px; border-radius: 24px 24px 0 0; background: var(--surface); color: var(--ink); }
+.task-people-grabber { align-self: center; flex-shrink: 0; width: 36px; height: 4px; border-radius: 999px; background: var(--line-strong); }
+.task-people-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.task-people-heading h4 { font-size: 20px; font-weight: 650; }
+.task-people-heading p { margin-top: 4px; font-size: 12px; color: var(--ink-soft); }
+.task-people-close { display: grid; place-items: center; flex-shrink: 0; min-width: 44px; min-height: 44px; border-radius: 8px; background: var(--sunken); color: var(--ink-soft); }
+.task-people-date-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 4px; border-radius: 12px; background: var(--sunken); }
+.task-people-date-choice > button { min-height: 44px; padding: 4px 8px; border-radius: 8px; color: var(--ink-soft); font-size: 12px; }
+.task-people-date-choice > button[aria-pressed='true'] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px var(--line); }
+.task-people-body { min-height: 0; overflow-y: auto; }
+.task-people-choice { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 50px; padding: 8px 12px; border: 1px solid var(--line-control); border-radius: 12px; text-align: left; font-size: 14px; color: var(--ink); }
+.task-people-choice[aria-pressed='true'] { border: 1.5px solid var(--gold); background: var(--gold-wash); }
+.task-people-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.task-people-name small { display: block; font-size: 12px; color: var(--ink-soft); }
+.task-people-check { display: grid; place-items: center; flex-shrink: 0; width: 24px; height: 24px; margin-left: auto; border: 1px solid var(--line-control); border-radius: 50%; color: var(--paper); }
+.task-people-choice[aria-pressed='true'] .task-people-check { border-color: var(--gold-deep); background: var(--gold-deep); }
+.task-people-done { flex-shrink: 0; width: 100%; min-height: 48px; border-radius: 12px; background: var(--ink); color: var(--paper); font-size: 16px; font-weight: 650; }
+@media (max-width: 400px) {
+  .task-who-day-grid { gap: 0; padding: 0; }
+}

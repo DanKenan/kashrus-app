@@ -16,6 +16,7 @@ globalThis.localStorage = { getItem: (k) => storage.get(k) ?? null, setItem: (k,
 const shift = { id: 's', venueId: 'v', name: 'Deli day', area: 'Deli', days: Array.from({ length: 7 }, (_, w) => ({ on: w < 6 })), startMinutes: 480, endMinutes: 1080, userId: 'u', userName: 'Moshe L.', overrides: [], createdAt: '' };
 const noop = () => {};
 const saveForm = async (view) => {
+  if (view.find((e) => e.props['aria-label'] === 'Go to Who').length) await view.click('Go to Who');
   for (let i = 0; i < 2 && view.find((e) => e.props['data-task-form-current-step'])[0]?.props['data-task-form-current-step'] !== 'Who'; i++) await view.submit();
   if (view.find((e) => e.props.id === 'save-task-submit-btn')[0].props.disabled) await view.click((e) => e.props['aria-label'] === 'Everyone at the venue');
   await view.submit();
@@ -25,7 +26,7 @@ recordFetch({});
 const form = mount(TaskModal, { isOpen: true, onClose: noop, onSave: (t) => { saved = t; }, knownWorkers: [{ id: 'u', name: 'Moshe L.' }], venueId: 'v', shifts: [shift], timeZone: 'America/New_York' });
 await form.render();
 await form.click((e) => e.props['aria-label'] === 'A shift');
-assert.match(form.text(), /Usual for Deli day/);
+assert.ok(form.buttons().some((button) => button.el.props['aria-pressed'] === true && button.label.includes('Deli day')));
 const title = form.find((e) => e.type === 'input' && e.props.required)[0];
 assert.ok(title);
 await title.props.onChange({ target: { value: 'Check deli' } });

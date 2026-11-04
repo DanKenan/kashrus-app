@@ -26,7 +26,7 @@ const afternoon = { ...shifts.find((s) => s.name === 'Afternoon'), userIds: ['y'
 const base = { id: 't', venueId: 'v', title: 'Check', description: '', category: 'General', categories: ['General'], inputType: 'yes_no', assignedTo: ['yossi@test'], scheduleType: 'recurring', daysOfWeek: [0,1,2,3,4,5,6], targetTime: '2:00 PM', targetTimeMinutes: 840 };
 const make = async (props = {}) => { recordFetch({}); const view = mount(TaskModal, { isOpen: true, onClose: noop, onSave: noop, knownWorkers: people, venueId: 'v', shifts: [afternoon], timeZone: 'UTC', ...props }); await view.render(); return view; };
 const change = async (view, predicate, value) => { const e = view.find(predicate)[0]; assert.ok(e); await e.props.onChange({ target: { value } }); await view.render(); };
-const goWho = async (view) => { await view.submit(); await view.submit(); };
+const goWho = async (view) => { if (view.find((e) => e.props['aria-label'] === 'Go to Who').length) await view.click('Go to Who'); else { await view.submit(); await view.submit(); } };
 const exact = (text) => (e) => e.props.children === text;
 
 try {
@@ -40,7 +40,7 @@ try {
   await view.submit();
   assert.equal(view.find((e) => e.props['aria-label'] === 'Who')[0].props.hidden, true);
   await view.click('A shift');
-  assert.match(view.text(), /Usual for Afternoon/);
+  assert.match(view.text(), /usual for Afternoon/);
   await view.click('A time');
   assert.match(view.text(), /During the Afternoon shift/);
   await view.click('Back');
@@ -49,7 +49,7 @@ try {
   let saved;
   const daily = await make({ onSave: (task) => { saved = task; return false; } });
   await daily.type('task-title-input', 'Check'); await goWho(daily);
-  assert.doesNotMatch(daily.text(), /Usual for Afternoon/);
+  assert.doesNotMatch(daily.text(), /usual for Afternoon/);
   await daily.click((e) => e.type === 'button' && e.props.children?.[0]?.props?.children === 'Fri');
   await daily.click((e) => e.props['aria-label'] === 'Pick Yossi');
   await daily.click((e) => e.props['aria-label'] === 'Pick Eli');
