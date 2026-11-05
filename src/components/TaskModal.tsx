@@ -317,6 +317,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const pickerShifts = venueShifts(shiftRecords, venueId, agencyId).filter((s) => shiftIsUpcoming(s, workDateIn(timeZone)));
   const [shiftId, setShiftId] = useState<string | null>(null);
   const [shiftMode, setShiftMode] = useState(false);
+  const [deletedShiftName, setDeletedShiftName] = useState<string | null>(null);
   const [shiftTime, setShiftTime] = useState(false);
   const [scheduleType, setScheduleType] = useState<'recurring' | 'specific_dates'>('recurring');
   const [selectedDays, setSelectedDays] = useState<number[]>([0, 1, 2, 3, 4, 5, 6]);
@@ -338,7 +339,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     setShowEditTime(false);
     setStep(0); setExtras([]); setPeopleTouched(false); setDayPeople(taskToEdit?.dayAssignees || {});
     setSwaps(taskToEdit?.assigneeSwaps || []); setPeopleDay(null); setJustOnce(false);
-    setShowPeople(false); setPeopleSearch(''); setSaving(false); setSaveError(''); setRemovedShifts([]);
+    setShowPeople(false); setPeopleSearch(''); setSaving(false); setSaveError(''); setRemovedShifts([]); setDeletedShiftName(null);
     setRepeat(taskToEdit?.scheduleType === 'specific_dates' ? 'One time' : taskToEdit?.daysOfWeek?.length === 1 ? 'Every week' : taskToEdit?.daysOfWeek?.length && taskToEdit.daysOfWeek.length < 7 ? 'Some days' : 'Every day');
     setCreatingShift(false); setCreatedShifts([]);
     setShiftId(taskToEdit?.shiftId || null);
@@ -453,7 +454,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   }, [isOpen, step, shiftMode, shiftId]);
 
   const chooseShift = (shift: Shift) => {
-    setShiftId(shift.id); setShiftMode(true);
+    setShiftId(shift.id); setShiftMode(true); setDeletedShiftName(null);
     if (!taskToEdit && !peopleTouched) {
       const emails = knownWorkers.filter((w) => w.id && shiftUserIds(shift).includes(w.id) && w.email).map((w) => w.email!);
       setSelectedWorkers(emails); setAssignType('specific');
@@ -492,7 +493,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const peopleReady = mainPeople.length > 0 && (scheduleType !== 'recurring' || selectedDays.every((day) => (dayPeople[String(day) as keyof typeof dayPeople] ?? mainPeople).length > 0)) && swaps.every((swap) => swap.date < today || swap.assignedTo.length > 0);
   const choice = (on: boolean) => `min-h-11 px-3 rounded-lg border pressable ${on ? 'bg-gold-deep text-paper border-gold-deep' : 'border-line-control bg-surface text-ink'}`;
   const shiftChanged = (shift: Shift, deleted = false) => {
-    if (deleted) { setRemovedShifts((old) => [...old, shift]); if (shiftId === shift.id) { setShiftId(null); setShiftMode(false); } }
+    if (deleted) { setRemovedShifts((old) => [...old, shift]); if (shiftId === shift.id) { setShiftId(null); setDeletedShiftName(shift.name); } }
     else { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); chooseShift(shift); }
     onShiftCreated?.(shift, deleted); setCreatingShift(false);
   };
@@ -572,6 +573,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (step === 1 && shiftMode && !chosenShift) return;
     if (!taskToEdit && step !== 2) {
       if (title.trim() && extras.every((t) => t.name.trim())) {
         if (step === 1 && !taskToEdit && !peopleTouched) {
@@ -1033,9 +1035,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </div>
           <section hidden={step !== 1} aria-label="When" className="task-when space-y-4">
             <details className="task-mode-switch" open={!taskToEdit}><summary>Change time or shift<ChevronDown aria-hidden="true" className="w-4 h-4" /></summary><div role="group" aria-label="Time or Shift" className="task-when-segment">
-              <button type="button" aria-label="A shift" aria-pressed={shiftMode} onClick={() => { const shift = pickerShifts.find((s) => s.id === shiftId) || detectedShift || pickerShifts[0]; if (shift) chooseShift(shift); }} className="pressable"><Layers aria-hidden="true" className="w-4 h-4" />A shift</button>
-              <button type="button" aria-label="A time" aria-pressed={!shiftMode} onClick={() => setShiftMode(false)} className="pressable"><Clock aria-hidden="true" className="w-4 h-4" />A time</button>
+              <button type="button" aria-label="A shift" aria-pressed={shiftMode} onClick={() => { if (deletedShiftName) { setShiftMode(true); return; } const shift = pickerShifts.find((s) => s.id === shiftId) || detectedShift || pickerShifts[0]; if (shift) chooseShift(shift); }} className="pressable"><Layers aria-hidden="true" className="w-4 h-4" />A shift</button>
+              <button type="button" aria-label="A time" aria-pressed={!shiftMode} onClick={() => { setShiftMode(false); setDeletedShiftName(null); }} className="pressable"><Clock aria-hidden="true" className="w-4 h-4" />A time</button>
             </div></details>
+            {deletedShiftName && <p aria-live="polite" className="task-when-note"><Info aria-hidden="true" className="w-4 h-4 shrink-0" /><span>{deletedShiftName} was deleted. Choose another shift or switch to a set time.</span></p>}
             {shiftMode && <div className="task-shift-mode space-y-3">
               <details className="task-change-shift" open={!taskToEdit}><summary>Change shift<ChevronDown aria-hidden="true" className="w-4 h-4" /></summary>
               <div className="task-when-label">Which shift?<span>tap one</span></div>
@@ -1051,7 +1054,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 </div>
                 <div className="task-when-new-wrap"><button type="button" onClick={() => { setEditingShift(undefined); setCreatingShift(true); }} className="task-when-new pressable"><Plus aria-hidden="true" className="w-4 h-4" /><span>+ New</span></button></div>
               </div>
-              {!chosenShift && <p className="task-when-note"><Info aria-hidden="true" className="w-4 h-4" />Tap a shift. Morning, Afternoon and Night come built in.</p>}
+              {!chosenShift && !deletedShiftName && <p className="task-when-note"><Info aria-hidden="true" className="w-4 h-4" />Tap a shift. Morning, Afternoon and Night come built in.</p>}
               {chosenShift && <ShiftHoursBar shift={chosenShift} pinMinutes={shiftTime ? pickerTimeToMinutes(time1) : undefined} onSaved={(shift) => { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); onShiftCreated?.(shift); }} />}
               </details>
               <div className="task-during-shift space-y-2"><p className="task-when-label">{taskToEdit && chosenShift ? `When during the ${chosenShift.name} shift?` : 'When during the shift?'}{taskToEdit && chosenShift && <span>{compactShiftHours(chosenShift)}</span>}</p>
@@ -1167,7 +1170,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               Cancel
             </button>
             {step > 0 && <button type="button" onClick={() => setStep(step - 1)} className="sr-only focus:not-sr-only min-h-12 px-4 rounded-lg border border-line-control text-base text-ink pressable">Back</button>}
-            <button disabled={saving || !title.trim() || extras.some((t) => !t.name.trim()) || ((step === 2 || !!taskToEdit) && (!peopleReady || (shiftMode && !usingShift)))} id="save-task-submit-btn" type="submit" className="task-form-primary pressable disabled:opacity-50">
+            <button disabled={saving || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 1 && shiftMode && !usingShift) || ((step === 2 || !!taskToEdit) && (!peopleReady || (shiftMode && !usingShift)))} id="save-task-submit-btn" type="submit" className="task-form-primary pressable disabled:opacity-50">
               {saving ? 'Saving…' : taskToEdit ? '✓ Save changes' : step === 0 ? 'Next: When →' : step === 1 ? 'Next: Who does it →' : extras.length ? `✓ Save ${extras.length + 1} tasks` : '✓ Save task'}
             </button>
             {(step === 2 || !!taskToEdit) && !peopleReady && <p className="w-full text-sm text-ink-soft" role="status">Pick who does it</p>}

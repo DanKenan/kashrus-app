@@ -85,6 +85,40 @@ try {
   await local.click('+ New');
   assert.equal(venueShifts(walk(local.tree()).find((e) => e.type === ShiftsPanel).props.shifts, 'v').some((s) => s.id === morning.id), false);
 
+  // Confirming deletion of the picked shift requires an explicit replacement.
+  for (const [resolution, editing] of [['shift', false], ['time', false], ['shift', true], ['time', true]]) {
+    let savedDraft;
+    const draft = mount(TaskModal, { isOpen: true, onClose: noop, onSave: (task) => { savedDraft = task; }, knownWorkers: [], venueId: 'v', timeZone: 'UTC', shifts: [], taskToEdit: editing ? { id: 'existing', title: 'Check kitchen', venueId: 'v', shiftId: morning.id, assignedTo: ['all'] } : undefined });
+    await draft.render(); await draft.type('task-title-input', 'Check kitchen');
+    if (editing) await draft.click('Go to When'); else await draft.submit();
+    await draft.click((e) => e.props['aria-label'] === 'A shift');
+    await draft.click((e) => e.props['aria-label'] === 'Edit Morning shift');
+    const child = walk(draft.tree()).find((e) => e.type === ShiftsPanel);
+    const deletion = mount(ShiftsPanel, child.props);
+    await deletion.render(); await deletion.click('Delete shift');
+    const beforeDelete = calls.length;
+    await deletion.tree().props.children.at(-1).props.onConfirm(); await draft.render();
+    assert.deepEqual(calls.slice(beforeDelete).map(([method, path]) => [method, path]), [['DELETE', '/api/shifts/builtin-morning%3Av']]);
+    assert.equal(draft.find((e) => e.props['aria-label'] === 'A shift')[0].props['aria-pressed'], true);
+    assert.equal(draft.find((e) => e.props.className === 'task-when-shift-pick pressable' && e.props['aria-pressed']).length, 0);
+    assert.match(draft.find((e) => e.type === 'p' && e.props['aria-live'] === 'polite')[0].props.children[1].props.children.join(''), /Morning was deleted. Choose another shift or switch to a set time\./);
+    assert.equal(draft.find((e) => e.props.id === 'save-task-submit-btn')[0].props.disabled, true);
+    await draft.submit();
+    assert.equal(draft.find((e) => e.props['data-task-form-current-step'])[0].props['data-task-form-current-step'], 'When');
+    assert.equal(savedDraft, undefined);
+    await draft.click((e) => e.props['aria-label'] === 'A shift');
+    assert.equal(draft.find((e) => e.props.className === 'task-when-shift-pick pressable' && e.props['aria-pressed']).length, 0, 'mode button does not auto-pick a replacement');
+    if (resolution === 'shift') await draft.click((e) => e.props.className === 'task-when-shift-pick pressable' && e.props.children[0].props.children.at(-1) === 'Afternoon');
+    else await draft.click((e) => e.props['aria-label'] === 'A time');
+    assert.equal(draft.find((e) => e.type === 'p' && e.props['aria-live'] === 'polite').length, 0);
+    if (editing) await draft.click('Go to Who'); else await draft.submit();
+    await draft.click((e) => e.props['aria-label'] === 'Everyone at the venue'); await draft.submit();
+    assert.equal(savedDraft.shiftId, resolution === 'shift' ? defaults[1].id : null);
+    assert.equal(calls.length, beforeDelete + 1, 'no requests beyond the confirmed deletion');
+  }
+
+  const deleteRequests = calls.length;
+
   // Both entry points share the sketch's header, day strip and disclosures.
   const people = [{ id: 'u', name: 'Alex', email: 'alex@test.local' }];
   const headerTasks = [{ id: 'one', venueId: 'v', shiftId: morning.id }, { id: 'old-id', venueId: 'v', shiftId: 'builtin-morning' }, { id: 'elsewhere', venueId: 'elsewhere', shiftId: morning.id }];
@@ -124,7 +158,7 @@ try {
   await bar.render(); bar.find((e) => e.props['aria-label'] === 'Shift start')[0].props.onPointerUp();
   await sheet.render();
   assert.equal(sheet.find((e) => e.type === 'input' && e.props.type === 'time')[0].props.value, '09:30');
-  assert.equal(calls.length, 0, 'sheet draft edits never issue requests');
+  assert.equal(calls.length, deleteRequests, 'sheet draft edits never issue requests');
 
   const namedShifts = [
     custom('david-long', 450, { name: 'David Aguirre', endMinutes: 1175 }),
