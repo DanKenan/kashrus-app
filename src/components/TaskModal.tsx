@@ -444,8 +444,13 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   }, [isAny]);
 
   useEffect(() => {
-    if (step === 1 && shiftMode) pickedShiftRef.current?.parentElement?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }, [step, shiftMode, shiftId]);
+    if (!isOpen || step !== 1 || !shiftMode) return;
+    const chip = pickedShiftRef.current?.parentElement;
+    const scroller = chip?.parentElement;
+    if (!chip || !scroller) return;
+    // Align the whole card (including its pencil) inside this scroller only.
+    scroller.scrollLeft += chip.getBoundingClientRect().left - scroller.getBoundingClientRect().left - scroller.clientLeft;
+  }, [isOpen, step, shiftMode, shiftId]);
 
   const chooseShift = (shift: Shift) => {
     setShiftId(shift.id); setShiftMode(true);

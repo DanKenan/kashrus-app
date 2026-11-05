@@ -150,7 +150,20 @@ try {
   checkNames();
   await chips.click((e) => e.props.className === 'task-when-shift-pick pressable' && e.props.children[1].props.children === '7:30 AM–7:35 PM');
   checkNames();
+  // Entering When and picking another shift scroll only the list, using the
+  // whole card's bounds rather than the label's bounds or page scrolling.
+  const scroller = { scrollLeft: 100, clientLeft: 0, getBoundingClientRect: () => ({ left: 20 }) };
+  let chipLeft = 171;
+  const card = { parentElement: scroller, getBoundingClientRect: () => ({ left: chipLeft }), scrollIntoView() { throw new Error('must not scroll the page'); } };
+  chips.find((e) => e.props['aria-pressed'] === true && e.props.className === 'task-when-shift-pick pressable')[0].props.ref.current = { parentElement: card };
+  await chips.type('task-title-input', 'Check selected shift'); await chips.submit();
+  assert.equal(scroller.scrollLeft, 251, 'auto-picked card aligns with the list start on entering When');
+  chipLeft = -80;
+  await chips.click((e) => e.props.className === 'task-when-shift-pick pressable' && e.props.children[0].props.children.at(-1) === 'Morning Kitchen');
+  assert.equal(scroller.scrollLeft, 151, 'picking to the left also aligns the whole card');
   const chipCss = readFileSync(new URL('../../src/index.css', import.meta.url), 'utf8');
+  assert.match(chipCss, /\.task-shift-scroll \{[^}]*padding-inline-end: 10%/);
+  assert.match(chipCss, /\.task-shift-scroll > \* \{ scroll-snap-align: start/);
   assert.match(chipCss, /\.task-when-shift-name \{[^}]*white-space: normal/);
   assert.match(chipCss, /\.task-when-pencil \{[^}]*position: static/);
   assert.doesNotMatch(chipCss, /\.task-when-shift-pick[^{}]*\{[^}]*(?:nowrap|ellipsis|overflow: hidden)/);

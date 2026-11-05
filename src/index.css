@@ -386,6 +386,7 @@
 }
 .task-shift-scroll {
   mask-image: linear-gradient(to right, var(--ink) 90%, transparent);
+  padding-inline-end: 10%;
   scroll-snap-type: x proximity;
 }
 .task-shift-scroll > * { scroll-snap-align: start; }
