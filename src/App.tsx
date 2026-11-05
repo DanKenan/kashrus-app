@@ -3079,6 +3079,7 @@ export default function App() {
         venueId={taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || ''}
         venueName={venues.find((v) => v.id === (taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id))?.name}
         onShiftCreated={(shift, deleted) => setShiftsByVenue((prev) => ({ ...prev, [shift.venueId]: [...(prev[shift.venueId] || []).filter((s) => s.id !== shift.id), deleted ? { id: shift.id, venueId: shift.venueId, agencyId: shift.agencyId, deleted: true } as unknown as Shift : shift] }))}
+        tasks={tasks}
         knownWorkers={knownUsers}
         shifts={shiftsByVenue[taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || ''] || []}
         currentUserEmail={currentUser?.email}

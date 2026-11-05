@@ -32,6 +32,13 @@ export function venueShifts(records: readonly ShiftRecord[], venueId: string, ag
       days: Array.from({ length: 7 }, () => ({ on: true })), userIds: [], userId: null, overrides: [], createdAt: '',
     }))];
 }
+/** Stable start-clock order; overnight windows sort on their start, not end.
+ * Weekly shifts precede one-time shifts, which keep date order first. */
+export function sortShiftsByStart(shifts: readonly Shift[]): Shift[] {
+  return [...shifts].sort((a, b) => Number(!!a.oneTimeDate) - Number(!!b.oneTimeDate)
+    || (a.oneTimeDate && b.oneTimeDate ? a.oneTimeDate.localeCompare(b.oneTimeDate) : 0)
+    || a.startMinutes - b.startMinutes);
+}
 /** The single scoped lookup for stored and built-in task shifts. Bare ids remain accepted with a venue. */
 export function resolveTaskShift(task: { shiftId?: unknown; venueId?: string; agencyId?: string }, records: readonly ShiftRecord[]): Shift | undefined {
   if (typeof task.shiftId !== 'string' || !task.venueId) return undefined;

@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Check, X } from 'lucide-react';
-import type { Shift, ShiftDay, ShiftOverride } from '../types';
-import { formatShiftHours, shiftDayOf, shiftWeekdays, shiftVariesByDay, shiftIsUpcoming, shiftUserIds, shiftPeopleSummary, shiftEditableFields, venueShifts } from '../lib/shifts';
+import { Check, ChevronDown, X } from 'lucide-react';
+import type { Shift, ShiftDay, ShiftOverride, Task } from '../types';
+import { formatShiftHours, isBuiltinShiftId, shiftDayOf, shiftWeekdays, shiftVariesByDay, shiftIsUpcoming, shiftUserIds, shiftPeopleSummary, shiftEditableFields, sortShiftsByStart, venueShifts } from '../lib/shifts';
 import { apiWrite, captureEditBaseline, newActionId } from '../lib/api';
 import { addDays, workDateIn } from '../lib/workday';
 import { ConfirmModal } from './ConfirmModal';
+import { ShiftHoursBar } from './ShiftHoursBar';
+import { personAvatar } from '../lib/personAvatar';
 
 const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const control = 'min-h-11 rounded-lg border border-line-control bg-sunken text-ink px-3 text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold';
@@ -29,16 +31,17 @@ function weekdayPeople(shift: Shift): string {
 const dateLabel = (date: string) => new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
 interface Props {
   shifts: Shift[];
+  tasks?: Task[];
   venueId: string;
   timeZone: string;
-  people: Array<{ id?: string; name: string }>;
+  people: Array<{ id?: string; name: string; email?: string }>;
   createOnly?: boolean;
   initialShift?: Shift;
   agencyId?: string;
   onCancel?: () => void;
   onChange: (shift: Shift, deleted?: boolean) => void;
 }
-export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, createOnly = false, initialShift, agencyId = shifts.find((s) => s.venueId === venueId)?.agencyId || 'agency-hkc', onCancel }: Props) {
+export function ShiftsPanel({ shifts, tasks = [], venueId, timeZone, people, onChange, createOnly = false, initialShift, agencyId = shifts.find((s) => s.venueId === venueId)?.agencyId || 'agency-hkc', onCancel }: Props) {
   const [editing, setEditing] = useState<Shift | 'new' | null>(null);
   const [savedWeekly, setSavedWeekly] = useState(true);
   const [oneTimeDate, setOneTimeDate] = useState('');
@@ -103,15 +106,16 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
       setConfirm(false);
     } finally { lock.current = false; setBusy(false); }
   };
-  const picker = (label: string, value: string[], onChangeValue: (v: string[]) => void) => <div role="group" aria-label={label} className="flex flex-wrap gap-2 max-h-48 overflow-y-auto">
-    <button type="button" aria-pressed={!value.length} className={!value.length ? button.replace('border-line-control', 'border-gold') : button} onClick={() => onChangeValue([])}>Nobody</button>
-    {people.filter((p) => p.id).map((p) => <button key={p.id} type="button" aria-pressed={value.includes(p.id!)} className={value.includes(p.id!) ? button.replace('border-line-control', 'border-gold') : button}
+  const picker = (label: string, value: string[], onChangeValue: (v: string[]) => void, avatars = false) => <div role="group" aria-label={label} className={avatars ? "shift-editor-people" : "flex flex-wrap gap-2 max-h-48 overflow-y-auto"}>
+    <button type="button" aria-pressed={!value.length} className={`${!value.length ? button.replace('border-line-control', 'border-gold') : button} ${avatars ? 'shift-editor-person' : ''}`} onClick={() => onChangeValue([])}>{avatars && <span aria-hidden="true" className="task-who-avatar">○</span>}Nobody{avatars && !value.length && <span aria-hidden="true" className="shift-editor-person-check">✓</span>}</button>
+    {people.filter((p) => p.id).map((p) => <button key={p.id} type="button" aria-pressed={value.includes(p.id!)} className={`${value.includes(p.id!) ? button.replace('border-line-control', 'border-gold') : button} ${avatars ? 'shift-editor-person' : ''}`}
       onClick={() => onChangeValue(value.includes(p.id!) ? value.filter((id) => id !== p.id) : [...value, p.id!])}>
-      {value.includes(p.id!) && <Check aria-hidden="true" className="inline w-4 h-4 mr-1" />}{p.name}
+      {avatars && <span className="task-who-avatar" style={personAvatar(p.email || p.name)} aria-hidden="true">{p.name.slice(0, 1)}</span>}
+      {!avatars && value.includes(p.id!) && <Check aria-hidden="true" className="inline w-4 h-4 mr-1" />}{p.name}{avatars && value.includes(p.id!) && <span aria-hidden="true" className="shift-editor-person-check">✓</span>}
     </button>)}
   </div>;
   const upcoming = venueShifts(shifts, venueId, agencyId).filter((s) => shiftIsUpcoming(s, today));
-  const ordered = [...upcoming.filter((s) => !s.oneTimeDate), ...upcoming.filter((s) => s.oneTimeDate).sort((a, b) => a.oneTimeDate!.localeCompare(b.oneTimeDate!))];
+  const ordered = sortShiftsByStart(upcoming);
   if (!editing && createOnly) return null;
   if (!editing) return <section className="space-y-4">
     <p className="text-base text-ink-soft">Optional — without shifts the app works as today.</p>
@@ -131,17 +135,40 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
       <button type="button" className="min-h-12 w-full rounded-lg bg-gold-deep text-paper text-base font-semibold pressable cursor-pointer" onClick={() => open('new')}>+ New shift</button>
     </>}
   </section>;
-  return <section aria-label={editing === 'new' ? 'New shift' : 'Edit shift'} className="space-y-4">
-    <div className="flex items-center justify-between"><h3 className="text-xl font-semibold text-ink">{editing === 'new' ? 'New shift' : 'Edit shift'}</h3><button type="button" aria-label="Close" disabled={busy} onClick={close} className={`w-11 h-11 flex items-center justify-center ${button}`}><X className="w-5 h-5" /></button></div>
-    <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void save(); }}>
-      <fieldset disabled={busy} className="space-y-4 disabled:opacity-50">
+  const existing = editing === 'new' ? undefined : editing;
+  const usedBy = existing ? tasks.filter((task) => task.venueId === venueId && (task.shiftId === existing.id
+    || (isBuiltinShiftId(existing.id) && task.shiftId === existing.id.split(':')[0]))).length : 0;
+  const draftShift: Shift = { id: existing?.id || 'new', venueId, agencyId, name, area, days: week,
+    startMinutes: minutes(start), endMinutes: minutes(end), userIds: person, userId: person[0] || null, overrides, createdAt: existing?.createdAt || '' };
+  return <section role={createOnly ? undefined : 'dialog'} aria-modal={createOnly ? undefined : true} aria-label={editing === 'new' ? 'New shift' : 'Edit shift'} className="shift-editor-overlay" onKeyDown={(e) => { if (e.key === 'Escape' && !busy && !confirm) { e.stopPropagation(); close(); } }}>
+    <div className="shift-editor-sheet">
+    <header className="shift-editor-header">
+      <div aria-hidden="true" className="task-people-grabber" />
+      <div className="shift-editor-heading"><div className="min-w-0"><h3>{existing ? `Edit ${existing.name} shift` : 'New shift'}</h3><p>{existing && isBuiltinShiftId(existing.id) ? 'Built in' : 'Custom'} · used by {usedBy} {usedBy === 1 ? 'task' : 'tasks'}</p></div><button type="button" aria-label="Close" disabled={busy} onClick={close} className="shift-editor-close pressable disabled:opacity-50"><X aria-hidden="true" className="w-5 h-5" /></button></div>
+      {editing !== 'new' && <button type="button" disabled={busy} onClick={() => { operation.current = undefined; setConfirm(true); }} className="min-h-11 px-3 rounded-lg border border-bad bg-surface text-bad text-sm font-semibold hover:bg-bad-bg pressable disabled:opacity-50 cursor-pointer">Delete shift</button>}
+    </header>
+    <form className="shift-editor-form" onSubmit={(e) => { e.preventDefault(); void save(); }}>
+      <div className="shift-editor-body task-form-body">
+      <fieldset disabled={busy} className="task-form-current-card task-form-what min-w-0 space-y-4 disabled:opacity-50">
         <label className="block text-sm text-ink-soft">Name<input required maxLength={40} value={name} onChange={(e) => setName(e.target.value)} className={`block w-full ${control}`} /></label>
         <label className="block text-sm text-ink-soft">Area (type anything)<input maxLength={40} value={area} onChange={(e) => setArea(e.target.value)} className={`block w-full ${control}`} /></label>
-        <p className="text-sm text-ink-soft">General hours</p>
-        <div className="grid grid-cols-2 gap-3"><label className="text-sm text-ink-soft">From<input required type="time" value={start} onChange={(e) => setStart(e.target.value)} className={`block w-full ${control}`} /></label><label className="text-sm text-ink-soft">Until<input required type="time" value={end} onChange={(e) => setEnd(e.target.value)} className={`block w-full ${control}`} /></label></div>
-        {end < start && <p className="text-sm text-ink-soft">Ends next day</p>}
-        <div className="space-y-2"><p className="text-sm text-ink-soft">Usual mashgiach (optional)</p>{picker('Usual people', person, setPerson)}</div>
+        <section aria-label="General hours" className="space-y-2">
+          <h4 className="shift-editor-label">Hours</h4>
+          <ShiftHoursBar shift={draftShift} readOnly={busy} onSaved={() => {}} onDraftChange={(hours) => { setStart(timeValue(hours.startMinutes)); setEnd(timeValue(hours.endMinutes)); }} />
+          <details className="shift-editor-exact"><summary>Type exact times<ChevronDown aria-hidden="true" className="w-4 h-4" /></summary>
+          <div className="grid grid-cols-2 gap-3"><label className="text-sm text-ink-soft">From<input required type="time" value={start} onChange={(e) => setStart(e.target.value)} className={`block w-full ${control}`} /></label><label className="text-sm text-ink-soft">Until<input required type="time" value={end} onChange={(e) => setEnd(e.target.value)} className={`block w-full ${control}`} /></label></div>
+          </details>
+          {end < start && <p className="text-sm text-ink-soft">Ends next day</p>}
+        </section>
         {savedWeekly ? <section aria-label="Week" className="space-y-2">
+          <h4 className="shift-editor-label">Days</h4>
+          <div className="shift-editor-days">{days.map((label, i) => <button key={label} type="button" role="switch" aria-label={`${label} shift`} aria-checked={week[i].on} onClick={() => changeDay(i, { on: !week[i].on })} className="pressable">{label[0]}</button>)}</div>
+          <p className="text-xs text-ink-soft">Repeats every week</p>
+        </section> : <label className="block text-sm text-ink-soft">Date<input required type="date" min={today} value={oneTimeDate} onChange={(e) => setOneTimeDate(e.target.value)} className={`block w-full ${control}`} /></label>}
+        <section className="space-y-2"><h4 className="shift-editor-label">Usual mashgiach<span>optional</span></h4>{picker('Usual people', person, setPerson, true)}</section>
+        {savedWeekly && <details key={existing?.id || 'new'} open={!!existing && (shiftVariesByDay(existing) || existing.overrides.some((o) => o.date >= today))} className="shift-editor-differences">
+          <summary>Different on some days<ChevronDown aria-hidden="true" className="w-4 h-4" /></summary>
+          <section aria-label="Per-day settings" className="space-y-2">
           <h4 className="text-sm font-semibold text-ink">Week</h4>
           {days.map((name, i) => {
             const day = week[i], ownHours = day.startMinutes !== undefined;
@@ -149,11 +176,7 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
             const differs = day.userIds !== undefined || ownHours;
             return <div key={name} role="group" aria-label={name} className={`p-2 rounded-lg border border-line ${day.on ? 'bg-surface' : 'bg-sunken'}`}>
               <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 items-center">
-                <button type="button" role="switch" aria-label={`${name} shift`} aria-checked={day.on}
-                  onClick={() => changeDay(i, { on: !day.on })}
-                  className={`${differs && day.on ? '' : 'row-span-2'} self-start min-h-11 min-w-16 px-2 rounded-lg border inline-flex items-center justify-center gap-1 text-sm pressable cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold ${day.on ? 'bg-ink text-paper border-ink font-semibold' : 'bg-surface text-ink-soft border-line-control opacity-60'}`}>
-                  {day.on && <Check aria-hidden="true" className="w-4 h-4" />}{name}
-                </button>
+                <span className="self-start min-h-11 min-w-16 px-2 inline-flex items-center text-sm text-ink-soft">{name}</span>
                 {day.on && <>
                   <button type="button" aria-label={`${name} people`} aria-expanded={peopleDay === i} onClick={() => setPeopleDay(peopleDay === i ? null : i)} className={`w-full min-w-0 text-left ${button}`}>
                     {day.userIds === undefined ? 'Usual: ' : ''}{shiftPeopleSummary(peopleNames(day.userIds === undefined ? person : shiftUserIds(day)))}
@@ -173,19 +196,23 @@ export function ShiftsPanel({ shifts, venueId, timeZone, people, onChange, creat
               </div>}
             </div>;
           })}
-        </section> : <label className="block text-sm text-ink-soft">Date<input required type="date" min={today} value={oneTimeDate} onChange={(e) => setOneTimeDate(e.target.value)} className={`block w-full ${control}`} /></label>}
-        {savedWeekly && <div className="space-y-2"><p className="text-sm text-ink-soft">Changes for a date</p>
+          </section>
+        <div className="space-y-2"><p className="text-sm text-ink-soft">Changes for a date</p>
           {overrides.map((o) => <div key={o.date} className="flex items-center justify-between gap-2 text-base text-ink"><span>{dateLabel(o.date)} → {shiftPeopleSummary(peopleNames(shiftUserIds(o)))}</span><button type="button" aria-label={`Remove change for ${dateLabel(o.date)}`} className={button} onClick={() => setOverrides((old) => old.filter((v) => v.date !== o.date))}>×</button></div>)}
           {addingDate && <div className="space-y-2"><label className="block text-sm text-ink-soft">Date<input type="date" min={today} value={date} onChange={(e) => setDate(e.target.value)} className={`block w-full ${control}`} /></label><div className="space-y-2"><p className="text-sm text-ink-soft">People</p>{picker('People for date', datePerson, setDatePerson)}</div><button type="button" disabled={!date || date < today || overrides.length >= 60} className={button} onClick={() => { setOverrides((old) => [...old.filter((o) => o.date !== date), { date, userIds: datePerson, userId: datePerson[0] || null }].sort((a, b) => a.date.localeCompare(b.date))); setAddingDate(false); }}>Add change</button></div>}
           {!addingDate && <button type="button" disabled={overrides.length >= 60} className={button} onClick={() => setAddingDate(true)}>+ Change for a date</button>}
-        </div>}
+        </div>
+        </details>}
         <button type="button" role="switch" aria-label="Save for next weeks" disabled={editing !== 'new'} aria-checked={savedWeekly} onClick={() => setSavedWeekly((v) => !v)} className={`w-full flex items-center gap-2 ${button}`}><span aria-hidden="true">{savedWeekly ? '✓' : '○'}</span>Save for next weeks<span className="ml-auto text-sm">{savedWeekly ? 'On' : 'Off'}</span></button>
         {editing !== 'new' && <p className="text-sm text-ink-soft">Can't change after the shift is created.</p>}
       </fieldset>
       {error && <p role="alert" className="text-base text-bad">{error}</p>}
-      <button type="submit" disabled={busy} className="min-h-12 w-full rounded-lg bg-gold-deep text-paper text-base font-semibold pressable disabled:opacity-50 cursor-pointer">{busy ? 'Saving…' : 'Save'}</button>
-      {editing !== 'new' && <button type="button" disabled={busy} onClick={() => { operation.current = undefined; setConfirm(true); }} className="min-h-11 px-3 rounded-lg border border-bad bg-surface text-bad text-base font-semibold hover:bg-bad-bg pressable disabled:opacity-50 cursor-pointer">Delete shift</button>}
+      </div>
+      <div className="shift-editor-footer task-form-footer">
+      <button type="submit" disabled={busy} className="task-form-primary pressable disabled:opacity-50">{busy ? 'Saving…' : '✓ Save shift'}</button>
+      </div>
     </form>
+    </div>
     <ConfirmModal isOpen={confirm} onClose={() => { if (!busy) setConfirm(false); }} onConfirm={() => void save(true)} title="Delete shift?" message="Its tasks will keep the shift’s hours and days as their own schedule." confirmText="Delete shift" isLoading={busy} />
   </section>;
 }

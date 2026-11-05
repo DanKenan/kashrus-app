@@ -386,6 +386,7 @@
 }
 .task-shift-scroll {
   mask-image: linear-gradient(to right, var(--ink) 90%, transparent);
+  padding-inline-end: 10%;
   scroll-snap-type: x proximity;
 }
 .task-shift-scroll > * { scroll-snap-align: start; }
@@ -468,7 +469,7 @@
 .task-form-count { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
 .task-form-what label { color: var(--ink-soft); font-size: 12px; font-weight: 650; }
 .task-form-optional { float: right; font-weight: 400; }
-.task-form-what input:not([type='checkbox']):not([type='radio']),
+.task-form-what input:not([type='checkbox']):not([type='radio']):not([type='range']),
 .task-form-what select,
 .task-form-what textarea { min-height: var(--task-form-field-height); border: 1px solid var(--line-control); border-radius: 12px; background: var(--paper); padding: 8px 12px; color: var(--ink); font-size: 16px; font-weight: 400; }
 .task-form-what textarea { height: var(--task-form-field-height); resize: vertical; }
@@ -503,8 +504,9 @@
 .task-when-segment > button[aria-pressed='true'] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px var(--line); }
 .task-when-shift { display: flex; align-items: center; flex-shrink: 0; min-height: 46px; border: 1px solid var(--line-control); border-radius: 12px; background: var(--paper); color: var(--ink); }
 .task-when-shift-pick { min-width: 86px; min-height: 44px; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 650; }
-.task-when-shift-pick > span:first-child { display: flex; align-items: center; justify-content: center; gap: 4px; max-width: 144px; overflow: hidden; white-space: nowrap; }
-.task-when-shift-hours { display: block; font-size: 12px; font-weight: 400; color: var(--ink-soft); white-space: nowrap; }
+.task-when-shift-pick > span:first-child { display: flex; align-items: center; justify-content: center; gap: 4px; white-space: normal; }
+.task-when-shift-name { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+.task-when-shift-hours { display: block; font-size: 12px; font-weight: 400; color: var(--ink-soft); white-space: normal; }
 .task-when-shift.is-picked { background: linear-gradient(var(--task-form-gold-start), var(--task-form-gold-end)); border-color: var(--gold-deep); color: var(--paper); }
 .task-when-shift.is-picked .task-when-shift-hours { color: inherit; }
 .task-shift-icon { color: var(--ink-soft); }
@@ -676,13 +678,11 @@
 .task-edit-sheet .task-change-shift { order: 2; }
 .task-edit-sheet .task-shift-mode > * { margin-top: 0; }
 .task-when-label { margin-top: 12px; }
-.task-when-shift { position: relative; width: 86px; }
-.task-when-shift-pick { width: 84px; min-width: 0; padding: 4px; }
-.task-when-shift-pick > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.task-when-shift { width: auto; }
+.task-when-shift-pick { width: 144px; min-width: 0; padding: 8px; }
 .task-when-shift-hours { font-size: 12px; }
-.task-when-pencil { position: absolute; right: 0; bottom: 0; width: 44px; height: 44px; transform: translate(12px, 10px); }
+.task-when-pencil { position: static; flex-shrink: 0; align-self: stretch; width: 44px; }
 .task-when-pencil > span { width: 20px; height: 20px; }
-.task-when-shift.is-picked { margin-right: 12px; }
 .task-when-radio[aria-pressed='true'] { border-width: 1px; background: color-mix(in srgb, var(--gold-wash) 45%, var(--surface)); }
 .task-when-radio { padding: 6px 8px; }
 .task-time-readout { flex: 1; min-width: 0; display: grid; place-items: center; height: 52px; border: 1.5px solid var(--gold); border-radius: 12px; color: var(--ink); font-size: 27px; font-weight: 700; white-space: nowrap; }
@@ -757,8 +757,6 @@
 .task-who-day { border-color: var(--line); }
 .task-who-day.is-different { border-color: var(--gold); }
 .task-who-day[aria-pressed='true'] { border-color: var(--ink); }
-.task-when-shift.is-picked .task-when-shift-pick { padding-right: 22px; }
-.task-when-pencil { right: -10px; bottom: 0; transform: none; }
 .task-when-pencil > span { width: 20px; height: 20px; background: var(--surface); border-radius: 6px; }
 .task-form-primary { background: linear-gradient(var(--task-action-start), var(--task-action-end)); box-shadow: 0 4px 12px color-mix(in srgb, var(--gold) 25%, transparent); }
 .task-form-what { display: flex; flex-direction: column; }
@@ -791,3 +789,44 @@
 .task-change-shift > .shift-hours-visual { margin-top: 8px; }
 .task-when > :not([hidden]) ~ :not([hidden]) { margin-block: 2px 0; }
 [data-task-step='When'] .task-form-card-header { margin-bottom: 4px; }
+
+/* Shift editor: the same draft controls in a bottom sheet from either entry. */
+.shift-editor-overlay { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; justify-content: center; background: var(--scrim); }
+.shift-editor-sheet { display: flex; flex-direction: column; width: 100%; max-width: 576px; max-height: 90dvh; overflow: hidden; border-radius: 24px 24px 0 0; background: var(--paper); color: var(--ink); }
+.shift-editor-header { flex-shrink: 0; padding: 12px 16px 8px; border-bottom: 1px solid var(--line); background: var(--paper); }
+.shift-editor-header > .task-people-grabber { margin: 0 auto 12px; }
+.shift-editor-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.shift-editor-heading h3 { font-size: 20px; line-height: 28px; font-weight: 690; overflow-wrap: anywhere; }
+.shift-editor-heading p { color: var(--ink-soft); font-size: 12px; line-height: 20px; }
+.shift-editor-close { display: grid; place-items: center; flex-shrink: 0; width: 44px; height: 44px; border-radius: 50%; background: var(--sunken); color: var(--ink-soft); }
+.shift-editor-header > button { margin-top: 4px; }
+.shift-editor-form { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.shift-editor-body { min-width: 0; min-height: 0; overflow-y: auto; padding: 16px; }
+.shift-editor-body > fieldset { min-inline-size: 0; max-width: 100%; padding: 16px; }
+.shift-editor-body fieldset > * { min-width: 0; max-width: 100%; }
+.shift-editor-label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: var(--ink); font-size: 14px; font-weight: 650; }
+.shift-editor-label > span { color: var(--ink-soft); font-size: 12px; font-weight: 400; }
+.shift-editor-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.shift-editor-days > button { min-width: 0; min-height: 44px; border: 1px solid var(--line-control); border-radius: 12px; background: var(--paper); color: var(--ink-soft); font-size: 14px; }
+.shift-editor-days > button[aria-checked='true'] { border-color: var(--ink); background: var(--ink); color: var(--paper); font-weight: 600; }
+.shift-editor-people { display: flex; min-width: 0; max-width: 100%; gap: 8px; overflow-x: auto; padding: 4px 0; }
+.shift-editor-person { position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; flex-shrink: 0; width: 80px; padding: 8px 4px; border-radius: 12px; font-size: 12px; overflow-wrap: anywhere; }
+.shift-editor-person-check { position: absolute; top: 4px; right: 8px; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--gold-deep); color: var(--paper); font-size: 12px; }
+.shift-editor-exact > summary, .shift-editor-differences > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; color: var(--ink-soft); font-size: 12px; list-style: none; cursor: pointer; }
+.shift-editor-exact > summary::-webkit-details-marker, .shift-editor-differences > summary::-webkit-details-marker { display: none; }
+.shift-editor-differences { border-top: 1px solid var(--line); }
+.shift-editor-differences > :not(summary) { margin-top: 12px; }
+.shift-editor-footer { flex-shrink: 0; border-top: 1px solid var(--line); padding: 12px 16px max(16px, env(safe-area-inset-bottom)); background: var(--paper); }
+.shift-editor-footer .task-form-primary { background: var(--gold-deep); }
+.shift-editor-sheet :is(button, summary):focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+/* Remove transformed/backdrop containing blocks only while the Team sheet is open. */
+.team-modal-overlay:has(.shift-editor-overlay) { backdrop-filter: none; }
+.team-modal-overlay:has(.shift-editor-overlay) > div { animation: none; overflow: visible; }
+@media (max-width: 399px) {
+  .shift-editor-body, .shift-editor-body > fieldset { padding: 8px; }
+}
+@media (max-width: 359px) {
+  .shift-editor-body { padding: 8px 4px; }
+  .shift-editor-body > fieldset { padding: 8px 0; }
+  .shift-editor-days { gap: 0; }
+}

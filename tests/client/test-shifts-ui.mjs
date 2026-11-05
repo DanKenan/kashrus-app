@@ -63,7 +63,7 @@ await panel.find((e) => e.type === 'input' && e.props.maxLength === 40)[0].props
 globalThis.fetch = async () => new Response(JSON.stringify({ error: 'This venue is outside your scope.' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
 await panel.submit();
 assert.match(panel.text(), /This venue is outside your scope\./);
-assert.match(panel.text(), /Edit shift/);
+assert.match(panel.text(), /Edit .* shift/);
 let changed;
 await panel.render({ onChange: (s) => { changed = s; } });
 globalThis.fetch = async () => new Response(JSON.stringify({ ...shift, name: 'Saved shift' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -82,13 +82,13 @@ globalThis.fetch = async () => {
 };
 await panel.submit();
 assert.match(panel.text(), /Couldn't save the shift\. Check the connection and try again\./);
-assert.match(panel.text(), /Edit shift/);
+assert.match(panel.text(), /Edit .* shift/);
 await panel.click('Delete shift');
 const confirmation = panel.tree().props.children.find((child) => child?.props?.title === 'Delete shift?');
 await confirmation.props.onConfirm();
 await panel.render();
 assert.match(panel.text(), /Couldn't delete the shift\. Check the connection and try again\./);
-assert.equal(panel.buttons().find((b) => b.label === 'Save').el.props.disabled, false);
+assert.equal(panel.buttons().find((b) => b.label === '✓ Save shift').el.props.disabled, false);
 
 // Render the actual card/table badges with a venue-local fake clock.
 const { TaskCardView } = await import('../../src/components/TaskCardView.tsx');

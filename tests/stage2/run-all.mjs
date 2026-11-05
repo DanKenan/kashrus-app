@@ -224,6 +224,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-109-boot-upgrade.mjs')).default, // BOOTFIX
     (await import('./test-110-taskform-writes.mjs')).default, // TASKFORM-A
     (await import('./test-111-night-created-at.mjs')).default, // NIGHTFIX
+    (await import('./test-112-shiftdel-sort.mjs')).default, // SHIFTDEL-SORT
     // MERGE-FIX: merges into the operator row and re-signs the suite's admin session; keep it LAST, after its own fresh state.
     FRESH_STATE,
     (await import('./test-85-merge-operator.mjs')).default,
