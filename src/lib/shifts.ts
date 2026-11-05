@@ -1,9 +1,9 @@
 import { taskAssigneesOn, taskOwnsPeople, type TaskPeople } from './taskAssignees.ts';
 import type { Shift, ShiftDay } from '../types.ts';
-import { isTaskOverdue, targetMinutesOf } from './overdue.ts';
+import { checkInCoversDue, type CheckInTask, isTaskOverdue, targetMinutesOf } from './overdue.ts';
 import { addDays, isWorkDate, DEFAULT_TIME_ZONE, workDateIn, minutesIn } from './workday.ts';
 
-type ShiftTask = TaskPeople & {
+type ShiftTask = TaskPeople & CheckInTask & {
   createdAt?: string;
   shiftTime?: boolean;
   shiftId?: string | null; venueId?: string; assignedTo?: unknown;
@@ -39,6 +39,20 @@ export function sortShiftsByStart(shifts: readonly Shift[]): Shift[] {
     || (a.oneTimeDate && b.oneTimeDate ? a.oneTimeDate.localeCompare(b.oneTimeDate) : 0)
     || a.startMinutes - b.startMinutes);
 }
+
+export const NO_SHIFT_FILTER = '__no_shift__';
+export function validShiftFilter(pick: string, shifts: readonly Shift[], hasNoShift: boolean): string {
+  return shifts.length && (shifts.some((s) => s.id === pick) || (pick === NO_SHIFT_FILTER && hasNoShift)) ? pick : '';
+}
+
+/** Board filtering uses explicit shift membership, never a clock-time guess. */
+export function matchesShiftFilter(task: ShiftTask & { agencyId?: string }, pick: string, records: readonly ShiftRecord[]): boolean {
+  if (!pick) return true;
+  const shift = resolveTaskShift(task, records);
+  if (pick === NO_SHIFT_FILTER) return !shift && timeMinutes(task) === null;
+  return shift?.id === pick;
+}
+
 /** The single scoped lookup for stored and built-in task shifts. Bare ids remain accepted with a venue. */
 export function resolveTaskShift(task: { shiftId?: unknown; venueId?: string; agencyId?: string }, records: readonly ShiftRecord[]): Shift | undefined {
   if (typeof task.shiftId !== 'string' || !task.venueId) return undefined;
@@ -219,6 +233,8 @@ export function shiftOwnTimeOverdueDay(shift: Shift, ymd: string, weekday: numbe
   const startWeekday = weekdayOf(occurrence);
   const deadline = shiftTimeOffset(shift, targetMinutesOf(task), startWeekday);
   const elapsed = nowMinutes + (occurrence !== ymd ? 1440 : 0);
+  const second = shiftTimeOffset(shift, targetMinutesOf({ targetTime: task.targetTime2, targetTimeMinutes: task.targetTime2Minutes }), startWeekday);
+  if (checkInCoversDue(task, occurrence, elapsed, timeZone, shiftHoursOn(shift, startWeekday).startMinutes, [deadline, second])) return null;
   return isTaskOverdue({ ...task, targetTimeMinutes: deadline }, elapsed)
     && shiftDeadlineExisted(task, occurrence, deadline, timeZone) ? occurrence : null;
 }
@@ -229,8 +245,11 @@ export function shiftTaskOverdueAt(shift: Shift, ymd: string, weekday: number, n
   const previous = shiftHoursOn(shift, (weekday + 6) % 7);
   const hours = shiftHoursOn(shift, weekday);
   if (nowMinutes > previous.endMinutes && previousOvernightOverdueDay(shift, ymd, weekday, nowMinutes)) {
-    return shiftDeadlineExisted(task, addDays(ymd, -1), previous.endMinutes + 1440, timeZone);
+    const occurrence = addDays(ymd, -1);
+    if (task && checkInCoversDue(task, occurrence, nowMinutes + 1440, timeZone, previous.startMinutes, [previous.endMinutes + 1440])) return false;
+    return shiftDeadlineExisted(task, occurrence, previous.endMinutes + 1440, timeZone);
   }
+  if (task && checkInCoversDue(task, ymd, nowMinutes, timeZone, hours.startMinutes, [hours.endMinutes])) return false;
   return hours.endMinutes > hours.startMinutes && shiftRunsOn(shift, ymd, weekday) && nowMinutes > hours.endMinutes
     && shiftDeadlineExisted(task, ymd, hours.endMinutes, timeZone);
 }

@@ -1,4 +1,5 @@
-import { venueShifts as clientVenueShifts, resolveTaskShift, shiftPeopleOccurrenceDay } from './lib/shifts';
+import { filterChipClass, FilterCheck } from './lib/filterChip';
+import { venueShifts as clientVenueShifts, resolveTaskShift, shiftPeopleOccurrenceDay, sortShiftsByStart, validShiftFilter, matchesShiftFilter, NO_SHIFT_FILTER } from './lib/shifts';
 import { saveTaskBatch } from './lib/taskForm';
 import { activeFilterChips, clearActiveFilter, type FilterDefaults, type FilterState } from './lib/activeFilters';
 import { ActiveFilters } from './components/ActiveFilters';
@@ -764,6 +765,26 @@ export default function App() {
   // "Today" in the app is the venue's local day, never the device zone or UTC.
   const currentVenueTimeZone = venueTimeZone(currentVenue, currentUser);
   const venueShifts = clientVenueShifts(shiftsByVenue[currentVenue?.id || ''] || [], currentVenue?.id || '', currentUser?.agencyId);
+  const shiftFilterKey = `task_shift_filter:${JSON.stringify([currentUser?.agencyId || 'agency-hkc', currentVenue?.id || ''])}`;
+  const readShiftPick = () => {
+    try { return localStorage.getItem(shiftFilterKey) || ''; } catch { return ''; }
+  };
+  const [shiftPick, setShiftPick] = useState(() => ({ key: shiftFilterKey, id: readShiftPick() }));
+  if (shiftPick.key !== shiftFilterKey) setShiftPick({ key: shiftFilterKey, id: readShiftPick() });
+  const shiftFilterOptions = sortShiftsByStart(venueShifts.filter((s) => !('deleted' in s && s.deleted)));
+  const hasNoShift = tasks.some((task) => task.venueId === currentVenue?.id && !resolveTaskShift(task, shiftsByVenue[currentVenue?.id || ''] || []));
+  const selectedShift = !isKiosk && canUserAssignTasks(currentUser) && shiftPick.key === shiftFilterKey
+    ? validShiftFilter(shiftPick.id, shiftFilterOptions, hasNoShift) : '';
+  const changeShift = (id: string) => {
+    setShiftPick({ key: shiftFilterKey, id });
+    try { localStorage.setItem(shiftFilterKey, id); } catch { /* Device storage can be unavailable. */ }
+  };
+  // Wait for the existing venue payload before pruning a remembered selection.
+  useEffect(() => {
+    if (Object.prototype.hasOwnProperty.call(shiftsByVenue, currentVenue?.id || '')
+      && shiftPick.key === shiftFilterKey && shiftPick.id
+      && !validShiftFilter(shiftPick.id, shiftFilterOptions, hasNoShift)) changeShift('');
+  }, [shiftsByVenue, shiftFilterKey, shiftPick, hasNoShift]);
   const shiftsById = useMemo(() => {
     const records = Object.values<Shift[]>(shiftsByVenue).flat();
     const all = venues.flatMap((v) => clientVenueShifts(records, v.id, v.agencyId || currentUser?.agencyId));
@@ -1993,6 +2014,8 @@ export default function App() {
         }
       }
 
+      if (!matchesShiftFilter(task, selectedShift, shiftsByVenue[currentVenue?.id || ''] || [])) return false;
+
       // Category filter — with several chips picked, a task must carry every one (AND)
       if (!matchesCategories(task, selectedCategories)) {
         return false;
@@ -2009,7 +2032,7 @@ export default function App() {
 
       return true;
     });
-  }, [dayTasks, shiftsById, effectiveDayView, taskWeekday, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone, taskOccurrenceDate]);
+  }, [dayTasks, shiftsById, selectedShift, shiftsByVenue, currentVenue?.id, effectiveDayView, taskWeekday, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone, taskOccurrenceDate]);
 
   // #185 sorts two independent task times by their earliest time. A shift is
   // one window: use its start for ordering, then restore its full display window.
@@ -3016,6 +3039,22 @@ export default function App() {
             isAdmin={canUserAssignTasks(currentUser)}
           />
 
+            {canUserAssignTasks(currentUser) && shiftFilterOptions.length > 0 && (
+              <div className="flex items-center gap-2 overflow-x-auto pb-1 mb-4 -mx-1 px-1" role="group" aria-label="Filter by shift">
+                {[{ id: '', name: 'All shifts' }, ...shiftFilterOptions,
+                  ...(hasNoShift ? [{ id: NO_SHIFT_FILTER, name: 'No shift' }] : [])].map((shift) => (
+                  <button
+                    key={shift.id}
+                    type="button"
+                    onClick={() => changeShift(shift.id)}
+                    aria-pressed={selectedShift === shift.id}
+                    className={`pressable min-h-11 min-w-11 shrink-0 inline-flex items-center gap-2 px-3 py-2 rounded-full text-xs font-bold border transition cursor-pointer ${filterChipClass(selectedShift === shift.id)}`}
+                  >
+                    <FilterCheck on={selectedShift === shift.id} />{shift.name}
+                  </button>
+                ))}
+              </div>
+            )}
             {showingFilters}
             {/* Dynamic View Mode: Excel-like Table View vs Responsive Card View */}
             {viewMode === 'table' ? taskTableView : taskCardView}

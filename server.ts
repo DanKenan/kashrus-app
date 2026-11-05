@@ -1,3 +1,4 @@
+import { checkInCoversDue } from './src/lib/overdue.ts';
 import { assigneeEmails, taskAssigneesOn, taskPotentialAssignees, taskOwnsPeople, type TaskPeople } from './src/lib/taskAssignees.ts';
 import type { Shift } from './src/types.ts';
 import { venueShifts, resolveTaskShift, isBuiltinShiftId, builtinShiftVenue, shiftPeopleOccurrenceDay, normalizeShifts, shiftDayOf, shiftHoursOn, shiftOccurrenceDay, shiftPeopleOn, shiftUserIds, shiftRunsOn, shiftWeekdays, shiftTaskOverdueAt, shiftOwnTimeOverdueDay, taskWithShiftTimes, shiftEditableFields } from './src/lib/shifts.ts';
@@ -5936,6 +5937,7 @@ function taskOverdueDay(task: TaskItem, now: Date): string | null {
   // TODAYSORT (Don, Nov 1): a Friday-only task is not overdue on a Sunday.
   if (!taskAppliesOn(task, today, weekdayIn(tz, now))) return null;
   if (isAnyTimeTask(task) || !task.targetTime || task.targetTime === 'End of Day') return null;
+  if (checkInCoversDue(task, today, minutes, tz)) return null;
   return taskSortMinutes(task) < minutes ? today : null;
 }
 
