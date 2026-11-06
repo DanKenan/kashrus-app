@@ -45,11 +45,25 @@ export function validShiftFilter(pick: string, shifts: readonly Shift[], hasNoSh
   return shifts.length && (shifts.some((s) => s.id === pick) || (pick === NO_SHIFT_FILTER && hasNoShift)) ? pick : '';
 }
 
+/** Incomplete payloads cannot invalidate a device's remembered choice. */
+export function rememberedShiftFilter(pick: string, shifts: readonly Shift[], hasNoShift: boolean, shiftsLoaded: boolean, tasksLoaded: boolean): string {
+  return shiftsLoaded && tasksLoaded ? validShiftFilter(pick, shifts, hasNoShift) : pick;
+}
+
+export function shiftFilterCounts<T extends ShiftTask & { agencyId?: string; isCompleted?: boolean }>(tasks: readonly T[], pick: string, records: readonly ShiftRecord[], isMine: (task: T) => boolean) {
+  const scoped = tasks.filter((task) => matchesShiftFilter(task, pick, records));
+  const totalTasks = scoped.length;
+  const completedTasks = scoped.filter((task) => task.isCompleted).length;
+  const mine = scoped.filter(isMine);
+  return { totalTasks, completedTasks, completionRate: totalTasks ? Math.round(completedTasks / totalTasks * 100) : 0,
+    myTotal: mine.length, myCompleted: mine.filter((task) => task.isCompleted).length };
+}
+
 /** Board filtering uses explicit shift membership, never a clock-time guess. */
 export function matchesShiftFilter(task: ShiftTask & { agencyId?: string }, pick: string, records: readonly ShiftRecord[]): boolean {
   if (!pick) return true;
   const shift = resolveTaskShift(task, records);
-  if (pick === NO_SHIFT_FILTER) return !shift && timeMinutes(task) === null;
+  if (pick === NO_SHIFT_FILTER) return !shift;
   return shift?.id === pick;
 }
 

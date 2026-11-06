@@ -1,5 +1,5 @@
 import { filterChipClass, FilterCheck } from './lib/filterChip';
-import { venueShifts as clientVenueShifts, resolveTaskShift, shiftPeopleOccurrenceDay, sortShiftsByStart, validShiftFilter, matchesShiftFilter, NO_SHIFT_FILTER } from './lib/shifts';
+import { venueShifts as clientVenueShifts, resolveTaskShift, shiftPeopleOccurrenceDay, sortShiftsByStart, validShiftFilter, rememberedShiftFilter, shiftFilterCounts, matchesShiftFilter, NO_SHIFT_FILTER } from './lib/shifts';
 import { saveTaskBatch } from './lib/taskForm';
 import { activeFilterChips, clearActiveFilter, type FilterDefaults, type FilterState } from './lib/activeFilters';
 import { ActiveFilters } from './components/ActiveFilters';
@@ -338,6 +338,7 @@ export default function App() {
 
   // Main tasks & history states
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasksLoadedGeneration, setTasksLoadedGeneration] = useState(-1);
   const [shiftsByVenue, setShiftsByVenue] = useState<Record<string, Shift[]>>({});
   const [historyLogs, setHistoryLogs] = useState<DailySnapshot[]>([]);
   const [knownUsers, setKnownUsers] = useState<User[]>(DEFAULT_USERS);
@@ -772,19 +773,42 @@ export default function App() {
   const [shiftPick, setShiftPick] = useState(() => ({ key: shiftFilterKey, id: readShiftPick() }));
   if (shiftPick.key !== shiftFilterKey) setShiftPick({ key: shiftFilterKey, id: readShiftPick() });
   const shiftFilterOptions = sortShiftsByStart(venueShifts.filter((s) => !('deleted' in s && s.deleted)));
-  const hasNoShift = tasks.some((task) => task.venueId === currentVenue?.id && !resolveTaskShift(task, shiftsByVenue[currentVenue?.id || ''] || []));
+  const hasNoShift = tasks.some((task) => task.venueId === currentVenue?.id && matchesShiftFilter(task, NO_SHIFT_FILTER, shiftsByVenue[currentVenue?.id || ''] || []));
   const selectedShift = !isKiosk && canUserAssignTasks(currentUser) && shiftPick.key === shiftFilterKey
     ? validShiftFilter(shiftPick.id, shiftFilterOptions, hasNoShift) : '';
   const changeShift = (id: string) => {
     setShiftPick({ key: shiftFilterKey, id });
     try { localStorage.setItem(shiftFilterKey, id); } catch { /* Device storage can be unavailable. */ }
   };
-  // Wait for the existing venue payload before pruning a remembered selection.
+  const shiftsLoaded = Object.prototype.hasOwnProperty.call(shiftsByVenue, currentVenue?.id || '');
+  const tasksLoaded = tasksLoadedGeneration === requestContext.current.generation;
+  const rememberedShift = rememberedShiftFilter(shiftPick.id, shiftFilterOptions, hasNoShift, shiftsLoaded, tasksLoaded);
   useEffect(() => {
-    if (Object.prototype.hasOwnProperty.call(shiftsByVenue, currentVenue?.id || '')
-      && shiftPick.key === shiftFilterKey && shiftPick.id
-      && !validShiftFilter(shiftPick.id, shiftFilterOptions, hasNoShift)) changeShift('');
-  }, [shiftsByVenue, shiftFilterKey, shiftPick, hasNoShift]);
+    if (shiftPick.key === shiftFilterKey && shiftPick.id !== rememberedShift) changeShift(rememberedShift);
+  }, [shiftFilterKey, shiftPick, rememberedShift]);
+
+  const [shiftRow, setShiftRow] = useState<HTMLDivElement | null>(null);
+  const [moreShiftsRight, setMoreShiftsRight] = useState(false);
+  const shiftOptionIds = shiftFilterOptions.map((shift) => shift.id).join('|');
+  useEffect(() => {
+    if (!shiftRow) return;
+    const revealPick = () => {
+      const picked = shiftRow.querySelector<HTMLButtonElement>('[aria-pressed="true"]');
+      if (picked) {
+        const rowBounds = shiftRow.getBoundingClientRect();
+        const bounds = picked.getBoundingClientRect();
+        if (bounds.left < rowBounds.left) shiftRow.scrollLeft -= rowBounds.left - bounds.left;
+        else if (bounds.right > rowBounds.right) shiftRow.scrollLeft += bounds.right - rowBounds.right;
+      }
+    };
+    const updateFade = () => setMoreShiftsRight(shiftRow.scrollWidth - shiftRow.clientWidth - shiftRow.scrollLeft > 1);
+    const resized = () => { revealPick(); updateFade(); };
+    resized();
+    const observer = new ResizeObserver(resized);
+    observer.observe(shiftRow);
+    shiftRow.addEventListener('scroll', updateFade, { passive: true });
+    return () => { observer.disconnect(); shiftRow.removeEventListener('scroll', updateFade); };
+  }, [shiftRow, selectedShift, shiftOptionIds, hasNoShift]);
   const shiftsById = useMemo(() => {
     const records = Object.values<Shift[]>(shiftsByVenue).flat();
     const all = venues.flatMap((v) => clientVenueShifts(records, v.id, v.agencyId || currentUser?.agencyId));
@@ -1095,8 +1119,9 @@ export default function App() {
       .then((res) => res.json())
       .then((data) => {
         if (!isCurrent()) return;
-        if (activeVenueId) setShiftsByVenue((prev) => ({ ...prev, [activeVenueId]: Array.isArray(data.shifts) ? data.shifts.filter((s: Shift) => s.venueId === activeVenueId) : [] }));
+        if (activeVenueId && Array.isArray(data.shifts)) setShiftsByVenue((prev) => ({ ...prev, [activeVenueId]: Array.isArray(data.shifts) ? data.shifts.filter((s: Shift) => s.venueId === activeVenueId) : [] }));
         if (Array.isArray(data.tasks)) {
+          setTasksLoadedGeneration(generation);
           setTasks(data.tasks.filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t, Array.isArray(data.shifts) ? data.shifts : []))));
         }
       })
@@ -1219,9 +1244,11 @@ export default function App() {
             return;
           }
         }
-        if (Array.isArray(msg.payload.tasks))
+        if (Array.isArray(msg.payload.tasks)) {
+          setTasksLoadedGeneration(generation);
           setTasks(scopeListToVenue<Task>(msg.payload.tasks, venueScope)
             .filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t))));
+        }
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
         if (Array.isArray(msg.payload.events)) setEvents(scopeListToVenue(msg.payload.events, eventScope));
         if (Array.isArray(msg.payload.users)) setKnownUsers(msg.payload.users);
@@ -1969,13 +1996,10 @@ export default function App() {
 
   // Statistics calculation
   // The progress header reads "Today": it always counts today's tasks, also while an editor browses "All days".
-  const totalTasks = todayTasks.length;
-  const completedTasks = todayTasks.filter((t) => t.isCompleted).length;
-  const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
-
-  const myTasks = todayTasks.filter((t) => isMyTask(t, currentUser, taskOccurrenceDate(t)));
-  const myTotal = myTasks.length;
-  const myCompleted = myTasks.filter((t) => t.isCompleted).length;
+  const { totalTasks, completedTasks, completionRate, myTotal, myCompleted } = shiftFilterCounts(
+    todayTasks, selectedShift, shiftsByVenue[currentVenue?.id || ''] || [],
+    (task) => isMyTask(task, currentUser, taskOccurrenceDate(task)),
+  );
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -3040,7 +3064,8 @@ export default function App() {
           />
 
             {canUserAssignTasks(currentUser) && shiftFilterOptions.length > 0 && (
-              <div className="flex items-center gap-2 overflow-x-auto pb-1 mb-4 -mx-1 px-1" role="group" aria-label="Filter by shift">
+              <div className="relative mb-4">
+              <div ref={setShiftRow} className="flex items-center gap-2 overflow-x-auto pb-1 -mx-1 px-1" role="group" aria-label="Filter by shift">
                 {[{ id: '', name: 'All shifts' }, ...shiftFilterOptions,
                   ...(hasNoShift ? [{ id: NO_SHIFT_FILTER, name: 'No shift' }] : [])].map((shift) => (
                   <button
@@ -3053,6 +3078,8 @@ export default function App() {
                     <FilterCheck on={selectedShift === shift.id} />{shift.name}
                   </button>
                 ))}
+              </div>
+              {moreShiftsRight && <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-paper to-transparent" />}
               </div>
             )}
             {showingFilters}
