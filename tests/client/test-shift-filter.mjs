@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { isMyTask } from '../../src/lib/myTasks.ts';
+import { taskAppliesOn } from '../../src/lib/taskDay.ts';
 import { matchesShiftFilter, validShiftFilter, sortShiftsByStart, rememberedShiftFilter, shiftFilterCounts, venueShifts, NO_SHIFT_FILTER } from '../../src/lib/shifts.ts';
 import { matchesCategories } from '../../src/lib/categoryFilter.ts';
 
@@ -59,4 +61,24 @@ assert.deepEqual(noShiftCounts,
 assert.equal(noShiftCounts.totalTasks - noShiftCounts.completedTasks, 1, 'Pending uses scoped totals');
 assert.deepEqual(shiftFilterCounts([], '', records, isMine),
   { totalTasks: 0, completedTasks: 0, completionRate: 0, myTotal: 0, myCompleted: 0 });
+// Today stays the count boundary even when the board browses All days.
+// An overnight occurrence's swap must decide Mine using its start date.
+const currentUser = { role: 'admin', email: 'admin@test' };
+const taskOccurrenceDate = (task) => task.occurrenceDate;
+const countTasks = [
+  { id: 'swap-in', venueId: 'v', shiftId: 'early', daysOfWeek: [6], assignedTo: ['other@test'],
+    occurrenceDate: '2026-11-06', assigneeSwaps: [{ date: '2026-11-06', assignedTo: ['admin@test'] }], isCompleted: true },
+  { id: 'swap-out', venueId: 'v', shiftId: 'early', daysOfWeek: [6], assignedTo: ['admin@test'],
+    occurrenceDate: '2026-11-06', assigneeSwaps: [{ date: '2026-11-06', assignedTo: ['other@test'] }] },
+  { id: 'team', venueId: 'v', shiftId: 'late', daysOfWeek: [6], assignedTo: ['all'], occurrenceDate: '2026-11-07' },
+  { id: 'tomorrow', venueId: 'v', shiftId: 'early', daysOfWeek: [0], assignedTo: ['admin@test'], occurrenceDate: '2026-11-08' },
+];
+const todayTasks = countTasks.filter((task) => taskAppliesOn(task, '2026-11-07', 6));
+const countMine = (task) => isMyTask(task, currentUser, taskOccurrenceDate(task));
+assert.deepEqual(shiftFilterCounts(todayTasks, '', records, countMine),
+  { totalTasks: 3, completedTasks: 1, completionRate: 33, myTotal: 1, myCompleted: 1 });
+assert.deepEqual(shiftFilterCounts(todayTasks, 'early', records, countMine),
+  { totalTasks: 2, completedTasks: 1, completionRate: 50, myTotal: 1, myCompleted: 1 });
+assert.equal(isMyTask(countTasks[0], currentUser), false, 'without occurrence date the swap-in is missed');
+assert.equal(isMyTask(countTasks[1], currentUser), true, 'without occurrence date the swap-out is wrongly counted');
 console.log('SHIFT-FILTER client: all assertions passed');

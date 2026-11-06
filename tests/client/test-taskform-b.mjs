@@ -145,6 +145,6 @@ try {
   assert.deepEqual(taskWithOccurrenceTimes(ownSchedule, byId).daysOfWeek, [5]);
   assert.equal(taskOccursToday(ownSchedule, byId, '2026-11-09',1,1400), false);
   const app = readFileSync(new URL('../../src/App.tsx', import.meta.url), 'utf8');
-  for (const needle of ['taskIsForViewer(task, currentUser?.email, taskOccurrenceDate(task))', 'isMyTask(t, currentUser, taskOccurrenceDate(t))', 'isMyTask(task, currentUser, taskOccurrenceDate(task))']) assert.ok(app.includes(needle));
+  for (const needle of ['taskIsForViewer(task, currentUser?.email, taskOccurrenceDate(task))', '(task) => isMyTask(task, currentUser, taskOccurrenceDate(task))', 'isMyTask(task, currentUser, taskOccurrenceDate(task))']) assert.ok(app.includes(needle));
   console.log('TASKFORM-B: steps, Night detection, day people, swap, legacy payload, one batch, one release save, private and occurrence filters, and tag passed');
 } finally { globalThis.Date = RealDate; }

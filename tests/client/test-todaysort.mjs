@@ -89,7 +89,7 @@ eq('signed out not limited (nothing to show anyway)', seesOnlyOwnTasks(null, fal
 eq('App: own-tasks rule never on the kiosk', /const onlyOwnTasks = !isKiosk && seesOnlyOwnTasks\(currentUser, canUserAssignTasks\(currentUser\)\)/.test(app), true);
 eq('App: today list = today rule AND own-tasks rule', /taskAppliesOn\(task, todayYmd, todayWeekday\) &&\s*\(!onlyOwnTasks \|\| taskIsForViewer\(task, currentUser\?\.email, taskOccurrenceDate\(task\)\)\)/.test(app), true);
 eq('App: "All days" only for editors, else today', /const dayTasks = effectiveDayView === 'all' \? tasks : todayTasks;/.test(app), true);
-eq('App: progress header counts today', /const totalTasks = todayTasks\.length;/.test(app) && /const myTasks = todayTasks\.filter/.test(app), true);
+eq('App: progress header counts today', /const \{ totalTasks, completedTasks, completionRate, myTotal, myCompleted \} = shiftFilterCounts\(\s*todayTasks, selectedShift,[\s\S]*?\(task\) => isMyTask\(task, currentUser, taskOccurrenceDate\(task\)\),\s*\);/.test(app), true);
 for (const name of ['TaskCardView', 'TaskTableView']) eq(`${name}: overdue chip only on a task due today`, /isTaskOverdue\(task, nowMinutes\) && dueToday\(task\)/.test(read(`src/components/${name}.tsx`)), true);
 const srv = read('server.ts');
 // SHIFTS: push and dashboard share taskOverdueDay(), which keeps the TODAYSORT day rule.
