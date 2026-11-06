@@ -80,7 +80,7 @@ import { SHOW_FACTORY_AUDIT } from './lib/features';
 import { signoffUndoBy, signoffUndoTitle, SIGNOFF_UNDO_TEXT } from './lib/signoffUndo';
 import { taskCategories } from './lib/utils';
 import { taskAppliesOn, sortTasksByTime, groupTasksByDay, taskIsForViewer, seesOnlyOwnTasks } from './lib/taskDay';
-import { toggleCategory, matchesCategories, pruneCategories } from './lib/categoryFilter';
+import { toggleCategory, matchesCategories, pruneCategories, countTaskCategories } from './lib/categoryFilter';
 import { isMyTask } from './lib/myTasks';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn, minutesIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
@@ -874,13 +874,16 @@ export default function App() {
     dayView: 'today',
     quickFilter: !isKiosk && (currentUser?.role === 'mashgiach' || currentUser?.role === 'worker') ? 'mine' : 'all',
   };
-  const filterState = { dayView: effectiveDayView, quickFilter: activeTabFilter, categories: selectedCategories, search: searchQuery };
+  const filterState: FilterState = { dayView: effectiveDayView, quickFilter: activeTabFilter, categories: selectedCategories, search: searchQuery,
+    shift: selectedShift ? { id: selectedShift, label: selectedShift === NO_SHIFT_FILTER ? 'No shift' : shiftFilterOptions.find((shift) => shift.id === selectedShift)!.name } : undefined,
+  };
   const hasActiveFilters = activeFilterChips(filterState, filterDefaults).length > 0;
   const changeFilters = (next: FilterState) => {
     setDayView(next.dayView);
     setActiveTabFilter(next.quickFilter);
     setSelectedCategories(next.categories);
     setSearchQuery(next.search);
+    changeShift(next.shift?.id || '');
   };
   const clearAllFilters = () => changeFilters(clearActiveFilter(filterState, filterDefaults, 'all'));
   const showingFilters = <ActiveFilters state={filterState} defaults={filterDefaults} onChange={changeFilters} onClearAll={clearAllFilters} kiosk={isKiosk} />;
@@ -2009,13 +2012,10 @@ export default function App() {
     return Array.from(set);
   }, [dayTasks]);
 
-  const categoryCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    dayTasks.forEach((t) => {
-      for (const c of taskCategories(t)) counts[c] = (counts[c] || 0) + 1;
-    });
-    return counts;
-  }, [dayTasks]);
+  const shiftCategoryTasks = useMemo(() => dayTasks.filter((task) => matchesShiftFilter(
+    task, selectedShift, shiftsByVenue[currentVenue?.id || ''] || [],
+  )), [dayTasks, selectedShift, shiftsByVenue, currentVenue?.id]);
+  const categoryCounts = useMemo(() => countTaskCategories(shiftCategoryTasks, categories), [shiftCategoryTasks, categories]);
 
   // A picked category that vanished from the board (e.g. after a venue switch) would hide everything with no chip lit.
   useEffect(() => {
@@ -3055,6 +3055,7 @@ export default function App() {
             onCategoryChange={changeCategory}
             categories={categories}
             categoryCounts={categoryCounts}
+            taskCount={shiftCategoryTasks.length}
             dayView={dayView}
             onDayViewChange={setDayView}
             viewMode={viewMode}

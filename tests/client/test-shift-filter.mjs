@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { activeFilterChips, clearActiveFilter } from '../../src/lib/activeFilters.ts';
+import { ActiveFilters } from '../../src/components/ActiveFilters.tsx';
+import { TaskFilterBar } from '../../src/components/TaskFilterBar.tsx';
 import { isMyTask } from '../../src/lib/myTasks.ts';
 import { taskAppliesOn } from '../../src/lib/taskDay.ts';
 import { matchesShiftFilter, validShiftFilter, sortShiftsByStart, rememberedShiftFilter, shiftFilterCounts, venueShifts, NO_SHIFT_FILTER } from '../../src/lib/shifts.ts';
-import { matchesCategories } from '../../src/lib/categoryFilter.ts';
+import { matchesCategories, countTaskCategories } from '../../src/lib/categoryFilter.ts';
 
 const make = (id, startMinutes, extra = {}) => ({ id, venueId: 'v', name: id, startMinutes, endMinutes: 1200, ...extra });
 const records = [make('late', 900), make('early', 300),
@@ -81,4 +87,44 @@ assert.deepEqual(shiftFilterCounts(todayTasks, 'early', records, countMine),
   { totalTasks: 2, completedTasks: 1, completionRate: 50, myTotal: 1, myCompleted: 1 });
 assert.equal(isMyTask(countTasks[0], currentUser), false, 'without occurrence date the swap-in is missed');
 assert.equal(isMyTask(countTasks[1], currentUser), true, 'without occurrence date the swap-out is wrongly counted');
+const defaults = { dayView: 'today', quickFilter: 'all' };
+const baseFilters = { ...defaults, categories: [], search: '' };
+for (const shift of [{ id: 'early', label: 'Early' }, { id: NO_SHIFT_FILTER, label: 'No shift' }]) {
+  const picked = { ...baseFilters, shift };
+  assert.deepEqual(activeFilterChips(picked, defaults), [{ key: 'shift', label: shift.label }]);
+  assert.equal(activeFilterChips(picked, defaults).length > 0, true, 'shift alone activates filtered empty state');
+  const html = renderToStaticMarkup(React.createElement(ActiveFilters, { state: picked, defaults, onChange() {} }));
+  assert(html.includes(`Turn off ${shift.label}`) && html.includes('Clear all'));
+  assert.equal(clearActiveFilter(picked, defaults, 'shift').shift, undefined);
+  const cleared = clearActiveFilter({ ...picked, categories: ['General'], search: 'test' }, defaults, 'all');
+  assert.deepEqual(cleared, baseFilters);
+  assert.deepEqual(shown(cleared.shift?.id || ''), shown(''), 'Clear all restores every shift');
+}
+const categoryTasks = [
+  { venueId: 'v', shiftId: 'early', categories: ['Kitchen', 'General'] },
+  { venueId: 'v', shiftId: 'early', category: 'General' },
+  { venueId: 'v', shiftId: 'late', category: 'Kitchen' },
+  { venueId: 'v', category: 'General' },
+];
+for (const [pick, total, expected] of [
+  ['', 4, { Kitchen: 2, General: 3 }],
+  ['early', 2, { Kitchen: 1, General: 2 }],
+  [NO_SHIFT_FILTER, 1, { Kitchen: 0, General: 1 }],
+]) {
+  const scoped = categoryTasks.filter((task) => matchesShiftFilter(task, pick, records));
+  const counts = countTaskCategories(scoped, ['Kitchen', 'General']);
+  assert.deepEqual(counts, expected);
+  const html = renderToStaticMarkup(React.createElement(TaskFilterBar, {
+    searchQuery: '', onSearchChange() {}, selectedCategories: [], onCategoryChange() {},
+    categories: ['Kitchen', 'General'], categoryCounts: counts, taskCount: scoped.length,
+    viewMode: 'cards', onViewModeChange() {}, dayView: 'today', onDayViewChange() {}, onOpenTaskModal() {}, isAdmin: true,
+  }));
+  const buttons = [...html.matchAll(/<button[^>]*>[\s\S]*?<\/button>/g)].map((match) => match[0].replace(/<[^>]+>/g, ''));
+  for (const label of [`All${total}`, `Kitchen${expected.Kitchen}`, `General${expected.General}`]) assert(buttons.includes(label), label);
+}
+const app = fs.readFileSync(new URL('../../src/App.tsx', import.meta.url), 'utf8');
+assert(app.includes("changeShift(next.shift?.id || '')"), 'summary and Clear all persist the changed shift');
+assert(app.includes('shift: selectedShift ?'), 'summary includes the effective shift');
+assert(app.includes('countTaskCategories(shiftCategoryTasks, categories)') && app.includes('taskCount={shiftCategoryTasks.length}'));
+assert(/dayTasks.filter\(\(task\) => matchesShiftFilter\(\s*task, selectedShift,/.test(app));
 console.log('SHIFT-FILTER client: all assertions passed');
