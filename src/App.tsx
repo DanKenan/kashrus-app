@@ -1,4 +1,5 @@
-import { venueShifts as clientVenueShifts, resolveTaskShift, shiftPeopleOccurrenceDay } from './lib/shifts';
+import { filterChipClass, FilterCheck } from './lib/filterChip';
+import { venueShifts as clientVenueShifts, resolveTaskShift, shiftPeopleOccurrenceDay, sortShiftsByStart, validShiftFilter, rememberedShiftFilter, shiftFilterCounts, matchesShiftFilter, NO_SHIFT_FILTER } from './lib/shifts';
 import { saveTaskBatch } from './lib/taskForm';
 import { activeFilterChips, clearActiveFilter, type FilterDefaults, type FilterState } from './lib/activeFilters';
 import { ActiveFilters } from './components/ActiveFilters';
@@ -79,7 +80,7 @@ import { SHOW_FACTORY_AUDIT } from './lib/features';
 import { signoffUndoBy, signoffUndoTitle, SIGNOFF_UNDO_TEXT } from './lib/signoffUndo';
 import { taskCategories } from './lib/utils';
 import { taskAppliesOn, sortTasksByTime, groupTasksByDay, taskIsForViewer, seesOnlyOwnTasks } from './lib/taskDay';
-import { toggleCategory, matchesCategories, pruneCategories } from './lib/categoryFilter';
+import { toggleCategory, matchesCategories, pruneCategories, countTaskCategories } from './lib/categoryFilter';
 import { isMyTask } from './lib/myTasks';
 import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn, minutesIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
@@ -337,6 +338,7 @@ export default function App() {
 
   // Main tasks & history states
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasksLoadedGeneration, setTasksLoadedGeneration] = useState(-1);
   const [shiftsByVenue, setShiftsByVenue] = useState<Record<string, Shift[]>>({});
   const [historyLogs, setHistoryLogs] = useState<DailySnapshot[]>([]);
   const [knownUsers, setKnownUsers] = useState<User[]>(DEFAULT_USERS);
@@ -764,6 +766,49 @@ export default function App() {
   // "Today" in the app is the venue's local day, never the device zone or UTC.
   const currentVenueTimeZone = venueTimeZone(currentVenue, currentUser);
   const venueShifts = clientVenueShifts(shiftsByVenue[currentVenue?.id || ''] || [], currentVenue?.id || '', currentUser?.agencyId);
+  const shiftFilterKey = `task_shift_filter:${JSON.stringify([currentUser?.agencyId || 'agency-hkc', currentVenue?.id || ''])}`;
+  const readShiftPick = () => {
+    try { return localStorage.getItem(shiftFilterKey) || ''; } catch { return ''; }
+  };
+  const [shiftPick, setShiftPick] = useState(() => ({ key: shiftFilterKey, id: readShiftPick() }));
+  if (shiftPick.key !== shiftFilterKey) setShiftPick({ key: shiftFilterKey, id: readShiftPick() });
+  const shiftFilterOptions = sortShiftsByStart(venueShifts.filter((s) => !('deleted' in s && s.deleted)));
+  const hasNoShift = tasks.some((task) => task.venueId === currentVenue?.id && matchesShiftFilter(task, NO_SHIFT_FILTER, shiftsByVenue[currentVenue?.id || ''] || []));
+  const selectedShift = !isKiosk && canUserAssignTasks(currentUser) && shiftPick.key === shiftFilterKey
+    ? validShiftFilter(shiftPick.id, shiftFilterOptions, hasNoShift) : '';
+  const changeShift = (id: string) => {
+    setShiftPick({ key: shiftFilterKey, id });
+    try { localStorage.setItem(shiftFilterKey, id); } catch { /* Device storage can be unavailable. */ }
+  };
+  const shiftsLoaded = Object.prototype.hasOwnProperty.call(shiftsByVenue, currentVenue?.id || '');
+  const tasksLoaded = tasksLoadedGeneration === requestContext.current.generation;
+  const rememberedShift = rememberedShiftFilter(shiftPick.id, shiftFilterOptions, hasNoShift, shiftsLoaded, tasksLoaded);
+  useEffect(() => {
+    if (shiftPick.key === shiftFilterKey && shiftPick.id !== rememberedShift) changeShift(rememberedShift);
+  }, [shiftFilterKey, shiftPick, rememberedShift]);
+
+  const [shiftRow, setShiftRow] = useState<HTMLDivElement | null>(null);
+  const [moreShiftsRight, setMoreShiftsRight] = useState(false);
+  const shiftOptionIds = shiftFilterOptions.map((shift) => shift.id).join('|');
+  useEffect(() => {
+    if (!shiftRow) return;
+    const revealPick = () => {
+      const picked = shiftRow.querySelector<HTMLButtonElement>('[aria-pressed="true"]');
+      if (picked) {
+        const rowBounds = shiftRow.getBoundingClientRect();
+        const bounds = picked.getBoundingClientRect();
+        if (bounds.left < rowBounds.left) shiftRow.scrollLeft -= rowBounds.left - bounds.left;
+        else if (bounds.right > rowBounds.right) shiftRow.scrollLeft += bounds.right - rowBounds.right;
+      }
+    };
+    const updateFade = () => setMoreShiftsRight(shiftRow.scrollWidth - shiftRow.clientWidth - shiftRow.scrollLeft > 1);
+    const resized = () => { revealPick(); updateFade(); };
+    resized();
+    const observer = new ResizeObserver(resized);
+    observer.observe(shiftRow);
+    shiftRow.addEventListener('scroll', updateFade, { passive: true });
+    return () => { observer.disconnect(); shiftRow.removeEventListener('scroll', updateFade); };
+  }, [shiftRow, selectedShift, shiftOptionIds, hasNoShift]);
   const shiftsById = useMemo(() => {
     const records = Object.values<Shift[]>(shiftsByVenue).flat();
     const all = venues.flatMap((v) => clientVenueShifts(records, v.id, v.agencyId || currentUser?.agencyId));
@@ -829,13 +874,16 @@ export default function App() {
     dayView: 'today',
     quickFilter: !isKiosk && (currentUser?.role === 'mashgiach' || currentUser?.role === 'worker') ? 'mine' : 'all',
   };
-  const filterState = { dayView: effectiveDayView, quickFilter: activeTabFilter, categories: selectedCategories, search: searchQuery };
+  const filterState: FilterState = { dayView: effectiveDayView, quickFilter: activeTabFilter, categories: selectedCategories, search: searchQuery,
+    shift: selectedShift ? { id: selectedShift, label: selectedShift === NO_SHIFT_FILTER ? 'No shift' : shiftFilterOptions.find((shift) => shift.id === selectedShift)!.name } : undefined,
+  };
   const hasActiveFilters = activeFilterChips(filterState, filterDefaults).length > 0;
   const changeFilters = (next: FilterState) => {
     setDayView(next.dayView);
     setActiveTabFilter(next.quickFilter);
     setSelectedCategories(next.categories);
     setSearchQuery(next.search);
+    changeShift(next.shift?.id || '');
   };
   const clearAllFilters = () => changeFilters(clearActiveFilter(filterState, filterDefaults, 'all'));
   const showingFilters = <ActiveFilters state={filterState} defaults={filterDefaults} onChange={changeFilters} onClearAll={clearAllFilters} kiosk={isKiosk} />;
@@ -1074,8 +1122,9 @@ export default function App() {
       .then((res) => res.json())
       .then((data) => {
         if (!isCurrent()) return;
-        if (activeVenueId) setShiftsByVenue((prev) => ({ ...prev, [activeVenueId]: Array.isArray(data.shifts) ? data.shifts.filter((s: Shift) => s.venueId === activeVenueId) : [] }));
+        if (activeVenueId && Array.isArray(data.shifts)) setShiftsByVenue((prev) => ({ ...prev, [activeVenueId]: Array.isArray(data.shifts) ? data.shifts.filter((s: Shift) => s.venueId === activeVenueId) : [] }));
         if (Array.isArray(data.tasks)) {
+          setTasksLoadedGeneration(generation);
           setTasks(data.tasks.filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t, Array.isArray(data.shifts) ? data.shifts : []))));
         }
       })
@@ -1198,9 +1247,11 @@ export default function App() {
             return;
           }
         }
-        if (Array.isArray(msg.payload.tasks))
+        if (Array.isArray(msg.payload.tasks)) {
+          setTasksLoadedGeneration(generation);
           setTasks(scopeListToVenue<Task>(msg.payload.tasks, venueScope)
             .filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t))));
+        }
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
         if (Array.isArray(msg.payload.events)) setEvents(scopeListToVenue(msg.payload.events, eventScope));
         if (Array.isArray(msg.payload.users)) setKnownUsers(msg.payload.users);
@@ -1948,13 +1999,10 @@ export default function App() {
 
   // Statistics calculation
   // The progress header reads "Today": it always counts today's tasks, also while an editor browses "All days".
-  const totalTasks = todayTasks.length;
-  const completedTasks = todayTasks.filter((t) => t.isCompleted).length;
-  const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
-
-  const myTasks = todayTasks.filter((t) => isMyTask(t, currentUser, taskOccurrenceDate(t)));
-  const myTotal = myTasks.length;
-  const myCompleted = myTasks.filter((t) => t.isCompleted).length;
+  const { totalTasks, completedTasks, completionRate, myTotal, myCompleted } = shiftFilterCounts(
+    todayTasks, selectedShift, shiftsByVenue[currentVenue?.id || ''] || [],
+    (task) => isMyTask(task, currentUser, taskOccurrenceDate(task)),
+  );
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -1964,13 +2012,10 @@ export default function App() {
     return Array.from(set);
   }, [dayTasks]);
 
-  const categoryCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    dayTasks.forEach((t) => {
-      for (const c of taskCategories(t)) counts[c] = (counts[c] || 0) + 1;
-    });
-    return counts;
-  }, [dayTasks]);
+  const shiftCategoryTasks = useMemo(() => dayTasks.filter((task) => matchesShiftFilter(
+    task, selectedShift, shiftsByVenue[currentVenue?.id || ''] || [],
+  )), [dayTasks, selectedShift, shiftsByVenue, currentVenue?.id]);
+  const categoryCounts = useMemo(() => countTaskCategories(shiftCategoryTasks, categories), [shiftCategoryTasks, categories]);
 
   // A picked category that vanished from the board (e.g. after a venue switch) would hide everything with no chip lit.
   useEffect(() => {
@@ -1993,6 +2038,8 @@ export default function App() {
         }
       }
 
+      if (!matchesShiftFilter(task, selectedShift, shiftsByVenue[currentVenue?.id || ''] || [])) return false;
+
       // Category filter — with several chips picked, a task must carry every one (AND)
       if (!matchesCategories(task, selectedCategories)) {
         return false;
@@ -2009,7 +2056,7 @@ export default function App() {
 
       return true;
     });
-  }, [dayTasks, shiftsById, effectiveDayView, taskWeekday, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone, taskOccurrenceDate]);
+  }, [dayTasks, shiftsById, selectedShift, shiftsByVenue, currentVenue?.id, effectiveDayView, taskWeekday, searchQuery, selectedCategories, activeTabFilter, currentUser?.email, currentUser?.role, currentVenueTimeZone, taskOccurrenceDate]);
 
   // #185 sorts two independent task times by their earliest time. A shift is
   // one window: use its start for ordering, then restore its full display window.
@@ -3008,6 +3055,7 @@ export default function App() {
             onCategoryChange={changeCategory}
             categories={categories}
             categoryCounts={categoryCounts}
+            taskCount={shiftCategoryTasks.length}
             dayView={dayView}
             onDayViewChange={setDayView}
             viewMode={viewMode}
@@ -3016,6 +3064,25 @@ export default function App() {
             isAdmin={canUserAssignTasks(currentUser)}
           />
 
+            {canUserAssignTasks(currentUser) && shiftFilterOptions.length > 0 && (
+              <div className="relative mb-4">
+              <div ref={setShiftRow} className="flex items-center gap-2 overflow-x-auto pb-1 -mx-1 px-1" role="group" aria-label="Filter by shift">
+                {[{ id: '', name: 'All shifts' }, ...shiftFilterOptions,
+                  ...(hasNoShift ? [{ id: NO_SHIFT_FILTER, name: 'No shift' }] : [])].map((shift) => (
+                  <button
+                    key={shift.id}
+                    type="button"
+                    onClick={() => changeShift(shift.id)}
+                    aria-pressed={selectedShift === shift.id}
+                    className={`pressable min-h-11 min-w-11 shrink-0 inline-flex items-center gap-2 px-3 py-2 rounded-full text-xs font-bold border transition cursor-pointer ${filterChipClass(selectedShift === shift.id)}`}
+                  >
+                    <FilterCheck on={selectedShift === shift.id} />{shift.name}
+                  </button>
+                ))}
+              </div>
+              {moreShiftsRight && <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-paper to-transparent" />}
+              </div>
+            )}
             {showingFilters}
             {/* Dynamic View Mode: Excel-like Table View vs Responsive Card View */}
             {viewMode === 'table' ? taskTableView : taskCardView}

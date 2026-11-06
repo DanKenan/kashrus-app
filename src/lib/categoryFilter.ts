@@ -27,3 +27,12 @@ export function pruneCategories(selected: string[], available: readonly string[]
   const kept = selected.filter((c) => available.includes(c));
   return kept.length === selected.length ? selected : kept;
 }
+
+/** Count each category within the supplied task scope, retaining visible zero-count chips. */
+export function countTaskCategories(tasks: readonly { category?: string; categories?: string[] }[], available: readonly string[] = []): Record<string, number> {
+  const counts = new Map(available.map((category) => [category, 0]));
+  for (const task of tasks) {
+    for (const category of taskCategories(task)) counts.set(category, (counts.get(category) || 0) + 1);
+  }
+  return Object.fromEntries(counts);
+}

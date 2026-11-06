@@ -117,7 +117,11 @@ export default {
       await check('2026-11-06T22:01:00Z', 'Taskform 0', ['coord']);
       await check('2026-11-13T22:01:00Z', 'Taskform 0', ['assign']);
       await check('2026-11-14T22:01:00Z', 'Taskform 0', ['mash']);
-      await check('2026-11-06T13:22:00Z', 'Taskform legacy', ['mash']);
+      // POST uses the real clock: check this daily shift at least two days later.
+      const legacyCheckAt = new Date(Date.now() + 3 * 86_400_000);
+      legacyCheckAt.setUTCHours(13, 22, 0, 0);
+      await check(legacyCheckAt.toISOString(), 'Taskform legacy', ['mash']);
+      await clock('2026-11-06T13:22:00Z'); // Restore the date for the swap fixtures below.
       // Private visibility includes upcoming swaps, but not expired ones.
       const swapOnly = await api('admin', 'POST', '/api/tasks', { venueId, title: 'Swap visibility', isPrivate: true, assignedTo: [people.mash.email], assigneeSwaps: [{ date: '2026-11-07', assignedTo: [people.assign.email] }] });
       assert.equal(swapOnly.status, 201);

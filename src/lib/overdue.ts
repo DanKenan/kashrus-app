@@ -1,3 +1,4 @@
+import { addDays, minutesIn, workDateIn, DEFAULT_TIME_ZONE } from './workday.ts';
 import { isAnyTimeTask } from './anyTime';
 
 /**
@@ -19,6 +20,31 @@ export function targetMinutesOf(t: { targetTime?: string | null; targetTimeMinut
   const m24 = s.match(/^(\d{1,2}):(\d{2})$/);
   if (m24) return parseInt(m24[1], 10) * 60 + parseInt(m24[2], 10);
   return Infinity;
+}
+
+export type CheckInTask = {
+  inputType?: string;
+  checkIns?: { at: string }[];
+  targetTime?: string | null; targetTimeMinutes?: number | null;
+  targetTime2?: string | null; targetTime2Minutes?: number | null;
+};
+
+/** Pure check-in coverage for the latest passed deadline; offsets use the start day. */
+export function checkInCoversDue(
+  task: CheckInTask, day: string, elapsed: number, timeZone = DEFAULT_TIME_ZONE,
+  start = 0, deadlines = [targetMinutesOf(task), targetMinutesOf({ targetTime: task.targetTime2, targetTimeMinutes: task.targetTime2Minutes })],
+): boolean {
+  if (task.inputType !== 'check_in') return false;
+  const passed = [...new Set(deadlines.filter(Number.isFinite))].sort((a, b) => a - b).filter((m) => m < elapsed);
+  const lower = passed.length > 1 ? passed[passed.length - 2] : start;
+  return (task.checkIns || []).some((check) => {
+    const at = Date.parse(check.at);
+    if (!Number.isFinite(at)) return false;
+    const date = workDateIn(timeZone, at);
+    if (date !== day && date !== addDays(day, 1)) return false;
+    const offset = minutesIn(timeZone, at) + (date === day ? 0 : 1440);
+    return offset >= lower && offset <= elapsed;
+  });
 }
 
 export function isTaskOverdue(

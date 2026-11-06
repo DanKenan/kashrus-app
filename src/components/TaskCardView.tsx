@@ -8,7 +8,7 @@ import { shiftLabel, shiftTaskAppliesAt, shiftTaskOverdueAt } from '../lib/shift
 import { isNoTimeTask, taskAppliesOn, type TaskDaySection } from '../lib/taskDay';
 import { seesOnlyOwnTasks } from '../lib/taskDay';
 import { ANY_TIME_LABEL } from '../lib/anyTime';
-import { isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
+import { checkInCoversDue, isTaskOverdue, OVERDUE_CHIP_CLASS } from '../lib/overdue';
 import { minutesIn, workDateIn, weekdayIn } from '../lib/workday';
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
@@ -99,6 +99,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
     const shift = task.shiftId ? shiftsById.get(task.shiftId) : undefined;
     if (shift) return !task.isCompleted && todayYmd !== null && todayWeekday !== null && nowMinutes !== null &&
       shiftTaskOverdueAt(shift, todayYmd, todayWeekday, nowMinutes, task, timeZone);
+    if (todayYmd && nowMinutes !== null && checkInCoversDue(task, todayYmd, nowMinutes, timeZone)) return false;
     return isTaskOverdue(task, nowMinutes) && dueToday(task);
   };
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({});

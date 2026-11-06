@@ -13,6 +13,7 @@ interface TaskFilterBarProps {
   onCategoryChange: (cat: string) => void;
   categories: string[];
   categoryCounts?: Record<string, number>;
+  taskCount?: number;
   viewMode: 'table' | 'cards';
   onViewModeChange: (mode: 'table' | 'cards') => void;
   dayView: 'today' | 'all';
@@ -28,6 +29,7 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
   onCategoryChange,
   categories,
   categoryCounts,
+  taskCount,
   viewMode,
   onViewModeChange,
   dayView,
@@ -36,7 +38,7 @@ export const TaskFilterBar: React.FC<TaskFilterBarProps> = ({
   isAdmin,
 }) => {
   const counts: Record<string, number> = categoryCounts ?? {};
-  const totalCount = Object.values(counts).reduce((a, b) => a + b, 0);
+  const totalCount = taskCount ?? Object.values(counts).reduce((a, b) => a + b, 0);
   const allActive = selectedCategories.length === 0;
 
   return (
