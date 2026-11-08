@@ -277,6 +277,7 @@ export const TaskTableView: React.FC<TaskTableViewProps> = ({
 
                   {/* Flexible Completion Input Column */}
                   <td className="py-3.5 px-4 align-top">
+                    {task.inputType === 'checklist' && <span className="tnum text-base text-ink">Checklist {task.checklistItems?.filter((_, i) => task.checklistTicks?.some((tick) => tick.item === i)).length || 0}/{task.checklistItems?.length || 0}</span>}
                     {/* PHOTOALL: optional photo with the answer; the camera sits beside the answer */}
                     <TaskAnswerPhoto task={task} canAttach={canFill} size="desk">
                     {!canFill ? (

@@ -5,9 +5,16 @@ export interface UserPermissions {
   canAssignTasks?: boolean; // Can add / create new assignments and edit tasks
 }
 
-export type TaskInputType = 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in';
+export type TaskInputType = 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in' | 'checklist';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'yes' | 'no' | string;
+
+export interface TaskChecklistTick {
+  item: number; // index into checklistItems
+  byName: string | null;
+  byEmail: string | null;
+  at: string;
+}
 
 export interface TaskCheckIn {
   id: string;
@@ -176,6 +183,8 @@ export interface Task {
   createdAt: string;
   // Repeatable check-ins (inputType === 'check_in'): one record per tap
   checkIns?: TaskCheckIn[];
+  checklistItems?: string[];
+  checklistTicks?: TaskChecklistTick[]; // today; cleared with checkIns by the daily reset
   // Optional answer photo (PHOTOALL); cleared by the daily reset
   answerPhoto?: TaskAnswerPhoto;
   // Manual board order (up/down arrows); initialized from target time

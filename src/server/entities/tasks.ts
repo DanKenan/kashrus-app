@@ -12,6 +12,13 @@
  * Agency scoping is enforced by callers via the verified session user.
  */
 
+export interface TaskChecklistTick {
+  item: number; // Index into checklistItems
+  byName: string | null;
+  byEmail: string | null;
+  at: string;
+}
+
 export interface TaskCheckInItem {
   id: string;
   byName: string | null;
@@ -34,7 +41,7 @@ export interface TaskDoc {
   description: string;
   category: string;
   categories?: string[];
-  inputType: 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in';
+  inputType: 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in' | 'checklist';
   customStatusOptions?: string[];
   completedStatusValues?: string[];
   assignedTo: string[]; // ['all'] or array of worker emails
@@ -55,6 +62,8 @@ export interface TaskDoc {
   updatedAt: string | null;
   createdAt: string;
   checkIns?: TaskCheckInItem[];
+  checklistItems?: string[];
+  checklistTicks?: TaskChecklistTick[];
   sortOrder?: number;
   isPrivate?: boolean;
   _v: number; // Per-entity version, incremented transactionally

@@ -886,3 +886,28 @@
 .task-done-disclosure > summary > svg { margin-inline-start: auto; margin-inline-end: 0; }
 @media (max-width: 339px) { .task-done-cards { grid-template-columns: minmax(0, 1fr); } }
 @media (hover: hover) { .task-done-card:not(:has(input:checked)):hover { background: var(--sunken); } }
+
+/* checklist */
+.task-checklist, .checklist-builder { width: 100%; min-width: 0; font-size: 16px; color: var(--ink); }
+.task-checklist ul, .checklist-builder ul { display: flex; flex-direction: column; gap: 8px; margin-block: 8px; }
+.checklist-row, .checklist-builder li { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; text-align: start; }
+.checklist-row { padding: 8px; border: 1px solid var(--line-control); border-radius: 8px; background: var(--surface); }
+.checklist-row[aria-checked="true"] { background: var(--ok-bg); color: var(--ok); }
+.checklist-row:disabled { opacity: 0.5; cursor: not-allowed; }
+.checklist-box { display: inline-flex; flex: 0 0 32px; width: 32px; height: 32px; align-items: center; justify-content: center; border: 1px solid var(--line-control); border-radius: 6px; }
+.checklist-label { display: flex; min-width: 0; flex-direction: column; overflow-wrap: anywhere; }
+.checklist-attribution { font-size: 14px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.checklist-builder { display: flex; flex-direction: column; gap: 8px; margin-block-start: 16px; }
+.checklist-add { display: flex; gap: 8px; }
+.checklist-add input { flex: 1; min-width: 0; background: var(--sunken); padding: 8px; border: 1px solid var(--line-control); border-radius: 8px; }
+.checklist-builder button { min-height: 48px; min-width: 48px; padding: 8px; border: 1px solid var(--line-control); border-radius: 8px; }
+.checklist-builder li > span[dir] { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.checklist-builder li > button { margin-inline-start: auto; }
+.checklist-mini { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.checklist-mini > span { display: flex; align-items: center; gap: 4px; }
+.checklist-mini-box { width: 16px; height: 16px; border: 1px solid var(--line-control); border-radius: 6px; }
+.task-checklist-kiosk { font-size: 20px; }
+.task-checklist-kiosk .checklist-row { min-height: 64px; }
+.task-checklist-kiosk .checklist-attribution { font-size: 16px; }
+.checklist-row:focus-visible, .checklist-builder button:focus-visible, .checklist-add input:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+@media (hover: hover) { .checklist-row:hover, .checklist-builder button:hover { background: var(--sunken); } }

@@ -2515,6 +2515,7 @@ export default function App() {
       onUpdateStatus={handleBoardUpdateStatus}
       timeZone={currentVenueTimeZone}
       onUpdateNotes={handleUpdateNotes}
+      onChecklistUpdated={(updated) => setTasks((prev) => prev.map((task) => task.id === updated.id ? updated : task))}
       onCheckIn={handleCheckIn}
       onRemoveCheckIn={handleRemoveCheckIn}
       onEditTask={(task) => {
@@ -3024,6 +3025,7 @@ export default function App() {
             onViewChange={setKioskView}
             onUpdateStatus={handleUpdateStatus}
             onUpdateNotes={handleUpdateNotes}
+            onChecklistUpdated={(updated) => setTasks((prev) => prev.map((task) => task.id === updated.id ? updated : task))}
             onCheckIn={handleCheckIn}
             onRemoveCheckIn={handleRemoveCheckIn}
             onEditTask={(task) => {

@@ -1,3 +1,4 @@
+import { TaskChecklist } from './TaskChecklist';
 import { taskOccurrenceDate } from '../lib/taskOccurrences';
 import { TaskEmptyState } from './TaskEmptyState';
 import { filterChipClass, FilterCheck } from '../lib/filterChip';
@@ -75,6 +76,7 @@ interface KioskTaskPanelProps {
   myCompleted: number;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => Promise<boolean>;
   onUpdateNotes: (taskId: string, notes: string, baselineVersion?: number) => void;
+  onChecklistUpdated?: (task: Task) => void;
   onCheckIn: (taskId: string, photoData?: string, photoCaption?: string) => void;
   onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
   onEditTask: (task: Task) => void;
@@ -128,6 +130,10 @@ function rowStatus(task: Task): { word: string; tone: Tone } {
   const who = [by, at].filter(Boolean).join(' · ');
   const withWho = (w: string) => (who ? `${w} · ${who}` : w);
 
+  if (task.inputType === 'checklist') {
+    const n = task.checklistItems?.filter((_, i) => task.checklistTicks?.some((tick) => tick.item === i)).length || 0;
+    return { word: `Checklist ${n}/${task.checklistItems?.length || 0}${task.isCompleted ? ' · Done' : ''}`, tone: task.isCompleted ? 'ok' : 'open' };
+  }
   if (task.inputType === 'check_in') {
     const n = task.checkIns?.length || 0;
     if (task.isCompleted) return { word: withWho('Done'), tone: 'ok' };
@@ -219,6 +225,7 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
   onUpdateStatus,
   onUpdateNotes,
   onCheckIn,
+  onChecklistUpdated,
   onRemoveCheckIn,
   onEditTask,
   onDeleteTask,
@@ -825,6 +832,8 @@ export const KioskTaskPanel: React.FC<KioskTaskPanelProps> = ({
                             })}
                           </div>
                         )}
+
+                        {task.inputType === 'checklist' && <TaskChecklist task={task} canFill={canFill} onUpdated={onChecklistUpdated} kiosk />}
 
                         {/* PHOTOALL: optional photo with the answer (toggle / yes-no / status / checkbox) */}
                         <TaskAnswerPhoto task={task} canAttach={canFill} size="kiosk" />
