@@ -47,10 +47,9 @@
 
 .mboard-header { background: var(--ink); color: var(--paper); }
 .mboard-segment { background: var(--ink-soft); }
-.mboard-segment-done { background: var(--ok-bg); border: 1px solid var(--ok); }
+.mboard-segment-done { background: var(--ok); }
 .dark .mboard-header { background: var(--sunken); color: var(--ink); }
 .dark .mboard-segment { background: var(--line); }
-.dark .mboard-segment-done { background: var(--ok); }
 .mboard-focus [class*=text-ink-faint] { color: var(--ink-soft); }
 
 .mboard-check-avatar {

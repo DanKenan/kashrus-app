@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Check, Clock, List, ListChecks, ToggleRight, CircleHelp, AlertCircle } from 'lucide-react';
+import { Check, Clock, List, ListChecks, ToggleRight, CircleHelp, AlertCircle, ChevronDown } from 'lucide-react';
 import { TaskCardView, type TaskCardViewProps } from './TaskCardView';
 import { mashgiachHeader, mashgiachProgress, mashgiachCheckInCovered, mashgiachCheckInSummary } from '../lib/mashgiachBoard';
 import type { Shift } from '../types';
@@ -38,20 +38,20 @@ export function MashgiachBoard(props: TaskCardViewProps & { headerShifts?: Shift
       <p className="mt-2 text-sm" aria-live="polite">{board.completed} of {board.total} done</p>
     </section>
     {board.next ? <section aria-label="Do this next"><h2 className="mb-2 text-xl font-semibold text-ink">Do this next</h2>{card(board.next, true)}</section>
-      : <section className="rounded-xl border border-line bg-surface p-4 text-ink"><Check className="inline w-5 h-5 me-2" />{board.completed === board.total ? 'All done for today' : 'All done for now'}</section>}
+      : <section className="rounded-xl border border-line bg-ok-bg p-4 text-ok"><Check className="inline w-5 h-5 me-2" />{board.completed === board.total ? 'All done for today' : 'All done for now'}</section>}
     {board.later.length > 0 && <section aria-label="Later in your shift">
       <h2 className="mb-2 text-xl font-semibold text-ink">Later in your shift</h2>
       <div className="space-y-2">{board.later.map((task) => {
         const Icon = icons[task.inputType] || Check;
         return <div key={task.id}><button className="mboard-row pressable" aria-expanded={expanded === task.id} onClick={() => setExpanded(expanded === task.id ? null : task.id)}>
-          <Icon className="w-5 h-5 shrink-0 text-ink-soft" /><span className="min-w-0 flex-1 text-start"><span className="block truncate" dir="auto">{task.title}</span>{task.inputType === 'check_in' && <span className="block text-xs text-ink-soft">{mashgiachCheckInSummary(task, now, timeZone)}</span>}</span>{overdue(task) && <span className="inline-flex items-center gap-1 rounded-full bg-bad-bg px-2 text-xs text-bad"><AlertCircle className="h-4 w-4 shrink-0" />Late</span>}<span className="max-w-1/2 text-xs text-ink-soft tnum">{time(task)}</span>
+          <Icon className="w-5 h-5 shrink-0 text-ink-soft" /><span className="min-w-0 flex-1 text-start"><span className="line-clamp-2 break-words" dir="auto">{task.title}</span><span className="block break-words text-xs text-ink-soft tnum">{time(task)}{task.inputType === 'check_in' && ` · ${mashgiachCheckInSummary(task, now, timeZone)}`}</span></span>{overdue(task) && <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-bad-bg px-2 text-xs text-bad"><AlertCircle className="h-4 w-4 shrink-0" />Late</span>}
         </button>{expanded === task.id && card(task)}</div>;
       })}</div>
     </section>}
-    <section><button className="mboard-row pressable" aria-expanded={doneOpen} aria-controls="mboard-done" onClick={() => setDoneOpen(!doneOpen)}>Done today · {board.completed}</button>
+    <section><button className="mboard-row pressable" aria-expanded={doneOpen} aria-controls="mboard-done" onClick={() => setDoneOpen(!doneOpen)}>Done today · {board.completed}<ChevronDown aria-hidden="true" className={`ms-auto h-5 w-5 shrink-0 ${doneOpen ? 'rotate-180' : ''}`} /></button>
       <div id="mboard-done" hidden={!doneOpen} className="mt-2 space-y-2">{board.done.map((task) => <div key={task.id} className="mboard-row bg-ok-bg text-ok">
         <Check className="w-5 h-5 shrink-0" /><span className="min-w-0 flex-1 truncate" dir="auto">{task.title}</span>
-        <span className="max-w-1/2 truncate text-xs">{task.updatedByName?.trim().split(/\s+/)[0] || task.updatedByEmail}{task.updatedAt && ` · ${new Date(task.updatedAt).toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit', hour12: true })}`}</span>
+        <span className="shrink-0 text-xs tnum">{task.updatedByName?.trim().split(/\s+/)[0] || task.updatedByEmail}{task.updatedAt && ` · ${new Date(task.updatedAt).toLocaleTimeString('en-US', { timeZone, hour: 'numeric', minute: '2-digit', hour12: true })}`}</span>
       </div>)}</div>
     </section>
   </div>;

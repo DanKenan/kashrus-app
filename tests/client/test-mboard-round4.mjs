@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict';
+import React from 'react';
+import { mount } from './lib/mini-render.mjs';
+import { TaskCardView } from '../../src/components/TaskCardView.tsx';
+import { TaskAnswerPhoto } from '../../src/components/TaskAnswerPhoto.tsx';
+import { MashgiachBoard } from '../../src/components/MashgiachBoard.tsx';
+const task = { id: 't', title: 'Walk-in fridge temperature check', inputType: 'status_select', category: 'General', assignedTo: ['all'], daysOfWeek: [], currentStatus: 'Clean', customStatusOptions: ['Clean', 'Needs cleaning'], completedStatusValues: ['Clean'], isCompleted: false, notes: '', targetTime: '' };
+const calls = [];
+const props = { tasks: [task], focused: true, currentUser: { id: 'u', email: 'u@test', role: 'mashgiach' }, timeZone: 'UTC', onUpdateStatus: (...args) => calls.push(args), onCheckIn() {}, onUpdateNotes() {}, onEditTask() {}, onDeleteTask() {} };
+const card = mount(TaskCardView, props); await card.render();
+const options = () => card.find((e) => e.props.className === 'mboard-option pressable');
+assert.deepEqual(options().map((e) => e.props['aria-pressed']), [false, false]);
+await card.render({ tasks: [{ ...task, updatedByName: 'Yossi' }] });
+assert.deepEqual(options().map((e) => e.props['aria-pressed']), [false, false]);
+await card.render({ tasks: [{ ...task, isCompleted: true }] });
+assert.deepEqual(options().map((e) => e.props['aria-pressed']), [true, false]);
+for (const attribution of [{ updatedByEmail: 'y@test' }, { updatedByName: 'Yossi' }]) {
+  await card.render({ tasks: [{ ...task, currentStatus: 'Needs cleaning', ...attribution }] });
+  assert.deepEqual(options().map((e) => e.props['aria-pressed']), [false, true]);
+}
+await card.render({ tasks: [{ ...task, currentStatus: 'Needs cleaning' }] });
+assert.deepEqual(options().map((e) => e.props['aria-pressed']), [false, false]);
+await card.click('Needs cleaning'); assert.deepEqual(calls.at(-1), ['t', 'Needs cleaning', false]);
+await card.click('Clean'); assert.deepEqual(calls.at(-1), ['t', 'Clean', true]);
+function* walk(node) { if (Array.isArray(node)) { for (const n of node) yield* walk(n); } else if (React.isValidElement(node)) { yield node; yield* walk(node.props.children); } }
+const photoElement = [...walk(card.tree())].find((e) => e.type === TaskAnswerPhoto);
+assert.equal(photoElement.props.stacked, true);
+const photo = mount(TaskAnswerPhoto, photoElement.props); await photo.render();
+assert.match(photo.find((e) => 'data-answer-photo-row' in e.props)[0].props.className, /flex-col/);
+assert.equal(photo.find((e) => 'data-answer-photo-add' in e.props).length, 1);
+await photo.render({ stacked: false }); assert.equal(photo.find((e) => 'data-answer-photo-row' in e.props)[0].props.className, 'flex gap-2');
+await card.render({ focused: false });
+assert.equal([...walk(card.tree())].find((e) => e.type === TaskAnswerPhoto).props.stacked, false);
+await card.render({ focused: true, tasks: [{ ...task, inputType: 'check_in' }] });
+const checkIn = card.find((e) => e.props.id === 'mobile-task-checkin-t')[0];
+const checkInRow = [...walk(card.tree())].find((e) => Array.isArray(e.props.children) && e.props.children.includes(checkIn));
+assert.equal(checkInRow.props.className, 'flex flex-col gap-2');
+const checks = Array.from({ length: 4 }, (_, i) => ({ id: String(i), at: new Date().toISOString() }));
+const board = mount(MashgiachBoard, { ...props, tasks: [{ ...task, id: 'next', inputType: 'checkbox' }, { ...task, id: 'later', inputType: 'check_in', targetTime: '04:30 PM', targetTime2: '05:30 PM', checkIns: checks }] }); await board.render();
+const row = board.find((e) => e.type === 'button' && e.props.className === 'mboard-row pressable' && !e.props['aria-controls'])[0];
+const content = [...walk(row)].find((e) => e.props.className === 'min-w-0 flex-1 text-start');
+assert.equal(content.props.children[0].props.children, task.title);
+const metadata = content.props.children[1];
+assert.match(metadata.props.className, /block break-words/);
+assert.match(board.text(), /04:30 PM · 05:30 PM · 4 checks today · last/);
+console.log('mboard round 4: answered options, unchanged handlers, stacked photos and second-line metadata passed');

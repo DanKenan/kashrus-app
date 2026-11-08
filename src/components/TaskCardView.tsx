@@ -258,7 +258,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
               {/* Completion Control Bar or Read-Only Audit Bar */}
               <div className="mt-3 pt-3 border-t border-line/70">
                 {/* PHOTOALL: optional photo with the answer (toggle / yes-no / status / checkbox); the camera sits beside the answer */}
-                <TaskAnswerPhoto task={task} canAttach={canFill}>
+                <TaskAnswerPhoto task={task} canAttach={canFill} stacked={focused}>
                 {!canFill ? (
                   <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-sunken border border-line tactile-1">
                     <div className="flex items-center gap-2.5">
@@ -370,7 +370,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                       <div className="w-full">
                         {focused ? <div className="grid gap-2">{(task.customStatusOptions?.length ? task.customStatusOptions : ['Pending', 'In Progress', 'Blocked', 'Completed']).map((opt) => {
                           const isDone = task.completedStatusValues && task.completedStatusValues.length > 0 ? task.completedStatusValues.includes(opt) : ['completed', 'done', 'passed', 'approved', 'yes'].includes(opt.toLowerCase());
-                          return <button key={opt} aria-pressed={task.currentStatus === opt} onClick={() => onUpdateStatus(task.id, opt, isDone)} className="mboard-option pressable"><span>{opt}</span><span className="text-xs text-ink-soft">{isDone ? 'Counts as done' : 'Stays open'}</span></button>;
+                          return <button key={opt} aria-pressed={task.currentStatus === opt && (task.isCompleted || (!isDone && !!(task.updatedByEmail || task.updatedByName)))} onClick={() => onUpdateStatus(task.id, opt, isDone)} className="mboard-option pressable"><span>{opt}</span><span className="text-xs text-ink-soft">{isDone ? 'Counts as done' : 'Stays open'}</span></button>;
                         })}</div> : <select
                           id={`mobile-task-select-${task.id}`}
                           value={task.currentStatus}
@@ -420,7 +420,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                     {task.inputType === 'check_in' && (
                       <div className="w-full">
                         {focused && <p className="mb-2 text-sm text-ink-soft">{mashgiachCheckInSummary(task, now, timeZone, true)}</p>}
-                        <div className="flex gap-2">
+                        <div className={focused ? 'flex flex-col gap-2' : 'flex gap-2'}>
                           <button
                             id={`mobile-task-checkin-${task.id}`}
                             onClick={() => onCheckIn(task.id)}

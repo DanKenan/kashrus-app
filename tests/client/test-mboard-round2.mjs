@@ -52,7 +52,7 @@ const RealDate = globalThis.Date;
 globalThis.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : ['2026-11-08T18:00:00Z'])); } };
 try {
   await view.render({ tasks: [{ ...nextTask, id: 'first', targetTime: '12:01 AM' }, { ...nextTask, id: 'late', title: 'Late task', targetTime: '12:02 AM' }] });
-  assert.match(view.text(), /Late task Late/);
+  assert.match(view.text(), /Late task .* Late/);
 } finally { globalThis.Date = RealDate; }
 const normal = mount(TaskCardView, props); await normal.render(); assert.match(normal.text(), /1 check logged/);
 const focus = mount(TaskCardView, { ...props, focused: true }); await focus.render();
