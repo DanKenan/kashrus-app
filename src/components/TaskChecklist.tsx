@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { Check } from 'lucide-react';
 import type { Task } from '../types';
 import { apiWrite } from '../lib/api';
-import { formatExactTime } from '../lib/utils';
 
 export function TaskChecklist({ task, canFill, onUpdated, kiosk = false }: {
   task: Task;
@@ -33,10 +32,13 @@ export function TaskChecklist({ task, canFill, onUpdated, kiosk = false }: {
     }
   };
   return <div className={`task-checklist${kiosk ? ' task-checklist-kiosk' : ''}`}>
-    <p className={task.isCompleted ? 'text-ok' : 'text-ink-soft'} aria-live="polite">{count} of {items.length}{task.isCompleted ? ' · Done' : ''}{saving ? ' · Saving…' : ''}</p>
+    <div className="checklist-progress">
+      <progress max={items.length || 1} value={count} aria-label="Checklist progress" />
+      <p className={task.isCompleted ? 'text-ok' : 'text-ink-soft'} aria-live="polite"><strong>{count} of {items.length}</strong>{task.isCompleted ? ' · Done' : ''}{saving ? ' · Saving…' : ''}</p>
+    </div>
     <ul>{items.map((label, item) => {
       const tick = task.checklistTicks?.find((entry) => entry.item === item);
-      const content = <><span className="checklist-box" aria-hidden="true">{tick && <Check className="w-6 h-6" />}</span><span className="checklist-label"><span dir="auto">{label}</span>{tick && <span className="checklist-attribution"><bdi>{tick.byName?.trim().split(/\s+/)[0] || tick.byEmail || 'Someone'}</bdi> · {formatExactTime(tick.at)}</span>}</span></>;
+      const content = <><span className="checklist-box" aria-hidden="true">{tick && <Check className="w-6 h-6" />}</span><span className="checklist-label"><span dir="auto">{label}</span>{tick && <span className="checklist-attribution"><bdi>{tick.byName?.trim().split(/\s+/)[0] || tick.byEmail || 'Someone'}</bdi> · {new Date(tick.at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}</span>}{!tick && canFill && <span className="checklist-hint">Tap when done</span>}</span></>;
       return <li key={item}>{canFill ? <button type="button" role="checkbox" aria-checked={!!tick} aria-label={label} disabled={saving} onClick={() => toggle(item, !tick)} className="checklist-row pressable">{content}</button> : <div role="checkbox" aria-checked={!!tick} aria-readonly="true" aria-label={label} className="checklist-row">{content}</div>}</li>;
     })}</ul>
     {error && <p role="alert" className="text-bad">{error}</p>}

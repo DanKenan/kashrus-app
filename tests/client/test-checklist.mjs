@@ -50,12 +50,14 @@ const calls = recordFetch({ 'POST /api/tasks/t/checklist': (_, body) => {
 controls = mount(TaskChecklist, { task: current, canFill: true, onUpdated(updated) { current = updated; } });
 const refresh = () => controls.render({ task: current });
 await refresh(); assert.match(controls.text(), /0 of 3/);
+assert.equal(controls.find((e) => e.type === 'progress')[0].props.value, 0);
+assert.match(controls.text(), /Tap when done/);
 for (let item = 0; item < 3; item++) {
   await controls.click((e) => e.props.role === 'checkbox' && e.props['aria-label'] === items[item]);
   await refresh();
   assert.deepEqual(calls.at(-1), ['POST', '/api/tasks/t/checklist', { item, ticked: true }]);
   assert.equal(controls.find((e) => e.props.role === 'checkbox')[item].props['aria-checked'], true);
-  if (item === 1) { assert.match(controls.text(), /2 of 3/); assert.match(controls.text(), /Yossi · \d{1,2}:02 [AP]M/); }
+  if (item === 1) { assert.match(controls.text(), /2 of 3/); assert.match(controls.text(), /Yossi · 7:02 AM/); assert.equal(controls.find((e) => e.type === 'progress')[0].props.value, 2); }
 }
 assert.equal(current.isCompleted, true); assert.match(controls.text(), /3 of 3 · Done/);
 await controls.click('Sink'); await refresh();
@@ -63,6 +65,7 @@ assert.deepEqual(calls.at(-1), ['POST', '/api/tasks/t/checklist', { item: 0, tic
 assert.equal(current.isCompleted, false);
 await controls.render({ canFill: false });
 assert.equal(controls.find((e) => e.type === 'button').length, 0);
+assert.ok(!controls.text().includes('Tap when done'));
 assert.equal(controls.find((e) => e.props.role === 'checkbox').length, 3);
 const common = { tasks: [current], currentUser: { name: 'Admin', email: 'a@test', role: 'admin' }, onCheckIn() {}, onUpdateStatus() {}, onUpdateNotes() {}, onEditTask() {}, onDeleteTask() {}, roster: [], shiftsById: new Map() };
 const card = mount(TaskCardView, common); await card.render(); assert.match(card.html(), /2 of 3/);

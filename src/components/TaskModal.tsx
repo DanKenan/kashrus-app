@@ -950,8 +950,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
             <div className="checklist-add"><input id="task-checklist-item" value={checklistDraft} onChange={(e) => setChecklistDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addChecklistItem(); } }} /><button type="button" onClick={addChecklistItem} className="pressable">Add</button></div>
             <ul>{checklistItems.map((item, index) => <li key={index}><span dir="auto">{item}</span><button type="button" aria-label={`Remove ${item}`} onClick={() => setChecklistItems((items) => items.filter((_, i) => i !== index))} className="pressable"><X className="w-5 h-5" aria-hidden="true" /></button></li>)}</ul>
             {checklistInvalid && <p role="status">Add at least 2 items</p>}
-            <p><bdi>{statusPreviewName}</bdi> will see:</p>
-            <ul>{checklistItems.map((item, index) => <li key={index}><span className="checklist-box" aria-hidden="true" /><span dir="auto">{item}</span></li>)}</ul>
+            <p className="checklist-preview-label"><bdi>{statusPreviewName}</bdi> will see:</p>
+            <ul className="checklist-builder-preview">{checklistItems.map((item, index) => <li key={index}><span className="checklist-box" aria-hidden="true" /><span dir="auto">{item}</span></li>)}</ul>
           </div>}
 
           {/* CUSTOM STATUS VALUES BUILDER (When inputType === 'status_select') */}
