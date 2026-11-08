@@ -29,7 +29,7 @@ assert.equal(view.find((e) => e.props['aria-controls'] === 'mboard-done')[0].pro
 assert.equal(view.find((e) => e.props.id === 'mboard-done')[0].props.hidden, true);
 assert.match(view.text(), /Done today · 3/);
 await view.click('Done today'); assert.equal(view.find((e) => e.props.id === 'mboard-done')[0].props.hidden, false);
-await view.render({ tasks: [] }); assert.equal(view.text(), 'Nothing for you today');
+await view.render({ tasks: [] }); assert.match(view.text(), /Your tasks today 0 of 0 done Nothing for you today/); assert.doesNotMatch(view.text(), /All done for today|Do this next|Done today/);
 await view.render({ tasks: six.slice(0, 3) }); assert.match(view.text(), /All done for today/); assert.doesNotMatch(view.text(), /Do this next/);
 function* walk(node) { if (Array.isArray(node)) { for (const n of node) yield* walk(n); } else if (React.isValidElement(node)) { yield node; yield* walk(node.props.children); } }
 for (const [type, label, expected] of [

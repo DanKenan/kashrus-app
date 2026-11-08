@@ -419,7 +419,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                     {/* 5. Repeatable check-in — every tap logs who + when under the task */}
                     {task.inputType === 'check_in' && (
                       <div className="w-full">
-                        {focused && <p className="mb-2 text-sm text-ink-soft">{mashgiachCheckInSummary(task, now, timeZone, true)}</p>}
+                        {focused && <p className="mb-2 text-sm text-ink-soft">{mashgiachCheckInSummary(task, now, timeZone, true, task.shiftId ? shiftsById.get(task.shiftId) : undefined)}</p>}
                         <div className={focused ? 'flex flex-col gap-2' : 'flex gap-2'}>
                           <button
                             id={`mobile-task-checkin-${task.id}`}
