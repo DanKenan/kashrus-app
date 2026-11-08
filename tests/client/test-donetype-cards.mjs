@@ -10,7 +10,24 @@ async function make(taskToEdit) {
   return { view, saves };
 }
 const radios = (view) => view.find((e) => e.type === 'input' && e.props.name === 'task-done-type');
-const pick = (view, value) => view.click((e) => e.type === 'input' && e.props.name === 'task-done-type' && e.props.value === value);
+const pick = async (view, value) => {
+  const radio = radios(view).find((e) => e.props.value === value);
+  assert.equal(radio.props.onClick, undefined);
+  radio.props.onChange({ target: { value, checked: true } });
+  await view.render();
+};
+const previewOptions = (view) => view.find((e) => e.props.className === 'task-done-preview-options')[0].props.children;
+for (const [options, done, expected] of [
+  [['Pending', 'In Progress', 'Blocked', 'Completed'], ['Completed'], ['Pending', 'In Progress', 'Completed']],
+  [['Pending', 'Completed', 'Blocked', 'Other'], ['Completed'], ['Pending', 'Completed', 'Blocked']],
+  [['Pending', 'Blocked', 'Other', 'Later'], [], ['Pending', 'Blocked', 'Other']],
+  [['Pending', 'Completed'], ['Completed'], ['Pending', 'Completed']],
+]) {
+  const { view } = await make({ ...task, customStatusOptions: options, completedStatusValues: done });
+  const preview = previewOptions(view);
+  assert.deepEqual(preview.map((e) => e.props.children[1].props.children), expected);
+  assert.equal(preview.some((e) => e.props.className === 'is-done'), done.length > 0);
+}
 for (const value of ['checkbox', 'check_in', 'yes_no', 'status_select']) {
   const { view, saves } = await make();
   assert.deepEqual(radios(view).map((e) => e.props.value), ['checkbox', 'check_in', 'yes_no', 'status_select']);

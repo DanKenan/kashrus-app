@@ -13,7 +13,8 @@ const make = async (changes = {}) => {
 };
 const done = await make();
 assert.equal(done.view.find((e) => e.type === 'details' && e.props.className === 'task-done-disclosure')[0].props.open, undefined);
-await done.view.click((e) => e.type === 'input' && e.props.value === 'checkbox'); await done.view.submit();
+done.view.find((e) => e.type === 'input' && e.props.value === 'checkbox')[0].props.onChange({ target: { value: 'checkbox', checked: true } });
+await done.view.render(); await done.view.submit();
 assert.equal(done.saves.length, 1); assert.equal(done.saves[0].inputType, 'checkbox');
 const shift = await make({ shiftId: afternoon.id, shiftTime: false });
 await shift.view.click('Go to When');

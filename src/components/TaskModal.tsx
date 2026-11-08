@@ -499,6 +499,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     else { setCreatedShifts((old) => [...old.filter((s) => s.id !== shift.id), shift]); chooseShift(shift); }
     onShiftCreated?.(shift, deleted); setCreatingShift(false);
   };
+  const firstDoneOption = customStatusOptions.findIndex((option) => completedStatusValues.includes(option));
+  const previewStatusOptions = customStatusOptions.filter((_, index) => index < (firstDoneOption > 2 ? 2 : 3) || index === firstDoneOption);
   const count = extras.length + 1;
   const stepName = ['What', 'When', 'Who'][step];
   const whatSummary = `${count > 1 ? `${count} tasks · ` : ''}${[title, ...extras.map((t) => t.name)].filter(Boolean).join(', ')}`;
@@ -915,12 +917,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 { value: 'status_select', title: 'Your own options', line: 'You write the choices' },
                 ...(taskToEdit?.inputType === 'toggle' ? [{ value: 'toggle', title: 'On / Off switch', line: 'Tap to turn on or off' }] : []),
               ] as { value: TaskInputType; title: string; line: string }[]).map((card) => <label key={card.value} className={`task-done-card${card.value === 'toggle' ? ' task-done-card-legacy' : ''}`}>
-                <input type="radio" name="task-done-type" value={card.value} checked={inputType === card.value} onChange={() => setInputType(card.value)} onClick={() => setInputType(card.value)} aria-label={card.title} />
+                <input type="radio" name="task-done-type" value={card.value} checked={inputType === card.value} onChange={() => setInputType(card.value)} aria-label={card.title} />
                 <span className="task-done-preview" aria-hidden="true">
                   {card.value === 'checkbox' && <span className="task-done-preview-check"><Check className="w-6 h-6" /></span>}
                   {card.value === 'check_in' && <span className="task-done-preview-count"><span>3×</span><span className="task-done-preview-dots"><i /><i /><i /></span></span>}
                   {card.value === 'yes_no' && <><span className="task-done-preview-pill is-yes">Yes</span><span className="task-done-preview-pill is-no">No</span></>}
-                  {card.value === 'status_select' && <span className="task-done-preview-options">{customStatusOptions.slice(0, 3).map((option, index) => <span key={index} className={completedStatusValues.includes(option) ? 'is-done' : undefined}>{completedStatusValues.includes(option) && <Check className="w-4 h-4" />}<span>{option}</span></span>)}</span>}
+                  {card.value === 'status_select' && <span className="task-done-preview-options">{previewStatusOptions.map((option, index) => <span key={index} className={completedStatusValues.includes(option) ? 'is-done' : undefined}>{completedStatusValues.includes(option) && <Check className="w-4 h-4" />}<span>{option}</span></span>)}</span>}
                   {card.value === 'toggle' && <ToggleRight className="w-6 h-6" />}
                 </span>
                 <span className="task-done-card-copy"><strong>{card.title}</strong><span>{card.line}</span></span>
