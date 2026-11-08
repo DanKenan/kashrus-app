@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { mount, recordFetch } from './lib/mini-render.mjs';
 import { TaskModal, validChecklistItems } from '../../src/components/TaskModal.tsx';
 import { observeVersion } from '../../src/lib/api.ts';
-import { TaskChecklist, applyChecklistResponse } from '../../src/components/TaskChecklist.tsx';
+import { TaskChecklist, applyChecklistResponse, recordTaskState } from '../../src/components/TaskChecklist.tsx';
 import { TaskCardView } from '../../src/components/TaskCardView.tsx';
 import { KioskTaskPanel } from '../../src/components/KioskTaskPanel.tsx';
 import { TaskTableView } from '../../src/components/TaskTableView.tsx';
@@ -75,28 +75,37 @@ const kiosk = renderToStaticMarkup(React.createElement(KioskTaskPanel, { ...comm
 assert.match(kiosk.replace(/<!--.*?-->/g, ''), /Checklist 2\/3/);
 console.log('checklist: builder, validation, batch/edit saves, tick/untick, attribution, done, readonly and board counts passed');
 
-// HTTP A is delayed until after socket A+B has already populated the board.
+// An unrelated task must not make A's response stale; a newer A update must.
 const tickA = { item: 0, byName: 'Yossi', byEmail: 'y@test', at: '2026-11-08T07:02:00Z' };
 const tickB = { ...tickA, item: 1, at: '2026-11-08T07:03:00Z' };
 const older = { ...task, checklistTicks: [tickA], updatedAt: tickA.at };
 const newer = { ...task, checklistTicks: [tickA, tickB], updatedAt: tickB.at };
-let board = [task];
-let releaseResponse;
-const responseReady = new Promise((resolve) => { releaseResponse = resolve; });
-globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get(name) { return name.toLowerCase() === 'x-state-version' ? '100' : null; } }, json: () => responseReady });
-const delayed = mount(TaskChecklist, { task, canFill: true, onUpdated(updated, version) { board = applyChecklistResponse(board, updated, version); } });
-await delayed.render();
-const request = delayed.find((e) => e.props.role === 'checkbox')[0].props.onClick();
-await new Promise((resolve) => setTimeout(resolve, 0));
-observeVersion(101); board = [newer]; // same version observation used by App's broadcasts
-await delayed.render({ task: newer });
-releaseResponse(older); await request;
-await delayed.render({ task: board[0] });
-assert.deepEqual(board[0].checklistTicks, [tickA, tickB]);
-assert.match(delayed.text(), /2 of 3/);
-assert.equal(applyChecklistResponse(board, older)[0], newer);
-assert.equal(applyChecklistResponse(board, { ...newer, notes: 'confirmed' }, 101)[0].notes, 'confirmed');
-console.log('checklist: late HTTP response cannot replace a newer broadcast');
+for (const sameTask of [false, true]) {
+  const other = { ...task, id: 'other' };
+  let state = recordTaskState({ tasks: [], versions: new Map() }, [task, other], 90);
+  let releaseResponse;
+  const responseReady = new Promise((resolve) => { releaseResponse = resolve; });
+  globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get(name) { return name.toLowerCase() === 'x-state-version' ? '100' : null; } }, json: () => responseReady });
+  const delayed = mount(TaskChecklist, { task, canFill: true, onUpdated(updated, version) {
+    state = recordTaskState(state, applyChecklistResponse(state.tasks, updated, version, state.versions), version);
+  } });
+  await delayed.render();
+  const request = delayed.find((e) => e.props.role === 'checkbox')[0].props.onClick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  observeVersion(101);
+  // Same recorder used when App applies a task broadcast/state update.
+  state = recordTaskState(state, sameTask ? [newer, other] : [task, { ...other, notes: 'B saved' }], 101);
+  await delayed.render({ task: state.tasks[0] });
+  releaseResponse(older); await request;
+  await delayed.render({ task: state.tasks[0] });
+  assert.deepEqual(state.tasks[0].checklistTicks, sameTask ? [tickA, tickB] : [tickA]);
+  assert.match(delayed.text(), sameTask ? /2 of 3/ : /1 of 3/);
+  assert.equal(state.versions.get(task.id), sameTask ? 101 : 100);
+  assert.equal(state.versions.get(other.id), sameTask ? 90 : 101);
+  assert.equal(applyChecklistResponse(state.tasks, older, undefined, state.versions)[0], sameTask ? newer : older);
+  assert.equal(recordTaskState(state, []).versions.size, 0);
+}
+console.log('checklist: unrelated B v101 allows A v100; newer A+B v101 rejects older A v100');
 
 for (const [checklistItems, reason] of [
   [items.slice(0, 1), 'Add at least 2 items'],

@@ -125,7 +125,7 @@ ok('S EVENT_CREATED scoped', /if \(!inVenueScope\(newEvt, eventScope\)\) return;
 const eu = block("msg.type === 'EVENT_UPDATED'", "msg.type === 'EVENT_DELETED'");
 ok('S EVENT_UPDATED scoped (out-of-scope removed)', /inVenueScope\(updatedEvt, eventScope\)/.test(eu) && /prev\.filter\(\(e\) => e\.id !== updatedEvt\.id\)/.test(eu));
 const demo = handler.slice(handler.indexOf("msg.type === 'DEMO_RESTORED'"));
-ok('S DEMO_RESTORED tasks/events scoped', /setTasks\(scopeListToVenue<Task>\(msg\.payload\.tasks, restoredScope\)\)/.test(demo) && /setEvents\(scopeListToVenue<KosherEvent>\(msg\.payload\.events, restoredEventScope\)\)/.test(demo));
+ok('S DEMO_RESTORED tasks/events scoped', /setTasks\(scopeListToVenue<Task>\(msg\.payload\.tasks, restoredScope\), msg\.version\)/.test(demo) && /setEvents\(scopeListToVenue<KosherEvent>\(msg\.payload\.events, restoredEventScope\)\)/.test(demo));
 // The only raw list left is HISTORY_PRUNED's unscoped branch (no venue scope = the list as sent;
 // tests/stage4/test-history-retention.mjs checks that literal).
 const rawSets = handler.match(/set(Tasks|Events|HistoryLogs)\(msg\.payload\.(tasks|events|historyLogs)\)/g) || [];

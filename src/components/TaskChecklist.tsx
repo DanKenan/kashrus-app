@@ -1,12 +1,30 @@
 import React, { useState } from 'react';
 import { Check } from 'lucide-react';
 import type { Task } from '../types';
-import { apiWrite, getLastKnownVersion } from '../lib/api';
+import { apiWrite } from '../lib/api';
 
-// Tasks have no per-task revision. Use the existing monotonic state version;
-// older servers without that header can only be ordered by task.updatedAt.
-export function applyChecklistResponse(tasks: Task[], updated: Task, version?: number): Task[] {
-  const latest = getLastKnownVersion();
+export interface TaskVersionState {
+  tasks: Task[];
+  versions: ReadonlyMap<string, number>;
+}
+
+// Keep versions alongside the task state, so queued/Strict Mode updates remain atomic.
+export function recordTaskState(previous: TaskVersionState, tasks: Task[], version?: number): TaskVersionState {
+  if (tasks === previous.tasks) return previous;
+  const versions = new Map(previous.versions);
+  const before = new Map(previous.tasks.map((task) => [task.id, task]));
+  const ids = new Set(tasks.map((task) => task.id));
+  for (const id of versions.keys()) if (!ids.has(id)) versions.delete(id);
+  if (version !== undefined) {
+    for (const task of tasks) {
+      if (before.get(task.id) !== task) versions.set(task.id, Math.max(versions.get(task.id) ?? version, version));
+    }
+  }
+  return { tasks, versions };
+}
+
+export function applyChecklistResponse(tasks: Task[], updated: Task, version: number | undefined, versions: ReadonlyMap<string, number>): Task[] {
+  const latest = versions.get(updated.id);
   if (version !== undefined && latest !== undefined && version < latest) return tasks;
   return tasks.map((task) => {
     if (task.id !== updated.id) return task;

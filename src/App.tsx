@@ -26,7 +26,7 @@ import { initialTaskView, readPhoneTaskView, rememberPhoneTaskView, type TaskVie
 import { OwnerAuditBanner } from './components/OwnerAuditBanner';
 import { TaskFilterBar } from './components/TaskFilterBar';
 import { TaskTableView } from './components/TaskTableView';
-import { applyChecklistResponse } from './components/TaskChecklist';
+import { applyChecklistResponse, recordTaskState, type TaskVersionState } from './components/TaskChecklist';
 import { TaskCardView } from './components/TaskCardView';
 import { TaskModal } from './components/TaskModal';
 import { HistoryLogModal } from './components/HistoryLogModal';
@@ -96,7 +96,7 @@ import { testFirestoreConnection } from './lib/firebaseClient';
 import { Building2, MapPin, ShieldCheck, Plus, ExternalLink, Calendar, Sparkles, Factory } from 'lucide-react';
 import { canUserFillTasks, canUserAssignTasks, canSeeTask, getRoleLabel, isVenueOwnerLike, ownerMayAddManager } from './lib/permissions';
 import { refreshCustomCategories } from './lib/categoryStyle';
-import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry, syncCookieSession, isCookieSession } from './lib/api';
+import { apiFetch, apiWrite, clearSession, endServerSession, getSessionToken, setSessionToken, observeVersion, versionFromResponse, loadStaleDrafts, discardStaleDraft, StaleDraft, getKioskDevice, clearKioskDevice, startCookieSession, endSessionForKioskEntry, syncCookieSession, isCookieSession } from './lib/api';
 import { noVenueMessage, NO_VENUE_TEXT, VENUE_LOADING_TEXT, VENUE_LOAD_FAILED_TEXT } from './lib/venueRemoved';
 import { venueListKey, deliveredVenueListKey, venueListPending, venueRetryDelayMs, VENUE_LOAD_TIMEOUT_MS } from './lib/venueLoad';
 import { forgetSignedInUserForKiosk, isKioskEntryUrl, stripKioskEntryFromUrl } from './lib/kioskSetup';
@@ -338,7 +338,12 @@ export default function App() {
   }, [currentUser]);
 
   // Main tasks & history states
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskState, setTaskState] = useState<TaskVersionState>(() => ({ tasks: [], versions: new Map() }));
+  const tasks = taskState.tasks;
+  const setTasks = useCallback((update: Task[] | ((tasks: Task[], versions: ReadonlyMap<string, number>) => Task[]), version?: number) => {
+    setTaskState((previous) => recordTaskState(previous,
+      typeof update === 'function' ? update(previous.tasks, previous.versions) : update, version));
+  }, []);
   const [tasksLoadedGeneration, setTasksLoadedGeneration] = useState(-1);
   const [shiftsByVenue, setShiftsByVenue] = useState<Record<string, Shift[]>>({});
   const [historyLogs, setHistoryLogs] = useState<DailySnapshot[]>([]);
@@ -1120,13 +1125,13 @@ export default function App() {
       : `?userEmail=${encodeURIComponent(currentUser.email)}`;
 
     apiFetch(`/api/tasks${qs}`)
-      .then((res) => res.json())
-      .then((data) => {
+      .then(async (res) => ({ data: await res.json(), version: versionFromResponse(res) }))
+      .then(({ data, version }) => {
         if (!isCurrent()) return;
         if (activeVenueId && Array.isArray(data.shifts)) setShiftsByVenue((prev) => ({ ...prev, [activeVenueId]: Array.isArray(data.shifts) ? data.shifts.filter((s: Shift) => s.venueId === activeVenueId) : [] }));
         if (Array.isArray(data.tasks)) {
           setTasksLoadedGeneration(generation);
-          setTasks(data.tasks.filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t, Array.isArray(data.shifts) ? data.shifts : []))));
+          setTasks(data.tasks.filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t, Array.isArray(data.shifts) ? data.shifts : []))), version);
         }
       })
       .catch((err) => console.warn('Could not fetch /api/tasks:', err));
@@ -1251,7 +1256,7 @@ export default function App() {
         if (Array.isArray(msg.payload.tasks)) {
           setTasksLoadedGeneration(generation);
           setTasks(scopeListToVenue<Task>(msg.payload.tasks, venueScope)
-            .filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t))));
+            .filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t))), msg.version);
         }
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
         if (Array.isArray(msg.payload.events)) setEvents(scopeListToVenue(msg.payload.events, eventScope));
@@ -1269,7 +1274,8 @@ export default function App() {
         setTasks((prev) =>
           shownHere
             ? prev.map((t) => (t.id === updated.id ? updated : t))
-            : prev.filter((t) => t.id !== updated.id)
+            : prev.filter((t) => t.id !== updated.id),
+          msg.version
         );
         if (shownHere && msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
           showToast(`${updated.updatedByName || msg.senderEmail} updated "${updated.title}"`);
@@ -1277,7 +1283,7 @@ export default function App() {
       } else if (msg.type === 'TASK_CREATED' && msg.payload) {
         const created = msg.payload as Task;
         if (!canSeeTask(created, currentUser, taskVenueToday(created), visibilityOccurrence(created)) || !inVenueScope(created, venueScope)) return;
-        setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
+        setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]), msg.version);
         if (msg.senderEmail && currentUser && msg.senderEmail !== currentUser.email) {
           showToast(`New assignment added: "${created.title}"`);
         }
@@ -1286,7 +1292,7 @@ export default function App() {
       } else if (msg.type === 'DAILY_RESET' && msg.payload) {
         if (Array.isArray(msg.payload.tasks))
           setTasks(scopeListToVenue<Task>(msg.payload.tasks, venueScope)
-            .filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t))));
+            .filter((t: Task) => canSeeTask(t, currentUser, taskVenueToday(t), visibilityOccurrence(t))), msg.version);
         if (Array.isArray(msg.payload.historyLogs)) setHistoryLogs(scopeListToVenue(msg.payload.historyLogs, venueScope));
         showToast('Daily board has refreshed for the day! Previous records archived.');
       } else if (msg.type === 'HISTORY_PRUNED' && msg.payload) {
@@ -1362,7 +1368,7 @@ export default function App() {
         // The restore selects the first venue; a scoped screen shows only its records.
         const restoredScope = venueScope && msg.payload?.venues?.[0]?.id ? String(msg.payload.venues[0].id) : venueScope;
         const restoredEventScope = currentUser.role === 'admin' ? restoredScope : eventScope;
-        if (Array.isArray(msg.payload?.tasks)) setTasks(scopeListToVenue<Task>(msg.payload.tasks, restoredScope));
+        if (Array.isArray(msg.payload?.tasks)) setTasks(scopeListToVenue<Task>(msg.payload.tasks, restoredScope), msg.version);
         if (Array.isArray(msg.payload?.events)) setEvents(scopeListToVenue<KosherEvent>(msg.payload.events, restoredEventScope));
         if (Array.isArray(msg.payload?.users)) setKnownUsers(msg.payload.users);
         setIsDemoCleared(false);
@@ -1419,7 +1425,7 @@ export default function App() {
     });
     if (result.ok) {
       // Ensure sync
-      setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)));
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)), result.version);
       return true;
     } else {
       if (previousTask) {
@@ -1545,7 +1551,7 @@ export default function App() {
       // if the server logged the check without its photo, say so.
       const photoNote = photoData ? afterCheckInWithPhoto(beforeIds, result.data, currentUser.email, photoData) : null;
       // Ensure sync (server is the source of truth for the check-in list)
-      setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)));
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)), result.version);
       if (photoNote) showToast(photoNote);
     } else {
       // Roll back the optimistic check-in so it doesn't linger as if logged.
@@ -1582,7 +1588,7 @@ export default function App() {
       body: JSON.stringify({ userEmail: currentUser.email }),
     });
     if (result.ok) {
-      setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)));
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? result.data : t)), result.version);
     } else {
       if (removedCheckIn) {
         setTasks((prev) =>
@@ -1689,7 +1695,7 @@ export default function App() {
         return false;
       }
       const updated = result.data;
-      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)), result.version);
       return true;
     }
     // Create
@@ -1711,7 +1717,7 @@ export default function App() {
     const created = result.data;
     // Dedupe by id: the TASK_CREATED broadcast can arrive before the
     // POST resolves, in which case the task is already in state.
-    setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]));
+    setTasks((prev) => (prev.some((t) => t.id === created.id) ? prev : [...prev, created]), result.version);
     return true;
   };
 
@@ -1720,7 +1726,7 @@ export default function App() {
     const result = await saveTaskBatch(drafts, taskToEdit?.venueId || taskEditorVenueId || currentVenue?.id || '', currentUser.email, operationId);
     if (!result.ok) { showToast(result.error || 'Could not create the assignments.'); return false; }
     const created = result.data;
-    setTasks((prev) => [...prev, ...created.filter((task) => !prev.some((t) => t.id === task.id))]);
+    setTasks((prev) => [...prev, ...created.filter((task) => !prev.some((t) => t.id === task.id))], result.version);
     return true;
   };
 
@@ -1784,7 +1790,7 @@ export default function App() {
           return;
         }
         const data = result.data;
-        if (data.tasks) setTasks(data.tasks);
+        if (data.tasks) setTasks(data.tasks, result.version);
         if (data.snapshot) setHistoryLogs((prev) => [data.snapshot, ...prev]);
         showToast(`Daily board for "${venueName}" has been reset and archived!`);
       },
@@ -1810,7 +1816,7 @@ export default function App() {
         setVenues(data.venues);
         if (data.venues.length > 0) setCurrentVenueId(data.venues[0].id);
       }
-      if (Array.isArray(data.tasks)) setTasks(data.tasks);
+      if (Array.isArray(data.tasks)) setTasks(data.tasks, result.version);
       if (Array.isArray(data.events)) setEvents(data.events);
       if (Array.isArray(data.users)) setKnownUsers(data.users);
       setIsDemoCleared(false);
@@ -2516,7 +2522,7 @@ export default function App() {
       onUpdateStatus={handleBoardUpdateStatus}
       timeZone={currentVenueTimeZone}
       onUpdateNotes={handleUpdateNotes}
-      onChecklistUpdated={(updated, version) => setTasks((prev) => applyChecklistResponse(prev, updated, version))}
+      onChecklistUpdated={(updated, version) => setTasks((prev, versions) => applyChecklistResponse(prev, updated, version, versions), version)}
       onCheckIn={handleCheckIn}
       onRemoveCheckIn={handleRemoveCheckIn}
       onEditTask={(task) => {
@@ -3026,7 +3032,7 @@ export default function App() {
             onViewChange={setKioskView}
             onUpdateStatus={handleUpdateStatus}
             onUpdateNotes={handleUpdateNotes}
-            onChecklistUpdated={(updated, version) => setTasks((prev) => applyChecklistResponse(prev, updated, version))}
+            onChecklistUpdated={(updated, version) => setTasks((prev, versions) => applyChecklistResponse(prev, updated, version, versions), version)}
             onCheckIn={handleCheckIn}
             onRemoveCheckIn={handleRemoveCheckIn}
             onEditTask={(task) => {
