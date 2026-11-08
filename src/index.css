@@ -747,6 +747,32 @@
 .task-done-icon { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; border-radius: 8px; background: var(--gold-wash); color: var(--gold-ink); }
 .task-done-copy { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
 .task-done-copy > span { font-size: 12px; color: var(--ink-soft); }
+/* own-options builder */
+.own-options-builder { display: grid; gap: 12px; padding: 16px; background: var(--sunken); border-radius: 12px; color: var(--ink); }
+.own-options-presets-label { font-size: 12px; color: var(--ink-soft); }
+.own-options-builder button, .own-options-builder input { min-block-size: 48px; border: 1px solid var(--line-control); border-radius: 8px; background: var(--surface); color: var(--ink); padding-inline: 12px; }
+.own-options-builder button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; font-size: 12px; }
+.own-options-builder input { min-inline-size: 0; inline-size: 100%; font-size: 16px; }
+.own-options-add { display: flex; gap: 8px; }
+.own-options-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.own-options-presets button { border-radius: 999px; }
+.own-options-rows { display: grid; gap: 8px; }
+.own-options-row { display: grid; grid-template-columns: minmax(0, 1fr) 48px; align-items: center; gap: 8px; padding-block: 8px; border-block-end: 1px solid var(--line); }
+.own-options-row > span { overflow-wrap: anywhere; font-size: 17px; font-weight: 600; }
+.own-options-choice { display: flex; grid-row: 2; grid-column: 1 / -1; }
+.own-options-choice button { flex: 1; border-radius: 0; border-color: transparent; background: transparent; }
+.own-options-choice button:first-child { border-start-start-radius: 8px; border-end-start-radius: 8px; }
+.own-options-choice button:last-child { border-start-end-radius: 8px; border-end-end-radius: 8px; }
+.own-options-choice button:first-child[aria-pressed='true'] { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
+.own-options-choice button:last-child[aria-pressed='true'] { border-color: var(--ink); }
+.own-options-remove { grid-column: 2; grid-row: 1; display: grid; place-items: center; padding-inline: 0; }
+.own-options-builder p { margin: 0; font-size: 14px; }
+.own-options-preview { display: grid; gap: 8px; }
+.own-options-preview > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.own-options-preview > div > span { display: inline-flex; align-items: center; gap: 8px; min-block-size: 48px; padding-inline: 12px; border: 1px solid var(--line-control); border-radius: 8px; background: var(--surface); font-size: 12px; overflow-wrap: anywhere; }
+.own-options-preview > div > .is-done { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
+.own-options-builder :is(button, input):focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
 .task-done-disclosure .task-done-copy > strong { margin: 0; text-align: left; font-size: 13px; font-weight: 630; }
 .task-done-disclosure[open] > :not(summary) { margin: 8px; }
 .task-what-more > summary, .task-who-visibility > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; color: var(--ink-soft); font-size: 12px; list-style: none; cursor: pointer; }
@@ -830,3 +856,33 @@
   .shift-editor-body > fieldset { padding: 8px 0; }
   .shift-editor-days { gap: 0; }
 }
+
+/* done-type cards */
+.task-done-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.task-done-card { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-inline-size: 0; min-block-size: 46px; padding: 8px; border: 1px solid var(--line-control); border-radius: 12px; background: var(--surface); color: var(--ink); cursor: pointer; }
+.task-done-card > input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; }
+.task-done-card:has(input:checked) { border-color: var(--gold); box-shadow: inset 0 0 0 1px var(--gold); background: var(--gold-wash); }
+.task-done-card:focus-within { outline: 2px solid var(--gold); outline-offset: 2px; }
+.task-done-card:active { transform: scale(0.97); }
+.task-done-preview { display: flex; align-items: center; justify-content: center; gap: 8px; block-size: 64px; padding: 4px; border-radius: 8px; background: var(--sunken); color: var(--ink-soft); font-size: 12px; }
+.task-done-preview-check { display: grid; place-items: center; inline-size: 40px; block-size: 40px; border-radius: 50%; background: var(--ok); color: var(--task-avatar-letter); }
+.task-done-preview-count { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.task-done-preview-dots { display: flex; align-items: center; gap: 8px; }
+.task-done-preview-dots > i { inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--gold); }
+.task-done-preview-pill { padding: 4px 12px; border-radius: 999px; }
+.task-done-preview-pill.is-yes, .task-done-preview-options .is-done { background: var(--ok-bg); color: var(--ok); }
+.task-done-preview-pill.is-no { background: var(--bad-bg); color: var(--bad); }
+.task-done-preview-options { display: flex; flex-direction: column; gap: 2px; min-inline-size: 0; max-inline-size: 100%; }
+.task-done-preview-options > span { display: flex; align-items: center; gap: 4px; min-inline-size: 0; padding-inline: 4px; border-radius: 6px; line-height: 16px; }
+.task-done-preview-options svg { flex-shrink: 0; }
+.task-done-preview-options > span > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-done-card-copy { display: flex; flex: 1; flex-direction: column; gap: 4px; min-inline-size: 0; overflow-wrap: anywhere; }
+.task-done-card-copy strong { font-size: 14px; font-weight: 600; }
+.task-done-card-copy > span { font-size: 12px; color: var(--ink-soft); }
+.task-done-card-check { position: absolute; inset-block-start: 4px; inset-inline-end: 4px; display: grid; place-items: center; inline-size: 20px; block-size: 20px; border-radius: 50%; background: var(--gold-deep); color: var(--paper); }
+.task-done-card-legacy { grid-column: 1 / -1; flex-direction: row; align-items: center; min-block-size: 56px; padding-inline-end: 32px; }
+.task-done-card-legacy .task-done-preview { flex: 0 0 48px; block-size: 40px; }
+.task-done-disclosure .task-done-copy > strong { text-align: start; }
+.task-done-disclosure > summary > svg { margin-inline-start: auto; margin-inline-end: 0; }
+@media (max-width: 339px) { .task-done-cards { grid-template-columns: minmax(0, 1fr); } }
+@media (hover: hover) { .task-done-card:not(:has(input:checked)):hover { background: var(--sunken); } }

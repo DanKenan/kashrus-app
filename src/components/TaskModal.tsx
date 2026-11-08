@@ -8,7 +8,7 @@ import type { Shift } from '../types';
 import { shiftWeekdays, shiftIsUpcoming, sortShiftsByStart, venueShifts, shiftUserIds, formatShiftHours } from '../lib/shifts';
 import { ANY_TIME_LABEL, isAnyTimeTask, isAnyTimeText } from '../lib/anyTime';
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Pencil, Clock, Plus, CirclePlus, List, Layers, Sun, Sunset, Moon, Circle, Info, Repeat2, Minus, Users, ChevronDown, Trash2, CheckCircle2, ListFilter } from 'lucide-react';
+import { X, Pencil, Clock, Plus, CirclePlus, List, Layers, Sun, Sunset, Moon, Circle, Info, Repeat2, Minus, Users, ChevronDown, Trash2, CheckCircle2, ListFilter, Check, ToggleRight } from 'lucide-react';
 import { Task, TaskInputType } from '../types';
 import { captureEditBaseline, newActionId } from '../lib/api';
 import { DAYS_MAP } from '../lib/utils';
@@ -305,6 +305,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   ]);
   const [completedStatusValues, setCompletedStatusValues] = useState<string[]>(['Completed']);
   const [newOptionInput, setNewOptionInput] = useState('');
+  const [doneDisclosureOpen, setDoneDisclosureOpen] = useState<boolean | undefined>(undefined);
 
   // Schedule State: Recurring Days vs Specific Calendar Dates
   const [creatingShift, setCreatingShift] = useState(false);
@@ -337,6 +338,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     submitGuard.current = false; batchAttempt.current = null;
     if (isOpen) setSavedNotice(null);
     setShowEditTime(false);
+    setDoneDisclosureOpen(undefined);
     setStep(0); setExtras([]); setPeopleTouched(false); setDayPeople(taskToEdit?.dayAssignees || {});
     setSwaps(taskToEdit?.assigneeSwaps || []); setPeopleDay(null); setJustOnce(false);
     setShowPeople(false); setPeopleSearch(''); setSaving(false); setSaveError(''); setRemovedShifts([]); setDeletedShiftName(null);
@@ -502,6 +504,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const whatSummary = `${count > 1 ? `${count} tasks · ` : ''}${[title, ...extras.map((t) => t.name)].filter(Boolean).join(', ')}`;
   const whenSummary = `${shiftMode && chosenShift ? `${chosenShift.name} ${compactShiftHours(chosenShift)}` : isAny ? ANY_TIME_LABEL : customTimeText ?? formatPickerTime(time1)} · ${repeat.toLowerCase()}`;
   const notice = savedNotice && <div role="status" className="task-form-saved-notice"><span aria-hidden="true">✓</span><span>{savedNotice}</span><button type="button" aria-label="Dismiss saved notification" onClick={() => setSavedNotice(null)} className="min-h-11 min-w-11 rounded-full pressable"><X className="w-4 h-4 mx-auto" /></button></div>;
+  const statusHasDone = customStatusOptions.some((option) => completedStatusValues.includes(option));
+  const statusOptionsInvalid = inputType === 'status_select' && (!customStatusOptions.length || !statusHasDone);
+  useEffect(() => {
+    if (statusOptionsInvalid) setDoneDisclosureOpen(true);
+  }, [statusOptionsInvalid]);
+
   if (!isOpen) return notice;
 
 
@@ -526,22 +534,18 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   };
 
   const handleRemoveStatusOption = (optionToRemove: string) => {
-    if (customStatusOptions.length <= 1) return; // keep at least one
     const updated = customStatusOptions.filter((opt) => opt !== optionToRemove);
     setCustomStatusOptions(updated);
     setCompletedStatusValues(completedStatusValues.filter((v) => v !== optionToRemove));
   };
 
-  const toggleOptionCompleted = (option: string) => {
-    if (completedStatusValues.includes(option)) {
-      // Don't deselect if it's the only completed option
-      if (completedStatusValues.length > 1) {
-        setCompletedStatusValues(completedStatusValues.filter((v) => v !== option));
-      }
-    } else {
-      setCompletedStatusValues([...completedStatusValues, option]);
-    }
+  const setOptionCompleted = (option: string, done: boolean) => {
+    setCompletedStatusValues((values) => done
+      ? values.includes(option) ? values : [...values, option]
+      : values.filter((value) => value !== option));
   };
+  const statusPreviewName = !mainPeople.length || mainPeople.includes('all')
+    ? 'The mashgiach' : namesFor([mainPeople[0]]);
 
   const applyStatusPreset = (preset: typeof PRESET_STATUS_GROUPS[0]) => {
     setCustomStatusOptions(preset.options);
@@ -573,6 +577,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (statusOptionsInvalid) {
+      setStep(0);
+      setDoneDisclosureOpen(true);
+      return;
+    }
     if (step === 1 && shiftMode && !chosenShift) return;
     if (!taskToEdit && step !== 2) {
       if (title.trim() && extras.every((t) => t.name.trim())) {
@@ -895,136 +904,75 @@ export const TaskModal: React.FC<TaskModalProps> = ({
             </div>
           </label>
           </details>
-          <details className="task-done-disclosure">
-            <summary><span className="task-done-icon"><CheckCircle2 aria-hidden="true" className="w-5 h-5" /></span><span className="task-done-copy"><span>How is it marked done?</span><strong>{({ yes_no: 'Yes or No', toggle: 'On / Off switch', status_select: 'Your own options', checkbox: 'Big check · one tap', check_in: 'Check many times' })[inputType]}{count > 1 ? ` · all ${count}` : ''}</strong></span><ChevronDown aria-hidden="true" className="w-4 h-4 shrink-0" /></summary>
-            <div>
-              <label className="block font-semibold text-ink-soft mb-1">
-                How is it marked done?
-              </label>
-              <select
-                id="task-input-type-select"
-                value={inputType}
-                onChange={(e) => setInputType(e.target.value as TaskInputType)}
-                className="w-full text-xs px-3 py-2 rounded-xl border border-line bg-sunken text-ink"
-              >
-                <option value="yes_no">Yes or No</option>
-                <option value="toggle">On / Off switch</option>
-                <option value="status_select">Your own options</option>
-                <option value="checkbox">One tick</option>
-                <option value="check_in">Check many times (logs who and when)</option>
-              </select>
+          <details className="task-done-disclosure" open={doneDisclosureOpen}
+            onToggle={(e) => setDoneDisclosureOpen(e.currentTarget.open)}>
+            <summary><span className="task-done-icon"><CheckCircle2 aria-hidden="true" className="w-5 h-5" /></span><span className="task-done-copy"><span>How is it marked done?</span><strong>{({ yes_no: 'Yes or No', toggle: 'On / Off switch', status_select: 'Your own options', checkbox: 'One big check', check_in: 'Check many times' })[inputType]}{count > 1 ? ` · all ${count}` : ''}</strong></span><ChevronDown aria-hidden="true" className="w-4 h-4 shrink-0" /></summary>
+            <div id="task-input-type-select" role="radiogroup" aria-label="How is it marked done?" className="task-done-cards">
+              {([
+                { value: 'checkbox', title: 'One big check', line: "One tap and it's done" },
+                { value: 'check_in', title: 'Check many times', line: 'Tap every time you check · logs who and when' },
+                { value: 'yes_no', title: 'Yes or No', line: 'Answer a question' },
+                { value: 'status_select', title: 'Your own options', line: 'You write the choices' },
+                ...(taskToEdit?.inputType === 'toggle' ? [{ value: 'toggle', title: 'On / Off switch', line: 'Tap to turn on or off' }] : []),
+              ] as { value: TaskInputType; title: string; line: string }[]).map((card) => <label key={card.value} className={`task-done-card${card.value === 'toggle' ? ' task-done-card-legacy' : ''}`}>
+                <input type="radio" name="task-done-type" value={card.value} checked={inputType === card.value} onChange={() => setInputType(card.value)} onClick={() => setInputType(card.value)} aria-label={card.title} />
+                <span className="task-done-preview" aria-hidden="true">
+                  {card.value === 'checkbox' && <span className="task-done-preview-check"><Check className="w-6 h-6" /></span>}
+                  {card.value === 'check_in' && <span className="task-done-preview-count"><span>3×</span><span className="task-done-preview-dots"><i /><i /><i /></span></span>}
+                  {card.value === 'yes_no' && <><span className="task-done-preview-pill is-yes">Yes</span><span className="task-done-preview-pill is-no">No</span></>}
+                  {card.value === 'status_select' && <span className="task-done-preview-options">{customStatusOptions.slice(0, 3).map((option, index) => <span key={index} className={completedStatusValues.includes(option) ? 'is-done' : undefined}>{completedStatusValues.includes(option) && <Check className="w-4 h-4" />}<span>{option}</span></span>)}</span>}
+                  {card.value === 'toggle' && <ToggleRight className="w-6 h-6" />}
+                </span>
+                <span className="task-done-card-copy"><strong>{card.title}</strong><span>{card.line}</span></span>
+                {inputType === card.value && <span className="task-done-card-check" aria-hidden="true"><Check className="w-4 h-4" /></span>}
+              </label>)}
             </div>
 
           {/* CUSTOM STATUS VALUES BUILDER (When inputType === 'status_select') */}
           {inputType === 'status_select' && (
-            <div className="p-4 bg-sunken rounded-2xl border border-gold/30 space-y-3 animate-fade-in">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <ListFilter className="w-4 h-4 text-gold-deep" />
-                  <span className="font-bold text-ink text-xs">
-                    Custom Status Values
-                  </span>
-                </div>
-                <span className="text-xs text-ink-faint">
-                  Staff choose from these values
-                </span>
-              </div>
-
-              {/* Preset Quick Select */}
-              <div>
-                <div className="text-xs font-semibold text-ink-faint uppercase tracking-wider mb-1">
-                  Quick Presets:
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {PRESET_STATUS_GROUPS.map((preset) => (
-                    <button
-                      key={preset.name}
-                      type="button"
-                      onClick={() => applyStatusPreset(preset)}
-                      className="px-2 py-0.5 text-xs font-medium rounded-lg bg-surface text-ink-soft border border-line hover:border-gold hover:text-gold-deep transition"
-                    >
-                      {preset.name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Current Status Options List */}
-              <div className="space-y-1.5">
-                <div className="text-xs font-semibold text-ink-faint flex items-center justify-between">
-                  <span>Current Options (Click checkmark to toggle &quot;Counts as Done&quot;):</span>
-                  <span>{customStatusOptions.length} values</span>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {customStatusOptions.map((opt) => {
-                    const isCompleted = completedStatusValues.includes(opt);
-                    return (
-                      <div
-                        key={opt}
-                        className={`inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-xl text-xs font-semibold border transition ${
-                          isCompleted
-                            ? 'bg-ok-bg border-ok text-ok'
-                            : 'bg-surface border-line text-ink-soft'
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => toggleOptionCompleted(opt)}
-                          className="flex items-center gap-1 hover:opacity-80"
-                          title={isCompleted ? 'Marked as completed status (click to toggle)' : 'Not completed (click to mark as completed)'}
-                        >
-                          <span className={`w-4 h-4 rounded-full flex items-center justify-center text-xs ${
-                            isCompleted ? 'bg-ok text-paper' : 'border border-line-strong'
-                          }`}>
-                            {isCompleted ? '✓' : ''}
-                          </span>
-                          <span>{opt}</span>
-                          {isCompleted && (
-                            <span className="text-xs px-1 py-0.2 rounded bg-ok-bg text-ok font-bold uppercase">
-                              Done
-                            </span>
-                          )}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveStatusOption(opt)}
-                          disabled={customStatusOptions.length <= 1}
-                          className="p-1 text-ink-faint hover:text-bad rounded hover:bg-sunken disabled:opacity-30"
-                          title="Delete status option"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Add New Status Option Input */}
-              <div className="flex items-center gap-2 pt-1">
-                <input
-                  type="text"
-                  value={newOptionInput}
+            <div className="own-options-builder">
+              <strong>Your own options</strong>
+              <p>Each option either finishes the task or leaves it open.</p>
+              <label htmlFor="task-status-option" className="sr-only">Add an option</label>
+              <div className="own-options-add">
+                <input id="task-status-option" type="text" placeholder="Add an option, e.g. Kashered" value={newOptionInput}
                   onChange={(e) => setNewOptionInput(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      handleAddStatusOption();
-                    }
-                  }}
-                  placeholder="New status value"
-                  className="flex-1 px-3 py-1.5 text-xs rounded-xl border border-line bg-sunken text-ink"
-                />
-                <button
-                  type="button"
-                  onClick={handleAddStatusOption}
-                  className="px-3 py-1.5 text-xs font-semibold rounded-xl bg-gold-deep hover:brightness-105 text-paper transition tactile-1 flex items-center gap-1"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Add Value</span>
-                </button>
+                    if (e.key === 'Enter') { e.preventDefault(); handleAddStatusOption(); }
+                  }} />
+                <button type="button" className="pressable" onClick={handleAddStatusOption}><Plus aria-hidden="true" className="w-4 h-4" />Add</button>
+              </div>
+              <span className="own-options-presets-label">Or start from:</span>
+              <div className="own-options-presets" aria-label="Or start from:">
+                {PRESET_STATUS_GROUPS.map((preset) => <button key={preset.name} type="button"
+                  className="pressable" onClick={() => applyStatusPreset(preset)}>{preset.name}</button>)}
+              </div>
+              <div className="own-options-rows">
+                {customStatusOptions.map((option) => {
+                  const done = completedStatusValues.includes(option);
+                  return <div key={option} className="own-options-row">
+                    <span dir="auto">{option}</span>
+                    <div className="own-options-choice" role="group" aria-label={option}>
+                      <button type="button" className="pressable" aria-pressed={done}
+                        onClick={() => setOptionCompleted(option, true)}>{done && <Check aria-hidden="true" className="w-4 h-4" />}Counts as done</button>
+                      <button type="button" className="pressable" aria-pressed={!done}
+                        onClick={() => setOptionCompleted(option, false)}>Stays open</button>
+                    </div>
+                    <button type="button" className="own-options-remove pressable" aria-label={`Remove ${option}`}
+                      onClick={() => handleRemoveStatusOption(option)}><X aria-hidden="true" className="w-5 h-5" /></button>
+                  </div>;
+                })}
+              </div>
+              {!customStatusOptions.length && <p role="alert">Add at least one option.</p>}
+              {!statusHasDone && <p role="alert">Pick at least one option that counts as done.</p>}
+              <div className="own-options-preview">
+                <p><bdi>{statusPreviewName}</bdi> will see:</p>
+                <div>
+                  {customStatusOptions.map((option) => <span key={option}
+                    className={completedStatusValues.includes(option) ? 'is-done' : ''}>
+                    <bdi>{option}</bdi>{completedStatusValues.includes(option) && <><Check aria-hidden="true" className="w-4 h-4" /><span>Done</span></>}
+                  </span>)}
+                </div>
               </div>
             </div>
           )}
@@ -1170,7 +1118,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               Cancel
             </button>
             {step > 0 && <button type="button" onClick={() => setStep(step - 1)} className="sr-only focus:not-sr-only min-h-12 px-4 rounded-lg border border-line-control text-base text-ink pressable">Back</button>}
-            <button disabled={saving || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 1 && shiftMode && !usingShift) || ((step === 2 || !!taskToEdit) && (!peopleReady || (shiftMode && !usingShift)))} id="save-task-submit-btn" type="submit" className="task-form-primary pressable disabled:opacity-50">
+            <button disabled={saving || (step === 0 && statusOptionsInvalid) || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 1 && shiftMode && !usingShift) || ((step === 2 || !!taskToEdit) && (!peopleReady || (shiftMode && !usingShift)))} id="save-task-submit-btn" type="submit" className="task-form-primary pressable disabled:opacity-50">
               {saving ? 'Saving…' : taskToEdit ? '✓ Save changes' : step === 0 ? 'Next: When →' : step === 1 ? 'Next: Who does it →' : extras.length ? `✓ Save ${extras.length + 1} tasks` : '✓ Save task'}
             </button>
             {(step === 2 || !!taskToEdit) && !peopleReady && <p className="w-full text-sm text-ink-soft" role="status">Pick who does it</p>}
