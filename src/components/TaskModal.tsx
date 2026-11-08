@@ -545,7 +545,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       : values.filter((value) => value !== option));
   };
   const statusPreviewName = !mainPeople.length || mainPeople.includes('all')
-    ? 'The mashgiach' : namesFor([mainPeople[0]]);
+    ? 'The mashgiach' : knownWorkers.find((person) => person.email === mainPeople[0])?.name?.trim().split(/\s+/)[0] || 'The mashgiach';
 
   const applyStatusPreset = (preset: typeof PRESET_STATUS_GROUPS[0]) => {
     setCustomStatusOptions(preset.options);

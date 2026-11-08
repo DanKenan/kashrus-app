@@ -7,15 +7,16 @@ const modalSource = readFileSync(new URL('../../src/components/TaskModal.tsx', i
 const closedReturn = modalSource.indexOf('if (!isOpen) return');
 assert.ok(closedReturn >= 0);
 assert.doesNotMatch(modalSource.slice(closedReturn), /\buse[A-Z]\w*\s*\(/, 'TaskModal must call every hook before its closed-modal return');
-const make = async (assignedTo = ['yossi@example.test', 'eli@example.test']) => {
+const make = async (assignedTo = ['yossi@example.test', 'eli@example.test'], name = 'Yossi Cohen') => {
   const saves = [];
   const view = mount(TaskModal, { isOpen: true, onClose() {}, onSave(payload) { saves.push(payload); return false; },
     taskToEdit: { id: 't', title: 'Inspect', venueId: 'v', assignedTo, inputType: 'status_select', customStatusOptions: ['Pending', 'Passed'], completedStatusValues: ['Passed'], scheduleType: 'recurring', daysOfWeek: [0,1,2,3,4,5,6] },
-    knownWorkers: [{ email: 'yossi@example.test', name: 'Yossi' }, { email: 'eli@example.test', name: 'Eli' }], venueId: 'v', shifts: [] });
+    knownWorkers: [{ email: 'yossi@example.test', name }, { email: 'eli@example.test', name: 'Eli' }], venueId: 'v', shifts: [] });
   await view.render(); return { view, saves };
 };
 const { view, saves } = await make();
 assert.match(view.text(), /Yossi will see:/);
+assert.doesNotMatch(view.text(), /Yossi Cohen will see:/);
 const add = () => view.click((e) => e.type === 'button' && Array.isArray(e.props.children) && e.props.children.includes('Add'));
 await view.type('Add an option', '  '); await add();
 await view.type('Add an option', 'pending'); await add();
@@ -48,10 +49,12 @@ await view.click((e) => e.props['aria-label'] === 'Remove Needs review');
 await view.click((e) => e.props['aria-label'] === 'Remove Passed');
 await view.submit(); assert.equal(saves.length, 1);
 assert.match(view.text(), /Add at least one option\./);
-for (const assignees of [[], ['all']]) {
+for (const assignees of [[], ['all'], ['unknown@example.test']]) {
   const fallback = await make(assignees);
   assert.match(fallback.view.text(), /The mashgiach will see:/);
 }
+const unnamed = await make(['yossi@example.test'], '   ');
+assert.match(unnamed.view.text(), /The mashgiach will see:/);
 console.log('own-options builder: add, Enter, duplicates, removal, done/open, payload, validation, and assignee preview passed');
 
 const newSaves = [];
