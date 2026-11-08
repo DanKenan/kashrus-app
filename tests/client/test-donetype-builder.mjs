@@ -65,7 +65,8 @@ await fresh.render({ isOpen: true });
 assert.equal(fresh.find((e) => e.type === 'form').length, 1);
 await fresh.type('task-title-input', 'Check equipment');
 if (fresh.find((e) => e.type === 'input' && e.props.type === 'radio' && e.props.value === 'status_select').length) {
-  await fresh.click((e) => e.type === 'input' && e.props.value === 'status_select');
+  await fresh.find((e) => e.type === 'input' && e.props.value === 'status_select')[0].props.onChange({ target: { value: 'status_select', checked: true } });
+  await fresh.render();
 } else {
   await fresh.type('task-input-type-select', 'status_select');
 }
