@@ -27,6 +27,13 @@ import {
 import { MonthlyCalendarPicker } from './MonthlyCalendarPicker';
 import { rosterKey } from '../lib/rosterDisplay';
 
+// Mirrors server.ts validChecklistItems(): trimmed, case-sensitive duplicates.
+export function validChecklistItems(items: unknown): items is string[] {
+  return Array.isArray(items) && items.length >= 2 && items.length <= 20
+    && items.every((item) => typeof item === 'string' && item.trim().length > 0 && item.trim().length <= 80)
+    && new Set(items.map((item) => item.trim())).size === items.length;
+}
+
 /** Structured time value: 12-hour clock the app can reliably process. */
 export interface PickerTime {
   hour: number; // 1-12
@@ -218,6 +225,18 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [selectedCategories, setSelectedCategories] = useState<string[]>([PRESET_CATEGORIES[0]]);
+  const [checklistItems, setChecklistItems] = useState<string[]>([]);
+  const [checklistDraft, setChecklistDraft] = useState('');
+  const [checklistAddNote, setChecklistAddNote] = useState('');
+  const addChecklistItem = () => {
+    if (checklistItems.length >= 20) { setChecklistAddNote('Up to 20 items'); return; }
+    if (!checklistDraft.trim()) { setChecklistAddNote('Enter an item'); return; }
+    if (checklistDraft.trim().length > 80) { setChecklistAddNote('Up to 80 characters per item'); return; }
+    if (checklistItems.some((item) => item.trim() === checklistDraft.trim())) { setChecklistAddNote('Already on the list'); return; }
+    setChecklistAddNote('');
+    setChecklistItems((items) => [...items, checklistDraft.trim()]);
+    setChecklistDraft('');
+  };
   const [inputType, setInputType] = useState<TaskInputType>('yes_no');
   // Structured times — the app can reliably sort and process these.
   const [time1, setTime1] = useState<PickerTime>(() => nextFullHour(minutesIn(timeZone, new Date())));
@@ -368,6 +387,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           ? [...taskToEdit.categories]
           : [taskToEdit.category || 'General']
       );
+      setChecklistItems(taskToEdit.checklistItems || []);
+      setChecklistDraft('');
+      setChecklistAddNote('');
       setInputType(taskToEdit.inputType || 'yes_no');
       // Load times: structured when parseable, free-text otherwise.
       const editingAnyTime = isAnyTimeTask(taskToEdit);
@@ -420,6 +442,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setTitle('');
       setDescription('');
       setSelectedCategories([PRESET_CATEGORIES[0]]);
+      setChecklistItems([]);
+      setChecklistDraft('');
+      setChecklistAddNote('');
       setInputType('yes_no');
       setTime1(nextFullHour(minutesIn(timeZone, new Date())));
       setTime2(null);
@@ -507,6 +532,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const whenSummary = `${shiftMode && chosenShift ? `${chosenShift.name} ${compactShiftHours(chosenShift)}` : isAny ? ANY_TIME_LABEL : customTimeText ?? formatPickerTime(time1)} · ${repeat.toLowerCase()}`;
   const notice = savedNotice && <div role="status" className="task-form-saved-notice"><span aria-hidden="true">✓</span><span>{savedNotice}</span><button type="button" aria-label="Dismiss saved notification" onClick={() => setSavedNotice(null)} className="min-h-11 min-w-11 rounded-full pressable"><X className="w-4 h-4 mx-auto" /></button></div>;
   const statusHasDone = customStatusOptions.some((option) => completedStatusValues.includes(option));
+  const checklistListNote = checklistItems.length < 2 ? 'Add at least 2 items'
+    : checklistItems.length > 20 ? 'Up to 20 items'
+    : checklistItems.some((item) => typeof item !== 'string' || !item.trim()) ? 'Enter an item'
+    : checklistItems.some((item) => item.trim().length > 80) ? 'Up to 80 characters per item'
+    : new Set(checklistItems.map((item) => item.trim())).size !== checklistItems.length ? 'Already on the list' : '';
+  const checklistInvalid = inputType === 'checklist' && !validChecklistItems(checklistItems);
   const statusOptionsInvalid = inputType === 'status_select' && (!customStatusOptions.length || !statusHasDone);
   useEffect(() => {
     if (statusOptionsInvalid) setDoneDisclosureOpen(true);
@@ -579,7 +610,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (statusOptionsInvalid) {
+    if (statusOptionsInvalid || checklistInvalid) {
       setStep(0);
       setDoneDisclosureOpen(true);
       return;
@@ -621,6 +652,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       shiftTime: usingShift && shiftTime,
       isPrivate: taskToEdit && !peopleTouched ? taskToEdit.isPrivate : (!usingShift || !taskToEdit || peopleTouched || !!taskToEdit.assignmentMode) && assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
       inputType,
+      ...(inputType === 'checklist' ? { checklistItems: checklistItems.map((item) => item.trim()) } : {}),
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
       // Structured times when set via picker; custom text clears the minutes.
@@ -908,13 +940,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
           </details>
           <details className="task-done-disclosure" open={doneDisclosureOpen}
             onToggle={(e) => setDoneDisclosureOpen(e.currentTarget.open)}>
-            <summary><span className="task-done-icon"><CheckCircle2 aria-hidden="true" className="w-5 h-5" /></span><span className="task-done-copy"><span>How is it marked done?</span><strong>{({ yes_no: 'Yes or No', toggle: 'On / Off switch', status_select: 'Your own options', checkbox: 'One big check', check_in: 'Check many times' })[inputType]}{count > 1 ? ` · all ${count}` : ''}</strong></span><ChevronDown aria-hidden="true" className="w-4 h-4 shrink-0" /></summary>
+            <summary><span className="task-done-icon"><CheckCircle2 aria-hidden="true" className="w-5 h-5" /></span><span className="task-done-copy"><span>How is it marked done?</span><strong>{({ yes_no: 'Yes or No', toggle: 'On / Off switch', status_select: 'Your own options', checkbox: 'One big check', check_in: 'Check many times', checklist: 'Checklist' })[inputType]}{count > 1 ? ` · all ${count}` : ''}</strong></span><ChevronDown aria-hidden="true" className="w-4 h-4 shrink-0" /></summary>
             <div id="task-input-type-select" role="radiogroup" aria-label="How is it marked done?" className="task-done-cards">
               {([
                 { value: 'checkbox', title: 'One big check', line: "One tap and it's done" },
                 { value: 'check_in', title: 'Check many times', line: 'Tap every time you check · logs who and when' },
                 { value: 'yes_no', title: 'Yes or No', line: 'Answer a question' },
                 { value: 'status_select', title: 'Your own options', line: 'You write the choices' },
+                { value: 'checklist', title: 'Checklist', line: 'Tick each item · done when all are ticked' },
                 ...(taskToEdit?.inputType === 'toggle' ? [{ value: 'toggle', title: 'On / Off switch', line: 'Tap to turn on or off' }] : []),
               ] as { value: TaskInputType; title: string; line: string }[]).map((card) => <label key={card.value} className={`task-done-card${card.value === 'toggle' ? ' task-done-card-legacy' : ''}`}>
                 <input type="radio" name="task-done-type" value={card.value} checked={inputType === card.value} onChange={() => setInputType(card.value)} aria-label={card.title} />
@@ -923,12 +956,23 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                   {card.value === 'check_in' && <span className="task-done-preview-count"><span>3×</span><span className="task-done-preview-dots"><i /><i /><i /></span></span>}
                   {card.value === 'yes_no' && <><span className="task-done-preview-pill is-yes">Yes</span><span className="task-done-preview-pill is-no">No</span></>}
                   {card.value === 'status_select' && <span className="task-done-preview-options">{previewStatusOptions.map((option, index) => <span key={index} className={completedStatusValues.includes(option) ? 'is-done' : undefined}>{completedStatusValues.includes(option) && <Check className="w-4 h-4" />}<span>{option}</span></span>)}</span>}
+                  {card.value === 'checklist' && <span className="checklist-mini">{['First item', 'Second item', 'Third item'].map((item, i) => <span key={item}><span className="checklist-mini-box">{i < 2 && <Check className="w-4 h-4" />}</span>{item}</span>)}</span>}
                   {card.value === 'toggle' && <ToggleRight className="w-6 h-6" />}
                 </span>
                 <span className="task-done-card-copy"><strong>{card.title}</strong><span>{card.line}</span></span>
                 {inputType === card.value && <span className="task-done-card-check" aria-hidden="true"><Check className="w-4 h-4" /></span>}
               </label>)}
             </div>
+
+          {inputType === 'checklist' && <div className="checklist-builder">
+            <label htmlFor="task-checklist-item">Checklist items</label>
+            <div className="checklist-add"><input id="task-checklist-item" maxLength={80} aria-describedby="checklist-add-note" value={checklistDraft} onChange={(e) => { setChecklistDraft(e.target.value); setChecklistAddNote(''); }} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addChecklistItem(); } }} /><button type="button" onClick={addChecklistItem} disabled={checklistItems.length >= 20} className="pressable disabled:opacity-50">Add</button></div>
+            <p id="checklist-add-note" role="status">{checklistItems.length >= 20 ? 'Up to 20 items' : checklistAddNote}</p>
+            <ul>{checklistItems.map((item, index) => <li key={index}><span dir="auto">{item}</span><button type="button" aria-label={`Remove ${item}`} onClick={() => setChecklistItems((items) => items.filter((_, i) => i !== index))} className="pressable"><X className="w-5 h-5" aria-hidden="true" /></button></li>)}</ul>
+            {checklistInvalid && <p role="status">{checklistListNote}</p>}
+            <p className="checklist-preview-label"><bdi>{statusPreviewName}</bdi> will see:</p>
+            <ul className="checklist-builder-preview">{checklistItems.map((item, index) => <li key={index}><span className="checklist-box" aria-hidden="true" /><span dir="auto">{item}</span></li>)}</ul>
+          </div>}
 
           {/* CUSTOM STATUS VALUES BUILDER (When inputType === 'status_select') */}
           {inputType === 'status_select' && (
@@ -1120,7 +1164,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
               Cancel
             </button>
             {step > 0 && <button type="button" onClick={() => setStep(step - 1)} className="sr-only focus:not-sr-only min-h-12 px-4 rounded-lg border border-line-control text-base text-ink pressable">Back</button>}
-            <button disabled={saving || (step === 0 && statusOptionsInvalid) || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 1 && shiftMode && !usingShift) || ((step === 2 || !!taskToEdit) && (!peopleReady || (shiftMode && !usingShift)))} id="save-task-submit-btn" type="submit" className="task-form-primary pressable disabled:opacity-50">
+            <button disabled={saving || checklistInvalid || (step === 0 && statusOptionsInvalid) || !title.trim() || extras.some((t) => !t.name.trim()) || (step === 1 && shiftMode && !usingShift) || ((step === 2 || !!taskToEdit) && (!peopleReady || (shiftMode && !usingShift)))} id="save-task-submit-btn" type="submit" className="task-form-primary pressable disabled:opacity-50">
               {saving ? 'Saving…' : taskToEdit ? '✓ Save changes' : step === 0 ? 'Next: When →' : step === 1 ? 'Next: Who does it →' : extras.length ? `✓ Save ${extras.length + 1} tasks` : '✓ Save task'}
             </button>
             {(step === 2 || !!taskToEdit) && !peopleReady && <p className="w-full text-sm text-ink-soft" role="status">Pick who does it</p>}

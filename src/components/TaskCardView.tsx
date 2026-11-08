@@ -1,3 +1,4 @@
+import { TaskChecklist } from './TaskChecklist';
 import { taskOccursToday } from '../lib/taskOccurrences';
 import { TaskEmptyState } from './TaskEmptyState';
 import { whoSeesLabel } from '../lib/whoSees';
@@ -46,6 +47,7 @@ interface TaskCardViewProps {
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
   onUpdateNotes: (taskId: string, notes: string, baselineVersion?: number) => void;
+  onChecklistUpdated?: (task: Task, version?: number) => void;
   onCheckIn: (taskId: string, photoData?: string, photoCaption?: string) => void;
   onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
   onEditTask: (task: Task) => void;
@@ -75,6 +77,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
   onUpdateStatus,
   onUpdateNotes,
   onCheckIn,
+  onChecklistUpdated,
   onRemoveCheckIn,
   onEditTask,
   onDeleteTask,
@@ -482,6 +485,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                 )}
                 </TaskAnswerPhoto>
               </div>
+
+              {task.inputType === 'checklist' && <TaskChecklist task={task} canFill={canFill} onUpdated={onChecklistUpdated} kiosk={isKiosk} />}
 
               {/* Attribution & Signature Banner */}
               <div className="flex items-center justify-between mt-2.5 pt-2 text-[11px] text-ink-faint">

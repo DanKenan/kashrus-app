@@ -1044,7 +1044,7 @@ app.use('/api', async (req, res, next) => {
     const allowed =
       (method === 'GET' && path === '/tasks') ||
       (method === 'PUT' && /^\/tasks\/[^/]+$/.test(path)) ||
-      (method === 'POST' && /^\/tasks\/[^/]+\/check-in$/.test(path)) ||
+      (method === 'POST' && /^\/tasks\/[^/]+\/(check-in|checklist)$/.test(path)) ||
       (method === 'DELETE' && /^\/tasks\/[^/]+\/check-in\/[^/]+$/.test(path)) ||
       // CHECKINPHOTO: read one check-in photo (same task gate as the answer photo).
       (method === 'GET' && /^\/tasks\/[^/]+\/check-in\/[^/]+\/photo$/.test(path)) ||
@@ -2413,6 +2413,13 @@ interface Venue {
   timeZone?: string;
 }
 
+interface TaskChecklistTick {
+  item: number; // Index into checklistItems
+  byName: string | null;
+  byEmail: string | null;
+  at: string;
+}
+
 interface TaskItem {
   /** Present only for task-owned people; absent preserves legacy shift roster assignment. */
   assignmentMode?: 'task';
@@ -2427,7 +2434,7 @@ interface TaskItem {
   description: string;
   category: string;
   categories?: string[]; // All assigned categories; categories[0] is the primary
-  inputType: 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in';
+  inputType: 'toggle' | 'yes_no' | 'status_select' | 'checkbox' | 'check_in' | 'checklist';
   customStatusOptions?: string[];
   completedStatusValues?: string[];
   assignedTo: string[]; // ['all'] or array of worker emails
@@ -2448,6 +2455,8 @@ interface TaskItem {
   updatedAt: string | null;
   createdAt: string;
   checkIns?: TaskCheckInItem[];
+  checklistItems?: string[];
+  checklistTicks?: TaskChecklistTick[];
   /** PHOTOALL: the optional answer photo (reference only; bytes in taskPhotos). */
   answerPhoto?: AnswerPhotoRef;
   sortOrder?: number;
@@ -7060,7 +7069,16 @@ async function executeDailyReset(
                 })
                 .join('; ')
             : '';
-        const archivedNotes = checkInSummary
+        const checklistTicks = t.checklistTicks || [];
+        const checklistSummary = t.inputType === 'checklist'
+          ? `Checklist ${checklistTicks.length}/${(t.checklistItems || []).length}: ` + checklistTicks.map((tick: any) => {
+              const when = new Date(tick.at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: tz });
+              return `${t.checklistItems?.[tick.item] || 'Item'} (${tick.byName || tick.byEmail || 'Someone'} ${when})`;
+            }).join(', ')
+          : '';
+        const archivedNotes = checklistSummary
+          ? `${t.notes ? t.notes + '\n' : ''}${checklistSummary}`
+          : checkInSummary
           ? `${t.notes ? t.notes + '\n' : ''}Checks (${checkIns.length}): ${checkInSummary}`
           : t.notes;
         return {
@@ -7100,6 +7118,7 @@ async function executeDailyReset(
       updatedByName: null,
       updatedAt: null,
       checkIns: [],
+      ...(t.inputType === 'checklist' ? { checklistTicks: [] } : {}),
       answerPhoto: undefined, // PHOTOALL: bytes are swept by sweepAnswerPhotos()
     };
   };
@@ -13609,12 +13628,24 @@ app.get('/api/tasks', (req, res) => {
   });
 });
 
+const CHECKLIST_ITEMS_ERROR = 'Checklist needs 2 to 20 distinct non-empty items, each at most 80 characters.';
+function validChecklistItems(items: any): items is string[] {
+  return Array.isArray(items) && items.length >= 2 && items.length <= 20
+    && items.every((item) => typeof item === 'string' && item.trim().length > 0 && item.trim().length <= 80)
+    && new Set(items.map((item) => item.trim())).size === items.length;
+}
+function checklistRequestValid(task: any, item: any, ticked: any): boolean {
+  return task.inputType === 'checklist' && validChecklistItems(task.checklistItems)
+    && Number.isInteger(item) && item >= 0 && item < task.checklistItems.length && typeof ticked === 'boolean';
+}
+
 app.post('/api/tasks', async (req, res) => {
   const batch = req.body.tasks;
   if (Array.isArray(batch) && batch.some((item: any) => !item || typeof item !== 'object' || Array.isArray(item))) return res.status(400).json({ error: 'Every task must be an object.' });
   if (batch !== undefined && (!Array.isArray(batch) || batch.length < 1 || batch.length > 20)) return res.status(400).json({ error: 'Create between 1 and 20 tasks.' });
   const inputs = batch === undefined ? [req.body] : batch.map((item: any) => ({ ...req.body, ...item, tasks: undefined }));
   if (inputs.some((item: any) => !item || typeof item.title !== 'string' || !item.title.trim() || (item.venueId !== undefined && item.venueId !== req.body.venueId))) return res.status(400).json({ error: 'Every task needs a title and the same venue.' });
+  if (inputs.some((input: any) => input.inputType === 'checklist' && !validChecklistItems(input.checklistItems))) return res.status(400).json({ error: CHECKLIST_ITEMS_ERROR });
   const { venueId, createdByEmail } = req.body;
 
   // Checklist C: resolve the caller by authenticated user ID + agency (never
@@ -13699,6 +13730,7 @@ app.post('/api/tasks', async (req, res) => {
       isPrivate: isPrivate === true,
       sortOrder: 0, // computed inside the transaction against fresh data
       inputType: inputType || 'yes_no',
+      ...(inputType === 'checklist' ? { checklistItems: input.checklistItems.map((item: string) => item.trim()), checklistTicks: [] } : {}),
       customStatusOptions: Array.isArray(customStatusOptions) && customStatusOptions.length > 0 ? customStatusOptions : undefined,
       completedStatusValues: Array.isArray(completedStatusValues) && completedStatusValues.length > 0 ? completedStatusValues : undefined,
       assignedTo: Array.isArray(assignedTo) && assignedTo.length > 0 ? assignedTo : ['all'],
@@ -13910,8 +13942,17 @@ app.put('/api/tasks/:id', async (req, res) => {
     enableOverdueAlert,
   } = req.body;
 
+  const checklistItems = req.body.checklistItems;
+  const validateChecklistEdit = (task: any) => {
+    if ((inputType ?? task.inputType) !== 'checklist') return;
+    if (!validChecklistItems(checklistItems !== undefined ? checklistItems : task.checklistItems)) throw new OperationConflictError(CHECKLIST_ITEMS_ERROR, 400);
+    if (currentStatus !== undefined || isCompleted !== undefined) throw new OperationConflictError('Checklist completion comes from its ticks.', 400);
+  };
+  try { validateChecklistEdit(existing); } catch (err: any) { return res.status(400).json({ error: err.message }); }
+
   const hasStatusChange = currentStatus !== undefined || isCompleted !== undefined || notes !== undefined;
   const isDefinitionEdit =
+    ((inputType ?? existing.inputType) === 'checklist' && checklistItems !== undefined) ||
     enableOverdueAlert !== undefined ||
     req.body.assignmentMode !== undefined || req.body.dayAssignees !== undefined || req.body.assigneeSwaps !== undefined ||
     req.body.shiftTime !== undefined ||
@@ -13970,7 +14011,7 @@ app.put('/api/tasks/:id', async (req, res) => {
     ['assignmentMode', req.body.assignmentMode], ['dayAssignees', req.body.dayAssignees], ['assigneeSwaps', req.body.assigneeSwaps],
     ['shiftTime', req.body.shiftTime], ['targetTimeMinutes', targetTimeMinutes], ['targetTime2', targetTime2], ['targetTime2Minutes', targetTime2Minutes],
     ['shiftId', shiftId], ['title', title], ['description', description], ['category', category],
-    ['inputType', inputType], ['assignedTo', assignedTo], ['priority', priority],
+    ['checklistItems', (inputType ?? existing.inputType) === 'checklist' ? checklistItems : undefined], ['inputType', inputType], ['assignedTo', assignedTo], ['priority', priority],
     ['targetTime', targetTime], ['scheduleType', scheduleType],
   ];
 
@@ -13986,6 +14027,7 @@ app.put('/api/tasks/:id', async (req, res) => {
       if (!freshTask) {
         return { conflict: 'Task not found (it may have been deleted).' };
       }
+      validateChecklistEdit(freshTask);
       baselineFresh.task = freshTask;
       // K1: a kiosk write re-checks venue + private visibility on FRESH data.
       if (!kioskMayTouchTask(req, freshTask)) {
@@ -14070,6 +14112,24 @@ app.put('/api/tasks/:id', async (req, res) => {
         updatedByName,
         updatedAt,
       }, peopleInput, freshDoc), freshDoc.shifts || [], shiftId !== undefined, req.body, freshTask));
+
+      if (updated.inputType === 'checklist') {
+        updated.checklistItems = (checklistItems !== undefined ? checklistItems : freshTask.checklistItems).map((item: string) => item.trim());
+        if (freshTask.inputType !== 'checklist' || !sameJsonValue(updated.checklistItems, freshTask.checklistItems)) {
+          updated.checklistTicks = [];
+          updated.updatedByEmail = null;
+          updated.updatedByName = null;
+          updated.updatedAt = null;
+          updated.isCompleted = false;
+          updated.currentStatus = 'pending';
+        } else {
+          updated.isCompleted = freshTask.isCompleted;
+          updated.currentStatus = freshTask.currentStatus;
+          updated.updatedByEmail = freshTask.updatedByEmail;
+          updated.updatedByName = freshTask.updatedByName;
+          updated.updatedAt = freshTask.updatedAt;
+        }
+      }
 
       const prunedFresh = validatedTaskPeople(freshTask, {}, freshDoc);
       if (sameJsonValue(updated, prunedFresh)) return { doc: freshDoc, result: freshTask };
@@ -14196,6 +14256,70 @@ app.delete('/api/tasks/:id/check-in/:checkInId', async (req, res) => {
   // CHECKINPHOTO: its stored bytes go now (best effort; the sweep is the backstop).
   if (removedPhotoId) void checkInPhotoStore.remove(checkInPhotoKey(id, removedPhotoId));
 
+  broadcastTaskUpdated(updated, updated, caller.email);
+  res.json(updated);
+});
+
+// Tick or untick one checklist item, merging against fresh task state.
+app.post('/api/tasks/:id/checklist', async (req, res) => {
+  const caller = requireAuthUser(req, res);
+  if (!caller) return;
+  const { id } = req.params;
+  const existing = tasks.find((t) => t.id === id);
+
+  if (!existing) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+  if (!requireSameAgency(req, res, existing, 'tasks')) return;
+  // Kiosk: task must belong to the token's venue and be visible to the
+  // acting user (K1: no check-in on someone else's private task).
+  if ((req as any).kiosk === true) {
+    if (!kioskMayTouchTask(req, existing)) {
+      return res.status(403).json({
+        error: 'This kiosk session can only clock in and out.',
+        code: 'KIOSK_SCOPE',
+      });
+    }
+  }
+  // RULE T: a non-admin phone session may only check in at their own venue.
+  if ((req as any).kiosk !== true && caller.role !== 'admin' && !callerMaySeeVenue(caller, existing.venueId)) {
+    return res.status(403).json({ error: 'You can only work on tasks at your own venue.' });
+  }
+
+  const { item, ticked } = req.body || {};
+  // Fill permission checked against the VERIFIED session user.
+  {
+    const canFill =
+      caller.role === 'admin' ||
+      (caller.role === 'coordinator' && caller.permissions?.canFillTasks !== false) ||
+      ((caller.role === 'mashgiach' || caller.role === 'worker') && caller.permissions?.canFillTasks !== false) ||
+      ((caller.role === 'owner' || caller.role === 'manager') && caller.permissions?.canFillTasks === true);
+    if (!canFill) {
+      return res.status(403).json({ error: 'You do not have permission to log checks.' });
+    }
+  }
+
+  if (!checklistRequestValid(existing, item, ticked)) return res.status(400).json({ error: 'Invalid checklist item or ticked value.' });
+  const now = new Date().toISOString();
+  const committed = await commitOrRespond(req, res, (freshDoc) => {
+    const freshTasks: TaskItem[] = freshDoc.tasks || [];
+    const task = freshTasks.find((t) => t.id === id);
+    if (!task || !kioskMayTouchTask(req, task) || !answerPhotoMayWriteFresh(req, freshDoc, task, caller, CHECKIN_FRESH_RULE)) {
+      throw new OperationConflictError('You do not have permission to log checks.', 403);
+    }
+    if (!checklistRequestValid(task, item, ticked)) throw new OperationConflictError('Invalid checklist item or ticked value.', 400);
+    const ticks = task.checklistTicks || [];
+    if (ticks.some((tick) => tick.item === item) === ticked) return { doc: freshDoc, result: task };
+    const checklistTicks = ticked
+      ? [...ticks, { item, byName: caller.name || null, byEmail: caller.email || null, at: now }]
+      : ticks.filter((tick) => tick.item !== item);
+    const isCompleted = task.checklistItems!.every((_, index) => checklistTicks.some((tick) => tick.item === index));
+    const updated: TaskItem = { ...task, checklistTicks, isCompleted, currentStatus: isCompleted ? 'completed' : 'pending',
+      updatedByName: caller.name || null, updatedByEmail: caller.email || null, updatedAt: now };
+    return { doc: { ...freshDoc, tasks: freshTasks.map((t) => t.id === id ? updated : t) }, result: updated };
+  }, { label: 'task-checklist' });
+  if (!committed) return;
+  const updated = committed.result as TaskItem;
   broadcastTaskUpdated(updated, updated, caller.email);
   res.json(updated);
 });

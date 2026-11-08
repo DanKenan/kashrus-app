@@ -30,7 +30,7 @@ for (const [options, done, expected] of [
 }
 for (const value of ['checkbox', 'check_in', 'yes_no', 'status_select']) {
   const { view, saves } = await make();
-  assert.deepEqual(radios(view).map((e) => e.props.value), ['checkbox', 'check_in', 'yes_no', 'status_select']);
+  assert.deepEqual(radios(view).map((e) => e.props.value), ['checkbox', 'check_in', 'yes_no', 'status_select', 'checklist']);
   await view.type('task-title-input', 'Check sink');
   await pick(view, value);
   assert.equal(radios(view).filter((e) => e.props.checked)[0].props.value, value);
