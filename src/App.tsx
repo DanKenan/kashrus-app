@@ -26,6 +26,7 @@ import { initialTaskView, readPhoneTaskView, rememberPhoneTaskView, type TaskVie
 import { OwnerAuditBanner } from './components/OwnerAuditBanner';
 import { TaskFilterBar } from './components/TaskFilterBar';
 import { TaskTableView } from './components/TaskTableView';
+import { applyChecklistResponse } from './components/TaskChecklist';
 import { TaskCardView } from './components/TaskCardView';
 import { TaskModal } from './components/TaskModal';
 import { HistoryLogModal } from './components/HistoryLogModal';
@@ -2515,7 +2516,7 @@ export default function App() {
       onUpdateStatus={handleBoardUpdateStatus}
       timeZone={currentVenueTimeZone}
       onUpdateNotes={handleUpdateNotes}
-      onChecklistUpdated={(updated) => setTasks((prev) => prev.map((task) => task.id === updated.id ? updated : task))}
+      onChecklistUpdated={(updated, version) => setTasks((prev) => applyChecklistResponse(prev, updated, version))}
       onCheckIn={handleCheckIn}
       onRemoveCheckIn={handleRemoveCheckIn}
       onEditTask={(task) => {
@@ -3025,7 +3026,7 @@ export default function App() {
             onViewChange={setKioskView}
             onUpdateStatus={handleUpdateStatus}
             onUpdateNotes={handleUpdateNotes}
-            onChecklistUpdated={(updated) => setTasks((prev) => prev.map((task) => task.id === updated.id ? updated : task))}
+            onChecklistUpdated={(updated, version) => setTasks((prev) => applyChecklistResponse(prev, updated, version))}
             onCheckIn={handleCheckIn}
             onRemoveCheckIn={handleRemoveCheckIn}
             onEditTask={(task) => {

@@ -1,12 +1,25 @@
 import React, { useState } from 'react';
 import { Check } from 'lucide-react';
 import type { Task } from '../types';
-import { apiWrite } from '../lib/api';
+import { apiWrite, getLastKnownVersion } from '../lib/api';
+
+// Tasks have no per-task revision. Use the existing monotonic state version;
+// older servers without that header can only be ordered by task.updatedAt.
+export function applyChecklistResponse(tasks: Task[], updated: Task, version?: number): Task[] {
+  const latest = getLastKnownVersion();
+  if (version !== undefined && latest !== undefined && version < latest) return tasks;
+  return tasks.map((task) => {
+    if (task.id !== updated.id) return task;
+    if (version === undefined && task.updatedAt &&
+        (!updated.updatedAt || Date.parse(updated.updatedAt) < Date.parse(task.updatedAt))) return task;
+    return updated;
+  });
+}
 
 export function TaskChecklist({ task, canFill, onUpdated, kiosk = false }: {
   task: Task;
   canFill: boolean;
-  onUpdated?: (task: Task) => void;
+  onUpdated?: (task: Task, version?: number) => void;
   kiosk?: boolean;
 }) {
   const [saving, setSaving] = useState(false);
@@ -23,7 +36,7 @@ export function TaskChecklist({ task, canFill, onUpdated, kiosk = false }: {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ item, ticked }),
       });
-      if (result.ok) onUpdated?.(result.data);
+      if (result.ok) onUpdated?.(result.data, result.version);
       else setError(result.error || "Couldn't save. Check the connection and try again.");
     } catch {
       setError("Couldn't save. Check the connection and try again.");

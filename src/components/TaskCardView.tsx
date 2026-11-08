@@ -47,7 +47,7 @@ interface TaskCardViewProps {
   currentUser: UserType | null;
   onUpdateStatus: (taskId: string, status: TaskStatus, isCompleted: boolean) => void;
   onUpdateNotes: (taskId: string, notes: string, baselineVersion?: number) => void;
-  onChecklistUpdated?: (task: Task) => void;
+  onChecklistUpdated?: (task: Task, version?: number) => void;
   onCheckIn: (taskId: string, photoData?: string, photoCaption?: string) => void;
   onRemoveCheckIn?: (taskId: string, checkInId: string) => void;
   onEditTask: (task: Task) => void;

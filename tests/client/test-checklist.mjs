@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { mount, recordFetch } from './lib/mini-render.mjs';
-import { TaskModal } from '../../src/components/TaskModal.tsx';
-import { TaskChecklist } from '../../src/components/TaskChecklist.tsx';
+import { TaskModal, validChecklistItems } from '../../src/components/TaskModal.tsx';
+import { observeVersion } from '../../src/lib/api.ts';
+import { TaskChecklist, applyChecklistResponse } from '../../src/components/TaskChecklist.tsx';
 import { TaskCardView } from '../../src/components/TaskCardView.tsx';
 import { KioskTaskPanel } from '../../src/components/KioskTaskPanel.tsx';
 import { TaskTableView } from '../../src/components/TaskTableView.tsx';
@@ -73,3 +74,71 @@ const table = mount(TaskTableView, common); await table.render(); assert.match(t
 const kiosk = renderToStaticMarkup(React.createElement(KioskTaskPanel, { ...common, venueName: 'Kitchen', view: 'list', categories: [] }));
 assert.match(kiosk.replace(/<!--.*?-->/g, ''), /Checklist 2\/3/);
 console.log('checklist: builder, validation, batch/edit saves, tick/untick, attribution, done, readonly and board counts passed');
+
+// HTTP A is delayed until after socket A+B has already populated the board.
+const tickA = { item: 0, byName: 'Yossi', byEmail: 'y@test', at: '2026-11-08T07:02:00Z' };
+const tickB = { ...tickA, item: 1, at: '2026-11-08T07:03:00Z' };
+const older = { ...task, checklistTicks: [tickA], updatedAt: tickA.at };
+const newer = { ...task, checklistTicks: [tickA, tickB], updatedAt: tickB.at };
+let board = [task];
+let releaseResponse;
+const responseReady = new Promise((resolve) => { releaseResponse = resolve; });
+globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get(name) { return name.toLowerCase() === 'x-state-version' ? '100' : null; } }, json: () => responseReady });
+const delayed = mount(TaskChecklist, { task, canFill: true, onUpdated(updated, version) { board = applyChecklistResponse(board, updated, version); } });
+await delayed.render();
+const request = delayed.find((e) => e.props.role === 'checkbox')[0].props.onClick();
+await new Promise((resolve) => setTimeout(resolve, 0));
+observeVersion(101); board = [newer]; // same version observation used by App's broadcasts
+await delayed.render({ task: newer });
+releaseResponse(older); await request;
+await delayed.render({ task: board[0] });
+assert.deepEqual(board[0].checklistTicks, [tickA, tickB]);
+assert.match(delayed.text(), /2 of 3/);
+assert.equal(applyChecklistResponse(board, older)[0], newer);
+assert.equal(applyChecklistResponse(board, { ...newer, notes: 'confirmed' }, 101)[0].notes, 'confirmed');
+console.log('checklist: late HTTP response cannot replace a newer broadcast');
+
+for (const [checklistItems, reason] of [
+  [items.slice(0, 1), 'Add at least 2 items'],
+  [['Sink', '   '], 'Enter an item'],
+  [['Sink', ' Sink '], 'Already on the list'],
+  [['Sink', 1], 'Enter an item'],
+  [['Sink', 'x'.repeat(81)], 'Up to 80 characters per item'],
+  [Array.from({ length: 21 }, (_, i) => `Item ${i}`), 'Up to 20 items'],
+]) {
+  const blocked = [];
+  const invalid = mount(TaskModal, { isOpen: true, taskToEdit: { ...task, checklistItems }, knownWorkers: [], onClose() {}, onSave(p) { blocked.push(p); return false; }, venueId: 'v' });
+  await invalid.render(); await invalid.submit();
+  assert.equal(blocked.length, 0);
+  assert.match(invalid.text(), new RegExp(reason));
+  assert.equal(invalid.find((e) => e.props.id === 'save-task-submit-btn')[0].props.disabled, true);
+}
+const cappedItems = Array.from({ length: 20 }, (_, i) => `Item ${i}`);
+const capped = mount(TaskModal, { isOpen: true, taskToEdit: { ...task, checklistItems: cappedItems }, knownWorkers: [], onClose() {}, onSave() { return false; }, venueId: 'v' });
+await capped.render();
+assert.equal(capped.find((e) => e.props.id === 'task-checklist-item')[0].props.maxLength, 80);
+assert.equal(capped.find((e) => e.type === 'button' && e.props.children === 'Add')[0].props.disabled, true);
+await capped.type('task-checklist-item', 'Extra');
+capped.find((e) => e.props.id === 'task-checklist-item')[0].props.onKeyDown({ key: 'Enter', preventDefault() {} }); await capped.render();
+assert.match(capped.text(), /Up to 20 items/);
+assert.equal(capped.find((e) => String(e.props['aria-label'] || '').startsWith('Remove ')).length, 20);
+await capped.click('Remove Item 0');
+await capped.type('task-checklist-item', '   ');
+await capped.click((e) => e.type === 'button' && e.props.children === 'Add');
+assert.match(capped.text(), /Enter an item/);
+console.log('checklist: empty, item length, list length and Enter cap guards passed');
+
+assert.equal(validChecklistItems(['Sink', ' Sink ']), false);
+assert.equal(validChecklistItems(['Sink', 'sink']), true);
+assert.equal(validChecklistItems([' x ', 'y'.repeat(80)]), true);
+assert.equal(validChecklistItems(null), false);
+await capped.type('task-checklist-item', ' Item 1 ');
+await capped.click((e) => e.type === 'button' && e.props.children === 'Add');
+assert.match(capped.text(), /Already on the list/);
+capped.find((e) => e.props.id === 'task-checklist-item')[0].props.onKeyDown({ key: 'Enter', preventDefault() {} }); await capped.render();
+assert.match(capped.text(), /Already on the list/);
+assert.equal(capped.find((e) => String(e.props['aria-label'] || '').startsWith('Remove ')).length, 19);
+await capped.type('task-checklist-item', 'item 1');
+await capped.click((e) => e.type === 'button' && e.props.children === 'Add');
+assert.equal(capped.find((e) => String(e.props['aria-label'] || '').startsWith('Remove ')).length, 20);
+console.log('checklist: duplicates are compared after trimming, with case preserved');

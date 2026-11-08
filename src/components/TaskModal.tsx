@@ -27,6 +27,13 @@ import {
 import { MonthlyCalendarPicker } from './MonthlyCalendarPicker';
 import { rosterKey } from '../lib/rosterDisplay';
 
+// Mirrors server.ts validChecklistItems(): trimmed, case-sensitive duplicates.
+export function validChecklistItems(items: unknown): items is string[] {
+  return Array.isArray(items) && items.length >= 2 && items.length <= 20
+    && items.every((item) => typeof item === 'string' && item.trim().length > 0 && item.trim().length <= 80)
+    && new Set(items.map((item) => item.trim())).size === items.length;
+}
+
 /** Structured time value: 12-hour clock the app can reliably process. */
 export interface PickerTime {
   hour: number; // 1-12
@@ -220,8 +227,13 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [selectedCategories, setSelectedCategories] = useState<string[]>([PRESET_CATEGORIES[0]]);
   const [checklistItems, setChecklistItems] = useState<string[]>([]);
   const [checklistDraft, setChecklistDraft] = useState('');
+  const [checklistAddNote, setChecklistAddNote] = useState('');
   const addChecklistItem = () => {
-    if (!checklistDraft.trim()) return;
+    if (checklistItems.length >= 20) { setChecklistAddNote('Up to 20 items'); return; }
+    if (!checklistDraft.trim()) { setChecklistAddNote('Enter an item'); return; }
+    if (checklistDraft.trim().length > 80) { setChecklistAddNote('Up to 80 characters per item'); return; }
+    if (checklistItems.some((item) => item.trim() === checklistDraft.trim())) { setChecklistAddNote('Already on the list'); return; }
+    setChecklistAddNote('');
     setChecklistItems((items) => [...items, checklistDraft.trim()]);
     setChecklistDraft('');
   };
@@ -377,6 +389,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       );
       setChecklistItems(taskToEdit.checklistItems || []);
       setChecklistDraft('');
+      setChecklistAddNote('');
       setInputType(taskToEdit.inputType || 'yes_no');
       // Load times: structured when parseable, free-text otherwise.
       const editingAnyTime = isAnyTimeTask(taskToEdit);
@@ -431,6 +444,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setSelectedCategories([PRESET_CATEGORIES[0]]);
       setChecklistItems([]);
       setChecklistDraft('');
+      setChecklistAddNote('');
       setInputType('yes_no');
       setTime1(nextFullHour(minutesIn(timeZone, new Date())));
       setTime2(null);
@@ -518,7 +532,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const whenSummary = `${shiftMode && chosenShift ? `${chosenShift.name} ${compactShiftHours(chosenShift)}` : isAny ? ANY_TIME_LABEL : customTimeText ?? formatPickerTime(time1)} · ${repeat.toLowerCase()}`;
   const notice = savedNotice && <div role="status" className="task-form-saved-notice"><span aria-hidden="true">✓</span><span>{savedNotice}</span><button type="button" aria-label="Dismiss saved notification" onClick={() => setSavedNotice(null)} className="min-h-11 min-w-11 rounded-full pressable"><X className="w-4 h-4 mx-auto" /></button></div>;
   const statusHasDone = customStatusOptions.some((option) => completedStatusValues.includes(option));
-  const checklistInvalid = inputType === 'checklist' && checklistItems.length < 2;
+  const checklistListNote = checklistItems.length < 2 ? 'Add at least 2 items'
+    : checklistItems.length > 20 ? 'Up to 20 items'
+    : checklistItems.some((item) => typeof item !== 'string' || !item.trim()) ? 'Enter an item'
+    : checklistItems.some((item) => item.trim().length > 80) ? 'Up to 80 characters per item'
+    : new Set(checklistItems.map((item) => item.trim())).size !== checklistItems.length ? 'Already on the list' : '';
+  const checklistInvalid = inputType === 'checklist' && !validChecklistItems(checklistItems);
   const statusOptionsInvalid = inputType === 'status_select' && (!customStatusOptions.length || !statusHasDone);
   useEffect(() => {
     if (statusOptionsInvalid) setDoneDisclosureOpen(true);
@@ -633,7 +652,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       shiftTime: usingShift && shiftTime,
       isPrivate: taskToEdit && !peopleTouched ? taskToEdit.isPrivate : (!usingShift || !taskToEdit || peopleTouched || !!taskToEdit.assignmentMode) && assignType === 'specific' && selectedWorkers.length > 0 && !visibleToTeam,
       inputType,
-      ...(inputType === 'checklist' ? { checklistItems } : {}),
+      ...(inputType === 'checklist' ? { checklistItems: checklistItems.map((item) => item.trim()) } : {}),
       customStatusOptions: inputType === 'status_select' ? customStatusOptions : undefined,
       completedStatusValues: inputType === 'status_select' ? completedStatusValues : undefined,
       // Structured times when set via picker; custom text clears the minutes.
@@ -947,9 +966,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
           {inputType === 'checklist' && <div className="checklist-builder">
             <label htmlFor="task-checklist-item">Checklist items</label>
-            <div className="checklist-add"><input id="task-checklist-item" value={checklistDraft} onChange={(e) => setChecklistDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addChecklistItem(); } }} /><button type="button" onClick={addChecklistItem} className="pressable">Add</button></div>
+            <div className="checklist-add"><input id="task-checklist-item" maxLength={80} aria-describedby="checklist-add-note" value={checklistDraft} onChange={(e) => { setChecklistDraft(e.target.value); setChecklistAddNote(''); }} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addChecklistItem(); } }} /><button type="button" onClick={addChecklistItem} disabled={checklistItems.length >= 20} className="pressable disabled:opacity-50">Add</button></div>
+            <p id="checklist-add-note" role="status">{checklistItems.length >= 20 ? 'Up to 20 items' : checklistAddNote}</p>
             <ul>{checklistItems.map((item, index) => <li key={index}><span dir="auto">{item}</span><button type="button" aria-label={`Remove ${item}`} onClick={() => setChecklistItems((items) => items.filter((_, i) => i !== index))} className="pressable"><X className="w-5 h-5" aria-hidden="true" /></button></li>)}</ul>
-            {checklistInvalid && <p role="status">Add at least 2 items</p>}
+            {checklistInvalid && <p role="status">{checklistListNote}</p>}
             <p className="checklist-preview-label"><bdi>{statusPreviewName}</bdi> will see:</p>
             <ul className="checklist-builder-preview">{checklistItems.map((item, index) => <li key={index}><span className="checklist-box" aria-hidden="true" /><span dir="auto">{item}</span></li>)}</ul>
           </div>}

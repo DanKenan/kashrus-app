@@ -1108,6 +1108,8 @@ export function discardStaleDraft(key: string): void {
 // ---------------------------------------------------------------------------
 
 export interface ApiWriteResult<T = any> {
+  /** Version of this exact response, distinct from the highest version observed. */
+  version?: number;
   /** true only when the server confirmed the write (res.ok). */
   ok: boolean;
   status: number;
@@ -1264,7 +1266,7 @@ async function apiWriteOnce<T = any>(input: string, init: ApiWriteInit): Promise
   }
   const data = (await res.json().catch(() => ({}))) as T;
   if (res.ok) {
-    return { ok: true, status: res.status, data, error: null };
+    return { ok: true, status: res.status, data, error: null, version: versionFromResponse(res) };
   }
   const body = (data || {}) as Record<string, any>;
   const code = typeof body.code === 'string' ? body.code : undefined;
