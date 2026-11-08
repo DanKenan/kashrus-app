@@ -1,3 +1,4 @@
+import { futureWeekday } from './future-dates.mjs';
 /**
  * Test 40 (6c): any-time tasks — a task with no target time.
  *
@@ -116,13 +117,14 @@ export default {
 
   async run(baseUrl, harnessCtx) {
     const ctx = await freshAdminCtx(baseUrl, harnessCtx);
+    const { date, at } = futureWeekday('America/New_York', 2);
     const ts = Date.now();
     const details = [];
     const createdTasks = [];
     let templateId = null;
     const saved = await saveWorkDates(ctx);
     try {
-      await setClock(ctx, '2026-11-10T14:00:00Z'); // NY 09:00 EST
+      await setClock(ctx, at(0, '09:00:00'));
       const vr = await ctx.api('POST', '/api/venues', { name: `T40 any-time ${ts}` });
       assert(vr.status === 201 || vr.status === 200, `venue create failed: ${vr.status} ${JSON.stringify(vr.json)}`);
       const venueId = vr.json.venue.id;
@@ -157,19 +159,19 @@ export default {
       details.push('order: new any-time task placed after the timed tasks');
 
       // ---------- overdue at 23:30 venue time ----------
-      await setClock(ctx, '2026-11-11T04:30:00Z'); // NY 23:30 EST Nov 10
+      await setClock(ctx, at(0, '23:30:00'));
       let keys = await overdue(ctx);
-      assert(keys.includes(`${timed}:2026-11-10`), `timed 10 AM task should alert: ${JSON.stringify(keys)}`);
+      assert(keys.includes(`${timed}:${date(0)}`), `timed 10 AM task should alert: ${JSON.stringify(keys)}`);
       assert(!keys.some((k) => k.startsWith(`${anyA}:`) || k.startsWith(`${anyTyped}:`)), `any-time task alerted: ${JSON.stringify(keys)}`);
       details.push('overdue: timed task alerts, any-time tasks never');
 
       // ---------- edit a timed task to Any time (only targetTime sent) ----------
-      await setClock(ctx, '2026-11-10T14:00:00Z');
+      await setClock(ctx, at(0, '09:00:00'));
       const toAny = await makeTask(ctx, venueId, `T40 timed->any ${ts}`, { targetTime: '9:00 AM', targetTimeMinutes: 540, enableOverdueAlert: true });
       createdTasks.push(toAny);
-      await setClock(ctx, '2026-11-11T04:30:00Z');
+      await setClock(ctx, at(0, '23:30:00'));
       keys = await overdue(ctx);
-      assert(keys.includes(`${toAny}:2026-11-10`), `9 AM task should alert before the edit: ${JSON.stringify(keys)}`);
+      assert(keys.includes(`${toAny}:${date(0)}`), `9 AM task should alert before the edit: ${JSON.stringify(keys)}`);
       await editTask(ctx, toAny, { targetTime: 'Any time' });
       expectAnyTime(await stored(ctx, toAny), 'edit to Any time (only targetTime sent)');
       keys = await overdue(ctx);
@@ -192,11 +194,11 @@ export default {
       const back = await stored(ctx, anyA);
       assert(back.targetTime === '9:00 AM' && back.targetTimeMinutes === 540 && back.enableOverdueAlert === true, `edit back to 9 AM: ${JSON.stringify([back.targetTime, back.targetTimeMinutes, back.enableOverdueAlert])}`);
       keys = await overdue(ctx);
-      assert(keys.includes(`${anyA}:2026-11-10`), `task switched back to 9 AM should alert again: ${JSON.stringify(keys)}`);
+      assert(keys.includes(`${anyA}:${date(0)}`), `task switched back to 9 AM should alert again: ${JSON.stringify(keys)}`);
       details.push('edit back to 9:00 AM with the alert on: alerts again');
 
       // ---------- templates ----------
-      await setClock(ctx, '2026-11-10T14:00:00Z');
+      await setClock(ctx, at(0, '09:00:00'));
       const tr = await ctx.api('POST', '/api/task-templates', {
         name: `T40 template ${ts}`,
         tasks: [
@@ -215,9 +217,9 @@ export default {
       createdTasks.push(tAny.id, tTim.id);
       expectAnyTime(tAny, 'template any-time entry');
       assert(tTim.targetTime === '10:00 AM' && tTim.enableOverdueAlert === true, `ordinary template entry changed: ${JSON.stringify([tTim.targetTime, tTim.enableOverdueAlert])}`);
-      await setClock(ctx, '2026-11-11T04:30:00Z');
+      await setClock(ctx, at(0, '23:30:00'));
       keys = await overdue(ctx);
-      assert(keys.includes(`${tTim.id}:2026-11-10`), `timed template task should alert: ${JSON.stringify(keys)}`);
+      assert(keys.includes(`${tTim.id}:${date(0)}`), `timed template task should alert: ${JSON.stringify(keys)}`);
       assert(!keys.some((k) => k.startsWith(`${tAny.id}:`)), `any-time template task alerted: ${JSON.stringify(keys)}`);
       details.push('templates: any-time entry applies with the alert off; ordinary entry unchanged and alerts');
     } finally {

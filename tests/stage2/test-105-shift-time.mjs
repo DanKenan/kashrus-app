@@ -1,3 +1,4 @@
+import { futureWeekday } from './future-dates.mjs';
 import assert from 'node:assert/strict';
 import { shiftFixture } from './test-101-shifts-crud.mjs';
 
@@ -6,7 +7,8 @@ export default {
   whatItProves: 'Own times persist and survive live projection, partial edits and detachment; overdue uses own time only on shift dates, with unchanged recipients and fallback deadlines.',
   async run(baseUrl, ctx) {
     const { api, venueId, people } = await shiftFixture(baseUrl, ctx, '105');
-    const sunday = '2026-11-08';
+    const { date } = futureWeekday('UTC', 0);
+    const sunday = date();
     const clock = async (day, time) => assert.equal((await ctx.api('POST', '/api/__test__/clock', { iso: `${day}T${time}:00Z` })).status, 200);
     const put = async (id, body) => {
       const r = await api('admin', 'PUT', `/api/tasks/${id}`, { ...body, expectedVersion: await ctx.getVersion() });
@@ -75,7 +77,7 @@ export default {
       await check(sunday, '14:00', []);
       await check(sunday, '14:01', [own.id]);
       await check(sunday, '18:01', [own.id, fallback.id]);
-      await check('2026-11-09', '15:00', []);
+      await check(date(1), '15:00', []);
       await clock(sunday, '12:00');
       changed = await put(own.id, { shiftTime: false });
       assert.equal(changed.shiftTime, undefined);
@@ -104,7 +106,7 @@ export default {
       const once = await api('admin', 'POST', '/api/shifts', { venueId, name: 'Once', oneTimeDate: sunday, startMinutes: 480, endMinutes: 1080, userId: people.mash.id });
       assert.equal(once.status, 201);
       const dated = await create({ shiftId: once.json.id, targetTime: '2:00 PM' });
-      await clock('2026-11-10', '12:00');
+      await clock(date(2), '12:00');
       // Any shift write prunes expired one-time shifts, without another document read.
       assert.equal((await api('admin', 'POST', '/api/shifts', { venueId, name: 'Trigger prune', daysOfWeek: [0], startMinutes: 480, endMinutes: 1080 })).status, 201);
       const pruned = (await ctx.getDoc()).tasks.find((t) => t.id === dated.id);
