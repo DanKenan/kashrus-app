@@ -1,3 +1,4 @@
+import { futureWeekday } from './future-dates.mjs';
 import assert from 'node:assert/strict';
 import { shiftFixture } from './test-101-shifts-crud.mjs';
 
@@ -6,7 +7,8 @@ export default {
   whatItProves: 'Two people receive identity-bound overdue alerts for the start-date occurrence, including first checks after midnight; next-morning deadlines wait until that morning; enabling own time requires an explicit primary clock value.',
   async run(baseUrl, ctx) {
     const { api, venueId, people } = await shiftFixture(baseUrl, ctx, '107');
-    const sunday = '2026-11-08', monday = '2026-11-09';
+    const { date: day } = futureWeekday('UTC', 0);
+    const sunday = day(), monday = day(1);
     const clock = async (date, time) => assert.equal((await ctx.api('POST', '/api/__test__/clock', { iso: `${date}T${time}:00Z` })).status, 200);
     try {
       await clock(sunday, '22:00');
@@ -94,7 +96,7 @@ export default {
       assert.equal(morning.status, 201);
       for (const [date, time, occurrence, recipients] of [
         [monday, '02:01', sunday, endpoints], [monday, '23:00', null, []],
-        ['2026-11-10', '01:30', monday, [mondayEndpoint]],
+        [day(2), '01:30', monday, [mondayEndpoint]],
       ]) {
         await clock(date, time);
         await ctx.api('POST', '/api/__test__/push-log/clear', {});

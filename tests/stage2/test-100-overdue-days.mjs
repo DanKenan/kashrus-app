@@ -1,3 +1,4 @@
+import { futureWeekday } from './future-dates.mjs';
 /**
  * Test 100 (TODAYSORT, Don Nov 1 2026): a task only counts as overdue on the days it is scheduled for.
  *
@@ -110,12 +111,13 @@ export default {
 
   async run(baseUrl, harnessCtx) {
     const ctx = await freshAdminCtx(baseUrl, harnessCtx);
+    const { date, at } = futureWeekday('America/New_York', 0);
     const ts = Date.now();
     const details = [];
     const createdTasks = [];
     const saved = await saveWorkDates(ctx);
     try {
-      await setClock(ctx, '2026-11-08T14:00:00Z'); // Sun Nov 8, NY 09:00 EST
+      await setClock(ctx, at(0, '09:00:00'));
       const vr = await ctx.api('POST', '/api/venues', { name: `T100 days ${ts}` });
       assert(vr.status === 201 || vr.status === 200, `venue create failed: ${vr.status} ${JSON.stringify(vr.json)}`);
       const venueId = vr.json.venue.id;
@@ -123,17 +125,17 @@ export default {
       const sun = await makeTask(ctx, venueId, `T100 Sunday only ${ts}`, { ...due, daysOfWeek: [0] });
       const fri = await makeTask(ctx, venueId, `T100 Friday only ${ts}`, { ...due, daysOfWeek: [5] });
       const every = await makeTask(ctx, venueId, `T100 every day (empty) ${ts}`, { ...due, daysOfWeek: [] });
-      const datedSun = await makeTask(ctx, venueId, `T100 dated Sunday ${ts}`, { ...due, scheduleType: 'specific_dates', specificDates: ['2026-11-08'], daysOfWeek: [] });
-      const datedFri = await makeTask(ctx, venueId, `T100 dated Friday ${ts}`, { ...due, scheduleType: 'specific_dates', specificDates: ['2026-11-13'], daysOfWeek: [0, 1, 2, 3, 4, 5, 6] });
+      const datedSun = await makeTask(ctx, venueId, `T100 dated Sunday ${ts}`, { ...due, scheduleType: 'specific_dates', specificDates: [date(0)], daysOfWeek: [] });
+      const datedFri = await makeTask(ctx, venueId, `T100 dated Friday ${ts}`, { ...due, scheduleType: 'specific_dates', specificDates: [date(5)], daysOfWeek: [0, 1, 2, 3, 4, 5, 6] });
       createdTasks.push(sun, fri, every, datedSun, datedFri);
       const st = await stored(ctx, every);
       assert(Array.isArray(st.daysOfWeek) && st.daysOfWeek.length === 0, `every-day task stored days ${JSON.stringify(st.daysOfWeek)}`);
 
       // ---------- Sunday 23:30 ----------
-      await setClock(ctx, '2026-11-09T04:30:00Z'); // NY 23:30 EST Sun Nov 8
+      await setClock(ctx, at(0, '23:30:00'));
       let keys = await overdue(ctx);
       for (const [id, label] of [[sun, 'Sunday-only'], [every, 'every-day'], [datedSun, 'dated today']]) {
-        assert(keys.includes(`${id}:2026-11-08`), `${label} task should alert on Sunday: ${JSON.stringify(keys)}`);
+        assert(keys.includes(`${id}:${date(0)}`), `${label} task should alert on Sunday: ${JSON.stringify(keys)}`);
       }
       for (const [id, label] of [[fri, 'Friday-only'], [datedFri, 'dated next Friday']]) {
         assert(!keys.some((k) => k.startsWith(`${id}:`)), `${label} task alerted on a Sunday: ${JSON.stringify(keys)}`);
@@ -144,10 +146,10 @@ export default {
       details.push('Sunday: Sunday-only, every-day and dated-today alert + dashboard; Friday-only and dated-Friday neither');
 
       // ---------- Friday 23:30 ----------
-      await setClock(ctx, '2026-11-14T04:30:00Z'); // NY 23:30 EST Fri Nov 13
+      await setClock(ctx, at(5, '23:30:00'));
       keys = await overdue(ctx);
       for (const [id, label] of [[fri, 'Friday-only'], [datedFri, 'dated Friday'], [every, 'every-day']]) {
-        assert(keys.includes(`${id}:2026-11-13`), `${label} task should alert on Friday: ${JSON.stringify(keys)}`);
+        assert(keys.includes(`${id}:${date(5)}`), `${label} task should alert on Friday: ${JSON.stringify(keys)}`);
       }
       for (const [id, label] of [[sun, 'Sunday-only'], [datedSun, 'dated last Sunday']]) {
         assert(!keys.some((k) => k.startsWith(`${id}:`)), `${label} task alerted on a Friday: ${JSON.stringify(keys)}`);

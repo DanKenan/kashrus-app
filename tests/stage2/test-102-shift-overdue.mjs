@@ -1,3 +1,4 @@
+import { futureWeekday } from './future-dates.mjs';
 import assert from 'node:assert/strict';
 import { shiftFixture } from './test-101-shifts-crud.mjs';
 
@@ -19,11 +20,9 @@ export default {
     assert.deepEqual(hydrated.json.shifts.find((s) => s.id.endsWith('-no-overrides')).overrides, []);
     assert.deepEqual(hydrated.json.shifts.find((s) => s.id.endsWith('-no-days')).days, Array.from({ length: 7 }, () => ({ on: false })));
     assert.equal(hydrated.json.shifts.some((s) => s.id.endsWith('-bad-hours')), false);
-    // Pick Sunday within the next week; all boundaries are venue-local UTC.
-    const date = new Date();
-    date.setUTCDate(date.getUTCDate() + (7 - date.getUTCDay()) % 7);
-    const sunday = date.toISOString().slice(0, 10);
-    const nextDay = (n) => new Date(Date.parse(`${sunday}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+    // Always leave several days before the first real-clock-created occurrence.
+    const { date: nextDay } = futureWeekday('UTC', 0);
+    const sunday = nextDay();
     const clock = async (day, time) => {
       const r = await ctx.api('POST', '/api/__test__/clock', { iso: `${day}T${time}:00Z` });
       assert.equal(r.status, 200);
