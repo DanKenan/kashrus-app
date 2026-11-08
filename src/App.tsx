@@ -1,3 +1,4 @@
+import './components/MashgiachBoard.css';
 import { filterChipClass, FilterCheck } from './lib/filterChip';
 import { venueShifts as clientVenueShifts, resolveTaskShift, shiftPeopleOccurrenceDay, sortShiftsByStart, validShiftFilter, rememberedShiftFilter, shiftFilterCounts, matchesShiftFilter, NO_SHIFT_FILTER } from './lib/shifts';
 import { saveTaskBatch } from './lib/taskForm';
@@ -28,6 +29,8 @@ import { TaskFilterBar } from './components/TaskFilterBar';
 import { TaskTableView } from './components/TaskTableView';
 import { applyChecklistResponse, recordTaskState, type TaskVersionState } from './components/TaskChecklist';
 import { TaskCardView } from './components/TaskCardView';
+import { MashgiachBoard } from './components/MashgiachBoard';
+import { usesMashgiachBoard } from './lib/mashgiachBoard';
 import { TaskModal } from './components/TaskModal';
 import { HistoryLogModal } from './components/HistoryLogModal';
 import { LoginPage } from './components/LoginPage';
@@ -2509,8 +2512,10 @@ export default function App() {
       onRemoveCheckIn={handleRemoveCheckIn}
     />
   );
+  const CardBoard = usesMashgiachBoard(currentUser, isKiosk, effectiveDayView) ? MashgiachBoard : TaskCardView;
   const taskCardView = (
-    <TaskCardView
+    <CardBoard
+      headerShifts={venueShifts}
       isKiosk={isKiosk}
       hasActiveFilters={hasActiveFilters}
       onClearFilters={clearAllFilters}

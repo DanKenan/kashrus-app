@@ -57,6 +57,8 @@ const bytesCache = new Map<string, string>();
 
 interface Props {
   task: Task;
+  /** Place the camera on a full-width row below the answer. */
+  stacked?: boolean;
   /** May this person record the answer (and so add or remove the photo)? */
   canAttach: boolean;
   /** 'kiosk' = the wall tablet's larger targets and text; 'desk' = a compact camera for the desk table. */
@@ -77,7 +79,7 @@ interface Props {
  * Renders only the children for other task types, and for a read-only viewer
  * when there is no photo.
  */
-export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phone', children }) => {
+export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phone', children, stacked = false }) => {
   const [draft, setDraft] = useState<string | null>(null);
   const [caption, setCaption] = useState('');
   const [busy, setBusy] = useState(false);
@@ -366,8 +368,8 @@ export const TaskAnswerPhoto: React.FC<Props> = ({ task, canAttach, size = 'phon
   if (children === undefined) return rows;
   return (
     <>
-      <div data-answer-photo-row className={desk ? 'flex items-start gap-3' : 'flex gap-2'}>
-        <div className={desk ? 'min-w-0' : 'min-w-0 flex-1 flex flex-col justify-center'}>{children}</div>
+      <div data-answer-photo-row className={stacked ? 'flex flex-col gap-2' : desk ? 'flex items-start gap-3' : 'flex gap-2'}>
+        <div className={stacked || desk ? 'min-w-0' : 'min-w-0 flex-1 flex flex-col justify-center'}>{children}</div>
         {camera}
       </div>
       {shown || draft || error ? rows : null}

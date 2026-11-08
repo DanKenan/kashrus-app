@@ -1,3 +1,4 @@
+import { mashgiachCheckInSummary } from '../lib/mashgiachBoard';
 import { TaskChecklist } from './TaskChecklist';
 import { taskOccursToday } from '../lib/taskOccurrences';
 import { TaskEmptyState } from './TaskEmptyState';
@@ -36,7 +37,8 @@ import { TaskInstructions } from './TaskInstructions';
 import { TaskAnswerPhoto, compressPhoto } from './TaskAnswerPhoto';
 import { CheckInPhoto } from './CheckInPhoto';
 
-interface TaskCardViewProps {
+export interface TaskCardViewProps {
+  focused?: boolean;
   shiftsById?: Map<string, Shift>;
   isKiosk?: boolean;
   roster?: ReadonlyArray<{ id?: string; email?: string; name: string }>;
@@ -68,6 +70,7 @@ const getInitials = (nameOrEmail: string) => {
 };
 
 export const TaskCardView: React.FC<TaskCardViewProps> = ({
+  focused = false,
   shiftsById = new Map(),
   isKiosk = false,
   roster = [],
@@ -157,16 +160,16 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.25, delay: Math.min(i * 0.03, 0.3), ease: [0.22, 1, 0.36, 1] }}
             style={categoryVars(task.category)}
-            className={`relative rounded-2xl bg-surface border border-line tactile-2 lift overflow-hidden ${
+            className={`${focused ? 'mboard-focus' : ''} relative rounded-2xl bg-surface border border-line tactile-2 lift overflow-hidden ${
               done ? 'opacity-55' : ''
             } ${mine ? 'mine-glow' : ''}`}
           >
             {/* Category spine — every category carries its own color */}
-            <div className="cat-spine absolute left-0 top-0 bottom-0 w-[5px]" aria-hidden />
+            {!focused && <div className="cat-spine absolute left-0 top-0 bottom-0 w-[5px]" aria-hidden />}
 
             <div className={done ? 'p-2.5 sm:p-3 pl-4 sm:pl-4' : 'p-4 sm:p-5 pl-5 sm:pl-6'}>
               {/* Top Bar: Category, Assignment, Priority, Target Time, Admin Actions */}
-              <div className="flex items-center justify-between gap-2 mb-2">
+              {focused ? <div className="flex flex-wrap items-center gap-2 mb-2 text-sm text-ink-soft"><span>{task.shiftId && shiftsById.has(task.shiftId) ? shiftLabel(shiftsById.get(task.shiftId)!, todayWeekday ?? undefined, task) : formatTaskTimes(task)}</span>{isOverdue(task) && <span className="inline-flex items-center gap-2 rounded-full px-2 text-xs text-bad bg-bad-bg"><AlertCircle className="w-4 h-4" />Late</span>}</div> : <div className="flex items-center justify-between gap-2 mb-2">
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {task.priority === 'high' && (
                     <span className="px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200 dark:border-rose-900/60">
@@ -220,6 +223,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                 )}
               </div>
 
+              }
               {/* Task Title with Verification Seal Badge */}
               <div className="flex items-start justify-between gap-2">
                 <h3 className={`font-bold text-ink leading-snug ${done ? 'text-xs sm:text-sm' : 'text-sm sm:text-base'}`}>
@@ -237,7 +241,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
               <TaskInstructions text={task.description} />
 
               {/* Mashgiach Assignment & Schedule Meta */}
-              <div className="flex items-center justify-between text-xs text-ink-soft mt-3 pt-2.5 border-t border-line/70">
+              {!focused && <div className="flex items-center justify-between text-xs text-ink-soft mt-3 pt-2.5 border-t border-line/70">
                 <div className="flex items-center gap-2">
                   <WhoSeesTag label={audience} kiosk={isKiosk} />
                 </div>
@@ -250,10 +254,11 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                 </span>
               </div>
 
+              }
               {/* Completion Control Bar or Read-Only Audit Bar */}
               <div className="mt-3 pt-3 border-t border-line/70">
                 {/* PHOTOALL: optional photo with the answer (toggle / yes-no / status / checkbox); the camera sits beside the answer */}
-                <TaskAnswerPhoto task={task} canAttach={canFill}>
+                <TaskAnswerPhoto task={task} canAttach={canFill} stacked={focused}>
                 {!canFill ? (
                   <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-sunken border border-line tactile-1">
                     <div className="flex items-center gap-2.5">
@@ -300,6 +305,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                         </span>
                         <button
                           id={`mobile-task-toggle-${task.id}`}
+                          aria-label={focused ? 'Inspection Status' : undefined}
+                          aria-pressed={focused ? task.isCompleted : undefined}
                           onClick={() => onUpdateStatus(task.id, task.isCompleted ? 'pending' : 'completed', !task.isCompleted)}
                           className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none tactile-1 ${
                             task.isCompleted ? 'bg-emerald-600' : 'bg-sunken border-line'
@@ -319,6 +326,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                       <div className="grid grid-cols-2 gap-2.5 w-full">
                         <button
                           id={`mobile-task-yes-${task.id}`}
+                          aria-pressed={focused ? task.currentStatus === 'yes' : undefined}
                           onClick={() => {
                             if (task.currentStatus === 'yes' && task.isCompleted) {
                               onUpdateStatus(task.id, 'pending', false);
@@ -337,6 +345,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                         </button>
                         <button
                           id={`mobile-task-no-${task.id}`}
+                          aria-pressed={focused ? task.currentStatus === 'no' : undefined}
                           onClick={() => {
                             if (task.currentStatus === 'no') {
                               onUpdateStatus(task.id, 'pending', false);
@@ -359,7 +368,10 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                     {/* 3. Status Select Dropdown with Admin Custom Values */}
                     {task.inputType === 'status_select' && (
                       <div className="w-full">
-                        <select
+                        {focused ? <div className="grid gap-2">{(task.customStatusOptions?.length ? task.customStatusOptions : ['Pending', 'In Progress', 'Blocked', 'Completed']).map((opt) => {
+                          const isDone = task.completedStatusValues && task.completedStatusValues.length > 0 ? task.completedStatusValues.includes(opt) : ['completed', 'done', 'passed', 'approved', 'yes'].includes(opt.toLowerCase());
+                          return <button key={opt} aria-pressed={task.currentStatus === opt && (task.isCompleted || (!isDone && !!(task.updatedByEmail || task.updatedByName)))} onClick={() => onUpdateStatus(task.id, opt, isDone)} className="mboard-option pressable"><span>{opt}</span><span className="text-xs text-ink-soft">{isDone ? 'Counts as done' : 'Stays open'}</span></button>;
+                        })}</div> : <select
                           id={`mobile-task-select-${task.id}`}
                           value={task.currentStatus}
                           onChange={(e) => {
@@ -383,7 +395,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                               {opt}
                             </option>
                           ))}
-                        </select>
+                        </select>}
                       </div>
                     )}
 
@@ -400,14 +412,15 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                         title={task.isCompleted ? 'Tap to undo the sign-off' : 'Sign and mark as complete'}
                       >
                         <CheckCircle2 className="w-4 h-4" />
-                        <span>{task.isCompleted ? '✓ Signed & Verified (tap to undo)' : 'Sign & Complete Inspection'}</span>
+                        <span>{focused ? 'Tap when done' : task.isCompleted ? '✓ Signed & Verified (tap to undo)' : 'Sign & Complete Inspection'}</span>
                       </button>
                     )}
 
                     {/* 5. Repeatable check-in — every tap logs who + when under the task */}
                     {task.inputType === 'check_in' && (
                       <div className="w-full">
-                        <div className="flex gap-2">
+                        {focused && <p className="mb-2 text-sm text-ink-soft">{mashgiachCheckInSummary(task, now, timeZone, true, task.shiftId ? shiftsById.get(task.shiftId) : undefined)}</p>}
+                        <div className={focused ? 'flex flex-col gap-2' : 'flex gap-2'}>
                           <button
                             id={`mobile-task-checkin-${task.id}`}
                             onClick={() => onCheckIn(task.id)}
@@ -450,13 +463,13 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                                 className="px-2.5 py-1.5 rounded-lg bg-sunken border border-line text-[11px] animate-fade-in"
                               >
                                 <div className="flex items-center gap-2">
-                                  <span className="w-5 h-5 rounded-full bg-gold-wash border border-gold/40 text-gold-ink flex items-center justify-center text-[9px] font-black shrink-0">
+                                  <span className={focused ? 'mboard-check-avatar' : 'w-5 h-5 rounded-full bg-gold-wash border border-gold/40 text-gold-ink flex items-center justify-center text-[9px] font-black shrink-0'}>
                                     {getInitials(c.byName || c.byEmail || 'MK')}
                                   </span>
                                   <span className="font-bold text-ink truncate">
                                     {c.byName || c.byEmail || 'Someone'}
                                   </span>
-                                  <span className="text-ink-faint ml-auto shrink-0 font-semibold">
+                                  <span className={focused ? 'text-ink-soft ms-auto shrink-0 font-semibold' : 'text-ink-faint ml-auto shrink-0 font-semibold'}>
                                     {formatExactTime(c.at)}
                                   </span>
                                   {onRemoveCheckIn && (
@@ -489,9 +502,9 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
               {task.inputType === 'checklist' && <TaskChecklist task={task} canFill={canFill} onUpdated={onChecklistUpdated} kiosk={isKiosk} />}
 
               {/* Attribution & Signature Banner */}
-              <div className="flex items-center justify-between mt-2.5 pt-2 text-[11px] text-ink-faint">
+              <div className={focused ? 'flex items-center justify-between mt-2.5 pt-2 text-sm text-ink-soft' : 'flex items-center justify-between mt-2.5 pt-2 text-[11px] text-ink-faint'}>
                 <div>
-                  {task.inputType === 'check_in' && (task.checkIns?.length || 0) > 0 ? (
+                  {focused && task.inputType === 'check_in' ? null : task.inputType === 'check_in' && (task.checkIns?.length || 0) > 0 ? (
                     <span className="flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded-full bg-gold shrink-0 inline-block" />
                       <span>
@@ -507,8 +520,8 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                       </span>
                     </span>
                   ) : (
-                    <span className="text-gold-deep font-semibold flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-gold shrink-0 inline-block animate-pulse" />
+                    <span className={focused ? 'text-ink-soft font-semibold flex items-center gap-1.5' : 'text-gold-deep font-semibold flex items-center gap-1.5'}>
+                      <span className={focused ? 'w-2 h-2 rounded-full bg-ink-soft shrink-0 inline-block' : 'w-2 h-2 rounded-full bg-gold shrink-0 inline-block animate-pulse'} />
                       <span>Awaiting on-site verification</span>
                     </span>
                   )}
@@ -518,7 +531,7 @@ export const TaskCardView: React.FC<TaskCardViewProps> = ({
                 {task.notes ? (
                   <button
                     onClick={() => toggleNotes(task.id, isNotesOpen)}
-                    className="flex items-center gap-1 font-bold text-gold-deep hover:underline cursor-pointer"
+                    className={focused ? 'flex items-center gap-1 font-bold text-ink-soft hover:underline cursor-pointer' : 'flex items-center gap-1 font-bold text-gold-deep hover:underline cursor-pointer'}
                   >
                     <MessageSquare className="w-3 h-3" />
                     <span>Notes</span>
