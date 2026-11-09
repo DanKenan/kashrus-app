@@ -51,13 +51,28 @@ export function MashgiachBoard(props: TaskCardViewProps & { headerShifts?: Shift
       <h2 className="mb-2 text-xl font-semibold text-ink">Later in your shift</h2>
       <div className="space-y-2">{board.later.map((task) => {
         const Icon = icons[task.inputType] || Check;
-        return <div key={task.id}><div className="mboard-row flex-wrap"><button className={`pressable flex min-h-[46px] min-w-0 items-center gap-2 text-start ${task.inputType === 'yes_no' ? 'flex-[1_1_100%] sm:flex-[1_1_12rem]' : 'flex-[1_1_12rem]'}`} aria-label={`Open ${task.title}`} aria-controls={`mboard-task-${encodeURIComponent(task.id)}`} aria-expanded={expanded === task.id} onClick={() => setExpanded(expanded === task.id ? null : task.id)}>
+        return <div key={task.id}><div className="mboard-row flex-wrap"><button className={`pressable flex min-h-[46px] min-w-0 items-center gap-2 text-start ${(task.inputType === 'yes_no' || task.inputType === 'status_select') ? 'flex-[1_1_100%] sm:flex-[1_1_12rem]' : 'flex-[1_1_12rem]'}`} aria-label={`Open ${task.title}`} aria-controls={`mboard-task-${encodeURIComponent(task.id)}`} aria-expanded={expanded === task.id} onClick={() => setExpanded(expanded === task.id ? null : task.id)}>
           <Icon className="w-5 h-5 shrink-0 text-ink-soft" /><span className="min-w-0 flex-1 text-start"><span className="block break-words" dir="auto">{task.title}</span><span className="block break-words text-xs text-ink-soft tnum">{time(task)}{task.inputType === 'check_in' && ` · ${mashgiachCheckInSummary(task, now, timeZone, false, taskShift(task))}`}</span></span>{overdue(task) && <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-bad-bg px-2 text-xs text-bad"><AlertCircle className="h-4 w-4 shrink-0" />Late</span>}
-        <span className="inline-flex shrink-0 items-center gap-1 text-xs text-ink-soft">Open<ChevronDown aria-hidden="true" className={`h-4 w-4 ${expanded === task.id ? 'rotate-180' : ''}`} /></span>
+        {task.inputType === 'checklist' && <span className="inline-flex shrink-0 items-center gap-1 text-xs text-ink-soft">Open<ChevronDown aria-hidden="true" className={`h-4 w-4 ${expanded === task.id ? 'rotate-180' : ''}`} /></span>}
         </button>
           {canFill && <>
             {(task.inputType === 'checkbox' || task.inputType === 'toggle') && <button className={actionClass} aria-label={`Mark ${task.title} done`} onClick={() => props.onUpdateStatus(task.id, 'completed', true)}><Check aria-hidden="true" className="h-4 w-4" />Done</button>}
             {task.inputType === 'check_in' && <button className={actionClass} aria-label={`Check in: ${task.title}`} onClick={() => props.onCheckIn(task.id)}><Clock aria-hidden="true" className="h-4 w-4" />Check in</button>}
+            {task.inputType === 'status_select' && <select
+              aria-label={`Status: ${task.title}`}
+              value={!task.isCompleted && !(task.updatedByEmail || task.updatedByName) ? '' : task.currentStatus}
+              onChange={(e) => {
+                const value = e.target.value;
+                const isDone = task.completedStatusValues && task.completedStatusValues.length > 0
+                  ? task.completedStatusValues.includes(value)
+                  : ['completed', 'done', 'passed', 'approved', 'yes'].includes(value.toLowerCase());
+                props.onUpdateStatus(task.id, value, isDone);
+              }}
+              className="min-h-[46px] min-w-0 w-full rounded-xl border border-line-control bg-surface px-3 text-base text-ink sm:w-auto sm:flex-1"
+            >
+              <option value="" disabled>Pick status</option>
+              {(task.customStatusOptions?.length ? task.customStatusOptions : ['Pending', 'In Progress', 'Blocked', 'Completed']).map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>}
             {task.inputType === 'yes_no' && <>
               <button className={`${actionClass} ${task.currentStatus === 'yes' ? 'bg-ok-bg text-ok' : ''}`} aria-label={`${task.currentStatus === 'yes' && task.isCompleted ? 'Clear answer Yes' : 'Answer Yes'}: ${task.title}`} aria-pressed={task.currentStatus === 'yes'} onClick={() => props.onUpdateStatus(task.id, task.currentStatus === 'yes' && task.isCompleted ? 'pending' : 'yes', !(task.currentStatus === 'yes' && task.isCompleted))}><Check aria-hidden="true" className="h-4 w-4" />Yes</button>
               <button className={`${actionClass} aria-[pressed=true]:bg-sunken aria-[pressed=true]:border-ink`} aria-label={`${task.currentStatus === 'no' ? 'Clear answer No' : 'Answer No'}: ${task.title}`} aria-pressed={task.currentStatus === 'no'} onClick={() => props.onUpdateStatus(task.id, task.currentStatus === 'no' ? 'pending' : 'no', false)}><X aria-hidden="true" className="h-4 w-4" />No</button>

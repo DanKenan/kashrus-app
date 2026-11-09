@@ -24,11 +24,12 @@ try {
     const view = mount(MashgiachBoard, props); await view.render();
     const title = () => view.find((e) => e.type === 'button' && e.props['aria-expanded'] !== undefined && [...walk(e)].some((n) => n.props.children === task.title))[0];
     const chevron = () => [...walk(title())].find((e) => e.type === ChevronDown);
-    assert.ok(chevron());
+    assert.equal(!!chevron(), inputType === 'checklist');
     assert.equal([...walk(title())].some((e) => e.type === ChevronRight), false);
-    assert.doesNotMatch(chevron().props.className, /rotate-180|rtl:/);
+    if (chevron()) assert.doesNotMatch(chevron().props.className, /rotate-180|rtl:/);
     assert.ok(title()); assert.equal(title().props['aria-expanded'], false);
-    assert.match(view.text(), /Open/);
+    if (inputType === 'checklist') assert.match(view.text(), /Open/);
+    else assert.doesNotMatch(view.text(), /Open/);
     assert.equal(title().props['aria-label'], `Open ${task.title}`);
     assert.equal(title().props['aria-controls'], 'mboard-task-later');
     for (const button of view.find((e) => e.type === 'button')) assert.equal([...walk(button.props.children)].some((e) => e.type === 'button'), false);
@@ -73,19 +74,54 @@ try {
     assert.equal(title().props['aria-expanded'], false);
     await view.click((e) => e === title());
     assert.equal(title().props['aria-expanded'], true);
-    assert.match(chevron().props.className, /(?:^| )rotate-180(?: |$)/);
-    assert.doesNotMatch(chevron().props.className, /rtl:/);
+    if (chevron()) assert.match(chevron().props.className, /(?:^| )rotate-180(?: |$)/);
+    if (chevron()) assert.doesNotMatch(chevron().props.className, /rtl:/);
     assert.equal(view.find((e) => e.props.id === title().props['aria-controls']).length, 1);
     await view.click((e) => e === title());
     assert.equal(title().props['aria-expanded'], false);
-    assert.doesNotMatch(chevron().props.className, /rotate-180/);
+    if (chevron()) assert.doesNotMatch(chevron().props.className, /rotate-180/);
     await view.click((e) => e === title());
     assert.equal(title().props['aria-controls'], 'mboard-task-later');
     assert.equal(view.find((e) => e.props.id === title().props['aria-controls']).length, 1);
     assert.ok([...walk(view.tree())].some((e) => e.type === TaskCardView && e.props.tasks[0].id === 'later'));
     await view.render({ currentUser: { ...user, permissions: { canFillTasks: false } } });
     assert.equal(view.buttons().filter((b) => ['Done', 'Check in', 'Yes', 'No'].includes(b.label)).length, 0);
-    assert.match(view.text(), /Open/);
+    assert.equal(view.find((e) => e.type === 'select').length, 0);
+    if (inputType === 'checklist') assert.match(view.text(), /Open/);
+    else assert.doesNotMatch(view.text(), /Open/);
+  }
+  for (const settings of [
+    { currentStatus: 'Pending', options: ['Pending', 'In Progress', 'Blocked', 'Completed'], done: 'Completed', open: 'Pending' },
+    { currentStatus: 'Ready', customStatusOptions: ['Ready', 'Completed'], completedStatusValues: ['Ready'], options: ['Ready', 'Completed'], done: 'Ready', open: 'Completed' },
+    { currentStatus: 'Review', customStatusOptions: ['Review', 'APPROVED'], completedStatusValues: [], options: ['Review', 'APPROVED'], done: 'APPROVED', open: 'Review' },
+  ]) {
+    const calls = [];
+    const statusTask = { ...task, ...settings, inputType: 'status_select' };
+    const props = { tasks: [first, statusTask], currentUser: user, timeZone: 'UTC', onUpdateStatus: (...args) => calls.push(args), onCheckIn() {}, onUpdateNotes() {}, onEditTask() {}, onDeleteTask() {} };
+    const view = mount(MashgiachBoard, props); await view.render();
+    const select = () => view.find((e) => e.type === 'select')[0];
+    assert.equal(select().props['aria-label'], `Status: ${task.title}`);
+    assert.equal(select().props.value, '');
+    assert.match(select().props.className, /min-h-\[46px\]/);
+    assert.match(select().props.className, /w-full/);
+    const options = [...walk(select())].filter((e) => e.type === 'option');
+    assert.equal(options[0].props.value, ''); assert.equal(options[0].props.disabled, true);
+    assert.equal(options[0].props.children, 'Pick status');
+    assert.deepEqual(options.slice(1).map((e) => e.props.value), settings.options);
+    const card = mount(TaskCardView, { ...props, tasks: [statusTask], focused: false }); await card.render();
+    const cardSelect = [...walk(card.tree())].find((e) => e.props.id === 'mobile-task-select-later');
+    for (const value of [settings.options[0], settings.done, settings.open]) {
+      select().props.onChange({ target: { value } });
+      const inlineCall = calls.pop();
+      cardSelect.props.onChange({ target: { value } });
+      assert.deepEqual(inlineCall, calls.pop());
+      assert.deepEqual(inlineCall, ['later', value, value === settings.done]);
+    }
+    for (const attribution of [{ updatedByEmail: 'u@test' }, { updatedByName: 'Don' }]) {
+      await view.render({ tasks: [first, { ...statusTask, ...attribution }] });
+      assert.equal(select().props.value, settings.currentStatus);
+    }
+    assert.doesNotMatch(view.text(), /Open/);
   }
   // Compare the card handlers directly, including completed Yes undo (which
   // normally lives in Done today rather than Later).
