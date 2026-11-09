@@ -23,7 +23,7 @@ const attribution = view.find((e) => e.type === 'span' && e.props.className === 
 assert.ok(attribution);
 await view.click('Done today'); assert.equal(summary().props['aria-expanded'], false);
 await view.render({ tasks: [{ ...task, id: 'next', isCompleted: false, targetTime: '4:00 PM' }, { ...task, id: 'later', isCompleted: false, targetTime: '04:30 PM', targetTime2: '05:30 PM' }] });
-const title = view.find((e) => e.type === 'span' && e.props.children === task.title && e.props.className?.includes('line-clamp-2'))[0];
+const title = view.find((e) => e.type === 'span' && e.props.children === task.title && e.props.className?.includes('break-words'))[0];
 assert.ok(title); assert.doesNotMatch(title.props.className, /truncate/);
 const css = readFileSync(new URL('../../src/components/MashgiachBoard.css', import.meta.url), 'utf8');
 assert.match(css, /\.mboard-segment-done \{ background: var\(--ok\); \}/);
