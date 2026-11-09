@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import React from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { mount } from './lib/mini-render.mjs';
 import { MashgiachBoard } from '../../src/components/MashgiachBoard.tsx';
 import { TaskCardView } from '../../src/components/TaskCardView.tsx';
@@ -22,18 +23,33 @@ try {
     const props = { tasks: [first, later], currentUser: user, timeZone: 'UTC', onUpdateStatus: (...args) => calls.push(args), onCheckIn: (...args) => calls.push(args), onUpdateNotes() {}, onEditTask() {}, onDeleteTask() {} };
     const view = mount(MashgiachBoard, props); await view.render();
     const title = () => view.find((e) => e.type === 'button' && e.props['aria-expanded'] !== undefined && [...walk(e)].some((n) => n.props.children === task.title))[0];
+    const chevron = () => [...walk(title())].find((e) => e.type === ChevronDown);
+    assert.ok(chevron());
+    assert.equal([...walk(title())].some((e) => e.type === ChevronRight), false);
+    assert.doesNotMatch(chevron().props.className, /rotate-180|rtl:/);
     assert.ok(title()); assert.equal(title().props['aria-expanded'], false);
     assert.match(view.text(), /Open/);
+    assert.equal(title().props['aria-label'], `Open ${task.title}`);
+    assert.equal(title().props['aria-controls'], 'mboard-task-later');
     for (const button of view.find((e) => e.type === 'button')) assert.equal([...walk(button.props.children)].some((e) => e.type === 'button'), false);
+    const button = (label) => view.buttons().find((b) => b.label === label).el;
     const clickLabel = (label) => view.click((e) => e === view.buttons().find((b) => b.label === label)?.el);
     if (inputType === 'checkbox' || inputType === 'toggle') {
+      assert.equal(button('Done').props['aria-label'], `Mark ${task.title} done`);
       await clickLabel('Done'); assert.deepEqual(calls.pop(), ['later', 'completed', true]);
     } else if (inputType === 'check_in') {
+      assert.equal(button('Check in').props['aria-label'], `Check in: ${task.title}`);
       await clickLabel('Check in'); assert.deepEqual(calls.pop(), ['later']);
     } else if (inputType === 'yes_no') {
+      assert.equal(button('Yes').props['aria-label'], `Answer Yes: ${task.title}`);
+      assert.equal(button('No').props['aria-label'], `Answer No: ${task.title}`);
       await clickLabel('Yes'); assert.deepEqual(calls.pop(), ['later', 'yes', true]);
       await view.render({ tasks: [first, Object.assign(later, { currentStatus: 'no' })] });
       assert.equal(view.buttons().find((b) => b.label === 'No').el.props['aria-pressed'], true);
+      assert.equal(button('No').props['aria-label'], `Clear answer No: ${task.title}`);
+      assert.match(button('No').props.className, /aria-\[pressed=true\]:bg-sunken/);
+      assert.match(button('No').props.className, /aria-\[pressed=true\]:border-ink/);
+      assert.doesNotMatch(button('No').props.className, /bad|red/);
       await clickLabel('No'); assert.deepEqual(calls.pop(), ['later', 'pending', false]);
       later.currentStatus = 'pending'; await view.render();
       await clickLabel('No'); assert.deepEqual(calls.pop(), ['later', 'no', false]);
@@ -41,13 +57,31 @@ try {
       // handler before that render too, to check the card's exact undo branch.
       later.currentStatus = 'yes'; await view.render();
       assert.equal(view.buttons().find((b) => b.label === 'Yes').el.props['aria-pressed'], true);
+      assert.equal(button('Yes').props['aria-label'], `Answer Yes: ${task.title}`);
       later.isCompleted = true;
+      // Progress excludes completed tasks; expose completion after its filters
+      // to exercise the same transient undo branch as the captured handler.
+      let reads = 0;
+      const completedYes = { ...later, get isCompleted() { return ++reads > 2; } };
+      // mount settles twice, so reset the getter before each board invocation.
+      const undoOnce = mount((p) => { reads = 0; return MashgiachBoard(p); }, { ...props, tasks: [first, completedYes] });
+      await undoOnce.render();
+      assert.equal(undoOnce.buttons().find((b) => b.label === 'Yes').el.props['aria-label'], `Clear answer Yes: ${task.title}`);
       await clickLabel('Yes'); assert.deepEqual(calls.pop(), ['later', 'pending', false]);
       later.isCompleted = false; await view.render();
     } else assert.equal(view.buttons().filter((b) => ['Done', 'Check in', 'Yes', 'No'].includes(b.label)).length, 0);
     assert.equal(title().props['aria-expanded'], false);
     await view.click((e) => e === title());
     assert.equal(title().props['aria-expanded'], true);
+    assert.match(chevron().props.className, /(?:^| )rotate-180(?: |$)/);
+    assert.doesNotMatch(chevron().props.className, /rtl:/);
+    assert.equal(view.find((e) => e.props.id === title().props['aria-controls']).length, 1);
+    await view.click((e) => e === title());
+    assert.equal(title().props['aria-expanded'], false);
+    assert.doesNotMatch(chevron().props.className, /rotate-180/);
+    await view.click((e) => e === title());
+    assert.equal(title().props['aria-controls'], 'mboard-task-later');
+    assert.equal(view.find((e) => e.props.id === title().props['aria-controls']).length, 1);
     assert.ok([...walk(view.tree())].some((e) => e.type === TaskCardView && e.props.tasks[0].id === 'later'));
     await view.render({ currentUser: { ...user, permissions: { canFillTasks: false } } });
     assert.equal(view.buttons().filter((b) => ['Done', 'Check in', 'Yes', 'No'].includes(b.label)).length, 0);
