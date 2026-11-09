@@ -37,7 +37,7 @@ const checkInRow = [...walk(card.tree())].find((e) => Array.isArray(e.props.chil
 assert.equal(checkInRow.props.className, 'flex flex-col gap-2');
 const checks = Array.from({ length: 4 }, (_, i) => ({ id: String(i), at: new Date().toISOString() }));
 const board = mount(MashgiachBoard, { ...props, tasks: [{ ...task, id: 'next', inputType: 'checkbox' }, { ...task, id: 'later', inputType: 'check_in', targetTime: '04:30 PM', targetTime2: '05:30 PM', checkIns: checks }] }); await board.render();
-const row = board.find((e) => e.type === 'button' && e.props.className === 'mboard-row pressable' && !e.props['aria-controls'])[0];
+const row = board.find((e) => e.type === 'button' && e.props['aria-expanded'] !== undefined && !e.props['aria-controls'])[0];
 const content = [...walk(row)].find((e) => e.props.className === 'min-w-0 flex-1 text-start');
 assert.equal(content.props.children[0].props.children, task.title);
 const metadata = content.props.children[1];
