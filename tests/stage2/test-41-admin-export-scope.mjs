@@ -81,6 +81,7 @@ export default {
     const apiKeyValue = `patT41XSECRET${ts}`;
 
     const inj = await ctx.api('POST', '/api/__test__/inject-fixture', {
+      airtableConfigs: [{ id: `atcfg-t41-${ts}`, agencyId: A, apiKey: apiKeyValue, baseId: `app${ts}` }],
       agencies: [
         { id: A, name: `T41X Agency A ${ts}`, shortCode: 'TXA', adminEmail: marks.aEmail },
         { id: B, name: `T41X Agency B ${ts}`, shortCode: 'TXB', adminEmail: `bob41x-${ts}@b.test` },
@@ -116,10 +117,10 @@ export default {
       coordB: await mintToken(baseUrl, ids.coordB), mashB: await mintToken(baseUrl, ids.mashB),
       hkc2: await mintToken(baseUrl, ids.hkcAdmin2),
     };
-    // Agency A stores an Airtable key (real admin API) so the strip check is not vacuous.
+    // Update settings through the real admin API; the fixture holds a legacy key.
     const cfg = await fetch(`${baseUrl}/api/airtable/config`, {
       method: 'POST', headers: auth(tok.adminA),
-      body: JSON.stringify({ apiKey: apiKeyValue, baseId: `app${ts}`, tableName: 'Approved Ingredients', expectedVersion: await ctx.getVersion() }),
+      body: JSON.stringify({ baseId: `app${ts}`, tableName: 'Approved Ingredients', expectedVersion: await ctx.getVersion() }),
     });
     assert(cfg.status === 200 || cfg.status === 201, `airtable config: ${cfg.status}`);
 

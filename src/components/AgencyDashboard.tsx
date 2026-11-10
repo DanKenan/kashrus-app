@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Building2, CalendarDays, CheckCircle2, AlertTriangle, MessageSquare, Phone, User } from 'lucide-react';
+import { Building2, Factory, CalendarDays, CheckCircle2, AlertTriangle, MessageSquare, Phone, User } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { rosterKey } from '../lib/rosterDisplay';
 
@@ -45,9 +45,10 @@ interface AgencyDashboardProps {
   onSelectVenue: (venueId: string) => void;
   /** Don 2026-10-22: opens the agency-wide Events screen. */
   onOpenEvents?: () => void;
+  onOpenFactories?: () => void;
 }
 
-export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOpenEvents }: AgencyDashboardProps) {
+export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOpenEvents, onOpenFactories }: AgencyDashboardProps) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -99,7 +100,7 @@ export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOp
 
   return (
     <section className="space-y-4 text-ink">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-2xl font-semibold flex-1 min-w-0">Agency Dashboard</h2>
         {onOpenEvents && (
           <button type="button" onClick={onOpenEvents} data-agency-events-btn
@@ -108,6 +109,7 @@ export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOp
             <span>Events</span>
           </button>
         )}
+        {onOpenFactories && <button type="button" onClick={onOpenFactories} className="pressable min-h-11 inline-flex items-center gap-2 rounded-xl border border-line-control bg-surface px-3 text-sm font-semibold text-ink"><Factory aria-hidden="true" className="h-5 w-5" />Factories</button>}
       </div>
       {logo && <div className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface p-4">
         {logo.logoSrc ? <img src={logo.logoSrc} alt={logo.agencyName} className="h-[32px] max-w-[120px] w-auto object-contain" /> : <span className="rounded-lg border border-line bg-sunken px-2 text-xs text-ink">{logo.agencyShortCode}</span>}

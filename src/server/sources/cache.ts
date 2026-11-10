@@ -70,9 +70,8 @@ export function createSourceCache({ connectorFor, backups, now = Date.now }: Sou
       // A successful refresh establishes the baseline; persisted hashes can override it.
       e.hashes = new Map(all.map(b => [b.companyId, b.hash]));
       return { ok: true, calls, changedBackups };
-    } catch {
-      // Connector errors may contain credentials; expose only a fixed diagnostic here.
-      const error = 'Source refresh failed', calls = connector ? connector.calls() - start : 0;
+    } catch (cause) {
+      const error = cause instanceof Error && cause.message.startsWith('Airtable ') ? cause.message : 'Source refresh failed', calls = connector ? connector.calls() - start : 0;
       if (e.data) e.state = { ...e.state, status: e.state.status === 'backup' ? 'backup' : 'stale', calls, error };
       else {
         if (!e.backupLoaded) {
