@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import { createSourceCache, nextNightlyRun } from '../../src/server/sources/cache.ts';
+import { encryptKey, decryptKey, keyHint } from '../../src/server/sources/crypto.ts';
+const data = { companies: [{ id: 'c1', name: 'Demo Factory', extra: { attachment: 'https://example.test' } }], ingredients: [{ id: 'i1', companyIds: ['c1'], name: 'Salt', brand: 'Demo', noSymbolNeeded: true, extra: { private: 'omit' } }], products: [{ id: 'p1', companyIds: ['c1'], name: 'Bread', code: '001', plant: 'https://example.test', extra: {} }] };
+let down = false, calls = 0, loads = 0, release;
+let gate = Promise.resolve();
+const connector = { kind: 'airtable', calls: () => calls, async loadAll() { calls++; await gate; if (down) throw new Error('secret'); return structuredClone(data); } };
+const cache = createSourceCache({ connectorFor: () => connector, backups: { async load() { loads++; return []; } }, now: () => Date.parse('2026-01-01T00:00:00Z') });
+assert.equal(cache.state('a').status, 'never');
+const first = await cache.refresh('a');
+assert.equal(first.ok, true); assert.equal(first.calls, 1); assert.equal(first.changedBackups.length, 1);
+const saved = first.changedBackups;
+assert.equal(cache.state('a').status, 'ok');
+assert.equal(cache.state('a').itemsFor('c1', 'ingredient')[0].name, 'Salt');
+assert.equal(cache.state('a').itemsFor('c1', 'product')[0].code, '001');
+assert.ok(!JSON.stringify(saved).includes('https:'));
+assert.ok(!JSON.stringify(saved).includes('extra'));
+assert.equal((await cache.refresh('a')).changedBackups.length, 0);
+cache.setKnownHashes('a', { c1: 'different' });
+assert.equal((await cache.refresh('a')).changedBackups.length, 1);
+data.ingredients[0].name = 'Sea Salt';
+assert.equal((await cache.refresh('a')).changedBackups.length, 1);
+down = true;
+assert.equal((await cache.refresh('a')).ok, false);
+assert.equal(cache.state('a').status, 'stale'); assert.equal(loads, 0);
+assert.equal(cache.state('a').itemsFor('c1', 'ingredient')[0].name, 'Sea Salt');
+const fallback = createSourceCache({ connectorFor: () => connector, backups: { async load() { loads++; return saved; } } });
+await fallback.refresh('a'); await fallback.refresh('a');
+assert.equal(fallback.state('a').status, 'backup'); assert.equal(loads, 1);
+assert.equal(fallback.state('a').itemsFor('c1', 'ingredient')[0].name, 'Salt');
+await fallback.refresh('other'); await fallback.refresh('other');
+assert.equal(fallback.state('other').status, 'error'); assert.equal(loads, 2);
+down = false; gate = new Promise(resolve => { release = resolve; });
+const before = calls, p1 = cache.refresh('a'), p2 = cache.refresh('a');
+assert.equal(p1, p2); release(); await Promise.all([p1, p2]); assert.equal(calls - before, 1);
+const plain = 'demo-secret-key-1234', blob = encryptKey(plain, 'demo-master-secret', 'a');
+assert.equal(decryptKey(blob, 'demo-master-secret', 'a'), plain);
+assert.throws(() => decryptKey(blob, 'demo-master-secret', 'b'));
+assert.throws(() => decryptKey(blob, 'wrong', 'a'));
+assert.throws(() => decryptKey('v2:bad', 'wrong', 'a'));
+assert.equal(blob.includes(plain), false); assert.equal(keyHint(plain), '…1234');
+assert.notEqual(encryptKey(plain, 'demo-master-secret', 'a'), blob);
+for (const [now, expected] of [
+  ['2026-03-07T09:00:00Z', '2026-03-08T07:00:00Z'],
+  ['2026-10-31T08:00:00Z', '2026-11-01T08:00:00Z'],
+  ['2026-03-08T07:00:00Z', '2026-03-09T07:00:00Z'],
+]) assert.equal(new Date(nextNightlyRun(Date.parse(now), 'America/New_York')).toISOString(), new Date(expected).toISOString());
+assert.equal(new Date(nextNightlyRun(Date.parse('2026-01-01T00:00Z'), 'Asia/Kolkata')).toISOString(), '2026-01-01T21:30:00.000Z');
+assert.equal(new Date(nextNightlyRun(Date.parse('2026-03-08T06:00Z'), 'America/New_York', 2)).toISOString(), '2026-03-08T07:00:00.000Z');
+console.log('all source cache and crypto checks passed');
