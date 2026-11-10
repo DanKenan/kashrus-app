@@ -29,7 +29,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
           const result = await sourceRequest('/api/factories');
           if (generation.current !== request) return;
           next = { ...current, ...result.status };
-          setConnection(next); setCompanies(result.companies || []); setError('');
+          setConnection(next); setCompanies(next.status === 'never' ? [] : result.companies || []); setError('');
         } catch (e) {
           if (generation.current !== request) return;
           setError(e instanceof Error ? e.message : "Couldn't load factories. Try again.");
@@ -52,7 +52,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
         }
         if (generation.current !== request) return;
         const current = { ...next, ...status };
-        setConnection(current); setCompanies(list);
+        setConnection(current); setCompanies(current.status === 'never' ? [] : list);
         schedule(current);
       } catch (e) { if (generation.current === request) setError(e instanceof Error ? e.message : "Couldn't load factories. Try again."); }
     })();

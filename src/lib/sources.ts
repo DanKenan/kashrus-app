@@ -11,6 +11,7 @@ export interface SourceTable { name: string; columns: string[] }
 export interface SourceConnection {
   sourceType: string | null; baseId?: string; access?: 'read' | 'readwrite'; mapping?: SourceMapping;
   hasKey?: boolean; keyHint?: string; status?: 'never' | 'ok' | 'stale' | 'backup' | 'error';
+  backupSaveError?: boolean;
   refreshedAt?: string | null; calls?: number; backupTakenAt?: string | null; error?: string | null;
 }
 export const emptyMapping = (): SourceMapping => ({
@@ -28,15 +29,17 @@ export async function sourceRequest(path: string, method?: string, body?: unknow
   return data;
 }
 export function sourceStatus(connection: SourceConnection, timeZone: string): string {
-  if (!connection.sourceType) return 'Not connected';
-  if (connection.status === 'never') return 'Connected to Airtable · reading your database…';
+  const backup = connection.backupSaveError ? ' · backup copy not saved yet' : '';
+  const source = ({ airtable: 'Airtable', google_sheets: 'Google Sheets', excel: 'Excel', supabase: 'Supabase' } as Record<string, string>)[connection.sourceType] || 'database';
+  if (!connection.sourceType) return `Not connected${backup}`;
+  if (connection.status === 'never') return `Connected to ${source} · reading your database…${backup}`;
   const day = (value: Date) => new Intl.DateTimeFormat('en-US', { timeZone, dateStyle: 'short' }).format(value);
   const updatedToday = connection.refreshedAt && day(new Date(connection.refreshedAt)) === day(new Date());
   const date = (value: string, timeOnly = false) => new Intl.DateTimeFormat('en-US', {
     timeZone, ...(timeOnly ? { hour: 'numeric', minute: '2-digit' } as const : { dateStyle: 'medium', timeStyle: 'short' } as const),
   }).format(new Date(value));
   if (connection.error || connection.status === 'error' || connection.status === 'backup') {
-    return `Couldn't reach Airtable: ${connection.error || 'Connection unavailable'}${connection.backupTakenAt ? ` · showing the copy saved ${date(connection.backupTakenAt)}` : ''}`;
+    return `Couldn't reach ${source}: ${connection.error || 'Connection unavailable'}${connection.backupTakenAt ? ` · showing the copy saved ${date(connection.backupTakenAt)}` : ''}${backup}`;
   }
-  return `Connected to Airtable${connection.refreshedAt ? ` · updated ${date(connection.refreshedAt, !!updatedToday)}` : ''} · ${connection.calls ?? 0} calls${connection.status === 'stale' ? ' · Out of date' : ''}`;
+  return `Connected to ${source}${connection.refreshedAt ? ` · updated ${date(connection.refreshedAt, !!updatedToday)}` : ''} · ${connection.calls ?? 0} calls${connection.status === 'stale' ? ' · Out of date' : ''}${backup}`;
 }

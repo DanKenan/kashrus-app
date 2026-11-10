@@ -9,9 +9,9 @@ export function SourceConnectSheet(props: Props) {
   return props.isOpen ? <SourceConnectForm {...props} /> : null;
 }
 const groups = {
-  companies: [['name', 'Name'], ['type', 'Type'], ['brand', 'Brand optional'], ['plant', 'Plant / location optional']],
-  ingredients: [['companyLink', 'Link to company'], ['name', 'Name'], ['brand', 'Brand optional'], ['certification', 'Certification'], ['agency', 'Certifying agency (if separate)'], ['status', 'Dairy / pareve / meat status'], ['plant', 'Plant optional'], ['expiresOn', 'Expiration optional']],
-  products: [['companyLink', 'Link to company'], ['name', 'Name'], ['brand', 'Brand optional'], ['code', 'Code / UPC'], ['status', 'Status'], ['symbolRequired', 'Symbol required'], ['plant', 'Plant optional']],
+  companies: [['name', 'Name'], ['type', 'Type'], ['brand', 'Brand (optional)'], ['plant', 'Plant / location (optional)']],
+  ingredients: [['companyLink', 'Link to company'], ['name', 'Name'], ['brand', 'Brand (optional)'], ['certification', 'Certification'], ['agency', 'Certifying agency (if separate)'], ['status', 'Dairy / pareve / meat status'], ['plant', 'Plant / location (optional)'], ['expiresOn', 'Expiration (optional)']],
+  products: [['companyLink', 'Link to company'], ['name', 'Name'], ['brand', 'Brand (optional)'], ['code', 'Code / UPC'], ['status', 'Status'], ['symbolRequired', 'Symbol required'], ['plant', 'Plant / location (optional)']],
 } as const;
 const commaList = (value: string) => value.split(',').map(s => s.trim()).filter(Boolean);
 export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
@@ -59,11 +59,27 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         if (!result.ok) throw new Error("Couldn't test the connection. Try again.");
         setTables(result.tables || []);
         if (result.guess?.mapping) {
-          const next = { ...emptyMapping(), ...result.guess.mapping };
+          const suggestion = { ...emptyMapping(), ...result.guess.mapping };
+          const next = connection.mapping ? {
+            ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) },
+            ingredients: { ...mapping.ingredients }, products: { ...mapping.products }, noSymbolValues: commaList(noSymbolValues),
+          } : suggestion;
+          const filled: Record<string, number> = {};
+          for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
+            const values = next[group] as unknown as Record<string, string | string[]>;
+            for (const [field, value] of Object.entries(suggestion[group])) {
+              if (!connection.mapping || !values[field]?.length) {
+                values[field] = value as string | string[];
+                const path = `${group}.${field}`;
+                if (result.guess.guessed?.[path] != null) filled[path] = result.guess.guessed[path];
+              }
+            }
+          }
+          if (!next.noSymbolValues.length) next.noSymbolValues = suggestion.noSymbolValues;
           setMapping(next); setFactoryValues((next.companies.factoryValues || []).join(', '));
-          setNoSymbolValues((next.noSymbolValues || ['Group 1']).join(', '));
-        }
-        setGuessed(result.guess?.guessed || {});
+          setNoSymbolValues(next.noSymbolValues.join(', '));
+          setGuessed(filled);
+        } else setGuessed({});
         setAccess(result.access || 'read');
         setMessage(`Connected · ${result.access === 'readwrite' ? 'read and write' : 'read only'}`);
       } else {

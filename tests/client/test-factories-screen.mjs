@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { mount } from './lib/mini-render.mjs';
+import { SourceConnectForm } from '../../src/components/SourceConnectSheet.tsx';
 import { FactoriesScreen } from '../../src/components/FactoriesScreen.tsx';
 import { sourceStatus } from '../../src/lib/sources.ts';
 const originalFetch = globalThis.fetch;
+const originalDocument = globalThis.document;
+globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
 const OriginalDate = globalThis.Date;
 const originalSetTimeout = globalThis.setTimeout;
 const originalClearTimeout = globalThis.clearTimeout;
@@ -104,9 +107,49 @@ try {
     assert.equal(timers.size, 0);
     assert.ok(requests.every(([, method]) => method === 'GET'));
   }
+  for (const [sourceType, name] of Object.entries({ airtable: 'Airtable', google_sheets: 'Google Sheets', excel: 'Excel', supabase: 'Supabase' })) {
+    for (const status of ['never', 'ok', 'stale', 'error', 'backup']) {
+      const state = { ...connected, sourceType, status, ...(status === 'error' || status === 'backup' ? { error: 'Offline' } : {}) };
+      const text = sourceStatus(state, 'America/Chicago');
+      assert.ok(text.includes(name));
+      assert.equal(sourceStatus({ ...state, backupSaveError: true }, 'America/Chicago'), `${text} · backup copy not saved yet`);
+      globalThis.fetch = async url => new Response(JSON.stringify(url.endsWith('/connection') ? state : { status: { ...state, backupSaveError: true }, companies: [] }));
+      const named = mount(FactoriesScreen, { isOpen: true, onClose() {}, timeZone: 'America/Chicago' }); await named.render();
+      assert.ok(named.text().includes(`${text} · backup copy not saved yet`));
+      await named.render({ isOpen: false });
+      for (const fn of timers.values()) await fn();
+      timers.clear();
+    }
+  }
+  let baseId = 'appOld';
+  let status = 'ok';
+  const savedMapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, noSymbolValues: ['Group 1'] };
+  globalThis.fetch = async (url, options = {}) => {
+    if (options.method === 'PUT') { baseId = JSON.parse(options.body).baseId; status = 'never'; return new Response(JSON.stringify({ ok: true })); }
+    const state = { ...connected, baseId, status, mapping: savedMapping };
+    return new Response(JSON.stringify(url.endsWith('/connection') ? state : { status: state, companies: [
+      { id: 'old', name: 'Old factory', ingredientCount: 1, productCount: 2 },
+    ] }));
+  };
+  const changed = mount(FactoriesScreen, { isOpen: true, onClose() {}, timeZone: 'America/Chicago' }); await changed.render();
+  assert.match(changed.text(), /Old factory/);
+  await changed.click('Settings');
+  const sheet = changed.tree().props.children[1];
+  const edit = mount(SourceConnectForm, sheet.props); await edit.render();
+  await edit.type('app…', 'appNew'); await edit.submit();
+  assert.equal(baseId, 'appNew');
+  await changed.render();
+  assert.match(changed.text(), /reading your database…/);
+  assert.doesNotMatch(changed.text(), /Old factory/);
+  await poll(); await changed.render();
+  assert.doesNotMatch(changed.text(), /Old factory/);
+  assert.equal(timers.size, 1);
+  await changed.render({ isOpen: false });
+  await poll();
   console.log('factories screen: OK');
 } finally {
   globalThis.fetch = originalFetch;
+  globalThis.document = originalDocument;
   globalThis.Date = OriginalDate;
   globalThis.setTimeout = originalSetTimeout;
   globalThis.clearTimeout = originalClearTimeout;
