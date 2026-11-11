@@ -1,0 +1,72 @@
+import assert from 'node:assert/strict';
+import { applyMapping, assign } from '../../src/server/sources/mapping.ts';
+import { previewRows, summarizeValues } from '../../src/lib/sourcePreview.ts';
+import { createSourceCache } from '../../src/server/sources/cache.ts';
+import { registerSourceRoutes } from '../../src/server/sources/routes.ts';
+const mapping = { companies: { table: 'C', name: 'Name' }, ingredients: { table: 'I', name: 'Name', companyLink: 'Company', certification: 'Cert', status: 'Status', agency: 'Agency' }, products: { table: 'P', name: 'Name', companyLink: 'Company', certification: 'Cert', status: 'Status', agency: 'Agency' }, group1Values: ['Group 1'], valueAssignments: { Cert: { 'Kof-K Parve': { dpm: 'dairy' } } } };
+const fields = { Name: 'Milk', Company: 'c', Cert: 'OU-D', Status: 'Dairy', Agency: 'OU' };
+const rows = { C: [{ id: 'c', fields: { Name: 'Factory' } }], I: [{ id: 'i', fields }, { id: 'override', fields: { ...fields, Cert: 'Kof-K Parve', Status: '' } }], P: [{ id: 'p', fields }] };
+for (const value of ['Dairy', 'OU-D', 'CY', 'Cholov Yisroel']) assert.equal(assign(value).dpm, 'dairy');
+let down = false;
+const connector = { calls: () => 0, loadAll: async () => { if (down) throw Error('offline'); return applyMapping(rows, mapping); } };
+const cache = createSourceCache({ connectorFor: () => connector, backups: { load: async () => [] } });
+const first = await cache.refresh('a');
+for (const item of [cache.data('a').ingredients[0], cache.data('a').products[0]]) {
+  assert.equal(item.certificationRaw, 'OU-D'); assert.equal(item.statusRaw, 'Dairy'); assert.equal(item.agencyRaw, 'OU'); assert.equal(item.dpm, 'dairy');
+}
+assert.equal(cache.data('a').ingredients[1].dpm, 'dairy');
+await cache.refresh('a'); assert.equal(cache.data('a').ingredients[1].dpm, 'dairy');
+down = true;
+const restored = createSourceCache({ connectorFor: () => connector, backups: { load: async () => JSON.parse(JSON.stringify(first.changedBackups)) } });
+await restored.refresh('a');
+for (const kind of ['ingredient', 'product']) {
+  const item = restored.state('a').itemsFor('c', kind)[0];
+  assert.equal(item.certificationRaw, 'OU-D'); assert.equal(item.statusRaw, 'Dairy');
+}
+assert.equal(restored.state('a').itemsFor('c', 'ingredient')[1].dpm, 'dairy');
+cache.reassign('a', { ...mapping, valueAssignments: { Cert: { 'OU-D': { dpm: 'meat', group1: true } }, Status: { 'Dairy': { dpm: 'pareve' } } } });
+assert.equal(cache.data('a').ingredients[0].dpm, 'pareve'); assert.equal(cache.data('a').ingredients[0].group1, true);
+const preview = previewRows({ I: rows.I }, mapping, 'ingredients');
+assert.ok(preview.rows[0].includes('OU-D')); assert.ok(preview.rows[0].includes('Dairy'));
+assert.ok(preview.chips[0].flat().includes('Dairy')); assert.ok(preview.chips[0].flat().includes('Agency: OU'));
+// The values handler must not touch storage, and must use the authenticated agency.
+const handlers = new Map(); let reads = 0, admin = true;
+registerSourceRoutes(Object.fromEntries(['get', 'put', 'post'].map(method => [method, (path, handler) => handlers.set(`${method} ${path}`, handler)])), { db: () => { reads++; throw Error('storage forbidden'); }, dataDir: '/unused', staged: () => true, secret: () => '', testMode: false, requireAdmin: (_req, res) => admin ? { agencyId: 'own', id: 'admin' } : (res.status(403).json({ error: 'Forbidden' }), null), timeZone: () => 'UTC' });
+let result, status;
+const response = { json: value => { result = value; }, status: value => { status = value; return response; } };
+await handlers.get('get /api/sources/values')({ query: { agencyId: 'other' } }, response);
+assert.deepEqual(result.values, []); assert.equal(reads, 0);
+admin = false; await handlers.get('get /api/sources/values')({ query: {} }, response); assert.equal(status, 403); assert.equal(reads, 0);
+console.log('source values: raw text, overrides, backup, preview and memory-only authorization passed');
+
+const scoped = { ...mapping, valueAssignments: {
+  ingredient: { Cert: { 'OU-D': { dpm: 'meat', agency: 'Ingredient agency', group1: true } } },
+  product: { Cert: { 'OU-D': { dpm: 'pareve', agency: 'Product agency', group1: false } } },
+} };
+const scopedRows = { ...rows, I: [{ id: 'i', fields: { ...fields, Status: '', Agency: '' } }], P: [{ id: 'p', fields: { ...fields, Status: '', Agency: '' } }] };
+const classified = applyMapping(scopedRows, scoped);
+assert.equal(classified.ingredients[0].dpm, 'meat');
+assert.equal(classified.products[0].dpm, 'pareve');
+assert.equal(classified.ingredients[0].group1, true);
+assert.equal(classified.products[0].group1, false);
+assert.equal(classified.ingredients[0].certifyingAgency, 'Ingredient agency');
+assert.equal(classified.products[0].certifyingAgency, 'Product agency');
+assert.ok(previewRows(scopedRows, scoped, 'products').chips.flat(2).includes('Pareve'));
+cache.reassign('a', scoped);
+assert.equal(cache.data('a').products[0].group1, false);
+
+const deMapping = { ...mapping, valueAssignments: { ingredient: { Cert: { 'Any value': { dpm: 'dairy_equipment' } } } } };
+const deRows = { ...rows, I: [{ id: 'de', fields: { ...fields, Cert: 'Any value', Status: '' } }] };
+const deCache = createSourceCache({ connectorFor: () => ({ calls: () => 0, loadAll: async () => applyMapping(deRows, deMapping) }), backups: { load: async () => [] } });
+const deBackups = (await deCache.refresh('de')).changedBackups;
+assert.equal(deBackups[0].ingredients[0].dpm, 'dairy_equipment');
+const deRestored = createSourceCache({ connectorFor: () => ({ calls: () => 0, loadAll: async () => { throw Error('offline'); } }), backups: { load: async () => deBackups } });
+await deRestored.refresh('de');
+assert.equal(deRestored.state('de').itemsFor('c', 'ingredient')[0].dpm, 'dairy_equipment');
+assert.ok(previewRows(deRows, deMapping, 'ingredients').chips.flat(2).includes('DE'));
+
+const uses = Array.from({ length: 60 }, (_, i) => ({ kind: 'ingredient', column: 'Cert', value: 'DE', id: String(i), name: `Item ${i}`, brand: `Brand ${i}` }));
+const summary = summarizeValues([...uses, uses[0], { kind: 'product', column: 'Cert', value: 'DE', id: 'p', name: 'Product' }]);
+assert.equal(summary[0].usage.ingredient.count, 60);
+assert.equal(summary[0].usage.ingredient.items.length, 50);
+assert.equal(summary[0].usage.product.count, 1);

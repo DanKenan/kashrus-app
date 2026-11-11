@@ -1,3 +1,5 @@
+import { removeLegacyKeys, stripLegacyKeys } from './src/server/sources/legacy.ts';
+import { registerSourceRoutes } from './src/server/sources/routes.ts';
 import { checkInCoversDue } from './src/lib/overdue.ts';
 import { assigneeEmails, taskAssigneesOn, taskPotentialAssignees, taskOwnsPeople, type TaskPeople } from './src/lib/taskAssignees.ts';
 import type { Shift } from './src/types.ts';
@@ -3880,6 +3882,7 @@ const INITIAL_AIRTABLE_CONFIGS: AirtableConfigItem[] = [];
 
 const INITIAL_APPROVED_INGREDIENTS: ApprovedIngredientItem[] = [];
 
+let legacyKeysRemovedFromMemory = false;
 let airtableConfigs: AirtableConfigItem[] = [...INITIAL_AIRTABLE_CONFIGS];
 let approvedIngredients: ApprovedIngredientItem[] = [...INITIAL_APPROVED_INGREDIENTS];
 let factoryReports: FactoryAuditReportItem[] = [];
@@ -4069,7 +4072,7 @@ function hydrateStateInner(parsed: any) {
         incidents = Array.isArray(parsed.incidents) ? parsed.incidents : [];
         announcements = Array.isArray(parsed.announcements) ? parsed.announcements : [];
         events = Array.isArray(parsed.events) ? parsed.events : [];
-        airtableConfigs = Array.isArray(parsed.airtableConfigs) ? parsed.airtableConfigs : [];
+        airtableConfigs = Array.isArray(parsed.airtableConfigs) ? (legacyKeysRemovedFromMemory ? stripLegacyKeys(parsed.airtableConfigs) : parsed.airtableConfigs) : [];
         approvedIngredients = Array.isArray(parsed.approvedIngredients) ? parsed.approvedIngredients : [];
         factoryReports = Array.isArray(parsed.factoryReports) ? parsed.factoryReports : [];
 
@@ -4143,7 +4146,7 @@ function hydrateStateInner(parsed: any) {
         }
 
         if (Array.isArray(parsed.airtableConfigs)) {
-          airtableConfigs = parsed.airtableConfigs;
+          airtableConfigs = legacyKeysRemovedFromMemory ? stripLegacyKeys(parsed.airtableConfigs) : parsed.airtableConfigs;
         } else {
           airtableConfigs = [...INITIAL_AIRTABLE_CONFIGS];
         }
@@ -6499,7 +6502,7 @@ function agencyStateFor(agencyId: string, recipient?: UserProfile) {
     // exception (item 7) so an assigned event at another venue survives in
     // the recipient's live state exactly as GET /api/events shows it.
     events: events.filter((e) => norm(e.agencyId) === agencyId && canSeeEventServer(e, recipient)),
-    airtableConfigs: airtableConfigs.filter((c) => norm(c.agencyId) === agencyId && inScopeVenue(c.venueId)),
+    airtableConfigs: airtableConfigs.filter((c) => norm(c.agencyId) === agencyId && inScopeVenue(c.venueId)).map(safeAirtableConfig),
     approvedIngredients: approvedIngredients.filter((i) => norm(i.agencyId) === agencyId && inScopeVenue(i.venueId)),
     factoryReports: factoryReports.filter((r) => norm(r.agencyId) === agencyId && inScopeVenue(r.venueId)),
     users: getSafeUsersForAgency(agencyId, recipient),
@@ -11899,7 +11902,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
       venues = [], tasks = [], shifts: newShifts = [], agencies: newAgencies = [], users: newUsers = [],
       events = [], incidents = [], handoffNotes = [], announcements = [],
       taskTemplates = [], eventTaskTemplates = [], approvedIngredients = [], factoryReports = [],
-      kioskDevices: newKioskDevices = [], historyLogs = [],
+      kioskDevices: newKioskDevices = [], historyLogs = [], airtableConfigs: newAirtableConfigs = [],
       venueWorkDates: newWorkDates, currentWorkDate: newLegacyWorkDate,
     } = req.body || {};
     try {
@@ -11924,6 +11927,7 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
               eventTaskTemplates: [...(freshDoc.eventTaskTemplates || []), ...eventTaskTemplates],
               approvedIngredients: [...(freshDoc.approvedIngredients || []), ...approvedIngredients],
               factoryReports: [...(freshDoc.factoryReports || []), ...factoryReports],
+              airtableConfigs: [...(freshDoc.airtableConfigs || []), ...newAirtableConfigs],
               kioskDevices: [...(freshDoc.kioskDevices || []), ...newKioskDevices],
               historyLogs: [...(freshDoc.historyLogs || []), ...historyLogs],
               // Item 6 (test-only): pin per-venue markers / the legacy date;
@@ -14810,6 +14814,12 @@ const checkInPhotoStore = createCheckInPhotoStore({
   memoryTasks: () => tasks,
   graceMs: ANSWER_PHOTO_SWEEP_GRACE_MS,
   log,
+});
+const sourceRoutes = registerSourceRoutes(app, {
+  db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
+  secret: () => process.env.SOURCE_KEYS_SECRET || getJwtSecret(),
+  testMode: isTestMode(), requireAdmin,
+  timeZone: (id) => agencies.find(a => a.id === id)?.timeZone,
 });
 registerCheckInPhotoRoutes(app, {
   store: checkInPhotoStore,
@@ -21657,6 +21667,11 @@ app.post('/api/auth/recover', async (req, res) => {
 // AIRTABLE & FACTORY INGREDIENTS AUDIT APIS
 // ==========================================
 
+function safeAirtableConfig(config: any) {
+  const { apiKey, ...safe } = config;
+  return { ...safe, hasApiKey: Boolean(apiKey) };
+}
+
 // Get Airtable Config for agency or venue
 app.get('/api/airtable/config', (req, res) => {
   const caller = requireAuthUser(req, res);
@@ -21684,12 +21699,7 @@ app.get('/api/airtable/config', (req, res) => {
       viewName: 'Grid view',
     };
 
-  // Mask apiKey for safety if present
-  const safeConfig = {
-    ...config,
-    apiKey: config.apiKey ? `${config.apiKey.slice(0, 4)}...${config.apiKey.slice(-4)}` : '',
-    hasApiKey: Boolean(config.apiKey),
-  };
+  const safeConfig = safeAirtableConfig(config);
 
   res.json({ config: safeConfig });
 });
@@ -21706,6 +21716,9 @@ app.post('/api/airtable/config', async (req, res) => {
   }
 
   const { venueId, apiKey, baseId, tableName, viewName, fieldNameMapping } = req.body;
+  if (apiKey !== undefined && apiKey !== null && String(apiKey).trim()) {
+    return res.status(400).json({ error: 'Keys are saved in Factories › Connect now.' });
+  }
 
   const configId = `atcfg_${Date.now()}`;
   const nowIso = new Date().toISOString();
@@ -21719,17 +21732,13 @@ app.post('/api/airtable/config', async (req, res) => {
         (c) => c.agencyId === callerAgencyId && (venueId ? c.venueId === venueId : true)
       );
       const existing = existingIdx >= 0 ? arr[existingIdx] : null;
-      // Sensitive fields are NEVER blanked by an update that omits them: a new
-      // value overwrites only when explicitly provided (non-empty). This keeps
-      // the frontend from wiping the stored API key / base ID when it saves
-      // the config form without re-sending secrets.
-      const incomingApiKey = apiKey === undefined || apiKey === null ? '' : String(apiKey).trim();
+      // Legacy settings never persist a key.
+      // An omitted or empty base ID keeps its existing value.
       const incomingBaseId = baseId === undefined || baseId === null ? '' : String(baseId).trim();
       const updatedConfig: AirtableConfigItem = {
         id: existing ? existing.id : configId,
         agencyId: callerAgencyId,
         venueId: venueId || undefined,
-        apiKey: incomingApiKey !== '' ? incomingApiKey : (existing?.apiKey || ''),
         baseId: incomingBaseId !== '' ? incomingBaseId : (existing?.baseId || ''),
         tableName: (tableName || 'Approved Ingredients').trim(),
         viewName: (viewName || 'Grid view').trim(),
@@ -21740,19 +21749,15 @@ app.post('/api/airtable/config', async (req, res) => {
       const newArr = existingIdx >= 0
         ? arr.map((c, i) => (i === existingIdx ? updatedConfig : c))
         : [...arr, updatedConfig];
-      return { doc: { ...freshDoc, airtableConfigs: newArr }, result: updatedConfig };
+      return { doc: { ...freshDoc, airtableConfigs: stripLegacyKeys(newArr) }, result: safeAirtableConfig(updatedConfig) };
     },
-    { label: 'save-airtable-config', requireVersion: true }
+    { label: 'save-airtable-config', requireVersion: true, returnDuplicate: true }
   );
   if (!committed) return;
   const updatedConfig = committed.result as AirtableConfigItem;
   res.json({
     success: true,
-    config: {
-      ...updatedConfig,
-      apiKey: updatedConfig.apiKey ? `${updatedConfig.apiKey.slice(0, 4)}...${updatedConfig.apiKey.slice(-4)}` : '',
-      hasApiKey: Boolean(updatedConfig.apiKey),
-    },
+    config: safeAirtableConfig(updatedConfig),
   });
 });
 
@@ -21773,6 +21778,8 @@ app.post('/api/airtable/sync', async (req, res) => {
   const config =
     airtableConfigs.find((c) => c.venueId === venueId && c.agencyId === callerAgencyId) ||
     airtableConfigs.find((c) => c.agencyId === callerAgencyId);
+
+  if (!config?.apiKey) return res.status(400).json({ error: 'Connect your source in Factories › Connect to sync ingredients.' });
 
   if (!config || !config.baseId || !config.tableName) {
     return res.status(400).json({
@@ -22235,6 +22242,14 @@ async function startServer() {
   } else {
     durableStateLoaded = true; // No Firestore configured; local file is the source of truth.
   }
+
+  await removeLegacyKeys({
+    blocked: kqrPickupWritesBlocked, configs: () => airtableConfigs,
+    install: configs => { legacyKeysRemovedFromMemory = true; airtableConfigs = configs; },
+    commit: mutator => commitState(mutator, { label: 'strip-legacy-airtable-keys' }),
+    log: message => console.info(message),
+  }).catch(() => console.warn('[sources] legacy key cleanup failed'));
+  void sourceRoutes.boot();
 
   // STAGED REVISION: verification reads only. Skip ALL startup writes —
   // pepper init, task-order backfill, VAPID persistence, password migration.

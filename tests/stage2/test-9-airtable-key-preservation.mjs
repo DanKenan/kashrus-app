@@ -1,75 +1,59 @@
-/**
- * Test 9: Airtable API key preservation — updating the config without
- * re-sending the API key (or base ID) must NOT wipe the stored secret.
- * Only an explicitly provided non-empty key replaces it.
- */
+import assert from 'node:assert/strict';
+import { removeLegacyKeys } from '../../src/server/sources/legacy.ts';
 export default {
-  name: 'Test 9: Airtable API key preservation',
-  whatItProves:
-    'A config update that omits apiKey/baseId preserves the stored secrets; an explicit non-empty key replaces them; an empty string does not wipe.',
-
-  async run(baseUrl, ctx) {
+  name: 'Test 9: legacy Airtable key path is closed',
+  whatItProves: 'Boot removes only legacy keys in one write (none when absent); live state, config and replay never expose a key.',
+  async run(_baseUrl, ctx) {
+    // Exercise the exact boot migration with a counted main-doc commit boundary.
+    const original = { airtableConfigs: [{ id: 'legacy', apiKey: 'fake-legacy-key', baseId: 'base', tableName: 'table', viewName: 'view', fieldNameMapping: { name: 'Name' }, custom: ['preserve'] }], approvedIngredients: [{ id: 'keep', name: 'unchanged' }], other: 'untouched' };
+    let doc = structuredClone(original), writes = 0, memory, logs = [];
+    const deps = { blocked: () => false, configs: () => doc.airtableConfigs, install: v => { memory = v; }, log: v => logs.push(v), async commit(mutator) { const result = mutator(doc); if (result.doc !== doc) writes++; doc = result.doc; return result; } };
+    await removeLegacyKeys(deps);
+    const expected = structuredClone(original); delete expected.airtableConfigs[0].apiKey;
+    assert.deepEqual(doc, expected); assert.deepEqual(memory, expected.airtableConfigs);
+    assert.equal(writes, 1); assert.deepEqual(logs, ['[sources] removed 1 legacy keys']);
+    writes = 0; await removeLegacyKeys(deps); assert.equal(writes, 0);
     const venueId = `venue-test9-${Date.now()}`;
-    const key1 = `pat-test9-key1-${Date.now()}`;
-    const key2 = `pat-test9-key2-${Date.now()}`;
-    const base1 = `appTEST9BASE1`;
-    const base2 = `appTEST9BASE2`;
-
-    const findConfig = async () => {
-      const doc = await ctx.getDoc();
-      const arr = Array.isArray(doc.airtableConfigs) ? doc.airtableConfigs : [];
-      return arr.find((c) => c && c.venueId === venueId);
-    };
-    const api = async (body) => {
-      // save-airtable-config is an update endpoint: the version contract
-      // requires the version the client saw. Fetch it fresh per call since
-      // each call bumps the version.
-      const v = await ctx.getVersion();
-      return ctx.api('POST', '/api/airtable/config', { venueId, expectedVersion: v, ...body });
-    };
-
-    // 1. Create the config with a key + base ID.
-    const r1 = await api({ apiKey: key1, baseId: base1, tableName: 'T9-Table' });
-    if (r1.status !== 200) {
-      throw new Error(`create failed: ${r1.status} ${JSON.stringify(r1.json)}`);
+    const before = await ctx.getDoc();
+    const bad = await ctx.api('POST', '/api/airtable/config', { venueId, apiKey: 'fake-legacy-key', expectedVersion: await ctx.getVersion() });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json.error, 'Keys are saved in Factories › Connect now.');
+    assert.deepEqual(await ctx.getDoc(), before);
+    for (const apiKey of [undefined, '']) {
+      const r = await ctx.api('POST', '/api/airtable/config', { venueId, apiKey, baseId: 'appTEST9BASE1', tableName: 'Legacy table', expectedVersion: await ctx.getVersion() });
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.equal('apiKey' in r.json.config, false);
+      assert.equal(r.json.config.hasApiKey, false);
+      const config = (await ctx.getDoc()).airtableConfigs.find(c => c.venueId === venueId);
+      assert.equal('apiKey' in config, false);
     }
-    if (!r1.json.config?.hasApiKey) throw new Error('create: hasApiKey should be true');
-    let cfg = await findConfig();
-    if (!cfg) throw new Error('create: config not found in Firestore doc');
-    if (cfg.apiKey !== key1) throw new Error('create: stored apiKey mismatch');
-    if (cfg.baseId !== base1) throw new Error('create: stored baseId mismatch');
-
-    // 2. Update WITHOUT apiKey/baseId (e.g. the form saved other fields).
-    const r2 = await api({ tableName: 'T9-Table-Renamed' });
-    if (r2.status !== 200) {
-      throw new Error(`update-without-key failed: ${r2.status} ${JSON.stringify(r2.json)}`);
+    // Inject old data after boot, proving every response projection is safe too.
+    const legacyVenue = `legacy-${venueId}`, key = 'fake-private-old-key';
+    await ctx.api('POST', '/api/__test__/inject-fixture', { airtableConfigs: [{ agencyId: 'agency-hkc', venueId: legacyVenue, apiKey: key, baseId: 'appOLD' }] });
+    assert.equal(JSON.stringify((await ctx.api('GET', `/api/airtable/config?venueId=${legacyVenue}`)).json).includes(key), false);
+    const token = ctx.authHeaders.Authorization.replace(/^Bearer /, '');
+    await new Promise((resolve, reject) => {
+      const ws = new WebSocket(_baseUrl.replace(/^http/, 'ws') + `/ws?token=${token}`);
+      const timer = setTimeout(() => { ws.close(); reject(Error('live state timeout')); }, 10000);
+      ws.onmessage = e => { const m = JSON.parse(String(e.data)); if (m.type === 'INITIAL_STATE') { clearTimeout(timer); ws.close(); try { assert.equal(JSON.stringify(m).includes(key), false); resolve(); } catch (e) { reject(e); } } };
+    });
+    const request = { venueId: legacyVenue, baseId: 'appOLD', expectedVersion: await ctx.getVersion(), operationId: `legacy-replay-${Date.now()}` };
+    for (let i = 0; i < 2; i++) {
+      const r = await ctx.api('POST', '/api/airtable/config', request);
+      assert.equal(r.status, 200); assert.equal(JSON.stringify(r.json).includes(key), false);
     }
-    if (!r2.json.config?.hasApiKey) {
-      throw new Error('update-without-key: hasApiKey false — the stored key was wiped!');
-    }
-    cfg = await findConfig();
-    if (cfg.apiKey !== key1) throw new Error('update-without-key: stored apiKey was wiped/changed');
-    if (cfg.baseId !== base1) throw new Error('update-without-key: stored baseId was wiped/changed');
-    if (cfg.tableName !== 'T9-Table-Renamed') throw new Error('update-without-key: tableName was not updated');
-
-    // 3. Update WITH an explicit new key + base ID → both change.
-    const r3 = await api({ apiKey: key2, baseId: base2 });
-    if (r3.status !== 200) {
-      throw new Error(`update-with-key failed: ${r3.status} ${JSON.stringify(r3.json)}`);
-    }
-    cfg = await findConfig();
-    if (cfg.apiKey !== key2) throw new Error('update-with-key: stored apiKey did not change to the new key');
-    if (cfg.baseId !== base2) throw new Error('update-with-key: stored baseId did not change to the new base');
-
-    // 4. Update with EMPTY strings → preserved, not wiped.
-    const r4 = await api({ apiKey: '', baseId: '' });
-    if (r4.status !== 200) {
-      throw new Error(`update-empty-key failed: ${r4.status} ${JSON.stringify(r4.json)}`);
-    }
-    cfg = await findConfig();
-    if (cfg.apiKey !== key2) throw new Error('update-empty-key: stored apiKey was wiped by empty string');
-    if (cfg.baseId !== base2) throw new Error('update-empty-key: stored baseId was wiped by empty string');
-
-    return 'key/baseId preserved across key-less updates, replaced on explicit update, empty string does not wipe';
+    assert.equal((await ctx.getDoc()).airtableConfigs.some(c => 'apiKey' in c), false);
+    const bootConfig = { id: `boot-${venueId}`, agencyId: 'agency-hkc', venueId: `boot-${venueId}`, apiKey: key, baseId: 'appBOOT', tableName: 'Legacy', viewName: 'View', fieldNameMapping: { name: 'Name' }, custom: ['unchanged'] };
+    await ctx.api('POST', '/api/__test__/inject-fixture', { airtableConfigs: [bootConfig] });
+    const beforeBoot = await ctx.getDoc(), version = await ctx.getVersion();
+    await ctx.restartServer({});
+    const afterBoot = await ctx.getDoc();
+    assert.equal(await ctx.getVersion(), version + 1);
+    const expectedConfigs = beforeBoot.airtableConfigs.map(({ apiKey, ...rest }) => rest);
+    assert.deepEqual(afterBoot.airtableConfigs, expectedConfigs);
+    assert.deepEqual(afterBoot.approvedIngredients, beforeBoot.approvedIngredients);
+    await ctx.restartServer({});
+    assert.equal(await ctx.getVersion(), version + 1); // no-key boot costs zero main-doc writes
+    return 'legacy key-only boot migration: one write, no-key boot zero writes; config/live state/replay never leak keys';
   },
 };

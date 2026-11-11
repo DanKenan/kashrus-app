@@ -79,6 +79,7 @@ import { CreateEventModal } from './components/CreateEventModal';
 import { CopyEventDialog } from './components/CopyEventDialog';
 import { ConfirmModal } from './components/ConfirmModal';
 import { VenueTabs } from './components/VenueTabs';
+import { FactoriesScreen } from './components/FactoriesScreen';
 import { AgencyEventsScreen } from './components/AgencyEventsScreen';
 import { SHOW_FACTORY_AUDIT } from './lib/features';
 import { signoffUndoBy, signoffUndoTitle, SIGNOFF_UNDO_TEXT } from './lib/signoffUndo';
@@ -86,7 +87,7 @@ import { taskCategories } from './lib/utils';
 import { taskAppliesOn, sortTasksByTime, groupTasksByDay, taskIsForViewer, seesOnlyOwnTasks } from './lib/taskDay';
 import { toggleCategory, matchesCategories, pruneCategories, countTaskCategories } from './lib/categoryFilter';
 import { isMyTask } from './lib/myTasks';
-import { isValidTimeZone, venueTimeZone, weekdayIn, workDateIn, minutesIn } from './lib/workday';
+import { DEFAULT_TIME_ZONE, isValidTimeZone, venueTimeZone, weekdayIn, workDateIn, minutesIn } from './lib/workday';
 import { FactoryAuditHubModal } from './components/FactoryAuditHubModal';
 import { InvitePage } from './components/InvitePage';
 import { ResetPage } from './components/ResetPage';
@@ -635,6 +636,7 @@ export default function App() {
   const [events, setEvents] = useState<KosherEvent[]>([]);
   const [isFactoryAuditOpen, setIsFactoryAuditOpen] = useState(false);
   // Don 2026-10-22: the admin's agency-wide Events screen (from the dashboard).
+  const [isFactoriesOpen, setIsFactoriesOpen] = useState(false);
   const [isAgencyEventsOpen, setIsAgencyEventsOpen] = useState(false);
 
   // Remember the main screen for a refresh (lib/screenMemory.ts): base view + main sheet only.
@@ -2881,6 +2883,7 @@ export default function App() {
             settings={{ onOpen: () => setIsAgencySettingsOpen(true) }}
             reloadKey={adminHomeReloadKey}
             onSelectVenue={(id) => { setAdminHome(false); handleSelectVenue(id); }}
+            onOpenFactories={currentUser?.role === 'admin' ? () => setIsFactoriesOpen(true) : undefined}
             onOpenEvents={() => setIsAgencyEventsOpen(true)}
           />
         ) : (
@@ -3377,6 +3380,7 @@ export default function App() {
       />
 
       {/* Create / Notify Event Modal */}
+      <FactoriesScreen isOpen={isFactoriesOpen && currentUser?.role === 'admin'} onClose={() => setIsFactoriesOpen(false)} timeZone={currentUser?.agencyTimeZone || DEFAULT_TIME_ZONE} />
       <AgencyEventsScreen
         isOpen={isAgencyEventsOpen && currentUser?.role === 'admin'}
         onClose={() => setIsAgencyEventsOpen(false)}
