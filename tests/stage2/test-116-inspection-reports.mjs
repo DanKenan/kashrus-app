@@ -105,7 +105,21 @@ export default {
         if ((await api('admin', 'POST', '/api/__test__/reads', {})).json.byCollection.reports >= 200) break;
         await sleep(50);
       }
-      const bootReads = (await api('admin', 'POST', '/api/__test__/reads', {})).json;
+      // Source backup hydration runs independently of report warm-up on the emulator.
+      for (let i = 0; i < 100; i++) {
+        if ((await api('admin', 'GET', '/api/visits/factories')).json.companies.length) break;
+        await sleep(50);
+      }
+      assert.ok((await api('admin', 'GET', '/api/visits/factories')).json.companies.length);
+      let bootReads = (await api('admin', 'POST', '/api/__test__/reads', {})).json;
+      let settled = false;
+      for (let i = 0; i < 100; i++) {
+        await sleep(100);
+        const next = (await api('admin', 'POST', '/api/__test__/reads', {})).json;
+        if (next.total === bootReads.total) { bootReads = next; settled = true; break; }
+        bootReads = next;
+      }
+      assert.ok(settled, 'Source boot reads did not settle');
       assert.equal(bootReads.byCollection.inspectionReportPhotos || 0, 0);
       // Only the connected agency is warmed; at most 200 full reports, no photos.
       assert.equal(bootReads.byCollection.reports, 200 + bootReads.byCollection.sourceConnections - 1); // Other connected agencies are empty.
@@ -116,10 +130,6 @@ export default {
       await reset();
       const older = (await api('admin', 'GET', `/api/inspections/reports?limit=200&before=${encodeURIComponent(JSON.stringify({ submittedAt: last.submittedAt, id: last.id }))}`)).json.reports;
       assert.equal(older.length, 4); await budget(4, 0);
-      for (let i = 0; i < 100; i++) {
-        if ((await api('admin', 'GET', '/api/visits/factories')).json.companies.length) break;
-        await sleep(50);
-      }
       await reset();
       const retry = await api('mash', 'POST', '/api/visits/reports', body); assert.equal(retry.status, 200); assert.equal(retry.json.report.id, id); await budget(1, 0);
       await reset();
