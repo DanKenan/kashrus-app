@@ -51,3 +51,18 @@ for (const settings of [{ kind: 'google_sheets', spreadsheetId: 'demo' }, { kind
   assert.equal(connector.calls(), 0);
 }
 console.log('all source mapping checks passed');
+
+const loose = guessMapping([
+  { name: 'Est. 2024', columns: ['Name', 'Manufacturer', 'Supplier', 'Mfr'] },
+  { name: 'Ingredient List 2024', columns: ['Ingr. name', 'Certification', 'Cert agency', 'Exp. date', 'Brand Name'] },
+]);
+assert.equal(loose.mapping.companies.table, 'Est. 2024');
+assert.equal(loose.mapping.companies.brand, undefined);
+assert.equal(loose.mapping.ingredients.table, 'Ingredient List 2024');
+assert.equal(loose.guessed['ingredients.table'], 0.6);
+assert.equal(loose.mapping.ingredients.name, 'Ingr. name');
+assert.equal(loose.mapping.ingredients.certification, 'Certification');
+assert.equal(loose.mapping.ingredients.agency, 'Cert agency');
+assert.equal(loose.mapping.ingredients.expiresOn, 'Exp. date');
+assert.equal(loose.mapping.ingredients.brand, 'Brand Name');
+assert.equal(loose.guessed['ingredients.brand'], 0.9);

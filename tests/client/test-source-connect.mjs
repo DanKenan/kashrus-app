@@ -43,6 +43,43 @@ try {
     assert.deepEqual(calls[1], ['/api/sources/connection', 'PUT', { sourceType: 'airtable', baseId: 'appBase', access: typedKey ? 'readwrite' : 'read', mapping, ...expectedKey }]);
     assert.equal(saved, 1); assert.equal(closed, 1);
   }
+  const previewMapping = { ...mapping, companies: { ...mapping.companies, type: 'Type' }, ingredients: { ...mapping.ingredients, certification: 'Cert' } };
+  let previewCalls = 0;
+  globalThis.fetch = async () => {
+    previewCalls++;
+    return new Response(JSON.stringify({ ok: true, tables: [
+      { name: 'Ingredients', columns: ['Name', 'Company', 'Cert', 'Other'] },
+      { name: 'Alternate', columns: ['Name', 'Cert'] },
+    ], samples: {
+      Companies: [{ id: 'c1', fields: { Name: 'Factory company', Type: 'Factory' } }],
+      Ingredients: [{ id: '1', fields: { Name: 'Salt', Cert: 'OU-D', Other: 'OK-M' } }, { id: '2', fields: { Name: 'Water', Cert: 'Group 1' } }],
+      Alternate: [{ id: '3', fields: { Name: 'Alternate ingredient', Cert: 'Star-K' } }],
+    }, guess: { mapping: previewMapping, guessed: { 'ingredients.certification': 0.6, 'ingredients.name': 0.9 } } }));
+  };
+  const preview = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appPreview' }, onClose() {}, onSaved() {} });
+  await preview.render();
+  assert.match(preview.text(), /Press Test connection to see a preview\./);
+  await preview.click('Test connection');
+  assert.equal(preview.find(e => e.props['aria-label'] === 'Check this guess').length, 1);
+  assert.equal(preview.find(e => e.type === 'span' && e.props.children === 'Guessed').length, 1);
+  const cells = () => preview.find(e => e.type === 'td').map(e => e.props.children);
+  assert.ok(cells().includes('OU')); assert.ok(cells().includes('Dairy')); assert.ok(cells().includes('Yes'));
+  assert.match(preview.text(), /No sample rows for this table\./);
+  await preview.type('noSymbolValues', 'OU-D');
+  assert.ok(!cells().includes('OU')); assert.ok(!cells().includes('Dairy'));
+  await preview.type('noSymbolValues', 'Group 1');
+  await preview.type('factoryValues', 'Other type');
+  const companyCells = cells().slice(0, 5);
+  assert.equal(companyCells[2], 'No');
+  await preview.type('factoryValues', 'Factory');
+  assert.equal(cells()[2], 'Yes');
+  await preview.type('ingredients.certification', 'Other');
+  assert.ok(cells().includes('OK')); assert.ok(cells().includes('Meat')); assert.ok(!cells().includes('OU'));
+  assert.equal(preview.find(e => e.props['aria-label'] === 'Check this guess').length, 0);
+  await preview.type('ingredients.table', 'Alternate');
+  await preview.type('ingredients.name', 'Name');
+  assert.ok(cells().includes('Alternate ingredient')); assert.ok(!cells().includes('Salt'));
+  assert.equal(previewCalls, 1);
   const savedMapping = {
     companies: { table: 'Companies', name: 'Custom name', factoryValues: ['Existing factory'], brand: '' },
     ingredients: { table: 'Ingredients', name: 'Custom ingredient', companyLink: 'Existing link' },
@@ -61,6 +98,7 @@ try {
   };
   const existing = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appSaved', mapping: savedMapping }, onClose() {}, onSaved() {} });
   await existing.render();
+  assert.match(existing.text(), /Press Test connection to see a preview\./);
   await existing.type('factoryValues', 'Edited factory');
   await existing.type('noSymbolValues', 'Edited no symbol');
   await existing.click('Test connection');

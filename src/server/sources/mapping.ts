@@ -4,7 +4,7 @@ const normalized = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 const folded = (s: string) => s.trim().toLowerCase();
 const synonyms: Record<string, string[]> = {
   name: ['Name', 'Item', 'Ingredient', 'Product', 'Product Name', 'Company Name', 'Establishment Name'],
-  brand: ['Brand', 'Brand Name', 'Manufacturer', 'Supplier'],
+  brand: ['Brand', 'Brand Name'],
   certification: ['Certification', 'Hechsher', 'Kosher Certification', 'Certifying Agency'],
   agency: ['Agency', 'Certifying Agency'], status: ['Status', 'Kosher Status', 'DPM', 'Dairy Pareve Meat'],
   code: ['UPC', 'UPC Code', 'Code', 'SKU', 'Code Case', 'Barcode'],
@@ -18,16 +18,32 @@ const tableNames = {
   ingredients: ['Ingredients', 'Ingredients List', 'Schedule A', 'Raw Materials'],
   products: ['Products', 'Schedule B', 'Product List'],
 };
+const shortForms: Record<string, string> = { ingr: 'ingredient', ingred: 'ingredient', cert: 'certification', certif: 'certification', hech: 'hechsher', exp: 'expiration', expir: 'expiration', mfr: 'manufacturer', mfg: 'manufacturer', prod: 'product', est: 'establishment', estab: 'establishment', co: 'company', loc: 'location', fac: 'facility', stat: 'status', desc: 'description', no: 'number', num: 'number' };
+function words(name: string): string[] {
+  return name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/#/g, ' number ').toLowerCase().split(/[^a-z]+/).filter(Boolean).map(w => {
+    const singular = w.endsWith('ies') ? w.slice(0, -3) + 'y' : w.endsWith('s') && !w.endsWith('ss') && w !== 'status' ? w.slice(0, -1) : w;
+    return shortForms[singular] || singular;
+  });
+}
+function overlap(name: string, aliases: string[]): number {
+  const a = new Set(words(name));
+  return Math.max(0, ...aliases.map(alias => {
+    const b = new Set(words(alias)), common = [...a].filter(w => b.has(w)).length;
+    return common / Math.max(a.size, b.size, 1);
+  }));
+}
 // Partial mappings deliberately leave missing tables/columns unset for the caller to review.
 export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'noSymbolValues'>]: Partial<SourceMapping[K]> } & { noSymbolValues: string[] };
 export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; guessed: Record<string, number> } {
   const mapping: GuessedMapping = { companies: {}, ingredients: {}, products: {}, noSymbolValues: ['Group 1'] };
   const guessed: Record<string, number> = {};
   for (const kind of Object.keys(tableNames) as (keyof typeof tableNames)[]) {
-    const table = tableNames[kind].map(n => tables.find(t => normalized(t.name) === normalized(n))).find(Boolean);
+    let table = tableNames[kind].map(n => tables.find(t => normalized(t.name) === normalized(n))).find(Boolean);
+    const exactTable = !!table;
+    if (!table) table = tables.map(t => ({ t, score: overlap(t.name, tableNames[kind]) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score)[0]?.t;
     if (!table) continue;
     mapping[kind].table = table.name;
-    guessed[`${kind}.table`] = 1;
+    guessed[`${kind}.table`] = exactTable ? 1 : 0.6;
     const fields = kind === 'companies' ? ['name', 'type', 'brand', 'plant']
       : kind === 'ingredients' ? ['companyLink', 'name', 'brand', 'certification', 'agency', 'status', 'plant', 'expiresOn']
       : ['companyLink', 'name', 'brand', 'code', 'status', 'symbolRequired', 'plant'];
@@ -38,6 +54,17 @@ export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; 
       used.add(column);
       (mapping[kind] as Record<string, unknown>)[field] = column;
       guessed[`${kind}.${field}`] = normalized(column) === normalized(synonyms[field][0]) ? 1 : 0.9;
+    }
+    // Exact assignments reserve their columns before any fuzzy assignment.
+    for (const field of fields) {
+      if ((mapping[kind] as Record<string, unknown>)[field]) continue;
+      const column = table.columns.filter(c => !used.has(c) && (field !== 'brand' || words(c).includes('brand')))
+        .map(c => ({ c, score: overlap(c, synonyms[field]) }))
+        .filter(x => x.score > 0).sort((a, b) => b.score - a.score)[0]?.c;
+      if (!column) continue;
+      used.add(column);
+      (mapping[kind] as Record<string, unknown>)[field] = column;
+      guessed[`${kind}.${field}`] = 0.6;
     }
   }
   return { mapping, guessed };

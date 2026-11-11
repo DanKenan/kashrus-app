@@ -21,9 +21,10 @@ export default {
       const url = new URL(req.url, 'http://localhost');
       if (url.pathname === '/v0/meta/whoami') return res.end(JSON.stringify({ scopes: ['data.records:read'] }));
       if (url.pathname.endsWith('/tables')) return res.end(JSON.stringify({ tables: Object.entries(rows).map(([name, records]) => ({ name, fields: Object.keys(records[0].fields).map(name => ({ name })) })) }));
+      const sample = url.searchParams.get('maxRecords') === '3';
       const table = decodeURIComponent(url.pathname.split('/').pop()), start = Number(url.searchParams.get('offset') || 0), records = rows[table];
       if (!records) { res.writeHead(404); return res.end('{}'); }
-      res.end(JSON.stringify({ records: records.slice(start, start + 100), ...(start + 100 < records.length ? { offset: String(start + 100) } : {}) }));
+      res.end(JSON.stringify({ records: records.slice(start, start + (sample ? 3 : 100)), ...(!sample && start + 100 < records.length ? { offset: String(start + 100) } : {}) }));
     });
     await new Promise(r => mock.listen(0, '127.0.0.1', r));
     try {
@@ -31,10 +32,11 @@ export default {
       const body = { sourceType: 'airtable', baseId: 'appTEST115', access: 'read', mapping, apiKey: key };
       const raw = async () => (await api('admin', 'POST', '/api/__test__/source-raw', { agencyId })).json;
       const bad = await api('admin', 'POST', '/api/sources/test', { ...body, apiKey: 'wrong' });
-      assert.deepEqual(bad.json, { ok: false, error: 'Airtable 401: authentication failed' });
+      assert.deepEqual(bad.json, { ok: false, error: 'Airtable 401: authentication failed', calls: 1 });
       assert.equal((await raw()).connection, null);
       const tested = await api('admin', 'POST', '/api/sources/test', body);
       assert.equal(tested.json.ok, true); assert.ok(tested.json.guess.mapping.companies);
+      assert.equal(tested.json.calls, 5); assert.equal(tested.json.samples.Ingredients.length, 3);
       const firstWrites = (await ctx.api('POST', '/api/__test__/writes', {})).json;
       calls = 0;
       assert.equal((await api('admin', 'PUT', '/api/sources/connection', body)).status, 200);
@@ -71,6 +73,7 @@ export default {
       assert.deepEqual(await raw(), beforeWrong);
       // A settings save also triggers a second real refresh, without waiting a minute.
       const beforeWrites = (await ctx.api('POST', '/api/__test__/writes', {})).json.byCollection.sourceBackups || 0;
+      const beforeRefreshDay = (await raw()).connection.lastRefresh.at.slice(0, 10);
       const connectionWrites = (await ctx.api('POST', '/api/__test__/writes', {})).json.byCollection.sourceConnections || 0;
       calls = 0;
       const { apiKey, ...same } = body;
@@ -78,7 +81,7 @@ export default {
       for (let i = 0; i < 100 && calls < 6; i++) await sleep(100);
       await sleep(200);
       assert.equal(calls, 6);
-      assert.equal(((await ctx.api('POST', '/api/__test__/writes', {})).json.byCollection.sourceConnections || 0) - connectionWrites, 1);
+      assert.equal(((await ctx.api('POST', '/api/__test__/writes', {})).json.byCollection.sourceConnections || 0) - connectionWrites, (await raw()).connection.lastRefresh.at.slice(0, 10) === beforeRefreshDay ? 1 : 2);
       assert.equal((await ctx.api('POST', '/api/__test__/writes', {})).json.byCollection.sourceBackups || 0, beforeWrites);
       return '6 calls per refresh; 5 factories, 46 ingredients and 24 products each; 0 page reads; unchanged backups cost 0 writes';
     } finally { socket?.close(); await new Promise(r => mock.close(r)); }

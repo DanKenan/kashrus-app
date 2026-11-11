@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
+import { previewRows, type SourceSamples } from '../lib/sourcePreview';
 import { X } from 'lucide-react';
 import { emptyMapping, mappingReady, sourceRequest, type SourceConnection, type SourceMapping, type SourceTable } from '../lib/sources';
 
@@ -20,6 +21,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [access, setAccess] = useState<'read' | 'readwrite'>(connection.access || 'read');
   const [mapping, setMapping] = useState<SourceMapping>(connection.mapping || emptyMapping());
   const [tables, setTables] = useState<SourceTable[]>([]);
+  const [samples, setSamples] = useState<SourceSamples | null>(null);
   const [guessed, setGuessed] = useState<Record<string, number>>({});
   const [factoryValues, setFactoryValues] = useState((connection.mapping?.companies.factoryValues || []).join(', '));
   const [noSymbolValues, setNoSymbolValues] = useState((connection.mapping?.noSymbolValues || ['Group 1']).join(', '));
@@ -58,6 +60,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         const result = await sourceRequest('/api/sources/test', 'POST', payload());
         if (!result.ok) throw new Error("Couldn't test the connection. Try again.");
         setTables(result.tables || []);
+        setSamples(result.samples ?? null);
         if (result.guess?.mapping) {
           const suggestion = { ...emptyMapping(), ...result.guess.mapping };
           const next = connection.mapping ? {
@@ -95,7 +98,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     const options = field === 'table' ? tables.map(t => t.name) : tables.find(t => t.name === values.table)?.columns || [];
     const path = `${group}.${field}`;
     return <div key={field} className="min-w-0">
-      <label htmlFor={`${id}-${path}`} className="block text-sm text-ink-soft">{label} {guessed[path] != null && <span className="rounded-md bg-sunken px-2 text-xs text-ink-soft">Guessed</span>}</label>
+      <label htmlFor={`${id}-${path}`} className="block text-sm text-ink-soft">{label} {guessed[path] != null && <span aria-label={guessed[path] < 0.8 ? 'Check this guess' : undefined} className="rounded-md bg-sunken px-2 text-xs text-ink-soft">{guessed[path] < 0.8 ? 'Check' : 'Guessed'}</span>}</label>
       <select id={`${id}-${path}`} name={path} className={fieldClass} value={value} disabled={!!busy} required={['table', 'name', 'companyLink'].includes(field)} onChange={e => {
         setMapping(prev => ({ ...prev, [group]: field === 'table' ? { table: e.target.value, name: '', ...(group === 'companies' ? {} : { companyLink: '' }) } : { ...prev[group], [field]: e.target.value } }));
         setGuessed(prev => Object.fromEntries(Object.entries(prev).filter(([k]) => field === 'table' ? !k.startsWith(`${group}.`) : k !== path)));
@@ -105,18 +108,28 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       </select>
     </div>;
   };
+  const preview = (group: keyof typeof groups) => {
+    const data = previewRows(samples || {}, { ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) }, noSymbolValues: commaList(noSymbolValues) }, group);
+    return <div className="min-w-0 space-y-2">
+      <h4 className="text-sm font-semibold">Preview</h4>
+      {!samples ? <p className="text-sm text-ink-soft">Press Test connection to see a preview.</p> : !data.rows.length ? <p className="text-sm text-ink-soft">No sample rows for this table.</p> : <div role="region" aria-label={`${group} preview`} tabIndex={0} className="max-w-full overflow-x-auto rounded-lg border border-line">
+        <table className="w-full text-xs text-ink"><thead className="bg-sunken"><tr>{data.header.map(label => <th key={label} scope="col" className="whitespace-nowrap p-2 text-left font-medium">{label}</th>)}</tr></thead>
+          <tbody>{data.rows.map((row, index) => <tr key={index}>{row.map((cell, column) => <td key={column} className="max-w-48 break-words border-t border-line p-2">{cell}</td>)}</tr>)}</tbody></table>
+      </div>}
+    </div>;
+  };
   return <div className="fixed inset-0 z-50 flex items-end justify-center bg-scrim">
-    <div ref={root} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} className="max-h-[90dvh] w-full max-w-2xl overflow-y-auto rounded-t-2xl bg-surface p-4 text-ink tactile-4">
+    <div ref={root} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} className="max-h-[90dvh] min-w-0 w-full max-w-2xl overflow-y-auto overflow-x-hidden rounded-t-2xl bg-surface p-4 text-ink tactile-4">
       <div className="flex items-center gap-4"><h2 id={`${id}-title`} className="flex-1 text-2xl font-semibold">Connect database</h2><button type="button" aria-label="Close" onClick={onClose} className={`${sourceButton} w-11 px-0 inline-flex items-center justify-center`}><X aria-hidden="true" className="h-5 w-5" /></button></div>
       <form className="space-y-4" onSubmit={e => { e.preventDefault(); void run('save'); }}>
         <fieldset disabled={!!busy}><legend className="text-sm text-ink-soft">Source</legend><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{['Airtable', 'Google Sheets', 'Excel', 'Supabase'].map((name, i) => <button key={name} type="button" disabled={i !== 0} aria-pressed={i === 0} className={sourceButton}>{name}{i !== 0 && <span className="block text-xs">Coming soon</span>}</button>)}</div></fieldset>
-        <div><label htmlFor={`${id}-base`} className="block text-sm text-ink-soft">Base ID</label><input id={`${id}-base`} name="baseId" placeholder="app…" className={fieldClass} value={baseId} disabled={!!busy} onChange={e => { setBaseId(e.target.value); setTables([]); setMessage(''); }} /></div>
+        <div><label htmlFor={`${id}-base`} className="block text-sm text-ink-soft">Base ID</label><input id={`${id}-base`} name="baseId" placeholder="app…" className={fieldClass} value={baseId} disabled={!!busy} onChange={e => { setBaseId(e.target.value); setTables([]); setSamples(null); setMessage(''); }} /></div>
         <div><label htmlFor={`${id}-key`} className="block text-sm text-ink-soft">Access key</label><input id={`${id}-key`} name="apiKey" type="password" autoComplete="off" className={fieldClass} value={apiKey} disabled={!!busy} onChange={e => setApiKey(e.target.value)} />{connection.hasKey && <p className="text-sm text-ink-soft">{`A key is saved (…${connection.keyHint?.slice(-4) || ''}). Leave empty to keep it.`}</p>}</div>
         <fieldset disabled={!!busy}><legend className="text-sm text-ink-soft">Access</legend>{(['read', 'readwrite'] as const).map(value => <label key={value} className="flex min-h-11 items-center gap-2"><input type="radio" name="access" value={value} checked={access === value} onChange={() => setAccess(value)} />{value === 'read' ? 'Read only' : 'Read and write'}</label>)}<p className="text-sm text-ink-soft">Read only is enough for now. Read and write lets you manage your database from the app later.</p></fieldset>
         <button type="button" className={sourceButton} disabled={!!busy || !baseId.trim()} onClick={() => void run('test')}>{busy === 'test' ? 'Testing…' : 'Test connection'}</button>
         {message && <p role="status" className="text-base text-ink">{message}</p>}
         <h3 className="text-xl font-semibold">Mapping</h3>
-        {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients' : 'Products'}</legend>{select(group, 'table', 'Table')}{groups[group].map(([field, label]) => select(group, field, label))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}</fieldset>)}
+        {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients' : 'Products'}</legend>{select(group, 'table', 'Table')}{groups[group].map(([field, label]) => select(group, field, label))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{preview(group)}</fieldset>)}
         <div><label htmlFor={`${id}-symbols`} className="block text-sm text-ink-soft">No symbol needed values</label><input id={`${id}-symbols`} name="noSymbolValues" className={fieldClass} value={noSymbolValues} disabled={!!busy} onChange={e => setNoSymbolValues(e.target.value)} /><p className="text-sm text-ink-soft">Ingredients certified this way are kosher with no symbol (like salt).</p></div>
         {error && <p role="alert" className="text-base text-bad">{error}</p>}
         <button type="submit" disabled={!!busy || !ready} className="pressable min-h-12 w-full rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper disabled:opacity-50">{busy === 'save' ? 'Saving…' : 'Save'}</button>

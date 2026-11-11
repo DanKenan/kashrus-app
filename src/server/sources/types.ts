@@ -20,6 +20,7 @@ export interface SourceMapping {
 }
 export interface SourceData { companies: Company[]; ingredients: Ingredient[]; products: Product[] }
 export interface SourceTable { name: string; columns: string[] }
+export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
 export interface ConnectionResult { ok: boolean; access?: 'read' | 'readwrite'; tables?: SourceTable[]; error?: string }
 export interface SourceConnector {
   kind: SourceKind;
@@ -27,6 +28,7 @@ export interface SourceConnector {
   listCompanies(): Promise<Company[]>;
   listItems(companyId: string, kind: 'ingredient' | 'product'): Promise<(Ingredient | Product)[]>;
   loadAll?(): Promise<SourceData>;
+  samples?(tables: SourceTable[]): Promise<SourceSamples>;
   calls(): number;
 }
 export interface SourceRow { id: string; fields: Record<string, unknown> }

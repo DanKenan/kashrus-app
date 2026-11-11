@@ -4,6 +4,8 @@ import { createAirtableConnector } from '../../src/server/sources/airtable.ts';
 const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company', certification: 'Certification' }, products: { table: 'Products', name: 'Name', companyLink: 'Company', code: 'Code' }, noSymbolValues: ['Group 1'] };
 const row = (id, fields) => ({ id, fields });
 const tables = {
+  Notes: [row('n', { Name: 'Notes' })],
+  Contacts: [row('x', { Name: 'Contacts' })],
   Companies: Array.from({ length: 7 }, (_, i) => row(`c${i}`, { Name: `Demo ${i}`, Type: i < 5 ? 'Factory' : 'Shop' })),
   Ingredients: Array.from({ length: 230 }, (_, i) => row(`i${i}`, { Name: `Demo ingredient ${i}`, Company: [`c${i % 5}`], Certification: 'Group 1' })),
   Products: Array.from({ length: 120 }, (_, i) => row(`p${i}`, { Name: `Demo product ${i}`, Company: [`c${i % 5}`], Code: `${i}` })),
@@ -19,6 +21,13 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/v0/meta/whoami') return res.end(JSON.stringify({ scopes: writes ? ['data.records:read', 'data.records:write'] : ['data.records:read'] }));
   if (url.pathname === '/v0/meta/bases/demo/tables') return res.end(JSON.stringify({ tables: Object.entries(tables).map(([name, rows]) => ({ name, fields: Object.keys(rows[0].fields).map(name => ({ name })) })) }));
   const name = decodeURIComponent(url.pathname.split('/').at(-1));
+  if (url.searchParams.has('maxRecords')) {
+    assert.equal(url.searchParams.get('maxRecords'), '3');
+    assert.equal(url.searchParams.get('cellFormat'), 'string');
+    assert.equal(url.searchParams.get('timeZone'), 'UTC');
+    assert.equal(url.searchParams.get('userLocale'), 'en-us');
+    return res.end(JSON.stringify({ records: tables[name].slice(0, 3).map(r => ({ ...r, fields: { ...r.fields, Company: ' Demo Factory ', Long: 'x'.repeat(250) } })) }));
+  }
   assert.equal(url.searchParams.get('pageSize'), '100');
   const config = Object.values(mapping).find(v => v.table === name);
   const fields = Object.entries(config).filter(([k, v]) => k !== 'table' && typeof v === 'string').map(([, v]) => v);
@@ -37,7 +46,14 @@ try {
   for (let i = 5; i < starts.length; i++) assert.ok(starts[i] - starts[i - 5] >= 1000);
   for (const c of await connector.listCompanies()) { assert.equal((await connector.listItems(c.id, 'ingredient')).length, 46); assert.equal((await connector.listItems(c.id, 'product')).length, 24); }
   assert.equal(connector.calls(), 6);
-  let result = await connector.testConnection(); assert.equal(result.access, 'read'); assert.equal(result.tables.length, 3);
+  let result = await connector.testConnection(); assert.equal(result.access, 'read'); assert.equal(result.tables.length, 5);
+  const beforeSamples = connector.calls();
+  const samples = await connector.samples(result.tables);
+  assert.equal(connector.calls() - beforeSamples, 5);
+  assert.equal(samples.Ingredients.length, 3);
+  console.log('Mock Test connection on 5 tables: 7 calls (2 metadata + 5 sample requests)');
+  assert.equal(samples.Ingredients[0].fields.Company, 'Demo Factory');
+  assert.equal(samples.Ingredients[0].fields.Long.length, 200);
   writes = true; result = await connector.testConnection(); assert.equal(result.access, 'readwrite');
   for (const status of ['401', '403', '404']) {
     mode = status; const failed = createAirtableConnector(config);

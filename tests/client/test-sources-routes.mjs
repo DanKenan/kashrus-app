@@ -52,5 +52,17 @@ try {
   assert.equal(tested.json.error, message);
   assert.equal(JSON.stringify(logs).includes(plain), false);
   assert.equal(JSON.stringify(state).includes(plain), false);
+  const fetchBefore = globalThis.fetch;
+  const mapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, noSymbolValues: [] };
+  globalThis.fetch = async () => Response.json({ scopes: [], tables: ['Companies', 'Ingredients', 'Products'].map(name => ({ name, fields: [{ name: 'Name' }, { name: 'Company' }] })), records: [] });
+  try {
+    const replacement = await saved.request('put', '/api/sources/connection', { sourceType: 'airtable', baseId: 'appTEST', access: 'read', mapping, apiKey: 'fake-replacement-key' });
+    assert.equal(replacement.code, 200); assert.equal(replacement.json.status, 'never'); assert.equal(replacement.json.error, null);
+    for (let i = 0; i < 30; i++) {
+      if ((await saved.request('get', '/api/sources/connection')).json.status === 'ok') break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal((await saved.request('get', '/api/sources/connection')).json.status, 'ok');
+  } finally { globalThis.fetch = fetchBefore; }
 } finally { console.warn = warn; console.info = info; }
 console.log('source boot failures are contained; unreadable keys have a safe error status');

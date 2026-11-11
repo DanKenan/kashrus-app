@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createSourceCache, nextNightlyRun } from '../../src/server/sources/cache.ts';
 import { encryptKey, decryptKey, keyHint } from '../../src/server/sources/crypto.ts';
-const data = { companies: [{ id: 'c1', name: 'Demo Factory', extra: { attachment: 'https://example.test' } }], ingredients: [{ id: 'i1', companyIds: ['c1'], name: 'Salt', brand: 'Demo', noSymbolNeeded: true, extra: { private: 'omit' } }], products: [{ id: 'p1', companyIds: ['c1'], name: 'Bread', code: '001', plant: 'https://example.test', extra: {} }] };
+const data = { companies: [{ id: 'c1', name: 'Demo Factory', type: 'Factory', brand: 'Brand', plant: 'Plant', extra: { attachment: 'https://example.test' } }], ingredients: [{ id: 'i1', companyIds: ['c1'], name: 'Salt', brand: 'Demo', noSymbolNeeded: true, expiresOn: '2027-01-01', certificationRaw: 'Group 1', certifyingAgency: 'Agency', dpm: 'pareve', plant: 'Plant', extra: { private: 'omit' } }], products: [{ id: 'p1', companyIds: ['c1'], name: 'Bread', symbolRequired: false, dpm: 'pareve', code: '001', plant: 'https://example.test', extra: {} }] };
 let down = false, calls = 0, loads = 0, release;
 let gate = Promise.resolve();
 const connector = { kind: 'airtable', calls: () => calls, async loadAll() { calls++; await gate; if (down) throw new Error('secret'); return structuredClone(data); } };
@@ -28,6 +28,18 @@ const fallback = createSourceCache({ connectorFor: () => connector, backups: { a
 await fallback.refresh('a'); await fallback.refresh('a');
 assert.equal(fallback.state('a').status, 'backup'); assert.equal(loads, 1);
 assert.equal(fallback.state('a').itemsFor('c1', 'ingredient')[0].name, 'Salt');
+assert.equal(fallback.state('a').companies[0].type, 'Factory');
+assert.equal(fallback.state('a').companies[0].brand, 'Brand');
+const restored = fallback.state('a').itemsFor('c1', 'ingredient')[0];
+for (const field of ['id', 'expiresOn', 'certificationRaw', 'certifyingAgency', 'noSymbolNeeded', 'dpm', 'plant']) assert.equal(restored[field], data.ingredients[0][field]);
+assert.equal(fallback.state('a').itemsFor('c1', 'product')[0].symbolRequired, false);
+const broken = createSourceCache({ connectorFor: () => connector, backups: { async load() { const result = []; result.invalidCompanyIds = ['c1']; return result; } } });
+await broken.refresh('a'); assert.equal(broken.state('a').status, 'error'); assert.match(broken.state('a').error, /no usable backup/);
+const partial = createSourceCache({ connectorFor: () => connector, backups: { async load() { const result = [...saved]; result.invalidCompanyIds = ['c2']; return result; } } });
+await partial.refresh('a'); await partial.refresh('a');
+assert.equal(partial.state('a').status, 'backup'); assert.match(partial.state('a').error, /no usable backup/);
+assert.equal(partial.state('a').companies.length, 1);
+
 await fallback.refresh('other'); await fallback.refresh('other');
 assert.equal(fallback.state('other').status, 'error'); assert.equal(loads, 2);
 down = false; gate = new Promise(resolve => { release = resolve; });

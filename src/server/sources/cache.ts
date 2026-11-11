@@ -3,13 +3,14 @@ import type { Company, Ingredient, Product, SourceConnector, SourceData } from '
 
 export interface Backup {
   v: 1; agencyId: string; companyId: string; companyName: string; takenAt: string; hash: string;
-  ingredients: { name: string; brand: string; certifyingAgency: string; dpm: string; noSymbolNeeded: boolean; plant: string }[];
-  products: { name: string; brand: string; code: string; dpm: string; plant: string }[];
+  company?: Omit<Company, 'extra'>;
+  ingredients: Omit<Ingredient, 'extra' | 'companyIds'>[];
+  products: Omit<Product, 'extra' | 'companyIds'>[];
 }
 export interface SourceState {
   status: 'never' | 'ok' | 'stale' | 'backup' | 'error'; refreshedAt?: string; calls: number;
   companies: Company[]; itemsFor(companyId: string, kind: 'ingredient' | 'product'): (Ingredient | Product)[];
-  backupTakenAt?: string; error?: string;
+  backupTakenAt?: string; backupError?: string; error?: string;
 }
 export interface RefreshResult { ok: boolean; calls: number; changedBackups: Backup[]; error?: string }
 export interface SourceCacheConfig {
@@ -22,12 +23,13 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
   return data.companies.map(c => {
     const content = {
       companyName: safeText(c.name),
+      company: { id: c.id, name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant) },
       ingredients: data.ingredients.filter(i => i.companyIds.includes(c.id)).map(i => ({
-        name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
-        dpm: safeText(i.dpm), noSymbolNeeded: i.noSymbolNeeded === true, plant: safeText(i.plant),
+        id: safeText(i.id), name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
+        dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: safeText(i.certificationRaw), noSymbolNeeded: i.noSymbolNeeded === true, plant: safeText(i.plant),
       })),
       products: data.products.filter(p => p.companyIds.includes(c.id)).map(p => ({
-        name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: safeText(p.dpm), plant: safeText(p.plant),
+        id: safeText(p.id), name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: p.dpm, symbolRequired: typeof p.symbolRequired === 'boolean' ? p.symbolRequired : undefined, plant: safeText(p.plant),
       })),
     };
     for (const items of [content.ingredients, content.products]) items.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
@@ -72,35 +74,39 @@ export function createSourceCache({ connectorFor, backups, now = Date.now }: Sou
       return { ok: true, calls, changedBackups };
     } catch (cause) {
       const error = cause instanceof Error && cause.message.startsWith('Airtable ') ? cause.message : 'Source refresh failed', calls = connector ? connector.calls() - start : 0;
-      if (e.data) e.state = { ...e.state, status: e.state.status === 'backup' ? 'backup' : 'stale', calls, error };
+      if (e.data) e.state = { ...e.state, status: e.state.status === 'backup' ? 'backup' : 'stale', calls, error: e.state.backupError || error };
       else {
         if (!e.backupLoaded) {
           e.backupLoaded = true;
           try {
-            const saved = (await backups.load(id)).filter(b => b.v === 1 && b.agencyId === id);
+            const loaded = await backups.load(id) as Backup[] & { invalidCompanyIds?: string[] };
+            const backupError = loaded.invalidCompanyIds?.length ? 'Some companies have no usable backup (missing or invalid parts).' : undefined;
+            if (backupError) e.state = { ...e.state, error: backupError };
+            const saved = loaded.filter(b => b.v === 1 && b.agencyId === id);
             if (saved.length) {
               const data: SourceData = { companies: [], ingredients: [], products: [] };
               for (const b of saved) {
-                data.companies.push({ id: b.companyId, name: safeText(b.companyName), extra: {} });
+                data.companies.push({ id: b.companyId, ...b.company, name: safeText(b.companyName), extra: {} });
                 for (const [kind, items] of [['ingredients', b.ingredients], ['products', b.products]] as const) {
                   items.forEach((item, index) => {
-                    const base = { id: `backup:${b.companyId}:${kind}:${index}`, companyIds: [b.companyId], name: safeText(item.name), brand: safeText(item.brand),
+                    const base = { id: safeText(item.id) || `backup:${b.companyId}:${kind}:${index}`, companyIds: [b.companyId], name: safeText(item.name), brand: safeText(item.brand),
                       dpm: ['dairy', 'pareve', 'meat'].includes(item.dpm) ? item.dpm as Ingredient['dpm'] : undefined, plant: safeText(item.plant), extra: {} };
-                    if (kind === 'ingredients') data.ingredients.push({ ...base, certifyingAgency: safeText('certifyingAgency' in item ? item.certifyingAgency : ''), noSymbolNeeded: 'noSymbolNeeded' in item && item.noSymbolNeeded === true });
-                    else data.products.push({ ...base, code: safeText('code' in item ? item.code : '') });
+                    if (kind === 'ingredients') data.ingredients.push({ ...base, expiresOn: safeText('expiresOn' in item ? item.expiresOn : ''), certificationRaw: safeText('certificationRaw' in item ? item.certificationRaw : ''), certifyingAgency: safeText('certifyingAgency' in item ? item.certifyingAgency : ''), noSymbolNeeded: 'noSymbolNeeded' in item && item.noSymbolNeeded === true });
+                    else data.products.push({ ...base, symbolRequired: 'symbolRequired' in item ? item.symbolRequired : undefined, code: safeText('code' in item ? item.code : '') });
                   });
                 }
               }
-              publish(id, data, 'backup', { calls, error, backupTakenAt: saved.map(b => b.takenAt).sort()[0] });
+              publish(id, data, 'backup', { calls, error: backupError || error, backupError, backupTakenAt: saved.map(b => b.takenAt).sort()[0] });
             }
           } catch { /* Backup failures also leave the cache in a usable error state. */ }
         }
-        if (!e.data) e.state = { ...e.state, status: 'error', calls, error };
+        if (!e.data) e.state = { ...e.state, status: 'error', calls, error: e.state.error || error };
       }
       return { ok: false, calls, changedBackups: [], error };
     }
   }
   return {
+    reset(agencyId: string) { entries.delete(agencyId); },
     state: (agencyId: string): SourceState => entry(agencyId).state,
     setKnownHashes(agencyId: string, hashes: ReadonlyMap<string, string> | Record<string, string>) {
       entry(agencyId).hashes = new Map(hashes instanceof Map ? hashes : Object.entries(hashes));

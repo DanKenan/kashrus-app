@@ -72,6 +72,16 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
   const data = () => loaded ? Promise.resolve(loaded) : loading ?? loadAll();
   return {
     kind: 'airtable', calls: () => count, loadAll,
+    async samples(tables) {
+      const samples: import('./types.ts').SourceSamples = Object.create(null);
+      for (const table of tables.slice(0, 15)) {
+        const params = new URLSearchParams({ maxRecords: '3', cellFormat: 'string', timeZone: 'UTC', userLocale: 'en-us' });
+        const page = await request(`/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(table.name)}?${params}`);
+        if (!Array.isArray(page.records)) throw new Error('Airtable returned invalid records');
+        samples[table.name] = page.records.slice(0, 3).map((r: any) => ({ id: String(r.id), fields: Object.fromEntries(Object.entries(r.fields || {}).map(([k, v]) => [k, String(v ?? '').trim().slice(0, 200)])) }));
+      }
+      return samples;
+    },
     async testConnection() {
       try {
         const identity = await request('/v0/meta/whoami');

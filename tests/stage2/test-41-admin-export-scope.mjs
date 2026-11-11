@@ -17,7 +17,7 @@
  *    passwordResets, passwordResetRateLimits, pushSubscriptions,
  *    kioskPinLockouts, kioskPairings, kioskPairingLimits keys; no user
  *    password / passwordHash / kioskPin / kioskPinHash; Airtable configs
- *    without apiKey (hasApiKey true), and the API key VALUE appears nowhere.
+ *    without apiKey (hasApiKey false after legacy key removal), and the API key VALUE appears nowhere.
  *  6 coordinator and mashgiach → 403 (positive twin: their admin → 200).
  */
 const A = 'agency-test41x-a';
@@ -180,10 +180,10 @@ export default {
     for (const m of [marks.aTask, marks.bTask, marks.aEmail, A, B, `T41X-ORPHAN-${ts}`, `T41X-MISMATCH-${ts}`]) assert(!eOp.text.includes(m), `home primary admin export leaks "${m}"`);
     assert(!('_v' in eOp.json) && eOp.json.restorable === false, 'home export is not a whole-database backup');
     checkNoSecrets('home primary admin', eOp, apiKeyValue);
-    // Airtable: the key holder (A) sees its config with hasApiKey and no key.
+    // Airtable: legacy keys are removed from memory, including after hydration.
     const eA0 = await exportAs(baseUrl, auth(tok.adminA));
     const cfgA = (eA0.json.airtableConfigs || []).find((c) => c.agencyId === A);
-    assert(cfgA && cfgA.hasApiKey === true && !('apiKey' in cfgA), 'airtable config present with hasApiKey true, no key');
+    assert(cfgA && cfgA.hasApiKey === false && !('apiKey' in cfgA), 'airtable config present with hasApiKey false, no key');
     checkNoSecrets('admin A', eA0, apiKeyValue);
 
     // A's own admin: twin of 1 from the other side.
