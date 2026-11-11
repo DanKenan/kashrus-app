@@ -47,6 +47,22 @@ export function createAgencyDocument<T extends { updatedAt: string }>(deps: Docu
     }
     return result;
   }
+  function stage(agency: string, change: (next: T) => void) {
+    if (!memory.has(agency)) throw Error('Inspection document unavailable');
+    const before = doc(agency), next = structuredClone(before);
+    change(next);
+    check(next);
+    if (isDeepStrictEqual(before, next)) return null;
+    next.updatedAt = deps.now().toISOString();
+    check(next);
+    return { before, next, patch: patch(before, next), ref: deps.db() ? deps.db().collection(collection).doc(agency) : null };
+  }
+  async function persistLocal(agency: string, next: T) {
+    const target = file(agency), temporary = `${target}.${randomUUID()}.tmp`;
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    try { await fs.writeFile(temporary, JSON.stringify(next)); await fs.rename(temporary, target); }
+    finally { await fs.rm(temporary, { force: true }); }
+  }
   async function persist(agency: string, before: T, next: T) {
     check(next);
     if (deps.db()) {
@@ -54,12 +70,7 @@ export function createAgencyDocument<T extends { updatedAt: string }>(deps: Docu
       batch.set(deps.db().collection(collection).doc(agency), patch(before, next), { merge: true });
       await batch.commit();
     }
-    else {
-      const target = file(agency), temporary = `${target}.${randomUUID()}.tmp`;
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      try { await fs.writeFile(temporary, JSON.stringify(next)); await fs.rename(temporary, target); }
-      finally { await fs.rm(temporary, { force: true }); }
-    }
+    else await persistLocal(agency, next);
   }
   async function update(agency: string, change: (next: T) => void) {
     return locked(agency, async () => {
@@ -70,6 +81,6 @@ export function createAgencyDocument<T extends { updatedAt: string }>(deps: Docu
       await persist(agency, before, next); memory.set(agency, next); return true;
     });
   }
-  return { doc, ensure, locked, check, persist, update, install: (a: string, d: T) => memory.set(a, d), ready: (a: string) => memory.has(a), boot: async (agencies: string[]) => { await Promise.allSettled([...new Set(agencies)].map(ensure)); } };
+  return { doc, ensure, locked, check, stage, persist, persistLocal, update, install: (a: string, d: T) => memory.set(a, d), ready: (a: string) => memory.has(a), boot: async (agencies: string[]) => { await Promise.allSettled([...new Set(agencies)].map(ensure)); } };
 }
 export const createFoodServiceStore = (deps: DocumentDeps) => createAgencyDocument<FoodServiceDoc>(deps, 'inspectionFoodService', () => ({ templates: {}, templateOrder: [], marked: [], placeTemplates: {}, manualPlaces: {}, updatedAt: '' }));

@@ -69,6 +69,18 @@ export function createScheduleStore(deps: { db(): any; dataDir: string; staged()
     patch.updatedAt = updatedAt;
     return { next, patch, ref: deps.db() ? ref(agency) : null };
   }
+  function prepareRemoval(agency: string, id: string) {
+    if (deps.staged()) throw Object.assign(Error('Writes blocked'), { status: 503 });
+    if (!memory.has(agency)) throw Error('Schedules unavailable');
+    const old = doc(agency);
+    const companies = Object.assign(Object.create(null), old.companies) as ScheduleDoc['companies'];
+    delete companies[id];
+    const updatedAt = deps.now().toISOString();
+    const next = { settings: old.settings, companies, updatedAt };
+    if (Buffer.byteLength(JSON.stringify(next), 'utf8') > 900_000) throw Object.assign(Error('Schedule document too large'), { status: 400 });
+    const patch = { companies: { [id]: FieldValue.delete() }, updatedAt };
+    return { next, patch, ref: deps.db() ? ref(agency) : null };
+  }
   async function persistLocal(agency: string, next: ScheduleDoc) {
     const target = file(agency), temporary = `${target}.${randomUUID()}.tmp`;
     await fs.mkdir(path.dirname(target), { recursive: true });
@@ -83,5 +95,5 @@ export function createScheduleStore(deps: { db(): any; dataDir: string; staged()
       memory.set(agency, p.next); return true;
     });
   }
-  return { boot: async (agencies: string[]) => { await Promise.allSettled([...new Set(agencies)].map(ensure)); }, ensure, ready: (agency: string) => memory.has(agency), doc, company: (a: string, id: string) => ({ ...emptyCompany(), ...company(a, id) }), locked, prepare, persistLocal, install: (a: string, next: ScheduleDoc) => memory.set(a, next), update };
+  return { boot: async (agencies: string[]) => { await Promise.allSettled([...new Set(agencies)].map(ensure)); }, ensure, ready: (agency: string) => memory.has(agency), doc, company: (a: string, id: string) => ({ ...emptyCompany(), ...company(a, id) }), locked, prepare, prepareRemoval, persistLocal, install: (a: string, next: ScheduleDoc) => memory.set(a, next), update };
 }

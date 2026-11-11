@@ -41,5 +41,92 @@ try {
   await food.update('a', d => { delete d.manualPlaces.fs_test; });
   const deleted = createFoodServiceStore(deps); await deleted.boot(['a']); assert.deepEqual(deleted.doc('a').manualPlaces, {});
  }
+ // A failed remote write must retain pending marks, including marks made
+ // after the failure. The next flush must combine them into one write.
+ {
+  const db = new MockFirestore();
+  const clock = new Date('2026-11-11T12:00:00Z');
+  let attempts = 0, successfulWrites = 0, failWrites = true;
+  const collection = db.collection.bind(db);
+  db.collection = name => {
+    const c = collection(name), doc = c.doc.bind(c);
+    c.doc = id => {
+      const ref = doc(id), set = ref.set.bind(ref);
+      ref.set = async (...args) => {
+        attempts++;
+        if (failWrites) throw new Error('Simulated Firestore failure');
+        successfulWrites++;
+        return set(...args);
+      };
+      return ref;
+    };
+    return c;
+  };
+  const batch = db.batch.bind(db);
+  db.batch = () => {
+    const b = batch(), commit = b.commit.bind(b);
+    b.commit = async () => {
+      attempts++;
+      if (failWrites) throw new Error('Simulated Firestore failure');
+      await commit();
+      successfulWrites += b._ops.length;
+    };
+    return b;
+  };
+  const deps = { db: () => db, dataDir: join(dir, 'retry'), staged: () => false, now: () => clock, submittedAt: () => clock.toISOString() };
+  const inbox = createInboxStore(deps);
+  await inbox.boot(['retry']);
+  const user = { id: 'u', name: 'Test admin' };
+  const report = id => ({ id, submittedAt: clock.toISOString() });
+  await inbox.mark('retry', report('first'), user);
+  await assert.rejects(inbox.flush(), /Simulated Firestore failure/);
+  assert.equal(successfulWrites, 0);
+  assert.equal(inbox.status('retry', report('first')).status, 'seen');
+  await inbox.mark('retry', report('second'), user);
+  failWrites = false;
+  assert.equal(await inbox.flush(), 1);
+  assert.equal(successfulWrites, 1);
+  assert.equal(await inbox.flush(), 0);
+  const reboot = createInboxStore(deps);
+  await reboot.boot(['retry']);
+  assert.equal(reboot.status('retry', report('first')).status, 'seen');
+  assert.equal(reboot.status('retry', report('second')).status, 'seen');
+  assert.equal(attempts, 2);
+ }
+ // Shutdown retries three times, resolves, and reports unsaved marks once.
+ {
+  const db = new MockFirestore();
+  let attempts = 0;
+  const collection = db.collection.bind(db);
+  db.collection = name => {
+    const c = collection(name), doc = c.doc.bind(c);
+    c.doc = id => {
+      const ref = doc(id);
+      ref.set = async () => { attempts++; throw new Error('Simulated persistent failure'); };
+      return ref;
+    };
+    return c;
+  };
+  const batch = db.batch.bind(db);
+  db.batch = () => {
+    const b = batch();
+    b.commit = async () => { attempts++; throw new Error('Simulated persistent failure'); };
+    return b;
+  };
+  const clock = new Date('2026-11-11T12:00:00Z');
+  const inbox = createInboxStore({ db: () => db, dataDir: join(dir, 'shutdown'), staged: () => false, now: () => clock, submittedAt: () => clock.toISOString() });
+  await inbox.boot(['shutdown']);
+  await inbox.mark('shutdown', { id: 'pending', submittedAt: clock.toISOString() }, { id: 'u', name: 'Test admin' });
+  const warnings = [], originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    await assert.rejects(inbox.flush(true), /Simulated persistent failure/);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(attempts, 3);
+  assert.deepEqual(warnings, ['[inspections] 1 seen marks could not be saved']);
+  assert.equal(inbox.status('shutdown', { id: 'pending', submittedAt: clock.toISOString() }).status, 'seen');
+ }
  console.log('PASS food-service/inbox boot, debounce, merge/delete, no-op, persistence, size and maintenance guards (local and Firestore)');
 } finally { await rm(dir, { recursive: true, force: true }); }

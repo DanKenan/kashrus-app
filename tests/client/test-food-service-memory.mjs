@@ -55,5 +55,105 @@ try {
  clock = new Date('2026-11-11T12:00:20Z'); await inbox.flush(); assert.ok(db._docs['inspectionInbox/a'].seen.new7);
  await inbox.mark('a', report(8), u); blocked = true; await assert.rejects(inbox.flush(true), e => e.status === 503); assert.equal(db._docs['inspectionInbox/a'].seen.new8, undefined);
  blocked = false; assert.equal(await inbox.flush(true), 1);
+ const companies = [
+  { id: 'alpha', name: 'Alpha Kitchen', type: 'Factory' },
+  { id: 'beta', name: 'Beta Kitchen', type: 'Restaurant' },
+  { id: 'factory', name: 'Factory Without Reports', type: 'Factory' }
+ ];
+ const template = (id, name) => ({ id, name, items: [], version: 1, updatedAt: clock.toISOString() });
+ const templates = { ta: template('ta', 'Alpha Checklist'), tb: template('tb', 'Beta Checklist'), unused: template('unused', 'Unused Checklist') };
+ db._seed('inspectionFoodService/b', {
+  templates, templateOrder: ['ta', 'tb', 'unused'], marked: ['alpha'],
+  placeTemplates: { alpha: 'ta', beta: 'tb' },
+  manualPlaces: { manual1: { name: 'Manual Kitchen', address: 'Demo address', createdAt: clock.toISOString() } },
+  updatedAt: clock.toISOString()
+ });
+ const scheduleRow = (mashgiachIds, coordinatorIds) => ({
+  schedule: { every: 7, unit: 'days', startDate: '2026-11-01' },
+  mashgiachIds, coordinatorIds,
+  mute: { until: null, by: 'admin', at: clock.toISOString() },
+  lastVisit: { at: clock.toISOString(), reportId: 'old', mashgiachName: 'Demo Mashgiach' },
+  alert: { kind: 'first', at: clock.toISOString(), nextDue: '2026-11-08' }
+ });
+ db._seed('inspectionSchedules/b', {
+  companies: {
+   alpha: scheduleRow(['m1'], ['c1']),
+   beta: scheduleRow(['m2'], ['c2']),
+   factory: scheduleRow(['m1'], ['c1']),
+   manual1: scheduleRow(['m2'], ['c1'])
+  },
+  updatedAt: clock.toISOString()
+ });
+ const users = [
+  { id: 'admin', name: 'Demo Admin', role: 'admin', agencyId: 'b' },
+  { id: 'c1', name: 'First Coordinator', role: 'coordinator', agencyId: 'b' },
+  { id: 'c2', name: 'Second Coordinator', role: 'coordinator', agencyId: 'b' },
+  { id: 'm1', name: 'First Mashgiach', role: 'mashgiach', agencyId: 'b' },
+  { id: 'm2', name: 'Second Mashgiach', role: 'mashgiach', agencyId: 'b' }
+ ];
+ const handlersB = new Map();
+ const appB = Object.fromEntries(['get', 'post', 'put', 'delete'].map(method => [method, (path, handler) => handlersB.set(`${method} ${path}`, handler)]));
+ const routesB = registerInspectionRoutes(appB, {
+  ...deps, agencyIds: () => ['b'], user: req => req.user, people: () => users,
+  source: () => ({
+   connection: { mapping: { companies: { foodServiceValues: ['Restaurant'] } } },
+   state: { companies, itemsFor: () => [] },
+   items: () => [], listVersion: () => ''
+  }),
+  maxPhotoChars: 400000, photoRe: /./
+ });
+ await routesB.boot();
+ const callB = async (method, path, user, body = {}, params = {}) => {
+  const res = { code: 200, status(code) { this.code = code; return this; }, json(value) { this.body = value; return this; } };
+  await handlersB.get(`${method} ${path}`)({ user, body, query: {}, params }, res);
+  return res;
+ };
+ const [admin, c1, c2] = users;
+ resetReadMeter();
+ const first = await callB('get', '/api/food-service', c1);
+ const second = await callB('get', '/api/food-service', c2);
+ assert.deepEqual(first.body.templates.map(t => t.id), ['ta']);
+ assert.deepEqual(second.body.templates.map(t => t.id), ['tb']);
+ assert.deepEqual(first.body.places.map(p => p.id), ['alpha', 'manual1']);
+ assert.deepEqual(second.body.places.map(p => p.id), ['beta']);
+ assert.equal(readMeterSnapshot().total, 0);
+ const all = await callB('get', '/api/food-service', admin);
+ assert.deepEqual(all.body.templates.map(t => t.id), ['ta', 'tb', 'unused']);
+ assert.equal(all.body.places.find(p => p.id === 'alpha').marked, true);
+ assert.equal(all.body.places.find(p => p.id === 'alpha').typeMatched, false);
+ assert.equal(all.body.places.find(p => p.id === 'beta').marked, false);
+ assert.equal(all.body.places.find(p => p.id === 'beta').typeMatched, true);
+ assert.equal(all.body.places.find(p => p.id === 'manual1').marked, false);
+ assert.equal(all.body.places.find(p => p.id === 'manual1').typeMatched, false);
+ companies[0].type = 'Restaurant';
+ const unmarked = await callB('put', '/api/food-service/marked', admin, { remove: ['alpha'] });
+ assert.equal(unmarked.code, 200);
+ assert.equal(unmarked.body.places.find(p => p.id === 'alpha').marked, false);
+ assert.equal(unmarked.body.places.find(p => p.id === 'alpha').typeMatched, true);
+ assert.equal((await callB('put', '/api/food-service/marked', admin, { remove: ['unknown'] })).code, 400);
+ const adminFilters = await callB('get', '/api/inspections/reports/filters', admin);
+ const coordinatorFilters = await callB('get', '/api/inspections/reports/filters', c1);
+ assert.ok(adminFilters.body.companies.some(c => c.id === 'factory'));
+ assert.deepEqual(adminFilters.body.mashgichim.map(m => m.id), ['m1', 'm2']);
+ assert.ok(coordinatorFilters.body.companies.some(c => c.id === 'factory'));
+ assert.deepEqual(coordinatorFilters.body.mashgichim.map(m => m.id), ['m1', 'm2']);
+ assert.equal(readMeterSnapshot().total, 0);
+ resetReadMeter(); resetWriteMeter();
+ const originalBatch = db.batch.bind(db);
+ let commits = 0;
+ db.batch = (...args) => {
+  const batch = originalBatch(...args), commit = batch.commit.bind(batch);
+  batch.commit = async (...commitArgs) => { commits++; return commit(...commitArgs); };
+  return batch;
+ };
+ const deleted = await callB('delete', '/api/food-service/places/:id', admin, {}, { id: 'manual1' });
+ assert.equal(deleted.code, 200);
+ assert.equal(commits, 1);
+ assert.equal(writeMeterSnapshot().total, 2);
+ assert.equal(readMeterSnapshot().total, 0);
+ assert.equal(Object.hasOwn(db._docs['inspectionSchedules/b'].companies, 'manual1'), false);
+ assert.equal(Object.hasOwn(db._docs['inspectionFoodService/b'].manualPlaces, 'manual1'), false);
+ assert.equal((await callB('get', '/api/inspections/schedule', admin)).body.companies.some(c => c.id === 'manual1'), false);
+ db.batch = originalBatch;
  console.log('PASS food-service memory-only pages, bounded explicit loading, projection, concurrent seen debounce, 90-day prune, pending seen isolation and blocked flush');
 } finally { await rm(dir, { recursive: true, force: true }); }

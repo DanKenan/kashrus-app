@@ -55,5 +55,44 @@ export function createInboxStore(deps: DocumentDeps & { submittedAt(agency: stri
       await base.persist(a, before, saved); persisted.set(a, structuredClone(saved)); base.install(a, next);
     });
   }
-  return { ensure, boot: async (agencies: string[]) => { await Promise.allSettled([...new Set(agencies)].map(ensure)); }, ready: base.ready, doc: base.doc, mark, followUp, status: (a: string, r: { id: string; submittedAt: string }) => inboxStatus(base.doc(a), r, deps.now()), flush: async (force = false) => { let writes = 0; for (const a of dirty.keys()) writes += await flushAgency(a, force); return writes; } };
+  async function flush(force = false) {
+    const flushPending = async () => {
+      let writes = 0;
+      for (const a of [...dirty.keys()]) writes += await flushAgency(a, force);
+      return writes;
+    };
+    if (!force) return flushPending();
+
+    // Shutdown is bounded even if a Firestore write never settles.
+    // Each failed attempt leaves dirty marks untouched for the next attempt.
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('Seen flush deadline exceeded')), 5_000);
+    });
+    let writes = 0;
+    let lastError: unknown;
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (![...dirty.values()].some(ids => ids.size)) break;
+        try {
+          writes += await Promise.race([flushPending(), deadline]);
+          break;
+        } catch (error) {
+          lastError = error;
+          // Retry pending agencies only. Successful writes have already cleared
+          // their dirty sets; failed writes retain the original pending marks.
+        }
+      }
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    const unsaved = [...dirty.values()].reduce((n, ids) => n + ids.size, 0);
+    if (unsaved) {
+      console.warn(`[inspections] ${unsaved} seen marks could not be saved`);
+      for (const [a, ids] of dirty) if (ids.size) schedule(a);
+      throw lastError ?? new Error('Seen flush incomplete');
+    }
+    return writes;
+  }
+  return { ensure, boot: async (agencies: string[]) => { await Promise.allSettled([...new Set(agencies)].map(ensure)); }, ready: base.ready, doc: base.doc, mark, followUp, status: (a: string, r: { id: string; submittedAt: string }) => inboxStatus(base.doc(a), r, deps.now()), flush };
 }
