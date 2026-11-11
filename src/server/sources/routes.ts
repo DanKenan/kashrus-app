@@ -313,7 +313,7 @@ export function registerSourceRoutes(app: any, deps: {
       const timer = setTimeout(() => { void boot(); }, delay); timer.unref();
     }
   }
-  return { boot, inspectionSource: inspectionSourceAccessor(cache, connections) };
+  return { boot, inspectionAgencyIds: () => [...connections.keys()], inspectionSource: inspectionSourceAccessor(cache, connections) };
 }
 
 // Read-only bridge for factory visits; no source calls or persistence.

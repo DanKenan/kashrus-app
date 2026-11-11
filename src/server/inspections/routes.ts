@@ -7,12 +7,10 @@ export function registerInspectionRoutes(app: any, deps: {
   maxPhotoChars: number; photoRe: RegExp;
 }) {
   const store = createReportStore(deps), pending = new Map<string, Promise<any>>();
-  let ready = false;
-  const handler = (admin: boolean, fn: any) => async (req: any, res: any) => {
+  const handler = (admin: boolean, fn: any, reports = false) => async (req: any, res: any) => {
     const user = deps.user(req);
     if (req.kiosk || !user?.agencyId || !(admin ? user.role === 'admin' : ['admin', 'coordinator', 'mashgiach'].includes(user.role))) return res.status(403).json({ error: 'Forbidden' });
-    if (!ready) return res.status(503).json({ error: 'Reports unavailable' });
-    try { await store.ensure(user.agencyId); await fn(req, res, user, user.agencyId); }
+    try { if (reports) await store.ensure(user.agencyId); await fn(req, res, user, user.agencyId); }
     catch { res.status(503).json({ error: 'Report operation failed' }); }
   };
   app.get('/api/visits/factories', handler(false, (_req: any, res: any, _u: any, agency: string) => {
@@ -60,17 +58,17 @@ export function registerInspectionRoutes(app: any, deps: {
     } catch { return res.status(400).json({ error: 'Invalid pagination' }); }
     res.json({ reports: await store.page(agency, limit, before, userId) });
   }
-  app.get('/api/visits/reports/mine', handler(false, (req: any, res: any, u: any, agency: string) => list(req, res, agency, u.id)));
-  app.get('/api/inspections/reports', handler(true, (req: any, res: any, _u: any, agency: string) => list(req, res, agency)));
+  app.get('/api/visits/reports/mine', handler(false, (req: any, res: any, u: any, agency: string) => list(req, res, agency, u.id), true));
+  app.get('/api/inspections/reports', handler(true, (req: any, res: any, _u: any, agency: string) => list(req, res, agency), true));
   app.get('/api/inspections/reports/:id', handler(true, async (req: any, res: any, _u: any, agency: string) => {
     const r = await store.get(agency, req.params.id);
     if (!r) return res.status(404).json({ error: 'Report not found' });
     res.json({ report: { ...summary(r), note: r.note, marks: r.marks, offList: r.offList } });
-  }));
+  }, true));
   app.get('/api/inspections/reports/:id/photos', handler(true, async (req: any, res: any, _u: any, agency: string) => {
     const r = await store.get(agency, req.params.id);
     if (!r) return res.status(404).json({ error: 'Report not found' });
     res.json({ photos: await store.readPhotos(r) });
-  }));
-  return { boot: async () => { await store.boot(deps.agencyIds?.() || []); ready = true; } };
+  }, true));
+  return { boot: async () => { await store.boot(deps.agencyIds?.() || []); } };
 }

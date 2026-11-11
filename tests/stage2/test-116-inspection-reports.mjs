@@ -41,6 +41,8 @@ export default {
         const w = (await api('admin', 'POST', '/api/__test__/writes', {})).json;
         assert.equal(r.total, reads, JSON.stringify(r)); assert.equal(w.total, writes, JSON.stringify(w));
       };
+      await api('admin', 'GET', '/api/inspections/reports'); // Finish this newly connected agency's empty hydration.
+      await api('foreign', 'GET', '/api/visits/reports/mine');
       await reset(); const sourceCalls = calls;
       assert.equal((await api('mash', 'GET', '/api/visits/factories')).json.companies.length, 1);
       const list = (await api('mash', 'GET', '/api/visits/factories/factory116')).json;
@@ -92,21 +94,38 @@ export default {
       await reset();
       const liveFee = await api('admin', 'POST', '/api/visits/reports', { ...body, clientReportId: 'report-116-live-fee', marks: [], offList: [] });
       assert.equal(liveFee.status, 201); assert.deepEqual(liveFee.json.fee, { amount: 82, currency: 'USD' }); await budget(0, 1);
+      await reset();
+      for (let i = 0; i < 201; i++) {
+        const extra = await api('admin', 'POST', '/api/visits/reports', { ...body, clientReportId: `report-116-page-${i}`, marks: [], offList: [] });
+        assert.equal(extra.status, 201);
+      }
+      await budget(0, 201);
       await ctx.restartServer();
+      for (let i = 0; i < 100; i++) {
+        if ((await api('admin', 'POST', '/api/__test__/reads', {})).json.byCollection.reports >= 200) break;
+        await sleep(50);
+      }
       const bootReads = (await api('admin', 'POST', '/api/__test__/reads', {})).json;
       assert.equal(bootReads.byCollection.inspectionReportPhotos || 0, 0);
-      // One bounded query per agency; Firestore bills one read even for an empty query.
-      assert.equal(bootReads.byCollection.inspectionReports, (await ctx.getDoc()).agencies.length + 2);
-      assert.equal((await api('admin', 'GET', '/api/inspections/reports')).json.reports.length, 3);
-      const retry = await api('mash', 'POST', '/api/visits/reports', body); assert.equal(retry.status, 200); assert.equal(retry.json.report.id, id);
+      // Only the connected agency is warmed; at most 200 full reports, no photos.
+      assert.equal(bootReads.byCollection.reports, 200 + bootReads.byCollection.sourceConnections - 1); // Other connected agencies are empty.
+      await reset();
+      const hydrated = (await api('admin', 'GET', '/api/inspections/reports?limit=200')).json.reports;
+      assert.equal(hydrated.length, 200); await budget(0, 0);
+      const last = hydrated.at(-1);
+      await reset();
+      const older = (await api('admin', 'GET', `/api/inspections/reports?limit=200&before=${encodeURIComponent(JSON.stringify({ submittedAt: last.submittedAt, id: last.id }))}`)).json.reports;
+      assert.equal(older.length, 4); await budget(4, 0);
       for (let i = 0; i < 100; i++) {
         if ((await api('admin', 'GET', '/api/visits/factories')).json.companies.length) break;
         await sleep(50);
       }
       await reset();
+      const retry = await api('mash', 'POST', '/api/visits/reports', body); assert.equal(retry.status, 200); assert.equal(retry.json.report.id, id); await budget(1, 0);
+      await reset();
       const paid = await api('admin', 'POST', '/api/visits/reports', { ...body, clientReportId: 'report-116-fee', marks: [], offList: [] });
       assert.equal(paid.status, 201, JSON.stringify(paid.json)); assert.deepEqual(paid.json.fee, { amount: 82, currency: 'USD' }); await budget(0, 1);
-      return 'List/detail/mine/inbox 0R/0W; submit photos 0R/2W; plain 0R/1W; retry 0R/0W; photos 1R then 0R; boot at most 5000 report reads per agency (empty query 1), 0 photo reads';
+      return 'List/detail/mine/inbox 0R/0W; submit photos 0R/2W; plain 0R/1W; cached retry 0R/0W; uncached retry 1R/0W; Load more 4R/0W for 4 reports; photos 1R then 0R; boot at most 200 report reads per agency (empty query 1), 0 photo reads';
     } finally { await new Promise(r => mock.close(r)); }
   },
 };

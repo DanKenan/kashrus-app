@@ -17,7 +17,7 @@ async function request(method, route, extra = {}) {
   await handlers.get(`${method} ${route}`)({ user, body, query: {}, params: {}, ...extra }, res); return res;
 }
 try {
-  assert.equal((await request('POST', '/api/visits/reports')).statusCode, 503);
+  assert.equal((await request('GET', '/api/visits/factories')).statusCode, 200);
   await routes.boot();
   assert.equal((await request('POST', '/api/visits/reports', { kiosk: true })).statusCode, 403);
   for (const badUser of [undefined, { ...user, agencyId: '' }, { ...user, role: 'worker' }, { ...user, role: 'manager' }]) assert.equal((await request('POST', '/api/visits/reports', { user: badUser })).statusCode, 403);

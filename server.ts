@@ -14825,7 +14825,7 @@ const sourceRoutes = registerSourceRoutes(app, {
   timeZone: (id) => agencies.find(a => a.id === id)?.timeZone,
 });
 const inspectionRoutes = registerInspectionRoutes(app, {
-  agencyIds: () => agencies.map(a => a.id),
+  agencyIds: sourceRoutes.inspectionAgencyIds,
   db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
   source: sourceRoutes.inspectionSource, user: getAuthUser,
   maxPhotoChars: ANSWER_PHOTO_MAX_CHARS, photoRe: ANSWER_PHOTO_DATA_RE,
@@ -22258,8 +22258,7 @@ async function startServer() {
     commit: mutator => commitState(mutator, { label: 'strip-legacy-airtable-keys' }),
     log: message => console.info(message),
   }).catch(() => console.warn('[sources] legacy key cleanup failed'));
-  void sourceRoutes.boot();
-  await inspectionRoutes.boot();
+  void sourceRoutes.boot().then(() => inspectionRoutes.boot());
 
   // STAGED REVISION: verification reads only. Skip ALL startup writes —
   // pepper init, task-order backfill, VAPID persistence, password migration.

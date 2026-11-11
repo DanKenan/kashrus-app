@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { apiFetch, sessionCredentialKey } from '../lib/api';
 import { ANSWER_PHOTO_MAX_CHARS } from './TaskAnswerPhoto';
-import { acceptReport, buildPayload, draftKey, markLabels, newDraft, queueReport, readOutbox, removeOutbox, restoreDraft, retryDue, retryResult, saveDraft, setMark, storeOutbox, visitCounts, visitScope, type DraftEditor, type Factory, type FactoryList, type Kind, type MarkStatus, type OffListItem, type OutboxEntry, type SentReport, type VisitDraft, type VisitItem } from '../lib/inspectionVisit';
+import { withOutboxLock, acceptReport, buildPayload, draftKey, markLabels, newDraft, queueReport, readOutbox, removeOutbox, restoreDraft, retryDue, retryResult, saveDraft, setMark, storeOutbox, visitCounts, visitScope, type DraftEditor, type Factory, type FactoryList, type Kind, type MarkStatus, type OffListItem, type OutboxEntry, type SentReport, type VisitDraft, type VisitItem } from '../lib/inspectionVisit';
 
 export const visitButton = 'pressable min-h-11 rounded-lg border border-line-control bg-surface px-3 py-2 text-base font-semibold text-ink focus-visible:ring-2 focus-visible:ring-gold disabled:opacity-50';
 const primary = 'pressable min-h-12 w-full rounded-xl bg-gold-deep px-4 py-3 text-base font-semibold text-paper disabled:opacity-50';
@@ -67,34 +67,36 @@ export function VisitOutbox({ userId, agencyId }: { key?: string; userId: string
       const sameCredential = () => { const same = sessionCredentialKey() === credential; if (!same) again = true; return same; };
       try {
         if (!readOutbox(localStorage, scope).some(entry => retryDue(entry, Date.now()))) return;
-        // Verify the live cookie/token belongs to this membership before sending its bytes.
-        const me = await apiFetch('/api/auth/me', { cache: 'no-store', signal: controller.signal });
-        const identity = await me.json();
-        if (!me.ok || identity.kiosk || identity.user?.id !== userId || identity.user?.agencyId !== agencyId || !active || !sameCredential()) return;
-        for (const entry of readOutbox(localStorage, scope)) {
-          if (!active || !sameCredential()) break;
-          if (!retryDue(entry, Date.now())) continue;
-          storeOutbox(localStorage, scope, { ...entry, sending: true }); changed();
-          const timeout = new AbortController();
-          const abort = () => timeout.abort();
-          controller.signal.addEventListener('abort', abort);
-          const timer = setTimeout(abort, 25_000);
-          try {
-            const response = await apiFetch('/api/visits/reports', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry.draft), signal: timeout.signal });
-            const body = await response.json().catch(() => ({}));
+        await withOutboxLock(localStorage, scope, async () => {
+          // Verify the live cookie/token belongs to this membership before sending its bytes.
+          const me = await apiFetch('/api/auth/me', { cache: 'no-store', signal: controller.signal });
+          const identity = await me.json();
+          if (!me.ok || identity.kiosk || identity.user?.id !== userId || identity.user?.agencyId !== agencyId || !active || !sameCredential()) return;
+          for (const entry of readOutbox(localStorage, scope)) {
             if (!active || !sameCredential()) break;
-            if (response.status === 200 || response.status === 201) acceptReport(localStorage, scope, entry, body);
-            else storeOutbox(localStorage, scope, retryResult(entry, response.status, body.error || `Request failed (${response.status}).`, Date.now()));
-          } catch (error) {
-            if (active && sameCredential()) storeOutbox(localStorage, scope, retryResult(entry, 0, error instanceof Error ? error.message : 'Connection unavailable.', Date.now()));
-          } finally {
-            clearTimeout(timer); controller.signal.removeEventListener('abort', abort);
-            const current = readOutbox(localStorage, scope).find(row => row.draft.clientReportId === entry.draft.clientReportId);
-            if (current?.sending) storeOutbox(localStorage, scope, { ...current, sending: false });
+            if (!retryDue(entry, Date.now())) continue;
+            storeOutbox(localStorage, scope, { ...entry, sending: true }); changed();
+            const timeout = new AbortController();
+            const abort = () => timeout.abort();
+            controller.signal.addEventListener('abort', abort);
+            const timer = setTimeout(abort, 25_000);
+            try {
+              const response = await apiFetch('/api/visits/reports', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry.draft), signal: timeout.signal });
+              const body = await response.json().catch(() => ({}));
+              if (!active || !sameCredential()) break;
+              if (response.status === 200 || response.status === 201) acceptReport(localStorage, scope, entry, body);
+              else storeOutbox(localStorage, scope, retryResult(entry, response.status, body.error || `Request failed (${response.status}).`, Date.now()));
+            } catch (error) {
+              if (active && sameCredential()) storeOutbox(localStorage, scope, retryResult(entry, 0, error instanceof Error ? error.message : 'Connection unavailable.', Date.now()));
+            } finally {
+              clearTimeout(timer); controller.signal.removeEventListener('abort', abort);
+              const current = readOutbox(localStorage, scope).find(row => row.draft.clientReportId === entry.draft.clientReportId);
+              if (current?.sending) storeOutbox(localStorage, scope, { ...current, sending: false });
+              changed();
+            }
             changed();
           }
-          changed();
-        }
+        });
       } catch { if (active) window.dispatchEvent(new Event('inspection-storage-error')); }
       finally { running = false; if (again && active) { again = false; void run(); } }
     };
@@ -245,7 +247,7 @@ export function FactoryVisitScreen({ userId, agencyId, timeZone, onClose }: Prop
       {review ? <section className="space-y-4"><h3 className="text-xl font-semibold">Review</h3><VisitCounts counts={visitCounts(draft)} /><button type="button" className={visitButton} onClick={() => setReview(false)}>Edit visit</button>{(['alert', 'not_used', 'checked'] as MarkStatus[]).map(status => <section key={status} className="space-y-2"><h4 className="text-xl font-semibold">{markLabels[status]}</h4>{draft.marks.filter(row => row.status === status).map(row => { const item = (row.kind === 'ingredient' ? list.ingredients : list.products).find(item => item.id === row.itemId); return <div key={`${row.kind}:${row.itemId}`} className="space-y-2 rounded-xl border border-line p-4">{(row.item || item) && <SourceText item={(row.item || item)!} />}<p dir="auto" className="whitespace-pre-wrap break-words">{row.note}</p>{row.photo && <img src={row.photo} alt="Alert photo" className="max-h-48 rounded-lg" />}</div>; })}</section>)}<label className="block">Report note<textarea name="report-note" maxLength={4000} className={input} value={draft.note} onChange={e => update({ ...draft, note: e.target.value })} /></label></section> : <><ItemSection title="Ingredients" kind="ingredient" items={list.ingredients} draft={draft} onMark={mark} onEdit={editAlert} /><ItemSection title="Products" kind="product" items={list.products} draft={draft} onMark={mark} onEdit={editAlert} /></>}
       {draft.marks.some(row => !(row.kind === 'ingredient' ? list.ingredients : list.products).some(item => item.id === row.itemId)) && <section className="space-y-2"><h3 className="text-xl font-semibold">No longer on the current list</h3>{draft.marks.filter(row => !(row.kind === 'ingredient' ? list.ingredients : list.products).some(item => item.id === row.itemId)).map(row => <div key={`${row.kind}:${row.itemId}`} className="space-y-2 rounded-xl border border-line p-4">{row.item ? <SourceText item={row.item} /> : <p>{row.itemId}</p>}<p>{markLabels[row.status]}</p><p dir="auto" className="whitespace-pre-wrap break-words">{row.note}</p>{row.photo && <img src={row.photo} alt="Alert photo" className="max-h-48 rounded-lg" />}</div>)}</section>}
       <section className="space-y-2"><h3 className="text-xl font-semibold">Off-list items</h3>{draft.offList.map((row, index) => <div key={index} className="space-y-2 rounded-xl border border-line p-4"><p dir="auto" className="whitespace-pre-wrap break-words">{row.name}</p><p dir="auto" className="whitespace-pre-wrap break-words">{row.brand}</p><p dir="auto" className="whitespace-pre-wrap break-words">{row.note}</p>{row.photo && <img src={row.photo} alt="Off-list item photo" className="max-h-48 rounded-lg" />}<button type="button" className={visitButton} onClick={() => editSheet({ index, initial: row })}>Edit item</button><button type="button" className={visitButton} onClick={() => update({ ...draft, offList: draft.offList.filter((_, i) => i !== index) })}>Remove item</button></div>)}</section>
-      {!sheet && <footer className="fixed inset-x-0 bottom-0 z-10 border-t border-line bg-surface p-4"><div className="mx-auto max-w-2xl space-y-2"><VisitCounts counts={visitCounts(draft)} />{!review && <button type="button" className={visitButton} onClick={() => editSheet({ initial: { name: '', brand: '', note: '' } })}>Add item not on the list</button>}<button type="button" className={primary} onClick={review ? send : () => setReview(true)}>{review ? 'Send report' : 'Review and send'}</button></div></footer>}
+      {!sheet && <footer className="fixed inset-x-0 bottom-0 z-10 border-t border-line bg-surface p-4 pb-[max(16px,env(safe-area-inset-bottom))]"><div className="mx-auto max-w-2xl space-y-2"><VisitCounts counts={visitCounts(draft)} />{!review && <button type="button" className={visitButton} onClick={() => editSheet({ initial: { name: '', brand: '', note: '' } })}>Add item not on the list</button>}<button type="button" className={primary} onClick={review ? send : () => setReview(true)}>{review ? 'Send report' : 'Review and send'}</button></div></footer>}
       </>}
     </> : <section className="space-y-4">{waiting.length > 0 && <p role="status">Waiting to send ({waiting.length})</p>}{waiting.map(entry => <div key={entry.draft.clientReportId} className="space-y-2"><p>{factories?.find(row => row.id === entry.draft.companyId)?.name || entry.draft.companyId}</p>{entry.stopped && <p role="alert">{entry.error}</p>}<button type="button" className={visitButton} onClick={() => void open(entry.draft.companyId)}>{entry.stopped ? 'Edit report' : 'View waiting report'}</button></div>)}{entries.filter(entry => entry.sent).map(entry => <button key={entry.draft.clientReportId} className={visitButton} type="button" onClick={() => setSent(entry.sent!)}>We got it · {entry.sent!.report.companyName} · {visitTime(entry.sent!.report.submittedAt, timeZone)}</button>)}<label className="block">Search factories<input name="factory-search" type="search" className={input} value={query} onChange={e => setQuery(e.target.value)} /></label>{loading || factories === null ? <p role="status">Loading factories…</p> : <ul className="space-y-2">{factories.filter(row => [row.name, row.brand, row.plant].some(value => value?.toLocaleLowerCase().includes(query.toLocaleLowerCase()))).map(row => <li key={row.id}><button disabled={loading} type="button" className={`${visitButton} w-full space-y-2 p-4 text-left`} onClick={() => void open(row.id)}><p dir="auto" className="whitespace-pre-wrap break-words text-xl">{row.name}</p><p dir="auto" className="whitespace-pre-wrap break-words">{row.brand}</p><p dir="auto" className="whitespace-pre-wrap break-words">{row.plant}</p><p>{row.ingredientCount} ingredients · {row.productCount} products</p></button></li>)}</ul>}</section>}
     {sheet && draft && <ItemSheet initial={sheet.initial} alert={!!sheet.kind} onClose={() => editSheet(null)} onChange={row => editSheet({ ...sheet, initial: row })} onSave={row => {

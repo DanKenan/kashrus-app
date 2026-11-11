@@ -49,6 +49,10 @@ class MockQuery {
   limit(value) { return new MockQuery(this.store, this.path, this.filters, this.orders, this.cursor, value, this.fields); }
   select(...values) { return new MockQuery(this.store, this.path, this.filters, this.orders, this.cursor, this.cap, values); }
   async get() {
+    if (this.path.startsWith('inspectionReportsByAgency/') && (
+      (this.filters.length && this.orders.length) || this.orders.length > 1 ||
+      this.filters.some(([field, op]) => op !== '==' && this.orders.some(([order]) => order !== field))
+    )) throw Error('composite index required');
     const compare = (a, b) => { for (const [field, direction] of this.orders) { const cmp = a[field] === b[field] ? 0 : a[field] < b[field] ? -1 : 1; if (cmp) return direction === 'desc' ? -cmp : cmp; } return 0; };
     const boundary = this.cursor && Object.fromEntries(this.orders.map(([field], i) => [field, this.cursor[i]]));
     const rows = Object.entries(this.store._docs).filter(([path, data]) => path.startsWith(`${this.path}/`) && data !== undefined && this.filters.every(([field, op, value]) => op === '==' ? data[field] === value : op === '>=' ? data[field] >= value : false)).sort((a, b) => compare(a[1], b[1])).filter(([, data]) => !boundary || compare(data, boundary) > 0).slice(0, this.cap);

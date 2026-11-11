@@ -21,15 +21,16 @@ try {
   assert.equal((await store.save(report, input.photos)).created, true); budget(0, 2);
   // An old report outside every cache is still protected by the deterministic create precondition.
   const old = { ...report, submittedAt: '2000-01-01T00:00:00Z' };
-  db._seed(`inspectionReports/a__${old.id}`, old);
+  db._seed(`inspectionReportsByAgency/a/reports/${old.id}`, { ...old, sortKey: `${old.submittedAt}|${old.id}` });
   const restarted = createReportStore(deps); await restarted.boot(); reset();
   const duplicate = await restarted.save(report, input.photos);
   assert.equal(duplicate.created, false); assert.equal(duplicate.report.submittedAt, old.submittedAt); budget(1, 0);
   // More than 5000, with ties spanning the cache boundary; another agency never enters a page.
-  for (let i = 0; i < 5105; i++) db._seed(`inspectionReports/a__r${String(i).padStart(5, '0')}`, { ...report, id: `r${String(i).padStart(5, '0')}`, submittedAt: '2026-11-10T00:00:00Z' });
-  db._seed('inspectionReports/b__foreign', { ...report, id: 'foreign', agencyId: 'b' });
-  reset(); await restarted.ensure('a'); budget(5000, 0);
-  assert.equal(restarted.list('a').length, 5000); assert.equal(restarted.cachedDetails(), 500);
+  for (let i = 0; i < 5105; i++) db._seed(`inspectionReportsByAgency/a/reports/r${String(i).padStart(5, '0')}`, { ...report, id: `r${String(i).padStart(5, '0')}`, submittedAt: '2026-11-10T00:00:00Z', sortKey: `2026-11-10T00:00:00Z|r${String(i).padStart(5, '0')}` });
+  db._seed('inspectionReportsByAgency/b/reports/foreign', { ...report, id: 'foreign', agencyId: 'b' });
+  reset(); await restarted.ensure('a'); budget(200, 0);
+  reset(); await restarted.ensure('empty'); budget(1, 0);
+  assert.equal(restarted.list('a').length, 200); assert.equal(restarted.cachedDetails(), 200);
   assert.ok(restarted.list('a').every(r => !('marks' in r) && !('offList' in r)));
   const ids = []; let cursor;
   reset();
@@ -39,9 +40,12 @@ try {
     if (page.length < 200) break;
     cursor = { submittedAt: page.at(-1).submittedAt, id: page.at(-1).id };
   }
-  assert.equal(ids.length, 5106); assert.equal(new Set(ids).size, ids.length); budget(106, 0);
+  assert.equal(restarted.list('a').length, 5000);
+  assert.equal(ids.length, 5106); assert.equal(new Set(ids).size, ids.length); budget(4906, 0);
+  reset(); const revisit = await restarted.page('a', 200, restarted.list('a').at(-1)); assert.equal(revisit.length, 106); budget(106, 0);
   reset(); assert.equal((await restarted.get('a', 'r00000')).id, 'r00000'); budget(1, 0);
-  assert.equal(restarted.cachedDetails(), 500);
+  assert.equal(restarted.cachedDetails(), 201);
+  reset(); await restarted.get('a', 'r00000'); budget(0, 0);
   reset(); await Promise.all([restarted.readPhotos(report), restarted.readPhotos(report)]); budget(1, 0);
   await restarted.readPhotos(report); budget(1, 0);
   reset(); await restarted.page('a', 200, cursor, 'u'); budget(0, 0);
@@ -58,5 +62,8 @@ try {
   assert.equal(await failedLocal.get('a', report.id), undefined);
   const concurrentLocal = await Promise.all([local.save(report, input.photos), localBoot.save(report, input.photos)]);
   assert.ok(concurrentLocal.every(result => !result.created));
+  const bounded = createReportStore({ ...deps, db: () => ({ collection: () => ({ doc: id => id }), batch: () => ({ create() {}, async commit() {} }) }) });
+  for (let i = 0; i < 501; i++) await bounded.save({ ...report, id: `cap-${i}`, photoCount: 0 }, {});
+  assert.equal(bounded.cachedDetails(), 500);
   console.log('inspection store: durable create, 5000 summaries / 500 details, tied pages, exact read/write counts, lazy photos and local restart passed');
 } finally { await rm(dir, { recursive: true, force: true }); }

@@ -42,6 +42,11 @@ globalThis.fetch = async (url, options = {}) => {
   if (url === '/api/visits/reports') { posts.push(options.body); return new Promise(resolve => { resolvePost = () => resolve(Response.json(status < 400 ? { report: { ...removed, id: 'r' }, fee: null } : { error: 'Edit report' }, { status })); }); }
   throw Error(url);
 };
+const heldLocks = new Set();
+Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: async (name, _options, fn) => {
+  if (heldLocks.has(name)) return fn(null);
+  heldLocks.add(name); try { await fn({}); } finally { heldLocks.delete(name); }
+} } } });
 const interval = globalThis.setInterval; globalThis.setInterval = () => 0;
 try {
   saveDraft(localStorage, scope, four);
@@ -58,6 +63,8 @@ try {
   await screen.click('Review and send'); await screen.click('Send report');
   await worker.render(); await screen.render(); assert.equal(posts.length, 1); assert.equal(identityChecks, 2); assert.match(screen.text(), /Sending…/);
   assert.equal(screen.buttons().some(b => /Edit|Remove/.test(b.label)), false);
+  const otherTab = mount(VisitOutbox, { userId: 'u', agencyId: 'a' }); await otherTab.render();
+  assert.equal(posts.length, 1); // A second mounted worker cannot POST the in-flight entry.
   for (const name of ['focus', 'online', 'inspection-send']) window.dispatchEvent(new Event(name));
   await worker.render(); assert.equal(posts.length, 1);
   resolvePost(); await worker.render(); await screen.render(); assert.match(screen.text(), /We got it/); assert.equal(posts.length, 1);

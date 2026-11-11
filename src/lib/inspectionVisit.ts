@@ -124,3 +124,23 @@ export function acceptReport(storage: StorageLike, scope: string, entry: OutboxE
   if (raw && JSON.parse(raw).clientReportId === entry.draft.clientReportId) storage.removeItem(key);
 }
 export const retryDue = (entry: OutboxEntry, now: number) => !entry.stopped && !entry.sent && entry.nextAttempt <= now;
+
+/** Serialize a membership's outbox across tabs; leases recover after a closed tab. */
+export async function withOutboxLock(storage: StorageLike, scope: string, send: () => Promise<void>) {
+  const name = `${scope}:send-lock`;
+  if (typeof navigator !== 'undefined' && navigator.locks) {
+    await navigator.locks.request(name, { ifAvailable: true }, async lock => { if (lock) await send(); });
+    return;
+  }
+  const owner = globalThis.crypto.randomUUID();
+  const read = () => { try { return JSON.parse(storage.getItem(name) || 'null'); } catch { return null; } };
+  if (read()?.expires > Date.now()) return;
+  const renew = () => storage.setItem(name, JSON.stringify({ owner, expires: Date.now() + 60000 }));
+  renew();
+  // Let simultaneous claims settle before either tab starts a request.
+  await new Promise(resolve => setTimeout(resolve, 50));
+  if (read()?.owner !== owner) return;
+  const timer = setInterval(() => { if (read()?.owner === owner) renew(); }, 10000);
+  try { await send(); }
+  finally { clearInterval(timer); if (read()?.owner === owner) storage.removeItem(name); }
+}

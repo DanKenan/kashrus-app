@@ -8,17 +8,25 @@ export const reportOrder = (a: Cursor, b: Cursor) => b.submittedAt.localeCompare
 export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean }) {
   const reports = new Map<string, Report>(), summaries = new Map<string, ReturnType<typeof summary> & { agencyId: string }>();
   const loaded = new Map<string, Promise<void>>();
+  const failures = new Map<string, { retryAt: number; attempts: number }>();
+  const ends = new Map<string, Cursor | undefined>();
+  const collection = (agency: string) => deps.db().collection(`inspectionReportsByAgency/${agency}/reports`);
+  const sortKey = (r: Cursor) => `${r.submittedAt}|${r.id}`;
   const photos = new Map<string, Record<string, string>>(), flights = new Map<string, Promise<Record<string, string>>>();
   const key = (agency: string, id: string) => `${agency}__${id}`;
   const file = (collection: string, id: string) => path.join(deps.dataDir, 'inspection-reports', collection, encodeURIComponent(id) + '.json');
   const list = (agency: string) => [...summaries.values()].filter(r => r.agencyId === agency).sort(reportOrder);
+  function cacheDetail(r: Report) {
+    const id = key(r.agencyId, r.id);
+    reports.delete(id); reports.set(id, r);
+    const ids = [...reports].filter(([, row]) => row.agencyId === r.agencyId).map(([id]) => id);
+    for (const id of ids.slice(0, Math.max(0, ids.length - 500))) reports.delete(id);
+  }
   function install(r: Report) {
     const id = key(r.agencyId, r.id);
-    summaries.set(id, { ...summary(r), agencyId: r.agencyId }); reports.set(id, r);
+    summaries.set(id, { ...summary(r), agencyId: r.agencyId }); cacheDetail(r);
     const rows = list(r.agencyId);
     for (const row of rows.slice(5000)) summaries.delete(key(r.agencyId, row.id));
-    const detailIds = new Set(rows.slice(0, 500).map(row => key(r.agencyId, row.id)));
-    for (const [id, row] of reports) if (row.agencyId === r.agencyId && !detailIds.has(id)) reports.delete(id);
   }
   async function localRows(): Promise<Report[]> {
     let names: string[] = [];
@@ -26,35 +34,41 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     return Promise.all(names.filter(n => n.endsWith('.json')).map(n => fs.readFile(path.join(path.dirname(file('inspectionReports', 'x')), n), 'utf8').then(JSON.parse)));
   }
   function query(agency: string, limit: number, before?: Cursor, projection = false) {
-    let q = deps.db().collection('inspectionReports').where('agencyId', '==', agency).orderBy('submittedAt', 'desc').orderBy('id', 'desc');
-    if (before) q = q.startAfter(before.submittedAt, before.id);
+    let q = collection(agency).orderBy('sortKey', 'desc');
+    if (before) q = q.startAfter(sortKey(before));
     if (projection) q = q.select('id', 'agencyId', 'companyId', 'companyName', 'mashgiachId', 'mashgiachName', 'submittedAt', 'startedAt', 'counts', 'hasAlerts', 'listChanged', 'photoCount');
     return q.limit(limit);
   }
-  // Hydrate each agency once, using bounded queries and no retention window.
+  // One bounded page per agency; failed background work never rejects boot.
   async function ensure(agency: string) {
     if (!loaded.has(agency)) {
+      const failed = failures.get(agency);
+      if (failed && Date.now() < failed.retryAt) throw Error('Reports unavailable');
       const task = (async () => {
-        if (deps.db()) {
-          const details: Report[] = (await query(agency, 500).get()).docs.map((d: any) => d.data());
-          for (const r of details) install(r);
-          if (details.length === 500) {
-            const rows = (await query(agency, 4500, details.at(-1), true).get()).docs;
-            for (const d of rows) { const r = d.data(); summaries.set(key(agency, r.id), r); }
-          }
-        } else for (const r of (await localRows()).filter(r => r.agencyId === agency).sort(reportOrder).slice(0, 5000)) install(r);
-      })().catch(error => { loaded.delete(agency); throw error; });
+        const rows: Report[] = deps.db()
+          ? (await query(agency, 200).get()).docs.map((d: any) => d.data())
+          : (await localRows()).filter(r => r.agencyId === agency).sort(reportOrder).slice(0, 200);
+        for (const r of rows) install(r);
+        if (rows.length < 200) ends.set(agency, rows.at(-1));
+        failures.delete(agency);
+      })().catch(error => {
+        loaded.delete(agency);
+        const attempts = (failed?.attempts || 0) + 1;
+        failures.set(agency, { attempts, retryAt: Date.now() + Math.min(1000 * 2 ** Math.min(attempts - 1, 6), 60000) });
+        throw error;
+      });
       loaded.set(agency, task);
     }
     await loaded.get(agency);
   }
   async function get(agency: string, id: string): Promise<Report | undefined> {
-    const cached = reports.get(key(agency, id)); if (cached) return cached;
+    const cached = reports.get(key(agency, id)); if (cached) { cacheDetail(cached); return cached; }
     const db = deps.db();
     let r: Report | undefined;
-    if (db) r = (await db.collection('inspectionReports').doc(key(agency, id)).get()).data();
+    if (db) r = (await collection(agency).doc(id).get()).data();
     else try { r = JSON.parse(await fs.readFile(file('inspectionReports', key(agency, id)), 'utf8')); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
-    return r?.agencyId === agency ? r : undefined;
+    if (r?.agencyId !== agency) return undefined;
+    cacheDetail(r); return r;
   }
   async function save(r: Report, photoData: Record<string, string>): Promise<{ report: Report; created: boolean }> {
     if (deps.staged()) throw Error('Writes blocked');
@@ -63,7 +77,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     try {
       if (db) {
         const batch = db.batch();
-        batch.create(db.collection('inspectionReports').doc(id), r);
+        batch.create(collection(r.agencyId).doc(r.id), { ...r, sortKey: sortKey(r) });
         if (r.photoCount) batch.create(db.collection('inspectionReportPhotos').doc(id), { photos: photoData });
         await batch.commit();
       } else {
@@ -85,7 +99,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     } catch (e: any) {
       if (![6, 'already-exists', 'ALREADY_EXISTS', 'EEXIST'].includes(e.code)) throw e;
       // One document read, no writes, irrespective of the in-memory cache/window.
-      const stored = db ? (await db.collection('inspectionReports').doc(id).get()).data() : JSON.parse(await fs.readFile(file('inspectionReports', id), 'utf8'));
+      const stored = db ? (await collection(r.agencyId).doc(r.id).get()).data() : JSON.parse(await fs.readFile(file('inspectionReports', id), 'utf8'));
       if (!stored) throw e;
       return { report: stored, created: false };
     }
@@ -95,10 +109,13 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     await ensure(agency);
     const cached = list(agency), rows = cached.filter(r => (!userId || r.mashgiachId === userId) && (!before || reportOrder(r, before) > 0)).slice(0, limit);
     // Only admins can cross the memory boundary. Projection never reads photo documents.
-    if (!userId && cached.length === 5000 && rows.length < limit) {
+    if (!userId && rows.length < limit && (!ends.has(agency) || (before && ends.get(agency) && reportOrder(before, ends.get(agency)!) < 0))) {
       const cursor = rows.at(-1) || before || cached.at(-1);
       const db = deps.db();
       const older = db ? (await query(agency, limit - rows.length, cursor, true).get()).docs.map((d: any) => d.data()) : (await localRows()).filter(r => r.agencyId === agency && (!cursor || reportOrder(r, cursor) > 0)).sort(reportOrder).slice(0, limit - rows.length);
+      if (older.length < limit - rows.length) ends.set(agency, older.at(-1) || cursor);
+      for (const r of older) summaries.set(key(agency, r.id), { ...summary(r), agencyId: agency });
+      for (const r of list(agency).slice(5000)) summaries.delete(key(agency, r.id));
       return [...rows, ...older].map(summary);
     }
     return rows.map(summary);
@@ -119,5 +136,5 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     })().finally(() => flights.delete(id));
     flights.set(id, flight); return flight;
   }
-  return { boot: async (agencies: string[] = []) => { await Promise.all(agencies.map(ensure)); }, ensure, save, readPhotos, get, page, list, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
+  return { boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, ensure, save, readPhotos, get, page, list, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
 }
