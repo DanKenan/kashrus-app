@@ -133,7 +133,7 @@ export default {
       assert.equal(hydrated.length, 200); await budget(0, 0);
       const last = hydrated.at(-1);
       await reset();
-      const older = (await api('admin', 'GET', `/api/inspections/reports?limit=200&before=${encodeURIComponent(JSON.stringify({ submittedAt: last.submittedAt, id: last.id }))}`)).json.reports;
+      const older = (await api('admin', 'GET', `/api/inspections/reports?limit=200&more=1&before=${encodeURIComponent(JSON.stringify({ submittedAt: last.submittedAt, id: last.id }))}`)).json.reports;
       assert.equal(older.length, 4); await budget(4, 0);
       await reset();
       const retry = await api('mash', 'POST', '/api/visits/reports', body); assert.equal(retry.status, 200); assert.equal(retry.json.report.id, id); await budget(1, 0);

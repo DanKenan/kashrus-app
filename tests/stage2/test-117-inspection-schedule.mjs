@@ -164,12 +164,12 @@ export default {
       assert.deepEqual(coldAdmin, expectedAdmin); assert.deepEqual(coldAdminMore, expectedAdminMore);
       await budget('admin paging after restart', 0, 0);
       await reset();
-      const cold = (await api('coord', 'GET', '/api/inspections/reports?limit=50')).json;
+      const cold = (await api('coord', 'GET', '/api/inspections/reports?limit=50&more=1')).json;
       assert.deepEqual(cold.reports, []); assert.ok(cold.nextCursor);
       assert.equal(cold.nextCursor.submittedAt, '2098-11-20T14:00:00.000Z');
       await budget('coordinator cold scan (1000 extra rows)', 1000, 0);
       await reset();
-      const loaded = (await api('coord', 'GET', `/api/inspections/reports?limit=50&before=${encodeURIComponent(JSON.stringify(cold.nextCursor))}`)).json;
+      const loaded = (await api('coord', 'GET', `/api/inspections/reports?limit=50&more=1&before=${encodeURIComponent(JSON.stringify(cold.nextCursor))}`)).json;
       assert.deepEqual(loaded.reports.map(r => r.id), visibleIds); assert.equal(loaded.nextCursor, null);
       await budget('coordinator Load more (history exhausted)', 4, 0);
       await reset();

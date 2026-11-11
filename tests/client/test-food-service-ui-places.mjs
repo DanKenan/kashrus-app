@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { mount } from './lib/mini-render.mjs';
+import { FoodServiceScreen } from '../../src/components/FoodServiceScreen.tsx';
+import { VisitScheduleEditor } from '../../src/components/VisitScheduleEditor.tsx';
+import { previewRows } from '../../src/lib/sourcePreview.ts';
+const company = { id: 'fs_test', name: ' Test place ', address: ' Test address ', type: '', source: 'manual', templateId: null, schedule: null, nextDue: null, lastVisit: null, status: 'none', overdueDays: 0, mashgiachIds: [], coordinatorIds: [], mute: null };
+const data = { today: '2026-11-11', timeZone: 'UTC', settings: { countFrom: 'planned', mashgichimSeeAll: true }, people: { mashgichim: [], coordinators: [] }, templates: [], places: [company], candidates: [] };
+globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
+const calls = []; globalThis.fetch = async (url, opts = {}) => { calls.push([url, opts.method || 'GET', opts.body && JSON.parse(opts.body)]); return new Response(JSON.stringify(url.endsWith('/connection') ? { mapping: { companies: { foodServiceValues: [' Test food '] } } } : url.endsWith('/mute') ? { company: { ...company, mute: { until: null } } } : data)); };
+const props = { role: 'admin', userId: 'test-u', agencyId: 'test-a', timeZone: 'UTC', onClose() {} };
+const screen = mount(FoodServiceScreen, props); await screen.render(); assert.match(screen.text(), /No checklist/); await screen.click('Add a place');
+const inputs = screen.find(e => e.type === 'input'); inputs[0].props.onChange({ target: { value: ' New test place ' } }); await screen.render(); screen.find(e => e.type === 'input')[1].props.onChange({ target: { value: ' Test address ' } }); await screen.render(); await screen.submit();
+assert.deepEqual(calls.find(c => c[0] === '/api/food-service/places'), ['/api/food-service/places', 'POST', { name: ' New test place ', address: ' Test address ' }]);
+const editor = mount(VisitScheduleEditor, { company, data, isAdmin: false, onSaved() {}, onClose() {} }); await editor.render();
+assert.match(editor.text(), /Turning alerts off stops new-report and overdue notifications\. Problems found on a visit are always sent\./); assert.doesNotMatch(editor.text(), /Overdue alerts/);
+await editor.click(e => e.props.children === 'Off'); assert.equal(editor.find(e => e.type === 'button' && e.props.children === 'Off')[0].props['aria-pressed'], true); await editor.submit(); assert.deepEqual(calls.find(c => c[0].endsWith('/mute')), ['/api/inspections/schedule/companies/fs_test/mute', 'PUT', { muted: true, until: null }]);
+assert.equal(editor.find(e => e.type === 'input' && ['radio', 'checkbox'].includes(e.props.type)).length, 0);
+const mapping = { companies: { table: 'test', name: 'name', type: 'type', factoryValues: ['Factory'], foodServiceValues: ['Food'] } };
+const preview = previewRows({ test: [{ id: 'c', fields: { name: ' Test name ', type: ' Food ' } }] }, mapping, 'companies');
+assert.deepEqual(preview.rows[0].slice(0, 4), [' Test name ', ' Food ', 'No', 'Yes']);
+for (const file of ['src/lib/foodService.ts', ...['ChecklistTemplatesScreen', 'FoodServiceScreen', 'FoodServiceVisitScreen'].map(n => `src/components/${n}.tsx`)]) { const text = fs.readFileSync(file, 'utf8'); assert.doesNotMatch(text, /e\.g\.|\.where\(|\.orderBy\(|commitState\(/); }
+console.log('food service places, indefinite mute, approved copy, source preservation and index-free guard: OK');

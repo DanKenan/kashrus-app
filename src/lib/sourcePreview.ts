@@ -41,17 +41,18 @@ export function classifyRaw(mapping: SourceMapping, config: { certification?: st
 export function previewRows(samples: SourceSamples, mapping: SourceMapping, group: 'companies' | 'ingredients' | 'products', group1Label = 'Group 1'): { header: string[]; rows: string[][]; chips: string[][][] } {
   const config = mapping[group];
   const optional = ['brand', 'plant', ...(group === 'ingredients' ? ['expiresOn'] : [])].filter(key => config[key as keyof typeof config]);
-  const header = group === 'companies' ? ['Company', 'Type', 'Counts as factory', 'Brand', 'Plant']
+  const header = group === 'companies' ? ['Company', 'Type', 'Counts as factory', 'Food service', 'Brand', 'Plant']
     : [...(group === 'ingredients' ? ['Ingredient', 'Certification', 'Status', 'Agency', group1Label, 'Company'] : ['Product', 'Code', 'Certification', 'Status', 'Agency', 'Symbol required', group1Label, 'Company']), ...optional.map(key => ({ brand: 'Brand', plant: 'Plant', expiresOn: 'Expiration' })[key])];
   const chips: string[][][] = [];
   const rows = (samples[config.table] || []).slice(0, 3).map(row => {
-    const read = (key: string) => row.fields[(config as unknown as Record<string, string>)[key]]?.trim() || '';
+    const read = (key: string) => row.fields[(config as unknown as Record<string, string>)[key]] || '';
     const dpmLabel = (value?: Dpm) => value === 'dairy_equipment' ? 'DE' : value ? value[0].toUpperCase() + value.slice(1) : '';
     let cells: string[];
     if (group === 'companies') {
       const types = mapping.companies.factoryValues;
-      const factory = !types?.length || types.some(value => value.trim().toLowerCase() === read('type').toLowerCase());
-      cells = [read('name'), read('type'), factory ? 'Yes' : 'No', read('brand'), read('plant')];
+      const foodService = mapping.companies.foodServiceValues?.some(value => value.trim().toLowerCase() === read('type').trim().toLowerCase());
+      const factory = !foodService && (!types?.length || types.some(value => value.trim().toLowerCase() === read('type').trim().toLowerCase()));
+      cells = [read('name'), read('type'), factory ? 'Yes' : 'No', foodService ? 'Yes' : 'No', read('brand'), read('plant')];
     } else {
       const raw = { certificationRaw: read('certification'), statusRaw: read('status'), agencyRaw: read('agency') };
       const result = classifyRaw(mapping, mapping[group], raw);

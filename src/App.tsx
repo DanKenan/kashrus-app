@@ -1,3 +1,5 @@
+import { FoodServiceScreen } from './components/FoodServiceScreen';
+import { FoodServiceVisitScreen, FoodServiceOutbox } from './components/FoodServiceVisitScreen';
 import { FactoryVisitScreen, VisitOutbox, visitButton } from './components/FactoryVisitScreen';
 import './components/MashgiachBoard.css';
 import { filterChipClass, FilterCheck } from './lib/filterChip';
@@ -638,6 +640,8 @@ export default function App() {
   const [events, setEvents] = useState<KosherEvent[]>([]);
   const [isFactoryAuditOpen, setIsFactoryAuditOpen] = useState(false);
   // Don 2026-10-22: the admin's agency-wide Events screen (from the dashboard).
+  const [isFoodServiceOpen, setIsFoodServiceOpen] = useState(false);
+  const [isFoodVisitOpen, setIsFoodVisitOpen] = useState(false);
   const [isFactoryVisitOpen, setIsFactoryVisitOpen] = useState(false);
   const [isFactoriesOpen, setIsFactoriesOpen] = useState(false);
   const [isAgencyEventsOpen, setIsAgencyEventsOpen] = useState(false);
@@ -2792,7 +2796,10 @@ export default function App() {
       <main className={`flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-12 ${!isKiosk && !isVenueOwnerLike(currentUser) ? 'max-sm:flex max-sm:flex-col' : ''}`}>
       {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && <div className="mb-4 max-sm:order-first">
         {!dashboardHome && overdueCard}
+        {['admin', 'coordinator'].includes(currentUser.role) && <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFoodServiceOpen(true)}>Food service</button></div>}
+        <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFoodVisitOpen(true)}>Food service visit</button></div>
         {currentUser.role === 'coordinator' && <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFactoriesOpen(true)}>Factories</button></div>}
+        <FoodServiceOutbox key={`food:${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} />
         <VisitOutbox key={`${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} />
         {(currentUser.role !== 'admin' || !adminHome || venues.length === 0 || noVenueInScope) && <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFactoryVisitOpen(true)}>Factory visit</button></div>}
       </div>}
@@ -3394,6 +3401,8 @@ export default function App() {
 
       {/* Create / Notify Event Modal */}
       {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && isFactoryVisitOpen && <FactoryVisitScreen key={`${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} timeZone={currentUser.agencyTimeZone || DEFAULT_TIME_ZONE} onClose={() => setIsFactoryVisitOpen(false)} />}
+      {!isKiosk && currentUser.agencyId && ['admin', 'coordinator'].includes(currentUser.role) && isFoodServiceOpen && <FoodServiceScreen key={`food:${currentUser.agencyId}:${currentUser.id}`} role={currentUser.role} userId={currentUser.id} agencyId={currentUser.agencyId} timeZone={currentUser.agencyTimeZone || DEFAULT_TIME_ZONE} onClose={() => setIsFoodServiceOpen(false)} />}
+      {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && isFoodVisitOpen && <FoodServiceVisitScreen key={`food-visit:${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} timeZone={currentUser.agencyTimeZone || DEFAULT_TIME_ZONE} onClose={() => setIsFoodVisitOpen(false)} />}
       <FactoriesScreen role={currentUser.role} isOpen={!isKiosk && isFactoriesOpen && ['admin', 'coordinator'].includes(currentUser?.role)} onClose={() => setIsFactoriesOpen(false)} timeZone={currentUser?.agencyTimeZone || DEFAULT_TIME_ZONE} />
       <AgencyEventsScreen
         isOpen={isAgencyEventsOpen && currentUser?.role === 'admin'}

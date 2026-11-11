@@ -7,7 +7,7 @@ import { registerInspectionRoutes } from '../../src/server/inspections/routes.ts
 import { withOutboxLock } from '../../src/lib/inspectionVisit.ts';
 // Scan complete statement chains, including multiline chains and argument callbacks.
 const serverFiles = await readdir('src/server/inspections');
-for (const required of ['schedule.ts', 'schedule-store.ts']) assert.ok(serverFiles.includes(required), `${required}: missing index guard coverage`);
+for (const required of ['schedule.ts', 'schedule-store.ts', 'food-service.ts', 'food-service-store.ts', 'inbox-store.ts']) assert.ok(serverFiles.includes(required), `${required}: missing index guard coverage`);
 for (const file of serverFiles) {
   if (!file.endsWith('.ts')) continue;
   const source = await readFile(`src/server/inspections/${file}`, 'utf8');
@@ -20,7 +20,7 @@ const dir = await mkdtemp(join(tmpdir(), 'inspection-index-'));
 process.env.FIRESTORE_MOCK_FILE = join(dir, 'db.json');
 try {
   const db = new MockFirestore(), path = 'inspectionReportsByAgency/a/reports';
-  for (const q of [db.collection(path).where('agencyId', '==', 'a').orderBy('sortKey'), db.collection(path).orderBy('sortKey').orderBy('id'), db.collection(path).where('id', '>=', 'x').orderBy('sortKey'), db.collection('inspectionSchedules').where('x', '==', 'y').orderBy('updatedAt'), db.collection('inspectionSchedules').orderBy('updatedAt').orderBy('id')]) await assert.rejects(q.get(), /composite index required/);
+  for (const q of [db.collection(path).where('id', '==', 'x'), db.collection('inspectionFoodService').where('x', '==', 'y').orderBy('updatedAt'), db.collection('inspectionInbox').orderBy('updatedAt').orderBy('id'), db.collection(path).where('agencyId', '==', 'a').orderBy('sortKey'), db.collection(path).orderBy('sortKey').orderBy('id'), db.collection(path).where('id', '>=', 'x').orderBy('sortKey'), db.collection('inspectionSchedules').where('x', '==', 'y').orderBy('updatedAt'), db.collection('inspectionSchedules').orderBy('updatedAt').orderBy('id')]) await assert.rejects(q.get(), /composite index required/);
   await db.collection(path).orderBy('sortKey').limit(200).get();
   await db.collection('other').where('id', '==', 'x').orderBy('sortKey').orderBy('id').get();
   const handlers = new Map(), app = { get: (p, h) => handlers.set(`GET ${p}`, h), post: (p, h) => handlers.set(`POST ${p}`, h), put: (p, h) => handlers.set(`PUT ${p}`, h) };

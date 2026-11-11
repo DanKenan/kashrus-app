@@ -33,11 +33,11 @@ for (const [kind, expected] of [['per_year', { kind: 'per_year', n: 1, start: da
 }
 const peopleData = { ...data, people: { mashgichim: [{ id: 'm', name: 'Test Inspector' }], coordinators: [{ id: 'r', name: 'Test Coordinator' }] } };
 const assigned = mount(VisitScheduleEditor, { company, data: peopleData, isAdmin: true, onSaved() {}, onClose() {} }); await assigned.render(); calls = [];
-assigned.find(e => e.type === 'input' && e.props.type === 'checkbox')[0].props.onChange({ target: { checked: true } }); await assigned.render(); await assigned.submit();
+assigned.find(e => e.type === 'button' && e.props.children?.props?.children === 'Test Inspector')[0].props.onClick(); await assigned.render(); await assigned.submit();
 assert.deepEqual(calls, [['/api/inspections/schedule/companies/c/people', { mashgiachIds: ['m'], coordinatorIds: [] }]]);
 for (const mode of ['on', 'until']) {
   const muted = mount(VisitScheduleEditor, { company, data, isAdmin: false, onSaved() {}, onClose() {} }); await muted.render(); calls = [];
-  muted.find(e => e.type === 'input' && e.props.name === 'alerts')[mode === 'on' ? 0 : 2].props.onChange(); await muted.render(); await muted.submit();
+  muted.find(e => e.type === 'button' && e.props.children === (mode === 'on' ? 'On' : 'Off until'))[0].props.onClick(); await muted.render(); await muted.submit();
   assert.deepEqual(calls, [['/api/inspections/schedule/companies/c/mute', mode === 'on' ? { muted: false } : { muted: true, until: data.today }]]);
 }
 for (const countFrom of ['last_visit', 'planned']) {
