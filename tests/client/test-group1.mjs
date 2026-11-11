@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
 import { mount } from './lib/mini-render.mjs';
 import { CompanyItemsSheet, FactoriesScreen } from '../../src/components/FactoriesScreen.tsx';
 import { SourceConnectForm } from '../../src/components/SourceConnectSheet.tsx';
@@ -11,7 +11,7 @@ try {
   const mapping = emptyMapping(); mapping.ingredients = { table: 'Ingredients', name: 'Name', companyLink: 'Company', certification: 'Cert', status: 'Status' }; mapping.group1Values = ['Inherently kosher'];
   const samples = { Ingredients: [{ id: 'i', fields: { Name: 'Salt', Cert: 'Group 1', Status: ' INHERENTLY KOSHER ' } }] };
   const preview = previewRows(samples, mapping, 'ingredients', 'Basic ingredients');
-  assert.equal(preview.header[3], 'Basic ingredients'); assert.equal(preview.rows[0][3], 'Yes');
+  assert.equal(preview.header[4], 'Basic ingredients'); assert.equal(preview.rows[0][4], 'Yes');
   const calls = [];
   let release;
   globalThis.fetch = async (url, options = {}) => {
@@ -47,9 +47,14 @@ try {
   await factories.render(); await factories.click('Factory');
   const opened = factories.tree().props.children.find(child => child?.type === CompanyItemsSheet);
   assert.equal(opened.props.company.id, 'c'); assert.equal(opened.props.group1Label, 'Basic ingredients');
-  // grep all source files, including future additions; exit 1 means no match.
-  let status = 0;
-  try { execFileSync('rg', ['-n', '-i', 'No symbol needed', 'src'], { stdio: 'pipe' }); } catch (e) { status = e.status; }
-  assert.equal(status, 1, 'retired copy must not occur anywhere in src/');
+  // Walk all source files, including future additions, without an external search tool.
+  function retiredCopyFiles(directory) {
+    return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+      const path = new URL(encodeURIComponent(entry.name) + (entry.isDirectory() ? '/' : ''), directory);
+      return entry.isDirectory() ? retiredCopyFiles(path)
+        : entry.isFile() && /No symbol needed/i.test(readFileSync(path, 'utf8')) ? [path.pathname] : [];
+    });
+  }
+  assert.deepEqual(retiredCopyFiles(new URL('../../src/', import.meta.url)), [], 'retired copy must not occur anywhere in src/');
 } finally { globalThis.fetch = originalFetch; globalThis.document = originalDocument; }
 console.log('Group 1 preview, confirmed single PUT, admin attribution and retired-copy guard passed');

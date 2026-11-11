@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { parseDpm, splitCertification, previewRows } from '../../src/lib/sourcePreview.ts';
-import { parseDpm as serverDpm, splitCertification as serverSplit, applyMapping } from '../../src/server/sources/mapping.ts';
-const values = ['OU-D', 'OU-P', 'OK-M', 'Star-K', 'cRc Dairy', 'OU DE', 'Group 1', 'group1', '', ' ', 'OU', 'Dairy', 'pareve', 'parve', 'meat', 'glatt', 'M', 'D', 'P', 'OU - Dairy', 'OK parve', 'STAR-K Meat', 'unknown', 'Group 2', 'ou-d'];
+import { assign, parseDpm, splitCertification, previewRows } from '../../src/lib/sourcePreview.ts';
+import { assign as serverAssign, parseDpm as serverDpm, splitCertification as serverSplit, applyMapping } from '../../src/server/sources/mapping.ts';
+const values = ['OU-D', 'OU-P', 'OK-M', 'Star-K', 'cRc Dairy', 'OU DE', 'Group 1', 'group1', '', ' ', 'OU', 'Dairy', 'pareve', 'parve', 'meat', 'glatt', 'M', 'D', 'P', 'OU - Dairy', 'OK parve', 'STAR-K Meat', 'unknown', 'Group 2', 'ou-d', 'Dairy Equipment', 'OU-DE', 'Kof-K Parve', 'DE', 'Cholov Yisroel', 'CY', 'Inherently kosher', ' dairy_equipment ', 'O.U.-D', 'Cholov.Yisroel'];
 for (const value of values) {
+  assert.deepEqual(assign(value), serverAssign(value), value);
   assert.deepEqual(parseDpm(value), serverDpm(value), value);
   for (const list of [undefined, [], ['Group 1', 'Group 2']]) assert.deepEqual(splitCertification(value, list), serverSplit(value, list), value);
 }
@@ -13,7 +14,7 @@ for (const value of ['Group 1', 'Inherently kosher', '  INHERENTLY  KOSHER  ', '
   for (const field of ['Cert', 'Status']) {
     const fields = { Name: 'Salt', Company: 'c', [field]: value };
     const data = applyMapping({ C: [{ id: 'c', fields: { Name: 'Factory' } }], I: [{ id: 'i', fields }], P: [{ id: 'p', fields }] }, mapping);
-    assert.equal(previewRows({ I: [{ id: 'i', fields }] }, mapping, 'ingredients', 'Custom').rows[0][3], data.ingredients[0].group1 ? 'Yes' : '—');
-    assert.equal(previewRows({ P: [{ id: 'p', fields }] }, mapping, 'products', 'Custom').rows[0][4], data.products[0].group1 ? 'Yes' : '—');
+    assert.equal(previewRows({ I: [{ id: 'i', fields }] }, mapping, 'ingredients', 'Custom').rows[0][4], data.ingredients[0].group1 ? 'Yes' : '—');
+    assert.equal(previewRows({ P: [{ id: 'p', fields }] }, mapping, 'products', 'Custom').rows[0][6], data.products[0].group1 ? 'Yes' : '—');
   }
 }

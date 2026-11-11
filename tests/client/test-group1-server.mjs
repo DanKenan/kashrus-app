@@ -47,7 +47,7 @@ try {
   const before = [writes, sourceCalls];
   assert.equal((await put({ kind: 'ingredient', itemId: 'i', group1: false })).status, 200);
   assert.equal(writes - before[0], 1); assert.equal(sourceCalls, before[1]);
-  assert.deepEqual((await getItems()).json.ingredients[0], { id: 'i', name: 'Salt', agency: '', dpm: null, group1: false, group1Source: 'admin' });
+  assert.deepEqual((await getItems()).json.ingredients[0], { certificationRaw: 'Group 1', statusRaw: undefined, agencyRaw: undefined, confidence: 1, id: 'i', name: 'Salt', agency: '', dpm: null, group1: false, group1Source: 'admin' });
   assert.equal((await routes.request('put', '/api/sources/group1', { kind: 'ingredient', itemId: 'i', group1: true }, { agency: 'b' })).status, 404);
   assert.equal((await routes.request('get', '/api/factories/:companyId/items', {}, { agency: 'b' })).status, 404);
   assert.equal((await routes.request('put', '/api/sources/group1', { kind: 'ingredient', itemId: 'i', group1: true }, { admin: false })).status, 403);
@@ -59,6 +59,20 @@ try {
   assert.equal((await getItems()).json.ingredients[0].group1, false);
   assert.equal((await getItems()).json.ingredients[1].group1, true);
   assert.equal((await getItems()).json.ingredients[1].group1Source, 'admin');
+  const valuesBefore = reads;
+  const values = (await routes.request('get', '/api/sources/values')).json.values;
+  assert.ok(values.some(v => v.value === 'OU' && v.column === 'Cert'));
+  assert.equal(reads, valuesBefore);
+  assert.deepEqual((await routes.request('get', '/api/sources/values', {}, { agency: 'b' })).json.values, []);
+  assert.equal((await routes.request('get', '/api/sources/values', {}, { admin: false })).status, 403);
+  rows.Ingredients[1].fields.Cert = 'Kof-K Parve';
+  mapping.valueAssignments = { Cert: { 'Kof-K Parve': { dpm: 'dairy', group1: false } } };
+  const assignedSave = await routes.request('put', '/api/sources/connection', { sourceType: 'airtable', baseId: 'appTEST', access: 'readwrite', mapping });
+  assert.equal(assignedSave.status, 200);
+  await until(async () => (await getItems()).json.ingredients[1].certificationRaw === 'Kof-K Parve');
+  assert.equal((await getItems()).json.ingredients[1].dpm, 'dairy');
+  assert.equal((await getItems()).json.ingredients[1].group1, true, 'hand mark wins over value assignment');
+  await until(() => docs.get('sourceConnections/a').mapping.valueAssignments.Cert['Kof-K Parve'].dpm === 'dairy');
   const manifest = docs.get('sourceBackups/a__c');
   const backup = JSON.parse(Buffer.from(Array.from({ length: manifest.parts }, (_, i) => docs.get(`sourceBackupParts/a__c__${manifest.hash}__${i}`).data).join(''), 'base64').toString());
   assert.equal(backup.group1Overrides.ingredient.i, false); assert.equal(backup.group1Label, 'Basic ingredients'); assert.equal(backup.ingredients[0].certificationRaw, 'Group 1');
@@ -66,6 +80,8 @@ try {
   await until(async () => (await routes.request('get', '/api/factories')).json.status.status === 'backup');
   assert.equal((await getItems()).json.ingredients[0].group1, false);
   assert.equal((await getItems()).json.ingredients[0].group1Source, 'admin');
+  assert.equal((await getItems()).json.ingredients[1].dpm, 'dairy');
+  assert.equal((await getItems()).json.ingredients[1].certificationRaw, 'Kof-K Parve');
   await put({ kind: 'ingredient', itemId: 'i', group1: null });
   assert.equal((await getItems()).json.ingredients[0].group1, true); assert.equal((await getItems()).json.ingredients[0].group1Source, 'source');
   assert.equal(Object.hasOwn(docs.get('sourceConnections/a').group1Overrides.ingredient, 'i'), false);

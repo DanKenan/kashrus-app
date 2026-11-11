@@ -8,11 +8,11 @@ export default {
   async run(baseUrl, ctx) {
     const { api, agencyId, tokens } = await shiftFixture(baseUrl, ctx, '115');
     const key = 'fake-source-test115-key';
-    const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: ['Group 1'] };
+    const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company', certification: 'Cert', status: 'Status', agency: 'Agency' }, products: { table: 'Products', name: 'Name', companyLink: 'Company', certification: 'Cert', status: 'Status', agency: 'Agency' }, group1Values: ['Group 1'] };
     const rows = {
       Companies: Array.from({ length: 7 }, (_, i) => ({ id: `rec${i}`, fields: { Name: `Company ${i}`, Type: i < 5 ? 'Factory' : 'Other' } })),
-      Ingredients: Array.from({ length: 230 }, (_, i) => ({ id: `ing${i}`, fields: { Name: `Ingredient ${i}`, Company: [`rec${i % 5}`] } })),
-      Products: Array.from({ length: 120 }, (_, i) => ({ id: `prod${i}`, fields: { Name: `Product ${i}`, Company: [`rec${i % 5}`] } })),
+      Ingredients: Array.from({ length: 230 }, (_, i) => ({ id: `ing${i}`, fields: { Name: `Ingredient ${i}`, Company: [`rec${i % 5}`], Cert: 'OU-D', Status: 'Dairy Equipment', Agency: 'OU' } })),
+      Products: Array.from({ length: 120 }, (_, i) => ({ id: `prod${i}`, fields: { Name: `Product ${i}`, Company: [`rec${i % 5}`], Cert: 'OU-D', Status: 'Dairy Equipment', Agency: 'OU' } })),
     };
     let calls = 0, socket;
     const mock = http.createServer((req, res) => {
@@ -60,6 +60,17 @@ export default {
       await ctx.api('POST', '/api/__test__/reads', { reset: true });
       const factories = (await api('admin', 'GET', '/api/factories')).json;
       assert.equal((await ctx.api('POST', '/api/__test__/reads', {})).json.total, 0);
+      await ctx.api('POST', '/api/__test__/reads', { reset: true });
+      const values = await api('admin', 'GET', '/api/sources/values?agencyId=other');
+      assert.equal(values.status, 200); assert.ok(values.json.values.length > 0);
+      assert.ok(values.json.values.length <= 300);
+      const items = (await api('admin', 'GET', '/api/factories/rec0/items')).json;
+      for (const item of [items.ingredients[0], items.products[0]]) {
+        assert.equal(item.certificationRaw, 'OU-D'); assert.equal(item.statusRaw, 'Dairy Equipment'); assert.equal(item.dpm, 'dairy');
+      }
+      assert.equal((await ctx.api('POST', '/api/__test__/reads', {})).json.total, 0);
+      assert.deepEqual((await api('foreign', 'GET', '/api/sources/values')).json.values, []);
+      assert.equal((await api('mash', 'GET', '/api/sources/values')).status, 403);
       assert.equal(factories.companies.length, 5);
       for (const c of factories.companies) { assert.equal(c.ingredientCount, 46); assert.equal(c.productCount, 24); }
       assert.equal((await api('admin', 'POST', '/api/sources/refresh', {})).status, 429);

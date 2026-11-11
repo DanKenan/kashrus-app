@@ -33,7 +33,7 @@ function overlap(name: string, aliases: string[]): number {
   }));
 }
 // Partial mappings deliberately leave missing tables/columns unset for the caller to review.
-export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
+export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values' | 'valueAssignments'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
 export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; guessed: Record<string, number> } {
   const mapping: GuessedMapping = { companies: {}, ingredients: {}, products: {}, group1Values: ['Group 1'] };
   const guessed: Record<string, number> = {};
@@ -46,7 +46,7 @@ export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; 
     guessed[`${kind}.table`] = exactTable ? 1 : 0.6;
     const fields = kind === 'companies' ? ['name', 'type', 'brand', 'plant']
       : kind === 'ingredients' ? ['companyLink', 'name', 'brand', 'certification', 'agency', 'status', 'plant', 'expiresOn']
-      : ['companyLink', 'name', 'brand', 'code', 'status', 'symbolRequired', 'plant'];
+      : ['companyLink', 'name', 'brand', 'code', 'certification', 'agency', 'status', 'symbolRequired', 'plant'];
     const used = new Set<string>();
     for (const field of fields) {
       const column = synonyms[field].map(n => table.columns.find(c => !used.has(c) && normalized(c) === normalized(n))).find(Boolean);
@@ -69,18 +69,34 @@ export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; 
   }
   return { mapping, guessed };
 }
-export function parseDpm(text: string): Dpm | undefined {
-  if (/\b(meat|glatt|m)\b/i.test(text)) return 'meat';
-  if (/\b(dairy|de|d)\b/i.test(text)) return 'dairy';
-  if (/\b(parve|pareve|p)\b/i.test(text)) return 'pareve';
-  return undefined;
+export type ValueAssignment = { agency?: string; dpm?: Dpm; group1?: boolean };
+export function assign(text: string, group1Values: string[] = ['Group 1']): ValueAssignment & { confidence: number } {
+  const fold = (v: string) => v.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (text.trim() && group1Values.some(v => fold(v) === fold(text))) return { group1: true, confidence: 1 };
+  const dairy = /\b(dairy(?:[\s.,_-]*equipment)?|cholov[\s.,_-]*yisroel|cy|de|d)\b/ig;
+  const meat = /\b(meat|glatt|m)\b/ig;
+  const pareve = /\b(parve|pareve|p)\b/ig;
+  const dpm: Dpm | undefined = meat.test(text) ? 'meat' : dairy.test(text) ? 'dairy' : pareve.test(text) ? 'pareve' : undefined;
+  const agency = text.replace(dairy, '').replace(meat, '').replace(pareve, '').trim().replace(/^[\s.,_-]+|[\s.,_-]+$/g, '');
+  const known = /^(ou|ok|star[\s-]*k|kof[\s-]*k|crc)$/i.test(agency);
+  return { ...(agency ? { agency } : {}), ...(dpm ? { dpm } : {}), group1: false, confidence: known || (!agency && dpm) ? 1 : text.trim() ? 0.6 : 1 };
 }
+export function parseDpm(text: string): Dpm | undefined { return assign(text).dpm; }
 export function splitCertification(text: string, group1Values: string[] = ['Group 1']): { agency?: string; dpm?: Dpm; group1: boolean } {
-  if (group1Values.some(v => v.toLowerCase().replace(/\s/g, '') === text.toLowerCase().replace(/\s/g, '')))
-    return { group1: true };
-  const dpm = parseDpm(text);
-  const agency = text.replace(/(?:[\s-]+)?\b(dairy|de|d|pareve|parve|p|meat|glatt|m)\b/gi, '').trim().replace(/[-\s]+$/, '');
-  return { ...(agency ? { agency } : {}), ...(dpm ? { dpm } : {}), group1: false };
+  const { confidence, ...value } = assign(text, group1Values);
+  return { ...value, group1: value.group1 === true };
+}
+export function assigned(mapping: SourceMapping, column: string | undefined, value: string): ReturnType<typeof assign> {
+  const values = column && Object.prototype.hasOwnProperty.call(mapping.valueAssignments || {}, column) ? mapping.valueAssignments?.[column] : undefined;
+  const override = values && Object.prototype.hasOwnProperty.call(values, value) ? values[value] : undefined;
+  return { ...assign(value, mapping.group1Values), ...override, ...(override ? { confidence: 1 } : {}) };
+}
+export function classifyRaw(mapping: SourceMapping, config: { certification?: string; agency?: string; status?: string }, raw: { certificationRaw?: string; agencyRaw?: string; statusRaw?: string }) {
+  const cert = assigned(mapping, config.certification, raw.certificationRaw || '');
+  const status = assigned(mapping, config.status, raw.statusRaw || '');
+  const agency = assigned(mapping, config.agency, raw.agencyRaw || '');
+  return { certifyingAgency: agency.agency || cert.agency, dpm: status.dpm || cert.dpm,
+    group1: [cert, status, agency].some(v => v.group1 === true), confidence: Math.min(cert.confidence, status.confidence, agency.confidence) };
 }
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value.trim() : undefined;
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
@@ -104,19 +120,17 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
   };
   const i = mapping.ingredients, p = mapping.products;
   const ingredients = (rows[i.table] ?? []).map(r => {
-    const certificationRaw = read(r, i.certification);
-    const split = splitCertification(certificationRaw ?? '', mapping.group1Values ?? ['Group 1']);
-    const status = read(r, i.status);
+    const raw = { certificationRaw: read(r, i.certification), statusRaw: read(r, i.status), agencyRaw: read(r, i.agency) };
     return { id: r.id, companyIds: links(r, i.companyLink), name: read(r, i.name) ?? '', brand: read(r, i.brand),
-      certificationRaw, certifyingAgency: read(r, i.agency) || split.agency,
-      dpm: status ? parseDpm(status) : split.dpm, group1: split.group1 || splitCertification(status ?? '', mapping.group1Values).group1,
+      ...raw, ...classifyRaw(mapping, i, raw),
       plant: read(r, i.plant), expiresOn: read(r, i.expiresOn), extra: extra(r, i) };
   });
   const products = (rows[p.table] ?? []).map(r => {
     const raw = p.symbolRequired ? r.fields[p.symbolRequired] : undefined;
     const symbolRequired = typeof raw === 'boolean' ? raw : typeof raw === 'string' && /^(yes|true|1|no|false|0)$/i.test(raw.trim()) ? /^(yes|true|1)$/i.test(raw.trim()) : undefined;
-    return { id: r.id, companyIds: links(r, p.companyLink), name: read(r, p.name) ?? '', brand: read(r, p.brand),
-      group1: splitCertification(read(r, p.status) ?? '', mapping.group1Values).group1, code: read(r, p.code), dpm: parseDpm(read(r, p.status) ?? ''), symbolRequired, plant: read(r, p.plant), extra: extra(r, p) };
+    const classifiedRaw = { certificationRaw: read(r, p.certification), statusRaw: read(r, p.status), agencyRaw: read(r, p.agency) };
+    return { ...classifiedRaw, ...classifyRaw(mapping, p, classifiedRaw), id: r.id, companyIds: links(r, p.companyLink), name: read(r, p.name) ?? '', brand: read(r, p.brand),
+      code: read(r, p.code), symbolRequired, plant: read(r, p.plant), extra: extra(r, p) };
   });
   return { companies, ingredients, products };
 }

@@ -62,11 +62,18 @@ try {
   await preview.click('Test connection');
   assert.equal(preview.find(e => e.props['aria-label'] === 'Check this guess').length, 1);
   assert.equal(preview.find(e => e.type === 'span' && e.props.children === 'Guessed').length, 1);
-  const cells = () => preview.find(e => e.type === 'td').map(e => e.props.children);
-  assert.ok(cells().includes('OU')); assert.ok(cells().includes('Dairy')); assert.ok(cells().includes('Yes'));
+  const cells = () => preview.find(e => e.type === 'td').map(e => e.props.children[0]);
+  assert.ok(cells().includes('OU-D')); assert.match(preview.text(), /Agency: OU/); assert.match(preview.text(), /Dairy/); assert.ok(cells().includes('Yes'));
+  const dairySelect = preview.find(e => e.type === 'select' && e.props.value === 'dairy')[0];
+  dairySelect.props.onChange({ target: { value: 'meat' } });
+  await preview.render();
+  assert.ok(cells().includes('OU-D')); assert.match(preview.text(), /Meat/);
+  assert.equal(previewCalls, 1, 'editing a value updates the preview without a request');
+  preview.find(e => e.type === 'select' && e.props.value === 'meat')[0].props.onChange({ target: { value: 'dairy' } });
+  await preview.render();
   assert.match(preview.text(), /No sample rows for this table\./);
   await preview.type('group1Values', 'OU-D');
-  assert.ok(!cells().includes('OU')); assert.ok(!cells().includes('Dairy'));
+  assert.ok(cells().includes('OU-D')); assert.doesNotMatch(preview.text(), /Agency: OU/);
   await preview.type('group1Values', 'Group 1');
   await preview.type('factoryValues', 'Other type');
   const companyCells = cells().slice(0, 5);
@@ -74,12 +81,24 @@ try {
   await preview.type('factoryValues', 'Factory');
   assert.equal(cells()[2], 'Yes');
   await preview.type('ingredients.certification', 'Other');
-  assert.ok(cells().includes('OK')); assert.ok(cells().includes('Meat')); assert.ok(!cells().includes('OU'));
+  assert.ok(cells().includes('OK-M')); assert.match(preview.text(), /Agency: OK/); assert.match(preview.text(), /Meat/); assert.ok(!cells().includes('OU-D'));
   assert.equal(preview.find(e => e.props['aria-label'] === 'Check this guess').length, 0);
   await preview.type('ingredients.table', 'Alternate');
   await preview.type('ingredients.name', 'Name');
   assert.ok(cells().includes('Alternate ingredient')); assert.ok(!cells().includes('Salt'));
   assert.equal(previewCalls, 1);
+  const valueCalls = [];
+  globalThis.fetch = async url => {
+    valueCalls.push(url);
+    const q = new URL(url, 'http://local').searchParams.get('q');
+    return Response.json({ total: 301, values: q ? [{ column: 'Cert', value: 'Rare value', count: 1 }] : Array.from({ length: 300 }, (_, i) => ({ column: 'Cert', value: `Value ${i}`, count: 301 - i })) });
+  };
+  const valueForm = mount(SourceConnectForm, { connection: { sourceType: 'airtable', mapping }, onClose() {}, onSaved() {} });
+  await valueForm.render();
+  await valueForm.type('valueSearch', 'Rare');
+  assert.match(valueForm.text(), /Rare value/);
+  assert.ok(valueCalls.includes('/api/sources/values?q=Rare'), 'search can find values outside the first 300');
+  assert.equal(valueForm.find(e => e.props.name === 'valueSearch').length, 1);
   const savedMapping = {
     companies: { table: 'Companies', name: 'Custom name', factoryValues: ['Existing factory'], brand: '' },
     ingredients: { table: 'Ingredients', name: 'Custom ingredient', companyLink: 'Existing link' },

@@ -3,7 +3,8 @@ import { apiFetch } from './api';
 export interface SourceMapping {
   companies: { table: string; name: string; type?: string; factoryValues?: string[]; brand?: string; plant?: string };
   ingredients: { table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
-  products: { table: string; companyLink: string; name: string; brand?: string; code?: string; status?: string; symbolRequired?: string; plant?: string };
+  products: { table: string; companyLink: string; name: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };
+  valueAssignments?: Record<string, Record<string, { agency?: string; dpm?: 'dairy' | 'pareve' | 'meat'; group1?: boolean }>>;
   group1Values: string[];
 }
 

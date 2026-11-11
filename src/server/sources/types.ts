@@ -6,16 +6,18 @@ export interface Company {
 export interface Ingredient {
   id: string; companyIds: string[]; name: string; brand?: string; certifyingAgency?: string;
   dpm?: Dpm; group1: boolean; plant?: string; expiresOn?: string;
-  certificationRaw?: string; extra: Record<string, string>;
+  certificationRaw?: string; statusRaw?: string; agencyRaw?: string; confidence?: number; extra: Record<string, string>;
 }
 export interface Product {
   id: string; companyIds: string[]; name: string; brand?: string; code?: string;
+  certificationRaw?: string; statusRaw?: string; agencyRaw?: string; certifyingAgency?: string; confidence?: number;
   dpm?: Dpm; group1?: boolean; symbolRequired?: boolean; plant?: string; extra: Record<string, string>;
 }
 export interface SourceMapping {
   companies: { table: string; name: string; type?: string; factoryValues?: string[]; brand?: string; plant?: string };
   ingredients: { table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
-  products: { table: string; companyLink: string; name: string; brand?: string; code?: string; status?: string; symbolRequired?: string; plant?: string };
+  products: { table: string; companyLink: string; name: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };
+  valueAssignments?: Record<string, Record<string, { agency?: string; dpm?: 'dairy' | 'pareve' | 'meat'; group1?: boolean }>>;
   group1Values: string[];
 }
 export interface SourceData { companies: Company[]; ingredients: Ingredient[]; products: Product[] }

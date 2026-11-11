@@ -29,6 +29,17 @@ function settings(body: any, mapping = true) {
       else if (!str(v)) throw Error('Invalid mapping');
     }
   }
+  if (m.valueAssignments !== undefined) {
+    if (!m.valueAssignments || typeof m.valueAssignments !== 'object' || Array.isArray(m.valueAssignments)) throw Error('Invalid valueAssignments');
+    let count = 0;
+    for (const [column, values] of Object.entries(m.valueAssignments)) {
+      if (!str(column) || !values || typeof values !== 'object' || Array.isArray(values)) throw Error('Invalid valueAssignments');
+      for (const [value, a] of Object.entries(values)) {
+        const assignment = a as any;
+        if (++count > 300 || value.length > 10000 || !assignment || typeof assignment !== 'object' || Array.isArray(assignment) || Object.keys(assignment).some(k => !['agency', 'dpm', 'group1'].includes(k)) || (assignment.agency !== undefined && !str(assignment.agency)) || (assignment.dpm !== undefined && !['', 'dairy', 'pareve', 'meat'].includes(assignment.dpm)) || (assignment.group1 !== undefined && typeof assignment.group1 !== 'boolean')) throw Error('Invalid valueAssignments');
+      }
+    }
+  }
   if (!Array.isArray(m.group1Values) || m.group1Values.length > 50 || !m.group1Values.every(str)) throw Error('Invalid group1Values');
 }
 export function registerSourceRoutes(app: any, deps: {
@@ -54,7 +65,7 @@ export function registerSourceRoutes(app: any, deps: {
   const status = (id: string) => keyErrors.has(id) ? 'error' : cache.state(id).status;
   const connector = (c: Connection, plain?: string) => createConnector({ kind: c.sourceType, baseId: c.baseId, spreadsheetId: c.baseId, workbookId: c.baseId, url: c.baseId, mapping: c.mapping, ...(deps.testMode && apiBase ? { apiBase } : {}) } as SourceSettings, plain || storedKey(c));
   const loadBackups = (id: string) => store.load(id, Object.keys(connections.get(id)?.backupHashes || {}));
-  const cache = createSourceCache({ connectorFor: id => connector(connections.get(id)!), backups: { load: loadBackups }, group1SettingsFor: id => ({ group1Label: connections.get(id)?.group1Label || 'Group 1', group1Overrides: connections.get(id)?.group1Overrides }) });
+  const cache = createSourceCache({ mappingFor: id => connections.get(id)?.mapping, connectorFor: id => connector(connections.get(id)!), backups: { load: loadBackups }, group1SettingsFor: id => ({ group1Label: connections.get(id)?.group1Label || 'Group 1', group1Overrides: connections.get(id)?.group1Overrides, valueAssignments: connections.get(id)?.mapping.valueAssignments }) });
   const flights = new Map<string, Promise<any>>(), last = new Map<string, number>(), timers = new Map<string, ReturnType<typeof setTimeout>>();
   function schedule(id: string) {
     clearTimeout(timers.get(id));
@@ -162,7 +173,8 @@ export function registerSourceRoutes(app: any, deps: {
     try { await save(c); } catch (cause) { if (job) retrySave(id, job.connection, job.backups, job.attempt); throw cause; }
     backupErrors.delete(id);
     connections.set(id, c); keyErrors.delete(id);
-    if (changed) cache.reset(id);
+    if (changed && (!old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || keyChanged || JSON.stringify({ ...old.mapping, valueAssignments: undefined }) !== JSON.stringify({ ...c.mapping, valueAssignments: undefined }))) cache.reset(id);
+    else cache.reassign(id, c.mapping);
     res.json(safe(id)); schedule(id); void refresh(id);
   }));
   app.post('/api/sources/test', handler(async (req: any, res: any, { id }: any) => {
@@ -186,10 +198,28 @@ export function registerSourceRoutes(app: any, deps: {
     if (Date.now() - (last.get(id) || 0) < 60_000) return res.status(429).json({ error: 'Just refreshed, try again in a minute' });
     res.json(await refresh(id));
   }));
+  app.get('/api/sources/values', handler((req: any, res: any, { id }: any) => {
+    const mapping = connections.get(id)?.mapping, data = cache.data(id);
+    const counts = new Map<string, { column: string; value: string; count: number }>();
+    if (mapping && data) for (const kind of ['ingredients', 'products'] as const) {
+      const config = mapping[kind];
+      for (const column of new Set([config.certification, config.status, config.agency].filter(Boolean))) {
+        const field = config.certification === column ? 'certificationRaw' : config.status === column ? 'statusRaw' : 'agencyRaw';
+        for (const item of data[kind]) {
+          const value = item[field]; if (!value) continue;
+          const key = JSON.stringify([column, value]), prior = counts.get(key);
+          counts.set(key, { column: column!, value, count: (prior?.count || 0) + 1 });
+        }
+      }
+    }
+    const all = [...counts.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+    const search = typeof req.query?.q === 'string' ? req.query.q.toLowerCase() : '';
+    res.json({ total: all.length, values: all.filter(v => v.value.toLowerCase().includes(search)).slice(0, 300) });
+  }));
   const items = (id: string, companyId: string, kind: 'ingredient' | 'product') =>
     cache.state(id).itemsFor(companyId, kind).map(item => {
       const override = connections.get(id)?.group1Overrides?.[kind]?.[item.id];
-      return { id: item.id, name: item.name, agency: 'certifyingAgency' in item ? item.certifyingAgency || '' : '',
+      return { certificationRaw: item.certificationRaw, statusRaw: item.statusRaw, agencyRaw: item.agencyRaw, confidence: item.confidence, id: item.id, name: item.name, agency: 'certifyingAgency' in item ? item.certifyingAgency || '' : '',
         dpm: item.dpm || null, group1: typeof override === 'boolean' ? override : item.group1 === true,
         group1Source: typeof override === 'boolean' ? 'admin' : 'source' };
     });

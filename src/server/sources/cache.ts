@@ -1,8 +1,10 @@
+import { classifyRaw } from './mapping.ts';
+import type { SourceMapping } from './types.ts';
 import { createHash } from 'node:crypto';
 import type { Company, Group1Overrides, Ingredient, Product, SourceConnector, SourceData } from './types.ts';
 
 export interface Backup {
-  group1Overrides?: Group1Overrides; group1Label?: string;
+  group1Overrides?: Group1Overrides; group1Label?: string; valueAssignments?: SourceMapping['valueAssignments'];
   v: 1; agencyId: string; companyId: string; companyName: string; takenAt: string; hash: string;
   company?: Omit<Company, 'extra'>;
   ingredients: Omit<Ingredient, 'extra' | 'companyIds'>[];
@@ -16,10 +18,11 @@ export interface SourceState {
 export interface RefreshResult { ok: boolean; calls: number; changedBackups: Backup[]; error?: string }
 export interface SourceCacheConfig {
   group1SettingsFor?(agencyId: string): { group1Overrides?: Group1Overrides; group1Label?: string };
+  mappingFor?(agencyId: string): SourceMapping | undefined;
   connectorFor(agencyId: string): SourceConnector | Promise<SourceConnector>;
   backups: { load(agencyId: string): Promise<Backup[]> }; now?: () => number;
 }
-// Only whitelisted scalar text is copied. URLs and attachment structures never enter backups.
+// Classified raw text is preserved verbatim. Other fields use whitelisted scalar text; attachment structures are omitted.
 const safeText = (value: unknown): string => typeof value === 'string' && !/(?:https?:\/\/|www\.|data:|ftp:\/\/)/i.test(value) ? value : '';
 function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backup[] {
   return data.companies.map(c => {
@@ -28,10 +31,10 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
       company: { id: c.id, name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant) },
       ingredients: data.ingredients.filter(i => i.companyIds.includes(c.id)).map(i => ({
         id: safeText(i.id), name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
-        dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: safeText(i.certificationRaw), group1: i.group1 === true, plant: safeText(i.plant),
+        dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: i.certificationRaw, statusRaw: i.statusRaw, agencyRaw: i.agencyRaw, confidence: i.confidence, group1: i.group1 === true, plant: safeText(i.plant),
       })),
       products: data.products.filter(p => p.companyIds.includes(c.id)).map(p => ({
-        id: safeText(p.id), name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: p.dpm, group1: p.group1 === true, symbolRequired: typeof p.symbolRequired === 'boolean' ? p.symbolRequired : undefined, plant: safeText(p.plant),
+        certificationRaw: p.certificationRaw, statusRaw: p.statusRaw, agencyRaw: p.agencyRaw, certifyingAgency: p.certifyingAgency, confidence: p.confidence, id: safeText(p.id), name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: p.dpm, group1: p.group1 === true, symbolRequired: typeof p.symbolRequired === 'boolean' ? p.symbolRequired : undefined, plant: safeText(p.plant),
       })),
     };
     for (const items of [content.ingredients, content.products]) items.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
@@ -39,7 +42,7 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
     return { v: 1, agencyId, companyId: c.id, takenAt, hash, ...content };
   });
 }
-export function createSourceCache({ connectorFor, backups, group1SettingsFor, now = Date.now }: SourceCacheConfig) {
+export function createSourceCache({ connectorFor, backups, group1SettingsFor, mappingFor, now = Date.now }: SourceCacheConfig) {
   const entries = new Map<string, { state: SourceState; data?: SourceData; backupLoaded: boolean; hashes: Map<string, string> }>();
   const flights = new Map<string, Promise<RefreshResult>>();
   function entry(id: string) {
@@ -94,13 +97,16 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, no
                 data.companies.push({ id: b.companyId, ...b.company, name: safeText(b.companyName), extra: {} });
                 for (const [kind, items] of [['ingredients', b.ingredients], ['products', b.products]] as const) {
                   items.forEach((item, index) => {
-                    const base = { id: safeText(item.id) || `backup:${b.companyId}:${kind}:${index}`, companyIds: [b.companyId], name: safeText(item.name), brand: safeText(item.brand),
+                    const base = { certificationRaw: typeof item.certificationRaw === 'string' ? item.certificationRaw : undefined, statusRaw: typeof item.statusRaw === 'string' ? item.statusRaw : undefined, agencyRaw: typeof item.agencyRaw === 'string' ? item.agencyRaw : undefined, certifyingAgency: item.certifyingAgency, confidence: item.confidence, id: safeText(item.id) || `backup:${b.companyId}:${kind}:${index}`, companyIds: [b.companyId], name: safeText(item.name), brand: safeText(item.brand),
                       dpm: ['dairy', 'pareve', 'meat'].includes(item.dpm) ? item.dpm as Ingredient['dpm'] : undefined, plant: safeText(item.plant), extra: {} };
-                    if (kind === 'ingredients') data.ingredients.push({ ...base, expiresOn: safeText('expiresOn' in item ? item.expiresOn : ''), certificationRaw: safeText('certificationRaw' in item ? item.certificationRaw : ''), certifyingAgency: safeText('certifyingAgency' in item ? item.certifyingAgency : ''), group1: 'group1' in item && item.group1 === true });
+                    if (kind === 'ingredients') data.ingredients.push({ ...base, expiresOn: safeText('expiresOn' in item ? item.expiresOn : ''), certifyingAgency: safeText('certifyingAgency' in item ? item.certifyingAgency : ''), group1: 'group1' in item && item.group1 === true });
                     else data.products.push({ ...base, group1: 'group1' in item && item.group1 === true, symbolRequired: 'symbolRequired' in item ? item.symbolRequired : undefined, code: safeText('code' in item ? item.code : '') });
                   });
                 }
               }
+              const mapping = mappingFor?.(id);
+              if (mapping) for (const kind of ['ingredients', 'products'] as const)
+                for (const item of data[kind]) if (item.certificationRaw !== undefined || item.statusRaw !== undefined || item.agencyRaw !== undefined) Object.assign(item, classifyRaw(mapping, mapping[kind], item));
               publish(id, data, 'backup', { calls, error: backupError || error, backupError, backupTakenAt: saved.map(b => b.takenAt).sort()[0] });
             }
           } catch { /* Backup failures also leave the cache in a usable error state. */ }
@@ -111,6 +117,13 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, no
     }
   }
   return {
+    reassign(agencyId: string, mapping: SourceMapping) {
+      const e = entry(agencyId);
+      if (!e.data) return;
+      for (const [kind, config] of [['ingredients', mapping.ingredients], ['products', mapping.products]] as const)
+        for (const item of e.data[kind]) Object.assign(item, classifyRaw(mapping, config, item));
+    },
+    data: (agencyId: string) => entry(agencyId).data,
     reset(agencyId: string) { entries.delete(agencyId); },
     state: (agencyId: string): SourceState => entry(agencyId).state,
     setKnownHashes(agencyId: string, hashes: ReadonlyMap<string, string> | Record<string, string>) {
