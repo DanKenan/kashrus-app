@@ -32,11 +32,16 @@ function settings(body: any, mapping = true) {
   if (m.valueAssignments !== undefined) {
     if (!m.valueAssignments || typeof m.valueAssignments !== 'object' || Array.isArray(m.valueAssignments)) throw Error('Invalid valueAssignments');
     let count = 0;
-    for (const [column, values] of Object.entries(m.valueAssignments)) {
-      if (!str(column) || !values || typeof values !== 'object' || Array.isArray(values)) throw Error('Invalid valueAssignments');
-      for (const [value, a] of Object.entries(values)) {
-        const assignment = a as any;
-        if (++count > 300 || value.length > 10000 || !assignment || typeof assignment !== 'object' || Array.isArray(assignment) || Object.keys(assignment).some(k => !['agency', 'dpm', 'group1'].includes(k)) || (assignment.agency !== undefined && !str(assignment.agency)) || (assignment.dpm !== undefined && !['', 'dairy', 'pareve', 'meat'].includes(assignment.dpm)) || (assignment.group1 !== undefined && typeof assignment.group1 !== 'boolean')) throw Error('Invalid valueAssignments');
+    const scopes = Object.keys(m.valueAssignments).every(k => ['ingredient', 'product'].includes(k))
+      ? Object.values(m.valueAssignments) : [m.valueAssignments];
+    for (const scope of scopes) {
+      if (!scope || typeof scope !== 'object' || Array.isArray(scope)) throw Error('Invalid valueAssignments');
+      for (const [column, values] of Object.entries(scope)) {
+        if (!str(column) || !values || typeof values !== 'object' || Array.isArray(values)) throw Error('Invalid valueAssignments');
+        for (const [value, a] of Object.entries(values)) {
+          const assignment = a as any;
+          if (++count > 300 || value.length > 10000 || !assignment || typeof assignment !== 'object' || Array.isArray(assignment) || Object.keys(assignment).some(k => !['agency', 'dpm', 'group1'].includes(k)) || (assignment.agency !== undefined && !str(assignment.agency)) || (assignment.dpm !== undefined && !['', 'dairy', 'pareve', 'meat'].includes(assignment.dpm)) || (assignment.group1 !== undefined && typeof assignment.group1 !== 'boolean')) throw Error('Invalid valueAssignments');
+        }
       }
     }
   }
@@ -85,9 +90,24 @@ export function registerSourceRoutes(app: any, deps: {
   }
   // Serialize persistence so an already-running retry cannot overwrite a later PUT.
   const saves = new Map<string, Promise<void>>();
+  const unconfirmed = new Map<string, Map<string, import('./cache.ts').Backup>>();
   function save(c: Connection, backups: import('./cache.ts').Backup[] = []) {
     const previous = saves.get(c.agencyId) || Promise.resolve();
-    const next = previous.catch(() => {}).then(() => store.save(c, backups));
+    const next = previous.catch(() => {}).then(async () => {
+      const dirty = unconfirmed.get(c.agencyId);
+      const newest = new Map(backups.map(b => [b.companyId, b]));
+      for (const b of dirty?.values() || []) newest.set(b.companyId, b);
+      const snapshot = [...newest.values()];
+      const hashes = { ...c.backupHashes };
+      for (const b of snapshot) hashes[b.companyId] = b.hash;
+      const persisted = { ...c, backupHashes: hashes };
+      await store.save(persisted, snapshot);
+      c.backupParts = persisted.backupParts;
+      backupErrors.delete(c.agencyId);
+      c.backupHashes = hashes;
+      cache.setKnownHashes(c.agencyId, hashes);
+      for (const b of snapshot) if (dirty?.get(b.companyId)?.hash === b.hash) dirty.delete(b.companyId);
+    });
     saves.set(c.agencyId, next);
     void next.finally(() => { if (saves.get(c.agencyId) === next) saves.delete(c.agencyId); }).catch(() => {});
     return next;
@@ -119,7 +139,11 @@ export function registerSourceRoutes(app: any, deps: {
       const c = connections.get(id)!;
       const cached = await cache.refresh(id);
       const result = keyErrors.has(id) ? { ...cached, ok: false, error: unreadableKey } : cached;
-      const toSave = result.ok ? result.changedBackups : priorSave?.backups || [];
+      const dirty = unconfirmed.get(id) || new Map();
+      for (const b of result.latestBackups || [])
+        if (dirty.has(b.companyId) || c.backupHashes[b.companyId] !== b.hash) dirty.set(b.companyId, b);
+      unconfirmed.set(id, dirty);
+      const toSave = [...dirty.values()];
       const at = new Date().toISOString();
       const hashes = { ...c.backupHashes };
       for (const b of toSave) hashes[b.companyId] = b.hash;
@@ -127,8 +151,9 @@ export function registerSourceRoutes(app: any, deps: {
       try {
         if (!deps.staged() && (toSave.length || c.lastRefresh?.at.slice(0, 10) !== at.slice(0, 10))) {
           await save(updated, toSave);
-          connections.set(id, updated); backupErrors.delete(id); cache.setKnownHashes(id, hashes);
+          connections.set(id, updated); backupErrors.delete(id); cache.setKnownHashes(id, updated.backupHashes);
         }
+        else if (toSave.length) retrySave(id, updated, toSave);
       } catch { console.warn(`[sources] persistence failed agency=${id}`); backupErrors.add(id); cache.setKnownHashes(id, c.backupHashes); retrySave(id, updated, toSave); }
       console.info(`[sources] agency=${id} ok=${result.ok} calls=${result.calls} ms=${Date.now() - start}`);
       return { ok: result.ok, status: status(id), calls: result.calls, refreshedAt: cache.state(id).refreshedAt || null };
@@ -200,15 +225,15 @@ export function registerSourceRoutes(app: any, deps: {
   }));
   app.get('/api/sources/values', handler((req: any, res: any, { id }: any) => {
     const mapping = connections.get(id)?.mapping, data = cache.data(id);
-    const counts = new Map<string, { column: string; value: string; count: number }>();
+    const counts = new Map<string, { kind: 'ingredient' | 'product'; column: string; value: string; count: number }>();
     if (mapping && data) for (const kind of ['ingredients', 'products'] as const) {
       const config = mapping[kind];
       for (const column of new Set([config.certification, config.status, config.agency].filter(Boolean))) {
         const field = config.certification === column ? 'certificationRaw' : config.status === column ? 'statusRaw' : 'agencyRaw';
         for (const item of data[kind]) {
           const value = item[field]; if (!value) continue;
-          const key = JSON.stringify([column, value]), prior = counts.get(key);
-          counts.set(key, { column: column!, value, count: (prior?.count || 0) + 1 });
+          const key = JSON.stringify([kind, column, value]), prior = counts.get(key);
+          counts.set(key, { kind: kind === 'ingredients' ? 'ingredient' : 'product', column: column!, value, count: (prior?.count || 0) + 1 });
         }
       }
     }

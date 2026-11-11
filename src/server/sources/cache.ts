@@ -15,26 +15,26 @@ export interface SourceState {
   companies: Company[]; itemsFor(companyId: string, kind: 'ingredient' | 'product'): (Ingredient | Product)[];
   backupTakenAt?: string; backupError?: string; error?: string;
 }
-export interface RefreshResult { ok: boolean; calls: number; changedBackups: Backup[]; error?: string }
+export interface RefreshResult { ok: boolean; calls: number; changedBackups: Backup[]; latestBackups?: Backup[]; error?: string }
 export interface SourceCacheConfig {
   group1SettingsFor?(agencyId: string): { group1Overrides?: Group1Overrides; group1Label?: string };
   mappingFor?(agencyId: string): SourceMapping | undefined;
   connectorFor(agencyId: string): SourceConnector | Promise<SourceConnector>;
   backups: { load(agencyId: string): Promise<Backup[]> }; now?: () => number;
 }
-// Classified raw text is preserved verbatim. Other fields use whitelisted scalar text; attachment structures are omitted.
-const safeText = (value: unknown): string => typeof value === 'string' && !/(?:https?:\/\/|www\.|data:|ftp:\/\/)/i.test(value) ? value : '';
+// Persist only bounded scalar text; attachment structures and URL-looking cells are omitted.
+const safeText = (value: unknown): string => typeof value === 'string' && value.length <= 10000 && !/(?:https?:\/\/|www\.|data:|ftp:\/\/)/i.test(value) ? value : '';
 function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backup[] {
   return data.companies.map(c => {
     const content = {
       companyName: safeText(c.name),
-      company: { id: c.id, name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant) },
+      company: { id: safeText(c.id), name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant) },
       ingredients: data.ingredients.filter(i => i.companyIds.includes(c.id)).map(i => ({
         id: safeText(i.id), name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
-        dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: i.certificationRaw, statusRaw: i.statusRaw, agencyRaw: i.agencyRaw, confidence: i.confidence, group1: i.group1 === true, plant: safeText(i.plant),
+        dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: safeText(i.certificationRaw), statusRaw: safeText(i.statusRaw), agencyRaw: safeText(i.agencyRaw), confidence: i.confidence, group1: i.group1 === true, plant: safeText(i.plant),
       })),
       products: data.products.filter(p => p.companyIds.includes(c.id)).map(p => ({
-        certificationRaw: p.certificationRaw, statusRaw: p.statusRaw, agencyRaw: p.agencyRaw, certifyingAgency: p.certifyingAgency, confidence: p.confidence, id: safeText(p.id), name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: p.dpm, group1: p.group1 === true, symbolRequired: typeof p.symbolRequired === 'boolean' ? p.symbolRequired : undefined, plant: safeText(p.plant),
+        certificationRaw: safeText(p.certificationRaw), statusRaw: safeText(p.statusRaw), agencyRaw: safeText(p.agencyRaw), certifyingAgency: safeText(p.certifyingAgency), confidence: p.confidence, id: safeText(p.id), name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: p.dpm, group1: p.group1 === true, symbolRequired: typeof p.symbolRequired === 'boolean' ? p.symbolRequired : undefined, plant: safeText(p.plant),
       })),
     };
     for (const items of [content.ingredients, content.products]) items.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
@@ -77,9 +77,7 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
       });
       const changedBackups = all.filter(b => e.hashes.get(b.companyId) !== b.hash);
       publish(id, data, 'ok', { calls, refreshedAt });
-      // A successful refresh establishes the baseline; persisted hashes can override it.
-      e.hashes = new Map(all.map(b => [b.companyId, b.hash]));
-      return { ok: true, calls, changedBackups };
+      return { ok: true, calls, changedBackups, latestBackups: all };
     } catch (cause) {
       const error = cause instanceof Error && cause.message.startsWith('Airtable ') ? cause.message : 'Source refresh failed', calls = connector ? connector.calls() - start : 0;
       if (e.data) e.state = { ...e.state, status: e.state.status === 'backup' ? 'backup' : 'stale', calls, error: e.state.backupError || error };

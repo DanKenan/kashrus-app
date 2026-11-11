@@ -1,3 +1,4 @@
+type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'pareve' | 'meat'; group1?: boolean };
 export type Dpm = 'dairy' | 'pareve' | 'meat';
 export type SourceKind = 'airtable' | 'google_sheets' | 'excel' | 'supabase';
 export interface Company {
@@ -17,7 +18,7 @@ export interface SourceMapping {
   companies: { table: string; name: string; type?: string; factoryValues?: string[]; brand?: string; plant?: string };
   ingredients: { table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
   products: { table: string; companyLink: string; name: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };
-  valueAssignments?: Record<string, Record<string, { agency?: string; dpm?: 'dairy' | 'pareve' | 'meat'; group1?: boolean }>>;
+  valueAssignments?: Record<string, Record<string, ValueAssignment>> | Partial<Record<'ingredient' | 'product', Record<string, Record<string, ValueAssignment>>>>;
   group1Values: string[];
 }
 export interface SourceData { companies: Company[]; ingredients: Ingredient[]; products: Product[] }

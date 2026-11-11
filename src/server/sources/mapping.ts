@@ -86,15 +86,19 @@ export function splitCertification(text: string, group1Values: string[] = ['Grou
   const { confidence, ...value } = assign(text, group1Values);
   return { ...value, group1: value.group1 === true };
 }
-export function assigned(mapping: SourceMapping, column: string | undefined, value: string): ReturnType<typeof assign> {
-  const values = column && Object.prototype.hasOwnProperty.call(mapping.valueAssignments || {}, column) ? mapping.valueAssignments?.[column] : undefined;
+export function assigned(mapping: SourceMapping, column: string | undefined, value: string, kind?: 'ingredient' | 'product'): ReturnType<typeof assign> {
+  const assignments = mapping.valueAssignments as Record<string, any> | undefined;
+  const scoped = assignments && Object.keys(assignments).every(k => ['ingredient', 'product'].includes(k));
+  const columns = scoped ? (kind ? assignments?.[kind] : undefined) : assignments;
+  const values = column && Object.prototype.hasOwnProperty.call(columns || {}, column) ? columns?.[column] : undefined;
   const override = values && Object.prototype.hasOwnProperty.call(values, value) ? values[value] : undefined;
   return { ...assign(value, mapping.group1Values), ...override, ...(override ? { confidence: 1 } : {}) };
 }
 export function classifyRaw(mapping: SourceMapping, config: { certification?: string; agency?: string; status?: string }, raw: { certificationRaw?: string; agencyRaw?: string; statusRaw?: string }) {
-  const cert = assigned(mapping, config.certification, raw.certificationRaw || '');
-  const status = assigned(mapping, config.status, raw.statusRaw || '');
-  const agency = assigned(mapping, config.agency, raw.agencyRaw || '');
+  const kind = config === mapping.products ? 'product' : 'ingredient';
+  const cert = assigned(mapping, config.certification, raw.certificationRaw || '', kind);
+  const status = assigned(mapping, config.status, raw.statusRaw || '', kind);
+  const agency = assigned(mapping, config.agency, raw.agencyRaw || '', kind);
   return { certifyingAgency: agency.agency || cert.agency, dpm: status.dpm || cert.dpm,
     group1: [cert, status, agency].some(v => v.group1 === true), confidence: Math.min(cert.confidence, status.confidence, agency.confidence) };
 }

@@ -38,3 +38,19 @@ await handlers.get('get /api/sources/values')({ query: { agencyId: 'other' } }, 
 assert.deepEqual(result.values, []); assert.equal(reads, 0);
 admin = false; await handlers.get('get /api/sources/values')({ query: {} }, response); assert.equal(status, 403); assert.equal(reads, 0);
 console.log('source values: raw text, overrides, backup, preview and memory-only authorization passed');
+
+const scoped = { ...mapping, valueAssignments: {
+  ingredient: { Cert: { 'OU-D': { dpm: 'meat', agency: 'Ingredient agency', group1: true } } },
+  product: { Cert: { 'OU-D': { dpm: 'pareve', agency: 'Product agency', group1: false } } },
+} };
+const scopedRows = { ...rows, I: [{ id: 'i', fields: { ...fields, Status: '', Agency: '' } }], P: [{ id: 'p', fields: { ...fields, Status: '', Agency: '' } }] };
+const classified = applyMapping(scopedRows, scoped);
+assert.equal(classified.ingredients[0].dpm, 'meat');
+assert.equal(classified.products[0].dpm, 'pareve');
+assert.equal(classified.ingredients[0].group1, true);
+assert.equal(classified.products[0].group1, false);
+assert.equal(classified.ingredients[0].certifyingAgency, 'Ingredient agency');
+assert.equal(classified.products[0].certifyingAgency, 'Product agency');
+assert.ok(previewRows(scopedRows, scoped, 'products').chips.flat(2).includes('Pareve'));
+cache.reassign('a', scoped);
+assert.equal(cache.data('a').products[0].group1, false);

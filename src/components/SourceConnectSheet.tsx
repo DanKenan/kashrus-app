@@ -23,7 +23,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [mapping, setMapping] = useState<SourceMapping>(connection.mapping || emptyMapping());
   const [tables, setTables] = useState<SourceTable[]>([]);
   const [samples, setSamples] = useState<SourceSamples | null>(null);
-  const [storedValues, setStoredValues] = useState<{ column: string; value: string; count: number }[]>([]);
+  const [storedValues, setStoredValues] = useState<{ kind: 'ingredient' | 'product'; column: string; value: string; count: number }[]>([]);
   const [storedValueTotal, setStoredValueTotal] = useState(0);
   const [valueSearch, setValueSearch] = useState('');
   useEffect(() => {
@@ -129,18 +129,27 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       </div>}
     </div>;
   };
-  const counts = new Map<string, { column: string; value: string; count: number }>();
+  const counts = new Map<string, { kind: 'ingredient' | 'product'; column: string; value: string; count: number }>();
   if (samples) for (const group of ['ingredients', 'products'] as const) {
     const config = mapping[group];
     for (const column of new Set([config.certification, config.status, config.agency].filter(Boolean)))
       for (const row of samples[config.table] || []) {
         const value = row.fields[column!]?.trim(); if (!value) continue;
-        const key = JSON.stringify([column, value]);
-        counts.set(key, { column: column!, value, count: (counts.get(key)?.count || 0) + 1 });
+        const key = JSON.stringify([group, column, value]);
+        counts.set(key, { kind: group === 'ingredients' ? 'ingredient' : 'product', column: column!, value, count: (counts.get(key)?.count || 0) + 1 });
       }
   }
-  const values = (samples ? [...counts.values()] : storedValues).sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
-  const editValue = (column: string, value: string, change: object) => setMapping(prev => ({ ...prev, valueAssignments: { ...prev.valueAssignments, [column]: { ...prev.valueAssignments?.[column], [value]: { ...prev.valueAssignments?.[column]?.[value], ...change } } } }));
+  const merged = new Map<string, (typeof storedValues)[number]>(storedValues.map(v => [JSON.stringify([v.kind, v.column, v.value]), v]));
+  for (const v of counts.values()) {
+    const key = JSON.stringify([v.kind, v.column, v.value]);
+    if (!merged.has(key)) merged.set(key, v);
+  }
+  const values = [...merged.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+  const editValue = (kind: 'ingredient' | 'product', column: string, value: string, change: object) => setMapping(prev => {
+    const old = prev.valueAssignments as Record<string, any> || {};
+    const scoped = Object.keys(old).every(k => ['ingredient', 'product'].includes(k)) ? old : { ingredient: old, product: old };
+    return { ...prev, valueAssignments: { ...scoped, [kind]: { ...scoped[kind], [column]: { ...scoped[kind]?.[column], [value]: { ...scoped[kind]?.[column]?.[value], ...change } } } } };
+  });
   return <div className="fixed inset-0 z-50 flex items-end justify-center bg-scrim">
     <div ref={root} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} className="max-h-[90dvh] min-w-0 w-full max-w-2xl overflow-y-auto overflow-x-hidden rounded-t-2xl bg-surface p-4 text-ink tactile-4">
       <div className="flex items-center gap-4"><h2 id={`${id}-title`} className="flex-1 text-2xl font-semibold">Connect database</h2><button type="button" aria-label="Close" onClick={onClose} className={`${sourceButton} w-11 px-0 inline-flex items-center justify-center`}><X aria-hidden="true" className="h-5 w-5" /></button></div>
@@ -154,14 +163,14 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         <h3 className="text-xl font-semibold">Mapping</h3>
         {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients' : 'Products'}</legend>{select(group, 'table', 'Table')}{groups[group].map(([field, label]) => select(group, field, label))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{preview(group)}</fieldset>)}
         <fieldset className="space-y-4"><legend className="text-xl font-semibold">Values</legend>
-          {(samples ? values.length : storedValueTotal) > 20 && <label className="block text-sm text-ink-soft">Search values<input className={fieldClass} name="valueSearch" value={valueSearch} onChange={e => setValueSearch(e.target.value)} /></label>}
-          {values.filter(v => v.value.toLowerCase().includes(valueSearch.toLowerCase())).slice(0, 300).map(({ column, value, count }) => {
-            const guess = assigned({ ...mapping, group1Values: commaList(group1Values) }, column, value);
-            return <div key={JSON.stringify([column, value])} className="space-y-2 rounded-lg border border-line p-4">
-              <p className="break-words text-base">{value} <span className="text-xs text-ink-soft">{column} · {count}</span> {guess.confidence < 0.8 && <span className="text-xs text-ink-soft">Check</span>}</p>
-              <label className="block text-sm text-ink-soft">Agency<input className={fieldClass} value={guess.agency || ''} disabled={!!busy} onChange={e => editValue(column, value, { agency: e.target.value })} /></label>
-              <label className="block text-sm text-ink-soft">D/P/M<select className={fieldClass} value={guess.dpm || ''} disabled={!!busy} onChange={e => editValue(column, value, { dpm: e.target.value })}><option value="">—</option><option value="dairy">Dairy</option><option value="pareve">Pareve</option><option value="meat">Meat</option></select></label>
-              <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={guess.group1 === true} disabled={!!busy} onChange={e => editValue(column, value, { group1: e.target.checked })} />{group1Label.trim() || 'Group 1'}</label>
+          {Math.max(values.length, storedValueTotal) > 20 && <label className="block text-sm text-ink-soft">Search values<input className={fieldClass} name="valueSearch" value={valueSearch} onChange={e => setValueSearch(e.target.value)} /></label>}
+          {values.filter(v => v.value.toLowerCase().includes(valueSearch.toLowerCase())).map(({ kind, column, value, count }) => {
+            const guess = assigned({ ...mapping, group1Values: commaList(group1Values) }, column, value, kind);
+            return <div key={JSON.stringify([kind, column, value])} className="space-y-2 rounded-lg border border-line p-4">
+              <p className="break-words text-base">{value} <span className="text-xs text-ink-soft">{kind === 'ingredient' ? 'Ingredients' : 'Products'} · {column} · {count}</span> {guess.confidence < 0.8 && <span className="text-xs text-ink-soft">Check</span>}</p>
+              <label className="block text-sm text-ink-soft">Agency<input className={fieldClass} value={guess.agency || ''} disabled={!!busy} onChange={e => editValue(kind, column, value, { agency: e.target.value })} /></label>
+              <label className="block text-sm text-ink-soft">D/P/M<select className={fieldClass} value={guess.dpm || ''} disabled={!!busy} onChange={e => editValue(kind, column, value, { dpm: e.target.value })}><option value="">—</option><option value="dairy">Dairy</option><option value="pareve">Pareve</option><option value="meat">Meat</option></select></label>
+              <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={guess.group1 === true} disabled={!!busy} onChange={e => editValue(kind, column, value, { group1: e.target.checked })} />{group1Label.trim() || 'Group 1'}</label>
             </div>;
           })}
         </fieldset>

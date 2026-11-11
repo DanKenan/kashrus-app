@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { registerSourceRoutes } from '../../src/server/sources/routes.ts';
 const originalFetch = globalThis.fetch;
+const originalNow = Date.now;
+let clock = originalNow();
+Date.now = () => clock;
 let calls = 0, failBackup = true, gate = Promise.resolve(), startupFails = true, connectionLoads = 0;
 const docs = new Map(), writes = [];
 const rows = { Companies: [{ id: 'c', fields: { Name: 'Old Company' } }], Ingredients: [{ id: 'i', fields: { Name: 'Salt', Company: ['c'] } }], Products: [] };
@@ -45,11 +48,36 @@ try {
   assert.equal(calls - before, 3); // PUT reuses the test schema.
   assert.equal((await request('get', '/api/factories')).json.status.backupSaveError, true);
   assert.deepEqual(docs.get('sourceConnections/a').backupHashes, {});
-  failBackup = false; const fetched = calls;
+  clock += 61000;
+  assert.equal((await request('post', '/api/sources/refresh')).json.ok, true);
+  assert.equal((await state()).backupSaveError, true, 'unchanged refresh must not clear failed persistence');
+  assert.deepEqual(docs.get('sourceConnections/a').backupHashes, {});
+  failBackup = false;
+  clock += 61000;
+  assert.equal((await request('post', '/api/sources/refresh')).json.ok, true);
+  assert.ok(writes.some(w => w.ref.collection === 'sourceBackupParts'), 'unchanged refresh writes the unconfirmed backup');
+  const fetched = calls;
   await until(async () => !(await state()).backupSaveError);
   assert.equal(calls, fetched); // Timer persists from memory without a source fetch.
   assert.ok(docs.get('sourceConnections/a').backupHashes.c);
   assert.equal((await request('get', '/api/factories')).json.companies.length, 1);
+  // A pending version may be superseded even when the source returns to its confirmed hash.
+  failBackup = true; rows.Ingredients[0].fields.Name = 'Sea Salt'; clock += 61000;
+  await request('post', '/api/sources/refresh');
+  assert.equal((await state()).backupSaveError, true);
+  rows.Ingredients[0].fields.Name = 'Salt'; failBackup = false; clock += 61000;
+  await request('post', '/api/sources/refresh');
+  assert.equal((await state()).backupSaveError, false);
+  const manifest = docs.get('sourceBackups/a__c');
+  const latest = JSON.parse(Buffer.from(docs.get(`sourceBackupParts/a__c__${manifest.hash}__0`).data, 'base64').toString());
+  assert.equal(latest.ingredients[0].name, 'Salt', 'save the newest version, even with zero changedBackups');
+  failBackup = true; rows.Companies[0].fields.Name = 'Newest Company'; clock += 61000;
+  await request('post', '/api/sources/refresh');
+  assert.equal((await state()).backupSaveError, true);
+  failBackup = false;
+  const beforeRetry = calls;
+  await until(async () => !(await state()).backupSaveError);
+  assert.equal(calls, beforeRetry, 'retry persists from memory without fetching the source');
   let release; gate = new Promise(r => { release = r; });
   const changed = await request('put', '/api/sources/connection', { ...body, mapping: { ...mapping, companies: { ...mapping.companies, brand: 'Company' } } });
   assert.equal(changed.json.status, 'never');
@@ -58,4 +86,4 @@ try {
   await routes.boot(); const failedLoads = connectionLoads; startupFails = false;
   await until(() => connectionLoads > failedLoads);
   console.log('source PUT validation, schema reuse, cache reset and memory-only backup retry passed');
-} finally { globalThis.fetch = originalFetch; }
+} finally { globalThis.fetch = originalFetch; Date.now = originalNow; }

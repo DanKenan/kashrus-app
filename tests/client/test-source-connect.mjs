@@ -99,6 +99,30 @@ try {
   assert.match(valueForm.text(), /Rare value/);
   assert.ok(valueCalls.includes('/api/sources/values?q=Rare'), 'search can find values outside the first 300');
   assert.equal(valueForm.find(e => e.props.name === 'valueSearch').length, 1);
+  globalThis.fetch = async url => Response.json(url.includes('/values') ? {
+    total: 2, values: [{ kind: 'ingredient', column: 'Cert', value: 'Saved only', count: 12 }, { kind: 'ingredient', column: 'Cert', value: 'OU-D', count: 9 }],
+  } : { ok: true, samples: { Ingredients: [{ id: 's', fields: { Cert: 'OU-D' } }, { id: 'n', fields: { Cert: 'Sample only' } }] } });
+  const fullValues = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appSaved', mapping: { ...mapping, ingredients: { ...mapping.ingredients, certification: 'Cert' } } }, onClose() {}, onSaved() {} });
+  await fullValues.render();
+  assert.match(fullValues.text(), /Saved only/);
+  await fullValues.click('Test connection');
+  assert.match(fullValues.text(), /Saved only/);
+  assert.match(fullValues.text(), /Sample only/);
+  const valueRows = fullValues.find(e => e.type === 'p' && e.props.className === 'break-words text-base');
+  assert.equal(valueRows.length, 3, 'merge samples without duplicating saved values');
+  assert.match(fullValues.text(), /9/);
+  globalThis.fetch = async url => Response.json(url.includes('/values') ? { total: 2, values: [
+    { kind: 'ingredient', column: 'Cert', value: 'OU-D', count: 2 },
+    { kind: 'product', column: 'Cert', value: 'OU-D', count: 1 },
+  ] } : { ok: true });
+  const separate = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appSaved', mapping: {
+    ...mapping, valueAssignments: { Cert: { 'OU-D': { dpm: 'pareve' } } },
+  } }, onClose() {}, onSaved() {} });
+  await separate.render();
+  const controls = () => separate.find(e => e.type === 'select' && ['pareve', 'meat'].includes(e.props.value));
+  assert.equal(controls().length, 2, 'legacy assignments apply to both kinds');
+  controls()[0].props.onChange({ target: { value: 'meat' } }); await separate.render();
+  assert.deepEqual(controls().map(e => e.props.value), ['meat', 'pareve']);
   const savedMapping = {
     companies: { table: 'Companies', name: 'Custom name', factoryValues: ['Existing factory'], brand: '' },
     ingredients: { table: 'Ingredients', name: 'Custom ingredient', companyLink: 'Existing link' },

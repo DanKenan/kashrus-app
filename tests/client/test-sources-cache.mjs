@@ -15,11 +15,22 @@ assert.equal(cache.state('a').itemsFor('c1', 'ingredient')[0].name, 'Salt');
 assert.equal(cache.state('a').itemsFor('c1', 'product')[0].code, '001');
 assert.ok(!JSON.stringify(saved).includes('https:'));
 assert.ok(!JSON.stringify(saved).includes('extra'));
+assert.equal((await cache.refresh('a')).changedBackups.length, 1, 'unconfirmed backup survives an unchanged refresh');
+cache.setKnownHashes('a', Object.fromEntries(saved.map(b => [b.companyId, b.hash])));
 assert.equal((await cache.refresh('a')).changedBackups.length, 0);
 cache.setKnownHashes('a', { c1: 'different' });
 assert.equal((await cache.refresh('a')).changedBackups.length, 1);
 data.ingredients[0].name = 'Sea Salt';
 assert.equal((await cache.refresh('a')).changedBackups.length, 1);
+const unsafe = structuredClone(data);
+for (const item of [...unsafe.ingredients, ...unsafe.products]) {
+  for (const field of ['name', 'brand', 'plant', 'certificationRaw', 'statusRaw', 'agencyRaw', 'certifyingAgency', 'code']) item[field] = 'OU https://example.test/private';
+}
+unsafe.ingredients[0].expiresOn = 'x'.repeat(10001);
+const filtered = createSourceCache({ connectorFor: () => ({ calls: () => 0, loadAll: async () => unsafe }), backups: { load: async () => [] } });
+const filteredBackup = (await filtered.refresh('safe')).changedBackups;
+assert.ok(!JSON.stringify(filteredBackup).includes('https://'));
+assert.ok(!JSON.stringify(filteredBackup).includes('x'.repeat(10001)));
 down = true;
 assert.equal((await cache.refresh('a')).ok, false);
 assert.equal(cache.state('a').status, 'stale'); assert.equal(loads, 0);
