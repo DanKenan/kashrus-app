@@ -1,11 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import type { createScheduleStore } from './schedule-store.ts';
 import { summary, type Report } from './model.ts';
 export const reportId = (agency: string, user: string, client: string) => createHash('sha256').update(JSON.stringify([agency, user, client])).digest('hex');
 export type Cursor = { submittedAt: string; id: string };
 export const reportOrder = (a: Cursor, b: Cursor) => b.submittedAt.localeCompare(a.submittedAt) || (a.id === b.id ? 0 : a.id > b.id ? -1 : 1);
-export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean }) {
+export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean; schedules?: ReturnType<typeof createScheduleStore> }) {
   const reports = new Map<string, Report>(), summaries = new Map<string, ReturnType<typeof summary> & { agencyId: string }>();
   const loaded = new Map<string, Promise<void>>();
   const failures = new Map<string, { retryAt: number; attempts: number }>();
@@ -70,15 +71,19 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     if (r?.agencyId !== agency) return undefined;
     cacheDetail(r); return r;
   }
-  async function save(r: Report, photoData: Record<string, string>): Promise<{ report: Report; created: boolean }> {
+  async function saveUnlocked(r: Report, photoData: Record<string, string>): Promise<{ report: Report; created: boolean }> {
     if (deps.staged()) throw Error('Writes blocked');
     const id = key(r.agencyId, r.id), db = deps.db();
     let saved = r;
+    const schedules = deps.schedules, previous = schedules?.company(r.agencyId, r.companyId).lastVisit;
+    const update = schedules && (!previous || r.submittedAt > previous.at || (r.submittedAt === previous.at && r.id > previous.reportId))
+      ? schedules.prepare(r.agencyId, { companies: { [r.companyId]: { lastVisit: { at: r.submittedAt, reportId: r.id, mashgiachName: r.mashgiachName } } } }) : null;
     try {
       if (db) {
         const batch = db.batch();
         batch.create(collection(r.agencyId).doc(r.id), { ...r, sortKey: sortKey(r) });
         if (r.photoCount) batch.create(db.collection('inspectionReportPhotos').doc(id), { photos: photoData });
+        if (update) batch.set(update.ref, update.patch, { merge: true });
         await batch.commit();
       } else {
         const target = file('inspectionReports', id), nonce = randomUUID();
@@ -90,7 +95,10 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
           if (r.photoCount) { const targetPhoto = file('inspectionReportPhotos', photoId); await fs.mkdir(path.dirname(targetPhoto), { recursive: true }); await fs.writeFile(targetPhoto, JSON.stringify({ photos: photoData })); }
           await fs.writeFile(temporary, JSON.stringify(saved));
           // Atomic, exclusive publication: retries can only observe a complete report.
-          await fs.link(temporary, target); published = true;
+          await fs.link(temporary, target);
+          try { if (update) await schedules!.persistLocal(r.agencyId, update.next); }
+          catch (error) { await fs.rm(target, { force: true }); throw error; }
+          published = true;
         } finally {
           await fs.rm(temporary, { force: true });
           if (!published && r.photoCount) await fs.rm(file('inspectionReportPhotos', photoId), { force: true });
@@ -103,7 +111,11 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
       if (!stored) throw e;
       return { report: stored, created: false };
     }
+    if (update) schedules!.install(r.agencyId, update.next);
     install(saved); return { report: saved, created: true };
+  }
+  async function save(r: Report, photoData: Record<string, string>) {
+    return deps.schedules ? deps.schedules.locked(r.agencyId, () => saveUnlocked(r, photoData)) : saveUnlocked(r, photoData);
   }
   async function page(agency: string, limit: number, before?: Cursor, userId?: string) {
     await ensure(agency);
@@ -119,6 +131,13 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
       return [...rows, ...older].map(summary);
     }
     return rows.map(summary);
+  }
+  function latest(agency: string, companyId: string) {
+    let newest: ReturnType<typeof summary> | undefined;
+    for (const rows of [summaries.values(), reports.values()]) for (const r of rows) {
+      if (r.agencyId === agency && r.companyId === companyId && (!newest || reportOrder(r, newest) < 0)) newest = r;
+    }
+    return newest;
   }
   async function readPhotos(r: Report): Promise<Record<string, string>> {
     if (!r.photoCount) return {};
@@ -136,5 +155,5 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     })().finally(() => flights.delete(id));
     flights.set(id, flight); return flight;
   }
-  return { boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, ensure, save, readPhotos, get, page, list, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
+  return { boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
 }

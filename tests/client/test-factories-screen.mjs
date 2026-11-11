@@ -53,6 +53,15 @@ try {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push([url, options.method || 'GET']);
+    if (url === '/api/inspections/schedule') return new Response(JSON.stringify({
+      today: '2026-11-10', timeZone: 'America/Chicago',
+      settings: { countFrom: 'last_visit', mashgichimSeeAll: true },
+      people: { mashgichim: [], coordinators: [] },
+      companies: [
+        { id: 'a', name: 'Alpha מפעל with a long name', brand: 'Brand', plant: 'Plant', schedule: { kind: 'every', n: 8, unit: 'day', start: '2026-11-02' }, lastVisit: { at: '2026-11-03T01:00:00Z', reportId: 'report-a', mashgiachName: 'Test Inspector' }, nextDue: '2026-11-10', status: 'overdue', overdueDays: 0, mashgiachIds: [], coordinatorIds: [], mute: null },
+        { id: 'z', name: 'Zebra', schedule: null, lastVisit: null, nextDue: null, status: 'none', overdueDays: 0, mashgiachIds: [], coordinatorIds: [], mute: null },
+      ],
+    }));
     if (url === '/api/sources/refresh') return new Response(JSON.stringify({ error: 'Please wait before refreshing again.' }), { status: 429 });
     return new Response(JSON.stringify(url === '/api/sources/connection' ? connected : { status: connected, companies: [
       { id: 'z', name: 'Zebra', ingredientCount: 0, productCount: 0 },
@@ -66,8 +75,8 @@ try {
   await screen.render({ timeZone: 'America/Chicago' });
   assert.ok(screen.text().indexOf('Alpha') < screen.text().indexOf('Zebra'));
   assert.match(screen.text(), /Brand \/ Plant 42 ingredients · 18 products/);
-  assert.match(screen.text(), /Last visit — Next due — Overdue —/);
-  assert.equal(screen.find(e => e.type === 'dd' && e.props['aria-label'] === 'Not scheduled yet').length, 6);
+  assert.match(screen.text(), /Last visit Nov 2 · Test Inspector Next due Nov 10 Overdue ⚠ Yes · due today.*Last visit None yet Next due No schedule Overdue No/);
+  assert.deepEqual(screen.find(e => e.type === 'dd').map(e => e.props.children), ['Nov 2 · Test Inspector', 'Nov 10', '⚠ Yes · due today', 'None yet', 'No schedule', 'No']);
   await screen.click('Refresh now');
   assert.equal(calls.filter(([url, method]) => url === '/api/sources/refresh' && method === 'POST').length, 1);
   assert.match(screen.text(), /Please wait before refreshing again\./);
@@ -78,6 +87,12 @@ try {
     const requests = [];
     let status = 'never';
     globalThis.fetch = async (url, options = {}) => {
+      // Keep these polling counts focused on source requests.
+      if (url === '/api/inspections/schedule') return new Response(JSON.stringify({
+        today: '2026-11-10', timeZone: 'America/Chicago',
+        settings: { countFrom: 'last_visit', mashgichimSeeAll: true },
+        companies: [], people: { mashgichim: [], coordinators: [] },
+      }));
       requests.push([url, options.method || 'GET']);
       return new Response(JSON.stringify(url.endsWith('/connection') ? { ...connected, status } : {
         status: { ...connected, status }, companies: status === 'ok' ? [{ id: 'ready', name: 'Ready factory', ingredientCount: 1, productCount: 2 }] : [],

@@ -80,6 +80,7 @@ import { CreateEventModal } from './components/CreateEventModal';
 import { CopyEventDialog } from './components/CopyEventDialog';
 import { ConfirmModal } from './components/ConfirmModal';
 import { VenueTabs } from './components/VenueTabs';
+import { InspectionOverdueBanner } from './components/InspectionOverdueBanner';
 import { FactoriesScreen } from './components/FactoriesScreen';
 import { AgencyEventsScreen } from './components/AgencyEventsScreen';
 import { SHOW_FACTORY_AUDIT } from './lib/features';
@@ -2572,6 +2573,8 @@ export default function App() {
   return (
     <div data-phone-layout={!isKiosk ? true : undefined} className={`min-h-screen bg-paper text-ink flex flex-col transition-colors ${showBar || showGold ? 'max-sm:pb-[calc(144px+env(safe-area-inset-bottom))]' : ''}`}>
       {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && <>
+        <InspectionOverdueBanner key={`alerts:${currentUser.agencyId}:${currentUser.id}`} membership={`${currentUser.agencyId}:${currentUser.id}`} onOpen={() => currentUser.role === 'mashgiach' ? setIsFactoryVisitOpen(true) : setIsFactoriesOpen(true)} />
+        {currentUser.role === 'coordinator' && <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFactoriesOpen(true)}>Factories</button></div>}
         <VisitOutbox key={`${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} />
         {(currentUser.role !== 'admin' || !adminHome || venues.length === 0 || noVenueInScope) && <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFactoryVisitOpen(true)}>Factory visit</button></div>}
       </>}
@@ -3388,7 +3391,7 @@ export default function App() {
 
       {/* Create / Notify Event Modal */}
       {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && isFactoryVisitOpen && <FactoryVisitScreen key={`${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} timeZone={currentUser.agencyTimeZone || DEFAULT_TIME_ZONE} onClose={() => setIsFactoryVisitOpen(false)} />}
-      <FactoriesScreen isOpen={!isKiosk && isFactoriesOpen && currentUser?.role === 'admin'} onClose={() => setIsFactoriesOpen(false)} timeZone={currentUser?.agencyTimeZone || DEFAULT_TIME_ZONE} />
+      <FactoriesScreen role={currentUser.role} isOpen={!isKiosk && isFactoriesOpen && ['admin', 'coordinator'].includes(currentUser?.role)} onClose={() => setIsFactoriesOpen(false)} timeZone={currentUser?.agencyTimeZone || DEFAULT_TIME_ZONE} />
       <AgencyEventsScreen
         isOpen={isAgencyEventsOpen && currentUser?.role === 'admin'}
         onClose={() => setIsAgencyEventsOpen(false)}

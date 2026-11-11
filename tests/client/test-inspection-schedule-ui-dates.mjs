@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import { nextVisitDue, calendarDate, displayDate } from '../../src/lib/visitSchedule.ts';
+const every = { kind: 'every', n: 1, unit: 'month', start: '2026-01-31' };
+assert.equal(nextVisitDue(every, 'planned', '2026-02-28'), '2026-03-31');
+assert.equal(nextVisitDue(every, 'last_visit', '2026-02-28'), '2026-03-28');
+assert.equal(nextVisitDue({ ...every, start: '2024-01-31' }, 'planned', '2024-01-31'), '2024-02-29');
+assert.equal(nextVisitDue(every, 'planned', null), '2026-01-31');
+assert.equal(nextVisitDue({ kind: 'per_year', n: 4, start: '2026-01-31' }, 'planned', '2026-04-30'), '2026-07-31');
+assert.equal(nextVisitDue({ kind: 'per_year', n: 52, start: '2026-01-01' }, 'last_visit', '2026-01-01'), '2026-01-08');
+assert.equal(nextVisitDue({ kind: 'dates', dates: ['2026-01-01', '2026-02-01'] }, 'last_visit', '2026-01-01'), '2026-02-01');
+assert.equal(nextVisitDue({ kind: 'dates', dates: ['2026-01-01'] }, 'planned', '2026-01-01'), null);
+assert.equal(nextVisitDue(null, 'planned', null), null);
+assert.equal(calendarDate('2026-11-03T01:00:00Z', 'America/Chicago'), '2026-11-02');
+assert.equal(displayDate('2026-11-03'), 'Nov 3');
+console.log('inspection schedule calendar rules: OK');

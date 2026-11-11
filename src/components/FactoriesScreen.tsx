@@ -1,13 +1,25 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FactoryItemChip } from './FactoryItemChip';
 import { InspectionReportsInbox } from './InspectionReportsInbox';
+import { VisitScheduleEditor } from './VisitScheduleEditor';
+import { visitRequest } from './FactoryVisitScreen';
+import { calendarDate, displayDate, type ScheduleData, type ScheduleCompany } from '../lib/visitSchedule';
 import { X } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { sourceRequest, sourceStatus, type SourceConnection } from '../lib/sources';
 import { SourceConnectSheet, sourceButton } from './SourceConnectSheet';
 interface Factory { id: string; name: string; brand?: string; plant?: string; ingredientCount: number; productCount: number }
-interface Props { isOpen: boolean; onClose: () => void; timeZone: string }
-export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
+interface Props { isOpen: boolean; onClose: () => void; timeZone: string; role?: string }
+export function FactoriesScreen({ isOpen, onClose, timeZone, role = 'admin' }: Props) {
+  const [scheduleData, setScheduleData] = useState<ScheduleData | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    if (!isOpen) { setScheduleData(null); setEditing(null); return; }
+    void visitRequest('/api/inspections/schedule').then(data => { if (active && data.settings && data.people) setScheduleData(data); }).catch(() => { if (active) setError("Couldn't load visit schedules. Try again."); });
+    return () => { active = false; };
+  }, [isOpen]);
+  const updateCompany = (company: ScheduleCompany) => setScheduleData(data => data && ({ ...data, companies: data.companies.map(row => row.id === company.id ? company : row) }));
   const [connection, setConnection] = useState<SourceConnection | null>(null);
   const [companies, setCompanies] = useState<Factory[]>([]);
   const [selectedCompany, setSelectedCompany] = useState<Factory | null>(null);
@@ -44,6 +56,11 @@ export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
     setConnection(null); setCompanies([]); setError('');
     void (async () => {
       try {
+        if (role === 'coordinator') {
+          const result = await sourceRequest('/api/factories');
+          if (generation.current === request) setCompanies(result.companies || []);
+          return;
+        }
         const response = await apiFetch('/api/sources/connection');
         const next = response.status === 404 ? { sourceType: null } : await response.json();
         if (response.status !== 404 && (!response.ok || next.error && !next.sourceType)) throw new Error(next.error || "Couldn't load the connection. Try again.");
@@ -61,7 +78,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
       } catch (e) { if (generation.current === request) setError(e instanceof Error ? e.message : "Couldn't load factories. Try again."); }
     })();
     return () => { generation.current += 1; clearTimeout(timer); };
-  }, [isOpen, reload]);
+  }, [isOpen, reload, role]);
   const refresh = async () => {
     if (refreshingRef.current) return;
     refreshingRef.current = true; setRefreshing(true); setError('');
@@ -76,19 +93,22 @@ export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
   return <div role="dialog" aria-modal="true" aria-label="Factories" className="fixed inset-0 z-50 overflow-y-auto bg-paper text-ink" data-factories>
     <div className="mx-auto max-w-2xl space-y-4 px-4 pt-3 pb-24">
       <div className="flex items-center gap-2"><button type="button" aria-label="Close" onClick={onClose} className={`${sourceButton} flex h-11 w-11 shrink-0 items-center justify-center px-0`}><X aria-hidden="true" className="h-5 w-5" /></button><h2 className="min-w-0 flex-1 text-2xl font-semibold">Factories</h2></div>
-      <p role="status" className="break-words text-base text-ink-soft">{connection ? sourceStatus(connection, timeZone) : 'Loading factories…'}</p>
-      <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setReportsOpen(true)}>Reports</button><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></div>
+      {role === 'coordinator' && <p className="text-base text-ink-soft">Showing the companies assigned to you.</p>}
+      {role === 'admin' && scheduleData && <VisitScheduleSettings data={scheduleData} onSaved={settings => setScheduleData(data => data && ({ ...data, settings }))} />}
+      <p role="status" className="break-words text-base text-ink-soft">{role === 'coordinator' ? '' : connection ? sourceStatus(connection, timeZone) : 'Loading factories…'}</p>
+      <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setReportsOpen(true)}>Reports</button>{role === 'admin' && <><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></>}</div>
       {error && <p role="alert" className="break-words text-base text-bad">{error}</p>}
-      {connection && !connection.sourceType ? <div className="space-y-4 rounded-xl border border-line bg-surface p-6 text-center"><p className="text-base">Connect your database to see your factories here.</p><button type="button" onClick={() => setSettings(true)} className="pressable min-h-12 rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper">Connect</button></div> : <ul className="space-y-2">{[...companies].sort((a, b) => a.name.localeCompare(b.name)).map(company => <li key={company.id}><button type="button" onClick={() => setSelectedCompany(company)} className="pressable min-h-11 w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold"><div className="min-w-0 space-y-2 rounded-xl border border-line bg-surface p-4">
+      {connection && !connection.sourceType ? <div className="space-y-4 rounded-xl border border-line bg-surface p-6 text-center"><p className="text-base">Connect your database to see your factories here.</p><button type="button" onClick={() => setSettings(true)} className="pressable min-h-12 rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper">Connect</button></div> : <ul className="space-y-2">{[...companies].filter(company => role !== 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)).sort((a, b) => a.name.localeCompare(b.name)).map(company => <li key={company.id}><button type="button" onClick={() => setSelectedCompany(company)} className="pressable min-h-11 w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold"><div className="min-w-0 space-y-2 rounded-xl border border-line bg-surface p-4">
         <h3 dir="auto" className="break-words text-xl font-semibold">{company.name}</h3>
         {(company.brand || company.plant) && <p dir="auto" className="break-words text-base text-ink-soft">{[company.brand, company.plant].filter(Boolean).join(' / ')}</p>}
         <p className="text-base text-ink-soft">{company.ingredientCount} ingredients · {company.productCount} products</p>
-        <dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft">{['Last visit', 'Next due', 'Overdue'].map(label => <div key={label} className="flex gap-2"><dt>{label}</dt><dd aria-label="Not scheduled yet">—</dd></div>)}</dl>
-      </div></button></li>)}</ul>}
+        {(() => { const row = scheduleData?.companies.find(row => row.id === company.id); return <><dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft"><div><dt>Last visit</dt><dd>{row?.lastVisit ? `${displayDate(calendarDate(row.lastVisit.at, scheduleData!.timeZone))} · ${row.lastVisit.mashgiachName}` : 'None yet'}</dd></div><div><dt>Next due</dt><dd>{row?.nextDue ? displayDate(row.nextDue) : 'No schedule'}</dd></div><div><dt>Overdue</dt><dd>{row?.status === 'overdue' ? `⚠ Yes · ${row.overdueDays === 0 ? 'due today' : `${row.overdueDays} days`}` : 'No'}</dd></div></dl>{row?.mute && (row.mute.until === null || row.mute.until >= scheduleData!.today) && <span className="text-xs text-ink-soft">Alerts off</span>}</>; })()}
+      </div></button>{scheduleData?.companies.some(row => row.id === company.id) && <button type="button" className={sourceButton} onClick={() => setEditing(company.id)}>Visit schedule</button>}</li>)}</ul>}
     </div>
+    {editing && scheduleData && <VisitScheduleEditor key={editing} company={scheduleData.companies.find(row => row.id === editing)!} data={scheduleData} isAdmin={role === 'admin'} onSaved={updateCompany} onClose={() => setEditing(null)} />}
     {reportsOpen && <InspectionReportsInbox timeZone={timeZone} onClose={() => setReportsOpen(false)} />}
     {selectedCompany && <CompanyItemsSheet company={selectedCompany} group1Label={connection?.group1Label || 'Group 1'} onClose={() => setSelectedCompany(null)} />}
-    {connection && <SourceConnectSheet isOpen={settings} connection={connection} onClose={() => setSettings(false)} onSaved={() => setReload(k => k + 1)} />}
+    {role === 'admin' && connection && <SourceConnectSheet isOpen={settings} connection={connection} onClose={() => setSettings(false)} onSaved={() => setReload(k => k + 1)} />}
   </div>;
 }
 
@@ -141,4 +161,10 @@ export function CompanyItemsSheet({ company, group1Label, onClose }: { company: 
       })}</ul></section>)}
     </div>
   </div>;
+}
+
+function VisitScheduleSettings({ data, onSaved }: { data: ScheduleData; onSaved(settings: ScheduleData['settings']): void }) {
+  const [settings, setSettings] = useState(data.settings), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const lock = useRef(false);
+  return <details className="rounded-xl border border-line bg-surface p-4"><summary className="min-h-11 cursor-pointer text-base">Visit schedule settings</summary><form className="space-y-4" onSubmit={async event => { event.preventDefault(); if (lock.current) return; const patch = Object.fromEntries(Object.entries(settings).filter(([key, value]) => value !== data.settings[key as keyof typeof settings])); if (!Object.keys(patch).length) return; lock.current = true; setBusy(true); setError(''); try { const result = await visitRequest('/api/inspections/schedule/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); onSaved(result.settings); } catch { setError("Couldn't save. Check the connection and try again."); } finally { lock.current = false; setBusy(false); } }}><fieldset disabled={busy}><legend>Count the next visit from:</legend>{([['last_visit', 'The last visit', 'Next visit = last visit + the time you set'], ['planned', 'The planned dates', 'Visits follow fixed planned dates, even if one was late']] as const).map(([value, label, hint]) => <label key={value} className="block py-2"><span className="flex min-h-11 items-center gap-2"><input type="radio" name="countFrom" checked={settings.countFrom === value} onChange={() => setSettings({ ...settings, countFrom: value })} />{label}</span><span className="text-sm text-ink-soft">{hint}</span></label>)}</fieldset><fieldset disabled={busy}><legend>Mashgichim can also visit companies not assigned to them</legend>{[true, false].map(value => <label key={String(value)} className="flex min-h-11 items-center gap-2"><input type="radio" name="seeAll" checked={settings.mashgichimSeeAll === value} onChange={() => setSettings({ ...settings, mashgichimSeeAll: value })} />{value ? 'Yes' : 'No'}</label>)}</fieldset>{error && <p role="alert" className="text-bad">{error}</p>}<button type="submit" className={sourceButton} disabled={busy}>{busy ? 'Saving…' : 'Save settings'}</button></form></details>;
 }

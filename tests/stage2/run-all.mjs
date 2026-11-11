@@ -229,6 +229,7 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-114-checklist.mjs')).default,
     (await import('./test-115-sources.mjs')).default,
     (await import('./test-116-inspection-reports.mjs')).default,
+    (await import('./test-117-inspection-schedule.mjs')).default,
     // MERGE-FIX: merges into the operator row and re-signs the suite's admin session; keep it LAST, after its own fresh state.
     FRESH_STATE,
     (await import('./test-85-merge-operator.mjs')).default,

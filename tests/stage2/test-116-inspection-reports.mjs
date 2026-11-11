@@ -55,15 +55,19 @@ export default {
         { kind: 'ingredient', itemId: list.ingredients[1].id, status: 'not_used' },
         { kind: 'product', itemId: list.products[0].id, status: 'alert', photo },
       ], offList: [{ name: ' Off-list Exact ', brand: 'Brand Exact', photo }] };
+      // +1 = lastVisit in the same batch (Phase 3 schedule)
       await reset(); const first = await api('mash', 'POST', '/api/visits/reports', body);
-      assert.equal(first.status, 201, JSON.stringify(first.json)); await budget(0, 2);
+      assert.equal(first.status, 201, JSON.stringify(first.json)); await budget(0, 3);
       assert.equal(first.json.fee, null); const id = first.json.report.id;
       assert.deepEqual(first.json.report.counts, { checked: 1, not_used: 1, alert: 1, offList: 1 });
       assert.equal(first.json.report.mashgiachId, people.mash.id);
       await reset(); const duplicate = await api('mash', 'POST', '/api/visits/reports', body);
       assert.equal(duplicate.status, 200); assert.deepEqual(duplicate.json, first.json); await budget(0, 0);
+      await reset();
+      assert.equal((await api('admin', 'PUT', '/api/inspections/schedule/companies/factory116/people', { mashgiachIds: [], coordinatorIds: [people.coord.id] })).status, 200);
+      await budget(0, 1);
       await reset(); const plain = await api('coord', 'POST', '/api/visits/reports', { ...body, clientReportId: 'report-116-plain', listVersion: 'old-version', marks: [{ ...body.marks[0] }], offList: [] });
-      assert.equal(plain.status, 201); assert.equal(plain.json.report.listChanged, true); await budget(0, 1);
+      assert.equal(plain.status, 201); assert.equal(plain.json.report.listChanged, true); await budget(0, 2);
       for (const extra of [
         { marks: [{ kind: 'product', itemId: list.products[0].id, status: 'alert' }] },
         { marks: [{ kind: 'product', itemId: 'unknown', status: 'checked' }] },
@@ -93,13 +97,13 @@ export default {
       await budget(0, 1);
       await reset();
       const liveFee = await api('admin', 'POST', '/api/visits/reports', { ...body, clientReportId: 'report-116-live-fee', marks: [], offList: [] });
-      assert.equal(liveFee.status, 201); assert.deepEqual(liveFee.json.fee, { amount: 82, currency: 'USD' }); await budget(0, 1);
+      assert.equal(liveFee.status, 201); assert.deepEqual(liveFee.json.fee, { amount: 82, currency: 'USD' }); await budget(0, 2);
       await reset();
       for (let i = 0; i < 201; i++) {
         const extra = await api('admin', 'POST', '/api/visits/reports', { ...body, clientReportId: `report-116-page-${i}`, marks: [], offList: [] });
         assert.equal(extra.status, 201);
       }
-      await budget(0, 201);
+      await budget(0, 402);
       await ctx.restartServer();
       for (let i = 0; i < 100; i++) {
         if ((await api('admin', 'POST', '/api/__test__/reads', {})).json.byCollection.reports >= 200) break;
@@ -134,8 +138,8 @@ export default {
       const retry = await api('mash', 'POST', '/api/visits/reports', body); assert.equal(retry.status, 200); assert.equal(retry.json.report.id, id); await budget(1, 0);
       await reset();
       const paid = await api('admin', 'POST', '/api/visits/reports', { ...body, clientReportId: 'report-116-fee', marks: [], offList: [] });
-      assert.equal(paid.status, 201, JSON.stringify(paid.json)); assert.deepEqual(paid.json.fee, { amount: 82, currency: 'USD' }); await budget(0, 1);
-      return 'List/detail/mine/inbox 0R/0W; submit photos 0R/2W; plain 0R/1W; cached retry 0R/0W; uncached retry 1R/0W; Load more 4R/0W for 4 reports; photos 1R then 0R; boot at most 200 report reads per agency (empty query 1), 0 photo reads';
+      assert.equal(paid.status, 201, JSON.stringify(paid.json)); assert.deepEqual(paid.json.fee, { amount: 82, currency: 'USD' }); await budget(0, 2);
+      return 'List/detail/mine/inbox 0R/0W; submit photos 0R/3W; plain 0R/2W; cached retry 0R/0W; uncached retry 1R/0W; Load more 4R/0W for 4 reports; photos 1R then 0R; boot at most 200 report reads per agency (empty query 1), 0 photo reads';
     } finally { await new Promise(r => mock.close(r)); }
   },
 };

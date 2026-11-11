@@ -14826,6 +14826,10 @@ const sourceRoutes = registerSourceRoutes(app, {
 });
 const inspectionRoutes = registerInspectionRoutes(app, {
   agencyIds: sourceRoutes.inspectionAgencyIds,
+  scheduleAgencyIds: () => agencies.map(a => a.id),
+  people: (agencyId) => users.filter(u => u.agencyId === agencyId && !sessionIneligibleCode(u)),
+  timeZone: (agencyId) => effectiveTimeZone(undefined, agencies.find(a => a.id === agencyId)?.timeZone),
+  now: serverNow, testMode: isTestMode(), push: sendPushToRecipient,
   db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
   source: sourceRoutes.inspectionSource, user: getAuthUser,
   maxPhotoChars: ANSWER_PHOTO_MAX_CHARS, photoRe: ANSWER_PHOTO_DATA_RE,
@@ -22258,7 +22262,8 @@ async function startServer() {
     commit: mutator => commitState(mutator, { label: 'strip-legacy-airtable-keys' }),
     log: message => console.info(message),
   }).catch(() => console.warn('[sources] legacy key cleanup failed'));
-  void sourceRoutes.boot().then(() => inspectionRoutes.boot());
+  void sourceRoutes.boot().then(() => inspectionRoutes.boot()).then(() => inspectionRoutes.check()).catch(() => console.warn('[inspections] boot unavailable'));
+  setInterval(() => { void inspectionRoutes.check().catch(() => console.warn('[inspections] overdue check failed')); }, 60 * 60 * 1000).unref();
 
   // STAGED REVISION: verification reads only. Skip ALL startup writes —
   // pepper init, task-order backfill, VAPID persistence, password migration.

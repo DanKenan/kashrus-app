@@ -6,7 +6,9 @@ import { MockFirestore } from '../stage2/firestore-mock.mjs';
 import { registerInspectionRoutes } from '../../src/server/inspections/routes.ts';
 import { withOutboxLock } from '../../src/lib/inspectionVisit.ts';
 // Scan complete statement chains, including multiline chains and argument callbacks.
-for (const file of await readdir('src/server/inspections')) {
+const serverFiles = await readdir('src/server/inspections');
+for (const required of ['schedule.ts', 'schedule-store.ts']) assert.ok(serverFiles.includes(required), `${required}: missing index guard coverage`);
+for (const file of serverFiles) {
   if (!file.endsWith('.ts')) continue;
   const source = await readFile(`src/server/inspections/${file}`, 'utf8');
   for (const chain of source.split(';')) {
@@ -18,10 +20,10 @@ const dir = await mkdtemp(join(tmpdir(), 'inspection-index-'));
 process.env.FIRESTORE_MOCK_FILE = join(dir, 'db.json');
 try {
   const db = new MockFirestore(), path = 'inspectionReportsByAgency/a/reports';
-  for (const q of [db.collection(path).where('agencyId', '==', 'a').orderBy('sortKey'), db.collection(path).orderBy('sortKey').orderBy('id'), db.collection(path).where('id', '>=', 'x').orderBy('sortKey')]) await assert.rejects(q.get(), /composite index required/);
+  for (const q of [db.collection(path).where('agencyId', '==', 'a').orderBy('sortKey'), db.collection(path).orderBy('sortKey').orderBy('id'), db.collection(path).where('id', '>=', 'x').orderBy('sortKey'), db.collection('inspectionSchedules').where('x', '==', 'y').orderBy('updatedAt'), db.collection('inspectionSchedules').orderBy('updatedAt').orderBy('id')]) await assert.rejects(q.get(), /composite index required/);
   await db.collection(path).orderBy('sortKey').limit(200).get();
   await db.collection('other').where('id', '==', 'x').orderBy('sortKey').orderBy('id').get();
-  const handlers = new Map(), app = { get: (p, h) => handlers.set(`GET ${p}`, h), post: (p, h) => handlers.set(`POST ${p}`, h) };
+  const handlers = new Map(), app = { get: (p, h) => handlers.set(`GET ${p}`, h), post: (p, h) => handlers.set(`POST ${p}`, h), put: (p, h) => handlers.set(`PUT ${p}`, h) };
   let attempts = 0, fail = true, releaseHydration;
   const hydration = new Promise(resolve => { releaseHydration = resolve; });
   const original = db.collection.bind(db);
@@ -33,12 +35,12 @@ try {
     const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
     await handlers.get(`${method} ${path}`)({ user: { id: 'u', name: 'User', agencyId, role: 'admin' }, params: { companyId: 'c' }, query: {}, body: { clientReportId: 'index-free-report', companyId: 'c', listVersion: 'v', startedAt: new Date().toISOString(), marks: [], offList: [] } }, res); return res;
   };
-  await routes.boot(); await new Promise(r => setTimeout(r, 0));
+  const boot = routes.boot(); await new Promise(r => setTimeout(r, 0));
   for (const p of ['/api/visits/factories', '/api/visits/factories/:companyId']) assert.equal((await request('GET', p)).code, 200);
   assert.equal((await request('POST', '/api/visits/reports')).code, 201);
   assert.equal((await request('GET', '/api/visits/factories', 'pending')).code, 200);
   assert.equal((await request('POST', '/api/visits/reports', 'pending')).code, 201);
-  releaseHydration();
+  releaseHydration(); await boot;
   const n = attempts;
   assert.equal((await request('GET', '/api/inspections/reports')).code, 503); assert.equal(attempts, n);
   assert.equal((await request('GET', '/api/inspections/reports', 'b')).code, 200);
