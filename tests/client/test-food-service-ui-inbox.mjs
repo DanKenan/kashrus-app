@@ -36,4 +36,11 @@ collect(detail.tree(), FoodChoice)[0].props.onClick(); await detail.render(); co
 assert.deepEqual(calls.at(-1), ['/api/inspections/reports/test-r/follow-up', 'PUT', { on: true, note: ' Test follow ' }]); assert.equal(updated.status, 'follow_up'); assert.equal(saveButtons().length, 0); assert.match(detail.text(), /Needs follow-up · Test admin ·/);
 const savedNote = detail.find(e => e.type === 'textarea')[0]; savedNote.props.onChange({ target: { value: 'Changed note' } }); await detail.render(); assert.equal(saveButtons().length, 1); detail.find(e => e.type === 'textarea')[0].props.onChange({ target: { value: ' Test follow ' } }); await detail.render(); assert.equal(saveButtons().length, 0);
 collect(detail.tree(), FoodChoice)[0].props.onClick(); await detail.render(); await detail.click(e => e.props.children === 'Save'); assert.deepEqual(calls.at(-1)[2], { on: false }); assert.equal(saveButtons().length, 0); assert.equal(detail.find(e => e.type === 'textarea').length, 0); assert.equal(updated.status, 'seen');
+for (const checklist of [[], [{ itemId: 'test-pass', label: ' Test passing check ', type: 'yes_no', value: true, failed: false }]]) {
+  globalThis.fetch = async () => new Response(JSON.stringify({ report: { ...summary, checklist, counts: { ...summary.counts, alert: 0 }, hasAlerts: false, note: '' } }));
+  const clean = mount(InspectionReportDetail, { id: 'test-clean', timeZone: 'UTC', onClose() {} }); await clean.render();
+  assert.doesNotMatch(clean.text(), /⚠ Problems/); assert.match(clean.text(), /✓ No problems found/);
+  assert.equal(clean.find(e => e.type === 'section' && e.props.children?.[0]?.props?.children === '⚠ Problems').length, 0);
+  assert.match(clean.text(), /Other answers/);
+}
 console.log('food service inbox filter paging, chips, detail seen and follow-up bodies: OK');
