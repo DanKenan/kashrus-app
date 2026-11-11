@@ -45,8 +45,9 @@ export function failedItem(item: ChecklistItem, value: boolean | number | string
   return item.type === 'number' && typeof value === 'number' && ((item.min != null && value < item.min) || (item.max != null && value > item.max));
 }
 export const typeMatched = (company: { type?: string }, values: string[] = []) => values.some(v => v.trim().toLowerCase() === (company.type ?? '').trim().toLowerCase());
-export function classifyPlace(company: { id: string; type?: string }, values: string[] = [], marked: string[] = [], manual: Record<string, unknown> = {}) {
-  return Object.hasOwn(manual, company.id) || typeMatched(company, values) || marked.includes(company.id) ? 'food_service' as const : 'factory' as const;
+export function classifyPlace(company: { id: string; type?: string }, values: string[] = [], marked: string[] = [], manual: Record<string, unknown> = {}, factoryValues: string[] = []) {
+  if (Object.hasOwn(manual, company.id) || typeMatched(company, values) || marked.includes(company.id)) return 'food_service' as const;
+  return !factoryValues.length || typeMatched(company, factoryValues) ? 'factory' as const : 'other' as const;
 }
 export function buildFoodServiceReport(body: any, template: Template | null, context: { id: string; agencyId: string; userId: string; userName: string; companyName: string; now: string; fee: Fee }, maxPhotoChars: number, photoRe: RegExp) {
   strict(body, ['kind', 'clientReportId', 'companyId', 'startedAt', 'templateId', 'templateVersion', 'answers', 'note', 'photo'], ['kind', 'clientReportId', 'companyId', 'startedAt', 'templateId', 'templateVersion', 'answers']);

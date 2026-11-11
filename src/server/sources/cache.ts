@@ -12,7 +12,7 @@ export interface Backup {
 }
 export interface SourceState {
   status: 'never' | 'ok' | 'stale' | 'backup' | 'error'; refreshedAt?: string; calls: number;
-  companies: Company[]; itemsFor(companyId: string, kind: 'ingredient' | 'product'): (Ingredient | Product)[];
+  companies: Company[]; otherCompanies?: { id: string; name: string; type?: string }[]; itemsFor(companyId: string, kind: 'ingredient' | 'product'): (Ingredient | Product)[];
   backupTakenAt?: string; backupError?: string; error?: string;
 }
 export interface RefreshResult { ok: boolean; calls: number; changedBackups: Backup[]; latestBackups?: Backup[]; error?: string }
@@ -46,12 +46,12 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
   const entries = new Map<string, { state: SourceState; data?: SourceData; backupLoaded: boolean; hashes: Map<string, string> }>();
   const flights = new Map<string, Promise<RefreshResult>>();
   function entry(id: string) {
-    if (!entries.has(id)) entries.set(id, { state: { status: 'never', calls: 0, companies: [], itemsFor: () => [] }, backupLoaded: false, hashes: new Map() });
+    if (!entries.has(id)) entries.set(id, { state: { status: 'never', calls: 0, companies: [], otherCompanies: [], itemsFor: () => [] }, backupLoaded: false, hashes: new Map() });
     return entries.get(id)!;
   }
   function publish(id: string, data: SourceData, status: SourceState['status'], fields: Partial<SourceState>) {
     const e = entry(id); e.data = data;
-    e.state = { status, calls: 0, companies: data.companies,
+    e.state = { status, calls: 0, companies: data.companies, otherCompanies: data.otherCompanies ?? [],
       itemsFor: (companyId, kind) => (kind === 'ingredient' ? data.ingredients : data.products).filter(i => i.companyIds.includes(companyId)), ...fields };
   }
   async function run(id: string): Promise<RefreshResult> {

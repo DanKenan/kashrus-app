@@ -38,8 +38,25 @@ assert.equal(calendarDate('2026-11-01T03:30:00Z', 'Asia/Jerusalem'), '2026-11-01
 console.log('PASS food-service validation, snapshots, failed rules, classification, inbox status and agency calendar dates');
 
 const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', brand: 'Brand', plant: 'Plant', factoryValues: ['factory'], foodServiceValues: ['bakery'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: [] };
-const source = { Companies: [{ id: 'factory', fields: { Name: '  Test factory ', Type: ' Factory ' } }, { id: 'food', fields: { Name: '  שלום 🥯 ', Type: ' Bakery ', Brand: '  Test brand ', Plant: '  Test plant ' } }, { id: 'other', fields: { Name: 'Test other', Type: 'other' } }] };
+const source = { Companies: [{ id: 'factory', fields: { Name: '  Test factory ', Type: ' Factory ' } }, { id: 'food', fields: { Name: '  שלום 🥯 ', Type: ' Bakery ', Brand: '  Test brand ', Plant: '  Test plant ' } }, { id: 'other', fields: { Name: 'Test other', Type: 'other' } }, { id: 'cafe', fields: { Name: 'Test Café', Type: 'Café' } }] };
 const mapped = applyMapping(source, mapping).companies;
 assert.deepEqual(mapped.map(c => c.id), ['factory', 'food']);
 assert.equal(mapped[1].name, '  שלום 🥯 '); assert.equal(mapped[1].type, ' Bakery '); assert.equal(mapped[1].brand, '  Test brand '); assert.equal(mapped[1].plant, '  Test plant ');
-assert.equal(applyMapping(source, { ...mapping, companies: { ...mapping.companies, factoryValues: [] } }).companies.length, 3);
+assert.equal(applyMapping(source, { ...mapping, companies: { ...mapping.companies, factoryValues: [] } }).companies.length, 4);
+const data = applyMapping(source, mapping);
+assert.deepEqual(data.otherCompanies, [{ id: 'other', name: 'Test other', type: 'other' }, { id: 'cafe', name: 'Test Café', type: 'Café' }]);
+const cafe = data.otherCompanies.find(c => c.id === 'cafe');
+const foodValues = mapping.companies.foodServiceValues;
+const factoryValues = mapping.companies.factoryValues;
+const classify = (c, marked = []) => classifyPlace(c, foodValues, marked, {}, factoryValues);
+assert.equal(classify(cafe), 'other');
+assert.deepEqual(data.companies.filter(c => classify(c) === 'factory').map(c => c.id), ['factory']);
+const candidates = marked => [...data.companies.filter(c => classify(c, marked) === 'factory'), ...data.otherCompanies.filter(c => !marked.includes(c.id))].map(c => ({ id: c.id, name: c.name, type: c.type ?? '' }));
+assert.deepEqual(candidates([]).map(c => c.id), ['factory', 'other', 'cafe']);
+const marked = ['cafe'];
+assert.equal([...data.companies, ...data.otherCompanies].some(c => c.id === 'cafe'), true);
+assert.equal(classify(cafe, marked), 'food_service');
+assert.deepEqual(candidates(marked).map(c => c.id), ['factory', 'other']);
+assert.equal([...data.companies.filter(c => classify(c, marked) === 'food_service'), ...data.otherCompanies.filter(c => marked.includes(c.id))].some(c => c.id === 'cafe' && c.name === 'Test Café' && c.type === 'Café'), true);
+assert.equal(classifyPlace(cafe, foodValues, [], {}, []), 'factory');
+console.log('PASS other connected companies remain candidates without factory backups and become food-service places when marked');

@@ -22,9 +22,12 @@ export function registerInspectionRoutes(app: any, deps: {
   const inbox = createInboxStore({ ...deps, now, submittedAt: (a, id) => store.list(a).find(r => r.id === id)?.submittedAt });
   const reportSummary = (a: string, r: Parameters<typeof summary>[0]) => ({ ...summary(r), ...inbox.status(a, r) });
   const foodValues = (a: string) => deps.source(a).connection?.mapping?.companies?.foodServiceValues ?? [];
-  const kind = (a: string, c: { id: string; type?: string }) => classifyPlace(c, foodValues(a), food.doc(a).marked, food.doc(a).manualPlaces);
-  const places = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'food_service').map(c => ({ ...c, address: '', source: 'connected' as const })), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '', source: 'manual' as const }))];
-  const allPlaces = (a: string) => [...deps.source(a).state.companies, ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '' }))];
+  const factoryValues = (a: string) => deps.source(a).connection?.mapping?.companies?.factoryValues ?? [];
+  const others = (a: string) => deps.source(a).state.otherCompanies ?? [];
+  const kind = (a: string, c: { id: string; type?: string }) => classifyPlace(c, foodValues(a), food.doc(a).marked, food.doc(a).manualPlaces, factoryValues(a));
+  const markedOthers = (a: string) => others(a).filter(c => food.doc(a).marked.includes(c.id));
+  const places = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'food_service').map(c => ({ ...c, address: '', source: 'connected' as const })), ...markedOthers(a).map(c => ({ ...c, address: '', source: 'connected' as const })), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '', source: 'manual' as const }))];
+  const allPlaces = (a: string) => [...deps.source(a).state.companies, ...markedOthers(a), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '' }))];
   const templateFor = (a: string, id: string) => { const tid = Object.hasOwn(food.doc(a).placeTemplates, id) ? food.doc(a).placeTemplates[id] : null; return tid && Object.hasOwn(food.doc(a).templates, tid) ? food.doc(a).templates[tid] : null; };
   const zone = (a: string) => deps.timeZone?.(a) || 'America/New_York';
   const today = (a: string) => calendarDate(now().toISOString(), zone(a));
@@ -60,7 +63,7 @@ export function registerInspectionRoutes(app: any, deps: {
       marked: connected && food.doc(a).marked.includes(c.id), typeMatched: connected && typeMatched(c, foodValues(a)), templateId: template?.id ?? null, templateName: template?.name ?? '' };
   }
   const sortedPlaces = (a: string, u: Person) => places(a).filter(c => visible(a, c.id, u)).map(c => foodRow(a, c)).sort((a, b) => a.name.localeCompare(b.name));
-  const candidates = (a: string) => deps.source(a).state.companies.filter(c => kind(a, c) === 'factory').map(c => ({ id: c.id, name: c.name, type: c.type ?? '' }));
+  const candidates = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'factory'), ...others(a).filter(c => !food.doc(a).marked.includes(c.id))].map(c => ({ id: c.id, name: c.name, type: c.type ?? '' }));
   const templates = (a: string) => food.doc(a).templateOrder.map(id => food.doc(a).templates[id]);
   async function notifyReport(a: string, r: Parameters<typeof summary>[0]) {
     const hasProblems = r.counts.alert > 0;
@@ -139,22 +142,23 @@ export function registerInspectionRoutes(app: any, deps: {
         delete next.placeTemplates[req.params.id];
       });
       if (!preparedFood) return;
-      const preparedSchedule = schedules.prepareRemoval(a, req.params.id);
+      const preparedSchedule = Object.hasOwn(schedules.doc(a).companies, req.params.id)
+        ? schedules.prepareRemoval(a, req.params.id) : null;
       if (deps.db()) {
         const batch = deps.db().batch();
         batch.set(preparedFood.ref, preparedFood.patch, { merge: true });
-        batch.set(preparedSchedule.ref, preparedSchedule.patch, { merge: true });
+        if (preparedSchedule) batch.set(preparedSchedule.ref, preparedSchedule.patch, { merge: true });
         await batch.commit();
       } else {
-        await schedules.persistLocal(a, preparedSchedule.next);
+        if (preparedSchedule) await schedules.persistLocal(a, preparedSchedule.next);
         try { await food.persistLocal(a, preparedFood.next); }
         catch (error) {
-          await schedules.persistLocal(a, schedules.doc(a));
+          if (preparedSchedule) await schedules.persistLocal(a, schedules.doc(a));
           throw error;
         }
       }
       food.install(a, preparedFood.next);
-      schedules.install(a, preparedSchedule.next);
+      if (preparedSchedule) schedules.install(a, preparedSchedule.next);
     }));
     res.json({ ok: true });
   }));
@@ -163,8 +167,16 @@ export function registerInspectionRoutes(app: any, deps: {
     await food.update(a, next => {
       for (const k of ['add', 'remove']) {
         const ids = req.body[k] ?? [];
-        if (!Array.isArray(ids) || ids.length > 2000 || !ids.every(id => typeof id === 'string' &&
-          (deps.source(a).state.companies.some(c => c.id === id) || (k === 'remove' && next.marked.includes(id))))) invalidFood('Unknown connected company');
+        if (!Array.isArray(ids) || ids.length > 2000 || !ids.every(id => typeof id === 'string')) invalidFood('Unknown connected company');
+        for (const id of ids) {
+          if (k === 'remove') {
+            if (next.marked.includes(id)) continue;
+            const connected = [...deps.source(a).state.companies, ...others(a)].find(c => c.id === id);
+            if (connected && typeMatched(connected, foodValues(a))) invalidFood('This place is food service because of its type in your connected list');
+            invalidFood('Unknown connected company');
+          }
+          if (!deps.source(a).state.companies.some(c => c.id === id) && !others(a).some(c => c.id === id)) invalidFood('Unknown connected company');
+        }
       }
       next.marked = [...new Set([...next.marked, ...(req.body.add ?? [])])].filter(id => !(req.body.remove ?? []).includes(id));
       if (next.marked.length > 2000) invalidFood('Too many marked places');
