@@ -42,7 +42,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   function query(agency: string, limit: number, before?: Cursor, projection = false) {
     let q = collection(agency).orderBy('sortKey', 'desc');
     if (before) q = q.startAfter(sortKey(before));
-    if (projection) q = q.select('id', 'agencyId', 'companyId', 'companyName', 'mashgiachId', 'mashgiachName', 'submittedAt', 'startedAt', 'counts', 'hasAlerts', 'listChanged', 'photoCount');
+    if (projection) q = q.select('id', 'agencyId', 'companyId', 'companyName', 'mashgiachId', 'mashgiachName', 'submittedAt', 'startedAt', 'counts', 'hasAlerts', 'listChanged', 'photoCount', 'kind', 'templateName');
     return q.limit(limit);
   }
   // One bounded page per agency; failed background work never rejects boot.
@@ -123,7 +123,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   async function save(r: Report, photoData: Record<string, string>) {
     return deps.schedules ? deps.schedules.locked(r.agencyId, () => saveUnlocked(r, photoData)) : saveUnlocked(r, photoData);
   }
-  async function visiblePage(agency: string, limit: number, before?: Cursor, visible?: (r: ReturnType<typeof summary>) => boolean) {
+  async function visiblePage(agency: string, limit: number, before?: Cursor, visible?: (r: ReturnType<typeof summary>) => boolean, more = true) {
     await ensure(agency);
     const rows: ReturnType<typeof summary>[] = [];
     let cursor = before, fetched = 0;
@@ -144,7 +144,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
         if (rows.length === limit) return { reports: rows, nextCursor: atEnd() ? null : cursor! };
       }
     }
-    while (!atEnd() && (fetched < 1000 || !deps.db())) {
+    while (more && !atEnd() && (fetched < 1000 || !deps.db())) {
       const db = deps.db(), start = cursor, size = visible ? 200 : limit - rows.length;
       const older: ReturnType<typeof summary>[] = db
         ? (await query(agency, size, start, true).get()).docs.map((d: any) => d.data())
@@ -172,7 +172,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   function latest(agency: string, companyId: string) {
     let newest: ReturnType<typeof summary> | undefined;
     for (const rows of [summaries.values(), reports.values()]) for (const r of rows) {
-      if (r.agencyId === agency && r.companyId === companyId && (!newest || reportOrder(r, newest) < 0)) newest = r;
+      if (r.agencyId === agency && r.companyId === companyId && (!newest || reportOrder(r, newest) < 0)) newest = summary(r as Report);
     }
     return newest;
   }

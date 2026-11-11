@@ -11,7 +11,7 @@ export interface OffListItem { name: string; brand?: string; note?: string; phot
 export interface DraftEditor { kind?: Kind; itemId?: string; index?: number; initial: OffListItem }
 export interface VisitDraft { factorySnapshot?: FactoryList; editor?: DraftEditor; clientReportId: string; companyId: string; listVersion: string; startedAt: string; note: string; marks: Mark[]; offList: OffListItem[] }
 export interface Counts { checked: number; not_used: number; alert: number; offList: number }
-export interface ReportSummary { id: string; companyId: string; companyName: string; mashgiachId: string; mashgiachName: string; submittedAt: string; startedAt: string; counts: Counts; hasAlerts: boolean; listChanged: boolean; photoCount: number }
+export interface ReportSummary { kind?: 'factory' | 'food_service'; templateName?: string; status?: 'new' | 'seen' | 'follow_up'; seenBy?: { name: string; at: string } | null; followUp?: { note: string; byName: string; at: string } | null; id: string; companyId: string; companyName: string; mashgiachId: string; mashgiachName: string; submittedAt: string; startedAt: string; counts: Counts; hasAlerts: boolean; listChanged: boolean; photoCount: number }
 export interface SentReport { report: ReportSummary; fee: { amount: number; currency: string } | null }
 export type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'>;
 export const visitScope = (userId: string, agencyId: string) => `inspection-visit:${encodeURIComponent(agencyId)}:${encodeURIComponent(userId)}`;

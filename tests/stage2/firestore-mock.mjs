@@ -49,8 +49,8 @@ class MockQuery {
   limit(value) { return new MockQuery(this.store, this.path, this.filters, this.orders, this.cursor, value, this.fields); }
   select(...values) { return new MockQuery(this.store, this.path, this.filters, this.orders, this.cursor, this.cap, values); }
   async get() {
-    if ((this.path.startsWith('inspectionReportsByAgency/') || this.path === 'inspectionSchedules') && (
-      (this.filters.length && this.orders.length) || this.orders.length > 1 ||
+    if ((this.path.startsWith('inspectionReportsByAgency/') || ['inspectionSchedules', 'inspectionFoodService', 'inspectionInbox'].includes(this.path)) && (
+      (this.path.startsWith('inspectionReportsByAgency/') && this.filters.length) || (this.filters.length && this.orders.length) || this.orders.length > 1 ||
       this.filters.some(([field, op]) => op !== '==' && this.orders.some(([order]) => order !== field))
     )) throw Error('composite index required');
     const compare = (a, b) => { for (const [field, direction] of this.orders) { const cmp = a[field] === b[field] ? 0 : a[field] < b[field] ? -1 : 1; if (cmp) return direction === 'desc' ? -cmp : cmp; } return 0; };

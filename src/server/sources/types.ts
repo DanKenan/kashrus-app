@@ -15,13 +15,13 @@ export interface Product {
   dpm?: Dpm; group1?: boolean; symbolRequired?: boolean; plant?: string; extra: Record<string, string>;
 }
 export interface SourceMapping {
-  companies: { table: string; name: string; type?: string; factoryValues?: string[]; brand?: string; plant?: string };
+  companies: { table: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
   ingredients: { table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
   products: { table: string; companyLink: string; name: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };
   valueAssignments?: Record<string, Record<string, ValueAssignment>> | Partial<Record<'ingredient' | 'product', Record<string, Record<string, ValueAssignment>>>>;
   group1Values: string[];
 }
-export interface SourceData { companies: Company[]; ingredients: Ingredient[]; products: Product[] }
+export interface SourceData { companies: Company[]; otherCompanies?: { id: string; name: string; type?: string }[]; ingredients: Ingredient[]; products: Product[] }
 export interface SourceTable { name: string; columns: string[] }
 export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
 export interface ConnectionResult { ok: boolean; access?: 'read' | 'readwrite'; tables?: SourceTable[]; error?: string }

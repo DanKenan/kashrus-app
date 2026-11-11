@@ -62,10 +62,10 @@ export function buildReport(input: ReturnType<typeof normalizeSubmit>, context: 
   });
   const counts = { checked: 0, not_used: 0, alert: 0, offList: input.offList.length };
   for (const m of marks) counts[m.status]++;
-  return { ...body, marks, id: context.id, agencyId: context.agencyId, mashgiachId: context.userId, mashgiachName: context.userName, companyName: context.companyName, submittedAt: context.now, receivedAt: context.now, listChanged: input.listVersion !== context.listVersion, counts, hasAlerts: counts.alert > 0 || counts.offList > 0, photoCount: Object.keys(photos).length, fee: context.fee };
+  return { kind: 'factory' as const, ...body, marks, id: context.id, agencyId: context.agencyId, mashgiachId: context.userId, mashgiachName: context.userName, companyName: context.companyName, submittedAt: context.now, receivedAt: context.now, listChanged: input.listVersion !== context.listVersion, counts, hasAlerts: counts.alert > 0 || counts.offList > 0, photoCount: Object.keys(photos).length, fee: context.fee };
 }
-export type Report = ReturnType<typeof buildReport>;
+export type Report = ReturnType<typeof buildReport> | ReturnType<typeof import('./food-service.ts').buildFoodServiceReport>['report'];
 export function summary(r: Report) {
   const { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, startedAt, counts, hasAlerts, listChanged, photoCount } = r;
-  return { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, startedAt, counts, hasAlerts, listChanged, photoCount };
+  return { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, startedAt, counts, hasAlerts, listChanged, photoCount, kind: r.kind || 'factory', templateName: r.kind === 'food_service' ? r.templateName : '' };
 }

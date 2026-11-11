@@ -105,14 +105,17 @@ export function classifyRaw(mapping: SourceMapping, config: { certification?: st
 }
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value.trim() : undefined;
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
-  const read = (row: SourceRow, column?: string) => column ? text(row.fields[column]) : undefined;
+  const read = (row: SourceRow, column?: string): string | undefined => column && typeof row.fields[column] === 'string' ? row.fields[column] as string : undefined;
   const extra = (row: SourceRow, config: object) => {
     const mapped = new Set(Object.entries(config).filter(([k, v]) => k !== 'table' && typeof v === 'string').map(([, v]) => v));
     return Object.fromEntries(Object.entries(row.fields).filter(([k, v]) => !mapped.has(k) && typeof v === 'string')) as Record<string, string>;
   };
   const c = mapping.companies;
-  const companies = (rows[c.table] ?? []).filter(r => !c.factoryValues?.length || c.factoryValues.some(v => folded(v) === folded(read(r, c.type) ?? '')))
+  const companies = (rows[c.table] ?? []).filter(r => !c.factoryValues?.length || [...c.factoryValues, ...(c.foodServiceValues ?? [])].some(v => folded(v) === folded(read(r, c.type) ?? '')))
     .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), extra: extra(r, c) }));
+  const keptIds = new Set(companies.map(c => c.id));
+  const otherCompanies = (rows[c.table] ?? []).filter(r => !keptIds.has(r.id))
+    .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type) }));
   const ids = new Set(companies.map(c => c.id));
   const names = new Map<string, string[]>();
   for (const c of companies) names.set(folded(c.name), [...(names.get(folded(c.name)) ?? []), c.id]);
@@ -137,5 +140,5 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
     return { ...classifiedRaw, ...classifyRaw(mapping, p, classifiedRaw), id: r.id, companyIds: links(r, p.companyLink), name: read(r, p.name) ?? '', brand: read(r, p.brand),
       code: read(r, p.code), symbolRequired, plant: read(r, p.plant), extra: extra(r, p) };
   });
-  return { companies, ingredients, products };
+  return { companies, ingredients, products, otherCompanies };
 }

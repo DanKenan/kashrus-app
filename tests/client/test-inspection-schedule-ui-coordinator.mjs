@@ -44,7 +44,7 @@ await screen.click('Visit schedule');
 const editorProps = screen.tree().props.children.find(e => e?.type === VisitScheduleEditor).props;
 assert.equal(editorProps.isAdmin, false);
 const editor = mount(VisitScheduleEditor, editorProps); await editor.render();
-assert.doesNotMatch(editor.text(), /Who's responsible/); assert.match(editor.text(), /How often/); assert.match(editor.text(), /Overdue alerts/);
+assert.doesNotMatch(editor.text(), /Who's responsible/); assert.match(editor.text(), /How often/); assert.equal(editor.find(e => e.type === 'legend' && e.props.children === 'Alerts').length, 1);
 await screen.click('Reports'); assert.equal(screen.tree().props.children.filter(e => e?.type === InspectionReportsInbox).length, 1);
 assert.ok(calls.every(([, method]) => method === 'GET'));
 

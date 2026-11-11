@@ -35,6 +35,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     return () => { active = false; };
   }, [valueSearch]);
   const [guessed, setGuessed] = useState<Record<string, number>>({});
+  const [foodServiceValues, setFoodServiceValues] = useState((connection.mapping?.companies.foodServiceValues || []).join(', '));
   const [factoryValues, setFactoryValues] = useState((connection.mapping?.companies.factoryValues || []).join(', '));
   const [group1Values, setGroup1Values] = useState((connection.mapping?.group1Values || ['Group 1']).join(', '));
   const [busy, setBusy] = useState<'test' | 'save' | null>(null);
@@ -76,7 +77,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         if (result.guess?.mapping) {
           const suggestion = { ...emptyMapping(), ...result.guess.mapping };
           const next = connection.mapping ? {
-            ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) },
+            ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues), ...(foodServiceValues || mapping.companies.foodServiceValues ? { foodServiceValues: commaList(foodServiceValues) } : {}) },
             ingredients: { ...mapping.ingredients }, products: { ...mapping.products }, group1Values: commaList(group1Values),
           } : suggestion;
           const filled: Record<string, number> = {};
@@ -91,14 +92,14 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
             }
           }
           if (!next.group1Values.length) next.group1Values = suggestion.group1Values;
-          setMapping(next); setFactoryValues((next.companies.factoryValues || []).join(', '));
+          setFoodServiceValues((next.companies.foodServiceValues || []).join(', ')); setMapping(next); setFactoryValues((next.companies.factoryValues || []).join(', '));
           setGroup1Values(next.group1Values.join(', '));
           setGuessed(filled);
         } else setGuessed({});
         setAccess(result.access || 'read');
         setMessage(`Connected · ${result.access === 'readwrite' ? 'read and write' : 'read only'}`);
       } else {
-        await sourceRequest('/api/sources/connection', 'PUT', { ...payload(), access, group1Label: group1Label.trim(), mapping: { ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) }, group1Values: commaList(group1Values) } });
+        await sourceRequest('/api/sources/connection', 'PUT', { ...payload(), access, group1Label: group1Label.trim(), mapping: { ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues), ...(foodServiceValues || mapping.companies.foodServiceValues ? { foodServiceValues: commaList(foodServiceValues) } : {}) }, group1Values: commaList(group1Values) } });
         setApiKey(''); onSaved(); onClose();
       }
     } catch (e) { setError(e instanceof Error ? e.message : "Couldn't save. Try again."); }
@@ -121,7 +122,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     </div>;
   };
   const preview = (group: keyof typeof groups) => {
-    const data = previewRows(samples || {}, { ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) }, group1Values: commaList(group1Values) }, group, group1Label.trim() || 'Group 1');
+    const data = previewRows(samples || {}, { ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues), ...(foodServiceValues || mapping.companies.foodServiceValues ? { foodServiceValues: commaList(foodServiceValues) } : {}) }, group1Values: commaList(group1Values) }, group, group1Label.trim() || 'Group 1');
     return <div className="min-w-0 space-y-2">
       <h4 className="text-sm font-semibold">Preview</h4>
       {!samples ? <p className="text-sm text-ink-soft">Press Test connection to see a preview.</p> : !data.rows.length ? <p className="text-sm text-ink-soft">No sample rows for this table.</p> : <div role="region" aria-label={`${group} preview`} tabIndex={0} className="max-w-full overflow-x-auto rounded-lg border border-line">
@@ -161,7 +162,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         <button type="button" className={sourceButton} disabled={!!busy || !baseId.trim()} onClick={() => void run('test')}>{busy === 'test' ? 'Testing…' : 'Test connection'}</button>
         {message && <p role="status" className="text-base text-ink">{message}</p>}
         <h3 className="text-xl font-semibold">Mapping</h3>
-        {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients' : 'Products'}</legend>{select(group, 'table', 'Table')}{groups[group].map(([field, label]) => select(group, field, label))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{preview(group)}</fieldset>)}
+        {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients' : 'Products'}</legend>{select(group, 'table', 'Table')}{groups[group].map(([field, label]) => select(group, field, label))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{group === 'companies' && <label className="block text-sm text-ink-soft">Which types are food service places<input name="foodServiceValues" className={fieldClass} value={foodServiceValues} disabled={!!busy} onChange={e => setFoodServiceValues(e.target.value)} /></label>}{preview(group)}</fieldset>)}
         <fieldset className="space-y-4"><legend className="text-xl font-semibold">What each value means</legend>
           <p className="text-base text-ink-soft">Your database writes the certification in different ways. Tell the app once what each one means — it applies to every ingredient that uses it.</p>
           {Math.max(values.length, storedValueTotal) > 20 && <label className="block text-sm text-ink-soft">Search values<input className={fieldClass} name="valueSearch" value={valueSearch} onChange={e => setValueSearch(e.target.value)} /></label>}

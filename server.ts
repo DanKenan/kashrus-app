@@ -14821,6 +14821,7 @@ const checkInPhotoStore = createCheckInPhotoStore({
 });
 const sourceRoutes = registerSourceRoutes(app, {
   db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
+  foodServiceCompanyIds: (agencyId) => inspectionRoutes.foodServiceCompanyIds(agencyId),
   secret: () => process.env.SOURCE_KEYS_SECRET || getJwtSecret(),
   testMode: isTestMode(), requireAdmin,
   timeZone: (id) => agencies.find(a => a.id === id)?.timeZone,
@@ -14834,6 +14835,10 @@ const inspectionRoutes = registerInspectionRoutes(app, {
   db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
   source: sourceRoutes.inspectionSource, user: getAuthUser,
   maxPhotoChars: ANSWER_PHOTO_MAX_CHARS, photoRe: ANSWER_PHOTO_DATA_RE,
+});
+// Drain debounced agency inbox state before graceful process termination.
+for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => {
+  void inspectionRoutes.flushSeen(true).catch(() => console.warn('[inspections] seen flush failed')).finally(() => process.exit(0));
 });
 registerCheckInPhotoRoutes(app, {
   store: checkInPhotoStore,

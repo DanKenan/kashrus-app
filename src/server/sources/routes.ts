@@ -26,7 +26,7 @@ function settings(body: any, mapping = true) {
     const c = m[kind];
     if (!c || !str(c.table) || !c.table.trim() || !str(c.name) || !c.name.trim() || (kind !== 'companies' && (!str(c.companyLink) || !c.companyLink.trim()))) throw Error('Invalid mapping');
     for (const [k, v] of Object.entries(c)) {
-      if (k === 'factoryValues') { if (!Array.isArray(v) || v.length > 50 || !v.every(str)) throw Error('Invalid mapping'); }
+      if ((k === 'factoryValues' || k === 'foodServiceValues')) { if (!Array.isArray(v) || v.length > 50 || !v.every(str)) throw Error('Invalid mapping'); }
       else if (!str(v)) throw Error('Invalid mapping');
     }
   }
@@ -50,6 +50,7 @@ function settings(body: any, mapping = true) {
 }
 export function registerSourceRoutes(app: any, deps: {
   db(): any; dataDir: string; staged(): boolean; secret(): string; testMode: boolean;
+  foodServiceCompanyIds?(agencyId: string): Promise<string[]>;
   requireAdmin(req: any, res: any): any; timeZone(id: string): string | undefined;
 }) {
   const store = createSourceStore(deps), connections = new Map<string, Connection>();
@@ -274,9 +275,10 @@ export function registerSourceRoutes(app: any, deps: {
     const company = state.companies.find(company => state.itemsFor(company.id, kind).some(item => item.id === itemId))!;
     res.json({ item: items(id, company.id, kind).find(item => item.id === itemId) });
   }));
-  app.get('/api/factories', handler((_req: any, res: any, { id }: any) => {
+  app.get('/api/factories', handler(async (_req: any, res: any, { id }: any) => {
     const s = cache.state(id), c = connections.get(id);
-    res.json({ status: { group1Label: c?.group1Label || 'Group 1', connected: !!c, sourceType: c?.sourceType || null, status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: s.error || null }, companies: s.companies.map(c => ({ id: c.id, name: c.name, brand: c.brand || '', plant: c.plant || '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length, lastVisitAt: null, nextDueAt: null, overdue: null })).sort((a, b) => a.name.localeCompare(b.name)) });
+    const foodServiceIds = new Set(await deps.foodServiceCompanyIds?.(id) ?? []);
+    res.json({ status: { group1Label: c?.group1Label || 'Group 1', connected: !!c, sourceType: c?.sourceType || null, status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: s.error || null }, companies: s.companies.filter(c => !foodServiceIds.has(c.id)).map(c => ({ id: c.id, name: c.name, brand: c.brand || '', plant: c.plant || '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length, lastVisitAt: null, nextDueAt: null, overdue: null })).sort((a, b) => a.name.localeCompare(b.name)) });
   }));
   if (deps.testMode) {
     app.post('/api/__test__/source-fees', mutation(async (req: any, res: any, { id }: any) => {
