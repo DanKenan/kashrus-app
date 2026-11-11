@@ -38,6 +38,7 @@ interface DashboardData {
 }
 
 interface AgencyDashboardProps {
+  overdueCard?: React.ReactNode;
   logo?: { agencyName: string; agencyShortCode: string; logoSrc: string | null; onOpen: () => void };
   /** QA2 #27: admin-only agency settings (name, phone, time zone). */
   settings?: { onOpen: () => void };
@@ -49,7 +50,7 @@ interface AgencyDashboardProps {
   onOpenFactoryVisit?: () => void;
 }
 
-export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOpenEvents, onOpenFactories, onOpenFactoryVisit }: AgencyDashboardProps) {
+export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOpenEvents, onOpenFactories, onOpenFactoryVisit, overdueCard }: AgencyDashboardProps) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -101,8 +102,9 @@ export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOp
 
   return (
     <section className="space-y-4 text-ink">
+      {overdueCard}
+      <h2 className="min-w-0 break-words text-2xl font-semibold">Agency Dashboard</h2>
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-2xl font-semibold flex-1 min-w-0">Agency Dashboard</h2>
         {onOpenEvents && (
           <button type="button" onClick={onOpenEvents} data-agency-events-btn
             className="pressable min-h-11 inline-flex items-center gap-1.5 px-3 rounded-xl bg-surface border border-line-control text-ink text-sm font-semibold hover:bg-sunken cursor-pointer shrink-0">

@@ -1,15 +1,18 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import type { createScheduleStore } from './schedule-store.ts';
 import { summary, type Report } from './model.ts';
 export const reportId = (agency: string, user: string, client: string) => createHash('sha256').update(JSON.stringify([agency, user, client])).digest('hex');
 export type Cursor = { submittedAt: string; id: string };
 export const reportOrder = (a: Cursor, b: Cursor) => b.submittedAt.localeCompare(a.submittedAt) || (a.id === b.id ? 0 : a.id > b.id ? -1 : 1);
-export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean }) {
+export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean; schedules?: ReturnType<typeof createScheduleStore> }) {
   const reports = new Map<string, Report>(), summaries = new Map<string, ReturnType<typeof summary> & { agencyId: string }>();
   const loaded = new Map<string, Promise<void>>();
   const failures = new Map<string, { retryAt: number; attempts: number }>();
-  const ends = new Map<string, Cursor | undefined>();
+  const ends = new Map<string, Cursor | undefined>(), frontiers = new Map<string, Cursor | undefined>();
+  // Keep the last bounded query window when its rows fall outside the 5000-summary prefix.
+  const windows = new Map<string, { after?: Cursor; rows: ReturnType<typeof summary>[] }>();
   const collection = (agency: string) => deps.db().collection(`inspectionReportsByAgency/${agency}/reports`);
   const sortKey = (r: Cursor) => `${r.submittedAt}|${r.id}`;
   const photos = new Map<string, Record<string, string>>(), flights = new Map<string, Promise<Record<string, string>>>();
@@ -23,10 +26,13 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     for (const id of ids.slice(0, Math.max(0, ids.length - 500))) reports.delete(id);
   }
   function install(r: Report) {
-    const id = key(r.agencyId, r.id);
+    const id = key(r.agencyId, r.id), frontier = frontiers.get(r.agencyId), end = ends.get(r.agencyId);
+    const complete = frontiers.has(r.agencyId) && ends.has(r.agencyId) && (!end || (!!frontier && reportOrder(frontier, end) >= 0));
     summaries.set(id, { ...summary(r), agencyId: r.agencyId }); cacheDetail(r);
     const rows = list(r.agencyId);
     for (const row of rows.slice(5000)) summaries.delete(key(r.agencyId, row.id));
+    if (ends.has(r.agencyId) && (!ends.get(r.agencyId) || reportOrder(r, ends.get(r.agencyId)!) > 0)) ends.set(r.agencyId, r);
+    if (complete) frontiers.set(r.agencyId, rows.slice(0, 5000).at(-1));
   }
   async function localRows(): Promise<Report[]> {
     let names: string[] = [];
@@ -49,7 +55,8 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
           ? (await query(agency, 200).get()).docs.map((d: any) => d.data())
           : (await localRows()).filter(r => r.agencyId === agency).sort(reportOrder).slice(0, 200);
         for (const r of rows) install(r);
-        if (rows.length < 200) ends.set(agency, rows.at(-1));
+        if (rows.length < 200) ends.set(agency, list(agency).at(-1));
+        frontiers.set(agency, rows.length < 200 ? list(agency).at(-1) : rows.at(-1));
         failures.delete(agency);
       })().catch(error => {
         loaded.delete(agency);
@@ -70,15 +77,19 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     if (r?.agencyId !== agency) return undefined;
     cacheDetail(r); return r;
   }
-  async function save(r: Report, photoData: Record<string, string>): Promise<{ report: Report; created: boolean }> {
+  async function saveUnlocked(r: Report, photoData: Record<string, string>): Promise<{ report: Report; created: boolean }> {
     if (deps.staged()) throw Error('Writes blocked');
     const id = key(r.agencyId, r.id), db = deps.db();
     let saved = r;
+    const schedules = deps.schedules, previous = schedules?.company(r.agencyId, r.companyId).lastVisit;
+    const update = schedules && (!previous || r.submittedAt > previous.at || (r.submittedAt === previous.at && r.id > previous.reportId))
+      ? schedules.prepare(r.agencyId, { companies: { [r.companyId]: { lastVisit: { at: r.submittedAt, reportId: r.id, mashgiachName: r.mashgiachName } } } }) : null;
     try {
       if (db) {
         const batch = db.batch();
         batch.create(collection(r.agencyId).doc(r.id), { ...r, sortKey: sortKey(r) });
         if (r.photoCount) batch.create(db.collection('inspectionReportPhotos').doc(id), { photos: photoData });
+        if (update) batch.set(update.ref, update.patch, { merge: true });
         await batch.commit();
       } else {
         const target = file('inspectionReports', id), nonce = randomUUID();
@@ -90,7 +101,10 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
           if (r.photoCount) { const targetPhoto = file('inspectionReportPhotos', photoId); await fs.mkdir(path.dirname(targetPhoto), { recursive: true }); await fs.writeFile(targetPhoto, JSON.stringify({ photos: photoData })); }
           await fs.writeFile(temporary, JSON.stringify(saved));
           // Atomic, exclusive publication: retries can only observe a complete report.
-          await fs.link(temporary, target); published = true;
+          await fs.link(temporary, target);
+          try { if (update) await schedules!.persistLocal(r.agencyId, update.next); }
+          catch (error) { await fs.rm(target, { force: true }); throw error; }
+          published = true;
         } finally {
           await fs.rm(temporary, { force: true });
           if (!published && r.photoCount) await fs.rm(file('inspectionReportPhotos', photoId), { force: true });
@@ -103,22 +117,64 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
       if (!stored) throw e;
       return { report: stored, created: false };
     }
+    if (update) schedules!.install(r.agencyId, update.next);
     install(saved); return { report: saved, created: true };
   }
-  async function page(agency: string, limit: number, before?: Cursor, userId?: string) {
+  async function save(r: Report, photoData: Record<string, string>) {
+    return deps.schedules ? deps.schedules.locked(r.agencyId, () => saveUnlocked(r, photoData)) : saveUnlocked(r, photoData);
+  }
+  async function visiblePage(agency: string, limit: number, before?: Cursor, visible?: (r: ReturnType<typeof summary>) => boolean) {
     await ensure(agency);
-    const cached = list(agency), rows = cached.filter(r => (!userId || r.mashgiachId === userId) && (!before || reportOrder(r, before) > 0)).slice(0, limit);
-    // Only admins can cross the memory boundary. Projection never reads photo documents.
-    if (!userId && rows.length < limit && (!ends.has(agency) || (before && ends.get(agency) && reportOrder(before, ends.get(agency)!) < 0))) {
-      const cursor = rows.at(-1) || before || cached.at(-1);
-      const db = deps.db();
-      const older = db ? (await query(agency, limit - rows.length, cursor, true).get()).docs.map((d: any) => d.data()) : (await localRows()).filter(r => r.agencyId === agency && (!cursor || reportOrder(r, cursor) > 0)).sort(reportOrder).slice(0, limit - rows.length);
-      if (older.length < limit - rows.length) ends.set(agency, older.at(-1) || cursor);
-      for (const r of older) summaries.set(key(agency, r.id), { ...summary(r), agencyId: agency });
-      for (const r of list(agency).slice(5000)) summaries.delete(key(agency, r.id));
-      return [...rows, ...older].map(summary);
+    const rows: ReturnType<typeof summary>[] = [];
+    let cursor = before, fetched = 0;
+    const atEnd = () => ends.has(agency) && (!ends.get(agency) || (!!cursor && reportOrder(cursor, ends.get(agency)!) >= 0));
+    const consume = (r: ReturnType<typeof summary>) => {
+      cursor = { submittedAt: r.submittedAt, id: r.id };
+      if (!visible || visible(r)) rows.push(summary(r as Report));
+    };
+    const frontier = frontiers.get(agency);
+    for (const r of list(agency)) {
+      if ((!before || reportOrder(r, before) > 0) && frontier && reportOrder(r, frontier) <= 0) consume(r);
+      if (rows.length === limit) return { reports: rows, nextCursor: atEnd() ? null : cursor! };
     }
-    return rows.map(summary);
+    const window = windows.get(agency), last = window?.rows.at(-1);
+    if (window && last && (!window.after || (!!cursor && reportOrder(cursor, window.after) >= 0)) && (!cursor || reportOrder(cursor, last) <= 0)) {
+      for (const r of window.rows) {
+        if (!cursor || reportOrder(r, cursor) > 0) consume(r);
+        if (rows.length === limit) return { reports: rows, nextCursor: atEnd() ? null : cursor! };
+      }
+    }
+    while (!atEnd() && (fetched < 1000 || !deps.db())) {
+      const db = deps.db(), start = cursor, size = visible ? 200 : limit - rows.length;
+      const older: ReturnType<typeof summary>[] = db
+        ? (await query(agency, size, start, true).get()).docs.map((d: any) => d.data())
+        : (await localRows()).filter(r => r.agencyId === agency && (!start || reportOrder(r, start) > 0)).sort(reportOrder).slice(0, size);
+      fetched += older.length || 1;
+      if (older.length < size) ends.set(agency, older.at(-1) || start);
+      windows.set(agency, { after: start, rows: older });
+      for (const r of older) summaries.set(key(agency, r.id), { ...summary(r as Report), agencyId: agency });
+      const covered = frontiers.get(agency);
+      if (!start || (covered && reportOrder(start, covered) <= 0)) frontiers.set(agency, older.at(-1) || covered);
+      for (const r of list(agency).slice(5000)) summaries.delete(key(agency, r.id));
+      const tail = list(agency).at(-1), extended = frontiers.get(agency);
+      if (tail && extended && reportOrder(tail, extended) < 0) frontiers.set(agency, tail);
+      for (const r of older) {
+        consume(r);
+        if (rows.length === limit) return { reports: rows, nextCursor: atEnd() ? null : cursor! };
+      }
+      if (!older.length) break;
+    }
+    return { reports: rows, nextCursor: atEnd() ? null : cursor! };
+  }
+  async function page(agency: string, limit: number, before?: Cursor, userId?: string) {
+    return (await visiblePage(agency, limit, before, userId ? r => r.mashgiachId === userId : undefined)).reports;
+  }
+  function latest(agency: string, companyId: string) {
+    let newest: ReturnType<typeof summary> | undefined;
+    for (const rows of [summaries.values(), reports.values()]) for (const r of rows) {
+      if (r.agencyId === agency && r.companyId === companyId && (!newest || reportOrder(r, newest) < 0)) newest = r;
+    }
+    return newest;
   }
   async function readPhotos(r: Report): Promise<Record<string, string>> {
     if (!r.photoCount) return {};
@@ -136,5 +192,5 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     })().finally(() => flights.delete(id));
     flights.set(id, flight); return flight;
   }
-  return { boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, ensure, save, readPhotos, get, page, list, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
+  return { boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, visiblePage, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
 }

@@ -49,7 +49,7 @@ class MockQuery {
   limit(value) { return new MockQuery(this.store, this.path, this.filters, this.orders, this.cursor, value, this.fields); }
   select(...values) { return new MockQuery(this.store, this.path, this.filters, this.orders, this.cursor, this.cap, values); }
   async get() {
-    if (this.path.startsWith('inspectionReportsByAgency/') && (
+    if ((this.path.startsWith('inspectionReportsByAgency/') || this.path === 'inspectionSchedules') && (
       (this.filters.length && this.orders.length) || this.orders.length > 1 ||
       this.filters.some(([field, op]) => op !== '==' && this.orders.some(([order]) => order !== field))
     )) throw Error('composite index required');
@@ -60,15 +60,24 @@ class MockQuery {
     return { docs, empty: !docs.length, size: docs.length, forEach: fn => docs.forEach(fn) };
   }
 }
+// Firestore merge recursively replaces leaves (arrays and explicit null included).
+function mergeData(old, patch) {
+  const result = { ...old };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value?.constructor?.name === 'DeleteTransform') { delete result[key]; continue; }
+    Object.defineProperty(result, key, { enumerable: true, writable: true, configurable: true, value: value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length ? mergeData(old?.[key], value) : value });
+  }
+  return result;
+}
 class MockWriteBatch {
   constructor(store) { this.store = store; this._ops = []; }
   create(ref, data) { this._ops.push({ docPath: ref.path, data, create: true }); return this; }
-  set(ref, data) { this._ops.push({ docPath: ref.path, data }); return this; }
+  set(ref, data, options) { this._ops.push({ docPath: ref.path, data, merge: options?.merge }); return this; }
   delete(ref) { this._ops.push({ docPath: ref.path, deleted: true, op: () => ({ delete: ref.path }) }); return this; }
   commit() { return this._commit(); }
   async _commit() {
     for (const write of this._ops) if (write.create && this.store._docs[write.docPath] !== undefined) { const error = Error('Already exists'); error.code = 6; throw error; }
-    for (const write of this._ops) { if (write.deleted) delete this.store._docs[write.docPath]; else this.store._docs[write.docPath] = JSON.parse(JSON.stringify(write.data)); }
+    for (const write of this._ops) { if (write.deleted) delete this.store._docs[write.docPath]; else this.store._docs[write.docPath] = JSON.parse(JSON.stringify(write.merge ? mergeData(this.store._docs[write.docPath], write.data) : write.data)); }
     this.store._save();
   }
 }
@@ -93,8 +102,9 @@ class MockDocumentReference {
   async get() {
     return new MockDocumentSnapshot(this._store._docs[this.path]);
   }
-  async set(data) {
-    this._store._docs[this.path] = JSON.parse(JSON.stringify(data));
+  async set(data, options) {
+    this._store._docs[this.path] = JSON.parse(JSON.stringify(options?.merge ? mergeData(this._store._docs[this.path], data) : data));
+    this._store._save();
   }
   /**
    * 8k test-harness correction: DocumentReference.delete() was missing, so the

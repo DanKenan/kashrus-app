@@ -80,6 +80,7 @@ import { CreateEventModal } from './components/CreateEventModal';
 import { CopyEventDialog } from './components/CopyEventDialog';
 import { ConfirmModal } from './components/ConfirmModal';
 import { VenueTabs } from './components/VenueTabs';
+import { InspectionOverdueBanner } from './components/InspectionOverdueBanner';
 import { FactoriesScreen } from './components/FactoriesScreen';
 import { AgencyEventsScreen } from './components/AgencyEventsScreen';
 import { SHOW_FACTORY_AUDIT } from './lib/features';
@@ -2568,13 +2569,11 @@ export default function App() {
       : undefined;
 
   const { showBar, showGold } = getPhoneNavState(isKiosk ? null : currentUser, venues.length > 0);
+  const dashboardHome = !isKiosk && currentUser.role === 'admin' && adminHome && !((venues.length === 0 || noVenueInScope) && noVenueMessage(currentUser));
+  const overdueCard = !isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) ? <InspectionOverdueBanner key={`alerts:${currentUser.agencyId}:${currentUser.id}`} membership={`${currentUser.agencyId}:${currentUser.id}`} timeZone={currentUser.agencyTimeZone || DEFAULT_TIME_ZONE} onOpen={() => currentUser.role === 'mashgiach' ? setIsFactoryVisitOpen(true) : setIsFactoriesOpen(true)} /> : null;
 
   return (
     <div data-phone-layout={!isKiosk ? true : undefined} className={`min-h-screen bg-paper text-ink flex flex-col transition-colors ${showBar || showGold ? 'max-sm:pb-[calc(144px+env(safe-area-inset-bottom))]' : ''}`}>
-      {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && <>
-        <VisitOutbox key={`${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} />
-        {(currentUser.role !== 'admin' || !adminHome || venues.length === 0 || noVenueInScope) && <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFactoryVisitOpen(true)}>Factory visit</button></div>}
-      </>}
       {/* Stale-draft banner: changes preserved across the refresh that a
           428 STALE_CLIENT required. Re-apply sends them with a fresh version. */}
       {staleDrafts.length > 0 && (
@@ -2791,6 +2790,12 @@ export default function App() {
 
       {/* Main Body */}
       <main className={`flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-12 ${!isKiosk && !isVenueOwnerLike(currentUser) ? 'max-sm:flex max-sm:flex-col' : ''}`}>
+      {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && <div className="mb-4 max-sm:order-first">
+        {!dashboardHome && overdueCard}
+        {currentUser.role === 'coordinator' && <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFactoriesOpen(true)}>Factories</button></div>}
+        <VisitOutbox key={`${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} />
+        {(currentUser.role !== 'admin' || !adminHome || venues.length === 0 || noVenueInScope) && <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFactoryVisitOpen(true)}>Factory visit</button></div>}
+      </div>}
         
         {/* QA2 #8: a non-admin with no venue (e.g. their venue was deleted) never
             sees the admin setup screen below; one plain message instead. */}
@@ -2882,6 +2887,7 @@ export default function App() {
           </div>
         ) : !isKiosk && currentUser.role === 'admin' && adminHome ? (
           <AgencyDashboard
+            overdueCard={overdueCard}
             logo={currentUser.role === 'admin' && isLogoFeatureOn(currentUser) ? {
               agencyName: currentUser.agencyName || '', agencyShortCode: currentUser.agencyShortCode || '',
               logoSrc: agencyLogoSrc, onOpen: () => setIsAgencyLogoOpen(true),
@@ -3388,7 +3394,7 @@ export default function App() {
 
       {/* Create / Notify Event Modal */}
       {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && isFactoryVisitOpen && <FactoryVisitScreen key={`${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} timeZone={currentUser.agencyTimeZone || DEFAULT_TIME_ZONE} onClose={() => setIsFactoryVisitOpen(false)} />}
-      <FactoriesScreen isOpen={!isKiosk && isFactoriesOpen && currentUser?.role === 'admin'} onClose={() => setIsFactoriesOpen(false)} timeZone={currentUser?.agencyTimeZone || DEFAULT_TIME_ZONE} />
+      <FactoriesScreen role={currentUser.role} isOpen={!isKiosk && isFactoriesOpen && ['admin', 'coordinator'].includes(currentUser?.role)} onClose={() => setIsFactoriesOpen(false)} timeZone={currentUser?.agencyTimeZone || DEFAULT_TIME_ZONE} />
       <AgencyEventsScreen
         isOpen={isAgencyEventsOpen && currentUser?.role === 'admin'}
         onClose={() => setIsAgencyEventsOpen(false)}
