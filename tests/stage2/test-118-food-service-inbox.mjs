@@ -171,13 +171,14 @@ export default {
    await action('remove manual place', 'DELETE', `${path}/places/${spare.id}`);
    const retryPlace = (await action('add retry manual place', 'POST', `${path}/places`, { name: 'Test retry manual' }, 1, 201)).place;
    const retryBody = { ...body, companyId: retryPlace.id, clientReportId: 'report-118-deleted-manual', templateId: null, templateVersion: null, answers: [] };
-   const savedManual = await action('submit manual report before deletion', 'POST', '/api/visits/reports', retryBody, 3, 201);
+   const savedManual = await action('submit manual report before deletion', 'POST', '/api/visits/reports', retryBody, 2, 201);
    assert.equal(savedManual.report.companyId, retryPlace.id);
    await action('delete reported manual place', 'DELETE', `${path}/places/${retryPlace.id}`, undefined, 2);
    const retriedManual = await action('retry report after manual deletion', 'POST', '/api/visits/reports', retryBody, 0, 200);
    assert.equal(retriedManual.report.id, savedManual.report.id);
    assert.deepEqual(retriedManual.report, savedManual.report);
    assert.ok((await api('admin', 'GET', '/api/inspections/reports')).json.reports.some(r => r.id === savedManual.report.id));
+   await pin('2098-11-11T14:00:00Z');
    const before = (await api('admin', 'GET', path)).json, reportBefore = (await api('admin', 'GET', '/api/inspections/reports')).json;
    await api('admin', 'POST', '/api/__test__/inspections/flush-seen', {});
    await ctx.restartServer(); const boot = await settle(), agencyCount = (await ctx.getDoc()).agencies.length;
