@@ -1,5 +1,6 @@
 import { classifyCheckInPhoto } from '../checkin-photos.ts';
 export type Item = { id: string; name: string; brand: string; code: string; certificationRaw: string; statusRaw: string; agency: string; dpm: string; group1: boolean };
+type ItemSnapshot = Pick<Item, 'name' | 'brand' | 'code' | 'certificationRaw' | 'statusRaw'> & Partial<Pick<Item, 'agency' | 'dpm' | 'group1'>>;
 export type Fee = { amount: number; currency: string } | null;
 export function normalizeSubmit(body: any, maxPhotoChars: number, photoRe: RegExp) {
   const text = (value: any, max: number, required = false): string => {
@@ -27,10 +28,21 @@ export function normalizeSubmit(body: any, maxPhotoChars: number, photoRe: RegEx
     if (!m || !['ingredient', 'product'].includes(m.kind) || !['checked', 'not_used', 'alert'].includes(m.status)) throw Error('Invalid mark');
     const itemId = text(m.itemId, 200, true), key = JSON.stringify([m.kind, itemId]);
     if (seen.has(key)) throw Error('Duplicate mark'); seen.add(key);
-    const item = m.item === undefined ? undefined : Object.fromEntries(['name', 'brand', 'code', 'certificationRaw', 'statusRaw'].map(key => [key, typeof m.item?.[key] === 'string' ? text(m.item[key], 4000) : (() => { throw Error('Invalid item snapshot'); })()]));
+    const item: ItemSnapshot | undefined = m.item === undefined ? undefined : Object.fromEntries(['name', 'brand', 'code', 'certificationRaw', 'statusRaw'].map(key => [key, typeof m.item?.[key] === 'string' ? text(m.item[key], 4000) : (() => { throw Error('Invalid item snapshot'); })()])) as Pick<Item, 'name' | 'brand' | 'code' | 'certificationRaw' | 'statusRaw'>;
+    if (item) {
+      if (m.item.agency !== undefined) item.agency = text(m.item.agency, 200);
+      if (m.item.dpm !== undefined) {
+        if (!['', 'dairy', 'dairy_equipment', 'pareve', 'meat'].includes(m.item.dpm)) throw Error('Invalid item assignment');
+        item.dpm = m.item.dpm;
+      }
+      if (m.item.group1 !== undefined) {
+        if (typeof m.item.group1 !== 'boolean') throw Error('Invalid item assignment');
+        item.group1 = m.item.group1;
+      }
+    }
     const note = text(m.note, 1000), hasPhoto = photo(m.photo, `mark:${i}`);
     if (m.status === 'alert' && !note.trim() && !hasPhoto) throw Error('Alert needs a note or photo');
-    return { ...(item ? { item: item as Pick<Item, 'name' | 'brand' | 'code' | 'certificationRaw' | 'statusRaw'> } : {}), kind: m.kind as 'ingredient' | 'product', itemId, status: m.status as 'checked' | 'not_used' | 'alert', note, hasPhoto };
+    return { ...(item ? { item } : {}), kind: m.kind as 'ingredient' | 'product', itemId, status: m.status as 'checked' | 'not_used' | 'alert', note, hasPhoto };
   });
   const offList = body.offList.map((o: any, i: number) => {
     if (!o) throw Error('Invalid off-list item');
@@ -45,7 +57,8 @@ export function buildReport(input: ReturnType<typeof normalizeSubmit>, context: 
     const found = items[m.kind].get(m.itemId);
     if (!found && !m.item) throw Error('Unknown item');
     const { name, brand, code, certificationRaw, statusRaw } = m.item || found!;
-    return { ...m, ...(!found ? { itemMissing: true } : {}), item: { name, brand, code, certificationRaw, statusRaw } };
+    const { agency, dpm, group1 } = { ...found, ...m.item };
+    return { ...m, ...(!found ? { itemMissing: true } : {}), item: { name, brand, code, certificationRaw, statusRaw, ...(agency !== undefined ? { agency } : {}), ...(dpm !== undefined ? { dpm } : {}), ...(group1 !== undefined ? { group1 } : {}) } };
   });
   const counts = { checked: 0, not_used: 0, alert: 0, offList: input.offList.length };
   for (const m of marks) counts[m.status]++;

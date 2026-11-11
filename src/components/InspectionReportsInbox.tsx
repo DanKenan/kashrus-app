@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { markLabels, type Mark, type OffListItem, type ReportSummary, type VisitItem } from '../lib/inspectionVisit';
+import { markLabels, type Mark, type OffListItem, type ReportSummary, type ItemSnapshot } from '../lib/inspectionVisit';
 import { SourceText, VisitCounts, VisitSheet, visitButton, visitRequest, visitTime, useVisitFocus } from './FactoryVisitScreen';
 export interface ReportDetail extends ReportSummary {
   note: string;
-  marks: (Omit<Mark, 'photo'> & { hasPhoto: boolean; item: Pick<VisitItem, 'name' | 'brand' | 'code' | 'certificationRaw' | 'statusRaw'> })[];
+  marks: (Omit<Mark, 'photo'> & { hasPhoto: boolean; item: ItemSnapshot })[];
   offList: (Omit<OffListItem, 'photo'> & { hasPhoto: boolean })[];
 }
 export function InspectionReportDetail({ id, timeZone, onClose }: { key?: string; id: string; timeZone: string; onClose(): void }) {
@@ -27,7 +27,7 @@ export function InspectionReportDetail({ id, timeZone, onClose }: { key?: string
   return <VisitSheet title="Report details" onClose={onClose}>{error && <p role="alert" className="whitespace-pre-wrap break-words text-bad">{error}</p>}{!report ? <p role="status">Loading report…</p> : <>
     <h3 dir="auto" className="whitespace-pre-wrap break-words text-xl font-semibold">{report.companyName}</h3><p dir="auto" className="whitespace-pre-wrap break-words">{report.mashgiachName}</p><p>Submitted {visitTime(report.submittedAt, timeZone)}</p><p>Started {visitTime(report.startedAt, timeZone)}</p><VisitCounts counts={report.counts} />{report.listChanged && <p>List changed</p>}<p dir="auto" className="whitespace-pre-wrap break-words">{report.note}</p>
     {report.photoCount > 0 && !photos && <button type="button" className={visitButton} disabled={loadingPhotos} onClick={() => void loadPhotos()}>{loadingPhotos ? 'Loading photos…' : 'Load photos'}</button>}
-    {(['alert', 'not_used', 'checked'] as const).map(status => <section key={status} className="space-y-2"><h3 className="text-xl font-semibold">{status === 'alert' ? '⚠ Alerts' : markLabels[status]}</h3>{report.marks.map((mark, index) => mark.status === status && <div key={index} className="space-y-2 rounded-xl border border-line p-4"><p>{mark.kind === 'ingredient' ? 'Ingredient' : 'Product'}</p><SourceText item={mark.item} /><p dir="auto" className="whitespace-pre-wrap break-words">{mark.note}</p>{photo(`mark:${index}`, mark.hasPhoto)}</div>)}</section>)}
+    {(['alert', 'not_used', 'checked'] as const).map(status => <section key={status} className="space-y-2"><h3 className="text-xl font-semibold">{status === 'alert' ? '⚠ Alerts' : markLabels[status]}</h3>{report.marks.map((mark, index) => mark.status === status && <div key={index} className="space-y-2 rounded-xl border border-line p-4"><SourceText item={mark.item} kind={mark.kind} /><p>{mark.kind === 'ingredient' ? 'Ingredient' : 'Product'}</p><p dir="auto" className="whitespace-pre-wrap break-words">{mark.note}</p>{photo(`mark:${index}`, mark.hasPhoto)}</div>)}</section>)}
     <section className="space-y-2"><h3 className="text-xl font-semibold">Off-list items</h3>{report.offList.map((row, index) => <div key={index} className="space-y-2 rounded-xl border border-line p-4"><p dir="auto" className="whitespace-pre-wrap break-words">{row.name}</p><p dir="auto" className="whitespace-pre-wrap break-words">{row.brand}</p><p dir="auto" className="whitespace-pre-wrap break-words">{row.note}</p>{photo(`off:${index}`, row.hasPhoto)}</div>)}</section>
   </>}</VisitSheet>;
 }

@@ -5,7 +5,7 @@ export const markLabels: Record<MarkStatus, string> = { checked: 'Checked', not_
 export interface VisitItem { id: string; name: string; brand: string; code: string; certificationRaw: string; statusRaw: string; agency: string; dpm: 'dairy' | 'dairy_equipment' | 'pareve' | 'meat' | ''; group1: boolean }
 export interface Factory { id: string; name: string; brand: string; plant: string; ingredientCount: number; productCount: number }
 export interface FactoryList { company: Pick<Factory, 'id' | 'name' | 'brand' | 'plant'>; listVersion: string; group1Label: string; refreshedAt: string | null; backupTakenAt?: string | null; ingredients: VisitItem[]; products: VisitItem[] }
-export type ItemSnapshot = Pick<VisitItem, 'name' | 'brand' | 'code' | 'certificationRaw' | 'statusRaw'>;
+export type ItemSnapshot = Pick<VisitItem, 'name' | 'brand' | 'code' | 'certificationRaw' | 'statusRaw'> & Partial<Pick<VisitItem, 'agency' | 'dpm' | 'group1'>>;
 export interface Mark { item?: ItemSnapshot; kind: Kind; itemId: string; status: MarkStatus; note?: string; photo?: string }
 export interface OffListItem { name: string; brand?: string; note?: string; photo?: string }
 export interface DraftEditor { kind?: Kind; itemId?: string; index?: number; initial: OffListItem }
@@ -21,8 +21,8 @@ export function boundedSnapshot(list: FactoryList): FactoryList {
   return list;
 }
 export function itemSnapshot(item: VisitItem): ItemSnapshot {
-  const { name, brand, code, certificationRaw, statusRaw } = item;
-  return { name, brand, code, certificationRaw, statusRaw };
+  const { name, brand, code, certificationRaw, statusRaw, agency, dpm, group1 } = item;
+  return { name, brand, code, certificationRaw, statusRaw, agency, dpm, group1 };
 }
 export function newDraft(list: FactoryList, id: string, now: string): VisitDraft {
   return { factorySnapshot: boundedSnapshot(list), clientReportId: id, companyId: list.company.id, listVersion: list.listVersion, startedAt: now, note: '', marks: [], offList: [] };
