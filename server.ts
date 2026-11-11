@@ -14825,6 +14825,7 @@ const sourceRoutes = registerSourceRoutes(app, {
   timeZone: (id) => agencies.find(a => a.id === id)?.timeZone,
 });
 const inspectionRoutes = registerInspectionRoutes(app, {
+  agencyIds: () => agencies.map(a => a.id),
   db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
   source: sourceRoutes.inspectionSource, user: getAuthUser,
   maxPhotoChars: ANSWER_PHOTO_MAX_CHARS, photoRe: ANSWER_PHOTO_DATA_RE,

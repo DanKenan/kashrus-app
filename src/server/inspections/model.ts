@@ -19,6 +19,7 @@ export function normalizeSubmit(body: any, maxPhotoChars: number, photoRe: RegEx
     const verdict = classifyCheckInPhoto(value, maxPhotoChars, photoRe);
     if (!['none', 'ok'].includes(verdict)) throw Error('Invalid photo');
     if (verdict === 'ok') photos[key] = value;
+    if (Object.values(photos).reduce((total, value) => total + value.length, 0) > 900_000) throw Error('Photos together exceed 900000 characters');
     if (Object.keys(photos).length > 4) throw Error('Too many photos');
     return verdict === 'ok';
   }
@@ -26,9 +27,10 @@ export function normalizeSubmit(body: any, maxPhotoChars: number, photoRe: RegEx
     if (!m || !['ingredient', 'product'].includes(m.kind) || !['checked', 'not_used', 'alert'].includes(m.status)) throw Error('Invalid mark');
     const itemId = text(m.itemId, 200, true), key = JSON.stringify([m.kind, itemId]);
     if (seen.has(key)) throw Error('Duplicate mark'); seen.add(key);
+    const item = m.item === undefined ? undefined : Object.fromEntries(['name', 'brand', 'code', 'certificationRaw', 'statusRaw'].map(key => [key, typeof m.item?.[key] === 'string' ? text(m.item[key], 4000) : (() => { throw Error('Invalid item snapshot'); })()]));
     const note = text(m.note, 1000), hasPhoto = photo(m.photo, `mark:${i}`);
     if (m.status === 'alert' && !note.trim() && !hasPhoto) throw Error('Alert needs a note or photo');
-    return { kind: m.kind as 'ingredient' | 'product', itemId, status: m.status as 'checked' | 'not_used' | 'alert', note, hasPhoto };
+    return { ...(item ? { item: item as Pick<Item, 'name' | 'brand' | 'code' | 'certificationRaw' | 'statusRaw'> } : {}), kind: m.kind as 'ingredient' | 'product', itemId, status: m.status as 'checked' | 'not_used' | 'alert', note, hasPhoto };
   });
   const offList = body.offList.map((o: any, i: number) => {
     if (!o) throw Error('Invalid off-list item');
@@ -41,9 +43,9 @@ export function buildReport(input: ReturnType<typeof normalizeSubmit>, context: 
   const items = { ingredient: new Map(context.items('ingredient').map(i => [i.id, i])), product: new Map(context.items('product').map(i => [i.id, i])) };
   const marks = input.marks.map(m => {
     const found = items[m.kind].get(m.itemId);
-    if (!found) throw Error('Unknown item');
-    const { name, brand, code, certificationRaw, statusRaw } = found;
-    return { ...m, item: { name, brand, code, certificationRaw, statusRaw } };
+    if (!found && !m.item) throw Error('Unknown item');
+    const { name, brand, code, certificationRaw, statusRaw } = m.item || found!;
+    return { ...m, ...(!found ? { itemMissing: true } : {}), item: { name, brand, code, certificationRaw, statusRaw } };
   });
   const counts = { checked: 0, not_used: 0, alert: 0, offList: input.offList.length };
   for (const m of marks) counts[m.status]++;

@@ -18,7 +18,8 @@ let fee = null;
 globalThis.fetch = async (url, options = {}) => {
   calls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
   let body;
-  if (url === '/api/visits/factories') body = { companies: [factory], group1Label: 'Group 1', refreshedAt: list.refreshedAt };
+  if (url === '/api/auth/me') body = { user: { id: 'user-1', agencyId: 'agency-1' } };
+  else if (url === '/api/visits/factories') body = { companies: [factory], group1Label: 'Group 1', refreshedAt: list.refreshedAt };
   else if (url === '/api/visits/factories/factory-1') body = list;
   else if (url === '/api/visits/reports') return new Response(JSON.stringify(responseStatus < 400 ? { report: summary, fee } : { error: 'Please edit this report.' }), { status: responseStatus });
   else if (url.startsWith('/api/inspections/reports?')) body = { reports: Array.from({ length: 50 }, (_, i) => ({ ...summary, id: `report-${i}` })) };
@@ -45,14 +46,14 @@ assert.equal(row.find(e => e.props['aria-pressed'] === true).length, 1);
 await row.click('Checked'); await row.render({ draft });
 assert.equal(draft.marks.length, 0);
 await row.type('search-ingredient', 'no match'); assert.equal(row.find(e => e.type === 'li').length, 0);
-// Restore a previously saved, changed-list draft and send only its surviving marks.
-draft = { ...newDraft(list, 'client-report-123', '2026-11-10T12:00:00Z'), listVersion: 'older-hash', marks: [{ kind: 'ingredient', itemId: item.id, status: 'alert', note: ' Original note ' }, { kind: 'ingredient', itemId: 'removed', status: 'checked' }], offList: [{ name: '  Off list  ', brand: ' Brand ' }] };
+// Restore a changed-list draft without dropping any findings.
+draft = { ...newDraft(list, 'client-report-123', '2026-11-10T12:00:00Z'), listVersion: 'older-hash', marks: [{ kind: 'ingredient', itemId: item.id, status: 'alert', note: ' Original note ' }, { kind: 'ingredient', itemId: 'removed', status: 'checked', item: { name: 'Removed source', brand: '', code: '', certificationRaw: '', statusRaw: '' } }], offList: [{ name: '  Off list  ', brand: ' Brand ' }] };
 saveDraft(localStorage, scope, draft);
 screen = mount(FactoryVisitScreen, props); await screen.render(); await screen.click(e => e.props.children?.some?.(child => child?.props?.children === factory.name));
-assert.match(screen.text(), /Draft restored/); assert.match(screen.text(), /marks for items still on the list were kept/);
+assert.match(screen.text(), /Draft restored/); assert.match(screen.text(), /all findings were kept/);
 await screen.click('Review and send'); await screen.type('report-note', '  Report note\noriginal  ');
 await screen.click('Send report'); assert.match(screen.text(), /Saved on this phone — it will be sent automatically/);
-assert.equal(readOutbox(localStorage, scope)[0].draft.marks.length, 1);
+assert.equal(readOutbox(localStorage, scope)[0].draft.marks.length, 2);
 assert.equal(readOutbox(localStorage, scope)[0].draft.note, '  Report note\noriginal  ');
 // Worker sends exactly the queued body; success clears the draft and shows confirmation without a fee.
 const originalInterval = globalThis.setInterval;
@@ -97,7 +98,7 @@ assert.equal(saved.note, '  Different label  ');
 calls = [];
 const inbox = mount(InspectionReportsInbox, { timeZone: 'America/Chicago', onClose() {} }); await inbox.render();
 assert.match(inbox.text(), /Alert/); assert.match(inbox.text(), /List changed/); assert.match(inbox.text(), /9:00 AM/);
-await inbox.click('Load more'); assert.ok(calls.at(-1).url.includes(`before=${encodeURIComponent(summary.submittedAt)}`));
+await inbox.click('Load more'); assert.ok(calls.at(-1).url.includes(`before=${encodeURIComponent(JSON.stringify({ submittedAt: summary.submittedAt, id: 'report-49' }))}`));
 const detail = mount(InspectionReportDetail, { id: 'report-1', timeZone: 'America/Chicago', onClose() {} }); await detail.render();
 assert.equal(calls.some(call => call.url.endsWith('/photos')), false);
 const markup = detail.html(); assert.ok(markup.includes(item.certificationRaw)); assert.ok(markup.indexOf('Different panel') < markup.indexOf('>Checked<'));

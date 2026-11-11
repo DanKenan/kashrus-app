@@ -279,6 +279,21 @@ export function registerSourceRoutes(app: any, deps: {
     res.json({ status: { group1Label: c?.group1Label || 'Group 1', connected: !!c, sourceType: c?.sourceType || null, status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: s.error || null }, companies: s.companies.map(c => ({ id: c.id, name: c.name, brand: c.brand || '', plant: c.plant || '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length, lastVisitAt: null, nextDueAt: null, overdue: null })).sort((a, b) => a.name.localeCompare(b.name)) });
   }));
   if (deps.testMode) {
+    app.post('/api/__test__/source-fees', mutation(async (req: any, res: any, { id }: any) => {
+      if (req.body.agencyId !== id) return res.status(403).json({ error: 'Forbidden' });
+      if (deps.staged()) return res.status(503).json({ error: 'Writes blocked' });
+      const fees = req.body.fees;
+      if (!fees || typeof fees !== 'object' || !fees.mashgiach || typeof fees.mashgiach !== 'object' || Array.isArray(fees.mashgiach) || Object.values(fees.mashgiach).some((fee: any) => !fee || !Number.isFinite(fee.amount) || typeof fee.currency !== 'string')) return res.status(400).json({ error: 'Invalid fees' });
+      if (flights.has(id)) await flights.get(id);
+      await saves.get(id)?.catch(() => {});
+      const connection = connections.get(id);
+      if (!connection) return res.status(404).json({ error: 'Connection not found' });
+      const updated = { ...connection, fees };
+      await save(updated);
+      connections.set(id, updated);
+      const job = pending.get(id); if (job) job.connection = updated;
+      res.json({ ok: true });
+    }));
     app.post('/api/__test__/sources-api-base', handler((req: any, res: any) => { const url = new URL(req.body.url); if (!['http:', 'https:'].includes(url.protocol)) return res.status(400).json({ error: 'Invalid URL' }); apiBase = url.origin; res.json({ ok: true }); }));
     app.post('/api/__test__/source-raw', handler(async (req: any, res: any, { id }: any) => { if (req.body.agencyId && req.body.agencyId !== id) return res.status(403).json({ error: 'Forbidden' }); res.json({ connection: await store.raw(id), backupIds: (await loadBackups(id)).map(b => `${id}__${b.companyId}`) }); }));
   }

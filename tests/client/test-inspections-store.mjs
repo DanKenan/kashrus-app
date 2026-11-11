@@ -1,34 +1,62 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createReportStore } from '../../src/server/inspections/store.ts';
+import { createReportStore, reportId } from '../../src/server/inspections/store.ts';
 import { normalizeSubmit, buildReport } from '../../src/server/inspections/model.ts';
+import { MockFirestore } from '../stage2/firestore-mock.mjs';
+import { installReadMeter, resetReadMeter, readMeterSnapshot } from '../../src/server/read-meter.ts';
+import { installWriteMeter, resetWriteMeter, writeMeterSnapshot } from '../../src/server/write-meter.ts';
 const dir = await mkdtemp(path.join(os.tmpdir(), 'inspection-store-'));
-const docs = new Map(); let reads = 0, writes = 0, batches = 0, blocked = false;
-const db = { collection: c => ({ doc: id => ({ key: `${c}/${id}`, get: async () => { reads++; return { data: () => docs.get(`${c}/${id}`) }; } }), where: () => ({ get: async () => ({ docs: [...docs.entries()].filter(([k]) => k.startsWith('inspectionReports/')).map(([, v]) => ({ data: () => v })) }) }) }), batch: () => { const pending = []; return { set: (ref, doc) => pending.push([ref.key, doc]), commit: async () => { batches++; for (const [k, v] of pending) { docs.set(k, v); writes++; } } }; } };
+process.env.FIRESTORE_MOCK_FILE = path.join(dir, 'mock.json');
+const db = new MockFirestore(); installReadMeter(db); installWriteMeter(db);
+let blocked = false;
 const deps = { db: () => db, dataDir: dir, staged: () => blocked };
 const input = normalizeSubmit({ clientReportId: 'test-12345', companyId: 'c', listVersion: 'v', startedAt: new Date().toISOString(), marks: [], offList: [{ name: 'item', photo: 'data:image/png;base64,YQ==' }] }, 400000, /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/);
-const report = buildReport(input, { id: 'r', agencyId: 'a', userId: 'u', userName: 'User', companyName: 'Factory', listVersion: 'v', items: () => [], now: new Date().toISOString(), fee: null });
+const report = buildReport(input, { id: reportId('a', 'u', input.clientReportId), agencyId: 'a', userId: 'u', userName: 'User', companyName: 'Factory', listVersion: 'v', items: () => [], now: new Date().toISOString(), fee: null });
+const reset = () => { resetReadMeter(); resetWriteMeter(); };
+const budget = (reads, writes) => { assert.equal(readMeterSnapshot().total, reads); assert.equal(writeMeterSnapshot().total, writes); };
 try {
-  const store = createReportStore(deps); await store.save(report, input.photos);
-  assert.equal(writes, 2); assert.equal(batches, 1); assert.equal(reads, 0);
-  docs.set('inspectionReports/a__old', { ...report, id: 'old', clientReportId: 'old-client', submittedAt: '2000-01-01T00:00:00Z' });
-  const restarted = createReportStore(deps); await restarted.boot(); assert.equal(reads, 0);
-  assert.equal(restarted.list('a').length, 1); assert.equal(restarted.get('a', 'old'), undefined);
-  const failed = createReportStore({ ...deps, db: () => ({ ...db, batch: () => ({ set() {}, commit: async () => { throw Error('Storage unavailable'); } }) }) });
-  await assert.rejects(failed.save(report, input.photos)); assert.equal(failed.get('a', 'r'), undefined);
-  assert.equal(restarted.duplicate('a', 'u', input.clientReportId), 'r');
-  assert.equal(restarted.get('other', 'r'), undefined);
-  await Promise.all([restarted.readPhotos(report), restarted.readPhotos(report)]); assert.equal(reads, 1);
-  await restarted.readPhotos(report); assert.equal(reads, 1);
-  await restarted.readPhotos({ ...report, photoCount: 0 }); assert.equal(reads, 1);
-  for (let i = 0; i < 9; i++) { const r = { ...report, id: `r${i}` }; await restarted.save(r, input.photos); await restarted.readPhotos(r); }
-  const before = reads; await restarted.readPhotos(report); assert.equal(reads, before + 1);
-  blocked = true; const w = writes; await assert.rejects(store.save({ ...report, id: 'blocked' }, input.photos)); assert.equal(writes, w); assert.equal(store.get('a', 'blocked'), undefined);
-  blocked = false;
+  const store = createReportStore(deps); reset();
+  assert.equal((await store.save(report, input.photos)).created, true); budget(0, 2);
+  // An old report outside every cache is still protected by the deterministic create precondition.
+  const old = { ...report, submittedAt: '2000-01-01T00:00:00Z' };
+  db._seed(`inspectionReports/a__${old.id}`, old);
+  const restarted = createReportStore(deps); await restarted.boot(); reset();
+  const duplicate = await restarted.save(report, input.photos);
+  assert.equal(duplicate.created, false); assert.equal(duplicate.report.submittedAt, old.submittedAt); budget(1, 0);
+  // More than 5000, with ties spanning the cache boundary; another agency never enters a page.
+  for (let i = 0; i < 5105; i++) db._seed(`inspectionReports/a__r${String(i).padStart(5, '0')}`, { ...report, id: `r${String(i).padStart(5, '0')}`, submittedAt: '2026-11-10T00:00:00Z' });
+  db._seed('inspectionReports/b__foreign', { ...report, id: 'foreign', agencyId: 'b' });
+  reset(); await restarted.ensure('a'); budget(5000, 0);
+  assert.equal(restarted.list('a').length, 5000); assert.equal(restarted.cachedDetails(), 500);
+  assert.ok(restarted.list('a').every(r => !('marks' in r) && !('offList' in r)));
+  const ids = []; let cursor;
+  reset();
+  for (;;) {
+    const page = await restarted.page('a', 200, cursor);
+    ids.push(...page.map(r => r.id));
+    if (page.length < 200) break;
+    cursor = { submittedAt: page.at(-1).submittedAt, id: page.at(-1).id };
+  }
+  assert.equal(ids.length, 5106); assert.equal(new Set(ids).size, ids.length); budget(106, 0);
+  reset(); assert.equal((await restarted.get('a', 'r00000')).id, 'r00000'); budget(1, 0);
+  assert.equal(restarted.cachedDetails(), 500);
+  reset(); await Promise.all([restarted.readPhotos(report), restarted.readPhotos(report)]); budget(1, 0);
+  await restarted.readPhotos(report); budget(1, 0);
+  reset(); await restarted.page('a', 200, cursor, 'u'); budget(0, 0);
+  blocked = true; reset(); await assert.rejects(store.save({ ...report, id: 'blocked' }, input.photos)); budget(0, 0); blocked = false;
   const localDeps = { ...deps, db: () => null }, local = createReportStore(localDeps);
-  await local.save(report, input.photos); const localBoot = createReportStore(localDeps); await localBoot.boot();
+  await local.save(report, input.photos); const localBoot = createReportStore(localDeps); await localBoot.ensure('a');
   assert.equal(localBoot.list('a').length, 1); assert.deepEqual(await localBoot.readPhotos(report), input.photos);
-  console.log('inspection store: atomic batch budgets, boot, idempotency, LRU, write block and local restart passed');
+  assert.equal((await localBoot.save(report, input.photos)).created, false);
+  const failedDir = path.join(dir, 'failed');
+  await mkdir(path.join(failedDir, 'inspection-reports'), { recursive: true });
+  await writeFile(path.join(failedDir, 'inspection-reports', 'inspectionReportPhotos'), 'unavailable');
+  const failedLocal = createReportStore({ ...localDeps, dataDir: failedDir });
+  await assert.rejects(failedLocal.save(report, input.photos));
+  assert.equal(await failedLocal.get('a', report.id), undefined);
+  const concurrentLocal = await Promise.all([local.save(report, input.photos), localBoot.save(report, input.photos)]);
+  assert.ok(concurrentLocal.every(result => !result.created));
+  console.log('inspection store: durable create, 5000 summaries / 500 details, tied pages, exact read/write counts, lazy photos and local restart passed');
 } finally { await rm(dir, { recursive: true, force: true }); }

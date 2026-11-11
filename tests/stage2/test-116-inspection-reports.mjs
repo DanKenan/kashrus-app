@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { shiftFixture } from './test-101-shifts-crud.mjs';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 export default {
@@ -85,17 +82,22 @@ export default {
       assert.equal(detail.note, body.note); assert.equal(detail.marks[2].item.code, 'Code Exact'); assert.equal(detail.offList[0].name, ' Off-list Exact '); await budget(0, 0);
       await reset(); assert.deepEqual((await api('admin', 'GET', `/api/inspections/reports/${id}/photos`)).json.photos, { 'mark:2': photo, 'off:0': photo }); await budget(1, 0);
       await reset(); await api('admin', 'GET', `/api/inspections/reports/${id}/photos`); await api('admin', 'GET', `/api/inspections/reports/${plain.json.report.id}/photos`); await budget(0, 0);
-      // Set future-phase fee settings in the mock's connection document only.
-      // No production fee-writing endpoint is introduced by this server chunk.
-      const mockFile = process.env.FIRESTORE_MOCK_FILE || join(tmpdir(), 'stage2-mock-firestore.json');
-      const stored = JSON.parse(readFileSync(mockFile, 'utf8'));
-      stored[`sourceConnections/${agencyId}`].fees = { mashgiach: { factory116: { amount: 82, currency: 'USD' } } };
-      writeFileSync(mockFile, JSON.stringify(stored));
+      // The test-only hook uses the configured backend and updates the live connection too.
+      const fees = { mashgiach: { factory116: { amount: 82, currency: 'USD' } } };
+      await reset();
+      assert.equal((await api('admin', 'POST', '/api/__test__/source-fees', { agencyId: `${agencyId}-other`, fees })).status, 403);
+      await budget(0, 0);
+      assert.equal((await api('admin', 'POST', '/api/__test__/source-fees', { agencyId, fees })).status, 200);
+      await budget(0, 1);
+      await reset();
+      const liveFee = await api('admin', 'POST', '/api/visits/reports', { ...body, clientReportId: 'report-116-live-fee', marks: [], offList: [] });
+      assert.equal(liveFee.status, 201); assert.deepEqual(liveFee.json.fee, { amount: 82, currency: 'USD' }); await budget(0, 1);
       await ctx.restartServer();
       const bootReads = (await api('admin', 'POST', '/api/__test__/reads', {})).json;
       assert.equal(bootReads.byCollection.inspectionReportPhotos || 0, 0);
-      assert.equal(bootReads.byCollection.inspectionReports, 2);
-      assert.equal((await api('admin', 'GET', '/api/inspections/reports')).json.reports.length, 2);
+      // One bounded query per agency; Firestore bills one read even for an empty query.
+      assert.equal(bootReads.byCollection.inspectionReports, (await ctx.getDoc()).agencies.length + 2);
+      assert.equal((await api('admin', 'GET', '/api/inspections/reports')).json.reports.length, 3);
       const retry = await api('mash', 'POST', '/api/visits/reports', body); assert.equal(retry.status, 200); assert.equal(retry.json.report.id, id);
       for (let i = 0; i < 100; i++) {
         if ((await api('admin', 'GET', '/api/visits/factories')).json.companies.length) break;
@@ -104,7 +106,7 @@ export default {
       await reset();
       const paid = await api('admin', 'POST', '/api/visits/reports', { ...body, clientReportId: 'report-116-fee', marks: [], offList: [] });
       assert.equal(paid.status, 201, JSON.stringify(paid.json)); assert.deepEqual(paid.json.fee, { amount: 82, currency: 'USD' }); await budget(0, 1);
-      return 'List/detail/mine/inbox 0R/0W; submit photos 0R/2W; plain 0R/1W; retry 0R/0W; photos 1R then 0R; boot 2 report reads, 0 photo reads';
+      return 'List/detail/mine/inbox 0R/0W; submit photos 0R/2W; plain 0R/1W; retry 0R/0W; photos 1R then 0R; boot at most 5000 report reads per agency (empty query 1), 0 photo reads';
     } finally { await new Promise(r => mock.close(r)); }
   },
 };
