@@ -40,6 +40,39 @@ export class MockTransactionAborted extends Error {
   }
 }
 
+class MockQuery {
+  constructor(store, path, filters = [], orders = [], cursor = null, cap = Infinity, fields = null) { Object.assign(this, { store, path, filters, orders, cursor, cap, fields }); }
+  doc(id) { return this.store.doc(`${this.path}/${id}`); }
+  where(field, op, value) { return new MockQuery(this.store, this.path, [...this.filters, [field, op, value]], this.orders, this.cursor, this.cap, this.fields); }
+  orderBy(field, direction = 'asc') { return new MockQuery(this.store, this.path, this.filters, [...this.orders, [field, direction]], this.cursor, this.cap, this.fields); }
+  startAfter(...values) { return new MockQuery(this.store, this.path, this.filters, this.orders, values, this.cap, this.fields); }
+  limit(value) { return new MockQuery(this.store, this.path, this.filters, this.orders, this.cursor, value, this.fields); }
+  select(...values) { return new MockQuery(this.store, this.path, this.filters, this.orders, this.cursor, this.cap, values); }
+  async get() {
+    if (this.path.startsWith('inspectionReportsByAgency/') && (
+      (this.filters.length && this.orders.length) || this.orders.length > 1 ||
+      this.filters.some(([field, op]) => op !== '==' && this.orders.some(([order]) => order !== field))
+    )) throw Error('composite index required');
+    const compare = (a, b) => { for (const [field, direction] of this.orders) { const cmp = a[field] === b[field] ? 0 : a[field] < b[field] ? -1 : 1; if (cmp) return direction === 'desc' ? -cmp : cmp; } return 0; };
+    const boundary = this.cursor && Object.fromEntries(this.orders.map(([field], i) => [field, this.cursor[i]]));
+    const rows = Object.entries(this.store._docs).filter(([path, data]) => path.startsWith(`${this.path}/`) && data !== undefined && this.filters.every(([field, op, value]) => op === '==' ? data[field] === value : op === '>=' ? data[field] >= value : false)).sort((a, b) => compare(a[1], b[1])).filter(([, data]) => !boundary || compare(data, boundary) > 0).slice(0, this.cap);
+    const docs = rows.map(([path, data]) => ({ id: path.slice(this.path.length + 1), ref: this.store.doc(path), exists: true, data: () => JSON.parse(JSON.stringify(this.fields ? Object.fromEntries(this.fields.filter(field => data[field] !== undefined).map(field => [field, data[field]])) : data)) }));
+    return { docs, empty: !docs.length, size: docs.length, forEach: fn => docs.forEach(fn) };
+  }
+}
+class MockWriteBatch {
+  constructor(store) { this.store = store; this._ops = []; }
+  create(ref, data) { this._ops.push({ docPath: ref.path, data, create: true }); return this; }
+  set(ref, data) { this._ops.push({ docPath: ref.path, data }); return this; }
+  delete(ref) { this._ops.push({ docPath: ref.path, deleted: true, op: () => ({ delete: ref.path }) }); return this; }
+  commit() { return this._commit(); }
+  async _commit() {
+    for (const write of this._ops) if (write.create && this.store._docs[write.docPath] !== undefined) { const error = Error('Already exists'); error.code = 6; throw error; }
+    for (const write of this._ops) { if (write.deleted) delete this.store._docs[write.docPath]; else this.store._docs[write.docPath] = JSON.parse(JSON.stringify(write.data)); }
+    this.store._save();
+  }
+}
+
 class MockDocumentSnapshot {
   constructor(data) {
     this._data = data;
@@ -157,28 +190,10 @@ export class MockFirestore {
    * firestoreDb.collection(); the mock on main only had doc()/runTransaction().)
    */
   collection(name) {
-    const self = this;
-    const prefix = `${name}/`;
-    return {
-      doc: (id) => self.doc(`${prefix}${id}`),
-      get: async () => {
-        const docs = Object.entries(self._docs)
-          .filter(([path, data]) => path.startsWith(prefix) && data !== undefined)
-          .map(([path, data]) => ({
-            id: path.slice(prefix.length),
-            ref: self.doc(path),
-            exists: true,
-            data: () => JSON.parse(JSON.stringify(data)),
-          }));
-        return {
-          docs,
-          empty: docs.length === 0,
-          size: docs.length,
-          forEach: (fn) => docs.forEach(fn),
-        };
-      },
-    };
+    return new MockQuery(this, name);
   }
+
+  batch() { return new MockWriteBatch(this); }
 
   /**
    * Run a transaction with optimistic-concurrency retries, mirroring

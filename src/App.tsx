@@ -1,3 +1,4 @@
+import { FactoryVisitScreen, VisitOutbox, visitButton } from './components/FactoryVisitScreen';
 import './components/MashgiachBoard.css';
 import { filterChipClass, FilterCheck } from './lib/filterChip';
 import { venueShifts as clientVenueShifts, resolveTaskShift, shiftPeopleOccurrenceDay, sortShiftsByStart, validShiftFilter, rememberedShiftFilter, shiftFilterCounts, matchesShiftFilter, NO_SHIFT_FILTER } from './lib/shifts';
@@ -636,6 +637,7 @@ export default function App() {
   const [events, setEvents] = useState<KosherEvent[]>([]);
   const [isFactoryAuditOpen, setIsFactoryAuditOpen] = useState(false);
   // Don 2026-10-22: the admin's agency-wide Events screen (from the dashboard).
+  const [isFactoryVisitOpen, setIsFactoryVisitOpen] = useState(false);
   const [isFactoriesOpen, setIsFactoriesOpen] = useState(false);
   const [isAgencyEventsOpen, setIsAgencyEventsOpen] = useState(false);
 
@@ -2569,6 +2571,10 @@ export default function App() {
 
   return (
     <div data-phone-layout={!isKiosk ? true : undefined} className={`min-h-screen bg-paper text-ink flex flex-col transition-colors ${showBar || showGold ? 'max-sm:pb-[calc(144px+env(safe-area-inset-bottom))]' : ''}`}>
+      {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && <>
+        <VisitOutbox key={`${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} />
+        {(currentUser.role !== 'admin' || !adminHome || venues.length === 0 || noVenueInScope) && <div className="px-4 pt-4"><button type="button" className={visitButton} onClick={() => setIsFactoryVisitOpen(true)}>Factory visit</button></div>}
+      </>}
       {/* Stale-draft banner: changes preserved across the refresh that a
           428 STALE_CLIENT required. Re-apply sends them with a fresh version. */}
       {staleDrafts.length > 0 && (
@@ -2884,6 +2890,7 @@ export default function App() {
             reloadKey={adminHomeReloadKey}
             onSelectVenue={(id) => { setAdminHome(false); handleSelectVenue(id); }}
             onOpenFactories={currentUser?.role === 'admin' ? () => setIsFactoriesOpen(true) : undefined}
+            onOpenFactoryVisit={() => setIsFactoryVisitOpen(true)}
             onOpenEvents={() => setIsAgencyEventsOpen(true)}
           />
         ) : (
@@ -3380,7 +3387,8 @@ export default function App() {
       />
 
       {/* Create / Notify Event Modal */}
-      <FactoriesScreen isOpen={isFactoriesOpen && currentUser?.role === 'admin'} onClose={() => setIsFactoriesOpen(false)} timeZone={currentUser?.agencyTimeZone || DEFAULT_TIME_ZONE} />
+      {!isKiosk && currentUser.agencyId && ['admin', 'coordinator', 'mashgiach'].includes(currentUser.role) && isFactoryVisitOpen && <FactoryVisitScreen key={`${currentUser.agencyId}:${currentUser.id}`} userId={currentUser.id} agencyId={currentUser.agencyId} timeZone={currentUser.agencyTimeZone || DEFAULT_TIME_ZONE} onClose={() => setIsFactoryVisitOpen(false)} />}
+      <FactoriesScreen isOpen={!isKiosk && isFactoriesOpen && currentUser?.role === 'admin'} onClose={() => setIsFactoriesOpen(false)} timeZone={currentUser?.agencyTimeZone || DEFAULT_TIME_ZONE} />
       <AgencyEventsScreen
         isOpen={isAgencyEventsOpen && currentUser?.role === 'admin'}
         onClose={() => setIsAgencyEventsOpen(false)}

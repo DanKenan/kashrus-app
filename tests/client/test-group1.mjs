@@ -28,7 +28,7 @@ try {
   await sheet.render();
   assert.match(sheet.text(), /Factory — ingredients/);
   assert.match(sheet.text(), /OU-DE/);
-  assert.ok(sheet.find(e => e.type === 'span' && e.props.children === 'DE').length);
+  assert.ok(sheet.html().includes('text-xs text-ink-soft">DE</span>')); // Render the shared chip component.
   assert.doesNotMatch(sheet.text(), /Dairy_equipment/);
   const button = sheet.buttons().find(b => b.label === 'Mark as Group 1').el;
   button.props.onClick(); button.props.onClick(); await sheet.render();
