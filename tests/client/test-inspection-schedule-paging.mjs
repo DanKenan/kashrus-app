@@ -32,6 +32,17 @@ try {
   assert.deepEqual(partial.reports.map(r => r.id), ['r0500']); assert.equal(partial.nextCursor.id, 'r1199'); assert.equal(readMeterSnapshot().total, 1000);
   resetReadMeter(); const partialMore = await partialStore.visiblePage('a', 50, partial.nextCursor, r => r.companyId === 'assigned');
   assert.deepEqual(partialMore.reports.map(r => r.id), ['r1200', 'r1202']); assert.equal(partialMore.nextCursor, null); assert.equal(readMeterSnapshot().total, 4);
+  // Knowing the history end must not hide unloaded gaps; admins fetch only missing visible rows.
+  const adminStore = createReportStore({ db: () => db, dataDir: dir, staged: () => false }); await adminStore.ensure('a');
+  resetReadMeter(); const tail = await adminStore.visiblePage('a', 50, { submittedAt: at(1199), id: 'r1199' });
+  assert.equal(tail.reports.length, 4); assert.equal(tail.nextCursor, null); assert.equal(readMeterSnapshot().total, 4);
+  resetReadMeter(); assert.deepEqual(await adminStore.visiblePage('a', 50, { submittedAt: at(1199), id: 'r1199' }), tail); assert.equal(readMeterSnapshot().total, 0);
+  resetReadMeter(); const coldAdmin = await adminStore.visiblePage('a', 50, { submittedAt: at(199), id: 'r0199' });
+  assert.equal(coldAdmin.reports[0].id, 'r0200'); assert.equal(coldAdmin.reports.at(-1).id, 'r0249'); assert.equal(readMeterSnapshot().total, 50);
+  resetReadMeter(); assert.deepEqual(await adminStore.visiblePage('a', 50, { submittedAt: at(199), id: 'r0199' }), coldAdmin); assert.equal(readMeterSnapshot().total, 0);
+  resetReadMeter(); const mixed = await adminStore.visiblePage('a', 50, { submittedAt: at(229), id: 'r0229' });
+  assert.equal(mixed.reports.length, 50); assert.equal(mixed.reports[0].id, 'r0230'); assert.equal(mixed.reports.at(-1).id, 'r0279'); assert.equal(readMeterSnapshot().total, 30);
+  resetReadMeter(); assert.deepEqual(await adminStore.visiblePage('a', 50, { submittedAt: at(229), id: 'r0229' }), mixed); assert.equal(readMeterSnapshot().total, 0);
   // The 1000-row read budget applies to Firestore; local history can fill its visible page.
   const directory = join(dir, 'local', 'inspection-reports', 'inspectionReports');
   const files = new Map(Object.values(db._docs).map(r => [join(directory, `a__${r.id}.json`), JSON.stringify(r)]));

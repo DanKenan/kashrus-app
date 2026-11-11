@@ -11,6 +11,8 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   const loaded = new Map<string, Promise<void>>();
   const failures = new Map<string, { retryAt: number; attempts: number }>();
   const ends = new Map<string, Cursor | undefined>(), frontiers = new Map<string, Cursor | undefined>();
+  // Keep the last bounded query window when its rows fall outside the 5000-summary prefix.
+  const windows = new Map<string, { after?: Cursor; rows: ReturnType<typeof summary>[] }>();
   const collection = (agency: string) => deps.db().collection(`inspectionReportsByAgency/${agency}/reports`);
   const sortKey = (r: Cursor) => `${r.submittedAt}|${r.id}`;
   const photos = new Map<string, Record<string, string>>(), flights = new Map<string, Promise<Record<string, string>>>();
@@ -121,27 +123,35 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   async function save(r: Report, photoData: Record<string, string>) {
     return deps.schedules ? deps.schedules.locked(r.agencyId, () => saveUnlocked(r, photoData)) : saveUnlocked(r, photoData);
   }
-  async function visiblePage(agency: string, limit: number, before?: Cursor, visible: (r: ReturnType<typeof summary>) => boolean = () => true) {
+  async function visiblePage(agency: string, limit: number, before?: Cursor, visible?: (r: ReturnType<typeof summary>) => boolean) {
     await ensure(agency);
     const rows: ReturnType<typeof summary>[] = [];
     let cursor = before, fetched = 0;
     const atEnd = () => ends.has(agency) && (!ends.get(agency) || (!!cursor && reportOrder(cursor, ends.get(agency)!) >= 0));
     const consume = (r: ReturnType<typeof summary>) => {
       cursor = { submittedAt: r.submittedAt, id: r.id };
-      if (visible(r)) rows.push(summary(r as Report));
+      if (!visible || visible(r)) rows.push(summary(r as Report));
     };
     const frontier = frontiers.get(agency);
     for (const r of list(agency)) {
       if ((!before || reportOrder(r, before) > 0) && frontier && reportOrder(r, frontier) <= 0) consume(r);
       if (rows.length === limit) return { reports: rows, nextCursor: atEnd() ? null : cursor! };
     }
+    const window = windows.get(agency), last = window?.rows.at(-1);
+    if (window && last && (!window.after || (!!cursor && reportOrder(cursor, window.after) >= 0)) && (!cursor || reportOrder(cursor, last) <= 0)) {
+      for (const r of window.rows) {
+        if (!cursor || reportOrder(r, cursor) > 0) consume(r);
+        if (rows.length === limit) return { reports: rows, nextCursor: atEnd() ? null : cursor! };
+      }
+    }
     while (!atEnd() && (fetched < 1000 || !deps.db())) {
-      const db = deps.db(), start = cursor;
+      const db = deps.db(), start = cursor, size = visible ? 200 : limit - rows.length;
       const older: ReturnType<typeof summary>[] = db
-        ? (await query(agency, 200, start, true).get()).docs.map((d: any) => d.data())
-        : (await localRows()).filter(r => r.agencyId === agency && (!start || reportOrder(r, start) > 0)).sort(reportOrder).slice(0, 200);
+        ? (await query(agency, size, start, true).get()).docs.map((d: any) => d.data())
+        : (await localRows()).filter(r => r.agencyId === agency && (!start || reportOrder(r, start) > 0)).sort(reportOrder).slice(0, size);
       fetched += older.length || 1;
-      if (older.length < 200) ends.set(agency, older.at(-1) || start);
+      if (older.length < size) ends.set(agency, older.at(-1) || start);
+      windows.set(agency, { after: start, rows: older });
       for (const r of older) summaries.set(key(agency, r.id), { ...summary(r as Report), agencyId: agency });
       const covered = frontiers.get(agency);
       if (!start || (covered && reportOrder(start, covered) <= 0)) frontiers.set(agency, older.at(-1) || covered);
@@ -157,7 +167,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     return { reports: rows, nextCursor: atEnd() ? null : cursor! };
   }
   async function page(agency: string, limit: number, before?: Cursor, userId?: string) {
-    return (await visiblePage(agency, limit, before, r => !userId || r.mashgiachId === userId)).reports;
+    return (await visiblePage(agency, limit, before, userId ? r => r.mashgiachId === userId : undefined)).reports;
   }
   function latest(agency: string, companyId: string) {
     let newest: ReturnType<typeof summary> | undefined;

@@ -86,7 +86,8 @@ export function registerInspectionRoutes(app: any, deps: {
       }
       if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw Error();
     } catch { return res.status(400).json({ error: 'Invalid pagination' }); }
-    res.json(await store.visiblePage(agency, limit, before, r => (!userId || r.mashgiachId === userId) && (!caller || visible(agency, r.companyId, caller))));
+    const allReports = !userId && caller?.role === 'admin';
+    res.json(await store.visiblePage(agency, limit, before, allReports ? undefined : r => (!userId || r.mashgiachId === userId) && (!caller || visible(agency, r.companyId, caller))));
   }
   app.get('/api/visits/reports/mine', handler(false, (req: any, res: any, u: any, agency: string) => list(req, res, agency, u.id, u), true));
   app.get('/api/inspections/reports', handler(true, (req: any, res: any, u: any, agency: string) => list(req, res, agency, undefined, u), true));

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import ts from 'typescript';
 import { mount } from './lib/mini-render.mjs';
+import { AgencyDashboard } from '../../src/components/AgencyDashboard.tsx';
 import { FactoriesScreen } from '../../src/components/FactoriesScreen.tsx';
 import { FactoryVisitScreen } from '../../src/components/FactoryVisitScreen.tsx';
 import { InspectionOverdueBanner } from '../../src/components/InspectionOverdueBanner.tsx';
@@ -17,12 +18,13 @@ const tag = node => (ts.isJsxElement(node) ? node.openingElement : node).tagName
 const main = elements.find(node => tag(node) === 'main');
 const header = elements.find(node => tag(node) === 'Header');
 assert.ok(header.end < main.pos);
-const bannerNode = elements.find(node => tag(node) === 'InspectionOverdueBanner');
-assert.ok(bannerNode.pos > main.pos && bannerNode.end < main.end);
-const controls = bannerNode.parent;
-assert.match(controls.getText(app), /max-sm:order-first/);
+const controls = elements.find(node => tag(node) === 'div' && node.pos > main.pos && node.end < main.end && node.getText(app).includes('max-sm:order-first'));
+assert.match(controls.getText(app), /!dashboardHome && overdueCard/);
 let ancestor = controls; while (ancestor && ancestor !== main) ancestor = ancestor.parent;
 assert.equal(ancestor, main);
+const dashboardNode = elements.find(node => tag(node) === 'AgencyDashboard');
+assert.match(dashboardNode.getText(app), /overdueCard=\{overdueCard\}/);
+assert.ok(controls.end < dashboardNode.pos && dashboardNode.end < main.end);
 for (const label of ['Factories', 'Factory visit']) {
   const button = elements.find(node => tag(node) === 'button' && ts.isJsxElement(node) && node.children.some(child => ts.isJsxText(child) && child.text === label));
   assert.ok(button.pos > controls.pos && button.end < controls.end);
@@ -59,6 +61,19 @@ try {
   assert.match(editor.text(), /Next visit due: Aug 10, 2027/);
   const banner = mount(InspectionOverdueBanner, { membership: 'a:u', timeZone: data.timeZone, onOpen() {} }); await banner.render();
   assert.match(banner.text(), /due Nov 4, 2025/);
+  const actions = [];
+  const dashboard = mount(AgencyDashboard, { overdueCard: banner.tree(), onSelectVenue() {}, onOpenEvents: () => actions.push('events'), onOpenFactoryVisit: () => actions.push('visit'), onOpenFactories: () => actions.push('factories') }); await dashboard.render();
+  const siblings = dashboard.tree().props.children;
+  assert.equal(siblings[0].type, 'aside');
+  assert.equal(siblings[1].type, 'h2'); assert.equal(siblings[1].props.children, 'Agency Dashboard');
+  const row = siblings[2];
+  assert.equal(row.type, 'div'); assert.match(row.props.className, /flex flex-wrap/);
+  assert.doesNotMatch(row.props.className + ' ' + siblings[1].props.className, /(?:^|\s)(?:(?:[\w-]+):)*(?:absolute|fixed|sticky|float-\S+|(?:-?)(?:top|bottom|inset|translate-y)-\S+)/);
+  assert.match(dashboard.tree().props.className, /space-y-4/);
+  if (process.env.INSPECTION_LAYOUT_HTML) fs.writeFileSync(process.env.INSPECTION_LAYOUT_HTML, dashboard.html());
+  assert.ok(row.props.children.every(child => child.type === 'button'));
+  await dashboard.click('Events'); await dashboard.click('Factory visit'); await dashboard.click('Factories');
+  assert.deepEqual(actions, ['events', 'visit', 'factories']);
   await banner.click(e => e.props['aria-label'] === 'Close'); assert.equal(banner.text(), '');
   // The visit response has no today: its fallback must use the agency zone at New Year.
   const visits = mount(FactoryVisitScreen, { userId: 'm', agencyId: 'a', timeZone: data.timeZone, onClose() {} }); await visits.render();
