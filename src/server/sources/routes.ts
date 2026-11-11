@@ -298,5 +298,21 @@ export function registerSourceRoutes(app: any, deps: {
       const timer = setTimeout(() => { void boot(); }, delay); timer.unref();
     }
   }
-  return { boot };
+  return { boot, inspectionSource: inspectionSourceAccessor(cache, connections) };
+}
+
+// Read-only bridge for factory visits; no source calls or persistence.
+export function inspectionSourceAccessor(cache: ReturnType<typeof createSourceCache>, connections: Map<string, Connection>) {
+  return (agencyId: string) => {
+    const connection = connections.get(agencyId), state = cache.state(agencyId);
+    return {
+      state, connection: connection as (Connection & { fees?: { mashgiach?: Record<string, { amount: number; currency: string }> } }) | undefined,
+      listVersion: (companyId: string) => connection?.backupHashes?.[companyId] || '',
+      items: (companyId: string, kind: 'ingredient' | 'product') => state.itemsFor(companyId, kind).map(item => ({
+        id: item.id, name: item.name, brand: item.brand ?? '', code: 'code' in item ? item.code ?? '' : '',
+        certificationRaw: item.certificationRaw ?? '', statusRaw: item.statusRaw ?? '', agency: item.certifyingAgency ?? '',
+        dpm: item.dpm ?? '', group1: connection?.group1Overrides?.[kind]?.[item.id] ?? item.group1 === true,
+      })),
+    };
+  };
 }

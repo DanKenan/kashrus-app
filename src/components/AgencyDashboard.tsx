@@ -46,9 +46,10 @@ interface AgencyDashboardProps {
   /** Don 2026-10-22: opens the agency-wide Events screen. */
   onOpenEvents?: () => void;
   onOpenFactories?: () => void;
+  onOpenFactoryVisit?: () => void;
 }
 
-export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOpenEvents, onOpenFactories }: AgencyDashboardProps) {
+export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOpenEvents, onOpenFactories, onOpenFactoryVisit }: AgencyDashboardProps) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -109,6 +110,7 @@ export function AgencyDashboard({ onSelectVenue, reloadKey, logo, settings, onOp
             <span>Events</span>
           </button>
         )}
+        {onOpenFactoryVisit && <button type="button" onClick={onOpenFactoryVisit} className="pressable min-h-11 inline-flex items-center gap-2 rounded-xl border border-line-control bg-surface px-3 text-sm font-semibold text-ink">Factory visit</button>}
         {onOpenFactories && <button type="button" onClick={onOpenFactories} className="pressable min-h-11 inline-flex items-center gap-2 rounded-xl border border-line-control bg-surface px-3 text-sm font-semibold text-ink"><Factory aria-hidden="true" className="h-5 w-5" />Factories</button>}
       </div>
       {logo && <div className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface p-4">

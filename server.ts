@@ -1,3 +1,4 @@
+import { registerInspectionRoutes } from './src/server/inspections/routes.ts';
 import { removeLegacyKeys, stripLegacyKeys } from './src/server/sources/legacy.ts';
 import { registerSourceRoutes } from './src/server/sources/routes.ts';
 import { checkInCoversDue } from './src/lib/overdue.ts';
@@ -518,6 +519,8 @@ app.use((req, res, next) => {
   next();
 });
 
+// Visit reports can include four capped photos and up to 2,000 item notes.
+app.use('/api/visits/reports', express.json({ limit: '20mb' }));
 app.use(express.json({ limit: '2mb' }));
 // WRITECUT: every database write below is attributed to the route that caused it.
 app.use(writeMeterMiddleware);
@@ -14821,6 +14824,11 @@ const sourceRoutes = registerSourceRoutes(app, {
   testMode: isTestMode(), requireAdmin,
   timeZone: (id) => agencies.find(a => a.id === id)?.timeZone,
 });
+const inspectionRoutes = registerInspectionRoutes(app, {
+  db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
+  source: sourceRoutes.inspectionSource, user: getAuthUser,
+  maxPhotoChars: ANSWER_PHOTO_MAX_CHARS, photoRe: ANSWER_PHOTO_DATA_RE,
+});
 registerCheckInPhotoRoutes(app, {
   store: checkInPhotoStore,
   requireAuthUser,
@@ -22250,6 +22258,7 @@ async function startServer() {
     log: message => console.info(message),
   }).catch(() => console.warn('[sources] legacy key cleanup failed'));
   void sourceRoutes.boot();
+  await inspectionRoutes.boot();
 
   // STAGED REVISION: verification reads only. Skip ALL startup writes —
   // pepper init, task-order backfill, VAPID persistence, password migration.

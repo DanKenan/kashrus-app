@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { InspectionReportsInbox } from './InspectionReportsInbox';
 import { X } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { sourceRequest, sourceStatus, type SourceConnection } from '../lib/sources';
@@ -9,6 +10,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
   const [connection, setConnection] = useState<SourceConnection | null>(null);
   const [companies, setCompanies] = useState<Factory[]>([]);
   const [selectedCompany, setSelectedCompany] = useState<Factory | null>(null);
+  const [reportsOpen, setReportsOpen] = useState(false);
   const [settings, setSettings] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -17,7 +19,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
   const generation = useRef(0);
   useEffect(() => {
     const request = ++generation.current;
-    if (!isOpen) { setSettings(false); setSelectedCompany(null); return; }
+    if (!isOpen) { setSettings(false); setReportsOpen(false); setSelectedCompany(null); return; }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let polls = 0;
     const schedule = (current: SourceConnection) => {
@@ -74,7 +76,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
     <div className="mx-auto max-w-2xl space-y-4 px-4 pt-3 pb-24">
       <div className="flex items-center gap-2"><button type="button" aria-label="Close" onClick={onClose} className={`${sourceButton} flex h-11 w-11 shrink-0 items-center justify-center px-0`}><X aria-hidden="true" className="h-5 w-5" /></button><h2 className="min-w-0 flex-1 text-2xl font-semibold">Factories</h2></div>
       <p role="status" className="break-words text-base text-ink-soft">{connection ? sourceStatus(connection, timeZone) : 'Loading factories…'}</p>
-      <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></div>
+      <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setReportsOpen(true)}>Reports</button><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></div>
       {error && <p role="alert" className="break-words text-base text-bad">{error}</p>}
       {connection && !connection.sourceType ? <div className="space-y-4 rounded-xl border border-line bg-surface p-6 text-center"><p className="text-base">Connect your database to see your factories here.</p><button type="button" onClick={() => setSettings(true)} className="pressable min-h-12 rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper">Connect</button></div> : <ul className="space-y-2">{[...companies].sort((a, b) => a.name.localeCompare(b.name)).map(company => <li key={company.id}><button type="button" onClick={() => setSelectedCompany(company)} className="pressable min-h-11 w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold"><div className="min-w-0 space-y-2 rounded-xl border border-line bg-surface p-4">
         <h3 dir="auto" className="break-words text-xl font-semibold">{company.name}</h3>
@@ -83,6 +85,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone }: Props) {
         <dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft">{['Last visit', 'Next due', 'Overdue'].map(label => <div key={label} className="flex gap-2"><dt>{label}</dt><dd aria-label="Not scheduled yet">—</dd></div>)}</dl>
       </div></button></li>)}</ul>}
     </div>
+    {reportsOpen && <InspectionReportsInbox timeZone={timeZone} onClose={() => setReportsOpen(false)} />}
     {selectedCompany && <CompanyItemsSheet company={selectedCompany} group1Label={connection?.group1Label || 'Group 1'} onClose={() => setSelectedCompany(null)} />}
     {connection && <SourceConnectSheet isOpen={settings} connection={connection} onClose={() => setSettings(false)} onSaved={() => setReload(k => k + 1)} />}
   </div>;
