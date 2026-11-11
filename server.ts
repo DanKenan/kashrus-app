@@ -5715,7 +5715,7 @@ function sendPushToRecipient(user: any, title: string, body: string, data?: any,
   if (!user || !user.id) return;
   const agencyId = normalizeStoredUser(user).agencyId || 'agency-hkc';
   const subs = pushSubscriptions.filter((s) => s.userId === user.id && s.agencyId === agencyId && pushModeAllows(s, level));
-  deliverPush(subs, 'identity', user.id, title, body, data, onError);
+  return deliverPush(subs, 'identity', user.id, title, body, data, onError);
 }
 
 function deliverPush(
@@ -5734,9 +5734,9 @@ function deliverPush(
     if (testPushLog.length > 5000) testPushLog.splice(0, testPushLog.length - 5000);
   }
   if (!vapidKeys) return;
-  for (const sub of subs) {
+  const deliveries = subs.map((sub) => {
     const payload = JSON.stringify({ title, body, data: data || {} });
-    webpush
+    return webpush
       .sendNotification(
         { endpoint: sub.endpoint, keys: sub.keys } as any,
         payload
@@ -5761,7 +5761,8 @@ function deliverPush(
           log.warn('[Push] Send failed:', err?.message || err);
         }
       });
-  }
+  });
+  return Promise.allSettled(deliveries).then(() => {});
 }
 
 // Media retention: photos and voice notes auto-expire after 30 days

@@ -21,6 +21,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone, role = 'admin' }: P
   }, [isOpen]);
   const updateCompany = (company: ScheduleCompany) => setScheduleData(data => data && ({ ...data, companies: data.companies.map(row => row.id === company.id ? company : row) }));
   const [connection, setConnection] = useState<SourceConnection | null>(null);
+  const [visitGroup1Label, setVisitGroup1Label] = useState('Group 1');
   const [companies, setCompanies] = useState<Factory[]>([]);
   const [selectedCompany, setSelectedCompany] = useState<Factory | null>(null);
   const [reportsOpen, setReportsOpen] = useState(false);
@@ -58,7 +59,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone, role = 'admin' }: P
       try {
         if (role !== 'admin') {
           const result = await visitRequest('/api/visits/factories');
-          if (generation.current === request) setCompanies(result.companies || []);
+          if (generation.current === request) { setCompanies(result.companies || []); setVisitGroup1Label(result.group1Label ?? 'Group 1'); }
           return;
         }
         const response = await apiFetch('/api/sources/connection');
@@ -98,16 +99,16 @@ export function FactoriesScreen({ isOpen, onClose, timeZone, role = 'admin' }: P
       <p role="status" className="break-words text-base text-ink-soft">{role === 'coordinator' ? '' : connection ? sourceStatus(connection, timeZone) : 'Loading factories…'}</p>
       <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setReportsOpen(true)}>Reports</button>{role === 'admin' && <><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></>}</div>
       {error && <p role="alert" className="break-words text-base text-bad">{error}</p>}
-      {role === 'admin' && connection && !connection.sourceType ? <div className="space-y-4 rounded-xl border border-line bg-surface p-6 text-center"><p className="text-base">Connect your database to see your factories here.</p><button type="button" onClick={() => setSettings(true)} className="pressable min-h-12 rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper">Connect</button></div> : <ul className="space-y-2">{[...companies].filter(company => role !== 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)).sort((a, b) => a.name.localeCompare(b.name)).map(company => <li key={company.id}><button type="button" onClick={() => setSelectedCompany(company)} className="pressable min-h-11 w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold"><div className="min-w-0 space-y-2 rounded-xl border border-line bg-surface p-4">
+      {role === 'admin' && connection && !connection.sourceType ? <div className="space-y-4 rounded-xl border border-line bg-surface p-6 text-center"><p className="text-base">Connect your database to see your factories here.</p><button type="button" onClick={() => setSettings(true)} className="pressable min-h-12 rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper">Connect</button></div> : <ul className="space-y-2">{[...companies].filter(company => role !== 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)).sort((a, b) => a.name.localeCompare(b.name)).map(company => <li key={company.id}><div className="min-w-0 space-y-2 rounded-xl border border-line bg-surface p-4"><button type="button" onClick={() => setSelectedCompany(company)} className="pressable min-h-11 w-full space-y-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold">
         <h3 dir="auto" className="break-words text-xl font-semibold">{company.name}</h3>
         {(company.brand || company.plant) && <p dir="auto" className="break-words text-base text-ink-soft">{[company.brand, company.plant].filter(Boolean).join(' / ')}</p>}
         <p className="text-base text-ink-soft">{company.ingredientCount} ingredients · {company.productCount} products</p>
-        {(() => { const row = scheduleData?.companies.find(row => row.id === company.id); return <><dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft"><div><dt>Last visit</dt><dd>{row?.lastVisit ? `${displayDate(calendarDate(row.lastVisit.at, scheduleData!.timeZone))} · ${row.lastVisit.mashgiachName}` : 'None yet'}</dd></div><div><dt>Next due</dt><dd>{row?.nextDue ? displayDate(row.nextDue) : 'No schedule'}</dd></div><div><dt>Overdue</dt><dd>{row?.status === 'overdue' ? `⚠ Yes · ${overdueDaysText(row.overdueDays)}` : 'No'}</dd></div></dl>{row?.mute && (row.mute.until === null || row.mute.until >= scheduleData!.today) && <span className="text-xs text-ink-soft">Alerts off</span>}</>; })()}
-      </div></button>{scheduleData?.companies.some(row => row.id === company.id) && <button type="button" className={sourceButton} onClick={() => setEditing(company.id)}>Visit schedule</button>}</li>)}</ul>}
+        {(() => { const row = scheduleData?.companies.find(row => row.id === company.id); return <><dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft"><div><dt>Last visit</dt><dd>{row?.lastVisit ? `${displayDate(calendarDate(row.lastVisit.at, scheduleData!.timeZone), scheduleData!.today)} · ${row.lastVisit.mashgiachName}` : 'None yet'}</dd></div><div><dt>Next due</dt><dd>{row?.nextDue ? displayDate(row.nextDue, scheduleData!.today) : 'No schedule'}</dd></div><div><dt>Overdue</dt><dd>{row?.status === 'overdue' ? `⚠ Yes · ${overdueDaysText(row.overdueDays)}` : 'No'}</dd></div></dl>{row?.mute && (row.mute.until === null || row.mute.until >= scheduleData!.today) && <span className="text-xs text-ink-soft">Alerts off</span>}</>; })()}
+      </button>{scheduleData?.companies.some(row => row.id === company.id) && <button type="button" className={sourceButton} onClick={() => setEditing(company.id)}>Visit schedule</button>}</div></li>)}</ul>}
     </div>
     {editing && scheduleData && <VisitScheduleEditor key={editing} company={scheduleData.companies.find(row => row.id === editing)!} data={scheduleData} isAdmin={role === 'admin'} onSaved={updateCompany} onClose={() => setEditing(null)} />}
     {reportsOpen && <InspectionReportsInbox timeZone={timeZone} onClose={() => setReportsOpen(false)} />}
-    {selectedCompany && <CompanyItemsSheet isAdmin={role === 'admin'} company={selectedCompany} group1Label={connection?.group1Label || 'Group 1'} onClose={() => setSelectedCompany(null)} />}
+    {selectedCompany && <CompanyItemsSheet isAdmin={role === 'admin'} company={selectedCompany} group1Label={role === 'admin' ? connection?.group1Label || 'Group 1' : visitGroup1Label} onClose={() => setSelectedCompany(null)} />}
     {role === 'admin' && connection && <SourceConnectSheet isOpen={settings} connection={connection} onClose={() => setSettings(false)} onSaved={() => setReload(k => k + 1)} />}
   </div>;
 }

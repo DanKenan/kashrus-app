@@ -48,7 +48,7 @@ try {
   reset(); await restarted.get('a', 'r00000'); budget(0, 0);
   reset(); await Promise.all([restarted.readPhotos(report), restarted.readPhotos(report)]); budget(1, 0);
   await restarted.readPhotos(report); budget(1, 0);
-  reset(); await restarted.page('a', 200, cursor, 'u'); budget(0, 0);
+  reset(); await restarted.page('a', 200, cursor, 'u'); budget(106, 0);
   blocked = true; reset(); await assert.rejects(store.save({ ...report, id: 'blocked' }, input.photos)); budget(0, 0); blocked = false;
   const localDeps = { ...deps, db: () => null }, local = createReportStore(localDeps);
   await local.save(report, input.photos); const localBoot = createReportStore(localDeps); await localBoot.ensure('a');

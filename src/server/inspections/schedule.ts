@@ -31,7 +31,7 @@ export function addDays(date: string, days: number): string {
   return new Date(Date.parse(date + 'T00:00:00Z') + days * 86400000).toISOString().slice(0, 10);
 }
 function step(s: Exclude<Schedule, { kind: 'dates' }>) {
-  if (s.kind === 'per_year') return 12 % s.n === 0 ? { months: 12 / s.n, days: 0 } : { months: 0, days: Math.round(365 / s.n) };
+  if (s.kind === 'per_year') return { months: 12 / s.n, days: 0 };
   return { months: s.unit === 'month' ? s.n : 0, days: s.unit === 'day' ? s.n : s.unit === 'week' ? 7 * s.n : 0 };
 }
 function advance(start: string, months: number, days: number, k: number) {
@@ -42,10 +42,23 @@ function advance(start: string, months: number, days: number, k: number) {
   date.setUTCDate(Math.min(day, end.getUTCDate()));
   return date.toISOString().slice(0, 10);
 }
+export function yearlyOccurrence(start: string, n: number, k: number): string {
+  const y = Math.floor(k / n), j = k % n;
+  const base = advance(start, 12, 0, y), end = advance(start, 12, 0, y + 1);
+  return addDays(base, Math.round(j * daysBetween(base, end) / n));
+}
 export function dueState(schedule: Schedule | null, countFrom: Settings['countFrom'], lastVisit: LastVisit | null, today: string, timeZone: string) {
   const last = lastVisit ? calendarDate(lastVisit.at, timeZone) : null;
   let nextDue: string | null = null;
   if (schedule?.kind === 'dates') nextDue = schedule.dates.find(d => !last || d > last) || null;
+  else if (schedule?.kind === 'per_year' && 12 % schedule.n !== 0) {
+    if (!last) nextDue = schedule.start;
+    else if (countFrom === 'last_visit') nextDue = yearlyOccurrence(last, schedule.n, 1);
+    else {
+      let k = Math.max(0, (Number(last.slice(0, 4)) - Number(schedule.start.slice(0, 4)) - 1) * schedule.n);
+      do { nextDue = yearlyOccurrence(schedule.start, schedule.n, k++); } while (nextDue <= last);
+    }
+  }
   else if (schedule) {
     const { months, days } = step(schedule);
     if (!last) nextDue = schedule.start;
@@ -65,6 +78,6 @@ export function alertDecision(input: { nextDue: string | null; today: string; ho
   const { nextDue, today, hour, mute, alert } = input;
   if (!nextDue || today < nextDue || hour < 8 || hour >= 21 || isMuted(mute, today)) return null;
   if (alert?.dueDate !== nextDue) return { kind: 'first', alert: { dueDate: nextDue, count: 1, lastSentDate: today } };
-  if (today > alert.lastSentDate && daysBetween(nextDue, today) >= 7 * alert.count) return { kind: 'reminder', alert: { ...alert, count: alert.count + 1, lastSentDate: today } };
+  if (daysBetween(alert.lastSentDate, today) >= 7 && daysBetween(nextDue, today) >= 7 * alert.count) return { kind: 'reminder', alert: { ...alert, count: Math.floor(daysBetween(nextDue, today) / 7) + 1, lastSentDate: today } };
   return null;
 }

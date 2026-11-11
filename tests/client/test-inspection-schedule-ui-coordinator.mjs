@@ -18,7 +18,7 @@ globalThis.fetch = async (url, options = {}) => {
   calls.push([url, options.method || 'GET']);
   assert.ok(!url.startsWith('/api/factories') && !url.startsWith('/api/sources/'), `Coordinator called an admin endpoint: ${url}`);
   if (url === '/api/inspections/schedule') return new Response(JSON.stringify({ today: '2026-11-11', timeZone: 'UTC', settings: { countFrom: 'planned', mashgichimSeeAll: true }, companies: [{ ...row, overdueDays: days }, { ...row, id: 'not-in-list', name: 'Test Excluded Company' }], people: { mashgichim: [], coordinators: [] } }));
-  if (url === '/api/visits/factories') return new Response(JSON.stringify({ companies: [{ ...company, assigned: true, nextDue: row.nextDue, status: row.status, overdueDays: days }] }));
+  if (url === '/api/visits/factories') return new Response(JSON.stringify({ group1Label: ' Test Priority Group ', companies: [{ ...company, assigned: true, nextDue: row.nextDue, status: row.status, overdueDays: days }] }));
   if (url === '/api/visits/factories/company%2Fa') return new Response(JSON.stringify({ company, ingredients: [item], products: [{ ...item, id: 'p', name: ' Test Product ' }] }));
   throw new Error(`Unexpected request: ${url}`);
 };
@@ -33,10 +33,12 @@ assert.match(screen.text(), /Last visit None yet Next due Nov 10 Overdue ⚠ Yes
 await screen.click(/Test Company/);
 const sheetProps = screen.tree().props.children.find(e => e?.type === CompanyItemsSheet).props;
 assert.equal(sheetProps.isAdmin, false);
+assert.equal(sheetProps.group1Label, ' Test Priority Group ');
 const sheet = mount(CompanyItemsSheet, sheetProps); await sheet.render();
 assert.deepEqual(calls.at(-1), ['/api/visits/factories/company%2Fa', 'GET']);
 assert.equal(sheet.find(e => e.type === 'p' && e.props.children === item.name).length, 1); assert.match(sheet.text(), /Test Product/);
-assert.doesNotMatch(sheet.text(), /Remove Group 1|Mark as Group 1|Use source value/);
+assert.match(sheet.text(), /Test Priority Group : Yes/);
+assert.doesNotMatch(sheet.text(), /Group 1|Use source value/);
 assert.deepEqual(sheet.find(e => e.type === 'button').map(e => e.props['aria-label']), ['Close']);
 await screen.click('Visit schedule');
 const editorProps = screen.tree().props.children.find(e => e?.type === VisitScheduleEditor).props;

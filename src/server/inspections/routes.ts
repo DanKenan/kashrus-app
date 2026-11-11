@@ -1,5 +1,5 @@
 import { createScheduleStore } from './schedule-store.ts';
-import { validateSchedule, isDate, calendarDate, dueState, isMuted, alertDecision, type LastVisit } from './schedule.ts';
+import { validateSchedule, isDate, calendarDate, dueState, isMuted, alertDecision, type LastVisit, type Alert } from './schedule.ts';
 import { normalizeSubmit, buildReport, summary, type Fee } from './model.ts';
 import { createReportStore, reportId, type Cursor } from './store.ts';
 import type { inspectionSourceAccessor } from '../sources/routes.ts';
@@ -8,7 +8,7 @@ export function registerInspectionRoutes(app: any, deps: {
   agencyIds?(): string[]; db(): any; dataDir: string; staged(): boolean; source: ReturnType<typeof inspectionSourceAccessor>;
   user(req: any): { id: string; name: string; role: string; agencyId?: string } | undefined;
   scheduleAgencyIds?(): string[]; people?(agency: string): Person[]; timeZone?(agency: string): string;
-  now?(): Date; testMode?: boolean; push?(user: Person, title: string, body: string): void;
+  now?(): Date; testMode?: boolean; push?(user: Person, title: string, body: string): void | Promise<void>;
   maxPhotoChars: number; photoRe: RegExp;
 }) {
   const now = () => deps.now?.() || new Date();
@@ -86,7 +86,7 @@ export function registerInspectionRoutes(app: any, deps: {
       }
       if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw Error();
     } catch { return res.status(400).json({ error: 'Invalid pagination' }); }
-    res.json({ reports: (await store.page(agency, limit, before, userId)).filter(r => !caller || visible(agency, r.companyId, caller)) });
+    res.json(await store.visiblePage(agency, limit, before, r => (!userId || r.mashgiachId === userId) && (!caller || visible(agency, r.companyId, caller))));
   }
   app.get('/api/visits/reports/mine', handler(false, (req: any, res: any, u: any, agency: string) => list(req, res, agency, u.id, u), true));
   app.get('/api/inspections/reports', handler(true, (req: any, res: any, u: any, agency: string) => list(req, res, agency, undefined, u), true));
@@ -142,6 +142,7 @@ export function registerInspectionRoutes(app: any, deps: {
     const alerts = deps.source(a).state.companies.filter(c => visible(a, c.id, u, true)).map(c => row(a, c)).filter(c => c.status === 'overdue').map(c => ({ companyId: c.id, companyName: c.name, nextDue: c.nextDue, overdueDays: c.overdueDays, muted: isMuted(c.mute, today(a)) })).sort((a, b) => a.nextDue!.localeCompare(b.nextDue!) || a.companyName.localeCompare(b.companyName));
     res.json({ today: today(a), alerts });
   }));
+  const pendingAlerts = new Map<string, Record<string, { alert: Alert }>>();
   let checking: Promise<any> | undefined;
   async function runCheck() {
     const sent: { companyId: string; kind: 'first' | 'reminder'; userIds: string[] }[] = []; let writes = 0;
@@ -152,6 +153,17 @@ export function registerInspectionRoutes(app: any, deps: {
       await store.settled(a);
       await schedules.locked(a, async () => {
         if (deps.staged()) return;
+        const persist = async (changes: Record<string, { alert: Alert }>) => {
+          const prepared = schedules.prepare(a, { companies: changes });
+          if (prepared) {
+            if (deps.db()) { const batch = deps.db().batch(); batch.set(prepared.ref, prepared.patch, { merge: true }); await batch.commit(); }
+            else await schedules.persistLocal(a, prepared.next);
+            schedules.install(a, prepared.next); writes++;
+          }
+          pendingAlerts.delete(a);
+        };
+        const retry = pendingAlerts.get(a);
+        if (retry) { await persist(retry); return; }
         const changes: Record<string, any> = Object.create(null), messages: { c: ReturnType<typeof row>; kind: 'first' | 'reminder'; recipients: Person[] }[] = [];
         const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: zone(a), hour: 'numeric', hourCycle: 'h23' }).format(now()));
         for (const company of deps.source(a).state.companies) {
@@ -161,15 +173,19 @@ export function registerInspectionRoutes(app: any, deps: {
           const recipients = [...new Map(people(a).filter(p => p.role === 'admin' || (p.role === 'mashgiach' && c.mashgiachIds.includes(p.id)) || (p.role === 'coordinator' && c.coordinatorIds.includes(p.id))).map(p => [p.id, p])).values()];
           changes[c.id] = { alert: decision.alert }; messages.push({ c, kind: decision.kind, recipients });
         }
-        const prepared = schedules.prepare(a, { companies: changes }); if (!prepared) return;
-        if (deps.db()) { const batch = deps.db().batch(); batch.set(prepared.ref, prepared.patch, { merge: true }); await batch.commit(); }
-        else await schedules.persistLocal(a, prepared.next);
-        schedules.install(a, prepared.next); writes++;
+        if (!schedules.prepare(a, { companies: changes })) return;
         for (const { c, kind, recipients } of messages) {
           const date = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' }).format(new Date(c.nextDue! + 'T12:00:00Z'));
-          for (const user of recipients) deps.push?.(user, 'Visit overdue', `${kind === 'reminder' ? 'Still no visit: ' : ''}${c.name} — due ${date}`);
+          for (const user of recipients) {
+            try { await deps.push?.(user, 'Visit overdue', `${kind === 'reminder' ? 'Still no visit: ' : ''}${c.name} — due ${date}`); }
+            catch { /* One recipient's delivery failure must not block the others or the state write. */ }
+          }
           sent.push({ companyId: c.id, kind, userIds: recipients.map(p => p.id) });
         }
+        // A crash between push and commit may duplicate this alert once after restart.
+        // Failed commits retain this sent state: the next check retries only its write.
+        pendingAlerts.set(a, changes);
+        await persist(changes);
       });
     }
     return { sent, writes };

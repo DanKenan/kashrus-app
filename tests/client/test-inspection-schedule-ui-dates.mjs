@@ -11,5 +11,5 @@ assert.equal(nextVisitDue({ kind: 'dates', dates: ['2026-01-01', '2026-02-01'] }
 assert.equal(nextVisitDue({ kind: 'dates', dates: ['2026-01-01'] }, 'planned', '2026-01-01'), null);
 assert.equal(nextVisitDue(null, 'planned', null), null);
 assert.equal(calendarDate('2026-11-03T01:00:00Z', 'America/Chicago'), '2026-11-02');
-assert.equal(displayDate('2026-11-03'), 'Nov 3');
+assert.equal(displayDate('2026-11-03', '2026-11-11'), 'Nov 3');
 console.log('inspection schedule calendar rules: OK');

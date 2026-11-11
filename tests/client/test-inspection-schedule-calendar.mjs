@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { validateSchedule, dueState, calendarDate, alertDecision } from '../../src/server/inspections/schedule.ts';
+import { validateSchedule, dueState, calendarDate, alertDecision, yearlyOccurrence, addDays } from '../../src/server/inspections/schedule.ts';
 const visit = date => ({ at: date.includes('T') ? date : date + 'T12:00:00Z', reportId: 'r', mashgiachName: 'Test person' });
 const every = (start, n = 1, unit = 'month') => ({ kind: 'every', start, n, unit });
 const due = (s, from, last, today = '2026-01-01', tz = 'UTC') => dueState(s, from, last && visit(last), today, tz);
@@ -38,10 +38,32 @@ const first = alertDecision(base); assert.equal(first.kind, 'first');
 assert.equal(alertDecision({ ...base, alert: first.alert }), null);
 assert.equal(alertDecision({ ...base, today: '2026-11-09', alert: first.alert }), null);
 const reminder = alertDecision({ ...base, today: '2026-11-10', alert: first.alert }); assert.equal(reminder.kind, 'reminder');
-const missed = alertDecision({ ...base, today: '2026-11-24', alert: first.alert }); assert.equal(missed.alert.count, 2);
+const missed = alertDecision({ ...base, today: '2026-11-24', alert: first.alert }); assert.equal(missed.alert.count, 4);
 assert.equal(alertDecision({ ...base, today: '2026-11-24', alert: missed.alert }), null);
 for (const hour of [0, 7, 21, 23]) assert.equal(alertDecision({ ...base, hour }), null);
 for (const hour of [8, 20]) assert.equal(alertDecision({ ...base, hour }).kind, 'first');
 for (const until of [null, '2026-11-03', '2026-11-04']) assert.equal(alertDecision({ ...base, mute: { until, by: 'u', at: '2026-11-01T12:00:00Z' } }), null);
 assert.equal(alertDecision({ ...base, mute: { until: '2026-11-02', by: 'u', at: '2026-11-01T12:00:00Z' } }).kind, 'first');
 console.log('inspection schedule: validation, calendar recurrence, agency TZ/DST and alert decisions passed');
+
+const five = { kind: 'per_year', n: 5, start: '2027-01-01' };
+const planned = Array.from({ length: 11 }, (_, k) => yearlyOccurrence(five.start, 5, k));
+assert.deepEqual(planned, ['2027-01-01', '2027-03-15', '2027-05-27', '2027-08-08', '2027-10-20', '2028-01-01', '2028-03-14', '2028-05-26', '2028-08-08', '2028-10-20', '2029-01-01']);
+for (const year of ['2027', '2028']) assert.equal(planned.filter(d => d.startsWith(year)).length, 5);
+for (let k = 0; k < 10; k++) assert.equal(due(five, 'planned', planned[k]).nextDue, planned[k + 1]);
+assert.equal(due(five, 'last_visit', '2028-07-20').nextDue, '2028-10-01');
+assert.equal(yearlyOccurrence('2028-02-29', 5, 5), '2029-02-28');
+assert.equal(yearlyOccurrence('2028-02-29', 5, 20), '2032-02-29');
+let state = alertDecision({ ...base, hour: 8 }).alert;
+const gap = alertDecision({ ...base, today: addDays(base.nextDue, 21), hour: 8, alert: state });
+assert.equal(gap.kind, 'reminder'); assert.equal(gap.alert.count, 4); state = gap.alert;
+const sent = [];
+for (let h = 1; h <= 168; h++) {
+  const at = new Date(Date.parse(addDays(base.nextDue, 21) + 'T08:00:00Z') + h * 3600000);
+  const decision = alertDecision({ ...base, today: at.toISOString().slice(0, 10), hour: at.getUTCHours(), alert: state });
+  if (decision) { sent.push(h); state = decision.alert; }
+}
+assert.deepEqual(sent, [168]); assert.equal(state.count, 5);
+const lateFirst = alertDecision({ ...base, today: addDays(base.nextDue, 21), alert: null }).alert;
+assert.equal(alertDecision({ ...base, today: addDays(base.nextDue, 22), alert: lateFirst }), null);
+console.log('year-aligned per_year recurrence and skipped-week hourly reminders passed');

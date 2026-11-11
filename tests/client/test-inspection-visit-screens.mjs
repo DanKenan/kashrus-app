@@ -22,7 +22,7 @@ globalThis.fetch = async (url, options = {}) => {
   else if (url === '/api/visits/factories') body = { companies: [factory], group1Label: 'Group 1', refreshedAt: list.refreshedAt };
   else if (url === '/api/visits/factories/factory-1') body = list;
   else if (url === '/api/visits/reports') return new Response(JSON.stringify(responseStatus < 400 ? { report: summary, fee } : { error: 'Please edit this report.' }), { status: responseStatus });
-  else if (url.startsWith('/api/inspections/reports?')) body = { reports: Array.from({ length: 50 }, (_, i) => ({ ...summary, id: `report-${i}` })) };
+  else if (url.startsWith('/api/inspections/reports?')) body = { reports: Array.from({ length: 50 }, (_, i) => ({ ...summary, id: `report-${i}` })), nextCursor: { submittedAt: summary.submittedAt, id: 'report-49' } };
   else if (url.endsWith('/photos')) body = { photos: { 'mark:1': 'data:image/jpeg;base64,YQ==' } };
   else body = { report: { ...summary, note: ' Report note ', marks: [{ kind: 'ingredient', itemId: item.id, status: 'checked', note: '', hasPhoto: false, item }, { kind: 'product', itemId: 'product-1', status: 'alert', note: ' Different panel ', hasPhoto: true, item }], offList: [{ name: ' Off list ', brand: ' Brand ', note: ' Off note ', hasPhoto: false }] } };
   return new Response(JSON.stringify(body));
