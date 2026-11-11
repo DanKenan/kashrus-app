@@ -169,6 +169,15 @@ export default {
    await reset(); assert.deepEqual((await api('admin', 'GET', `/api/inspections/reports/${first.report.id}/photos`)).json.photos, { [`item:${item.id}`]: photo }); await budget('lazy food-service item photos', 1, 0);
    const spare = (await action('add spare manual place', 'POST', `${path}/places`, { name: 'Test spare manual' }, 1, 201)).place;
    await action('remove manual place', 'DELETE', `${path}/places/${spare.id}`);
+   const retryPlace = (await action('add retry manual place', 'POST', `${path}/places`, { name: 'Test retry manual' }, 1, 201)).place;
+   const retryBody = { ...body, companyId: retryPlace.id, clientReportId: 'report-118-deleted-manual', templateId: null, templateVersion: null, answers: [] };
+   const savedManual = await action('submit manual report before deletion', 'POST', '/api/visits/reports', retryBody, 3, 201);
+   assert.equal(savedManual.report.companyId, retryPlace.id);
+   await action('delete reported manual place', 'DELETE', `${path}/places/${retryPlace.id}`, undefined, 2);
+   const retriedManual = await action('retry report after manual deletion', 'POST', '/api/visits/reports', retryBody, 0, 200);
+   assert.equal(retriedManual.report.id, savedManual.report.id);
+   assert.deepEqual(retriedManual.report, savedManual.report);
+   assert.ok((await api('admin', 'GET', '/api/inspections/reports')).json.reports.some(r => r.id === savedManual.report.id));
    const before = (await api('admin', 'GET', path)).json, reportBefore = (await api('admin', 'GET', '/api/inspections/reports')).json;
    await api('admin', 'POST', '/api/__test__/inspections/flush-seen', {});
    await ctx.restartServer(); const boot = await settle(), agencyCount = (await ctx.getDoc()).agencies.length;

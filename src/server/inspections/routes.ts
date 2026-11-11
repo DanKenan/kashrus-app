@@ -204,12 +204,12 @@ export function registerInspectionRoutes(app: any, deps: {
     if (deps.staged()) return res.status(503).json({ error: 'Writes blocked' });
     const clientId = req.body?.clientReportId;
     if (typeof clientId !== 'string' || !/^[A-Za-z0-9-]{8,64}$/.test(clientId)) return res.status(400).json({ error: 'Invalid clientReportId' });
-    if (typeof req.body?.companyId !== 'string' || !allPlaces(agency).some(c => c.id === req.body.companyId && kind(agency, c) === (req.body.kind === 'food_service' ? 'food_service' : 'factory')) || !visible(agency, req.body.companyId, u)) return res.status(404).json({ error: 'Company not found' });
     const identity = JSON.stringify([agency, u.id, clientId]);
     const cached = store.cached(agency, reportId(agency, u.id, clientId));
     if (cached && !visible(agency, cached.companyId, u)) return res.status(404).json({ error: 'Company not found' });
     if (cached) return res.status(200).json({ report: reportSummary(agency, cached), fee: cached.fee });
     if (pending.has(identity)) { const { created, ...body } = await pending.get(identity); if (!visible(agency, body.report.companyId, u)) return res.status(404).json({ error: 'Company not found' }); return res.status(200).json(body); }
+    if (typeof req.body?.companyId !== 'string' || !allPlaces(agency).some(c => c.id === req.body.companyId && kind(agency, c) === (req.body.kind === 'food_service' ? 'food_service' : 'factory')) || !visible(agency, req.body.companyId, u)) return res.status(404).json({ error: 'Company not found' });
     let input, report;
     try {
       const source = deps.source(agency), company = allPlaces(agency).find(c => c.id === req.body.companyId)!;
