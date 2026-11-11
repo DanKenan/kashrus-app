@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createAirtableConnector } from '../../src/server/sources/airtable.ts';
-const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company', certification: 'Certification' }, products: { table: 'Products', name: 'Name', companyLink: 'Company', code: 'Code' }, noSymbolValues: ['Group 1'] };
+const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company', certification: 'Certification' }, products: { table: 'Products', name: 'Name', companyLink: 'Company', code: 'Code' }, group1Values: ['Group 1'] };
 const row = (id, fields) => ({ id, fields });
 const tables = {
   Notes: [row('n', { Name: 'Notes' })],

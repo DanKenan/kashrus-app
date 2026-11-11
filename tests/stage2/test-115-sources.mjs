@@ -8,7 +8,7 @@ export default {
   async run(baseUrl, ctx) {
     const { api, agencyId, tokens } = await shiftFixture(baseUrl, ctx, '115');
     const key = 'fake-source-test115-key';
-    const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, noSymbolValues: ['Group 1'] };
+    const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: ['Group 1'] };
     const rows = {
       Companies: Array.from({ length: 7 }, (_, i) => ({ id: `rec${i}`, fields: { Name: `Company ${i}`, Type: i < 5 ? 'Factory' : 'Other' } })),
       Ingredients: Array.from({ length: 230 }, (_, i) => ({ id: `ing${i}`, fields: { Name: `Ingredient ${i}`, Company: [`rec${i % 5}`] } })),

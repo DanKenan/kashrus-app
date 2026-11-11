@@ -2,9 +2,10 @@ import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { Backup } from './cache.ts';
-import type { SourceKind, SourceMapping } from './types.ts';
+import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
 export interface Connection {
+  group1Label?: string; group1Overrides?: Group1Overrides;
   agencyId: string; sourceType: SourceKind; baseId: string; access: 'read' | 'readwrite';
   mapping: SourceMapping; encryptedKey: string; keyHint: string; updatedAt: string; updatedBy: string;
   backupParts?: Record<string, { parts: number; hash: string }>; backupHashes: Record<string, string>; lastRefresh?: { at: string; ok: boolean; calls: number; error?: string };
@@ -109,5 +110,12 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     try { return JSON.parse(await fs.readFile(file('sourceConnections', id), 'utf8')); }
     catch (e: any) { if (e.code === 'ENOENT') return null; throw e; }
   }
-  return { connections: () => list('sourceConnections') as Promise<Connection[]>, save, load, raw };
+  return { connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw };
+}
+// Read legacy connection settings without rewriting source values.
+export function normalizeConnection(connection: any): Connection {
+  const mapping = { ...connection.mapping };
+  mapping.group1Values = mapping.group1Values ?? mapping.noSymbolValues ?? ['Group 1'];
+  delete mapping.noSymbolValues;
+  return { ...connection, mapping, group1Label: connection.group1Label || 'Group 1' };
 }

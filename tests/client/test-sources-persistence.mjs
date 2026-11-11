@@ -27,7 +27,7 @@ async function request(method, path, body = {}) {
   return { json, status };
 }
 const state = async () => (await request('get', '/api/sources/connection')).json;
-const mapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, noSymbolValues: [] };
+const mapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: [] };
 const body = { sourceType: 'airtable', baseId: 'appTEST', apiKey: 'fake-key', access: 'read', mapping };
 const until = async check => { for (let i = 0; i < 150; i++) { if (await check()) return; await new Promise(r => setTimeout(r, 50)); } assert.fail('timed out'); };
 try {

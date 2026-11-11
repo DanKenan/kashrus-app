@@ -123,7 +123,7 @@ try {
   }
   let baseId = 'appOld';
   let status = 'ok';
-  const savedMapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, noSymbolValues: ['Group 1'] };
+  const savedMapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: ['Group 1'] };
   globalThis.fetch = async (url, options = {}) => {
     if (options.method === 'PUT') { baseId = JSON.parse(options.body).baseId; status = 'never'; return new Response(JSON.stringify({ ok: true })); }
     const state = { ...connected, baseId, status, mapping: savedMapping };
@@ -134,7 +134,7 @@ try {
   const changed = mount(FactoriesScreen, { isOpen: true, onClose() {}, timeZone: 'America/Chicago' }); await changed.render();
   assert.match(changed.text(), /Old factory/);
   await changed.click('Settings');
-  const sheet = changed.tree().props.children[1];
+  const sheet = changed.tree().props.children.find(child => child?.props?.connection);
   const edit = mount(SourceConnectForm, sheet.props); await edit.render();
   await edit.type('app…', 'appNew'); await edit.submit();
   assert.equal(baseId, 'appNew');

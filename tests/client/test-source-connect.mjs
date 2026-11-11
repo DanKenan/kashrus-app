@@ -5,7 +5,7 @@ import { emptyMapping } from '../../src/lib/sources.ts';
 const originalFetch = globalThis.fetch;
 const originalDocument = globalThis.document;
 globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
-const mapping = { companies: { table: 'Companies', name: 'Name', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, noSymbolValues: ['Group 1'] };
+const mapping = { companies: { table: 'Companies', name: 'Name', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: ['Group 1'] };
 try {
   for (const typedKey of ['', 'new-test-key']) {
     const calls = []; let saved = 0; let closed = 0;
@@ -40,7 +40,7 @@ try {
       radio.props.onChange(); await form.render();
     }
     await form.submit();
-    assert.deepEqual(calls[1], ['/api/sources/connection', 'PUT', { sourceType: 'airtable', baseId: 'appBase', access: typedKey ? 'readwrite' : 'read', mapping, ...expectedKey }]);
+    assert.deepEqual(calls[1], ['/api/sources/connection', 'PUT', { sourceType: 'airtable', baseId: 'appBase', access: typedKey ? 'readwrite' : 'read', group1Label: 'Group 1', mapping, ...expectedKey }]);
     assert.equal(saved, 1); assert.equal(closed, 1);
   }
   const previewMapping = { ...mapping, companies: { ...mapping.companies, type: 'Type' }, ingredients: { ...mapping.ingredients, certification: 'Cert' } };
@@ -65,9 +65,9 @@ try {
   const cells = () => preview.find(e => e.type === 'td').map(e => e.props.children);
   assert.ok(cells().includes('OU')); assert.ok(cells().includes('Dairy')); assert.ok(cells().includes('Yes'));
   assert.match(preview.text(), /No sample rows for this table\./);
-  await preview.type('noSymbolValues', 'OU-D');
+  await preview.type('group1Values', 'OU-D');
   assert.ok(!cells().includes('OU')); assert.ok(!cells().includes('Dairy'));
-  await preview.type('noSymbolValues', 'Group 1');
+  await preview.type('group1Values', 'Group 1');
   await preview.type('factoryValues', 'Other type');
   const companyCells = cells().slice(0, 5);
   assert.equal(companyCells[2], 'No');
@@ -83,7 +83,7 @@ try {
   const savedMapping = {
     companies: { table: 'Companies', name: 'Custom name', factoryValues: ['Existing factory'], brand: '' },
     ingredients: { table: 'Ingredients', name: 'Custom ingredient', companyLink: 'Existing link' },
-    products: { table: 'Products', name: '', companyLink: 'Existing product link' }, noSymbolValues: ['Existing no symbol'],
+    products: { table: 'Products', name: '', companyLink: 'Existing product link' }, group1Values: ['Existing no symbol'],
   };
   const before = structuredClone(savedMapping);
   const suggestion = { ...mapping, companies: { ...mapping.companies, brand: 'Brand' } };
@@ -100,7 +100,7 @@ try {
   await existing.render();
   assert.match(existing.text(), /Press Test connection to see a preview\./);
   await existing.type('factoryValues', 'Edited factory');
-  await existing.type('noSymbolValues', 'Edited no symbol');
+  await existing.type('group1Values', 'Edited no symbol');
   await existing.click('Test connection');
   const selected = name => existing.find(e => e.type === 'select' && e.props.name === name)[0].props.value;
   assert.equal(selected('companies.name'), 'Custom name');
@@ -113,7 +113,7 @@ try {
   await existing.submit();
   assert.deepEqual(savedCalls.at(-1)[1].mapping, {
     ...savedMapping, companies: { ...savedMapping.companies, brand: 'Brand', factoryValues: ['Edited factory'] },
-    products: { ...savedMapping.products, name: 'Name' }, noSymbolValues: ['Edited no symbol'],
+    products: { ...savedMapping.products, name: 'Name' }, group1Values: ['Edited no symbol'],
   });
   assert.deepEqual(savedMapping, before);
   await existing.click('Test connection');

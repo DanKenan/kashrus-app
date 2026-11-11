@@ -17,6 +17,7 @@ const groups = {
 const commaList = (value: string) => value.split(',').map(s => s.trim()).filter(Boolean);
 export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [baseId, setBaseId] = useState(connection.baseId || '');
+  const [group1Label, setGroup1Label] = useState(connection.group1Label || 'Group 1');
   const [apiKey, setApiKey] = useState('');
   const [access, setAccess] = useState<'read' | 'readwrite'>(connection.access || 'read');
   const [mapping, setMapping] = useState<SourceMapping>(connection.mapping || emptyMapping());
@@ -24,7 +25,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [samples, setSamples] = useState<SourceSamples | null>(null);
   const [guessed, setGuessed] = useState<Record<string, number>>({});
   const [factoryValues, setFactoryValues] = useState((connection.mapping?.companies.factoryValues || []).join(', '));
-  const [noSymbolValues, setNoSymbolValues] = useState((connection.mapping?.noSymbolValues || ['Group 1']).join(', '));
+  const [group1Values, setGroup1Values] = useState((connection.mapping?.group1Values || ['Group 1']).join(', '));
   const [busy, setBusy] = useState<'test' | 'save' | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -51,7 +52,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     return () => { document.removeEventListener('keydown', key, true); document.removeEventListener('focusin', focus); previous?.focus(); };
   }, []);
   const payload = () => ({ sourceType: 'airtable', baseId: baseId.trim(), ...(apiKey ? { apiKey } : {}) });
-  const ready = !!baseId.trim() && mappingReady(mapping);
+  const ready = !!baseId.trim() && mappingReady(mapping) && !!group1Label.trim() && group1Label.trim().length <= 30;
   const run = async (action: 'test' | 'save') => {
     if (lock.current || (action === 'save' && !ready)) return;
     lock.current = true; setBusy(action); setError(''); setMessage('');
@@ -65,7 +66,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
           const suggestion = { ...emptyMapping(), ...result.guess.mapping };
           const next = connection.mapping ? {
             ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) },
-            ingredients: { ...mapping.ingredients }, products: { ...mapping.products }, noSymbolValues: commaList(noSymbolValues),
+            ingredients: { ...mapping.ingredients }, products: { ...mapping.products }, group1Values: commaList(group1Values),
           } : suggestion;
           const filled: Record<string, number> = {};
           for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
@@ -78,15 +79,15 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
               }
             }
           }
-          if (!next.noSymbolValues.length) next.noSymbolValues = suggestion.noSymbolValues;
+          if (!next.group1Values.length) next.group1Values = suggestion.group1Values;
           setMapping(next); setFactoryValues((next.companies.factoryValues || []).join(', '));
-          setNoSymbolValues(next.noSymbolValues.join(', '));
+          setGroup1Values(next.group1Values.join(', '));
           setGuessed(filled);
         } else setGuessed({});
         setAccess(result.access || 'read');
         setMessage(`Connected · ${result.access === 'readwrite' ? 'read and write' : 'read only'}`);
       } else {
-        await sourceRequest('/api/sources/connection', 'PUT', { ...payload(), access, mapping: { ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) }, noSymbolValues: commaList(noSymbolValues) } });
+        await sourceRequest('/api/sources/connection', 'PUT', { ...payload(), access, group1Label: group1Label.trim(), mapping: { ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) }, group1Values: commaList(group1Values) } });
         setApiKey(''); onSaved(); onClose();
       }
     } catch (e) { setError(e instanceof Error ? e.message : "Couldn't save. Try again."); }
@@ -109,7 +110,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     </div>;
   };
   const preview = (group: keyof typeof groups) => {
-    const data = previewRows(samples || {}, { ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) }, noSymbolValues: commaList(noSymbolValues) }, group);
+    const data = previewRows(samples || {}, { ...mapping, companies: { ...mapping.companies, factoryValues: commaList(factoryValues) }, group1Values: commaList(group1Values) }, group, group1Label.trim() || 'Group 1');
     return <div className="min-w-0 space-y-2">
       <h4 className="text-sm font-semibold">Preview</h4>
       {!samples ? <p className="text-sm text-ink-soft">Press Test connection to see a preview.</p> : !data.rows.length ? <p className="text-sm text-ink-soft">No sample rows for this table.</p> : <div role="region" aria-label={`${group} preview`} tabIndex={0} className="max-w-full overflow-x-auto rounded-lg border border-line">
@@ -130,7 +131,8 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         {message && <p role="status" className="text-base text-ink">{message}</p>}
         <h3 className="text-xl font-semibold">Mapping</h3>
         {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients' : 'Products'}</legend>{select(group, 'table', 'Table')}{groups[group].map(([field, label]) => select(group, field, label))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{preview(group)}</fieldset>)}
-        <div><label htmlFor={`${id}-symbols`} className="block text-sm text-ink-soft">No symbol needed values</label><input id={`${id}-symbols`} name="noSymbolValues" className={fieldClass} value={noSymbolValues} disabled={!!busy} onChange={e => setNoSymbolValues(e.target.value)} /><p className="text-sm text-ink-soft">Ingredients certified this way are kosher with no symbol (like salt).</p></div>
+        <div><label htmlFor={`${id}-group1-label`} className="block text-sm text-ink-soft">Name for Group 1</label><input id={`${id}-group1-label`} name="group1Label" className={fieldClass} value={group1Label} maxLength={30} required disabled={!!busy} onChange={e => setGroup1Label(e.target.value)} /></div>
+        <div><label htmlFor={`${id}-symbols`} className="block text-sm text-ink-soft">{`Values that mean ${group1Label.trim() || 'Group 1'}`}</label><input id={`${id}-symbols`} name="group1Values" className={fieldClass} value={group1Values} disabled={!!busy} onChange={e => setGroup1Values(e.target.value)} /></div>
         {error && <p role="alert" className="text-base text-bad">{error}</p>}
         <button type="submit" disabled={!!busy || !ready} className="pressable min-h-12 w-full rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper disabled:opacity-50">{busy === 'save' ? 'Saving…' : 'Save'}</button>
       </form>

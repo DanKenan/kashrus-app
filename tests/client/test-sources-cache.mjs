@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createSourceCache, nextNightlyRun } from '../../src/server/sources/cache.ts';
 import { encryptKey, decryptKey, keyHint } from '../../src/server/sources/crypto.ts';
-const data = { companies: [{ id: 'c1', name: 'Demo Factory', type: 'Factory', brand: 'Brand', plant: 'Plant', extra: { attachment: 'https://example.test' } }], ingredients: [{ id: 'i1', companyIds: ['c1'], name: 'Salt', brand: 'Demo', noSymbolNeeded: true, expiresOn: '2027-01-01', certificationRaw: 'Group 1', certifyingAgency: 'Agency', dpm: 'pareve', plant: 'Plant', extra: { private: 'omit' } }], products: [{ id: 'p1', companyIds: ['c1'], name: 'Bread', symbolRequired: false, dpm: 'pareve', code: '001', plant: 'https://example.test', extra: {} }] };
+const data = { companies: [{ id: 'c1', name: 'Demo Factory', type: 'Factory', brand: 'Brand', plant: 'Plant', extra: { attachment: 'https://example.test' } }], ingredients: [{ id: 'i1', companyIds: ['c1'], name: 'Salt', brand: 'Demo', group1: true, expiresOn: '2027-01-01', certificationRaw: 'Group 1', certifyingAgency: 'Agency', dpm: 'pareve', plant: 'Plant', extra: { private: 'omit' } }], products: [{ id: 'p1', companyIds: ['c1'], name: 'Bread', symbolRequired: false, dpm: 'pareve', code: '001', plant: 'https://example.test', extra: {} }] };
 let down = false, calls = 0, loads = 0, release;
 let gate = Promise.resolve();
 const connector = { kind: 'airtable', calls: () => calls, async loadAll() { calls++; await gate; if (down) throw new Error('secret'); return structuredClone(data); } };
@@ -31,7 +31,7 @@ assert.equal(fallback.state('a').itemsFor('c1', 'ingredient')[0].name, 'Salt');
 assert.equal(fallback.state('a').companies[0].type, 'Factory');
 assert.equal(fallback.state('a').companies[0].brand, 'Brand');
 const restored = fallback.state('a').itemsFor('c1', 'ingredient')[0];
-for (const field of ['id', 'expiresOn', 'certificationRaw', 'certifyingAgency', 'noSymbolNeeded', 'dpm', 'plant']) assert.equal(restored[field], data.ingredients[0][field]);
+for (const field of ['id', 'expiresOn', 'certificationRaw', 'certifyingAgency', 'group1', 'dpm', 'plant']) assert.equal(restored[field], data.ingredients[0][field]);
 assert.equal(fallback.state('a').itemsFor('c1', 'product')[0].symbolRequired, false);
 const broken = createSourceCache({ connectorFor: () => connector, backups: { async load() { const result = []; result.invalidCompanyIds = ['c1']; return result; } } });
 await broken.refresh('a'); assert.equal(broken.state('a').status, 'error'); assert.match(broken.state('a').error, /no usable backup/);

@@ -33,9 +33,9 @@ function overlap(name: string, aliases: string[]): number {
   }));
 }
 // Partial mappings deliberately leave missing tables/columns unset for the caller to review.
-export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'noSymbolValues'>]: Partial<SourceMapping[K]> } & { noSymbolValues: string[] };
+export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
 export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; guessed: Record<string, number> } {
-  const mapping: GuessedMapping = { companies: {}, ingredients: {}, products: {}, noSymbolValues: ['Group 1'] };
+  const mapping: GuessedMapping = { companies: {}, ingredients: {}, products: {}, group1Values: ['Group 1'] };
   const guessed: Record<string, number> = {};
   for (const kind of Object.keys(tableNames) as (keyof typeof tableNames)[]) {
     let table = tableNames[kind].map(n => tables.find(t => normalized(t.name) === normalized(n))).find(Boolean);
@@ -75,12 +75,12 @@ export function parseDpm(text: string): Dpm | undefined {
   if (/\b(parve|pareve|p)\b/i.test(text)) return 'pareve';
   return undefined;
 }
-export function splitCertification(text: string, noSymbolValues: string[] = ['Group 1']): { agency?: string; dpm?: Dpm; noSymbolNeeded: boolean } {
-  if (noSymbolValues.some(v => v.toLowerCase().replace(/\s/g, '') === text.toLowerCase().replace(/\s/g, '')))
-    return { noSymbolNeeded: true };
+export function splitCertification(text: string, group1Values: string[] = ['Group 1']): { agency?: string; dpm?: Dpm; group1: boolean } {
+  if (group1Values.some(v => v.toLowerCase().replace(/\s/g, '') === text.toLowerCase().replace(/\s/g, '')))
+    return { group1: true };
   const dpm = parseDpm(text);
   const agency = text.replace(/(?:[\s-]+)?\b(dairy|de|d|pareve|parve|p|meat|glatt|m)\b/gi, '').trim().replace(/[-\s]+$/, '');
-  return { ...(agency ? { agency } : {}), ...(dpm ? { dpm } : {}), noSymbolNeeded: false };
+  return { ...(agency ? { agency } : {}), ...(dpm ? { dpm } : {}), group1: false };
 }
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value.trim() : undefined;
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
@@ -105,18 +105,18 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
   const i = mapping.ingredients, p = mapping.products;
   const ingredients = (rows[i.table] ?? []).map(r => {
     const certificationRaw = read(r, i.certification);
-    const split = splitCertification(certificationRaw ?? '', mapping.noSymbolValues ?? ['Group 1']);
+    const split = splitCertification(certificationRaw ?? '', mapping.group1Values ?? ['Group 1']);
     const status = read(r, i.status);
     return { id: r.id, companyIds: links(r, i.companyLink), name: read(r, i.name) ?? '', brand: read(r, i.brand),
       certificationRaw, certifyingAgency: read(r, i.agency) || split.agency,
-      dpm: status ? parseDpm(status) : split.dpm, noSymbolNeeded: split.noSymbolNeeded,
+      dpm: status ? parseDpm(status) : split.dpm, group1: split.group1 || splitCertification(status ?? '', mapping.group1Values).group1,
       plant: read(r, i.plant), expiresOn: read(r, i.expiresOn), extra: extra(r, i) };
   });
   const products = (rows[p.table] ?? []).map(r => {
     const raw = p.symbolRequired ? r.fields[p.symbolRequired] : undefined;
     const symbolRequired = typeof raw === 'boolean' ? raw : typeof raw === 'string' && /^(yes|true|1|no|false|0)$/i.test(raw.trim()) ? /^(yes|true|1)$/i.test(raw.trim()) : undefined;
     return { id: r.id, companyIds: links(r, p.companyLink), name: read(r, p.name) ?? '', brand: read(r, p.brand),
-      code: read(r, p.code), dpm: parseDpm(read(r, p.status) ?? ''), symbolRequired, plant: read(r, p.plant), extra: extra(r, p) };
+      group1: splitCertification(read(r, p.status) ?? '', mapping.group1Values).group1, code: read(r, p.code), dpm: parseDpm(read(r, p.status) ?? ''), symbolRequired, plant: read(r, p.plant), extra: extra(r, p) };
   });
   return { companies, ingredients, products };
 }

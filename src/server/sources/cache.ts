@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import type { Company, Ingredient, Product, SourceConnector, SourceData } from './types.ts';
+import type { Company, Group1Overrides, Ingredient, Product, SourceConnector, SourceData } from './types.ts';
 
 export interface Backup {
+  group1Overrides?: Group1Overrides; group1Label?: string;
   v: 1; agencyId: string; companyId: string; companyName: string; takenAt: string; hash: string;
   company?: Omit<Company, 'extra'>;
   ingredients: Omit<Ingredient, 'extra' | 'companyIds'>[];
@@ -14,6 +15,7 @@ export interface SourceState {
 }
 export interface RefreshResult { ok: boolean; calls: number; changedBackups: Backup[]; error?: string }
 export interface SourceCacheConfig {
+  group1SettingsFor?(agencyId: string): { group1Overrides?: Group1Overrides; group1Label?: string };
   connectorFor(agencyId: string): SourceConnector | Promise<SourceConnector>;
   backups: { load(agencyId: string): Promise<Backup[]> }; now?: () => number;
 }
@@ -26,10 +28,10 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
       company: { id: c.id, name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant) },
       ingredients: data.ingredients.filter(i => i.companyIds.includes(c.id)).map(i => ({
         id: safeText(i.id), name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
-        dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: safeText(i.certificationRaw), noSymbolNeeded: i.noSymbolNeeded === true, plant: safeText(i.plant),
+        dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: safeText(i.certificationRaw), group1: i.group1 === true, plant: safeText(i.plant),
       })),
       products: data.products.filter(p => p.companyIds.includes(c.id)).map(p => ({
-        id: safeText(p.id), name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: p.dpm, symbolRequired: typeof p.symbolRequired === 'boolean' ? p.symbolRequired : undefined, plant: safeText(p.plant),
+        id: safeText(p.id), name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: p.dpm, group1: p.group1 === true, symbolRequired: typeof p.symbolRequired === 'boolean' ? p.symbolRequired : undefined, plant: safeText(p.plant),
       })),
     };
     for (const items of [content.ingredients, content.products]) items.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
@@ -37,7 +39,7 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
     return { v: 1, agencyId, companyId: c.id, takenAt, hash, ...content };
   });
 }
-export function createSourceCache({ connectorFor, backups, now = Date.now }: SourceCacheConfig) {
+export function createSourceCache({ connectorFor, backups, group1SettingsFor, now = Date.now }: SourceCacheConfig) {
   const entries = new Map<string, { state: SourceState; data?: SourceData; backupLoaded: boolean; hashes: Map<string, string> }>();
   const flights = new Map<string, Promise<RefreshResult>>();
   function entry(id: string) {
@@ -66,7 +68,10 @@ export function createSourceCache({ connectorFor, backups, now = Date.now }: Sou
         data = { companies, ingredients: [...ingredients.values()], products: [...products.values()] };
       }
       const calls = connector.calls() - start, refreshedAt = new Date(now()).toISOString();
-      const all = makeBackups(id, data, refreshedAt);
+      const all = makeBackups(id, data, refreshedAt).map(b => {
+        const settings = group1SettingsFor?.(id);
+        return { ...b, ...settings, hash: createHash('sha256').update(JSON.stringify([b.hash, settings])).digest('hex') };
+      });
       const changedBackups = all.filter(b => e.hashes.get(b.companyId) !== b.hash);
       publish(id, data, 'ok', { calls, refreshedAt });
       // A successful refresh establishes the baseline; persisted hashes can override it.
@@ -91,8 +96,8 @@ export function createSourceCache({ connectorFor, backups, now = Date.now }: Sou
                   items.forEach((item, index) => {
                     const base = { id: safeText(item.id) || `backup:${b.companyId}:${kind}:${index}`, companyIds: [b.companyId], name: safeText(item.name), brand: safeText(item.brand),
                       dpm: ['dairy', 'pareve', 'meat'].includes(item.dpm) ? item.dpm as Ingredient['dpm'] : undefined, plant: safeText(item.plant), extra: {} };
-                    if (kind === 'ingredients') data.ingredients.push({ ...base, expiresOn: safeText('expiresOn' in item ? item.expiresOn : ''), certificationRaw: safeText('certificationRaw' in item ? item.certificationRaw : ''), certifyingAgency: safeText('certifyingAgency' in item ? item.certifyingAgency : ''), noSymbolNeeded: 'noSymbolNeeded' in item && item.noSymbolNeeded === true });
-                    else data.products.push({ ...base, symbolRequired: 'symbolRequired' in item ? item.symbolRequired : undefined, code: safeText('code' in item ? item.code : '') });
+                    if (kind === 'ingredients') data.ingredients.push({ ...base, expiresOn: safeText('expiresOn' in item ? item.expiresOn : ''), certificationRaw: safeText('certificationRaw' in item ? item.certificationRaw : ''), certifyingAgency: safeText('certifyingAgency' in item ? item.certifyingAgency : ''), group1: 'group1' in item && item.group1 === true });
+                    else data.products.push({ ...base, group1: 'group1' in item && item.group1 === true, symbolRequired: 'symbolRequired' in item ? item.symbolRequired : undefined, code: safeText('code' in item ? item.code : '') });
                   });
                 }
               }

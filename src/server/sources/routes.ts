@@ -9,13 +9,14 @@ const unreadableKey = "The saved key can't be read. Enter the key again in Setti
 class SavedKeyError extends Error {
   constructor() { super(unreadableKey); }
 }
-const emptyMapping: SourceMapping = { companies: { table: '', name: '' }, ingredients: { table: '', name: '', companyLink: '' }, products: { table: '', name: '', companyLink: '' }, noSymbolValues: [] };
+const emptyMapping: SourceMapping = { companies: { table: '', name: '' }, ingredients: { table: '', name: '', companyLink: '' }, products: { table: '', name: '', companyLink: '' }, group1Values: [] };
 function settings(body: any, mapping = true) {
   if (!body || !['airtable', 'google_sheets', 'excel', 'supabase'].includes(body.sourceType)) throw Error('Invalid sourceType');
   if (typeof body.baseId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(body.baseId) || (body.sourceType === 'airtable' && !/^app[A-Za-z0-9]+$/.test(body.baseId))) throw Error('Invalid baseId');
   if (body.apiKey !== undefined && (typeof body.apiKey !== 'string' || body.apiKey.length > 4096)) throw Error('Invalid apiKey');
   if (body.sourceType !== 'airtable') throw Error('This source is not available yet.');
   if (!mapping) return;
+  if (body.group1Label !== undefined && (typeof body.group1Label !== 'string' || !body.group1Label.trim() || body.group1Label.trim().length > 30)) throw Error('Invalid group1Label');
   if (!['read', 'readwrite'].includes(body.access)) throw Error('Invalid access');
   const m = body.mapping;
   const str = (v: any) => typeof v === 'string' && v.length <= 200;
@@ -28,7 +29,7 @@ function settings(body: any, mapping = true) {
       else if (!str(v)) throw Error('Invalid mapping');
     }
   }
-  if (!Array.isArray(m.noSymbolValues) || m.noSymbolValues.length > 50 || !m.noSymbolValues.every(str)) throw Error('Invalid noSymbolValues');
+  if (!Array.isArray(m.group1Values) || m.group1Values.length > 50 || !m.group1Values.every(str)) throw Error('Invalid group1Values');
 }
 export function registerSourceRoutes(app: any, deps: {
   db(): any; dataDir: string; staged(): boolean; secret(): string; testMode: boolean;
@@ -53,7 +54,7 @@ export function registerSourceRoutes(app: any, deps: {
   const status = (id: string) => keyErrors.has(id) ? 'error' : cache.state(id).status;
   const connector = (c: Connection, plain?: string) => createConnector({ kind: c.sourceType, baseId: c.baseId, spreadsheetId: c.baseId, workbookId: c.baseId, url: c.baseId, mapping: c.mapping, ...(deps.testMode && apiBase ? { apiBase } : {}) } as SourceSettings, plain || storedKey(c));
   const loadBackups = (id: string) => store.load(id, Object.keys(connections.get(id)?.backupHashes || {}));
-  const cache = createSourceCache({ connectorFor: id => connector(connections.get(id)!), backups: { load: loadBackups } });
+  const cache = createSourceCache({ connectorFor: id => connector(connections.get(id)!), backups: { load: loadBackups }, group1SettingsFor: id => ({ group1Label: connections.get(id)?.group1Label || 'Group 1', group1Overrides: connections.get(id)?.group1Overrides }) });
   const flights = new Map<string, Promise<any>>(), last = new Map<string, number>(), timers = new Map<string, ReturnType<typeof setTimeout>>();
   function schedule(id: string) {
     clearTimeout(timers.get(id));
@@ -62,6 +63,14 @@ export function registerSourceRoutes(app: any, deps: {
     catch { next = nextNightlyRun(Date.now(), 'America/New_York', 3); }
     const timer = setTimeout(() => { void refresh(id); schedule(id); }, next - Date.now());
     timer.unref(); timers.set(id, timer);
+  }
+  const mutations = new Map<string, Promise<any>>();
+  function serialize<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const previous = mutations.get(id) || Promise.resolve();
+    const next = previous.catch(() => {}).then(fn);
+    mutations.set(id, next);
+    void next.finally(() => { if (mutations.get(id) === next) mutations.delete(id); }).catch(() => {});
+    return next;
   }
   // Serialize persistence so an already-running retry cannot overwrite a later PUT.
   const saves = new Map<string, Promise<void>>();
@@ -76,16 +85,16 @@ export function registerSourceRoutes(app: any, deps: {
     clearTimeout(pending.get(id)?.timer);
     const job = { connection, backups, attempt, timer: undefined as ReturnType<typeof setTimeout> | undefined };
     pending.set(id, job);
-    job.timer = setTimeout(async () => {
+    job.timer = setTimeout(() => { void serialize(id, async () => {
       if (pending.get(id) !== job) return;
       try {
-        if (deps.staged()) { retrySave(id, connection, backups, attempt + 1); return; }
-        await save(connection, backups);
+        if (deps.staged()) { retrySave(id, job.connection, backups, attempt + 1); return; }
+        await save(job.connection, backups);
         if (pending.get(id) !== job) return;
-        connections.set(id, connection); cache.setKnownHashes(id, connection.backupHashes);
+        connections.set(id, job.connection); cache.setKnownHashes(id, job.connection.backupHashes);
         backupErrors.delete(id); pending.delete(id);
-      } catch { if (pending.get(id) === job) retrySave(id, connection, backups, attempt + 1); }
-    }, Math.min(3600_000, 5000 * 3 ** Math.min(attempt, 10)));
+      } catch { if (pending.get(id) === job) retrySave(id, job.connection, backups, attempt + 1); }
+    }); }, Math.min(3600_000, 5000 * 3 ** Math.min(attempt, 10)));
     job.timer.unref();
   }
   function refresh(id: string): Promise<any> {
@@ -118,17 +127,18 @@ export function registerSourceRoutes(app: any, deps: {
   const own = (req: any, res: any) => { const u = deps.requireAdmin(req, res); return u ? { user: u, id: u.agencyId || 'agency-hkc' } : null; };
   const safe = (id: string) => {
     const c = connections.get(id), s = cache.state(id);
-    return { sourceType: c?.sourceType || null, baseId: c?.baseId || '', access: c?.access || 'read', mapping: c?.mapping || null, hasKey: !!c?.encryptedKey, keyHint: c?.keyHint || '', status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: keyErrors.has(id) ? unreadableKey : s.error || null };
+    return { group1Label: c?.group1Label || 'Group 1', sourceType: c?.sourceType || null, baseId: c?.baseId || '', access: c?.access || 'read', mapping: c?.mapping || null, hasKey: !!c?.encryptedKey, keyHint: c?.keyHint || '', status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: keyErrors.has(id) ? unreadableKey : s.error || null };
   };
   const handler = (fn: any) => async (req: any, res: any) => { const caller = own(req, res); if (!caller) return; try { await fn(req, res, caller); } catch (cause) { res.status(cause instanceof SavedKeyError ? 400 : 503).json({ error: cause instanceof SavedKeyError ? unreadableKey : 'Source operation failed' }); } };
+  const mutation = (fn: any) => handler((req: any, res: any, caller: any) => serialize(caller.id, () => fn(req, res, caller)));
   app.get('/api/sources/connection', handler((_req: any, res: any, { id }: any) => res.json(safe(id))));
-  app.put('/api/sources/connection', handler(async (req: any, res: any, { id, user }: any) => {
+  app.put('/api/sources/connection', mutation(async (req: any, res: any, { id, user }: any) => {
     try { settings(req.body); } catch (e: any) { return res.status(400).json({ error: e.message }); }
     if (flights.has(id)) await flights.get(id);
     await saves.get(id)?.catch(() => {});
     const old = connections.get(id), plain = req.body.apiKey?.trim();
     if (!plain && !old?.encryptedKey) return res.status(400).json({ error: 'API key required' });
-    const c: Connection = { agencyId: id, sourceType: req.body.sourceType, baseId: req.body.baseId, access: req.body.access, mapping: req.body.mapping, encryptedKey: plain ? encryptKey(plain, deps.secret(), id) : old!.encryptedKey, keyHint: plain ? keyHint(plain) : old!.keyHint, updatedAt: new Date().toISOString(), updatedBy: user.id, backupHashes: old?.backupHashes || {}, ...(old?.lastRefresh ? { lastRefresh: old.lastRefresh } : {}) };
+    const c: Connection = { group1Label: req.body.group1Label?.trim() ?? old?.group1Label ?? 'Group 1', group1Overrides: old?.group1Overrides || { ingredient: {}, product: {} }, agencyId: id, sourceType: req.body.sourceType, baseId: req.body.baseId, access: req.body.access, mapping: req.body.mapping, encryptedKey: plain ? encryptKey(plain, deps.secret(), id) : old!.encryptedKey, keyHint: plain ? keyHint(plain) : old!.keyHint, updatedAt: new Date().toISOString(), updatedBy: user.id, backupHashes: old?.backupHashes || {}, ...(old?.lastRefresh ? { lastRefresh: old.lastRefresh } : {}) };
     const key = plain || storedKey(c), recent = tested.get(id);
     let validation = recent && recent.baseId === c.baseId && recent.sourceType === c.sourceType && recent.key === key && Date.now() - recent.at < 30 * 60_000 ? recent.result : undefined;
     if (!validation) {
@@ -176,9 +186,42 @@ export function registerSourceRoutes(app: any, deps: {
     if (Date.now() - (last.get(id) || 0) < 60_000) return res.status(429).json({ error: 'Just refreshed, try again in a minute' });
     res.json(await refresh(id));
   }));
+  const items = (id: string, companyId: string, kind: 'ingredient' | 'product') =>
+    cache.state(id).itemsFor(companyId, kind).map(item => {
+      const override = connections.get(id)?.group1Overrides?.[kind]?.[item.id];
+      return { id: item.id, name: item.name, agency: 'certifyingAgency' in item ? item.certifyingAgency || '' : '',
+        dpm: item.dpm || null, group1: typeof override === 'boolean' ? override : item.group1 === true,
+        group1Source: typeof override === 'boolean' ? 'admin' : 'source' };
+    });
+  app.get('/api/factories/:companyId/items', handler((req: any, res: any, { id }: any) => {
+    if (!cache.state(id).companies.some(c => c.id === req.params.companyId)) return res.status(404).json({ error: 'Company not found' });
+    res.json({ ingredients: items(id, req.params.companyId, 'ingredient'), products: items(id, req.params.companyId, 'product') });
+  }));
+  app.put('/api/sources/group1', mutation(async (req: any, res: any, { id, user }: any) => {
+    const { kind, itemId, group1 } = req.body || {};
+    if (!['ingredient', 'product'].includes(kind) || typeof itemId !== 'string' || !itemId.trim() || itemId.length > 200 || !(typeof group1 === 'boolean' || group1 === null))
+      return res.status(400).json({ error: 'Invalid status change' });
+    // Wait for in-flight refresh persistence; never fetch the source for a hand mark.
+    if (flights.has(id)) await flights.get(id);
+    await saves.get(id)?.catch(() => {});
+    const c = connections.get(id), state = cache.state(id);
+    if (!c || !state.companies.some(company => state.itemsFor(company.id, kind).some(item => item.id === itemId)))
+      return res.status(404).json({ error: 'Item not found' });
+    const overrides = { ingredient: { ...c.group1Overrides?.ingredient }, product: { ...c.group1Overrides?.product } };
+    if (group1 === null) delete overrides[kind as 'ingredient' | 'product'][itemId];
+    else overrides[kind as 'ingredient' | 'product'] = { ...overrides[kind as 'ingredient' | 'product'], [itemId]: group1 };
+    const updated = { ...c, group1Overrides: overrides, updatedAt: new Date().toISOString(), updatedBy: user.id };
+    // A pending retry must retain the latest settings too.
+    const job = pending.get(id);
+    await save(updated);
+    connections.set(id, updated);
+    if (job) job.connection = { ...job.connection, group1Overrides: overrides };
+    const company = state.companies.find(company => state.itemsFor(company.id, kind).some(item => item.id === itemId))!;
+    res.json({ item: items(id, company.id, kind).find(item => item.id === itemId) });
+  }));
   app.get('/api/factories', handler((_req: any, res: any, { id }: any) => {
     const s = cache.state(id), c = connections.get(id);
-    res.json({ status: { connected: !!c, sourceType: c?.sourceType || null, status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: s.error || null }, companies: s.companies.map(c => ({ id: c.id, name: c.name, brand: c.brand || '', plant: c.plant || '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length, lastVisitAt: null, nextDueAt: null, overdue: null })).sort((a, b) => a.name.localeCompare(b.name)) });
+    res.json({ status: { group1Label: c?.group1Label || 'Group 1', connected: !!c, sourceType: c?.sourceType || null, status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: s.error || null }, companies: s.companies.map(c => ({ id: c.id, name: c.name, brand: c.brand || '', plant: c.plant || '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length, lastVisitAt: null, nextDueAt: null, overdue: null })).sort((a, b) => a.name.localeCompare(b.name)) });
   }));
   if (deps.testMode) {
     app.post('/api/__test__/sources-api-base', handler((req: any, res: any) => { const url = new URL(req.body.url); if (!['http:', 'https:'].includes(url.protocol)) return res.status(400).json({ error: 'Invalid URL' }); apiBase = url.origin; res.json({ ok: true }); }));

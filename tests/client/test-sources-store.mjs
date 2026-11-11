@@ -11,7 +11,7 @@ const db = {
 };
 const store = createSourceStore({ db: () => db, dataDir: '/unused', staged: () => false });
 const connection = { agencyId: 'a', backupHashes: { c: 'content-hash' } };
-const backup = { v: 1, agencyId: 'a', companyId: 'c', companyName: 'Factory', takenAt: 'today', hash: 'content-hash', ingredients: Array.from({ length: 7000 }, (_, i) => ({ name: `${i} ${'א"'.repeat(50)}`, noSymbolNeeded: false })), products: [] };
+const backup = { v: 1, agencyId: 'a', companyId: 'c', companyName: 'Factory', takenAt: 'today', hash: 'content-hash', ingredients: Array.from({ length: 7000 }, (_, i) => ({ name: `${i} ${'א"'.repeat(50)}`, group1: false })), products: [] };
 await store.save(connection, [backup]);
 assert.deepEqual([...(await store.load('a', ['c']))], [backup]);
 const { parts: partCount, hash } = docs.get('sourceBackups/a__c');
@@ -38,7 +38,7 @@ assert.deepEqual(docs.get('sourceConnections/a'), prior);
 failAt = Infinity;
 // More than 400 parts must use multiple bounded commits.
 fail = false;
-const many = { ...backup, ingredients: [{ name: 'x'.repeat(151 * 1024 * 1024), noSymbolNeeded: false }] };
+const many = { ...backup, ingredients: [{ name: 'x'.repeat(151 * 1024 * 1024), group1: false }] };
 await store.save(connection, [many]);
 await store.save(connection, [small]);
 assert.ok(commits.some(ops => ops.length === 400));

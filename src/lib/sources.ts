@@ -4,19 +4,19 @@ export interface SourceMapping {
   companies: { table: string; name: string; type?: string; factoryValues?: string[]; brand?: string; plant?: string };
   ingredients: { table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
   products: { table: string; companyLink: string; name: string; brand?: string; code?: string; status?: string; symbolRequired?: string; plant?: string };
-  noSymbolValues: string[];
+  group1Values: string[];
 }
 
 export interface SourceTable { name: string; columns: string[] }
 export interface SourceConnection {
-  sourceType: string | null; baseId?: string; access?: 'read' | 'readwrite'; mapping?: SourceMapping;
+  group1Label?: string; sourceType: string | null; baseId?: string; access?: 'read' | 'readwrite'; mapping?: SourceMapping;
   hasKey?: boolean; keyHint?: string; status?: 'never' | 'ok' | 'stale' | 'backup' | 'error';
   backupSaveError?: boolean;
   refreshedAt?: string | null; calls?: number; backupTakenAt?: string | null; error?: string | null;
 }
 export const emptyMapping = (): SourceMapping => ({
   companies: { table: '', name: '' }, ingredients: { table: '', companyLink: '', name: '' },
-  products: { table: '', companyLink: '', name: '' }, noSymbolValues: ['Group 1'],
+  products: { table: '', companyLink: '', name: '' }, group1Values: ['Group 1'],
 });
 export function mappingReady(mapping: SourceMapping): boolean {
   return [mapping.companies, mapping.ingredients, mapping.products].every(g => !!g.table && !!g.name)
