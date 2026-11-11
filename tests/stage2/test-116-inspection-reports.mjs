@@ -78,7 +78,8 @@ export default {
       for (const path of ['/api/visits/factories', '/api/visits/factories/factory116', '/api/visits/reports/mine']) assert.equal((await api('manager', 'GET', path)).status, 403);
       assert.equal((await api('manager', 'POST', '/api/visits/reports', body)).status, 403);
       assert.equal((await api('mash', 'GET', '/api/inspections/reports')).status, 403);
-      assert.equal((await api('coord', 'GET', `/api/inspections/reports/${id}`)).status, 403);
+      assert.equal((await api('coord', 'GET', `/api/inspections/reports/${id}`)).status, 200);
+      for (const suffix of ['', '/photos']) assert.equal((await api('coordOff', 'GET', `/api/inspections/reports/${id}${suffix}`)).status, 404);
       assert.equal((await api('foreign', 'GET', `/api/inspections/reports/${id}`)).status, 404);
       await reset();
       const inbox = (await api('admin', 'GET', '/api/inspections/reports')).json.reports;

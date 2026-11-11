@@ -13,7 +13,7 @@ const data = { today: '2026-11-03', timeZone: 'America/Chicago', settings: { cou
 let calls = [];
 globalThis.fetch = async (url, options = {}) => {
   calls.push([url, options.body && JSON.parse(options.body)]);
-  let body = url.endsWith('/schedule') ? data : url.endsWith('/connection') ? { sourceType: 'airtable', status: 'ok' } : url === '/api/factories' ? { companies: data.companies.map(row => ({ ...row, ingredientCount: 1, productCount: 2 })), status: { status: 'ok' } } : url === '/api/inspections/alerts' ? { alerts: [{ companyId: 'c', companyName: company.name, nextDue: '2026-11-03', muted: false }] } : { company };
+  let body = url.endsWith('/schedule') ? data : url.endsWith('/connection') ? { sourceType: 'airtable', status: 'ok' } : url === '/api/visits/factories' ? { companies: data.companies.map(row => ({ ...row, ingredientCount: 1, productCount: 2 })), status: { status: 'ok' } } : url === '/api/inspections/alerts' ? { alerts: [{ companyId: 'c', companyName: company.name, nextDue: '2026-11-03', muted: false }] } : { company };
   return new Response(JSON.stringify(body));
 };
 const closed = mount(FactoriesScreen, { isOpen: false, role: 'coordinator', timeZone: 'UTC', onClose() {} }); await closed.render(); assert.equal(calls.length, 0);

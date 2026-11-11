@@ -4,6 +4,7 @@ export interface ScheduleCompany { id: string; name: string; brand?: string; pla
 export interface ScheduleData { today: string; timeZone: string; settings: ScheduleSettings; companies: ScheduleCompany[]; people: { mashgichim: { id: string; name: string }[]; coordinators: { id: string; name: string }[] } }
 export const calendarDate = (at: string, timeZone: string) => new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(at));
 export const displayDate = (date: string) => new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' }).format(new Date(`${date}T00:00:00Z`));
+export const overdueDaysText = (days: number) => days === 0 ? 'due today' : `${days} ${days === 1 ? 'day' : 'days'}`;
 export function nextVisitDue(schedule: Schedule | null, countFrom: ScheduleSettings['countFrom'], lastVisitDate: string | null): string | null {
   if (!schedule) return null;
   if (schedule.kind === 'dates') return schedule.dates.find(date => !lastVisitDate || date > lastVisitDate) || null;
