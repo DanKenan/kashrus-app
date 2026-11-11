@@ -73,11 +73,12 @@ export type ValueAssignment = { agency?: string; dpm?: Dpm; group1?: boolean };
 export function assign(text: string, group1Values: string[] = ['Group 1']): ValueAssignment & { confidence: number } {
   const fold = (v: string) => v.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (text.trim() && group1Values.some(v => fold(v) === fold(text))) return { group1: true, confidence: 1 };
-  const dairy = /\b(dairy(?:[\s.,_-]*equipment)?|cholov[\s.,_-]*yisroel|cy|de|d)\b/ig;
+  const equipment = /\b(?:dairy[\s.,_-]*(?:equipment|eq\.?)|d\.?e\.?)(?![a-z])/ig;
+  const dairy = /\b(dairy|cholov[\s.,_-]*yisroel|cy|d)\b/ig;
   const meat = /\b(meat|glatt|m)\b/ig;
   const pareve = /\b(parve|pareve|p)\b/ig;
-  const dpm: Dpm | undefined = meat.test(text) ? 'meat' : dairy.test(text) ? 'dairy' : pareve.test(text) ? 'pareve' : undefined;
-  const agency = text.replace(dairy, '').replace(meat, '').replace(pareve, '').trim().replace(/^[\s.,_-]+|[\s.,_-]+$/g, '');
+  const dpm: Dpm | undefined = equipment.test(text) ? 'dairy_equipment' : meat.test(text) ? 'meat' : dairy.test(text) ? 'dairy' : pareve.test(text) ? 'pareve' : undefined;
+  const agency = text.replace(equipment, '').replace(dairy, '').replace(meat, '').replace(pareve, '').trim().replace(/^[\s.,_-]+|[\s.,_-]+$/g, '');
   const known = /^(ou|ok|star[\s-]*k|kof[\s-]*k|crc)$/i.test(agency);
   return { ...(agency ? { agency } : {}), ...(dpm ? { dpm } : {}), group1: false, confidence: known || (!agency && dpm) ? 1 : text.trim() ? 0.6 : 1 };
 }

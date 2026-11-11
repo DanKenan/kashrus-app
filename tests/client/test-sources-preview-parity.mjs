@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { assign, parseDpm, splitCertification, previewRows } from '../../src/lib/sourcePreview.ts';
 import { assign as serverAssign, parseDpm as serverDpm, splitCertification as serverSplit, applyMapping } from '../../src/server/sources/mapping.ts';
-const values = ['OU-D', 'OU-P', 'OK-M', 'Star-K', 'cRc Dairy', 'OU DE', 'Group 1', 'group1', '', ' ', 'OU', 'Dairy', 'pareve', 'parve', 'meat', 'glatt', 'M', 'D', 'P', 'OU - Dairy', 'OK parve', 'STAR-K Meat', 'unknown', 'Group 2', 'ou-d', 'Dairy Equipment', 'OU-DE', 'Kof-K Parve', 'DE', 'Cholov Yisroel', 'CY', 'Inherently kosher', ' dairy_equipment ', 'O.U.-D', 'Cholov.Yisroel'];
+const values = ['OU-D', 'OU-P', 'OK-M', 'Star-K', 'cRc Dairy', 'OU DE', 'Group 1', 'group1', '', ' ', 'OU', 'Dairy', 'pareve', 'parve', 'meat', 'glatt', 'M', 'D', 'P', 'OU - Dairy', 'OK parve', 'STAR-K Meat', 'unknown', 'Group 2', 'ou-d', 'Dairy Equipment', 'OU-DE', 'Kof-K Parve', 'DE', 'Cholov Yisroel', 'CY', 'Inherently kosher', ' dairy_equipment ', 'O.U.-D', 'Cholov.Yisroel', 'D.E.', 'Dairy Eq', 'Dairy Eq.'];
 for (const value of values) {
   assert.deepEqual(assign(value), serverAssign(value), value);
   assert.deepEqual(parseDpm(value), serverDpm(value), value);
@@ -18,3 +18,10 @@ for (const value of ['Group 1', 'Inherently kosher', '  INHERENTLY  KOSHER  ', '
     assert.equal(previewRows({ P: [{ id: 'p', fields }] }, mapping, 'products', 'Custom').rows[0][6], data.products[0].group1 ? 'Yes' : '—');
   }
 }
+
+for (const value of ['Dairy Equipment', 'DE', 'D.E.', 'Dairy Eq', 'Dairy Eq.', 'OU-DE']) {
+  assert.equal(assign(value).dpm, 'dairy_equipment', value);
+  assert.equal(serverAssign(value).dpm, 'dairy_equipment', value);
+}
+for (const value of ['Dairy', 'D', 'OU-D']) assert.equal(assign(value).dpm, 'dairy', value);
+assert.equal(assign('OU-DE').agency, 'OU');

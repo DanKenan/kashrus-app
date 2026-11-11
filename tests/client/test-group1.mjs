@@ -18,7 +18,7 @@ try {
     calls.push([url, options.method || 'GET', options.body && JSON.parse(options.body)]);
     if (url === '/api/sources/test') return Response.json({ ok: true, samples, tables: [], guess: { mapping } });
     if (options.method === 'PUT') return new Promise(resolve => { release = () => resolve(Response.json({ item: { id: 'i', name: 'Salt', agency: '', dpm: null, group1: true, group1Source: 'admin' } })); });
-    return Response.json({ ingredients: [{ id: 'i', name: 'Salt', agency: '', dpm: null, group1: false, group1Source: 'source' }], products: [] });
+    return Response.json({ ingredients: [{ id: 'i', name: 'Salt', agency: '', certificationRaw: 'OU-DE', dpm: 'dairy_equipment', group1: false, group1Source: 'source' }], products: [] });
   };
   const form = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appTest', mapping }, onClose() {}, onSaved() {} });
   await form.render(); await form.click('Test connection'); await form.type('group1Label', 'Basic ingredients');
@@ -27,6 +27,9 @@ try {
   const sheet = mount(CompanyItemsSheet, { company: { id: 'c', name: 'Factory' }, group1Label: 'Group 1', onClose() {} });
   await sheet.render();
   assert.match(sheet.text(), /Factory — ingredients/);
+  assert.match(sheet.text(), /OU-DE/);
+  assert.ok(sheet.find(e => e.type === 'span' && e.props.children === 'DE').length);
+  assert.doesNotMatch(sheet.text(), /Dairy_equipment/);
   const button = sheet.buttons().find(b => b.label === 'Mark as Group 1').el;
   button.props.onClick(); button.props.onClick(); await sheet.render();
   assert.equal(calls.filter(c => c[1] === 'PUT').length, 1);

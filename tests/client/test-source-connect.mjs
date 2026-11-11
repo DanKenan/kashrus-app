@@ -108,7 +108,7 @@ try {
   await fullValues.click('Test connection');
   assert.match(fullValues.text(), /Saved only/);
   assert.match(fullValues.text(), /Sample only/);
-  const valueRows = fullValues.find(e => e.type === 'p' && e.props.className === 'break-words text-base');
+  const valueRows = fullValues.find(e => e.type === 'div' && e.props.className === 'space-y-2 rounded-lg border border-line p-4');
   assert.equal(valueRows.length, 3, 'merge samples without duplicating saved values');
   assert.match(fullValues.text(), /9/);
   globalThis.fetch = async url => Response.json(url.includes('/values') ? { total: 2, values: [
@@ -123,6 +123,33 @@ try {
   assert.equal(controls().length, 2, 'legacy assignments apply to both kinds');
   controls()[0].props.onChange({ target: { value: 'meat' } }); await separate.render();
   assert.deepEqual(controls().map(e => e.props.value), ['meat', 'pareve']);
+  const usageCalls = [];
+  globalThis.fetch = async url => {
+    usageCalls.push(url);
+    return Response.json({ ok: true, samples: { Products: Array.from({ length: 3 }, (_, i) => ({ id: `p${i}`, fields: { Name: `Product ${i}`, Cert: 'OU-DE' } })), Ingredients: Array.from({ length: 14 }, (_, i) => ({ id: `u${i}`, fields: { Name: ['Sugar', 'Salt', 'Cocoa'][i] || `Item ${i}`, Brand: ['Domino', 'Morton', 'Hershey'][i] || `Brand ${i}`, Cert: 'OU-DE' } })) } });
+  };
+  const usageForm = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appNew' }, onClose() {}, onSaved() {} });
+  await usageForm.render();
+  await usageForm.click('Test connection');
+  await usageForm.type('ingredients.table', 'Ingredients');
+  await usageForm.type('ingredients.name', 'Name');
+  await usageForm.type('ingredients.brand', 'Brand');
+  await usageForm.type('ingredients.certification', 'Cert');
+  assert.match(usageForm.text(), /What each value means/);
+  assert.match(usageForm.text(), /Your database writes the certification in different ways. Tell the app once what each one means — it applies to every ingredient that uses it./);
+  assert.match(usageForm.text(), /Used by 14 ingredients/);
+  assert.match(usageForm.text(), /Sugar \(Domino\) · Salt \(Morton\) · Cocoa \(Hershey\)/);
+  assert.equal(usageForm.find(e => e.type === 'select' && e.props.value === 'dairy_equipment').length, 1);
+  const expand = usageForm.find(e => e.type === 'button' && e.props.children === '+11')[0];
+  assert.match(expand.props.className, /min-h-11/);
+  await usageForm.click('+11');
+  assert.match(usageForm.text(), /Item 13 \(Brand 13\)/);
+  assert.equal(usageForm.find(e => e.type === 'li').length, 14);
+  await usageForm.type('products.table', 'Products');
+  await usageForm.type('products.name', 'Name');
+  await usageForm.type('products.certification', 'Cert');
+  assert.match(usageForm.text(), /Used by 3 products/);
+  assert.equal(usageCalls.length, 1, 'usage and expansion make no extra requests');
   const savedMapping = {
     companies: { table: 'Companies', name: 'Custom name', factoryValues: ['Existing factory'], brand: '' },
     ingredients: { table: 'Ingredients', name: 'Custom ingredient', companyLink: 'Existing link' },

@@ -1,5 +1,5 @@
-type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'pareve' | 'meat'; group1?: boolean };
-export type Dpm = 'dairy' | 'pareve' | 'meat';
+type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'dairy_equipment' | 'pareve' | 'meat'; group1?: boolean };
+export type Dpm = 'dairy' | 'dairy_equipment' | 'pareve' | 'meat';
 export type SourceKind = 'airtable' | 'google_sheets' | 'excel' | 'supabase';
 export interface Company {
   id: string; name: string; type?: string; brand?: string; plant?: string; extra: Record<string, string>;

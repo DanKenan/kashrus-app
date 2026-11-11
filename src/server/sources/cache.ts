@@ -96,7 +96,7 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
                 for (const [kind, items] of [['ingredients', b.ingredients], ['products', b.products]] as const) {
                   items.forEach((item, index) => {
                     const base = { certificationRaw: typeof item.certificationRaw === 'string' ? item.certificationRaw : undefined, statusRaw: typeof item.statusRaw === 'string' ? item.statusRaw : undefined, agencyRaw: typeof item.agencyRaw === 'string' ? item.agencyRaw : undefined, certifyingAgency: item.certifyingAgency, confidence: item.confidence, id: safeText(item.id) || `backup:${b.companyId}:${kind}:${index}`, companyIds: [b.companyId], name: safeText(item.name), brand: safeText(item.brand),
-                      dpm: ['dairy', 'pareve', 'meat'].includes(item.dpm) ? item.dpm as Ingredient['dpm'] : undefined, plant: safeText(item.plant), extra: {} };
+                      dpm: ['dairy', 'dairy_equipment', 'pareve', 'meat'].includes(item.dpm) ? item.dpm as Ingredient['dpm'] : undefined, plant: safeText(item.plant), extra: {} };
                     if (kind === 'ingredients') data.ingredients.push({ ...base, expiresOn: safeText('expiresOn' in item ? item.expiresOn : ''), certifyingAgency: safeText('certifyingAgency' in item ? item.certifyingAgency : ''), group1: 'group1' in item && item.group1 === true });
                     else data.products.push({ ...base, group1: 'group1' in item && item.group1 === true, symbolRequired: 'symbolRequired' in item ? item.symbolRequired : undefined, code: safeText('code' in item ? item.code : '') });
                   });

@@ -1,3 +1,4 @@
+import { summarizeValues } from '../../lib/sourcePreview.ts';
 import { createConnector, type SourceSettings } from './stubs.ts';
 import { createSourceCache, nextNightlyRun } from './cache.ts';
 import { encryptKey, decryptKey, keyHint } from './crypto.ts';
@@ -40,7 +41,7 @@ function settings(body: any, mapping = true) {
         if (!str(column) || !values || typeof values !== 'object' || Array.isArray(values)) throw Error('Invalid valueAssignments');
         for (const [value, a] of Object.entries(values)) {
           const assignment = a as any;
-          if (++count > 300 || value.length > 10000 || !assignment || typeof assignment !== 'object' || Array.isArray(assignment) || Object.keys(assignment).some(k => !['agency', 'dpm', 'group1'].includes(k)) || (assignment.agency !== undefined && !str(assignment.agency)) || (assignment.dpm !== undefined && !['', 'dairy', 'pareve', 'meat'].includes(assignment.dpm)) || (assignment.group1 !== undefined && typeof assignment.group1 !== 'boolean')) throw Error('Invalid valueAssignments');
+          if (++count > 300 || value.length > 10000 || !assignment || typeof assignment !== 'object' || Array.isArray(assignment) || Object.keys(assignment).some(k => !['agency', 'dpm', 'group1'].includes(k)) || (assignment.agency !== undefined && !str(assignment.agency)) || (assignment.dpm !== undefined && !['', 'dairy', 'dairy_equipment', 'pareve', 'meat'].includes(assignment.dpm)) || (assignment.group1 !== undefined && typeof assignment.group1 !== 'boolean')) throw Error('Invalid valueAssignments');
         }
       }
     }
@@ -225,19 +226,18 @@ export function registerSourceRoutes(app: any, deps: {
   }));
   app.get('/api/sources/values', handler((req: any, res: any, { id }: any) => {
     const mapping = connections.get(id)?.mapping, data = cache.data(id);
-    const counts = new Map<string, { kind: 'ingredient' | 'product'; column: string; value: string; count: number }>();
+    const uses: Parameters<typeof summarizeValues>[0] = [];
     if (mapping && data) for (const kind of ['ingredients', 'products'] as const) {
       const config = mapping[kind];
       for (const column of new Set([config.certification, config.status, config.agency].filter(Boolean))) {
         const field = config.certification === column ? 'certificationRaw' : config.status === column ? 'statusRaw' : 'agencyRaw';
         for (const item of data[kind]) {
           const value = item[field]; if (!value) continue;
-          const key = JSON.stringify([kind, column, value]), prior = counts.get(key);
-          counts.set(key, { kind: kind === 'ingredients' ? 'ingredient' : 'product', column: column!, value, count: (prior?.count || 0) + 1 });
+          uses.push({ kind: kind === 'ingredients' ? 'ingredient' : 'product', column: column!, value, id: item.id, name: item.name, brand: item.brand });
         }
       }
     }
-    const all = [...counts.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+    const all = summarizeValues(uses).sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
     const search = typeof req.query?.q === 'string' ? req.query.q.toLowerCase() : '';
     res.json({ total: all.length, values: all.filter(v => v.value.toLowerCase().includes(search)).slice(0, 300) });
   }));

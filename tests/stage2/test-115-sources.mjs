@@ -64,9 +64,12 @@ export default {
       const values = await api('admin', 'GET', '/api/sources/values?agencyId=other');
       assert.equal(values.status, 200); assert.ok(values.json.values.length > 0);
       assert.ok(values.json.values.length <= 300);
+      const usage = values.json.values.find(v => v.kind === 'ingredient' && v.column === 'Cert' && v.value === 'OU-D').usage;
+      assert.equal(usage.ingredient.count, 230); assert.equal(usage.product.count, 120);
+      assert.equal(usage.ingredient.items.length, 50); assert.equal(usage.product.items.length, 50);
       const items = (await api('admin', 'GET', '/api/factories/rec0/items')).json;
       for (const item of [items.ingredients[0], items.products[0]]) {
-        assert.equal(item.certificationRaw, 'OU-D'); assert.equal(item.statusRaw, 'Dairy Equipment'); assert.equal(item.dpm, 'dairy');
+        assert.equal(item.certificationRaw, 'OU-D'); assert.equal(item.statusRaw, 'Dairy Equipment'); assert.equal(item.dpm, 'dairy_equipment');
       }
       assert.equal((await ctx.api('POST', '/api/__test__/reads', {})).json.total, 0);
       assert.deepEqual((await api('foreign', 'GET', '/api/sources/values')).json.values, []);

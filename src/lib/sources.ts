@@ -1,4 +1,4 @@
-type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'pareve' | 'meat'; group1?: boolean };
+type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'dairy_equipment' | 'pareve' | 'meat'; group1?: boolean };
 import { apiFetch } from './api';
 
 export interface SourceMapping {

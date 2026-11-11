@@ -7,7 +7,9 @@ Date.now = () => clock;
 let calls = 0, failBackup = true, gate = Promise.resolve(), startupFails = true, connectionLoads = 0;
 const docs = new Map(), writes = [];
 const rows = { Companies: [{ id: 'c', fields: { Name: 'Old Company' } }], Ingredients: [{ id: 'i', fields: { Name: 'Salt', Company: ['c'] } }], Products: [] };
-const tables = [...Array.from({ length: 17 }, (_, i) => ({ name: `Other ${i}`, fields: [{ name: 'Description' }] })), ...Object.keys(rows).map(name => ({ name, fields: [{ name: 'Name' }, { name: 'Company' }] }))];
+rows.Ingredients = Array.from({ length: 14 }, (_, i) => ({ id: i ? `i${i}` : 'i', fields: { Name: i ? `Ingredient ${i}` : 'Salt', Brand: i ? `Brand ${i}` : 'Morton', Company: ['c'], Cert: 'Custom DE' } }));
+rows.Products = Array.from({ length: 3 }, (_, i) => ({ id: `p${i}`, fields: { Name: `Product ${i}`, Company: ['c'], Cert: 'Custom DE' } }));
+const tables = [...Array.from({ length: 17 }, (_, i) => ({ name: `Other ${i}`, fields: [{ name: 'Description' }] })), ...Object.keys(rows).map(name => ({ name, fields: [{ name: 'Name' }, { name: 'Company' }, { name: 'Cert' }, { name: 'Brand' }] }))];
 globalThis.fetch = async url => {
   calls++; const u = new URL(url);
   if (u.pathname.endsWith('/whoami')) return Response.json({ scopes: [] });
@@ -30,7 +32,7 @@ async function request(method, path, body = {}) {
   return { json, status };
 }
 const state = async () => (await request('get', '/api/sources/connection')).json;
-const mapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: [] };
+const mapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company', certification: 'Cert', brand: 'Brand' }, products: { table: 'Products', name: 'Name', companyLink: 'Company', certification: 'Cert', brand: 'Brand' }, group1Values: [], valueAssignments: { ingredient: { Cert: { 'Custom DE': { dpm: 'dairy_equipment' } } } } };
 const body = { sourceType: 'airtable', baseId: 'appTEST', apiKey: 'fake-key', access: 'read', mapping };
 const until = async check => { for (let i = 0; i < 150; i++) { if (await check()) return; await new Promise(r => setTimeout(r, 50)); } assert.fail('timed out'); };
 try {
@@ -61,6 +63,13 @@ try {
   assert.equal(calls, fetched); // Timer persists from memory without a source fetch.
   assert.ok(docs.get('sourceConnections/a').backupHashes.c);
   assert.equal((await request('get', '/api/factories')).json.companies.length, 1);
+  const beforeValues = calls, beforeReads = connectionLoads;
+  const values = (await request('get', '/api/sources/values')).json.values;
+  const usage = values.find(v => v.kind === 'ingredient' && v.value === 'Custom DE').usage;
+  assert.equal(usage.ingredient.count, 14); assert.equal(usage.product.count, 3);
+  assert.deepEqual(usage.ingredient.items[0], { name: 'Salt', brand: 'Morton' });
+  assert.equal(calls, beforeValues, 'usage is computed without source calls');
+  assert.equal(connectionLoads, beforeReads, 'usage is computed without Firestore reads');
   // A pending version may be superseded even when the source returns to its confirmed hash.
   failBackup = true; rows.Ingredients[0].fields.Name = 'Sea Salt'; clock += 61000;
   await request('post', '/api/sources/refresh');

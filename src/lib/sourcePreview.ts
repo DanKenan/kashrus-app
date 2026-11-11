@@ -1,17 +1,18 @@
 import type { SourceMapping } from './sources';
 
-type Dpm = 'meat' | 'dairy' | 'pareve';
+type Dpm = 'meat' | 'dairy' | 'dairy_equipment' | 'pareve';
 export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
 
 export type ValueAssignment = { agency?: string; dpm?: Dpm; group1?: boolean };
 export function assign(text: string, group1Values: string[] = ['Group 1']): ValueAssignment & { confidence: number } {
   const fold = (v: string) => v.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (text.trim() && group1Values.some(v => fold(v) === fold(text))) return { group1: true, confidence: 1 };
-  const dairy = /\b(dairy(?:[\s.,_-]*equipment)?|cholov[\s.,_-]*yisroel|cy|de|d)\b/ig;
+  const equipment = /\b(?:dairy[\s.,_-]*(?:equipment|eq\.?)|d\.?e\.?)(?![a-z])/ig;
+  const dairy = /\b(dairy|cholov[\s.,_-]*yisroel|cy|d)\b/ig;
   const meat = /\b(meat|glatt|m)\b/ig;
   const pareve = /\b(parve|pareve|p)\b/ig;
-  const dpm: Dpm | undefined = meat.test(text) ? 'meat' : dairy.test(text) ? 'dairy' : pareve.test(text) ? 'pareve' : undefined;
-  const agency = text.replace(dairy, '').replace(meat, '').replace(pareve, '').trim().replace(/^[\s.,_-]+|[\s.,_-]+$/g, '');
+  const dpm: Dpm | undefined = equipment.test(text) ? 'dairy_equipment' : meat.test(text) ? 'meat' : dairy.test(text) ? 'dairy' : pareve.test(text) ? 'pareve' : undefined;
+  const agency = text.replace(equipment, '').replace(dairy, '').replace(meat, '').replace(pareve, '').trim().replace(/^[\s.,_-]+|[\s.,_-]+$/g, '');
   const known = /^(ou|ok|star[\s-]*k|kof[\s-]*k|crc)$/i.test(agency);
   return { ...(agency ? { agency } : {}), ...(dpm ? { dpm } : {}), group1: false, confidence: known || (!agency && dpm) ? 1 : text.trim() ? 0.6 : 1 };
 }
@@ -45,7 +46,7 @@ export function previewRows(samples: SourceSamples, mapping: SourceMapping, grou
   const chips: string[][][] = [];
   const rows = (samples[config.table] || []).slice(0, 3).map(row => {
     const read = (key: string) => row.fields[(config as unknown as Record<string, string>)[key]]?.trim() || '';
-    const dpmLabel = (value?: Dpm) => value ? value[0].toUpperCase() + value.slice(1) : '';
+    const dpmLabel = (value?: Dpm) => value === 'dairy_equipment' ? 'DE' : value ? value[0].toUpperCase() + value.slice(1) : '';
     let cells: string[];
     if (group === 'companies') {
       const types = mapping.companies.factoryValues;
@@ -68,4 +69,30 @@ export function previewRows(samples: SourceSamples, mapping: SourceMapping, grou
     return cells.map(value => value || '—');
   });
   return { header, rows, chips };
+}
+
+export type ValueKind = 'ingredient' | 'product';
+export interface ValueUsage { count: number; items: { name: string; brand?: string }[] }
+export interface SourceValue {
+  kind: ValueKind; column: string; value: string; count: number;
+  usage?: Partial<Record<ValueKind, ValueUsage>>;
+}
+// Both live cache data and connection-test samples use the same bounded, memory-only summary.
+export function summarizeValues(uses: { kind: ValueKind; column: string; value: string; id: string; name: string; brand?: string }[]): SourceValue[] {
+  const groups = new Map<string, { column: string; value: string; items: Record<ValueKind, Map<string, { name: string; brand?: string }>> }>();
+  for (const use of uses) {
+    if (!use.value) continue;
+    const key = JSON.stringify([use.column, use.value]);
+    const group = groups.get(key) || { column: use.column, value: use.value, items: { ingredient: new Map(), product: new Map() } };
+    group.items[use.kind].set(use.id, { name: use.name, ...(use.brand ? { brand: use.brand } : {}) });
+    groups.set(key, group);
+  }
+  return [...groups.values()].flatMap(group => {
+    const usage = Object.fromEntries((['ingredient', 'product'] as const).filter(kind => group.items[kind].size).map(kind => [kind, {
+      count: group.items[kind].size, items: [...group.items[kind].values()].slice(0, 50),
+    }]));
+    return (['ingredient', 'product'] as const).filter(kind => group.items[kind].size).map(kind => ({
+      kind, column: group.column, value: group.value, count: group.items[kind].size, usage,
+    }));
+  });
 }

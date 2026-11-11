@@ -19,7 +19,7 @@ assert.deepEqual(guessMapping([]).mapping.companies, {});
 const single = guessMapping([{ name: 'Ingredients', columns: ['Certifying Agency'] }]).mapping.ingredients;
 assert.equal(single.certification, 'Certifying Agency');
 assert.equal(single.agency, undefined);
-for (const value of ['OU-D', 'OU D', 'OU Dairy', 'OU-DE']) assert.deepEqual(splitCertification(value), { agency: 'OU', dpm: 'dairy', group1: false });
+for (const value of ['OU-D', 'OU D', 'OU Dairy']) assert.deepEqual(splitCertification(value), { agency: 'OU', dpm: 'dairy', group1: false });
 for (const value of ['Kof-K Parve', 'OK-P', 'Star-K Pareve']) assert.equal(splitCertification(value).dpm, 'pareve');
 for (const value of ['Meat', 'Glatt', 'Demo-M']) assert.equal(splitCertification(value).dpm, 'meat');
 assert.deepEqual(splitCertification('OU'), { agency: 'OU', group1: false });
@@ -66,3 +66,5 @@ assert.equal(loose.mapping.ingredients.agency, 'Cert agency');
 assert.equal(loose.mapping.ingredients.expiresOn, 'Exp. date');
 assert.equal(loose.mapping.ingredients.brand, 'Brand Name');
 assert.equal(loose.guessed['ingredients.brand'], 0.9);
+
+assert.deepEqual(splitCertification('OU-DE'), { agency: 'OU', dpm: 'dairy_equipment', group1: false });

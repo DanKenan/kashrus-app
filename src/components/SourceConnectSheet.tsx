@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { assigned, previewRows, type SourceSamples } from '../lib/sourcePreview';
+import { assigned, previewRows, summarizeValues, type SourceValue, type SourceSamples } from '../lib/sourcePreview';
 import { X } from 'lucide-react';
 import { emptyMapping, mappingReady, sourceRequest, type SourceConnection, type SourceMapping, type SourceTable } from '../lib/sources';
 
@@ -23,7 +23,8 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [mapping, setMapping] = useState<SourceMapping>(connection.mapping || emptyMapping());
   const [tables, setTables] = useState<SourceTable[]>([]);
   const [samples, setSamples] = useState<SourceSamples | null>(null);
-  const [storedValues, setStoredValues] = useState<{ kind: 'ingredient' | 'product'; column: string; value: string; count: number }[]>([]);
+  const [storedValues, setStoredValues] = useState<SourceValue[]>([]);
+  const [expandedValues, setExpandedValues] = useState<Record<string, boolean>>({});
   const [storedValueTotal, setStoredValueTotal] = useState(0);
   const [valueSearch, setValueSearch] = useState('');
   useEffect(() => {
@@ -129,18 +130,17 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       </div>}
     </div>;
   };
-  const counts = new Map<string, { kind: 'ingredient' | 'product'; column: string; value: string; count: number }>();
+  const uses: Parameters<typeof summarizeValues>[0] = [];
   if (samples) for (const group of ['ingredients', 'products'] as const) {
     const config = mapping[group];
     for (const column of new Set([config.certification, config.status, config.agency].filter(Boolean)))
       for (const row of samples[config.table] || []) {
         const value = row.fields[column!]?.trim(); if (!value) continue;
-        const key = JSON.stringify([group, column, value]);
-        counts.set(key, { kind: group === 'ingredients' ? 'ingredient' : 'product', column: column!, value, count: (counts.get(key)?.count || 0) + 1 });
+        uses.push({ kind: group === 'ingredients' ? 'ingredient' : 'product', column: column!, value, id: row.id, name: row.fields[config.name] || '', brand: config.brand ? row.fields[config.brand] : undefined });
       }
   }
   const merged = new Map<string, (typeof storedValues)[number]>(storedValues.map(v => [JSON.stringify([v.kind, v.column, v.value]), v]));
-  for (const v of counts.values()) {
+  for (const v of summarizeValues(uses)) {
     const key = JSON.stringify([v.kind, v.column, v.value]);
     if (!merged.has(key)) merged.set(key, v);
   }
@@ -162,14 +162,26 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         {message && <p role="status" className="text-base text-ink">{message}</p>}
         <h3 className="text-xl font-semibold">Mapping</h3>
         {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients' : 'Products'}</legend>{select(group, 'table', 'Table')}{groups[group].map(([field, label]) => select(group, field, label))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{preview(group)}</fieldset>)}
-        <fieldset className="space-y-4"><legend className="text-xl font-semibold">Values</legend>
+        <fieldset className="space-y-4"><legend className="text-xl font-semibold">What each value means</legend>
+          <p className="text-base text-ink-soft">Your database writes the certification in different ways. Tell the app once what each one means — it applies to every ingredient that uses it.</p>
           {Math.max(values.length, storedValueTotal) > 20 && <label className="block text-sm text-ink-soft">Search values<input className={fieldClass} name="valueSearch" value={valueSearch} onChange={e => setValueSearch(e.target.value)} /></label>}
-          {values.filter(v => v.value.toLowerCase().includes(valueSearch.toLowerCase())).map(({ kind, column, value, count }) => {
+          {values.filter(v => v.value.toLowerCase().includes(valueSearch.toLowerCase())).map(({ kind, column, value, count, usage }) => {
             const guess = assigned({ ...mapping, group1Values: commaList(group1Values) }, column, value, kind);
             return <div key={JSON.stringify([kind, column, value])} className="space-y-2 rounded-lg border border-line p-4">
-              <p className="break-words text-base">{value} <span className="text-xs text-ink-soft">{kind === 'ingredient' ? 'Ingredients' : 'Products'} · {column} · {count}</span> {guess.confidence < 0.8 && <span className="text-xs text-ink-soft">Check</span>}</p>
+              <p className="break-words text-base">{value} <span className="text-xs text-ink-soft">{kind === 'ingredient' ? 'Ingredients' : 'Products'} · {column} · {count}</span> {guess.dpm === 'dairy_equipment' && <span className="rounded-full bg-sunken px-2 text-xs text-ink-soft">DE</span>} {guess.confidence < 0.8 && <span className="text-xs text-ink-soft">Check</span>}</p>
+              {(['ingredient', 'product'] as const).map(usedKind => {
+                const used = usage?.[usedKind]; if (!used) return null;
+                const key = JSON.stringify([kind, column, value, usedKind]);
+                const expanded = expandedValues[key];
+                const label = (item: { name: string; brand?: string }) => `${item.name}${item.brand ? ` (${item.brand})` : ''}`;
+                return <div key={usedKind} className="space-y-2">
+                  <p className="text-sm text-ink-soft">{`Used by ${used.count} ${usedKind === 'ingredient' ? (used.count === 1 ? 'ingredient' : 'ingredients') : (used.count === 1 ? 'product' : 'products')}`}</p>
+                  <p className="break-words text-base">{used.items.slice(0, 3).map(label).join(' · ')}{used.count > 3 && <button type="button" className={sourceButton} aria-expanded={!!expanded} onClick={() => setExpandedValues(prev => ({ ...prev, [key]: !prev[key] }))}>{expanded ? 'Show less' : `+${used.count - 3}`}</button>}</p>
+                  {expanded && <ul className="space-y-2 text-base">{used.items.map((item, index) => <li key={index} className="break-words">{label(item)}</li>)}{used.count > used.items.length && <li className="text-sm text-ink-soft">{`Showing ${used.items.length} of ${used.count}`}</li>}</ul>}
+                </div>;
+              })}
               <label className="block text-sm text-ink-soft">Agency<input className={fieldClass} value={guess.agency || ''} disabled={!!busy} onChange={e => editValue(kind, column, value, { agency: e.target.value })} /></label>
-              <label className="block text-sm text-ink-soft">D/P/M<select className={fieldClass} value={guess.dpm || ''} disabled={!!busy} onChange={e => editValue(kind, column, value, { dpm: e.target.value })}><option value="">—</option><option value="dairy">Dairy</option><option value="pareve">Pareve</option><option value="meat">Meat</option></select></label>
+              <label className="block text-sm text-ink-soft">Dairy / DE / Pareve / Meat<select className={fieldClass} value={guess.dpm || ''} disabled={!!busy} onChange={e => editValue(kind, column, value, { dpm: e.target.value })}><option value="">—</option><option value="dairy">Dairy</option><option value="dairy_equipment">DE</option><option value="pareve">Pareve</option><option value="meat">Meat</option></select></label>
               <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={guess.group1 === true} disabled={!!busy} onChange={e => editValue(kind, column, value, { group1: e.target.checked })} />{group1Label.trim() || 'Group 1'}</label>
             </div>;
           })}
