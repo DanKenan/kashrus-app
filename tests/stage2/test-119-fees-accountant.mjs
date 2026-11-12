@@ -148,7 +148,8 @@ export default {
    let messages = (await api('admin', 'GET', '/api/__test__/outbox')).json.messages; assert.equal(messages.length, 1); assert.deepEqual((await api('foreign', 'GET', '/api/__test__/outbox')).json.messages, []); assert.equal(messages[0].to, accountant.email); assert.ok(messages[0].attachments.every(a => a.contentBase64.length > 100));
    await action('scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 18); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
    await action('repeat scheduled run', 'POST', '/api/__test__/inspections/check', {}, 0);
-   await pin('2026-12-01T12:00:00Z'); await action('empty-month scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 1); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
+   await pin('2026-12-01T12:00:00Z'); // 1 claim read + 1 for the empty fresh period query (Firestore bills an empty query as one read); no email is sent.
+  await action('empty-month scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 2); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
    await action('repeat empty-month run', 'POST', '/api/__test__/inspections/check', {}, 0);
    await action('manual empty period', 'POST', '/api/inspections/accountant/send', { kind: 'now', from: '2026-11-01', to: '2026-11-30' }, 0).then(r => assert.equal(r.reason, 'no_visits'));
    await action('accountant after-report mode', 'PUT', '/api/inspections/accountant', { ...accountant, timing: { mode: 'after_report' } });
