@@ -1,34 +1,25 @@
 import { createAirtableConnector } from './airtable.ts';
 import type { SourceConnector, SourceMapping } from './types.ts';
 
-export class NotAvailableYet extends Error {
-  constructor() { super('Not available yet'); this.name = 'NotAvailableYet'; }
-}
-export interface GoogleSheetsConfig { spreadsheetId: string; mapping: SourceMapping }
-export interface ExcelConfig { workbookId: string; mapping: SourceMapping }
-export interface SupabaseConfig { url: string; mapping: SourceMapping }
-function stub(kind: SourceConnector['kind']): SourceConnector {
-  return { kind, calls: () => 0,
-    async testConnection() { return { ok: false, error: 'Not available yet' }; },
-    async listCompanies() { throw new NotAvailableYet(); },
-    async listItems() { throw new NotAvailableYet(); },
-    async loadAll() { throw new NotAvailableYet(); },
-  };
-}
-export const createGoogleSheetsConnector = (_config: GoogleSheetsConfig): SourceConnector => stub('google_sheets');
-export const createExcelConnector = (_config: ExcelConfig): SourceConnector => stub('excel');
-export const createSupabaseConnector = (_config: SupabaseConfig): SourceConnector => stub('supabase');
+import { createGoogleSheetsConnector, type GoogleSheetsConfig } from './google-sheets.ts';
+import { createExcelConnector, type ExcelConfig } from './excel.ts';
+import { createSupabaseConnector, type SupabaseConfig } from './supabase.ts';
+import { createUploadConnector, type UploadedFile } from './upload.ts';
+export { createGoogleSheetsConnector, createExcelConnector, createSupabaseConnector };
+export class NotAvailableYet extends Error { constructor() { super('Not available yet'); } }
 export type SourceSettings =
-  | { kind: 'airtable'; baseId: string; mapping: SourceMapping }
-  | ({ kind: 'google_sheets' } & GoogleSheetsConfig)
-  | ({ kind: 'excel' } & ExcelConfig)
-  | ({ kind: 'supabase' } & SupabaseConfig);
-export function createConnector(settings: SourceSettings, apiKey: string): SourceConnector {
-  switch (settings.kind) {
-    case 'airtable': return createAirtableConnector({ ...settings, apiKey });
-    case 'google_sheets': return createGoogleSheetsConnector(settings);
-    case 'excel': return createExcelConnector(settings);
-    case 'supabase': return createSupabaseConnector(settings);
-    default: throw new NotAvailableYet();
-  }
+ | {kind:'airtable';baseId:string;mapping:SourceMapping;apiBase?:string}
+ | ({kind:'google_sheets'} & GoogleSheetsConfig)
+ | ({kind:'excel'} & ExcelConfig)
+ | ({kind:'supabase'} & SupabaseConfig)
+ | {kind:'upload';mapping:SourceMapping;files:UploadedFile[]};
+export function createConnector(settings:SourceSettings,apiKey:string):SourceConnector {
+ if ((settings.kind==='google_sheets'||settings.kind==='excel') && !settings.token && !settings.accessToken || settings.kind==='supabase' && !/^https:\/\/[a-z0-9]{20}\.supabase\.co$/.test(settings.url)) return {kind:settings.kind,calls:()=>0,async testConnection(){return {ok:false,error:'Not available yet'};},async loadAll(){throw new NotAvailableYet();},async listCompanies(){throw new NotAvailableYet();},async listItems(){throw new NotAvailableYet();}};
+ switch(settings.kind){
+ case 'airtable':return createAirtableConnector({...settings,apiKey});
+ case 'google_sheets':return createGoogleSheetsConnector(settings);
+ case 'excel':return createExcelConnector(settings);
+ case 'supabase':return createSupabaseConnector({...settings,apiKey});
+ case 'upload':return createUploadConnector(settings);
+ }
 }

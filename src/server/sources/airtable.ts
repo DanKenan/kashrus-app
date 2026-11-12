@@ -1,3 +1,4 @@
+import { sourceFetch } from './http.ts';
 import { applyMapping } from './mapping.ts';
 import type { SourceConnector, SourceData, SourceMapping, SourceRow } from './types.ts';
 
@@ -15,7 +16,7 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
         lastStart = Date.now(); count++;
         let response: Response;
         try {
-          response = await fetchImpl(`${apiBase.replace(/\/$/, '')}${path}`, { headers: { Authorization: `Bearer ${apiKey}` }, redirect: 'error' });
+          response = await sourceFetch(`${apiBase.replace(/\/$/, '')}${path}`, { headers: { Authorization: `Bearer ${apiKey}` }, redirect: 'error' }, fetchImpl);
         } catch { throw new Error('Airtable request failed'); }
         finally { lastStart = Date.now(); }
         if (response.status === 429 && attempt === 0) {
