@@ -1,3 +1,9 @@
+import { createFeesStore } from './fees-store.ts';
+import { createCompanyInfoStore, validateCompanyInfo, emptyInfo } from './company-info-store.ts';
+import { validateFees, validateSettings, validateAccountant, computePay, range, amount, shape, paidAmount } from './fees.ts';
+import { accountantPeriod, afterReportDelayMs, nextAccountantDate, buildAccountantMessage } from './accountant.ts';
+import { createEmailTransport, type Message } from './email.ts';
+import { csv, xlsx, csvType, xlsxType } from './export.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { createFoodServiceStore } from './food-service-store.ts';
 import { createInboxStore } from './inbox-store.ts';
@@ -12,12 +18,15 @@ export function registerInspectionRoutes(app: any, deps: {
   agencyIds?(): string[]; db(): any; dataDir: string; staged(): boolean; source: ReturnType<typeof inspectionSourceAccessor>;
   user(req: any): { id: string; name: string; role: string; agencyId?: string } | undefined;
   scheduleAgencyIds?(): string[]; people?(agency: string): Person[]; timeZone?(agency: string): string;
+  agencyName?(agency: string): string;
   now?(): Date; testMode?: boolean; push?(user: Person, title: string, body: string): void | Promise<void>;
   maxPhotoChars: number; photoRe: RegExp;
 }) {
   const now = () => deps.now?.() || new Date();
+  const fees = createFeesStore({ ...deps, now }), companyInfo = createCompanyInfoStore({ ...deps, now });
+  const email = createEmailTransport(deps.dataDir, !!deps.testMode), outboxes = new Map<string, Message[]>();
   const schedules = createScheduleStore({ ...deps, now });
-  const store = createReportStore({ ...deps, schedules }), pending = new Map<string, Promise<any>>();
+  const store = createReportStore({ ...deps, schedules, now }), pending = new Map<string, Promise<any>>();
   const food = createFoodServiceStore({ ...deps, now });
   const inbox = createInboxStore({ ...deps, now, submittedAt: (a, id) => store.list(a).find(r => r.id === id)?.submittedAt });
   const reportSummary = (a: string, r: Parameters<typeof summary>[0]) => ({ ...summary(r), ...inbox.status(a, r) });
@@ -53,7 +62,7 @@ export function registerInspectionRoutes(app: any, deps: {
     if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
       const { userEmail: _verifiedEmail, ...body } = req.body; req.body = body;
     }
-    try { await schedules.ensure(user.agencyId); await food.ensure(user.agencyId); await inbox.ensure(user.agencyId); if (reports) await store.ensure(user.agencyId); await fn(req, res, user, user.agencyId); }
+    try { await schedules.ensure(user.agencyId); await food.ensure(user.agencyId); await inbox.ensure(user.agencyId); await fees.ensure(user.agencyId); await companyInfo.ensure(user.agencyId); if (reports) await store.ensure(user.agencyId); await fn(req, res, user, user.agencyId); }
     catch (e: any) { res.status([400, 409].includes(e.status) ? e.status : 503).json({ error: [400, 409].includes(e.status) ? e.message : 'Report operation failed', ...(e.status === 409 ? { template: e.template } : {}) }); }
   };
   function foodRow(a: string, c: ReturnType<typeof places>[number]) {
@@ -65,6 +74,138 @@ export function registerInspectionRoutes(app: any, deps: {
   const sortedPlaces = (a: string, u: Person) => places(a).filter(c => visible(a, c.id, u)).map(c => foodRow(a, c)).sort((a, b) => a.name.localeCompare(b.name));
   const candidates = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'factory'), ...others(a).filter(c => !food.doc(a).marked.includes(c.id))].map(c => ({ id: c.id, name: c.name, type: c.type ?? '' }));
   const templates = (a: string) => food.doc(a).templateOrder.map(id => food.doc(a).templates[id]);
+  const placeFee = (a: string, id: string) => Object.hasOwn(fees.doc(a).places, id) ? fees.doc(a).places[id] : null;
+  function visitFee(a: string, id: string): Fee {
+    const set = placeFee(a, id)?.mashgiach;
+    if (set) return { amount: set.amount, currency: 'USD' };
+    const data = deps.source(a).connection?.fees?.mashgiach?.[id];
+    return !Object.hasOwn(food.doc(a).manualPlaces, id) && data && Number.isFinite(data.amount) ? { amount: data.amount, currency: data.currency } : null;
+  }
+  const info = (a: string, id: string) => Object.hasOwn(companyInfo.doc(a).places, id) ? companyInfo.doc(a).places[id] : emptyInfo();
+  const pay = async (a: string, query: any) => {
+    const r = range(query.from, query.to, query.by ?? 'place');
+    return computePay(await store.payReportsForRange(a, r.from, r.to), fees.doc(a), allPlaces(a), r.from, r.to, r.by, zone(a));
+  };
+  const message = async (a: string, query: any) => buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant?.email || '', await pay(a, query));
+  async function sendSummary(a: string, query: any, idempotencyKey?: string, preparedTable?: Awaited<ReturnType<typeof pay>>) {
+    if (!email.transport) return { sent: false, reason: 'not_set_up' as const };
+    if (!fees.doc(a).accountant) return { sent: false, reason: 'no_accountant' as const };
+    const table = preparedTable ?? await pay(a, query);
+    if (!table.totals.visits) return { sent: false, reason: 'no_visits' as const };
+    if (deps.staged()) throw Object.assign(Error('Writes blocked'), { status: 503 });
+    const message = buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant!.email, table);
+    await email.transport.send({ ...message, ...(idempotencyKey ? { idempotencyKey } : {}) });
+    if (!outboxes.has(a)) outboxes.set(a, []); outboxes.get(a)!.push({ ...message, ...(idempotencyKey ? { idempotencyKey } : {}) });
+    return { sent: true };
+  }
+  const accountantTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  async function runAccountant(a: string) {
+    if (!email.transport || deps.staged() || !fees.ready(a) || !fees.doc(a).accountant) return;
+    await store.ensure(a);
+    return fees.locked(a, async () => {
+      const doc = fees.doc(a), accountant = doc.accountant;
+      if (!accountant || deps.staged()) return;
+      const newest = store.list(a)[0];
+      const period = accountantPeriod(accountant.timing, doc.lastSent, now(), zone(a), newest?.submittedAt);
+      if (!period) {
+        if (accountant.timing.mode === 'after_report' && !accountantTimers.has(a)) {
+          const delay = afterReportDelayMs(doc.lastSent, newest?.submittedAt, now());
+          if (delay !== null) {
+            const timer = setTimeout(() => {
+              accountantTimers.delete(a);
+              void runAccountant(a).catch(() => console.warn('[inspections] accountant retry unavailable'));
+            }, delay);
+            timer.unref();
+            accountantTimers.set(a, timer);
+          }
+        }
+        return;
+      }
+      const claim = await fees.claim(a, period.from, period.to, accountant.timing.mode === 'after_report'
+        ? { observedAt: doc.lastSent?.at ?? null, newestReportId: newest!.id } : undefined);
+      if (!claim) return;
+      try {
+        // A scheduled email must never rely on the process-local pay-screen cache.
+        const reports = await store.freshReportsForRange(a, period.from, period.to);
+        const table = computePay(reports, fees.doc(a), allPlaces(a), period.from, period.to, 'place', zone(a));
+        if (!table.totals.visits) return { sent: false, reason: 'no_visits' as const };
+        return await sendSummary(a, period, claim.key, table);
+      } catch (error) {
+        try { await fees.restore(a, claim); }
+        catch (restoreError) { console.warn('[inspections] accountant claim restore failed', restoreError); }
+        // A process crash between claim and send can still skip one summary until the next
+        // period; the admin can use "Email to accountant now".
+        console.warn('[inspections] accountant send failed', error);
+      }
+    });
+  }
+  app.get('/api/inspections/fees', handler(true, (_req: any, res: any, u: Person, a: string) => {
+    const doc = fees.doc(a);
+    res.json({ settings: doc.settings, canEdit: u.role === 'admin' || doc.settings.feeEditors === 'admins_and_coordinators',
+      places: allPlaces(a).filter(c => visible(a, c.id, u)).map(c => ({ id: c.id, name: c.name, kind: kind(a, c), company: placeFee(a, c.id)?.company ?? null, mashgiach: placeFee(a, c.id)?.mashgiach ?? null, mashgiachNames: schedules.company(a, c.id).mashgiachIds.map(id => people(a).find(p => p.id === id)?.name).filter(Boolean) })),
+      ...(u.role === 'admin' ? { accountant: doc.accountant, email: { setUp: !!email.transport }, nextEmail: nextAccountantDate(doc.accountant?.timing, doc.lastSent, now(), zone(a)) } : {}) });
+  }));
+  app.put?.('/api/inspections/fees/:placeId', handler(true, async (req: any, res: any, u: Person, a: string) => {
+    if (u.role !== 'admin' && fees.doc(a).settings.feeEditors !== 'admins_and_coordinators') return res.status(403).json({ error: 'Forbidden' });
+    const id = req.params.placeId;
+    if (!allPlaces(a).some(c => c.id === id) || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
+    const value = validateFees(req.body);
+    await fees.update(a, next => { const old = placeFee(a, id); if (!isDeepStrictEqual({ company: old?.company ?? null, mashgiach: old?.mashgiach ?? null }, value)) Object.defineProperty(next.places, id, { value: { ...value, updatedBy: u.id, updatedAt: now().toISOString() }, enumerable: true, configurable: true, writable: true }); });
+    res.json(value);
+  }));
+  app.put?.('/api/inspections/fee-settings', handler('only', async (req: any, res: any, _u: Person, a: string) => {
+    const value = validateSettings(req.body); await fees.update(a, next => { next.settings = value; }); res.json({ settings: value });
+  }));
+  app.put?.('/api/inspections/accountant', handler('only', async (req: any, res: any, _u: Person, a: string) => {
+    const value = validateAccountant(req.body); await fees.update(a, next => { next.accountant = value; }); res.json({ accountant: value });
+  }));
+  app.get('/api/inspections/pay', handler('only', async (req: any, res: any, _u: Person, a: string) => res.json(await pay(a, req.query)), true));
+  app.get('/api/inspections/pay/export', handler('only', async (req: any, res: any, _u: Person, a: string) => {
+    const table = await pay(a, req.query), format = req.query.format;
+    if (!['csv', 'xlsx'].includes(format)) return res.status(400).json({ error: 'Invalid export format' });
+    res.setHeader('Content-Disposition', `attachment; filename="pay-${table.from}-${table.to}.${format}"`);
+    res.type(format === 'csv' ? csvType : xlsxType).send(format === 'csv' ? csv(table) : xlsx(table));
+  }, true));
+  app.get('/api/inspections/accountant/preview', handler('only', async (req: any, res: any, _u: Person, a: string) => {
+    const m = await message(a, req.query); res.json({ ...m, attachments: m.attachments.map(({ contentBase64, ...rest }) => ({ ...rest, bytes: Buffer.from(contentBase64, 'base64').length })) });
+  }, true));
+  app.post('/api/inspections/accountant/send', handler('only', async (req: any, res: any, _u: Person, a: string) => {
+    shape(req.body, ['kind', 'from', 'to'], ['kind']);
+    if (!['test', 'now'].includes(req.body.kind)) return res.status(400).json({ error: 'Invalid send kind' });
+    const date = today(a), query = { from: req.body.from ?? date.slice(0, 7) + '-01', to: req.body.to ?? date };
+    range(query.from, query.to); res.json(await sendSummary(a, query));
+  }, true));
+  app.post('/api/inspections/reports/:id/fee-decision', handler(true, async (req: any, res: any, u: Person, a: string) => {
+    shape(req.body, ['amount'], []); const value = req.body.amount === undefined ? undefined : amount(req.body.amount), r = store.feeReport(a, req.params.id) ?? await store.get(a, req.params.id);
+    if (!r || !visible(a, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
+    if (value !== undefined && u.role !== 'admin' && fees.doc(a).settings.feeEditors !== 'admins_and_coordinators') return res.status(403).json({ error: 'Forbidden' });
+    if (!r.feeMismatch || value !== undefined && value !== placeFee(a, r.companyId)?.mashgiach?.amount) return res.status(400).json({ error: 'Amount must match a report fee' });
+    if (value === undefined && fees.doc(a).decisions[r.id]?.setFee && fees.doc(a).decisions[r.id].amount !== r.fee?.amount) return res.json({ decided: fees.doc(a).decisions[r.id] });
+    await fees.update(a, next => { next.decisions[r.id] = { ...(value !== undefined ? { amount: value, setFee: true } : {}), by: u.id, byName: u.name, at: now().toISOString() }; });
+    res.json({ decided: fees.doc(a).decisions[r.id] });
+  }, true));
+  app.get('/api/inspections/company-info/:placeId', handler(true, (req: any, res: any, u: Person, a: string) => {
+    if (!allPlaces(a).some(c => c.id === req.params.placeId) || !visible(a, req.params.placeId, u)) return res.status(404).json({ error: 'Place not found' });
+    res.json(info(a, req.params.placeId));
+  }));
+  app.put?.('/api/inspections/company-info/:placeId', handler('only', async (req: any, res: any, _u: Person, a: string) => {
+    const id = req.params.placeId;
+    if (!allPlaces(a).some(c => c.id === id)) return res.status(404).json({ error: 'Place not found' });
+    shape(req.body, ['address', 'phone', 'contacts'], []);
+    await companyInfo.update(a, next => { const old = Object.hasOwn(next.places, id) ? next.places[id] : emptyInfo(); const value = validateCompanyInfo({ ...old, ...req.body }, old); Object.defineProperty(next.places, id, { value, enumerable: true, configurable: true, writable: true }); }); res.json(info(a, id));
+  }));
+  app.get('/api/visits/places/:placeId/info', handler(false, (req: any, res: any, u: Person, a: string) => {
+    const id = req.params.placeId;
+    if (!allPlaces(a).some(c => c.id === id) || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
+    const value = info(a, id); res.json(u.role === 'mashgiach' ? { address: value.address, phone: value.phone } : value);
+  }));
+  if (deps.testMode) {
+    app.get('/api/__test__/outbox', handler('only', (_req: any, res: any, _u: Person, a: string) => res.json({ messages: outboxes.get(a) ?? [] })));
+    app.post('/api/__test__/inspections/email-transport', handler('only', (req: any, res: any) => {
+      if (!['none', 'test'].includes(req.body?.name)) return res.status(400).json({ error: 'Invalid transport' });
+      const next = createEmailTransport(deps.dataDir, true, req.body.name); email.transport = next.transport; email.outbox = next.outbox; outboxes.clear(); res.json({ setUp: !!email.transport });
+    }));
+  }
   async function notifyReport(a: string, r: Parameters<typeof summary>[0]) {
     const hasProblems = r.counts.alert > 0;
     if (!hasProblems && isMuted(schedules.company(a, r.companyId).mute, today(a))) return;
@@ -187,7 +328,7 @@ export function registerInspectionRoutes(app: any, deps: {
   }));
   app.get('/api/visits/food-service/:placeId', handler(false, (req: any, res: any, u: Person, a: string) => {
     const p = places(a).find(p => p.id === req.params.placeId); if (!p || !visible(a, p.id, u)) return res.status(404).json({ error: 'Place not found' });
-    const fee = p.source === 'connected' ? deps.source(a).connection?.fees?.mashgiach?.[p.id] ?? null : null;
+    const fee = visitFee(a, p.id);
     res.json({ place: { id: p.id, name: p.name, address: p.address, type: p.type ?? '' }, template: templateFor(a, p.id), fee });
   }));
   if (deps.testMode) app.post('/api/__test__/inspections/flush-seen', handler('only', async (_req: any, res: any) => { res.json({ writes: await inbox.flush() }); }));
@@ -198,7 +339,7 @@ export function registerInspectionRoutes(app: any, deps: {
   app.get('/api/visits/factories/:companyId', handler(false, (req: any, res: any, u: any, agency: string) => {
     const source = deps.source(agency), c = source.state.companies.find(c => c.id === req.params.companyId);
     if (!c || kind(agency, c) !== 'factory' || !visible(agency, c.id, u)) return res.status(404).json({ error: 'Company not found' });
-    res.json({ company: { id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '' }, listVersion: source.listVersion(c.id), group1Label: source.connection?.group1Label ?? 'Group 1', refreshedAt: source.state.refreshedAt ?? null, backupTakenAt: source.state.backupTakenAt ?? null, ingredients: source.items(c.id, 'ingredient'), products: source.items(c.id, 'product') });
+    res.json({ company: { id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '' }, fee: visitFee(agency, c.id), listVersion: source.listVersion(c.id), group1Label: source.connection?.group1Label ?? 'Group 1', refreshedAt: source.state.refreshedAt ?? null, backupTakenAt: source.state.backupTakenAt ?? null, ingredients: source.items(c.id, 'ingredient'), products: source.items(c.id, 'product') });
   }));
   app.post('/api/visits/reports', handler(false, async (req: any, res: any, u: any, agency: string) => {
     if (deps.staged()) return res.status(503).json({ error: 'Writes blocked' });
@@ -214,7 +355,8 @@ export function registerInspectionRoutes(app: any, deps: {
     try {
       const source = deps.source(agency), company = allPlaces(agency).find(c => c.id === req.body.companyId)!;
       const value = source.connection?.fees?.mashgiach?.[company.id];
-      const fee: Fee = !Object.hasOwn(food.doc(agency).manualPlaces, company.id) && value && Number.isFinite(value.amount) && typeof value.currency === 'string' ? { amount: value.amount, currency: value.currency } : null;
+      const dataFee: Fee = !Object.hasOwn(food.doc(agency).manualPlaces, company.id) && value && Number.isFinite(value.amount) && typeof value.currency === 'string' ? { amount: value.amount, currency: value.currency } : null;
+      const fee = visitFee(agency, company.id);
       const context = { id: reportId(agency, u.id, clientId), agencyId: agency, userId: u.id, userName: u.name, companyName: company.name, now: now().toISOString(), fee };
       if (req.body.kind === 'food_service') {
         const built = buildFoodServiceReport(req.body, templateFor(agency, company.id), context, deps.maxPhotoChars, deps.photoRe);
@@ -223,9 +365,10 @@ export function registerInspectionRoutes(app: any, deps: {
         input = normalizeSubmit(req.body, deps.maxPhotoChars, deps.photoRe);
         report = buildReport(input, { ...context, listVersion: source.listVersion(company.id), items: kind => source.items(company.id, kind) });
       }
+      report = { ...report, dataFee, ...(fee && dataFee && fee.amount !== dataFee.amount ? { feeMismatch: true } : {}) };
     } catch (e: any) { return res.status(e.status === 409 ? 409 : 400).json({ error: e.status ? e.message : 'Invalid report', ...(e.status === 409 ? { template: e.template } : {}) }); }
     const task = store.save(report, input.photos).then(async ({ report: stored, created }) => {
-      if (created) await notifyReport(agency, stored);
+      if (created) { await notifyReport(agency, stored); try { await runAccountant(agency); } catch { /* Retry on a later report; saving a report never depends on email. */ } }
       console.info(`[inspections] report=${report.id} checked=${report.counts.checked} not_used=${report.counts.not_used} alert=${report.counts.alert} offList=${report.counts.offList} photos=${report.photoCount}`);
       return { report: reportSummary(agency, stored), fee: stored.fee, created };
     });
@@ -243,11 +386,12 @@ export function registerInspectionRoutes(app: any, deps: {
       if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw Error();
     } catch { return res.status(400).json({ error: 'Invalid pagination' }); }
     const q = req.query;
-    if ((q.type !== undefined && !['factory', 'food_service'].includes(q.type)) || (q.status !== undefined && !['new', 'seen', 'follow_up'].includes(q.status)) || (q.from !== undefined && !isDate(q.from)) || (q.to !== undefined && !isDate(q.to)) || (q.from && q.to && q.from > q.to) || (q.more !== undefined && q.more !== '1') || ['companyId', 'mashgiachId'].some(k => q[k] !== undefined && (typeof q[k] !== 'string' || q[k].length > 200))) return res.status(400).json({ error: 'Invalid filters' });
-    const filtered = !!userId || caller?.role !== 'admin' || ['type', 'status', 'companyId', 'mashgiachId', 'from', 'to'].some(k => q[k] !== undefined);
+    if (q.amountCheck && caller?.role === 'mashgiach') return res.status(403).json({ error: 'Forbidden' });
+    if ((q.amountCheck !== undefined && q.amountCheck !== 'open') || (q.type !== undefined && !['factory', 'food_service'].includes(q.type)) || (q.status !== undefined && !['new', 'seen', 'follow_up'].includes(q.status)) || (q.from !== undefined && !isDate(q.from)) || (q.to !== undefined && !isDate(q.to)) || (q.from && q.to && q.from > q.to) || (q.more !== undefined && q.more !== '1') || ['companyId', 'mashgiachId'].some(k => q[k] !== undefined && (typeof q[k] !== 'string' || q[k].length > 200))) return res.status(400).json({ error: 'Invalid filters' });
+    const filtered = !!userId || caller?.role !== 'admin' || ['type', 'status', 'companyId', 'mashgiachId', 'from', 'to', 'amountCheck'].some(k => q[k] !== undefined);
     const predicate = (r: ReturnType<typeof summary>) => {
       const date = calendarDate(r.submittedAt, zone(agency));
-      return (!userId || r.mashgiachId === userId) && (!caller || visible(agency, r.companyId, caller)) && (!q.type || (r.kind || 'factory') === q.type) && (!q.status || inbox.status(agency, r).status === q.status) && (!q.companyId || r.companyId === q.companyId) && (!q.mashgiachId || r.mashgiachId === q.mashgiachId) && (!q.from || date >= q.from) && (!q.to || date <= q.to);
+      return (!q.amountCheck || !!store.feeReport(agency, r.id)?.feeMismatch && !fees.doc(agency).decisions[r.id]) && (!userId || r.mashgiachId === userId) && (!caller || visible(agency, r.companyId, caller)) && (!q.type || (r.kind || 'factory') === q.type) && (!q.status || inbox.status(agency, r).status === q.status) && (!q.companyId || r.companyId === q.companyId) && (!q.mashgiachId || r.mashgiachId === q.mashgiachId) && (!q.from || date >= q.from) && (!q.to || date <= q.to);
     };
     const page = await store.visiblePage(agency, limit, before, filtered ? predicate : undefined, !!userId || q.more === '1');
     res.json({ ...page, reports: page.reports.map(r => reportSummary(agency, r as any)) });
@@ -287,7 +431,7 @@ export function registerInspectionRoutes(app: any, deps: {
     const r = await store.get(agency, req.params.id);
     if (!r || !visible(agency, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
     await inbox.mark(agency, r, u);
-    res.json({ report: { ...reportSummary(agency, r), note: r.note, ...(r.kind === 'food_service' ? { checklist: r.checklist, templateId: r.templateId, templateVersion: r.templateVersion } : { marks: r.marks, offList: r.offList }) } });
+    res.json({ report: { ...reportSummary(agency, r), note: r.note, ...(r.feeMismatch ? { feeCheck: { reportAmount: r.dataFee?.amount ?? null, setAmount: placeFee(agency, r.companyId)?.mashgiach?.amount ?? r.fee?.amount ?? null, paidAmount: paidAmount(r, fees.doc(agency)), decided: fees.doc(agency).decisions[r.id] ? (({ amount, byName, at }) => ({ ...(amount === undefined ? {} : { amount }), byName, at }))(fees.doc(agency).decisions[r.id]) : null } } : {}), ...(r.kind === 'food_service' ? { checklist: r.checklist, templateId: r.templateId, templateVersion: r.templateVersion } : { marks: r.marks, offList: r.offList }) } });
   }, true));
   app.get('/api/inspections/reports/:id/photos', handler(true, async (req: any, res: any, u: any, agency: string) => {
     const r = await store.get(agency, req.params.id);
@@ -382,6 +526,7 @@ export function registerInspectionRoutes(app: any, deps: {
         await persist(changes);
       });
     }
+    for (const a of deps.scheduleAgencyIds?.() || deps.agencyIds?.() || []) { if (fees.ready(a)) await runAccountant(a); }
     return { sent, writes };
   }
   const check = () => checking ||= runCheck().finally(() => { checking = undefined; });
@@ -391,7 +536,7 @@ export function registerInspectionRoutes(app: any, deps: {
   return { check, foodServiceCompanyIds: async (a: string) => { await food.ensure(a); return places(a).filter(p => p.source === 'connected').map(p => p.id); }, flushSeen: inbox.flush, boot: async () => {
     await store.boot(deps.agencyIds?.() || []);
     const agencies = deps.scheduleAgencyIds?.() || deps.agencyIds?.() || [];
-    await Promise.all([schedules.boot(agencies), food.boot(agencies), inbox.boot(agencies)]);
+    await Promise.all([schedules.boot(agencies), food.boot(agencies), inbox.boot(agencies), fees.boot(agencies), companyInfo.boot(agencies)]);
   } };
 
 }

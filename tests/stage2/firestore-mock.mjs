@@ -50,12 +50,12 @@ class MockQuery {
   select(...values) { return new MockQuery(this.store, this.path, this.filters, this.orders, this.cursor, this.cap, values); }
   async get() {
     if ((this.path.startsWith('inspectionReportsByAgency/') || ['inspectionSchedules', 'inspectionFoodService', 'inspectionInbox'].includes(this.path)) && (
-      (this.path.startsWith('inspectionReportsByAgency/') && this.filters.length) || (this.filters.length && this.orders.length) || this.orders.length > 1 ||
+      (this.path.startsWith('inspectionReportsByAgency/') && this.filters.some(([field]) => field !== 'sortKey')) || (this.filters.length && this.orders.some(([field]) => this.filters.some(([filter]) => filter !== field))) || this.orders.length > 1 ||
       this.filters.some(([field, op]) => op !== '==' && this.orders.some(([order]) => order !== field))
     )) throw Error('composite index required');
     const compare = (a, b) => { for (const [field, direction] of this.orders) { const cmp = a[field] === b[field] ? 0 : a[field] < b[field] ? -1 : 1; if (cmp) return direction === 'desc' ? -cmp : cmp; } return 0; };
     const boundary = this.cursor && Object.fromEntries(this.orders.map(([field], i) => [field, this.cursor[i]]));
-    const rows = Object.entries(this.store._docs).filter(([path, data]) => path.startsWith(`${this.path}/`) && data !== undefined && this.filters.every(([field, op, value]) => op === '==' ? data[field] === value : op === '>=' ? data[field] >= value : false)).sort((a, b) => compare(a[1], b[1])).filter(([, data]) => !boundary || compare(data, boundary) > 0).slice(0, this.cap);
+    const rows = Object.entries(this.store._docs).filter(([path, data]) => path.startsWith(`${this.path}/`) && data !== undefined && this.filters.every(([field, op, value]) => op === '==' ? data[field] === value : op === '>=' ? data[field] >= value : op === '<' ? data[field] < value : false)).sort((a, b) => compare(a[1], b[1])).filter(([, data]) => !boundary || compare(data, boundary) > 0).slice(0, this.cap);
     const docs = rows.map(([path, data]) => ({ id: path.slice(this.path.length + 1), ref: this.store.doc(path), exists: true, data: () => JSON.parse(JSON.stringify(this.fields ? Object.fromEntries(this.fields.filter(field => data[field] !== undefined).map(field => [field, data[field]])) : data)) }));
     return { docs, empty: !docs.length, size: docs.length, forEach: fn => docs.forEach(fn) };
   }
@@ -119,12 +119,14 @@ class MockDocumentReference {
 }
 
 class MockTransaction {
-  constructor(store, snapshotVersions) {
+  constructor(store, snapshotVersions, snapshotData) {
     this._store = store;
     this._snapshotVersions = snapshotVersions; // path -> _v at tx start
+    this._snapshotData = snapshotData; this._reads = new Set();
     this._writes = new Map(); // path -> data
   }
   async get(docRef) {
+    this._reads.add(docRef.path);
     // Reads see the transaction's own writes first (read-your-writes),
     // otherwise the snapshot taken at transaction start.
     if (this._writes.has(docRef.path)) {
@@ -132,8 +134,8 @@ class MockTransaction {
     }
     return new MockDocumentSnapshot(this._store._docs[docRef.path]);
   }
-  set(docRef, data) {
-    this._writes.set(docRef.path, JSON.parse(JSON.stringify(data)));
+  set(docRef, data, options) {
+    this._writes.set(docRef.path, JSON.parse(JSON.stringify(options?.merge ? mergeData(this._store._docs[docRef.path], data) : data)));
   }
   /**
    * PR 1 test-harness correction: the mock lacked Firestore's delete().
@@ -146,6 +148,7 @@ class MockTransaction {
   }
   /** Commit: fail if any read document changed since the snapshot. */
   _commit() {
+    for (const path of this._reads) if (JSON.stringify(this._store._docs[path]) !== this._snapshotData[path]) throw new MockTransactionAborted('Document changed during transaction');
     for (const [path, writeData] of this._writes) {
       const snapV = this._snapshotVersions[path];
       const currentDoc = this._store._docs[path];
@@ -220,7 +223,7 @@ export class MockFirestore {
         const d = this._docs[path];
         snapshotVersions[path] = d ? d._v : undefined;
       }
-      const tx = new MockTransaction(this, snapshotVersions);
+      const tx = new MockTransaction(this, snapshotVersions, Object.fromEntries(Object.entries(this._docs).map(([path, data]) => [path, JSON.stringify(data)])));
       try {
         const result = await updateFunction(tx);
         tx._commit();

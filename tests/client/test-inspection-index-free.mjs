@@ -7,7 +7,7 @@ import { registerInspectionRoutes } from '../../src/server/inspections/routes.ts
 import { withOutboxLock } from '../../src/lib/inspectionVisit.ts';
 // Scan complete statement chains, including multiline chains and argument callbacks.
 const serverFiles = await readdir('src/server/inspections');
-for (const required of ['schedule.ts', 'schedule-store.ts', 'food-service.ts', 'food-service-store.ts', 'inbox-store.ts']) assert.ok(serverFiles.includes(required), `${required}: missing index guard coverage`);
+for (const required of ['schedule.ts', 'schedule-store.ts', 'food-service.ts', 'food-service-store.ts', 'inbox-store.ts', 'fees.ts', 'fees-store.ts', 'company-info-store.ts', 'accountant.ts', 'email.ts', 'export.ts']) assert.ok(serverFiles.includes(required), `${required}: missing index guard coverage`);
 for (const file of serverFiles) {
   if (!file.endsWith('.ts')) continue;
   const source = await readFile(`src/server/inspections/${file}`, 'utf8');
@@ -15,6 +15,12 @@ for (const file of serverFiles) {
     const orders = chain.match(/\.orderBy\s*\(/g) || [];
     assert.ok(orders.length < 2 && !(orders.length && /\.where\s*\(/.test(chain)), `${file}: composite query`);
   }
+}
+// The parallel server chunk is picked up by the directory scan above when merged.
+// Client additions also remain free of Firestore queries and composite chains.
+for (const file of ['src/lib/fees.ts', 'src/lib/companyInfo.ts']) {
+  const source = await readFile(file, 'utf8');
+  assert.doesNotMatch(source, /\.where\s*\(|\.orderBy\s*\(|getFirestore|collectionGroup/, `${file}: client API only`);
 }
 const dir = await mkdtemp(join(tmpdir(), 'inspection-index-'));
 process.env.FIRESTORE_MOCK_FILE = join(dir, 'db.json');

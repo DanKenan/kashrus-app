@@ -1,3 +1,5 @@
+import { addDays, calendarDate } from './schedule.ts';
+import { range, type PayReport } from './fees.ts';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -6,7 +8,65 @@ import { summary, type Report } from './model.ts';
 export const reportId = (agency: string, user: string, client: string) => createHash('sha256').update(JSON.stringify([agency, user, client])).digest('hex');
 export type Cursor = { submittedAt: string; id: string };
 export const reportOrder = (a: Cursor, b: Cursor) => b.submittedAt.localeCompare(a.submittedAt) || (a.id === b.id ? 0 : a.id > b.id ? -1 : 1);
-export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean; schedules?: ReturnType<typeof createScheduleStore> }) {
+export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean; now?(): Date; timeZone?(agency: string): string; schedules?: ReturnType<typeof createScheduleStore> }) {
+  // Pay-screen and export caches are process-local: deployment is limited to one Cloud Run instance (maxScale=1).
+  // Scheduled accountant sends always query fresh reports, independently of this cache.
+  const observedFrom = new Map<string, string>(), partialMonths = new Map<string, string>(), completeMonths = new Set<string>();
+  const months = new Map<string, Map<string, PayReport>>(), monthLoads = new Map<string, Promise<void>>();
+  const zone = (agency: string) => deps.timeZone?.(agency) || 'America/New_York';
+  const monthKey = (agency: string, month: string) => JSON.stringify([agency, month]);
+  const financial = (r: Report) => {
+    const month = calendarDate(r.submittedAt, zone(r.agencyId)).slice(0, 7), key = monthKey(r.agencyId, month);
+    const { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch } = r;
+    if (!months.has(key)) months.set(key, new Map());
+    months.get(key)!.set(id, { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch });
+  };
+  const feeReport = (agency: string, id: string) => {
+    for (const [key, rows] of months) if (JSON.parse(key)[0] === agency && rows.has(id)) return rows.get(id);
+  };
+  async function payReportsForRange(agency: string, from: string, to: string): Promise<PayReport[]> {
+    range(from, to); await ensure(agency);
+    const rows = new Map<string, PayReport>();
+    for (let month = from.slice(0, 7); month <= to.slice(0, 7);) {
+      const key = monthKey(agency, month), next = new Date(month + '-01T12:00:00Z'); next.setUTCMonth(next.getUTCMonth() + 1);
+      const nextMonth = next.toISOString().slice(0, 7);
+      const currentMonth = calendarDate((deps.now?.() || new Date()).toISOString(), zone(agency)).slice(0, 7);
+      if (!partialMonths.has(key) && month >= observedFrom.get(agency)! && month <= currentMonth) { if (!months.has(key)) months.set(key, new Map()); completeMonths.add(key); }
+      if (!completeMonths.has(key) || monthLoads.has(key)) {
+        if (!monthLoads.has(key)) monthLoads.set(key, (async () => {
+          const start = localMidnight(month + '-01', zone(agency)), end = partialMonths.get(key) ?? localMidnight(nextMonth + '-01', zone(agency));
+          const fetched: Report[] = deps.db()
+            ? (await collection(agency).where('sortKey', '>=', start).where('sortKey', '<', end).get()).docs.map((d: any) => d.data())
+            : (await localRows()).filter(r => r.agencyId === agency && r.submittedAt >= start && r.submittedAt < end);
+          // Preserve submissions that arrived while the range query was in flight.
+          const current = months.get(key) ?? new Map<string, PayReport>(); months.set(key, current);
+          for (const r of fetched) if (!current.has(r.id)) financial(r);
+          partialMonths.delete(key); completeMonths.add(key);
+        })().finally(() => monthLoads.delete(key)));
+        await monthLoads.get(key);
+      }
+      for (const r of months.get(key)?.values() ?? []) { const day = calendarDate(r.submittedAt, zone(agency)); if (day >= from && day <= to) rows.set(r.id, r); }
+      month = nextMonth;
+    }
+    return [...rows.values()];
+  }
+  async function freshReportsForRange(agency: string, from: string, to: string): Promise<PayReport[]> {
+    range(from, to); await ensure(agency);
+    const start = localMidnight(from, zone(agency)), end = localMidnight(addDays(to, 1), zone(agency));
+    // One sortKey field, no composite index. This query deliberately bypasses the month cache.
+    const fetched: Report[] = deps.db()
+      ? (await collection(agency).where('sortKey', '>=', start).where('sortKey', '<', end).get()).docs.map((d: any) => d.data())
+      : (await localRows()).filter(r => r.agencyId === agency && r.submittedAt >= start && r.submittedAt < end);
+    const selected: PayReport[] = [];
+    for (const r of fetched) {
+      const day = calendarDate(r.submittedAt, zone(agency));
+      if (r.agencyId !== agency || day < from || day > to) continue;
+      financial(r);
+      const { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch } = r;
+      selected.push({ id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch });
+    }
+    return selected;
+  }
   const reports = new Map<string, Report>(), summaries = new Map<string, ReturnType<typeof summary> & { agencyId: string }>();
   const loaded = new Map<string, Promise<void>>();
   const failures = new Map<string, { retryAt: number; attempts: number }>();
@@ -28,6 +88,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   function install(r: Report) {
     const id = key(r.agencyId, r.id), frontier = frontiers.get(r.agencyId), end = ends.get(r.agencyId);
     const complete = frontiers.has(r.agencyId) && ends.has(r.agencyId) && (!end || (!!frontier && reportOrder(frontier, end) >= 0));
+    financial(r);
     summaries.set(id, { ...summary(r), agencyId: r.agencyId }); cacheDetail(r);
     const rows = list(r.agencyId);
     for (const row of rows.slice(5000)) summaries.delete(key(r.agencyId, row.id));
@@ -42,7 +103,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   function query(agency: string, limit: number, before?: Cursor, projection = false) {
     let q = collection(agency).orderBy('sortKey', 'desc');
     if (before) q = q.startAfter(sortKey(before));
-    if (projection) q = q.select('id', 'agencyId', 'companyId', 'companyName', 'mashgiachId', 'mashgiachName', 'submittedAt', 'startedAt', 'counts', 'hasAlerts', 'listChanged', 'photoCount', 'kind', 'templateName');
+    if (projection) q = q.select('id', 'agencyId', 'companyId', 'companyName', 'mashgiachId', 'mashgiachName', 'submittedAt', 'startedAt', 'counts', 'hasAlerts', 'listChanged', 'photoCount', 'kind', 'templateName', 'fee', 'dataFee', 'feeMismatch');
     return q.limit(limit);
   }
   // One bounded page per agency; failed background work never rejects boot.
@@ -54,7 +115,12 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
         const rows: Report[] = deps.db()
           ? (await query(agency, 200).get()).docs.map((d: any) => d.data())
           : (await localRows()).filter(r => r.agencyId === agency).sort(reportOrder).slice(0, 200);
-        for (const r of rows) install(r);
+        for (const r of rows) { install(r); completeMonths.add(monthKey(agency, calendarDate(r.submittedAt, zone(agency)).slice(0, 7))); }
+        if (rows.length === 200) { const oldest = rows.at(-1)!, key = monthKey(agency, calendarDate(oldest.submittedAt, zone(agency)).slice(0, 7)); completeMonths.delete(key); partialMonths.set(key, sortKey(oldest)); }
+        const currentMonth = calendarDate((deps.now?.() || new Date()).toISOString(), zone(agency)).slice(0, 7);
+        observedFrom.set(agency, currentMonth);
+        if (!months.has(monthKey(agency, currentMonth))) months.set(monthKey(agency, currentMonth), new Map());
+        if (!partialMonths.has(monthKey(agency, currentMonth))) completeMonths.add(monthKey(agency, currentMonth));
         if (rows.length < 200) ends.set(agency, list(agency).at(-1));
         frontiers.set(agency, rows.length < 200 ? list(agency).at(-1) : rows.at(-1));
         failures.delete(agency);
@@ -152,6 +218,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
       fetched += older.length || 1;
       if (older.length < size) ends.set(agency, older.at(-1) || start);
       windows.set(agency, { after: start, rows: older });
+      for (const r of older) financial({ ...r, agencyId: agency } as Report);
       for (const r of older) summaries.set(key(agency, r.id), { ...summary(r as Report), agencyId: agency });
       const covered = frontiers.get(agency);
       if (!start || (covered && reportOrder(start, covered) <= 0)) frontiers.set(agency, older.at(-1) || covered);
@@ -192,5 +259,17 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     })().finally(() => flights.delete(id));
     flights.set(id, flight); return flight;
   }
-  return { boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, visiblePage, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
+  return { payReportsForRange, freshReportsForRange, feeReport, boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, visiblePage, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
+}
+
+// Convert agency-local midnight to a UTC sortKey boundary, including DST offsets.
+export function localMidnight(day: string, timeZone: string): string {
+  const wall = Date.parse(day + 'T00:00:00Z'); let at = wall;
+  for (let i = 0; i < 4; i++) {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(at));
+    const get = (key: string) => Number(parts.find(p => p.type === key)!.value);
+    const represented = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
+    at += wall - represented;
+  }
+  return new Date(at).toISOString();
 }

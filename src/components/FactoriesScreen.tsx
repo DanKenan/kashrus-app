@@ -1,3 +1,8 @@
+import { FeesSheet } from './FeesSheet';
+import { CompanyInfoSheet } from './CompanyInfoSheet';
+import { FeesAccountantSettings } from './FeesAccountantSettings';
+import { PayScreen } from './PayScreen';
+import { canSeeFees, yearlyVisits } from '../lib/fees';
 import React, { useEffect, useRef, useState } from 'react';
 import { FactoryItemChip } from './FactoryItemChip';
 import { InspectionReportsInbox } from './InspectionReportsInbox';
@@ -11,6 +16,7 @@ import { SourceConnectSheet, sourceButton } from './SourceConnectSheet';
 interface Factory { id: string; name: string; brand?: string; plant?: string; ingredientCount: number; productCount: number }
 interface Props { isOpen: boolean; onClose: () => void; timeZone: string; role?: string }
 export function FactoriesScreen({ isOpen, onClose, timeZone, role = 'admin' }: Props) {
+  const [feePlace, setFeePlace] = useState<string | null>(null), [infoPlace, setInfoPlace] = useState<string | null>(null), [feesSettings, setFeesSettings] = useState(false), [payOpen, setPayOpen] = useState(false);
   const [scheduleData, setScheduleData] = useState<ScheduleData | null>(null);
   const [scheduleFailed, setScheduleFailed] = useState(false);
   const [scheduleReload, setScheduleReload] = useState(0);
@@ -36,7 +42,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone, role = 'admin' }: P
   const generation = useRef(0);
   useEffect(() => {
     const request = ++generation.current;
-    if (!isOpen) { setSettings(false); setReportsOpen(false); setSelectedCompany(null); return; }
+    if (!isOpen) { setSettings(false); setReportsOpen(false); setFeePlace(null); setInfoPlace(null); setFeesSettings(false); setPayOpen(false); setSelectedCompany(null); return; }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let polls = 0;
     const schedule = (current: SourceConnection) => {
@@ -100,7 +106,7 @@ export function FactoriesScreen({ isOpen, onClose, timeZone, role = 'admin' }: P
       {role === 'coordinator' && <p className="text-base text-ink-soft">Showing the companies assigned to you.</p>}
       {role === 'admin' && scheduleData && <VisitScheduleSettings data={scheduleData} onSaved={settings => setScheduleData(data => data && ({ ...data, settings }))} />}
       <p role="status" className="break-words text-base text-ink-soft">{role === 'coordinator' ? '' : connection ? sourceStatus(connection, timeZone) : 'Loading factories…'}</p>
-      <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setReportsOpen(true)}>Reports</button>{role === 'admin' && <><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></>}</div>
+      <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setReportsOpen(true)}>Reports</button>{role === 'admin' && <><button type="button" className={sourceButton} onClick={() => setPayOpen(true)}>Pay</button><button type="button" className={sourceButton} onClick={() => setFeesSettings(true)}>Fees and accountant</button></>}{role === 'admin' && <><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></>}</div>
       {role === 'coordinator' && scheduleFailed && <p role="alert" className="text-base"><button type="button" className={sourceButton} onClick={() => setScheduleReload(k => k + 1)}>Couldn't load visit schedules. Try again</button></p>}
       {error && <p role="alert" className="break-words text-base text-bad">{error}</p>}
       {role === 'admin' && connection && !connection.sourceType ? <div className="space-y-4 rounded-xl border border-line bg-surface p-6 text-center"><p className="text-base">Connect your database to see your factories here.</p><button type="button" onClick={() => setSettings(true)} className="pressable min-h-12 rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper">Connect</button></div> : <ul className="space-y-2">{[...companies].sort((a, b) => a.name.localeCompare(b.name)).map(company => <li key={company.id}><div className="min-w-0 space-y-2 rounded-xl border border-line bg-surface p-4"><button type="button" onClick={() => setSelectedCompany(company)} className="pressable min-h-11 w-full space-y-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold">
@@ -108,8 +114,12 @@ export function FactoriesScreen({ isOpen, onClose, timeZone, role = 'admin' }: P
         {(company.brand || company.plant) && <p dir="auto" className="break-words text-base text-ink-soft">{[company.brand, company.plant].filter(Boolean).join(' / ')}</p>}
         <p className="text-base text-ink-soft">{company.ingredientCount} ingredients · {company.productCount} products</p>
         {(() => { const row = scheduleData?.companies.find(row => row.id === company.id); if (role === 'coordinator' && !row) return <dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft">{['Last visit', 'Next due', 'Overdue'].map(label => <div key={label}><dt>{label}</dt><dd aria-label="Not loaded yet">—</dd></div>)}</dl>; return <><dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft"><div><dt>Last visit</dt><dd>{row?.lastVisit ? `${displayDate(calendarDate(row.lastVisit.at, scheduleData!.timeZone), scheduleData!.today)} · ${row.lastVisit.mashgiachName}` : 'None yet'}</dd></div><div><dt>Next due</dt><dd>{row?.nextDue ? displayDate(row.nextDue, scheduleData!.today) : 'No schedule'}</dd></div><div><dt>Overdue</dt><dd>{row?.status === 'overdue' ? `⚠ Yes · ${overdueDaysText(row.overdueDays)}` : 'No'}</dd></div></dl>{row?.mute && (row.mute.until === null || row.mute.until >= scheduleData!.today) && <span className="text-xs text-ink-soft">Alerts off</span>}</>; })()}
-      </button>{(role === 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)) && <button type="button" className={sourceButton} disabled={role === 'coordinator' && !scheduleData?.companies.some(row => row.id === company.id)} onClick={() => setEditing(company.id)}>Visit schedule</button>}</div></li>)}</ul>}
+      </button>{canSeeFees(role) && <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setFeePlace(company.id)}>Fees</button><button type="button" className={sourceButton} onClick={() => setInfoPlace(company.id)}>Company info</button></div>}{(role === 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)) && <button type="button" className={sourceButton} disabled={role === 'coordinator' && !scheduleData?.companies.some(row => row.id === company.id)} onClick={() => setEditing(company.id)}>Visit schedule</button>}</div></li>)}</ul>}
     </div>
+    {canSeeFees(role) && feePlace && <FeesSheet placeId={feePlace} yearlyCount={yearlyVisits(scheduleData?.companies.find(c => c.id === feePlace)?.schedule, scheduleData?.today.slice(0, 4) || '')} onClose={() => setFeePlace(null)} />}
+    {canSeeFees(role) && infoPlace && <CompanyInfoSheet placeId={infoPlace} isAdmin={role === 'admin'} onClose={() => setInfoPlace(null)} />}
+    {role === 'admin' && feesSettings && <FeesAccountantSettings role={role} onClose={() => setFeesSettings(false)} />}
+    {role === 'admin' && payOpen && <PayScreen role={role} timeZone={timeZone} onClose={() => setPayOpen(false)} />}
     {editing && scheduleData && <VisitScheduleEditor key={editing} company={scheduleData.companies.find(row => row.id === editing)!} data={scheduleData} isAdmin={role === 'admin'} onSaved={updateCompany} onClose={() => setEditing(null)} />}
     {reportsOpen && <InspectionReportsInbox timeZone={timeZone} onClose={() => setReportsOpen(false)} />}
     {selectedCompany && <CompanyItemsSheet isAdmin={role === 'admin'} company={selectedCompany} group1Label={role === 'admin' ? connection?.group1Label || 'Group 1' : visitGroup1Label} onClose={() => setSelectedCompany(null)} />}
