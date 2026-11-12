@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import { mount, recordFetch } from './lib/mini-render.mjs';
+import { CompanyInfoSheet } from '../../src/components/CompanyInfoSheet.tsx';
+import { FeesAccountantSettings } from '../../src/components/FeesAccountantSettings.tsx';
+import { InspectionReportsInbox } from '../../src/components/InspectionReportsInbox.tsx';
+import { PayScreen } from '../../src/components/PayScreen.tsx';
+import { accountantTiming } from '../../src/lib/fees.ts';
+const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(nodes) : [node, ...nodes(node.props?.children)];
+const saved = { address: 'Saved address', phone: 'Saved phone', contacts: [] };
+const calls = recordFetch({ 'GET /api/inspections/company-info': () => ({ ...saved }), 'PUT /api/inspections/company-info': (_path, body) => Object.assign(saved, body) });
+const info = mount(CompanyInfoSheet, { placeId: 'test', isAdmin: true, onClose() {} }); await info.render();
+info.find(e => e.type === 'input')[0].props.onChange({ target: { value: 'Unsaved address' } }); await info.render();
+info.find(e => e.type === 'input')[1].props.onChange({ target: { value: 'Unsaved phone' } }); await info.render();
+await info.click('Add contact');
+info.find(e => e.type === 'input')[2].props.onChange({ target: { value: 'Test contact' } }); await info.render(); nodes(info.tree()).find(n => n.props?.children === 'Manager').props.onClick(); await info.render();
+await info.find(e => e.type === 'form')[1].props.onSubmit({ preventDefault() {} }); await info.render();
+const contactPut = calls.find(c => c[0] === 'PUT'); assert.deepEqual(Object.keys(contactPut[2]), ['contacts']); assert.equal(saved.address, 'Saved address'); assert.equal(saved.phone, 'Saved phone');
+assert.equal(info.find(e => e.type === 'input')[0].props.value, 'Unsaved address'); await info.submit(); assert.deepEqual(calls.filter(c => c[0] === 'PUT').at(-1)[2], { address: 'Unsaved address', phone: 'Unsaved phone' });
+for (const timing of [{ mode: 'after_report' }, { mode: 'dates', days: ['last'] }, { mode: 'every_days', everyDays: 3 }]) {
+ const fees = { settings: { feeEditors: 'admins' }, places: [], accountant: { name: 'Test', email: 'test@example.test', timing }, email: { setUp: false }, nextEmail: '2027-01-01' };
+ const requests = recordFetch({ '/api/inspections/fees': fees, '/api/inspections/fee-settings': {}, '/api/inspections/accountant': {} });
+ const settings = mount(FeesAccountantSettings, { role: 'admin', onClose() {} }); await settings.render(); await settings.submit();
+ assert.deepEqual(requests.find(c => c[0] === 'PUT' && c[1] === '/api/inspections/accountant')[2].timing, timing);
+ assert.match(settings.text(), /Next email: 2027-01-01 \(email not set up yet — nothing will be sent\)/);
+ assert.deepEqual(accountantTiming(timing.mode, ['last'], 3), timing);
+}
+globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
+const urls = [];
+globalThis.fetch = async url => { urls.push(String(url)); return { ok: true, json: async () => String(url).includes('/reports?') ? { reports: [], nextCursor: null } : String(url).includes('/pay?') ? { rows: [{ key: 'a', name: 'Test mashgiach', visits: 9, uniformFee: 50, paid: 450, companies: 500, left: 50, breakdown: [{ placeId: 'p', place: 'Test place', visits: 9, fee: 50, paid: 450 }] }], totals: { visits: 9, paid: 450, companies: 500, left: 50 }, mismatches: 1, noFee: 0 } : { settings: { feeEditors: 'admins' }, places: [], email: { setUp: false } } }; };
+const pay = mount(PayScreen, { role: 'admin', timeZone: 'UTC', onClose() {} }); await pay.render(); assert.match(pay.text(), /9 visits × \$50.00 = \$450.00/); await pay.click('1 report has a different amount'); const inboxProps = nodes(pay.tree()).find(n => n.type === InspectionReportsInbox).props; assert.deepEqual(inboxProps.initialFilters, { amountCheck: 'open' }); const inbox = mount(InspectionReportsInbox, inboxProps); await inbox.render(); assert.ok(urls.some(url => url.includes('/reports?') && url.includes('amountCheck=open')));
+console.log('R1 UI: contact isolation, strict timing round trips, next email, pay equation and open amount filter passed');

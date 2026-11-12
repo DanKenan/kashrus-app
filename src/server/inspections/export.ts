@@ -1,14 +1,16 @@
 import { deflateRawSync } from 'node:zlib';
 import type { PayTable } from './fees.ts';
 export const xml = (v: unknown) => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[c]!).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+export const safeCellText = (value: string) => /^[\s\r\t]*[=+@-]/.test(value) ? "'" + value : value;
+export const visitCount = (n: number) => `${n} ${n === 1 ? 'visit' : 'visits'}`;
 export function exportRows(table: PayTable): (string | number)[][] {
   const per = table.by === 'place';
   return [ ['Name', 'Visits', ...(per ? ['Per visit'] : []), 'Paid', 'Companies', 'Left'],
     ...table.rows.map(r => [r.name, r.visits, ...(per ? [r.perVisit ?? ''] : []), r.paid, r.companies, r.left]),
-    ['Totals', table.totals.visits, ...(per ? [''] : []), table.totals.paid, table.totals.companies, table.totals.left] ];
+    [`Totals (${visitCount(table.totals.visits)})`, table.totals.visits, ...(per ? [''] : []), table.totals.paid, table.totals.companies, table.totals.left] ];
 }
 export function csv(table: PayTable): Buffer {
-  const cell = (v: string | number) => { const s = String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const cell = (v: string | number) => { const s = typeof v === 'string' ? safeCellText(v) : String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
   return Buffer.from('\ufeff' + exportRows(table).map(row => row.map(cell).join(',')).join('\r\n') + '\r\n', 'utf8');
 }
 export function crc32(bytes: Buffer): number {
@@ -30,7 +32,7 @@ function zip(files: Record<string, string>): Buffer {
 }
 export function xlsx(table: PayTable): Buffer {
   const ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
-  const sheet = exportRows(table).map((row, i) => `<row r="${i + 1}">${row.map((v, j) => `<c r="${String.fromCharCode(65 + j)}${i + 1}"${typeof v === 'number' ? '' : ' t="inlineStr"'}>${typeof v === 'number' ? `<v>${v}</v>` : `<is><t xml:space="preserve">${xml(v)}</t></is>`}</c>`).join('')}</row>`).join('');
+  const sheet = exportRows(table).map((row, i) => `<row r="${i + 1}">${row.map((v, j) => `<c r="${String.fromCharCode(65 + j)}${i + 1}"${typeof v === 'number' ? '' : ' t="inlineStr"'}>${typeof v === 'number' ? `<v>${v}</v>` : `<is><t xml:space="preserve">${xml(safeCellText(String(v)))}</t></is>`}</c>`).join('')}</row>`).join('');
   return zip({
     '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
     '_rels/.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',

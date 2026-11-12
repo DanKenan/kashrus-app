@@ -26,7 +26,9 @@ for (const [id, count, company, set, name] of [['a', 9, 60, 50, 'R. Dovid Stern'
 for (const by of ['place', 'mashgiach']) {
  const table = computePay(reports, fees, places, '2026-10-01', '2026-10-31', by, 'America/New_York');
  assert.deepEqual(table.totals, { visits: 16, paid: 1430, companies: 1840, left: 410 }); assert.equal(table.mismatches, 1);
- fees.decisions.c0 = { amount: 180 }; assert.equal(computePay(reports, fees, places, table.from, table.to, by, 'UTC').totals.paid, 1460); delete fees.decisions.c0;
+ fees.decisions.c0 = { by: 'admin', byName: 'Test admin', at: '' }; assert.equal(computePay(reports, fees, places, table.from, table.to, by, 'UTC').totals.paid, 1430);
+ fees.decisions.c0 = { amount: 180 }; assert.equal(computePay(reports, fees, places, table.from, table.to, by, 'UTC').totals.paid, 1430);
+ fees.places.c.mashgiach.amount = 180; fees.decisions.c0.setFee = true; assert.equal(computePay(reports, fees, places, table.from, table.to, by, 'UTC').totals.paid, 1460); fees.places.c.mashgiach.amount = 150; delete fees.decisions.c0;
 }
 fees.places.d = { company: { amount: 310, per: 'month' }, mashgiach: null }; places.push({ id: 'd', name: 'Test empty monthly place' });
 const prorated = computePay([], fees, places, '2026-10-01', '2026-10-15', 'place', 'UTC');

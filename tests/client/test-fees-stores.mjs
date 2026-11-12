@@ -37,16 +37,6 @@ try {
   await Promise.all(Array.from({ length: 10 }, (_, i) => fees.update('a', n => { n.decisions['r' + i] = { amount: i, by: 'test', byName: 'Test admin', at: '' }; })));
   assert.equal(Object.keys(fees.doc('a').decisions).length, 10);
  }
- const historyDb = new MockFirestore(); installReadMeter(historyDb); installWriteMeter(historyDb);
- for (let i = 0; i < 1205; i++) {
-  const id = 'history-' + String(i).padStart(4, '0'), submittedAt = '2026-10-01T14:00:00Z';
-  historyDb._seed(`inspectionReportsByAgency/history/reports/${id}`, { id, agencyId: 'history', companyId: 'test-place', companyName: 'Test place', mashgiachId: 'test-mash', mashgiachName: 'Test mashgiach', submittedAt, sortKey: `${submittedAt}|${id}`, fee: { amount: 7 }, counts: {} });
- }
- const history = createReportStore({ db: () => historyDb, dataDir: dir, staged: () => false, hydratePay: true });
- resetReadMeter(); await history.ensure('history'); assert.equal(readMeterSnapshot().total, 1205); assert.equal(history.payReports('history').length, 1205);
- const restartedHistory = createReportStore({ db: () => historyDb, dataDir: dir, staged: () => false, hydratePay: true });
- resetReadMeter(); await restartedHistory.ensure('history'); assert.equal(readMeterSnapshot().total, 200); assert.equal(restartedHistory.payReports('history').length, 1205);
- resetReadMeter(); assert.equal(history.payReports('history').reduce((s, r) => s + r.fee.amount, 0), 8435); assert.deepEqual(history.payReports('history__other'), []); assert.equal(readMeterSnapshot().total, 0);
  const none = createEmailTransport(dir, true, 'none'); assert.equal(none.transport, null);
  const test = createEmailTransport(dir, true, 'test'); await test.transport.send({ to: 'test@example.test', subject: 'Test', html: '', text: '', attachments: [] }); assert.equal(test.outbox.length, 1); assert.equal((await readdir(join(dir, 'outbox'))).length, 1);
  assert.throws(() => validateCompanyInfo({ address: '', phone: '', contacts: Array(21).fill({}) }, emptyInfo()));

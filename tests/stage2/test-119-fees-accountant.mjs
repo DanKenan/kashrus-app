@@ -27,8 +27,8 @@ export default {
    const r = (await api('admin', 'POST', '/api/__test__/reads', {})).json, w = (await api('admin', 'POST', '/api/__test__/writes', {})).json;
    table.push({ action, reads: r.total, writes: w.total }); assert.equal(r.total, reads, `${action}: ${JSON.stringify(r)}`); assert.equal(w.total, writes, `${action}: ${JSON.stringify(w)}`);
   };
-  const action = async (label, method, path, body, writes = 1, status = 200, who = 'admin') => {
-   await reset(); const r = await api(who, method, path, body); assert.equal(r.status, status, `${label}: ${JSON.stringify(r.json)}`); await budget(label, 0, writes); return r.json;
+  const action = async (label, method, path, body, writes = 1, status = 200, who = 'admin', reads = 0) => {
+   await reset(); const r = await api(who, method, path, body); assert.equal(r.status, status, `${label}: ${JSON.stringify(r.json)}`); await budget(label, reads, writes); return r.json;
   };
   const raw = async (who, path, method = 'GET', body) => {
    const response = await fetch(`${baseUrl}${path}`, { method, headers: { Authorization: `Bearer ${tokens[who]}`, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -85,18 +85,26 @@ export default {
     if (by === 'mashgiach') assert.deepEqual(pay.rows.map(r => r.name).sort(), ['R. Dovid Stern', 'R. Eli Weiss', 'R. Moshe Klein'].sort());
     for (const format of ['csv', 'xlsx']) { await reset(); const r = await raw('admin', `/api/inspections/pay/export?${query}&by=${by}&format=${format}`); assert.equal(r.response.status, 200); assert.ok(r.response.headers.get('content-disposition').includes('.' + format)); assert.ok(r.bytes.length > 100); if (format === 'csv') assert.ok(r.bytes.toString().includes('1430,1840,410')); else assert.equal(r.bytes.readUInt32LE(), 0x04034b50); await budget(`export ${format} ${by}`, 0, 0); }
    }
+   const openChecks = await action('open amount check filter', 'GET', '/api/inspections/reports?amountCheck=open', undefined, 0); assert.equal(openChecks.reports.length, 1);
    const mismatch = saved[10];
    const detail = (await api('admin', 'GET', `/api/inspections/reports/${mismatch.id}`)).json.report;
-   assert.deepEqual(detail.feeCheck, { reportAmount: 180, setAmount: 150, decided: null });
+   assert.deepEqual(detail.feeCheck, { reportAmount: 180, setAmount: 150, paidAmount: 150, decided: null });
    await api('admin', 'POST', '/api/__test__/inspections/flush-seen', {});
    await action('invalid decision', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 177 }, 0, 400);
-   await action('fee decision', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 180 });
+   await action('data amount cannot override admin fee', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 180 }, 0, 400);
+   await action('keep acknowledges stamped fee', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, {});
+   assert.equal((await api('admin', 'GET', `/api/inspections/pay?${query}`)).json.totals.paid, 1430);
+   assert.equal((await api('admin', 'GET', '/api/inspections/reports?amountCheck=open')).json.reports.length, 0);
+   await action('change place admin fee', 'PUT', feesPath('snacks119'), { company: { amount: 200, per: 'visit' }, mashgiach: { amount: 180 } });
+   await action('decision uses current admin fee', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 180 });
    assert.equal((await api('admin', 'GET', `/api/inspections/pay?${query}`)).json.mismatches, 0);
+   assert.equal((await api('admin', 'GET', `/api/inspections/pay?${query}`)).json.totals.paid, 1460);
    assert.equal((await api('admin', 'GET', `/api/inspections/reports/${mismatch.id}`)).json.report.feeCheck.decided.amount, 180);
+   await action('restore place admin fee', 'PUT', feesPath('snacks119'), { company: { amount: 200, per: 'visit' }, mashgiach: { amount: 150 } });
    await action('restore decision to set fee', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 150 });
    await action('coordinator decision outside scope', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 150 }, 0, 404, 'coord');
    await api('admin', 'PUT', '/api/inspections/schedule/companies/snacks119/people', { mashgiachIds: [people.elsewhere.id], coordinatorIds: [people.coord.id] });
-   await action('coordinator scoped fee decision', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 180 }, 1, 200, 'coord');
+   await action('coordinator scoped fee decision', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, {}, 1, 200, 'coord');
    assert.equal((await api('coord', 'GET', `/api/inspections/reports/${mismatch.id}`)).json.report.feeCheck.decided.byName, people.coord.name);
    await action('admin restores set decision', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 150 });
    await api('admin', 'PUT', '/api/inspections/schedule/companies/snacks119/people', { mashgiachIds: [people.elsewhere.id], coordinatorIds: [] });
@@ -134,18 +142,18 @@ export default {
    await api('admin', 'POST', '/api/__test__/inspections/email-transport', { name: 'test' });
    await action('test send', 'POST', '/api/inspections/accountant/send', { kind: 'test', from: '2026-10-01', to: '2026-10-31' }, 0).then(r => assert.equal(r.sent, true));
    let messages = (await api('admin', 'GET', '/api/__test__/outbox')).json.messages; assert.equal(messages.length, 1); assert.deepEqual((await api('foreign', 'GET', '/api/__test__/outbox')).json.messages, []); assert.equal(messages[0].to, accountant.email); assert.ok(messages[0].attachments.every(a => a.contentBase64.length > 100));
-   await action('scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
+   await action('scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 1); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
    await action('repeat scheduled run', 'POST', '/api/__test__/inspections/check', {}, 0);
-   await pin('2026-12-01T12:00:00Z'); await action('empty-month scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
+   await pin('2026-12-01T12:00:00Z'); await action('empty-month scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 1); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
    await action('repeat empty-month run', 'POST', '/api/__test__/inspections/check', {}, 0);
    await action('manual empty period', 'POST', '/api/inspections/accountant/send', { kind: 'now', from: '2026-11-01', to: '2026-11-30' }, 0).then(r => assert.equal(r.reason, 'no_visits'));
    await action('accountant after-report mode', 'PUT', '/api/inspections/accountant', { ...accountant, timing: { mode: 'after_report' } });
    await pin('2026-12-02T12:00:00Z');
-   await action('after-report send plus lastSent', 'POST', '/api/visits/reports', { ...baseBody, clientReportId: 'report-119-after-report' }, 3, 201, 'mash');
+   await action('after-report send plus lastSent', 'POST', '/api/visits/reports', { ...baseBody, clientReportId: 'report-119-after-report' }, 3, 201, 'mash', 1);
    await pin('2026-12-02T12:01:00Z');
    await action('after-report debounce', 'POST', '/api/visits/reports', { ...baseBody, clientReportId: 'report-119-after-report-debounce' }, 2, 201, 'mash');
    await action('accountant every-days mode', 'PUT', '/api/inspections/accountant', { ...accountant, timing: { mode: 'every_days', everyDays: 2 } });
-   await pin('2026-12-05T12:00:00Z'); await action('every-days run', 'POST', '/api/__test__/inspections/check', {}, 1);
+   await pin('2026-12-05T12:00:00Z'); await action('every-days run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 1);
    await action('clear accountant', 'PUT', '/api/inspections/accountant', null);
    await action('no accountant', 'POST', '/api/inspections/accountant/send', { kind: 'now' }, 0).then(r => assert.equal(r.reason, 'no_accountant'));
    await action('clear company info contacts', 'PUT', infoPath, { address: '', phone: '', contacts: [] });
@@ -159,6 +167,17 @@ export default {
    table.push({ action: `boot new docs (${agencyCount} agencies)`, reads: boot.byCollection.inspectionFees + boot.byCollection.inspectionCompanyInfo, writes: 0 });
    const restoredInfo = await api('admin', 'GET', infoPath); assert.equal(restoredInfo.status, 200, JSON.stringify(restoredInfo.json)); assert.equal(restoredInfo.json.contacts.length, 0);
    assert.equal((await api('admin', 'GET', '/api/inspections/fees')).json.places.find(p => p.id === 'cafe119').company.amount, 60);
+   // Evict a past month from the bounded boot window, then measure on-demand month reads.
+   await pin('2026-05-15T14:00:00Z');
+   for (let i = 0; i < 5; i++) assert.equal((await api('mash', 'POST', '/api/visits/reports', { ...baseBody, clientReportId: `report-119-old-month-${i}` })).status, 201);
+   await pin('2027-01-15T14:00:00Z');
+   for (let i = 0; i < 201; i++) assert.equal((await api('mash', 'POST', '/api/visits/reports', { ...baseBody, clientReportId: `report-119-current-month-${i}` })).status, 201);
+   await ctx.restartServer(); await settle(); await pin('2027-01-15T14:00:00Z');
+   const completedMonth = await action('complete boundary month pay', 'GET', '/api/inspections/pay?from=2027-01-01&to=2027-01-31', undefined, 0, 200, 'admin', 1); assert.equal(completedMonth.totals.visits, 201);
+   await action('cached boundary month pay', 'GET', '/api/inspections/pay?from=2027-01-01&to=2027-01-31', undefined, 0);
+   const past = await action('cold past month pay', 'GET', '/api/inspections/pay?from=2026-05-01&to=2026-05-31', undefined, 0, 200, 'admin', 5); assert.equal(past.totals.visits, 5);
+   await action('cached past month pay', 'GET', '/api/inspections/pay?from=2026-05-01&to=2026-05-31&by=mashgiach', undefined, 0);
+   await action('cached past month preview', 'GET', '/api/inspections/accountant/preview?from=2026-05-01&to=2026-05-31', undefined, 0);
    console.table(table); return 'Fees/pay/export/accountant/company info, privacy sentinels, scheduled jobs, persistence and exact budgets passed.';
   } finally { await ctx.api('POST', '/api/__test__/staged', { enabled: false }); await pin(null); await new Promise(r => mock.close(r)); }
  },

@@ -1,6 +1,6 @@
 import { createFeesStore } from './fees-store.ts';
 import { createCompanyInfoStore, validateCompanyInfo, emptyInfo } from './company-info-store.ts';
-import { validateFees, validateSettings, validateAccountant, computePay, range, amount, shape } from './fees.ts';
+import { validateFees, validateSettings, validateAccountant, computePay, range, amount, shape, paidAmount } from './fees.ts';
 import { accountantPeriod, nextAccountantDate, buildAccountantMessage } from './accountant.ts';
 import { createEmailTransport, type Message } from './email.ts';
 import { csv, xlsx, csvType, xlsxType } from './export.ts';
@@ -26,7 +26,7 @@ export function registerInspectionRoutes(app: any, deps: {
   const fees = createFeesStore({ ...deps, now }), companyInfo = createCompanyInfoStore({ ...deps, now });
   const email = createEmailTransport(deps.dataDir, !!deps.testMode), outboxes = new Map<string, Message[]>();
   const schedules = createScheduleStore({ ...deps, now });
-  const store = createReportStore({ ...deps, schedules, hydratePay: true }), pending = new Map<string, Promise<any>>();
+  const store = createReportStore({ ...deps, schedules, now }), pending = new Map<string, Promise<any>>();
   const food = createFoodServiceStore({ ...deps, now });
   const inbox = createInboxStore({ ...deps, now, submittedAt: (a, id) => store.list(a).find(r => r.id === id)?.submittedAt });
   const reportSummary = (a: string, r: Parameters<typeof summary>[0]) => ({ ...summary(r), ...inbox.status(a, r) });
@@ -82,20 +82,20 @@ export function registerInspectionRoutes(app: any, deps: {
     return !Object.hasOwn(food.doc(a).manualPlaces, id) && data && Number.isFinite(data.amount) ? { amount: data.amount, currency: data.currency } : null;
   }
   const info = (a: string, id: string) => Object.hasOwn(companyInfo.doc(a).places, id) ? companyInfo.doc(a).places[id] : emptyInfo();
-  const pay = (a: string, query: any) => {
+  const pay = async (a: string, query: any) => {
     const r = range(query.from, query.to, query.by ?? 'place');
-    return computePay(store.payReports(a), fees.doc(a), allPlaces(a), r.from, r.to, r.by, zone(a));
+    return computePay(await store.payReportsForRange(a, r.from, r.to), fees.doc(a), allPlaces(a), r.from, r.to, r.by, zone(a));
   };
-  const message = (a: string, query: any) => buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant?.email || '', pay(a, query));
-  async function sendSummary(a: string, query: any) {
+  const message = async (a: string, query: any) => buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant?.email || '', await pay(a, query));
+  async function sendSummary(a: string, query: any, idempotencyKey?: string) {
     if (!email.transport) return { sent: false, reason: 'not_set_up' as const };
     if (!fees.doc(a).accountant) return { sent: false, reason: 'no_accountant' as const };
-    const table = pay(a, query);
+    const table = await pay(a, query);
     if (!table.totals.visits) return { sent: false, reason: 'no_visits' as const };
     if (deps.staged()) throw Object.assign(Error('Writes blocked'), { status: 503 });
     const message = buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant!.email, table);
-    await email.transport.send(message);
-    if (!outboxes.has(a)) outboxes.set(a, []); outboxes.get(a)!.push(message);
+    await email.transport.send({ ...message, ...(idempotencyKey ? { idempotencyKey } : {}) });
+    if (!outboxes.has(a)) outboxes.set(a, []); outboxes.get(a)!.push({ ...message, ...(idempotencyKey ? { idempotencyKey } : {}) });
     return { sent: true };
   }
   async function runAccountant(a: string, afterReport = false) {
@@ -107,18 +107,17 @@ export function registerInspectionRoutes(app: any, deps: {
       if (!accountant || deps.staged()) return;
       const period = accountantPeriod(accountant.timing, doc.lastSent, now(), zone(a), afterReport);
       if (!period) return;
-      const prepared = fees.stage(a, next => { next.lastSent = { at: now().toISOString(), periodEnd: period.to }; });
-      const result = await sendSummary(a, period);
-      if (!result.sent && result.reason !== 'no_visits') return;
-      if (prepared) { await fees.persist(a, prepared.before, prepared.next); fees.install(a, prepared.next); }
-      return result;
+      await pay(a, period);
+      const key = await fees.claim(a, period.from, period.to, accountant.timing.mode === 'after_report');
+      if (!key) return;
+      return sendSummary(a, { from: key.split('|').at(-2)!, to: period.to }, key);
     });
   }
   app.get('/api/inspections/fees', handler(true, (_req: any, res: any, u: Person, a: string) => {
     const doc = fees.doc(a);
     res.json({ settings: doc.settings, canEdit: u.role === 'admin' || doc.settings.feeEditors === 'admins_and_coordinators',
       places: allPlaces(a).filter(c => visible(a, c.id, u)).map(c => ({ id: c.id, name: c.name, kind: kind(a, c), company: placeFee(a, c.id)?.company ?? null, mashgiach: placeFee(a, c.id)?.mashgiach ?? null, mashgiachNames: schedules.company(a, c.id).mashgiachIds.map(id => people(a).find(p => p.id === id)?.name).filter(Boolean) })),
-      ...(u.role === 'admin' ? { accountant: doc.accountant, email: { setUp: !!email.transport }, nextEmail: email.transport ? nextAccountantDate(doc.accountant?.timing, doc.lastSent, now(), zone(a)) : null } : {}) });
+      ...(u.role === 'admin' ? { accountant: doc.accountant, email: { setUp: !!email.transport }, nextEmail: nextAccountantDate(doc.accountant?.timing, doc.lastSent, now(), zone(a)) } : {}) });
   }));
   app.put?.('/api/inspections/fees/:placeId', handler(true, async (req: any, res: any, u: Person, a: string) => {
     if (u.role !== 'admin' && fees.doc(a).settings.feeEditors !== 'admins_and_coordinators') return res.status(403).json({ error: 'Forbidden' });
@@ -134,15 +133,15 @@ export function registerInspectionRoutes(app: any, deps: {
   app.put?.('/api/inspections/accountant', handler('only', async (req: any, res: any, _u: Person, a: string) => {
     const value = validateAccountant(req.body); await fees.update(a, next => { next.accountant = value; }); res.json({ accountant: value });
   }));
-  app.get('/api/inspections/pay', handler('only', (req: any, res: any, _u: Person, a: string) => res.json(pay(a, req.query)), true));
-  app.get('/api/inspections/pay/export', handler('only', (req: any, res: any, _u: Person, a: string) => {
-    const table = pay(a, req.query), format = req.query.format;
+  app.get('/api/inspections/pay', handler('only', async (req: any, res: any, _u: Person, a: string) => res.json(await pay(a, req.query)), true));
+  app.get('/api/inspections/pay/export', handler('only', async (req: any, res: any, _u: Person, a: string) => {
+    const table = await pay(a, req.query), format = req.query.format;
     if (!['csv', 'xlsx'].includes(format)) return res.status(400).json({ error: 'Invalid export format' });
     res.setHeader('Content-Disposition', `attachment; filename="pay-${table.from}-${table.to}.${format}"`);
     res.type(format === 'csv' ? csvType : xlsxType).send(format === 'csv' ? csv(table) : xlsx(table));
   }, true));
-  app.get('/api/inspections/accountant/preview', handler('only', (req: any, res: any, _u: Person, a: string) => {
-    const m = message(a, req.query); res.json({ ...m, attachments: m.attachments.map(({ contentBase64, ...rest }) => ({ ...rest, bytes: Buffer.from(contentBase64, 'base64').length })) });
+  app.get('/api/inspections/accountant/preview', handler('only', async (req: any, res: any, _u: Person, a: string) => {
+    const m = await message(a, req.query); res.json({ ...m, attachments: m.attachments.map(({ contentBase64, ...rest }) => ({ ...rest, bytes: Buffer.from(contentBase64, 'base64').length })) });
   }, true));
   app.post('/api/inspections/accountant/send', handler('only', async (req: any, res: any, _u: Person, a: string) => {
     shape(req.body, ['kind', 'from', 'to'], ['kind']);
@@ -151,10 +150,12 @@ export function registerInspectionRoutes(app: any, deps: {
     range(query.from, query.to); res.json(await sendSummary(a, query));
   }, true));
   app.post('/api/inspections/reports/:id/fee-decision', handler(true, async (req: any, res: any, u: Person, a: string) => {
-    shape(req.body, ['amount']); const value = amount(req.body.amount), r = store.payReports(a).find(r => r.id === req.params.id);
+    shape(req.body, ['amount'], []); const value = req.body.amount === undefined ? undefined : amount(req.body.amount), r = store.feeReport(a, req.params.id) ?? await store.get(a, req.params.id);
     if (!r || !visible(a, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
-    if (!r.feeMismatch || ![r.dataFee?.amount, r.fee?.amount].includes(value)) return res.status(400).json({ error: 'Amount must match a report fee' });
-    await fees.update(a, next => { next.decisions[r.id] = { amount: value, by: u.id, byName: u.name, at: now().toISOString() }; });
+    if (value !== undefined && u.role !== 'admin' && fees.doc(a).settings.feeEditors !== 'admins_and_coordinators') return res.status(403).json({ error: 'Forbidden' });
+    if (!r.feeMismatch || value !== undefined && value !== placeFee(a, r.companyId)?.mashgiach?.amount) return res.status(400).json({ error: 'Amount must match a report fee' });
+    if (value === undefined && fees.doc(a).decisions[r.id]?.setFee && fees.doc(a).decisions[r.id].amount !== r.fee?.amount) return res.json({ decided: fees.doc(a).decisions[r.id] });
+    await fees.update(a, next => { next.decisions[r.id] = { ...(value !== undefined ? { amount: value, setFee: true } : {}), by: u.id, byName: u.name, at: now().toISOString() }; });
     res.json({ decided: fees.doc(a).decisions[r.id] });
   }, true));
   app.get('/api/inspections/company-info/:placeId', handler(true, (req: any, res: any, u: Person, a: string) => {
@@ -164,8 +165,8 @@ export function registerInspectionRoutes(app: any, deps: {
   app.put?.('/api/inspections/company-info/:placeId', handler('only', async (req: any, res: any, _u: Person, a: string) => {
     const id = req.params.placeId;
     if (!allPlaces(a).some(c => c.id === id)) return res.status(404).json({ error: 'Place not found' });
-    const value = validateCompanyInfo(req.body, info(a, id));
-    await companyInfo.update(a, next => { Object.defineProperty(next.places, id, { value, enumerable: true, configurable: true, writable: true }); }); res.json(value);
+    shape(req.body, ['address', 'phone', 'contacts'], []);
+    await companyInfo.update(a, next => { const old = Object.hasOwn(next.places, id) ? next.places[id] : emptyInfo(); const value = validateCompanyInfo({ ...old, ...req.body }, old); Object.defineProperty(next.places, id, { value, enumerable: true, configurable: true, writable: true }); }); res.json(info(a, id));
   }));
   app.get('/api/visits/places/:placeId/info', handler(false, (req: any, res: any, u: Person, a: string) => {
     const id = req.params.placeId;
@@ -359,11 +360,12 @@ export function registerInspectionRoutes(app: any, deps: {
       if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw Error();
     } catch { return res.status(400).json({ error: 'Invalid pagination' }); }
     const q = req.query;
-    if ((q.type !== undefined && !['factory', 'food_service'].includes(q.type)) || (q.status !== undefined && !['new', 'seen', 'follow_up'].includes(q.status)) || (q.from !== undefined && !isDate(q.from)) || (q.to !== undefined && !isDate(q.to)) || (q.from && q.to && q.from > q.to) || (q.more !== undefined && q.more !== '1') || ['companyId', 'mashgiachId'].some(k => q[k] !== undefined && (typeof q[k] !== 'string' || q[k].length > 200))) return res.status(400).json({ error: 'Invalid filters' });
-    const filtered = !!userId || caller?.role !== 'admin' || ['type', 'status', 'companyId', 'mashgiachId', 'from', 'to'].some(k => q[k] !== undefined);
+    if (q.amountCheck && caller?.role === 'mashgiach') return res.status(403).json({ error: 'Forbidden' });
+    if ((q.amountCheck !== undefined && q.amountCheck !== 'open') || (q.type !== undefined && !['factory', 'food_service'].includes(q.type)) || (q.status !== undefined && !['new', 'seen', 'follow_up'].includes(q.status)) || (q.from !== undefined && !isDate(q.from)) || (q.to !== undefined && !isDate(q.to)) || (q.from && q.to && q.from > q.to) || (q.more !== undefined && q.more !== '1') || ['companyId', 'mashgiachId'].some(k => q[k] !== undefined && (typeof q[k] !== 'string' || q[k].length > 200))) return res.status(400).json({ error: 'Invalid filters' });
+    const filtered = !!userId || caller?.role !== 'admin' || ['type', 'status', 'companyId', 'mashgiachId', 'from', 'to', 'amountCheck'].some(k => q[k] !== undefined);
     const predicate = (r: ReturnType<typeof summary>) => {
       const date = calendarDate(r.submittedAt, zone(agency));
-      return (!userId || r.mashgiachId === userId) && (!caller || visible(agency, r.companyId, caller)) && (!q.type || (r.kind || 'factory') === q.type) && (!q.status || inbox.status(agency, r).status === q.status) && (!q.companyId || r.companyId === q.companyId) && (!q.mashgiachId || r.mashgiachId === q.mashgiachId) && (!q.from || date >= q.from) && (!q.to || date <= q.to);
+      return (!q.amountCheck || !!store.feeReport(agency, r.id)?.feeMismatch && !fees.doc(agency).decisions[r.id]) && (!userId || r.mashgiachId === userId) && (!caller || visible(agency, r.companyId, caller)) && (!q.type || (r.kind || 'factory') === q.type) && (!q.status || inbox.status(agency, r).status === q.status) && (!q.companyId || r.companyId === q.companyId) && (!q.mashgiachId || r.mashgiachId === q.mashgiachId) && (!q.from || date >= q.from) && (!q.to || date <= q.to);
     };
     const page = await store.visiblePage(agency, limit, before, filtered ? predicate : undefined, !!userId || q.more === '1');
     res.json({ ...page, reports: page.reports.map(r => reportSummary(agency, r as any)) });
@@ -403,7 +405,7 @@ export function registerInspectionRoutes(app: any, deps: {
     const r = await store.get(agency, req.params.id);
     if (!r || !visible(agency, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
     await inbox.mark(agency, r, u);
-    res.json({ report: { ...reportSummary(agency, r), note: r.note, ...(r.feeMismatch ? { feeCheck: { reportAmount: r.dataFee?.amount ?? null, setAmount: r.fee?.amount ?? null, decided: fees.doc(agency).decisions[r.id] ? (({ amount, byName, at }) => ({ amount, byName, at }))(fees.doc(agency).decisions[r.id]) : null } } : {}), ...(r.kind === 'food_service' ? { checklist: r.checklist, templateId: r.templateId, templateVersion: r.templateVersion } : { marks: r.marks, offList: r.offList }) } });
+    res.json({ report: { ...reportSummary(agency, r), note: r.note, ...(r.feeMismatch ? { feeCheck: { reportAmount: r.dataFee?.amount ?? null, setAmount: placeFee(agency, r.companyId)?.mashgiach?.amount ?? r.fee?.amount ?? null, paidAmount: paidAmount(r, fees.doc(agency)), decided: fees.doc(agency).decisions[r.id] ? (({ amount, byName, at }) => ({ ...(amount === undefined ? {} : { amount }), byName, at }))(fees.doc(agency).decisions[r.id]) : null } } : {}), ...(r.kind === 'food_service' ? { checklist: r.checklist, templateId: r.templateId, templateVersion: r.templateVersion } : { marks: r.marks, offList: r.offList }) } });
   }, true));
   app.get('/api/inspections/reports/:id/photos', handler(true, async (req: any, res: any, u: any, agency: string) => {
     const r = await store.get(agency, req.params.id);

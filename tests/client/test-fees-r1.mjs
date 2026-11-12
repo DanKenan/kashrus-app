@@ -1,0 +1,60 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { MockFirestore } from '../stage2/firestore-mock.mjs';
+import { registerInspectionRoutes } from '../../src/server/inspections/routes.ts';
+import { createReportStore, localMidnight } from '../../src/server/inspections/store.ts';
+import { createFeesStore } from '../../src/server/inspections/fees-store.ts';
+import { createEmailTransport } from '../../src/server/inspections/email.ts';
+import { computePay, validateAccountant } from '../../src/server/inspections/fees.ts';
+import { buildAccountantMessage } from '../../src/server/inspections/accountant.ts';
+import { installReadMeter, resetReadMeter, readMeterSnapshot } from '../../src/server/read-meter.ts';
+import { installWriteMeter, resetWriteMeter, writeMeterSnapshot } from '../../src/server/write-meter.ts';
+const dir = await mkdtemp(join(tmpdir(), 'fees-r1-')); process.env.FIRESTORE_MOCK_FILE = join(dir, 'db.json');
+try {
+ const db = new MockFirestore(); installReadMeter(db); installWriteMeter(db);
+ const record = (id, submittedAt, fee = 50) => ({ id, agencyId: 'a', companyId: 'place', companyName: 'Test place', mashgiachId: id, mashgiachName: id, submittedAt, sortKey: `${submittedAt}|${id}`, fee: { amount: fee }, counts: {}, photoCount: 0 });
+ for (let i = 0; i < 200; i++) db._seed(`inspectionReportsByAgency/a/reports/current${i}`, record('current' + i, i === 0 ? '2026-09-20T14:00:00Z' : '2026-10-20T14:00:00Z'));
+ for (let i = 0; i < 9; i++) db._seed(`inspectionReportsByAgency/a/reports/old${i}`, record('old' + i, '2026-02-15T14:00:00Z'));
+ const deps = { db: () => db, dataDir: dir, staged: () => false, now: () => new Date('2026-10-20T14:00:00Z'), timeZone: () => 'America/New_York' };
+ const store = createReportStore(deps); resetReadMeter(); await store.ensure('a'); assert.equal(readMeterSnapshot().total, 200);
+ resetReadMeter(); assert.equal((await store.payReportsForRange('a', '2026-10-01', '2026-10-31')).length, 199); assert.equal(readMeterSnapshot().total, 0);
+ resetReadMeter(); const [first, second] = await Promise.all([store.payReportsForRange('a', '2026-02-01', '2026-02-28'), store.payReportsForRange('a', '2026-02-10', '2026-02-20')]); assert.equal(first.length, 9); assert.equal(second.length, 9); assert.equal(readMeterSnapshot().total, 9);
+ resetReadMeter(); await store.save(record('new', '2026-02-20T14:00:00Z'), {}); assert.equal((await store.payReportsForRange('a', '2026-02-01', '2026-02-28')).length, 10); assert.equal(readMeterSnapshot().total, 0);
+ for (let i = 0; i < 205; i++) db._seed(`inspectionReportsByAgency/b/reports/large${i}`, { ...record('large' + String(i).padStart(3, '0'), '2026-10-20T14:00:00Z'), agencyId: 'b' });
+ resetReadMeter(); await store.ensure('b'); assert.equal(readMeterSnapshot().total, 200);
+ resetReadMeter(); assert.equal((await store.payReportsForRange('b', '2026-10-01', '2026-10-31')).length, 205); assert.equal(readMeterSnapshot().total, 5);
+ resetReadMeter(); await store.payReportsForRange('b', '2026-10-01', '2026-10-31'); assert.equal(readMeterSnapshot().total, 0);
+ assert.equal((await readdir(dir)).includes('inspection-pay-cache'), false);
+ assert.equal(localMidnight('2026-03-01', 'America/New_York'), '2026-03-01T05:00:00.000Z'); assert.equal(localMidnight('2026-04-01', 'America/New_York'), '2026-04-01T04:00:00.000Z');
+ const a = createFeesStore(deps), b = createFeesStore(deps); await Promise.all([a.boot(['a']), b.boot(['a'])]);
+ resetReadMeter(); resetWriteMeter(); const claims = await Promise.all([a.locked('a', () => a.claim('a', '2026-02-01', '2026-02-28')), b.locked('a', () => b.claim('a', '2026-02-01', '2026-02-28'))]);
+ assert.equal(claims.filter(Boolean).length, 1); assert.equal(writeMeterSnapshot().total, 1); assert.ok(readMeterSnapshot().total >= 2 && readMeterSnapshot().total <= 3);
+ const march = await a.locked('a', () => a.claim('a', '2026-03-01', '2026-03-31')); assert.equal(march, 'a|2026-03-01|2026-03-31');
+ const april = await b.locked('a', () => b.claim('a', '2026-03-01', '2026-04-30')); assert.equal(april, 'a|2026-04-01|2026-04-30');
+ const transport = createEmailTransport(dir, true, 'test'); for (const key of claims.filter(Boolean)) await transport.transport.send({ idempotencyKey: key, to: 'test@example.test', subject: 'Test', text: '', html: '', attachments: [] }); assert.equal(transport.outbox.length, 1);
+ await transport.transport.send(transport.outbox[0]); assert.equal(transport.outbox.length, 1);
+ const oldTransport = process.env.EMAIL_TRANSPORT; process.env.EMAIL_TRANSPORT = 'test';
+ db._seed('inspectionFees/race', { settings: { feeEditors: 'admins' }, places: { place: { company: null, mashgiach: { amount: 50 } } }, decisions: {}, lastSent: null, accountant: { name: 'Test', email: 'test@example.test', timing: { mode: 'dates', days: [1] } }, updatedAt: '' });
+ db._seed('inspectionReportsByAgency/race/reports/race-report', { ...record('race-report', '2026-10-20T14:00:00Z'), agencyId: 'race', feeMismatch: true, dataFee: { amount: 180 } });
+ const instances = [0, 1].map(() => { const handlers = new Map(), app = Object.fromEntries(['get', 'post', 'put'].map(method => [method, (path, handler) => handlers.set(path, handler)])); return { handlers, routes: registerInspectionRoutes(app, { ...deps, testMode: true, now: () => new Date('2026-11-01T12:00:00Z'), agencyIds: () => ['race'], user: () => ({ id: 'admin', name: 'Test admin', role: 'admin', agencyId: 'race' }), source: () => ({ state: { companies: [], itemsFor: () => [] }, items: () => [], listVersion: () => '' }), maxPhotoChars: 100, photoRe: /./ }) }; });
+ await Promise.all(instances.map(i => i.routes.boot()));
+ resetReadMeter(); resetWriteMeter(); await Promise.all(instances.map(i => i.routes.check())); assert.equal(writeMeterSnapshot().total, 1); assert.ok(readMeterSnapshot().total >= 2 && readMeterSnapshot().total <= 3);
+ let sent = 0; for (const instance of instances) { const res = { status() { return this; }, json(body) { sent += body.messages.length; } }; await instance.handlers.get('/api/__test__/outbox')({ query: {}, body: {} }, res); } assert.equal(sent, 1);
+ resetReadMeter(); resetWriteMeter(); await Promise.all(instances.map(i => i.routes.check())); assert.equal(readMeterSnapshot().total, 0); assert.equal(writeMeterSnapshot().total, 0);
+ const decide = async body => { const res = { code: 200, status(code) { this.code = code; return this; }, json(value) { this.value = value; } }; await instances[0].handlers.get('/api/inspections/reports/:id/fee-decision')({ query: {}, params: { id: 'race-report' }, body }, res); assert.equal(res.code, 200); return res.value; };
+ await decide({ amount: 50 }); resetWriteMeter(); const acknowledged = await decide({}); assert.equal('amount' in acknowledged.decided, false); assert.equal(writeMeterSnapshot().total, 1);
+ if (oldTransport === undefined) delete process.env.EMAIL_TRANSPORT; else process.env.EMAIL_TRANSPORT = oldTransport;
+ const fees = { settings: { feeEditors: 'admins' }, places: { place: { company: { amount: 0.01, per: 'month' }, mashgiach: { amount: 50 } } }, decisions: {}, accountant: null, lastSent: null, updatedAt: '' };
+ const reports = ['z', 'a', 'm'].map(id => record(id, '2026-02-15T14:00:00Z'));
+ for (const by of ['place', 'mashgiach']) {
+  const table = computePay(reports, fees, [{ id: 'place', name: 'Test place' }], '2026-02-01', '2026-02-28', by, 'UTC');
+  assert.equal(Math.round(table.rows.reduce((sum, r) => sum + r.companies, 0) * 100), 1); assert.equal(table.totals.companies, 0.01); assert.equal(table.totals.paid, 150);
+  if (by === 'mashgiach') { assert.equal(table.rows.find(r => r.key === 'a').companies, 0.01); assert.equal(table.rows[0].uniformFee, 50); assert.equal(table.rows[0].breakdown[0].visits, 1); }
+  assert.ok(buildAccountantMessage('Test agency', 'test@example.test', table).text.includes('$0.01'));
+ }
+ for (const timing of [{ mode: 'after_report', days: [1] }, { mode: 'dates', days: [1], everyDays: 2 }, { mode: 'every_days', everyDays: 2, days: [1] }]) assert.throws(() => validateAccountant({ name: 'Test', email: 'test@example.test', timing }));
+ for (const timing of [{ mode: 'after_report' }, { mode: 'dates', days: ['last'] }, { mode: 'every_days', everyDays: 3 }]) assert.deepEqual(validateAccountant({ name: 'Test', email: 'test@example.test', timing }).timing, timing);
+ console.log('R1: month cache 200 boot / 0 warm / 9 cold / 0 repeat, transaction race, idempotency, cents allocation and strict timing passed');
+} finally { await rm(dir, { recursive: true, force: true }); }

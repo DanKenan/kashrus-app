@@ -27,6 +27,6 @@ export function foodPayload(draft: FoodDraft): FoodDraft {
 }
 export const foodDraftKey = (scope: string, id: string) => `${scope}:food-draft:${encodeURIComponent(id)}`;
 export const saveFoodDraft = (storage: StorageLike, scope: string, draft: FoodDraft) => storage.setItem(foodDraftKey(scope, draft.companyId), JSON.stringify(draft));
-export type InboxFilters = Partial<Record<'type' | 'status' | 'companyId' | 'mashgiachId' | 'from' | 'to', string>>;
-export function reportQuery(filters: InboxFilters, before?: string, more = false) { const query = new URLSearchParams({ limit: '50' }); for (const key of ['type', 'status', 'companyId', 'mashgiachId', 'from', 'to'] as const) if (filters[key]) query.set(key, filters[key]!); if (before) query.set('before', before); if (more) query.set('more', '1'); return query.toString(); }
+export type InboxFilters = Partial<Record<'type' | 'status' | 'companyId' | 'mashgiachId' | 'from' | 'to' | 'amountCheck', string>>;
+export function reportQuery(filters: InboxFilters, before?: string, more = false) { const query = new URLSearchParams({ limit: '50' }); for (const key of ['type', 'status', 'companyId', 'mashgiachId', 'from', 'to', 'amountCheck'] as const) if (filters[key]) query.set(key, filters[key]!); if (before) query.set('before', before); if (more) query.set('more', '1'); return query.toString(); }
 export const statusLabel = (status?: string) => status === 'follow_up' ? 'Needs follow-up' : status === 'seen' ? 'Seen' : 'New';

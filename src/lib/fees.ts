@@ -2,12 +2,13 @@ import { apiFetch } from './api';
 import { nextVisitDue, type Schedule } from './visitSchedule';
 export type CompanyFee = { amount: number; per: 'visit' | 'month' | 'year' };
 export interface FeePlace { id: string; name: string; kind: string; company: CompanyFee | null; mashgiach: { amount: number } | null; mashgiachNames: string[] }
-export interface Accountant { name: string; email: string; timing: { mode: 'after_report' | 'dates' | 'every_days'; days: (number | 'last')[]; everyDays: number } }
+export type AccountantTiming = { mode: 'after_report' } | { mode: 'dates'; days: (number | 'last')[] } | { mode: 'every_days'; everyDays: number };
+export interface Accountant { name: string; email: string; timing: AccountantTiming }
 export interface FeesData { settings: { feeEditors: 'admins' | 'admins_and_coordinators' }; canEdit: boolean; places: FeePlace[]; accountant?: Accountant | null; email?: { setUp: boolean }; nextEmail?: string | null }
-export interface PayRow { key: string; name: string; visits: number; perVisit?: number | null; paid: number; companies: number; left: number }
+export interface PayRow { key: string; name: string; visits: number; perVisit?: number | null; uniformFee?: number | null; breakdown?: { placeId: string; place: string; visits: number; fee: number | null; paid: number }[]; paid: number; companies: number; left: number }
 export interface PayData { from: string; to: string; by: string; rows: PayRow[]; totals: Omit<PayRow, 'key' | 'name'>; mismatches: number; noFee: number }
 export interface EmailPreview { to: string; subject: string; html: string; text: string; attachments: { filename: string; contentType: string; bytes: number }[] }
-export interface FeeCheck { reportAmount: number; setAmount: number; decided: { amount: number; byName: string; at: string } | null }
+export interface FeeCheck { reportAmount: number; setAmount: number; paidAmount?: number | null; decided: { amount?: number; byName: string; at: string } | null }
 export async function feesRequest<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const response = await apiFetch(path, { method, ...(body !== undefined ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
   const result = await response.json();
@@ -16,7 +17,7 @@ export async function feesRequest<T>(path: string, method = 'GET', body?: unknow
 }
 export const getFees = () => feesRequest<FeesData>('/api/inspections/fees');
 export const saveFees = (id: string, company: CompanyFee | null, mashgiach: { amount: number } | null) => feesRequest(`/api/inspections/fees/${encodeURIComponent(id)}`, 'PUT', { company, mashgiach });
-export const decideFee = (id: string, amount: number) => feesRequest(`/api/inspections/reports/${encodeURIComponent(id)}/fee-decision`, 'POST', { amount });
+export const decideFee = (id: string, amount?: number) => feesRequest(`/api/inspections/reports/${encodeURIComponent(id)}/fee-decision`, 'POST', amount === undefined ? {} : { amount });
 export const canSeeFees = (role: string) => role === 'admin' || role === 'coordinator';
 export const canSeePay = (role: string) => role === 'admin';
 export const canChangeFees = (role: string, editors: FeesData['settings']['feeEditors']) => role === 'admin' || role === 'coordinator' && editors === 'admins_and_coordinators';
@@ -46,7 +47,7 @@ export function leftLine(company: CompanyFee | null, mashgiach: { amount: number
   if (company.per === 'visit') return `Left for the agency: ${money(company.amount - mashgiach.amount)} a visit`;
   if (count === null) return null;
   const total = company.amount * (company.per === 'month' ? 12 : 1), paid = mashgiach.amount * count;
-  return `If there are ${count} visits this year: ${money(total)} − ${money(paid)} = ${money(total - paid)} left`;
+  return `If there ${count === 1 ? 'is' : 'are'} ${count} ${count === 1 ? 'visit' : 'visits'} this year: ${money(total)} − ${money(paid)} = ${money(total - paid)} left`;
 }
 export const payQuery = (from: string, to: string, by: string) => new URLSearchParams({ from, to, by }).toString();
 export async function downloadPay(from: string, to: string, by: string, format: 'csv' | 'xlsx') {
@@ -64,3 +65,6 @@ export const previewAccountant = (from: string, to: string) => feesRequest<Email
 export function toggleSendDay(days: (number | 'last')[], day: number | 'last'): (number | 'last')[] {
   return days.includes(day) ? days.filter(d => d !== day) : days.length < 3 ? [...days, day] : days;
 }
+
+export const accountantTiming = (mode: AccountantTiming['mode'], days: (number | 'last')[], everyDays: number): AccountantTiming => mode === 'dates' ? { mode, days } : mode === 'every_days' ? { mode, everyDays } : { mode };
+export const visitsLabel = (count: number) => `${count} ${count === 1 ? 'visit' : 'visits'}`;
