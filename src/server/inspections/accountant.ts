@@ -3,11 +3,18 @@ import type { FeesDoc, PayTable, Timing } from './fees.ts';
 import { csv, xlsx, xml, exportRows, csvType, xlsxType } from './export.ts';
 import type { Message } from './email.ts';
 const monthStart = (date: string) => date.slice(0, 7) + '-01';
-export function accountantPeriod(timing: Timing, last: FeesDoc['lastSent'], now: Date, zone: string, afterReport = false): { from: string; to: string } | null {
+export function afterReportDelayMs(last: FeesDoc['lastSent'], newestSubmittedAt: string | undefined, now: Date): number | null {
+  if (!last || !newestSubmittedAt || newestSubmittedAt <= last.at) return null;
+  const remaining = Date.parse(last.at) + 600_000 - now.getTime();
+  return remaining > 0 ? remaining : null;
+}
+export function accountantPeriod(timing: Timing, last: FeesDoc['lastSent'], now: Date, zone: string, newestSubmittedAt?: string): { from: string; to: string } | null {
   const today = calendarDate(now.toISOString(), zone), yesterday = addDays(today, -1);
   if (timing.mode === 'after_report') {
-    if (!afterReport || last && (last.periodEnd >= today || now.getTime() - Date.parse(last.at) < 600000)) return null;
-    return { from: monthStart(today), to: today };
+    if (!newestSubmittedAt || (last && (newestSubmittedAt <= last.at || now.getTime() - Date.parse(last.at) < 600000))) return null;
+    const reportDay = calendarDate(newestSubmittedAt, zone);
+    // A deferred report arriving before midnight still belongs to that month's summary.
+    return { from: monthStart(reportDay), to: reportDay };
   }
   const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: zone, hour: 'numeric', hourCycle: 'h23' }).format(now));
   if (last && last.periodEnd >= yesterday) return null;

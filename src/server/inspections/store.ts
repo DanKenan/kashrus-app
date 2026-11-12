@@ -1,4 +1,4 @@
-import { calendarDate } from './schedule.ts';
+import { addDays, calendarDate } from './schedule.ts';
 import { range, type PayReport } from './fees.ts';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -9,6 +9,8 @@ export const reportId = (agency: string, user: string, client: string) => create
 export type Cursor = { submittedAt: string; id: string };
 export const reportOrder = (a: Cursor, b: Cursor) => b.submittedAt.localeCompare(a.submittedAt) || (a.id === b.id ? 0 : a.id > b.id ? -1 : 1);
 export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean; now?(): Date; timeZone?(agency: string): string; schedules?: ReturnType<typeof createScheduleStore> }) {
+  // Pay-screen and export caches are process-local: deployment is limited to one Cloud Run instance (maxScale=1).
+  // Scheduled accountant sends always query fresh reports, independently of this cache.
   const observedFrom = new Map<string, string>(), partialMonths = new Map<string, string>(), completeMonths = new Set<string>();
   const months = new Map<string, Map<string, PayReport>>(), monthLoads = new Map<string, Promise<void>>();
   const zone = (agency: string) => deps.timeZone?.(agency) || 'America/New_York';
@@ -47,6 +49,23 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
       month = nextMonth;
     }
     return [...rows.values()];
+  }
+  async function freshReportsForRange(agency: string, from: string, to: string): Promise<PayReport[]> {
+    range(from, to); await ensure(agency);
+    const start = localMidnight(from, zone(agency)), end = localMidnight(addDays(to, 1), zone(agency));
+    // One sortKey field, no composite index. This query deliberately bypasses the month cache.
+    const fetched: Report[] = deps.db()
+      ? (await collection(agency).where('sortKey', '>=', start).where('sortKey', '<', end).get()).docs.map((d: any) => d.data())
+      : (await localRows()).filter(r => r.agencyId === agency && r.submittedAt >= start && r.submittedAt < end);
+    const selected: PayReport[] = [];
+    for (const r of fetched) {
+      const day = calendarDate(r.submittedAt, zone(agency));
+      if (r.agencyId !== agency || day < from || day > to) continue;
+      financial(r);
+      const { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch } = r;
+      selected.push({ id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch });
+    }
+    return selected;
   }
   const reports = new Map<string, Report>(), summaries = new Map<string, ReturnType<typeof summary> & { agencyId: string }>();
   const loaded = new Map<string, Promise<void>>();
@@ -240,7 +259,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     })().finally(() => flights.delete(id));
     flights.set(id, flight); return flight;
   }
-  return { payReportsForRange, feeReport, boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, visiblePage, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
+  return { payReportsForRange, freshReportsForRange, feeReport, boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, visiblePage, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
 }
 
 // Convert agency-local midnight to a UTC sortKey boundary, including DST offsets.

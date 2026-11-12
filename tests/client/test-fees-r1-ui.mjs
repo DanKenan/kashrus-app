@@ -21,7 +21,7 @@ for (const timing of [{ mode: 'after_report' }, { mode: 'dates', days: ['last'] 
  const requests = recordFetch({ '/api/inspections/fees': fees, '/api/inspections/fee-settings': {}, '/api/inspections/accountant': {} });
  const settings = mount(FeesAccountantSettings, { role: 'admin', onClose() {} }); await settings.render(); await settings.submit();
  assert.deepEqual(requests.find(c => c[0] === 'PUT' && c[1] === '/api/inspections/accountant')[2].timing, timing);
- assert.match(settings.text(), /Next email: 2027-01-01 \(email not set up yet — nothing will be sent\)/);
+ assert.match(settings.text(), /Next email: Jan 1, 2027 \(email not set up yet — nothing will be sent\)/);
  assert.deepEqual(accountantTiming(timing.mode, ['last'], 3), timing);
 }
 globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {} };

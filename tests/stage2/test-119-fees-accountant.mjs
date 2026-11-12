@@ -86,6 +86,10 @@ export default {
     for (const format of ['csv', 'xlsx']) { await reset(); const r = await raw('admin', `/api/inspections/pay/export?${query}&by=${by}&format=${format}`); assert.equal(r.response.status, 200); assert.ok(r.response.headers.get('content-disposition').includes('.' + format)); assert.ok(r.bytes.length > 100); if (format === 'csv') assert.ok(r.bytes.toString().includes('1430,1840,410')); else assert.equal(r.bytes.readUInt32LE(), 0x04034b50); await budget(`export ${format} ${by}`, 0, 0); }
    }
    const openChecks = await action('open amount check filter', 'GET', '/api/inspections/reports?amountCheck=open', undefined, 0); assert.equal(openChecks.reports.length, 1);
+   const coordOnlyCafe = await action('coordinator open checks limited to own place', 'GET', '/api/inspections/reports?amountCheck=open', undefined, 0, 200, 'coord'); assert.deepEqual(coordOnlyCafe.reports, []);
+   await api('admin', 'PUT', '/api/inspections/schedule/companies/snacks119/people', { mashgiachIds: [people.elsewhere.id], coordinatorIds: [people.coord.id] });
+   const coordWithSnacks = await action('coordinator open checks with assigned place', 'GET', '/api/inspections/reports?amountCheck=open', undefined, 0, 200, 'coord'); assert.deepEqual(coordWithSnacks.reports.map(r => r.id), [saved[10].id]);
+   await api('admin', 'PUT', '/api/inspections/schedule/companies/snacks119/people', { mashgiachIds: [people.elsewhere.id], coordinatorIds: [] });
    const mismatch = saved[10];
    const detail = (await api('admin', 'GET', `/api/inspections/reports/${mismatch.id}`)).json.report;
    assert.deepEqual(detail.feeCheck, { reportAmount: 180, setAmount: 150, paidAmount: 150, decided: null });
@@ -122,7 +126,7 @@ export default {
    await action('company privacy sentinel', 'PUT', feesPath('cafe119'), { ...feeA, company: { amount: 60.17, per: 'visit' } });
    await action('other fee privacy sentinel', 'PUT', feesPath('bakery119'), { company: { amount: 1200, per: 'year' }, mashgiach: { amount: 77.31 } });
    const newRoutes = [ ['GET', '/api/inspections/fees'], ['PUT', feesPath('cafe119'), feeA], ['PUT', '/api/inspections/fee-settings', { feeEditors: 'admins' }], ['PUT', '/api/inspections/accountant', accountant], ['GET', `/api/inspections/pay?${query}`], ['GET', `/api/inspections/pay/export?${query}&format=csv`], ['GET', `/api/inspections/accountant/preview?${query}`], ['POST', '/api/inspections/accountant/send', { kind: 'test' }], ['POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 150 }], ['GET', infoPath], ['PUT', infoPath, info] ];
-   const readRoutes = ['/api/visits/factories', '/api/visits/factories/snacks119', '/api/factories', '/api/factories/snacks119/items?kind=ingredient', '/api/food-service', '/api/visits/food-service', '/api/visits/food-service/cafe119', '/api/visits/food-service/bakery119', '/api/visits/reports/mine', '/api/inspections/alerts', '/api/inspections/schedule', '/api/visits/places/cafe119/info', '/api/visits/places/bakery119/info', '/api/inspections/reports', `/api/inspections/reports/${mismatch.id}`, `/api/inspections/reports/${mismatch.id}/photos`];
+   const readRoutes = ['/api/visits/factories', '/api/visits/factories/snacks119', '/api/factories', '/api/factories/snacks119/items?kind=ingredient', '/api/food-service', '/api/visits/food-service', '/api/visits/food-service/cafe119', '/api/visits/food-service/bakery119', '/api/visits/reports/mine', '/api/visits/reports/mine?amountCheck=open', '/api/inspections/alerts', '/api/inspections/schedule', '/api/visits/places/cafe119/info', '/api/visits/places/bakery119/info', '/api/inspections/reports', '/api/inspections/reports?amountCheck=open', `/api/inspections/reports/${mismatch.id}`, `/api/inspections/reports/${mismatch.id}/photos`];
    await pin('2026-10-21T14:00:00Z');
    const privacyBody = { ...baseBody, clientReportId: 'report-119-privacy' };
    for (const [method, path, body] of [...readRoutes.map(p => ['GET', p]), ...newRoutes, ['POST', '/api/visits/reports', privacyBody]]) {
@@ -142,14 +146,14 @@ export default {
    await api('admin', 'POST', '/api/__test__/inspections/email-transport', { name: 'test' });
    await action('test send', 'POST', '/api/inspections/accountant/send', { kind: 'test', from: '2026-10-01', to: '2026-10-31' }, 0).then(r => assert.equal(r.sent, true));
    let messages = (await api('admin', 'GET', '/api/__test__/outbox')).json.messages; assert.equal(messages.length, 1); assert.deepEqual((await api('foreign', 'GET', '/api/__test__/outbox')).json.messages, []); assert.equal(messages[0].to, accountant.email); assert.ok(messages[0].attachments.every(a => a.contentBase64.length > 100));
-   await action('scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 1); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
+   await action('scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 17); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
    await action('repeat scheduled run', 'POST', '/api/__test__/inspections/check', {}, 0);
    await pin('2026-12-01T12:00:00Z'); await action('empty-month scheduled run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 1); assert.equal((await api('admin', 'GET', '/api/__test__/outbox')).json.messages.length, 2);
    await action('repeat empty-month run', 'POST', '/api/__test__/inspections/check', {}, 0);
    await action('manual empty period', 'POST', '/api/inspections/accountant/send', { kind: 'now', from: '2026-11-01', to: '2026-11-30' }, 0).then(r => assert.equal(r.reason, 'no_visits'));
    await action('accountant after-report mode', 'PUT', '/api/inspections/accountant', { ...accountant, timing: { mode: 'after_report' } });
    await pin('2026-12-02T12:00:00Z');
-   await action('after-report send plus lastSent', 'POST', '/api/visits/reports', { ...baseBody, clientReportId: 'report-119-after-report' }, 3, 201, 'mash', 1);
+   await action('after-report send plus lastSent', 'POST', '/api/visits/reports', { ...baseBody, clientReportId: 'report-119-after-report' }, 3, 201, 'mash', 2);
    await pin('2026-12-02T12:01:00Z');
    await action('after-report debounce', 'POST', '/api/visits/reports', { ...baseBody, clientReportId: 'report-119-after-report-debounce' }, 2, 201, 'mash');
    await action('accountant every-days mode', 'PUT', '/api/inspections/accountant', { ...accountant, timing: { mode: 'every_days', everyDays: 2 } });

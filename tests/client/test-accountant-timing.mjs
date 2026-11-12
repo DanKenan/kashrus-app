@@ -17,9 +17,9 @@ assert.deepEqual(period({ mode: 'every_days', everyDays: 3 }, null, clock('2026-
 const last = { at: '2026-11-10T10:00:00Z', periodEnd: '2026-11-09' };
 assert.equal(period({ mode: 'every_days', everyDays: 3 }, last, clock('2026-11-12T12:00:00Z'), zone), null);
 assert.deepEqual(period({ mode: 'every_days', everyDays: 3 }, last, clock('2026-11-13T12:00:00Z'), zone), { from: '2026-11-10', to: '2026-11-12' });
-assert.equal(period({ mode: 'after_report' }, last, clock('2026-11-10T10:09:59Z'), zone, true), null);
-assert.deepEqual(period({ mode: 'after_report' }, last, clock('2026-11-10T10:10:00Z'), zone, true), { from: '2026-11-01', to: '2026-11-10' });
-assert.equal(period({ mode: 'after_report' }, { at: '2026-11-10T10:00:00Z', periodEnd: '2026-11-10' }, clock('2026-11-10T11:00:00Z'), zone, true), null);
+assert.equal(period({ mode: 'after_report' }, last, clock('2026-11-10T10:09:59Z'), zone, '2026-11-10T10:01:00Z'), null);
+assert.deepEqual(period({ mode: 'after_report' }, last, clock('2026-11-10T10:10:00Z'), zone, '2026-11-10T10:01:00Z'), { from: '2026-11-01', to: '2026-11-10' });
+assert.equal(period({ mode: 'after_report' }, { at: '2026-11-10T10:00:00Z', periodEnd: '2026-11-10' }, clock('2026-11-10T11:00:00Z'), zone, '2026-11-10T09:59:00Z'), null);
 assert.equal(period({ mode: 'after_report' }, null, clock('2026-11-10T12:00:00Z'), zone), null);
 assert.equal(nextAccountantDate({ mode: 'dates', days: ['last'] }, null, clock('2026-11-10T12:00:00Z'), zone), '2026-12-01');
 const table = { from: '2026-10-01', to: '2026-10-31', by: 'place', rows: [], totals: { visits: 0, paid: 0, companies: 0, left: 0 }, mismatches: 2 };

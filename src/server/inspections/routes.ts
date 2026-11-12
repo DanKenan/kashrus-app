@@ -1,7 +1,7 @@
 import { createFeesStore } from './fees-store.ts';
 import { createCompanyInfoStore, validateCompanyInfo, emptyInfo } from './company-info-store.ts';
 import { validateFees, validateSettings, validateAccountant, computePay, range, amount, shape, paidAmount } from './fees.ts';
-import { accountantPeriod, nextAccountantDate, buildAccountantMessage } from './accountant.ts';
+import { accountantPeriod, afterReportDelayMs, nextAccountantDate, buildAccountantMessage } from './accountant.ts';
 import { createEmailTransport, type Message } from './email.ts';
 import { csv, xlsx, csvType, xlsxType } from './export.ts';
 import { isDeepStrictEqual } from 'node:util';
@@ -87,10 +87,10 @@ export function registerInspectionRoutes(app: any, deps: {
     return computePay(await store.payReportsForRange(a, r.from, r.to), fees.doc(a), allPlaces(a), r.from, r.to, r.by, zone(a));
   };
   const message = async (a: string, query: any) => buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant?.email || '', await pay(a, query));
-  async function sendSummary(a: string, query: any, idempotencyKey?: string) {
+  async function sendSummary(a: string, query: any, idempotencyKey?: string, preparedTable?: Awaited<ReturnType<typeof pay>>) {
     if (!email.transport) return { sent: false, reason: 'not_set_up' as const };
     if (!fees.doc(a).accountant) return { sent: false, reason: 'no_accountant' as const };
-    const table = await pay(a, query);
+    const table = preparedTable ?? await pay(a, query);
     if (!table.totals.visits) return { sent: false, reason: 'no_visits' as const };
     if (deps.staged()) throw Object.assign(Error('Writes blocked'), { status: 503 });
     const message = buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant!.email, table);
@@ -98,19 +98,45 @@ export function registerInspectionRoutes(app: any, deps: {
     if (!outboxes.has(a)) outboxes.set(a, []); outboxes.get(a)!.push({ ...message, ...(idempotencyKey ? { idempotencyKey } : {}) });
     return { sent: true };
   }
-  async function runAccountant(a: string, afterReport = false) {
+  const accountantTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  async function runAccountant(a: string) {
     if (!email.transport || deps.staged() || !fees.ready(a) || !fees.doc(a).accountant) return;
     await store.ensure(a);
-    // One lock covers timing, delivery and lastSent, including simultaneous reports/hourly checks.
     return fees.locked(a, async () => {
       const doc = fees.doc(a), accountant = doc.accountant;
       if (!accountant || deps.staged()) return;
-      const period = accountantPeriod(accountant.timing, doc.lastSent, now(), zone(a), afterReport);
-      if (!period) return;
-      await pay(a, period);
-      const key = await fees.claim(a, period.from, period.to, accountant.timing.mode === 'after_report');
-      if (!key) return;
-      return sendSummary(a, { from: key.split('|').at(-2)!, to: period.to }, key);
+      const newest = store.list(a)[0];
+      const period = accountantPeriod(accountant.timing, doc.lastSent, now(), zone(a), newest?.submittedAt);
+      if (!period) {
+        if (accountant.timing.mode === 'after_report' && !accountantTimers.has(a)) {
+          const delay = afterReportDelayMs(doc.lastSent, newest?.submittedAt, now());
+          if (delay !== null) {
+            const timer = setTimeout(() => {
+              accountantTimers.delete(a);
+              void runAccountant(a).catch(() => console.warn('[inspections] accountant retry unavailable'));
+            }, delay);
+            timer.unref();
+            accountantTimers.set(a, timer);
+          }
+        }
+        return;
+      }
+      const claim = await fees.claim(a, period.from, period.to, accountant.timing.mode === 'after_report'
+        ? { observedAt: doc.lastSent?.at ?? null, newestReportId: newest!.id } : undefined);
+      if (!claim) return;
+      try {
+        // A scheduled email must never rely on the process-local pay-screen cache.
+        const reports = await store.freshReportsForRange(a, period.from, period.to);
+        const table = computePay(reports, fees.doc(a), allPlaces(a), period.from, period.to, 'place', zone(a));
+        if (!table.totals.visits) return { sent: false, reason: 'no_visits' as const };
+        return await sendSummary(a, period, claim.key, table);
+      } catch (error) {
+        try { await fees.restore(a, claim); }
+        catch (restoreError) { console.warn('[inspections] accountant claim restore failed', restoreError); }
+        // A process crash between claim and send can still skip one summary until the next
+        // period; the admin can use "Email to accountant now".
+        console.warn('[inspections] accountant send failed', error);
+      }
     });
   }
   app.get('/api/inspections/fees', handler(true, (_req: any, res: any, u: Person, a: string) => {
@@ -342,7 +368,7 @@ export function registerInspectionRoutes(app: any, deps: {
       report = { ...report, dataFee, ...(fee && dataFee && fee.amount !== dataFee.amount ? { feeMismatch: true } : {}) };
     } catch (e: any) { return res.status(e.status === 409 ? 409 : 400).json({ error: e.status ? e.message : 'Invalid report', ...(e.status === 409 ? { template: e.template } : {}) }); }
     const task = store.save(report, input.photos).then(async ({ report: stored, created }) => {
-      if (created) { await notifyReport(agency, stored); try { await runAccountant(agency, true); } catch { /* Retry on a later report; saving a report never depends on email. */ } }
+      if (created) { await notifyReport(agency, stored); try { await runAccountant(agency); } catch { /* Retry on a later report; saving a report never depends on email. */ } }
       console.info(`[inspections] report=${report.id} checked=${report.counts.checked} not_used=${report.counts.not_used} alert=${report.counts.alert} offList=${report.counts.offList} photos=${report.photoCount}`);
       return { report: reportSummary(agency, stored), fee: stored.fee, created };
     });

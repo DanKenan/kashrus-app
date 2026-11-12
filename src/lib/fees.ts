@@ -68,3 +68,6 @@ export function toggleSendDay(days: (number | 'last')[], day: number | 'last'): 
 
 export const accountantTiming = (mode: AccountantTiming['mode'], days: (number | 'last')[], everyDays: number): AccountantTiming => mode === 'dates' ? { mode, days } : mode === 'every_days' ? { mode, everyDays } : { mode };
 export const visitsLabel = (count: number) => `${count} ${count === 1 ? 'visit' : 'visits'}`;
+export const readableEmailDate = (day: string | null | undefined) => day
+  ? new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${day}T12:00:00Z`))
+  : 'Not scheduled';
