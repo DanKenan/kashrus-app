@@ -521,6 +521,8 @@ app.use((req, res, next) => {
 
 // Visit reports can include four capped photos and up to 2,000 item notes.
 app.use('/api/visits/reports', express.json({ limit: '20mb' }));
+// The accountant endpoint accepts JSON null to clear the agency's accountant.
+app.use('/api/inspections/accountant', express.json({ limit: '2mb', strict: false }));
 app.use(express.json({ limit: '2mb' }));
 // WRITECUT: every database write below is attributed to the route that caused it.
 app.use(writeMeterMiddleware);
@@ -14830,6 +14832,7 @@ const inspectionRoutes = registerInspectionRoutes(app, {
   agencyIds: sourceRoutes.inspectionAgencyIds,
   scheduleAgencyIds: () => agencies.map(a => a.id),
   people: (agencyId) => users.filter(u => u.agencyId === agencyId && !sessionIneligibleCode(u)),
+  agencyName: (agencyId) => agencies.find(a => a.id === agencyId)?.name || 'Agency',
   timeZone: (agencyId) => effectiveTimeZone(undefined, agencies.find(a => a.id === agencyId)?.timeZone),
   now: serverNow, testMode: isTestMode(), push: sendPushToRecipient,
   db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,

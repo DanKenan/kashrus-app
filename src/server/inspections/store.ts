@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { createScheduleStore } from './schedule-store.ts';
@@ -6,7 +7,9 @@ import { summary, type Report } from './model.ts';
 export const reportId = (agency: string, user: string, client: string) => createHash('sha256').update(JSON.stringify([agency, user, client])).digest('hex');
 export type Cursor = { submittedAt: string; id: string };
 export const reportOrder = (a: Cursor, b: Cursor) => b.submittedAt.localeCompare(a.submittedAt) || (a.id === b.id ? 0 : a.id > b.id ? -1 : 1);
-export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean; schedules?: ReturnType<typeof createScheduleStore> }) {
+export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean; hydratePay?: boolean; schedules?: ReturnType<typeof createScheduleStore> }) {
+  const payReports = new Map<string, Map<string, import('./fees.ts').PayReport>>(), payComplete = new Set<string>();
+  const financial = (r: Report) => { const { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch } = r; if (!payReports.has(r.agencyId)) payReports.set(r.agencyId, new Map()); payReports.get(r.agencyId)!.set(id, { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch }); };
   const reports = new Map<string, Report>(), summaries = new Map<string, ReturnType<typeof summary> & { agencyId: string }>();
   const loaded = new Map<string, Promise<void>>();
   const failures = new Map<string, { retryAt: number; attempts: number }>();
@@ -19,6 +22,28 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   const key = (agency: string, id: string) => `${agency}__${id}`;
   const file = (collection: string, id: string) => path.join(deps.dataDir, 'inspection-reports', collection, encodeURIComponent(id) + '.json');
   const list = (agency: string) => [...summaries.values()].filter(r => r.agencyId === agency).sort(reportOrder);
+  const payFile = (agency: string) => path.join(deps.dataDir, 'inspection-pay-cache', encodeURIComponent(agency) + '.json');
+  function loadPayCache(agency: string): Set<string> | null {
+    if (!deps.hydratePay || !deps.db()) return null;
+    try {
+      const cached = JSON.parse(readFileSync(payFile(agency), 'utf8'));
+      if (cached.version !== 1 || cached.agencyId !== agency || !Array.isArray(cached.reports) || !cached.reports.every((r: any) => typeof r.id === 'string' && typeof r.submittedAt === 'string')) return null;
+      const current = payReports.get(agency) ?? new Map();
+      for (const r of cached.reports) if (!current.has(r.id)) current.set(r.id, r);
+      payReports.set(agency, current);
+      return new Set(cached.reports.map((r: any) => r.id));
+    } catch { return null; } // A missing/corrupt cache is rebuilt from the authoritative report collection.
+  }
+  async function persistPayCache(agency: string) {
+    if (!deps.hydratePay || !deps.db() || !payComplete.has(agency)) return;
+    const target = payFile(agency), temporary = `${target}.${randomUUID()}.tmp`;
+    try {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(temporary, JSON.stringify({ version: 1, agencyId: agency, reports: [...(payReports.get(agency)?.values() ?? [])] }));
+      await fs.rename(temporary, target);
+    } catch { /* Cache failures never fail a committed report; the next boot can rebuild it. */ }
+    finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
+  }
   function cacheDetail(r: Report) {
     const id = key(r.agencyId, r.id);
     reports.delete(id); reports.set(id, r);
@@ -28,6 +53,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   function install(r: Report) {
     const id = key(r.agencyId, r.id), frontier = frontiers.get(r.agencyId), end = ends.get(r.agencyId);
     const complete = frontiers.has(r.agencyId) && ends.has(r.agencyId) && (!end || (!!frontier && reportOrder(frontier, end) >= 0));
+    financial(r);
     summaries.set(id, { ...summary(r), agencyId: r.agencyId }); cacheDetail(r);
     const rows = list(r.agencyId);
     for (const row of rows.slice(5000)) summaries.delete(key(r.agencyId, row.id));
@@ -51,12 +77,26 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
       const failed = failures.get(agency);
       if (failed && Date.now() < failed.retryAt) throw Error('Reports unavailable');
       const task = (async () => {
+        const cachedPayIds = loadPayCache(agency);
         const rows: Report[] = deps.db()
           ? (await query(agency, 200).get()).docs.map((d: any) => d.data())
           : (await localRows()).filter(r => r.agencyId === agency).sort(reportOrder).slice(0, 200);
+        // A short head is the entire authoritative collection, including an emptied collection.
+        if (rows.length < 200 && cachedPayIds) { const ids = new Set(rows.map(r => r.id)); for (const id of cachedPayIds) if (!ids.has(id)) payReports.get(agency)?.delete(id); }
         for (const r of rows) install(r);
+        // Reports are immutable: overlap with a complete cache avoids re-reading older history.
+        if (deps.hydratePay && deps.db() && rows.length === 200 && !rows.some(r => cachedPayIds?.has(r.id))) {
+          let cursor = rows.at(-1)!;
+          for (;;) {
+            const page = (await collection(agency).orderBy('sortKey', 'desc').startAfter(sortKey(cursor)).select('id', 'agencyId', 'companyId', 'companyName', 'mashgiachId', 'mashgiachName', 'submittedAt', 'fee', 'dataFee', 'feeMismatch').limit(1000).get()).docs.map((d: any) => d.data());
+            for (const r of page) financial(r);
+            if (page.length < 1000 || page.some((r: Report) => cachedPayIds?.has(r.id))) break;
+            cursor = page.at(-1)!;
+          }
+        } else if (!deps.db()) for (const r of (await localRows()).filter(r => r.agencyId === agency)) financial(r);
         if (rows.length < 200) ends.set(agency, list(agency).at(-1));
         frontiers.set(agency, rows.length < 200 ? list(agency).at(-1) : rows.at(-1));
+        payComplete.add(agency); await persistPayCache(agency);
         failures.delete(agency);
       })().catch(error => {
         loaded.delete(agency);
@@ -118,7 +158,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
       return { report: stored, created: false };
     }
     if (update) schedules!.install(r.agencyId, update.next);
-    install(saved); return { report: saved, created: true };
+    install(saved); await persistPayCache(r.agencyId); return { report: saved, created: true };
   }
   async function save(r: Report, photoData: Record<string, string>) {
     return deps.schedules ? deps.schedules.locked(r.agencyId, () => saveUnlocked(r, photoData)) : saveUnlocked(r, photoData);
@@ -192,5 +232,5 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     })().finally(() => flights.delete(id));
     flights.set(id, flight); return flight;
   }
-  return { boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, visiblePage, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
+  return { payReports: (agency: string) => [...(payReports.get(agency)?.values() ?? [])], boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, visiblePage, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
 }
