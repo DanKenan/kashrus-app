@@ -6,7 +6,9 @@ import { MockFirestore } from '../stage2/firestore-mock.mjs';
 import { registerInspectionRoutes } from '../../src/server/inspections/routes.ts';
 import { withOutboxLock } from '../../src/lib/inspectionVisit.ts';
 // Scan complete statement chains, including multiline chains and argument callbacks.
-const serverFiles = await readdir('src/server/inspections');
+const inspectionFiles = await readdir('src/server/inspections');
+const sourceFiles = await readdir('src/server/sources');
+const serverFiles = [...inspectionFiles, ...sourceFiles.map(f=>'../sources/'+f)];
 for (const required of ['schedule.ts', 'schedule-store.ts', 'food-service.ts', 'food-service-store.ts', 'inbox-store.ts', 'fees.ts', 'fees-store.ts', 'company-info-store.ts', 'accountant.ts', 'email.ts', 'export.ts']) assert.ok(serverFiles.includes(required), `${required}: missing index guard coverage`);
 for (const file of serverFiles) {
   if (!file.endsWith('.ts')) continue;

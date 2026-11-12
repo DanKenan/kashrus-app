@@ -4,6 +4,9 @@ const normalized = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 const folded = (s: string) => s.trim().toLowerCase();
 const synonyms: Record<string, string[]> = {
   name: ['Name', 'Item', 'Ingredient', 'Product', 'Product Name', 'Company Name', 'Establishment Name'],
+  address: ['Address', 'Street Address', 'Street', 'Location Address'],
+  companyFee: ['Annual Fee', 'Yearly Fee', 'Company Fee', 'Certification Fee'],
+  mashgiachFee: ['Supervision Fee', 'Mashgiach Fee', 'Inspection Fee', 'Visit Fee'],
   brand: ['Brand', 'Brand Name'],
   certification: ['Certification', 'Hechsher', 'Kosher Certification', 'Certifying Agency'],
   agency: ['Agency', 'Certifying Agency'], status: ['Status', 'Kosher Status', 'DPM', 'Dairy Pareve Meat'],
@@ -44,7 +47,7 @@ export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; 
     if (!table) continue;
     mapping[kind].table = table.name;
     guessed[`${kind}.table`] = exactTable ? 1 : 0.6;
-    const fields = kind === 'companies' ? ['name', 'type', 'brand', 'plant']
+    const fields = kind === 'companies' ? ['name', 'type', 'brand', 'plant', 'address', 'companyFee', 'mashgiachFee']
       : kind === 'ingredients' ? ['companyLink', 'name', 'brand', 'certification', 'agency', 'status', 'plant', 'expiresOn']
       : ['companyLink', 'name', 'brand', 'code', 'certification', 'agency', 'status', 'symbolRequired', 'plant'];
     const used = new Set<string>();
@@ -105,22 +108,22 @@ export function classifyRaw(mapping: SourceMapping, config: { certification?: st
 }
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value.trim() : undefined;
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
-  const read = (row: SourceRow, column?: string): string | undefined => column && typeof row.fields[column] === 'string' ? row.fields[column] as string : undefined;
+  const read = (row: SourceRow, column?: string): string | undefined => column && ['string', 'number'].includes(typeof row.fields[column]) ? String(row.fields[column]) : undefined;
   const extra = (row: SourceRow, config: object) => {
     const mapped = new Set(Object.entries(config).filter(([k, v]) => k !== 'table' && typeof v === 'string').map(([, v]) => v));
     return Object.fromEntries(Object.entries(row.fields).filter(([k, v]) => !mapped.has(k) && typeof v === 'string')) as Record<string, string>;
   };
   const c = mapping.companies;
   const companies = (rows[c.table] ?? []).filter(r => !c.factoryValues?.length || [...c.factoryValues, ...(c.foodServiceValues ?? [])].some(v => folded(v) === folded(read(r, c.type) ?? '')))
-    .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), extra: extra(r, c) }));
+    .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), address: read(r, c.address), companyFee: parseMoney(read(r, c.companyFee)), mashgiachFee: parseMoney(read(r, c.mashgiachFee)), extra: extra(r, c) }));
   const keptIds = new Set(companies.map(c => c.id));
   const otherCompanies = (rows[c.table] ?? []).filter(r => !keptIds.has(r.id))
     .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type) }));
   const ids = new Set(companies.map(c => c.id));
   const names = new Map<string, string[]>();
   for (const c of companies) names.set(folded(c.name), [...(names.get(folded(c.name)) ?? []), c.id]);
-  const links = (r: SourceRow, column: string) => {
-    const value = r.fields[column];
+  const links = (r: SourceRow, column?: string) => {
+    const value = column ? r.fields[column] : undefined;
     const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
     return [...new Set(values.flatMap(v => {
       const s = text(v); return !s ? [] : ids.has(s) ? [s] : names.get(folded(s)) ?? [];
@@ -141,4 +144,11 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
       code: read(r, p.code), symbolRequired, plant: read(r, p.plant), extra: extra(r, p) };
   });
   return { companies, ingredients, products, otherCompanies };
+}
+
+export function parseMoney(value: unknown): number | undefined {
+  const s = String(value ?? '').trim();
+  if (!/^\$?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?$/.test(s)) return undefined;
+  const amount = Number(s.replace(/[$,]/g, ''));
+  return Number.isFinite(amount) ? amount : undefined;
 }

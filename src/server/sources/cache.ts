@@ -28,7 +28,7 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
   return data.companies.map(c => {
     const content = {
       companyName: safeText(c.name),
-      company: { id: safeText(c.id), name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant) },
+      company: { id: safeText(c.id), name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant), address: safeText(c.address), companyFee: c.companyFee, mashgiachFee: c.mashgiachFee },
       ingredients: data.ingredients.filter(i => i.companyIds.includes(c.id)).map(i => ({
         id: safeText(i.id), name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
         dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: safeText(i.certificationRaw), statusRaw: safeText(i.statusRaw), agencyRaw: safeText(i.agencyRaw), confidence: i.confidence, group1: i.group1 === true, plant: safeText(i.plant),
@@ -115,6 +115,7 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
     }
   }
   return {
+    publish(agencyId: string, data: SourceData) { publish(agencyId, data, 'ok', {refreshedAt:new Date(now()).toISOString()}); },
     reassign(agencyId: string, mapping: SourceMapping) {
       const e = entry(agencyId);
       if (!e.data) return;

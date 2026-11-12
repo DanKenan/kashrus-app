@@ -35,7 +35,7 @@ export function registerInspectionRoutes(app: any, deps: {
   const others = (a: string) => deps.source(a).state.otherCompanies ?? [];
   const kind = (a: string, c: { id: string; type?: string }) => classifyPlace(c, foodValues(a), food.doc(a).marked, food.doc(a).manualPlaces, factoryValues(a));
   const markedOthers = (a: string) => others(a).filter(c => food.doc(a).marked.includes(c.id));
-  const places = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'food_service').map(c => ({ ...c, address: '', source: 'connected' as const })), ...markedOthers(a).map(c => ({ ...c, address: '', source: 'connected' as const })), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '', source: 'manual' as const }))];
+  const places = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'food_service').map(c => ({ ...c, address: ('address' in c ? c.address : '') || '', source: 'connected' as const })), ...markedOthers(a).map(c => ({ ...c, address: ('address' in c ? c.address : '') || '', source: 'connected' as const })), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '', source: 'manual' as const }))];
   const allPlaces = (a: string) => [...deps.source(a).state.companies, ...markedOthers(a), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '' }))];
   const templateFor = (a: string, id: string) => { const tid = Object.hasOwn(food.doc(a).placeTemplates, id) ? food.doc(a).placeTemplates[id] : null; return tid && Object.hasOwn(food.doc(a).templates, tid) ? food.doc(a).templates[tid] : null; };
   const zone = (a: string) => deps.timeZone?.(a) || 'America/New_York';
@@ -68,7 +68,7 @@ export function registerInspectionRoutes(app: any, deps: {
   function foodRow(a: string, c: ReturnType<typeof places>[number]) {
     const template = templateFor(a, c.id);
     const connected = c.source === 'connected';
-    return { ...row(a, c), address: c.address, source: c.source, type: c.type ?? '',
+    return { ...row(a, c), address: info(a,c.id).address || c.address, source: c.source, type: c.type ?? '',
       marked: connected && food.doc(a).marked.includes(c.id), typeMatched: connected && typeMatched(c, foodValues(a)), templateId: template?.id ?? null, templateName: template?.name ?? '' };
   }
   const sortedPlaces = (a: string, u: Person) => places(a).filter(c => visible(a, c.id, u)).map(c => foodRow(a, c)).sort((a, b) => a.name.localeCompare(b.name));
@@ -81,10 +81,12 @@ export function registerInspectionRoutes(app: any, deps: {
     const data = deps.source(a).connection?.fees?.mashgiach?.[id];
     return !Object.hasOwn(food.doc(a).manualPlaces, id) && data && Number.isFinite(data.amount) ? { amount: data.amount, currency: data.currency } : null;
   }
-  const info = (a: string, id: string) => Object.hasOwn(companyInfo.doc(a).places, id) ? companyInfo.doc(a).places[id] : emptyInfo();
+  const info = (a: string, id: string) => {const saved=Object.hasOwn(companyInfo.doc(a).places,id)?companyInfo.doc(a).places[id]:emptyInfo();return {...saved,address:saved.address||deps.source(a).state.companies.find(c=>c.id===id)?.address||''};};
+  const companyFee = (a:string,id:string) => {const saved=placeFee(a,id)?.company;if(saved)return saved;const value=deps.source(a).state.companies.find(c=>c.id===id)?.companyFee;return value===undefined?null:{amount:value,per:'year' as const,source:'data' as const};};
+  const effectiveFees = (a:string) => {const doc=fees.doc(a),places={...doc.places};for(const c of allPlaces(a)){const company=companyFee(a,c.id);if(company)places[c.id]={...places[c.id],company};}return {...doc,places};};
   const pay = async (a: string, query: any) => {
     const r = range(query.from, query.to, query.by ?? 'place');
-    return computePay(await store.payReportsForRange(a, r.from, r.to), fees.doc(a), allPlaces(a), r.from, r.to, r.by, zone(a));
+    return computePay(await store.payReportsForRange(a, r.from, r.to), effectiveFees(a), allPlaces(a), r.from, r.to, r.by, zone(a));
   };
   const message = async (a: string, query: any) => buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant?.email || '', await pay(a, query));
   async function sendSummary(a: string, query: any, idempotencyKey?: string, preparedTable?: Awaited<ReturnType<typeof pay>>) {
@@ -142,7 +144,7 @@ export function registerInspectionRoutes(app: any, deps: {
   app.get('/api/inspections/fees', handler(true, (_req: any, res: any, u: Person, a: string) => {
     const doc = fees.doc(a);
     res.json({ settings: doc.settings, canEdit: u.role === 'admin' || doc.settings.feeEditors === 'admins_and_coordinators',
-      places: allPlaces(a).filter(c => visible(a, c.id, u)).map(c => ({ id: c.id, name: c.name, kind: kind(a, c), company: placeFee(a, c.id)?.company ?? null, mashgiach: placeFee(a, c.id)?.mashgiach ?? null, mashgiachNames: schedules.company(a, c.id).mashgiachIds.map(id => people(a).find(p => p.id === id)?.name).filter(Boolean) })),
+      places: allPlaces(a).filter(c => visible(a, c.id, u)).map(c => ({ id: c.id, name: c.name, kind: kind(a, c), company: companyFee(a, c.id), ...(('mashgiachFee' in c && c.mashgiachFee !== undefined) ? {dataFee:{amount:c.mashgiachFee,currency:'USD'}} : {}), mashgiach: placeFee(a, c.id)?.mashgiach ?? null, mashgiachNames: schedules.company(a, c.id).mashgiachIds.map(id => people(a).find(p => p.id === id)?.name).filter(Boolean) })),
       ...(u.role === 'admin' ? { accountant: doc.accountant, email: { setUp: !!email.transport }, nextEmail: nextAccountantDate(doc.accountant?.timing, doc.lastSent, now(), zone(a)) } : {}) });
   }));
   app.put?.('/api/inspections/fees/:placeId', handler(true, async (req: any, res: any, u: Person, a: string) => {

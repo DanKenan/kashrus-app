@@ -1,8 +1,8 @@
 type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'dairy_equipment' | 'pareve' | 'meat'; group1?: boolean };
 export type Dpm = 'dairy' | 'dairy_equipment' | 'pareve' | 'meat';
-export type SourceKind = 'airtable' | 'google_sheets' | 'excel' | 'supabase';
+export type SourceKind = 'airtable' | 'google_sheets' | 'excel' | 'supabase' | 'upload';
 export interface Company {
-  id: string; name: string; type?: string; brand?: string; plant?: string; extra: Record<string, string>;
+  id: string; name: string; address?: string; companyFee?: number; mashgiachFee?: number; type?: string; brand?: string; plant?: string; extra: Record<string, string>;
 }
 export interface Ingredient {
   id: string; companyIds: string[]; name: string; brand?: string; certifyingAgency?: string;
@@ -15,13 +15,14 @@ export interface Product {
   dpm?: Dpm; group1?: boolean; symbolRequired?: boolean; plant?: string; extra: Record<string, string>;
 }
 export interface SourceMapping {
-  companies: { table: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
-  ingredients: { table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
-  products: { table: string; companyLink: string; name: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };
+  companies: { table: string; file?: SourceFile; pk?: string; address?: string; companyFee?: string; mashgiachFee?: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
+  ingredients: { table: string; file?: SourceFile; pk?: string; companyLink?: string; name?: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
+  products: { table: string; file?: SourceFile; pk?: string; companyLink?: string; name?: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };
   valueAssignments?: Record<string, Record<string, ValueAssignment>> | Partial<Record<'ingredient' | 'product', Record<string, Record<string, ValueAssignment>>>>;
   group1Values: string[];
 }
 export interface SourceData { companies: Company[]; otherCompanies?: { id: string; name: string; type?: string }[]; ingredients: Ingredient[]; products: Product[] }
+export interface SourceFile { id: string; name: string }
 export interface SourceTable { name: string; columns: string[] }
 export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
 export interface ConnectionResult { ok: boolean; access?: 'read' | 'readwrite'; tables?: SourceTable[]; error?: string }
@@ -32,6 +33,9 @@ export interface SourceConnector {
   listItems(companyId: string, kind: 'ingredient' | 'product'): Promise<(Ingredient | Product)[]>;
   loadAll?(): Promise<SourceData>;
   samples?(tables: SourceTable[]): Promise<SourceSamples>;
+  listTables?(): Promise<SourceTable[]>;
+  readRows?(table: string, file?: SourceFile): Promise<SourceRow[]>;
+  writeRow?(table: string, row: { id?: string; fields: Record<string, string> }, file?: SourceFile): Promise<SourceRow>;
   calls(): number;
 }
 export interface SourceRow { id: string; fields: Record<string, unknown> }

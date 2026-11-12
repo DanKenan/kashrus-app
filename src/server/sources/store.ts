@@ -5,6 +5,9 @@ import type { Backup } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
 export interface Connection {
+  oauth?: Partial<Record<import('./oauth.ts').OAuthProvider, import('./oauth.ts').OAuthRecord>>;
+  upload?: {fileNames:string[];copiedAt:string;rows:number;parts:number;hash:string};
+  fees?: {mashgiach?:Record<string,{amount:number;currency:string}>};
   group1Label?: string; group1Overrides?: Group1Overrides;
   agencyId: string; sourceType: SourceKind; baseId: string; access: 'read' | 'readwrite';
   mapping: SourceMapping; encryptedKey: string; keyHint: string; updatedAt: string; updatedBy: string;
@@ -110,7 +113,28 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     try { return JSON.parse(await fs.readFile(file('sourceConnections', id), 'utf8')); }
     catch (e: any) { if (e.code === 'ENOENT') return null; throw e; }
   }
-  return { connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw };
+  async function saveUpload(connection:Connection, files:import('./upload.ts').UploadedFile[]) {
+    if(deps.staged()) throw Error('Writes blocked');
+    const text=JSON.stringify(files);
+    if(Buffer.byteLength(text)>3*1024*1024) throw Object.assign(Error('This file is too big to copy. Split it into smaller files.'),{status:400});
+    const encoded=Buffer.from(text).toString('base64'), hash=digest(text), parts=Math.ceil(encoded.length/(480*1024));
+    const old=connection.upload;
+    const upload={fileNames:files.map(f=>f.name),copiedAt:new Date().toISOString(),rows:files.reduce((n,f)=>n+f.tabs.reduce((n,t)=>n+t.rows.length,0),0),parts,hash};
+    await commit([...Array.from({length:parts},(_,i)=>({collection:'sourceUploads',id:`${connection.agencyId}__copy__${i}`,doc:{data:encoded.slice(i*480*1024,(i+1)*480*1024)}})),{collection:'sourceConnections',id:connection.agencyId,doc:{...connection,upload}}]);
+    connection.upload=upload;
+    if(old&&old.parts>parts) await commit(Array.from({length:old.parts-parts},(_,i)=>({collection:'sourceUploads',id:`${connection.agencyId}__copy__${i+parts}`})));
+  }
+  async function loadUpload(c:Connection):Promise<import('./upload.ts').UploadedFile[]> {
+    if(!c.upload)return [];
+    const parts=await Promise.all(Array.from({length:c.upload.parts},(_,i)=>read('sourceUploads',`${c.agencyId}__copy__${i}`)));
+    if(parts.some(p=>typeof p?.data!=='string'))throw Error('Missing upload part');
+    const text=Buffer.from(parts.map(p=>p.data).join(''),'base64').toString('utf8');if(digest(text)!==c.upload.hash)throw Error('Invalid upload');return JSON.parse(text);
+  }
+  async function remove(c:Connection) {
+    if(deps.staged())throw Error('Writes blocked');
+    await commit([{collection:'sourceConnections',id:c.agencyId},...Array.from({length:c.upload?.parts||0},(_,i)=>({collection:'sourceUploads',id:`${c.agencyId}__copy__${i}`}))]);
+  }
+  return { connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
 }
 // Read legacy connection settings without rewriting source values.
 export function normalizeConnection(connection: any): Connection {

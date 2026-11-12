@@ -520,6 +520,12 @@ app.use((req, res, next) => {
 });
 
 // Visit reports can include four capped photos and up to 2,000 item notes.
+app.post('/api/sources/upload', (req, res, next) => {
+  express.raw({ type: () => true, limit: '5mb' })(req, res, error => {
+    if (error) return res.status(400).json({ error: 'This file is larger than 5 MiB.' });
+    next();
+  });
+});
 app.use('/api/visits/reports', express.json({ limit: '20mb' }));
 // The accountant endpoint accepts JSON null to clear the agency's accountant.
 app.use('/api/inspections/accountant', express.json({ limit: '2mb', strict: false }));
@@ -747,6 +753,8 @@ app.use('/api', (_req, res, next) => {
 const PUBLIC_API_ROUTES: Array<{ method: string; path: string }> = [
   // Note: req.path inside app.use('/api') is stripped of the /api prefix.
   { method: 'GET', path: '/health' },
+  { method: 'GET', path: '/sources/oauth/google_sheets/callback' },
+  { method: 'GET', path: '/sources/oauth/excel/callback' },
   { method: 'POST', path: '/auth/login' },
   { method: 'POST', path: '/auth/setup' },
   { method: 'POST', path: '/auth/forgot-password' },
@@ -14826,6 +14834,7 @@ const sourceRoutes = registerSourceRoutes(app, {
   foodServiceCompanyIds: (agencyId) => inspectionRoutes.foodServiceCompanyIds(agencyId),
   secret: () => process.env.SOURCE_KEYS_SECRET || getJwtSecret(),
   testMode: isTestMode(), requireAdmin,
+  agencyName: (id) => agencies.find(a => a.id === id)?.name || 'Agency',
   timeZone: (id) => agencies.find(a => a.id === id)?.timeZone,
 });
 const inspectionRoutes = registerInspectionRoutes(app, {
