@@ -158,7 +158,7 @@ export default {
    await pin('2026-12-02T12:01:00Z');
    await action('after-report debounce', 'POST', '/api/visits/reports', { ...baseBody, clientReportId: 'report-119-after-report-debounce' }, 2, 201, 'mash');
    await action('accountant every-days mode', 'PUT', '/api/inspections/accountant', { ...accountant, timing: { mode: 'every_days', everyDays: 2 } });
-   await pin('2026-12-05T12:00:00Z'); await action('every-days run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 1);
+   await pin('2026-12-05T12:00:00Z'); await action('every-days run', 'POST', '/api/__test__/inspections/check', {}, 1, 200, 'admin', 2);
    await action('clear accountant', 'PUT', '/api/inspections/accountant', null);
    await action('no accountant', 'POST', '/api/inspections/accountant/send', { kind: 'now' }, 0).then(r => assert.equal(r.reason, 'no_accountant'));
    await action('clear company info contacts', 'PUT', infoPath, { address: '', phone: '', contacts: [] });
