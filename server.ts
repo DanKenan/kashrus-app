@@ -1229,6 +1229,13 @@ let freshnessNeededCached = false;
 const FRESHNESS_IDLE_READ_MS = 300_000;
 let freshnessLastIdleReadMono = -Infinity;
 let freshnessReadCount = 0; // test-visible: version reads issued by the freshness check
+// Two-step rollout. Only turn on reads after all live revisions dual-write
+// this companion; an old writer could otherwise advance the monolith alone.
+let freshnessSidecarReadsForTests = false;
+function useFreshnessSidecar(): boolean {
+  return process.env.FRESHNESS_SIDECAR_READS === 'true' ||
+    (isTestMode() && freshnessSidecarReadsForTests);
+}
 function freshnessNeedRecompute(): boolean {
   const nowMs = serverNow().getTime();
   let need = false;
@@ -4296,6 +4303,9 @@ function saveState() {
 // entirely (even on Cloud Run) — see EMERGENCY.md.
 // ---------------------------------------------------------------------------
 const FIRESTORE_STATE_DOC = 'app-state/main';
+// Small, atomically maintained _v companion. Enterprise charges read units
+// for the large document even when a read requests only its version field.
+const FIRESTORE_FRESHNESS_DOC = 'app-state-freshness/main';
 let firestoreDb: any = null;
 // Set true once we've successfully applied Firestore state (or confirmed no
 // doc exists yet). persistToFirestore() refuses to write until this is true,
@@ -4966,6 +4976,26 @@ function applyIdentityInvariant(identityBase: any, outDoc: any, outcome: any, la
   return { ...outDoc, users };
 }
 
+/**
+ * Bootstrap/repair the small companion from the authoritative main document,
+ * transactionally, before the server starts accepting traffic. Staged
+ * revisions and maintenance must never write during boot.
+ */
+async function initializeFreshnessSidecar(): Promise<void> {
+  if (!firestoreDb || isStagedRevision() || process.env.MAINTENANCE_MODE === 'true') return;
+  await withWriteLabel('freshness:bootstrap', () => runFirestoreTransaction(async (tx: any) => {
+    const monolith = await tx.get(firestoreDb.doc(FIRESTORE_STATE_DOC));
+    if (!monolith.exists) return;
+    const version = monolith.data()?._v;
+    if (!Number.isSafeInteger(version) || version < 0) {
+      throw new Error('[freshness] Invalid monolith version; refusing sidecar bootstrap.');
+    }
+    const sidecar = firestoreDb.doc(FIRESTORE_FRESHNESS_DOC);
+    const previous = await tx.get(sidecar);
+    if (!previous.exists || previous.data()?._v !== version) tx.set(sidecar, { _v: version });
+  }));
+}
+
 async function commitState(
   mutator: (freshDoc: any, currentVersion: number, preRead?: any) => MutatorOutcome,
   options: CommitOptions = {}
@@ -5218,6 +5248,9 @@ async function commitState(
           await dualWriteChangedEntities(tx, firestoreDb, pristineBefore, outcome.doc);
         }
         tx.set(docRef, payload);
+        // Atomic companion: no independent version drift or partial commit.
+        // No-op, refused and duplicate operations never reach this write.
+        tx.set(firestoreDb.doc(FIRESTORE_FRESHNESS_DOC), { _v: currentVersion + 1 });
         return { result: outcome.result, version: currentVersion + 1, doc: payload };
       }));
 
@@ -11726,13 +11759,16 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
         return res.status(500).json({ error: 'mock not active' });
       }
       const doc = firestoreDb._read('app-state/main');
-      return res.json({ doc, version: doc ? doc._v : null });
+      const sidecar = firestoreDb._read(FIRESTORE_FRESHNESS_DOC);
+      return res.json({ doc, version: doc ? doc._v : null, freshnessVersion: sidecar?._v ?? null });
     }
     // Real emulator: read via the Admin SDK.
     try {
       const snap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
       const doc = snap.exists ? snap.data() : null;
-      return res.json({ doc, version: doc && typeof doc._v === 'number' ? doc._v : null });
+      const sidecar = await firestoreDb.doc(FIRESTORE_FRESHNESS_DOC).get();
+      return res.json({ doc, version: doc && typeof doc._v === 'number' ? doc._v : null,
+        freshnessVersion: sidecar.exists ? (sidecar.data()?._v ?? null) : null });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || 'read failed' });
     }
@@ -17120,7 +17156,9 @@ async function readStoredVersion(): Promise<number | null> {
   freshnessReadCount++;
   if (isTestMode() && testFreshnessFailReads) throw new Error('test: read failure');
   if (isTestMode() && testFreshnessHangReads) return new Promise<number | null>(() => {});
-  const ref = firestoreDb.doc(FIRESTORE_STATE_DOC);
+  // Sidecar mode never touches the big monolith unless _v is newer.
+  // Missing/invalid sidecar does not confirm freshness (extras fail closed).
+  const ref = firestoreDb.doc(useFreshnessSidecar() ? FIRESTORE_FRESHNESS_DOC : FIRESTORE_STATE_DOC);
   let snap: any;
   if (typeof firestoreDb.getAll === 'function') {
     const arr = await firestoreDb.getAll(ref, { fieldMask: ['_v'] });
@@ -17983,6 +18021,7 @@ app.post('/api/__test__/freshness', async (req, res) => {
   if (!isTestMode()) return res.status(404).json({ error: 'Not found' });
   const b = req.body || {};
   if (typeof b.advanceMonoMs === 'number') testMonoOffsetMs += b.advanceMonoMs;
+  if (typeof b.useSidecar === 'boolean') freshnessSidecarReadsForTests = b.useSidecar;
   if (typeof b.failReads === 'boolean') testFreshnessFailReads = b.failReads;
   if (typeof b.hangReads === 'boolean') testFreshnessHangReads = b.hangReads;
   if (b.holdNextInstall === true) testFreshnessHoldNext = true;
@@ -22280,6 +22319,9 @@ async function startServer() {
   // boot. The live revision (flag removed) does the normal startup writes
   // at cutover time. Reads (initFirestore/loadStateFromFirestore above) stay.
   const staged = isStagedRevision();
+  // Phase 1 writes the companion; phase 2 enables sidecar reads once ALL old
+  // revisions have drained. Do not enable the read flag during rollout.
+  if (!staged) await initializeFreshnessSidecar();
   if (staged) {
     console.log('[Boot] STAGED_REVISION=true — skipping all startup writes (pepper init, task-order backfill, VAPID, password migration). Reads only.');
   }

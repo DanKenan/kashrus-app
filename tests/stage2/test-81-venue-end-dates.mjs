@@ -190,6 +190,27 @@ export default {
       fz = await hook('freshness', { tick: true });
       assert(fz.needed === true && fz.status === 'fresh' && fz.reads === readsA0 + 1 && !String(fz.tick).startsWith('idle'), `first temporary grant -> 15 s reads resume (born fresh) ${J(fz)}`);
       assert(r.status === 200 && J(r.json.venueIds) === J([V1]), `coordinator loan ${r.status} ${r.text.slice(0, 200)} (response limited to the caller's venues)`);
+      // Regression: a Pool-like temporary loan turns on 15-second freshness.
+      // Twelve checks must read the tiny sidecar, not 12 * 254 KiB of state.
+      const marker = await call(baseUrl, 'GET', '/api/__test__/firestore-doc', ctx.authHeaders);
+      assert(marker.status === 200 && marker.json?.freshnessVersion === marker.json?.version,
+        `sidecar _v must match committed main _v: ${J(marker.json?.freshnessVersion)} / ${J(marker.json?.version)}`);
+      try {
+        await hook('freshness', { useSidecar: true });
+        await hook('reads', { reset: true });
+        for (let i = 0; i < 12; i++) {
+          const fr = await hook('freshness', { refreshNow: true });
+          assert(fr.refresh?.result === 'confirmed' && fr.status === 'fresh',
+            `sidecar must confirm current permissions: ${J(fr)}`);
+        }
+        const bill = await hook('reads', {});
+        assert((bill.byCollection?.['app-state-freshness'] || 0) >= 12 &&
+               (bill.byCollection?.['app-state'] || 0) === 0,
+          `12 freshness checks must not reread the full state: ${J(bill)}`);
+      } finally {
+        await hook('freshness', { useSidecar: false });
+      }
+      details.push('dated Pool-like access: 12 version checks, zero large-document reads');
       r = await ops(tOwner, U('mash2'), [{ op: 'add', venueId: V3, until: day(2) }], await revOf(U('mash2')));
       assert(r.status === 200 && J(r.json.venueIds) === J([V3]), `owner loan ${r.status} ${r.text.slice(0, 200)}`);
       let m2 = await rec(U('mash2'));
