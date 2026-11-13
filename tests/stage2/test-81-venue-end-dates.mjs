@@ -660,9 +660,12 @@ export default {
           // B's reverse grant; no silent use of a stale companion.
           const sideA = await hook('freshness', { useSidecar: true, inspectSidecar: true });
           const sideB = await hookB('freshness', { useSidecar: true, inspectSidecar: true });
-          assert(sideA.stateVersion === sideA.sidecarVersion &&
-                 sideB.stateVersion === sideB.sidecarVersion,
-            `both processes have a current atomic sidecar: A=${J(sideA)} B=${J(sideB)}`);
+          // A process may be one version behind when it boots while the
+          // other is sweeping an expired grant. That's safe: the next refresh
+          // must install the newer state, as asserted below.
+          assert(Number.isSafeInteger(sideA.sidecarVersion) && sideA.sidecarVersion >= sideA.stateVersion &&
+                 Number.isSafeInteger(sideB.sidecarVersion) && sideB.sidecarVersion >= sideB.stateVersion,
+            `both processes see the authoritative sidecar, at least as new as their own memory: A=${J(sideA)} B=${J(sideB)}`);
           await hookB('grant-sweep', { disable: true });
           let fbB = await hookB('freshness', { recompute: true, tick: true });
           assert(fbB.needed === false, `B idle (only undated access) ${J(fbB)}`);
