@@ -655,6 +655,14 @@ export default {
           assert(J(taskIds(await tasksAt(tMashB, V3, Bu))) === J([`task-t81-3-${ts}`]), 'B sees V3');
           // root N7 (a): idle process B learns of an end date set on A within 5 min + one tick (normal ticks, fake clocks)
           const hookB = async (path, body) => { const q = await call(Bu, 'POST', `/api/__test__/${path}`, ctx.authHeaders, body); assert(q.status === 200, `${path} on B ${q.status}`); return q.json; };
+          // Real-emulator, two-process security test IN sidecar mode. B must
+          // discover A's new temporary grant, A's untick, and A must discover
+          // B's reverse grant; no silent use of a stale companion.
+          const sideA = await hook('freshness', { useSidecar: true, inspectSidecar: true });
+          const sideB = await hookB('freshness', { useSidecar: true, inspectSidecar: true });
+          assert(sideA.stateVersion === sideA.sidecarVersion &&
+                 sideB.stateVersion === sideB.sidecarVersion,
+            `both processes have a current atomic sidecar: A=${J(sideA)} B=${J(sideB)}`);
           await hookB('grant-sweep', { disable: true });
           let fbB = await hookB('freshness', { recompute: true, tick: true });
           assert(fbB.needed === false, `B idle (only undated access) ${J(fbB)}`);
@@ -707,6 +715,7 @@ export default {
           assert((await call(Bu, 'GET', '/api/tasks', authKB)).status === 401, 'B refuses the old kiosk session after the reset');
           details.push('J two processes: untick on A enforced + notified on B in one refresh; reverse direction');
         } finally {
+          await hook('freshness', { useSidecar: false }).catch(() => {});
           await second.stop();
         }
       }
