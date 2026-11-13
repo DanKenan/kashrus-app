@@ -190,6 +190,27 @@ export default {
       fz = await hook('freshness', { tick: true });
       assert(fz.needed === true && fz.status === 'fresh' && fz.reads === readsA0 + 1 && !String(fz.tick).startsWith('idle'), `first temporary grant -> 15 s reads resume (born fresh) ${J(fz)}`);
       assert(r.status === 200 && J(r.json.venueIds) === J([V1]), `coordinator loan ${r.status} ${r.text.slice(0, 200)} (response limited to the caller's venues)`);
+      // Regression: a Pool-like temporary loan turns on 15-second freshness.
+      // Twelve checks must read the tiny sidecar, not 12 * 254 KiB of state.
+      const marker = await hook('freshness', { inspectSidecar: true });
+      assert(marker.sidecarVersion === marker.stateVersion && marker.sidecarBytes < 256,
+        `tiny atomic sidecar must match main _v: ${J(marker)}`);
+      try {
+        await hook('freshness', { useSidecar: true });
+        await hook('reads', { reset: true });
+        for (let i = 0; i < 12; i++) {
+          const fr = await hook('freshness', { refreshNow: true });
+          assert(fr.refresh?.result === 'confirmed' && fr.status === 'fresh',
+            `sidecar must confirm current permissions: ${J(fr)}`);
+        }
+        const bill = await hook('reads', {});
+        assert((bill.byCollection?.['app-state-freshness'] || 0) >= 12 &&
+               (bill.byCollection?.['app-state'] || 0) === 0,
+          `12 freshness checks must not reread the full state: ${J(bill)}`);
+      } finally {
+        await hook('freshness', { useSidecar: false });
+      }
+      details.push('dated Pool-like access: 12 version checks, zero large-document reads');
       r = await ops(tOwner, U('mash2'), [{ op: 'add', venueId: V3, until: day(2) }], await revOf(U('mash2')));
       assert(r.status === 200 && J(r.json.venueIds) === J([V3]), `owner loan ${r.status} ${r.text.slice(0, 200)}`);
       let m2 = await rec(U('mash2'));
@@ -634,6 +655,17 @@ export default {
           assert(J(taskIds(await tasksAt(tMashB, V3, Bu))) === J([`task-t81-3-${ts}`]), 'B sees V3');
           // root N7 (a): idle process B learns of an end date set on A within 5 min + one tick (normal ticks, fake clocks)
           const hookB = async (path, body) => { const q = await call(Bu, 'POST', `/api/__test__/${path}`, ctx.authHeaders, body); assert(q.status === 200, `${path} on B ${q.status}`); return q.json; };
+          // Real-emulator, two-process security test IN sidecar mode. B must
+          // discover A's new temporary grant, A's untick, and A must discover
+          // B's reverse grant; no silent use of a stale companion.
+          const sideA = await hook('freshness', { useSidecar: true, inspectSidecar: true });
+          const sideB = await hookB('freshness', { useSidecar: true, inspectSidecar: true });
+          // A process may be one version behind when it boots while the
+          // other is sweeping an expired grant. That's safe: the next refresh
+          // must install the newer state, as asserted below.
+          assert(Number.isSafeInteger(sideA.sidecarVersion) && sideA.sidecarVersion >= sideA.stateVersion &&
+                 Number.isSafeInteger(sideB.sidecarVersion) && sideB.sidecarVersion >= sideB.stateVersion,
+            `both processes see the authoritative sidecar, at least as new as their own memory: A=${J(sideA)} B=${J(sideB)}`);
           await hookB('grant-sweep', { disable: true });
           let fbB = await hookB('freshness', { recompute: true, tick: true });
           assert(fbB.needed === false, `B idle (only undated access) ${J(fbB)}`);
@@ -686,6 +718,7 @@ export default {
           assert((await call(Bu, 'GET', '/api/tasks', authKB)).status === 401, 'B refuses the old kiosk session after the reset');
           details.push('J two processes: untick on A enforced + notified on B in one refresh; reverse direction');
         } finally {
+          await hook('freshness', { useSidecar: false }).catch(() => {});
           await second.stop();
         }
       }

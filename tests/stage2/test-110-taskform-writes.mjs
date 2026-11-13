@@ -5,7 +5,7 @@ import { shiftFixture } from './test-101-shifts-crud.mjs';
 
 export default {
   name: 'Test 110: Task form people, built-ins, atomic batch and write costs',
-  whatItProves: 'Code defaults require zero writes; venue overrides and tombstones persist; task-owned per-day people and date swaps route private visibility and overdue pushes; a batch commits atomically with one push per person.',
+  whatItProves: 'Code defaults require zero writes; venue overrides and tombstones persist; task-owned per-day people and date swaps route private visibility and overdue pushes; a batch commits atomically with one push per person and one tiny version-sidecar write.',
   async run(baseUrl, ctx) {
     const { api, venueId, venue2, people } = await shiftFixture(baseUrl, ctx, '110');
     const clock = async (iso) => assert.equal((await ctx.api('POST', '/api/__test__/clock', { iso })).status, 200);
@@ -44,7 +44,7 @@ export default {
       const late = await api('admin', 'POST', '/api/tasks', { venueId, title: 'Existing late task', targetTime: '11:00 PM' });
       assert.equal(late.status, 201);
       const originalLate = (await ctx.getDoc()).tasks.find((t) => t.id === late.json.id);
-      await measure('create 1 task in populated venue', 2, 2, async () => {
+      await measure('create 1 task in populated venue', 2, 3, async () => {
         const r = await api('admin', 'POST', '/api/tasks', { venueId, title: 'Earlier single', targetTime: '10:30 PM' });
         assert.equal(r.status, 201); assert.ok(r.json.sortOrder < originalLate.sortOrder);
       });
@@ -54,7 +54,7 @@ export default {
       }
       await ctx.api('POST', '/api/__test__/push-log/clear', {});
       const batchBody = { venueId, operationId: randomUUID(), shiftId: 'builtin-afternoon', assignmentMode: 'task', assignedTo: [people.mash.email], isPrivate: true, enableOverdueAlert: true, tasks: Array.from({ length: 5 }, (_, i) => ({ title: `Taskform ${i}` })) };
-      const created = await measure('create 5 tasks', 6, 6, async () => {
+      const created = await measure('create 5 tasks', 6, 7, async () => {
         const r = await api('admin', 'POST', '/api/tasks', batchBody);
         assert.equal(r.status, 201, JSON.stringify(r.json)); return r.json.tasks;
       });
@@ -77,25 +77,25 @@ export default {
       let pushes = (await ctx.api('GET', '/api/__test__/push-log')).json.log;
       assert.deepEqual(pushes.filter((p) => p.title === '📋 New task assigned to you').map((p) => p.endpoint), [endpoints.mash]);
       const id = created[0].id;
-      await measureSave('change one weekday', 2, 2, id, { dayAssignees: { '5': [people.assign.email] } });
-      await measureSave('one-time swap', 2, 2, id, { assigneeSwaps: [{ date: date(0), assignedTo: [people.coord.email] }] });
+      await measureSave('change one weekday', 2, 3, id, { dayAssignees: { '5': [people.assign.email] } });
+      await measureSave('one-time swap', 2, 3, id, { assigneeSwaps: [{ date: date(0), assignedTo: [people.coord.email] }] });
       await measureSave('unchanged task save', 1, 0, id, { dayAssignees: { '5': [people.assign.email] }, assigneeSwaps: [{ date: date(0), assignedTo: [people.coord.email] }] });
       assert.ok((await read('assign')).tasks.some((t) => t.id === id), 'weekday assignee can see private task');
       assert.equal((await read('elsewhere')).tasks.some((t) => t.id === id), false);
-      const edit = await measure('first built-in edit', 1, 1, async () => {
+      const edit = await measure('first built-in edit', 1, 2, async () => {
         const r = await api('admin', 'PUT', `/api/shifts/${encodeURIComponent(builtin('morning'))}`, { venueId, endMinutes: 800, userIds: [people.mash.id] });
         assert.equal(r.status, 200, JSON.stringify(r.json)); return r.json;
       });
       await measure('unchanged shift save', 1, 0, async () => assert.equal((await api('admin', 'PUT', '/api/shifts/builtin-morning', edit)).status, 200));
       assert.equal((await read('admin', venue2)).shifts.find((s) => s.id === builtin('morning', venue2)).endMinutes, 840, 'other venue unchanged');
-      await measure('drag-release shift hours', 1, 1, async () => {
+      await measure('drag-release shift hours', 1, 2, async () => {
         const r = await api('admin', 'PUT', `/api/shifts/${encodeURIComponent(edit.id)}`, { endMinutes: 801 });
         assert.equal(r.status, 200);
       });
       const beforeOld = (await read()).tasks.find((t) => t.id === id);
       const oldPayload = { title: 'Taskform 0 old client', assignedTo: ['all'], isPrivate: false };
       const oldTitleVersion = await ctx.getVersion();
-      await measure('old-client title edit', 2, 2, async () => {
+      await measure('old-client title edit', 2, 3, async () => {
         const r = await save(id, oldPayload, oldTitleVersion);
         assert.deepEqual(r.assignedTo, beforeOld.assignedTo); assert.equal(r.isPrivate, true);
         assert.deepEqual(r.dayAssignees, beforeOld.dayAssignees); assert.deepEqual(r.assigneeSwaps, beforeOld.assigneeSwaps);
@@ -167,8 +167,8 @@ export default {
         assert.equal((await api('admin', 'POST', '/api/tasks', { venueId, title: 'Bad fields', ...bad })).status, 400);
       }
       assert.equal((await api('admin', 'DELETE', `/api/shifts/${encodeURIComponent(builtin('night', venue2))}`, { venueId })).status, 404);
-      await measure('delete unused built-in', 1, 1, async () => assert.equal((await api('admin', 'DELETE', `/api/shifts/${encodeURIComponent(builtin('night', venue2))}`)).status, 200));
-      await measure('delete attached built-in', 2, 2, async () => assert.equal((await api('admin', 'DELETE', '/api/shifts/builtin-morning', { venueId })).status, 200));
+      await measure('delete unused built-in', 1, 2, async () => assert.equal((await api('admin', 'DELETE', `/api/shifts/${encodeURIComponent(builtin('night', venue2))}`)).status, 200));
+      await measure('delete attached built-in', 2, 3, async () => assert.equal((await api('admin', 'DELETE', '/api/shifts/builtin-morning', { venueId })).status, 200));
       assert.equal((await read()).tasks.find((t) => t.id === legacy.json.id).shiftId, null);
       assert.equal((await ctx.getDoc()).shifts.find((s) => s.id === builtin('morning') && s.venueId === venueId).deleted, true);
       if (ctx.restartServer) await ctx.restartServer();
@@ -183,7 +183,7 @@ export default {
         { ...late.json, id: `${thirdVenue}-early`, venueId: thirdVenue, title: 'Equal order early', targetTime: '8:00 AM', sortOrder: 0 },
         { ...late.json, id: `${thirdVenue}-late`, venueId: thirdVenue, title: 'Equal order late', targetTime: '10:00 AM', sortOrder: 0 },
       ] })).status, 200);
-      const collision = await measure('create with exhausted order gap', 3, 3, () => api('admin', 'POST', '/api/tasks', { venueId: thirdVenue, title: 'Insert between equal positions', targetTime: '9:00 AM' }));
+      const collision = await measure('create with exhausted order gap', 3, 4, () => api('admin', 'POST', '/api/tasks', { venueId: thirdVenue, title: 'Insert between equal positions', targetTime: '9:00 AM' }));
       assert.equal(collision.status, 201, JSON.stringify(collision.json));
       const ordered = (await read('admin', thirdVenue)).tasks.sort((a, b) => a.sortOrder - b.sortOrder);
       assert.deepEqual(ordered.map((t) => t.title), ['Equal order early', 'Insert between equal positions', 'Equal order late']);
@@ -192,7 +192,7 @@ export default {
         { ...late.json, id: `${extremeVenue}-early`, venueId: extremeVenue, targetTime: '8:00 AM', sortOrder: -1e308 },
         { ...late.json, id: `${extremeVenue}-late`, venueId: extremeVenue, targetTime: '10:00 AM', sortOrder: 1e308 },
       ] })).status, 200);
-      await measure('create between wide order values', 2, 2, async () => {
+      await measure('create between wide order values', 2, 3, async () => {
         const r = await api('admin', 'POST', '/api/tasks', { venueId: extremeVenue, title: 'Finite midpoint', targetTime: '9:00 AM' });
         assert.equal(r.status, 201); assert.equal(r.json.sortOrder, 0);
       });

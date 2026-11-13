@@ -37,8 +37,8 @@
 // well under the 20,000/day free write quota.
 const DAY_BUDGET = 2_000;
 const DAY_WITH_QR_BUDGET = 7_500;
-// One save = the main document + the entities it changed (never every user row).
-const SAVE_MAX = 3;
+// One save = monolith + tiny atomic version companion + changed entities.
+const SAVE_MAX = 4;
 const DAY = {
   logins: 20,            // password sign-ins
   appOpens: 80,

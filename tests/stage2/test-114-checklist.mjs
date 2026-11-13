@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { shiftFixture } from './test-101-shifts-crud.mjs';
 export default {
   name: 'Test 114: checklist completion, permissions and write budget',
-  whatItProves: 'Validated checklists; attributed ticks; all-items completion; unticking; partial overdue; legacy behavior; checklist ticks and unticks match a check-in at the same venue by the same mashgiach: 2 reads and 2 writes = one commit (app-state + task mirror); no-op 1 read/0 writes; cached GET 0/0; concurrent different-item ticks survive with attribution; same-item races leave one tick (last commit wins), never duplicates.',
+  whatItProves: 'Validated checklists; attributed ticks; all-items completion; unticking; partial overdue; legacy behavior; checklist ticks and unticks match a check-in at the same venue by the same mashgiach: 2 reads and 3 writes = one commit (app-state + task mirror + tiny freshness sidecar); no-op 1 read/0 writes; cached GET 0/0; concurrent different-item ticks survive with attribution; same-item races leave one tick (last commit wins), never duplicates.',
   async run(baseUrl, ctx) {
     const { api, venueId, people } = await shiftFixture(baseUrl, ctx, '114');
     const body = { venueId, title: 'Opening checklist', inputType: 'checklist', checklistItems: [' Lights on ', 'Doors open'], targetTime: '6:00 AM', targetTimeMinutes: 360, enableOverdueAlert: true, daysOfWeek: [0,1,2,3,4,5,6] };
@@ -30,7 +30,7 @@ export default {
       const version = await ctx.getVersion();
       // A changed task reads app-state and its entity mirror; a no-op reads only app-state.
       const label = `${++operation}: ${ticked ? 'tick' : 'untick'} ${item}${delta ? '' : ' no-op'}`;
-      const r = await measure(label, delta ? 2 : 1, delta ? 2 : 0,
+      const r = await measure(label, delta ? 2 : 1, delta ? 3 : 0,
         () => api('mash', 'POST', path, { item, ticked, byName: 'Forged' }));
       assert.equal(r.status, 200, JSON.stringify(r.json));
       assert.equal((await ctx.getVersion()) - version, delta, 'commit count');
@@ -62,7 +62,7 @@ export default {
     const baseline = await api('admin', 'POST', '/api/tasks', { ...body, title: 'Check-in budget baseline', inputType: 'check_in' });
     assert.equal(baseline.status, 201);
     const baselineVersion = await ctx.getVersion();
-    const checkIn = await measure('check-in baseline', 2, 2,
+    const checkIn = await measure('check-in baseline', 2, 3,
       () => api('mash', 'POST', `/api/tasks/${baseline.json.id}/check-in`, {}));
     assert.equal(checkIn.status, 200, JSON.stringify(checkIn.json));
     assert.equal((await ctx.getVersion()) - baselineVersion, 1, 'check-in is one commit');
