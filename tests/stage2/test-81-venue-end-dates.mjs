@@ -192,9 +192,9 @@ export default {
       assert(r.status === 200 && J(r.json.venueIds) === J([V1]), `coordinator loan ${r.status} ${r.text.slice(0, 200)} (response limited to the caller's venues)`);
       // Regression: a Pool-like temporary loan turns on 15-second freshness.
       // Twelve checks must read the tiny sidecar, not 12 * 254 KiB of state.
-      const marker = await call(baseUrl, 'GET', '/api/__test__/firestore-doc', ctx.authHeaders);
-      assert(marker.status === 200 && marker.json?.freshnessVersion === marker.json?.version,
-        `sidecar _v must match committed main _v: ${J(marker.json?.freshnessVersion)} / ${J(marker.json?.version)}`);
+      const marker = await hook('freshness', { inspectSidecar: true });
+      assert(marker.sidecarVersion === marker.stateVersion && marker.sidecarBytes < 256,
+        `tiny atomic sidecar must match main _v: ${J(marker)}`);
       try {
         await hook('freshness', { useSidecar: true });
         await hook('reads', { reset: true });

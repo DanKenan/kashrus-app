@@ -11759,16 +11759,13 @@ if (process.env.FIRESTORE_MOCK === 'true' || isTestMode()) {
         return res.status(500).json({ error: 'mock not active' });
       }
       const doc = firestoreDb._read('app-state/main');
-      const sidecar = firestoreDb._read(FIRESTORE_FRESHNESS_DOC);
-      return res.json({ doc, version: doc ? doc._v : null, freshnessVersion: sidecar?._v ?? null });
+      return res.json({ doc, version: doc ? doc._v : null });
     }
     // Real emulator: read via the Admin SDK.
     try {
       const snap = await firestoreDb.doc(FIRESTORE_STATE_DOC).get();
       const doc = snap.exists ? snap.data() : null;
-      const sidecar = await firestoreDb.doc(FIRESTORE_FRESHNESS_DOC).get();
-      return res.json({ doc, version: doc && typeof doc._v === 'number' ? doc._v : null,
-        freshnessVersion: sidecar.exists ? (sidecar.data()?._v ?? null) : null });
+      return res.json({ doc, version: doc && typeof doc._v === 'number' ? doc._v : null });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || 'read failed' });
     }
@@ -18036,7 +18033,13 @@ app.post('/api/__test__/freshness', async (req, res) => {
   let tick: any = null;
   if (b.tick === true) tick = await freshnessTick();
   if (b.recompute === true) freshnessNeedRecompute();
-  res.json({ status: freshnessStatus(), ageMs: Math.round(freshnessAgeMs()), enabled: freshnessEnabled, stateVersion, refresh, held: !!testFreshnessHoldInstall, tick, needed: freshnessNeededCached, reads: freshnessReadCount });
+  // Test-only, opt-in: leave the widely-used firestore-doc helper unchanged.
+  // An unconditional extra sidecar get there corrupts exact read budgets.
+  const sidecar = b.inspectSidecar === true && firestoreDb
+    ? await firestoreDb.doc(FIRESTORE_FRESHNESS_DOC).get() : null;
+  const sidecarData = sidecar?.exists ? sidecar.data() : null;
+  res.json({ status: freshnessStatus(), ageMs: Math.round(freshnessAgeMs()), enabled: freshnessEnabled, stateVersion, refresh, held: !!testFreshnessHoldInstall, tick, needed: freshnessNeededCached, reads: freshnessReadCount,
+    ...(b.inspectSidecar === true ? { sidecarVersion: sidecarData?._v ?? null, sidecarBytes: sidecarData ? Buffer.byteLength(JSON.stringify(sidecarData)) : null } : {}) });
 });
 
 /** Test mode only (404 otherwise): the grant sweep. */
