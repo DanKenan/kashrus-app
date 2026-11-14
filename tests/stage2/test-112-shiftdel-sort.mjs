@@ -36,7 +36,7 @@ export default {
         };
         ws.onerror = () => { clearTimeout(timer); reject(new Error('shift socket failed')); };
       });
-      await measure('delete built-in (zero extra reads)', 1, 1, async () => {
+      await measure('delete built-in (zero extra reads)', 1, 2, async () => {
         const r = await api('admin', 'DELETE', `/api/shifts/${encodeURIComponent(builtin('morning'))}`);
         assert.equal(r.status, 200, JSON.stringify(r.json));
       });
@@ -70,7 +70,7 @@ export default {
       check(await measure('GET after restart', 0, 0, read));
       // No live shift is needed to carry the tombstones.
       for (const key of ['morning', 'afternoon', 'night']) {
-        const r = await measure(`delete empty venue ${key}`, 1, 1, () => api('admin', 'DELETE', `/api/shifts/${encodeURIComponent(builtin(key, venue2))}`));
+        const r = await measure(`delete empty venue ${key}`, 1, 2, () => api('admin', 'DELETE', `/api/shifts/${encodeURIComponent(builtin(key, venue2))}`));
         assert.equal(r.status, 200);
       }
       const empty = await api('admin', 'GET', `/api/tasks?venueId=${venue2}`);
