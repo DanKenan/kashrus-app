@@ -63,6 +63,72 @@ try {
     assert.deepEqual(calls[1], ['/api/sources/connection', 'PUT', { sourceType: 'airtable', baseId: 'appBase', access: typedKey ? 'readwrite' : 'read', group1Label: 'Group 1', mapping, ...expectedKey }]);
     assert.equal(saved, 1); assert.equal(closed, 1);
   }
+  // Add and remove mapping fields.
+  const arCalls = [];
+  globalThis.fetch = async (url, options) => {
+    arCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify(url.endsWith('/test') ? { ok: true, access: 'read', tables: ['Companies', 'Ingredients', 'Products'].map(name => ({ name, columns: ['Name', 'Company', 'Other'] })), guess: { mapping, guessed: {} } } : { ok: true }));
+  };
+  const ar = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', hasKey: true, keyHint: 'abcd' }, onClose() {}, onSaved() {} });
+  await ar.render();
+  const removes = () => ar.buttons().filter(b => b.aria.startsWith('Remove'));
+  assert.equal(removes().length, 16, 'every optional row has a remove control');
+  assert.ok(!removes().some(b => ['Remove Table', 'Remove Name', 'Remove Link to company'].includes(b.aria)), 'required rows cannot be removed');
+  assert.equal(ar.buttons().filter(b => b.label === 'Add field').length, 3, 'one add control per section');
+  await ar.click('Test connection');
+  assert.match(ar.text(), /Connected · read only/);
+  await ar.click('Add field', 1);
+  assert.match(ar.text(), /Field label/);
+  await ar.type(/extra\.1\.label$/, 'Symbol');
+  await ar.type(/extra\.1$/, 'Other');
+  assert.equal(ar.find(e => e.type === 'select' && e.props.name === 'ingredients.extra.1')[0].props.value, 'Other');
+  await ar.click('Remove Brand (optional)', 0);
+  assert.equal(removes().length, 16, 'added row plus removed row cancel out');
+  await ar.submit();
+  assert.deepEqual(arCalls[1][2].mapping, { ...mapping, ingredients: { ...mapping.ingredients, Symbol: 'Other' }, hidden: { companies: ['brand'], ingredients: [], products: [] } });
+  await ar.click('Remove Symbol');
+  assert.equal(ar.find(e => e.type === 'select' && e.props.name === 'ingredients.extra.1').length, 0, 'removed row is gone');
+  await ar.submit();
+  assert.deepEqual(arCalls[2][2].mapping, { ...mapping, hidden: { companies: ['brand'], ingredients: [], products: [] } }, 'removing the added row clears its mapping entry');
+  // Review round 1: Test connection must not restore a removed field, a draft
+  // named like a built-in must not clobber it, and Not used deletes an entry.
+  const restoreMapping = { companies: { table: 'Companies', name: 'Name', brand: 'Brand', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: ['Group 1'] };
+  const restoreCalls = [];
+  globalThis.fetch = async (url, options) => {
+    restoreCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify(url.endsWith('/test') ? { ok: true, access: 'read', tables: ['Companies', 'Ingredients', 'Products'].map(name => ({ name, columns: ['Name', 'Company', 'Other'] })), guess: { mapping: restoreMapping, guessed: { 'companies.brand': 1 } } } : { ok: true }));
+  };
+  const restore = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: restoreMapping }, onClose() {}, onSaved() {} });
+  await restore.render();
+  await restore.click('Remove Brand (optional)', 0);
+  await restore.click('Test connection');
+  await restore.submit();
+  const restored = restoreCalls.at(-1)[2].mapping;
+  assert.equal(restored.companies.brand, undefined, 'removed brand is not restored by Test connection');
+  assert.deepEqual(restored.hidden.companies, ['brand'], 'removal is saved so it persists on reopen');
+  const draftCalls = [];
+  globalThis.fetch = async (url, options) => {
+    draftCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify(url.endsWith('/test') ? { ok: true, access: 'read', tables: ['Companies'].map(name => ({ name, columns: ['Name', 'Company', 'Other'] })), guess: { mapping: restoreMapping, guessed: {} } } : { ok: true }));
+  };
+  const draft = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: restoreMapping }, onClose() {}, onSaved() {} });
+  await draft.render();
+  await draft.click('Add field', 0);
+  await draft.type(/extra\.1\.label$/, 'Symbol');
+  await draft.type(/extra\.1$/, 'Other');
+  await draft.type(/extra\.1\.label$/, 'name');
+  await draft.submit();
+  assert.deepEqual(draftCalls.at(-1)[2].mapping, restoreMapping, 'draft named name keeps the required Name mapping');
+  const unusedCalls = [];
+  globalThis.fetch = async (url, options) => {
+    unusedCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify({ ok: true }));
+  };
+  const unused = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: restoreMapping }, onClose() {}, onSaved() {} });
+  await unused.render();
+  await unused.type('companies.brand', '');
+  await unused.submit();
+  assert.equal(unusedCalls.at(-1)[2].mapping.companies.brand, undefined, 'Not used deletes the optional mapping entry');
   const previewMapping = { ...mapping, companies: { ...mapping.companies, type: 'Type' }, ingredients: { ...mapping.ingredients, certification: 'Cert' } };
   let previewCalls = 0;
   globalThis.fetch = async () => {
@@ -83,6 +149,11 @@ try {
   assert.equal(preview.find(e => e.props['aria-label'] === 'Check this guess').length, 1);
   assert.equal(preview.find(e => e.type === 'span' && e.props.children === 'Guessed').length, 1);
   const cells = () => preview.find(e => e.type === 'td').map(e => e.props.children[0]);
+  await preview.click('Add field', 1);
+  assert.match(preview.text(), /Field label/);
+  await preview.type(/extra\.1\.label$/, 'Symbol');
+  await preview.type(/extra\.1$/, 'Other');
+  assert.ok(cells().includes('OK-M'), 'a custom field shows as an extra preview column');
   assert.ok(cells().includes('OU-D')); assert.match(preview.text(), /Agency: OU/); assert.match(preview.text(), /Dairy/); assert.ok(cells().includes('Yes'));
   const dairySelect = preview.find(e => e.type === 'select' && e.props.value === 'dairy')[0];
   dairySelect.props.onChange({ target: { value: 'meat' } });

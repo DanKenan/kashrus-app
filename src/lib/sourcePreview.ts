@@ -1,5 +1,7 @@
 import type { SourceMapping } from './sources';
 
+const knownFields = new Set(['table', 'name', 'type', 'factoryValues', 'foodServiceValues', 'brand', 'plant', 'companyLink', 'certification', 'agency', 'status', 'expiresOn', 'code', 'symbolRequired']);
+
 type Dpm = 'meat' | 'dairy' | 'dairy_equipment' | 'pareve';
 export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
 
@@ -41,8 +43,9 @@ export function classifyRaw(mapping: SourceMapping, config: { certification?: st
 export function previewRows(samples: SourceSamples, mapping: SourceMapping, group: 'companies' | 'ingredients' | 'products', group1Label = 'Group 1'): { header: string[]; rows: string[][]; chips: string[][][] } {
   const config = mapping[group];
   const optional = ['brand', 'plant', ...(group === 'ingredients' ? ['expiresOn'] : [])].filter(key => config[key as keyof typeof config]);
-  const header = group === 'companies' ? ['Company', 'Type', 'Counts as factory', 'Food service', 'Brand', 'Plant']
-    : [...(group === 'ingredients' ? ['Ingredient', 'Certification', 'Status', 'Agency', group1Label, 'Company'] : ['Product', 'Code', 'Certification', 'Status', 'Agency', 'Symbol required', group1Label, 'Company']), ...optional.map(key => ({ brand: 'Brand', plant: 'Plant', expiresOn: 'Expiration' })[key])];
+  const customFields = Object.keys(config as unknown as Record<string, unknown>).filter(key => !knownFields.has(key) && typeof (config as unknown as Record<string, unknown>)[key] === 'string');
+  const header = group === 'companies' ? ['Company', 'Type', 'Counts as factory', 'Food service', 'Brand', 'Plant', ...customFields]
+    : [...(group === 'ingredients' ? ['Ingredient', 'Certification', 'Status', 'Agency', group1Label, 'Company'] : ['Product', 'Code', 'Certification', 'Status', 'Agency', 'Symbol required', group1Label, 'Company']), ...optional.map(key => ({ brand: 'Brand', plant: 'Plant', expiresOn: 'Expiration' })[key]), ...customFields];
   const chips: string[][][] = [];
   const rows = (samples[config.table] || []).slice(0, 3).map(row => {
     const read = (key: string) => row.fields[(config as unknown as Record<string, string>)[key]] || '';
@@ -52,14 +55,14 @@ export function previewRows(samples: SourceSamples, mapping: SourceMapping, grou
       const types = mapping.companies.factoryValues;
       const foodService = mapping.companies.foodServiceValues?.some(value => value.trim().toLowerCase() === read('type').trim().toLowerCase());
       const factory = !foodService && (!types?.length || types.some(value => value.trim().toLowerCase() === read('type').trim().toLowerCase()));
-      cells = [read('name'), read('type'), factory ? 'Yes' : 'No', foodService ? 'Yes' : 'No', read('brand'), read('plant')];
+      cells = [read('name'), read('type'), factory ? 'Yes' : 'No', foodService ? 'Yes' : 'No', read('brand'), read('plant'), ...customFields.map(read)];
     } else {
       const raw = { certificationRaw: read('certification'), statusRaw: read('status'), agencyRaw: read('agency') };
       const result = classifyRaw(mapping, mapping[group], raw);
       const symbol = read('symbolRequired');
       cells = group === 'ingredients'
-        ? [read('name'), raw.certificationRaw, raw.statusRaw, raw.agencyRaw, result.group1 ? 'Yes' : '—', read('companyLink'), ...optional.map(read)]
-        : [read('name'), read('code'), raw.certificationRaw, raw.statusRaw, raw.agencyRaw, /^(yes|true|1|no|false|0)$/i.test(symbol) ? (/^(yes|true|1)$/i.test(symbol) ? 'Yes' : 'No') : '', result.group1 ? 'Yes' : '—', read('companyLink'), ...optional.map(read)];
+        ? [read('name'), raw.certificationRaw, raw.statusRaw, raw.agencyRaw, result.group1 ? 'Yes' : '—', read('companyLink'), ...optional.map(read), ...customFields.map(read)]
+        : [read('name'), read('code'), raw.certificationRaw, raw.statusRaw, raw.agencyRaw, /^(yes|true|1|no|false|0)$/i.test(symbol) ? (/^(yes|true|1)$/i.test(symbol) ? 'Yes' : 'No') : '', result.group1 ? 'Yes' : '—', read('companyLink'), ...optional.map(read), ...customFields.map(read)];
       const rowChips = cells.map(() => [] as string[]);
       for (const [offset, field] of ['certification', 'status', 'agency'].entries()) {
         const value = assigned(mapping, mapping[group][field as 'certification' | 'status' | 'agency'], read(field), group === 'ingredients' ? 'ingredient' : 'product');

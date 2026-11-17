@@ -103,12 +103,19 @@ export function classifyRaw(mapping: SourceMapping, config: { certification?: st
   return { certifyingAgency: agency.agency || cert.agency, dpm: status.dpm || cert.dpm,
     group1: [cert, status, agency].some(v => v.group1 === true), confidence: Math.min(cert.confidence, status.confidence, agency.confidence) };
 }
+const knownFields = new Set(['table', 'name', 'type', 'factoryValues', 'foodServiceValues', 'brand', 'plant', 'companyLink', 'certification', 'agency', 'status', 'expiresOn', 'code', 'symbolRequired']);
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value.trim() : undefined;
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
   const read = (row: SourceRow, column?: string): string | undefined => column && typeof row.fields[column] === 'string' ? row.fields[column] as string : undefined;
   const extra = (row: SourceRow, config: object) => {
     const mapped = new Set(Object.entries(config).filter(([k, v]) => k !== 'table' && typeof v === 'string').map(([, v]) => v));
-    return Object.fromEntries(Object.entries(row.fields).filter(([k, v]) => !mapped.has(k) && typeof v === 'string')) as Record<string, string>;
+    const out = Object.fromEntries(Object.entries(row.fields).filter(([k, v]) => !mapped.has(k) && typeof v === 'string')) as Record<string, string>;
+    for (const [key, column] of Object.entries(config)) {
+      if (knownFields.has(key) || typeof column !== 'string') continue;
+      const value = row.fields[column];
+      if (typeof value === 'string') out[key] = value;
+    }
+    return out;
   };
   const c = mapping.companies;
   const companies = (rows[c.table] ?? []).filter(r => !c.factoryValues?.length || [...c.factoryValues, ...(c.foodServiceValues ?? [])].some(v => folded(v) === folded(read(r, c.type) ?? '')))
