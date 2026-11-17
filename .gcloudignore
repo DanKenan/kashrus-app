@@ -5,3 +5,4 @@ dist/
 .gitignore
 dev-dist/
 *.log
+gha-creds-*.json
