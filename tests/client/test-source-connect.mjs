@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mount } from './lib/mini-render.mjs';
 import { SourceConnectForm } from '../../src/components/SourceConnectSheet.tsx';
+import { applyMapping } from '../../src/server/sources/mapping.ts';
 import { emptyMapping } from '../../src/lib/sources.ts';
 const originalFetch = globalThis.fetch;
 const originalDocument = globalThis.document;
@@ -161,6 +162,12 @@ try {
   await dupe.submit();
   assert.equal(dupeCalls.length, 0, 'duplicate custom labels are rejected before saving');
   assert.match(dupe.text(), /Each field name must be used once in a section: Symbol \(Companies\)\./);
+  // Review round 3: clearing the duplicate row's column resolves it.
+  assert.equal(dupe.find(e => e.type === 'select' && e.props.name === 'companies.extra.2')[0].props.disabled, false, 'a duplicate row column can be cleared');
+  await dupe.type(/extra\.2$/, '');
+  await dupe.submit();
+  assert.equal(dupeCalls.length, 1, 'clearing the duplicate column lets the save through');
+  assert.equal(dupeCalls[0][2].mapping.companies.Symbol, 'Other', 'the mapped row is saved once');
   // Review round 2: saved custom fields live in the drafts alone, so removing or
   // renaming one sticks, and changing tables clears their column selections.
   const savedCustom = { ...restoreMapping, companies: { ...restoreMapping.companies, Symbol: 'Other' }, ingredients: { ...restoreMapping.ingredients, Mark: 'Other' } };
@@ -210,6 +217,74 @@ try {
   await staleForm.type('companies.name', 'Name');
   await staleForm.submit();
   assert.equal(staleCalls.at(-1)[2].mapping.hidden, undefined, 'changing the table clears the hidden record instead of resending it');
+  // Review round 3: a duplicate label only blocks saving when both rows
+  // would actually be saved; a row with no column picked does not count.
+  const clearCalls = [];
+  globalThis.fetch = async (url, options) => {
+    clearCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify({ ok: true }));
+  };
+  const clear = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: restoreMapping }, onClose() {}, onSaved() {} });
+  await clear.render();
+  await clear.click('Add field', 0);
+  await clear.click('Add field', 0);
+  await clear.type(/extra\.1\.label$/, 'Symbol');
+  await clear.type(/extra\.1$/, 'Other');
+  await clear.type(/extra\.2\.label$/, 'Symbol');
+  await clear.submit();
+  assert.equal(clearCalls.length, 1, 'a duplicate label with only one column mapped saves');
+  assert.equal(clearCalls[0][2].mapping.companies.Symbol, 'Other', 'the mapped row is saved once');
+  // Review round 3: a Companies custom field named like another section's
+  // built-in (code) must reach the payload, the preview, and the server extra.
+  const codeMapping = { ...mapping, companies: { ...mapping.companies, type: 'Type' } };
+  const codeCalls = [];
+  globalThis.fetch = async (url, options) => {
+    codeCalls.push([url, options.method, options.body ? JSON.parse(options.body) : undefined]);
+    return new Response(JSON.stringify(url.endsWith('/test') ? { ok: true, access: 'read',
+      tables: ['Companies', 'Ingredients', 'Products'].map(name => ({ name, columns: ['Name', 'Company', 'Code', 'Other'] })),
+      samples: { Companies: [{ id: 'c1', fields: { Name: 'Factory company', Type: 'Factory', Code: 'C-1' } }] },
+      guess: { mapping: codeMapping, guessed: {} } } : { ok: true }));
+  };
+  const codeForm = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: codeMapping }, onClose() {}, onSaved() {} });
+  await codeForm.render();
+  await codeForm.click('Test connection');
+  await codeForm.click('Add field', 0);
+  await codeForm.type(/extra\.1\.label$/, 'code');
+  await codeForm.type(/extra\.1$/, 'Code');
+  const codeCells = () => codeForm.find(e => e.type === 'td').map(e => e.props.children[0]);
+  assert.ok(codeCells().includes('C-1'), 'a Companies custom field named code shows in the preview');
+  await codeForm.submit();
+  const codeSaved = codeCalls.at(-1)[2].mapping;
+  assert.equal(codeSaved.companies.code, 'Code', 'a Companies custom field named code reaches the save payload');
+  const codeData = applyMapping({ Companies: [{ id: 'c1', fields: { Name: 'Factory company', Type: 'Factory', Code: 'C-1' } }] }, codeSaved);
+  assert.equal(codeData.companies[0].extra.code, 'C-1', 'the live mapper keeps a Companies custom field named code');
+  // Review round 3: a saved mapping where Brand is both hidden and mapped is
+  // normalized on load, and Restore brings it back unmapped.
+  const staleHiddenMapping = { ...restoreMapping, companies: { ...restoreMapping.companies, brand: 'Brand' }, hidden: { companies: ['brand'], ingredients: [], products: [] } };
+  const staleHiddenCalls = [];
+  globalThis.fetch = async (url, options) => {
+    staleHiddenCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify({ ok: true }));
+  };
+  const staleHidden = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: staleHiddenMapping }, onClose() {}, onSaved() {} });
+  await staleHidden.render();
+  await staleHidden.submit();
+  assert.equal(staleHiddenCalls.at(-1)[2].mapping.companies.brand, undefined, 'a hidden field keeps no column mapping on load');
+  assert.deepEqual(staleHiddenCalls.at(-1)[2].mapping.hidden.companies, ['brand'], 'the hidden record is kept');
+  const staleRestoreCalls = [];
+  globalThis.fetch = async (url, options) => {
+    staleRestoreCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify({ ok: true }));
+  };
+  const staleRestore = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: staleHiddenMapping }, onClose() {}, onSaved() {} });
+  await staleRestore.render();
+  assert.ok(staleRestore.buttons().some(b => b.aria === 'Restore Brand (optional) in Companies'), 'a stale hidden built-in offers a restore control');
+  await staleRestore.click('Restore Brand (optional)');
+  assert.equal(staleRestore.find(e => e.type === 'select' && e.props.name === 'companies.brand')[0].props.value, '', 'a restored row from a stale mapping is unmapped');
+  await staleRestore.submit();
+  const staleRestored = staleRestoreCalls.at(-1)[2].mapping;
+  assert.equal(staleRestored.companies.brand, undefined, 'the stale brand mapping is not resent');
+  assert.equal(staleRestored.hidden, undefined, 'restoring the last hidden row leaves no hidden record');
   const previewMapping = { ...mapping, companies: { ...mapping.companies, type: 'Type' }, ingredients: { ...mapping.ingredients, certification: 'Cert' } };
   let previewCalls = 0;
   globalThis.fetch = async () => {

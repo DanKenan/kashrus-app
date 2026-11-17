@@ -56,6 +56,10 @@ function settings(body: any, mapping = true) {
     };
     for (const [kind, fields] of Object.entries(m.hidden)) {
       if (!hiddenFields[kind] || !Array.isArray(fields) || fields.length > 50 || fields.some(f => typeof f !== 'string' || f.length > 200 || !hiddenFields[kind].includes(f))) throw Error('Invalid mapping');
+      // A hidden field must not keep a column mapping: the pair is stale
+      // (the row was removed and the mapping was never cleared).
+      const config = m[kind];
+      if (fields.some(f => typeof config[f] === 'string' && config[f].trim())) throw Error('Invalid mapping');
     }
   }
 }

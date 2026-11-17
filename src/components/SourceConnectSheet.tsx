@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { assigned, previewRows, summarizeValues, type SourceValue, type SourceSamples } from '../lib/sourcePreview';
+import { assigned, builtinFieldKeys, previewRows, summarizeValues, type SourceValue, type SourceSamples } from '../lib/sourcePreview';
 import { X } from 'lucide-react';
 import { emptyMapping, mappingReady, sourceRequest, type SourceConnection, type SourceMapping, type SourceTable } from '../lib/sources';
 
@@ -16,10 +16,21 @@ const groups = {
   products: [['companyLink', 'Link to company'], ['name', 'Name'], ['brand', 'Brand (optional)'], ['code', 'Code / UPC'], ['certification', 'Certification'], ['agency', 'Certifying agency (if separate)'], ['status', 'Status'], ['symbolRequired', 'Symbol required'], ['plant', 'Plant / location (optional)']],
 } as const;
 const commaList = (value: string) => value.split(',').map(s => s.trim()).filter(Boolean);
-const builtinKeys = (group: keyof typeof groups) => ['table', ...groups[group].map(([field]: readonly [string, string]) => field)];
+const builtinKeys = (group: keyof typeof groups): string[] => [...builtinFieldKeys[group]];
 const settingsKeys = ['factoryValues', 'foodServiceValues', 'valueAssignments', 'group1Values', 'hidden'];
 type HiddenMap = Partial<Record<'companies' | 'ingredients' | 'products', string[]>>;
 const savedHidden = (m?: SourceMapping): HiddenMap => (m as (SourceMapping & { hidden?: HiddenMap }) | undefined)?.hidden ?? {};
+// A stored hidden list is only trusted for optional fields; anything else in
+// it is ignored, and a hidden field must not keep a column mapping.
+const normalizedHidden = (m?: SourceMapping): Record<string, string[]> => {
+  const hidden = savedHidden(m);
+  const out: Record<string, string[]> = {};
+  for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
+    const optional: string[] = groups[group].filter(([field]) => !['table', 'name', 'companyLink'].includes(field)).map(([field]) => field);
+    out[group] = [...new Set((hidden[group] ?? []).filter(field => optional.includes(field)))];
+  }
+  return out;
+};
 const sectionName = (group: keyof typeof groups) => group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients/Schedule A' : 'Products/Schedule B';
 const extraKeys = (mapping: SourceMapping | undefined, group: keyof typeof groups) => {
   if (!mapping) return [] as string[];
@@ -35,9 +46,11 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [mapping, setMapping] = useState<SourceMapping>(() => {
     const base = connection.mapping || emptyMapping();
     const next = { ...base, companies: { ...base.companies }, ingredients: { ...base.ingredients }, products: { ...base.products } };
+    const hidden = normalizedHidden(connection.mapping);
     for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
       const rec = next[group] as unknown as Record<string, unknown>;
       for (const key of Object.keys(rec)) if (!builtinKeys(group).includes(key) && !settingsKeys.includes(key)) delete rec[key];
+      for (const field of hidden[group] || []) delete rec[field];
     }
     return next;
   });
@@ -63,15 +76,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [error, setError] = useState('');
   const [helpBase, setHelpBase] = useState(false);
   const [helpKey, setHelpKey] = useState(false);
-  const [removed, setRemoved] = useState<Record<string, string[]>>(() => {
-    const hidden = savedHidden(connection.mapping);
-    const out: Record<string, string[]> = {};
-    for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
-      const optional: string[] = groups[group].filter(([field]) => !['table', 'name', 'companyLink'].includes(field)).map(([field]) => field);
-      out[group] = [...new Set((hidden[group] ?? []).filter(field => optional.includes(field)))];
-    }
-    return out;
-  });
+  const [removed, setRemoved] = useState<Record<string, string[]>>(() => normalizedHidden(connection.mapping));
   const [added, setAdded] = useState<Record<string, { id: number; label: string }[]>>(() => ({
     companies: extraKeys(connection.mapping, 'companies').map((label, i) => ({ id: i + 1, label })),
     ingredients: extraKeys(connection.mapping, 'ingredients').map((label, i) => ({ id: i + 1, label })),
@@ -96,25 +101,31 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     target?.focus();
   });
   const validDraftLabel = (group: keyof typeof groups, label: string) => !!label && !builtinKeys(group).includes(label) && !settingsKeys.includes(label) && !groups[group].some(([, display]) => display === label);
+  // One eligibility rule for saving and for duplicate checks: a draft row
+  // only counts once it has a valid label and a column picked.
+  const draftRow = (group: keyof typeof groups, row: { id: number; label: string }) => {
+    const label = row.label.trim();
+    const column = (extraColumns[group] || {})[row.id] || '';
+    if (!label || !column || !validDraftLabel(group, label)) return null;
+    return { label, column };
+  };
   const draftEntries = (group: keyof typeof groups): Record<string, string> => {
     const out: Record<string, string> = {};
     const seen = new Set<string>();
     for (const row of added[group] || []) {
-      const label = row.label.trim();
-      const column = (extraColumns[group] || {})[row.id] || '';
-      if (!label || !column) continue;
-      if (!validDraftLabel(group, label) || seen.has(label)) continue;
-      seen.add(label);
-      out[label] = column;
+      const entry = draftRow(group, row);
+      if (!entry || seen.has(entry.label)) continue;
+      seen.add(entry.label);
+      out[entry.label] = entry.column;
     }
     return out;
   };
   const duplicateLabels = (group: keyof typeof groups): string[] => {
     const seen = new Set<string>(); const dupes = new Set<string>();
     for (const row of added[group] || []) {
-      const label = row.label.trim();
-      if (!validDraftLabel(group, label)) continue;
-      if (seen.has(label)) dupes.add(label); else seen.add(label);
+      const entry = draftRow(group, row);
+      if (!entry) continue;
+      if (seen.has(entry.label)) dupes.add(entry.label); else seen.add(entry.label);
     }
     return [...dupes];
   };
@@ -240,6 +251,11 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     pendingFocus.current = { kind: 'add', key: group };
   };
   const restoreField = (group: keyof typeof groups, field: string) => {
+    setMapping(prev => {
+      const rec = { ...(prev[group] as unknown as Record<string, string>) };
+      delete rec[field];
+      return { ...prev, [group]: rec as unknown as SourceMapping[keyof typeof groups] };
+    });
     setRemoved(prev => ({ ...prev, [group]: (prev[group] || []).filter(f => f !== field) }));
     pendingFocus.current = { kind: 'add', key: group };
   };
@@ -278,7 +294,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       </div>
       <div>
         <label htmlFor={`${id}-${group}-extra-${row.id}-column`} className="block text-sm text-ink-soft">{label || 'Column'}</label>
-        <select id={`${id}-${group}-extra-${row.id}-column`} name={`${group}.extra.${row.id}`} className={fieldClass} value={value} disabled={!!busy || !label || taken} onChange={e => {
+        <select id={`${id}-${group}-extra-${row.id}-column`} name={`${group}.extra.${row.id}`} className={fieldClass} value={value} disabled={!!busy || !label} onChange={e => {
           setExtraColumns(prev => ({ ...prev, [group]: { ...(prev[group] || {}), [row.id]: e.target.value } }));
         }}>
           <option value="">— Not used —</option>

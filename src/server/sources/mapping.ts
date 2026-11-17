@@ -1,4 +1,5 @@
 import type { Dpm, SourceData, SourceMapping, SourceRow, SourceTable } from './types.ts';
+import { isBuiltinFieldKey, type SourceSection } from '../../lib/sourcePreview.ts';
 
 const normalized = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 const folded = (s: string) => s.trim().toLowerCase();
@@ -103,7 +104,6 @@ export function classifyRaw(mapping: SourceMapping, config: { certification?: st
   return { certifyingAgency: agency.agency || cert.agency, dpm: status.dpm || cert.dpm,
     group1: [cert, status, agency].some(v => v.group1 === true), confidence: Math.min(cert.confidence, status.confidence, agency.confidence) };
 }
-const knownFields = new Set(['table', 'name', 'type', 'factoryValues', 'foodServiceValues', 'brand', 'plant', 'companyLink', 'certification', 'agency', 'status', 'expiresOn', 'code', 'symbolRequired']);
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value.trim() : undefined;
 const fieldValue = (value: unknown): string | undefined => {
   if (typeof value === 'string') return value;
@@ -112,11 +112,11 @@ const fieldValue = (value: unknown): string | undefined => {
 };
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
   const read = (row: SourceRow, column?: string): string | undefined => column ? fieldValue(row.fields[column]) : undefined;
-  const extra = (row: SourceRow, config: object) => {
+  const extra = (row: SourceRow, config: object, group: SourceSection) => {
     const mapped = new Set(Object.entries(config).filter(([k, v]) => k !== 'table' && typeof v === 'string').map(([, v]) => v));
     const out = Object.fromEntries(Object.entries(row.fields).filter(([k, v]) => !mapped.has(k) && typeof v === 'string')) as Record<string, string>;
     for (const [key, column] of Object.entries(config)) {
-      if (knownFields.has(key) || typeof column !== 'string') continue;
+      if (isBuiltinFieldKey(group, key) || typeof column !== 'string') continue;
       const value = fieldValue(row.fields[column]);
       if (value !== undefined) out[key] = value;
     }
@@ -124,7 +124,7 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
   };
   const c = mapping.companies;
   const companies = (rows[c.table] ?? []).filter(r => !c.factoryValues?.length || [...c.factoryValues, ...(c.foodServiceValues ?? [])].some(v => folded(v) === folded(read(r, c.type) ?? '')))
-    .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), extra: extra(r, c) }));
+    .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), extra: extra(r, c, 'companies') }));
   const keptIds = new Set(companies.map(c => c.id));
   const otherCompanies = (rows[c.table] ?? []).filter(r => !keptIds.has(r.id))
     .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type) }));
@@ -143,14 +143,14 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
     const raw = { certificationRaw: read(r, i.certification), statusRaw: read(r, i.status), agencyRaw: read(r, i.agency) };
     return { id: r.id, companyIds: links(r, i.companyLink), name: read(r, i.name) ?? '', brand: read(r, i.brand),
       ...raw, ...classifyRaw(mapping, i, raw),
-      plant: read(r, i.plant), expiresOn: read(r, i.expiresOn), extra: extra(r, i) };
+      plant: read(r, i.plant), expiresOn: read(r, i.expiresOn), extra: extra(r, i, 'ingredients') };
   });
   const products = (rows[p.table] ?? []).map(r => {
     const raw = p.symbolRequired ? r.fields[p.symbolRequired] : undefined;
     const symbolRequired = typeof raw === 'boolean' ? raw : typeof raw === 'string' && /^(yes|true|1|no|false|0)$/i.test(raw.trim()) ? /^(yes|true|1)$/i.test(raw.trim()) : undefined;
     const classifiedRaw = { certificationRaw: read(r, p.certification), statusRaw: read(r, p.status), agencyRaw: read(r, p.agency) };
     return { ...classifiedRaw, ...classifyRaw(mapping, p, classifiedRaw), id: r.id, companyIds: links(r, p.companyLink), name: read(r, p.name) ?? '', brand: read(r, p.brand),
-      code: read(r, p.code), symbolRequired, plant: read(r, p.plant), extra: extra(r, p) };
+      code: read(r, p.code), symbolRequired, plant: read(r, p.plant), extra: extra(r, p, 'products') };
   });
   return { companies, ingredients, products, otherCompanies };
 }

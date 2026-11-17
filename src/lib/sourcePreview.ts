@@ -1,6 +1,18 @@
 import type { SourceMapping } from './sources';
 
-const knownFields = new Set(['table', 'name', 'type', 'factoryValues', 'foodServiceValues', 'brand', 'plant', 'companyLink', 'certification', 'agency', 'status', 'expiresOn', 'code', 'symbolRequired']);
+// Built-in keys are reserved per section: a key that is built-in in one
+// section (for example code in Products) is still a free custom label in
+// another section (for example Companies). Every reader of a mapping must
+// use this rule so a custom field survives the preview and the live mapper.
+export const builtinFieldKeys = {
+  companies: ['table', 'name', 'type', 'brand', 'plant'],
+  ingredients: ['table', 'companyLink', 'name', 'brand', 'certification', 'agency', 'status', 'plant', 'expiresOn'],
+  products: ['table', 'companyLink', 'name', 'brand', 'code', 'certification', 'agency', 'status', 'symbolRequired', 'plant'],
+} as const;
+export type SourceSection = keyof typeof builtinFieldKeys;
+export function isBuiltinFieldKey(group: SourceSection, key: string): boolean {
+  return (builtinFieldKeys[group] as readonly string[]).includes(key);
+}
 
 type Dpm = 'meat' | 'dairy' | 'dairy_equipment' | 'pareve';
 export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
@@ -43,7 +55,7 @@ export function classifyRaw(mapping: SourceMapping, config: { certification?: st
 export function previewRows(samples: SourceSamples, mapping: SourceMapping, group: 'companies' | 'ingredients' | 'products', group1Label = 'Group 1'): { header: string[]; rows: string[][]; chips: string[][][] } {
   const config = mapping[group];
   const optional = ['brand', 'plant', ...(group === 'ingredients' ? ['expiresOn'] : [])].filter(key => config[key as keyof typeof config]);
-  const customFields = Object.keys(config as unknown as Record<string, unknown>).filter(key => !knownFields.has(key) && typeof (config as unknown as Record<string, unknown>)[key] === 'string');
+  const customFields = Object.keys(config as unknown as Record<string, unknown>).filter(key => !isBuiltinFieldKey(group, key) && typeof (config as unknown as Record<string, unknown>)[key] === 'string');
   const header = group === 'companies' ? ['Company', 'Type', 'Counts as factory', 'Food service', 'Brand', 'Plant', ...customFields]
     : [...(group === 'ingredients' ? ['Ingredient', 'Certification', 'Status', 'Agency', group1Label, 'Company'] : ['Product', 'Code', 'Certification', 'Status', 'Agency', 'Symbol required', group1Label, 'Company']), ...optional.map(key => ({ brand: 'Brand', plant: 'Plant', expiresOn: 'Expiration' })[key]), ...customFields];
   const chips: string[][][] = [];
