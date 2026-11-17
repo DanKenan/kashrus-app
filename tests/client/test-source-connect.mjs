@@ -92,7 +92,7 @@ try {
   await ar.submit();
   assert.deepEqual(arCalls[2][2].mapping, { ...mapping, hidden: { companies: ['brand'], ingredients: [], products: [] } }, 'removing the added row clears its mapping entry');
   // Review round 1: Test connection must not restore a removed field, a draft
-  // named like a built-in must not clobber it, and Not used deletes an entry.
+  // named like a built-in cannot save until it is renamed, and Not used deletes an entry.
   const restoreMapping = { companies: { table: 'Companies', name: 'Name', brand: 'Brand', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: ['Group 1'] };
   const restoreCalls = [];
   globalThis.fetch = async (url, options) => {
@@ -119,7 +119,11 @@ try {
   await draft.type(/extra\.1$/, 'Other');
   await draft.type(/extra\.1\.label$/, 'name');
   await draft.submit();
-  assert.deepEqual(draftCalls.at(-1)[2].mapping, restoreMapping, 'draft named name keeps the required Name mapping');
+  assert.equal(draftCalls.length, 0, 'a mapped draft named like a built-in cannot save');
+  assert.match(draft.text(), /A field name that is already used cannot hold a column: name \(Companies\)\./);
+  await draft.type(/extra\.1\.label$/, 'Symbol');
+  await draft.submit();
+  assert.deepEqual(draftCalls.at(-1)[2].mapping, { ...restoreMapping, companies: { ...restoreMapping.companies, Symbol: 'Other' } }, 'renaming the draft back to a valid label saves it with its column');
   const unusedCalls = [];
   globalThis.fetch = async (url, options) => {
     unusedCalls.push([url, options.method, JSON.parse(options.body)]);
@@ -285,7 +289,7 @@ try {
   const staleRestored = staleRestoreCalls.at(-1)[2].mapping;
   assert.equal(staleRestored.companies.brand, undefined, 'the stale brand mapping is not resent');
   assert.equal(staleRestored.hidden, undefined, 'restoring the last hidden row leaves no hidden record');
-  // Review round 4: a label that matches a built-in can never take a column,
+  // Review round 4: a label that matches a built-in cannot take a new column,
   // so a mapped row can never vanish silently from the Save payload.
   const reservedCalls = [];
   globalThis.fetch = async (url, options) => {
@@ -301,8 +305,8 @@ try {
   assert.equal(reserved.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.disabled, true, 'a reserved label cannot take a column');
   await reserved.submit();
   assert.deepEqual(reservedCalls.at(-1)[2].mapping, restoreMapping, 'the reserved draft is not saved and nothing else is lost');
-  // Review round 4: renaming a mapped row to a reserved label clears its
-  // column, so the row reaches Save unmapped instead of mapped and dropped.
+  // Review round 5: renaming a mapped row to a reserved label keeps its
+  // column in draft state, and Save is blocked while the label is reserved.
   const renameCalls = [];
   globalThis.fetch = async (url, options) => {
     renameCalls.push([url, options.method, JSON.parse(options.body)]);
@@ -316,10 +320,34 @@ try {
   await rename.type(/extra\.1$/, 'Other');
   assert.equal(rename.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.value, 'Other');
   await rename.type(/extra\.1\.label$/, 'Name');
-  assert.equal(rename.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.value, '', 'renaming to a reserved label clears the column');
+  assert.equal(rename.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.value, 'Other', 'renaming to a reserved label keeps the column');
   assert.equal(rename.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.disabled, true, 'the renamed row cannot take a column back');
   await rename.submit();
-  assert.deepEqual(renameCalls.at(-1)[2].mapping, restoreMapping, 'the renamed draft does not clobber the built-in Name mapping');
+  assert.equal(renameCalls.length, 1, 'saving with a reserved mapped row is blocked');
+  assert.match(rename.text(), /A field name that is already used cannot hold a column: Name \(Companies\)\./);
+  // Review round 5: renaming a saved custom field through a reserved label
+  // keeps its column, and once the label is valid again the mapping saves
+  // under the new label.
+  const renameThroughCalls = [];
+  globalThis.fetch = async (url, options) => {
+    renameThroughCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify({ ok: true }));
+  };
+  const renameThrough = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: savedCustom }, onClose() {}, onSaved() {} });
+  await renameThrough.render();
+  assert.equal(renameThrough.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.value, 'Other', 'the saved custom field opens mapped');
+  await renameThrough.type(/extra\.1\.label$/, 'Name');
+  assert.equal(renameThrough.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.value, 'Other', 'the column survives passing through a reserved label');
+  assert.equal(renameThrough.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.disabled, true, 'the selector is disabled while the label is reserved');
+  await renameThrough.submit();
+  assert.equal(renameThroughCalls.length, 0, 'saving while the label is reserved is blocked');
+  await renameThrough.type(/extra\.1\.label$/, 'Name on invoice');
+  assert.equal(renameThrough.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.value, 'Other', 'the column is still there once the label is valid again');
+  assert.equal(renameThrough.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.disabled, false, 'the selector is enabled again once the label is valid');
+  await renameThrough.submit();
+  assert.equal(renameThroughCalls.length, 1, 'the save goes through once the label is valid');
+  assert.equal(renameThroughCalls.at(-1)[2].mapping.companies['Name on invoice'], 'Other', 'the renamed field saves under its new label with its column');
+  assert.equal(renameThroughCalls.at(-1)[2].mapping.companies.Symbol, undefined, 'the old label is gone');
   // Review round 4: a saved custom field named like a built-in opens as an
   // unmapped draft, never as a mapped row that Save would drop.
   const storedReservedMapping = { ...restoreMapping, companies: { ...restoreMapping.companies, Name: 'Other' } };

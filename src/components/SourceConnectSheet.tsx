@@ -19,8 +19,10 @@ const commaList = (value: string) => value.split(',').map(s => s.trim()).filter(
 const builtinKeys = (group: keyof typeof groups): string[] => [...builtinFieldKeys[group]];
 const settingsKeys = ['factoryValues', 'foodServiceValues', 'valueAssignments', 'group1Values', 'hidden'];
 // A custom label that matches a built-in key, a settings key, or a built-in
-// display name is reserved for that section. A reserved row can never hold a
-// column, so a mapped row can never vanish silently from the Save payload.
+// display name is reserved for that section. A reserved row keeps its column
+// in draft state while the label is reserved, and Save is blocked until the
+// label is valid again, so a mapped row can never vanish silently from the
+// Save payload.
 const reservedDraftLabel = (group: keyof typeof groups, label: string) => {
   const trimmed = label.trim();
   return !!trimmed && (builtinKeys(group).includes(trimmed) || settingsKeys.includes(trimmed) || groups[group].some(([, display]) => display === trimmed));
@@ -139,6 +141,17 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     }
     return [...dupes];
   };
+  // A row whose label is reserved while it still holds a column must never
+  // reach Save: the column is kept in draft state, and Save is blocked
+  // until the label is valid again.
+  const reservedMapped = (group: keyof typeof groups): string[] => {
+    const out: string[] = [];
+    for (const row of added[group] || []) {
+      const column = (extraColumns[group] || {})[row.id] || '';
+      if (column && reservedDraftLabel(group, row.label)) out.push(row.label.trim());
+    }
+    return out;
+  };
   const withDrafts = (base: SourceMapping): SourceMapping => {
     const { hidden: _hidden, ...rest } = base as SourceMapping & { hidden?: HiddenMap };
     const next = { ...rest, companies: { ...base.companies }, ingredients: { ...base.ingredients }, products: { ...base.products } };
@@ -213,6 +226,8 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       } else {
         const dupes = (Object.keys(groups) as (keyof typeof groups)[]).flatMap(group => duplicateLabels(group).map(label => `${label} (${sectionName(group)})`));
         if (dupes.length) { setError(`Each field name must be used once in a section: ${dupes.join(', ')}.`); return; }
+        const reserved = (Object.keys(groups) as (keyof typeof groups)[]).flatMap(group => reservedMapped(group).map(label => `${label} (${sectionName(group)})`));
+        if (reserved.length) { setError(`A field name that is already used cannot hold a column: ${reserved.join(', ')}.`); return; }
         const merged = withDrafts(mapping);
         await sourceRequest('/api/sources/connection', 'PUT', { ...payload(), access, group1Label: group1Label.trim(), mapping: { ...merged, companies: { ...merged.companies, factoryValues: commaList(factoryValues), ...(foodServiceValues || merged.companies.foodServiceValues ? { foodServiceValues: commaList(foodServiceValues) } : {}) }, group1Values: commaList(group1Values), ...(removed.companies.length || removed.ingredients.length || removed.products.length ? { hidden: removed } : {}) } });
         setApiKey(''); onSaved(); onClose();
@@ -276,16 +291,10 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     pendingFocus.current = { kind: 'extra', key: `${group}-${nextId}` };
   };
   const renameExtra = (group: keyof typeof groups, row: { id: number; label: string }, nextLabel: string) => {
+    // The column stays in draft state while the label is typed, even when
+    // the label passes through a reserved value: clearing it here would
+    // silently drop the mapping once the label is valid again.
     setAdded(prev => ({ ...prev, [group]: (prev[group] || []).map(r => r.id === row.id ? { ...r, label: nextLabel } : r) }));
-    // A reserved label cannot hold a column: clear it now so the row can
-    // never reach Save mapped and then vanish from the payload.
-    if (reservedDraftLabel(group, nextLabel)) {
-      setExtraColumns(prev => {
-        const rec = { ...(prev[group] || {}) };
-        delete rec[row.id];
-        return { ...prev, [group]: rec };
-      });
-    }
   };
   const removeExtra = (group: keyof typeof groups, row: { id: number; label: string }) => {
     setAdded(prev => ({ ...prev, [group]: (prev[group] || []).filter(r => r.id !== row.id) }));
