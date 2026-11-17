@@ -47,6 +47,21 @@ function settings(body: any, mapping = true) {
     }
   }
   if (!Array.isArray(m.group1Values) || m.group1Values.length > 50 || !m.group1Values.every(str)) throw Error('Invalid group1Values');
+  if (m.hidden !== undefined) {
+    if (!m.hidden || typeof m.hidden !== 'object' || Array.isArray(m.hidden)) throw Error('Invalid mapping');
+    const hiddenFields: Record<string, string[]> = {
+      companies: ['type', 'brand', 'plant'],
+      ingredients: ['brand', 'certification', 'agency', 'status', 'plant', 'expiresOn'],
+      products: ['brand', 'code', 'certification', 'agency', 'status', 'symbolRequired', 'plant'],
+    };
+    for (const [kind, fields] of Object.entries(m.hidden)) {
+      if (!hiddenFields[kind] || !Array.isArray(fields) || fields.length > 50 || fields.some(f => typeof f !== 'string' || f.length > 200 || !hiddenFields[kind].includes(f))) throw Error('Invalid mapping');
+      // A hidden field must not keep a column mapping: the pair is stale
+      // (the row was removed and the mapping was never cleared).
+      const config = m[kind];
+      if (fields.some(f => typeof config[f] === 'string' && config[f].trim())) throw Error('Invalid mapping');
+    }
+  }
 }
 export function registerSourceRoutes(app: any, deps: {
   db(): any; dataDir: string; staged(): boolean; secret(): string; testMode: boolean;

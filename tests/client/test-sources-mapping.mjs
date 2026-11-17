@@ -42,6 +42,15 @@ assert.equal(data.ingredients[0].dpm, 'pareve');
 assert.deepEqual(data.ingredients[0].extra, { Notes: 'dry' });
 assert.equal(data.ingredients[1].group1, true);
 assert.equal(data.products[0].symbolRequired, false);
+// Numeric mapped and custom fields survive as strings instead of being dropped.
+const numericMapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company', expiresOn: 'Expiry', Batch: 'Batch' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: ['Group 1'] };
+const numeric = applyMapping({
+  Companies: [row('c1', { Name: 'Acme' })],
+  Ingredients: [row('i1', { Company: 'c1', Name: 'Salt', Expiry: 2027, Batch: 42, Notes: 'dry' })],
+  Products: [],
+}, numericMapping);
+assert.equal(numeric.ingredients[0].expiresOn, '2027', 'a numeric expiry date survives');
+assert.deepEqual(numeric.ingredients[0].extra, { Batch: '42', Notes: 'dry' }, 'a numeric custom field survives alongside text extras');
 for (const settings of [{ kind: 'google_sheets', spreadsheetId: 'demo' }, { kind: 'excel', workbookId: 'demo' }, { kind: 'supabase', url: 'https://example.test' }]) {
   const connector = createConnector({ ...settings, mapping }, 'demo-key');
   assert.deepEqual(await connector.testConnection(), { ok: false, error: 'Not available yet' });
