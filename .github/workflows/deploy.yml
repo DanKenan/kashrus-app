@@ -54,14 +54,19 @@ jobs:
           container = service["spec"]["template"]["spec"]["containers"][0]
           envs = {env["name"]: env.get("value", "") for env in container.get("env", [])
                   if env["name"].startswith("VITE_")}
-          args = ["build", sys.argv[1], "--builder", "gcr.io/buildpacks/builder:latest",
+          image = sys.argv[1]
+          args = ["build", image, "--builder", "gcr.io/buildpacks/builder:latest",
                   "--network", "cloudbuild", "--publish"]
           for name, value in envs.items():
               # Cloud Build treats dollar signs in step args as substitutions.
               args.extend(["--env", name + "=" + value.replace("$", "$$")])
           json.dump({
               "options": {"logging": "CLOUD_LOGGING_ONLY"},
-              "steps": [{"name": "gcr.io/k8s-skaffold/pack", "entrypoint": "pack", "args": args}],
+              "steps": [
+                  {"name": "gcr.io/k8s-skaffold/pack", "entrypoint": "pack", "args": args},
+                  {"name": "gcr.io/cloud-builders/docker", "args": ["pull", image]},
+              ],
+              "images": [image],
           }, sys.stdout)
           ' "$IMAGE" > "$BUILD_CONFIG"
           # build with buildpacks, push to Artifact Registry (async: we poll status ourselves)
