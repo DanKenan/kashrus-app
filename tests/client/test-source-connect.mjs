@@ -23,13 +23,16 @@ try {
     await form.click('How to find your Base ID');
     assert.match(form.text(), /Open your base in Airtable in a browser\./);
     assert.match(form.text(), /Look at the address bar\./);
-    assert.match(form.text(), /The part starting with app is your Base ID\. Copy the whole thing\./);
+    assert.match(form.text(), /Copy from app up to the next slash\. That is your Base ID\./);
     await form.click('Close Base ID help');
     assert.doesNotMatch(form.text(), /Look at the address bar\./);
     assert.doesNotMatch(form.text(), /tap your profile picture/);
     await form.click('How to find your access key');
-    assert.match(form.text(), /In Airtable, tap your profile picture, then Developer hub, then Personal access tokens\./);
+    assert.match(form.text(), /In Airtable, tap your profile picture, then Builder Hub, then Personal access tokens\./);
     assert.match(form.text(), /Tap Create token and name it, for example Shutfey\./);
+    assert.match(form.text(), /Tap Add a scope and add/);
+    assert.match(form.text(), /Tap Add a base and pick your base\./);
+    assert.match(form.text(), /airtable\.com\/create\/tokens/);
     assert.match(form.text(), /Airtable shows it only once\./);
     await form.click('Close access key help');
     assert.doesNotMatch(form.text(), /tap your profile picture/);

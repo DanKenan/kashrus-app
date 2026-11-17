@@ -46,6 +46,8 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [helpKey, setHelpKey] = useState(false);
   const lock = useRef(false);
   const root = useRef<HTMLDivElement>(null);
+  const baseHelpButton = useRef<HTMLButtonElement>(null);
+  const keyHelpButton = useRef<HTMLButtonElement>(null);
   const id = useId();
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -160,29 +162,30 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       <form className="space-y-4" onSubmit={e => { e.preventDefault(); void run('save'); }}>
         <fieldset disabled={!!busy}><legend className="text-sm text-ink-soft">Source</legend><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{['Airtable', 'Google Sheets', 'Excel', 'Supabase'].map((name, i) => <button key={name} type="button" disabled={i !== 0} aria-pressed={i === 0} className={sourceButton}>{name}{i !== 0 && <span className="block text-xs">Coming soon</span>}</button>)}</div></fieldset>
         <div>
-          <div className="flex items-center gap-2"><label htmlFor={`${id}-base`} className="block text-sm text-ink-soft">Base ID</label><button type="button" aria-label="How to find your Base ID" aria-expanded={helpBase} aria-controls={`${id}-base-help`} className={helpButton} disabled={!!busy} onClick={() => setHelpBase(v => !v)}>?</button></div>
+          <div className="flex items-center gap-2"><label htmlFor={`${id}-base`} className="block text-sm text-ink-soft">Base ID</label><button type="button" ref={baseHelpButton} aria-label="How to find your Base ID" aria-expanded={helpBase} aria-controls={`${id}-base-help`} className={helpButton} disabled={!!busy} onClick={() => setHelpBase(v => !v)}>?</button></div>
           <input id={`${id}-base`} name="baseId" placeholder="app…" className={fieldClass} value={baseId} disabled={!!busy} onChange={e => { setBaseId(e.target.value); setTables([]); setSamples(null); setMessage(''); }} />
           {helpBase && <div id={`${id}-base-help`} className="mt-2 space-y-2 rounded-lg border border-line bg-sunken p-3">
-            <ol className="list-decimal space-y-1 pl-5 text-sm text-ink-soft">
+            <ol className="list-decimal space-y-1 pl-5 text-base text-ink-soft">
               <li>Open your base in Airtable in a browser.</li>
               <li>Look at the address bar.</li>
-              <li>The part starting with <code className="font-mono">app</code> is your Base ID. Copy the whole thing.</li>
+              <li>Copy from <code className="font-mono">app</code> up to the next slash. That is your Base ID.</li>
             </ol>
-            <button type="button" aria-label="Close Base ID help" className={sourceButton} disabled={!!busy} onClick={() => setHelpBase(false)}>Close</button>
+            <button type="button" aria-label="Close Base ID help" className={sourceButton} disabled={!!busy} onClick={() => { setHelpBase(false); baseHelpButton.current?.focus(); }}>Close</button>
           </div>}
         </div>
         <div>
-          <div className="flex items-center gap-2"><label htmlFor={`${id}-key`} className="block text-sm text-ink-soft">Access key</label><button type="button" aria-label="How to find your access key" aria-expanded={helpKey} aria-controls={`${id}-key-help`} className={helpButton} disabled={!!busy} onClick={() => setHelpKey(v => !v)}>?</button></div>
+          <div className="flex items-center gap-2"><label htmlFor={`${id}-key`} className="block text-sm text-ink-soft">Access key</label><button type="button" ref={keyHelpButton} aria-label="How to find your access key" aria-expanded={helpKey} aria-controls={`${id}-key-help`} className={helpButton} disabled={!!busy} onClick={() => setHelpKey(v => !v)}>?</button></div>
           <input id={`${id}-key`} name="apiKey" type="password" autoComplete="off" className={fieldClass} value={apiKey} disabled={!!busy} onChange={e => setApiKey(e.target.value)} />{connection.hasKey && <p className="text-sm text-ink-soft">{`A key is saved (…${connection.keyHint?.slice(-4) || ''}). Leave empty to keep it.`}</p>}
           {helpKey && <div id={`${id}-key-help`} className="mt-2 space-y-2 rounded-lg border border-line bg-sunken p-3">
-            <ol className="list-decimal space-y-1 pl-5 text-sm text-ink-soft">
-              <li>In Airtable, tap your profile picture, then Developer hub, then Personal access tokens.</li>
+            <ol className="list-decimal space-y-1 pl-5 text-base text-ink-soft">
+              <li>In Airtable, tap your profile picture, then Builder Hub, then Personal access tokens.</li>
               <li>Tap Create token and name it, for example Shutfey.</li>
-              <li>Add the scopes <code className="font-mono">data.records:read</code> and <code className="font-mono">schema.bases:read</code>. Add <code className="font-mono">data.records:write</code> only if you chose Read and write.</li>
-              <li>Under Access, pick your base.</li>
+              <li>Tap Add a scope and add <code className="font-mono">data.records:read</code> and <code className="font-mono">schema.bases:read</code>. Add <code className="font-mono">data.records:write</code> only if you chose Read and write.</li>
+              <li>Tap Add a base and pick your base.</li>
               <li>Tap Create token and copy it right away. Airtable shows it only once.</li>
             </ol>
-            <button type="button" aria-label="Close access key help" className={sourceButton} disabled={!!busy} onClick={() => setHelpKey(false)}>Close</button>
+            <p className="text-base text-ink-soft">If you cannot find Builder Hub, open <a className="text-gold-deep underline" href="https://airtable.com/create/tokens" target="_blank" rel="noreferrer">airtable.com/create/tokens</a>.</p>
+            <button type="button" aria-label="Close access key help" className={sourceButton} disabled={!!busy} onClick={() => { setHelpKey(false); keyHelpButton.current?.focus(); }}>Close</button>
           </div>}
         </div>
         <fieldset disabled={!!busy}><legend className="text-sm text-ink-soft">Access</legend>{(['read', 'readwrite'] as const).map(value => <label key={value} className="flex min-h-11 items-center gap-2"><input type="radio" name="access" value={value} checked={access === value} onChange={() => setAccess(value)} />{value === 'read' ? 'Read only' : 'Read and write'}</label>)}<p className="text-sm text-ink-soft">Read only is enough for now. Read and write lets you manage your database from the app later.</p></fieldset>
