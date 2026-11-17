@@ -48,7 +48,10 @@ export function previewRows(samples: SourceSamples, mapping: SourceMapping, grou
     : [...(group === 'ingredients' ? ['Ingredient', 'Certification', 'Status', 'Agency', group1Label, 'Company'] : ['Product', 'Code', 'Certification', 'Status', 'Agency', 'Symbol required', group1Label, 'Company']), ...optional.map(key => ({ brand: 'Brand', plant: 'Plant', expiresOn: 'Expiration' })[key]), ...customFields];
   const chips: string[][][] = [];
   const rows = (samples[config.table] || []).slice(0, 3).map(row => {
-    const read = (key: string) => row.fields[(config as unknown as Record<string, string>)[key]] || '';
+    const read = (key: string) => {
+      const value = row.fields[(config as unknown as Record<string, string>)[key]];
+      return value == null ? '' : String(value);
+    };
     const dpmLabel = (value?: Dpm) => value === 'dairy_equipment' ? 'DE' : value ? value[0].toUpperCase() + value.slice(1) : '';
     let cells: string[];
     if (group === 'companies') {

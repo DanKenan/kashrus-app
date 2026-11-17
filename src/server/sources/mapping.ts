@@ -105,15 +105,20 @@ export function classifyRaw(mapping: SourceMapping, config: { certification?: st
 }
 const knownFields = new Set(['table', 'name', 'type', 'factoryValues', 'foodServiceValues', 'brand', 'plant', 'companyLink', 'certification', 'agency', 'status', 'expiresOn', 'code', 'symbolRequired']);
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value.trim() : undefined;
+const fieldValue = (value: unknown): string | undefined => {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return undefined;
+};
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
-  const read = (row: SourceRow, column?: string): string | undefined => column && typeof row.fields[column] === 'string' ? row.fields[column] as string : undefined;
+  const read = (row: SourceRow, column?: string): string | undefined => column ? fieldValue(row.fields[column]) : undefined;
   const extra = (row: SourceRow, config: object) => {
     const mapped = new Set(Object.entries(config).filter(([k, v]) => k !== 'table' && typeof v === 'string').map(([, v]) => v));
     const out = Object.fromEntries(Object.entries(row.fields).filter(([k, v]) => !mapped.has(k) && typeof v === 'string')) as Record<string, string>;
     for (const [key, column] of Object.entries(config)) {
       if (knownFields.has(key) || typeof column !== 'string') continue;
-      const value = row.fields[column];
-      if (typeof value === 'string') out[key] = value;
+      const value = fieldValue(row.fields[column]);
+      if (value !== undefined) out[key] = value;
     }
     return out;
   };

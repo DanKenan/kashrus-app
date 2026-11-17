@@ -32,7 +32,15 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [group1Label, setGroup1Label] = useState(connection.group1Label || 'Group 1');
   const [apiKey, setApiKey] = useState('');
   const [access, setAccess] = useState<'read' | 'readwrite'>(connection.access || 'read');
-  const [mapping, setMapping] = useState<SourceMapping>(connection.mapping || emptyMapping());
+  const [mapping, setMapping] = useState<SourceMapping>(() => {
+    const base = connection.mapping || emptyMapping();
+    const next = { ...base, companies: { ...base.companies }, ingredients: { ...base.ingredients }, products: { ...base.products } };
+    for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
+      const rec = next[group] as unknown as Record<string, unknown>;
+      for (const key of Object.keys(rec)) if (!builtinKeys(group).includes(key) && !settingsKeys.includes(key)) delete rec[key];
+    }
+    return next;
+  });
   const [tables, setTables] = useState<SourceTable[]>([]);
   const [samples, setSamples] = useState<SourceSamples | null>(null);
   const [storedValues, setStoredValues] = useState<SourceValue[]>([]);
@@ -57,7 +65,12 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [helpKey, setHelpKey] = useState(false);
   const [removed, setRemoved] = useState<Record<string, string[]>>(() => {
     const hidden = savedHidden(connection.mapping);
-    return { companies: [...(hidden.companies ?? [])], ingredients: [...(hidden.ingredients ?? [])], products: [...(hidden.products ?? [])] };
+    const out: Record<string, string[]> = {};
+    for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
+      const optional: string[] = groups[group].filter(([field]) => !['table', 'name', 'companyLink'].includes(field)).map(([field]) => field);
+      out[group] = [...new Set((hidden[group] ?? []).filter(field => optional.includes(field)))];
+    }
+    return out;
   });
   const [added, setAdded] = useState<Record<string, { id: number; label: string }[]>>(() => ({
     companies: extraKeys(connection.mapping, 'companies').map((label, i) => ({ id: i + 1, label })),
@@ -82,6 +95,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     pendingFocus.current = null;
     target?.focus();
   });
+  const validDraftLabel = (group: keyof typeof groups, label: string) => !!label && !builtinKeys(group).includes(label) && !settingsKeys.includes(label) && !groups[group].some(([, display]) => display === label);
   const draftEntries = (group: keyof typeof groups): Record<string, string> => {
     const out: Record<string, string> = {};
     const seen = new Set<string>();
@@ -89,14 +103,24 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       const label = row.label.trim();
       const column = (extraColumns[group] || {})[row.id] || '';
       if (!label || !column) continue;
-      if (builtinKeys(group).includes(label) || settingsKeys.includes(label) || groups[group].some(([, display]) => display === label) || seen.has(label)) continue;
+      if (!validDraftLabel(group, label) || seen.has(label)) continue;
       seen.add(label);
       out[label] = column;
     }
     return out;
   };
+  const duplicateLabels = (group: keyof typeof groups): string[] => {
+    const seen = new Set<string>(); const dupes = new Set<string>();
+    for (const row of added[group] || []) {
+      const label = row.label.trim();
+      if (!validDraftLabel(group, label)) continue;
+      if (seen.has(label)) dupes.add(label); else seen.add(label);
+    }
+    return [...dupes];
+  };
   const withDrafts = (base: SourceMapping): SourceMapping => {
-    const next = { ...base, companies: { ...base.companies }, ingredients: { ...base.ingredients }, products: { ...base.products } };
+    const { hidden: _hidden, ...rest } = base as SourceMapping & { hidden?: HiddenMap };
+    const next = { ...rest, companies: { ...base.companies }, ingredients: { ...base.ingredients }, products: { ...base.products } };
     for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
       for (const [label, column] of Object.entries(draftEntries(group))) (next[group] as unknown as Record<string, string>)[label] = column;
     }
@@ -155,6 +179,9 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
               }
             }
           }
+          for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
+            for (const field of removed[group] || []) delete (next[group] as unknown as Record<string, unknown>)[field];
+          }
           if (!next.group1Values.length) next.group1Values = suggestion.group1Values;
           setFoodServiceValues((next.companies.foodServiceValues || []).join(', ')); setMapping(next); setFactoryValues((next.companies.factoryValues || []).join(', '));
           setGroup1Values(next.group1Values.join(', '));
@@ -163,6 +190,8 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         setAccess(result.access || 'read');
         setMessage(`Connected · ${result.access === 'readwrite' ? 'read and write' : 'read only'}`);
       } else {
+        const dupes = (Object.keys(groups) as (keyof typeof groups)[]).flatMap(group => duplicateLabels(group).map(label => `${label} (${sectionName(group)})`));
+        if (dupes.length) { setError(`Each field name must be used once in a section: ${dupes.join(', ')}.`); return; }
         const merged = withDrafts(mapping);
         await sourceRequest('/api/sources/connection', 'PUT', { ...payload(), access, group1Label: group1Label.trim(), mapping: { ...merged, companies: { ...merged.companies, factoryValues: commaList(factoryValues), ...(foodServiceValues || merged.companies.foodServiceValues ? { foodServiceValues: commaList(foodServiceValues) } : {}) }, group1Values: commaList(group1Values), ...(removed.companies.length || removed.ingredients.length || removed.products.length ? { hidden: removed } : {}) } });
         setApiKey(''); onSaved(); onClose();
@@ -189,6 +218,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         }
         setGuessed(prev => Object.fromEntries(Object.entries(prev).filter(([k]) => field === 'table' ? !k.startsWith(`${group}.`) : k !== path)));
         if (field === 'table') setRemoved(prev => ({ ...prev, [group]: [] }));
+        if (field === 'table') setExtraColumns(prev => ({ ...prev, [group]: {} }));
       }}>
         <option value="">— Not used —</option>
         {Array.from(new Set([...options, ...(value ? [value] : [])])).map(v => <option key={v} value={v}>{v}</option>)}
@@ -207,6 +237,10 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     });
     setRemoved(prev => ({ ...prev, [group]: [...(prev[group] || []), field] }));
     setGuessed(prev => Object.fromEntries(Object.entries(prev).filter(([k]) => k !== `${group}.${field}`)));
+    pendingFocus.current = { kind: 'add', key: group };
+  };
+  const restoreField = (group: keyof typeof groups, field: string) => {
+    setRemoved(prev => ({ ...prev, [group]: (prev[group] || []).filter(f => f !== field) }));
     pendingFocus.current = { kind: 'add', key: group };
   };
   const addField = (group: keyof typeof groups) => {
@@ -269,7 +303,9 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     const config = mapping[group];
     for (const column of new Set([config.certification, config.status, config.agency].filter(Boolean)))
       for (const row of samples[config.table] || []) {
-        const value = row.fields[column!]?.trim(); if (!value) continue;
+        const rawValue = row.fields[column!];
+        const value = typeof rawValue === 'string' ? rawValue.trim() : typeof rawValue === 'number' ? String(rawValue) : '';
+        if (!value) continue;
         uses.push({ kind: group === 'ingredients' ? 'ingredient' : 'product', column: column!, value, id: row.id, name: row.fields[config.name] || '', brand: config.brand ? row.fields[config.brand] : undefined });
       }
   }
@@ -320,7 +356,13 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         <button type="button" className={sourceButton} disabled={!!busy || !baseId.trim()} onClick={() => void run('test')}>{busy === 'test' ? 'Testing…' : 'Test connection'}</button>
         {message && <p role="status" className="text-base text-ink">{message}</p>}
         <h3 className="text-xl font-semibold">Mapping</h3>
-        {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients/Schedule A' : 'Products/Schedule B'}</legend>{select(group, 'table', 'Table')}{groups[group].filter(([field]) => !(removed[group] || []).includes(field)).map(([field, label]) => select(group, field, label, requiredField(field) ? undefined : { onRemove: () => removeField(group, field) }))}{(added[group] || []).map(row => extraRow(group, row))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{group === 'companies' && <label className="block text-sm text-ink-soft">Which types are food service places<input name="foodServiceValues" className={fieldClass} value={foodServiceValues} disabled={!!busy} onChange={e => setFoodServiceValues(e.target.value)} /></label>}<button type="button" aria-label={`Add field to ${sectionName(group)}`} className={sourceButton} disabled={!!busy} ref={el => { addButtonRefs.current[group] = el; }} onClick={() => addField(group)}>Add field</button>{preview(group)}</fieldset>)}
+        {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients/Schedule A' : 'Products/Schedule B'}</legend>{select(group, 'table', 'Table')}{groups[group].filter(([field]) => !(removed[group] || []).includes(field)).map(([field, label]) => select(group, field, label, requiredField(field) ? undefined : { onRemove: () => removeField(group, field) }))}{(added[group] || []).map(row => extraRow(group, row))}{(removed[group] || []).map(field => {
+          const label = groups[group].find(([f]) => f === field)?.[1] || field;
+          return <div key={field} className="flex items-end gap-2">
+            <div className="min-w-0 flex-1"><p className="text-sm text-ink-soft">{label} (hidden)</p></div>
+            <button type="button" aria-label={`Restore ${label} in ${sectionName(group)}`} className={sourceButton} disabled={!!busy} onClick={() => restoreField(group, field)}>Restore</button>
+          </div>;
+        })}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{group === 'companies' && <label className="block text-sm text-ink-soft">Which types are food service places<input name="foodServiceValues" className={fieldClass} value={foodServiceValues} disabled={!!busy} onChange={e => setFoodServiceValues(e.target.value)} /></label>}<button type="button" aria-label={`Add field to ${sectionName(group)}`} className={sourceButton} disabled={!!busy} ref={el => { addButtonRefs.current[group] = el; }} onClick={() => addField(group)}>Add field</button>{preview(group)}</fieldset>)}
         <fieldset className="space-y-4"><legend className="text-xl font-semibold">What each value means</legend>
           <p className="text-base text-ink-soft">Your database writes the certification in different ways. Tell the app once what each one means — it applies to every ingredient that uses it.</p>
           {Math.max(values.length, storedValueTotal) > 20 && <label className="block text-sm text-ink-soft">Search values<input className={fieldClass} name="valueSearch" value={valueSearch} onChange={e => setValueSearch(e.target.value)} /></label>}

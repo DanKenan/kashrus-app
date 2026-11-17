@@ -129,6 +129,87 @@ try {
   await unused.type('companies.brand', '');
   await unused.submit();
   assert.equal(unusedCalls.at(-1)[2].mapping.companies.brand, undefined, 'Not used deletes the optional mapping entry');
+  // Review round 2: Test connection on a fresh draft must not restore a removed field.
+  const freshCalls = [];
+  globalThis.fetch = async (url, options) => {
+    freshCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify(url.endsWith('/test') ? { ok: true, access: 'read', tables: ['Companies', 'Ingredients', 'Products'].map(name => ({ name, columns: ['Name', 'Company', 'Other'] })), guess: { mapping: restoreMapping, guessed: { 'companies.brand': 1 } } } : { ok: true }));
+  };
+  const fresh = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', hasKey: true }, onClose() {}, onSaved() {} });
+  await fresh.render();
+  await fresh.click('Test connection');
+  await fresh.click('Remove Brand (optional)', 0);
+  await fresh.click('Test connection');
+  await fresh.submit();
+  const freshSaved = freshCalls.at(-1)[2].mapping;
+  assert.equal(freshSaved.companies.brand, undefined, 'a second Test connection on a fresh draft does not restore a removed field');
+  assert.deepEqual(freshSaved.hidden.companies, ['brand'], 'the removal is saved so it persists on reopen');
+  // Review round 2: two draft rows with the same custom label are rejected, not saved.
+  const dupeCalls = [];
+  globalThis.fetch = async (url, options) => {
+    dupeCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify({ ok: true }));
+  };
+  const dupe = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: restoreMapping }, onClose() {}, onSaved() {} });
+  await dupe.render();
+  await dupe.click('Add field', 0);
+  await dupe.click('Add field', 0);
+  await dupe.type(/extra\.1\.label$/, 'Symbol');
+  await dupe.type(/extra\.1$/, 'Other');
+  await dupe.type(/extra\.2\.label$/, 'Symbol');
+  await dupe.type(/extra\.2$/, 'Company');
+  await dupe.submit();
+  assert.equal(dupeCalls.length, 0, 'duplicate custom labels are rejected before saving');
+  assert.match(dupe.text(), /Each field name must be used once in a section: Symbol \(Companies\)\./);
+  // Review round 2: saved custom fields live in the drafts alone, so removing or
+  // renaming one sticks, and changing tables clears their column selections.
+  const savedCustom = { ...restoreMapping, companies: { ...restoreMapping.companies, Symbol: 'Other' }, ingredients: { ...restoreMapping.ingredients, Mark: 'Other' } };
+  const customFetch = async (url, options) => new Response(JSON.stringify(url.endsWith('/test') ? { ok: true, access: 'read', tables: ['Companies', 'Ingredients', 'Products', 'Alternate'].map(name => ({ name, columns: ['Name', 'Company', 'Other'] })), guess: { mapping: savedCustom, guessed: {} } } : { ok: true }));
+  const customCalls = [];
+  globalThis.fetch = async (url, options) => { customCalls.push([url, options.method, JSON.parse(options.body)]); return customFetch(url, options); };
+  const custom = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: savedCustom }, onClose() {}, onSaved() {} });
+  await custom.render();
+  await custom.click('Remove Symbol');
+  await custom.type(/extra\.1\.label$/, 'Renamed');
+  await custom.submit();
+  const customSaved = customCalls.at(-1)[2].mapping;
+  assert.equal(customSaved.companies.Symbol, undefined, 'removing a saved custom row sticks');
+  assert.equal(customSaved.ingredients.Mark, undefined, 'renaming a saved custom row drops the old label');
+  assert.equal(customSaved.ingredients.Renamed, 'Other', 'the renamed row keeps its column');
+  const tableCalls = [];
+  globalThis.fetch = async (url, options) => { tableCalls.push([url, options.method, JSON.parse(options.body)]); return customFetch(url, options); };
+  const tableForm = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: savedCustom }, onClose() {}, onSaved() {} });
+  await tableForm.render();
+  await tableForm.click('Test connection');
+  await tableForm.type('ingredients.table', 'Alternate');
+  await tableForm.type('ingredients.name', 'Name');
+  await tableForm.type('ingredients.companyLink', 'Company');
+  await tableForm.submit();
+  assert.equal(tableCalls.at(-1)[2].mapping.ingredients.Mark, undefined, 'changing tables clears a custom draft column');
+  // Review round 2: hidden is built from current state alone, and a hidden
+  // built-in can be restored without changing tables.
+  const hiddenMapping = { ...restoreMapping, companies: { table: 'Companies', name: 'Name', factoryValues: ['Factory'] }, hidden: { companies: ['brand'], ingredients: [], products: [] } };
+  const hiddenFetch = async (url, options) => new Response(JSON.stringify(url.endsWith('/test') ? { ok: true, access: 'read', tables: ['Companies', 'Ingredients', 'Products', 'Alternate'].map(name => ({ name, columns: ['Name', 'Company', 'Other'] })), guess: { mapping: hiddenMapping, guessed: {} } } : { ok: true }));
+  const hiddenCalls = [];
+  globalThis.fetch = async (url, options) => { hiddenCalls.push([url, options.method, JSON.parse(options.body)]); return hiddenFetch(url, options); };
+  const hiddenForm = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: hiddenMapping }, onClose() {}, onSaved() {} });
+  await hiddenForm.render();
+  assert.ok(hiddenForm.buttons().some(b => b.aria === 'Restore Brand (optional) in Companies'), 'a hidden built-in offers a restore control');
+  await hiddenForm.click('Restore Brand (optional)');
+  assert.equal(hiddenForm.find(e => e.type === 'select' && e.props.name === 'companies.brand').length, 1, 'the restored row is back');
+  await hiddenForm.submit();
+  const hiddenSaved = hiddenCalls.at(-1)[2].mapping;
+  assert.equal(hiddenSaved.hidden, undefined, 'restoring the last hidden row leaves no hidden record');
+  assert.equal(hiddenSaved.companies.brand, undefined, 'a restored row is unmapped until a column is picked');
+  const staleCalls = [];
+  globalThis.fetch = async (url, options) => { staleCalls.push([url, options.method, JSON.parse(options.body)]); return hiddenFetch(url, options); };
+  const staleForm = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: hiddenMapping }, onClose() {}, onSaved() {} });
+  await staleForm.render();
+  await staleForm.click('Test connection');
+  await staleForm.type('companies.table', 'Alternate');
+  await staleForm.type('companies.name', 'Name');
+  await staleForm.submit();
+  assert.equal(staleCalls.at(-1)[2].mapping.hidden, undefined, 'changing the table clears the hidden record instead of resending it');
   const previewMapping = { ...mapping, companies: { ...mapping.companies, type: 'Type' }, ingredients: { ...mapping.ingredients, certification: 'Cert' } };
   let previewCalls = 0;
   globalThis.fetch = async () => {
@@ -138,7 +219,7 @@ try {
       { name: 'Alternate', columns: ['Name', 'Cert'] },
     ], samples: {
       Companies: [{ id: 'c1', fields: { Name: 'Factory company', Type: 'Factory' } }],
-      Ingredients: [{ id: '1', fields: { Name: 'Salt', Cert: 'OU-D', Other: 'OK-M' } }, { id: '2', fields: { Name: 'Water', Cert: 'Group 1' } }],
+      Ingredients: [{ id: '1', fields: { Name: 'Salt', Cert: 'OU-D', Other: 'OK-M' } }, { id: '2', fields: { Name: 'Water', Cert: 'Group 1' } }, { id: '3', fields: { Name: 'Yeast', Cert: 'Star-K', Other: 2027 } }],
       Alternate: [{ id: '3', fields: { Name: 'Alternate ingredient', Cert: 'Star-K' } }],
     }, guess: { mapping: previewMapping, guessed: { 'ingredients.certification': 0.6, 'ingredients.name': 0.9 } } }));
   };
@@ -154,6 +235,7 @@ try {
   await preview.type(/extra\.1\.label$/, 'Symbol');
   await preview.type(/extra\.1$/, 'Other');
   assert.ok(cells().includes('OK-M'), 'a custom field shows as an extra preview column');
+  assert.ok(cells().includes('2027'), 'a numeric custom field shows in the preview');
   assert.ok(cells().includes('OU-D')); assert.match(preview.text(), /Agency: OU/); assert.match(preview.text(), /Dairy/); assert.ok(cells().includes('Yes'));
   const dairySelect = preview.find(e => e.type === 'select' && e.props.value === 'dairy')[0];
   dairySelect.props.onChange({ target: { value: 'meat' } });
