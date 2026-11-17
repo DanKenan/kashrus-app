@@ -4,6 +4,7 @@ import { X } from 'lucide-react';
 import { emptyMapping, mappingReady, sourceRequest, type SourceConnection, type SourceMapping, type SourceTable } from '../lib/sources';
 
 export const sourceButton = 'pressable min-h-11 rounded-lg border border-line-control bg-surface px-3 text-base font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold disabled:opacity-50';
+const helpButton = 'pressable inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line-control bg-surface text-base font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold disabled:opacity-50';
 const fieldClass = 'min-h-11 w-full min-w-0 rounded-lg border border-line-control bg-surface px-3 text-base text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold';
 interface Props { isOpen: boolean; connection: SourceConnection; onClose: () => void; onSaved: () => void }
 export function SourceConnectSheet(props: Props) {
@@ -41,8 +42,12 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   const [busy, setBusy] = useState<'test' | 'save' | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [helpBase, setHelpBase] = useState(false);
+  const [helpKey, setHelpKey] = useState(false);
   const lock = useRef(false);
   const root = useRef<HTMLDivElement>(null);
+  const baseHelpButton = useRef<HTMLButtonElement>(null);
+  const keyHelpButton = useRef<HTMLButtonElement>(null);
   const id = useId();
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -156,13 +161,38 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       <div className="flex items-center gap-4"><h2 id={`${id}-title`} className="flex-1 text-2xl font-semibold">Connect database</h2><button type="button" aria-label="Close" onClick={onClose} className={`${sourceButton} w-11 px-0 inline-flex items-center justify-center`}><X aria-hidden="true" className="h-5 w-5" /></button></div>
       <form className="space-y-4" onSubmit={e => { e.preventDefault(); void run('save'); }}>
         <fieldset disabled={!!busy}><legend className="text-sm text-ink-soft">Source</legend><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{['Airtable', 'Google Sheets', 'Excel', 'Supabase'].map((name, i) => <button key={name} type="button" disabled={i !== 0} aria-pressed={i === 0} className={sourceButton}>{name}{i !== 0 && <span className="block text-xs">Coming soon</span>}</button>)}</div></fieldset>
-        <div><label htmlFor={`${id}-base`} className="block text-sm text-ink-soft">Base ID</label><input id={`${id}-base`} name="baseId" placeholder="app…" className={fieldClass} value={baseId} disabled={!!busy} onChange={e => { setBaseId(e.target.value); setTables([]); setSamples(null); setMessage(''); }} /></div>
-        <div><label htmlFor={`${id}-key`} className="block text-sm text-ink-soft">Access key</label><input id={`${id}-key`} name="apiKey" type="password" autoComplete="off" className={fieldClass} value={apiKey} disabled={!!busy} onChange={e => setApiKey(e.target.value)} />{connection.hasKey && <p className="text-sm text-ink-soft">{`A key is saved (…${connection.keyHint?.slice(-4) || ''}). Leave empty to keep it.`}</p>}</div>
+        <div>
+          <div className="flex items-center gap-2"><label htmlFor={`${id}-base`} className="block text-sm text-ink-soft">Base ID</label><button type="button" ref={baseHelpButton} aria-label="How to find your Base ID" aria-expanded={helpBase} aria-controls={`${id}-base-help`} className={helpButton} disabled={!!busy} onClick={() => setHelpBase(v => !v)}>?</button></div>
+          <input id={`${id}-base`} name="baseId" placeholder="app…" className={fieldClass} value={baseId} disabled={!!busy} onChange={e => { setBaseId(e.target.value); setTables([]); setSamples(null); setMessage(''); }} />
+          {helpBase && <div id={`${id}-base-help`} className="mt-2 space-y-2 rounded-lg border border-line bg-sunken p-3">
+            <ol className="list-decimal space-y-1 pl-5 text-base text-ink-soft">
+              <li>Open your base in Airtable in a browser.</li>
+              <li>Look at the address bar.</li>
+              <li>Copy from <code className="font-mono">app</code> up to the next slash. That is your Base ID.</li>
+            </ol>
+            <button type="button" aria-label="Close Base ID help" className={sourceButton} disabled={!!busy} onClick={() => { setHelpBase(false); baseHelpButton.current?.focus(); }}>Close</button>
+          </div>}
+        </div>
+        <div>
+          <div className="flex items-center gap-2"><label htmlFor={`${id}-key`} className="block text-sm text-ink-soft">Access key</label><button type="button" ref={keyHelpButton} aria-label="How to find your access key" aria-expanded={helpKey} aria-controls={`${id}-key-help`} className={helpButton} disabled={!!busy} onClick={() => setHelpKey(v => !v)}>?</button></div>
+          <input id={`${id}-key`} name="apiKey" type="password" autoComplete="off" className={fieldClass} value={apiKey} disabled={!!busy} onChange={e => setApiKey(e.target.value)} />{connection.hasKey && <p className="text-sm text-ink-soft">{`A key is saved (…${connection.keyHint?.slice(-4) || ''}). Leave empty to keep it.`}</p>}
+          {helpKey && <div id={`${id}-key-help`} className="mt-2 space-y-2 rounded-lg border border-line bg-sunken p-3">
+            <ol className="list-decimal space-y-1 pl-5 text-base text-ink-soft">
+              <li>In Airtable, tap your profile picture, then Builder Hub, then Personal access tokens.</li>
+              <li>Tap Create token and name it, for example Shutfey.</li>
+              <li>Tap Add a scope and add <code className="font-mono">data.records:read</code> and <code className="font-mono">schema.bases:read</code>. Add <code className="font-mono">data.records:write</code> only if you chose Read and write.</li>
+              <li>Tap Add a base and pick your base.</li>
+              <li>Tap Create token and copy it right away. Airtable shows it only once.</li>
+            </ol>
+            <p className="text-base text-ink-soft">If you cannot find Builder Hub, open <a className="text-gold-deep underline" href="https://airtable.com/create/tokens" target="_blank" rel="noreferrer">airtable.com/create/tokens</a>.</p>
+            <button type="button" aria-label="Close access key help" className={sourceButton} disabled={!!busy} onClick={() => { setHelpKey(false); keyHelpButton.current?.focus(); }}>Close</button>
+          </div>}
+        </div>
         <fieldset disabled={!!busy}><legend className="text-sm text-ink-soft">Access</legend>{(['read', 'readwrite'] as const).map(value => <label key={value} className="flex min-h-11 items-center gap-2"><input type="radio" name="access" value={value} checked={access === value} onChange={() => setAccess(value)} />{value === 'read' ? 'Read only' : 'Read and write'}</label>)}<p className="text-sm text-ink-soft">Read only is enough for now. Read and write lets you manage your database from the app later.</p></fieldset>
         <button type="button" className={sourceButton} disabled={!!busy || !baseId.trim()} onClick={() => void run('test')}>{busy === 'test' ? 'Testing…' : 'Test connection'}</button>
         {message && <p role="status" className="text-base text-ink">{message}</p>}
         <h3 className="text-xl font-semibold">Mapping</h3>
-        {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients' : 'Products'}</legend>{select(group, 'table', 'Table')}{groups[group].map(([field, label]) => select(group, field, label))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{group === 'companies' && <label className="block text-sm text-ink-soft">Which types are food service places<input name="foodServiceValues" className={fieldClass} value={foodServiceValues} disabled={!!busy} onChange={e => setFoodServiceValues(e.target.value)} /></label>}{preview(group)}</fieldset>)}
+        {(Object.keys(groups) as (keyof typeof groups)[]).map(group => <fieldset key={group} className="min-w-0 space-y-3 rounded-xl border border-line p-4"><legend className="text-base">{group === 'companies' ? 'Companies' : group === 'ingredients' ? 'Ingredients/Schedule A' : 'Products/Schedule B'}</legend>{select(group, 'table', 'Table')}{groups[group].map(([field, label]) => select(group, field, label))}{group === 'companies' && <div><label htmlFor={`${id}-types`} className="block text-sm text-ink-soft">Which types are factories</label><input id={`${id}-types`} name="factoryValues" className={fieldClass} value={factoryValues} disabled={!!busy} onChange={e => setFactoryValues(e.target.value)} /></div>}{group === 'companies' && <label className="block text-sm text-ink-soft">Which types are food service places<input name="foodServiceValues" className={fieldClass} value={foodServiceValues} disabled={!!busy} onChange={e => setFoodServiceValues(e.target.value)} /></label>}{preview(group)}</fieldset>)}
         <fieldset className="space-y-4"><legend className="text-xl font-semibold">What each value means</legend>
           <p className="text-base text-ink-soft">Your database writes the certification in different ways. Tell the app once what each one means — it applies to every ingredient that uses it.</p>
           {Math.max(values.length, storedValueTotal) > 20 && <label className="block text-sm text-ink-soft">Search values<input className={fieldClass} name="valueSearch" value={valueSearch} onChange={e => setValueSearch(e.target.value)} /></label>}
