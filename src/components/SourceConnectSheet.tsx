@@ -18,6 +18,13 @@ const groups = {
 const commaList = (value: string) => value.split(',').map(s => s.trim()).filter(Boolean);
 const builtinKeys = (group: keyof typeof groups): string[] => [...builtinFieldKeys[group]];
 const settingsKeys = ['factoryValues', 'foodServiceValues', 'valueAssignments', 'group1Values', 'hidden'];
+// A custom label that matches a built-in key, a settings key, or a built-in
+// display name is reserved for that section. A reserved row can never hold a
+// column, so a mapped row can never vanish silently from the Save payload.
+const reservedDraftLabel = (group: keyof typeof groups, label: string) => {
+  const trimmed = label.trim();
+  return !!trimmed && (builtinKeys(group).includes(trimmed) || settingsKeys.includes(trimmed) || groups[group].some(([, display]) => display === trimmed));
+};
 type HiddenMap = Partial<Record<'companies' | 'ingredients' | 'products', string[]>>;
 const savedHidden = (m?: SourceMapping): HiddenMap => (m as (SourceMapping & { hidden?: HiddenMap }) | undefined)?.hidden ?? {};
 // A stored hidden list is only trusted for optional fields; anything else in
@@ -27,7 +34,10 @@ const normalizedHidden = (m?: SourceMapping): Record<string, string[]> => {
   const out: Record<string, string[]> = {};
   for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
     const optional: string[] = groups[group].filter(([field]) => !['table', 'name', 'companyLink'].includes(field)).map(([field]) => field);
-    out[group] = [...new Set((hidden[group] ?? []).filter(field => optional.includes(field)))];
+    // A stored hidden section that is not an array (for example a string)
+    // is treated as empty so the sheet still opens.
+    const list = Array.isArray(hidden[group]) ? hidden[group] : [];
+    out[group] = [...new Set(list.filter(field => optional.includes(field)))];
   }
   return out;
 };
@@ -87,7 +97,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
       const values = connection.mapping?.[group] as unknown as Record<string, string> | undefined;
       out[group] = {};
-      extraKeys(connection.mapping, group).forEach((label, i) => { out[group][i + 1] = values?.[label] || ''; });
+      extraKeys(connection.mapping, group).forEach((label, i) => { if (!reservedDraftLabel(group, label)) out[group][i + 1] = values?.[label] || ''; });
     }
     return out;
   });
@@ -100,7 +110,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     pendingFocus.current = null;
     target?.focus();
   });
-  const validDraftLabel = (group: keyof typeof groups, label: string) => !!label && !builtinKeys(group).includes(label) && !settingsKeys.includes(label) && !groups[group].some(([, display]) => display === label);
+  const validDraftLabel = (group: keyof typeof groups, label: string) => !!label && !reservedDraftLabel(group, label);
   // One eligibility rule for saving and for duplicate checks: a draft row
   // only counts once it has a valid label and a column picked.
   const draftRow = (group: keyof typeof groups, row: { id: number; label: string }) => {
@@ -267,6 +277,15 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   };
   const renameExtra = (group: keyof typeof groups, row: { id: number; label: string }, nextLabel: string) => {
     setAdded(prev => ({ ...prev, [group]: (prev[group] || []).map(r => r.id === row.id ? { ...r, label: nextLabel } : r) }));
+    // A reserved label cannot hold a column: clear it now so the row can
+    // never reach Save mapped and then vanish from the payload.
+    if (reservedDraftLabel(group, nextLabel)) {
+      setExtraColumns(prev => {
+        const rec = { ...(prev[group] || {}) };
+        delete rec[row.id];
+        return { ...prev, [group]: rec };
+      });
+    }
   };
   const removeExtra = (group: keyof typeof groups, row: { id: number; label: string }) => {
     setAdded(prev => ({ ...prev, [group]: (prev[group] || []).filter(r => r.id !== row.id) }));
@@ -279,7 +298,8 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   };
   const extraRow = (group: keyof typeof groups, row: { id: number; label: string }) => {
     const label = row.label.trim();
-    const taken = !!label && (builtinKeys(group).includes(label) || settingsKeys.includes(label) || groups[group].some(([, display]) => display === label) || (added[group] || []).some(r => r.id !== row.id && r.label.trim() === label));
+    const reserved = reservedDraftLabel(group, label);
+    const taken = !!label && (reserved || (added[group] || []).some(r => r.id !== row.id && r.label.trim() === label));
     const values = mapping[group] as unknown as Record<string, string>;
     const value = (extraColumns[group] || {})[row.id] || '';
     const options = tables.find(t => t.name === values.table)?.columns || [];
@@ -294,7 +314,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       </div>
       <div>
         <label htmlFor={`${id}-${group}-extra-${row.id}-column`} className="block text-sm text-ink-soft">{label || 'Column'}</label>
-        <select id={`${id}-${group}-extra-${row.id}-column`} name={`${group}.extra.${row.id}`} className={fieldClass} value={value} disabled={!!busy || !label} onChange={e => {
+        <select id={`${id}-${group}-extra-${row.id}-column`} name={`${group}.extra.${row.id}`} className={fieldClass} value={value} disabled={!!busy || !label || reserved} onChange={e => {
           setExtraColumns(prev => ({ ...prev, [group]: { ...(prev[group] || {}), [row.id]: e.target.value } }));
         }}>
           <option value="">— Not used —</option>

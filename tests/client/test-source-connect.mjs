@@ -285,6 +285,70 @@ try {
   const staleRestored = staleRestoreCalls.at(-1)[2].mapping;
   assert.equal(staleRestored.companies.brand, undefined, 'the stale brand mapping is not resent');
   assert.equal(staleRestored.hidden, undefined, 'restoring the last hidden row leaves no hidden record');
+  // Review round 4: a label that matches a built-in can never take a column,
+  // so a mapped row can never vanish silently from the Save payload.
+  const reservedCalls = [];
+  globalThis.fetch = async (url, options) => {
+    reservedCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify(url.endsWith('/test') ? { ok: true, access: 'read', tables: ['Companies', 'Ingredients', 'Products'].map(name => ({ name, columns: ['Name', 'Company', 'Other'] })), guess: { mapping: restoreMapping, guessed: {} } } : { ok: true }));
+  };
+  const reserved = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: restoreMapping }, onClose() {}, onSaved() {} });
+  await reserved.render();
+  await reserved.click('Test connection');
+  await reserved.click('Add field', 0);
+  await reserved.type(/extra\.1\.label$/, 'Name');
+  assert.match(reserved.text(), /That name is already used in this section\./);
+  assert.equal(reserved.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.disabled, true, 'a reserved label cannot take a column');
+  await reserved.submit();
+  assert.deepEqual(reservedCalls.at(-1)[2].mapping, restoreMapping, 'the reserved draft is not saved and nothing else is lost');
+  // Review round 4: renaming a mapped row to a reserved label clears its
+  // column, so the row reaches Save unmapped instead of mapped and dropped.
+  const renameCalls = [];
+  globalThis.fetch = async (url, options) => {
+    renameCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify(url.endsWith('/test') ? { ok: true, access: 'read', tables: ['Companies', 'Ingredients', 'Products'].map(name => ({ name, columns: ['Name', 'Company', 'Other'] })), guess: { mapping: restoreMapping, guessed: {} } } : { ok: true }));
+  };
+  const rename = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: restoreMapping }, onClose() {}, onSaved() {} });
+  await rename.render();
+  await rename.click('Test connection');
+  await rename.click('Add field', 0);
+  await rename.type(/extra\.1\.label$/, 'Symbol');
+  await rename.type(/extra\.1$/, 'Other');
+  assert.equal(rename.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.value, 'Other');
+  await rename.type(/extra\.1\.label$/, 'Name');
+  assert.equal(rename.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.value, '', 'renaming to a reserved label clears the column');
+  assert.equal(rename.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.disabled, true, 'the renamed row cannot take a column back');
+  await rename.submit();
+  assert.deepEqual(renameCalls.at(-1)[2].mapping, restoreMapping, 'the renamed draft does not clobber the built-in Name mapping');
+  // Review round 4: a saved custom field named like a built-in opens as an
+  // unmapped draft, never as a mapped row that Save would drop.
+  const storedReservedMapping = { ...restoreMapping, companies: { ...restoreMapping.companies, Name: 'Other' } };
+  const storedReservedCalls = [];
+  globalThis.fetch = async (url, options) => {
+    storedReservedCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify({ ok: true }));
+  };
+  const storedReserved = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: storedReservedMapping }, onClose() {}, onSaved() {} });
+  await storedReserved.render();
+  assert.match(storedReserved.text(), /That name is already used in this section\./);
+  assert.equal(storedReserved.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.value, '', 'a stored reserved-label field opens unmapped');
+  assert.equal(storedReserved.find(e => e.type === 'select' && e.props.name === 'companies.extra.1')[0].props.disabled, true, 'a stored reserved-label field cannot take a column');
+  await storedReserved.submit();
+  assert.equal(storedReservedCalls.at(-1)[2].mapping.companies.Name, undefined, 'the stored reserved-label field is not saved as a custom field');
+  // Review round 4: a saved hidden section that is not an array must not stop
+  // the sheet from opening; it is treated as empty.
+  const malformedHiddenMapping = { ...restoreMapping, hidden: { companies: 'brand', ingredients: [], products: [] } };
+  const malformedCalls = [];
+  globalThis.fetch = async (url, options) => {
+    malformedCalls.push([url, options.method, JSON.parse(options.body)]);
+    return new Response(JSON.stringify({ ok: true }));
+  };
+  const malformed = mount(SourceConnectForm, { connection: { sourceType: 'airtable', baseId: 'appBase', mapping: malformedHiddenMapping }, onClose() {}, onSaved() {} });
+  await malformed.render();
+  assert.match(malformed.text(), /Connect database/);
+  assert.ok(!malformed.buttons().some(b => b.aria === 'Restore Brand (optional) in Companies'), 'a malformed hidden section is treated as empty');
+  await malformed.submit();
+  assert.equal(malformedCalls.at(-1)[2].mapping.hidden, undefined, 'the malformed hidden record is not resent');
   const previewMapping = { ...mapping, companies: { ...mapping.companies, type: 'Type' }, ingredients: { ...mapping.ingredients, certification: 'Cert' } };
   let previewCalls = 0;
   globalThis.fetch = async () => {
