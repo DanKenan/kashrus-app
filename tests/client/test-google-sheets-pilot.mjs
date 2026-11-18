@@ -3,7 +3,7 @@ import { createGoogleSheetsApi } from '../../src/server/sources/google-sheets.ts
 
 const headers = ['ID', 'Fee', 'Company', 'Formula'];
 const edit = { metadataId: 19, table: 'Companies', headers, idHeader: 'ID', feeHeader: 'Fee', recordId: 'a', fee: 200 };
-function fixture(interleave, response = 'ok') {
+function fixture(interleave, response = 'ok', afterFirstRead) {
     const state = { headers: [...headers], rows: [
         { tag: 19, cells: ['a', 100, 'Original', '=1+1'] },
         { tag: 32, cells: ['b', 70, 'Other', '=2+2'] },
@@ -15,12 +15,17 @@ function fixture(interleave, response = 'ok') {
             const [tag, header] = body.dataFilters;
             assert.deepEqual(tag, { developerMetadataLookup: { metadataId: 19 } });
             assert.deepEqual(header, { a1Range: "'Companies'!1:1" });
-            return Response.json({ valueRanges: [
+            const snapshot = Response.json({ valueRanges: [
                 { dataFilters: [header], valueRange: { values: [state.headers] } },
                 ...state.rows.filter(r => r.tag === 19).map(r => ({
                     dataFilters: [tag], valueRange: { range: "'Companies'!A2:D2", values: [r.cells] },
                 })),
             ] });
+            if (afterFirstRead) {
+                afterFirstRead(state);
+                afterFirstRead = undefined;
+            }
+            return snapshot;
         }
         assert.ok(url.endsWith('/values:batchUpdateByDataFilter'));
         assert.deepEqual(body, { valueInputOption: 'RAW', data: [{
@@ -60,9 +65,22 @@ await assert.rejects(formula.save, /formula/);
 
 // Column moves can corrupt another cell despite correct update counts.
 // A partial sort that leaves the ID in place can still escape verification.
-const moved = fixture(s => {
+function moveFeeColumn(s) {
     for (const row of [s.headers, ...s.rows.map(r => r.cells)]) [row[1], row[2]] = [row[2], row[1]];
-});
+}
+const unchanged = fixture(undefined, 'ok', moveFeeColumn);
+unchanged.state.rows[0].cells[1] = 200;
+await assert.rejects(unchanged.save, /Fee is already set to this amount/);
+assert.equal(unchanged.state.writes, 0);
+assert.deepEqual(unchanged.state.headers, ['ID', 'Company', 'Fee', 'Formula']);
+assert.deepEqual(unchanged.state.rows[0].cells, ['a', 'Original', 200, '=1+1']);
+
+const formatted = fixture();
+formatted.state.rows[0].cells[1] = '$200.00';
+await assert.rejects(formatted.save, /Fee is already set to this amount/);
+assert.equal(formatted.state.writes, 0);
+
+const moved = fixture(moveFeeColumn);
 await assert.rejects(moved.save, /Fee save could not be confirmed/);
 assert.equal(moved.state.rows[0].cells[moved.state.headers.indexOf('Company')], 200);
 const partial = fixture(s => {

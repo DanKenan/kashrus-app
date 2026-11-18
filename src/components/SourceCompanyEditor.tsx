@@ -8,7 +8,10 @@ export function SourceCompanyEditor({ company, source, feeOnly = false, onClose,
   const root = useVisitFocus(onClose);
   const [fields, setFields] = useState({ name: company.name, address: company.address || '', type: company.type || '' }), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [fee, setFee] = useState(String(company.companyFee ?? ''));
-  const valid = feeOnly ? !!company.id && !!fee.trim() && Number.isFinite(Number(fee)) && Number(fee) >= 0 : !!fields.name.trim();
+  const amount = Number(fee);
+  const valid = feeOnly
+    ? !!company.id && !!fee.trim() && Number.isFinite(amount) && amount >= 0 && amount !== company.companyFee
+    : !!fields.name.trim();
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (busy || !valid) return;
@@ -16,7 +19,7 @@ export function SourceCompanyEditor({ company, source, feeOnly = false, onClose,
     setError('');
     try {
       if (feeOnly && company.id) {
-        await saveSheetFee(company.id, Number(fee));
+        await saveSheetFee(company.id, amount);
       } else {
         const changed = Object.fromEntries(Object.entries(fields).filter(([key, value]) =>
           company.id ? value !== (company[key as keyof typeof fields] ?? '') : value !== ''));

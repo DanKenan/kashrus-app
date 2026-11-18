@@ -1,3 +1,4 @@
+import { parseMoney } from '../../lib/sourceAmount.ts';
 import { sourceFetch } from './http.ts';
 import { matrixRows, tabularConnector, keyRows } from './tabular.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
@@ -154,6 +155,8 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
         const previous = await read();
         if (typeof previous === 'string' && previous.startsWith('='))
             throw conflict('This fee contains a formula.');
+        if (previous === fee || (typeof previous === 'string' && parseMoney(previous) === fee))
+            throw conflict('The Fee is already set to this amount. Refresh to see the current value.');
         const values = [Array(feeColumn).fill(null).concat(fee)];
         let result;
         try {
