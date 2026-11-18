@@ -66,7 +66,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     try { return JSON.parse(await fs.readFile(file(collection, id), 'utf8')); }
     catch (e: any) { if (e.code === 'ENOENT') return null; throw e; }
   }
-  async function save(connection: Connection, backups: Backup[] = []) {
+  async function save(connection: Connection, backups: Backup[] = [], previousUpload?: Connection['upload']) {
     if (deps.staged()) return;
     const counts = { ...connection.backupParts };
     for (const backup of backups) {
@@ -85,7 +85,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
       }
       counts[backup.companyId] = { parts, hash };
     }
-    await commit([{ collection: 'sourceConnections', id: connection.agencyId, doc: { ...connection, backupParts: counts } }]);
+    await activate({...connection, backupParts:counts}, previousUpload);
     connection.backupParts = counts;
   }
   async function load(agencyId: string, companyIds: string[]): Promise<Backup[] & { invalidCompanyIds?: string[] }> {
@@ -121,10 +121,61 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     const old=connection.upload;
     const upload={versioned:true,fileNames:files.map(f=>f.name),copiedAt:new Date().toISOString(),rows:files.reduce((n,f)=>n+f.tabs.reduce((n,t)=>n+t.rows.length,0),0),parts,hash};
     const partId = (i:number) => `${connection.agencyId}__copy__${hash}__${i}`;
-    await commit(Array.from({length:parts},(_,i)=>({collection:'sourceUploads',id:partId(i),doc:{data:encoded.slice(i*480*1024,(i+1)*480*1024)}})));
-    await commit([{collection:'sourceConnections',id:connection.agencyId,doc:{...connection,upload}}]);
+    const chunks = Array.from({length:parts},(_,i)=>({collection:'sourceUploads',id:partId(i),doc:{data:encoded.slice(i*480*1024,(i+1)*480*1024)}}));
+    await activate({...connection, upload}, old, chunks);
     connection.upload=upload;
-    if(old && old.hash !== hash) await commit(Array.from({length:old.parts},(_,i)=>({collection:'sourceUploads',id:uploadPart(connection.agencyId,old,i)}))).catch(()=>{});
+  }
+  // Filesystem renames commit one manifest at a time. Reclaim unreachable chunks under the
+  // same lock as activation so recovery cannot delete chunks from an in-progress upload.
+  let localWrites: Promise<void> = Promise.resolve();
+  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  function localWrite(fn: () => Promise<void>) {
+    const next = localWrites.then(fn);
+    localWrites = next.catch(() => {});
+    return next;
+  }
+  async function reclaimLocalUploads() {
+    if (deps.db() || deps.staged()) return;
+    await localWrite(async () => {
+      let names: string[];
+      try { names = await fs.readdir(path.join(dir,'sourceUploads')); }
+      catch (e:any) { if (e.code === 'ENOENT') return; throw e; }
+      const active = new Set<string>();
+      for (const c of await list('sourceConnections')) {
+        if (!c.upload) continue;
+        // Keep all chunks when the manifest itself needs recovery.
+        if (!Number.isInteger(c.upload.parts) || c.upload.parts < 1 || c.upload.parts > 10) return;
+        for (let i=0; i<c.upload.parts; i++) active.add(uploadPart(c.agencyId,c.upload,i));
+      }
+      for (const name of names) {
+        if (name.endsWith('.json') && !active.has(decodeURIComponent(name.slice(0,-5))))
+          await fs.rm(path.join(dir,'sourceUploads',name),{force:true});
+      }
+    });
+  }
+  function retryLocalCleanup() {
+    if (cleanupTimer) return;
+    cleanupTimer = setTimeout(() => {
+      cleanupTimer = undefined;
+      void reclaimLocalUploads().catch(retryLocalCleanup);
+    },5000);
+    cleanupTimer.unref();
+  }
+  async function activate(c:Connection, previous:Connection['upload'], chunks:Write[] = []) {
+    const manifest = {collection:'sourceConnections', id:c.agencyId, doc:c};
+    const obsolete = previous && (!c.upload || previous.hash !== c.upload.hash || previous.versioned !== c.upload.versioned)
+      ? Array.from({length:previous.parts}, (_,i)=>({collection:'sourceUploads',id:uploadPart(c.agencyId,previous,i)})) : [];
+    // At most 3 MiB of source data: the encoded chunks, manifest and deletes fit one Firestore batch.
+    // A rejected batch leaves the old connection intact and the entire activation can be retried.
+    if (deps.db()) {
+      await commit([...chunks, manifest, ...obsolete]);
+      return;
+    }
+    await localWrite(async () => {
+      try { await commit([...chunks, manifest]); }
+      catch (error) { retryLocalCleanup(); throw error; }
+      await commit(obsolete).catch(retryLocalCleanup);
+    });
   }
   function uploadPart(id:string, upload:NonNullable<Connection['upload']>, i:number) {
     return `${id}__copy__${upload.versioned ? upload.hash + '__' : ''}${i}`;
@@ -141,9 +192,11 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
   }
   async function remove(c:Connection) {
     if(deps.staged())throw Error('Writes blocked');
-    await commit([{collection:'sourceConnections',id:c.agencyId},...Array.from({length:c.upload?.parts||0},(_,i)=>({collection:'sourceUploads',id:uploadPart(c.agencyId,c.upload!,i)}))]);
+    const removals = [{collection:'sourceConnections',id:c.agencyId},...Array.from({length:c.upload?.parts||0},(_,i)=>({collection:'sourceUploads',id:uploadPart(c.agencyId,c.upload!,i)}))];
+    if (deps.db()) await commit(removals);
+    else await localWrite(async () => { await commit(removals.slice(0,1)); await commit(removals.slice(1)).catch(retryLocalCleanup); });
   }
-  return { connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
+  return { reclaimLocalUploads, connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
 }
 // Read legacy connection settings without rewriting source values.
 export function normalizeConnection(connection: any): Connection {

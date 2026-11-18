@@ -78,16 +78,18 @@ export function keyRows(rows: SourceRow[], columns: string[], scope: string[], m
     const config = mapping && [mapping.companies, mapping.ingredients, mapping.products].find(c =>
         c.table === scope[2] && (!c.file || c.file.id === scope[1]));
     const primary = config?.pk || columns.find(c => /^id$/i.test(c));
-    const natural = [config?.name || columns.find(c => /^name$/i.test(c)), config && 'companyLink' in config && config.companyLink].filter(Boolean) as string[];
-    const validPrimary = uploadVersion && primary && rows.every(r => r.fields[primary] != null && r.fields[primary] !== '') &&
+    if (!uploadVersion && (!primary || !columns.includes(primary) || !/^id$/i.test(primary))) {
+        throw Object.assign(Error('Each spreadsheet tab needs a dedicated ID column with permanent, unique record keys.'), {status:400});
+    }
+    const validPrimary = primary && rows.every(r => String(r.fields[primary] ?? '').trim()) &&
         new Set(rows.map(r => r.fields[primary])).size === rows.length;
+    if (!validPrimary && !uploadVersion) throw Object.assign(Error('Every spreadsheet row needs a unique, non-empty ID.'), {status:400});
     const versioned = uploadVersion && !validPrimary;
     const seen = new Set<string>();
     for (const row of rows) {
-        const keys = primary ? [primary] : natural.length ? natural : columns;
+        const keys = primary ? [primary] : [];
         const values = keys.map(col => row.fields[col]);
         const key = versioned ? [uploadVersion, row.id] : values;
-        if (!key.length || (!uploadVersion && (primary || natural.length) && !key[0])) throw Error('A unique record key is required.');
         if (primary && !versioned) row.sourceKey = String(row.fields[primary]);
         row.id = createHash('sha256').update(JSON.stringify([scope, versioned ? null : keys, key])).digest('base64url');
         if (seen.has(row.id)) throw Error('Duplicate record key.');

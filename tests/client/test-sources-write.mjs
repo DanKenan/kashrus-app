@@ -12,3 +12,9 @@ for (const list of ['reports', 'fees', 'oauth', 'products'])
 for (const fields of [{ unknown: 'demo' }, { file: 'secret' }, { pk: 'id' }, { name: 5 }, { name: 'x'.repeat(2001) }, null, {}, []])
     assert.throws(() => guardSourceWrite(c, 'companies', fields), e => e.status === 400);
 console.log('single write guard restricts providers, access, lists and mapped columns');
+
+for (const key of ['companyFee','mashgiachFee']) {
+    const protectedMapping={...mapping,companies:{...mapping.companies,[key]:'Imported',brand:'Imported'}};
+    for (const fields of [{[key]:'80'},{brand:'80'}])
+        assert.throws(()=>guardSourceWrite({...c,mapping:protectedMapping},'companies',fields),e=>e.status===400);
+}

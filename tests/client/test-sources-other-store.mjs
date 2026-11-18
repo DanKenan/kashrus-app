@@ -26,8 +26,12 @@ const routes = registerSourceRoutes(app, { db: () => db, dataDir: '/unused', sta
 const partKey = [...docs.keys()].find(k => k.startsWith('sourceUploads/'));
 const part = docs.get(partKey);
 docs.delete(partKey);
+const healthy = {...connection,agencyId:'healthy'};
+await store.saveUpload(healthy,files);
 await routes.boot();
 assert.equal(routes.inspectionSource(connection.agencyId).connection,undefined);
+assert.ok(routes.inspectionSource('healthy').connection);
+await store.remove(healthy);
 docs.set(partKey,part);
 await measure('boot connection + upload part', async () => { await routes.boot(); for (let i = 0; i < 10; i++)
     await new Promise(r => setImmediate(r)); }, 2, 0);
@@ -39,7 +43,20 @@ await assert.rejects(() => store.saveUpload(connection, files), /blocked/);
 blocked = false;
 const huge = [{ ...files[0], tabs: [{ name: 'Companies', columns: ['Name'], rows: Array.from({ length: 2000 }, (_, i) => ({ id: 'r' + i, fields: { Name: 'x'.repeat(2000) } })) }] }];
 await assert.rejects(() => store.saveUpload(connection, huge), /too big to copy/);
-await measure('disconnect + upload parts deleted', () => store.remove(connection), 0, 2);
+const switched = {...connection,sourceType:'excel'};
+delete switched.upload;
+const originalBatch = db.batch;
+db.batch = () => {
+    const batch = originalBatch();
+    batch.commit = async () => {throw Error('Activation failed');};
+    return batch;
+};
+await assert.rejects(store.save(switched,[],connection.upload),/Activation failed/);
+db.batch = originalBatch;
+assert.deepEqual(await store.loadUpload(await store.raw(connection.agencyId)),files);
+await measure('provider switch plus old chunk deletion', () => store.save(switched,[],connection.upload), 0, 2);
+assert.ok(![...docs.keys()].some(k=>k.startsWith('sourceUploads/')));
+await store.remove(switched);
 assert.equal(docs.size, 0);
 console.table(budget);
 console.log('upload boot-only reads, atomic bounded parts, no backups, writes and memory browse passed');
@@ -89,3 +106,19 @@ try {
   } finally {db.batch=batch;globalThis.setTimeout=setTimer;}
   console.table(budget.slice(-6));
 } finally { globalThis.fetch = previousFetch; Date.now = previousNow; }
+
+
+const fs = await import('node:fs/promises');
+const {tmpdir} = await import('node:os');
+const {join} = await import('node:path');
+const directory = await fs.mkdtemp(join(tmpdir(),'source-chunk-recovery-'));
+try {
+  const local = createSourceStore({db:()=>null,dataDir:directory,staged:()=>false});
+  const active = {...connection};
+  await local.saveUpload(active,files);
+  const orphan = join(directory,'source-connections','sourceUploads','obsolete__copy__0.json');
+  await fs.writeFile(orphan,'{}');
+  await local.reclaimLocalUploads();
+  await assert.rejects(fs.stat(orphan), {code:'ENOENT'});
+  assert.deepEqual(await local.loadUpload(active),files);
+} finally { await fs.rm(directory,{force:true,recursive:true}); }

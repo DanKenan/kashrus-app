@@ -10,6 +10,10 @@ export default {
         const sentinel = ['fake-120-key-sentinel', 'fake-120-refresh-sentinel', 'fake-120-access-sentinel', 'fake-client-secret'];
         const columns = ['Name', 'Address', 'Annual Fee', 'Supervision Fee'];
         const rows = { Companies: [columns, ['Golden Grain Bakery', '100 Demo Street', '$1,200', '80']], Ingredients: [['Name', 'Company'], ['Demo Flour', 'Golden Grain Bakery']], Products: [['Name', 'Company'], ['Demo Loaf', 'Golden Grain Bakery']] };
+        for (const [name,matrix] of Object.entries(rows)) {
+            matrix[0].push('ID');
+            matrix[1].push(name + '-key');
+        }
         let calls = 0, writes = 0, created = 0;
         const seen = [];
         const mock = http.createServer(async (req, res) => {
@@ -80,7 +84,7 @@ export default {
         const rawUpload = async (name, bytes, type) => { const r = await fetch(`${baseUrl}/api/sources/upload?draftId=${draftId}&name=${encodeURIComponent(name)}`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.admin}`, 'Content-Type': type }, body: bytes }); const json = await r.json(); assert.equal(r.status, 200, JSON.stringify(json)); return json; };
         const signIn = async (p, access) => { const start = await request('POST', `/api/sources/oauth/${p}/start`, { access }), url = new URL(start.url); assert.equal(url.origin, apiBase); assert.equal(url.searchParams.get('code_challenge_method'), 'S256'); const callback = `/api/sources/oauth/${p}/callback?state=${url.searchParams.get('state')}&code=fake-code`; const r = await measure(`${p} OAuth callback`, () => fetch(baseUrl + callback, { redirect: 'manual' }), 1); assert.equal(r.status, 302); assert.match(r.headers.get('location'), /signin=ok/); const replay = await fetch(baseUrl + callback, { redirect: 'manual' }); assert.match(replay.headers.get('location'), /signin=failed/); return url; };
         const mapping = { companies: { table: 'Companies', name: 'Name', address: 'Address', companyFee: 'Annual Fee', mashgiachFee: 'Supervision Fee' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: [] };
-        const save = async (p, access = 'read', m = mapping) => measure(`${p} mapping`, () => request('PUT', '/api/sources/connection', { sourceType: p, baseId: p === 'supabase' ? 'https://' + 'a'.repeat(20) + '.supabase.co' : p === 'upload' ? 'upload' : 'main', access, mapping: m, ...(p === 'upload' ? {draftId} : {}), ...(p === 'supabase' ? { apiKey: sentinel[0] } : {}) }), p === 'upload' ? 2 : 1);
+        const save = async (p, access = 'read', m = mapping, expectedWrites = p === 'upload' ? 2 : 1) => measure(`${p} mapping`, () => request('PUT', '/api/sources/connection', { sourceType: p, baseId: p === 'supabase' ? 'https://' + 'a'.repeat(20) + '.supabase.co' : p === 'upload' ? 'upload' : 'main', access, mapping: m, ...(p === 'upload' ? {draftId} : {}), ...(p === 'supabase' ? { apiKey: sentinel[0] } : {}) }), expectedWrites);
         const browse = async (p) => { const data = await measure(`${p} browse factories/items`, async () => { const factories = await request('GET', '/api/factories'); const c = factories.companies[0]; assert.equal(c.name, 'Golden Grain Bakery'); assert.equal(c.address, '100 Demo Street'); await request('GET', `/api/factories/${c.id}/items`); return factories; }); return data; };
         try {
             // Hydrate inspection settings once for this freshly injected agency. Source browsing is measured after boot.
@@ -106,6 +110,9 @@ export default {
             const separate = { ...mapping, ingredients: { ...mapping.ingredients, file: { id: 'separate', name: 'Demo separate' } } };
             await save('google_sheets', 'readwrite', separate);
             const googleId = (await browse('google_sheets')).companies[0].id;
+            const added = await request('POST','/api/sources/rows/ingredients',{fields:{name:'Raw linked item',companyLink:'Companies-key'}});
+            const items = await request('GET',`/api/factories/${googleId}/items`);
+            assert.ok(items.ingredients.some(r => r.id === added.row.id));
             assert.ok(seen.some(r => r.path.includes('/separate/values/')));
             await measure('Google rows POST/PATCH', async () => { await request('POST', '/api/sources/rows/companies', { fields: { name: 'Another bakery' } }); await request('PATCH', `/api/sources/rows/companies/${googleId}`, { fields: { address: '100 Demo Street' } }); });
             assert.equal((await request('POST', '/api/sources/create-file', { provider: 'google_sheets' })).file.id, 'created');
@@ -132,21 +139,21 @@ export default {
             assert.equal(calls, badBefore);
             assert.equal((await request('POST', '/api/sources/supabase/test', { url: 'https://' + 'a'.repeat(20) + '.supabase.co', apiKey: sentinel[0] })).ok, true);
             await save('supabase', 'readwrite');
-            await browse('supabase');
+            const supId = (await browse('supabase')).companies[0].id;
             await measure('Supabase tabs', () => request('GET', '/api/sources/tabs?provider=supabase'));
             await measure('Supabase row POST', () => request('POST', '/api/sources/rows/companies', { fields: { name: 'Golden Grain Bakery' } }));
             // Warm P5's agency-local stores before measuring source actions.
             await request('GET', '/api/inspections/fees');
             const fees = await request('GET', '/api/inspections/fees');
-            assert.deepEqual(fees.places.find(p => p.id === 'r2').importedCompany, { amount: 1200, per: 'year' });
-            const info = await request('GET', '/api/inspections/company-info/r2');
+            assert.deepEqual(fees.places.find(p => p.id === supId).importedCompany, { amount: 1200, per: 'year' });
+            const info = await request('GET', `/api/inspections/company-info/${supId}`);
             assert.equal(info.address, '100 Demo Street');
-            await request('PUT', '/api/inspections/fees/r2', { company: { amount: 1500, per: 'year' }, mashgiach: { amount: 75 } });
-            assert.equal((await request('GET', '/api/inspections/fees')).places.find(p => p.id === 'r2').company.amount, 1500);
-            await request('PUT', '/api/inspections/schedule/companies/r2/people', { mashgiachIds: [people.mash.id], coordinatorIds: [] });
-            const visit = await request('GET', '/api/visits/factories/r2', undefined, 200, 'mash');
+            await request('PUT', `/api/inspections/fees/${supId}`, { company: { amount: 1500, per: 'year' }, mashgiach: { amount: 75 } });
+            assert.equal((await request('GET', '/api/inspections/fees')).places.find(p => p.id === supId).company.amount, 1500);
+            await request('PUT', `/api/inspections/schedule/companies/${supId}/people`, { mashgiachIds: [people.mash.id], coordinatorIds: [] });
+            const visit = await request('GET', `/api/visits/factories/${supId}`, undefined, 200, 'mash');
             at = writes;
-            const report = await request('POST', '/api/visits/reports', { clientReportId: 'report-120-demo', companyId: 'r2', listVersion: visit.listVersion, startedAt: new Date().toISOString(), marks: [], offList: [] }, 201, 'mash');
+            const report = await request('POST', '/api/visits/reports', { clientReportId: 'report-120-demo', companyId: supId, listVersion: visit.listVersion, startedAt: new Date().toISOString(), marks: [], offList: [] }, 201, 'mash');
             assert.equal(writes, at, 'inspection report must not write source');
             const reportId = report.id || report.report?.id;
             const detail = await request('GET', `/api/inspections/reports/${reportId}`);
@@ -173,7 +180,9 @@ export default {
             for (const who of ['coord', 'mash'])
                 for (const [m, p, b] of routes)
                     await request(m, p, b, 403, who);
-            await measure('disconnect upload parts', () => request('DELETE', '/api/sources/connection'), 2);
+            await save('supabase','read',mapping,2);
+            assert.equal(table.at(-1).deletes,1,'provider switch must delete the old upload part');
+            await measure('disconnect after switch', () => request('DELETE', '/api/sources/connection'), 1);
             assert.equal((await request('GET', '/api/sources/connection')).sourceType, null);
             assert.equal((await request('GET', '/api/sources/oauth/google_sheets/account')).signedIn, false);
             console.table(table);

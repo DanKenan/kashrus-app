@@ -115,6 +115,19 @@ const fieldValue = (value: unknown): string | undefined => {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return undefined;
 };
+export function companyLinkResolver(companies: {id:string;name:string;sourceKey?:string}[]) {
+  const ids = new Set(companies.map(c => c.id));
+  const sourceKeys = new Map(companies.filter(c => c.sourceKey).map(c => [c.sourceKey, c.id]));
+  const names = new Map<string, string[]>();
+  for (const c of companies) names.set(folded(c.name), [...(names.get(folded(c.name)) ?? []), c.id]);
+  return (value: unknown) => {
+    const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [value];
+    return [...new Set(values.flatMap(v => {
+      const s = fieldValue(v)?.trim(); return !s ? [] : ids.has(s) ? [s] : sourceKeys.has(s) ? [sourceKeys.get(s)!] : names.get(folded(s)) ?? [];
+    }))];
+  };
+}
+
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
   const read = (row: SourceRow, column?: string): string | undefined => column ? fieldValue(row.fields[column]) : undefined;
   const extra = (row: SourceRow, config: object, group: SourceSection) => {
@@ -129,25 +142,15 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
   };
   const c = mapping.companies;
   const companies = (rows[c.table] ?? []).filter(r => !c.factoryValues?.length || [...c.factoryValues, ...(c.foodServiceValues ?? [])].some(v => folded(v) === folded(read(r, c.type) ?? '')))
-    .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), address: read(r, c.address), companyFee: parseMoney(read(r, c.companyFee)), mashgiachFee: parseMoney(read(r, c.mashgiachFee)), extra: extra(r, c, 'companies') }));
+    .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), address: read(r, c.address), companyFee: parseMoney(read(r, c.companyFee)), mashgiachFee: parseMoney(read(r, c.mashgiachFee)), extra: extra(r, c, 'companies') }));
   const keptIds = new Set(companies.map(c => c.id));
   const otherCompanies = (rows[c.table] ?? []).filter(r => !keptIds.has(r.id))
     .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type) }));
-  const ids = new Set(companies.map(c => c.id));
-  const sourceKeys = new Map((rows[c.table] ?? []).filter(r => r.sourceKey && ids.has(r.id)).map(r => [r.sourceKey, r.id]));
-  const names = new Map<string, string[]>();
-  for (const c of companies) names.set(folded(c.name), [...(names.get(folded(c.name)) ?? []), c.id]);
-  const links = (r: SourceRow, column?: string) => {
-    const value = column ? r.fields[column] : undefined;
-    const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [value];
-    return [...new Set(values.flatMap(v => {
-      const s = fieldValue(v)?.trim(); return !s ? [] : ids.has(s) ? [s] : sourceKeys.has(s) ? [sourceKeys.get(s)!] : names.get(folded(s)) ?? [];
-    }))];
-  };
+  const links = companyLinkResolver(companies);
   const i = mapping.ingredients, p = mapping.products;
   const ingredients = (rows[i.table] ?? []).map(r => {
     const raw = { certificationRaw: read(r, i.certification), statusRaw: read(r, i.status), agencyRaw: read(r, i.agency) };
-    return { id: r.id, companyIds: links(r, i.companyLink), name: read(r, i.name) ?? '', brand: read(r, i.brand),
+    return { id: r.id, companyIds: links(i.companyLink && r.fields[i.companyLink]), name: read(r, i.name) ?? '', brand: read(r, i.brand),
       ...raw, ...classifyRaw(mapping, i, raw),
       plant: read(r, i.plant), expiresOn: read(r, i.expiresOn), extra: extra(r, i, 'ingredients') };
   });
@@ -155,7 +158,7 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
     const raw = p.symbolRequired ? r.fields[p.symbolRequired] : undefined;
     const symbolRequired = typeof raw === 'boolean' ? raw : typeof raw === 'string' && /^(yes|true|1|no|false|0)$/i.test(raw.trim()) ? /^(yes|true|1)$/i.test(raw.trim()) : undefined;
     const classifiedRaw = { certificationRaw: read(r, p.certification), statusRaw: read(r, p.status), agencyRaw: read(r, p.agency) };
-    return { ...classifiedRaw, ...classifyRaw(mapping, p, classifiedRaw), id: r.id, companyIds: links(r, p.companyLink), name: read(r, p.name) ?? '', brand: read(r, p.brand),
+    return { ...classifiedRaw, ...classifyRaw(mapping, p, classifiedRaw), id: r.id, companyIds: links(p.companyLink && r.fields[p.companyLink]), name: read(r, p.name) ?? '', brand: read(r, p.brand),
       code: read(r, p.code), symbolRequired, plant: read(r, p.plant), extra: extra(r, p, 'products') };
   });
   return { companies, ingredients, products, otherCompanies };

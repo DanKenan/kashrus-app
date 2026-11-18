@@ -12,10 +12,14 @@ export function guardSourceWrite(c: Connection | undefined, list: string, fields
     if (!config?.table || !fields || typeof fields !== 'object' || Array.isArray(fields) || !Object.keys(fields).length)
         return reject(400, 'Invalid fields');
     const output: Record<string, string> = Object.create(null);
-    const allowed = list === 'companies' ? ['name', 'type', 'brand', 'plant', 'address', 'companyFee', 'mashgiachFee'] : list === 'ingredients' ? ['name', 'companyLink', 'brand', 'certification', 'agency', 'status', 'plant', 'expiresOn'] : ['name', 'companyLink', 'brand', 'code', 'certification', 'agency', 'status', 'symbolRequired', 'plant'];
+    const allowed = list === 'companies' ? ['name', 'type', 'brand', 'plant', 'address'] : list === 'ingredients' ? ['name', 'companyLink', 'brand', 'certification', 'agency', 'status', 'plant', 'expiresOn'] : ['name', 'companyLink', 'brand', 'code', 'certification', 'agency', 'status', 'symbolRequired', 'plant'];
     for (const [key, value] of Object.entries(fields)) {
         if (!allowed.includes(key) || typeof value !== 'string' || value.length > 2000)
             return reject(400, 'Only mapped list columns can be edited.');
+        const company = c.mapping.companies;
+        if (config.table === company.table && (config.file?.id || c.baseId) === (company.file?.id || c.baseId) &&
+            config[key] && [company.companyFee, company.mashgiachFee].includes(config[key]))
+            return reject(400, 'Imported fee columns are read only.');
         if (typeof config[key] === 'string' && config[key]) output[config[key]] = value;
     }
     if (!Object.keys(output).length) return reject(400, 'Only mapped list columns can be edited.');

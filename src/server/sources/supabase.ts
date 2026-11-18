@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { sourceJson, sourceFetch } from './http.ts';
 import { tabularConnector } from './tabular.ts';
 import type { SourceMapping } from './types.ts';
@@ -27,17 +28,19 @@ export function createSupabaseConnector(config: SupabaseConfig) {
         if (keys.length !== 1 || configured && configured !== keys[0]) throw Error('A verified single-column primary key is required.');
         return keys[0];
     }
-    function row(r:any, key:string) {
+    function row(r:any, key:string, table:string) {
         const value = r?.[key];
         if (!(typeof value === 'string' && value.trim() || typeof value === 'number' && Number.isSafeInteger(value))) throw Error('Invalid record key.');
-        return {id:String(value), fields:r};
+        const sourceKey = String(value);
+        const id = createHash('sha256').update(JSON.stringify(['supabase',config.url, table, key, sourceKey])).digest('base64url');
+        return {id, sourceKey, fields:r};
     }
-    return tabularConnector('supabase', config.mapping, {
+    const methods = {
         calls: () => calls,
         async listTables() {
             return Object.entries(await definitions()).map(([name, def]:[string,any]) => ({name, columns:Object.keys(def.properties || {})}));
         },
-        async readRows(table) {
+        async readRows(table:string) {
             const key = await primaryKey(table), seen = new Set<string>(), out = [];
             for (;;) {
                 const start = out.length;
@@ -51,7 +54,7 @@ export function createSupabaseConnector(config: SupabaseConfig) {
                 const range = response.headers.get('content-range')?.match(/^(?:(\d+)-(\d+)|\*)\/(\d+|\*)$/);
                 if (!Array.isArray(page) || !range || (page.length && (Number(range[1]) !== start || Number(range[2]) !== start + page.length - 1))) throw Error('Invalid source page.');
                 for (const raw of page) {
-                    const entry = row(raw,key);
+                    const entry = row(raw,key,table);
                     if (seen.has(entry.id)) throw Error('Duplicate record key.');
                     seen.add(entry.id);
                     out.push(entry);
@@ -64,7 +67,19 @@ export function createSupabaseConnector(config: SupabaseConfig) {
             }
             return out;
         },
-        async writeRow(table, input) { const key = await primaryKey(table); const query = input.id ? `?${encodeURIComponent(key)}=eq.${encodeURIComponent(input.id)}` : ''; const result = await request(`${encodeURIComponent(table)}${query}`, { method: input.id ? 'PATCH' : 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(input.fields) }); if (!Array.isArray(result) || result.length !== 1)
-            throw Error('Write returned no row'); return row(result[0], key); },
-    });
+        async writeRow(table:string, input:{id?:string; fields:Record<string,string>}) {
+            const key = await primaryKey(table);
+            let query = '';
+            if (input.id !== undefined) {
+                const target = (await methods.readRows(table)).find(r => r.id === input.id);
+                if (!target) throw Object.assign(Error('Record does not belong to this source.'), {status:409});
+                if (Object.hasOwn(input.fields,key)) throw Error('Cannot edit a primary key.');
+                query = `?${encodeURIComponent(key)}=eq.${encodeURIComponent(target.sourceKey)}`;
+            }
+            const result = await request(`${encodeURIComponent(table)}${query}`, {method:input.id ? 'PATCH' : 'POST', headers:{Prefer:'return=representation'}, body:JSON.stringify(input.fields)});
+            if (!Array.isArray(result) || result.length !== 1) throw Error('Write returned no row');
+            return row(result[0],key,table);
+        },
+    };
+    return tabularConnector('supabase',config.mapping,methods);
 }

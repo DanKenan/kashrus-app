@@ -2,6 +2,7 @@ type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'dairy_equipment' | 'p
 export type Dpm = 'dairy' | 'dairy_equipment' | 'pareve' | 'meat';
 export type SourceKind = 'airtable' | 'google_sheets' | 'excel' | 'supabase' | 'upload';
 export interface Company {
+  sourceKey?: string;
   id: string; name: string; address?: string; companyFee?: number; mashgiachFee?: number; type?: string; brand?: string; plant?: string; extra: Record<string, string>;
 }
 export interface Ingredient {

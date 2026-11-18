@@ -5,7 +5,7 @@ import { validSupabaseUrl } from './supabase.ts';
 import { randomUUID } from 'node:crypto';
 import { parseUpload, uploadRowsError, uploadTypeError, type UploadedFile } from './upload.ts';
 import { guardSourceWrite } from './write.ts';
-import { applyMapping } from './mapping.ts';
+import { applyMapping, companyLinkResolver } from './mapping.ts';
 import { summarizeValues } from '../../lib/sourcePreview.ts';
 import { createConnector, type SourceSettings } from './stubs.ts';
 import { createSourceCache, nextNightlyRun } from './cache.ts';
@@ -138,7 +138,7 @@ export function registerSourceRoutes(app: any, deps: {
       const hashes = { ...c.backupHashes };
       for (const b of snapshot) hashes[b.companyId] = b.hash;
       const persisted = { ...c, backupHashes: hashes };
-      await store.save(persisted, snapshot);
+      await store.save(persisted, snapshot, connections.get(c.agencyId)?.upload);
       c.backupParts = persisted.backupParts;
       backupErrors.delete(c.agencyId);
       c.backupHashes = hashes;
@@ -262,6 +262,7 @@ export function registerSourceRoutes(app: any, deps: {
           if (p !== 'upload') delete c.upload;
           await save(c, [], undefined, false);
       }
+      if (p !== 'upload') uploads.delete(id);
       unconfirmed.delete(id);
       connections.set(id, c);
       cache.reset(id);
@@ -465,8 +466,7 @@ export function registerSourceRoutes(app: any, deps: {
           if (replacement) {
               if (list !== 'companies') {
                   const col = (config as any).companyLink, v = col ? row.fields[col] : '';
-                  const links = Array.isArray(v) ? v : String(v || '').split(',');
-                  replacement.companyIds = data.companies.filter(co => links.some(x => String(x).trim() === co.id || String(x).trim().toLowerCase() === co.name.toLowerCase())).map(co => co.id);
+                  replacement.companyIds = companyLinkResolver(data.companies)(v);
               }
               const rows = (data as any)[list], at = rows.findIndex((r: any) => r.id === row.id);
               if (at < 0)
@@ -515,6 +515,7 @@ export function registerSourceRoutes(app: any, deps: {
     if (old?.backupParts) c.backupParts = old.backupParts;
     const job = pending.get(id); clearTimeout(job?.timer); pending.delete(id);
     try { await save(c, [], undefined, !changed); if(changed) unconfirmed.delete(id); } catch (cause) { if (job) retrySave(id, job.expected, job.connection, job.backups, job.attempt); throw cause; }
+    uploads.delete(id);
     backupErrors.delete(id);
     connections.set(id, c); keyErrors.delete(id);
     if (changed && (!old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || keyChanged || JSON.stringify({ ...old.mapping, valueAssignments: undefined }) !== JSON.stringify({ ...c.mapping, valueAssignments: undefined }))) cache.reset(id);
@@ -618,12 +619,15 @@ export function registerSourceRoutes(app: any, deps: {
   }
   let bootAttempt = 0;
   async function boot() {
+    let failed = false;
+    try { await store.reclaimLocalUploads(); } catch { failed = true; }
     try {
       for (const c of await store.connections()) {
         if (connections.has(c.agencyId)) continue;
         if(c.sourceType==='upload') {
-          if(!c.upload) throw Error('Missing upload manifest');
-          const files = await store.loadUpload(c);
+          let files;
+          try { files = await store.loadUpload(c); }
+          catch { failed = true; continue; }
           if (connections.has(c.agencyId)) continue;
           uploads.set(c.agencyId,files);
         }
@@ -633,7 +637,8 @@ export function registerSourceRoutes(app: any, deps: {
         if(c.sourceType!=='airtable'&&!c.mapping.companies?.table) continue;
         void serialize(c.agencyId, () => refresh(c.agencyId)).catch(() => console.warn('[sources] startup refresh failed'));
       }
-    } catch {
+    } catch { failed = true; }
+    if (failed) {
       console.warn('[sources] startup failed');
       const delay = [5000, 15000, 45000, 120000, 300000][Math.min(bootAttempt++, 4)];
       const timer = setTimeout(() => { void boot(); }, delay); timer.unref();
