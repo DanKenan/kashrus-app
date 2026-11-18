@@ -115,15 +115,31 @@ const fieldValue = (value: unknown): string | undefined => {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return undefined;
 };
+export class AmbiguousCompanyLink extends Error {
+  readonly status = 400;
+  constructor(name:string) {
+    super(`Multiple companies match "${name}". Use the company's unique ID in the company-link column.`);
+  }
+}
+
 export function companyLinkResolver(companies: {id:string;name:string;sourceKey?:string}[]) {
   const ids = new Set(companies.map(c => c.id));
   const sourceKeys = new Map(companies.filter(c => c.sourceKey).map(c => [c.sourceKey, c.id]));
   const names = new Map<string, string[]>();
   for (const c of companies) names.set(folded(c.name), [...(names.get(folded(c.name)) ?? []), c.id]);
   return (value: unknown) => {
+    const wholeKey = fieldValue(value)?.trim();
+    if (wholeKey && ids.has(wholeKey)) return [wholeKey];
+    if (wholeKey && sourceKeys.has(wholeKey)) return [sourceKeys.get(wholeKey)!];
     const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [value];
     return [...new Set(values.flatMap(v => {
-      const s = fieldValue(v)?.trim(); return !s ? [] : ids.has(s) ? [s] : sourceKeys.has(s) ? [sourceKeys.get(s)!] : names.get(folded(s)) ?? [];
+      const s = fieldValue(v)?.trim();
+      if (!s) return [];
+      if (ids.has(s)) return [s];
+      if (sourceKeys.has(s)) return [sourceKeys.get(s)!];
+      const matches = names.get(folded(s)) ?? [];
+      if (matches.length > 1) throw new AmbiguousCompanyLink(s);
+      return matches;
     }))];
   };
 }

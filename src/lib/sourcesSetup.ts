@@ -14,7 +14,7 @@ export const providers: { id: Provider; name: string; description: string }[] = 
 ];
 export function providerNote(provider: Provider, setUp: boolean) { return !setUp && ['google_sheets', 'excel'].includes(provider) ? `Not set up yet — the app's ${provider === 'excel' ? 'Microsoft' : 'Google'} sign-in is not turned on. Shutfey's team needs to set it up first.` : ''; }
 export function tileState(provider: Provider, selected: Provider | null, setUp: boolean) { return { selected: provider === selected, disabled: !setUp, note: providerNote(provider, setUp) }; }
-export function canEdit(role: string, connection: SourceConnection | null) { return role === 'admin' && connection?.canWrite === true && connection.access === 'readwrite' && ['google_sheets', 'excel', 'supabase'].includes(connection.sourceType || ''); }
+export function canEdit(role: string, connection: SourceConnection | null) { return role === 'admin' && connection?.canWrite === true && connection.access === 'readwrite' && connection.sourceType === 'supabase'; }
 export function mappingBadge(guessed: boolean) { return guessed ? 'Guessed' : 'Check'; }
 export function assignChip(mapping: SourceMapping, value: string, target: 'factoryValues' | 'foodServiceValues'): SourceMapping {
   const other = target === 'factoryValues' ? 'foodServiceValues' : 'factoryValues';

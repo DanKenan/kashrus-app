@@ -37,11 +37,11 @@ export default {
                 return send({ spreadsheetId: 'created', properties: { title: 'Demo new' } });
             }
             if (path.startsWith('/v4/spreadsheets/') && !path.includes('/values/'))
-                return send({ sheets: Object.keys(rows).map(title => ({ properties: { title } })) });
+                return send({ sheets: [...Object.keys(rows),'Notes'].map(title => ({ properties: { title } })) });
             if (path.includes('/values/')) {
                 const table = path.split('/values/')[1].split('!')[0].replace(/:append$/, '').replace(/^'|'$/g, '');
                 if (req.method === 'GET')
-                    return send({ values: rows[table] || [] });
+                    return send({ values: rows[table] || [['Memo'],['Reminder']] });
                 writes++;
                 return send({ updates: { updatedRange: `${table}!A3:D3` } });
             }
@@ -52,9 +52,9 @@ export default {
                 return send({ id: 'created', name: 'Demo workbook.xlsx' });
             }
             if (path.endsWith('/worksheets'))
-                return send({ value: Object.keys(rows).map(name => ({ name })) });
+                return send({ value: [...Object.keys(rows),'Notes'].map(name => ({ name })) });
             if (path.includes('/usedRange'))
-                return send({ values: rows[path.split('/worksheets/')[1].split('/')[0]] || [] });
+                return send({ values: rows[path.split('/worksheets/')[1].split('/')[0]] || [['Memo'],['Reminder']] });
             if (path.includes('/range(')) {
                 writes++;
                 return send({});
@@ -104,17 +104,16 @@ export default {
             await request('POST', '/api/__test__/sources-oauth-config', { enabled: true });
             assert.equal((await request('GET', '/api/sources/providers')).excel.setUp, true);
             await signIn('google_sheets', 'readwrite');
-            await measure('providers/files/tabs', async () => { await request('GET', '/api/sources/providers'); await request('GET', '/api/sources/files?provider=google_sheets'); const t = await request('GET', '/api/sources/tabs?provider=google_sheets&fileId=main'); assert.equal(t.tables.length, 3); await request('GET', '/api/sources/oauth/google_sheets/account'); });
+            await measure('providers/files/tabs', async () => { await request('GET', '/api/sources/providers'); await request('GET', '/api/sources/files?provider=google_sheets'); const t = await request('GET', '/api/sources/tabs?provider=google_sheets&fileId=main'); assert.equal(t.tables.length, 4); assert.equal(t.samples.Notes[0].fields.Memo,'Reminder'); await request('GET', '/api/sources/oauth/google_sheets/account'); });
             const pick = await request('POST', '/api/sources/oauth/google_sheets/picker-token', {});
             assert.equal(pick.accessToken, sentinel[2]);
             const separate = { ...mapping, ingredients: { ...mapping.ingredients, file: { id: 'separate', name: 'Demo separate' } } };
             await save('google_sheets', 'readwrite', separate);
             const googleId = (await browse('google_sheets')).companies[0].id;
-            const added = await request('POST','/api/sources/rows/ingredients',{fields:{name:'Raw linked item',companyLink:'Companies-key'}});
-            const items = await request('GET',`/api/factories/${googleId}/items`);
-            assert.ok(items.ingredients.some(r => r.id === added.row.id));
             assert.ok(seen.some(r => r.path.includes('/separate/values/')));
-            await measure('Google rows POST/PATCH', async () => { await request('POST', '/api/sources/rows/companies', { fields: { name: 'Another bakery' } }); await request('PATCH', `/api/sources/rows/companies/${googleId}`, { fields: { address: '100 Demo Street' } }); });
+            const beforeWrites = calls;
+            await measure('Google rows POST/PATCH denied', async () => { await request('POST', '/api/sources/rows/companies', { fields: { name: 'Another bakery' } },409); await request('PATCH', `/api/sources/rows/companies/${googleId}`, { fields: { address: '100 Demo Street' } },409); });
+            assert.equal(calls,beforeWrites);
             assert.equal((await request('POST', '/api/sources/create-file', { provider: 'google_sheets' })).file.id, 'created');
             assert.equal(created, 1);
             await measure('Google access read', () => request('PUT', '/api/sources/access', { access: 'read' }), 1);
@@ -130,8 +129,8 @@ export default {
             const ms = await signIn('excel', 'readwrite');
             assert.match(ms.searchParams.get('scope'), /Files.ReadWrite.All/);
             await save('excel', 'readwrite');
-            await measure('Excel files/tabs', async () => { await request('GET', '/api/sources/files?provider=excel'); assert.equal((await request('GET', '/api/sources/tabs?provider=excel&fileId=main')).tables.length, 3); });
-            await measure('Excel row PATCH', () => request('PATCH', `/api/sources/rows/companies/${excelId}`, { fields: { name: 'Golden Grain Bakery' } }));
+            await measure('Excel files/tabs', async () => { await request('GET', '/api/sources/files?provider=excel'); assert.equal((await request('GET', '/api/sources/tabs?provider=excel&fileId=main')).tables.length, 4); });
+            await measure('Excel row PATCH', () => request('PATCH', `/api/sources/rows/companies/${excelId}`, { fields: { name: 'Golden Grain Bakery' } },409));
             await request('POST', '/api/sources/create-file', { provider: 'excel' });
             assert.equal(created, 2);
             const badBefore = calls;
@@ -169,8 +168,10 @@ export default {
             const linked = await request('GET', `/api/factories/${live.id}/items`);
             assert.deepEqual(linked.ingredients.map(r => r.name), ['Demo Flour']);
             draftId = (await request('POST','/api/sources/upload/reset',{})).draftId;
-            await rawUpload('Replacement.csv', Buffer.from('Name\nDifferent'), 'text/csv');
-            await request('PUT','/api/sources/connection',{sourceType:'upload',baseId:'upload',access:'read',mapping:uploaded,draftId},400);
+            await rawUpload('Companies.csv',Buffer.from(csv + 'Golden Grain Bakery,Other Street,600,40\n'),'text/csv');
+            await rawUpload('Ingredients.csv',Buffer.from('Name,Company\nDemo Flour,Golden Grain Bakery'),'text/csv');
+            const ambiguous = await request('PUT','/api/sources/connection',{sourceType:'upload',baseId:'upload',access:'read',mapping:uploaded,draftId},400);
+            assert.match(ambiguous.error,/Multiple companies match.*unique ID/);
             await request('POST','/api/sources/upload/reset',{});
             assert.equal((await browse('upload')).companies[0].id,live.id);
             await measure('upload tabs', () => request('GET', '/api/sources/tabs?provider=upload'));

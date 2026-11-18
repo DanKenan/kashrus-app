@@ -41,13 +41,13 @@ const mock = createServer(async (req, res) => {
     if (u.pathname.includes('/drive/v3/files'))
         return res.end(JSON.stringify({ files: [{ id: 'g1', name: 'Demo sheets' }] }));
     if (u.pathname.includes('/v4/spreadsheets/') && !u.pathname.includes('/values/'))
-        return res.end(JSON.stringify({ sheets: [{ properties: { title: 'Companies' } }] }));
+        return res.end(JSON.stringify({ sheets: [{ properties: { title: 'Companies' } },{properties:{title:'Notes'}}] }));
     if (u.pathname.includes('/values/'))
-        return res.end(JSON.stringify(req.method === 'GET' ? { values: matrix, rowIndex:3, columnIndex:2 } : { updates: { updatedRange: 'Companies!D5' } }));
+        return res.end(JSON.stringify(req.method === 'GET' ? { values: u.pathname.includes('Notes') ? [['Memo'],['Reminder']] : matrix, rowIndex:3, columnIndex:2 } : { updates: { updatedRange: 'Companies!D5' } }));
     if (u.pathname.endsWith('/worksheets'))
-        return res.end(JSON.stringify({ value: [{ name: 'Companies' }] }));
+        return res.end(JSON.stringify({ value: [{ name: 'Companies' },{name:'Notes'}] }));
     if (u.pathname.includes('/usedRange'))
-        return res.end(JSON.stringify({ values: matrix, rowIndex:3, columnIndex:2 }));
+        return res.end(JSON.stringify({ values: u.pathname.includes('Notes') ? [['Memo'],['Reminder']] : matrix, rowIndex:3, columnIndex:2 }));
     if (u.pathname.includes('/range('))
         return res.end('{}');
     if (u.pathname.includes('/search(') || u.pathname.endsWith('/sharedWithMe'))
@@ -68,8 +68,6 @@ try {
     assert.equal((await g.readRows('Companies'))[0].fields.Name, 'Demo Bakery');
     const googleId = (await g.readRows('Companies'))[0].id;
     matrix.splice(1,0,['inserted','Other',true]);
-    await g.writeRow('Companies', { fields: {ID:'new', Name:'New demo'} });
-    await g.writeRow('Companies', { id: googleId, fields: { Name: 'Edited demo' } });
     assert.equal((await createGoogleSheetsApi(config).files())[0].id, 'g1');
     fail401 = true;
     let msRefresh = 0;
@@ -84,7 +82,12 @@ try {
     const excelId = (await e.readRows('Companies'))[1].id;
     assert.notEqual(googleId,excelId);
     matrix.reverse(); matrix.unshift(matrix.pop());
-    await e.writeRow('Companies', {id:excelId,fields:{Name:'Edited demo'}});
+    for (const adapter of [g,e]) {
+        assert.equal(adapter.writeRow,undefined);
+        assert.equal((await adapter.samples(await adapter.listTables())).Notes[0].fields.Memo,'Reminder');
+        assert.ok((await adapter.loadAll()).companies.some(c => c.name === 'Demo Bakery'));
+        await assert.rejects(adapter.readRows('Notes'),/ID column/);
+    }
     assert.equal((await createExcelApi({ mapping, apiBase, workbookId: 'e1', accessToken: 'fake' }).files()).length, 1);
     const { keyRows, matrixRows } = await import('../../src/server/sources/tabular.ts');
     const keys = matrix => {const {rows,columns}=matrixRows(matrix);return keyRows(rows,columns,['excel','book','companies']);};
@@ -103,10 +106,7 @@ try {
     await s.writeRow('Companies', { fields: { Name: 'New demo' } });
     await s.writeRow('Companies', { id: records[1].id, fields: { Name: 'Edited demo' } });
     for (invalid of ['missing','duplicate']) await assert.rejects(s.readRows('Companies'), /record key/);
-    assert.deepEqual(JSON.parse(requests.find(r=>r.path.endsWith(':batchUpdate')).body).data,[{range:"'Companies'!B3",values:[['Edited demo']]}]);
     assert.ok(requests.some(r => r.method === 'PATCH' && r.query === '?id=eq.1'));
-    assert.ok(requests.filter(r => r.path.includes('/values/') && r.method !== 'GET').every(r => r.query.includes('valueInputOption=RAW')));
-    assert.ok(requests.some(r => r.path.includes("range(address='D5')") || decodeURIComponent(r.path).includes("range(address='D5')")));
     await assert.rejects(() => sourceFetch(apiBase + '/slow', {}, fetch, 20), /request failed/);
     assert.throws(() => createSupabaseConnector({ mapping, url: 'http://localhost', apiKey: 'fake' }), /Invalid Supabase URL/);
     console.log('Google, Excel and Supabase metadata, reads, writes, paging, refresh-once and timeout passed');

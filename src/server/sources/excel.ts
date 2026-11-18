@@ -1,5 +1,5 @@
 import { sourceFetch } from './http.ts';
-import { matrixRows, tabularConnector, keyRows, columnLetter, prepareSheetWrite } from './tabular.ts';
+import { matrixRows, tabularConnector, keyRows } from './tabular.ts';
 import { defaultHeaders } from './google-sheets.ts';
 import { emptyWorkbook } from './xlsx-template.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
@@ -34,19 +34,8 @@ export function createExcelApi(config: ExcelConfig) {
             const parsed = matrixRows(v);
             return keyRows(parsed.rows, parsed.columns, ['excel', file?.id || config.workbookId, table], config.mapping);
         },
-        async writeRow(table: string, row: {id?: string; fields: Record<string,string>}, file?: SourceFile) {
-            const rangeData = await used(table, file), v = rangeData.values || [];
-            const {columns, cells, result, rowNumber:n} = prepareSheetWrite(v, ['excel', file?.id || config.workbookId, table], config.mapping, row);
-            if (cells.length) {
-                const indices = cells.map(([col]) => columns.indexOf(col));
-                const first = Math.min(...indices), last = Math.max(...indices);
-                const values = Array<string | null>(last - first + 1).fill(null);
-                cells.forEach(([,value], i) => { values[indices[i] - first] = value; });
-                const address = (i:number) => columnLetter((rangeData.columnIndex ?? 0) + i) + (n + (rangeData.rowIndex ?? 0));
-                const target = first === last ? address(first) : address(first) + ':' + address(last);
-                await request(`${sheet(table, file)}/range(address='${target}')`, {method:'PATCH', body:JSON.stringify({values:[values]})});
-            }
-            return result;
+        async sampleRows(table: string) {
+            return matrixRows(((await used(table)).values || []).slice(0,4)).rows;
         },
         async files() { const all = []; for (const path of ["/me/drive/root/search(q='.xlsx')", '/me/drive/sharedWithMe']) {
             let next = path;

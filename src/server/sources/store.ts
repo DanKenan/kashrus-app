@@ -6,7 +6,7 @@ import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
 export interface Connection {
   oauth?: Partial<Record<import('./oauth.ts').OAuthProvider, import('./oauth.ts').OAuthRecord>>;
-  upload?: {fileNames:string[];copiedAt:string;rows:number;parts:number;hash:string;versioned?:boolean};
+  upload?: {fileNames:string[];copiedAt:string;rows:number;parts:number;hash:string;versioned?:boolean;slotHash?:string};
   fees?: {mashgiach?:Record<string,{amount:number;currency:string}>};
   group1Label?: string; group1Overrides?: Group1Overrides;
   agencyId: string; sourceType: SourceKind; baseId: string; access: 'read' | 'readwrite';
@@ -119,8 +119,11 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     if(Buffer.byteLength(text)>3*1024*1024) throw Object.assign(Error('This file is too big to copy. Split it into smaller files.'),{status:400});
     const encoded=Buffer.from(text).toString('base64'), hash=digest(text), parts=Math.ceil(encoded.length/(480*1024));
     const old=connection.upload;
-    const upload={versioned:true,fileNames:files.map(f=>f.name),copiedAt:new Date().toISOString(),rows:files.reduce((n,f)=>n+f.tabs.reduce((n,t)=>n+t.rows.length,0),0),parts,hash};
-    const partId = (i:number) => `${connection.agencyId}__copy__${hash}__${i}`;
+    // Firestore overwrites existing chunk slots in the same atomic batch as the manifest.
+    // Local files keep content-addressed slots until the manifest rename completes.
+    const slot = deps.db() ? {versioned:old?.versioned ?? false, ...(old?.versioned ? {slotHash:old.slotHash ?? old.hash} : {})} : {versioned:true};
+    const upload={...slot,fileNames:files.map(f=>f.name),copiedAt:new Date().toISOString(),rows:files.reduce((n,f)=>n+f.tabs.reduce((n,t)=>n+t.rows.length,0),0),parts,hash};
+    const partId = (i:number) => uploadPart(connection.agencyId,upload,i);
     const chunks = Array.from({length:parts},(_,i)=>({collection:'sourceUploads',id:partId(i),doc:{data:encoded.slice(i*480*1024,(i+1)*480*1024)}}));
     await activate({...connection, upload}, old, chunks);
     connection.upload=upload;
@@ -163,8 +166,9 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
   }
   async function activate(c:Connection, previous:Connection['upload'], chunks:Write[] = []) {
     const manifest = {collection:'sourceConnections', id:c.agencyId, doc:c};
-    const obsolete = previous && (!c.upload || previous.hash !== c.upload.hash || previous.versioned !== c.upload.versioned)
-      ? Array.from({length:previous.parts}, (_,i)=>({collection:'sourceUploads',id:uploadPart(c.agencyId,previous,i)})) : [];
+    const live = new Set(Array.from({length:c.upload?.parts || 0}, (_,i)=>uploadPart(c.agencyId,c.upload!,i)));
+    const obsolete = Array.from({length:previous?.parts || 0}, (_,i)=>uploadPart(c.agencyId,previous!,i))
+      .filter(id => !live.has(id)).map(id => ({collection:'sourceUploads',id}));
     // At most 3 MiB of source data: the encoded chunks, manifest and deletes fit one Firestore batch.
     // A rejected batch leaves the old connection intact and the entire activation can be retried.
     if (deps.db()) {
@@ -178,7 +182,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     });
   }
   function uploadPart(id:string, upload:NonNullable<Connection['upload']>, i:number) {
-    return `${id}__copy__${upload.versioned ? upload.hash + '__' : ''}${i}`;
+    return `${id}__copy__${upload.versioned ? (upload.slotHash ?? upload.hash) + '__' : ''}${i}`;
   }
   async function loadUpload(c:Connection):Promise<import('./upload.ts').UploadedFile[]> {
     if (!c.upload || !Number.isInteger(c.upload.parts) || c.upload.parts < 1 || c.upload.parts > 10) throw Error('Invalid upload manifest');
@@ -196,7 +200,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     if (deps.db()) await commit(removals);
     else await localWrite(async () => { await commit(removals.slice(0,1)); await commit(removals.slice(1)).catch(retryLocalCleanup); });
   }
-  return { reclaimLocalUploads, connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
+  return { retryLocalCleanup, reclaimLocalUploads, connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
 }
 // Read legacy connection settings without rewriting source values.
 export function normalizeConnection(connection: any): Connection {

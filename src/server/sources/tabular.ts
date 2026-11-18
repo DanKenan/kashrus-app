@@ -4,6 +4,7 @@ import type { SourceConnector, SourceFile, SourceKind, SourceMapping, SourceRow,
 export function tabularConnector(kind: SourceKind, mapping: SourceMapping, methods: {
     listTables(): Promise<SourceTable[]>;
     readRows(table: string, file?: SourceFile): Promise<SourceRow[]>;
+    sampleRows?(table: string): Promise<SourceRow[]>;
     writeRow?(table: string, row: {
         id?: string;
         fields: Record<string, string>;
@@ -35,7 +36,7 @@ export function tabularConnector(kind: SourceKind, mapping: SourceMapping, metho
         async listCompanies() { return (await loadAll()).companies; },
         async listItems(id, kind) { return (kind === 'ingredient' ? (await loadAll()).ingredients : (await loadAll()).products).filter(i => i.companyIds.includes(id)); },
         async samples(tables) { const samples = Object.create(null); for (const t of tables)
-            samples[t.name] = (await methods.readRows(t.name)).slice(0, 3).map(r => ({ id: r.id, fields: Object.fromEntries(Object.entries(r.fields).map(([k, v]) => [k, String(v ?? '')])) })); return samples; },
+            samples[t.name] = (await (methods.sampleRows ?? methods.readRows)(t.name)).slice(0, 3).map(r => ({ id: r.id, fields: Object.fromEntries(Object.entries(r.fields).map(([k, v]) => [k, String(v ?? '')])) })); return samples; },
     };
 }
 export function headerNames(values: unknown[]): string[] {
@@ -67,13 +68,6 @@ export function matrixRows(values: unknown[][], maxBytes = Infinity): {
     return { columns, rows: values.slice(1).map((row, i) => ({ id: randomUUID(), rowNumber: i + 2, fields: Object.fromEntries(columns.map((c, j) => [c, cellText(row[j])])) })).filter(r => Object.values(r.fields).some(Boolean)) };
 }
 
-export function columnLetter(index: number): string {
-    let name = '';
-    for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26))
-        name = String.fromCharCode(65 + (n - 1) % 26) + name;
-    return name;
-}
-
 export function keyRows(rows: SourceRow[], columns: string[], scope: string[], mapping?: SourceMapping, uploadVersion?: string) {
     const config = mapping && [mapping.companies, mapping.ingredients, mapping.products].find(c =>
         c.table === scope[2] && (!c.file || c.file.id === scope[1]));
@@ -96,23 +90,4 @@ export function keyRows(rows: SourceRow[], columns: string[], scope: string[], m
         seen.add(row.id);
     }
     return rows;
-}
-
-export function prepareSheetWrite(matrix: unknown[][], scope: string[], mapping: SourceMapping,
-    input: { id?: string; fields: Record<string,string> }) {
-    const { columns, rows } = matrixRows(matrix);
-    keyRows(rows, columns, scope, mapping);
-    const old = rows.find(row => row.id === input.id);
-    if (input.id && !old) throw Error('Record is no longer available.');
-    const changes = { ...input.fields };
-    const primary = [mapping.companies, mapping.ingredients, mapping.products].find(c =>
-        c.table === scope[2] && (!c.file || c.file.id === scope[1]))?.pk || columns.find(c => /^id$/i.test(c));
-    if (!input.id && primary && !changes[primary]) changes[primary] = randomUUID();
-    const fields = { ...old?.fields, ...changes };
-    const [result] = keyRows([{id:'', fields}], columns, scope, mapping);
-    if (old ? old.id !== result.id : rows.some(row => row.id === result.id))
-        throw Error('A unique, unchanged record key is required.');
-    const cells = Object.entries(changes).filter(([column,value]) =>
-        columns.includes(column) && old?.fields[column] !== value);
-    return { columns, cells, result, rowNumber: old?.rowNumber ?? matrix.length + 1 };
 }

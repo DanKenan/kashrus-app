@@ -20,7 +20,7 @@ assert.equal(lastReadText('2026-11-12T15:41:00Z', 'America/Chicago', new Date('2
 assert.equal(lastReadText('2026-11-12T15:41:00Z', 'Asia/Jerusalem', new Date('2026-11-13T01:00:00Z')), 'Last read: Nov 12, 2026, 5:41 PM');
 assert.equal(lastReadText(null, 'UTC'), 'Last read: Not read yet');
 assert.equal(countsText({ companies: 214, ingredients: 1380, products: 0 }), '214 companies · 1,380 ingredients');
-for (const role of ['admin', 'coordinator', 'mashgiach']) for (const sourceType of providers.map(p => p.id)) for (const access of ['read', 'readwrite']) for (const canWrite of [true, false]) assert.equal(canEdit(role, { sourceType, access, canWrite }), role === 'admin' && access === 'readwrite' && canWrite && ['google_sheets', 'excel', 'supabase'].includes(sourceType));
+for (const role of ['admin', 'coordinator', 'mashgiach']) for (const sourceType of providers.map(p => p.id)) for (const access of ['read', 'readwrite']) for (const canWrite of [true, false]) assert.equal(canEdit(role, { sourceType, access, canWrite }), role === 'admin' && access === 'readwrite' && canWrite && sourceType === 'supabase');
 const calls = []; globalThis.fetch = async (url, options = {}) => { calls.push([url, options]); return new Response(JSON.stringify({ url: '/signin', ok: true })); };
 await startSignIn('excel', 'readwrite'); assert.deepEqual(JSON.parse(calls.at(-1)[1].body), { access: 'readwrite' });
 await saveConnection({ sourceType: 'upload', baseId: 'upload', access: 'read', mapping }); assert.equal(calls.at(-1)[1].method, 'PUT');

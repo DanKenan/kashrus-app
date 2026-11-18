@@ -11,7 +11,7 @@ import { createConnector, type SourceSettings } from './stubs.ts';
 import { createSourceCache, nextNightlyRun } from './cache.ts';
 import { encryptKey, decryptKey, keyHint } from './crypto.ts';
 import { guessMapping } from './mapping.ts';
-import { createSourceStore, type Connection } from './store.ts';
+import { normalizeConnection, createSourceStore, type Connection } from './store.ts';
 import type { ConnectionResult, SourceMapping } from './types.ts';
 
 const unreadableKey = "The saved key can't be read. Enter the key again in Settings.";
@@ -202,7 +202,7 @@ export function registerSourceRoutes(app: any, deps: {
   const own = (req: any, res: any) => { const u = deps.requireAdmin(req, res); return u ? { user: u, id: u.agencyId || 'agency-hkc' } : null; };
   const safe = (id: string) => {
     const c = connections.get(id), s = cache.state(id);
-    return { canWrite:!!c && c.access==='readwrite' && ['google_sheets','excel','supabase'].includes(c.sourceType), counts:{companies:s.companies.length,ingredients:cache.data(id)?.ingredients.length||0,products:cache.data(id)?.products.length||0}, ...(c?.upload?{fileName:c.upload.fileNames[0],upload:{fileNames:c.upload.fileNames,copiedAt:c.upload.copiedAt,rows:c.upload.rows}}:{}), ...(c && isOAuthProvider(c.sourceType) && c.oauth?.[c.sourceType]?{accountEmail:oauth.email(id,c.oauth[c.sourceType])}:{}), group1Label: c?.group1Label || 'Group 1', sourceType: c?.sourceType || null, baseId: c?.baseId || '', access: c?.access || 'read', mapping: c?.mapping || null, hasKey: !!c?.encryptedKey, keyHint: c?.keyHint || '', status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: keyErrors.has(id) ? unreadableKey : s.error || null };
+    return { canWrite:!!c && c.access==='readwrite' && c.sourceType==='supabase', counts:{companies:s.companies.length,ingredients:cache.data(id)?.ingredients.length||0,products:cache.data(id)?.products.length||0}, ...(c?.upload?{fileName:c.upload.fileNames[0],upload:{fileNames:c.upload.fileNames,copiedAt:c.upload.copiedAt,rows:c.upload.rows}}:{}), ...(c && isOAuthProvider(c.sourceType) && c.oauth?.[c.sourceType]?{accountEmail:oauth.email(id,c.oauth[c.sourceType])}:{}), group1Label: c?.group1Label || 'Group 1', sourceType: c?.sourceType || null, baseId: c?.baseId || '', access: c?.access || 'read', mapping: c?.mapping || null, hasKey: !!c?.encryptedKey, keyHint: c?.keyHint || '', status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: keyErrors.has(id) ? unreadableKey : s.error || null };
   };
   const handler = (fn: any) => async (req: any, res: any) => { const caller = own(req, res); if (!caller) return; try { await fn(req, res, caller); } catch (cause:any) { const code=cause instanceof SavedKeyError?400:[400,403,409,429].includes(cause.status)?cause.status:503; res.status(code).json({ error: cause instanceof SavedKeyError ? unreadableKey : code===503?'Source operation failed':cause.message,...(cause.notSetUp?{notSetUp:true}:{}) }); } };
   const mutation = (fn: any) => handler((req: any, res: any, caller: any) => serialize(caller.id, () => fn(req, res, caller)));
@@ -458,6 +458,9 @@ export function registerSourceRoutes(app: any, deps: {
       recent.push(Date.now());
       writeTimes.set(id, recent);
       const config = c!.mapping[list as 'companies' | 'ingredients' | 'products'];
+      if ('companyLink' in config && config.companyLink && Object.hasOwn(fields,config.companyLink)) {
+          companyLinkResolver(cache.data(id)?.companies ?? [])(fields[config.companyLink]);
+      }
       const row = await connector(c!).writeRow!(config.table, { ...(req.params.rowId ? { id: req.params.rowId } : {}), fields }, config.file);
       // Apply only this returned row to the mapped memory model; no Firestore reads/writes.
       const mapped = applyMapping({ [config.table]: [row] }, c!.mapping), data = cache.data(id);
@@ -617,31 +620,50 @@ export function registerSourceRoutes(app: any, deps: {
     app.post('/api/__test__/sources-api-base', handler((req: any, res: any) => { const url = new URL(req.body.apiBase||req.body.url); if (!['http:', 'https:'].includes(url.protocol)) return res.status(400).json({ error: 'Invalid URL' }); if(req.body.provider && req.body.provider!=='airtable') apiBases.set(req.body.provider,url.origin); else apiBase = url.origin; res.json({ ok: true }); }));
     app.post('/api/__test__/source-raw', handler(async (req: any, res: any, { id }: any) => { if (req.body.agencyId && req.body.agencyId !== id) return res.status(403).json({ error: 'Forbidden' }); res.json({ connection: await store.raw(id), backupIds: (await loadBackups(id)).map(b => `${id}__${b.companyId}`) }); }));
   }
+  const retryDelay = (attempt:number) => [5000,15000,45000,120000,300000][Math.min(attempt,4)];
+  const retrying = new Set<string>();
+  async function loadConnection(c:Connection) {
+    if (connections.has(c.agencyId)) return;
+    if (c.sourceType === 'upload') {
+      const files = await store.loadUpload(c);
+      uploads.set(c.agencyId,files);
+    }
+    connections.set(c.agencyId,c);
+    cache.setKnownHashes(c.agencyId,c.backupHashes || {});
+    schedule(c.agencyId);
+    if (c.sourceType === 'airtable' || c.mapping.companies?.table)
+      void serialize(c.agencyId, () => refresh(c.agencyId)).catch(() => console.warn('[sources] startup refresh failed'));
+  }
+  function retryAgency(id:string, attempt = 0) {
+    if (retrying.has(id)) return;
+    retrying.add(id);
+    const timer = setTimeout(() => {
+      void serialize(id, async () => {
+        retrying.delete(id);
+        if (connections.has(id)) return;
+        try {
+          const latest = await store.raw(id);
+          if (latest) await loadConnection(normalizeConnection(latest));
+        } catch { retryAgency(id,attempt+1); }
+      });
+    },retryDelay(attempt));
+    timer.unref();
+  }
   let bootAttempt = 0;
   async function boot() {
-    let failed = false;
-    try { await store.reclaimLocalUploads(); } catch { failed = true; }
-    try {
-      for (const c of await store.connections()) {
-        if (connections.has(c.agencyId)) continue;
-        if(c.sourceType==='upload') {
-          let files;
-          try { files = await store.loadUpload(c); }
-          catch { failed = true; continue; }
-          if (connections.has(c.agencyId)) continue;
-          uploads.set(c.agencyId,files);
-        }
-        connections.set(c.agencyId, c);
-        cache.setKnownHashes(c.agencyId, c.backupHashes || {});
-        schedule(c.agencyId);
-        if(c.sourceType!=='airtable'&&!c.mapping.companies?.table) continue;
-        void serialize(c.agencyId, () => refresh(c.agencyId)).catch(() => console.warn('[sources] startup refresh failed'));
-      }
-    } catch { failed = true; }
-    if (failed) {
+    await store.reclaimLocalUploads().catch(store.retryLocalCleanup);
+    let saved:Connection[];
+    try { saved = await store.connections(); }
+    catch {
       console.warn('[sources] startup failed');
-      const delay = [5000, 15000, 45000, 120000, 300000][Math.min(bootAttempt++, 4)];
-      const timer = setTimeout(() => { void boot(); }, delay); timer.unref();
+      const timer = setTimeout(() => { void boot(); },retryDelay(bootAttempt++));
+      timer.unref();
+      return;
+    }
+    bootAttempt = 0;
+    for (const c of saved) {
+      try { await serialize(c.agencyId, () => loadConnection(c)); }
+      catch { retryAgency(c.agencyId); }
     }
   }
   return { boot, inspectionAgencyIds: () => [...connections.keys()], inspectionSource: inspectionSourceAccessor(cache, connections) };

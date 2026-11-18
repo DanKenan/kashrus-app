@@ -19,7 +19,18 @@ const files = [parseUpload(Buffer.from('Name\nDemo Bakery'), 'Companies.csv')];
 const measure = async (action, fn, r, w) => { reads = 0; writes = 0; const result = await fn(); budget.push({ action, reads, writes }); assert.equal(reads, r, action); assert.equal(writes, w, action); return result; };
 await measure('upload parts + manifest', () => store.saveUpload(connection, files), 0, 2);
 files.push(parseUpload(Buffer.from('Name\nDemo Flour'), 'Ingredients.csv'));
-await measure('second upload parts + manifest + previous copy cleanup', () => store.saveUpload(connection, files), 0, 3);
+await measure('one-part replacement: overwrite chunk + manifest', () => store.saveUpload(connection, files), 0, 2);
+// A pre-upgrade copy already uses a hash in its chunk address. Keep that address
+// through subsequent replacements, including after reading the manifest again.
+const legacy = {...connection,agencyId:'old-layout',upload:{...connection.upload,versioned:true}};
+const oldSlot = 'sourceUploads/old-layout__copy__'+legacy.upload.hash+'__0';
+docs.set(oldSlot,{data:Buffer.from(JSON.stringify(files)).toString('base64')});
+await measure('legacy slot reused',()=>store.saveUpload(legacy,files.slice(0,1)),0,2);
+const restored = await store.raw(legacy.agencyId);
+await measure('legacy slot reused after restart',()=>store.saveUpload(restored,files),0,2);
+assert.deepEqual(await store.loadUpload(restored),files);
+assert.deepEqual([...docs.keys()].filter(k=>k.startsWith('sourceUploads/old-layout')), [oldSlot]);
+await store.remove(restored);
 await measure('mapping config', () => store.save(connection), 0, 1);
 const handlers = new Map(), app = Object.fromEntries(['get', 'post', 'put', 'delete', 'patch'].map(m => [m, (p, h) => handlers.set(m + ' ' + p, h)]));
 const routes = registerSourceRoutes(app, { db: () => db, dataDir: '/unused', staged: () => blocked, secret: () => 'demo-test-secret', testMode: false, requireAdmin: () => ({ id: 'demo-admin', agencyId: 'demo-agency' }), timeZone: () => 'UTC' });
@@ -28,13 +39,22 @@ const part = docs.get(partKey);
 docs.delete(partKey);
 const healthy = {...connection,agencyId:'healthy'};
 await store.saveUpload(healthy,files);
-await routes.boot();
-assert.equal(routes.inspectionSource(connection.agencyId).connection,undefined);
-assert.ok(routes.inspectionSource('healthy').connection);
+const nativeTimeout = globalThis.setTimeout;
+let retry;
+globalThis.setTimeout = (fn,ms,...args) => {
+  if ([5000,15000].includes(ms)) { retry = fn; return {unref(){}}; }
+  return nativeTimeout(fn,ms,...args);
+};
+const drain = async () => {for(let i=0;i<10;i++) await new Promise(r=>setImmediate(r));};
+try {
+  await routes.boot();
+  assert.equal(routes.inspectionSource(connection.agencyId).connection,undefined);
+  assert.ok(routes.inspectionSource('healthy').connection);
+  await measure('persistent failure: only failed manifest and part',async()=>{retry();await drain();},2,0);
+  docs.set(partKey,part);
+  await measure('targeted recovery',async()=>{retry();await drain();},2,0);
+} finally {globalThis.setTimeout=nativeTimeout;}
 await store.remove(healthy);
-docs.set(partKey,part);
-await measure('boot connection + upload part', async () => { await routes.boot(); for (let i = 0; i < 10; i++)
-    await new Promise(r => setImmediate(r)); }, 2, 0);
 const request = async (path) => { let value; await handlers.get('get ' + path)({ query: {}, params: {} }, { json(v) { value = v; }, status() { return this; } }); return value; };
 await measure('upload browse', async () => { assert.equal((await request('/api/factories')).companies[0].name, 'Demo Bakery'); await request('/api/sources/connection'); }, 0, 0);
 assert.equal([...docs.keys()].some(k => k.startsWith('sourceBackups/')), false);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { guardSourceWrite } from '../../src/server/sources/write.ts';
 const mapping = { companies: { table: 'Companies', name: 'Name', address: 'Street', companyFee: 'Annual Fee' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: '' }, group1Values: [] };
-const c = { sourceType: 'google_sheets', access: 'readwrite', mapping };
+const c = { sourceType: 'supabase', access: 'readwrite', mapping };
 assert.deepEqual({ ...guardSourceWrite(c, 'companies', { name: 'Demo Bakery', address: 'Demo Street' }) }, { Name: 'Demo Bakery', Street: 'Demo Street' });
 for (const sourceType of ['airtable', 'upload'])
     assert.throws(() => guardSourceWrite({ ...c, sourceType }, 'companies', { name: 'Demo' }), e => e.status === 409);
@@ -18,3 +18,6 @@ for (const key of ['companyFee','mashgiachFee']) {
     for (const fields of [{[key]:'80'},{brand:'80'}])
         assert.throws(()=>guardSourceWrite({...c,mapping:protectedMapping},'companies',fields),e=>e.status===400);
 }
+
+for (const sourceType of ['google_sheets','excel'])
+    assert.throws(()=>guardSourceWrite({...c,sourceType},'companies',{name:'Changed'}),e=>e.status===409);

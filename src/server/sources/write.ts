@@ -6,7 +6,8 @@ export function guardSourceWrite(c: Connection | undefined, list: string, fields
         return reject(409, 'Editing from the app is not available for this source.');
     if (c.access !== 'readwrite')
         return reject(403, 'This source is read only.');
-    if (!['google_sheets', 'excel', 'supabase'].includes(c.sourceType) || !['companies', 'ingredients', 'products'].includes(list))
+    if (c.sourceType !== 'supabase') return reject(409, 'Spreadsheet rows are read only.');
+    if (!['companies', 'ingredients', 'products'].includes(list))
         return reject(400, 'Invalid list');
     const config = c.mapping[list as 'companies' | 'ingredients' | 'products'] as any;
     if (!config?.table || !fields || typeof fields !== 'object' || Array.isArray(fields) || !Object.keys(fields).length)

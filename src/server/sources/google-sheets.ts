@@ -1,5 +1,5 @@
 import { sourceFetch } from './http.ts';
-import { matrixRows, tabularConnector, keyRows, columnLetter, prepareSheetWrite } from './tabular.ts';
+import { matrixRows, tabularConnector, keyRows } from './tabular.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
 export interface GoogleSheetsConfig {
     spreadsheetId: string;
@@ -41,15 +41,8 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
             const parsed = matrixRows(v);
             return keyRows(parsed.rows, parsed.columns, ['google_sheets', file?.id || config.spreadsheetId, table], config.mapping);
         },
-        async writeRow(table: string, row: {id?: string; fields: Record<string,string>}, file?: SourceFile) {
-            matrices.clear();
-            const v = await values(table, file);
-            const {columns, cells, result, rowNumber:n} = prepareSheetWrite(v, ['google_sheets', file?.id || config.spreadsheetId, table], config.mapping, row);
-            const changes = cells.map(([col, value]) => ({ range: `${range(table)}!${columnLetter(columns.indexOf(col))}${n}`, values: [[value]] }));
-            if (row.id && changes.length) await request('sheets', `${sheet(file)}/values:batchUpdate`, { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data: changes }) });
-            if (!row.id) await request('sheets', `${sheet(file)}/values/${encodeURIComponent(range(table))}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, { method: 'POST', body: JSON.stringify({ values: [columns.map(c => result.fields[c] ?? null)] }) });
-            matrices.clear();
-            return result;
+        async sampleRows(table: string) {
+            return matrixRows((await values(table)).slice(0,4)).rows;
         },
         async files() { const out = []; let pageToken = ''; do {
             const q = new URLSearchParams({ q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false", fields: 'files(id,name,modifiedTime),nextPageToken', pageSize: '100', ...(pageToken ? { pageToken } : {}) });

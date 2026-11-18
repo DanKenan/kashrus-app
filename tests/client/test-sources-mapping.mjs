@@ -77,3 +77,9 @@ assert.equal(loose.mapping.ingredients.brand, 'Brand Name');
 assert.equal(loose.guessed['ingredients.brand'], 0.9);
 
 assert.deepEqual(splitCertification('OU-DE'), { agency: 'OU', dpm: 'dairy_equipment', group1: false });
+
+const shared = {Companies:['a','b'].map(id => ({id,sourceKey:'raw-'+id,fields:{Name:'Same',Type:'Factory'}})),
+  Ingredients:[row('item',{Company:' sAME '})]};
+assert.throws(()=>applyMapping(shared,mapping),/Multiple companies match.*unique ID/);
+shared.Ingredients[0].fields.Company = 'raw-b';
+assert.deepEqual(applyMapping(shared,mapping).ingredients[0].companyIds,['b']);
