@@ -5,7 +5,7 @@ import { validSupabaseUrl } from './supabase.ts';
 import { randomUUID } from 'node:crypto';
 import { parseUpload, uploadRowsError, uploadTypeError, type UploadedFile } from './upload.ts';
 import { guardSourceWrite } from './write.ts';
-import { mapSourceLists, companyLinkResolver } from './mapping.ts';
+import { CompanyLinkError, mapSourceLists, companyLinkResolver } from './mapping.ts';
 import { summarizeValues, type SourceSection } from '../../lib/sourcePreview.ts';
 import { createConnector, type SourceSettings } from './stubs.ts';
 import { createSourceCache, nextNightlyRun } from './cache.ts';
@@ -17,13 +17,6 @@ import type { ConnectionResult, SourceMapping } from './types.ts';
 const unreadableKey = "The saved key can't be read. Enter the key again in Settings.";
 class SavedKeyError extends Error {
   constructor() { super(unreadableKey); }
-}
-function updateCachedRow<T extends { id: string }>(rows: T[], id: string, replacement?: T) {
-  const index = rows.findIndex(row => row.id === id);
-  if (replacement) {
-    if (index < 0) rows.push(replacement);
-    else rows[index] = replacement;
-  } else if (index >= 0) rows.splice(index, 1);
 }
 const emptyMapping: SourceMapping = { companies: { table: '', name: '' }, ingredients: { table: '', name: '', companyLink: '' }, products: { table: '', name: '', companyLink: '' }, group1Values: [] };
 function settings(body: any, mapping = true) {
@@ -475,16 +468,27 @@ export function registerSourceRoutes(app: any, deps: {
       if ('companyLink' in config && config.companyLink && Object.hasOwn(fields, config.companyLink)) {
           links(fields[config.companyLink]);
       }
-      const row = await connector(c!).writeRow!(config.table, { ...(req.params.rowId ? { id: req.params.rowId } : {}), fields }, config.file);
-      if (data) {
-          const mapped = mapSourceLists({ [list]: [row] }, c!.mapping, links);
-          updateCachedRow(data[list], row.id, mapped[list][0]);
-          if (list === 'companies') {
-              updateCachedRow(data.otherCompanies ??= [], row.id, mapped.otherCompanies?.[0]);
+      const adapter = connector(c!);
+      const row = await adapter.writeRow!(config.table, { ...(req.params.rowId ? { id: req.params.rowId } : {}), fields }, config.file);
+      try {
+          // Company names and eligibility can change associations in both item lists.
+          // Publish all three together, keeping the previous snapshot readable during the load.
+          if (list === 'companies' || !data || cache.state(id).status !== 'ok') {
+              cache.publish(id, await adapter.loadAll!());
+          } else {
+              const mapped = mapSourceLists({ [list]: [row] }, c!.mapping, { resolveLinks: links });
+              const rows = [...data[list]];
+              const index = rows.findIndex(item => item.id === row.id);
+              if (index < 0) rows.push(mapped[list][0]);
+              else rows[index] = mapped[list][0];
+              cache.publish(id, { ...data, [list]: rows });
           }
-          cache.publish(id, data);
+      } catch (cause) {
+          const warning = cause instanceof CompanyLinkError ? cause.message : 'Refresh the source to update the inspection list.';
+          cache.requireRefresh(id, warning);
+          return res.json({ row, saved: true, refreshRequired: true, warning });
       }
-      res.json({ row });
+      res.json({ row, saved: true });
   });
   app.post('/api/sources/rows/:list', write);
   app.patch?.('/api/sources/rows/:list/:rowId', write);

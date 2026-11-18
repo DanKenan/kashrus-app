@@ -10,6 +10,8 @@ const tables = {
   Ingredients: Array.from({ length: 230 }, (_, i) => row(`i${i}`, { Name: `Demo ingredient ${i}`, Company: [`c${i % 5}`], Certification: 'Group 1' })),
   Products: Array.from({ length: 120 }, (_, i) => row(`p${i}`, { Name: `Demo product ${i}`, Company: [`c${i % 5}`], Code: `${i}` })),
 };
+tables.Ingredients[0].fields.Company = ['c0', 'outside-mapped-table'];
+tables.Products[0].fields.Company = 'outside-mapped-table, c0';
 let mode = 'ok', writes = false, requests = [], retry = 0;
 const fakeKey = 'demo-key-never-expose';
 const server = http.createServer((req, res) => {
@@ -40,6 +42,8 @@ const config = { baseId: 'demo', apiKey: fakeKey, mapping, apiBase: `http://127.
 try {
   const connector = createAirtableConnector(config);
   const data = await connector.loadAll();
+  assert.deepEqual(data.ingredients[0].companyIds, ['c0']);
+  assert.deepEqual(data.products[0].companyIds, ['c0']);
   assert.equal(data.companies.length, 5); assert.equal(data.ingredients.length, 230); assert.equal(data.products.length, 120);
   assert.equal(connector.calls(), 6); console.log('Mock Airtable whole-base call count: 6 (1 company page + 3 ingredient pages + 2 product pages)');
   const starts = requests.map(r => r.at);

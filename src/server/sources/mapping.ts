@@ -126,7 +126,8 @@ export class AmbiguousCompanyLink extends CompanyLinkError {
 }
 
 type LinkCompany = Pick<Company, 'id' | 'name' | 'sourceKey'>;
-export function companyLinkResolver(eligible: LinkCompany[], others: LinkCompany[] = []) {
+type UnmatchedLinks = 'reject' | 'ignore';
+export function companyLinkResolver(eligible: LinkCompany[], others: LinkCompany[] = [], unmatched: UnmatchedLinks = 'reject') {
   const eligibleIds = new Set(eligible.map(c => c.id));
   const companies = [...eligible, ...others];
   const ids = new Set(companies.map(c => c.id));
@@ -152,7 +153,7 @@ export function companyLinkResolver(eligible: LinkCompany[], others: LinkCompany
     const link = fieldValue(value)?.trim() ?? '';
     const matches = candidates(link);
     if (matches.length > 1) throw new AmbiguousCompanyLink(link);
-    if (required && link && !matches.length) throw new CompanyLinkError(`Unknown company link "${link}". Use the company's unique ID.`);
+    if (required && unmatched === 'reject' && link && !matches.length) throw new CompanyLinkError(`Unknown company link "${link}". Use the company's unique ID.`);
     return matches[0];
   }
   function resolve(value: unknown): string[] {
@@ -162,43 +163,58 @@ export function companyLinkResolver(eligible: LinkCompany[], others: LinkCompany
     if (whole !== undefined) return [whole];
     if (!list) return [];
 
-    // Each suffix has zero, one, or multiple complete parses. Only retain a
-    // successor for reconstruction when exactly one path reaches the end.
+    // Strict sources require a complete parse. Airtable may skip unmatched
+    // fragments, preferring the unique parse that skips the fewest.
     const parts = value.split(',');
     const ways = new Uint8Array(parts.length + 1);
-    const next: {id:string; end:number}[] = [];
+    const skipped = new Uint32Array(parts.length + 1);
+    const next: {id?:string; end:number}[] = [];
     ways[parts.length] = 1;
     for (let start = parts.length - 1; start >= 0; start--) {
+      let best = Infinity;
+      if (unmatched === 'ignore') {
+        best = skipped[start + 1] + 1;
+        ways[start] = ways[start + 1];
+        next[start] = {end:start + 1};
+      }
       let span = '';
       for (let end = start + 1; end <= Math.min(parts.length, start + maxParts); end++) {
         span += (end === start + 1 ? '' : ',') + parts[end - 1];
         if (!ways[end]) continue;
         const matches = candidates(span.trim());
-        if (!matches.length) continue;
-        ways[start] = Math.min(2,ways[start] + matches.length * ways[end]);
-        if (ways[start] > 1) break;
+        if (!matches.length || skipped[end] > best) continue;
+        if (skipped[end] < best) {
+          best = skipped[end];
+          ways[start] = 0;
+        }
+        ways[start] = Math.min(2, ways[start] + matches.length * ways[end]);
         next[start] = {id:matches[0],end};
+        if (ways[start] > 1 && best === 0) break;
       }
+      if (ways[start]) skipped[start] = best;
     }
     if (ways[0] !== 1) throw new CompanyLinkError(`Cannot uniquely resolve the company list "${value}". Use a list of unique company IDs.`);
     const linked = new Set<string>();
-    for (let i = 0; i < parts.length; i = next[i].end) linked.add(next[i].id);
+    for (let i = 0; i < parts.length; i = next[i].end) {
+      const id = next[i].id;
+      if (id !== undefined) linked.add(id);
+    }
     return [...linked];
   }
   return (value: unknown) => resolve(value).filter(id => eligibleIds.has(id));
 }
 
-export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
+export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping, unmatched: UnmatchedLinks = 'reject'): SourceData {
   return mapSourceLists({
     companies: rows[mapping.companies.table],
     ingredients: rows[mapping.ingredients.table],
     products: rows[mapping.products.table],
-  }, mapping);
+  }, mapping, { unmatched });
 }
 
 export function mapSourceLists(
   rows: Partial<Record<SourceSection, SourceRow[]>>, mapping: SourceMapping,
-  resolveLinks?: ReturnType<typeof companyLinkResolver>,
+  options: { resolveLinks?: ReturnType<typeof companyLinkResolver>; unmatched?: UnmatchedLinks } = {},
 ): SourceData {
   const read = (row: SourceRow, column?: string): string | undefined => column ? fieldValue(row.fields[column]) : undefined;
   const extra = (row: SourceRow, config: object, group: SourceSection) => {
@@ -217,7 +233,7 @@ export function mapSourceLists(
   const keptIds = new Set(companies.map(c => c.id));
   const otherCompanies = (rows.companies ?? []).filter(r => !keptIds.has(r.id))
     .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), name: read(r, c.name) ?? '', type: read(r, c.type) }));
-  const links = resolveLinks ?? companyLinkResolver(companies, otherCompanies);
+  const links = options.resolveLinks ?? companyLinkResolver(companies, otherCompanies, options.unmatched);
   const i = mapping.ingredients, p = mapping.products;
   const ingredients = (rows.ingredients ?? []).map(r => {
     const raw = { certificationRaw: read(r, i.certification), statusRaw: read(r, i.status), agencyRaw: read(r, i.agency) };

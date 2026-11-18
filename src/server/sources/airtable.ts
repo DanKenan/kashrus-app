@@ -65,7 +65,7 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
           if (offset) seen.add(offset);
         } while (offset);
       }
-      loaded = applyMapping(rows, mapping);
+      loaded = applyMapping(rows, mapping, 'ignore');
       return loaded;
     })();
     try { return await loading; } finally { loading = undefined; }

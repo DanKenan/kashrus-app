@@ -116,6 +116,10 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
   }
   return {
     publish(agencyId: string, data: SourceData) { publish(agencyId, data, 'ok', {refreshedAt:new Date(now()).toISOString()}); },
+    requireRefresh(agencyId: string, error: string) {
+      const e = entry(agencyId);
+      e.state = { ...e.state, status: e.state.status === 'backup' ? 'backup' : e.data ? 'stale' : 'error', error };
+    },
     reassign(agencyId: string, mapping: SourceMapping) {
       const e = entry(agencyId);
       if (!e.data) return;

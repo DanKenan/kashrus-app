@@ -19,6 +19,7 @@ export default {
         ]));
         supabaseRows.Companies[0].Type = 'Factory';
         supabaseRows.Companies.push({ id: 'mill', Name: 'Harbor Mill', Type: 'Factory' }, { id: 'supply', Name: 'Vendor', Type: 'Vendor' });
+        supabaseRows.Products.push({ id: 'vendor-product', Name: 'Vendor loaf', Company: 'supply' });
         let calls = 0, writes = 0, created = 0;
         const seen = [];
         const mock = http.createServer(async (req, res) => {
@@ -74,6 +75,12 @@ export default {
                     return send(records);
                 }
                 writes++;
+                if (req.method === 'PATCH') {
+                    const record = records.find(r => 'eq.' + r.id === url.searchParams.get('id'));
+                    if (!record) return send([]);
+                    Object.assign(record, JSON.parse(text));
+                    return send([record]);
+                }
                 const record = { ...JSON.parse(text), id: `inserted-${records.length}` };
                 records.push(record);
                 return send([record]);
@@ -166,6 +173,40 @@ export default {
                     assert.equal(item?.name, 'Shared flour', `inserted ingredient in company ${id} cache`);
                 }
             }
+            const vendor = (await request('GET', '/api/food-service')).candidates.find(c => c.name === 'Vendor');
+            const vendorPath = `/api/sources/rows/companies/${vendor.id}`;
+            const vendorItems = `/api/factories/${vendor.id}/items`;
+            await request('GET', vendorItems, undefined, 404);
+            await measure('promote vendor with existing links', () => request('PATCH', vendorPath, { fields: { type: 'Factory' } }));
+            const promoted = await request('GET', vendorItems);
+            assert.deepEqual(promoted.ingredients.map(i => i.name), ['Shared flour']);
+            assert.deepEqual(promoted.products.map(p => p.name), ['Vendor loaf']);
+
+            const flour = (await request('GET', `/api/factories/${supId}/items`)).ingredients.find(i => i.name === 'Demo Flour');
+            const flourPath = `/api/sources/rows/ingredients/${flour.id}`;
+            const providerFlour = supabaseRows.Ingredients.find(r => r.id === 'r2');
+            providerFlour.Company = 'missing-company';
+            const beforePatch = writes;
+            const saved = await measure('name-only PATCH after external link change', () => request('PATCH', flourPath, { fields: { name: 'Renamed flour' } }));
+            assert.equal(writes, beforePatch + 1);
+            assert.equal(providerFlour.Name, 'Renamed flour');
+            assert.equal(saved.row.fields.Name, providerFlour.Name);
+            assert.equal(saved.saved, true);
+            assert.equal(saved.refreshRequired, true);
+            assert.match(saved.warning, /missing-company/);
+            const stale = await request('GET', '/api/factories');
+            assert.equal(stale.status.status, 'stale');
+            assert.equal(stale.status.error, saved.warning);
+            const cachedFlour = async () => (await request('GET', `/api/factories/${supId}/items`)).ingredients.find(i => i.id === flour.id);
+            assert.equal((await cachedFlour()).name, 'Demo Flour');
+            // Another successful write cannot mark the invalid list fresh.
+            const pending = await request('PATCH', vendorPath, { fields: { type: 'Vendor' } });
+            assert.equal(pending.refreshRequired, true);
+            assert.equal((await request('GET', '/api/factories')).status.status, 'stale');
+            await request('PATCH', flourPath, { fields: { companyLink: 'full' } });
+            assert.equal((await cachedFlour()).name, 'Renamed flour');
+            assert.equal((await request('GET', '/api/sources/connection')).status, 'ok');
+            await request('GET', vendorItems, undefined, 404);
             // Warm P5's agency-local stores before measuring source actions.
             await request('GET', '/api/inspections/fees');
             const fees = await request('GET', '/api/inspections/fees');
