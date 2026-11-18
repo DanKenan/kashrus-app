@@ -426,9 +426,11 @@ export function registerSourceRoutes(app: any, deps: {
       if (flights.has(id))
           await flights.get(id);
       await saves.get(id)?.catch(() => { });
-      const c = connections.get(id);
+      const c = connections.get(id) ?? await store.raw(id);
       if (c)
           await store.remove(c);
+      clearTimeout(startupRetries.get(id));
+      startupRetries.delete(id);
       clearTimeout(timers.get(id));
       clearTimeout(pending.get(id)?.timer);
       pending.delete(id);
@@ -621,7 +623,7 @@ export function registerSourceRoutes(app: any, deps: {
     app.post('/api/__test__/source-raw', handler(async (req: any, res: any, { id }: any) => { if (req.body.agencyId && req.body.agencyId !== id) return res.status(403).json({ error: 'Forbidden' }); res.json({ connection: await store.raw(id), backupIds: (await loadBackups(id)).map(b => `${id}__${b.companyId}`) }); }));
   }
   const retryDelay = (attempt:number) => [5000,15000,45000,120000,300000][Math.min(attempt,4)];
-  const retrying = new Set<string>();
+  const startupRetries = new Map<string, ReturnType<typeof setTimeout>>();
   async function loadConnection(c:Connection) {
     if (connections.has(c.agencyId)) return;
     if (c.sourceType === 'upload') {
@@ -635,11 +637,11 @@ export function registerSourceRoutes(app: any, deps: {
       void serialize(c.agencyId, () => refresh(c.agencyId)).catch(() => console.warn('[sources] startup refresh failed'));
   }
   function retryAgency(id:string, attempt = 0) {
-    if (retrying.has(id)) return;
-    retrying.add(id);
+    if (startupRetries.has(id)) return;
     const timer = setTimeout(() => {
       void serialize(id, async () => {
-        retrying.delete(id);
+        if (startupRetries.get(id) !== timer) return;
+        startupRetries.delete(id);
         if (connections.has(id)) return;
         try {
           const latest = await store.raw(id);
@@ -647,6 +649,7 @@ export function registerSourceRoutes(app: any, deps: {
         } catch { retryAgency(id,attempt+1); }
       });
     },retryDelay(attempt));
+    startupRetries.set(id,timer);
     timer.unref();
   }
   let bootAttempt = 0;
@@ -662,8 +665,10 @@ export function registerSourceRoutes(app: any, deps: {
     }
     bootAttempt = 0;
     for (const c of saved) {
-      try { await serialize(c.agencyId, () => loadConnection(c)); }
-      catch { retryAgency(c.agencyId); }
+      await serialize(c.agencyId, async () => {
+        try { await loadConnection(c); }
+        catch { retryAgency(c.agencyId); }
+      });
     }
   }
   return { boot, inspectionAgencyIds: () => [...connections.keys()], inspectionSource: inspectionSourceAccessor(cache, connections) };

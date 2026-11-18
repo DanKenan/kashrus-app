@@ -83,3 +83,14 @@ const shared = {Companies:['a','b'].map(id => ({id,sourceKey:'raw-'+id,fields:{N
 assert.throws(()=>applyMapping(shared,mapping),/Multiple companies match.*unique ID/);
 shared.Ingredients[0].fields.Company = 'raw-b';
 assert.deepEqual(applyMapping(shared,mapping).ingredients[0].companyIds,['b']);
+
+const commaName = 'Golden Grain, Inc.';
+const commaRows = {
+  Companies: [row('short',{Name:'Golden Grain',Type:'Factory'}),row('full',{Name:commaName,Type:'Factory'})],
+  Ingredients: [row('flour',{Company:commaName}),row('salt',{Company:'full, short'})],
+};
+assert.deepEqual(applyMapping(commaRows,mapping).ingredients.map(i => i.companyIds), [['full'],['full','short']]);
+commaRows.Companies.push(row('another',{Name:commaName,Type:'Factory'}));
+assert.throws(()=>applyMapping(commaRows,mapping),/Multiple companies match "Golden Grain, Inc\."/);
+commaRows.Companies[0].sourceKey = commaName;
+assert.deepEqual(applyMapping(commaRows,mapping).ingredients[0].companyIds,['short']);

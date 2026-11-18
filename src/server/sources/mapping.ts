@@ -127,20 +127,22 @@ export function companyLinkResolver(companies: {id:string;name:string;sourceKey?
   const sourceKeys = new Map(companies.filter(c => c.sourceKey).map(c => [c.sourceKey, c.id]));
   const names = new Map<string, string[]>();
   for (const c of companies) names.set(folded(c.name), [...(names.get(folded(c.name)) ?? []), c.id]);
+  function resolveOne(value:unknown): string | undefined {
+    const link = fieldValue(value)?.trim();
+    if (!link) return;
+    if (ids.has(link)) return link;
+    if (sourceKeys.has(link)) return sourceKeys.get(link);
+    const matches = names.get(folded(link));
+    if (matches && matches.length > 1) throw new AmbiguousCompanyLink(link);
+    return matches?.[0];
+  }
   return (value: unknown) => {
-    const wholeKey = fieldValue(value)?.trim();
-    if (wholeKey && ids.has(wholeKey)) return [wholeKey];
-    if (wholeKey && sourceKeys.has(wholeKey)) return [sourceKeys.get(wholeKey)!];
-    const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [value];
-    return [...new Set(values.flatMap(v => {
-      const s = fieldValue(v)?.trim();
-      if (!s) return [];
-      if (ids.has(s)) return [s];
-      if (sourceKeys.has(s)) return [sourceKeys.get(s)!];
-      const matches = names.get(folded(s)) ?? [];
-      if (matches.length > 1) throw new AmbiguousCompanyLink(s);
-      return matches;
-    }))];
+    if (!Array.isArray(value)) {
+      const whole = resolveOne(value);
+      if (whole !== undefined) return [whole];
+    }
+    const parts = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
+    return [...new Set(parts.map(resolveOne).filter((id): id is string => id !== undefined))];
   };
 }
 

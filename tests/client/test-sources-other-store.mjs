@@ -33,7 +33,8 @@ assert.deepEqual([...docs.keys()].filter(k=>k.startsWith('sourceUploads/old-layo
 await store.remove(restored);
 await measure('mapping config', () => store.save(connection), 0, 1);
 const handlers = new Map(), app = Object.fromEntries(['get', 'post', 'put', 'delete', 'patch'].map(m => [m, (p, h) => handlers.set(m + ' ' + p, h)]));
-const routes = registerSourceRoutes(app, { db: () => db, dataDir: '/unused', staged: () => blocked, secret: () => 'demo-test-secret', testMode: false, requireAdmin: () => ({ id: 'demo-admin', agencyId: 'demo-agency' }), timeZone: () => 'UTC' });
+const register = () => registerSourceRoutes(app, { db: () => db, dataDir: '/unused', staged: () => blocked, secret: () => 'demo-test-secret', testMode: false, requireAdmin: () => ({ id: 'demo-admin', agencyId: 'demo-agency' }), timeZone: () => 'UTC' });
+const routes = register();
 const partKey = [...docs.keys()].find(k => k.startsWith('sourceUploads/'));
 const part = docs.get(partKey);
 docs.delete(partKey);
@@ -78,6 +79,34 @@ await measure('provider switch plus old chunk deletion', () => store.save(switch
 assert.ok(![...docs.keys()].some(k=>k.startsWith('sourceUploads/')));
 await store.remove(switched);
 assert.equal(docs.size, 0);
+// A broken upload is durable but absent from memory. A failed DELETE must
+// remain retryable; a successful DELETE invalidates even an already-fired timer.
+await store.saveUpload(connection,files);
+docs.delete(partKey);
+const recovering = register();
+globalThis.setTimeout = (fn,ms,...args) => {
+  if (ms === 5000) { retry = fn; return {unref(){}}; }
+  return nativeTimeout(fn,ms,...args);
+};
+try { await recovering.boot(); } finally { globalThis.setTimeout = nativeTimeout; }
+assert.equal(recovering.inspectionSource(connection.agencyId).connection,undefined);
+const disconnect = async () => {
+  let status = 200, body;
+  await handlers.get('delete /api/sources/connection')({}, {status(n){status=n;return this;},json(v){body=v;}});
+  return {status,body};
+};
+db.batch = () => {throw Error('Offline');};
+try { assert.equal((await disconnect()).status,503); } finally { db.batch=originalBatch; }
+assert.ok(await store.raw(connection.agencyId));
+assert.equal(docs.has(partKey),false);
+assert.deepEqual(await disconnect(),{status:200,body:{ok:true}});
+assert.equal(await store.raw(connection.agencyId),null);
+// Make the formerly missing chunk readable, then fire the captured callback.
+docs.set(partKey,part);
+await measure('cancelled startup retry',async()=>{retry();await drain();},0,0);
+assert.equal(recovering.inspectionSource(connection.agencyId).connection,undefined);
+docs.delete(partKey);
+
 console.table(budget);
 console.log('upload boot-only reads, atomic bounded parts, no backups, writes and memory browse passed');
 
