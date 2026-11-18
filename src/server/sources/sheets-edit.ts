@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { updateTaggedRow, type Cell, type Change, type Edit, type EditAudit, type Target } from './tagged-row.ts';
+import { updateTaggedRow, type Cell, type Change, type Edit, type EditAudit, type FieldWriteEvidence, type Target } from './tagged-row.ts';
 
 type Post = (path: string, body: unknown) => Promise<any>;
 type Grid = { sheetId: number; startRowIndex?: number; endRowIndex: number; startColumnIndex?: number; endColumnIndex: number };
@@ -45,18 +45,19 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
     return { headers, cells, sheetId: properties.sheetId, row: rows[0].index, names, metadataId: target.metadataId, recordId: target.recordId };
   }
   type Snapshot = Awaited<ReturnType<typeof snapshot>>;
-  function receiptAt(address: string, row: number, col: number) {
+  function receiptColumn(address: string, row: number) {
     const end = address.lastIndexOf('!'), title = address.slice(0, end);
-    if (title !== target.table && title !== "'" + target.table.replace(/'/g, "''") + "'") return false;
+    if (title !== target.table && title !== "'" + target.table.replace(/'/g, "''") + "'") return -1;
     const [first, last = first] = address.slice(end + 1).split(':');
     const match = /^([A-Z]+)([1-9][0-9]*)$/.exec(first);
-    if (!match || last !== first || Number(match[2]) !== row + 1) return false;
+    if (!match || last !== first || Number(match[2]) !== row + 1) return -1;
     const column = [...match[1]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0);
-    return column === col + 1;
+    return column - 1;
   }
-  const receipts = new Map<string, string>();
+  const receipts = new Map<string, NonNullable<FieldWriteEvidence['receipt']>>();
   const bindings: { name: string; namedRangeId: string; change: Change }[] = [];
   let dispatched: Snapshot | undefined;
+  let readBack: Snapshot | undefined;
   const batch = (requests: unknown[]) => post(':batchUpdate', { requests });
   const current = (s: Snapshot, c: Change) => {
     const col = s.headers.indexOf(c.header), value = s.cells[col] ?? { raw: null };
@@ -91,8 +92,8 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
       const result = await post('/values:batchUpdate', { valueInputOption: 'RAW',
         data: bindings.map(({ name, change }) => ({ range: name, values: [[change.requested]] })) });
       for (const [i, binding] of bindings.entries()) {
-        const address = result.responses?.[i]?.updatedRange;
-        if (typeof address === 'string') receipts.set(binding.namedRangeId, address);
+        const receipt = result.responses?.[i];
+        if (typeof receipt?.updatedRange === 'string') receipts.set(binding.namedRangeId, receipt);
       }
       return result.totalUpdatedCells === changes.length && receipts.size === changes.length ? 'applied' : 'unconfirmed';
     } catch (error) {
@@ -106,43 +107,37 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
     }
   }
   async function read() {
+    readBack = undefined;
     const s = await snapshot();
+    if (dispatched) readBack = s;
     if (dispatched && (dispatched.sheetId !== s.sheetId || !equalHeaders(dispatched.headers, s.headers) || !bindings.every(b => {
       const bound = s.names.get(b.namedRangeId);
       const col = s.headers.indexOf(b.change.header), receipt = receipts.get(b.namedRangeId);
-      return (!receipt || receiptAt(receipt, s.row, col)) && bound?.name === b.name && singleCell(bound.range, s.sheetId, s.row, col);
+      return (!receipt || receiptColumn(receipt.updatedRange, s.row) === col) && bound?.name === b.name && singleCell(bound.range, s.sheetId, s.row, col);
     }))) throw conflict();
     return s;
   }
-  async function recover() {
-    const before = dispatched;
-    const restoredHeaders: string[] = [];
-    if (!before) return restoredHeaders;
-    for (const b of bindings) {
-      const now = await snapshot(), bound = now.names.get(b.namedRangeId);
-      if (!bound || bound.name !== b.name || now.sheetId !== before.sheetId ||
-          !equalHeaders([...before.headers].sort(), [...now.headers].sort())) continue;
-      const col = bound.range.startColumnIndex ?? 0, header = now.headers[col];
-      if (!singleCell(bound.range, now.sheetId, now.row, col) || !header || header === edit.idHeader || header === b.change.header) continue;
-      const receipt = receipts.get(b.namedRangeId);
-      if (!receipt || !receiptAt(receipt, now.row, col)) continue;
-      const previous = before.cells[before.headers.indexOf(header)] ?? { raw: null };
-      const value = now.cells[col];
-      // Never infer a target by scanning for equal values. Require the exact
-      // surviving binding, record identity, prior header, and our raw value.
-      if (!value || value.formula || value.raw !== b.change.requested || previous.raw === value.raw ||
-          previous.formula === 'derived' || bindings.some(other => other.change.header === header && other.change.requested === value.raw)) continue;
-      if (!previous.formula && previous.raw === null) await post('/values/' + b.name + ':clear', {});
-      else await post('/values:batchUpdate', { valueInputOption: previous.formula ? 'USER_ENTERED' : 'RAW',
-        data: [{ range: b.name, values: [[previous.formula || previous.raw]] }] });
-      const checked = await snapshot(), restored = checked.cells[checked.headers.indexOf(header)] ?? { raw: null };
-      if (restored.formula !== previous.formula || restored.raw !== previous.raw) break;
-      restoredHeaders.push(header);
-    }
-    return restoredHeaders;
+  // A receipt identifies the physical write, but cannot tell us what a human
+  // entered after our last read. Keep evidence for review without writing back.
+  function writeEvidence(): FieldWriteEvidence[] {
+    return bindings.map(({ name, namedRangeId, change }) => {
+      const receipt = receipts.get(namedRangeId);
+      const evidence: FieldWriteEvidence = { field: change.field, intendedHeader: change.header,
+        attemptedValue: change.requested, ...(receipt && { receipt }) };
+      if (!readBack || readBack.sheetId !== dispatched?.sheetId) return evidence;
+      const bound = readBack.names.get(namedRangeId);
+      const col = receipt ? receiptColumn(receipt.updatedRange, readBack.row) : (bound?.range.startColumnIndex ?? 0);
+      if (!receipt && (bound?.name !== name || !singleCell(bound.range, readBack.sheetId, readBack.row, col))) return evidence;
+      if (readBack.headers[col]) {
+        const value = readBack.cells[col];
+        evidence.readBack = { basis: receipt ? 'receipt' : 'namedRange', header: readBack.headers[col],
+          rowNumber: readBack.row + 1, raw: value?.raw ?? null, ...(value?.formula && { formula: value.formula }) };
+      }
+      return evidence;
+    });
   }
   try {
-    return await updateTaggedRow(edit, target, { read, applyIfCurrent: apply, recover }, audit);
+    return await updateTaggedRow(edit, target, { read, applyIfCurrent: apply, writeEvidence }, audit);
   } finally {
     if (bindings.length) await batch(bindings.map(b => ({ deleteNamedRange: { namedRangeId: b.namedRangeId } })))
       .catch(() => console.warn('[sources] Temporary Sheets edit ranges could not be removed.'));

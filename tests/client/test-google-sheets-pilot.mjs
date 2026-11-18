@@ -99,11 +99,11 @@ assert.deepEqual(movedBefore.state.rows[0].cells, ['a','Original',200,'Main','=1
 for (const other of [2,4]) {
     const f = fixture({ beforeWrite: s => moveFee(s,other) });
     await assert.rejects(f.save(), /could not be confirmed.*Refresh and review/);
-    assert.equal(f.state.writes, 2);
-    assert.equal(f.state.rows[0].cells[1], other === 2 ? 'Original' : '=1+1');
+    assert.equal(f.state.writes, 1);
+    assert.equal(f.state.rows[0].cells[1], 200);
     assert.equal(f.state.rows[0].cells[other], 100);
     assert.deepEqual(f.state.audit.map(e => e.outcome), ['attempted','unconfirmed']);
-    assert.deepEqual(f.state.audit.at(-1).restoredHeaders, [headers[other]]);
+    assert.equal(f.state.audit.at(-1).writeEvidence[0].readBack.header, headers[other]);
     assert.equal(f.state.names.size, 0);
 }
 const follows = fixture({ beforeWrite(s) {
@@ -126,11 +126,36 @@ const replacedAtDispatch = fixture({ beforeWrite(s) {
 await assert.rejects(replacedAtDispatch.save(), /Refresh and review/);
 assert.equal(replacedAtDispatch.state.rows[0].cells[1],90);
 const intervening = fixture({ beforeWrite: s => moveFee(s), beforeRead(s) {
-    if (s.reads === 5) s.rows[0].cells[1] = 'Human edit';
+    if (s.reads === 4) s.rows[0].cells[1] = 'Human edit';
 } });
 await assert.rejects(intervening.save(), /Refresh and review/);
 assert.equal(intervening.state.rows[0].cells[1], 'Human edit');
 assert.equal(intervening.state.writes, 1);
+
+// A human's edit between the final read and dispatch makes our earlier Company
+// snapshot unsafe to restore, even when the misplaced Fee still equals 200.
+const stale = fixture({ beforeWrite(s) {
+    s.rows[0].cells[2] = 'Updated by human';
+    moveFee(s);
+} });
+await assert.rejects(stale.save(), /could not be confirmed.*Refresh and review/);
+assert.equal(stale.state.writes, 1);
+assert.equal(stale.state.rows[0].cells[stale.state.headers.indexOf('Company')], 200);
+assert.deepEqual(stale.state.audit.map(e => e.outcome), ['attempted','unconfirmed']);
+const incident = stale.state.audit.at(-1);
+assert.equal(incident.recordId, 'a');
+assert.equal(incident.metadataId, 19);
+assert.deepEqual(incident.writeEvidence, [{ field:'companyFee', intendedHeader:'Fee', attemptedValue:200,
+    receipt:{updatedRange:"'Companies'!B2"}, readBack:{basis:'receipt',header:'Company',rowNumber:2,raw:200} }]);
+
+const mixed = fixture({ afterWrite(s) { s.rows[0].cells[1] = 175; } });
+await assert.rejects(mixed.save({ name:'Bakery', address:'Market', companyFee:200 }), /could not be confirmed.*Refresh and review/);
+assert.equal(mixed.state.writes, 1);
+assert.deepEqual(mixed.state.rows[0].cells, ['a',175,'Bakery','Market','=1+1']);
+assert.deepEqual(mixed.state.audit.map(e => e.outcome), ['attempted','unconfirmed']);
+assert.equal(mixed.state.audit[0].operationId, mixed.state.audit[1].operationId);
+assert.deepEqual(mixed.state.audit[1].writeEvidence.map(e => [e.field,e.attemptedValue,e.readBack.raw]),
+    [['name','Bakery','Bakery'],['address','Market','Market'],['companyFee',200,175]]);
 
 for (const mode of ['lost','superseded','wrong-value','identity']) {
     const f = fixture({ afterWrite(s) {
@@ -148,7 +173,7 @@ const partial = fixture({ beforeWrite(s) {
 } });
 await partial.save();
 assert.deepEqual(partial.state.rows[0].cells, ['a',200,'Other','Second','=2+2']);
-console.log('Sheets adapter: typed Name, Address and Fee, unchanged values, formulas, sorts, identity changes, forced column moves, guarded rollback and lost responses passed. Partial-sort limitation reproduced.');
+console.log('Sheets adapter: typed Name, Address and Fee, unchanged values, formulas, sorts, identity changes, forced column moves, read-only failure evidence and lost responses passed. Partial-sort limitation reproduced.');
 
 // Exercise the real OAuth callback, connection, tagging, editor, HTTP PATCH,
 // persistent audit and refreshed factory list. Only the Google service is simulated.

@@ -120,17 +120,22 @@ export function verifyTaggedEdit(before: TaggedSnapshot, after: TaggedSnapshot, 
 }
 
 export type Target = { actorId: string; agencyId: string; section: SourceSection; spreadsheetId: string; table: string; metadataId: number; recordId: string };
+export type FieldWriteEvidence = {
+  field: string; intendedHeader: string; attemptedValue: Scalar;
+  receipt?: { updatedRange: string; updatedRows?: number; updatedColumns?: number; updatedCells?: number; spreadsheetId?: string };
+  readBack?: { basis: 'receipt' | 'namedRange'; header: string; rowNumber: number; raw: Scalar | null; formula?: string };
+};
 export type EditAudit = Target & {
   operationId: string; outcome: 'attempted' | 'confirmed' | 'unconfirmed' | 'rejected';
   changedFields: string[]; previous: Record<string, Scalar | null>; requested: Record<string, unknown>;
-  verified: boolean; at: string; restoredHeaders?: string[];
+  verified: boolean; at: string; writeEvidence?: FieldWriteEvidence[];
 };
 
 export async function updateTaggedRow(edit: Edit, target: Target, provider: {
   read(target: Target): Promise<TaggedSnapshot>;
   // Resolve against freshly read source data immediately before dispatch.
   applyIfCurrent(target: Target, changes: readonly Change[]): Promise<'applied' | 'rejected' | 'unconfirmed'>;
-  recover?(): Promise<string[]>;
+  writeEvidence?(): FieldWriteEvidence[];
 }, audit: (entry: EditAudit) => Promise<void>) {
   const entry: EditAudit = { ...target, operationId: randomUUID(), outcome: 'attempted',
     changedFields: [], previous: {}, requested: edit.fields ?? {}, verified: false, at: new Date().toISOString() };
@@ -166,8 +171,8 @@ export async function updateTaggedRow(edit: Edit, target: Target, provider: {
     const after = await provider.read(target);
     if (result === 'unconfirmed' || !verifyTaggedEdit(before, after, edit.idHeader, changes, edit.links)) throw Error();
   } catch {
-    const restoredHeaders = await provider.recover?.().catch(() => []);
-    await audit({ ...entry, outcome: 'unconfirmed', ...(restoredHeaders && { restoredHeaders }) });
+    const writeEvidence = provider.writeEvidence?.();
+    await audit({ ...entry, outcome: 'unconfirmed', ...(writeEvidence && { writeEvidence }) });
     return reject('The change could not be confirmed. The sheet may already have changed. Refresh and review.');
   }
   try {
