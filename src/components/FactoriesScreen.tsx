@@ -16,7 +16,7 @@ import { sourceButton } from './SourceConnectSheet';
 import { SourcesSheet } from './SourcesSheet';
 import { SourceCompanyEditor } from './SourceCompanyEditor';
 import { canEdit, providers } from '../lib/sourcesSetup';
-interface Factory { address?: string; type?: string; id: string; name: string; brand?: string; plant?: string; ingredientCount: number; productCount: number }
+interface Factory { companyFee?: number; address?: string; type?: string; id: string; name: string; brand?: string; plant?: string; ingredientCount: number; productCount: number }
 interface Props { isOpen: boolean; onClose: () => void; timeZone: string; role?: string }
 export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose, timeZone, role = 'admin' }: Props) {
   const [oauthReturn, setOauthReturn] = useState(() => typeof window !== 'undefined' && role === 'admin' && ['google_sheets', 'excel'].includes(new URLSearchParams(window.location.search).get('sources') || ''));
@@ -39,6 +39,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const [connection, setConnection] = useState<SourceConnection | null>(null);
   const [visitGroup1Label, setVisitGroup1Label] = useState('Group 1');
   const [companies, setCompanies] = useState<Factory[]>([]);
+  const canEditFee = role === 'admin' && connection?.sourceType === 'google_sheets' && connection.sheetsFeeEditing === true;
   const [selectedCompany, setSelectedCompany] = useState<Factory | null>(null);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [settings, setSettings] = useState(oauthReturn);
@@ -129,7 +130,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
         {(company.brand || company.plant) && <p dir="auto" className="break-words text-base text-ink-soft">{[company.brand, company.plant].filter(Boolean).join(' / ')}</p>}
         <p className="text-base text-ink-soft">{company.ingredientCount} ingredients · {company.productCount} products</p>
         {(() => { const row = scheduleData?.companies.find(row => row.id === company.id); if (role === 'coordinator' && !row) return <dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft">{['Last visit', 'Next due', 'Overdue'].map(label => <div key={label}><dt>{label}</dt><dd aria-label="Not loaded yet">—</dd></div>)}</dl>; return <><dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft"><div><dt>Last visit</dt><dd>{row?.lastVisit ? `${displayDate(calendarDate(row.lastVisit.at, scheduleData!.timeZone), scheduleData!.today)} · ${row.lastVisit.mashgiachName}` : 'None yet'}</dd></div><div><dt>Next due</dt><dd>{row?.nextDue ? displayDate(row.nextDue, scheduleData!.today) : 'No schedule'}</dd></div><div><dt>Overdue</dt><dd>{row?.status === 'overdue' ? `⚠ Yes · ${overdueDaysText(row.overdueDays)}` : 'No'}</dd></div></dl>{row?.mute && (row.mute.until === null || row.mute.until >= scheduleData!.today) && <span className="text-xs text-ink-soft">Alerts off</span>}</>; })()}
-      </button>{canEdit(role, connection) && <button type="button" className={sourceButton} onClick={() => setCompanyEditor(company)}>Edit company</button>}{canSeeFees(role) && <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setFeePlace(company.id)}>Fees</button><button type="button" className={sourceButton} onClick={() => setInfoPlace(company.id)}>Company info</button></div>}{(role === 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)) && <button type="button" className={sourceButton} disabled={role === 'coordinator' && !scheduleData?.companies.some(row => row.id === company.id)} onClick={() => setEditing(company.id)}>Visit schedule</button>}</div></li>)}</ul>}
+      </button>{(canEdit(role, connection) || canEditFee) && <button type="button" className={sourceButton} onClick={() => setCompanyEditor(company)}>Edit company</button>}{canSeeFees(role) && <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setFeePlace(company.id)}>Fees</button><button type="button" className={sourceButton} onClick={() => setInfoPlace(company.id)}>Company info</button></div>}{(role === 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)) && <button type="button" className={sourceButton} disabled={role === 'coordinator' && !scheduleData?.companies.some(row => row.id === company.id)} onClick={() => setEditing(company.id)}>Visit schedule</button>}</div></li>)}</ul>}
     </div>
     {canSeeFees(role) && feePlace && <FeesSheet placeId={feePlace} yearlyCount={yearlyVisits(scheduleData?.companies.find(c => c.id === feePlace)?.schedule, scheduleData?.today.slice(0, 4) || '')} onClose={() => setFeePlace(null)} />}
     {canSeeFees(role) && infoPlace && <CompanyInfoSheet placeId={infoPlace} isAdmin={role === 'admin'} onClose={() => setInfoPlace(null)} />}
@@ -138,7 +139,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
     {editing && scheduleData && <VisitScheduleEditor key={editing} company={scheduleData.companies.find(row => row.id === editing)!} data={scheduleData} isAdmin={role === 'admin'} onSaved={updateCompany} onClose={() => setEditing(null)} />}
     {reportsOpen && <InspectionReportsInbox timeZone={timeZone} onClose={() => setReportsOpen(false)} />}
     {selectedCompany && <CompanyItemsSheet isAdmin={role === 'admin'} company={selectedCompany} group1Label={role === 'admin' ? connection?.group1Label || 'Group 1' : visitGroup1Label} onClose={() => setSelectedCompany(null)} />}
-    {canEdit(role, connection) && companyEditor && <SourceCompanyEditor company={companyEditor === 'new' ? { name: '' } : companyEditor} source={providers.find(p => p.id === connection?.sourceType)?.name || ''} onClose={() => setCompanyEditor(null)} onSaved={() => setReload(k => k + 1)} />}
+    {(canEdit(role, connection) || (canEditFee && companyEditor !== 'new')) && companyEditor && <SourceCompanyEditor feeOnly={canEditFee} company={companyEditor === 'new' ? { name: '' } : companyEditor} source={providers.find(p => p.id === connection?.sourceType)?.name || ''} onClose={() => setCompanyEditor(null)} onSaved={() => setReload(k => k + 1)} />}
     {role === 'admin' && connection && <React.Fragment key={connection.status === 'recovering' ? 'recovery' : 'setup'}><SourcesSheet timeZone={timeZone} isOpen={settings} connection={connection} onClose={() => setSettings(false)} onSaved={() => setReload(k => k + 1)} /></React.Fragment>}
   </div>;
 }
