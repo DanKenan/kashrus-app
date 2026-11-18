@@ -14,6 +14,13 @@ assert.match(sheet.text(), /What the company pays/); assert.match(sheet.text(), 
 assert.deepEqual(sheet.find(e => e.type === 'input').map(e => e.props.value), ['', '']);
 const inputs = sheet.find(e => e.type === 'input'); inputs[0].props.onChange({ target: { value: '160' } }); inputs[1].props.onChange({ target: { value: '150' } }); await sheet.render();
 assert.match(sheet.text(), /Left for the agency: \$10.00 a visit/); await sheet.submit(); assert.deepEqual(calls.at(-1)[2], { company: { amount: 160, per: 'visit' }, mashgiach: { amount: 150 } });
+Object.assign(fees.places[0],{importedCompany:{amount:1200,per:'year'},dataFee:{amount:80}});
+const imported = mount(FeesSheet,{placeId:'test-place',onClose() {}});
+await imported.render();
+assert.deepEqual(imported.find(e=>e.type==='input').map(e=>e.props.value),['1200','80']);
+imported.find(e=>e.type==='input')[1].props.onChange({target:{value:'75'}});
+await imported.render(); await imported.submit();
+assert.deepEqual(calls.at(-1)[2],{company:null,mashgiach:{amount:75}});
 fees.canEdit = false; const readonly = mount(FeesSheet, { placeId: 'test-place', onClose() {} }); await readonly.render(); assert.match(readonly.text(), /Only admins can change fees/); assert.equal(readonly.find(e => e.type === 'fieldset')[0].props.disabled, true); const before = calls.length; await readonly.submit(); assert.equal(calls.length, before);
 const settings = mount(FeesAccountantSettings, { role: 'admin', onClose() {} }); await settings.render();
 for (const text of ['Who can change fees', 'Your accountant', "Only this agency's pay summary is sent to this person.", 'When to send', 'No email is sent in a period with no visits.', 'Next email:', 'Email not set up yet', 'Send a test email']) assert.ok(settings.text().includes(text), text);

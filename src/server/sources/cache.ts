@@ -1,4 +1,4 @@
-import { classifyRaw } from './mapping.ts';
+import { CompanyLinkError, classifyRaw } from './mapping.ts';
 import type { SourceMapping } from './types.ts';
 import { createHash } from 'node:crypto';
 import type { Company, Group1Overrides, Ingredient, Product, SourceConnector, SourceData } from './types.ts';
@@ -28,7 +28,7 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
   return data.companies.map(c => {
     const content = {
       companyName: safeText(c.name),
-      company: { id: safeText(c.id), name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant) },
+      company: { id: safeText(c.id), name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant), address: safeText(c.address), companyFee: c.companyFee, mashgiachFee: c.mashgiachFee },
       ingredients: data.ingredients.filter(i => i.companyIds.includes(c.id)).map(i => ({
         id: safeText(i.id), name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
         dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: safeText(i.certificationRaw), statusRaw: safeText(i.statusRaw), agencyRaw: safeText(i.agencyRaw), confidence: i.confidence, group1: i.group1 === true, plant: safeText(i.plant),
@@ -79,7 +79,7 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
       publish(id, data, 'ok', { calls, refreshedAt });
       return { ok: true, calls, changedBackups, latestBackups: all };
     } catch (cause) {
-      const error = cause instanceof Error && cause.message.startsWith('Airtable ') ? cause.message : 'Source refresh failed', calls = connector ? connector.calls() - start : 0;
+      const error = cause instanceof CompanyLinkError || cause instanceof Error && cause.message.startsWith('Airtable ') ? cause.message : 'Source refresh failed', calls = connector ? connector.calls() - start : 0;
       if (e.data) e.state = { ...e.state, status: e.state.status === 'backup' ? 'backup' : 'stale', calls, error: e.state.backupError || error };
       else {
         if (!e.backupLoaded) {
@@ -115,6 +115,11 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
     }
   }
   return {
+    publish(agencyId: string, data: SourceData) { publish(agencyId, data, 'ok', {refreshedAt:new Date(now()).toISOString()}); },
+    requireRefresh(agencyId: string, error: string) {
+      const e = entry(agencyId);
+      e.state = { ...e.state, status: e.state.status === 'backup' ? 'backup' : e.data ? 'stale' : 'error', error };
+    },
     reassign(agencyId: string, mapping: SourceMapping) {
       const e = entry(agencyId);
       if (!e.data) return;

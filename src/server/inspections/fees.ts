@@ -8,8 +8,9 @@ export const bad = (message = 'Invalid fee data'): never => { throw Object.assig
 export function shape(value: any, keys: string[], required = keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !keys.includes(k)) || required.some(k => !Object.hasOwn(value, k))) bad();
 }
+import { parseMoney } from '../../lib/sourceAmount.ts';
 export function amount(value: any): number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100000 || Number(value.toFixed(2)) !== value) bad('Invalid amount');
+  if (typeof value !== 'number' || parseMoney(value) === undefined) bad('Invalid amount');
   return value;
 }
 export function bounded(value: any, max: number, required = false): string {

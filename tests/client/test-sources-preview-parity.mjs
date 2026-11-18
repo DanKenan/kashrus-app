@@ -25,3 +25,15 @@ for (const value of ['Dairy Equipment', 'DE', 'D.E.', 'Dairy Eq', 'Dairy Eq.', '
 }
 for (const value of ['Dairy', 'D', 'OU-D']) assert.equal(assign(value).dpm, 'dairy', value);
 assert.equal(assign('OU-DE').agency, 'OU');
+
+const { money } = await import('../../src/lib/sourcesSetup.ts');
+const { parseMoney } = await import('../../src/server/sources/mapping.ts');
+const { amount } = await import('../../src/server/inspections/fees.ts');
+for(const v of [' ', '-1', '1,00', '0.001', '100000.01', '$1,200.50', 0, 100000]) {
+  const imported = parseMoney(v);
+  assert.equal(money(v) === '', imported === undefined);
+  if(imported !== undefined) assert.equal(amount(imported), imported);
+}
+const numeric = applyMapping({C:[{id:'17',fields:{Name:'Company'}}], I:[{id:'2',fields:{Company:17}}]},
+  {companies:{table:'C',name:'Name'},ingredients:{table:'I',companyLink:'Company'},products:{table:''},group1Values:[]});
+assert.deepEqual(numeric.ingredients[0].companyIds,['17']);

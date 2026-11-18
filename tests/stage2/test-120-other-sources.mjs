@@ -1,0 +1,264 @@
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { shiftFixture } from './test-101-shifts-crud.mjs';
+import { zip, workbookFixture } from '../client/source-upload-fixtures.mjs';
+export default {
+    name: 'Test 120: other data sources, OAuth, uploads and budgets',
+    whatItProves: 'Agency-scoped OAuth and data copies, mapped address and P5 fees, guarded list edits, secret redaction, report isolation and memory browse budgets.',
+    async run(baseUrl, ctx) {
+        const { api, tokens, people } = await shiftFixture(baseUrl, ctx, '120');
+        const sentinel = ['fake-120-key-sentinel', 'fake-120-refresh-sentinel', 'fake-120-access-sentinel', 'fake-client-secret'];
+        const columns = ['Name', 'Address', 'Annual Fee', 'Supervision Fee'];
+        const rows = { Companies: [columns, ['Golden Grain Bakery', '100 Demo Street', '$1,200', '80']], Ingredients: [['Name', 'Company'], ['Demo Flour', 'Golden Grain Bakery']], Products: [['Name', 'Company'], ['Demo Loaf', 'Golden Grain Bakery']] };
+        for (const [name,matrix] of Object.entries(rows)) {
+            matrix[0].push('ID');
+            matrix[1].push(name + '-key');
+        }
+        const supabaseRows = Object.fromEntries(Object.entries(rows).map(([table, [header, first]]) => [
+            table, [{ id: table === 'Companies' ? 'full' : 'r2', ...Object.fromEntries(header.map((key, i) => [key, first[i]])) }],
+        ]));
+        supabaseRows.Companies[0].Type = 'Factory';
+        supabaseRows.Companies.push({ id: 'mill', Name: 'Harbor Mill', Type: 'Factory' }, { id: 'supply', Name: 'Vendor', Type: 'Vendor' });
+        supabaseRows.Products.push({ id: 'vendor-product', Name: 'Vendor loaf', Company: 'supply' });
+        let calls = 0, writes = 0, created = 0;
+        const seen = [];
+        const mock = http.createServer(async (req, res) => {
+            calls++;
+            let text = '';
+            for await (const c of req)
+                text += c;
+            const url = new URL(req.url, 'http://local');
+            const path = decodeURIComponent(url.pathname);
+            seen.push({ path, method: req.method, text });
+            res.setHeader('Content-Type', 'application/json');
+            const send = v => res.end(JSON.stringify(v));
+            if (path === '/oauth/token')
+                return send({ access_token: sentinel[2], refresh_token: sentinel[1], expires_in: 3600 });
+            if (path === '/oauth/userinfo')
+                return send({ email: 'demo-account120@example.test' });
+            if (path === '/drive/v3/files')
+                return send({ files: [{ id: 'main', name: 'Demo main' }, { id: 'separate', name: 'Demo separate' }] });
+            if (path === '/v4/spreadsheets' && req.method === 'POST') {
+                created++;
+                return send({ spreadsheetId: 'created', properties: { title: 'Demo new' } });
+            }
+            if (path.startsWith('/v4/spreadsheets/') && !path.includes('/values/'))
+                return send({ sheets: [...Object.keys(rows),'Notes'].map(title => ({ properties: { title } })) });
+            if (path.includes('/values/')) {
+                const table = path.split('/values/')[1].split('!')[0].replace(/:append$/, '').replace(/^'|'$/g, '');
+                if (req.method === 'GET')
+                    return send({ values: rows[table] || [['Memo'],['Reminder']] });
+                writes++;
+                return send({ updates: { updatedRange: `${table}!A3:D3` } });
+            }
+            if (path.includes('/search(') || path.endsWith('/sharedWithMe'))
+                return send({ value: [{ id: 'main', name: 'Demo workbook.xlsx' }] });
+            if (path.endsWith('/content') && req.method === 'PUT') {
+                created++;
+                return send({ id: 'created', name: 'Demo workbook.xlsx' });
+            }
+            if (path.endsWith('/worksheets'))
+                return send({ value: [...Object.keys(rows),'Notes'].map(name => ({ name })) });
+            if (path.includes('/usedRange'))
+                return send({ values: rows[path.split('/worksheets/')[1].split('/')[0]] || [['Memo'],['Reminder']] });
+            if (path.includes('/range(')) {
+                writes++;
+                return send({});
+            }
+            if (path === '/rest/v1/')
+                return send({ definitions: Object.fromEntries(Object.entries(rows).map(([table, data]) => [table, { properties: Object.fromEntries(['id', ...data[0], ...(table === 'Companies' ? ['Type'] : [])].map(c => [c, c === 'id' ? {description:'<pk/>'} : {}])) }])) });
+            if (path.startsWith('/rest/v1/')) {
+                const table = path.split('/').pop();
+                const records = supabaseRows[table];
+                if (req.method === 'GET') {
+                    res.setHeader('Content-Range', `0-${records.length - 1}/${records.length}`);
+                    return send(records);
+                }
+                writes++;
+                if (req.method === 'PATCH') {
+                    const record = records.find(r => 'eq.' + r.id === url.searchParams.get('id'));
+                    if (!record) return send([]);
+                    Object.assign(record, JSON.parse(text));
+                    return send([record]);
+                }
+                const record = { ...JSON.parse(text), id: `inserted-${records.length}` };
+                records.push(record);
+                return send([record]);
+            }
+            res.statusCode = 404;
+            send({ error: 'Mock route missing' });
+        });
+        await new Promise(r => mock.listen(0, '127.0.0.1', r));
+        const apiBase = `http://127.0.0.1:${mock.address().port}`, table = [];
+        const reset = async () => { await api('admin', 'POST', '/api/__test__/reads', { reset: true }); await api('admin', 'POST', '/api/__test__/writes', { reset: true }); };
+        const measure = async (label, fn, expectedWrites = 0) => { await reset(); const result = await fn(); const r = (await api('admin', 'POST', '/api/__test__/reads', {})).json, w = (await api('admin', 'POST', '/api/__test__/writes', {})).json; const billedWrites = w.total + (w.deletes || 0); table.push({ action: label, reads: r.total, writes: billedWrites, deletes: w.deletes || 0 }); assert.equal(r.total, 0, `${label} reads ${JSON.stringify(r)}`); if (expectedWrites !== null)
+            assert.equal(billedWrites, expectedWrites, `${label} writes ${JSON.stringify(w)}`); return result; };
+        const request = async (method, path, body, status = 200, who = 'admin') => { const r = await api(who, method, path, body); assert.equal(r.status, status, `${method} ${path}: ${JSON.stringify(r.json)}`); if (!path.endsWith('/picker-token'))
+            for (const s of sentinel)
+                assert.equal(JSON.stringify(r.json).includes(s), false, `${path} leaked sentinel`); return r.json; };
+        let draftId;
+        const rawUpload = async (name, bytes, type) => { const r = await fetch(`${baseUrl}/api/sources/upload?draftId=${draftId}&name=${encodeURIComponent(name)}`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.admin}`, 'Content-Type': type }, body: bytes }); const json = await r.json(); assert.equal(r.status, 200, JSON.stringify(json)); return json; };
+        const signIn = async (p, access) => { const start = await request('POST', `/api/sources/oauth/${p}/start`, { access }), url = new URL(start.url); assert.equal(url.origin, apiBase); assert.equal(url.searchParams.get('code_challenge_method'), 'S256'); const callback = `/api/sources/oauth/${p}/callback?state=${url.searchParams.get('state')}&code=fake-code`; const r = await measure(`${p} OAuth callback`, () => fetch(baseUrl + callback, { redirect: 'manual' }), 1); assert.equal(r.status, 302); assert.match(r.headers.get('location'), /signin=ok/); const replay = await fetch(baseUrl + callback, { redirect: 'manual' }); assert.match(replay.headers.get('location'), /signin=failed/); return url; };
+        const mapping = { companies: { table: 'Companies', name: 'Name', address: 'Address', companyFee: 'Annual Fee', mashgiachFee: 'Supervision Fee' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: [] };
+        const save = async (p, access = 'read', m = mapping, expectedWrites = p === 'upload' ? 2 : 1) => measure(`${p} mapping`, () => request('PUT', '/api/sources/connection', { sourceType: p, baseId: p === 'supabase' ? 'https://' + 'a'.repeat(20) + '.supabase.co' : p === 'upload' ? 'upload' : 'main', access, mapping: m, ...(p === 'upload' ? {draftId} : {}), ...(p === 'supabase' ? { apiKey: sentinel[0] } : {}) }), expectedWrites);
+        const browse = async (p) => { const data = await measure(`${p} browse factories/items`, async () => { const factories = await request('GET', '/api/factories'); const c = factories.companies[0]; assert.equal(c.name, 'Golden Grain Bakery'); assert.equal(c.address, '100 Demo Street'); await request('GET', `/api/factories/${c.id}/items`); return factories; }); return data; };
+        try {
+            // Hydrate inspection settings once for this freshly injected agency. Source browsing is measured after boot.
+            await request('GET', '/api/inspections/fees');
+            await request('POST', '/api/__test__/sources-oauth-config', { enabled: false });
+            for (const p of ['google_sheets', 'excel', 'supabase'])
+                await request('POST', '/api/__test__/sources-api-base', { provider: p, apiBase });
+            assert.equal((await request('GET', '/api/sources/providers')).google_sheets.setUp, false);
+            const before = calls;
+            for (const p of ['google_sheets', 'excel'])
+                for (const [method, path, body] of [['POST', `/api/sources/oauth/${p}/start`, { access: 'read' }], ['GET', `/api/sources/oauth/${p}/account`], ['GET', `/api/sources/files?provider=${p}`], ['GET', `/api/sources/tabs?provider=${p}&fileId=main`], ['POST', '/api/sources/create-file', { provider: p }]]) {
+                    const r = await request(method, path, body, 409);
+                    assert.equal(r.notSetUp, true);
+                }
+            await request('POST', '/api/sources/oauth/google_sheets/picker-token', {}, 409);
+            assert.equal(calls, before);
+            await request('POST', '/api/__test__/sources-oauth-config', { enabled: true });
+            assert.equal((await request('GET', '/api/sources/providers')).excel.setUp, true);
+            await signIn('google_sheets', 'readwrite');
+            await measure('providers/files/tabs', async () => { await request('GET', '/api/sources/providers'); await request('GET', '/api/sources/files?provider=google_sheets'); const t = await request('GET', '/api/sources/tabs?provider=google_sheets&fileId=main'); assert.equal(t.tables.length, 4); assert.equal(t.samples.Notes[0].fields.Memo,'Reminder'); await request('GET', '/api/sources/oauth/google_sheets/account'); });
+            const pick = await request('POST', '/api/sources/oauth/google_sheets/picker-token', {});
+            assert.equal(pick.accessToken, sentinel[2]);
+            const separate = { ...mapping, ingredients: { ...mapping.ingredients, file: { id: 'separate', name: 'Demo separate' } } };
+            await save('google_sheets', 'readwrite', separate);
+            const googleId = (await browse('google_sheets')).companies[0].id;
+            assert.ok(seen.some(r => r.path.includes('/separate/values/')));
+            const beforeWrites = calls;
+            await measure('Google rows POST/PATCH denied', async () => { await request('POST', '/api/sources/rows/companies', { fields: { name: 'Another bakery' } },409); await request('PATCH', `/api/sources/rows/companies/${googleId}`, { fields: { address: '100 Demo Street' } },409); });
+            assert.equal(calls,beforeWrites);
+            assert.equal((await request('POST', '/api/sources/create-file', { provider: 'google_sheets' })).file.id, 'created');
+            assert.equal(created, 1);
+            await measure('Google access read', () => request('PUT', '/api/sources/access', { access: 'read' }), 1);
+            let at = writes;
+            await request('POST', '/api/sources/rows/companies', { fields: { name: 'Blocked demo' } }, 403);
+            assert.equal(writes, at);
+            await signIn('excel', 'read');
+            await save('excel');
+            const excelId = (await browse('excel')).companies[0].id;
+            const change = await measure('Excel access upgrade', () => request('PUT', '/api/sources/access', { access: 'readwrite' }), 1);
+            assert.equal(change.needsSignIn, true);
+            await request('POST', '/api/sources/rows/companies', { fields: { name: 'Blocked demo' } }, 403);
+            const ms = await signIn('excel', 'readwrite');
+            assert.match(ms.searchParams.get('scope'), /Files.ReadWrite.All/);
+            await save('excel', 'readwrite');
+            await measure('Excel files/tabs', async () => { await request('GET', '/api/sources/files?provider=excel'); assert.equal((await request('GET', '/api/sources/tabs?provider=excel&fileId=main')).tables.length, 4); });
+            await measure('Excel row PATCH', () => request('PATCH', `/api/sources/rows/companies/${excelId}`, { fields: { name: 'Golden Grain Bakery' } },409));
+            await request('POST', '/api/sources/create-file', { provider: 'excel' });
+            assert.equal(created, 2);
+            const badBefore = calls;
+            await request('POST', '/api/sources/supabase/test', { url: 'https://example.test', apiKey: sentinel[0] }, 400);
+            assert.equal(calls, badBefore);
+            assert.equal((await request('POST', '/api/sources/supabase/test', { url: 'https://' + 'a'.repeat(20) + '.supabase.co', apiKey: sentinel[0] })).ok, true);
+            await save('supabase', 'readwrite', { ...mapping, companies: { ...mapping.companies, type: 'Type', factoryValues: ['Factory'] } });
+            const supId = (await browse('supabase')).companies[0].id;
+            await measure('Supabase tabs', () => request('GET', '/api/sources/tabs?provider=supabase'));
+            await measure('Supabase row POST', () => request('POST', '/api/sources/rows/companies', { fields: { name: 'Added Bakery', type: 'Factory' } }));
+            const millId = (await request('GET', '/api/factories')).companies.find(c => c.name === 'Harbor Mill').id;
+            const inserts = () => seen.filter(r => r.method === 'POST' && r.path === '/rest/v1/Ingredients').length;
+            const beforeInvalid = inserts();
+            await request('POST', '/api/sources/rows/ingredients', { fields: { name: 'Invalid', companyLink: 'full, missing' } }, 400);
+            assert.equal(inserts(), beforeInvalid);
+            for (const companyLink of ['full, mill', 'full, mill, supply']) {
+                const beforeInsert = inserts();
+                const { row } = await measure('Supabase linked ingredient', () => request('POST', '/api/sources/rows/ingredients',
+                    { fields: { name: 'Shared flour', companyLink } }));
+                assert.equal(inserts(), beforeInsert + 1);
+                for (const id of [supId, millId]) {
+                    const { ingredients } = await request('GET', `/api/factories/${id}/items`);
+                    const item = ingredients.find(i => i.id === row.id);
+                    assert.equal(item?.name, 'Shared flour', `inserted ingredient in company ${id} cache`);
+                }
+            }
+            const vendor = (await request('GET', '/api/food-service')).candidates.find(c => c.name === 'Vendor');
+            const vendorPath = `/api/sources/rows/companies/${vendor.id}`;
+            const vendorItems = `/api/factories/${vendor.id}/items`;
+            await request('GET', vendorItems, undefined, 404);
+            await measure('promote vendor with existing links', () => request('PATCH', vendorPath, { fields: { type: 'Factory' } }));
+            const promoted = await request('GET', vendorItems);
+            assert.deepEqual(promoted.ingredients.map(i => i.name), ['Shared flour']);
+            assert.deepEqual(promoted.products.map(p => p.name), ['Vendor loaf']);
+
+            const flour = (await request('GET', `/api/factories/${supId}/items`)).ingredients.find(i => i.name === 'Demo Flour');
+            const flourPath = `/api/sources/rows/ingredients/${flour.id}`;
+            const providerFlour = supabaseRows.Ingredients.find(r => r.id === 'r2');
+            providerFlour.Company = 'missing-company';
+            const beforePatch = writes;
+            const saved = await measure('name-only PATCH after external link change', () => request('PATCH', flourPath, { fields: { name: 'Renamed flour' } }));
+            assert.equal(writes, beforePatch + 1);
+            assert.equal(providerFlour.Name, 'Renamed flour');
+            assert.equal(saved.row.fields.Name, providerFlour.Name);
+            assert.equal(saved.saved, true);
+            assert.equal(saved.refreshRequired, true);
+            assert.match(saved.warning, /missing-company/);
+            const stale = await request('GET', '/api/factories');
+            assert.equal(stale.status.status, 'stale');
+            assert.equal(stale.status.error, saved.warning);
+            const cachedFlour = async () => (await request('GET', `/api/factories/${supId}/items`)).ingredients.find(i => i.id === flour.id);
+            assert.equal((await cachedFlour()).name, 'Demo Flour');
+            // Another successful write cannot mark the invalid list fresh.
+            const pending = await request('PATCH', vendorPath, { fields: { type: 'Vendor' } });
+            assert.equal(pending.refreshRequired, true);
+            assert.equal((await request('GET', '/api/factories')).status.status, 'stale');
+            await request('PATCH', flourPath, { fields: { companyLink: 'full' } });
+            assert.equal((await cachedFlour()).name, 'Renamed flour');
+            assert.equal((await request('GET', '/api/sources/connection')).status, 'ok');
+            await request('GET', vendorItems, undefined, 404);
+            // Warm P5's agency-local stores before measuring source actions.
+            await request('GET', '/api/inspections/fees');
+            const fees = await request('GET', '/api/inspections/fees');
+            assert.deepEqual(fees.places.find(p => p.id === supId).importedCompany, { amount: 1200, per: 'year' });
+            const info = await request('GET', `/api/inspections/company-info/${supId}`);
+            assert.equal(info.address, '100 Demo Street');
+            await request('PUT', `/api/inspections/fees/${supId}`, { company: { amount: 1500, per: 'year' }, mashgiach: { amount: 75 } });
+            assert.equal((await request('GET', '/api/inspections/fees')).places.find(p => p.id === supId).company.amount, 1500);
+            await request('PUT', `/api/inspections/schedule/companies/${supId}/people`, { mashgiachIds: [people.mash.id], coordinatorIds: [] });
+            const visit = await request('GET', `/api/visits/factories/${supId}`, undefined, 200, 'mash');
+            at = writes;
+            const report = await request('POST', '/api/visits/reports', { clientReportId: 'report-120-demo', companyId: supId, listVersion: visit.listVersion, startedAt: new Date().toISOString(), marks: [], offList: [] }, 201, 'mash');
+            assert.equal(writes, at, 'inspection report must not write source');
+            const reportId = report.id || report.report?.id;
+            const detail = await request('GET', `/api/inspections/reports/${reportId}`);
+            assert.equal(detail.report.feeCheck.reportAmount, 80);
+            await measure('disconnect remote', () => request('DELETE', '/api/sources/connection'), 1);
+            draftId = (await request('POST','/api/sources/upload/reset',{})).draftId;
+            const csv = 'Name,Address,Annual Fee,Supervision Fee\nGolden Grain Bakery,100 Demo Street,"$1,200",80\n';
+            await measure('upload CSV', () => rawUpload('Companies.csv', Buffer.from(csv), 'text/csv'), 0);
+            await measure('upload XLSX second file', () => rawUpload('Ingredients.xlsx', zip(workbookFixture()), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'), 0);
+            const uploaded = { ...mapping, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: '' } };
+            await save('upload', 'read', uploaded);
+            const live = (await browse('upload')).companies[0];
+            const linked = await request('GET', `/api/factories/${live.id}/items`);
+            assert.deepEqual(linked.ingredients.map(r => r.name), ['Demo Flour']);
+            draftId = (await request('POST','/api/sources/upload/reset',{})).draftId;
+            await rawUpload('Companies.csv',Buffer.from(csv + 'Golden Grain Bakery,Other Street,600,40\n'),'text/csv');
+            await rawUpload('Ingredients.csv',Buffer.from('Name,Company\nDemo Flour,Golden Grain Bakery'),'text/csv');
+            const ambiguous = await request('PUT','/api/sources/connection',{sourceType:'upload',baseId:'upload',access:'read',mapping:uploaded,draftId},400);
+            assert.match(ambiguous.error,/Multiple companies match.*unique ID/);
+            await request('POST','/api/sources/upload/reset',{});
+            assert.equal((await browse('upload')).companies[0].id,live.id);
+            await measure('upload tabs', () => request('GET', '/api/sources/tabs?provider=upload'));
+            await request('PUT', '/api/sources/access', { access: 'readwrite' }, 400);
+            await request('POST', '/api/sources/rows/companies', { fields: { name: 'Blocked demo' } }, 409);
+            const routes = [['GET', '/api/sources/providers'], ['POST', '/api/sources/oauth/google_sheets/start', { access: 'read' }], ['POST', '/api/sources/oauth/excel/start', { access: 'read' }], ['GET', '/api/sources/oauth/google_sheets/account'], ['GET', '/api/sources/oauth/excel/account'], ['POST', '/api/sources/oauth/google_sheets/picker-token', {}], ['GET', '/api/sources/files?provider=excel'], ['GET', '/api/sources/tabs?provider=upload'], ['POST', '/api/sources/supabase/test', { url: 'https://' + 'a'.repeat(20) + '.supabase.co', apiKey: sentinel[0] }], ['POST', '/api/sources/upload'], ['POST', '/api/sources/upload/reset', {}], ['POST', '/api/sources/create-file', { provider: 'excel' }], ['PUT', '/api/sources/access', { access: 'readwrite' }], ['DELETE', '/api/sources/connection'], ['POST', '/api/sources/rows/companies', { fields: { name: 'Blocked demo' } }], ['PATCH', '/api/sources/rows/companies/r2', { fields: { name: 'Blocked demo' } }]];
+            for (const who of ['coord', 'mash'])
+                for (const [m, p, b] of routes)
+                    await request(m, p, b, 403, who);
+            await save('supabase','read',mapping,2);
+            assert.equal(table.at(-1).deletes,1,'provider switch must delete the old upload part');
+            await measure('disconnect after switch', () => request('DELETE', '/api/sources/connection'), 1);
+            assert.equal((await request('GET', '/api/sources/connection')).sourceType, null);
+            assert.equal((await request('GET', '/api/sources/oauth/google_sheets/account')).signedIn, false);
+            console.table(table);
+            return 'OAuth, separate files, three-tab workbook, Supabase, two-file copy, P5 defaults, guarded writes and exact memory-path budgets';
+        }
+        finally {
+            mock.closeAllConnections();
+            await new Promise(r => mock.close(r));
+            await api('admin', 'POST', '/api/__test__/sources-oauth-config', { enabled: false });
+        }
+    }
+};

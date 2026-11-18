@@ -5,6 +5,9 @@ import type { Backup } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
 export interface Connection {
+  oauth?: Partial<Record<import('./oauth.ts').OAuthProvider, import('./oauth.ts').OAuthRecord>>;
+  upload?: {fileNames:string[];copiedAt:string;rows:number;parts:number;hash:string;versioned?:boolean;slotHash?:string};
+  fees?: {mashgiach?:Record<string,{amount:number;currency:string}>};
   group1Label?: string; group1Overrides?: Group1Overrides;
   agencyId: string; sourceType: SourceKind; baseId: string; access: 'read' | 'readwrite';
   mapping: SourceMapping; encryptedKey: string; keyHint: string; updatedAt: string; updatedBy: string;
@@ -63,7 +66,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     try { return JSON.parse(await fs.readFile(file(collection, id), 'utf8')); }
     catch (e: any) { if (e.code === 'ENOENT') return null; throw e; }
   }
-  async function save(connection: Connection, backups: Backup[] = []) {
+  async function save(connection: Connection, backups: Backup[] = [], previousUpload?: Connection['upload']) {
     if (deps.staged()) return;
     const counts = { ...connection.backupParts };
     for (const backup of backups) {
@@ -82,7 +85,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
       }
       counts[backup.companyId] = { parts, hash };
     }
-    await commit([{ collection: 'sourceConnections', id: connection.agencyId, doc: { ...connection, backupParts: counts } }]);
+    await activate({...connection, backupParts:counts}, previousUpload);
     connection.backupParts = counts;
   }
   async function load(agencyId: string, companyIds: string[]): Promise<Backup[] & { invalidCompanyIds?: string[] }> {
@@ -110,7 +113,94 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     try { return JSON.parse(await fs.readFile(file('sourceConnections', id), 'utf8')); }
     catch (e: any) { if (e.code === 'ENOENT') return null; throw e; }
   }
-  return { connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw };
+  async function saveUpload(connection:Connection, files:import('./upload.ts').UploadedFile[]) {
+    if(deps.staged()) throw Error('Writes blocked');
+    const text=JSON.stringify(files);
+    if(Buffer.byteLength(text)>3*1024*1024) throw Object.assign(Error('This file is too big to copy. Split it into smaller files.'),{status:400});
+    const encoded=Buffer.from(text).toString('base64'), hash=digest(text), parts=Math.ceil(encoded.length/(480*1024));
+    const old=connection.upload;
+    // Firestore overwrites existing chunk slots in the same atomic batch as the manifest.
+    // Local files keep content-addressed slots until the manifest rename completes.
+    const slot = deps.db() ? {versioned:old?.versioned ?? false, ...(old?.versioned ? {slotHash:old.slotHash ?? old.hash} : {})} : {versioned:true};
+    const upload={...slot,fileNames:files.map(f=>f.name),copiedAt:new Date().toISOString(),rows:files.reduce((n,f)=>n+f.tabs.reduce((n,t)=>n+t.rows.length,0),0),parts,hash};
+    const partId = (i:number) => uploadPart(connection.agencyId,upload,i);
+    const chunks = Array.from({length:parts},(_,i)=>({collection:'sourceUploads',id:partId(i),doc:{data:encoded.slice(i*480*1024,(i+1)*480*1024)}}));
+    await activate({...connection, upload}, old, chunks);
+    connection.upload=upload;
+  }
+  // Filesystem renames commit one manifest at a time. Reclaim unreachable chunks under the
+  // same lock as activation so recovery cannot delete chunks from an in-progress upload.
+  let localWrites: Promise<void> = Promise.resolve();
+  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  function localWrite(fn: () => Promise<void>) {
+    const next = localWrites.then(fn);
+    localWrites = next.catch(() => {});
+    return next;
+  }
+  async function reclaimLocalUploads() {
+    if (deps.db() || deps.staged()) return;
+    await localWrite(async () => {
+      let names: string[];
+      try { names = await fs.readdir(path.join(dir,'sourceUploads')); }
+      catch (e:any) { if (e.code === 'ENOENT') return; throw e; }
+      const active = new Set<string>();
+      for (const c of await list('sourceConnections')) {
+        if (!c.upload) continue;
+        // Keep all chunks when the manifest itself needs recovery.
+        if (!Number.isInteger(c.upload.parts) || c.upload.parts < 1 || c.upload.parts > 10) return;
+        for (let i=0; i<c.upload.parts; i++) active.add(uploadPart(c.agencyId,c.upload,i));
+      }
+      for (const name of names) {
+        if (name.endsWith('.json') && !active.has(decodeURIComponent(name.slice(0,-5))))
+          await fs.rm(path.join(dir,'sourceUploads',name),{force:true});
+      }
+    });
+  }
+  function retryLocalCleanup() {
+    if (cleanupTimer) return;
+    cleanupTimer = setTimeout(() => {
+      cleanupTimer = undefined;
+      void reclaimLocalUploads().catch(retryLocalCleanup);
+    },5000);
+    cleanupTimer.unref();
+  }
+  async function activate(c:Connection, previous:Connection['upload'], chunks:Write[] = []) {
+    const manifest = {collection:'sourceConnections', id:c.agencyId, doc:c};
+    const live = new Set(Array.from({length:c.upload?.parts || 0}, (_,i)=>uploadPart(c.agencyId,c.upload!,i)));
+    const obsolete = Array.from({length:previous?.parts || 0}, (_,i)=>uploadPart(c.agencyId,previous!,i))
+      .filter(id => !live.has(id)).map(id => ({collection:'sourceUploads',id}));
+    // At most 3 MiB of source data: the encoded chunks, manifest and deletes fit one Firestore batch.
+    // A rejected batch leaves the old connection intact and the entire activation can be retried.
+    if (deps.db()) {
+      await commit([...chunks, manifest, ...obsolete]);
+      return;
+    }
+    await localWrite(async () => {
+      try { await commit([...chunks, manifest]); }
+      catch (error) { retryLocalCleanup(); throw error; }
+      await commit(obsolete).catch(retryLocalCleanup);
+    });
+  }
+  function uploadPart(id:string, upload:NonNullable<Connection['upload']>, i:number) {
+    return `${id}__copy__${upload.versioned ? (upload.slotHash ?? upload.hash) + '__' : ''}${i}`;
+  }
+  async function loadUpload(c:Connection):Promise<import('./upload.ts').UploadedFile[]> {
+    if (!c.upload || !Number.isInteger(c.upload.parts) || c.upload.parts < 1 || c.upload.parts > 10) throw Error('Invalid upload manifest');
+    const parts=await Promise.all(Array.from({length:c.upload.parts},(_,i)=>read('sourceUploads',uploadPart(c.agencyId,c.upload!,i))));
+    if(parts.some(p=>typeof p?.data!=='string'))throw Error('Missing upload part');
+    const text=Buffer.from(parts.map(p=>p.data).join(''),'base64').toString('utf8');if(digest(text)!==c.upload.hash)throw Error('Invalid upload');const files = JSON.parse(text);
+    if (!Array.isArray(files) || !files.length || files.length > 3 || files.some(f =>
+      typeof f?.name !== 'string' || !Array.isArray(f.tabs) || f.tabs.some((t:any) =>
+        !Array.isArray(t.columns) || !Array.isArray(t.rows) || t.rows.some((r:any) => typeof r?.id !== 'string' || !r.fields)))) throw Error('Invalid upload');
+    return files;
+  }
+  async function remove(c:Connection) {
+    if(deps.staged())throw Error('Writes blocked');
+    const removals = [{collection:'sourceConnections',id:c.agencyId},...Array.from({length:c.upload?.parts||0},(_,i)=>({collection:'sourceUploads',id:uploadPart(c.agencyId,c.upload!,i)}))];
+    if (deps.db()) await commit(removals);
+    else await localWrite(async () => { await commit(removals.slice(0,1)); await commit(removals.slice(1)).catch(retryLocalCleanup); });
+  }
+  return { retryLocalCleanup, reclaimLocalUploads, connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
 }
 // Read legacy connection settings without rewriting source values.
 export function normalizeConnection(connection: any): Connection {

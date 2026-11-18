@@ -77,3 +77,44 @@ assert.equal(loose.mapping.ingredients.brand, 'Brand Name');
 assert.equal(loose.guessed['ingredients.brand'], 0.9);
 
 assert.deepEqual(splitCertification('OU-DE'), { agency: 'OU', dpm: 'dairy_equipment', group1: false });
+
+const shared = {Companies:['a','b'].map(id => ({id,sourceKey:'raw-'+id,fields:{Name:'Same',Type:'Factory'}})),
+  Ingredients:[row('item',{Company:' sAME '})]};
+assert.throws(()=>applyMapping(shared,mapping),/Multiple companies match.*unique ID/);
+shared.Ingredients[0].fields.Company = 'raw-b';
+assert.deepEqual(applyMapping(shared,mapping).ingredients[0].companyIds,['b']);
+
+const commaName = 'Golden Grain, Inc.';
+const commaRows = {
+  Companies: [row('short',{Name:'Golden Grain',Type:'Factory'}),row('full',{Name:commaName,Type:'Factory'})],
+  Ingredients: [row('flour',{Company:commaName}),row('salt',{Company:'full, short'})],
+};
+assert.deepEqual(applyMapping(commaRows,mapping).ingredients.map(i => i.companyIds), [['full'],['full','short']]);
+commaRows.Companies.push(row('another',{Name:commaName,Type:'Factory'}));
+assert.throws(()=>applyMapping(commaRows,mapping),/Multiple companies match "Golden Grain, Inc\."/);
+commaRows.Companies[0].sourceKey = commaName;
+assert.deepEqual(applyMapping(commaRows,mapping).ingredients[0].companyIds,['short']);
+
+const filteredRows = {
+  Companies: [
+    { id: 'c1', sourceKey: 'full', fields: { Name: 'Demo Factory', Type: 'Factory' } },
+    { id: 'c2', sourceKey: 'supply', fields: { Name: 'Demo Vendor', Type: 'Vendor' } },
+  ],
+  Ingredients: [row('flour', { Company: 'full, supply' })],
+  Products: [row('loaf', { Company: 'Demo Vendor, Demo Factory' })],
+};
+const filtered = applyMapping(filteredRows, mapping);
+assert.deepEqual(filtered.companies.map(c => c.id), ['c1']);
+assert.deepEqual(filtered.ingredients[0].companyIds, ['c1']);
+assert.deepEqual(filtered.products[0].companyIds, ['c1']);
+filteredRows.Ingredients[0].fields.Company = 'supply';
+assert.deepEqual(applyMapping(filteredRows, mapping).ingredients[0].companyIds, []);
+for (const missing of ['unknown', ['full', 'unknown']]) {
+  filteredRows.Ingredients[0].fields.Company = missing;
+  assert.throws(() => applyMapping(filteredRows, mapping), /Unknown company link/);
+}
+filteredRows.Ingredients[0].fields.Company = 'full, unknown';
+assert.throws(() => applyMapping(filteredRows, mapping), /Cannot uniquely resolve/);
+filteredRows.Companies[1].fields.Name = 'Demo Factory';
+filteredRows.Ingredients[0].fields.Company = 'Demo Factory';
+assert.throws(() => applyMapping(filteredRows, mapping), /Multiple companies match/);
