@@ -115,8 +115,11 @@ const fieldValue = (value: unknown): string | undefined => {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return undefined;
 };
-export class AmbiguousCompanyLink extends Error {
+export class CompanyLinkError extends Error {
   readonly status = 400;
+}
+
+export class AmbiguousCompanyLink extends CompanyLinkError {
   constructor(name:string) {
     super(`Multiple companies match "${name}". Use the company's unique ID in the company-link column.`);
   }
@@ -126,23 +129,56 @@ export function companyLinkResolver(companies: {id:string;name:string;sourceKey?
   const ids = new Set(companies.map(c => c.id));
   const sourceKeys = new Map(companies.filter(c => c.sourceKey).map(c => [c.sourceKey, c.id]));
   const names = new Map<string, string[]>();
-  for (const c of companies) names.set(folded(c.name), [...(names.get(folded(c.name)) ?? []), c.id]);
-  function resolveOne(value:unknown): string | undefined {
-    const link = fieldValue(value)?.trim();
-    if (!link) return;
-    if (ids.has(link)) return link;
-    if (sourceKeys.has(link)) return sourceKeys.get(link);
-    const matches = names.get(folded(link));
-    if (matches && matches.length > 1) throw new AmbiguousCompanyLink(link);
-    return matches?.[0];
-  }
-  return (value: unknown) => {
-    if (!Array.isArray(value)) {
-      const whole = resolveOne(value);
-      if (whole !== undefined) return [whole];
+  let maxParts = 1;
+  for (const company of companies) {
+    const name = folded(company.name);
+    const matches = names.get(name) ?? [];
+    matches.push(company.id);
+    names.set(name,matches);
+    for (const key of [company.id, company.sourceKey, name]) {
+      if (key) maxParts = Math.max(maxParts,key.split(',').length);
     }
-    const parts = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
-    return [...new Set(parts.map(resolveOne).filter((id): id is string => id !== undefined))];
+  }
+  function candidates(link:string): string[] {
+    if (!link) return [];
+    if (ids.has(link)) return [link];
+    const sourceId = sourceKeys.get(link);
+    return sourceId === undefined ? names.get(folded(link)) ?? [] : [sourceId];
+  }
+  function resolveOne(value:unknown): string | undefined {
+    const link = fieldValue(value)?.trim() ?? '';
+    const matches = candidates(link);
+    if (matches.length > 1) throw new AmbiguousCompanyLink(link);
+    return matches[0];
+  }
+  return (value: unknown): string[] => {
+    if (Array.isArray(value)) return [...new Set(value.map(resolveOne).filter((id): id is string => id !== undefined))];
+    const whole = resolveOne(value);
+    if (whole !== undefined) return [whole];
+    if (typeof value !== 'string' || !value.includes(',')) return [];
+
+    // Each suffix has zero, one, or multiple complete parses. Only retain a
+    // successor for reconstruction when exactly one path reaches the end.
+    const parts = value.split(',');
+    const ways = new Uint8Array(parts.length + 1);
+    const next: {id:string; end:number}[] = [];
+    ways[parts.length] = 1;
+    for (let start = parts.length - 1; start >= 0; start--) {
+      let span = '';
+      for (let end = start + 1; end <= Math.min(parts.length, start + maxParts); end++) {
+        span += (end === start + 1 ? '' : ',') + parts[end - 1];
+        if (!ways[end]) continue;
+        const matches = candidates(span.trim());
+        if (!matches.length) continue;
+        ways[start] = Math.min(2,ways[start] + matches.length * ways[end]);
+        if (ways[start] > 1) break;
+        next[start] = {id:matches[0],end};
+      }
+    }
+    if (ways[0] !== 1) throw new CompanyLinkError(`Cannot uniquely resolve the company list "${value}". Use a list of unique company IDs.`);
+    const linked = new Set<string>();
+    for (let i = 0; i < parts.length; i = next[i].end) linked.add(next[i].id);
+    return [...linked];
   };
 }
 

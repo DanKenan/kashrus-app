@@ -46,17 +46,23 @@ globalThis.setTimeout = (fn,ms,...args) => {
   if ([5000,15000].includes(ms)) { retry = fn; return {unref(){}}; }
   return nativeTimeout(fn,ms,...args);
 };
+const request = async (path) => { let value; await handlers.get('get ' + path)({ query: {}, params: {} }, { json(v) { value = v; }, status() { return this; } }); return value; };
 const drain = async () => {for(let i=0;i<10;i++) await new Promise(r=>setImmediate(r));};
 try {
   await routes.boot();
   assert.equal(routes.inspectionSource(connection.agencyId).connection,undefined);
   assert.ok(routes.inspectionSource('healthy').connection);
+  const recoveringSettings = await request('/api/sources/connection');
+  assert.equal(recoveringSettings.sourceType,'upload');
+  assert.equal(recoveringSettings.status,'recovering');
+  assert.deepEqual((await request('/api/factories')).companies,[]);
   await measure('persistent failure: only failed manifest and part',async()=>{retry();await drain();},2,0);
   docs.set(partKey,part);
   await measure('targeted recovery',async()=>{retry();await drain();},2,0);
 } finally {globalThis.setTimeout=nativeTimeout;}
+assert.equal((await request('/api/sources/connection')).status,'ok');
 await store.remove(healthy);
-const request = async (path) => { let value; await handlers.get('get ' + path)({ query: {}, params: {} }, { json(v) { value = v; }, status() { return this; } }); return value; };
+
 await measure('upload browse', async () => { assert.equal((await request('/api/factories')).companies[0].name, 'Demo Bakery'); await request('/api/sources/connection'); }, 0, 0);
 assert.equal([...docs.keys()].some(k => k.startsWith('sourceBackups/')), false);
 blocked = true;
@@ -101,6 +107,7 @@ assert.ok(await store.raw(connection.agencyId));
 assert.equal(docs.has(partKey),false);
 assert.deepEqual(await disconnect(),{status:200,body:{ok:true}});
 assert.equal(await store.raw(connection.agencyId),null);
+assert.equal((await request('/api/sources/connection')).sourceType,null);
 // Make the formerly missing chunk readable, then fire the captured callback.
 docs.set(partKey,part);
 await measure('cancelled startup retry',async()=>{retry();await drain();},0,0);

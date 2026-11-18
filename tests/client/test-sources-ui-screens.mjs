@@ -40,3 +40,13 @@ const matching = connected.tree().props.children.props.children.flat(Infinity).f
 assert.ok(matching); assert.equal(matching.props.initial.companies.companyFee, 'Company fee'); await matching.props.onSave(matching.props.initial); await connected.render(); assert.match(connected.html(), /Step 3 of 3/); assert.match(connected.html(), />Done</);
 const saved = calls.find(([method, path]) => method === 'PUT' && path === '/api/sources/connection'); assert.equal(saved[2].sourceType, 'google_sheets'); assert.equal(saved[2].baseId, 'company-file'); assert.equal(saved[2].access, 'read'); assert.equal(saved[2].mapping.companies.mashgiachFee, 'Supervision fee');
 console.log('sources signed-in file selection, filled tabs, matching fee guesses and confirmed done flow: OK');
+
+const recovering = mount(SourcesForm, {...props,connection:{sourceType:'upload',status:'recovering'}});
+const recoveryCalls = recordFetch({'DELETE /api/sources/connection':{ok:true}});
+await recovering.render();
+assert.match(recovering.text(),/saved upload is unavailable/i);
+assert.doesNotMatch(recovering.text(),/Change matching|Upload a new copy|Choose where your data lives/);
+await recovering.click('Disconnect');
+await recovering.click('Confirm disconnect');
+assert.ok(recoveryCalls.some(([method,path])=>method==='DELETE' && path==='/api/sources/connection'));
+assert.match(recovering.text(),/Choose where your data lives/);

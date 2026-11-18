@@ -12,7 +12,7 @@ export interface SourceMapping {
 export interface SourceTable { name: string; columns: string[] }
 export interface SourceConnection {
   group1Label?: string; sourceType: string | null; baseId?: string; access?: 'read' | 'readwrite'; mapping?: SourceMapping;
-  hasKey?: boolean; keyHint?: string; status?: 'never' | 'ok' | 'stale' | 'backup' | 'error';
+  hasKey?: boolean; keyHint?: string; status?: 'recovering' | 'never' | 'ok' | 'stale' | 'backup' | 'error';
   fileName?: string; accountEmail?: string; canWrite?: boolean; counts?: { companies: number; ingredients: number; products: number };
   upload?: { fileNames: string[]; copiedAt: string; rows: number };
   backupSaveError?: boolean;
@@ -33,6 +33,7 @@ export async function sourceRequest(path: string, method?: string, body?: unknow
   return data;
 }
 export function sourceStatus(connection: SourceConnection, timeZone: string): string {
+  if (connection.status === 'recovering') return 'The saved upload is unavailable. Retrying automatically.';
   const backup = connection.backupSaveError ? ' · backup copy not saved yet' : '';
   const source = ({ airtable: 'Airtable', google_sheets: 'Google Sheets', excel: 'Excel', supabase: 'Supabase' } as Record<string, string>)[connection.sourceType] || 'database';
   if (!connection.sourceType) return `Not connected${backup}`;

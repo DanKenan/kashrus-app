@@ -1,4 +1,4 @@
-import { AmbiguousCompanyLink, classifyRaw } from './mapping.ts';
+import { CompanyLinkError, classifyRaw } from './mapping.ts';
 import type { SourceMapping } from './types.ts';
 import { createHash } from 'node:crypto';
 import type { Company, Group1Overrides, Ingredient, Product, SourceConnector, SourceData } from './types.ts';
@@ -79,7 +79,7 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
       publish(id, data, 'ok', { calls, refreshedAt });
       return { ok: true, calls, changedBackups, latestBackups: all };
     } catch (cause) {
-      const error = cause instanceof AmbiguousCompanyLink || cause instanceof Error && cause.message.startsWith('Airtable ') ? cause.message : 'Source refresh failed', calls = connector ? connector.calls() - start : 0;
+      const error = cause instanceof CompanyLinkError || cause instanceof Error && cause.message.startsWith('Airtable ') ? cause.message : 'Source refresh failed', calls = connector ? connector.calls() - start : 0;
       if (e.data) e.state = { ...e.state, status: e.state.status === 'backup' ? 'backup' : 'stale', calls, error: e.state.backupError || error };
       else {
         if (!e.backupLoaded) {

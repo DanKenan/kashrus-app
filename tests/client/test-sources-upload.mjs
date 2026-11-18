@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { parseUpload, parseCsv, parseXlsx, uploadRowsError } from '../../src/server/sources/upload.ts';
+import { createUploadConnector, parseUpload, parseCsv, parseXlsx, uploadRowsError } from '../../src/server/sources/upload.ts';
 import { safeCellText } from '../../src/server/inspections/export.ts';
 import { zip, workbookFixture } from './source-upload-fixtures.mjs';
 assert.deepEqual(parseCsv('\uFEFFName;Note\r\n"Golden; Grain";"line 1\nline ""2"""\r\n'), [['Name', 'Note'], ['Golden; Grain', 'line 1\nline "2"']]);
@@ -40,3 +40,19 @@ assert.ok(created.every(t => t.rows.length === 0));
 const early = workbookFixture();
 early['xl/worksheets/sheet1.xml'] = early['xl/worksheets/sheet1.xml'].replace('<v>25569</v>', '<v>1</v>');
 assert.equal(parseXlsx(zip(early))[0].rows[0].fields.Date, '1900-01-01T00:00:00.000Z');
+
+async function importCompanyLinks(links, additionalCompany = '') {
+    const csv = (name, text) => parseUpload(Buffer.from(text),name + '.csv');
+    const files = [
+        csv('Companies','ID,Name\nshort,Golden Grain\nfull,"Golden Grain, Inc."\nmill,Harbor Mill\n' + additionalCompany),
+        csv('Ingredients',`Name,Company\nDemo Flour,"${links}"\n`)
+    ];
+    const mapping = { companies:{table:'Companies',name:'Name'}, ingredients:{table:'Ingredients',name:'Name',companyLink:'Company'},
+        products:{table:''},group1Values:[] };
+    const data = await createUploadConnector({mapping,files}).loadAll();
+    return data.ingredients[0].companyIds.map(id => data.companies.find(company => company.id === id).name);
+}
+assert.deepEqual(await importCompanyLinks('Golden Grain, Inc., Harbor Mill'),['Golden Grain, Inc.','Harbor Mill']);
+assert.deepEqual(await importCompanyLinks('full, mill'),['Golden Grain, Inc.','Harbor Mill']);
+await assert.rejects(importCompanyLinks('Golden Grain, Unknown, Harbor Mill'),/Cannot uniquely resolve/);
+await assert.rejects(importCompanyLinks('Golden Grain, Inc., Harbor Mill','other,Inc.'),/Cannot uniquely resolve/);

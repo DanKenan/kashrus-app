@@ -53,12 +53,19 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
     let timer: ReturnType<typeof setTimeout> | undefined;
     let polls = 0;
     const schedule = (current: SourceConnection) => {
-      if (current.status !== 'never' || polls >= 10 || generation.current !== request) return;
+      if ((current.status !== 'recovering' && (current.status !== 'never' || polls >= 10)) || generation.current !== request) return;
       timer = setTimeout(async () => {
         if (generation.current !== request) return;
         polls += 1;
         let next = current;
         try {
+          if (current.status === 'recovering') {
+            const saved = await sourceRequest('/api/sources/connection');
+            if (generation.current !== request) return;
+            if (saved.status === 'recovering') schedule(saved);
+            else setReload(k => k + 1);
+            return;
+          }
           const result = await sourceRequest('/api/factories');
           if (generation.current !== request) return;
           next = { ...current, ...result.status };
@@ -68,7 +75,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
           setError(e instanceof Error ? e.message : "Couldn't load factories. Try again.");
         }
         schedule(next);
-      }, 3000);
+      }, polls >= 10 ? 30000 : 3000);
     };
     setCompanies([]); setError('');
     void (async () => {
@@ -83,7 +90,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
         if (response.status !== 404 && (!response.ok || next.error && !next.sourceType)) throw new Error(next.error || "Couldn't load the connection. Try again.");
         let list: Factory[] = [];
         let status = {};
-        if (next.sourceType) {
+        if (next.sourceType && next.status !== 'recovering') {
           const result = await sourceRequest('/api/factories');
           list = result.companies || [];
           status = result.status || {};
@@ -113,7 +120,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
       {role === 'coordinator' && <p className="text-base text-ink-soft">Showing the companies assigned to you.</p>}
       {role === 'admin' && scheduleData && <VisitScheduleSettings data={scheduleData} onSaved={settings => setScheduleData(data => data && ({ ...data, settings }))} />}
       <p role="status" className="break-words text-base text-ink-soft">{role === 'coordinator' ? '' : connection ? sourceStatus(connection, timeZone) : 'Loading factories…'}</p>
-      <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setReportsOpen(true)}>Reports</button>{role === 'admin' && <><button type="button" className={sourceButton} onClick={() => setPayOpen(true)}>Pay</button><button type="button" className={sourceButton} onClick={() => setFeesSettings(true)}>Fees and accountant</button></>}{role === 'admin' && <><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></>}</div>
+      <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setReportsOpen(true)}>Reports</button>{role === 'admin' && <><button type="button" className={sourceButton} onClick={() => setPayOpen(true)}>Pay</button><button type="button" className={sourceButton} onClick={() => setFeesSettings(true)}>Fees and accountant</button></>}{role === 'admin' && <><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType || connection.status === 'recovering'} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></>}</div>
       {canEdit(role, connection) && <button type="button" className={sourceButton} onClick={() => setCompanyEditor('new')}>+ Add company</button>}
       {role === 'coordinator' && scheduleFailed && <p role="alert" className="text-base"><button type="button" className={sourceButton} onClick={() => setScheduleReload(k => k + 1)}>Couldn't load visit schedules. Try again</button></p>}
       {error && <p role="alert" className="break-words text-base text-bad">{error}</p>}
@@ -132,7 +139,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
     {reportsOpen && <InspectionReportsInbox timeZone={timeZone} onClose={() => setReportsOpen(false)} />}
     {selectedCompany && <CompanyItemsSheet isAdmin={role === 'admin'} company={selectedCompany} group1Label={role === 'admin' ? connection?.group1Label || 'Group 1' : visitGroup1Label} onClose={() => setSelectedCompany(null)} />}
     {canEdit(role, connection) && companyEditor && <SourceCompanyEditor company={companyEditor === 'new' ? { name: '' } : companyEditor} source={providers.find(p => p.id === connection?.sourceType)?.name || ''} onClose={() => setCompanyEditor(null)} onSaved={() => setReload(k => k + 1)} />}
-    {role === 'admin' && connection && <SourcesSheet timeZone={timeZone} isOpen={settings} connection={connection} onClose={() => setSettings(false)} onSaved={() => setReload(k => k + 1)} />}
+    {role === 'admin' && connection && <React.Fragment key={connection.status === 'recovering' ? 'recovery' : 'setup'}><SourcesSheet timeZone={timeZone} isOpen={settings} connection={connection} onClose={() => setSettings(false)} onSaved={() => setReload(k => k + 1)} /></React.Fragment>}
   </div>;
 }
 

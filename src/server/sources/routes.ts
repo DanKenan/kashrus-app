@@ -202,6 +202,9 @@ export function registerSourceRoutes(app: any, deps: {
   const own = (req: any, res: any) => { const u = deps.requireAdmin(req, res); return u ? { user: u, id: u.agencyId || 'agency-hkc' } : null; };
   const safe = (id: string) => {
     const c = connections.get(id), s = cache.state(id);
+    if (!c && startupRetries.get(id)?.sourceType === 'upload') {
+      return {sourceType:'upload',status:'recovering',access:'read',canWrite:false};
+    }
     return { canWrite:!!c && c.access==='readwrite' && c.sourceType==='supabase', counts:{companies:s.companies.length,ingredients:cache.data(id)?.ingredients.length||0,products:cache.data(id)?.products.length||0}, ...(c?.upload?{fileName:c.upload.fileNames[0],upload:{fileNames:c.upload.fileNames,copiedAt:c.upload.copiedAt,rows:c.upload.rows}}:{}), ...(c && isOAuthProvider(c.sourceType) && c.oauth?.[c.sourceType]?{accountEmail:oauth.email(id,c.oauth[c.sourceType])}:{}), group1Label: c?.group1Label || 'Group 1', sourceType: c?.sourceType || null, baseId: c?.baseId || '', access: c?.access || 'read', mapping: c?.mapping || null, hasKey: !!c?.encryptedKey, keyHint: c?.keyHint || '', status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: keyErrors.has(id) ? unreadableKey : s.error || null };
   };
   const handler = (fn: any) => async (req: any, res: any) => { const caller = own(req, res); if (!caller) return; try { await fn(req, res, caller); } catch (cause:any) { const code=cause instanceof SavedKeyError?400:[400,403,409,429].includes(cause.status)?cause.status:503; res.status(code).json({ error: cause instanceof SavedKeyError ? unreadableKey : code===503?'Source operation failed':cause.message,...(cause.notSetUp?{notSetUp:true}:{}) }); } };
@@ -429,7 +432,7 @@ export function registerSourceRoutes(app: any, deps: {
       const c = connections.get(id) ?? await store.raw(id);
       if (c)
           await store.remove(c);
-      clearTimeout(startupRetries.get(id));
+      clearTimeout(startupRetries.get(id)?.timer);
       startupRetries.delete(id);
       clearTimeout(timers.get(id));
       clearTimeout(pending.get(id)?.timer);
@@ -623,7 +626,7 @@ export function registerSourceRoutes(app: any, deps: {
     app.post('/api/__test__/source-raw', handler(async (req: any, res: any, { id }: any) => { if (req.body.agencyId && req.body.agencyId !== id) return res.status(403).json({ error: 'Forbidden' }); res.json({ connection: await store.raw(id), backupIds: (await loadBackups(id)).map(b => `${id}__${b.companyId}`) }); }));
   }
   const retryDelay = (attempt:number) => [5000,15000,45000,120000,300000][Math.min(attempt,4)];
-  const startupRetries = new Map<string, ReturnType<typeof setTimeout>>();
+  const startupRetries = new Map<string, {timer:ReturnType<typeof setTimeout>; sourceType:Connection['sourceType']}>();
   async function loadConnection(c:Connection) {
     if (connections.has(c.agencyId)) return;
     if (c.sourceType === 'upload') {
@@ -636,20 +639,27 @@ export function registerSourceRoutes(app: any, deps: {
     if (c.sourceType === 'airtable' || c.mapping.companies?.table)
       void serialize(c.agencyId, () => refresh(c.agencyId)).catch(() => console.warn('[sources] startup refresh failed'));
   }
-  function retryAgency(id:string, attempt = 0) {
+  function retryAgency(id:string, sourceType:Connection['sourceType'], attempt = 0) {
     if (startupRetries.has(id)) return;
     const timer = setTimeout(() => {
       void serialize(id, async () => {
-        if (startupRetries.get(id) !== timer) return;
-        startupRetries.delete(id);
-        if (connections.has(id)) return;
+        if (startupRetries.get(id)?.timer !== timer) return;
         try {
-          const latest = await store.raw(id);
-          if (latest) await loadConnection(normalizeConnection(latest));
-        } catch { retryAgency(id,attempt+1); }
+          if (!connections.has(id)) {
+            const latest = await store.raw(id);
+            if (latest) {
+              sourceType = latest.sourceType;
+              await loadConnection(normalizeConnection(latest));
+            }
+          }
+          startupRetries.delete(id);
+        } catch {
+          startupRetries.delete(id);
+          retryAgency(id,sourceType,attempt+1);
+        }
       });
     },retryDelay(attempt));
-    startupRetries.set(id,timer);
+    startupRetries.set(id,{timer,sourceType});
     timer.unref();
   }
   let bootAttempt = 0;
@@ -667,7 +677,7 @@ export function registerSourceRoutes(app: any, deps: {
     for (const c of saved) {
       await serialize(c.agencyId, async () => {
         try { await loadConnection(c); }
-        catch { retryAgency(c.agencyId); }
+        catch { retryAgency(c.agencyId,c.sourceType); }
       });
     }
   }
