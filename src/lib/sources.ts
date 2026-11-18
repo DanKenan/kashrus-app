@@ -2,6 +2,7 @@ type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'dairy_equipment' | 'p
 import { apiFetch } from './api';
 
 export interface SourceMapping {
+  editableCustomFields?: import('./sourcePreview').EditableCustomFields;
   companies: { file?: { id: string; name: string }; address?: string; companyFee?: string; mashgiachFee?: string; table: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
   ingredients: { file?: { id: string; name: string }; table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
   products: { file?: { id: string; name: string }; table: string; companyLink: string; name: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };

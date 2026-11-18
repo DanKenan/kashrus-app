@@ -10,6 +10,14 @@ export const builtinFieldKeys = {
   products: ['table', 'companyLink', 'name', 'brand', 'code', 'certification', 'agency', 'status', 'symbolRequired', 'plant'],
 } as const;
 export type SourceSection = keyof typeof builtinFieldKeys;
+export const customFieldTypes = { text: 'Text', money: 'Money', date: 'Calendar date', boolean: 'Checkbox', companyLink: 'Company links' } as const;
+export type ValueRule = keyof typeof customFieldTypes;
+export type EditableCustomFields = Partial<Record<SourceSection, Record<string, ValueRule>>>;
+export function isMappedCustomField(section: SourceSection, field: string) {
+  return !isBuiltinFieldKey(section, field) && !['file', 'pk', 'id', 'sourceKey', 'rowNumber', 'recordId',
+    'metadataId', 'extra', 'companyIds', 'dpm', 'group1', 'certifyingAgency', 'confidence', 'factoryValues', 'foodServiceValues'].includes(field) &&
+    !(section === 'companies' && ['address', 'companyFee', 'mashgiachFee'].includes(field));
+}
 export function isBuiltinFieldKey(group: SourceSection, key: string): boolean {
   return (builtinFieldKeys[group] as readonly string[]).includes(key);
 }

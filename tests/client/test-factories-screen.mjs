@@ -38,9 +38,9 @@ try {
         : Response.json({ ok: true });
     };
     const editor = mount(SourceCompanyEditor, { company: { id: 'a', name: 'Bakery', companyFee: 100 },
-      source: 'Google Sheets', feeOnly: true, onSaved() { refreshed = true; }, onClose() { closed = true; } });
+      source: 'Google Sheets', sheetMapping: { name: 'Name', address: 'Address', companyFee: 'Fee' }, onSaved() { refreshed = true; }, onClose() { closed = true; } });
     await editor.render();
-    await editor.type('', '200');
+    await editor.type('', 'New bakery');
     await editor.submit();
     assert.match(editor.text(), /could not be confirmed/);
     assert.equal(closed, false);

@@ -1,15 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { parseMoney } from '../../lib/sourceAmount.ts';
-import { builtinFieldKeys, type SourceSection } from '../../lib/sourcePreview.ts';
+import { builtinFieldKeys, isMappedCustomField, type ValueRule, type SourceSection } from '../../lib/sourcePreview.ts';
 import type { SourceMapping } from './types.ts';
 
 type Scalar = string | number | boolean;
-type ValueRule = 'text' | 'money' | 'date' | 'boolean' | 'companyLink';
-type Cell = { raw: Scalar | null; formula?: string; dateSerial?: boolean };
+export type Cell = { raw: Scalar | null; formula?: string; dateSerial?: boolean };
 export type TaggedSnapshot = {
   metadataId: number; recordId: string; headers: string[]; cells: Cell[];
 };
-type Change = { field: string; header: string; previous: Scalar | null; requested: Scalar; rule: ValueRule };
+export type Change = { field: string; header: string; previous: Scalar | null; requested: Scalar; rule: ValueRule };
 type CompanyLinks = { resolve(value: string): string[]; sourceKey(id: string): string | undefined };
 const reject = (message: string): never => { throw Object.assign(Error(message), { status: 409 }); };
 
@@ -64,7 +63,7 @@ function encode(rule: ValueRule, value: unknown, cell: Cell, links: CompanyLinks
     if (cell.raw !== null && cell.raw !== '' && typeof cell.raw !== 'boolean') return reject('Unknown checkbox representation.');
     return value;
   }
-  if (typeof value !== 'string') return reject('Enter text.');
+  if (typeof value !== 'string' || value.length > 2000) return reject('Enter text of up to 2,000 characters.');
   return text(value);
 }
 
@@ -78,7 +77,7 @@ function matches(cell: Cell, change: Change, links: CompanyLinks) {
   return raw === requested;
 }
 
-type Edit = {
+export type Edit = {
   mapping: SourceMapping; section: SourceSection; idHeader: string; fields: Record<string, unknown>;
   links: CompanyLinks;
   // Explicitly editable custom fields and their types come from trusted mapping configuration.
@@ -97,10 +96,10 @@ export function planTaggedEdit(edit: Edit, snapshot: TaggedSnapshot): Change[] {
     return reject('Invalid fields.');
   const changes: Change[] = [];
   for (const [field, value] of Object.entries(edit.fields)) {
+    if (field === 'name' && (typeof value !== 'string' || !value.trim())) return reject('Enter a name.');
     const custom = edit.customTypes?.get(field);
     const header = config[field];
-    if (['table','file','pk','factoryValues','foodServiceValues','id','recordId','metadataId','dpm','group1','certifyingAgency','confidence'].includes(field) ||
-        (!allowed.has(field) && !custom) || !Object.hasOwn(config, field) || typeof header !== 'string' || !header ||
+    if (field === 'table' || (!allowed.has(field) && (!custom || !isMappedCustomField(edit.section, field))) || !Object.hasOwn(config, field) || typeof header !== 'string' || !header ||
         header === edit.idHeader || header === config.pk ||
         Object.entries(config).some(([key, mapped]) => key !== field && key !== 'table' && mapped === header))
       return reject('Only independently mapped editable fields can be changed.');
@@ -120,21 +119,21 @@ export function verifyTaggedEdit(before: TaggedSnapshot, after: TaggedSnapshot, 
     changes.every(change => matches(column(after, change.header), change, links));
 }
 
-type Target = { actorId: string; agencyId: string; section: SourceSection; spreadsheetId: string; table: string; metadataId: number; recordId: string };
+export type Target = { actorId: string; agencyId: string; section: SourceSection; spreadsheetId: string; table: string; metadataId: number; recordId: string };
 export type EditAudit = Target & {
   operationId: string; outcome: 'attempted' | 'confirmed' | 'unconfirmed' | 'rejected';
   changedFields: string[]; previous: Record<string, Scalar | null>; requested: Record<string, unknown>;
-  verified: boolean; at: string;
+  verified: boolean; at: string; restoredHeaders?: string[];
 };
 
 export async function updateTaggedRow(edit: Edit, target: Target, provider: {
   read(target: Target): Promise<TaggedSnapshot>;
-  // Must resolve headers and check identity, previous values and formulas atomically
-  // with the write. A Sheets row DataFilter plus positional offsets cannot implement this.
-  applyIfCurrent(target: Target, changes: readonly Change[]): Promise<'applied' | 'rejected'>;
+  // Resolve against freshly read source data immediately before dispatch.
+  applyIfCurrent(target: Target, changes: readonly Change[]): Promise<'applied' | 'rejected' | 'unconfirmed'>;
+  recover?(): Promise<string[]>;
 }, audit: (entry: EditAudit) => Promise<void>) {
   const entry: EditAudit = { ...target, operationId: randomUUID(), outcome: 'attempted',
-    changedFields: [], previous: {}, requested: edit.fields, verified: false, at: new Date().toISOString() };
+    changedFields: [], previous: {}, requested: edit.fields ?? {}, verified: false, at: new Date().toISOString() };
   let before: TaggedSnapshot, changes: Change[];
   try {
     if (target.section !== edit.section || target.table !== edit.mapping[edit.section].table ||
@@ -165,9 +164,10 @@ export async function updateTaggedRow(edit: Edit, target: Target, provider: {
   }
   try {
     const after = await provider.read(target);
-    if (!verifyTaggedEdit(before, after, edit.idHeader, changes, edit.links)) throw Error();
+    if (result === 'unconfirmed' || !verifyTaggedEdit(before, after, edit.idHeader, changes, edit.links)) throw Error();
   } catch {
-    await audit({ ...entry, outcome: 'unconfirmed' });
+    const restoredHeaders = await provider.recover?.().catch(() => []);
+    await audit({ ...entry, outcome: 'unconfirmed', ...(restoredHeaders && { restoredHeaders }) });
     return reject('The change could not be confirmed. The sheet may already have changed. Refresh and review.');
   }
   try {

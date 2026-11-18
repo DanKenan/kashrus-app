@@ -6,16 +6,19 @@ export interface Company {
   id: string; name: string; address?: string; companyFee?: number; mashgiachFee?: number; type?: string; brand?: string; plant?: string; extra: Record<string, string>;
 }
 export interface Ingredient {
+  sourceKey?: string;
   id: string; companyIds: string[]; name: string; brand?: string; certifyingAgency?: string;
   dpm?: Dpm; group1: boolean; plant?: string; expiresOn?: string;
   certificationRaw?: string; statusRaw?: string; agencyRaw?: string; confidence?: number; extra: Record<string, string>;
 }
 export interface Product {
+  sourceKey?: string;
   id: string; companyIds: string[]; name: string; brand?: string; code?: string;
   certificationRaw?: string; statusRaw?: string; agencyRaw?: string; certifyingAgency?: string; confidence?: number;
   dpm?: Dpm; group1?: boolean; symbolRequired?: boolean; plant?: string; extra: Record<string, string>;
 }
 export interface SourceMapping {
+  editableCustomFields?: import('../../lib/sourcePreview.ts').EditableCustomFields;
   companies: { table: string; file?: SourceFile; pk?: string; address?: string; companyFee?: string; mashgiachFee?: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
   ingredients: { table: string; file?: SourceFile; pk?: string; companyLink?: string; name?: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
   products: { table: string; file?: SourceFile; pk?: string; companyLink?: string; name?: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };

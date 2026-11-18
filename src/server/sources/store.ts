@@ -5,7 +5,8 @@ import type { Backup } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
 export interface Connection {
-  sheetsPilot?: import('./google-sheets.ts').SheetsFeePilot;
+  sheetsPilot?: import('./google-sheets.ts').TaggedTable; // Existing Fee pilot connections
+  sheetsTables?: Partial<Record<'companies' | 'ingredients' | 'products', import('./google-sheets.ts').TaggedTable>>;
   oauth?: Partial<Record<import('./oauth.ts').OAuthProvider, import('./oauth.ts').OAuthRecord>>;
   upload?: {fileNames:string[];copiedAt:string;rows:number;parts:number;hash:string;versioned?:boolean;slotHash?:string};
   fees?: {mashgiach?:Record<string,{amount:number;currency:string}>};
