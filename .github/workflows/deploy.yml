@@ -42,19 +42,39 @@ jobs:
           gcloud artifacts repositories describe "$REPO" --location="$REGION" --project="$PROJECT" >/dev/null 2>&1 || \
             gcloud artifacts repositories create "$REPO" --repository-format=docker --location="$REGION" --project="$PROJECT" --description="Built containers for Cloud Run deploys"
           # Carry over the live frontend config so the new bundle behaves identically
-          # (VITE_ vars are baked in at build time). Values never leave the runner.
-          VITE_ENVS=$(gcloud run services describe workers-collaborative-dashboard --region="$REGION" --project="$PROJECT" --format=json | python3 -c "
-          import json,sys
-          d=json.load(sys.stdin)
-          envs={e['name']:e.get('value','') for e in d['spec']['template']['spec']['containers'][0].get('env',[]) if e['name'].startswith('VITE_')}
-          print(','.join(f'env={k}={v}' for k,v in envs.items()))")
-          PACK_ARGS="image=${IMAGE}"
-          [ -n "$VITE_ENVS" ] && PACK_ARGS="${PACK_ARGS},${VITE_ENVS}"
+          # (VITE_ vars are baked in at build time).
+          BUILD_REGION=global
+          BUILD_CONFIG=$(mktemp --suffix=.json)
+          trap 'rm -f "$BUILD_CONFIG"' EXIT
+          gcloud run services describe workers-collaborative-dashboard \
+            --region="$REGION" --project="$PROJECT" --format=json | \
+            python3 -c '
+          import json, sys
+          service = json.load(sys.stdin)
+          container = service["spec"]["template"]["spec"]["containers"][0]
+          envs = {env["name"]: env.get("value", "") for env in container.get("env", [])
+                  if env["name"].startswith("VITE_")}
+          image = sys.argv[1]
+          args = ["build", image, "--builder", "gcr.io/buildpacks/builder:latest",
+                  "--network", "cloudbuild", "--publish"]
+          for name, value in envs.items():
+              # Cloud Build treats dollar signs in step args as substitutions.
+              args.extend(["--env", name + "=" + value.replace("$", "$$")])
+          json.dump({
+              "options": {"logging": "CLOUD_LOGGING_ONLY"},
+              "steps": [
+                  {"name": "gcr.io/k8s-skaffold/pack", "entrypoint": "pack", "args": args},
+                  {"name": "gcr.io/cloud-builders/docker", "args": ["pull", image]},
+              ],
+              "images": [image],
+          }, sys.stdout)
+          ' "$IMAGE" > "$BUILD_CONFIG"
           # build with buildpacks, push to Artifact Registry (async: we poll status ourselves)
-          BUILD_ID=$(gcloud builds submit --async --pack "$PACK_ARGS" --project="$PROJECT" --format='value(id)' .)
+          BUILD_ID=$(gcloud builds submit . --async --config="$BUILD_CONFIG" --project="$PROJECT" \
+            --region="$BUILD_REGION" --format='value(id)')
           echo "build id: $BUILD_ID"
           while true; do
-            STATUS=$(gcloud builds describe "$BUILD_ID" --project="$PROJECT" --format='value(status)')
+            STATUS=$(gcloud builds describe "$BUILD_ID" --project="$PROJECT" --region="$BUILD_REGION" --format='value(status)')
             echo "build status: $STATUS"
             case "$STATUS" in
               SUCCESS) break ;;
