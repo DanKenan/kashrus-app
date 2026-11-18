@@ -13,6 +13,7 @@ export interface SourceTable { name: string; columns: string[] }
 export interface SourceConnection {
   group1Label?: string; sourceType: string | null; baseId?: string; access?: 'read' | 'readwrite'; mapping?: SourceMapping;
   hasKey?: boolean; keyHint?: string; status?: 'recovering' | 'never' | 'ok' | 'stale' | 'backup' | 'error';
+  sheetsFeeEditing?: boolean;
   fileName?: string; accountEmail?: string; canWrite?: boolean; counts?: { companies: number; ingredients: number; products: number };
   upload?: { fileNames: string[]; copiedAt: string; rows: number };
   backupSaveError?: boolean;

@@ -87,6 +87,10 @@ export function registerSourceRoutes(app: any, deps: {
   const oauthRecord=(id:string,p:OAuthProvider)=>connections.get(id)?.oauth?.[p];
   const token=(id:string,p:OAuthProvider)=>(force=false)=>oauth.token(id,p,oauthRecord(id,p),force).then(t=>t.accessToken);
   const providerApi=(id:string,p:OAuthProvider,fileId='')=>p==='google_sheets'?createGoogleSheetsApi({spreadsheetId:fileId,mapping:emptyMapping,apiBase:apiBases.get(p),token:token(id,p)}):createExcelApi({workbookId:fileId,mapping:emptyMapping,apiBase:apiBases.get(p),token:token(id,p)});
+  const sheetsApi = (c: Connection) => createGoogleSheetsApi({
+    spreadsheetId: c.mapping.companies.file?.id || c.baseId, mapping: c.mapping,
+    apiBase: apiBases.get('google_sheets'), token: token(c.agencyId, 'google_sheets'),
+  });
   function blank(id:string,userId:string,sourceType:Connection['sourceType']):Connection {return {agencyId:id,sourceType,baseId:sourceType==='upload'?'upload':'',access:'read',mapping:structuredClone(emptyMapping),encryptedKey:'',keyHint:'',updatedAt:new Date().toISOString(),updatedBy:userId,backupHashes:{}};}
 
   const tested = new Map<string, { baseId: string; sourceType: string; key: string; at: number; result: ConnectionResult }>();
@@ -205,7 +209,7 @@ export function registerSourceRoutes(app: any, deps: {
     if (!c && startupRetries.get(id)?.sourceType === 'upload') {
       return {sourceType:'upload',status:'recovering',access:'read',canWrite:false};
     }
-    return { canWrite:!!c && c.access==='readwrite' && c.sourceType==='supabase', counts:{companies:s.companies.length,ingredients:cache.data(id)?.ingredients.length||0,products:cache.data(id)?.products.length||0}, ...(c?.upload?{fileName:c.upload.fileNames[0],upload:{fileNames:c.upload.fileNames,copiedAt:c.upload.copiedAt,rows:c.upload.rows}}:{}), ...(c && isOAuthProvider(c.sourceType) && c.oauth?.[c.sourceType]?{accountEmail:oauth.email(id,c.oauth[c.sourceType])}:{}), group1Label: c?.group1Label || 'Group 1', sourceType: c?.sourceType || null, baseId: c?.baseId || '', access: c?.access || 'read', mapping: c?.mapping || null, hasKey: !!c?.encryptedKey, keyHint: c?.keyHint || '', status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: keyErrors.has(id) ? unreadableKey : s.error || null };
+    return { sheetsFeeEditing: !!c?.sheetsPilot && c.sourceType === 'google_sheets' && c.access === 'readwrite' && c.oauth?.google_sheets?.access === 'readwrite', canWrite:!!c && c.access==='readwrite' && c.sourceType==='supabase', counts:{companies:s.companies.length,ingredients:cache.data(id)?.ingredients.length||0,products:cache.data(id)?.products.length||0}, ...(c?.upload?{fileName:c.upload.fileNames[0],upload:{fileNames:c.upload.fileNames,copiedAt:c.upload.copiedAt,rows:c.upload.rows}}:{}), ...(c && isOAuthProvider(c.sourceType) && c.oauth?.[c.sourceType]?{accountEmail:oauth.email(id,c.oauth[c.sourceType])}:{}), group1Label: c?.group1Label || 'Group 1', sourceType: c?.sourceType || null, baseId: c?.baseId || '', access: c?.access || 'read', mapping: c?.mapping || null, hasKey: !!c?.encryptedKey, keyHint: c?.keyHint || '', status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: keyErrors.has(id) ? unreadableKey : s.error || null };
   };
   const handler = (fn: any) => async (req: any, res: any) => { const caller = own(req, res); if (!caller) return; try { await fn(req, res, caller); } catch (cause:any) { const code=cause instanceof SavedKeyError?400:[400,403,409,429].includes(cause.status)?cause.status:503; res.status(code).json({ error: cause instanceof SavedKeyError ? unreadableKey : code===503?'Source operation failed':cause.message,...(cause.notSetUp?{notSetUp:true}:{}) }); } };
   const mutation = (fn: any) => handler((req: any, res: any, caller: any) => serialize(caller.id, () => fn(req, res, caller)));
@@ -243,6 +247,7 @@ export function registerSourceRoutes(app: any, deps: {
       if (p === 'supabase' && !plain && !(old?.sourceType === 'supabase' && old.encryptedKey))
           return res.status(400).json({ error: 'API key required' });
       const c: Connection = { ...(old || blank(id, user.id, p)), sourceType: p, baseId: body.baseId, access: p === 'upload' ? 'read' : body.access, mapping: body.mapping, group1Label: body.group1Label?.trim() || old?.group1Label || 'Group 1', updatedAt: new Date().toISOString(), updatedBy: user.id, encryptedKey: p === 'supabase' ? (plain ? encryptKey(plain, deps.secret(), id) : old!.encryptedKey) : '', keyHint: p === 'supabase' ? (plain ? keyHint(plain) : old!.keyHint) : '', backupHashes: {} };
+      delete c.sheetsPilot;
       const adapter = connector(c, plain || undefined, files);
       // Validate each file separately, including a list whose tab has the same name.
       for (const list of ['companies', 'ingredients', 'products'] as const) {
@@ -404,6 +409,25 @@ export function registerSourceRoutes(app: any, deps: {
           return res.status(403).json({ error: 'This source is read only.' });
       res.json({ file: await providerApi(id, p).createFile(`Shutfey – ${deps.agencyName?.(id) || 'Agency'}`) });
   }));
+  app.put('/api/sources/sheets-editing', mutation(async (req: any, res: any, { id, user }: any) => {
+      if (blocked(res)) return;
+      const c = connections.get(id);
+      if (c?.sourceType !== 'google_sheets' || typeof req.body?.enabled !== 'boolean')
+          return res.status(400).json({ error: 'Choose a connected Google sheet.' });
+      const next = { ...c, updatedAt: new Date().toISOString(), updatedBy: user.id };
+      if (req.body.enabled && c.sheetsPilot) return res.json(safe(id));
+      if (req.body.enabled) {
+          if (c.access !== 'readwrite' || c.oauth?.google_sheets?.access !== 'readwrite')
+              return res.status(403).json({ error: 'Change access to enable editing.' });
+          const { table, companyFee, pk, ...other } = c.mapping.companies;
+          if (!companyFee || Object.values(other).includes(companyFee))
+              return res.status(409).json({ error: 'Map a separate company Fee column before enabling editing.' });
+          next.sheetsPilot = await sheetsApi(c).tagManagedRows(table, companyFee, pk);
+      } else delete next.sheetsPilot;
+      await save(next);
+      connections.set(id, next);
+      res.json(safe(id));
+  }));
   app.put('/api/sources/access', mutation(async (req: any, res: any, { id, user }: any) => {
       if (blocked(res))
           return;
@@ -417,8 +441,9 @@ export function registerSourceRoutes(app: any, deps: {
       if (isOAuthProvider(c.sourceType))
           oauth.requireSetUp(c.sourceType);
       if (flights.has(id)) await flights.get(id);
-      const needsSignIn = c.sourceType === 'excel' && req.body.access === 'readwrite' && c.oauth?.excel?.access !== 'readwrite';
+      const needsSignIn = isOAuthProvider(c.sourceType) && req.body.access === 'readwrite' && c.oauth?.[c.sourceType]?.access !== 'readwrite';
       const next = { ...connections.get(id)!, access: needsSignIn ? 'read' as const : req.body.access, updatedAt: new Date().toISOString(), updatedBy: user.id };
+      if (next.access === 'read') delete next.sheetsPilot;
       await save(next);
       connections.set(id, next);
       res.json({ access: next.access, ...(needsSignIn ? { needsSignIn: true } : {}) });
@@ -449,12 +474,14 @@ export function registerSourceRoutes(app: any, deps: {
       res.json({ ok: true });
   }));
   const writeTimes = new Map<string, number[]>();
-  const write = mutation(async (req: any, res: any, { id }: any) => {
+  const write = mutation(async (req: any, res: any, { id, user }: any) => {
       if (blocked(res))
           return;
       if (flights.has(id))
           await flights.get(id);
-      const c = connections.get(id), list: SourceSection = req.params.list, fields = guardSourceWrite(c, list, req.body?.fields);
+      const c = connections.get(id), list: SourceSection = req.params.list;
+      const sheets = c?.sourceType === 'google_sheets' && c.sheetsPilot;
+      const fields = sheets ? req.body?.fields : guardSourceWrite(c, list, req.body?.fields);
       if (isOAuthProvider(c!.sourceType))
           oauth.requireSetUp(c!.sourceType);
       const recent = (writeTimes.get(id) || []).filter(t => Date.now() - t < 60000);
@@ -462,6 +489,44 @@ export function registerSourceRoutes(app: any, deps: {
           return res.status(429).json({ error: 'Too many writes. Try again in a minute.' });
       recent.push(Date.now());
       writeTimes.set(id, recent);
+      if (sheets) {
+          if (c.access !== 'readwrite' || c.oauth?.google_sheets?.access !== 'readwrite')
+              return res.status(403).json({ error: 'This source is read only.' });
+          if (list !== 'companies' || !req.params.rowId || !fields || Object.keys(fields).length !== 1 ||
+              !Number.isFinite(fields.companyFee) || fields.companyFee < 0)
+              return res.status(400).json({ error: 'Only the Fee of an existing company can be edited.' });
+          const company = cache.data(id)?.companies.find(row => row.id === req.params.rowId);
+          const record = sheets.records.find(row => row.key === company?.sourceKey);
+          if (!company || !record) return res.status(409).json({ error: 'Record tag missing. Refresh the source.' });
+          const config = c.mapping.companies;
+          const auditId = randomUUID();
+          const entry = { agencyId: id, actorId: user.id, companyId: company.id, metadataId: record.metadataId,
+              spreadsheetId: config.file?.id || c.baseId, table: config.table, column: sheets.feeHeader,
+              fee: fields.companyFee, at: new Date().toISOString() };
+          await store.saveFeeAudit(auditId, { ...entry, outcome: 'attempted' });
+          let previous;
+          try {
+              previous = await sheetsApi(c).saveFee({ ...sheets, table: config.table, recordId: record.key,
+                  metadataId: record.metadataId, fee: fields.companyFee });
+          } catch (error) {
+              await store.saveFeeAudit(auditId, { ...entry, outcome: 'unconfirmed' });
+              throw error;
+          }
+          try {
+              await store.saveFeeAudit(auditId, { ...entry, previous, outcome: 'confirmed' });
+          } catch {
+              return res.status(503).json({ error: 'The Fee was saved, but its audit entry could not be confirmed. Refresh before retrying.' });
+          }
+          console.info(`[audit] Google Sheets Fee saved: agency ${id} company ${company.id} admin ${user.id} entry ${auditId}`);
+          try {
+              cache.publish(id, await connector(c).loadAll!());
+          } catch {
+              const warning = 'Refresh the source to update the inspection list.';
+              cache.requireRefresh(id, warning);
+              return res.json({ saved: true, refreshRequired: true, warning });
+          }
+          return res.json({ saved: true });
+      }
       const config = c!.mapping[list];
       const data = cache.data(id);
       const links = companyLinkResolver(data?.companies ?? [], data?.otherCompanies);

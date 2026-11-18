@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mount } from './lib/mini-render.mjs';
+import { SourcesSheet } from '../../src/components/SourcesSheet.tsx';
 import { SourceConnectForm } from '../../src/components/SourceConnectSheet.tsx';
 import { FactoriesScreen } from '../../src/components/FactoriesScreen.tsx';
 import { sourceStatus } from '../../src/lib/sources.ts';
@@ -136,6 +137,15 @@ try {
       timers.clear();
     }
   }
+  for (const enabled of [false, true]) {
+    const connection = { ...connected, sourceType: 'google_sheets', access: 'readwrite', sheetsFeeEditing: enabled };
+    globalThis.fetch = async url => Response.json(url.endsWith('/connection') ? connection :
+      { status: connection, companies: [{ id: 'a', name: 'Bakery', companyFee: 100 }] });
+    const screen = mount(FactoriesScreen, { isOpen: true, role: 'admin', onClose() {}, timeZone: 'UTC' });
+    await screen.render();
+    assert.equal(screen.buttons().some(b => b.label === 'Edit company'), enabled);
+    assert.ok(!screen.buttons().some(b => b.label.includes('Add company')));
+  }
   let baseId = 'appOld';
   let status = 'ok';
   const savedMapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: ['Group 1'] };
@@ -149,7 +159,7 @@ try {
   const changed = mount(FactoriesScreen, { isOpen: true, onClose() {}, timeZone: 'America/Chicago' }); await changed.render();
   assert.match(changed.text(), /Old factory/);
   await changed.click('Settings');
-  const sheet = changed.tree().props.children.find(child => child?.props?.connection);
+  const sheet = changed.tree().props.children.map(child => child?.props?.children).find(child => child?.type === SourcesSheet);
   const edit = mount(SourceConnectForm, sheet.props); await edit.render();
   await edit.type('app…', 'appNew'); await edit.submit();
   assert.equal(baseId, 'appNew');

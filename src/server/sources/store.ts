@@ -5,6 +5,7 @@ import type { Backup } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
 export interface Connection {
+  sheetsPilot?: import('./google-sheets.ts').SheetsFeePilot;
   oauth?: Partial<Record<import('./oauth.ts').OAuthProvider, import('./oauth.ts').OAuthRecord>>;
   upload?: {fileNames:string[];copiedAt:string;rows:number;parts:number;hash:string;versioned?:boolean;slotHash?:string};
   fees?: {mashgiach?:Record<string,{amount:number;currency:string}>};
@@ -200,7 +201,12 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     if (deps.db()) await commit(removals);
     else await localWrite(async () => { await commit(removals.slice(0,1)); await commit(removals.slice(1)).catch(retryLocalCleanup); });
   }
-  return { retryLocalCleanup, reclaimLocalUploads, connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
+  async function saveFeeAudit(id: string, entry: { agencyId: string; actorId: string; companyId: string; metadataId: number;
+    spreadsheetId: string; table: string; column: string; fee: number; at: string; outcome: 'attempted' | 'confirmed' | 'unconfirmed'; previous?: unknown }) {
+    if (deps.staged()) throw Error('Writes blocked');
+    await commit([{ collection: 'sourceFeeAudit', id, doc: entry }]);
+  }
+  return { saveFeeAudit, retryLocalCleanup, reclaimLocalUploads, connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
 }
 // Read legacy connection settings without rewriting source values.
 export function normalizeConnection(connection: any): Connection {
