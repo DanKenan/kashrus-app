@@ -14,6 +14,11 @@ export default {
             matrix[0].push('ID');
             matrix[1].push(name + '-key');
         }
+        const supabaseRows = Object.fromEntries(Object.entries(rows).map(([table, [header, first]]) => [
+            table, [{ id: table === 'Companies' ? 'full' : 'r2', ...Object.fromEntries(header.map((key, i) => [key, first[i]])) }],
+        ]));
+        supabaseRows.Companies[0].Type = 'Factory';
+        supabaseRows.Companies.push({ id: 'mill', Name: 'Harbor Mill', Type: 'Factory' }, { id: 'supply', Name: 'Vendor', Type: 'Vendor' });
         let calls = 0, writes = 0, created = 0;
         const seen = [];
         const mock = http.createServer(async (req, res) => {
@@ -60,14 +65,18 @@ export default {
                 return send({});
             }
             if (path === '/rest/v1/')
-                return send({ definitions: Object.fromEntries(Object.entries(rows).map(([table, data]) => [table, { properties: Object.fromEntries(['id', ...data[0]].map(c => [c, c === 'id' ? {description:'<pk/>'} : {}])) }])) });
+                return send({ definitions: Object.fromEntries(Object.entries(rows).map(([table, data]) => [table, { properties: Object.fromEntries(['id', ...data[0], ...(table === 'Companies' ? ['Type'] : [])].map(c => [c, c === 'id' ? {description:'<pk/>'} : {}])) }])) });
             if (path.startsWith('/rest/v1/')) {
                 const table = path.split('/').pop();
-                if (req.method === 'GET') res.setHeader('Content-Range', '0-0/1');
-                if (req.method === 'GET')
-                    return send((rows[table] || []).slice(1).map((r, i) => ({ id: `r${i + 2}`, ...Object.fromEntries(rows[table][0].map((c, j) => [c, r[j]])) })));
+                const records = supabaseRows[table];
+                if (req.method === 'GET') {
+                    res.setHeader('Content-Range', `0-${records.length - 1}/${records.length}`);
+                    return send(records);
+                }
                 writes++;
-                return send([{ id: 'r2', ...Object.fromEntries((rows[table]?.[0] || []).map((c, j) => [c, rows[table][1][j]])), ...JSON.parse(text) }]);
+                const record = { ...JSON.parse(text), id: `inserted-${records.length}` };
+                records.push(record);
+                return send([record]);
             }
             res.statusCode = 404;
             send({ error: 'Mock route missing' });
@@ -137,10 +146,26 @@ export default {
             await request('POST', '/api/sources/supabase/test', { url: 'https://example.test', apiKey: sentinel[0] }, 400);
             assert.equal(calls, badBefore);
             assert.equal((await request('POST', '/api/sources/supabase/test', { url: 'https://' + 'a'.repeat(20) + '.supabase.co', apiKey: sentinel[0] })).ok, true);
-            await save('supabase', 'readwrite');
+            await save('supabase', 'readwrite', { ...mapping, companies: { ...mapping.companies, type: 'Type', factoryValues: ['Factory'] } });
             const supId = (await browse('supabase')).companies[0].id;
             await measure('Supabase tabs', () => request('GET', '/api/sources/tabs?provider=supabase'));
-            await measure('Supabase row POST', () => request('POST', '/api/sources/rows/companies', { fields: { name: 'Golden Grain Bakery' } }));
+            await measure('Supabase row POST', () => request('POST', '/api/sources/rows/companies', { fields: { name: 'Added Bakery', type: 'Factory' } }));
+            const millId = (await request('GET', '/api/factories')).companies.find(c => c.name === 'Harbor Mill').id;
+            const inserts = () => seen.filter(r => r.method === 'POST' && r.path === '/rest/v1/Ingredients').length;
+            const beforeInvalid = inserts();
+            await request('POST', '/api/sources/rows/ingredients', { fields: { name: 'Invalid', companyLink: 'full, missing' } }, 400);
+            assert.equal(inserts(), beforeInvalid);
+            for (const companyLink of ['full, mill', 'full, mill, supply']) {
+                const beforeInsert = inserts();
+                const { row } = await measure('Supabase linked ingredient', () => request('POST', '/api/sources/rows/ingredients',
+                    { fields: { name: 'Shared flour', companyLink } }));
+                assert.equal(inserts(), beforeInsert + 1);
+                for (const id of [supId, millId]) {
+                    const { ingredients } = await request('GET', `/api/factories/${id}/items`);
+                    const item = ingredients.find(i => i.id === row.id);
+                    assert.equal(item?.name, 'Shared flour', `inserted ingredient in company ${id} cache`);
+                }
+            }
             // Warm P5's agency-local stores before measuring source actions.
             await request('GET', '/api/inspections/fees');
             const fees = await request('GET', '/api/inspections/fees');

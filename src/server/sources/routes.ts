@@ -5,8 +5,8 @@ import { validSupabaseUrl } from './supabase.ts';
 import { randomUUID } from 'node:crypto';
 import { parseUpload, uploadRowsError, uploadTypeError, type UploadedFile } from './upload.ts';
 import { guardSourceWrite } from './write.ts';
-import { applyMapping, companyLinkResolver } from './mapping.ts';
-import { summarizeValues } from '../../lib/sourcePreview.ts';
+import { mapSourceLists, companyLinkResolver } from './mapping.ts';
+import { summarizeValues, type SourceSection } from '../../lib/sourcePreview.ts';
 import { createConnector, type SourceSettings } from './stubs.ts';
 import { createSourceCache, nextNightlyRun } from './cache.ts';
 import { encryptKey, decryptKey, keyHint } from './crypto.ts';
@@ -17,6 +17,13 @@ import type { ConnectionResult, SourceMapping } from './types.ts';
 const unreadableKey = "The saved key can't be read. Enter the key again in Settings.";
 class SavedKeyError extends Error {
   constructor() { super(unreadableKey); }
+}
+function updateCachedRow<T extends { id: string }>(rows: T[], id: string, replacement?: T) {
+  const index = rows.findIndex(row => row.id === id);
+  if (replacement) {
+    if (index < 0) rows.push(replacement);
+    else rows[index] = replacement;
+  } else if (index >= 0) rows.splice(index, 1);
 }
 const emptyMapping: SourceMapping = { companies: { table: '', name: '' }, ingredients: { table: '', name: '', companyLink: '' }, products: { table: '', name: '', companyLink: '' }, group1Values: [] };
 function settings(body: any, mapping = true) {
@@ -454,7 +461,7 @@ export function registerSourceRoutes(app: any, deps: {
           return;
       if (flights.has(id))
           await flights.get(id);
-      const c = connections.get(id), list = req.params.list, fields = guardSourceWrite(c, list, req.body?.fields);
+      const c = connections.get(id), list: SourceSection = req.params.list, fields = guardSourceWrite(c, list, req.body?.fields);
       if (isOAuthProvider(c!.sourceType))
           oauth.requireSetUp(c!.sourceType);
       const recent = (writeTimes.get(id) || []).filter(t => Date.now() - t < 60000);
@@ -462,27 +469,20 @@ export function registerSourceRoutes(app: any, deps: {
           return res.status(429).json({ error: 'Too many writes. Try again in a minute.' });
       recent.push(Date.now());
       writeTimes.set(id, recent);
-      const config = c!.mapping[list as 'companies' | 'ingredients' | 'products'];
-      if ('companyLink' in config && config.companyLink && Object.hasOwn(fields,config.companyLink)) {
-          companyLinkResolver(cache.data(id)?.companies ?? [])(fields[config.companyLink]);
+      const config = c!.mapping[list];
+      const data = cache.data(id);
+      const links = companyLinkResolver(data?.companies ?? [], data?.otherCompanies);
+      if ('companyLink' in config && config.companyLink && Object.hasOwn(fields, config.companyLink)) {
+          links(fields[config.companyLink]);
       }
       const row = await connector(c!).writeRow!(config.table, { ...(req.params.rowId ? { id: req.params.rowId } : {}), fields }, config.file);
-      // Apply only this returned row to the mapped memory model; no Firestore reads/writes.
-      const mapped = applyMapping({ [config.table]: [row] }, c!.mapping), data = cache.data(id);
       if (data) {
-          const replacement = (mapped as any)[list]?.[0];
-          if (replacement) {
-              if (list !== 'companies') {
-                  const col = (config as any).companyLink, v = col ? row.fields[col] : '';
-                  replacement.companyIds = companyLinkResolver(data.companies)(v);
-              }
-              const rows = (data as any)[list], at = rows.findIndex((r: any) => r.id === row.id);
-              if (at < 0)
-                  rows.push(replacement);
-              else
-                  rows[at] = replacement;
-              cache.publish(id, data);
+          const mapped = mapSourceLists({ [list]: [row] }, c!.mapping, links);
+          updateCachedRow(data[list], row.id, mapped[list][0]);
+          if (list === 'companies') {
+              updateCachedRow(data.otherCompanies ??= [], row.id, mapped.otherCompanies?.[0]);
           }
+          cache.publish(id, data);
       }
       res.json({ row });
   });

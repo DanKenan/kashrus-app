@@ -1,6 +1,6 @@
 import { parseMoney } from '../../lib/sourceAmount.ts';
 export { parseMoney } from '../../lib/sourceAmount.ts';
-import type { Dpm, SourceData, SourceMapping, SourceRow, SourceTable } from './types.ts';
+import type { Company, Dpm, SourceData, SourceMapping, SourceRow, SourceTable } from './types.ts';
 import { isBuiltinFieldKey, type SourceSection } from '../../lib/sourcePreview.ts';
 
 const normalized = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -125,7 +125,10 @@ export class AmbiguousCompanyLink extends CompanyLinkError {
   }
 }
 
-export function companyLinkResolver(companies: {id:string;name:string;sourceKey?:string}[]) {
+type LinkCompany = Pick<Company, 'id' | 'name' | 'sourceKey'>;
+export function companyLinkResolver(eligible: LinkCompany[], others: LinkCompany[] = []) {
+  const eligibleIds = new Set(eligible.map(c => c.id));
+  const companies = [...eligible, ...others];
   const ids = new Set(companies.map(c => c.id));
   const sourceKeys = new Map(companies.filter(c => c.sourceKey).map(c => [c.sourceKey, c.id]));
   const names = new Map<string, string[]>();
@@ -145,17 +148,19 @@ export function companyLinkResolver(companies: {id:string;name:string;sourceKey?
     const sourceId = sourceKeys.get(link);
     return sourceId === undefined ? names.get(folded(link)) ?? [] : [sourceId];
   }
-  function resolveOne(value:unknown): string | undefined {
+  function resolveOne(value: unknown, required: boolean): string | undefined {
     const link = fieldValue(value)?.trim() ?? '';
     const matches = candidates(link);
     if (matches.length > 1) throw new AmbiguousCompanyLink(link);
+    if (required && link && !matches.length) throw new CompanyLinkError(`Unknown company link "${link}". Use the company's unique ID.`);
     return matches[0];
   }
-  return (value: unknown): string[] => {
-    if (Array.isArray(value)) return [...new Set(value.map(resolveOne).filter((id): id is string => id !== undefined))];
-    const whole = resolveOne(value);
+  function resolve(value: unknown): string[] {
+    if (Array.isArray(value)) return [...new Set(value.map(v => resolveOne(v, true)).filter((id): id is string => id !== undefined))];
+    const list = typeof value === 'string' && value.includes(',');
+    const whole = resolveOne(value, !list);
     if (whole !== undefined) return [whole];
-    if (typeof value !== 'string' || !value.includes(',')) return [];
+    if (!list) return [];
 
     // Each suffix has zero, one, or multiple complete parses. Only retain a
     // successor for reconstruction when exactly one path reaches the end.
@@ -179,10 +184,22 @@ export function companyLinkResolver(companies: {id:string;name:string;sourceKey?
     const linked = new Set<string>();
     for (let i = 0; i < parts.length; i = next[i].end) linked.add(next[i].id);
     return [...linked];
-  };
+  }
+  return (value: unknown) => resolve(value).filter(id => eligibleIds.has(id));
 }
 
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping): SourceData {
+  return mapSourceLists({
+    companies: rows[mapping.companies.table],
+    ingredients: rows[mapping.ingredients.table],
+    products: rows[mapping.products.table],
+  }, mapping);
+}
+
+export function mapSourceLists(
+  rows: Partial<Record<SourceSection, SourceRow[]>>, mapping: SourceMapping,
+  resolveLinks?: ReturnType<typeof companyLinkResolver>,
+): SourceData {
   const read = (row: SourceRow, column?: string): string | undefined => column ? fieldValue(row.fields[column]) : undefined;
   const extra = (row: SourceRow, config: object, group: SourceSection) => {
     const mapped = new Set(Object.entries(config).filter(([k, v]) => k !== 'table' && typeof v === 'string').map(([, v]) => v));
@@ -195,20 +212,20 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
     return out;
   };
   const c = mapping.companies;
-  const companies = (rows[c.table] ?? []).filter(r => !c.factoryValues?.length || [...c.factoryValues, ...(c.foodServiceValues ?? [])].some(v => folded(v) === folded(read(r, c.type) ?? '')))
+  const companies = (rows.companies ?? []).filter(r => !c.factoryValues?.length || [...c.factoryValues, ...(c.foodServiceValues ?? [])].some(v => folded(v) === folded(read(r, c.type) ?? '')))
     .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), address: read(r, c.address), companyFee: parseMoney(read(r, c.companyFee)), mashgiachFee: parseMoney(read(r, c.mashgiachFee)), extra: extra(r, c, 'companies') }));
   const keptIds = new Set(companies.map(c => c.id));
-  const otherCompanies = (rows[c.table] ?? []).filter(r => !keptIds.has(r.id))
-    .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type) }));
-  const links = companyLinkResolver(companies);
+  const otherCompanies = (rows.companies ?? []).filter(r => !keptIds.has(r.id))
+    .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), name: read(r, c.name) ?? '', type: read(r, c.type) }));
+  const links = resolveLinks ?? companyLinkResolver(companies, otherCompanies);
   const i = mapping.ingredients, p = mapping.products;
-  const ingredients = (rows[i.table] ?? []).map(r => {
+  const ingredients = (rows.ingredients ?? []).map(r => {
     const raw = { certificationRaw: read(r, i.certification), statusRaw: read(r, i.status), agencyRaw: read(r, i.agency) };
     return { id: r.id, companyIds: links(i.companyLink && r.fields[i.companyLink]), name: read(r, i.name) ?? '', brand: read(r, i.brand),
       ...raw, ...classifyRaw(mapping, i, raw),
       plant: read(r, i.plant), expiresOn: read(r, i.expiresOn), extra: extra(r, i, 'ingredients') };
   });
-  const products = (rows[p.table] ?? []).map(r => {
+  const products = (rows.products ?? []).map(r => {
     const raw = p.symbolRequired ? r.fields[p.symbolRequired] : undefined;
     const symbolRequired = typeof raw === 'boolean' ? raw : typeof raw === 'string' && /^(yes|true|1|no|false|0)$/i.test(raw.trim()) ? /^(yes|true|1)$/i.test(raw.trim()) : undefined;
     const classifiedRaw = { certificationRaw: read(r, p.certification), statusRaw: read(r, p.status), agencyRaw: read(r, p.agency) };

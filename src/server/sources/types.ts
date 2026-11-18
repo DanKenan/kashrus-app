@@ -22,7 +22,7 @@ export interface SourceMapping {
   valueAssignments?: Record<string, Record<string, ValueAssignment>> | Partial<Record<'ingredient' | 'product', Record<string, Record<string, ValueAssignment>>>>;
   group1Values: string[];
 }
-export interface SourceData { companies: Company[]; otherCompanies?: { id: string; name: string; type?: string }[]; ingredients: Ingredient[]; products: Product[] }
+export interface SourceData { companies: Company[]; otherCompanies?: Pick<Company, 'id' | 'name' | 'type' | 'sourceKey'>[]; ingredients: Ingredient[]; products: Product[] }
 export interface SourceFile { id: string; name: string }
 export interface SourceTable { name: string; columns: string[] }
 export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
