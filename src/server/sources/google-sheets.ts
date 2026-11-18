@@ -1,12 +1,13 @@
-import { parseMoney } from '../../lib/sourceAmount.ts';
+import { editSheetRow } from './sheets-edit.ts';
+import type { Edit, EditAudit, Target } from './tagged-row.ts';
 import { sourceFetch } from './http.ts';
 import { matrixRows, tabularConnector, keyRows } from './tabular.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
-export interface SheetsFeePilot {
+export interface TaggedTable {
     records: { key: string; metadataId: number }[];
     headers: string[];
     idHeader: string;
-    feeHeader: string;
+
 }
 export interface GoogleSheetsConfig {
     spreadsheetId: string;
@@ -45,7 +46,7 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     const conflict = (message: string) => Object.assign(Error(message), { status: 409 });
     // Setup requires exclusive access to the managed tab while dimensions
     // are resolved. Never use these coordinates for a record edit.
-    async function tagManagedRows(table: string, feeHeader: string, primary?: string): Promise<SheetsFeePilot> {
+    async function tagManagedRows(table: string, primary?: string): Promise<TaggedTable> {
         const metadata = await request('sheets', sheet() +
             '?fields=sheets(properties(sheetId,title))');
         const tab = metadata.sheets?.find((s: any) => s.properties.title === table);
@@ -55,9 +56,9 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
             encodeURIComponent(range(table)) + '?valueRenderOption=UNFORMATTED_VALUE')).values || [];
         const headers: string[] = matrix[0] || [];
         const idHeader = primary || headers.find(h => typeof h === 'string' && /^id$/i.test(h));
-        if (!idHeader || !headers.includes(feeHeader) || feeHeader === idHeader ||
+        if (!idHeader ||
             !headers.every(h => typeof h === 'string' && h.trim()) || new Set(headers).size !== headers.length)
-            throw conflict('Check the ID and Fee columns. Refresh and review the mapping.');
+            throw conflict('Check the ID and mapped columns. Refresh and review the mapping.');
         const column = headers.indexOf(idHeader);
         if (column < 0 || headers.lastIndexOf(idHeader) !== column)
             throw conflict('Choose one unique ID column.');
@@ -113,71 +114,15 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
         const records = Array.from(rows.keys(), key => ({ key, metadataId: existing.get(key)! }));
         if (records.some(r => !Number.isSafeInteger(r.metadataId)))
             throw conflict('Record tags could not be confirmed. Refresh the source.');
-        return { records, headers, idHeader, feeHeader };
+        return { records, headers, idHeader };
     }
-    async function saveFee(edit: {
-        metadataId: number; table: string; headers: string[]; idHeader: string;
-        feeHeader: string; recordId: string; fee: number;
-    }) {
-        const { metadataId, table, headers, idHeader, feeHeader, recordId, fee } = edit;
-        const idColumn = headers.indexOf(idHeader);
-        const feeColumn = headers.indexOf(feeHeader);
-        if (!Number.isSafeInteger(metadataId) || metadataId <= 0 || !recordId.trim())
-            throw conflict('Missing record tag or ID. Refresh the source.');
-        if (!Number.isFinite(fee) || fee < 0 || feeColumn < 0 || idColumn < 0 ||
-            idColumn === feeColumn || new Set(headers).size !== headers.length)
-            throw conflict('Check the fee and mapped columns.');
-        const dataFilter = { developerMetadataLookup: { metadataId } };
-        const post = (path: string, body: unknown) => request('sheets', sheet() + path, {
-            method: 'POST', body: JSON.stringify(body),
-        });
-        const headerFilter = { a1Range: range(table) + '!1:1' };
-        const read = async () => {
-            // Read the headers and the tagged row in the same provider response.
-            const result = await post('/values:batchGetByDataFilter', {
-                dataFilters: [dataFilter, headerFilter], valueRenderOption: 'FORMULA',
-            });
-            const ranges: any[] = result.valueRanges || [];
-            const header = ranges.find(r => r.dataFilters?.some((f: any) => f.a1Range === headerFilter.a1Range));
-            if (JSON.stringify(header?.valueRange?.values?.[0]) !== JSON.stringify(headers))
-                throw conflict('Columns changed. Refresh and review the mapping.');
-            const matches = ranges.filter(r => r.dataFilters?.some((f: any) => f.developerMetadataLookup?.metadataId === metadataId));
-            const rowRange = matches[0]?.valueRange;
-            const address: string = rowRange?.range || '';
-            const tabName = address.slice(0, address.lastIndexOf('!'));
-            if (matches.length !== 1 || rowRange?.values?.length !== 1 || (tabName !== range(table) && tabName !== table))
-                throw conflict('Record tag missing or ambiguous. Refresh the source.');
-            const row = rowRange.values[0];
-            if (String(row[idColumn] ?? '') !== recordId)
-                throw conflict('Record ID changed. Refresh the source.');
-            return row[feeColumn];
-        };
-        const previous = await read();
-        if (typeof previous === 'string' && previous.startsWith('='))
-            throw conflict('This fee contains a formula.');
-        if (previous === fee || (typeof previous === 'string' && parseMoney(previous) === fee))
-            throw conflict('The Fee is already set to this amount. Refresh to see the current value.');
-        const values = [Array(feeColumn).fill(null).concat(fee)];
-        let result;
-        try {
-            result = await post('/values:batchUpdateByDataFilter', {
-                valueInputOption: 'RAW', data: [{ dataFilter, values }],
-            });
-        } catch (cause) {
-            if ((cause as { rejected?: boolean }).rejected)
-                throw conflict('Google Sheets rejected the Fee edit. Refresh and check your access.');
-            // The write may already have landed. Verify once without sending it again.
-        }
-        try {
-            const currentFee = await read();
-            if (currentFee !== fee || (result && (result.totalUpdatedRows !== 1 || result.totalUpdatedCells !== 1)))
-                throw Error();
-        } catch {
-            throw conflict('Fee save could not be confirmed. The value may be in another cell. Refresh and review the sheet before retrying.');
-        }
-        return previous ?? null;
-    }
-    return { calls: () => calls, listTables, tagManagedRows, saveFee,
+    const post = (path: string, body: unknown) => request('sheets', sheet() + path, {
+        method: 'POST', body: JSON.stringify(body),
+    });
+    return { calls: () => calls, listTables, tagManagedRows,
+        updateTaggedRow(edit: Edit, target: Target, audit: (entry: EditAudit) => Promise<void>) {
+            return editSheetRow(post, edit, target, audit);
+        },
         async readRows(table: string, file?: SourceFile) {
             const v = await values(table, file);
             const parsed = matrixRows(v);

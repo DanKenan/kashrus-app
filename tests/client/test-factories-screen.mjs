@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mount } from './lib/mini-render.mjs';
+import { SourceCompanyEditor } from '../../src/components/SourceCompanyEditor.tsx';
 import { SourcesSheet } from '../../src/components/SourcesSheet.tsx';
 import { SourceConnectForm } from '../../src/components/SourceConnectSheet.tsx';
 import { FactoriesScreen } from '../../src/components/FactoriesScreen.tsx';
@@ -27,6 +28,28 @@ async function poll() {
 }
 const connected = { sourceType: 'airtable', status: 'ok', refreshedAt: '2026-11-10T09:00:00Z', calls: 6 };
 try {
+  {
+    const methods = [];
+    let closed = false, refreshed = false;
+    globalThis.fetch = async (_url, options) => {
+      methods.push(options.method);
+      return options.method === 'PATCH'
+        ? Response.json({ error: 'Fee save could not be confirmed. Refresh and review.' }, { status: 409 })
+        : Response.json({ ok: true });
+    };
+    const editor = mount(SourceCompanyEditor, { company: { id: 'a', name: 'Bakery', companyFee: 100 },
+      source: 'Google Sheets', sheetMapping: { name: 'Name', address: 'Address', companyFee: 'Fee' }, onSaved() { refreshed = true; }, onClose() { closed = true; } });
+    await editor.render();
+    await editor.type('', 'New bakery');
+    await editor.submit();
+    assert.match(editor.text(), /could not be confirmed/);
+    assert.equal(closed, false);
+    await editor.submit();
+    assert.deepEqual(methods, ['PATCH']);
+    await editor.click('Refresh for review');
+    assert.deepEqual(methods, ['PATCH','POST']);
+    assert.ok(closed && refreshed);
+  }
   assert.equal(sourceStatus({ sourceType: null }, 'America/Chicago'), 'Not connected');
   assert.equal(sourceStatus(connected, 'America/Chicago'), 'Connected to Airtable · updated 3:00 AM · 6 calls');
   assert.equal(sourceStatus({ ...connected, status: 'never', refreshedAt: null }, 'UTC'), 'Connected to Airtable · reading your database…');

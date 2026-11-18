@@ -39,7 +39,7 @@ function overlap(name: string, aliases: string[]): number {
   }));
 }
 // Partial mappings deliberately leave missing tables/columns unset for the caller to review.
-export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values' | 'valueAssignments'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
+export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values' | 'valueAssignments' | 'editableCustomFields'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
 export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; guessed: Record<string, number> } {
   const mapping: GuessedMapping = { companies: {}, ingredients: {}, products: {}, group1Values: ['Group 1'] };
   const guessed: Record<string, number> = {};
@@ -237,7 +237,7 @@ export function mapSourceLists(
   const i = mapping.ingredients, p = mapping.products;
   const ingredients = (rows.ingredients ?? []).map(r => {
     const raw = { certificationRaw: read(r, i.certification), statusRaw: read(r, i.status), agencyRaw: read(r, i.agency) };
-    return { id: r.id, companyIds: links(i.companyLink && r.fields[i.companyLink]), name: read(r, i.name) ?? '', brand: read(r, i.brand),
+    return { id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), companyIds: links(i.companyLink && r.fields[i.companyLink]), name: read(r, i.name) ?? '', brand: read(r, i.brand),
       ...raw, ...classifyRaw(mapping, i, raw),
       plant: read(r, i.plant), expiresOn: read(r, i.expiresOn), extra: extra(r, i, 'ingredients') };
   });
@@ -245,7 +245,7 @@ export function mapSourceLists(
     const raw = p.symbolRequired ? r.fields[p.symbolRequired] : undefined;
     const symbolRequired = typeof raw === 'boolean' ? raw : typeof raw === 'string' && /^(yes|true|1|no|false|0)$/i.test(raw.trim()) ? /^(yes|true|1)$/i.test(raw.trim()) : undefined;
     const classifiedRaw = { certificationRaw: read(r, p.certification), statusRaw: read(r, p.status), agencyRaw: read(r, p.agency) };
-    return { ...classifiedRaw, ...classifyRaw(mapping, p, classifiedRaw), id: r.id, companyIds: links(p.companyLink && r.fields[p.companyLink]), name: read(r, p.name) ?? '', brand: read(r, p.brand),
+    return { ...classifiedRaw, ...classifyRaw(mapping, p, classifiedRaw), id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), companyIds: links(p.companyLink && r.fields[p.companyLink]), name: read(r, p.name) ?? '', brand: read(r, p.brand),
       code: read(r, p.code), symbolRequired, plant: read(r, p.plant), extra: extra(r, p, 'products') };
   });
   return { companies, ingredients, products, otherCompanies };

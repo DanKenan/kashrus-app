@@ -2,6 +2,7 @@ type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'dairy_equipment' | 'p
 import { apiFetch } from './api';
 
 export interface SourceMapping {
+  editableCustomFields?: import('./sourcePreview').EditableCustomFields;
   companies: { file?: { id: string; name: string }; address?: string; companyFee?: string; mashgiachFee?: string; table: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
   ingredients: { file?: { id: string; name: string }; table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
   products: { file?: { id: string; name: string }; table: string; companyLink: string; name: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };
@@ -30,7 +31,7 @@ export function mappingReady(mapping: SourceMapping): boolean {
 export async function sourceRequest(path: string, method?: string, body?: unknown) {
   const response = await apiFetch(path, method ? { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) } : undefined);
   const data = await response.json();
-  if (!response.ok || data?.error) throw new Error(data?.error || "Couldn't reach the database. Try again.");
+  if (!response.ok || data?.error) throw Object.assign(new Error(data?.error || "Couldn't reach the database. Try again."), { status: response.status });
   return data;
 }
 export function sourceStatus(connection: SourceConnection, timeZone: string): string {

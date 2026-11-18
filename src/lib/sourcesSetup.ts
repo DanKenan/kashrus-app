@@ -37,13 +37,11 @@ export const createFile = (provider: Provider) => sourceRequest('/api/sources/cr
 export const testSupabase = (url: string, apiKey: string) => sourceRequest('/api/sources/supabase/test', 'POST', { url, apiKey });
 export const saveConnection = (body: { sourceType: Provider; baseId: string; access: Access; mapping: SourceMapping; draftId?:string; apiKey?: string }) => sourceRequest('/api/sources/connection', 'PUT', body);
 export const setSheetsEditing = (enabled: boolean) => sourceRequest('/api/sources/sheets-editing', 'PUT', { enabled });
-export const saveSheetFee = (id: string, companyFee: number) =>
-  sourceRequest(`/api/sources/rows/companies/${encodeURIComponent(id)}`, 'PATCH', { fields: { companyFee } });
 export const changeAccess = (access: Access) => sourceRequest('/api/sources/access', 'PUT', { access });
 export const disconnect = () => sourceRequest('/api/sources/connection', 'DELETE');
 export const readAgain = () => sourceRequest('/api/sources/refresh', 'POST');
 export const resetUpload = () => sourceRequest('/api/sources/upload/reset', 'POST') as Promise<{draftId:string}>;
-export const saveCompany = (fields: Partial<{ name: string; address: string; type: string }>, id?: string) => sourceRequest(`/api/sources/rows/companies${id ? `/${encodeURIComponent(id)}` : ''}`, id ? 'PATCH' : 'POST', { fields });
+export const saveCompany = (fields: Partial<{ name: string; address: string; type: string; companyFee: number }>, id?: string) => sourceRequest(`/api/sources/rows/companies${id ? `/${encodeURIComponent(id)}` : ''}`, id ? 'PATCH' : 'POST', { fields });
 export async function uploadFile(file: File, draftId:string) { const response = await apiFetch(`/api/sources/upload?draftId=${encodeURIComponent(draftId)}&name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'Content-Type': file.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }, body: file }); const data = await response.json(); if (!response.ok || data.error) throw new Error(data.error); return data as TabData & { fileName: string; rows: number }; }
 // Picker is loaded only in response to a signed-in account's explicit action.
 export async function pickGoogleFile(onPick: (file: SourceFile) => void) {
