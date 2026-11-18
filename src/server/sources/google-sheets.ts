@@ -1,4 +1,4 @@
-import { parseMoney } from '../../lib/sourceAmount.ts';
+import { feeAlreadySet } from './tagged-row.ts';
 import { sourceFetch } from './http.ts';
 import { matrixRows, tabularConnector, keyRows } from './tabular.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
@@ -118,6 +118,7 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     async function saveFee(edit: {
         metadataId: number; table: string; headers: string[]; idHeader: string;
         feeHeader: string; recordId: string; fee: number;
+        beforeWrite?(previous: unknown): Promise<void>;
     }) {
         const { metadataId, table, headers, idHeader, feeHeader, recordId, fee } = edit;
         const idColumn = headers.indexOf(idHeader);
@@ -155,9 +156,10 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
         const previous = await read();
         if (typeof previous === 'string' && previous.startsWith('='))
             throw conflict('This fee contains a formula.');
-        if (previous === fee || (typeof previous === 'string' && parseMoney(previous) === fee))
+        if (feeAlreadySet(previous, fee))
             throw conflict('The Fee is already set to this amount. Refresh to see the current value.');
         const values = [Array(feeColumn).fill(null).concat(fee)];
+        await edit.beforeWrite?.(previous ?? null);
         let result;
         try {
             result = await post('/values:batchUpdateByDataFilter', {
@@ -173,7 +175,7 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
             if (currentFee !== fee || (result && (result.totalUpdatedRows !== 1 || result.totalUpdatedCells !== 1)))
                 throw Error();
         } catch {
-            throw conflict('Fee save could not be confirmed. The value may be in another cell. Refresh and review the sheet before retrying.');
+            throw Object.assign(conflict('Fee save could not be confirmed. The value may be in another cell. Refresh and review the sheet before retrying.'), { unconfirmed: true });
         }
         return previous ?? null;
     }

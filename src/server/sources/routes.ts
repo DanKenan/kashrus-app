@@ -500,20 +500,26 @@ export function registerSourceRoutes(app: any, deps: {
           if (!company || !record) return res.status(409).json({ error: 'Record tag missing. Refresh the source.' });
           const config = c.mapping.companies;
           const auditId = randomUUID();
-          const entry = { agencyId: id, actorId: user.id, companyId: company.id, metadataId: record.metadataId,
-              spreadsheetId: config.file?.id || c.baseId, table: config.table, column: sheets.feeHeader,
-              fee: fields.companyFee, at: new Date().toISOString() };
-          await store.saveFeeAudit(auditId, { ...entry, outcome: 'attempted' });
-          let previous;
+          const entry: import('./tagged-row.ts').EditAudit = {
+              operationId: auditId, agencyId: id, actorId: user.id, section: list, recordId: record.key,
+              metadataId: record.metadataId, spreadsheetId: config.file?.id || c.baseId, table: config.table,
+              changedFields: [], previous: {}, requested: { companyFee: fields.companyFee },
+              verified: false, outcome: 'attempted', at: new Date().toISOString(),
+          };
           try {
-              previous = await sheetsApi(c).saveFee({ ...sheets, table: config.table, recordId: record.key,
-                  metadataId: record.metadataId, fee: fields.companyFee });
+              await sheetsApi(c).saveFee({ ...sheets, table: config.table, recordId: record.key,
+                  metadataId: record.metadataId, fee: fields.companyFee, async beforeWrite(previous) {
+                      entry.previous = { companyFee: previous as string | number | boolean | null };
+                      entry.changedFields = ['companyFee'];
+                      await store.saveEditAudit(entry);
+                  },
+              });
           } catch (error) {
-              await store.saveFeeAudit(auditId, { ...entry, outcome: 'unconfirmed' });
+              await store.saveEditAudit({ ...entry, outcome: (error as { unconfirmed?: boolean }).unconfirmed ? 'unconfirmed' : 'rejected' });
               throw error;
           }
           try {
-              await store.saveFeeAudit(auditId, { ...entry, previous, outcome: 'confirmed' });
+              await store.saveEditAudit({ ...entry, verified: true, outcome: 'confirmed' });
           } catch {
               return res.status(503).json({ error: 'The Fee was saved, but its audit entry could not be confirmed. Refresh before retrying.' });
           }
