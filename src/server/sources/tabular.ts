@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { applyMapping } from './mapping.ts';
 import type { SourceConnector, SourceFile, SourceKind, SourceMapping, SourceRow, SourceTable } from './types.ts';
 export function tabularConnector(kind: SourceKind, mapping: SourceMapping, methods: {
@@ -63,5 +64,53 @@ export function matrixRows(values: unknown[][], maxBytes = Infinity): {
                 tooBig();
         }
     }
-    return { columns, rows: values.slice(1).map((row, i) => ({ id: `r${i + 2}`, fields: Object.fromEntries(columns.map((c, j) => [c, cellText(row[j])])) })).filter(r => Object.values(r.fields).some(Boolean)) };
+    return { columns, rows: values.slice(1).map((row, i) => ({ id: randomUUID(), rowNumber: i + 2, fields: Object.fromEntries(columns.map((c, j) => [c, cellText(row[j])])) })).filter(r => Object.values(r.fields).some(Boolean)) };
+}
+
+export function columnLetter(index: number): string {
+    let name = '';
+    for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26))
+        name = String.fromCharCode(65 + (n - 1) % 26) + name;
+    return name;
+}
+
+export function keyRows(rows: SourceRow[], columns: string[], scope: string[], mapping?: SourceMapping, uploadVersion?: string) {
+    const config = mapping && [mapping.companies, mapping.ingredients, mapping.products].find(c =>
+        c.table === scope[2] && (!c.file || c.file.id === scope[1]));
+    const primary = config?.pk || columns.find(c => /^id$/i.test(c));
+    const natural = [config?.name || columns.find(c => /^name$/i.test(c)), config && 'companyLink' in config && config.companyLink].filter(Boolean) as string[];
+    const validPrimary = uploadVersion && primary && rows.every(r => r.fields[primary] != null && r.fields[primary] !== '') &&
+        new Set(rows.map(r => r.fields[primary])).size === rows.length;
+    const versioned = uploadVersion && !validPrimary;
+    const seen = new Set<string>();
+    for (const row of rows) {
+        const keys = primary ? [primary] : natural.length ? natural : columns;
+        const values = keys.map(col => row.fields[col]);
+        const key = versioned ? [uploadVersion, row.id] : values;
+        if (!key.length || (!uploadVersion && (primary || natural.length) && !key[0])) throw Error('A unique record key is required.');
+        if (primary && !versioned) row.sourceKey = String(row.fields[primary]);
+        row.id = createHash('sha256').update(JSON.stringify([scope, versioned ? null : keys, key])).digest('base64url');
+        if (seen.has(row.id)) throw Error('Duplicate record key.');
+        seen.add(row.id);
+    }
+    return rows;
+}
+
+export function prepareSheetWrite(matrix: unknown[][], scope: string[], mapping: SourceMapping,
+    input: { id?: string; fields: Record<string,string> }) {
+    const { columns, rows } = matrixRows(matrix);
+    keyRows(rows, columns, scope, mapping);
+    const old = rows.find(row => row.id === input.id);
+    if (input.id && !old) throw Error('Record is no longer available.');
+    const changes = { ...input.fields };
+    const primary = [mapping.companies, mapping.ingredients, mapping.products].find(c =>
+        c.table === scope[2] && (!c.file || c.file.id === scope[1]))?.pk || columns.find(c => /^id$/i.test(c));
+    if (!input.id && primary && !changes[primary]) changes[primary] = randomUUID();
+    const fields = { ...old?.fields, ...changes };
+    const [result] = keyRows([{id:'', fields}], columns, scope, mapping);
+    if (old ? old.id !== result.id : rows.some(row => row.id === result.id))
+        throw Error('A unique, unchanged record key is required.');
+    const cells = Object.entries(changes).filter(([column,value]) =>
+        columns.includes(column) && old?.fields[column] !== value);
+    return { columns, cells, result, rowNumber: old?.rowNumber ?? matrix.length + 1 };
 }

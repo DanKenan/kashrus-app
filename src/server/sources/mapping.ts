@@ -1,3 +1,5 @@
+import { parseMoney } from '../../lib/sourceAmount.ts';
+export { parseMoney } from '../../lib/sourceAmount.ts';
 import type { Dpm, SourceData, SourceMapping, SourceRow, SourceTable } from './types.ts';
 import { isBuiltinFieldKey, type SourceSection } from '../../lib/sourcePreview.ts';
 
@@ -132,13 +134,14 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
   const otherCompanies = (rows[c.table] ?? []).filter(r => !keptIds.has(r.id))
     .map(r => ({ id: r.id, name: read(r, c.name) ?? '', type: read(r, c.type) }));
   const ids = new Set(companies.map(c => c.id));
+  const sourceKeys = new Map((rows[c.table] ?? []).filter(r => r.sourceKey && ids.has(r.id)).map(r => [r.sourceKey, r.id]));
   const names = new Map<string, string[]>();
   for (const c of companies) names.set(folded(c.name), [...(names.get(folded(c.name)) ?? []), c.id]);
   const links = (r: SourceRow, column?: string) => {
     const value = column ? r.fields[column] : undefined;
-    const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
+    const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [value];
     return [...new Set(values.flatMap(v => {
-      const s = text(v); return !s ? [] : ids.has(s) ? [s] : names.get(folded(s)) ?? [];
+      const s = fieldValue(v)?.trim(); return !s ? [] : ids.has(s) ? [s] : sourceKeys.has(s) ? [sourceKeys.get(s)!] : names.get(folded(s)) ?? [];
     }))];
   };
   const i = mapping.ingredients, p = mapping.products;
@@ -156,11 +159,4 @@ export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceM
       code: read(r, p.code), symbolRequired, plant: read(r, p.plant), extra: extra(r, p, 'products') };
   });
   return { companies, ingredients, products, otherCompanies };
-}
-
-export function parseMoney(value: unknown): number | undefined {
-  const s = String(value ?? '').trim();
-  if (!/^\$?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?$/.test(s)) return undefined;
-  const amount = Number(s.replace(/[$,]/g, ''));
-  return Number.isFinite(amount) ? amount : undefined;
 }

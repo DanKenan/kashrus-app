@@ -82,8 +82,18 @@ export function registerInspectionRoutes(app: any, deps: {
     return !Object.hasOwn(food.doc(a).manualPlaces, id) && data && Number.isFinite(data.amount) ? { amount: data.amount, currency: data.currency } : null;
   }
   const info = (a: string, id: string) => {const saved=Object.hasOwn(companyInfo.doc(a).places,id)?companyInfo.doc(a).places[id]:emptyInfo();return {...saved,address:saved.address||deps.source(a).state.companies.find(c=>c.id===id)?.address||''};};
-  const companyFee = (a:string,id:string) => {const saved=placeFee(a,id)?.company;if(saved)return saved;const value=deps.source(a).state.companies.find(c=>c.id===id)?.companyFee;return value===undefined?null:{amount:value,per:'year' as const,source:'data' as const};};
-  const effectiveFees = (a:string) => {const doc=fees.doc(a),places={...doc.places};for(const c of allPlaces(a)){const company=companyFee(a,c.id);if(company)places[c.id]={...places[c.id],company};}return {...doc,places};};
+  function effectiveFees(a:string) {
+    const doc = fees.doc(a), places = {...doc.places};
+    for (const c of deps.source(a).state.companies) {
+      const manual = places[c.id];
+      if (c.companyFee === undefined && c.mashgiachFee === undefined) continue;
+      places[c.id] = {...manual,
+        company: manual?.company ?? (c.companyFee === undefined ? null : {amount:c.companyFee,per:'year'}),
+        mashgiach: manual?.mashgiach ?? (c.mashgiachFee === undefined ? null : {amount:c.mashgiachFee}),
+      };
+    }
+    return {...doc,places};
+  }
   const pay = async (a: string, query: any) => {
     const r = range(query.from, query.to, query.by ?? 'place');
     return computePay(await store.payReportsForRange(a, r.from, r.to), effectiveFees(a), allPlaces(a), r.from, r.to, r.by, zone(a));
@@ -129,7 +139,7 @@ export function registerInspectionRoutes(app: any, deps: {
       try {
         // A scheduled email must never rely on the process-local pay-screen cache.
         const reports = await store.freshReportsForRange(a, period.from, period.to);
-        const table = computePay(reports, fees.doc(a), allPlaces(a), period.from, period.to, 'place', zone(a));
+        const table = computePay(reports, effectiveFees(a), allPlaces(a), period.from, period.to, 'place', zone(a));
         if (!table.totals.visits) return { sent: false, reason: 'no_visits' as const };
         return await sendSummary(a, period, claim.key, table);
       } catch (error) {
@@ -144,7 +154,7 @@ export function registerInspectionRoutes(app: any, deps: {
   app.get('/api/inspections/fees', handler(true, (_req: any, res: any, u: Person, a: string) => {
     const doc = fees.doc(a);
     res.json({ settings: doc.settings, canEdit: u.role === 'admin' || doc.settings.feeEditors === 'admins_and_coordinators',
-      places: allPlaces(a).filter(c => visible(a, c.id, u)).map(c => ({ id: c.id, name: c.name, kind: kind(a, c), company: companyFee(a, c.id), ...(('mashgiachFee' in c && c.mashgiachFee !== undefined) ? {dataFee:{amount:c.mashgiachFee,currency:'USD'}} : {}), mashgiach: placeFee(a, c.id)?.mashgiach ?? null, mashgiachNames: schedules.company(a, c.id).mashgiachIds.map(id => people(a).find(p => p.id === id)?.name).filter(Boolean) })),
+      places: allPlaces(a).filter(c => visible(a, c.id, u)).map(c => ({ id: c.id, name: c.name, kind: kind(a, c), company: placeFee(a,c.id)?.company ?? null, importedCompany: c && 'companyFee' in c && c.companyFee !== undefined ? {amount:c.companyFee, per:'year'} : null, ...(('mashgiachFee' in c && c.mashgiachFee !== undefined) ? {dataFee:{amount:c.mashgiachFee,currency:'USD'}} : {}), mashgiach: placeFee(a, c.id)?.mashgiach ?? null, mashgiachNames: schedules.company(a, c.id).mashgiachIds.map(id => people(a).find(p => p.id === id)?.name).filter(Boolean) })),
       ...(u.role === 'admin' ? { accountant: doc.accountant, email: { setUp: !!email.transport }, nextEmail: nextAccountantDate(doc.accountant?.timing, doc.lastSent, now(), zone(a)) } : {}) });
   }));
   app.put?.('/api/inspections/fees/:placeId', handler(true, async (req: any, res: any, u: Person, a: string) => {

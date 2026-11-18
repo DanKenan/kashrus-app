@@ -1,5 +1,5 @@
 import { sourceFetch } from './http.ts';
-import { matrixRows, tabularConnector } from './tabular.ts';
+import { matrixRows, tabularConnector, keyRows, columnLetter, prepareSheetWrite } from './tabular.ts';
 import { defaultHeaders } from './google-sheets.ts';
 import { emptyWorkbook } from './xlsx-template.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
@@ -25,22 +25,29 @@ export function createExcelApi(config: ExcelConfig) {
     } throw Error('Excel request failed'); }
     const workbook = (file?: SourceFile) => `/me/drive/items/${encodeURIComponent(file?.id || config.workbookId)}/workbook`;
     const sheet = (table: string, file?: SourceFile) => `${workbook(file)}/worksheets/${encodeURIComponent(table)}`;
-    const matrices = new Map<string, unknown[][]>();
-    const used = async (table: string, file?: SourceFile) => { const path = `${sheet(table, file)}/usedRange(valuesOnly=true)`; if (!matrices.has(path))
-        matrices.set(path, (await request(path)).values || []); return matrices.get(path)!; };
+    const used = (table: string, file?: SourceFile) => request(`${sheet(table, file)}/usedRange(valuesOnly=true)`);
     return { calls: () => calls,
         async listTables() { const r = await request(`${workbook()}/worksheets`), tables = []; for (const t of r.value || [])
-            tables.push({ name: t.name, columns: matrixRows(await used(t.name)).columns }); return tables; },
-        async readRows(table: string, file?: SourceFile) { return matrixRows(await used(table, file)).rows; },
-        async writeRow(table: string, row: {
-            id?: string;
-            fields: Record<string, string>;
-        }, file?: SourceFile) { const v = await used(table, file), parsed = matrixRows(v), n = row.id ? Number(row.id.replace(/^r/, '')) : v.length + 1; if (!Number.isInteger(n) || n < 2 || row.id && n > v.length)
-            throw Error('Invalid row'); const fields = { ...(parsed.rows.find(r => r.id === row.id)?.fields || {}), ...row.fields }; let last = '', col = parsed.columns.length; while (col) {
-            col--;
-            last = String.fromCharCode(65 + col % 26) + last;
-            col = Math.floor(col / 26);
-        } await request(`${sheet(table, file)}/range(address='A${n}:${last}${n}')`, { method: 'PATCH', body: JSON.stringify({ values: [parsed.columns.map(c => String(fields[c] ?? ''))] }) }); matrices.clear(); return { id: `r${n}`, fields }; },
+            tables.push({ name: t.name, columns: matrixRows((await used(t.name)).values || []).columns }); return tables; },
+        async readRows(table: string, file?: SourceFile) {
+            const rangeData = await used(table, file), v = rangeData.values || [];
+            const parsed = matrixRows(v);
+            return keyRows(parsed.rows, parsed.columns, ['excel', file?.id || config.workbookId, table], config.mapping);
+        },
+        async writeRow(table: string, row: {id?: string; fields: Record<string,string>}, file?: SourceFile) {
+            const rangeData = await used(table, file), v = rangeData.values || [];
+            const {columns, cells, result, rowNumber:n} = prepareSheetWrite(v, ['excel', file?.id || config.workbookId, table], config.mapping, row);
+            if (cells.length) {
+                const indices = cells.map(([col]) => columns.indexOf(col));
+                const first = Math.min(...indices), last = Math.max(...indices);
+                const values = Array<string | null>(last - first + 1).fill(null);
+                cells.forEach(([,value], i) => { values[indices[i] - first] = value; });
+                const address = (i:number) => columnLetter((rangeData.columnIndex ?? 0) + i) + (n + (rangeData.rowIndex ?? 0));
+                const target = first === last ? address(first) : address(first) + ':' + address(last);
+                await request(`${sheet(table, file)}/range(address='${target}')`, {method:'PATCH', body:JSON.stringify({values:[values]})});
+            }
+            return result;
+        },
         async files() { const all = []; for (const path of ["/me/drive/root/search(q='.xlsx')", '/me/drive/sharedWithMe']) {
             let next = path;
             do {

@@ -5,7 +5,10 @@ import { zip, workbookFixture } from './source-upload-fixtures.mjs';
 assert.deepEqual(parseCsv('\uFEFFName;Note\r\n"Golden; Grain";"line 1\nline ""2"""\r\n'), [['Name', 'Note'], ['Golden; Grain', 'line 1\nline "2"']]);
 const file = parseUpload(Buffer.from('Name,Name,,Formula\r\n"  Demo\u0000 Bakery  ",second,,=SUM(A1)\r\n'), 'Companies.csv');
 assert.deepEqual(file.tabs[0].columns, ['Name', 'Name (2)', 'Column 3', 'Formula']);
-assert.equal(file.tabs[0].rows[0].id, 'r2');
+assert.equal(file.tabs[0].rows[0].rowNumber, 2);
+assert.notEqual(file.tabs[0].rows[0].id, parseUpload(Buffer.from('Name\nDifferent'), 'Companies.csv').tabs[0].rows[0].id);
+const keyed = csv => parseUpload(Buffer.from(csv), 'Companies.csv').tabs[0].rows.find(r => r.fields.ID === 'a').id;
+assert.equal(keyed('ID,Name\na,Alpha'),keyed('ID,Name\nb,Beta\na,Alpha'));
 assert.equal(file.tabs[0].rows[0].fields.Name, 'Demo Bakery');
 assert.equal(file.tabs[0].rows[0].fields.Formula, '=SUM(A1)');
 for (const text of ['=cmd', '+cmd', '-cmd', '@cmd']) {

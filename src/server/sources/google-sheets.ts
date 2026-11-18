@@ -1,5 +1,5 @@
 import { sourceFetch } from './http.ts';
-import { matrixRows, tabularConnector } from './tabular.ts';
+import { matrixRows, tabularConnector, keyRows, columnLetter, prepareSheetWrite } from './tabular.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
 export interface GoogleSheetsConfig {
     spreadsheetId: string;
@@ -36,25 +36,20 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
         tables.push({ name: table, columns: matrixRows(v).columns });
     } return tables; }
     return { calls: () => calls, listTables,
-        async readRows(table: string, file?: SourceFile) { return matrixRows(await values(table, file)).rows; },
-        async writeRow(table: string, row: {
-            id?: string;
-            fields: Record<string, string>;
-        }, file?: SourceFile) {
-            const v = await values(table, file), columns = matrixRows(v).columns;
-            let n = row.id ? Number(row.id.replace(/^r/, '')) : v.length + 1;
-            if (!Number.isInteger(n) || n < 2 || row.id && n > v.length)
-                throw Error('Invalid row');
-            const fields = { ...(row.id ? matrixRows(v).rows.find(r => r.id === row.id)?.fields : {}), ...row.fields };
-            const body = JSON.stringify({ values: [columns.map(c => String(fields[c] ?? ''))] });
-            if (row.id)
-                await request('sheets', `${sheet(file)}/values/${encodeURIComponent(`${range(table)}!A${n}`)}?valueInputOption=RAW`, { method: 'PUT', body });
-            else {
-                const result = await request('sheets', `${sheet(file)}/values/${encodeURIComponent(range(table))}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, { method: 'POST', body });
-                n = Number(result.updates?.updatedRange?.match(/![A-Z]+(\d+)/)?.[1] || n);
-            }
+        async readRows(table: string, file?: SourceFile) {
+            const v = await values(table, file);
+            const parsed = matrixRows(v);
+            return keyRows(parsed.rows, parsed.columns, ['google_sheets', file?.id || config.spreadsheetId, table], config.mapping);
+        },
+        async writeRow(table: string, row: {id?: string; fields: Record<string,string>}, file?: SourceFile) {
             matrices.clear();
-            return { id: `r${n}`, fields };
+            const v = await values(table, file);
+            const {columns, cells, result, rowNumber:n} = prepareSheetWrite(v, ['google_sheets', file?.id || config.spreadsheetId, table], config.mapping, row);
+            const changes = cells.map(([col, value]) => ({ range: `${range(table)}!${columnLetter(columns.indexOf(col))}${n}`, values: [[value]] }));
+            if (row.id && changes.length) await request('sheets', `${sheet(file)}/values:batchUpdate`, { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data: changes }) });
+            if (!row.id) await request('sheets', `${sheet(file)}/values/${encodeURIComponent(range(table))}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, { method: 'POST', body: JSON.stringify({ values: [columns.map(c => result.fields[c] ?? null)] }) });
+            matrices.clear();
+            return result;
         },
         async files() { const out = []; let pageToken = ''; do {
             const q = new URLSearchParams({ q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false", fields: 'files(id,name,modifiedTime),nextPageToken', pageSize: '100', ...(pageToken ? { pageToken } : {}) });
@@ -66,5 +61,5 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
             await request('sheets', `${sheet(file)}/values/${encodeURIComponent(`${range(table)}!A1`)}?valueInputOption=RAW`, { method: 'PUT', body: JSON.stringify({ values: [columns] }) }); return file; },
     };
 }
-export const defaultHeaders = { Companies: ['Name', 'Type', 'Brand', 'Plant', 'Address', 'Annual Fee', 'Supervision Fee'], Ingredients: ['Name', 'Company', 'Brand', 'Certification', 'Status'], Products: ['Name', 'Company', 'Brand', 'Code', 'Certification', 'Status'] };
+export const defaultHeaders = { Companies: ['ID', 'Name', 'Type', 'Brand', 'Plant', 'Address', 'Annual Fee', 'Supervision Fee'], Ingredients: ['ID', 'Name', 'Company', 'Brand', 'Certification', 'Status'], Products: ['ID', 'Name', 'Company', 'Brand', 'Code', 'Certification', 'Status'] };
 export function createGoogleSheetsConnector(config: GoogleSheetsConfig) { return tabularConnector('google_sheets', config.mapping, createGoogleSheetsApi(config)); }

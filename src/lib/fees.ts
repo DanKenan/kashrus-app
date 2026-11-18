@@ -1,7 +1,7 @@
 import { apiFetch } from './api';
 import { nextVisitDue, type Schedule } from './visitSchedule';
 export type CompanyFee = { amount: number; per: 'visit' | 'month' | 'year' };
-export interface FeePlace { id: string; name: string; kind: string; company: CompanyFee | null; mashgiach: { amount: number } | null; mashgiachNames: string[] }
+export interface FeePlace { id: string; name: string; kind: string; importedCompany?: CompanyFee | null; dataFee?: { amount:number }; company: CompanyFee | null; mashgiach: { amount: number } | null; mashgiachNames: string[] }
 export type AccountantTiming = { mode: 'after_report' } | { mode: 'dates'; days: (number | 'last')[] } | { mode: 'every_days'; everyDays: number };
 export interface Accountant { name: string; email: string; timing: AccountantTiming }
 export interface FeesData { settings: { feeEditors: 'admins' | 'admins_and_coordinators' }; canEdit: boolean; places: FeePlace[]; accountant?: Accountant | null; email?: { setUp: boolean }; nextEmail?: string | null }

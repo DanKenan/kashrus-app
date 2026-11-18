@@ -19,10 +19,16 @@ const files = [parseUpload(Buffer.from('Name\nDemo Bakery'), 'Companies.csv')];
 const measure = async (action, fn, r, w) => { reads = 0; writes = 0; const result = await fn(); budget.push({ action, reads, writes }); assert.equal(reads, r, action); assert.equal(writes, w, action); return result; };
 await measure('upload parts + manifest', () => store.saveUpload(connection, files), 0, 2);
 files.push(parseUpload(Buffer.from('Name\nDemo Flour'), 'Ingredients.csv'));
-await measure('second upload parts + manifest', () => store.saveUpload(connection, files), 0, 2);
+await measure('second upload parts + manifest + previous copy cleanup', () => store.saveUpload(connection, files), 0, 3);
 await measure('mapping config', () => store.save(connection), 0, 1);
 const handlers = new Map(), app = Object.fromEntries(['get', 'post', 'put', 'delete', 'patch'].map(m => [m, (p, h) => handlers.set(m + ' ' + p, h)]));
 const routes = registerSourceRoutes(app, { db: () => db, dataDir: '/unused', staged: () => blocked, secret: () => 'demo-test-secret', testMode: false, requireAdmin: () => ({ id: 'demo-admin', agencyId: 'demo-agency' }), timeZone: () => 'UTC' });
+const partKey = [...docs.keys()].find(k => k.startsWith('sourceUploads/'));
+const part = docs.get(partKey);
+docs.delete(partKey);
+await routes.boot();
+assert.equal(routes.inspectionSource(connection.agencyId).connection,undefined);
+docs.set(partKey,part);
 await measure('boot connection + upload part', async () => { await routes.boot(); for (let i = 0; i < 10; i++)
     await new Promise(r => setImmediate(r)); }, 2, 0);
 const request = async (path) => { let value; await handlers.get('get ' + path)({ query: {}, params: {} }, { json(v) { value = v; }, status() { return this; } }); return value; };
@@ -44,7 +50,9 @@ const remote = { ...connection, sourceType: 'supabase', baseId: 'https://' + 'a'
 docs.set('sourceConnections/demo-agency', JSON.parse(JSON.stringify(remote)));
 let release, name = 'Demo Bakery';
 const gate = new Promise(r => { release = r; }), previousFetch = globalThis.fetch, previousNow = Date.now;
-globalThis.fetch = async () => { await gate; return Response.json([{ id: 'r2', Name: name }]); };
+globalThis.fetch = async url => { await gate; return url.endsWith('/rest/v1/')
+  ? Response.json({definitions:{Companies:{properties:{id:{description:'<pk/>'},Name:{}}}}})
+  : Response.json([{ id: 'r2', Name: name }],{headers:{'Content-Range':'0-0/1'}}); };
 try {
   const restarted = registerSourceRoutes(app, { db: () => db, dataDir: '/unused', staged: () => false, secret: () => 'demo-test-secret', testMode: false, requireAdmin: () => ({ id: 'demo-admin', agencyId: 'demo-agency' }), timeZone: () => 'UTC' });
   await measure('remote boot connection only', () => restarted.boot(), 1, 0);
@@ -57,5 +65,27 @@ try {
   await measure('unchanged refresh', refresh, 0, 0);
   name = 'Changed Demo Bakery'; instant += 61000;
   await measure('changed refresh + old part cleanup', refresh, 0, 4);
-  console.table(budget.slice(-5));
+  // Fail a refresh write, change access, and explicitly fire its queued retry.
+  const setTimer = globalThis.setTimeout;
+  let retry;
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    if (ms === 5000) { retry = fn; return {unref(){}}; }
+    return setTimer(fn, ms, ...args);
+  };
+  const batch = db.batch;
+  try {
+    db.batch = () => { throw Error('Offline'); };
+    name = 'Queued refresh'; instant += 61000;
+    await refresh();
+    assert.equal(typeof retry,'function');
+    db.batch = batch;
+    const res = {status(n){throw Error('Unexpected HTTP '+n)},json(){}};
+    await handlers.get('put /api/sources/access')({body:{access:'readwrite'}},res);
+    await measure('stale retry discarded',async () => {
+      retry(); for(let i=0;i<5;i++) await new Promise(r=>setImmediate(r));
+    },0,0);
+    assert.equal(restarted.inspectionSource('demo-agency').connection.access,'readwrite');
+    assert.equal((await store.raw('demo-agency')).access,'readwrite');
+  } finally {db.batch=batch;globalThis.setTimeout=setTimer;}
+  console.table(budget.slice(-6));
 } finally { globalThis.fetch = previousFetch; Date.now = previousNow; }

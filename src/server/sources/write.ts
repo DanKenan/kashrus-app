@@ -14,9 +14,10 @@ export function guardSourceWrite(c: Connection | undefined, list: string, fields
     const output: Record<string, string> = Object.create(null);
     const allowed = list === 'companies' ? ['name', 'type', 'brand', 'plant', 'address', 'companyFee', 'mashgiachFee'] : list === 'ingredients' ? ['name', 'companyLink', 'brand', 'certification', 'agency', 'status', 'plant', 'expiresOn'] : ['name', 'companyLink', 'brand', 'code', 'certification', 'agency', 'status', 'symbolRequired', 'plant'];
     for (const [key, value] of Object.entries(fields)) {
-        if (!allowed.includes(key) || typeof config[key] !== 'string' || !config[key] || typeof value !== 'string' || value.length > 2000)
+        if (!allowed.includes(key) || typeof value !== 'string' || value.length > 2000)
             return reject(400, 'Only mapped list columns can be edited.');
-        output[config[key]] = value;
+        if (typeof config[key] === 'string' && config[key]) output[config[key]] = value;
     }
+    if (!Object.keys(output).length) return reject(400, 'Only mapped list columns can be edited.');
     return output;
 }

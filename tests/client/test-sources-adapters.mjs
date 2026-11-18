@@ -6,6 +6,8 @@ import { createSupabaseConnector } from '../../src/server/sources/supabase.ts';
 import { sourceFetch } from '../../src/server/sources/http.ts';
 const mapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: '' }, products: { table: '' }, group1Values: [] };
 const requests = [];
+const matrix = [['ID','Name','Formula'],['key','Demo Bakery',42]];
+let invalid = '';
 let fail401 = true, refreshes = 0;
 const mock = createServer(async (req, res) => {
     let body = '';
@@ -25,11 +27,14 @@ const mock = createServer(async (req, res) => {
         return res.end('{}');
     }
     if (u.pathname === '/rest/v1/')
-        return res.end(JSON.stringify({ definitions: { Companies: { properties: { id: {}, Name: {} } } } }));
+        return res.end(JSON.stringify({ definitions: { Companies: { properties: { id: {description:'Note: This is a Primary Key.<pk/>'}, Name: {} } } } }));
     if (u.pathname === '/rest/v1/Companies') {
         if (req.method === 'GET') {
-            const start = Number(req.headers.range?.split('-')[0] || 0);
-            return res.end(JSON.stringify(start === 0 ? Array.from({ length: 1000 }, (_, i) => ({ id: String(i), Name: 'Demo ' + i })) : [{ id: '1000', Name: 'Last demo' }]));
+            assert.equal(u.searchParams.get('order'), '"id".asc');
+            const start = Number(u.searchParams.get('offset'));
+            const size = Math.min(100,350-start);
+            res.setHeader('Content-Range', start + '-' + (start+size-1) + '/350');
+            return res.end(JSON.stringify(Array.from({length:size},(_,i)=>({id:invalid === 'missing' ? null : invalid === 'duplicate' ? 1 : start+i, Name:'Demo '+i}))));
         }
         return res.end(JSON.stringify([{ id: 'new', Name: 'Edited demo' }]));
     }
@@ -38,11 +43,11 @@ const mock = createServer(async (req, res) => {
     if (u.pathname.includes('/v4/spreadsheets/') && !u.pathname.includes('/values/'))
         return res.end(JSON.stringify({ sheets: [{ properties: { title: 'Companies' } }] }));
     if (u.pathname.includes('/values/'))
-        return res.end(JSON.stringify(req.method === 'GET' ? { values: [['Name'], ['Demo Bakery']] } : { updates: { updatedRange: 'Companies!A3:A3' } }));
+        return res.end(JSON.stringify(req.method === 'GET' ? { values: matrix, rowIndex:3, columnIndex:2 } : { updates: { updatedRange: 'Companies!D5' } }));
     if (u.pathname.endsWith('/worksheets'))
         return res.end(JSON.stringify({ value: [{ name: 'Companies' }] }));
     if (u.pathname.includes('/usedRange'))
-        return res.end(JSON.stringify({ values: [['Name'], ['Demo Bakery']] }));
+        return res.end(JSON.stringify({ values: matrix, rowIndex:3, columnIndex:2 }));
     if (u.pathname.includes('/range('))
         return res.end('{}');
     if (u.pathname.includes('/search(') || u.pathname.endsWith('/sharedWithMe'))
@@ -61,8 +66,10 @@ try {
     assert.equal((await g.listTables())[0].name, 'Companies');
     assert.equal(refreshes, 1);
     assert.equal((await g.readRows('Companies'))[0].fields.Name, 'Demo Bakery');
-    await g.writeRow('Companies', { fields: { Name: 'New demo' } });
-    await g.writeRow('Companies', { id: 'r2', fields: { Name: 'Edited demo' } });
+    const googleId = (await g.readRows('Companies'))[0].id;
+    matrix.splice(1,0,['inserted','Other',true]);
+    await g.writeRow('Companies', { fields: {ID:'new', Name:'New demo'} });
+    await g.writeRow('Companies', { id: googleId, fields: { Name: 'Edited demo' } });
     assert.equal((await createGoogleSheetsApi(config).files())[0].id, 'g1');
     fail401 = true;
     let msRefresh = 0;
@@ -73,20 +80,22 @@ try {
     await ms.listTables();
     assert.equal(msRefresh, 1);
     const e = createExcelConnector({ mapping, apiBase, workbookId: 'e1', accessToken: 'fake' });
-    assert.deepEqual((await e.listTables())[0].columns, ['Name']);
-    assert.equal((await e.readRows('Companies'))[0].id, 'r2');
-    await e.writeRow('Companies', { fields: { Name: 'New demo' } });
-    await e.writeRow('Companies', { id: 'r2', fields: { Name: 'Edited demo' } });
+    assert.deepEqual((await e.listTables())[0].columns, matrix[0]);
+    const excelId = (await e.readRows('Companies'))[1].id;
+    assert.notEqual(googleId,excelId);
+    matrix.reverse(); matrix.unshift(matrix.pop());
+    await e.writeRow('Companies', {id:excelId,fields:{Name:'Edited demo'}});
     assert.equal((await createExcelApi({ mapping, apiBase, workbookId: 'e1', accessToken: 'fake' }).files()).length, 1);
     const s = createSupabaseConnector({ mapping, apiBase, url: 'https://' + 'a'.repeat(20) + '.supabase.co', apiKey: 'fake' });
     assert.deepEqual((await s.listTables())[0], { name: 'Companies', columns: ['id', 'Name'] });
-    assert.equal((await s.readRows('Companies')).length, 1001);
+    assert.equal((await s.readRows('Companies')).length, 350);
     await s.writeRow('Companies', { fields: { Name: 'New demo' } });
     await s.writeRow('Companies', { id: 'new', fields: { Name: 'Edited demo' } });
-    assert.ok(requests.some(r => r.headers.range === '1000-1999'));
+    for (invalid of ['missing','duplicate']) await assert.rejects(s.readRows('Companies'), /record key/);
+    assert.deepEqual(JSON.parse(requests.find(r=>r.path.endsWith(':batchUpdate')).body).data,[{range:"'Companies'!B3",values:[['Edited demo']]}]);
     assert.ok(requests.some(r => r.method === 'PATCH' && r.query === '?id=eq.new'));
     assert.ok(requests.filter(r => r.path.includes('/values/') && r.method !== 'GET').every(r => r.query.includes('valueInputOption=RAW')));
-    assert.ok(requests.some(r => r.path.includes("range(address='A3:A3')") || decodeURIComponent(r.path).includes("range(address='A3:A3')")));
+    assert.ok(requests.some(r => r.path.includes("range(address='D5')") || decodeURIComponent(r.path).includes("range(address='D5')")));
     await assert.rejects(() => sourceFetch(apiBase + '/slow', {}, fetch, 20), /request failed/);
     assert.throws(() => createSupabaseConnector({ mapping, url: 'http://localhost', apiKey: 'fake' }), /Invalid Supabase URL/);
     console.log('Google, Excel and Supabase metadata, reads, writes, paging, refresh-once and timeout passed');

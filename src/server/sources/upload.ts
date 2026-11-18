@@ -1,5 +1,6 @@
 import { inflateRawSync } from 'node:zlib';
-import { matrixRows } from './tabular.ts';
+import { randomUUID } from 'node:crypto';
+import { matrixRows, keyRows } from './tabular.ts';
 import { tabularConnector } from './tabular.ts';
 import type { SourceMapping, SourceRow } from './types.ts';
 export interface UploadedFile {
@@ -173,7 +174,7 @@ export function parseXlsx(buffer: Buffer): UploadedFile['tabs'] {
         }
         const parsed = matrixRows(matrix, 3 * 1024 * 1024);
         for (const r of parsed.rows)
-            r.id = `r${rowNumbers[Number(r.id.slice(1)) - 1]}`;
+            r.rowNumber = rowNumbers[r.rowNumber! - 1];
         total += parsed.rows.length;
         if (total > 5000)
             throw Error(uploadRowsError);
@@ -189,6 +190,8 @@ export function parseUpload(buffer: Buffer, name: string): UploadedFile {
     const tabs = /\.csv$/i.test(name) ? [{ name: name.replace(/\.csv$/i, ''), ...matrixRows(parseCsv(buffer.toString('utf8')), 3 * 1024 * 1024) }] : /\.xlsx$/i.test(name) ? parseXlsx(buffer) : (() => { throw Error(uploadTypeError); })();
     if (tabs.reduce((n, t) => n + t.rows.length, 0) > 5000)
         throw Error(uploadRowsError);
+    const version = randomUUID();
+    for (const tab of tabs) keyRows(tab.rows, tab.columns, ['upload', name, tab.name], undefined, version);
     return { id: name, name, tabs };
 }
 export function createUploadConnector(config: {

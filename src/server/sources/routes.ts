@@ -2,6 +2,7 @@ import { createOAuth, isOAuthProvider, type OAuthProvider } from './oauth.ts';
 import { createGoogleSheetsApi } from './google-sheets.ts';
 import { createExcelApi } from './excel.ts';
 import { validSupabaseUrl } from './supabase.ts';
+import { randomUUID } from 'node:crypto';
 import { parseUpload, uploadRowsError, uploadTypeError, type UploadedFile } from './upload.ts';
 import { guardSourceWrite } from './write.ts';
 import { applyMapping } from './mapping.ts';
@@ -81,6 +82,7 @@ export function registerSourceRoutes(app: any, deps: {
   const store = createSourceStore(deps), connections = new Map<string, Connection>();
   let apiBase: string | undefined;
   const apiBases = new Map<string,string>(), uploads = new Map<string,UploadedFile[]>();
+  const drafts = new Map<string,{token:string;files:UploadedFile[]}>();
   const oauth = createOAuth({secret:deps.secret,apiBase:p=>deps.testMode?apiBases.get(p):undefined});
   const oauthRecord=(id:string,p:OAuthProvider)=>connections.get(id)?.oauth?.[p];
   const token=(id:string,p:OAuthProvider)=>(force=false)=>oauth.token(id,p,oauthRecord(id,p),force).then(t=>t.accessToken);
@@ -89,7 +91,7 @@ export function registerSourceRoutes(app: any, deps: {
 
   const tested = new Map<string, { baseId: string; sourceType: string; key: string; at: number; result: ConnectionResult }>();
   const backupErrors = new Set<string>();
-  const pending = new Map<string, { connection: Connection; backups: import('./cache.ts').Backup[]; attempt: number; timer?: ReturnType<typeof setTimeout> }>();
+  const pending = new Map<string, { connection: Connection; expected:Connection; backups: import('./cache.ts').Backup[]; attempt: number; timer?: ReturnType<typeof setTimeout> }>();
   const keyErrors = new Set<string>();
   function storedKey(c: Connection): string {
     try {
@@ -102,7 +104,7 @@ export function registerSourceRoutes(app: any, deps: {
     }
   }
   const status = (id: string) => keyErrors.has(id) ? 'error' : cache.state(id).status;
-  const connector = (c: Connection, plain?: string) => createConnector({ kind: c.sourceType, baseId: c.baseId, spreadsheetId: c.baseId, workbookId: c.baseId, url: c.baseId, mapping: c.mapping, files:uploads.get(c.agencyId)||[], ...(isOAuthProvider(c.sourceType)?{token:token(c.agencyId,c.sourceType)}:{}), ...(deps.testMode ? { apiBase: c.sourceType==='airtable'?apiBase:apiBases.get(c.sourceType) } : {}) } as SourceSettings, plain || (['airtable','supabase'].includes(c.sourceType)?storedKey(c):''));
+  const connector = (c: Connection, plain?: string, files = uploads.get(c.agencyId) || []) => createConnector({ kind: c.sourceType, baseId: c.baseId, spreadsheetId: c.baseId, workbookId: c.baseId, url: c.baseId, mapping: c.mapping, files, ...(isOAuthProvider(c.sourceType)?{token:token(c.agencyId,c.sourceType)}:{}), ...(deps.testMode ? { apiBase: c.sourceType==='airtable'?apiBase:apiBases.get(c.sourceType) } : {}) } as SourceSettings, plain || (['airtable','supabase'].includes(c.sourceType)?storedKey(c):''));
   const loadBackups = (id: string) => store.load(id, Object.keys(connections.get(id)?.backupHashes || {}));
   const cache = createSourceCache({ mappingFor: id => connections.get(id)?.mapping, connectorFor: id => connector(connections.get(id)!), backups: { load: loadBackups }, group1SettingsFor: id => ({ group1Label: connections.get(id)?.group1Label || 'Group 1', group1Overrides: connections.get(id)?.group1Overrides, valueAssignments: connections.get(id)?.mapping.valueAssignments }) });
   const flights = new Map<string, Promise<any>>(), last = new Map<string, number>(), timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -111,7 +113,7 @@ export function registerSourceRoutes(app: any, deps: {
     let next: number;
     try { next = nextNightlyRun(Date.now(), deps.timeZone(id) || 'America/New_York', 3); }
     catch { next = nextNightlyRun(Date.now(), 'America/New_York', 3); }
-    const timer = setTimeout(() => { void refresh(id); schedule(id); }, next - Date.now());
+    const timer = setTimeout(() => { void serialize(id, () => connections.has(id) ? refresh(id) : Promise.resolve()); schedule(id); }, next - Date.now());
     timer.unref(); timers.set(id, timer);
   }
   const mutations = new Map<string, Promise<any>>();
@@ -125,10 +127,11 @@ export function registerSourceRoutes(app: any, deps: {
   // Serialize persistence so an already-running retry cannot overwrite a later PUT.
   const saves = new Map<string, Promise<void>>();
   const unconfirmed = new Map<string, Map<string, import('./cache.ts').Backup>>();
-  function save(c: Connection, backups: import('./cache.ts').Backup[] = []) {
+  function save(c: Connection, backups: import('./cache.ts').Backup[] = [], expected?: Connection, includeDirty = true) {
     const previous = saves.get(c.agencyId) || Promise.resolve();
     const next = previous.catch(() => {}).then(async () => {
-      const dirty = unconfirmed.get(c.agencyId);
+      if (expected && connections.get(c.agencyId) !== expected) return;
+      const dirty = includeDirty ? unconfirmed.get(c.agencyId) : undefined;
       const newest = new Map(backups.map(b => [b.companyId, b]));
       for (const b of dirty?.values() || []) newest.set(b.companyId, b);
       const snapshot = [...newest.values()];
@@ -146,19 +149,19 @@ export function registerSourceRoutes(app: any, deps: {
     void next.finally(() => { if (saves.get(c.agencyId) === next) saves.delete(c.agencyId); }).catch(() => {});
     return next;
   }
-  function retrySave(id: string, connection: Connection, backups: import('./cache.ts').Backup[], attempt = 0) {
+  function retrySave(id: string, expected:Connection, connection: Connection, backups: import('./cache.ts').Backup[], attempt = 0) {
     clearTimeout(pending.get(id)?.timer);
-    const job = { connection, backups, attempt, timer: undefined as ReturnType<typeof setTimeout> | undefined };
+    const job = { expected, connection, backups, attempt, timer: undefined as ReturnType<typeof setTimeout> | undefined };
     pending.set(id, job);
     job.timer = setTimeout(() => { void serialize(id, async () => {
-      if (pending.get(id) !== job) return;
+      if (pending.get(id) !== job || connections.get(id) !== expected) { if (pending.get(id) === job) pending.delete(id); return; }
       try {
-        if (deps.staged()) { retrySave(id, job.connection, backups, attempt + 1); return; }
-        await save(job.connection, backups);
-        if (pending.get(id) !== job) return;
+        if (deps.staged()) { retrySave(id, job.expected, job.connection, backups, attempt + 1); return; }
+        await save(job.connection, backups, expected);
+        if (pending.get(id) !== job || connections.get(id) !== expected) { if (pending.get(id) === job) pending.delete(id); return; }
         connections.set(id, job.connection); cache.setKnownHashes(id, job.connection.backupHashes);
         backupErrors.delete(id); pending.delete(id);
-      } catch { if (pending.get(id) === job) retrySave(id, job.connection, backups, attempt + 1); }
+      } catch { if (pending.get(id) === job) retrySave(id, job.expected, job.connection, backups, attempt + 1); }
     }); }, Math.min(3600_000, 5000 * 3 ** Math.min(attempt, 10)));
     job.timer.unref();
   }
@@ -185,11 +188,12 @@ export function registerSourceRoutes(app: any, deps: {
       const updated = { ...c, backupHashes: hashes, lastRefresh: { at, ok: result.ok, calls: result.calls, ...(result.error ? { error: result.error } : {}) } };
       try {
         if (!deps.staged() && (toSave.length || c.lastRefresh?.at.slice(0, 10) !== at.slice(0, 10))) {
-          await save(updated, toSave);
+          await save(updated, toSave, c);
+          if (connections.get(id) !== c) return {ok:false,status:status(id)};
           connections.set(id, updated); backupErrors.delete(id); cache.setKnownHashes(id, updated.backupHashes);
         }
-        else if (toSave.length) retrySave(id, updated, toSave);
-      } catch { console.warn(`[sources] persistence failed agency=${id}`); backupErrors.add(id); cache.setKnownHashes(id, c.backupHashes); retrySave(id, updated, toSave); }
+        else if (toSave.length) retrySave(id, c, updated, toSave);
+      } catch { console.warn(`[sources] persistence failed agency=${id}`); backupErrors.add(id); cache.setKnownHashes(id, c.backupHashes); retrySave(id, c, updated, toSave); }
       console.info(`[sources] agency=${id} ok=${result.ok} calls=${result.calls} ms=${Date.now() - start}`);
       return { ok: result.ok, status: status(id), calls: result.calls, refreshedAt: cache.state(id).refreshedAt || null };
     })().finally(() => flights.delete(id));
@@ -226,13 +230,17 @@ export function registerSourceRoutes(app: any, deps: {
           if (!r || body.access === 'readwrite' && r.access !== 'readwrite')
               return res.status(409).json({ error: 'Sign in required', needsSignIn: true });
       }
-      if (p === 'upload' && !uploads.get(id)?.length)
+      const draft = drafts.get(id);
+      if (p === 'upload' && body.draftId && draft?.token !== body.draftId)
+          return res.status(409).json({error:'Upload draft expired.'});
+      const files = body.draftId ? draft?.files : uploads.get(id);
+      if (p === 'upload' && !files?.length)
           return res.status(400).json({ error: 'Upload a file first' });
       const plain = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
       if (p === 'supabase' && !plain && !(old?.sourceType === 'supabase' && old.encryptedKey))
           return res.status(400).json({ error: 'API key required' });
       const c: Connection = { ...(old || blank(id, user.id, p)), sourceType: p, baseId: body.baseId, access: p === 'upload' ? 'read' : body.access, mapping: body.mapping, group1Label: body.group1Label?.trim() || old?.group1Label || 'Group 1', updatedAt: new Date().toISOString(), updatedBy: user.id, encryptedKey: p === 'supabase' ? (plain ? encryptKey(plain, deps.secret(), id) : old!.encryptedKey) : '', keyHint: p === 'supabase' ? (plain ? keyHint(plain) : old!.keyHint) : '', backupHashes: {} };
-      const adapter = connector(c, plain || undefined);
+      const adapter = connector(c, plain || undefined, files);
       // Validate each file separately, including a list whose tab has the same name.
       for (const list of ['companies', 'ingredients', 'products'] as const) {
           const config = c.mapping[list];
@@ -246,7 +254,15 @@ export function registerSourceRoutes(app: any, deps: {
       }
       const data = await adapter.loadAll!();
       // Mapping save is exactly one config write; last-good backups follow explicit refresh.
-      await save(c);
+      if (p === 'upload' && body.draftId) {
+          await store.saveUpload(c, files!);
+          uploads.set(id, files!);
+          drafts.delete(id);
+      } else {
+          if (p !== 'upload') delete c.upload;
+          await save(c, [], undefined, false);
+      }
+      unconfirmed.delete(id);
       connections.set(id, c);
       cache.reset(id);
       cache.publish(id, data);
@@ -345,7 +361,10 @@ export function registerSourceRoutes(app: any, deps: {
       catch (e: any) {
           return res.status(400).json({ error: e.message });
       }
-      const previous = uploads.get(id) || [];
+      const draft = drafts.get(id);
+      if (!draft || req.query.draftId !== draft.token) return res.status(409).json({error:'Upload draft expired.'});
+      const previous = draft.files;
+      if (previous.some(f => f.name === file.name)) return res.status(400).json({error:'Choose files with distinct names.'});
       if (previous.length >= 3)
           return res.status(400).json({ error: 'A copy can contain up to three files.' });
       file.id = `file${previous.length + 1}`;
@@ -361,18 +380,15 @@ export function registerSourceRoutes(app: any, deps: {
               t.name = `${base} (${n++})`;
           used.add(t.name);
       }
-      const old = connections.get(id), c = { ...(old || blank(id, user.id, 'upload')), sourceType: 'upload' as const, baseId: 'upload', access: 'read' as const, encryptedKey: '', keyHint: '' };
-      await store.saveUpload(c, next);
-      uploads.set(id, next);
-      connections.set(id, c);
+      draft.files = next;
       res.json({ fileName: file.name, rows: file.tabs.reduce((n, t) => n + t.rows.length, 0), tables: file.tabs.map(t => ({ name: t.name, columns: t.columns })), samples: Object.fromEntries(file.tabs.map(t => [t.name, t.rows.slice(0, 3)])) });
   }));
-  app.post('/api/sources/upload/reset', mutation(async (_req: any, res: any, { id }: any) => { if (blocked(res))
-      return; const c = connections.get(id); if (c?.sourceType === 'upload') {
-      await store.remove(c);
-      connections.delete(id);
-      cache.reset(id);
-  } uploads.delete(id); res.json({ ok: true }); }));
+  app.post('/api/sources/upload/reset', mutation(async (req: any, res: any, { id }: any) => {
+      if (blocked(res)) return;
+      const draftId = randomUUID();
+      drafts.set(id, {token:draftId, files:[]});
+      res.json({draftId});
+  }));
   app.post('/api/sources/create-file', mutation(async (req: any, res: any, { id }: any) => {
       const p = req.body?.provider;
       if (!isOAuthProvider(p))
@@ -396,8 +412,9 @@ export function registerSourceRoutes(app: any, deps: {
           return res.status(400).json({ error: 'Uploaded copies are read only.' });
       if (isOAuthProvider(c.sourceType))
           oauth.requireSetUp(c.sourceType);
+      if (flights.has(id)) await flights.get(id);
       const needsSignIn = c.sourceType === 'excel' && req.body.access === 'readwrite' && c.oauth?.excel?.access !== 'readwrite';
-      const next = { ...c, access: needsSignIn ? 'read' as const : req.body.access, updatedAt: new Date().toISOString(), updatedBy: user.id };
+      const next = { ...connections.get(id)!, access: needsSignIn ? 'read' as const : req.body.access, updatedAt: new Date().toISOString(), updatedBy: user.id };
       await save(next);
       connections.set(id, next);
       res.json({ access: next.access, ...(needsSignIn ? { needsSignIn: true } : {}) });
@@ -416,6 +433,7 @@ export function registerSourceRoutes(app: any, deps: {
       pending.delete(id);
       connections.delete(id);
       uploads.delete(id);
+      drafts.delete(id);
       cache.reset(id);
       oauth.clear(id);
       tested.delete(id);
@@ -496,12 +514,12 @@ export function registerSourceRoutes(app: any, deps: {
     if (changed) { c.backupHashes = {}; delete c.lastRefresh; }
     if (old?.backupParts) c.backupParts = old.backupParts;
     const job = pending.get(id); clearTimeout(job?.timer); pending.delete(id);
-    try { await save(c); } catch (cause) { if (job) retrySave(id, job.connection, job.backups, job.attempt); throw cause; }
+    try { await save(c, [], undefined, !changed); if(changed) unconfirmed.delete(id); } catch (cause) { if (job) retrySave(id, job.expected, job.connection, job.backups, job.attempt); throw cause; }
     backupErrors.delete(id);
     connections.set(id, c); keyErrors.delete(id);
     if (changed && (!old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || keyChanged || JSON.stringify({ ...old.mapping, valueAssignments: undefined }) !== JSON.stringify({ ...c.mapping, valueAssignments: undefined }))) cache.reset(id);
     else cache.reassign(id, c.mapping);
-    res.json(safe(id)); schedule(id); void refresh(id);
+    res.json(safe(id)); schedule(id); void serialize(id, () => refresh(id));
   }));
   app.post('/api/sources/test', handler(async (req: any, res: any, { id }: any) => {
     try { settings(req.body, false); } catch (e: any) { return res.status(400).json({ error: e.message }); }
@@ -519,7 +537,7 @@ export function registerSourceRoutes(app: any, deps: {
     catch { return res.json({ ok: false, error: 'Source preview failed', calls: adapter.calls() }); }
     res.json({ ...result, guess, samples, calls: adapter.calls() });
   }));
-  app.post('/api/sources/refresh', handler(async (_req: any, res: any, { id }: any) => {
+  app.post('/api/sources/refresh', mutation(async (_req: any, res: any, { id }: any) => {
     if (!connections.has(id)) return res.status(400).json({ error: 'No source connected' });
     if (Date.now() - (last.get(id) || 0) < 60_000) return res.status(429).json({ error: 'Just refreshed, try again in a minute' });
     res.json(await refresh(id));
@@ -603,12 +621,17 @@ export function registerSourceRoutes(app: any, deps: {
     try {
       for (const c of await store.connections()) {
         if (connections.has(c.agencyId)) continue;
+        if(c.sourceType==='upload') {
+          if(!c.upload) throw Error('Missing upload manifest');
+          const files = await store.loadUpload(c);
+          if (connections.has(c.agencyId)) continue;
+          uploads.set(c.agencyId,files);
+        }
         connections.set(c.agencyId, c);
         cache.setKnownHashes(c.agencyId, c.backupHashes || {});
-        if(c.sourceType==='upload') uploads.set(c.agencyId,await store.loadUpload(c));
         schedule(c.agencyId);
         if(c.sourceType!=='airtable'&&!c.mapping.companies?.table) continue;
-        void refresh(c.agencyId).catch(() => console.warn('[sources] startup refresh failed'));
+        void serialize(c.agencyId, () => refresh(c.agencyId)).catch(() => console.warn('[sources] startup refresh failed'));
       }
     } catch {
       console.warn('[sources] startup failed');

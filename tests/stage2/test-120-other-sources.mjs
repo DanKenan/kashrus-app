@@ -56,9 +56,10 @@ export default {
                 return send({});
             }
             if (path === '/rest/v1/')
-                return send({ definitions: Object.fromEntries(Object.entries(rows).map(([table, data]) => [table, { properties: Object.fromEntries(['id', ...data[0]].map(c => [c, {}])) }])) });
+                return send({ definitions: Object.fromEntries(Object.entries(rows).map(([table, data]) => [table, { properties: Object.fromEntries(['id', ...data[0]].map(c => [c, c === 'id' ? {description:'<pk/>'} : {}])) }])) });
             if (path.startsWith('/rest/v1/')) {
                 const table = path.split('/').pop();
+                if (req.method === 'GET') res.setHeader('Content-Range', '0-0/1');
                 if (req.method === 'GET')
                     return send((rows[table] || []).slice(1).map((r, i) => ({ id: `r${i + 2}`, ...Object.fromEntries(rows[table][0].map((c, j) => [c, r[j]])) })));
                 writes++;
@@ -75,10 +76,11 @@ export default {
         const request = async (method, path, body, status = 200, who = 'admin') => { const r = await api(who, method, path, body); assert.equal(r.status, status, `${method} ${path}: ${JSON.stringify(r.json)}`); if (!path.endsWith('/picker-token'))
             for (const s of sentinel)
                 assert.equal(JSON.stringify(r.json).includes(s), false, `${path} leaked sentinel`); return r.json; };
-        const rawUpload = async (name, bytes, type) => { const r = await fetch(`${baseUrl}/api/sources/upload?name=${encodeURIComponent(name)}`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.admin}`, 'Content-Type': type }, body: bytes }); const json = await r.json(); assert.equal(r.status, 200, JSON.stringify(json)); return json; };
+        let draftId;
+        const rawUpload = async (name, bytes, type) => { const r = await fetch(`${baseUrl}/api/sources/upload?draftId=${draftId}&name=${encodeURIComponent(name)}`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.admin}`, 'Content-Type': type }, body: bytes }); const json = await r.json(); assert.equal(r.status, 200, JSON.stringify(json)); return json; };
         const signIn = async (p, access) => { const start = await request('POST', `/api/sources/oauth/${p}/start`, { access }), url = new URL(start.url); assert.equal(url.origin, apiBase); assert.equal(url.searchParams.get('code_challenge_method'), 'S256'); const callback = `/api/sources/oauth/${p}/callback?state=${url.searchParams.get('state')}&code=fake-code`; const r = await measure(`${p} OAuth callback`, () => fetch(baseUrl + callback, { redirect: 'manual' }), 1); assert.equal(r.status, 302); assert.match(r.headers.get('location'), /signin=ok/); const replay = await fetch(baseUrl + callback, { redirect: 'manual' }); assert.match(replay.headers.get('location'), /signin=failed/); return url; };
         const mapping = { companies: { table: 'Companies', name: 'Name', address: 'Address', companyFee: 'Annual Fee', mashgiachFee: 'Supervision Fee' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: [] };
-        const save = async (p, access = 'read', m = mapping) => measure(`${p} mapping`, () => request('PUT', '/api/sources/connection', { sourceType: p, baseId: p === 'supabase' ? 'https://' + 'a'.repeat(20) + '.supabase.co' : p === 'upload' ? 'upload' : 'main', access, mapping: m, ...(p === 'supabase' ? { apiKey: sentinel[0] } : {}) }), 1);
+        const save = async (p, access = 'read', m = mapping) => measure(`${p} mapping`, () => request('PUT', '/api/sources/connection', { sourceType: p, baseId: p === 'supabase' ? 'https://' + 'a'.repeat(20) + '.supabase.co' : p === 'upload' ? 'upload' : 'main', access, mapping: m, ...(p === 'upload' ? {draftId} : {}), ...(p === 'supabase' ? { apiKey: sentinel[0] } : {}) }), p === 'upload' ? 2 : 1);
         const browse = async (p) => { const data = await measure(`${p} browse factories/items`, async () => { const factories = await request('GET', '/api/factories'); const c = factories.companies[0]; assert.equal(c.name, 'Golden Grain Bakery'); assert.equal(c.address, '100 Demo Street'); await request('GET', `/api/factories/${c.id}/items`); return factories; }); return data; };
         try {
             // Hydrate inspection settings once for this freshly injected agency. Source browsing is measured after boot.
@@ -103,9 +105,9 @@ export default {
             assert.equal(pick.accessToken, sentinel[2]);
             const separate = { ...mapping, ingredients: { ...mapping.ingredients, file: { id: 'separate', name: 'Demo separate' } } };
             await save('google_sheets', 'readwrite', separate);
-            await browse('google_sheets');
+            const googleId = (await browse('google_sheets')).companies[0].id;
             assert.ok(seen.some(r => r.path.includes('/separate/values/')));
-            await measure('Google rows POST/PATCH', async () => { await request('POST', '/api/sources/rows/companies', { fields: { name: 'Golden Grain Bakery' } }); await request('PATCH', '/api/sources/rows/companies/r2', { fields: { address: '100 Demo Street' } }); });
+            await measure('Google rows POST/PATCH', async () => { await request('POST', '/api/sources/rows/companies', { fields: { name: 'Another bakery' } }); await request('PATCH', `/api/sources/rows/companies/${googleId}`, { fields: { address: '100 Demo Street' } }); });
             assert.equal((await request('POST', '/api/sources/create-file', { provider: 'google_sheets' })).file.id, 'created');
             assert.equal(created, 1);
             await measure('Google access read', () => request('PUT', '/api/sources/access', { access: 'read' }), 1);
@@ -114,7 +116,7 @@ export default {
             assert.equal(writes, at);
             await signIn('excel', 'read');
             await save('excel');
-            await browse('excel');
+            const excelId = (await browse('excel')).companies[0].id;
             const change = await measure('Excel access upgrade', () => request('PUT', '/api/sources/access', { access: 'readwrite' }), 1);
             assert.equal(change.needsSignIn, true);
             await request('POST', '/api/sources/rows/companies', { fields: { name: 'Blocked demo' } }, 403);
@@ -122,7 +124,7 @@ export default {
             assert.match(ms.searchParams.get('scope'), /Files.ReadWrite.All/);
             await save('excel', 'readwrite');
             await measure('Excel files/tabs', async () => { await request('GET', '/api/sources/files?provider=excel'); assert.equal((await request('GET', '/api/sources/tabs?provider=excel&fileId=main')).tables.length, 3); });
-            await measure('Excel row PATCH', () => request('PATCH', '/api/sources/rows/companies/r2', { fields: { name: 'Golden Grain Bakery' } }));
+            await measure('Excel row PATCH', () => request('PATCH', `/api/sources/rows/companies/${excelId}`, { fields: { name: 'Golden Grain Bakery' } }));
             await request('POST', '/api/sources/create-file', { provider: 'excel' });
             assert.equal(created, 2);
             const badBefore = calls;
@@ -136,7 +138,7 @@ export default {
             // Warm P5's agency-local stores before measuring source actions.
             await request('GET', '/api/inspections/fees');
             const fees = await request('GET', '/api/inspections/fees');
-            assert.deepEqual(fees.places.find(p => p.id === 'r2').company, { amount: 1200, per: 'year', source: 'data' });
+            assert.deepEqual(fees.places.find(p => p.id === 'r2').importedCompany, { amount: 1200, per: 'year' });
             const info = await request('GET', '/api/inspections/company-info/r2');
             assert.equal(info.address, '100 Demo Street');
             await request('PUT', '/api/inspections/fees/r2', { company: { amount: 1500, per: 'year' }, mashgiach: { amount: 75 } });
@@ -150,12 +152,20 @@ export default {
             const detail = await request('GET', `/api/inspections/reports/${reportId}`);
             assert.equal(detail.report.feeCheck.reportAmount, 80);
             await measure('disconnect remote', () => request('DELETE', '/api/sources/connection'), 1);
+            draftId = (await request('POST','/api/sources/upload/reset',{})).draftId;
             const csv = 'Name,Address,Annual Fee,Supervision Fee\nGolden Grain Bakery,100 Demo Street,"$1,200",80\n';
-            await measure('upload CSV', () => rawUpload('Companies.csv', Buffer.from(csv), 'text/csv'), 2);
-            await measure('upload XLSX second file', () => rawUpload('Ingredients.xlsx', zip(workbookFixture()), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'), 2);
+            await measure('upload CSV', () => rawUpload('Companies.csv', Buffer.from(csv), 'text/csv'), 0);
+            await measure('upload XLSX second file', () => rawUpload('Ingredients.xlsx', zip(workbookFixture()), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'), 0);
             const uploaded = { ...mapping, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: '' } };
             await save('upload', 'read', uploaded);
-            await browse('upload');
+            const live = (await browse('upload')).companies[0];
+            const linked = await request('GET', `/api/factories/${live.id}/items`);
+            assert.deepEqual(linked.ingredients.map(r => r.name), ['Demo Flour']);
+            draftId = (await request('POST','/api/sources/upload/reset',{})).draftId;
+            await rawUpload('Replacement.csv', Buffer.from('Name\nDifferent'), 'text/csv');
+            await request('PUT','/api/sources/connection',{sourceType:'upload',baseId:'upload',access:'read',mapping:uploaded,draftId},400);
+            await request('POST','/api/sources/upload/reset',{});
+            assert.equal((await browse('upload')).companies[0].id,live.id);
             await measure('upload tabs', () => request('GET', '/api/sources/tabs?provider=upload'));
             await request('PUT', '/api/sources/access', { access: 'readwrite' }, 400);
             await request('POST', '/api/sources/rows/companies', { fields: { name: 'Blocked demo' } }, 409);

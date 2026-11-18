@@ -38,6 +38,6 @@ export interface SourceConnector {
   writeRow?(table: string, row: { id?: string; fields: Record<string, string> }, file?: SourceFile): Promise<SourceRow>;
   calls(): number;
 }
-export interface SourceRow { id: string; fields: Record<string, unknown> }
+export interface SourceRow { rowNumber?: number; sourceKey?: string; id: string; fields: Record<string, unknown> }
 
 export type Group1Overrides = { ingredient: Record<string, boolean>; product: Record<string, boolean> };

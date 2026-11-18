@@ -6,7 +6,7 @@ import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
 export interface Connection {
   oauth?: Partial<Record<import('./oauth.ts').OAuthProvider, import('./oauth.ts').OAuthRecord>>;
-  upload?: {fileNames:string[];copiedAt:string;rows:number;parts:number;hash:string};
+  upload?: {fileNames:string[];copiedAt:string;rows:number;parts:number;hash:string;versioned?:boolean};
   fees?: {mashgiach?:Record<string,{amount:number;currency:string}>};
   group1Label?: string; group1Overrides?: Group1Overrides;
   agencyId: string; sourceType: SourceKind; baseId: string; access: 'read' | 'readwrite';
@@ -119,20 +119,29 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     if(Buffer.byteLength(text)>3*1024*1024) throw Object.assign(Error('This file is too big to copy. Split it into smaller files.'),{status:400});
     const encoded=Buffer.from(text).toString('base64'), hash=digest(text), parts=Math.ceil(encoded.length/(480*1024));
     const old=connection.upload;
-    const upload={fileNames:files.map(f=>f.name),copiedAt:new Date().toISOString(),rows:files.reduce((n,f)=>n+f.tabs.reduce((n,t)=>n+t.rows.length,0),0),parts,hash};
-    await commit([...Array.from({length:parts},(_,i)=>({collection:'sourceUploads',id:`${connection.agencyId}__copy__${i}`,doc:{data:encoded.slice(i*480*1024,(i+1)*480*1024)}})),{collection:'sourceConnections',id:connection.agencyId,doc:{...connection,upload}}]);
+    const upload={versioned:true,fileNames:files.map(f=>f.name),copiedAt:new Date().toISOString(),rows:files.reduce((n,f)=>n+f.tabs.reduce((n,t)=>n+t.rows.length,0),0),parts,hash};
+    const partId = (i:number) => `${connection.agencyId}__copy__${hash}__${i}`;
+    await commit(Array.from({length:parts},(_,i)=>({collection:'sourceUploads',id:partId(i),doc:{data:encoded.slice(i*480*1024,(i+1)*480*1024)}})));
+    await commit([{collection:'sourceConnections',id:connection.agencyId,doc:{...connection,upload}}]);
     connection.upload=upload;
-    if(old&&old.parts>parts) await commit(Array.from({length:old.parts-parts},(_,i)=>({collection:'sourceUploads',id:`${connection.agencyId}__copy__${i+parts}`})));
+    if(old && old.hash !== hash) await commit(Array.from({length:old.parts},(_,i)=>({collection:'sourceUploads',id:uploadPart(connection.agencyId,old,i)}))).catch(()=>{});
+  }
+  function uploadPart(id:string, upload:NonNullable<Connection['upload']>, i:number) {
+    return `${id}__copy__${upload.versioned ? upload.hash + '__' : ''}${i}`;
   }
   async function loadUpload(c:Connection):Promise<import('./upload.ts').UploadedFile[]> {
-    if(!c.upload)return [];
-    const parts=await Promise.all(Array.from({length:c.upload.parts},(_,i)=>read('sourceUploads',`${c.agencyId}__copy__${i}`)));
+    if (!c.upload || !Number.isInteger(c.upload.parts) || c.upload.parts < 1 || c.upload.parts > 10) throw Error('Invalid upload manifest');
+    const parts=await Promise.all(Array.from({length:c.upload.parts},(_,i)=>read('sourceUploads',uploadPart(c.agencyId,c.upload!,i))));
     if(parts.some(p=>typeof p?.data!=='string'))throw Error('Missing upload part');
-    const text=Buffer.from(parts.map(p=>p.data).join(''),'base64').toString('utf8');if(digest(text)!==c.upload.hash)throw Error('Invalid upload');return JSON.parse(text);
+    const text=Buffer.from(parts.map(p=>p.data).join(''),'base64').toString('utf8');if(digest(text)!==c.upload.hash)throw Error('Invalid upload');const files = JSON.parse(text);
+    if (!Array.isArray(files) || !files.length || files.length > 3 || files.some(f =>
+      typeof f?.name !== 'string' || !Array.isArray(f.tabs) || f.tabs.some((t:any) =>
+        !Array.isArray(t.columns) || !Array.isArray(t.rows) || t.rows.some((r:any) => typeof r?.id !== 'string' || !r.fields)))) throw Error('Invalid upload');
+    return files;
   }
   async function remove(c:Connection) {
     if(deps.staged())throw Error('Writes blocked');
-    await commit([{collection:'sourceConnections',id:c.agencyId},...Array.from({length:c.upload?.parts||0},(_,i)=>({collection:'sourceUploads',id:`${c.agencyId}__copy__${i}`}))]);
+    await commit([{collection:'sourceConnections',id:c.agencyId},...Array.from({length:c.upload?.parts||0},(_,i)=>({collection:'sourceUploads',id:uploadPart(c.agencyId,c.upload!,i)}))]);
   }
   return { connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
 }

@@ -20,7 +20,8 @@ export function assignChip(mapping: SourceMapping, value: string, target: 'facto
   const other = target === 'factoryValues' ? 'foodServiceValues' : 'factoryValues';
   return { ...mapping, companies: { ...mapping.companies, [target]: [...new Set([...(mapping.companies[target] || []), value])], [other]: (mapping.companies[other] || []).filter(v => v !== value) } };
 }
-export function money(value: unknown) { if (value === '' || value == null) return ''; const amount = Number(String(value).replace(/[$,]/g, '')); return Number.isFinite(amount) ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2, minimumFractionDigits: Number.isInteger(amount) ? 0 : 2 }).format(amount) : ''; }
+import { parseMoney } from './sourceAmount.ts';
+export function money(value: unknown) { const amount = parseMoney(value); return amount !== undefined ? new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2, minimumFractionDigits: Number.isInteger(amount) ? 0 : 2 }).format(amount) : ''; }
 export function previewRows(samples: Samples, mapping: SourceMapping) { const m = mapping.companies; return (samples[m.table] || []).slice(0, 3).map(({ fields }) => [fields[m.name] || '', fields[m.address || ''] || '', (m.foodServiceValues || []).includes(fields[m.type || '']) ? 'Food service' : (m.factoryValues || []).includes(fields[m.type || '']) ? 'Factory visits' : fields[m.type || ''] || '', money(fields[m.companyFee || '']), money(fields[m.mashgiachFee || ''])]); }
 export function lastReadText(at: string | null | undefined, timeZone: string, now = new Date()) { if (!at) return 'Last read: Not read yet'; const date = new Date(at); if (!Number.isFinite(date.getTime())) return 'Last read: Not read yet'; const day = (d: Date) => new Intl.DateTimeFormat('en-US', { timeZone, dateStyle: 'short' }).format(d); return `Last read: ${day(date) === day(now) ? 'today' : new Intl.DateTimeFormat('en-US', { timeZone, dateStyle: 'medium' }).format(date)}, ${new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', minute: '2-digit' }).format(date)}`; }
 export function countsText(counts: SourceConnection['counts']) { return counts ? `${counts.companies.toLocaleString('en-US')} companies · ${counts.ingredients.toLocaleString('en-US')} ingredients` : ''; }
@@ -34,13 +35,13 @@ export const getTabs = (provider: Provider, fileId = ''): Promise<TabData> => so
 export const startSignIn = (provider: Provider, access: Access) => sourceRequest(`/api/sources/oauth/${provider}/start`, 'POST', { access });
 export const createFile = (provider: Provider) => sourceRequest('/api/sources/create-file', 'POST', { provider });
 export const testSupabase = (url: string, apiKey: string) => sourceRequest('/api/sources/supabase/test', 'POST', { url, apiKey });
-export const saveConnection = (body: { sourceType: Provider; baseId: string; access: Access; mapping: SourceMapping; apiKey?: string }) => sourceRequest('/api/sources/connection', 'PUT', body);
+export const saveConnection = (body: { sourceType: Provider; baseId: string; access: Access; mapping: SourceMapping; draftId?:string; apiKey?: string }) => sourceRequest('/api/sources/connection', 'PUT', body);
 export const changeAccess = (access: Access) => sourceRequest('/api/sources/access', 'PUT', { access });
 export const disconnect = () => sourceRequest('/api/sources/connection', 'DELETE');
 export const readAgain = () => sourceRequest('/api/sources/refresh', 'POST');
-export const resetUpload = () => sourceRequest('/api/sources/upload/reset', 'POST');
-export const saveCompany = (fields: { name: string; address: string; type: string }, id?: string) => sourceRequest(`/api/sources/rows/companies${id ? `/${encodeURIComponent(id)}` : ''}`, id ? 'PATCH' : 'POST', { fields });
-export async function uploadFile(file: File) { const response = await apiFetch(`/api/sources/upload?name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'Content-Type': file.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }, body: file }); const data = await response.json(); if (!response.ok || data.error) throw new Error(data.error); return data as TabData & { fileName: string; rows: number }; }
+export const resetUpload = () => sourceRequest('/api/sources/upload/reset', 'POST') as Promise<{draftId:string}>;
+export const saveCompany = (fields: Partial<{ name: string; address: string; type: string }>, id?: string) => sourceRequest(`/api/sources/rows/companies${id ? `/${encodeURIComponent(id)}` : ''}`, id ? 'PATCH' : 'POST', { fields });
+export async function uploadFile(file: File, draftId:string) { const response = await apiFetch(`/api/sources/upload?draftId=${encodeURIComponent(draftId)}&name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'Content-Type': file.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }, body: file }); const data = await response.json(); if (!response.ok || data.error) throw new Error(data.error); return data as TabData & { fileName: string; rows: number }; }
 // Picker is loaded only in response to a signed-in account's explicit action.
 export async function pickGoogleFile(onPick: (file: SourceFile) => void) {
   const { accessToken, appId } = await sourceRequest('/api/sources/oauth/google_sheets/picker-token', 'POST');
