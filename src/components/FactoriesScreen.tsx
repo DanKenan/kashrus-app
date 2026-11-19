@@ -25,7 +25,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const isOpen = requestedOpen || oauthReturn;
   const onClose = () => { setOauthReturn(false); if (oauthReturn) { const url = new URL(window.location.href); url.searchParams.delete('sources'); url.searchParams.delete('signin'); window.history.replaceState(null, '', url); } requestedClose(); };
   const [sheetList, setSheetList] = useState<SourceSection | null>(null);
-  const [sheetRecord, setSheetRecord] = useState<{ section: SourceSection; row: Pick<Factory, 'id' | 'name'> } | null>(null);
+  const [sheetRecord, setSheetRecord] = useState<{ section: SourceSection; row?: Pick<Factory, 'id' | 'name'> } | null>(null);
   const [companyEditor, setCompanyEditor] = useState<Factory | 'new' | null>(null);
   const [feePlace, setFeePlace] = useState<string | null>(null), [infoPlace, setInfoPlace] = useState<string | null>(null), [feesSettings, setFeesSettings] = useState(false), [payOpen, setPayOpen] = useState(false);
   const [scheduleData, setScheduleData] = useState<ScheduleData | null>(null);
@@ -44,7 +44,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const [visitGroup1Label, setVisitGroup1Label] = useState('Group 1');
   const [companies, setCompanies] = useState<Factory[]>([]);
   const canEditSheet = role === 'admin' && connection?.sourceType === 'google_sheets' && connection.sheetsFeeEditing === true;
-  const sheetSections = canEditSheet ? connection?.sheetsEditSections : undefined;
+  const sheetSections = role === 'admin' && connection?.sourceType === 'google_sheets' ? connection.sheetsEditSections : undefined;
   const [selectedCompany, setSelectedCompany] = useState<Factory | null>(null);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [settings, setSettings] = useState(oauthReturn);
@@ -150,9 +150,10 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
     {(canEdit(role, connection) || (canEditSheet && companyEditor !== 'new')) && companyEditor && <SourceCompanyEditor sheetMapping={canEditSheet ? connection?.mapping?.companies : undefined} company={companyEditor === 'new' ? { name: '' } : companyEditor} source={providers.find(p => p.id === connection?.sourceType)?.name || ''} onClose={() => setCompanyEditor(null)} onSaved={() => setReload(k => k + 1)} />}
     {sheetList && sheetSections?.includes(sheetList) && !sheetRecord &&
       <SheetRecordList section={sheetList} onClose={() => setSheetList(null)}
-        onChoose={row => setSheetRecord({ section: sheetList, row })} />}
+        onChoose={row => setSheetRecord({ section: sheetList, row })}
+        onAdd={() => setSheetRecord({ section: sheetList })} />}
     {sheetRecord && sheetSections?.includes(sheetRecord.section) &&
-      <SheetRecordEditor key={sheetRecord.row.id} {...sheetRecord} onClose={() => setSheetRecord(null)}
+      <SheetRecordEditor key={sheetRecord.row?.id ?? sheetRecord.section} {...sheetRecord} onClose={() => setSheetRecord(null)}
         onSaved={() => { setReload(k => k + 1); setScheduleReload(k => k + 1); }} />}
     {role === 'admin' && connection && <React.Fragment key={connection.status === 'recovering' ? 'recovery' : 'setup'}><SourcesSheet timeZone={timeZone} isOpen={settings} connection={connection} onClose={() => setSettings(false)} onSaved={() => setReload(k => k + 1)} /></React.Fragment>}
   </div>;
