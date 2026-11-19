@@ -55,6 +55,26 @@ export function createInboxStore(deps: DocumentDeps & { submittedAt(agency: stri
       await base.persist(a, before, saved); persisted.set(a, structuredClone(saved)); base.install(a, next);
     });
   }
+  async function remove(a: string, reportIds: string[]) {
+    if (!reportIds.length) return;
+    await ensure(a);
+    return base.locked(a, async () => {
+      const next = structuredClone(base.doc(a)), before = persisted.get(a)!, saved = structuredClone(before);
+      let changed = false;
+      for (const id of reportIds) {
+        changed ||= Object.hasOwn(saved.seen, id) || Object.hasOwn(saved.followUp, id);
+        delete saved.seen[id]; delete saved.followUp[id];
+        delete next.seen[id]; delete next.followUp[id];
+      }
+      if (changed) {
+        saved.updatedAt = next.updatedAt = deps.now().toISOString();
+        await base.persist(a, before, saved);
+        persisted.set(a, saved);
+      }
+      base.install(a, next);
+      for (const id of reportIds) { submitted.delete(JSON.stringify([a, id])); dirty.get(a)?.delete(id); }
+    });
+  }
   async function flush(force = false) {
     const flushPending = async () => {
       let writes = 0;
@@ -94,5 +114,5 @@ export function createInboxStore(deps: DocumentDeps & { submittedAt(agency: stri
     }
     return writes;
   }
-  return { ensure, boot: async (agencies: string[]) => { await Promise.allSettled([...new Set(agencies)].map(ensure)); }, ready: base.ready, doc: base.doc, mark, followUp, status: (a: string, r: { id: string; submittedAt: string }) => inboxStatus(base.doc(a), r, deps.now()), flush };
+  return { ensure, boot: async (agencies: string[]) => { await Promise.allSettled([...new Set(agencies)].map(ensure)); }, ready: base.ready, doc: base.doc, mark, followUp, remove, status: (a: string, r: { id: string; submittedAt: string }) => inboxStatus(base.doc(a), r, deps.now()), flush };
 }

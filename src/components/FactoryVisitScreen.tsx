@@ -56,10 +56,11 @@ export function VisitSheet({ title, onClose, children }: { title: string; onClos
   const root = useVisitFocus(onClose);
   return <div className="fixed inset-0 z-50 flex items-end justify-center bg-scrim"><div ref={root} role="dialog" aria-modal="true" aria-label={title} className="max-h-[90dvh] w-full max-w-2xl space-y-4 overflow-y-auto rounded-t-2xl bg-surface p-4 text-ink tactile-4"><div className="flex items-center gap-4"><h2 className="min-w-0 flex-1 break-words text-2xl font-semibold">{title}</h2><button type="button" className={`${visitButton} h-11 w-11 shrink-0 px-0`} aria-label="Close" onClick={onClose}>×</button></div>{children}</div></div>;
 }
+const withoutHttpResponse = (error: unknown) => error instanceof Error && !('status' in error);
 export async function visitRequest(path: string, options?: RequestInit) {
   const response = await apiFetch(path, options);
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `Request failed (${response.status}).`);
+  if (!response.ok) throw Object.assign(new Error(body.error || `Request failed (${response.status}).`), { status: response.status });
   return body;
 }
 const changed = () => window.dispatchEvent(new Event('inspection-outbox'));
@@ -196,8 +197,13 @@ export function FactoryVisitScreen({ userId, agencyId, timeZone, onClose }: Prop
       const key = localStorage.key(i);
       if (key?.startsWith(`${scope}:draft:`)) try { const saved = JSON.parse(localStorage.getItem(key)!); if (saved.factorySnapshot) { const snapshot: FactoryList = saved.factorySnapshot; savedFactories.push({ ...snapshot.company, ingredientCount: snapshot.ingredients.length, productCount: snapshot.products.length }); } } catch { /* Other drafts remain available. */ }
     }
-    if (savedFactories.length) setFactories(savedFactories);
-    void visitRequest('/api/visits/factories').then(body => { if (active) { setFactories(body.companies); setToday(body.today ?? calendarDate(new Date().toISOString(), timeZone)); } }).catch(e => { if (active) setError(e.message); });
+    void visitRequest('/api/visits/factories').then(body => {
+      if (active) { setFactories(body.companies); setToday(body.today ?? calendarDate(new Date().toISOString(), timeZone)); }
+    }).catch(e => {
+      if (!active) return;
+      setFactories(withoutHttpResponse(e) ? savedFactories : []);
+      setError(e.message);
+    });
     const sync = () => {
       try {
         const next = readOutbox(localStorage, scope); setEntries(next);
@@ -215,6 +221,7 @@ export function FactoryVisitScreen({ userId, agencyId, timeZone, onClose }: Prop
       let next: FactoryList;
       try { next = await visitRequest(`/api/visits/factories/${encodeURIComponent(companyId)}`); }
       catch (error) {
+        if (!withoutHttpResponse(error)) throw error;
         const saved = JSON.parse(localStorage.getItem(draftKey(scope, companyId)) || 'null');
         if (!saved?.factorySnapshot) throw error;
         next = saved.factorySnapshot;

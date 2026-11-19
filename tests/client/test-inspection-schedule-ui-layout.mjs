@@ -52,7 +52,7 @@ try {
   const card = screen.find(e => e.type === 'li')[0].props.children;
   assert.equal(card.type, 'div'); assert.match(card.props.className, /border-line bg-surface/);
   assert.equal(card.props.children[0].type, 'button');
-  assert.equal(card.props.children.at(-1).props.children, 'Visit schedule');
+  assert.ok(screen.buttons().some(button => button.label === 'Visit schedule'));
   assert.ok(!Array.isArray(card.props.children[0].props.children) || !card.props.children[0].props.children.some(child => child?.type === 'button'));
   await screen.click('Visit schedule');
   const editorProps = screen.tree().props.children.find(e => e?.type === VisitScheduleEditor).props;

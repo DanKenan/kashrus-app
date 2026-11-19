@@ -40,6 +40,9 @@ export interface SourceConnector {
   listTables?(): Promise<SourceTable[]>;
   readRows?(table: string, file?: SourceFile): Promise<SourceRow[]>;
   writeRow?(table: string, row: { id?: string; fields: Record<string, string> }, file?: SourceFile): Promise<SourceRow>;
+  companyDeletion?(id: string): Promise<{
+    present: boolean; blockers: string[]; remove?(): Promise<void>;
+  }>;
   calls(): number;
 }
 export interface SourceRow { rowNumber?: number; sourceKey?: string; id: string; fields: Record<string, unknown> }

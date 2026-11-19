@@ -82,7 +82,7 @@ try {
     const res = { status(code) { this.code = code; return this; }, json(data) { this.data = data; } };
     await alertHandlers.get(method + ' ' + route)({ user: caller, body, params: { id: 'c' } }, res); return res;
   };
-  assert.deepEqual((await request('put', '/api/inspections/schedule/settings', {})).data.settings, { countFrom: 'last_visit', mashgichimSeeAll: true });
+  assert.deepEqual((await request('put', '/api/inspections/schedule/settings', {})).data.settings, { countFrom: 'last_visit', mashgichimSeeAll: false });
   await request('put', '/api/inspections/schedule/companies/:id', { schedule: { kind: 'every', n: 30, unit: 'day', start: '2026-11-03' } });
   await request('put', '/api/inspections/schedule/companies/:id/people', { mashgiachIds: ['mash'], coordinatorIds: [] });
   const exact = (await request('get', '/api/inspections/schedule')).data.companies[0];

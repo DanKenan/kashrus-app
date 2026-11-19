@@ -1,3 +1,4 @@
+import { createCompanyRemovalStore, retentionElapsed, type CompanyRemoval } from './company-removal.ts';
 import { createFeesStore } from './fees-store.ts';
 import { createCompanyInfoStore, validateCompanyInfo, emptyInfo } from './company-info-store.ts';
 import { validateFees, validateSettings, validateAccountant, computePay, range, amount, shape, paidAmount } from './fees.ts';
@@ -26,7 +27,28 @@ export function registerInspectionRoutes(app: any, deps: {
   const fees = createFeesStore({ ...deps, now }), companyInfo = createCompanyInfoStore({ ...deps, now });
   const email = createEmailTransport(deps.dataDir, !!deps.testMode), outboxes = new Map<string, Message[]>();
   const schedules = createScheduleStore({ ...deps, now });
-  const store = createReportStore({ ...deps, schedules, now }), pending = new Map<string, Promise<any>>();
+  const removals = createCompanyRemovalStore({ ...deps, now });
+  const removal = (a: string, id: string, source = deps.source(a).identity) => {
+    const entry = Object.hasOwn(removals.doc(a).companies, id) ? removals.doc(a).companies[id] : undefined;
+    return entry?.source === source ? entry : undefined;
+  };
+  const active = (a: string, id: string) => {
+    const entry = removal(a, id);
+    return !entry?.archived && !entry?.requested && !entry?.deletedAt;
+  };
+  const setRemoval = (a: string, id: string, value: CompanyRemoval) =>
+    removals.update(a, next => { next.companies[id] = value; });
+  const withRemoval = async <T,>(a: string, action: () => Promise<T>) => {
+    await removals.ensure(a);
+    await food.ensure(a);
+    await schedules.ensure(a);
+    return schedules.locked(a, action);
+  };
+  const pendingRemovals = async (a: string, source: string) => {
+    await removals.ensure(a);
+    return Object.entries(removals.doc(a).companies).filter(([, entry]) => entry.source === source && entry.requested && !entry.deletedAt);
+  };
+  const store = createReportStore({ ...deps, schedules, now, canSubmit: (a, id) => active(a, id) }), pending = new Map<string, Promise<any>>();
   const food = createFoodServiceStore({ ...deps, now });
   const inbox = createInboxStore({ ...deps, now, submittedAt: (a, id) => store.list(a).find(r => r.id === id)?.submittedAt });
   const reportSummary = (a: string, r: Parameters<typeof summary>[0]) => ({ ...summary(r), ...inbox.status(a, r) });
@@ -35,8 +57,9 @@ export function registerInspectionRoutes(app: any, deps: {
   const others = (a: string) => deps.source(a).state.otherCompanies ?? [];
   const kind = (a: string, c: { id: string; type?: string }) => classifyPlace(c, foodValues(a), food.doc(a).marked, food.doc(a).manualPlaces, factoryValues(a));
   const markedOthers = (a: string) => others(a).filter(c => food.doc(a).marked.includes(c.id));
-  const places = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'food_service').map(c => ({ ...c, address: ('address' in c ? c.address : '') || '', source: 'connected' as const })), ...markedOthers(a).map(c => ({ ...c, address: ('address' in c ? c.address : '') || '', source: 'connected' as const })), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '', source: 'manual' as const }))];
-  const allPlaces = (a: string) => [...deps.source(a).state.companies, ...markedOthers(a), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '' }))];
+  const connectedPlaces = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'food_service').map(c => ({ ...c, address: ('address' in c ? c.address : '') || '', source: 'connected' as const })), ...markedOthers(a).map(c => ({ ...c, address: ('address' in c ? c.address : '') || '', source: 'connected' as const })), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '', source: 'manual' as const }))];
+  const places = (a: string) => connectedPlaces(a).filter(c => active(a, c.id));
+  const allPlaces = (a: string) => [...deps.source(a).state.companies, ...markedOthers(a), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '' }))].filter(c => active(a, c.id));
   const templateFor = (a: string, id: string) => { const tid = Object.hasOwn(food.doc(a).placeTemplates, id) ? food.doc(a).placeTemplates[id] : null; return tid && Object.hasOwn(food.doc(a).templates, tid) ? food.doc(a).templates[tid] : null; };
   const zone = (a: string) => deps.timeZone?.(a) || 'America/New_York';
   const today = (a: string) => calendarDate(now().toISOString(), zone(a));
@@ -62,7 +85,7 @@ export function registerInspectionRoutes(app: any, deps: {
     if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
       const { userEmail: _verifiedEmail, ...body } = req.body; req.body = body;
     }
-    try { await schedules.ensure(user.agencyId); await food.ensure(user.agencyId); await inbox.ensure(user.agencyId); await fees.ensure(user.agencyId); await companyInfo.ensure(user.agencyId); if (reports) await store.ensure(user.agencyId); await fn(req, res, user, user.agencyId); }
+    try { await schedules.ensure(user.agencyId); await removals.ensure(user.agencyId); await food.ensure(user.agencyId); await inbox.ensure(user.agencyId); await fees.ensure(user.agencyId); await companyInfo.ensure(user.agencyId); if (reports) await store.ensure(user.agencyId); await fn(req, res, user, user.agencyId); }
     catch (e: any) { res.status([400, 409].includes(e.status) ? e.status : 503).json({ error: [400, 409].includes(e.status) ? e.message : 'Report operation failed', ...(e.status === 409 ? { template: e.template } : {}) }); }
   };
   function foodRow(a: string, c: ReturnType<typeof places>[number]) {
@@ -72,7 +95,7 @@ export function registerInspectionRoutes(app: any, deps: {
       marked: connected && food.doc(a).marked.includes(c.id), typeMatched: connected && typeMatched(c, foodValues(a)), templateId: template?.id ?? null, templateName: template?.name ?? '' };
   }
   const sortedPlaces = (a: string, u: Person) => places(a).filter(c => visible(a, c.id, u)).map(c => foodRow(a, c)).sort((a, b) => a.name.localeCompare(b.name));
-  const candidates = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'factory'), ...others(a).filter(c => !food.doc(a).marked.includes(c.id))].map(c => ({ id: c.id, name: c.name, type: c.type ?? '' }));
+  const candidates = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'factory'), ...others(a).filter(c => !food.doc(a).marked.includes(c.id))].filter(c => active(a, c.id)).map(c => ({ id: c.id, name: c.name, type: c.type ?? '' }));
   const templates = (a: string) => food.doc(a).templateOrder.map(id => food.doc(a).templates[id]);
   const placeFee = (a: string, id: string) => Object.hasOwn(fees.doc(a).places, id) ? fees.doc(a).places[id] : null;
   function visitFee(a: string, id: string): Fee {
@@ -84,7 +107,11 @@ export function registerInspectionRoutes(app: any, deps: {
   const info = (a: string, id: string) => {const saved=Object.hasOwn(companyInfo.doc(a).places,id)?companyInfo.doc(a).places[id]:emptyInfo();return {...saved,address:saved.address||deps.source(a).state.companies.find(c=>c.id===id)?.address||''};};
   function effectiveFees(a:string) {
     const doc = fees.doc(a), places = {...doc.places};
-    for (const c of deps.source(a).state.companies) {
+    const sourceRows = deps.source(a).state.companies;
+    const savedRows = Object.entries(removals.doc(a).companies).filter(([id, entry]) =>
+      !!(entry.requested || entry.deletedAt) && !entry.cleaned && !sourceRows.some(row => row.id === id))
+      .map(([id, entry]) => ({ ...entry, id }));
+    for (const c of [...sourceRows, ...savedRows]) {
       const manual = places[c.id];
       if (c.companyFee === undefined && c.mashgiachFee === undefined) continue;
       places[c.id] = {...manual,
@@ -94,9 +121,15 @@ export function registerInspectionRoutes(app: any, deps: {
     }
     return {...doc,places};
   }
+  const payPlaces = (a: string) => [
+    ...allPlaces(a),
+    ...deps.source(a).state.companies.filter(c => removal(a, c.id)?.archived && !removal(a, c.id)?.deletedAt),
+    ...Object.entries(removals.doc(a).companies).filter(([, entry]) => entry.deletedAt && !entry.cleaned)
+      .map(([id, entry]) => ({ id, name: entry.name })),
+  ];
   const pay = async (a: string, query: any) => {
     const r = range(query.from, query.to, query.by ?? 'place');
-    return computePay(await store.payReportsForRange(a, r.from, r.to), effectiveFees(a), allPlaces(a), r.from, r.to, r.by, zone(a));
+    return computePay(await store.payReportsForRange(a, r.from, r.to), effectiveFees(a), payPlaces(a), r.from, r.to, r.by, zone(a));
   };
   const message = async (a: string, query: any) => buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant?.email || '', await pay(a, query));
   async function sendSummary(a: string, query: any, idempotencyKey?: string, preparedTable?: Awaited<ReturnType<typeof pay>>) {
@@ -139,7 +172,7 @@ export function registerInspectionRoutes(app: any, deps: {
       try {
         // A scheduled email must never rely on the process-local pay-screen cache.
         const reports = await store.freshReportsForRange(a, period.from, period.to);
-        const table = computePay(reports, effectiveFees(a), allPlaces(a), period.from, period.to, 'place', zone(a));
+        const table = computePay(reports, effectiveFees(a), payPlaces(a), period.from, period.to, 'place', zone(a));
         if (!table.totals.visits) return { sent: false, reason: 'no_visits' as const };
         return await sendSummary(a, period, claim.key, table);
       } catch (error) {
@@ -188,17 +221,21 @@ export function registerInspectionRoutes(app: any, deps: {
     range(query.from, query.to); res.json(await sendSummary(a, query));
   }, true));
   app.post('/api/inspections/reports/:id/fee-decision', handler(true, async (req: any, res: any, u: Person, a: string) => {
-    shape(req.body, ['amount'], []); const value = req.body.amount === undefined ? undefined : amount(req.body.amount), r = store.feeReport(a, req.params.id) ?? await store.get(a, req.params.id);
-    if (!r || !visible(a, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
-    if (value !== undefined && u.role !== 'admin' && fees.doc(a).settings.feeEditors !== 'admins_and_coordinators') return res.status(403).json({ error: 'Forbidden' });
-    if (!r.feeMismatch || value !== undefined && value !== placeFee(a, r.companyId)?.mashgiach?.amount) return res.status(400).json({ error: 'Amount must match a report fee' });
-    if (value === undefined && fees.doc(a).decisions[r.id]?.setFee && fees.doc(a).decisions[r.id].amount !== r.fee?.amount) return res.json({ decided: fees.doc(a).decisions[r.id] });
-    await fees.update(a, next => { next.decisions[r.id] = { ...(value !== undefined ? { amount: value, setFee: true } : {}), by: u.id, byName: u.name, at: now().toISOString() }; });
-    res.json({ decided: fees.doc(a).decisions[r.id] });
+    await schedules.locked(a, async () => {
+      shape(req.body, ['amount'], []); const value = req.body.amount === undefined ? undefined : amount(req.body.amount), r = store.feeReport(a, req.params.id) ?? await store.get(a, req.params.id);
+      if (!r || !visible(a, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
+      if (value !== undefined && u.role !== 'admin' && fees.doc(a).settings.feeEditors !== 'admins_and_coordinators') return res.status(403).json({ error: 'Forbidden' });
+      if (!r.feeMismatch || value !== undefined && value !== placeFee(a, r.companyId)?.mashgiach?.amount) return res.status(400).json({ error: 'Amount must match a report fee' });
+      if (value === undefined && fees.doc(a).decisions[r.id]?.setFee && fees.doc(a).decisions[r.id].amount !== r.fee?.amount) return res.json({ decided: fees.doc(a).decisions[r.id] });
+      await fees.update(a, next => { next.decisions[r.id] = { ...(value !== undefined ? { amount: value, setFee: true } : {}), by: u.id, byName: u.name, at: now().toISOString() }; });
+      res.json({ decided: fees.doc(a).decisions[r.id] });
+    });
   }, true));
   app.get('/api/inspections/company-info/:placeId', handler(true, (req: any, res: any, u: Person, a: string) => {
-    if (!allPlaces(a).some(c => c.id === req.params.placeId) || !visible(a, req.params.placeId, u)) return res.status(404).json({ error: 'Place not found' });
-    res.json(info(a, req.params.placeId));
+    const id = req.params.placeId, entry = removal(a, id);
+    const archived = u.role === 'admin' && entry?.archived && !entry.requested && !entry.deletedAt;
+    if ((!allPlaces(a).some(c => c.id === id) && !archived) || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
+    res.json(info(a, id));
   }));
   app.put?.('/api/inspections/company-info/:placeId', handler('only', async (req: any, res: any, _u: Person, a: string) => {
     const id = req.params.placeId;
@@ -346,11 +383,11 @@ export function registerInspectionRoutes(app: any, deps: {
   if (deps.testMode) app.post('/api/__test__/inspections/flush-seen', handler('only', async (_req: any, res: any) => { res.json({ writes: await inbox.flush() }); }));
   app.get('/api/visits/factories', handler(false, (_req: any, res: any, u: any, agency: string) => {
     const { state: s, connection: c } = deps.source(agency);
-    res.json({ group1Label: c?.group1Label ?? 'Group 1', refreshedAt: s.refreshedAt ?? null, backupTakenAt: s.backupTakenAt ?? null, companies: s.companies.filter(c => kind(agency, c) === 'factory' && visible(agency, c.id, u)).map(c => ({ ...dueState(schedules.company(agency, c.id).schedule, schedules.doc(agency).settings.countFrom, lastVisit(agency, c.id), today(agency), zone(agency)), assigned: assigned(agency, c.id, u), id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length })).sort((a, b) => Number(b.assigned) - Number(a.assigned) || a.name.localeCompare(b.name)) });
+    res.json({ group1Label: c?.group1Label ?? 'Group 1', refreshedAt: s.refreshedAt ?? null, backupTakenAt: s.backupTakenAt ?? null, companies: s.companies.filter(c => kind(agency, c) === 'factory' && active(agency, c.id) && visible(agency, c.id, u)).map(c => ({ ...dueState(schedules.company(agency, c.id).schedule, schedules.doc(agency).settings.countFrom, lastVisit(agency, c.id), today(agency), zone(agency)), assigned: assigned(agency, c.id, u), id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length })).sort((a, b) => Number(b.assigned) - Number(a.assigned) || a.name.localeCompare(b.name)) });
   }));
   app.get('/api/visits/factories/:companyId', handler(false, (req: any, res: any, u: any, agency: string) => {
     const source = deps.source(agency), c = source.state.companies.find(c => c.id === req.params.companyId);
-    if (!c || kind(agency, c) !== 'factory' || !visible(agency, c.id, u)) return res.status(404).json({ error: 'Company not found' });
+    if (!c || kind(agency, c) !== 'factory' || !active(agency, c.id) || !visible(agency, c.id, u)) return res.status(404).json({ error: 'Company not found' });
     res.json({ company: { id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '' }, fee: visitFee(agency, c.id), listVersion: source.listVersion(c.id), group1Label: source.connection?.group1Label ?? 'Group 1', refreshedAt: source.state.refreshedAt ?? null, backupTakenAt: source.state.backupTakenAt ?? null, ingredients: source.items(c.id, 'ingredient'), products: source.items(c.id, 'product') });
   }));
   app.post('/api/visits/reports', handler(false, async (req: any, res: any, u: any, agency: string) => {
@@ -411,11 +448,15 @@ export function registerInspectionRoutes(app: any, deps: {
   app.get('/api/visits/reports/mine', handler(false, (req: any, res: any, u: any, agency: string) => list(req, res, agency, u.id, u), true));
   app.get('/api/inspections/reports', handler(true, (req: any, res: any, u: any, agency: string) => list(req, res, agency, undefined, u), true));
   app.get('/api/inspections/reports/filters', handler(true, (_req: any, res: any, u: Person, a: string) => {
-    const factories = deps.source(a).state.companies.filter(c => kind(a, c) === 'factory');
+    const factories = deps.source(a).state.companies.filter(c => kind(a, c) === 'factory' && !removal(a, c.id)?.deletedAt);
     const visibleCompanies = [...factories, ...places(a)].filter(c => visible(a, c.id, u));
-    const companies = [...new Map(visibleCompanies.map(c => [c.id, { id: c.id, name: c.name }])).values()]
-      .sort((x, y) => x.name.localeCompare(y.name));
     const rows = store.list(a).filter(r => visible(a, r.companyId, u));
+    const options = new Map(visibleCompanies.map(c => [c.id, { id: c.id, name: c.name }]));
+    for (const report of rows) {
+      if (!options.has(report.companyId) && Object.hasOwn(removals.doc(a).companies, report.companyId))
+        options.set(report.companyId, { id: report.companyId, name: report.companyName });
+    }
+    const companies = [...options.values()].sort((x, y) => x.name.localeCompare(y.name));
     const agencyMashgichim = people(a).filter(p => p.role === 'mashgiach');
     let mashgichim: { id: string; name: string }[];
     if (u.role === 'admin') {
@@ -430,20 +471,26 @@ export function registerInspectionRoutes(app: any, deps: {
     res.json({ companies, mashgichim: mashgichim.sort((x, y) => x.name.localeCompare(y.name)) });
   }, true));
   app.post('/api/inspections/reports/:id/seen', handler(true, async (req: any, res: any, u: Person, a: string) => {
-    const r = await store.get(a, req.params.id); if (!r || !visible(a, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
-    await inbox.mark(a, r, u); res.json({ status: inbox.status(a, r).status });
+    await schedules.locked(a, async () => {
+      const r = await store.get(a, req.params.id); if (!r || !visible(a, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
+      await inbox.mark(a, r, u); res.json({ status: inbox.status(a, r).status });
+    });
   }, true));
   app.put?.('/api/inspections/reports/:id/follow-up', handler(true, async (req: any, res: any, u: Person, a: string) => {
-    const r = await store.get(a, req.params.id); if (!r || !visible(a, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
-    strictFood(req.body, ['on', 'note'], ['on']); if (typeof req.body.on !== 'boolean') invalidFood('Invalid follow-up');
-    await inbox.followUp(a, r, u, req.body.on, text(req.body.note === undefined ? '' : req.body.note, 500));
-    const { status, followUp } = inbox.status(a, r); res.json({ status, followUp });
+    await schedules.locked(a, async () => {
+      const r = await store.get(a, req.params.id); if (!r || !visible(a, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
+      strictFood(req.body, ['on', 'note'], ['on']); if (typeof req.body.on !== 'boolean') invalidFood('Invalid follow-up');
+      await inbox.followUp(a, r, u, req.body.on, text(req.body.note === undefined ? '' : req.body.note, 500));
+      const { status, followUp } = inbox.status(a, r); res.json({ status, followUp });
+    });
   }, true));
   app.get('/api/inspections/reports/:id', handler(true, async (req: any, res: any, u: any, agency: string) => {
-    const r = await store.get(agency, req.params.id);
-    if (!r || !visible(agency, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
-    await inbox.mark(agency, r, u);
-    res.json({ report: { ...reportSummary(agency, r), note: r.note, ...(r.feeMismatch ? { feeCheck: { reportAmount: r.dataFee?.amount ?? null, setAmount: placeFee(agency, r.companyId)?.mashgiach?.amount ?? r.fee?.amount ?? null, paidAmount: paidAmount(r, fees.doc(agency)), decided: fees.doc(agency).decisions[r.id] ? (({ amount, byName, at }) => ({ ...(amount === undefined ? {} : { amount }), byName, at }))(fees.doc(agency).decisions[r.id]) : null } } : {}), ...(r.kind === 'food_service' ? { checklist: r.checklist, templateId: r.templateId, templateVersion: r.templateVersion } : { marks: r.marks, offList: r.offList }) } });
+    await schedules.locked(agency, async () => {
+      const r = await store.get(agency, req.params.id);
+      if (!r || !visible(agency, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
+      await inbox.mark(agency, r, u);
+      res.json({ report: { ...reportSummary(agency, r), note: r.note, ...(r.feeMismatch ? { feeCheck: { reportAmount: r.dataFee?.amount ?? null, setAmount: placeFee(agency, r.companyId)?.mashgiach?.amount ?? r.fee?.amount ?? null, paidAmount: paidAmount(r, fees.doc(agency)), decided: fees.doc(agency).decisions[r.id] ? (({ amount, byName, at }) => ({ ...(amount === undefined ? {} : { amount }), byName, at }))(fees.doc(agency).decisions[r.id]) : null } } : {}), ...(r.kind === 'food_service' ? { checklist: r.checklist, templateId: r.templateId, templateVersion: r.templateVersion } : { marks: r.marks, offList: r.offList }) } });
+    });
   }, true));
   app.get('/api/inspections/reports/:id/photos', handler(true, async (req: any, res: any, u: any, agency: string) => {
     const r = await store.get(agency, req.params.id);
@@ -462,7 +509,12 @@ export function registerInspectionRoutes(app: any, deps: {
   });
   app.get('/api/inspections/schedule', handler(true, (_req: any, res: any, u: Person, a: string) => {
     const select = (role: string) => u.role === 'admin' ? people(a).filter(p => p.role === role).map(({ id, name }) => ({ id, name })) : [];
-    res.json({ today: today(a), timeZone: zone(a), settings: schedules.doc(a).settings, companies: allPlaces(a).filter(c => visible(a, c.id, u)).map(c => row(a, c)).sort((a, b) => a.name.localeCompare(b.name)), people: { mashgichim: select('mashgiach'), coordinators: select('coordinator') } });
+    const archivedLastVisits = u.role === 'admin' ? Object.fromEntries(
+      Object.entries(removals.doc(a).companies).flatMap(([id, entry]) => {
+        const last = entry.archived && !entry.deletedAt && removal(a, id) && lastVisit(a, id);
+        return last ? [[id, last]] : [];
+      })) : undefined;
+    res.json({ today: today(a), timeZone: zone(a), settings: schedules.doc(a).settings, archivedLastVisits, companies: allPlaces(a).filter(c => visible(a, c.id, u)).map(c => row(a, c)).sort((a, b) => a.name.localeCompare(b.name)), people: { mashgichim: select('mashgiach'), coordinators: select('coordinator') } });
   }));
   app.put?.('/api/inspections/schedule/settings', handler('only', async (req: any, res: any, u: Person, a: string) => {
     strict(req.body, ['countFrom', 'mashgichimSeeAll'], []);
@@ -494,11 +546,44 @@ export function registerInspectionRoutes(app: any, deps: {
   }));
   const pendingAlerts = new Map<string, Record<string, { alert: Alert }>>();
   let checking: Promise<any> | undefined;
+  async function cleanRemovedCompanies(a: string) {
+    if (!schedules.ready(a) || !removals.ready(a)) return;
+    const entries = Object.entries(removals.doc(a).companies).filter(([, entry]) =>
+      entry.deletedAt && !entry.cleaned && retentionElapsed(entry.deletedAt, now()));
+    if (!entries.length) return;
+    await fees.ensure(a);
+    await store.ensure(a);
+    await schedules.locked(a, async () => {
+      for (const [id, entry] of entries) {
+        if (deps.staged()) return;
+        const source = deps.source(a);
+        if (source.state.status === 'ok' &&
+            (source.state.companies.some(row => row.id === id) || source.state.otherCompanies?.some(row => row.id === id))) continue;
+        const reports = await store.reportsBeforeRemoval(a, id, entry.deletedAt!);
+        await inbox.remove(a, reports.map(report => report.id));
+        await fees.update(a, next => {
+          for (const report of reports) delete next.decisions[report.id];
+          delete next.places[id];
+        });
+        await store.removeRetained(a, id, entry.deletedAt!, reports);
+        const current = schedules.company(a, id);
+        if (current.lastVisit && current.lastVisit.at <= entry.deletedAt!) {
+          const update = schedules.prepare(a, { companies: { [id]: { lastVisit: null } } });
+          if (update) {
+            if (deps.db()) await update.ref.set(update.patch, { merge: true });
+            else await schedules.persistLocal(a, update.next);
+            schedules.install(a, update.next);
+          }
+        }
+        await setRemoval(a, id, { source: entry.source, archived: false, name: '', deletedAt: entry.deletedAt, cleaned: true });
+      }
+    });
+  }
   async function runCheck() {
     const sent: { companyId: string; kind: 'first' | 'reminder'; userIds: string[] }[] = []; let writes = 0;
     if (deps.staged()) return { sent, writes };
     for (const a of deps.agencyIds?.() || []) {
-      if (!schedules.ready(a) || !food.ready(a)) continue;
+      if (!schedules.ready(a) || !food.ready(a) || !removals.ready(a)) continue;
       // Await only existing hydration; a failed query leaves stored lastVisit authoritative.
       await store.settled(a);
       await schedules.locked(a, async () => {
@@ -538,17 +623,21 @@ export function registerInspectionRoutes(app: any, deps: {
         await persist(changes);
       });
     }
-    for (const a of deps.scheduleAgencyIds?.() || deps.agencyIds?.() || []) { if (fees.ready(a)) await runAccountant(a); }
+    for (const a of deps.scheduleAgencyIds?.() || deps.agencyIds?.() || []) {
+      try { await cleanRemovedCompanies(a); }
+      catch { console.warn('[inspections] company history cleanup will retry'); }
+      if (fees.ready(a)) await runAccountant(a);
+    }
     return { sent, writes };
   }
   const check = () => checking ||= runCheck().finally(() => { checking = undefined; });
   if (deps.testMode) app.post('/api/__test__/inspections/check', handler('only', async (_req: any, res: any, u: Person) => {
     res.json(await check());
   }));
-  return { check, foodServiceCompanyIds: async (a: string) => { await food.ensure(a); return places(a).filter(p => p.source === 'connected').map(p => p.id); }, flushSeen: inbox.flush, boot: async () => {
+  return { check, withRemoval, removal, setRemoval, pendingRemovals, foodServiceCompanyIds: async (a: string) => { await food.ensure(a); return connectedPlaces(a).filter(p => p.source === 'connected').map(p => p.id); }, flushSeen: inbox.flush, boot: async () => {
     await store.boot(deps.agencyIds?.() || []);
     const agencies = deps.scheduleAgencyIds?.() || deps.agencyIds?.() || [];
-    await Promise.all([schedules.boot(agencies), food.boot(agencies), inbox.boot(agencies), fees.boot(agencies), companyInfo.boot(agencies)]);
+    await Promise.all([schedules.boot(agencies), food.boot(agencies), inbox.boot(agencies), fees.boot(agencies), companyInfo.boot(agencies), removals.boot(agencies)]);
   } };
 
 }

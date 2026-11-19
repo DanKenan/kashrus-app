@@ -33,6 +33,8 @@ export default {
         if (raw.json.connection?.backupHashes?.factory116) break;
         await sleep(50);
       }
+      assert.equal((await api('mash', 'GET', '/api/visits/factories')).json.companies.length, 0);
+      assert.equal((await api('admin', 'PUT', '/api/inspections/schedule/settings', { mashgichimSeeAll: true })).status, 200);
       // Warm session caches before resetting the operation meters.
       for (const who of ['mash', 'admin', 'coord', 'foreign', 'manager']) await api(who, 'GET', '/api/visits/factories');
       const reset = async () => { await api('admin', 'POST', '/api/__test__/reads', { reset: true }); await api('admin', 'POST', '/api/__test__/writes', { reset: true }); };

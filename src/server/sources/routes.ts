@@ -2,7 +2,8 @@ import { createOAuth, isOAuthProvider, type OAuthProvider } from './oauth.ts';
 import { createGoogleSheetsApi } from './google-sheets.ts';
 import { createExcelApi } from './excel.ts';
 import { validSupabaseUrl } from './supabase.ts';
-import { randomUUID } from 'node:crypto';
+import type { CompanyRemoval } from '../inspections/company-removal.ts';
+import { createHash, randomUUID } from 'node:crypto';
 import { parseUpload, uploadRowsError, uploadTypeError, type UploadedFile } from './upload.ts';
 import { guardSourceWrite } from './write.ts';
 import { CompanyLinkError, mapSourceLists, companyLinkResolver } from './mapping.ts';
@@ -85,10 +86,23 @@ function settings(body: any, mapping = true) {
     }
   }
 }
+function companySourceIdentity(c: Connection | undefined) {
+  if (!c?.mapping.companies?.table) return undefined;
+  const { file, table } = c.mapping.companies;
+  return createHash('sha256').update(JSON.stringify([c.sourceType, file?.id || c.baseId, table])).digest('base64url');
+}
+
 export function registerSourceRoutes(app: any, deps: {
   db(): any; dataDir: string; staged(): boolean; secret(): string; testMode: boolean;
   agencyName?(agencyId: string): string;
   foodServiceCompanyIds?(agencyId: string): Promise<string[]>;
+  companyRemoval?: {
+    withRemoval<T>(agencyId: string, action: () => Promise<T>): Promise<T>;
+    removal(agencyId: string, id: string, source: string): CompanyRemoval | undefined;
+    setRemoval(agencyId: string, id: string, status: CompanyRemoval): Promise<unknown>;
+    pendingRemovals(agencyId: string, source: string): Promise<[string, CompanyRemoval][]>;
+  };
+  now?(): Date;
   requireAdmin(req: any, res: any): any; timeZone(id: string): string | undefined;
 }) {
   const store = createSourceStore(deps), connections = new Map<string, Connection>();
@@ -818,8 +832,11 @@ export function registerSourceRoutes(app: any, deps: {
         ...('expiresOn' in item && { expiresOn: item.expiresOn }), dpm: item.dpm || null, group1: typeof override === 'boolean' ? override : item.group1 === true,
         group1Source: typeof override === 'boolean' ? 'admin' : 'source' };
     });
-  app.get('/api/factories/:companyId/items', handler((req: any, res: any, { id }: any) => {
-    if (!cache.state(id).companies.some(c => c.id === req.params.companyId)) return res.status(404).json({ error: 'Company not found' });
+  app.get('/api/factories/:companyId/items', handler(async (req: any, res: any, { id }: any) => {
+    const source = companySourceIdentity(connections.get(id));
+    if (source && deps.companyRemoval) await deps.companyRemoval.pendingRemovals(id, source);
+    if ((source && deps.companyRemoval?.removal(id, req.params.companyId, source)?.deletedAt) ||
+        !cache.state(id).companies.some(c => c.id === req.params.companyId)) return res.status(404).json({ error: 'Company not found' });
     res.json({ ingredients: items(id, req.params.companyId, 'ingredient'), products: items(id, req.params.companyId, 'product') });
   }));
   app.put('/api/sources/group1', mutation(async (req: any, res: any, { id, user }: any) => {
@@ -844,10 +861,162 @@ export function registerSourceRoutes(app: any, deps: {
     const company = state.companies.find(company => state.itemsFor(company.id, kind).some(item => item.id === itemId))!;
     res.json({ item: items(id, company.id, kind).find(item => item.id === itemId) });
   }));
+  const removalMode = (c: Connection): CompanyRemoval['requested'] | null => c.sourceType === 'google_sheets' ? 'guided'
+    : c.sourceType === 'airtable' && c.access === 'readwrite' ? 'direct' : null;
+  const linkedLabels = { companies: 'Companies', ingredients: 'Schedule A', products: 'Schedule B' };
+  async function removalPlan(c: Connection, companyId: string, entry?: CompanyRemoval) {
+    const mode = removalMode(c), adapter = connector(c);
+    const { table, file } = c.mapping.companies;
+    const sheet = c.sourceType === 'google_sheets';
+    const rawCompanies = sheet ? await sheetCompanies(c) : [];
+    const data = mode === 'direct' ? await adapter.loadAll!() : cache.data(c.agencyId);
+    const all = [...(data?.companies ?? []), ...(data?.otherCompanies ?? [])];
+    const freshCompany = (sheet ? rawCompanies : all).find(row =>
+      row.id === companyId || (sheet && entry?.recordKey && row.sourceKey === entry.recordKey));
+    const native = mode === 'direct' ? await adapter.companyDeletion!(companyId) : undefined;
+    const present = native?.present ?? !!freshCompany;
+    const recordKey = (sheet ? freshCompany?.sourceKey : companyId) ?? entry?.recordKey;
+    const name = freshCompany?.name ?? entry?.name ?? '';
+    const blockers = new Set(native?.blockers);
+    if (!mode) blockers.add(c.sourceType === 'airtable'
+      ? 'Enable write access in Source settings to delete this company in Shutfey.'
+      : 'Shutfey cannot safely verify and permanently delete this company from the connected source.');
+    if (mode && (present || entry?.requested)) {
+      for (const list of ['ingredients', 'products'] as const) {
+        const config = c.mapping[list];
+        if (config.table && config.table === table && (config.file?.id || c.baseId) === (file?.id || c.baseId))
+          blockers.add(`The company shares its source table with ${linkedLabels[list]}. Move those records to a separate table first.`);
+      }
+      if (sheet) {
+        if (!present && rawCompanies.some(row => cellText(row.name).toLowerCase() === cellText(name).toLowerCase()))
+          blockers.add('A row with this company name has a different permanent ID. Contact support to verify the removal.');
+        // When the row is gone, its old key and name still identify any links
+        // an editor added after the guided removal was started.
+        const companies = present ? rawCompanies : [...rawCompanies, { id: companyId, sourceKey: recordKey, name }];
+        const resolve = companyLinkResolver(companies);
+        for (const list of sections) {
+          const config = c.mapping[list] as Record<string, unknown>;
+          if (!config.table) continue;
+          const columns = new Set(Object.entries(c.mapping.editableCustomFields?.[list] ?? {})
+            .filter(([, rule]) => rule === 'companyLink').map(([field]) => config[field]));
+          if (list !== 'companies') columns.add(config.companyLink);
+          if (!columns.size) continue;
+          for (const row of await sheetRows(c, list)) {
+            if (list === 'companies' && row.id === companyId) continue;
+            for (const column of columns) {
+              if (typeof column !== 'string' || !column) continue;
+              try {
+                if (resolve(row.fields[column]).includes(companyId)) {
+                  const name = typeof config.name === 'string' ? cellText(row.fields[config.name]) : '';
+                  blockers.add(`${linkedLabels[list]} · ${name || row.sourceKey || row.id}`);
+                }
+              } catch (error) {
+                if (!(error instanceof CompanyLinkError)) throw error;
+                blockers.add(`Review unresolved company links in ${linkedLabels[list]}.`);
+              }
+            }
+          }
+        }
+      }
+    }
+    return {
+      mode, name, present, recordKey, blockers: [...blockers], remove: native?.remove,
+      ...(sheet ? { spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${encodeURIComponent(file?.id || c.baseId)}/edit`, table } : {}),
+    };
+  }
+  const companyRemovalRoute = '/api/factories/:companyId/removal';
+  app.get(companyRemovalRoute, mutation(async (req: any, res: any, { id, user }: any) => {
+    const c = connections.get(id), source = companySourceIdentity(c), lifecycle = deps.companyRemoval;
+    if (req.kiosk || !user.agencyId) return res.status(403).json({ error: 'Forbidden' });
+    if (!c || !source || !lifecycle || req.query.source !== source) return sheetConflict('The source changed. Refresh company data and try again.');
+    const companyId = req.params.companyId;
+    await lifecycle.withRemoval(id, async () => {
+      const entry = lifecycle.removal(id, companyId, source);
+      const row = cache.state(id).companies.find(row => row.id === companyId);
+      if (entry?.deletedAt || (!row && !entry?.requested) || (await deps.foodServiceCompanyIds?.(id))?.includes(companyId))
+        return res.status(404).json({ error: 'Company not found' });
+      const plan = await removalPlan(c, companyId, entry);
+      res.json({ ...plan, remove: undefined, pending: entry?.requested ?? null });
+    });
+  }));
+  app.post(companyRemovalRoute, mutation(async (req: any, res: any, { id, user }: any) => {
+    if (blocked(res)) return;
+    const c = connections.get(id), source = companySourceIdentity(c), lifecycle = deps.companyRemoval;
+    if (req.kiosk || !user.agencyId) return res.status(403).json({ error: 'Forbidden' });
+    if (!c || !source || !lifecycle || req.body?.source !== source) return sheetConflict('The source changed. Refresh company data and try again.');
+    const companyId = req.params.companyId, { action, confirmation, name } = req.body;
+    await lifecycle.withRemoval(id, async () => {
+      const entry = lifecycle.removal(id, companyId, source);
+      if (entry?.deletedAt) return res.json({ status: 'deleted' });
+      const row = cache.state(id).companies.find(row => row.id === companyId);
+      if ((!row && !entry?.requested) || (await deps.foodServiceCompanyIds?.(id))?.includes(companyId))
+        return res.status(404).json({ error: 'Company not found' });
+      if (action === 'archive' || action === 'restore') {
+        if (entry?.requested) return sheetConflict('Finish checking the permanent removal first.');
+        if (!row) return sheetConflict('Refresh company data and try again.');
+        const archived = action === 'archive';
+        await lifecycle.setRemoval(id, companyId, { source, archived, name: row.name });
+        return res.json({ status: archived ? 'archived' : 'restored' });
+      }
+      if (action !== 'delete' && action !== 'refresh' && action !== 'cancel') return res.status(400).json({ error: 'Invalid removal action' });
+      if (action === 'delete' && confirmation !== 'DELETE') return res.status(400).json({ error: 'Type DELETE to confirm.' });
+      if (action === 'refresh' && !entry?.requested) return sheetConflict('Start permanent removal before checking the source.');
+      const plan = await removalPlan(c, companyId, entry);
+      if (!plan.mode) return sheetConflict(plan.blockers[0]);
+      if (action === 'cancel') {
+        if (entry?.requested !== 'guided' || !plan.present) return sheetConflict('Refresh company data to verify removal.');
+        await lifecycle.setRemoval(id, companyId, { source, archived: entry.archived, name: plan.name });
+        return res.json({ status: 'cancelled' });
+      }
+      if (plan.blockers.length) return sheetConflict('Check linked records and verify the company identity before continuing.');
+      if (action === 'delete' && plan.present) {
+        if (plan.name !== name) return sheetConflict('The company name changed. Review the company and try again.');
+        if (plan.mode === 'guided' && !plan.recordKey) return sheetConflict('The permanent ID could not be verified. Contact support before deleting anything.');
+        await lifecycle.setRemoval(id, companyId, {
+          source, archived: entry?.archived ?? false, name: plan.name, requested: plan.mode,
+          ...(plan.recordKey ? { recordKey: plan.recordKey } : {}),
+          ...(row?.companyFee === undefined ? {} : { companyFee: row.companyFee }),
+          ...(row?.mashgiachFee === undefined ? {} : { mashgiachFee: row.mashgiachFee }),
+        });
+        if (plan.mode === 'guided') return res.json({ status: 'guided' });
+        await plan.remove!();
+      } else if (plan.present) {
+        const result = await refresh(id);
+        if (!result.ok) return sheetConflict('The source could not be read. Try refreshing again.');
+        return res.json({ status: 'present' });
+      } else if (!entry?.requested) {
+        return sheetConflict('The company could not be found in the source. Refresh company data and review the record.');
+      }
+      const result = await refresh(id);
+      const latest = cache.data(id);
+      if (!result.ok || !latest || [...latest.companies, ...(latest.otherCompanies ?? [])].some(row => row.id === companyId || (plan.mode === 'guided' && plan.recordKey && row.sourceKey === plan.recordKey)))
+        return sheetConflict('Removal could not be confirmed. Refresh company data and try again.');
+      const confirmed = lifecycle.removal(id, companyId, source)!;
+      const { requested: _requested, ...saved } = confirmed;
+      await lifecycle.setRemoval(id, companyId, { ...saved, deletedAt: (deps.now?.() ?? new Date()).toISOString() });
+      res.json({ status: 'deleted' });
+    });
+  }));
   app.get('/api/factories', handler(async (_req: any, res: any, { id }: any) => {
     const s = cache.state(id), c = connections.get(id);
     const foodServiceIds = new Set(await deps.foodServiceCompanyIds?.(id) ?? []);
-    res.json({ status: { group1Label: c?.group1Label || 'Group 1', connected: !!c, sourceType: c?.sourceType || null, status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: s.error || null }, companies: s.companies.filter(c => !foodServiceIds.has(c.id)).map(c => ({ id: c.id, name: c.name, address: c.address || '', companyFee:c.companyFee, mashgiachFee:c.mashgiachFee, brand: c.brand || '', plant: c.plant || '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length, lastVisitAt: null, nextDueAt: null, overdue: null })).sort((a, b) => a.name.localeCompare(b.name)) });
+    const source = companySourceIdentity(c), lifecycle = deps.companyRemoval;
+    const pending = source ? await lifecycle?.pendingRemovals(id, source) ?? [] : [];
+    const rows = s.companies.filter(c => !foodServiceIds.has(c.id)).flatMap(company => {
+      const entry = source ? lifecycle?.removal(id, company.id, source) : undefined;
+      if (entry?.deletedAt) return [];
+      return [{
+        id: company.id, name: company.name, address: company.address || '', companyFee: company.companyFee,
+        mashgiachFee: company.mashgiachFee, brand: company.brand || '', plant: company.plant || '',
+        ingredientCount: s.itemsFor(company.id, 'ingredient').length, productCount: s.itemsFor(company.id, 'product').length,
+        lastVisitAt: null, nextDueAt: null, overdue: null,
+        ...(entry?.archived || entry?.requested ? { archived: true, removalPending: !!entry.requested } : {}),
+      }];
+    });
+    const pendingOnly = pending.filter(([companyId]) => !rows.some(row => row.id === companyId))
+      .map(([companyId, entry]) => ({ id: companyId, name: entry.name, archived: true, removalPending: true }));
+    res.json({ status: { group1Label: c?.group1Label || 'Group 1', connected: !!c, sourceType: c?.sourceType || null, status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: s.error || null, companySource: source },
+      companies: [...rows, ...pendingOnly].sort((a, b) => a.name.localeCompare(b.name)) });
   }));
   if (deps.testMode) {
     app.post('/api/__test__/source-fees', mutation(async (req: any, res: any, { id }: any) => {
@@ -932,7 +1101,7 @@ export function inspectionSourceAccessor(cache: ReturnType<typeof createSourceCa
   return (agencyId: string) => {
     const connection = connections.get(agencyId), state = cache.state(agencyId);
     return {
-      state, connection: connection ? {...connection, fees:{...connection.fees,mashgiach:{...connection.fees?.mashgiach,...Object.fromEntries(state.companies.filter(c=>c.mashgiachFee!==undefined).map(c=>[c.id,{amount:c.mashgiachFee!,currency:'USD'}]))}}} : undefined,
+      state, identity: companySourceIdentity(connection), connection: connection ? {...connection, fees:{...connection.fees,mashgiach:{...connection.fees?.mashgiach,...Object.fromEntries(state.companies.filter(c=>c.mashgiachFee!==undefined).map(c=>[c.id,{amount:c.mashgiachFee!,currency:'USD'}]))}}} : undefined,
       listVersion: (companyId: string) => connection?.backupHashes?.[companyId] || '',
       items: (companyId: string, kind: 'ingredient' | 'product') => state.itemsFor(companyId, kind).map(item => ({
         id: item.id, name: item.name, brand: item.brand ?? '', code: 'code' in item ? item.code ?? '' : '',

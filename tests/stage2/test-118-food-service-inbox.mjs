@@ -48,6 +48,7 @@ export default {
    assert.equal((await api('admin', 'PUT', '/api/sources/connection', { sourceType: 'airtable', baseId: 'appTEST118', access: 'read', mapping, apiKey: 'fake-key-118' })).status, 200);
    for (let i = 0; i < 100; i++) { if ((await api('admin', 'POST', '/api/__test__/source-raw', {})).json.connection?.backupHashes?.factory118a) break; await sleep(50); }
    assert.equal((await api('admin', 'POST', '/api/__test__/source-fees', { agencyId, fees: { mashgiach: { place118a: { amount: 42, currency: 'USD' } } } })).status, 200);
+   assert.equal((await api('admin', 'PUT', '/api/inspections/schedule/settings', { mashgichimSeeAll: true })).status, 200);
    await api('admin', 'GET', '/api/inspections/reports'); await settle();
    for (const who of Object.keys(people)) {
     await api(who, 'GET', '/api/visits/factories');
