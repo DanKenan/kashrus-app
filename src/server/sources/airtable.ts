@@ -1,5 +1,5 @@
 import { sourceFetch } from './http.ts';
-import { applyMapping } from './mapping.ts';
+import { applyMapping, companyLinkResolver, CompanyLinkError } from './mapping.ts';
 import type { SourceConnector, SourceData, SourceMapping, SourceRow } from './types.ts';
 
 export interface AirtableConfig { baseId: string; apiKey: string; mapping: SourceMapping; apiBase?: string; fetchImpl?: typeof fetch }
@@ -8,15 +8,16 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
   let count = 0, lastStart = 0;
   let queue = Promise.resolve();
   let loaded: SourceData | undefined, loading: Promise<SourceData> | undefined;
+  let rawRows: Record<string, SourceRow[]> = {};
   // Serialize request starts, including metadata and retries, to stay below 5/s.
-  async function request(path: string): Promise<any> {
+  async function request(path: string, method = 'GET', missingAllowed = false): Promise<any> {
     const run = async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         await wait(Math.max(0, lastStart + 201 - Date.now()));
         lastStart = Date.now(); count++;
         let response: Response;
         try {
-          response = await sourceFetch(`${apiBase.replace(/\/$/, '')}${path}`, { headers: { Authorization: `Bearer ${apiKey}` }, redirect: 'error' }, fetchImpl);
+          response = await sourceFetch(`${apiBase.replace(/\/$/, '')}${path}`, { method, headers: { Authorization: `Bearer ${apiKey}` }, redirect: 'error' }, fetchImpl);
         } catch { throw new Error('Airtable request failed'); }
         finally { lastStart = Date.now(); }
         if (response.status === 429 && attempt === 0) {
@@ -27,6 +28,7 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
           await wait(Number.isFinite(delay) ? delay : 30_000);
           continue;
         }
+        if (response.status === 404 && missingAllowed) { await response.body?.cancel(); return null; }
         if (!response.ok) {
           const descriptions: Record<number, string> = { 401: 'authentication failed', 403: 'access denied', 404: 'base or table not found', 429: 'rate limit exceeded after retry' };
           await response.body?.cancel();
@@ -66,6 +68,7 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
         } while (offset);
       }
       loaded = applyMapping(rows, mapping, 'ignore');
+      rawRows = rows;
       return loaded;
     })();
     try { return await loading; } finally { loading = undefined; }
@@ -73,6 +76,70 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
   const data = () => loaded ? Promise.resolve(loaded) : loading ?? loadAll();
   return {
     kind: 'airtable', calls: () => count, loadAll,
+    async companyDeletion(id) {
+      if (!/^rec[A-Za-z0-9]+$/.test(id)) throw Error('Invalid Airtable record ID');
+      const base = `/v0/${encodeURIComponent(baseId)}`;
+      const schema = await request(`/v0/meta/bases/${encodeURIComponent(baseId)}/tables`);
+      const table = schema.tables.find((t: any) => t.name === mapping.companies.table || t.id === mapping.companies.table);
+      if (!table?.id || !Array.isArray(table.fields)) throw Error('Company table unavailable');
+      const target = `${base}/${encodeURIComponent(table.id)}/${encodeURIComponent(id)}`;
+      const record = await request(target, 'GET', true);
+      if (!record) return { present: false, blockers: [] };
+      if (record.id !== id || !record.fields) throw Error('Company identity could not be verified');
+      const blockers = new Set<string>();
+      const mapped = await data();
+      const resolve = companyLinkResolver(mapped.companies, mapped.otherCompanies, 'ignore');
+      const labels = { companies: 'Companies', ingredients: 'Schedule A', products: 'Schedule B' };
+      for (const list of ['companies', 'ingredients', 'products'] as const) {
+        const config = mapping[list] as Record<string, unknown>;
+        const columns = new Set(Object.entries(mapping.editableCustomFields?.[list] ?? {})
+          .filter(([, rule]) => rule === 'companyLink').map(([field]) => config[field]));
+        if (list !== 'companies' && config.companyLink) columns.add(config.companyLink);
+        for (const row of rawRows[mapping[list].table] ?? []) {
+          if (row.id === id) continue;
+          for (const column of columns) {
+            if (typeof column !== 'string' || !column) continue;
+            try {
+              if (resolve(row.fields[column]).includes(id))
+                blockers.add(`${labels[list]} · ${String(row.fields[mapping[list].name ?? ''] || row.id).trim()}`);
+            } catch (error) {
+              if (!(error instanceof CompanyLinkError)) throw error;
+              blockers.add(`Review unresolved company links in ${labels[list]}.`);
+            }
+          }
+        }
+      }
+      for (const field of table.fields) {
+        if (field.type === 'multipleRecordLinks' && record.fields[field.name]?.length)
+          blockers.add(`Airtable linked records in ${table.name} / ${field.name}`);
+      }
+      // Reciprocal links appear on the company record. Scan one-way links too.
+      for (const linkedTable of schema.tables) {
+        const fields = linkedTable.fields.filter((field: any) =>
+          field.type === 'multipleRecordLinks' && field.options?.linkedTableId === table.id &&
+          !table.fields.some((inverse: any) => inverse.id === field.options?.inverseLinkFieldId));
+        if (!fields.length) continue;
+        const params = new URLSearchParams({ pageSize: '100' });
+        for (const field of fields) params.append('fields[]', field.name);
+        const seen = new Set<string>();
+        for (;;) {
+          const page = await request(`${base}/${encodeURIComponent(linkedTable.id)}?${params}`);
+          if (!Array.isArray(page.records)) throw Error('Invalid Airtable records');
+          for (const field of fields) {
+            if (page.records.some((row: any) => row.id !== id && Array.isArray(row.fields?.[field.name]) && row.fields[field.name].includes(id)))
+              blockers.add(`Airtable linked records in ${linkedTable.name} / ${field.name}`);
+          }
+          if (!page.offset) break;
+          if (typeof page.offset !== 'string' || seen.has(page.offset)) throw Error('Invalid Airtable pagination');
+          seen.add(page.offset);
+          params.set('offset', page.offset);
+        }
+      }
+      return { present: true, blockers: [...blockers], async remove() {
+        const result = await request(target, 'DELETE');
+        if (result?.id !== id || result.deleted !== true) throw Error('Company removal could not be confirmed');
+      } };
+    },
     async samples(tables) {
       const samples: import('./types.ts').SourceSamples = Object.create(null);
       for (const table of tables.slice(0, 15)) {

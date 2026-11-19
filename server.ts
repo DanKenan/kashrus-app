@@ -14865,6 +14865,14 @@ const checkInPhotoStore = createCheckInPhotoStore({
 const sourceRoutes = registerSourceRoutes(app, {
   db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
   foodServiceCompanyIds: (agencyId) => inspectionRoutes.foodServiceCompanyIds(agencyId),
+  companyRemoval: {
+    withRemoval: (agencyId, action) => inspectionRoutes.withRemoval(agencyId, action),
+    removal: (agencyId, companyId, source, archiveKey) => inspectionRoutes.removal(agencyId, companyId, source, archiveKey),
+    setRemoval: (agencyId, companyId, status) => inspectionRoutes.setRemoval(agencyId, companyId, status),
+    bindSheetArchives: (agencyId, source, rows) => inspectionRoutes.bindSheetArchives(agencyId, source, rows),
+    pendingRemovals: (agencyId, source) => inspectionRoutes.pendingRemovals(agencyId, source),
+  },
+  now: serverNow,
   secret: () => process.env.SOURCE_KEYS_SECRET || getJwtSecret(),
   testMode: isTestMode(), requireAdmin,
   agencyName: (id) => agencies.find(a => a.id === id)?.name || 'Agency',

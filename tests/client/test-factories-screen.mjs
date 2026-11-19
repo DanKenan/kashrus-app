@@ -3,6 +3,7 @@ import { mount } from './lib/mini-render.mjs';
 import { SourceCompanyEditor } from '../../src/components/SourceCompanyEditor.tsx';
 import { SourcesSheet } from '../../src/components/SourcesSheet.tsx';
 import { SourceConnectForm } from '../../src/components/SourceConnectSheet.tsx';
+import { CompanyRemovalSheet } from '../../src/components/CompanyInfoSheet.tsx';
 import { FactoriesScreen } from '../../src/components/FactoriesScreen.tsx';
 import { sourceStatus } from '../../src/lib/sources.ts';
 const originalFetch = globalThis.fetch;
@@ -50,6 +51,18 @@ try {
     assert.deepEqual(methods, ['PATCH','POST']);
     assert.ok(closed && refreshed);
   }
+  {
+    const retention = "You can't undo this in Shutfey. After Shutfey confirms the company was removed, its past visit reports and payment history are kept for three calendar months, then permanently removed.";
+    globalThis.fetch = async () => Response.json({ mode: 'direct', present: true, name: 'Bakery', blockers: [] });
+    const removal = mount(CompanyRemovalSheet, { company: { id: 'a', name: 'Bakery' }, source: 'test-scope',
+      sourceName: 'Airtable', onClose() {}, onChanged() {}, onPending() {} });
+    await removal.render();
+    assert.ok(removal.text().includes(retention));
+    removal.find(element => element.type === 'input' && element.props.type === 'radio')[1].props.onChange();
+    await removal.render();
+    await removal.click('Continue');
+    assert.ok(removal.text().includes(retention));
+  }
   assert.equal(sourceStatus({ sourceType: null }, 'America/Chicago'), 'Not connected');
   assert.equal(sourceStatus(connected, 'America/Chicago'), 'Connected to Airtable · updated 3:00 AM · 6 calls');
   assert.equal(sourceStatus({ ...connected, status: 'never', refreshedAt: null }, 'UTC'), 'Connected to Airtable · reading your database…');
@@ -77,6 +90,7 @@ try {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push([url, options.method || 'GET']);
+    if (url.startsWith('/api/inspections/reports?')) return Response.json({ reports: [] });
     if (url === '/api/inspections/schedule') return new Response(JSON.stringify({
       today: '2026-11-10', timeZone: 'America/Chicago',
       settings: { countFrom: 'last_visit', mashgichimSeeAll: true },
@@ -101,7 +115,7 @@ try {
   assert.match(screen.text(), /Brand \/ Plant 42 ingredients · 18 products/);
   assert.match(screen.text(), /Last visit Nov 2 · Test Inspector Next due Nov 10 Overdue ⚠ Yes · due today.*Last visit None yet Next due No schedule Overdue No/);
   assert.deepEqual(screen.find(e => e.type === 'dd').map(e => e.props.children), ['Nov 2 · Test Inspector', 'Nov 10', '⚠ Yes · due today', 'None yet', 'No schedule', 'No']);
-  await screen.click('Refresh now');
+  await screen.click('Refresh company data');
   assert.equal(calls.filter(([url, method]) => url === '/api/sources/refresh' && method === 'POST').length, 1);
   assert.match(screen.text(), /Please wait before refreshing again\./);
   assert.equal(screen.find(e => e.props.role === 'alert').length, 1);
@@ -112,7 +126,8 @@ try {
     let status = 'never';
     globalThis.fetch = async (url, options = {}) => {
       // Keep these polling counts focused on source requests.
-      if (url === '/api/inspections/schedule') return new Response(JSON.stringify({
+      if (url.startsWith('/api/inspections/reports?')) return Response.json({ reports: [] });
+    if (url === '/api/inspections/schedule') return new Response(JSON.stringify({
         today: '2026-11-10', timeZone: 'America/Chicago',
         settings: { countFrom: 'last_visit', mashgichimSeeAll: true },
         companies: [], people: { mashgichim: [], coordinators: [] },
@@ -167,7 +182,7 @@ try {
     const screen = mount(FactoriesScreen, { isOpen: true, role: 'admin', onClose() {}, timeZone: 'UTC' });
     await screen.render();
     assert.equal(screen.buttons().some(b => b.label === 'Edit company'), enabled);
-    assert.ok(!screen.buttons().some(b => b.label.includes('Add company')));
+    assert.ok(screen.buttons().some(b => b.label === 'Add company'));
   }
   let baseId = 'appOld';
   let status = 'ok';
@@ -181,7 +196,7 @@ try {
   };
   const changed = mount(FactoriesScreen, { isOpen: true, onClose() {}, timeZone: 'America/Chicago' }); await changed.render();
   assert.match(changed.text(), /Old factory/);
-  await changed.click('Settings');
+  await changed.click('Source settings');
   const sheet = changed.tree().props.children.map(child => child?.props?.children).find(child => child?.type === SourcesSheet);
   const edit = mount(SourceConnectForm, sheet.props); await edit.render();
   await edit.type('app…', 'appNew'); await edit.submit();

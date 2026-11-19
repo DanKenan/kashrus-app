@@ -4,7 +4,7 @@ export type Settings = { countFrom: 'last_visit' | 'planned'; mashgichimSeeAll: 
 export type LastVisit = { at: string; reportId: string; mashgiachName: string };
 export type Mute = { until: string | null; by: string; at: string };
 export type Alert = { dueDate: string; count: number; lastSentDate: string };
-export const defaultSettings: Settings = { countFrom: 'last_visit', mashgichimSeeAll: true };
+export const defaultSettings: Settings = { countFrom: 'last_visit', mashgichimSeeAll: false };
 export function isDate(value: unknown): value is string {
   return typeof value === 'string' && /^\d{4}-\d\d-\d\d$/.test(value) && value >= '0001-01-01' && Number.isFinite(Date.parse(value + 'T00:00:00Z')) && new Date(value + 'T00:00:00Z').toISOString().slice(0, 10) === value;
 }

@@ -12,6 +12,7 @@ let recovered = false;
 globalThis.fetch = async url => {
   calls.push(url);
   if (url === '/api/visits/factories') return new Response(JSON.stringify({ companies: [company], group1Label: 'Test Group' }));
+  if (url.startsWith('/api/inspections/reports?')) return Response.json({ reports: [] });
   if (url === '/api/inspections/schedule') {
     if (!recovered) return new Promise(resolve => { finishSchedule = resolve; });
     return new Response(JSON.stringify({ today: '2026-11-11', timeZone: 'UTC', settings: { countFrom: 'planned', mashgichimSeeAll: true }, companies: [row], people: { mashgichim: [], coordinators: [] } }));
@@ -31,7 +32,7 @@ assertUnavailable(); // The list is usable while the independent schedule reques
 finishSchedule(new Response(JSON.stringify({ error: 'Unavailable' }), { status: 503 })); await factories.render();
 assertUnavailable();
 assert.match(factories.text(), /Couldn't load visit schedules\. Try again/);
-assert.ok(factories.buttons().some(button => button.label === 'Reports'));
+assert.ok(factories.buttons().some(button => button.label === 'View all reports'));
 recovered = true;
 await factories.click("Couldn't load visit schedules. Try again");
 assert.equal(calls.filter(url => url === '/api/visits/factories').length, 1);

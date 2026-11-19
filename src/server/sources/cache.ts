@@ -12,7 +12,7 @@ export interface Backup {
 }
 export interface SourceState {
   status: 'never' | 'ok' | 'stale' | 'backup' | 'error'; refreshedAt?: string; calls: number;
-  companies: Company[]; otherCompanies?: { id: string; name: string; type?: string }[]; itemsFor(companyId: string, kind: 'ingredient' | 'product'): (Ingredient | Product)[];
+  companies: Company[]; otherCompanies?: SourceData['otherCompanies']; itemsFor(companyId: string, kind: 'ingredient' | 'product'): (Ingredient | Product)[];
   backupTakenAt?: string; backupError?: string; error?: string;
 }
 export interface RefreshResult { ok: boolean; calls: number; changedBackups: Backup[]; latestBackups?: Backup[]; error?: string }
@@ -28,7 +28,7 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
   return data.companies.map(c => {
     const content = {
       companyName: safeText(c.name),
-      company: { id: safeText(c.id), name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant), address: safeText(c.address), companyFee: c.companyFee, mashgiachFee: c.mashgiachFee },
+      company: { id: safeText(c.id), name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant), address: safeText(c.address), companyFee: c.companyFee, mashgiachFee: c.mashgiachFee, ...(c.archiveKey ? { archiveKey: c.archiveKey } : {}) },
       ingredients: data.ingredients.filter(i => i.companyIds.includes(c.id)).map(i => ({
         id: safeText(i.id), name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
         dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: safeText(i.certificationRaw), statusRaw: safeText(i.statusRaw), agencyRaw: safeText(i.agencyRaw), confidence: i.confidence, group1: i.group1 === true, plant: safeText(i.plant),

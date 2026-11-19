@@ -17,6 +17,7 @@ let days = 1;
 globalThis.fetch = async (url, options = {}) => {
   calls.push([url, options.method || 'GET']);
   assert.ok(!url.startsWith('/api/factories') && !url.startsWith('/api/sources/'), `Coordinator called an admin endpoint: ${url}`);
+  if (url.startsWith('/api/inspections/reports?')) return Response.json({ reports: [] });
   if (url === '/api/inspections/schedule') return new Response(JSON.stringify({ today: '2026-11-11', timeZone: 'UTC', settings: { countFrom: 'planned', mashgichimSeeAll: true }, companies: [{ ...row, overdueDays: days }, { ...row, id: 'not-in-list', name: 'Test Excluded Company' }], people: { mashgichim: [], coordinators: [] } }));
   if (url === '/api/visits/factories') return new Response(JSON.stringify({ group1Label: ' Test Priority Group ', companies: [{ ...company, assigned: true, nextDue: row.nextDue, status: row.status, overdueDays: days }] }));
   if (url === '/api/visits/factories/company%2Fa') return new Response(JSON.stringify({ company, ingredients: [item], products: [{ ...item, id: 'p', name: ' Test Product ' }] }));
@@ -24,8 +25,8 @@ globalThis.fetch = async (url, options = {}) => {
 };
 const props = { isOpen: true, role: 'coordinator', timeZone: 'UTC', onClose() {} };
 const screen = mount(FactoriesScreen, props); await screen.render();
-assert.deepEqual(calls, [['/api/inspections/schedule', 'GET'], ['/api/visits/factories', 'GET']]);
-assert.equal(screen.find(e => e.type === 'h3')[0].props.children, company.name);
+assert.deepEqual(calls, [['/api/inspections/schedule', 'GET'], ['/api/inspections/reports?limit=3&more=1', 'GET'], ['/api/visits/factories', 'GET']]);
+assert.equal(screen.find(e => e.type === 'h3' && e.props.dir === 'auto')[0].props.children, company.name);
 assert.equal(screen.find(e => e.type === 'p' && e.props.dir === 'auto')[0].props.children, `${company.brand} / ${company.plant}`);
 assert.doesNotMatch(screen.text(), /Test Excluded Company|Connect|Refresh now|Settings|Visit schedule settings/);
 assert.match(screen.text(), /Showing the companies assigned to you\./);
@@ -45,7 +46,7 @@ const editorProps = screen.tree().props.children.find(e => e?.type === VisitSche
 assert.equal(editorProps.isAdmin, false);
 const editor = mount(VisitScheduleEditor, editorProps); await editor.render();
 assert.doesNotMatch(editor.text(), /Who's responsible/); assert.match(editor.text(), /How often/); assert.equal(editor.find(e => e.type === 'legend' && e.props.children === 'Alerts').length, 1);
-await screen.click('Reports'); assert.equal(screen.tree().props.children.filter(e => e?.type === InspectionReportsInbox).length, 1);
+await screen.click('View all reports'); assert.equal(screen.tree().props.children.filter(e => e?.type === InspectionReportsInbox).length, 1);
 assert.ok(calls.every(([, method]) => method === 'GET'));
 
 for (const [count, text] of [[0, 'due today'], [1, '1 day'], [5, '5 days']]) {

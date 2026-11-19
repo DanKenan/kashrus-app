@@ -1,20 +1,23 @@
+import { createHash } from 'node:crypto';
 import { addSheetRow, editSheetRow, readSheetAddEditor, readSheetEditor } from './sheets-edit.ts';
 import { isAddRecordId, isoDateFromSheetsSerial, type AddTarget, type Edit, type EditAudit, type Target } from './tagged-row.ts';
 import { sourceFetch } from './http.ts';
-import { matrixRows, tabularConnector, keyRows } from './tabular.ts';
+import { matrixRows, tabularConnector, keyRows, cellText } from './tabular.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
 type GridValue = {
     formattedValue?: string;
     effectiveValue?: { stringValue?: string; numberValue?: number; boolValue?: boolean };
     effectiveFormat?: { numberFormat?: { type?: string } };
 };
+type RowMetadata = { metadataKey: string; metadataValue: string; metadataId: number };
 type GridData = {
     rowData?: { values?: GridValue[] }[];
-    rowMetadata?: { developerMetadata?: { metadataKey: string; metadataValue: string }[] }[];
+    rowMetadata?: { developerMetadata?: RowMetadata[] }[];
 };
 const effectiveValue = (cell?: GridValue) =>
     cell?.effectiveValue?.stringValue ?? cell?.effectiveValue?.numberValue ?? cell?.effectiveValue?.boolValue;
 const hasValue = (value: unknown) => value !== '' && value != null;
+const identityHash = (data: unknown) => createHash('sha256').update(JSON.stringify(data)).digest('base64url');
 export interface TaggedTable {
     records: { key: string; metadataId: number }[];
     headers: string[];
@@ -51,20 +54,23 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     const matrices = new Map<string, unknown[][]>();
     async function values(table: string, file?: SourceFile) { const path = `${sheet(file)}/values/${encodeURIComponent(range(table))}`; if (!matrices.has(path))
         matrices.set(path, (await request('sheets', path)).values || []); return matrices.get(path)!; }
-    async function readGridData(table: string, file?: SourceFile, expiration?: string): Promise<GridData> {
+    async function readGridData(table: string, file?: SourceFile, expiration?: string, removal = false) {
         // Fetch row tags, values and date formats together so a row move cannot
         // make a tag or date serial apply to a different record.
         const format = expiration ? ',effectiveFormat(numberFormat(type))' : '';
-        const tags = config.unconfirmedAdds ? ',rowMetadata(developerMetadata(metadataKey,metadataValue))' : '';
+        const tags = removal ? ',rowMetadata(developerMetadata(metadataKey,metadataValue,metadataId))'
+            : config.unconfirmedAdds ? ',rowMetadata(developerMetadata(metadataKey,metadataValue))' : '';
+        const properties = removal ? 'title,sheetId,gridProperties(rowCount)' : 'title,sheetId';
         const query = new URLSearchParams({ ranges: range(table),
-            fields: `sheets(properties(title),data(rowData(values(formattedValue,effectiveValue${format}))${tags}))` });
+            fields: `sheets(properties(${properties}),data(rowData(values(formattedValue,effectiveValue${format}))${tags}))` });
         const result = await request('sheets', `${sheet(file)}?${query}`);
         const tab = result.sheets?.find((entry: { properties: { title: string } }) => entry.properties?.title === table);
         if (!tab) throw Error('Google Sheets tab missing.');
-        return tab.data?.[0] ?? {};
+        return { data: (tab.data?.[0] ?? {}) as GridData, sheetId: tab.properties.sheetId as number | undefined,
+            rowCount: tab.properties.gridProperties?.rowCount as number | undefined };
     }
     async function readGridRows(table: string, file: SourceFile | undefined, expiration: string | undefined) {
-        const data = await readGridData(table, file, expiration);
+        const { data, sheetId } = await readGridData(table, file, expiration);
         const grid = (data.rowData ?? []).map(row => row.values ?? []);
         const parsed = matrixRows(grid.map(row => row.map(cell => cell.formattedValue ?? effectiveValue(cell))));
         const index = expiration ? parsed.columns.indexOf(expiration) : -1;
@@ -86,7 +92,7 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
                 tag.metadataKey === 'recordId' && isAddRecordId(tag.metadataValue)).map(tag => tag.metadataValue);
             if (ids.length) recordTags.set(index + 1, ids);
         }
-        return { ...parsed, recordTags };
+        return { ...parsed, recordTags, sheetId };
     }
     async function listTables(file?: SourceFile) { const meta = await request('sheets', `${sheet(file)}?fields=sheets.properties`); const tables = []; for (const s of meta.sheets || []) {
         const table = s.properties.title;
@@ -173,7 +179,7 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
         const pending = await config.unconfirmedAdds?.(config.spreadsheetId);
         if (!pending?.size) return;
         // Read cells and tags together so the last-seen row number matches the tagged row in this snapshot.
-        const { rowData = [], rowMetadata = [] } = await readGridData(table);
+        const { data: { rowData = [], rowMetadata = [] } } = await readGridData(table);
         const headers = rowData[0]?.values?.map(effectiveValue) ?? [];
         const column = headers.indexOf(idHeader);
         if (column < 0 || headers.lastIndexOf(idHeader) !== column) return;
@@ -206,7 +212,34 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
         if (blankId || new Set(ids).size !== ids.length) throw conflict('Every data row needs a unique ID.');
         return ids;
     }
-    return { calls: () => calls, listTables, tagManagedRows,
+    async function companyRemovalSnapshot() {
+        const { table, name, pk } = config.mapping.companies;
+        const { data, sheetId, rowCount } = await readGridData(table, undefined, undefined, true);
+        const grid = (data.rowData ?? []).map(row =>
+            (row.values ?? []).map(cell => cell.formattedValue ?? effectiveValue(cell)));
+        const { columns, rows } = matrixRows(grid);
+        const headers = (grid[0] ?? []).map(cellText), primary = pk || columns.find(column => /^id$/i.test(column));
+        if (sheetId === undefined || !Number.isSafeInteger(sheetId) || rowCount === undefined ||
+            !Number.isSafeInteger(rowCount) || rowCount < grid.length || !primary ||
+            [primary, name].some(header => !headers.includes(header) || headers.indexOf(header) !== headers.lastIndexOf(header)))
+            throw conflict('The company tab and identity columns could not be verified. Contact support before deleting anything.');
+        const keyed = keyRows(rows, columns, ['google_sheets', config.spreadsheetId, table], config.mapping);
+        const tags = (data.rowMetadata ?? []).flatMap((row, index) =>
+            (row.developerMetadata ?? []).filter(tag => tag.metadataKey === 'recordId').map(tag => ({ ...tag, rowNumber: index + 1 })));
+        return {
+            rows: keyed, tags, rowCount,
+            binding: identityHash([config.spreadsheetId, sheetId, pk ?? null, primary, headers.indexOf(primary), name, headers.indexOf(name)]),
+            remainingRowsHash: (except?: string) => identityHash(keyed.filter(row => row.id !== except)
+                .map(row => identityHash(grid[row.rowNumber! - 1])).sort()),
+        };
+    }
+    async function hasRowMetadata(metadataId: number) {
+        const result = await post('/developerMetadata:search', { dataFilters: [{ developerMetadataLookup: { metadataId } }] });
+        if (!result || (result.matchedDeveloperMetadata !== undefined && !Array.isArray(result.matchedDeveloperMetadata)))
+            throw conflict('The company row tag could not be verified. Contact support before deleting anything.');
+        return !!result.matchedDeveloperMetadata?.length;
+    }
+    return { calls: () => calls, listTables, tagManagedRows, companyRemovalSnapshot, hasRowMetadata,
         readAddEditor(edit: Edit, target: AddTarget) { return readSheetAddEditor(post, edit, target); },
         addTaggedRow(edit: Edit, target: AddTarget, token: string, ledger: Parameters<typeof addSheetRow>[4], resume: boolean, revision: unknown) {
             return addSheetRow(post, edit, target, token, ledger, explainBlankId => readIds(target.table, edit.idHeader, explainBlankId), resume, revision);
@@ -230,7 +263,13 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
             const rows = blocked?.size ? parsed.rows.filter(row =>
                 !grid?.recordTags.get(row.rowNumber!)?.some(id => blocked.has(id)) &&
                 !(primary && blocked.has(String(row.fields[primary])))) : parsed.rows;
-            return keyRows(rows, parsed.columns, ['google_sheets', fileId, table], config.mapping);
+            const keyed = keyRows(rows, parsed.columns, ['google_sheets', fileId, table], config.mapping);
+            const companies = config.mapping.companies;
+            if (grid?.sheetId !== undefined && Number.isSafeInteger(grid.sheetId) &&
+                companies.table === table && (companies.file?.id || config.spreadsheetId) === fileId) {
+                for (const row of keyed) row.archiveKey = identityHash([fileId, grid.sheetId, row.sourceKey]);
+            }
+            return keyed;
         },
         async sampleRows(table: string) {
             return matrixRows((await values(table)).slice(0,4)).rows;

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { registerInspectionRoutes } from '../../src/server/inspections/routes.ts';
 const dir = await mkdtemp(path.join(os.tmpdir(), 'inspection-routes-'));
-const handlers = new Map(), app = { get: (p, h) => handlers.set(`GET ${p}`, h), post: (p, h) => handlers.set(`POST ${p}`, h) };
+const handlers = new Map(), app = Object.fromEntries(['GET', 'POST', 'PUT'].map(method => [method.toLowerCase(), (p, h) => handlers.set(`${method} ${p}`, h)]));
 let blocked = false;
 const connection = { fees: { mashgiach: { company: { amount: 82, currency: 'USD' } } } };
 const item = { id: 'item', name: ' Name ', brand: '', code: '', certificationRaw: ' Raw ', statusRaw: '', agency: '', dpm: '', group1: false };
@@ -21,6 +21,9 @@ try {
   await routes.boot();
   assert.equal((await request('POST', '/api/visits/reports', { kiosk: true })).statusCode, 403);
   for (const badUser of [undefined, { ...user, agencyId: '' }, { ...user, role: 'worker' }, { ...user, role: 'manager' }]) assert.equal((await request('POST', '/api/visits/reports', { user: badUser })).statusCode, 403);
+  assert.deepEqual((await request('GET', '/api/visits/factories')).body.companies, []);
+  assert.equal((await request('POST', '/api/visits/reports')).statusCode, 404);
+  assert.equal((await request('PUT', '/api/inspections/schedule/settings', { user: { ...user, role: 'admin' }, body: { mashgichimSeeAll: true } })).statusCode, 200);
   const [first, retry] = await Promise.all([request('POST', '/api/visits/reports'), request('POST', '/api/visits/reports')]);
   assert.equal(first.statusCode, 201); assert.equal(retry.statusCode, 200); assert.deepEqual(first.body, retry.body);
   assert.deepEqual(first.body.fee, { amount: 82, currency: 'USD' });

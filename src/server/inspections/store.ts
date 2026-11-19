@@ -8,14 +8,18 @@ import { summary, type Report } from './model.ts';
 export const reportId = (agency: string, user: string, client: string) => createHash('sha256').update(JSON.stringify([agency, user, client])).digest('hex');
 export type Cursor = { submittedAt: string; id: string };
 export const reportOrder = (a: Cursor, b: Cursor) => b.submittedAt.localeCompare(a.submittedAt) || (a.id === b.id ? 0 : a.id > b.id ? -1 : 1);
-export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean; now?(): Date; timeZone?(agency: string): string; schedules?: ReturnType<typeof createScheduleStore> }) {
+export function createReportStore(deps: { db(): any; dataDir: string; staged(): boolean; now?(): Date; timeZone?(agency: string): string; schedules?: ReturnType<typeof createScheduleStore>; canSubmit?(agency: string, companyId: string): boolean }) {
   // Pay-screen and export caches are process-local: deployment is limited to one Cloud Run instance (maxScale=1).
   // Scheduled accountant sends always query fresh reports, independently of this cache.
+  const purged = new Map<string, Map<string, string>>();
+  const retained = (agency: string, row: Pick<Report, 'companyId' | 'submittedAt'>) =>
+    row.submittedAt > (purged.get(agency)?.get(row.companyId) ?? '');
   const observedFrom = new Map<string, string>(), partialMonths = new Map<string, string>(), completeMonths = new Set<string>();
   const months = new Map<string, Map<string, PayReport>>(), monthLoads = new Map<string, Promise<void>>();
   const zone = (agency: string) => deps.timeZone?.(agency) || 'America/New_York';
   const monthKey = (agency: string, month: string) => JSON.stringify([agency, month]);
   const financial = (r: Report) => {
+    if (!retained(r.agencyId, r)) return;
     const month = calendarDate(r.submittedAt, zone(r.agencyId)).slice(0, 7), key = monthKey(r.agencyId, month);
     const { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch } = r;
     if (!months.has(key)) months.set(key, new Map());
@@ -45,7 +49,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
         })().finally(() => monthLoads.delete(key)));
         await monthLoads.get(key);
       }
-      for (const r of months.get(key)?.values() ?? []) { const day = calendarDate(r.submittedAt, zone(agency)); if (day >= from && day <= to) rows.set(r.id, r); }
+      for (const r of months.get(key)?.values() ?? []) { const day = calendarDate(r.submittedAt, zone(agency)); if (retained(agency, r) && day >= from && day <= to) rows.set(r.id, r); }
       month = nextMonth;
     }
     return [...rows.values()];
@@ -60,7 +64,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     const selected: PayReport[] = [];
     for (const r of fetched) {
       const day = calendarDate(r.submittedAt, zone(agency));
-      if (r.agencyId !== agency || day < from || day > to) continue;
+      if (r.agencyId !== agency || !retained(agency, r) || day < from || day > to) continue;
       financial(r);
       const { id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch } = r;
       selected.push({ id, companyId, companyName, mashgiachId, mashgiachName, submittedAt, fee, dataFee, feeMismatch });
@@ -78,7 +82,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   const photos = new Map<string, Record<string, string>>(), flights = new Map<string, Promise<Record<string, string>>>();
   const key = (agency: string, id: string) => `${agency}__${id}`;
   const file = (collection: string, id: string) => path.join(deps.dataDir, 'inspection-reports', collection, encodeURIComponent(id) + '.json');
-  const list = (agency: string) => [...summaries.values()].filter(r => r.agencyId === agency).sort(reportOrder);
+  const list = (agency: string) => [...summaries.values()].filter(r => r.agencyId === agency && retained(agency, r)).sort(reportOrder);
   function cacheDetail(r: Report) {
     const id = key(r.agencyId, r.id);
     reports.delete(id); reports.set(id, r);
@@ -98,7 +102,11 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   async function localRows(): Promise<Report[]> {
     let names: string[] = [];
     try { names = await fs.readdir(path.dirname(file('inspectionReports', 'x'))); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
-    return Promise.all(names.filter(n => n.endsWith('.json')).map(n => fs.readFile(path.join(path.dirname(file('inspectionReports', 'x')), n), 'utf8').then(JSON.parse)));
+    const rows = await Promise.all(names.filter(n => n.endsWith('.json')).map(async n => {
+      try { return JSON.parse(await fs.readFile(path.join(path.dirname(file('inspectionReports', 'x')), n), 'utf8')); }
+      catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+    }));
+    return rows.filter(Boolean);
   }
   function query(agency: string, limit: number, before?: Cursor, projection = false) {
     let q = collection(agency).orderBy('sortKey', 'desc');
@@ -140,11 +148,13 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     let r: Report | undefined;
     if (db) r = (await collection(agency).doc(id).get()).data();
     else try { r = JSON.parse(await fs.readFile(file('inspectionReports', key(agency, id)), 'utf8')); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
-    if (r?.agencyId !== agency) return undefined;
+    if (r?.agencyId !== agency || !retained(agency, r)) return undefined;
     cacheDetail(r); return r;
   }
   async function saveUnlocked(r: Report, photoData: Record<string, string>): Promise<{ report: Report; created: boolean }> {
     if (deps.staged()) throw Error('Writes blocked');
+    if (deps.canSubmit && !deps.canSubmit(r.agencyId, r.companyId))
+      throw Object.assign(Error('Company is unavailable for visits.'), { status: 409 });
     const id = key(r.agencyId, r.id), db = deps.db();
     let saved = r;
     const schedules = deps.schedules, previous = schedules?.company(r.agencyId, r.companyId).lastVisit;
@@ -196,7 +206,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     const atEnd = () => ends.has(agency) && (!ends.get(agency) || (!!cursor && reportOrder(cursor, ends.get(agency)!) >= 0));
     const consume = (r: ReturnType<typeof summary>) => {
       cursor = { submittedAt: r.submittedAt, id: r.id };
-      if (!visible || visible(r)) rows.push(summary(r as Report));
+      if (retained(agency, r) && (!visible || visible(r))) rows.push(summary(r as Report));
     };
     const frontier = frontiers.get(agency);
     for (const r of list(agency)) {
@@ -239,7 +249,7 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
   function latest(agency: string, companyId: string) {
     let newest: ReturnType<typeof summary> | undefined;
     for (const rows of [summaries.values(), reports.values()]) for (const r of rows) {
-      if (r.agencyId === agency && r.companyId === companyId && (!newest || reportOrder(r, newest) < 0)) newest = summary(r as Report);
+      if (r.agencyId === agency && r.companyId === companyId && retained(agency, r) && (!newest || reportOrder(r, newest) < 0)) newest = summary(r as Report);
     }
     return newest;
   }
@@ -259,7 +269,45 @@ export function createReportStore(deps: { db(): any; dataDir: string; staged(): 
     })().finally(() => flights.delete(id));
     flights.set(id, flight); return flight;
   }
-  return { payReportsForRange, freshReportsForRange, feeReport, boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, visiblePage, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
+  async function reportsBeforeRemoval(agency: string, companyId: string, deletedAt: string) {
+    const db = deps.db();
+    const rows: Report[] = db
+      ? (await collection(agency).where('companyId', '==', companyId).get()).docs
+        .filter((doc: any) => doc.id === doc.data()?.id).map((doc: any) => doc.data())
+      : await localRows();
+    return rows.filter(r => r.agencyId === agency && r.companyId === companyId && r.submittedAt <= deletedAt);
+  }
+  async function removeRetained(agency: string, companyId: string, deletedAt: string, rows: Report[]) {
+    if (rows.some(r => r.agencyId !== agency || r.companyId !== companyId || r.submittedAt > deletedAt))
+      throw Error('Report does not match the confirmed company removal');
+    const db = deps.db();
+    for (let offset = 0; offset < rows.length; offset += 150) {
+      if (deps.staged()) throw Error('Writes blocked');
+      const batch = db?.batch();
+      for (const report of rows.slice(offset, offset + 150)) {
+        const id = key(agency, report.id);
+        if (batch) {
+          if (report.photoCount) batch.delete(db.collection('inspectionReportPhotos').doc(id));
+          batch.delete(collection(agency).doc(report.id));
+        } else {
+          const local = report as Report & { localPhotoId?: string };
+          if (report.photoCount) await fs.rm(file('inspectionReportPhotos', local.localPhotoId ?? id), { force: true });
+          await fs.rm(file('inspectionReports', id), { force: true });
+        }
+      }
+      if (batch) await batch.commit();
+      for (const report of rows.slice(offset, offset + 150)) {
+        const id = key(agency, report.id);
+        reports.delete(id); summaries.delete(id); photos.delete(id);
+        const month = calendarDate(report.submittedAt, zone(agency)).slice(0, 7);
+        months.get(monthKey(agency, month))?.delete(report.id);
+      }
+    }
+    if (!purged.has(agency)) purged.set(agency, new Map());
+    purged.get(agency)!.set(companyId, deletedAt);
+    windows.delete(agency);
+  }
+  return { reportsBeforeRemoval, removeRetained, payReportsForRange, freshReportsForRange, feeReport, boot: async (agencies: string[] = []) => { for (const agency of agencies) void ensure(agency).catch(() => {}); }, settled: (agency: string) => loaded.get(agency)?.catch(() => {}) || Promise.resolve(), ensure, save, readPhotos, get, page, visiblePage, list, latest, cached: (agency: string, id: string) => reports.get(key(agency, id)), cachedDetails: () => reports.size };
 }
 
 // Convert agency-local midnight to a UTC sortKey boundary, including DST offsets.
