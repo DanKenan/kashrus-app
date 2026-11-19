@@ -83,7 +83,7 @@ function companyCents(fee: NonNullable<PlaceFees['company']>, visits: number, fr
   }
   return Number((numerator * 2n + denominator) / (2n * denominator));
 }
-export function computePay(reports: PayReport[], fees: FeesDoc, places: { id: string; name: string }[], from: string, to: string, by: 'place' | 'mashgiach', zone: string): PayTable {
+export function computePay(reports: PayReport[], fees: FeesDoc, places: { id: string; name: string }[], from: string, to: string, by: 'place' | 'mashgiach', zone: string, removedOn: ReadonlyMap<string, string> = new Map()): PayTable {
   range(from, to, by);
   const selected = reports.filter(r => { const day = calendarDate(r.submittedAt, zone); return day >= from && day <= to; });
   // Every monetary accumulator is integer cents. Only the response converts to dollars.
@@ -107,8 +107,9 @@ export function computePay(reports: PayReport[], fees: FeesDoc, places: { id: st
   for (const [id, name] of all) {
     const fee = Object.hasOwn(fees.places, id) ? fees.places[id] : undefined, company = fee?.company;
     const visits = byPlace.get(id) ?? [], n = visits.length;
-    if (!n && (!company || company.per === 'visit')) continue;
-    const revenue = company ? companyCents(company, n, from, to) : 0;
+    const removalDay = removedOn.get(id), recurringEnd = removalDay && removalDay < to ? removalDay : to;
+    if (!n && (!company || company.per === 'visit' || recurringEnd < from)) continue;
+    const revenue = company ? companyCents(company, n, from, recurringEnd) : 0;
     if (by === 'place') { const row = get(id, name); row.companies += revenue; row.perVisit = fee?.mashgiach?.amount ?? visits[0]?.fee?.amount ?? null; }
     else if (!n) get('__no_visits__', 'No visits in this period').companies += revenue;
     else {

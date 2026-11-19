@@ -3,6 +3,7 @@ export type Dpm = 'dairy' | 'dairy_equipment' | 'pareve' | 'meat';
 export type SourceKind = 'airtable' | 'google_sheets' | 'excel' | 'supabase' | 'upload';
 export interface Company {
   sourceKey?: string;
+  archiveKey?: string;
   id: string; name: string; address?: string; companyFee?: number; mashgiachFee?: number; type?: string; brand?: string; plant?: string; extra: Record<string, string>;
 }
 export interface Ingredient {
@@ -25,7 +26,7 @@ export interface SourceMapping {
   valueAssignments?: Record<string, Record<string, ValueAssignment>> | Partial<Record<'ingredient' | 'product', Record<string, Record<string, ValueAssignment>>>>;
   group1Values: string[];
 }
-export interface SourceData { companies: Company[]; otherCompanies?: Pick<Company, 'id' | 'name' | 'type' | 'sourceKey'>[]; ingredients: Ingredient[]; products: Product[] }
+export interface SourceData { companies: Company[]; otherCompanies?: Pick<Company, 'id' | 'name' | 'type' | 'sourceKey' | 'archiveKey'>[]; ingredients: Ingredient[]; products: Product[] }
 export interface SourceFile { id: string; name: string }
 export interface SourceTable { name: string; columns: string[] }
 export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
@@ -45,6 +46,6 @@ export interface SourceConnector {
   }>;
   calls(): number;
 }
-export interface SourceRow { rowNumber?: number; sourceKey?: string; id: string; fields: Record<string, unknown> }
+export interface SourceRow { archiveKey?: string; rowNumber?: number; sourceKey?: string; id: string; fields: Record<string, unknown> }
 
 export type Group1Overrides = { ingredient: Record<string, boolean>; product: Record<string, boolean> };

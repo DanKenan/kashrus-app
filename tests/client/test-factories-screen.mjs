@@ -3,6 +3,7 @@ import { mount } from './lib/mini-render.mjs';
 import { SourceCompanyEditor } from '../../src/components/SourceCompanyEditor.tsx';
 import { SourcesSheet } from '../../src/components/SourcesSheet.tsx';
 import { SourceConnectForm } from '../../src/components/SourceConnectSheet.tsx';
+import { CompanyRemovalSheet } from '../../src/components/CompanyInfoSheet.tsx';
 import { FactoriesScreen } from '../../src/components/FactoriesScreen.tsx';
 import { sourceStatus } from '../../src/lib/sources.ts';
 const originalFetch = globalThis.fetch;
@@ -49,6 +50,18 @@ try {
     await editor.click('Refresh for review');
     assert.deepEqual(methods, ['PATCH','POST']);
     assert.ok(closed && refreshed);
+  }
+  {
+    const retention = "You can't undo this in Shutfey. After Shutfey confirms the company was removed, its past visit reports and payment history are kept for three calendar months, then permanently removed.";
+    globalThis.fetch = async () => Response.json({ mode: 'direct', present: true, name: 'Bakery', blockers: [] });
+    const removal = mount(CompanyRemovalSheet, { company: { id: 'a', name: 'Bakery' }, source: 'test-scope',
+      sourceName: 'Airtable', onClose() {}, onChanged() {}, onPending() {} });
+    await removal.render();
+    assert.ok(removal.text().includes(retention));
+    removal.find(element => element.type === 'input' && element.props.type === 'radio')[1].props.onChange();
+    await removal.render();
+    await removal.click('Continue');
+    assert.ok(removal.text().includes(retention));
   }
   assert.equal(sourceStatus({ sourceType: null }, 'America/Chicago'), 'Not connected');
   assert.equal(sourceStatus(connected, 'America/Chicago'), 'Connected to Airtable · updated 3:00 AM · 6 calls');

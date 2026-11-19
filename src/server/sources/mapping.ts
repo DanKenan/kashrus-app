@@ -236,10 +236,10 @@ export function mapSourceLists(
   const c = mapping.companies;
   const types = companyTypeChoices(c)?.map(folded);
   const companies = (rows.companies ?? []).filter(r => !types || types.includes(folded(read(r, c.type) ?? '')))
-    .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), address: read(r, c.address), companyFee: parseMoney(read(r, c.companyFee)), mashgiachFee: parseMoney(read(r, c.mashgiachFee)), extra: extra(r, c, 'companies') }));
+    .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), ...(r.archiveKey ? { archiveKey: r.archiveKey } : {}), name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), address: read(r, c.address), companyFee: parseMoney(read(r, c.companyFee)), mashgiachFee: parseMoney(read(r, c.mashgiachFee)), extra: extra(r, c, 'companies') }));
   const keptIds = new Set(companies.map(c => c.id));
   const otherCompanies = (rows.companies ?? []).filter(r => !keptIds.has(r.id))
-    .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), name: read(r, c.name) ?? '', type: read(r, c.type) }));
+    .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), ...(r.archiveKey ? { archiveKey: r.archiveKey } : {}), name: read(r, c.name) ?? '', type: read(r, c.type) }));
   const links = options.resolveLinks ?? companyLinkResolver(companies, otherCompanies, options.unmatched);
   const i = mapping.ingredients, p = mapping.products;
   const ingredients = (rows.ingredients ?? []).map(r => {

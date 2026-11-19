@@ -36,4 +36,8 @@ assert.equal(prorated.totals.companies, 198.39); assert.equal(prorated.rows.leng
 assert.equal(computePay([], fees, places, '2026-10-01', '2026-10-15', 'mashgiach', 'UTC').rows[0].name, 'No visits in this period');
 const split = computePay([{ ...reports[9], mashgiachId: 'first' }, { ...reports[9], id: 'other', mashgiachId: 'second', fee: null }], fees, places.slice(0, 2), '2026-10-01', '2026-10-31', 'mashgiach', 'UTC');
 assert.equal(split.rows.filter(r => r.visits).every(r => r.companies === 50), true); assert.equal(split.noFee, 1);
+const removedOn = new Map([['b', '2026-10-20']]);
+const annual = computePay([reports[9]], fees, [places[1]], '2026-10-01', '2026-11-30', 'mashgiach', 'UTC', removedOn);
+assert.deepEqual(annual.totals, { visits: 1, paid: 80, companies: 64.52, left: -15.48 });
+assert.deepEqual(computePay([], fees, [places[1]], '2026-10-21', '2026-11-30', 'mashgiach', 'UTC', removedOn).rows, []);
 console.log('fees model: validation, sketch totals, proration, splits, rounding and decisions passed');

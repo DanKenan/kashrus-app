@@ -1,10 +1,20 @@
 import { createAgencyDocument, type DocumentDeps } from './food-service-store.ts';
 
+export type SheetRemovalEvidence = {
+  binding: string;
+  rowCount: number;
+  remainingRowsHash: string;
+  metadataId?: number;
+};
+
 export type CompanyRemoval = {
   source: string;
   archived: boolean;
   name: string;
   recordKey?: string;
+  archiveKey?: string;
+  archivedCompanyId?: string;
+  sheetEvidence?: SheetRemovalEvidence;
   companyFee?: number;
   mashgiachFee?: number;
   requested?: 'guided' | 'direct';

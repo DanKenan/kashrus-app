@@ -28,16 +28,62 @@ export function registerInspectionRoutes(app: any, deps: {
   const email = createEmailTransport(deps.dataDir, !!deps.testMode), outboxes = new Map<string, Message[]>();
   const schedules = createScheduleStore({ ...deps, now });
   const removals = createCompanyRemovalStore({ ...deps, now });
-  const removal = (a: string, id: string, source = deps.source(a).identity) => {
-    const entry = Object.hasOwn(removals.doc(a).companies, id) ? removals.doc(a).companies[id] : undefined;
-    return entry?.source === source ? entry : undefined;
+  const archiveEntryId = (key: string) => `sheets:${key}`;
+  const removal = (a: string, id: string, source?: string, archiveKey?: string) => {
+    if (source === undefined) {
+      const connected = deps.source(a);
+      source = connected.identity;
+      if (connected.connection?.sourceType === 'google_sheets') {
+        archiveKey = connected.state.companies.find(row => row.id === id)?.archiveKey ??
+          connected.state.otherCompanies?.find(row => row.id === id)?.archiveKey;
+      }
+    }
+    const { companies } = removals.doc(a);
+    const entry = Object.hasOwn(companies, id) ? companies[id] : undefined;
+    if (entry?.source === source && (!archiveKey || !entry?.archiveKey || entry.archiveKey === archiveKey)) return entry;
+    const archived = archiveKey ? companies[archiveEntryId(archiveKey)] : undefined;
+    if (!archived?.archivedCompanyId) return archived;
+    const pending = companies[archived.archivedCompanyId];
+    return pending?.requested && pending.archiveKey === archiveKey ? pending : archived;
   };
   const active = (a: string, id: string) => {
     const entry = removal(a, id);
     return !entry?.archived && !entry?.requested && !entry?.deletedAt;
   };
   const setRemoval = (a: string, id: string, value: CompanyRemoval) =>
-    removals.update(a, next => { next.companies[id] = value; });
+    removals.update(a, next => {
+      if (!value.archiveKey) {
+        next.companies[id] = value;
+        return;
+      }
+      const key = archiveEntryId(value.archiveKey), previous = next.companies[id];
+      if (value.requested || value.deletedAt) {
+        if (previous?.archiveKey && previous.archiveKey !== value.archiveKey)
+          throw Object.assign(Error('Check linked records and verify the company identity before continuing.'), { status: 409 });
+        next.companies[id] = value;
+        if (value.deletedAt) delete next.companies[key];
+      } else {
+        if (value.archived) next.companies[key] = { ...value, archivedCompanyId: id };
+        else delete next.companies[key];
+        if (previous?.source === value.source && (!previous.archiveKey || previous.archiveKey === value.archiveKey))
+          delete next.companies[id];
+      }
+    });
+  async function bindSheetArchives(a: string, source: string, rows: readonly { id: string; archiveKey?: string }[]) {
+    await removals.ensure(a);
+    const missingKey = (entry?: CompanyRemoval) => entry?.source === source && entry.archived &&
+      !entry.archiveKey && !entry.requested && !entry.deletedAt;
+    const legacy = rows.filter(row => row.archiveKey && missingKey(removals.doc(a).companies[row.id]));
+    if (!legacy.length) return;
+    await removals.update(a, next => {
+      for (const row of legacy) {
+        const entry = next.companies[row.id];
+        if (!row.archiveKey || !missingKey(entry)) continue;
+        next.companies[archiveEntryId(row.archiveKey)] = { ...entry, archiveKey: row.archiveKey, archivedCompanyId: row.id };
+        delete next.companies[row.id];
+      }
+    });
+  }
   const withRemoval = async <T,>(a: string, action: () => Promise<T>) => {
     await removals.ensure(a);
     await food.ensure(a);
@@ -127,9 +173,16 @@ export function registerInspectionRoutes(app: any, deps: {
     ...Object.entries(removals.doc(a).companies).filter(([, entry]) => entry.deletedAt && !entry.cleaned)
       .map(([id, entry]) => ({ id, name: entry.name })),
   ];
+  const payTable = (a: string, reports: Parameters<typeof computePay>[0], from: string, to: string, by: 'place' | 'mashgiach') => {
+    const timeZone = zone(a), removedOn = new Map<string, string>();
+    for (const [id, entry] of Object.entries(removals.doc(a).companies)) {
+      if (entry.deletedAt) removedOn.set(id, calendarDate(entry.deletedAt, timeZone));
+    }
+    return computePay(reports, effectiveFees(a), payPlaces(a), from, to, by, timeZone, removedOn);
+  };
   const pay = async (a: string, query: any) => {
     const r = range(query.from, query.to, query.by ?? 'place');
-    return computePay(await store.payReportsForRange(a, r.from, r.to), effectiveFees(a), payPlaces(a), r.from, r.to, r.by, zone(a));
+    return payTable(a, await store.payReportsForRange(a, r.from, r.to), r.from, r.to, r.by);
   };
   const message = async (a: string, query: any) => buildAccountantMessage(deps.agencyName?.(a) || 'Agency', fees.doc(a).accountant?.email || '', await pay(a, query));
   async function sendSummary(a: string, query: any, idempotencyKey?: string, preparedTable?: Awaited<ReturnType<typeof pay>>) {
@@ -172,7 +225,7 @@ export function registerInspectionRoutes(app: any, deps: {
       try {
         // A scheduled email must never rely on the process-local pay-screen cache.
         const reports = await store.freshReportsForRange(a, period.from, period.to);
-        const table = computePay(reports, effectiveFees(a), payPlaces(a), period.from, period.to, 'place', zone(a));
+        const table = payTable(a, reports, period.from, period.to, 'place');
         if (!table.totals.visits) return { sent: false, reason: 'no_visits' as const };
         return await sendSummary(a, period, claim.key, table);
       } catch (error) {
@@ -452,8 +505,9 @@ export function registerInspectionRoutes(app: any, deps: {
     const visibleCompanies = [...factories, ...places(a)].filter(c => visible(a, c.id, u));
     const rows = store.list(a).filter(r => visible(a, r.companyId, u));
     const options = new Map(visibleCompanies.map(c => [c.id, { id: c.id, name: c.name }]));
+    const removedIds = new Set(Object.entries(removals.doc(a).companies).map(([id, entry]) => entry.archivedCompanyId ?? id));
     for (const report of rows) {
-      if (!options.has(report.companyId) && Object.hasOwn(removals.doc(a).companies, report.companyId))
+      if (!options.has(report.companyId) && removedIds.has(report.companyId))
         options.set(report.companyId, { id: report.companyId, name: report.companyName });
     }
     const companies = [...options.values()].sort((x, y) => x.name.localeCompare(y.name));
@@ -509,10 +563,13 @@ export function registerInspectionRoutes(app: any, deps: {
   });
   app.get('/api/inspections/schedule', handler(true, (_req: any, res: any, u: Person, a: string) => {
     const select = (role: string) => u.role === 'admin' ? people(a).filter(p => p.role === role).map(({ id, name }) => ({ id, name })) : [];
+    const currentByArchiveKey = new Map(deps.source(a).state.companies.map(row => [row.archiveKey, row.id]));
     const archivedLastVisits = u.role === 'admin' ? Object.fromEntries(
       Object.entries(removals.doc(a).companies).flatMap(([id, entry]) => {
-        const last = entry.archived && !entry.deletedAt && removal(a, id) && lastVisit(a, id);
-        return last ? [[id, last]] : [];
+        const historyId = entry.archivedCompanyId ?? id;
+        const currentId = entry.archiveKey ? currentByArchiveKey.get(entry.archiveKey) ?? historyId : historyId;
+        const last = entry.archived && !entry.deletedAt && removal(a, currentId)?.archived && lastVisit(a, historyId);
+        return last ? [[currentId, last]] : [];
       })) : undefined;
     res.json({ today: today(a), timeZone: zone(a), settings: schedules.doc(a).settings, archivedLastVisits, companies: allPlaces(a).filter(c => visible(a, c.id, u)).map(c => row(a, c)).sort((a, b) => a.name.localeCompare(b.name)), people: { mashgichim: select('mashgiach'), coordinators: select('coordinator') } });
   }));
@@ -560,14 +617,14 @@ export function registerInspectionRoutes(app: any, deps: {
         if (source.state.status === 'ok' &&
             (source.state.companies.some(row => row.id === id) || source.state.otherCompanies?.some(row => row.id === id))) continue;
         const reports = await store.reportsBeforeRemoval(a, id, entry.deletedAt!);
-        await inbox.remove(a, reports.map(report => report.id));
+        const reportIds = new Set(reports.map(report => report.id));
+        await inbox.remove(a, [...reportIds]);
         await fees.update(a, next => {
-          for (const report of reports) delete next.decisions[report.id];
-          delete next.places[id];
+          for (const reportId of reportIds) delete next.decisions[reportId];
         });
-        await store.removeRetained(a, id, entry.deletedAt!, reports);
         const current = schedules.company(a, id);
-        if (current.lastVisit && current.lastVisit.at <= entry.deletedAt!) {
+        // Clear only a pointer to a report in this purge, before deleting it so a retry can still verify the match.
+        if (current.lastVisit && reportIds.has(current.lastVisit.reportId)) {
           const update = schedules.prepare(a, { companies: { [id]: { lastVisit: null } } });
           if (update) {
             if (deps.db()) await update.ref.set(update.patch, { merge: true });
@@ -575,7 +632,9 @@ export function registerInspectionRoutes(app: any, deps: {
             schedules.install(a, update.next);
           }
         }
-        await setRemoval(a, id, { source: entry.source, archived: false, name: '', deletedAt: entry.deletedAt, cleaned: true });
+        await store.removeRetained(a, id, entry.deletedAt!, reports);
+        await setRemoval(a, id, { source: entry.source, archived: false, name: '', deletedAt: entry.deletedAt, cleaned: true,
+          ...(entry.archiveKey ? { archiveKey: entry.archiveKey } : {}) });
       }
     });
   }
@@ -634,7 +693,7 @@ export function registerInspectionRoutes(app: any, deps: {
   if (deps.testMode) app.post('/api/__test__/inspections/check', handler('only', async (_req: any, res: any, u: Person) => {
     res.json(await check());
   }));
-  return { check, withRemoval, removal, setRemoval, pendingRemovals, foodServiceCompanyIds: async (a: string) => { await food.ensure(a); return connectedPlaces(a).filter(p => p.source === 'connected').map(p => p.id); }, flushSeen: inbox.flush, boot: async () => {
+  return { check, withRemoval, removal, setRemoval, bindSheetArchives, pendingRemovals, foodServiceCompanyIds: async (a: string) => { await food.ensure(a); return connectedPlaces(a).filter(p => p.source === 'connected').map(p => p.id); }, flushSeen: inbox.flush, boot: async () => {
     await store.boot(deps.agencyIds?.() || []);
     const agencies = deps.scheduleAgencyIds?.() || deps.agencyIds?.() || [];
     await Promise.all([schedules.boot(agencies), food.boot(agencies), inbox.boot(agencies), fees.boot(agencies), companyInfo.boot(agencies), removals.boot(agencies)]);

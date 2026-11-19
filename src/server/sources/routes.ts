@@ -2,7 +2,7 @@ import { createOAuth, isOAuthProvider, type OAuthProvider } from './oauth.ts';
 import { createGoogleSheetsApi } from './google-sheets.ts';
 import { createExcelApi } from './excel.ts';
 import { validSupabaseUrl } from './supabase.ts';
-import type { CompanyRemoval } from '../inspections/company-removal.ts';
+import type { CompanyRemoval, SheetRemovalEvidence } from '../inspections/company-removal.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { parseUpload, uploadRowsError, uploadTypeError, type UploadedFile } from './upload.ts';
 import { guardSourceWrite } from './write.ts';
@@ -98,8 +98,9 @@ export function registerSourceRoutes(app: any, deps: {
   foodServiceCompanyIds?(agencyId: string): Promise<string[]>;
   companyRemoval?: {
     withRemoval<T>(agencyId: string, action: () => Promise<T>): Promise<T>;
-    removal(agencyId: string, id: string, source: string): CompanyRemoval | undefined;
+    removal(agencyId: string, id: string, source: string, archiveKey?: string): CompanyRemoval | undefined;
     setRemoval(agencyId: string, id: string, status: CompanyRemoval): Promise<unknown>;
+    bindSheetArchives(agencyId: string, source: string, rows: readonly { id: string; archiveKey?: string }[]): Promise<void>;
     pendingRemovals(agencyId: string, source: string): Promise<[string, CompanyRemoval][]>;
   };
   now?(): Date;
@@ -137,6 +138,11 @@ export function registerSourceRoutes(app: any, deps: {
   }
   const status = (id: string) => keyErrors.has(id) ? 'error' : cache.state(id).status;
   const connector = (c: Connection, plain?: string, files = uploads.get(c.agencyId) || []) => createConnector({ kind: c.sourceType, baseId: c.baseId, spreadsheetId: c.baseId, workbookId: c.baseId, url: c.baseId, mapping: c.mapping, files, ...(c.sourceType === 'google_sheets' ? { unconfirmedAdds } : {}), ...(isOAuthProvider(c.sourceType)?{token:token(c.agencyId,c.sourceType)}:{}), ...(deps.testMode ? { apiBase: c.sourceType==='airtable'?apiBase:apiBases.get(c.sourceType) } : {}) } as SourceSettings, plain || (['airtable','supabase'].includes(c.sourceType)?storedKey(c):''));
+  async function bindSheetArchives(c: Connection) {
+    const source = companySourceIdentity(c), data = cache.data(c.agencyId);
+    if (c.sourceType === 'google_sheets' && source && data && !deps.staged())
+      await deps.companyRemoval?.bindSheetArchives(c.agencyId, source, [...data.companies, ...(data.otherCompanies ?? [])]);
+  }
   const loadBackups = (id: string) => store.load(id, Object.keys(connections.get(id)?.backupHashes || {}));
   const cache = createSourceCache({ mappingFor: id => connections.get(id)?.mapping, connectorFor: id => connector(connections.get(id)!), backups: { load: loadBackups }, group1SettingsFor: id => ({ group1Label: connections.get(id)?.group1Label || 'Group 1', group1Overrides: connections.get(id)?.group1Overrides, valueAssignments: connections.get(id)?.mapping.valueAssignments }) });
   const flights = new Map<string, Promise<any>>(), last = new Map<string, number>(), timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -207,6 +213,7 @@ export function registerSourceRoutes(app: any, deps: {
       await saves.get(id)?.catch(() => {});
       const c = connections.get(id)!;
       const cached = await cache.refresh(id);
+      if (cached.ok) await bindSheetArchives(c).catch(() => console.warn('[sources] company archive binding will retry'));
       const result = keyErrors.has(id) ? { ...cached, ok: false, error: unreadableKey } : cached;
       if(c.sourceType==='upload') return {ok:result.ok,status:status(id),calls:0,refreshedAt:cache.state(id).refreshedAt||null};
       const dirty = unconfirmed.get(id) || new Map();
@@ -383,6 +390,7 @@ export function registerSourceRoutes(app: any, deps: {
               return res.status(400).json({ error: 'Mapped tables and columns must exist in the source.' });
       }
       const data = await adapter.loadAll!();
+      if (old) await bindSheetArchives(old);
       // Mapping save is exactly one config write; last-good backups follow explicit refresh.
       if (p === 'upload' && body.draftId) {
           await store.saveUpload(c, files!);
@@ -864,20 +872,54 @@ export function registerSourceRoutes(app: any, deps: {
   const removalMode = (c: Connection): CompanyRemoval['requested'] | null => c.sourceType === 'google_sheets' ? 'guided'
     : c.sourceType === 'airtable' && c.access === 'readwrite' ? 'direct' : null;
   const linkedLabels = { companies: 'Companies', ingredients: 'Schedule A', products: 'Schedule B' };
+  const verifyCompanyIdentity = 'Check linked records and verify the company identity before continuing.';
+  async function sheetRemovalIdentity(c: Connection, companyId: string, entry?: CompanyRemoval) {
+    const api = sheetsApi(c, 'companies'), snapshot = await api.companyRemovalSnapshot();
+    const companies = snapshot.rows.map(row => ({
+      id: row.id, sourceKey: row.sourceKey, name: cellText(row.fields[c.mapping.companies.name]), rowNumber: row.rowNumber,
+    }));
+    const company = companies.find(row => row.id === companyId);
+    const tags = company ? snapshot.tags.filter(tag => tag.rowNumber === company.rowNumber) : [];
+    const metadataId = tags[0]?.metadataId;
+    const validTags = !tags.length || (tags.length === 1 && Number.isSafeInteger(metadataId) && tags[0].metadataValue === company?.sourceKey);
+    const evidence: SheetRemovalEvidence | undefined = company && validTags ? {
+      binding: snapshot.binding, rowCount: snapshot.rowCount, remainingRowsHash: snapshot.remainingRowsHash(companyId),
+      ...(metadataId === undefined ? {} : { metadataId }),
+    } : undefined;
+    if (entry?.requested !== 'guided') return { companies, company, evidence, consistent: validTags };
+
+    const original = entry.sheetEvidence;
+    const sameRow = !!company && validTags && company.sourceKey === entry.recordKey && company.name === entry.name;
+    const sameBinding = original?.binding === snapshot.binding;
+    if (company) return {
+      companies, company, evidence,
+      consistent: sameRow && (!original || (sameBinding && original.metadataId === metadataId)),
+    };
+
+    // Compare the full source tab, including records hidden by filters or Add quarantine.
+    // A physical row deletion reduces the grid by one and leaves the other rows intact.
+    const oldKeyOrName = companies.some(row => row.sourceKey === entry.recordKey || row.name.toLowerCase() === entry.name.toLowerCase());
+    const consistent = !!original && sameBinding && !oldKeyOrName &&
+      snapshot.rowCount === original.rowCount - 1 && snapshot.remainingRowsHash() === original.remainingRowsHash &&
+      (original.metadataId === undefined || (!snapshot.tags.some(tag => tag.metadataId === original.metadataId) &&
+        !await api.hasRowMetadata(original.metadataId)));
+    return { companies, company, evidence, consistent };
+  }
   async function removalPlan(c: Connection, companyId: string, entry?: CompanyRemoval) {
     const mode = removalMode(c), adapter = connector(c);
     const { table, file } = c.mapping.companies;
     const sheet = c.sourceType === 'google_sheets';
-    const rawCompanies = sheet ? await sheetCompanies(c) : [];
+    const identity = sheet ? await sheetRemovalIdentity(c, companyId, entry) : undefined;
+    const rawCompanies = identity?.companies ?? [];
     const data = mode === 'direct' ? await adapter.loadAll!() : cache.data(c.agencyId);
     const all = [...(data?.companies ?? []), ...(data?.otherCompanies ?? [])];
-    const freshCompany = (sheet ? rawCompanies : all).find(row =>
-      row.id === companyId || (sheet && entry?.recordKey && row.sourceKey === entry.recordKey));
+    const freshCompany = sheet ? identity?.company : all.find(row => row.id === companyId);
     const native = mode === 'direct' ? await adapter.companyDeletion!(companyId) : undefined;
     const present = native?.present ?? !!freshCompany;
     const recordKey = (sheet ? freshCompany?.sourceKey : companyId) ?? entry?.recordKey;
     const name = freshCompany?.name ?? entry?.name ?? '';
     const blockers = new Set(native?.blockers);
+    if (identity && !identity.consistent) blockers.add(verifyCompanyIdentity);
     if (!mode) blockers.add(c.sourceType === 'airtable'
       ? 'Enable write access in Source settings to delete this company in Shutfey.'
       : 'Shutfey cannot safely verify and permanently delete this company from the connected source.');
@@ -921,6 +963,7 @@ export function registerSourceRoutes(app: any, deps: {
     }
     return {
       mode, name, present, recordKey, blockers: [...blockers], remove: native?.remove,
+      sheetEvidence: identity?.evidence, consistent: identity?.consistent,
       ...(sheet ? { spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${encodeURIComponent(file?.id || c.baseId)}/edit`, table } : {}),
     };
   }
@@ -931,12 +974,13 @@ export function registerSourceRoutes(app: any, deps: {
     if (!c || !source || !lifecycle || req.query.source !== source) return sheetConflict('The source changed. Refresh company data and try again.');
     const companyId = req.params.companyId;
     await lifecycle.withRemoval(id, async () => {
-      const entry = lifecycle.removal(id, companyId, source);
       const row = cache.state(id).companies.find(row => row.id === companyId);
+      const entry = lifecycle.removal(id, companyId, source, row?.archiveKey);
       if (entry?.deletedAt || (!row && !entry?.requested) || (await deps.foodServiceCompanyIds?.(id))?.includes(companyId))
         return res.status(404).json({ error: 'Company not found' });
+      if (entry?.requested && entry.source !== source) return sheetConflict('The source changed. Refresh company data and try again.');
       const plan = await removalPlan(c, companyId, entry);
-      res.json({ ...plan, remove: undefined, pending: entry?.requested ?? null });
+      res.json({ ...plan, remove: undefined, sheetEvidence: undefined, consistent: undefined, pending: entry?.requested ?? null });
     });
   }));
   app.post(companyRemovalRoute, mutation(async (req: any, res: any, { id, user }: any) => {
@@ -946,35 +990,43 @@ export function registerSourceRoutes(app: any, deps: {
     if (!c || !source || !lifecycle || req.body?.source !== source) return sheetConflict('The source changed. Refresh company data and try again.');
     const companyId = req.params.companyId, { action, confirmation, name } = req.body;
     await lifecycle.withRemoval(id, async () => {
-      const entry = lifecycle.removal(id, companyId, source);
-      if (entry?.deletedAt) return res.json({ status: 'deleted' });
       const row = cache.state(id).companies.find(row => row.id === companyId);
+      const entry = lifecycle.removal(id, companyId, source, row?.archiveKey);
+      if (entry?.deletedAt) return res.json({ status: 'deleted' });
+      const archiveKey = row?.archiveKey ?? entry?.archiveKey;
       if ((!row && !entry?.requested) || (await deps.foodServiceCompanyIds?.(id))?.includes(companyId))
         return res.status(404).json({ error: 'Company not found' });
       if (action === 'archive' || action === 'restore') {
         if (entry?.requested) return sheetConflict('Finish checking the permanent removal first.');
         if (!row) return sheetConflict('Refresh company data and try again.');
         const archived = action === 'archive';
-        await lifecycle.setRemoval(id, companyId, { source, archived, name: row.name });
+        if (c.sourceType === 'google_sheets' && !archiveKey) return sheetConflict('Refresh company data and try again.');
+        await lifecycle.setRemoval(id, companyId, { source, archived, name: row.name, ...(archiveKey ? { archiveKey } : {}) });
         return res.json({ status: archived ? 'archived' : 'restored' });
       }
       if (action !== 'delete' && action !== 'refresh' && action !== 'cancel') return res.status(400).json({ error: 'Invalid removal action' });
       if (action === 'delete' && confirmation !== 'DELETE') return res.status(400).json({ error: 'Type DELETE to confirm.' });
       if (action === 'refresh' && !entry?.requested) return sheetConflict('Start permanent removal before checking the source.');
+      if (entry?.requested && entry.source !== source) return sheetConflict('The source changed. Refresh company data and try again.');
       const plan = await removalPlan(c, companyId, entry);
       if (!plan.mode) return sheetConflict(plan.blockers[0]);
       if (action === 'cancel') {
-        if (entry?.requested !== 'guided' || !plan.present) return sheetConflict('Refresh company data to verify removal.');
-        await lifecycle.setRemoval(id, companyId, { source, archived: entry.archived, name: plan.name });
+        if (entry?.requested !== 'guided' || !plan.present || !plan.consistent) return sheetConflict('Refresh company data to verify removal.');
+        await lifecycle.setRemoval(id, companyId, { source, archived: entry.archived, name: plan.name, ...(archiveKey ? { archiveKey } : {}) });
         return res.json({ status: 'cancelled' });
       }
-      if (plan.blockers.length) return sheetConflict('Check linked records and verify the company identity before continuing.');
+      if (plan.blockers.length) return sheetConflict(verifyCompanyIdentity);
       if (action === 'delete' && plan.present) {
         if (plan.name !== name) return sheetConflict('The company name changed. Review the company and try again.');
-        if (plan.mode === 'guided' && !plan.recordKey) return sheetConflict('The permanent ID could not be verified. Contact support before deleting anything.');
+        if (plan.mode === 'guided') {
+          if (!plan.recordKey || !plan.sheetEvidence) return sheetConflict('The permanent ID could not be verified. Contact support before deleting anything.');
+          if (entry?.requested === 'guided') return res.json({ status: 'guided' });
+        }
         await lifecycle.setRemoval(id, companyId, {
           source, archived: entry?.archived ?? false, name: plan.name, requested: plan.mode,
           ...(plan.recordKey ? { recordKey: plan.recordKey } : {}),
+          ...(archiveKey ? { archiveKey } : {}),
+          ...(plan.sheetEvidence ? { sheetEvidence: plan.sheetEvidence } : {}),
           ...(row?.companyFee === undefined ? {} : { companyFee: row.companyFee }),
           ...(row?.mashgiachFee === undefined ? {} : { mashgiachFee: row.mashgiachFee }),
         });
@@ -992,7 +1044,11 @@ export function registerSourceRoutes(app: any, deps: {
       if (!result.ok || !latest || [...latest.companies, ...(latest.otherCompanies ?? [])].some(row => row.id === companyId || (plan.mode === 'guided' && plan.recordKey && row.sourceKey === plan.recordKey)))
         return sheetConflict('Removal could not be confirmed. Refresh company data and try again.');
       const confirmed = lifecycle.removal(id, companyId, source)!;
-      const { requested: _requested, ...saved } = confirmed;
+      if (plan.mode === 'guided') {
+        const verified = await sheetRemovalIdentity(c, companyId, confirmed);
+        if (verified.company || !verified.consistent) return sheetConflict(verifyCompanyIdentity);
+      }
+      const { requested: _requested, sheetEvidence: _sheetEvidence, ...saved } = confirmed;
       await lifecycle.setRemoval(id, companyId, { ...saved, deletedAt: (deps.now?.() ?? new Date()).toISOString() });
       res.json({ status: 'deleted' });
     });
@@ -1003,7 +1059,7 @@ export function registerSourceRoutes(app: any, deps: {
     const source = companySourceIdentity(c), lifecycle = deps.companyRemoval;
     const pending = source ? await lifecycle?.pendingRemovals(id, source) ?? [] : [];
     const rows = s.companies.filter(c => !foodServiceIds.has(c.id)).flatMap(company => {
-      const entry = source ? lifecycle?.removal(id, company.id, source) : undefined;
+      const entry = source ? lifecycle?.removal(id, company.id, source, company.archiveKey) : undefined;
       if (entry?.deletedAt) return [];
       return [{
         id: company.id, name: company.name, address: company.address || '', companyFee: company.companyFee,

@@ -14867,8 +14867,9 @@ const sourceRoutes = registerSourceRoutes(app, {
   foodServiceCompanyIds: (agencyId) => inspectionRoutes.foodServiceCompanyIds(agencyId),
   companyRemoval: {
     withRemoval: (agencyId, action) => inspectionRoutes.withRemoval(agencyId, action),
-    removal: (agencyId, companyId, source) => inspectionRoutes.removal(agencyId, companyId, source),
+    removal: (agencyId, companyId, source, archiveKey) => inspectionRoutes.removal(agencyId, companyId, source, archiveKey),
     setRemoval: (agencyId, companyId, status) => inspectionRoutes.setRemoval(agencyId, companyId, status),
+    bindSheetArchives: (agencyId, source, rows) => inspectionRoutes.bindSheetArchives(agencyId, source, rows),
     pendingRemovals: (agencyId, source) => inspectionRoutes.pendingRemovals(agencyId, source),
   },
   now: serverNow,

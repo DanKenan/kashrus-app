@@ -15,6 +15,7 @@ export function CompanyInfoSheet({ placeId, isAdmin, onClose, onRemove }: { plac
 }
 
 const dangerButton = visitButton.replace('border-line-control', 'border-bad').replace('text-ink', 'text-bad');
+const removalRetention = "You can't undo this in Shutfey. After Shutfey confirms the company was removed, its past visit reports and payment history are kept for three calendar months, then permanently removed.";
 const removalPath = (id: string) => `/api/factories/${encodeURIComponent(id)}/removal`;
 export function companyRemovalRequest(id: string, source: string, action: string, extra = {}) {
   return sourceRequest(removalPath(id), 'POST', { source, action, ...extra });
@@ -84,7 +85,7 @@ export function CompanyRemovalSheet({ company, source, sourceName, onClose, onCh
       </label>
       <label className="flex min-h-11 items-start gap-2 rounded-lg border border-line-control p-4">
         <input type="radio" name="remove-company" className="mt-1" checked={choice === 'delete'} onChange={() => setChoice('delete')} />
-        <span><span className="block font-semibold">Delete company permanently</span>Permanently remove this company record. You can't undo this in Shutfey. Past visit reports and payment records stay.</span>
+        <span><span className="block font-semibold">Delete company permanently</span>Permanently remove this company record. {removalRetention}</span>
       </label>
     </fieldset>
     {error && <p role="alert" className="text-bad">{error}</p>}
@@ -101,7 +102,7 @@ export function CompanyRemovalSheet({ company, source, sourceName, onClose, onCh
   const checkOnly = plan?.pending && !plan.present;
   return <VisitSheet title={`Delete ${plan?.name || company.name} permanently?`} onClose={close}>
     <p>Source: {sourceName}</p>
-    <p>Past visit reports and payment records stay for 3 months and are then removed.</p>
+    <p>{removalRetention}</p>
     {error && <p role="alert" className="text-bad">{error}</p>}
     {!plan && (error
       ? <button type="button" className={visitButton} onClick={() => setReload(k => k + 1)}>Try again</button>
