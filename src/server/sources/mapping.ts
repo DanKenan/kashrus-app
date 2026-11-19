@@ -5,6 +5,12 @@ import { isBuiltinFieldKey, type SourceSection } from '../../lib/sourcePreview.t
 
 const normalized = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 const folded = (s: string) => s.trim().toLowerCase();
+export function companyTypeChoices(config: SourceMapping['companies']) {
+  return config.factoryValues?.length
+    ? [...new Set([...config.factoryValues, ...(config.foodServiceValues ?? [])])]
+    : undefined;
+}
+
 const synonyms: Record<string, string[]> = {
   name: ['Name', 'Item', 'Ingredient', 'Product', 'Product Name', 'Company Name', 'Establishment Name'],
   address: ['Address', 'Street Address', 'Street', 'Location Address'],
@@ -228,7 +234,8 @@ export function mapSourceLists(
     return out;
   };
   const c = mapping.companies;
-  const companies = (rows.companies ?? []).filter(r => !c.factoryValues?.length || [...c.factoryValues, ...(c.foodServiceValues ?? [])].some(v => folded(v) === folded(read(r, c.type) ?? '')))
+  const types = companyTypeChoices(c)?.map(folded);
+  const companies = (rows.companies ?? []).filter(r => !types || types.includes(folded(read(r, c.type) ?? '')))
     .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), address: read(r, c.address), companyFee: parseMoney(read(r, c.companyFee)), mashgiachFee: parseMoney(read(r, c.mashgiachFee)), extra: extra(r, c, 'companies') }));
   const keptIds = new Set(companies.map(c => c.id));
   const otherCompanies = (rows.companies ?? []).filter(r => !keptIds.has(r.id))

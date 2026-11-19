@@ -34,7 +34,7 @@ export function useVisitFocus(onClose: () => void) {
     const token = {}; visitDialogs.push(token);
     const top = () => visitDialogs.at(-1) === token;
     const previous = document.activeElement as HTMLElement | null;
-    const controls = () => Array.from<HTMLElement>(root.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href]') || []);
+    const controls = () => Array.from<HTMLElement>(root.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, a[href]') || []);
     controls()[0]?.focus();
     const key = (event: KeyboardEvent) => {
       if (!top()) return;

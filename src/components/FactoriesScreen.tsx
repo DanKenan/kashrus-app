@@ -14,6 +14,8 @@ import { apiFetch } from '../lib/api';
 import { sourceRequest, sourceStatus, type SourceConnection } from '../lib/sources';
 import { sourceButton } from './SourceConnectSheet';
 import { SourcesSheet } from './SourcesSheet';
+import { SheetRecordEditor, SheetRecordList, sheetSectionNames } from './SheetRecordEditor';
+import type { SourceSection } from '../lib/sourcePreview';
 import { SourceCompanyEditor } from './SourceCompanyEditor';
 import { canEdit, providers } from '../lib/sourcesSetup';
 interface Factory { companyFee?: number; address?: string; type?: string; id: string; name: string; brand?: string; plant?: string; ingredientCount: number; productCount: number }
@@ -22,6 +24,8 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const [oauthReturn, setOauthReturn] = useState(() => typeof window !== 'undefined' && role === 'admin' && ['google_sheets', 'excel'].includes(new URLSearchParams(window.location.search).get('sources') || ''));
   const isOpen = requestedOpen || oauthReturn;
   const onClose = () => { setOauthReturn(false); if (oauthReturn) { const url = new URL(window.location.href); url.searchParams.delete('sources'); url.searchParams.delete('signin'); window.history.replaceState(null, '', url); } requestedClose(); };
+  const [sheetList, setSheetList] = useState<SourceSection | null>(null);
+  const [sheetRecord, setSheetRecord] = useState<{ section: SourceSection; row: Pick<Factory, 'id' | 'name'> } | null>(null);
   const [companyEditor, setCompanyEditor] = useState<Factory | 'new' | null>(null);
   const [feePlace, setFeePlace] = useState<string | null>(null), [infoPlace, setInfoPlace] = useState<string | null>(null), [feesSettings, setFeesSettings] = useState(false), [payOpen, setPayOpen] = useState(false);
   const [scheduleData, setScheduleData] = useState<ScheduleData | null>(null);
@@ -40,6 +44,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const [visitGroup1Label, setVisitGroup1Label] = useState('Group 1');
   const [companies, setCompanies] = useState<Factory[]>([]);
   const canEditSheet = role === 'admin' && connection?.sourceType === 'google_sheets' && connection.sheetsFeeEditing === true;
+  const sheetSections = canEditSheet ? connection?.sheetsEditSections : undefined;
   const [selectedCompany, setSelectedCompany] = useState<Factory | null>(null);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [settings, setSettings] = useState(oauthReturn);
@@ -50,7 +55,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const generation = useRef(0);
   useEffect(() => {
     const request = ++generation.current;
-    if (!isOpen) { setSettings(false); setReportsOpen(false); setFeePlace(null); setInfoPlace(null); setFeesSettings(false); setPayOpen(false); setSelectedCompany(null); return; }
+    if (!isOpen) { setSettings(false); setReportsOpen(false); setFeePlace(null); setInfoPlace(null); setFeesSettings(false); setPayOpen(false); setSelectedCompany(null); setSheetList(null); setSheetRecord(null); return; }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let polls = 0;
     const schedule = (current: SourceConnection) => {
@@ -122,6 +127,8 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
       {role === 'admin' && scheduleData && <VisitScheduleSettings data={scheduleData} onSaved={settings => setScheduleData(data => data && ({ ...data, settings }))} />}
       <p role="status" className="break-words text-base text-ink-soft">{role === 'coordinator' ? '' : connection ? sourceStatus(connection, timeZone) : 'Loading factories…'}</p>
       <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setReportsOpen(true)}>Reports</button>{role === 'admin' && <><button type="button" className={sourceButton} onClick={() => setPayOpen(true)}>Pay</button><button type="button" className={sourceButton} onClick={() => setFeesSettings(true)}>Fees and accountant</button></>}{role === 'admin' && <><button type="button" className={sourceButton} disabled={refreshing || !connection?.sourceType || connection.status === 'recovering'} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh now'}</button><button type="button" className={sourceButton} disabled={!connection} onClick={() => setSettings(true)}>Settings</button></>}</div>
+      {!!sheetSections?.length && <div className="flex flex-wrap gap-2">{sheetSections.map(section =>
+        <button key={section} type="button" className={sourceButton} onClick={() => setSheetList(section)}>{sheetSectionNames[section]}</button>)}</div>}
       {canEdit(role, connection) && <button type="button" className={sourceButton} onClick={() => setCompanyEditor('new')}>+ Add company</button>}
       {role === 'coordinator' && scheduleFailed && <p role="alert" className="text-base"><button type="button" className={sourceButton} onClick={() => setScheduleReload(k => k + 1)}>Couldn't load visit schedules. Try again</button></p>}
       {error && <p role="alert" className="break-words text-base text-bad">{error}</p>}
@@ -130,7 +137,8 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
         {(company.brand || company.plant) && <p dir="auto" className="break-words text-base text-ink-soft">{[company.brand, company.plant].filter(Boolean).join(' / ')}</p>}
         <p className="text-base text-ink-soft">{company.ingredientCount} ingredients · {company.productCount} products</p>
         {(() => { const row = scheduleData?.companies.find(row => row.id === company.id); if (role === 'coordinator' && !row) return <dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft">{['Last visit', 'Next due', 'Overdue'].map(label => <div key={label}><dt>{label}</dt><dd aria-label="Not loaded yet">—</dd></div>)}</dl>; return <><dl className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-ink-soft"><div><dt>Last visit</dt><dd>{row?.lastVisit ? `${displayDate(calendarDate(row.lastVisit.at, scheduleData!.timeZone), scheduleData!.today)} · ${row.lastVisit.mashgiachName}` : 'None yet'}</dd></div><div><dt>Next due</dt><dd>{row?.nextDue ? displayDate(row.nextDue, scheduleData!.today) : 'No schedule'}</dd></div><div><dt>Overdue</dt><dd>{row?.status === 'overdue' ? `⚠ Yes · ${overdueDaysText(row.overdueDays)}` : 'No'}</dd></div></dl>{row?.mute && (row.mute.until === null || row.mute.until >= scheduleData!.today) && <span className="text-xs text-ink-soft">Alerts off</span>}</>; })()}
-      </button>{(canEdit(role, connection) || canEditSheet) && <button type="button" className={sourceButton} onClick={() => setCompanyEditor(company)}>Edit company</button>}{canSeeFees(role) && <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setFeePlace(company.id)}>Fees</button><button type="button" className={sourceButton} onClick={() => setInfoPlace(company.id)}>Company info</button></div>}{(role === 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)) && <button type="button" className={sourceButton} disabled={role === 'coordinator' && !scheduleData?.companies.some(row => row.id === company.id)} onClick={() => setEditing(company.id)}>Visit schedule</button>}</div></li>)}</ul>}
+      </button>{(canEdit(role, connection) || canEditSheet) && <button type="button" className={sourceButton} onClick={() => sheetSections?.includes('companies')
+        ? setSheetRecord({ section: 'companies', row: company }) : setCompanyEditor(company)}>Edit company</button>}{canSeeFees(role) && <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} onClick={() => setFeePlace(company.id)}>Fees</button><button type="button" className={sourceButton} onClick={() => setInfoPlace(company.id)}>Company info</button></div>}{(role === 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)) && <button type="button" className={sourceButton} disabled={role === 'coordinator' && !scheduleData?.companies.some(row => row.id === company.id)} onClick={() => setEditing(company.id)}>Visit schedule</button>}</div></li>)}</ul>}
     </div>
     {canSeeFees(role) && feePlace && <FeesSheet placeId={feePlace} yearlyCount={yearlyVisits(scheduleData?.companies.find(c => c.id === feePlace)?.schedule, scheduleData?.today.slice(0, 4) || '')} onClose={() => setFeePlace(null)} />}
     {canSeeFees(role) && infoPlace && <CompanyInfoSheet placeId={infoPlace} isAdmin={role === 'admin'} onClose={() => setInfoPlace(null)} />}
@@ -140,6 +148,12 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
     {reportsOpen && <InspectionReportsInbox timeZone={timeZone} onClose={() => setReportsOpen(false)} />}
     {selectedCompany && <CompanyItemsSheet isAdmin={role === 'admin'} company={selectedCompany} group1Label={role === 'admin' ? connection?.group1Label || 'Group 1' : visitGroup1Label} onClose={() => setSelectedCompany(null)} />}
     {(canEdit(role, connection) || (canEditSheet && companyEditor !== 'new')) && companyEditor && <SourceCompanyEditor sheetMapping={canEditSheet ? connection?.mapping?.companies : undefined} company={companyEditor === 'new' ? { name: '' } : companyEditor} source={providers.find(p => p.id === connection?.sourceType)?.name || ''} onClose={() => setCompanyEditor(null)} onSaved={() => setReload(k => k + 1)} />}
+    {sheetList && sheetSections?.includes(sheetList) && !sheetRecord &&
+      <SheetRecordList section={sheetList} onClose={() => setSheetList(null)}
+        onChoose={row => setSheetRecord({ section: sheetList, row })} />}
+    {sheetRecord && sheetSections?.includes(sheetRecord.section) &&
+      <SheetRecordEditor key={sheetRecord.row.id} {...sheetRecord} onClose={() => setSheetRecord(null)}
+        onSaved={() => { setReload(k => k + 1); setScheduleReload(k => k + 1); }} />}
     {role === 'admin' && connection && <React.Fragment key={connection.status === 'recovering' ? 'recovery' : 'setup'}><SourcesSheet timeZone={timeZone} isOpen={settings} connection={connection} onClose={() => setSettings(false)} onSaved={() => setReload(k => k + 1)} /></React.Fragment>}
   </div>;
 }

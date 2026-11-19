@@ -50,3 +50,37 @@ await recovering.click('Disconnect');
 await recovering.click('Confirm disconnect');
 assert.ok(recoveryCalls.some(([method,path])=>method==='DELETE' && path==='/api/sources/connection'));
 assert.match(recovering.text(),/Choose where your data lives/);
+
+const completedMapping = emptyMapping();
+completedMapping.companies = { table: 'Companies', name: 'Name' };
+completedMapping.ingredients = { table: 'Inputs', name: 'Name', companyLink: 'Company' };
+completedMapping.products = { table: 'Outputs', name: 'Name', companyLink: 'Company' };
+let sheetMapping;
+const expanded = mount(MappingStep, { initial: completedMapping, sheetsEditing: true, guessed: [], samples: {}, busy: false,
+  tables: [
+    { name:'Companies', columns:['ID','Name'] },
+    { name:'Inputs', columns:['ID','Name','Company','Expiry','Lot'] },
+    { name:'Outputs', columns:['ID','Name','Company','Barcode','Printed symbol'] },
+  ], onBack() {}, onSave(value) { sheetMapping = value; },
+});
+await expanded.render();
+async function chooseColumn(key, value) {
+  expanded.find(e => e.type === 'select' && e.props.id?.endsWith('-' + key))[0].props.onChange({ target: { value } });
+  await expanded.render();
+}
+await chooseColumn('ingredients.expiresOn','Expiry');
+await chooseColumn('products.code','Barcode');
+await chooseColumn('products.symbolRequired','Printed symbol');
+expanded.find(e => e.type === 'input' && e.props.maxLength === 200)[1].props.onChange({ target: { value: 'Lot reference' } });
+await expanded.render();
+await expanded.click('Add field',1);
+await chooseColumn('ingredients.Lot reference','Lot');
+expanded.find(e => e.type === 'select' && !e.props.id && !e.props.disabled)[0].props.onChange({ currentTarget: { value: 'text' } });
+await expanded.render();
+await expanded.submit();
+assert.equal(sheetMapping.ingredients.expiresOn,'Expiry');
+assert.equal(sheetMapping.ingredients['Lot reference'],'Lot');
+assert.equal(sheetMapping.editableCustomFields.ingredients['Lot reference'],'text');
+assert.equal(sheetMapping.products.code,'Barcode');
+assert.equal(sheetMapping.products.symbolRequired,'Printed symbol');
+console.log('Google matching exposes Schedule A/B fields and saves typed custom mappings.');

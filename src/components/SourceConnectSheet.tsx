@@ -12,11 +12,12 @@ interface Props { isOpen: boolean; connection: SourceConnection; onClose: () => 
 export function SourceConnectSheet(props: Props) {
   return props.isOpen ? <SourceConnectForm {...props} /> : null;
 }
-const groups = {
+export const sourceMatchingFields = {
   companies: [['name', 'Name'], ['type', 'Type'], ['brand', 'Brand (optional)'], ['plant', 'Plant / location (optional)']],
   ingredients: [['companyLink', 'Link to company'], ['name', 'Name'], ['brand', 'Brand (optional)'], ['certification', 'Certification'], ['agency', 'Certifying agency (if separate)'], ['status', 'Dairy / pareve / meat status'], ['plant', 'Plant / location (optional)'], ['expiresOn', 'Expiration (optional)']],
   products: [['companyLink', 'Link to company'], ['name', 'Name'], ['brand', 'Brand (optional)'], ['code', 'Code / UPC'], ['certification', 'Certification'], ['agency', 'Certifying agency (if separate)'], ['status', 'Status'], ['symbolRequired', 'Symbol required'], ['plant', 'Plant / location (optional)']],
 } as const;
+const groups = sourceMatchingFields;
 const sectionTabs = { companies: 'Companies', ingredients: 'Schedule A', products: 'Schedule B' } as const;
 const mappingGroups = Object.keys(groups) as (keyof typeof groups)[];
 const commaList = (value: string) => value.split(',').map(s => s.trim()).filter(Boolean);
