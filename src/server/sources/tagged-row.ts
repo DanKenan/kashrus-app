@@ -134,7 +134,7 @@ export type EditAudit = Target & {
 export async function updateTaggedRow(edit: Edit, target: Target, provider: {
   read(target: Target): Promise<TaggedSnapshot>;
   // Resolve against freshly read source data immediately before dispatch.
-  applyIfCurrent(target: Target, changes: readonly Change[], operationId: string): Promise<'applied' | 'rejected' | 'unconfirmed'>;
+  applyIfCurrent(target: Target, changes: readonly Change[]): Promise<'applied' | 'rejected' | 'unconfirmed'>;
   writeEvidence?(): FieldWriteEvidence[];
 }, audit: (entry: EditAudit) => Promise<void>) {
   const entry: EditAudit = { ...target, operationId: randomUUID(), outcome: 'attempted',
@@ -159,7 +159,7 @@ export async function updateTaggedRow(edit: Edit, target: Target, provider: {
   await audit(entry);
   let result;
   try {
-    result = await provider.applyIfCurrent(target, changes, entry.operationId);
+    result = await provider.applyIfCurrent(target, changes);
   } catch {
     // A lost write response is indeterminate. Read once, without resubmitting.
   }
