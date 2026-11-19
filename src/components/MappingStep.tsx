@@ -2,12 +2,13 @@ import { Check } from 'lucide-react';
 import React, { useId, useState } from 'react';
 import type { SourceMapping, SourceTable } from '../lib/sources';
 import { assignChip, mappingBadge, matchingReady, previewRows, type Samples, type TabData } from '../lib/sourcesSetup';
-import { customFieldTypes, isMappedCustomField, type ValueRule } from '../lib/sourcePreview';
-import { sourceButton } from './SourceConnectSheet';
+import { customFieldTypes, isMappedCustomField, type SourceSection, type ValueRule } from '../lib/sourcePreview';
+import { sourceButton, sourceMatchingFields } from './SourceConnectSheet';
 export const setupField = 'min-h-11 w-full min-w-0 rounded-lg border border-line-control bg-surface px-3 text-base text-ink focus-visible:ring-2 focus-visible:ring-gold';
 export const setupPrimary = 'pressable min-h-12 w-full rounded-xl bg-gold-deep px-4 text-base font-semibold text-paper disabled:opacity-50';
 export function MappingStep({ sheetsEditing, initial, guessed, tables, samples, byFile, onBack, onSave, busy }: { sheetsEditing?: boolean; initial: SourceMapping; guessed: string[]; tables: SourceTable[]; samples: Samples; byFile?: TabData['byFile']; onBack(): void; onSave(mapping: SourceMapping): void; busy: boolean }) {
   const [mapping, setMapping] = useState(initial), [added, setAdded] = useState('');
+  const [customLabel, setCustomLabel] = useState<Partial<Record<SourceSection, string>>>({});
   const [guesses, setGuesses] = useState(guessed);
   const id = useId();
   function select(list: 'companies' | 'ingredients' | 'products', field: string, label: string, required = false) {
@@ -16,31 +17,83 @@ export function MappingStep({ sheetsEditing, initial, guessed, tables, samples, 
     const options = field === 'table' ? listTables.map(t => t.name) : listTables.find(t => t.name === config.table)?.columns || [];
     return <div className="min-w-0 space-y-2" key={path}><label htmlFor={`${id}-${path}`} className="block text-base">{label} {required && '*'} <span className="rounded-md bg-sunken px-2 text-xs text-ink-soft">{mappingBadge(guesses.includes(path))}</span></label><select id={`${id}-${path}`} className={setupField} value={config[field] || ''} required={required} onChange={e => { const value = e.target.value; setMapping(m => ({ ...m, [list]: field === 'table' ? { table: value, name: '', ...(list === 'companies' ? {} : { companyLink: '' }), ...(m[list].file ? { file: m[list].file } : {}) } : { ...m[list], [field]: value } })); setGuesses(g => g.filter(p => field === 'table' ? !p.startsWith(`${list}.`) : p !== path)); }}><option value="">— Not used —</option>{[...new Set([...options, ...(config[field] ? [config[field]] : [])])].map(option => <option key={option}>{option}</option>)}</select></div>;
   }
+  function customFields(section: SourceSection) {
+    if (!sheetsEditing || !mapping[section].table) return null;
+    const config = mapping[section] as unknown as Record<string, unknown>;
+    const label = customLabel[section]?.trim() ?? '';
+    const canAdd = label && isMappedCustomField(section, label) && !Object.hasOwn(config, label);
+    return <div className="space-y-4">
+      <h3 className="text-base font-semibold">Custom fields</h3>
+      {Object.entries(config).filter(([field, column]) => typeof column === 'string' && isMappedCustomField(section, field))
+        .map(([field, column]) => <div key={field} className="space-y-2">
+          {select(section, field, field)}
+          <label className="block space-y-2 text-base">Editing for {field}
+            <select className={setupField} disabled={busy || !column} value={column ? mapping.editableCustomFields?.[section]?.[field] ?? '' : ''}
+              onChange={e => {
+                const rule = e.currentTarget.value as ValueRule | '';
+                setMapping(m => {
+                  const fields = { ...m.editableCustomFields?.[section] };
+                  if (rule) return { ...m, editableCustomFields: { ...m.editableCustomFields, [section]: { ...fields, [field]: rule } } };
+                  delete fields[field];
+                  return { ...m, editableCustomFields: { ...m.editableCustomFields, [section]: fields } };
+                });
+              }}>
+              <option value="">Read only</option>
+              {Object.entries(customFieldTypes).map(([rule, text]) => <option value={rule} key={rule}>{text}</option>)}
+            </select>
+          </label>
+        </div>)}
+      <div className="flex items-end gap-2">
+        <label className="min-w-0 flex-1 space-y-2">Custom field name
+          <input className={setupField} maxLength={200} value={customLabel[section] ?? ''}
+            onChange={e => setCustomLabel(previous => ({ ...previous, [section]: e.target.value }))} />
+        </label>
+        <button type="button" className={sourceButton} disabled={!canAdd} onClick={() => {
+          setMapping(m => ({ ...m, [section]: { ...m[section], [label]: '' } }));
+          setCustomLabel(previous => ({ ...previous, [section]: '' }));
+        }}>Add field</button>
+      </div>
+    </div>;
+  }
+
   const companySamples = mapping.companies.file ? byFile?.[mapping.companies.file.id]?.samples || samples : samples;
   const values = [...new Set((companySamples[mapping.companies.table] || []).map(row => row.fields[mapping.companies.type || '']).filter(Boolean))];
   const preview = previewRows(companySamples, mapping);
-  return <form className="min-w-0 space-y-6" onSubmit={e => { e.preventDefault(); if (matchingReady(mapping)) onSave({ ...mapping, ...(mapping.editableCustomFields && { editableCustomFields: Object.fromEntries(
-      (['companies', 'ingredients', 'products'] as const).map(section => [section, Object.fromEntries(
-        Object.entries(mapping.editableCustomFields?.[section] ?? {}).filter(([field]) => Object.hasOwn(mapping[section], field)))])
-    ) }) }); }}><p className="text-sm text-ink-soft">Step 2 of 3 · Match your columns</p><h2 className="text-2xl font-semibold">Match your columns</h2><p className="text-base">Tell Shutfey which column holds each piece of information. We guessed some for you.</p><fieldset disabled={busy} className="min-w-0 space-y-4"><legend className="text-xl font-semibold">Company information</legend>{mapping.companies.file && <p className="break-words text-base">{mapping.companies.file.name}</p>}{select('companies', 'table', 'Company table', true)}{select('companies', 'name', 'Company name', true)}{select('companies', 'address', 'Address')}{select('companies', 'type', 'Type')}
+  return <form className="min-w-0 space-y-6" onSubmit={e => {
+    e.preventDefault();
+    if (!matchingReady(mapping)) return;
+    const next = { ...mapping };
+    if (sheetsEditing) {
+      for (const section of ['companies', 'ingredients', 'products'] as const) {
+        const config = { ...next[section] } as Record<string, unknown>;
+        for (const field of Object.keys(config)) {
+          if (!['table', 'name', 'companyLink'].includes(field) && config[field] === '') delete config[field];
+        }
+        Object.assign(next, { [section]: config });
+      }
+    }
+    if (mapping.editableCustomFields) next.editableCustomFields = Object.fromEntries(
+      (['companies', 'ingredients', 'products'] as const).map(section => {
+        const config = next[section] as unknown as Record<string, unknown>;
+        return [section, Object.fromEntries(Object.entries(mapping.editableCustomFields?.[section] ?? {})
+          .filter(([field]) => typeof config[field] === 'string' && config[field]))];
+      })
+    );
+    onSave(next);
+  }}><p className="text-sm text-ink-soft">Step 2 of 3 · Match your columns</p><h2 className="text-2xl font-semibold">Match your columns</h2><p className="text-base">Tell Shutfey which column holds each piece of information. We guessed some for you.</p><fieldset disabled={busy} className="min-w-0 space-y-4"><legend className="text-xl font-semibold">Company information</legend>{mapping.companies.file && <p className="break-words text-base">{mapping.companies.file.name}</p>}{select('companies', 'table', 'Company table', true)}{select('companies', 'name', 'Company name', true)}{select('companies', 'address', 'Address')}{select('companies', 'type', 'Type')}
     {(['factoryValues', 'foodServiceValues'] as const).map((target, index) => <div key={target} className="space-y-2"><p className="text-base">{index === 0 ? 'Factory visits:' : 'Food service:'}</p><div className="flex flex-wrap gap-2">{[...new Set([...values, ...(mapping.companies.factoryValues || []), ...(mapping.companies.foodServiceValues || [])])].map(value => <button type="button" key={value} aria-pressed={(mapping.companies[target] || []).includes(value)} className={`${sourceButton.replace('bg-surface', '').replace('text-ink', '')} ${(mapping.companies[target] || []).includes(value) ? 'bg-gold-deep text-paper' : 'bg-surface text-ink'}`} onClick={() => setMapping(m => assignChip(m, value, target))}>{(mapping.companies[target] || []).includes(value) && <Check aria-hidden="true" className="inline h-5 w-5" />}{value}</button>)}</div><div className="flex gap-2"><label className="min-w-0 flex-1"><span className="text-sm text-ink-soft">Add a type value</span><input className={setupField} value={added} onChange={e => setAdded(e.target.value)} /></label><button type="button" className={sourceButton} disabled={!added.trim()} onClick={() => { setMapping(m => assignChip(m, added.trim(), target)); setAdded(''); }}>+ add</button></div></div>)}
-    {select('companies', 'brand', 'Brand (optional)')}{select('companies', 'plant', 'Plant / location (optional)')}</fieldset><fieldset disabled={busy} className="space-y-4"><legend className="text-xl font-semibold">Fees</legend>{select('companies', 'companyFee', 'Company pays (yearly) (optional)')}<p className="text-base text-ink-soft">What the company pays the agency each year.</p>{select('companies', 'mashgiachFee', 'Mashgiach supervision fee (per visit) (optional)')}<p className="text-base text-ink-soft">What the mashgiach is paid for each visit.</p></fieldset>
-    {(['ingredients', 'products'] as const).map(list => <fieldset key={list} disabled={busy} className="min-w-0 space-y-4"><legend className="text-xl font-semibold">{list === 'ingredients' ? 'Ingredients' : 'Products'}</legend>{mapping[list].file && <p className="break-words text-base">{mapping[list].file!.name}</p>}{select(list, 'table', 'Tab / table')}{mapping[list].table && <>{select(list, 'name', 'Name', true)}{select(list, 'companyLink', 'Link to company', true)}</>}</fieldset>)}
-    {sheetsEditing && (['companies', 'ingredients', 'products'] as const).flatMap(section =>
-      Object.entries(mapping[section]).filter(([field, column]) => typeof column === 'string' && column && isMappedCustomField(section, field)).map(([field, column]) =>
-        <label key={section + field} className="block space-y-2 text-base">Editing for {section} · {field} ({String(column)})
-          <select className={setupField} disabled={busy} value={mapping.editableCustomFields?.[section]?.[field] ?? ''}
-            onChange={e => {
-              const rule = e.currentTarget.value as ValueRule | '';
-              setMapping(m => {
-                const fields = { ...m.editableCustomFields?.[section] };
-                if (rule) fields[field] = rule; else delete fields[field];
-                return { ...m, editableCustomFields: { ...m.editableCustomFields, [section]: fields } };
-              });
-            }}>
-            <option value="">Read only</option>
-            {Object.entries(customFieldTypes).map(([rule, label]) => <option value={rule} key={rule}>{label}</option>)}
-          </select>
-        </label>))}
+    {select('companies', 'brand', 'Brand (optional)')}{select('companies', 'plant', 'Plant / location (optional)')}{customFields('companies')}</fieldset><fieldset disabled={busy} className="space-y-4"><legend className="text-xl font-semibold">Fees</legend>{select('companies', 'companyFee', 'Company pays (yearly) (optional)')}<p className="text-base text-ink-soft">What the company pays the agency each year.</p>{select('companies', 'mashgiachFee', 'Mashgiach supervision fee (per visit) (optional)')}<p className="text-base text-ink-soft">What the mashgiach is paid for each visit.</p></fieldset>
+    {(['ingredients', 'products'] as const).map(list => <fieldset key={list} disabled={busy} className="min-w-0 space-y-4">
+      <legend className="text-xl font-semibold">{list === 'ingredients' ? 'Ingredients' : 'Products'}</legend>
+      {mapping[list].file && <p className="break-words text-base">{mapping[list].file!.name}</p>}
+      {select(list, 'table', 'Tab / table')}
+      {mapping[list].table && <>
+        {select(list, 'name', 'Name', true)}
+        {select(list, 'companyLink', 'Link to company', true)}
+        {sheetsEditing && sourceMatchingFields[list].filter(([field]) => field !== 'name' && field !== 'companyLink')
+          .map(([field, text]) => select(list, field, text))}
+        {customFields(list)}
+      </>}
+    </fieldset>)}
     <section className="min-w-0 space-y-2"><h3 className="text-base font-semibold">Preview — first 3 rows as the app will see them</h3><div role="region" aria-label="Matched company preview" tabIndex={0} className="max-w-full overflow-x-auto rounded-lg border border-line"><table className="w-full text-sm"><thead><tr>{['Company name', 'Address', 'Type', 'Company pays', 'Supervision fee'].map(label => <th key={label} className="whitespace-nowrap p-2 text-left font-medium">{label}</th>)}</tr></thead><tbody>{preview.map((row, i) => <tr key={i}>{row.map((cell, j) => <td key={j} className="border-t border-line p-2">{cell}</td>)}</tr>)}</tbody></table></div></section><button type="button" disabled={busy} className={sourceButton} onClick={onBack}>Back</button><button type="submit" disabled={busy || !matchingReady(mapping)} className={setupPrimary}>{busy ? 'Saving…' : 'Save matching →'}</button><p className="text-base text-ink-soft">You can change these matches later.</p></form>;
 }

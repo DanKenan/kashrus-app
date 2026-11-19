@@ -5,13 +5,21 @@ const headers = ['ID', 'Fee', 'Company', 'Address', 'Formula'];
 const mapping = { companies: { table: 'Companies', pk: 'ID', name: 'Company', address: 'Address', companyFee: 'Fee' },
     ingredients: { table: '' }, products: { table: '' }, group1Values: [] };
 const target = { metadataId: 19, table: 'Companies', section: 'companies', spreadsheetId: 'pilot', recordId: 'a', agencyId: 'agency', actorId: 'admin' };
-const gridCell = raw => ({ userEnteredValue: typeof raw === 'string' && raw.startsWith('=') ? { formulaValue: raw }
-    : typeof raw === 'number' ? { numberValue: raw } : { stringValue: raw } });
+const gridCell = (raw, { formula = false, date = false } = {}) => ({
+    ...(raw === null ? {} : { userEnteredValue: formula ? { formulaValue: raw }
+        : typeof raw === 'boolean' ? { boolValue: raw } : typeof raw === 'number' ? { numberValue: raw } : { stringValue: raw } }),
+    ...(date && { effectiveFormat: { numberFormat: { type: 'DATE' } } }),
+});
+const quoteTab = title => "'" + title.replaceAll("'", "''") + "'";
 function fixture(options = {}) {
-    const state = { headers: [...headers], rows: [
+    const title = options.title || 'Companies';
+    const state = { headers: options.headers || [...headers], rows: options.rows || [
         { tag: 19, cells: ['a', 100, 'Original', 'Main', '=1+1'] },
         { tag: 32, cells: ['b', 70, 'Other', 'Second', '=2+2'] },
-    ], sheetId: 7, names: new Map(), creationRequests: [], reads: 0, writes: 0, audit: [] };
+    ], sheetId: options.sheetId ?? 7, names: new Map(), creationRequests: [], reads: 0, writes: 0, audit: [] };
+    const formulas = options.formulas ?? new Set(['Formula']);
+    const dates = options.dates ?? new Set();
+    const tracked = options.tracked || new Map([[19, 'a']]);
     const returnedName = ({ namedRangeId, name, range }) => ({ namedRangeId, name,
         range: options.returnedRange ? options.returnedRange(range) : range });
     const fetchImpl = async (url, init) => {
@@ -19,12 +27,17 @@ function fixture(options = {}) {
         if (url.includes(':getByDataFilter?')) {
             state.reads++;
             options.beforeRead?.(state);
-            assert.deepEqual(body.dataFilters, [{ developerMetadataLookup: { metadataId: 19,
-                metadataKey: 'recordId', metadataValue: 'a', locationType: 'ROW' } }, { a1Range: "'Companies'!1:1" }]);
+            const tag = body.dataFilters[0].developerMetadataLookup.metadataId;
+            assert.deepEqual(body.dataFilters, [{ developerMetadataLookup: { metadataId: tag,
+                metadataKey: 'recordId', metadataValue: tracked.get(tag), locationType: 'ROW' } }, { a1Range: quoteTab(title) + '!1:1' }]);
             const response = Response.json({ namedRanges: [...state.names.values()].map(returnedName),
-                sheets: [{ properties: { title: 'Companies', sheetId: state.sheetId },
-                data: [{ rowData: [{ values: state.headers.map(gridCell) }] }, ...state.rows.flatMap((row,i) => row.tag === 19
-                    ? [{ startRow: i+1, rowData: [{ values: row.cells.map(gridCell) }] }] : [])] }] });
+                sheets: [{ properties: { title, sheetId: state.sheetId },
+                data: [{ rowData: [{ values: state.headers.map(raw => gridCell(raw)) }] }, ...state.rows.flatMap((row,i) => row.tag === tag
+                    ? [{ startRow: i+1, rowData: [{ values: row.cells.map((raw, col) => gridCell(raw, {
+                        formula: row.formulaCols?.includes(col) || (formulas.has(state.headers[col]) && String(raw).startsWith('=')) ||
+                            (!options.title && String(raw).startsWith('=') && state.headers[col] === 'Fee'),
+                        date: dates.has(state.headers[col]),
+                    })) }] }] : [])] }] });
             options.afterRead?.(state);
             return response;
         }
@@ -43,6 +56,7 @@ function fixture(options = {}) {
             return Response.json({ replies });
         }
         assert.ok(url.endsWith('/values:batchUpdate'));
+        assert.equal(body.valueInputOption, 'RAW');
         const first = state.writes++ === 0;
         if (first) options.beforeWrite?.(state);
         const responses = [];
@@ -51,7 +65,7 @@ function fixture(options = {}) {
             assert.equal(values[0].length, 1);
             const n = [...state.names.values()].find(n => n.name === range);
             if (!n) return Response.json({}, {status:400});
-            responses.push({ updatedRange: "'Companies'!" + String.fromCharCode(65 + n.range.startColumnIndex) + (n.range.startRowIndex + 1) });
+            responses.push({ updatedRange: quoteTab(title) + '!' + String.fromCharCode(65 + n.range.startColumnIndex) + (n.range.startRowIndex + 1) });
             state.rows[n.range.startRowIndex - 1].cells[n.range.startColumnIndex] = values[0][0];
         }
         if (first) options.afterWrite?.(state);
@@ -99,8 +113,9 @@ const replaced = fixture({ beforeRead(s) { if (s.reads === 3) s.rows.splice(0,1,
 await assert.rejects(replaced.save(), /Refresh and review/);
 assert.equal(replaced.state.writes, 0);
 const movedBefore = fixture({ beforeRead(s) { if (s.reads === 2) moveFee(s); } });
-await movedBefore.save();
-assert.deepEqual(movedBefore.state.rows[0].cells, ['a','Original',200,'Main','=1+1']);
+await assert.rejects(movedBefore.save(), /Refresh and review/);
+assert.equal(movedBefore.state.writes, 0);
+assert.deepEqual(movedBefore.state.rows[0].cells, ['a','Original',100,'Main','=1+1']);
 
 for (const other of [2,4]) {
     const f = fixture({ beforeWrite: s => moveFee(s,other) });
@@ -193,6 +208,7 @@ const { SourceCompanyEditor } = await import('../../src/components/SourceCompany
 const { mount } = await import('./lib/mini-render.mjs');
 let responseRange;
 const { state, fetchImpl } = fixture({ returnedRange: range => responseRange ? { ...responseRange } : range });
+const files = new Map([['pilot', { state, fetchImpl, title: 'Companies' }]]);
 const app = express(), directory = await mkdtemp(join(tmpdir(),'sheets-edit-'));
 app.use(express.json());
 const priorFetch = globalThis.fetch, priorDocument = globalThis.document;
@@ -200,7 +216,7 @@ const secret = randomUUID();
 registerSourceRoutes(app, { dataDir: directory, secret: () => secret, staged: () => false, testMode: false,
     db: () => null, timeZone: () => 'UTC', requireAdmin: (req,res) => {
         if (req.headers['x-test-role'] === 'reader') { res.status(403).json({ error:'Admin required' }); return null; }
-        return { id:'admin',agencyId:'agency' };
+        return { id:'admin',agencyId:req.headers['x-test-agency'] || 'agency' };
     } });
 const server = await new Promise(resolve => { const s = app.listen(0,'127.0.0.1',() => resolve(s)); });
 const local = 'http://127.0.0.1:' + server.address().port;
@@ -213,17 +229,25 @@ try {
         if (String(url).startsWith('/api/')) return priorFetch(local + url, init);
         if (url === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: randomUUID(), refresh_token: randomUUID() });
         if (url === 'https://openidconnect.googleapis.com/v1/userinfo') return Response.json({ email: 'fixture@example.test' });
-        assert.ok(url.startsWith('https://sheets.googleapis.com/v4/spreadsheets/pilot'));
-        if (!init.body) return Response.json(url.includes('/values/') ? { values:[state.headers,...state.rows.map(r=>r.cells)] } :
-            { sheets:[{properties:{title:'Companies',sheetId:state.sheetId}}] });
+        const [, fileId] = /^https:\/\/sheets.googleapis.com\/v4\/spreadsheets\/([^/:?]+)/.exec(url) || [];
+        const file = files.get(fileId);
+        assert.ok(file, 'unexpected spreadsheet: ' + url);
+        const { state: tab, title } = file;
+        if (!init.body) {
+            if (url.includes('/values/')) {
+                assert.equal(decodeURIComponent(new URL(url).pathname.split('/values/')[1]), quoteTab(title));
+                return Response.json({ values:[tab.headers,...tab.rows.map(r=>r.cells)] });
+            }
+            return Response.json({ sheets:[{properties:{title,sheetId:tab.sheetId}}] });
+        }
         if (url.endsWith('/developerMetadata:search')) return Response.json({});
         const body = JSON.parse(init.body);
         if (body.requests?.[0]?.createDeveloperMetadata) {
-            assert.deepEqual(body.requests.map(r => r.createDeveloperMetadata.developerMetadata.metadataValue), ['a','b']);
-            return Response.json({ replies: state.rows.map((r,i) => ({createDeveloperMetadata:{ developerMetadata:{
+            assert.deepEqual(body.requests.map(r => r.createDeveloperMetadata.developerMetadata.metadataValue), tab.rows.map(r => r.cells[0]));
+            return Response.json({ replies: tab.rows.map((r,i) => ({createDeveloperMetadata:{ developerMetadata:{
                 ...body.requests[i].createDeveloperMetadata.developerMetadata, metadataId:r.tag }}})) });
         }
-        return fetchImpl(url,init);
+        return file.fetchImpl(url,init);
     };
     async function api(path, method='GET', body) {
         const response = await priorFetch(local+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -316,6 +340,155 @@ try {
         assert.deepEqual(state.rows.map(r => r.cells), expected, label);
     }
     console.log('Sheets range regression passed: omitted tab zero writes only D2, and mismatched coordinates return HTTP 409 before dispatch.');
+
+    const phaseB = {
+        companies: { table: 'Clients', file: { id: 'clients', name: 'Clients' }, pk: 'ID', name: 'Name',
+            address: 'Address', type: 'Type', brand: 'Brand', plant: 'Plant', companyFee: 'Annual',
+            mashgiachFee: 'Supervision', Notes: 'Notes', factoryValues: ['Factory'], foodServiceValues: ['Kitchen'] },
+        ingredients: { table: "Schedule A's items", file: { id: 'schedule-a', name: 'A' }, pk: 'ID', name: 'Name',
+            companyLink: 'Companies', brand: 'Brand', certification: 'Cert', agency: 'Agency', status: 'Status',
+            plant: 'Plant', expiresOn: 'Expiry', Deposit: 'Deposit', Label: 'Formula' },
+        products: { table: 'Schedule B', file: { id: 'schedule-b', name: 'B' }, pk: 'ID', name: 'Name',
+            companyLink: 'Companies', brand: 'Brand', certification: 'Cert', agency: 'Agency', status: 'Status',
+            plant: 'Plant', symbolRequired: 'Symbol', code: 'UPC', 'Approved on': 'Approval date', Verified: 'Verified',
+            'Other companies': 'Other companies', Private: 'Private' },
+        group1Values: [],
+        editableCustomFields: { companies: { Notes: 'text' }, ingredients: { Deposit: 'money', Label: 'text' },
+            products: { 'Approved on': 'date', Verified: 'boolean', 'Other companies': 'companyLink' } },
+    };
+    const companiesTab = fixture({ title: 'Clients', sheetId: 0, tracked: new Map([[19,'x'],[32,'y'],[48,'z']]),
+        headers: ['ID','Name','Address','Type','Brand','Plant','Annual','Supervision','Notes','Unmapped'],
+        rows: [
+            { tag:19, cells:['x','Company X','Old road','Factory','Old brand','Old plant',100,20,'Original','Keep'] },
+            { tag:32, cells:['y','Company Y','','Factory'] },
+            { tag:48, cells:['z','Company Z','','Other'] },
+        ] });
+    let disrupt = false;
+    const ingredientsTab = fixture({ title: phaseB.ingredients.table, sheetId: 2, tracked: new Map([[42,'i'],[43,'j']]),
+        headers: ['ID','Name','Companies','Brand','Cert','Agency','Status','Plant','Expiry','Deposit','Formula','Other'],
+        dates: new Set(['Expiry']),
+        rows: [
+            { tag:42, cells:['i','Flour','Company X','Old brand','OU-P','OU','pareve','Old plant',45400,100,'=1+1','Keep'] },
+            { tag:43, cells:['j','Salt','','','OU-P','','','',null,0,'=2+2','Keep'] },
+        ],
+        beforeRead(tab) {
+            if (disrupt && tab.reads === disrupt) tab.rows[1].cells[4] = 'Unexpected';
+        },
+    });
+    const productsTab = fixture({ title: 'Schedule B', sheetId: 5, tracked: new Map([[42,'p']]),
+        headers: ['ID','Name','Companies','Brand','Cert','Agency','Status','Plant','Symbol','UPC','Approval date','Verified','Other companies','Private'],
+        rows: [{ tag:42, cells:['p','Cereal','x','Old brand','OK-D','OK','Dairy','Old plant','No','0099','2025-01-01',false,'y','Keep'] }],
+    });
+    for (const [section, tab] of [['companies',companiesTab],['ingredients',ingredientsTab],['products',productsTab]]) {
+        files.set(phaseB[section].file.id, { ...tab, title: phaseB[section].table });
+    }
+    await api('/api/sources/connection','PUT',{ sourceType:'google_sheets', baseId:'clients', access:'readwrite',mapping:phaseB });
+    const expanded = await api('/api/sources/sheets-editing','PUT',{enabled:true});
+    assert.deepEqual(expanded.sheetsEditSections, ['companies','ingredients','products']);
+    const list = async section => (await api('/api/sources/sheet-editor/' + section)).rows;
+    const [companyX, companyY, companyZ] = await list('companies');
+    const [ingredient] = await list('ingredients');
+    const [product] = await list('products');
+    const editPath = (section, row) => '/api/sources/sheet-editor/' + section + '/' + row.id;
+    const writePath = (section, row) => '/api/sources/rows/' + section + '/' + row.id;
+    const readEditor = (section, row) => api(editPath(section,row));
+    async function patch(section, row, fields, { editor, status = 200, headers = {} } = {}) {
+        const prior = editor ?? await readEditor(section,row);
+        const expected = Object.fromEntries(prior.fields.filter(field => Object.hasOwn(fields, field.field)).map(field => [field.field,field.revision]));
+        const response = await priorFetch(local + writePath(section,row), { method:'PATCH',
+            headers: { 'Content-Type':'application/json', ...headers }, body:JSON.stringify({fields,expected}) });
+        const data = await response.json();
+        const allowed = Array.isArray(status) ? status : [status];
+        assert.ok(allowed.includes(response.status),JSON.stringify({ status:response.status, data }));
+        return data;
+    }
+    const companyEditor = await readEditor('companies',companyX);
+    assert.match((await patch('companies', companyX, { name:'Renamed X' }, { editor:companyEditor, status:409 })).error, /would leave company links/);
+    assert.equal(companiesTab.state.writes,0);
+    const ingredientEditor = await readEditor('ingredients',ingredient);
+    assert.equal(ingredientEditor.fields.find(f => f.field === 'expiresOn').value, '2024-04-18');
+    assert.deepEqual(ingredientEditor.fields.find(f => f.field === 'companyLink').value,[companyX.id]);
+    assert.match(ingredientEditor.fields.find(f => f.field === 'Label').readOnly,/Formula/);
+    for (const [fields, status, phrase] of [
+        [{ id:'changed' },409,/mapped editable/], [{ dpm:'meat' },409,/mapped editable/],
+        [{ Label:'changed' },409,/Formula/], [{ companyLink:['missing'] },409,/Unknown company ID/],
+    ]) assert.match((await patch('ingredients',ingredient,fields,{ editor:ingredientEditor,status })).error,phrase);
+    await patch('ingredients',ingredient,{ certification:'Refused' },{ editor:ingredientEditor,status:403,headers:{'x-test-role':'reader'} });
+    await patch('ingredients',ingredient,{ certification:'Refused' },{ editor:ingredientEditor,status:409,headers:{'x-test-agency':'other-agency'} });
+    const privateRead = await priorFetch(local + editPath('ingredients',ingredient),{ headers:{'x-test-agency':'other-agency'} });
+    assert.equal(privateRead.status,403);
+    assert.equal(ingredientsTab.state.writes,0);
+    const missingRevision = await priorFetch(local + writePath('ingredients',ingredient), {
+        method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({fields:{certification:'Stale'}}),
+    });
+    assert.equal(missingRevision.status,409);
+    companiesTab.state.rows.push({ tag:80, cells:['alias','z, y, x','','Other'] });
+    assert.match((await patch('ingredients',ingredient,{ companyLink:[companyZ.id,companyY.id,companyX.id] },
+        { editor:ingredientEditor,status:409 })).error,/Ambiguous company links/);
+    companiesTab.state.rows.pop();
+    assert.equal(ingredientsTab.state.writes,0);
+    ingredientsTab.state.rows.reverse();
+    ingredientsTab.state.rows.unshift({ tag:99, cells:['new','Inserted'] });
+    const editIngredient = { name:'Wheat flour', brand:'=Raw brand', companyLink:[companyZ.id,companyY.id,companyX.id],
+        certification:'  OK-D  ', agency:'Star K', status:'Dairy equipment', plant:'North', expiresOn:'2028-02-29', Deposit:12.75 };
+    await patch('ingredients',ingredient,editIngredient,{ editor:ingredientEditor });
+    const serial = (Date.UTC(2028,1,29) - Date.UTC(1899,11,30)) / 86400000;
+    assert.deepEqual(ingredientsTab.state.rows[2].cells,
+        ['i','Wheat flour','z, y, x','=Raw brand','  OK-D  ','Star K','Dairy equipment','North',serial,12.75,'=1+1','Keep']);
+    assert.equal(ingredientsTab.state.rows[1].cells[1],'Salt');
+    assert.equal(ingredientsTab.state.rows[0].cells[1],'Inserted');
+    const reread = await readEditor('ingredients',ingredient);
+    assert.equal(reread.fields.find(f => f.field === 'expiresOn').value,'2028-02-29');
+    assert.deepEqual(new Set(reread.fields.find(f => f.field === 'companyLink').value),new Set([companyX.id,companyY.id,companyZ.id]));
+    const factoryItems = await api('/api/factories/' + companyX.id + '/items');
+    assert.deepEqual(factoryItems.ingredients.map(({ name, dpm }) => [name,dpm]), [['Wheat flour','dairy_equipment']]);
+
+    await patch('companies',companyX,{ name:'Renamed X', address:'New road', type:'Kitchen', brand:'New company brand',
+        plant:'New company plant', companyFee:999, mashgiachFee:250, Notes:'=Literal note' },{ editor:companyEditor });
+    assert.deepEqual(companiesTab.state.rows[0].cells,
+        ['x','Renamed X','New road','Kitchen','New company brand','New company plant',999,250,'=Literal note','Keep']);
+
+    const productEditor = await readEditor('products',product);
+    await patch('products',product,{ name:'Corn cereal', brand:'New product brand', code:'0000123', companyLink:[companyY.id,companyX.id],
+        certification:'OU-P', agency:'OU', status:'Pareve', symbolRequired:true, plant:'West', 'Approved on':'2028-02-29',
+        Verified: true, 'Other companies':[companyZ.id] },{ editor:productEditor });
+    assert.deepEqual(productsTab.state.rows[0].cells,
+        ['p','Corn cereal','y, x','New product brand','OU-P','OU','Pareve','West','Yes','0000123','2028-02-29',true,'z','Keep']);
+    const overlap = await patch('products',product,{ certification:'Old editor' },{ editor:productEditor,status:409 });
+    assert.match(overlap.error,/changed.*Refresh and review/);
+    const separate = await readEditor('products',product);
+    await Promise.all([
+        patch('products',product,{ plant:'East' },{ editor:separate }),
+        patch('products',product,{ code:'000007' },{ editor:separate }),
+    ]);
+    assert.deepEqual(productsTab.state.rows[0].cells.slice(8,10),['Yes','000007']);
+    assert.equal(productsTab.state.rows[0].cells[7],'East');
+    const commonEditor = await readEditor('products',product);
+    const racing = await Promise.all(['OU-D','OK-P'].map(certification =>
+        patch('products',product,{ certification },{ editor:commonEditor,status:[200,409] })));
+    assert.equal(racing.filter(result => result.saved).length,1);
+    assert.match(racing.find(result => result.error).error,/changed.*Refresh and review/);
+
+    const moved = await readEditor('products',product);
+    for (const cells of [productsTab.state.headers,productsTab.state.rows[0].cells]) [cells[8],cells[9]] = [cells[9],cells[8]];
+    assert.match((await patch('products',product,{ code:'Changed' },{ editor:moved,status:409 })).error,/mapped column changed.*Refresh and review/);
+    const missing = await readEditor('products',product);
+    productsTab.state.rows[0].tag = 100;
+    await patch('products',product,{ name:'Wrong row' },{ editor:missing,status:409 });
+    assert.equal(productsTab.state.writes,4);
+
+    const salt = (await list('ingredients')).find(row => row.name === 'Salt');
+    const staleEditor = await readEditor('ingredients',salt);
+    disrupt = ingredientsTab.state.reads + 4;
+    const unconfirmed = await patch('ingredients',salt,{ certification:'New cert' },{ editor:staleEditor,status:409 });
+    assert.match(unconfirmed.error,/could not be confirmed.*sheet may already have changed.*Refresh and review/);
+    assert.equal(ingredientsTab.state.writes,2);
+    const logs = await Promise.all((await readdir(auditDir)).map(async file => JSON.parse(await readFile(join(auditDir,file),'utf8'))));
+    assert.ok(logs.some(entry => entry.section === 'products' && entry.spreadsheetId === 'schedule-b' && entry.table === 'Schedule B' && entry.outcome === 'confirmed'));
+    assert.ok(logs.some(entry => entry.section === 'ingredients' && entry.spreadsheetId === 'schedule-a' &&
+        entry.outcome === 'unconfirmed' && entry.writeEvidence[0].readBack.raw === 'Unexpected'));
+    console.log('Phase B passed through HTTP and the simulated Sheets transport for all mapped fields on separate files and tabs.');
+
 } finally {
     globalThis.fetch = priorFetch;
     globalThis.document = priorDocument;
@@ -324,3 +497,42 @@ try {
     await new Promise(resolve=>server.close(resolve));
     await rm(directory,{recursive:true,force:true});
 }
+
+const { SheetRecordEditor } = await import('../../src/components/SheetRecordEditor.tsx');
+const uiProduct = { id: 'product', name: 'Cereal' };
+const uiFields = { companies: [{ id:'permanent-x', key:'x', name:'Company X' }, { id:'permanent-y', key:'y', name:'Company Y' }], fields: [
+    { field:'code', header:'UPC', rule:'text', value:'0099', revision:'old-code' },
+    { field:'companyLink', header:'Companies', rule:'companyLink', value:['permanent-x'], revision:'old-links' },
+    { field:'plant', header:'Plant', rule:'text', value:'', revision:'old-plant', readOnly:'Formula cells are read only.' },
+] };
+const submissions = [];
+let refreshes = 0, uiSaved = 0;
+globalThis.fetch = async (url, init = {}) => {
+    if (url === '/api/sources/sheet-editor/products/product') return Response.json(uiFields);
+    if (url === '/api/sources/refresh') { refreshes++; return Response.json({ ok:true }); }
+    assert.equal(url,'/api/sources/rows/products/product');
+    submissions.push(JSON.parse(init.body));
+    return Response.json({error:'The change could not be confirmed. The sheet may already have changed. Refresh and review.'},{status:409});
+};
+try {
+    const view = mount(SheetRecordEditor, { section:'products', row:uiProduct, onSaved() { uiSaved++; }, onClose() {} });
+    await view.render();
+    assert.match(view.html(),/0099/);
+    assert.match(view.html(),/type="checkbox" checked="".*Company X/);
+    assert.match(view.html(),/Formula cells are read only/);
+    const inputs = view.find(e => e.type === 'form')[0].props.children[0].props.children.map(e => e.props.children);
+    inputs[0].props.onChange('00000123');
+    inputs[1].props.onChange(['permanent-x','permanent-y']);
+    await view.render();
+    await view.submit();
+    assert.match(view.text(),/could not be confirmed.*may already have changed/);
+    assert.equal(uiSaved,0);
+    await view.submit();
+    assert.deepEqual(submissions,[{ fields:{ code:'00000123',companyLink:['permanent-x','permanent-y'] },
+        expected:{ code:'old-code',companyLink:'old-links' } }]);
+    await view.click('Refresh for review');
+    assert.equal(refreshes,1);
+    assert.match(view.html(),/value="0099"/);
+    assert.equal(view.find(e => e.type === 'button' && e.props.type === 'submit')[0].props.disabled,true);
+    console.log('Schedule B editor sends a sparse revision-checked patch and requires review after an unconfirmed save.');
+} finally { globalThis.fetch = priorFetch; }

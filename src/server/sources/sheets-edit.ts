@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { updateTaggedRow, type Cell, type Change, type Edit, type EditAudit, type FieldWriteEvidence, type Target } from './tagged-row.ts';
+import { describeTaggedEdit, updateTaggedRow, type Cell, type Change, type Edit, type EditAudit, type FieldWriteEvidence, type Target } from './tagged-row.ts';
 
 type Post = (path: string, body: unknown) => Promise<any>;
 type Grid = { sheetId?: number; startRowIndex?: number; endRowIndex: number; startColumnIndex?: number; endColumnIndex: number };
@@ -12,7 +12,7 @@ function cell(data?: GridCell): Cell {
   // Spill/pivot output also belongs to the sheet.
   return { raw: v?.stringValue ?? v?.boolValue ?? v?.numberValue ?? null,
     formula: v?.formulaValue ?? (!v && data?.effectiveValue ? 'derived' : undefined),
-    dateSerial: data?.effectiveFormat?.numberFormat?.type === 'DATE' && (!v || typeof v.numberValue === 'number') };
+    dateSerial: data?.effectiveFormat?.numberFormat?.type === 'DATE' && (!v || v.stringValue === '' || typeof v.numberValue === 'number') };
 }
 const equalHeaders = (a: string[], b: string[]) => a.length === b.length && a.every((h,i) => h === b[i]);
 const singleCell = (grid: Grid, sheetId: number, row: number, col: number) =>
@@ -22,7 +22,7 @@ const singleCell = (grid: Grid, sheetId: number, row: number, col: number) =>
   (grid.startColumnIndex ?? 0) === col &&
   grid.endColumnIndex === col + 1;
 
-export async function editSheetRow(post: Post, edit: Edit, target: Target, audit: (entry: EditAudit) => Promise<void>) {
+function taggedSnapshot(post: Post, edit: Edit, target: Target) {
   const tag = { developerMetadataLookup: { metadataId: target.metadataId, metadataKey: 'recordId',
     metadataValue: target.recordId, locationType: 'ROW' } };
   const header = { a1Range: "'" + target.table.replace(/'/g, "''") + "'!1:1" };
@@ -47,7 +47,17 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
     const names = new Map<string, Binding>((result.namedRanges || []).map((n: Binding) => [n.namedRangeId, n]));
     return { headers, cells, sheetId: properties.sheetId, row: rows[0].index, names, metadataId: target.metadataId, recordId: target.recordId };
   }
+  return snapshot;
+}
+
+export async function readSheetEditor(post: Post, edit: Edit, target: Target) {
+  return describeTaggedEdit(edit, target, await taggedSnapshot(post, edit, target)());
+}
+
+export async function editSheetRow(post: Post, edit: Edit, target: Target, audit: (entry: EditAudit) => Promise<void>) {
+  const snapshot = taggedSnapshot(post, edit, target);
   type Snapshot = Awaited<ReturnType<typeof snapshot>>;
+  let initial: Snapshot | undefined;
   function receiptColumn(address: string, row: number) {
     const end = address.lastIndexOf('!'), title = address.slice(0, end);
     if (title !== target.table && title !== "'" + target.table.replace(/'/g, "''") + "'") return -1;
@@ -65,12 +75,12 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
   const current = (s: Snapshot, c: Change) => {
     const col = s.headers.indexOf(c.header), value = s.cells[col] ?? { raw: null };
     return col >= 0 && !value.formula && value.raw === c.previous &&
-      (c.rule !== 'date' || !!value.dateSerial === (typeof c.requested === 'number'));
+      (c.rule !== 'date' || c.requested === '' || !!value.dateSerial === (typeof c.requested === 'number'));
   };
   async function apply(_target: Target, changes: readonly Change[]): Promise<'rejected' | 'applied' | 'unconfirmed'> {
     try {
       const start = await snapshot();
-      if (!changes.every(c => current(start,c))) return 'rejected';
+      if (!initial || !equalHeaders(initial.headers, start.headers) || !changes.every(c => current(start,c))) return 'rejected';
       // A DataFilter selects one dimension. Column and row tags cannot be
       // intersected in a values write. A single-cell named range lets Sheets
       // resolve both dimensions at dispatch during structural moves. A sort,
@@ -84,6 +94,7 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
       });
       await batch(requests);
       const fresh = await snapshot();
+      if (!equalHeaders(start.headers, fresh.headers)) return 'rejected';
       for (const { namedRangeId, name, change } of bindings) {
         const bound = fresh.names.get(namedRangeId);
         if (!current(fresh, change)) return 'rejected';
@@ -114,11 +125,14 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
   async function read() {
     readBack = undefined;
     const s = await snapshot();
+    initial ??= s;
     if (dispatched) readBack = s;
     if (dispatched && (dispatched.sheetId !== s.sheetId || !equalHeaders(dispatched.headers, s.headers) || !bindings.every(b => {
       const bound = s.names.get(b.namedRangeId);
       const col = s.headers.indexOf(b.change.header), receipt = receipts.get(b.namedRangeId);
-      return (!receipt || receiptColumn(receipt.updatedRange, s.row) === col) && bound?.name === b.name && singleCell(bound.range, s.sheetId, s.row, col);
+      return (!receipt || ((!receipt.spreadsheetId || receipt.spreadsheetId === target.spreadsheetId) &&
+        receiptColumn(receipt.updatedRange, s.row) === col)) &&
+        bound?.name === b.name && singleCell(bound.range, s.sheetId, s.row, col);
     }))) throw conflict();
     return s;
   }

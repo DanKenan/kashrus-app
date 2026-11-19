@@ -63,3 +63,29 @@ assert.throws(() => plan('ingredients','companyLink',['unknown'],'Companies',{ra
 assert.deepEqual(plan('products','symbolRequired',false,'Symbol',{raw:false}), []);
 assert.equal(verifyTaggedEdit(snapshot,{...snapshot, recordId:'other'},'ID',[],links),false);
 console.log('Typed tagged-row planning, verification, and audit lifecycle passed with a model provider.');
+
+for (const failure of ['attempted', 'confirmed', 'unconfirmed']) {
+  const row = structuredClone(snapshot), writes = [], audit = [];
+  const provider = {
+    read: async () => structuredClone(row),
+    async applyIfCurrent(_target, changes) {
+      writes.push(changes.map(change => change.field));
+      row.cells[1].raw = failure === 'unconfirmed' ? 'Changed by a collaborator' : 'New name';
+      return 'applied';
+    },
+  };
+  await assert.rejects(updateTaggedRow({ ...edit, fields: { name: 'New name' } }, target, provider, async entry => {
+    audit.push(entry.outcome);
+    if (entry.outcome === failure) throw Error('Audit unavailable');
+  }), {
+    status: 409,
+    message: {
+      attempted: /stopped before saving/,
+      confirmed: /sheet change was verified but its audit could not be confirmed/,
+      unconfirmed: /sheet may already have changed/,
+    }[failure],
+  });
+  assert.deepEqual(writes, failure === 'attempted' ? [] : [['name']]);
+  assert.deepEqual(audit, failure === 'attempted' ? ['attempted'] : ['attempted',failure]);
+}
+console.log('Audit failures identify the write state and never replay the provider write.');

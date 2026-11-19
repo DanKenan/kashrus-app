@@ -1,4 +1,4 @@
-import { editSheetRow } from './sheets-edit.ts';
+import { editSheetRow, readSheetEditor } from './sheets-edit.ts';
 import type { Edit, EditAudit, Target } from './tagged-row.ts';
 import { sourceFetch } from './http.ts';
 import { matrixRows, tabularConnector, keyRows } from './tabular.ts';
@@ -120,6 +120,7 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
         method: 'POST', body: JSON.stringify(body),
     });
     return { calls: () => calls, listTables, tagManagedRows,
+        readTaggedEditor(edit: Edit, target: Target) { return readSheetEditor(post, edit, target); },
         updateTaggedRow(edit: Edit, target: Target, audit: (entry: EditAudit) => Promise<void>) {
             return editSheetRow(post, edit, target, audit);
         },

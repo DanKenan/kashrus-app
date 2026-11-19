@@ -1,3 +1,4 @@
+import { SheetEditHelpContent } from './SheetEditHelp';
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { Check, X } from 'lucide-react';
 import { SourceConnectSheet, sourceButton } from './SourceConnectSheet';
@@ -51,9 +52,7 @@ export function SourcesForm({ connection, timeZone, onClose, onSaved }: Props) {
       <button type="button" ref={editHelpButton} aria-label="About Google Sheets editing" aria-controls={`${id}-editing-help`} aria-expanded={editHelp} className="pressable inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line-control bg-surface text-base font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold" onClick={() => setEditHelp(open => !open)}>?</button>
     </div>
     {editHelp && <div id={`${id}-editing-help`} className="space-y-2 rounded-lg border border-line bg-sunken p-3">
-      <p>Choose “Read and create files” to turn on editing. In Edit company, you can change its mapped Name, Address, and Fee. Formula cells are read only.</p>
-      <p>When enabling editing, keep the mapped tabs still while the app tags existing rows by permanent ID.</p>
-      <p>The app checks the tagged row and column headers before and after saving. Someone moving columns, sorting part of a row, or editing at the same time can still change where a value lands. If the save cannot be confirmed, review the original sheet and refresh before editing again.</p>
+      <SheetEditHelpContent />
       <button type="button" aria-label="Close" className={sourceButton} onClick={() => { setEditHelp(false); editHelpButton.current?.focus(); }}>Close</button>
     </div>}
   </div>;
