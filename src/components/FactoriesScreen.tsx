@@ -1,8 +1,8 @@
-import { FeesSheet } from './FeesSheet';
-import { CompanyInfoSheet, CompanyRemovalSheet, companyRemovalRequest } from './CompanyInfoSheet';
+import { CompanyScreen } from './CompanyScreen';
+import { CompanyRemovalSheet, companyRemovalRequest } from './CompanyInfoSheet';
 import { FeesAccountantSettings } from './FeesAccountantSettings';
 import { PayScreen } from './PayScreen';
-import { canSeeFees, yearlyVisits } from '../lib/fees';
+import { yearlyVisits } from '../lib/fees';
 import React, { useEffect, useRef, useState } from 'react';
 import { FactoryItemChip } from './FactoryItemChip';
 import { InspectionReportDetail, InspectionReportsInbox } from './InspectionReportsInbox';
@@ -27,8 +27,9 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const onClose = () => { setOauthReturn(false); if (oauthReturn) { const url = new URL(window.location.href); url.searchParams.delete('sources'); url.searchParams.delete('signin'); window.history.replaceState(null, '', url); } requestedClose(); };
   const [sheetList, setSheetList] = useState<SourceSection | null>(null);
   const [sheetRecord, setSheetRecord] = useState<{ section: SourceSection; row?: Pick<Factory, 'id' | 'name'> } | null>(null);
-  const [companyEditor, setCompanyEditor] = useState<Factory | 'new' | null>(null);
-  const [feePlace, setFeePlace] = useState<string | null>(null), [infoPlace, setInfoPlace] = useState<string | null>(null), [feesSettings, setFeesSettings] = useState(false), [payOpen, setPayOpen] = useState(false);
+  const [companyEditor, setCompanyEditor] = useState(false);
+  const [companyScreen, setCompanyScreen] = useState<Factory | null>(null);
+  const [feesSettings, setFeesSettings] = useState(false), [payOpen, setPayOpen] = useState(false);
   const [scheduleData, setScheduleData] = useState<ScheduleData | null>(null);
   const [scheduleFailed, setScheduleFailed] = useState(false);
   const [scheduleReload, setScheduleReload] = useState(0);
@@ -44,7 +45,6 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const [connection, setConnection] = useState<SourceConnection | null>(null);
   const [visitGroup1Label, setVisitGroup1Label] = useState('Group 1');
   const [companies, setCompanies] = useState<Factory[]>([]);
-  const canEditSheet = role === 'admin' && connection?.sourceType === 'google_sheets' && connection.sheetsFeeEditing === true;
   const sheetSections = role === 'admin' && connection?.sourceType === 'google_sheets' ? connection.sheetsEditSections : undefined;
   const [selectedCompany, setSelectedCompany] = useState<Factory | null>(null);
   const [reportsOpen, setReportsOpen] = useState<{ companyId?: string; companyName?: string } | null>(null);
@@ -85,7 +85,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const generation = useRef(0);
   useEffect(() => {
     const request = ++generation.current;
-    if (!isOpen) { setSettings(false); setReportsOpen(null); setReportDetail(null); setRemoval(null); setArchived(false); setCompanyChange(''); setAddHelp(false); setCompanyEditor(null); setFeePlace(null); setInfoPlace(null); setFeesSettings(false); setPayOpen(false); setSelectedCompany(null); setSheetList(null); setSheetRecord(null); return; }
+    if (!isOpen) { setSettings(false); setReportsOpen(null); setReportDetail(null); setRemoval(null); setArchived(false); setCompanyChange(''); setAddHelp(false); setCompanyEditor(false); setCompanyScreen(null); setFeesSettings(false); setPayOpen(false); setSelectedCompany(null); setSheetList(null); setSheetRecord(null); return; }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let polls = 0;
     const schedule = (current: SourceConnection) => {
@@ -151,7 +151,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   };
   const addCompany = () => {
     if (sheetSections?.includes('companies')) setSheetRecord({ section: 'companies' });
-    else if (canEdit(role, connection)) setCompanyEditor('new');
+    else if (canEdit(role, connection)) setCompanyEditor(true);
     else setAddHelp(true);
   };
   const showArchived = () => {
@@ -159,7 +159,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
     companiesHeading.current?.focus();
   };
   const companyChanged = (change: string) => {
-    setInfoPlace(null); setRemoval(null); setCompanyChange(change);
+    setCompanyScreen(null); setRemoval(null); setCompanyChange(change);
     setReload(k => k + 1); setScheduleReload(k => k + 1);
   };
   const restore = async (company: Factory) => {
@@ -171,7 +171,6 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
     } catch (error) { setError((error as Error).message); }
     finally { restoreLock.current = false; setRestoring(null); }
   };
-  const infoCompany = companies.find(company => company.id === infoPlace);
   const scheduleSections = sheetSections?.filter(section => section !== 'companies') ?? [];
   if (!isOpen) return null;
   return <div role="dialog" aria-modal="true" aria-label="Factories" className="fixed inset-0 z-50 overflow-y-auto bg-paper text-ink" data-factories>
@@ -224,16 +223,15 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
       </button>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={sourceButton} onClick={() => setReportsOpen({ companyId: company.id, companyName: company.name })}>View visit reports</button>
-        {!company.archived && (canEdit(role, connection) || canEditSheet) && <button type="button" className={sourceButton} onClick={() => sheetSections?.includes('companies')
-          ? setSheetRecord({ section: 'companies', row: company }) : setCompanyEditor(company)}>Edit company</button>}
-        {canSeeFees(role) && !company.removalPending && <>
-          {!company.archived && <button type="button" className={sourceButton} onClick={() => setFeePlace(company.id)}>Fees</button>}
-          <button type="button" className={sourceButton} onClick={() => setInfoPlace(company.id)}>Company info</button>
-        </>}
         {!company.archived && (role === 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)) && <button type="button" className={sourceButton} disabled={role === 'coordinator' && !scheduleData?.companies.some(row => row.id === company.id)} onClick={() => setEditing(company.id)}>Visit schedule</button>}
         {company.removalPending ? <button type="button" className={sourceButton} onClick={() => setRemoval(company)}>Continue permanent removal</button> :
           company.archived && <button type="button" className={sourceButton} disabled={restoring !== null} onClick={() => void restore(company)}>{restoring === company.id ? 'Saving…' : 'Restore company'}</button>}
       </div>
+      {!company.removalPending && <button type="button" onClick={() => setCompanyScreen(company)}
+        className="pressable block min-h-12 w-full rounded-xl border border-line-control bg-sunken px-4 py-2 text-left text-ink focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2">
+        <span className="block font-semibold">Company</span>
+        <span className="block text-sm text-ink-soft">Everything about this company</span>
+      </button>}
       {scheduleData && !(scheduleData.companies.find(row => row.id === company.id)?.lastVisit || scheduleData.archivedLastVisits?.[company.id]) &&
         !recentReports?.some(report => report.companyId === company.id) && !company.removalPending && <p className="text-ink-soft">No visit reports yet</p>}
       </div></li>)}</ul>}
@@ -278,12 +276,14 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
         : 'Connect a source that supports adding companies and enable write access in Source settings.'}</p>
       <button type="button" className={sourceButton} disabled={!connection} onClick={() => { setAddHelp(false); setSettings(true); }}>Open source settings</button>
     </VisitSheet>}
-    {canSeeFees(role) && feePlace && <FeesSheet placeId={feePlace} yearlyCount={yearlyVisits(scheduleData?.companies.find(c => c.id === feePlace)?.schedule, scheduleData?.today.slice(0, 4) || '')} onClose={() => setFeePlace(null)} />}
-    {canSeeFees(role) && infoCompany && <CompanyInfoSheet placeId={infoCompany.id} isAdmin={role === 'admin' && !infoCompany.archived} onClose={() => setInfoPlace(null)}
-      onRemove={role === 'admin' && connection?.companySource ? () => setRemoval(infoCompany) : undefined} />}
+    {companyScreen && <CompanyScreen key={`${role}:${companyScreen.id}`} company={companyScreen} role={role} connection={connection}
+      yearlyCount={yearlyVisits(scheduleData?.companies.find(c => c.id === companyScreen.id)?.schedule, scheduleData?.today.slice(0, 4) || '')}
+      onClose={() => setCompanyScreen(null)}
+      onSourceSaved={() => { setReload(k => k + 1); setScheduleReload(k => k + 1); }}
+      onRemove={role === 'admin' && connection?.companySource ? (name) => setRemoval({ ...companyScreen, name }) : undefined} />}
     {removal && connection?.companySource && <CompanyRemovalSheet company={removal} source={connection.companySource}
       sourceName={providers.find(p => p.id === connection.sourceType)?.name ?? 'Connected source'}
-      onClose={() => setRemoval(null)} onChanged={companyChanged} onPending={() => { setReload(k => k + 1); setScheduleReload(k => k + 1); }} />}
+      onClose={() => setRemoval(null)} onChanged={companyChanged} onPending={() => { setCompanyScreen(null); setReload(k => k + 1); setScheduleReload(k => k + 1); }} />}
     {role === 'admin' && feesSettings && <FeesAccountantSettings role={role} onClose={() => setFeesSettings(false)} />}
     {role === 'admin' && payOpen && <PayScreen role={role} timeZone={timeZone} onClose={() => setPayOpen(false)} />}
     {editing && scheduleData?.companies.some(row => row.id === editing) && <VisitScheduleEditor key={editing} company={scheduleData.companies.find(row => row.id === editing)!} data={scheduleData} isAdmin={role === 'admin'} onSaved={updateCompany} onClose={() => setEditing(null)} />}
@@ -293,7 +293,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
     {reportDetail && <InspectionReportDetail key={reportDetail} id={reportDetail} timeZone={timeZone} onClose={() => setReportDetail(null)}
       onUpdated={report => setRecentReports(rows => rows?.map(row => row.id === report.id ? report : row) ?? null)} />}
     {selectedCompany && <CompanyItemsSheet isAdmin={role === 'admin'} company={selectedCompany} group1Label={role === 'admin' ? connection?.group1Label || 'Group 1' : visitGroup1Label} onClose={() => setSelectedCompany(null)} />}
-    {(canEdit(role, connection) || (canEditSheet && companyEditor !== 'new')) && companyEditor && <SourceCompanyEditor sheetMapping={canEditSheet ? connection?.mapping?.companies : undefined} company={companyEditor === 'new' ? { name: '' } : companyEditor} source={providers.find(p => p.id === connection?.sourceType)?.name || ''} onClose={() => setCompanyEditor(null)} onSaved={() => { setReload(k => k + 1); setScheduleReload(k => k + 1); }} />}
+    {canEdit(role, connection) && companyEditor && <SourceCompanyEditor company={{ name: '' }} source={providers.find(p => p.id === connection?.sourceType)?.name || ''} onClose={() => setCompanyEditor(false)} onSaved={() => { setReload(k => k + 1); setScheduleReload(k => k + 1); }} />}
     {sheetList && sheetSections?.includes(sheetList) && !sheetRecord &&
       <SheetRecordList section={sheetList} onClose={() => setSheetList(null)}
         onChoose={row => setSheetRecord({ section: sheetList, row })}

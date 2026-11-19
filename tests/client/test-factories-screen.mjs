@@ -4,6 +4,7 @@ import { SourceCompanyEditor } from '../../src/components/SourceCompanyEditor.ts
 import { SourcesSheet } from '../../src/components/SourcesSheet.tsx';
 import { SourceConnectForm } from '../../src/components/SourceConnectSheet.tsx';
 import { CompanyRemovalSheet } from '../../src/components/CompanyInfoSheet.tsx';
+import { CompanyScreen } from '../../src/components/CompanyScreen.tsx';
 import { FactoriesScreen } from '../../src/components/FactoriesScreen.tsx';
 import { sourceStatus } from '../../src/lib/sources.ts';
 const originalFetch = globalThis.fetch;
@@ -181,8 +182,14 @@ try {
       { status: connection, companies: [{ id: 'a', name: 'Bakery', companyFee: 100 }] });
     const screen = mount(FactoriesScreen, { isOpen: true, role: 'admin', onClose() {}, timeZone: 'UTC' });
     await screen.render();
-    assert.equal(screen.buttons().some(b => b.label === 'Edit company'), enabled);
+    const companyButton = screen.buttons().find(b => b.label === 'Company Everything about this company');
+    assert.match(companyButton.el.props.className, /\bw-full\b/);
+    assert.ok(screen.buttons().every(b => !['Edit company', 'Fees', 'Company info'].includes(b.label)));
     assert.ok(screen.buttons().some(b => b.label === 'Add company'));
+    await screen.click(/^Company Everything/);
+    const workspace = screen.tree().props.children.find(child => child?.type === CompanyScreen);
+    assert.equal(workspace.props.company.name, 'Bakery');
+    assert.equal(workspace.props.connection.sheetsFeeEditing, enabled);
   }
   let baseId = 'appOld';
   let status = 'ok';
