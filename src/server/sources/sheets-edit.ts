@@ -4,6 +4,8 @@ import { updateTaggedRow, type Cell, type Change, type Edit, type EditAudit, typ
 type Post = (path: string, body: unknown) => Promise<any>;
 type Grid = { sheetId: number; startRowIndex?: number; endRowIndex: number; startColumnIndex?: number; endColumnIndex: number };
 type Binding = { namedRangeId: string; name: string; range: Grid };
+type RejectionReason = 'cell_changed' | 'tagged_row_read_failed' | 'range_creation_failed' |
+  'range_missing' | 'range_mismatch' | 'values_update_rejected';
 type GridCell = { userEnteredValue?: { stringValue?: string; boolValue?: boolean; numberValue?: number; formulaValue?: string };
   effectiveValue?: unknown; effectiveFormat?: { numberFormat?: { type?: string } } };
 const conflict = () => Object.assign(Error('The tagged row or its columns changed. Refresh and review.'), { status: 409 });
@@ -64,14 +66,26 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
     return col >= 0 && !value.formula && value.raw === c.previous &&
       (c.rule !== 'date' || !!value.dateSerial === (typeof c.requested === 'number'));
   };
-  async function apply(_target: Target, changes: readonly Change[]): Promise<'rejected' | 'applied' | 'unconfirmed'> {
+  async function apply(_target: Target, changes: readonly Change[], operationId: string): Promise<'rejected' | 'applied' | 'unconfirmed'> {
+    // Temporary diagnostic for the Phase A write pilot.
+    function rejectWrite(reason: RejectionReason, details?: {
+      observedRangeCount?: number; idMatches?: boolean; nameMatches?: boolean; coordinatesMatch?: boolean;
+    }) {
+      try {
+        console.warn(JSON.stringify({ severity: 'WARNING', message: '[sources] Phase A write rejected',
+          operationId, reason, cellUpdateDispatched: dispatched !== undefined, ...details }));
+      } catch { /* diagnostics must not affect the write outcome */ }
+      return 'rejected' as const;
+    }
+    let exceptionReason: RejectionReason = 'tagged_row_read_failed';
     try {
       const start = await snapshot();
-      if (!changes.every(c => current(start,c))) return 'rejected';
+      if (!changes.every(c => current(start,c))) return rejectWrite('cell_changed');
       // A DataFilter selects one dimension. Column and row tags cannot be
       // intersected in a values write. A single-cell named range lets Sheets
       // resolve both dimensions at dispatch during structural moves. A sort,
       // paste, or collaborator changing a range can still defeat its identity.
+      exceptionReason = 'range_creation_failed';
       const requests = changes.map(change => {
         const col = start.headers.indexOf(change.header), id = randomUUID();
         const name = 'Shutfey_' + id.replaceAll('-', '');
@@ -80,14 +94,23 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
           startRowIndex: start.row, endRowIndex: start.row + 1, startColumnIndex: col, endColumnIndex: col + 1 } } } };
       });
       await batch(requests);
+      exceptionReason = 'tagged_row_read_failed';
       const fresh = await snapshot();
-      if (!bindings.every(({ namedRangeId, name, change }) => {
+      exceptionReason = 'range_mismatch';
+      for (const { namedRangeId, name, change } of bindings) {
         const bound = fresh.names.get(namedRangeId);
-        return current(fresh, change) && bound?.name === name &&
-          singleCell(bound.range, fresh.sheetId, fresh.row, fresh.headers.indexOf(change.header));
-      })) return 'rejected';
+        if (!current(fresh, change)) return rejectWrite('cell_changed');
+        if (!bound) {
+          if ([...fresh.names.values()].some(candidate => candidate.name === name))
+            return rejectWrite('range_mismatch', { idMatches: false, nameMatches: true });
+          return rejectWrite('range_missing', { observedRangeCount: fresh.names.size });
+        }
+        if (bound.name !== name) return rejectWrite('range_mismatch', { idMatches: true, nameMatches: false });
+        if (!bound.range || !singleCell(bound.range, fresh.sheetId, fresh.row, fresh.headers.indexOf(change.header)))
+          return rejectWrite('range_mismatch', { idMatches: true, nameMatches: true, coordinatesMatch: false });
+      }
       dispatched = fresh;
-    } catch { return 'rejected'; }
+    } catch { return rejectWrite(exceptionReason); }
     try {
       const result = await post('/values:batchUpdate', { valueInputOption: 'RAW',
         data: bindings.map(({ name, change }) => ({ range: name, values: [[change.requested]] })) });
@@ -100,7 +123,7 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
       if ((error as { rejected?: boolean }).rejected) {
         try {
           const after = await read();
-          return changes.every(c => current(after, c)) ? 'rejected' : 'unconfirmed';
+          return changes.every(c => current(after, c)) ? rejectWrite('values_update_rejected') : 'unconfirmed';
         } catch { return 'unconfirmed'; }
       }
       throw error; // Lost response: the engine verifies once, without replay.
