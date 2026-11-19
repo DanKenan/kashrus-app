@@ -68,12 +68,23 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
   };
   async function apply(_target: Target, changes: readonly Change[], operationId: string): Promise<'rejected' | 'applied' | 'unconfirmed'> {
     // Temporary diagnostic for the Phase A write pilot.
-    function rejectWrite(reason: RejectionReason, details?: {
-      observedRangeCount?: number; idMatches?: boolean; nameMatches?: boolean; coordinatesMatch?: boolean;
-    }) {
+    const rangeFields = ['sheetId', 'startRowIndex', 'endRowIndex', 'startColumnIndex', 'endColumnIndex'];
+    function captureCoordinates(source: Record<string, unknown> | null | undefined, fields: readonly string[]) {
+      const coordinates: Record<string, number | null> = {};
+      const absent: string[] = [];
+      for (const field of fields) {
+        const value = source?.[field];
+        if (value === undefined) absent.push(field);
+        else if (typeof value === 'number') coordinates[field] = value;
+        else if (value === null) coordinates[field] = null;
+      }
+      return { ...coordinates, absent };
+    }
+    function rejectWrite(reason: RejectionReason, details?: () => object) {
       try {
         console.warn(JSON.stringify({ severity: 'WARNING', message: '[sources] Phase A write rejected',
-          operationId, reason, cellUpdateDispatched: dispatched !== undefined, ...details }));
+          ...(reason !== 'range_mismatch' && { operationId }),
+          reason, cellUpdateDispatched: dispatched !== undefined, ...details?.() }));
       } catch { /* diagnostics must not affect the write outcome */ }
       return 'rejected' as const;
     }
@@ -93,21 +104,29 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
         return { addNamedRange: { namedRange: { name, namedRangeId: id, range: { sheetId: start.sheetId,
           startRowIndex: start.row, endRowIndex: start.row + 1, startColumnIndex: col, endColumnIndex: col + 1 } } } };
       });
-      await batch(requests);
+      const creation = await batch(requests);
       exceptionReason = 'tagged_row_read_failed';
       const fresh = await snapshot();
       exceptionReason = 'range_mismatch';
-      for (const { namedRangeId, name, change } of bindings) {
+      for (const [index, { namedRangeId, name, change }] of bindings.entries()) {
         const bound = fresh.names.get(namedRangeId);
+        const rejectRangeMismatch = (binding: Binding) => rejectWrite('range_mismatch', () => ({
+          addNamedRangeRequest: captureCoordinates(requests[index].addNamedRange.namedRange.range, rangeFields),
+          addNamedRangeReply: captureCoordinates(creation?.replies?.[index]?.addNamedRange?.namedRange?.range, rangeFields),
+          freshBinding: captureCoordinates(binding.range, rangeFields),
+          freshSnapshot: captureCoordinates({
+            sheetId: fresh.sheetId, rowIndex: fresh.row, columnIndex: fresh.headers.indexOf(change.header),
+          }, ['sheetId', 'rowIndex', 'columnIndex']),
+        }));
         if (!current(fresh, change)) return rejectWrite('cell_changed');
         if (!bound) {
-          if ([...fresh.names.values()].some(candidate => candidate.name === name))
-            return rejectWrite('range_mismatch', { idMatches: false, nameMatches: true });
-          return rejectWrite('range_missing', { observedRangeCount: fresh.names.size });
+          const sameName = [...fresh.names.values()].find(candidate => candidate.name === name);
+          if (sameName) return rejectRangeMismatch(sameName);
+          return rejectWrite('range_missing', () => ({ observedRangeCount: fresh.names.size }));
         }
-        if (bound.name !== name) return rejectWrite('range_mismatch', { idMatches: true, nameMatches: false });
+        if (bound.name !== name) return rejectRangeMismatch(bound);
         if (!bound.range || !singleCell(bound.range, fresh.sheetId, fresh.row, fresh.headers.indexOf(change.header)))
-          return rejectWrite('range_mismatch', { idMatches: true, nameMatches: true, coordinatesMatch: false });
+          return rejectRangeMismatch(bound);
       }
       dispatched = fresh;
     } catch { return rejectWrite(exceptionReason); }
