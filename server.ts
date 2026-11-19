@@ -19525,7 +19525,7 @@ function kqrMemoAnswer(device: KioskDevice, nowMs: number): KqrTabletAnswer | nu
  */
 async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDevice, userAgent: unknown): Promise<KqrTabletAnswer> {
   if (mode === 'poll') {
-    const memo = kqrMemoAnswer(device, Date.now());
+    const memo = kqrMemoAnswer(device, serverNow().getTime());
     if (memo) return memo;
   }
   // READCUT: the live code this transaction saw (or issued), kept as the memo
@@ -19536,7 +19536,7 @@ async function kqrTabletStep(mode: 'start' | 'cancel' | 'poll', device: KioskDev
   const answer = await pkTransaction<KqrTabletAnswer>(async (tx): Promise<KqrTabletAnswer> => {
     memoCandidate = null;
     genBefore = kqrMemoGenOf(device.id);
-    const nowMs = Date.now();
+    const nowMs = serverNow().getTime();
     const dev = asKqrDevice(await tx.get('kioskQrDevices', device.id), device.id);
     const code = dev.codeHash ? asKqrCode(await tx.get('kioskQr', dev.codeHash), dev.codeHash) : null;
     const prevCode = dev.prevCodeHash && dev.prevCodeHash !== dev.codeHash ? asKqrCode(await tx.get('kioskQr', dev.prevCodeHash), dev.prevCodeHash) : null;

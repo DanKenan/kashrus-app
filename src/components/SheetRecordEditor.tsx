@@ -20,10 +20,11 @@ type Value = string | number | boolean | string[];
 type Field = { field: string; header: string; rule: ValueRule; value: Value; readOnly?: string; choices?: string[]; revision: string };
 type Row = { id: string; name: string };
 type Company = Row & { key: string };
-type Editor = { fields: Field[]; companies: Company[] };
+type Editor = { fields: Field[]; companies: Company[]; addScope?: string[]; addRevision?: string };
+const addStorageKey = (scope: string[]) => 'shutfey-sheet-add:' + JSON.stringify(scope);
 
-export function SheetRecordList({ section, onChoose, onClose }: {
-  section: SourceSection; onChoose(row: Row): void; onClose(): void;
+export function SheetRecordList({ section, onChoose, onAdd, onClose }: {
+  section: SourceSection; onChoose(row: Row): void; onAdd(): void; onClose(): void;
 }) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [search, setSearch] = useState('');
@@ -37,6 +38,7 @@ export function SheetRecordList({ section, onChoose, onClose }: {
   }, [section]);
   const matching = rows?.filter(row => row.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
   return <VisitSheet title={sheetSectionNames[section]} onClose={onClose}>
+    <button type="button" className={sourceButton} onClick={onAdd}>Add {recordNames[section]}</button>
     <label className="block space-y-2">Search {sheetSectionNames[section]}<input type="search" className={setupField} value={search} onChange={e => setSearch(e.target.value)} /></label>
     {error && <p role="alert" className="text-bad">{error}</p>}
     {!rows && !error && <p role="status">Loading records…</p>}
@@ -97,12 +99,16 @@ function FieldInput({ section, field, value, companies, onChange }: {
 }
 
 export function SheetRecordEditor({ section, row, onClose, onSaved }: {
-  section: SourceSection; row: Row; onClose(): void; onSaved(): void;
+  section: SourceSection; row?: Row; onClose(): void; onSaved(): void;
 }) {
-  const path = `/${section}/${encodeURIComponent(row.id)}`;
+  const adding = !row;
+  const path = `/${section}/${row ? encodeURIComponent(row.id) : 'new'}`;
   const [editor, setEditor] = useState<Editor | null>(null);
   const [draft, setDraft] = useState<Record<string, Value>>({});
   const [busy, setBusy] = useState(false);
+  const [pendingToken, setPendingToken] = useState('');
+  const [confirmAbandon, setConfirmAbandon] = useState(false);
+  const [staleAdd, setStaleAdd] = useState(false);
   const [review, setReview] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -110,7 +116,17 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
   const fetchEditor = (): Promise<Editor> => sourceRequest('/api/sources/sheet-editor' + path);
   useEffect(() => {
     let active = true;
-    void fetchEditor().then(data => { if (active) setEditor(data); }).catch(cause => { if (active) setError(cause.message); });
+    void fetchEditor().then(data => {
+      if (!active) return;
+      setEditor(data);
+      const scope = data.addScope;
+      if (scope) {
+        try {
+          setPendingToken(sessionStorage.getItem(addStorageKey(scope.slice(0, 3))) ??
+            sessionStorage.getItem(addStorageKey(scope)) ?? '');
+        } catch { /* Storage may be unavailable. */ }
+      }
+    }).catch(cause => { if (active) setError(cause.message); });
     return () => { active = false; };
   }, [path]);
 
@@ -119,8 +135,84 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
       ? JSON.stringify([...value].sort()) !== JSON.stringify([...(draft[field] as string[])].sort())
       : String(draft[field]) !== String(value))) ?? [];
 
+  function rememberAdd(token: string) {
+    setPendingToken(token);
+    const scope = editor?.addScope;
+    if (!scope) return;
+    try {
+      if (token) sessionStorage.setItem(addStorageKey(scope.slice(0, 3)), token);
+      else sessionStorage.removeItem(addStorageKey(scope.slice(0, 3)));
+      sessionStorage.removeItem(addStorageKey(scope));
+    } catch { /* The open editor still retains the token. */ }
+  }
+
+  async function saveAdd() {
+    if (lock.current || notice || staleAdd || !editor) return;
+    if (!pendingToken && (typeof draft.name !== 'string' || !draft.name.trim())) {
+      setError('Enter a name.');
+      return;
+    }
+    const entries = editor.fields.filter(({ field, rule }) => Object.hasOwn(draft, field) &&
+      !(rule === 'money' && typeof draft[field] === 'string' && !draft[field].trim()))
+      .map(({ field, rule }) => [field, rule === 'money' ? parseMoney(draft[field]) : draft[field]] as const);
+    if (!pendingToken && entries.some(([, value]) => value === undefined)) { setError('Enter a valid amount.'); return; }
+    lock.current = true;
+    setBusy(true);
+    setError('');
+    setConfirmAbandon(false);
+    try {
+      const token = pendingToken || crypto.randomUUID();
+      if (!pendingToken) rememberAdd(token);
+      const result = await sourceRequest('/api/sources/rows/' + section, 'POST', {
+        token, ...(pendingToken ? {} : { fields: Object.fromEntries(entries), addRevision: editor.addRevision }),
+      });
+      if (result.saved !== true) throw Error();
+      rememberAdd('');
+      onSaved();
+      if (result.warning) setNotice(result.warning);
+      else onClose();
+    } catch (cause) {
+      const { status, addRevisionStale } = (cause as { status?: number; addRevisionStale?: boolean } | null) ?? {};
+      if (status === 400 || addRevisionStale) rememberAdd('');
+      if (addRevisionStale) setStaleAdd(true);
+      setError(!status || status >= 500
+        ? 'The new record could not be confirmed. It may already be in Google Sheets. Check again or review the sheet.'
+        : cause instanceof Error ? cause.message : "Couldn't save. Try again.");
+    } finally {
+      lock.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function abandonAdd() {
+    if (lock.current || !pendingToken) return;
+    lock.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await sourceRequest('/api/sources/sheet-editor/' + section + '/abandon', 'POST', { token: pendingToken });
+      if (result.abandoned !== true) throw Error('Could not abandon the Add attempt. Try again.');
+      rememberAdd('');
+      setConfirmAbandon(false);
+      setDraft({});
+      // The mapping may have changed while this attempt was pending.
+      try {
+        setEditor(await fetchEditor());
+      } catch (cause) {
+        setStaleAdd(true);
+        throw cause;
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not abandon the Add attempt. Try again.');
+    } finally {
+      lock.current = false;
+      setBusy(false);
+    }
+  }
+
   async function save(event: React.FormEvent) {
     event.preventDefault();
+    if (adding) return saveAdd();
     if (lock.current || review || notice || !changed.length) return;
     const entries = changed.map(({ field, rule }) => [field, rule === 'money' ? parseMoney(draft[field]) : draft[field]] as const);
     if (entries.some(([, value]) => value === undefined)) { setError('Enter a valid amount.'); return; }
@@ -171,24 +263,32 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
     }
   }
 
-  return <VisitSheet title={`Edit ${recordNames[section]}`} onClose={() => { if (!lock.current) onClose(); }}>
-    <p dir="auto" className="break-words">{row.name}</p>
+  return <VisitSheet title={`${adding ? 'Add' : 'Edit'} ${recordNames[section]}`} onClose={() => { if (!lock.current) onClose(); }}>
+    {row && <p dir="auto" className="break-words">{row.name}</p>}
     <details className="rounded-lg border border-line bg-sunken p-3">
       <summary className="flex min-h-11 cursor-pointer items-center font-semibold focus-visible:ring-2 focus-visible:ring-gold">? About Google Sheets editing</summary>
       <SheetEditHelpContent />
     </details>
     {error && <p role="alert" className="break-words text-bad">{error}</p>}
     {notice && <p role="status" className="break-words text-warn">{notice}</p>}
+    {adding && pendingToken && !error && <p role="status">Check whether Google Sheets saved the new record.</p>}
     {!editor && !error && <p role="status">Loading fields…</p>}
     {editor && <form onSubmit={save} className="space-y-4">
-      <fieldset disabled={busy || review || !!notice} className="space-y-4">
+      <fieldset disabled={busy || review || staleAdd || !!notice || !!pendingToken} className="space-y-4">
         {editor.fields.map(field => <div key={field.field}>
           <FieldInput section={section} field={field} value={Object.hasOwn(draft, field.field) ? draft[field.field] : field.value}
             companies={editor.companies} onChange={value => setDraft(previous => ({ ...previous, [field.field]: value }))} />
         </div>)}
       </fieldset>
-      {review ? <button type="button" className={setupPrimary} disabled={busy} onClick={() => void refreshForReview()}>{busy ? 'Refreshing…' : 'Refresh for review'}</button>
+      {adding ? !notice && <button type="submit" className={setupPrimary} disabled={busy || staleAdd}>{busy
+        ? (pendingToken ? 'Checking…' : 'Saving…') : pendingToken ? 'Check again' : `Add ${recordNames[section]}`}</button>
+        : review ? <button type="button" className={setupPrimary} disabled={busy} onClick={() => void refreshForReview()}>{busy ? 'Refreshing…' : 'Refresh for review'}</button>
         : !notice && <button type="submit" className={setupPrimary} disabled={busy || !changed.length}>{busy ? 'Saving…' : `Save ${recordNames[section]}`}</button>}
+      {adding && pendingToken && !notice && (confirmAbandon ? <div className="space-y-2">
+        <p>Review the original Google Sheet first. Abandoning this attempt keeps any row it creates out of Shutfey. A fresh Add will use a new request.</p>
+        <button type="button" className={sourceButton} disabled={busy} onClick={() => void abandonAdd()}>Confirm abandonment</button>
+        <button type="button" className={sourceButton} disabled={busy} onClick={() => setConfirmAbandon(false)}>Cancel</button>
+      </div> : <button type="button" className={sourceButton} disabled={busy} onClick={() => setConfirmAbandon(true)}>Abandon Add attempt</button>)}
     </form>}
   </VisitSheet>;
 }

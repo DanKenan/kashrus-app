@@ -29,7 +29,7 @@ function fixture(options = {}) {
             options.beforeRead?.(state);
             const tag = body.dataFilters[0].developerMetadataLookup.metadataId;
             assert.deepEqual(body.dataFilters, [{ developerMetadataLookup: { metadataId: tag,
-                metadataKey: 'recordId', metadataValue: tracked.get(tag), locationType: 'ROW' } }, { a1Range: quoteTab(title) + '!1:1' }]);
+                metadataKey: 'recordId', metadataValue: tracked.get(tag) ?? state.rows.find(row => row.tag === tag)?.cells[0], locationType: 'ROW' } }, { a1Range: quoteTab(title) + '!1:1' }]);
             const response = Response.json({ namedRanges: [...state.names.values()].map(returnedName),
                 sheets: [{ properties: { title, sheetId: state.sheetId },
                 data: [{ rowData: [{ values: state.headers.map(raw => gridCell(raw)) }] }, ...state.rows.flatMap((row,i) => row.tag === tag
@@ -227,7 +227,12 @@ try {
     process.env.GOOGLE_OAUTH_CLIENT_ID = randomUUID();
     process.env.GOOGLE_OAUTH_CLIENT_SECRET = randomUUID();
     globalThis.document = { activeElement:null, addEventListener() {}, removeEventListener() {} };
-    let googleWrites = 0;
+    let googleWrites = 0, addBatches = 0, addFailure, holdLayout, afterLayout, holdBatch;
+    let nextTag = 1000;
+    function rowTag(tab, row, index) {
+        return { metadataId:row.tag, metadataKey:'recordId', metadataValue:row.tagValue ?? row.cells[0],
+            visibility:'DOCUMENT', location:{ dimensionRange:{ sheetId:tab.sheetId, dimension:'ROWS', startIndex:index+1, endIndex:index+2 } } };
+    }
     function displayedValue(file, raw, col) {
         if (typeof raw !== 'number' || !file.dates?.has(file.state.headers[col])) return raw;
         const [year, month, day] = new Date(Date.UTC(1899,11,30) + raw * 86400000).toISOString().slice(0,10).split('-');
@@ -254,7 +259,9 @@ try {
             assert.equal(query.get('ranges'),quoteTab(title));
             const mask = query.get('fields');
             assert.equal([...mask].filter(char => char === '(').length,[...mask].filter(char => char === ')').length);
-            assert.match(mask,/formattedValue,effectiveValue,effectiveFormat\(numberFormat\(type\)\)/);
+            assert.match(mask,/formattedValue,effectiveValue/);
+            assert.match(mask,/rowMetadata\(developerMetadata\(metadataKey,metadataValue\)\)/);
+            if (file.dates?.size) assert.match(mask,/effectiveFormat\(numberFormat\(type\)\)/);
             const rowData = [{ values:tab.headers.map(raw => ({ formattedValue:raw, effectiveValue:{stringValue:raw} })) },
                 ...tab.rows.map(row => ({ values:row.cells.map((raw, col) => {
                     const date = typeof raw === 'number' && file.dates?.has(tab.headers[col]);
@@ -262,11 +269,63 @@ try {
                     return { formattedValue:displayedValue(file,raw,col),
                         effectiveValue:userEnteredValue, ...(date && {effectiveFormat:{numberFormat:{type:'DATE'}}}) };
                 }) }))];
-            return Response.json({ sheets:[{ ...props, data:[{rowData}] }] });
+            const rowMetadata = [{}, ...tab.rows.map((row, index) =>
+                row.tag ? { developerMetadata:[rowTag(tab, row, index)] } : {})];
+            return Response.json({ sheets:[{ ...props, data:[{rowData,rowMetadata}] }] });
         }
         if (url.endsWith(':batchUpdate') || url.endsWith('/values:batchUpdate')) googleWrites++;
-        if (url.endsWith('/developerMetadata:search')) return Response.json({});
         const body = JSON.parse(init.body);
+        if (url.includes(':getByDataFilter?') && body.dataFilters.length === 1) {
+            assert.deepEqual(body.dataFilters, [{ a1Range:quoteTab(title) + '!1:1' }]);
+            if (holdLayout) {
+                const hold = holdLayout;
+                holdLayout = undefined;
+                await hold();
+            }
+            const response = Response.json({ sheets:[{ properties:{ title, ...(tab.sheetId && { sheetId:tab.sheetId }),
+                sheetType:'GRID', gridProperties:{ rowCount:1000 } },
+                data:[{ rowData:[{ values:tab.headers.map(raw => gridCell(raw)) }] }] }] });
+            if (afterLayout) {
+                const change = afterLayout;
+                afterLayout = undefined;
+                change();
+            }
+            return response;
+        }
+        if (url.endsWith('/developerMetadata:search')) {
+            const key = body.dataFilters[0].developerMetadataLookup.metadataValue;
+            return Response.json({ matchedDeveloperMetadata: key ? tab.rows.flatMap((row,index) =>
+                row.tag && (row.tagValue ?? row.cells[0]) === key ? [{ developerMetadata:rowTag(tab,row,index) }] : []) : [] });
+        }
+        if (body.requests?.[0]?.insertDimension) {
+            addBatches++;
+            const [insert, write, create] = body.requests;
+            assert.equal(body.requests.length,3);
+            const range = { sheetId:tab.sheetId, dimension:'ROWS', startIndex:1, endIndex:2 };
+            assert.deepEqual(insert.insertDimension, { range, inheritFromBefore:false });
+            assert.deepEqual(write.updateCells.start, { sheetId:tab.sheetId, rowIndex:1, columnIndex:0 });
+            assert.equal(write.updateCells.fields,'userEnteredValue');
+            const cells = write.updateCells.rows[0].values.map(({ userEnteredValue:v }) =>
+                v?.stringValue ?? v?.boolValue ?? v?.numberValue ?? null);
+            const tag = create.createDeveloperMetadata.developerMetadata;
+            assert.deepEqual(tag, { metadataKey:'recordId', metadataValue:cells[0], visibility:'DOCUMENT',
+                location:{ dimensionRange:range } });
+            const failure = addFailure;
+            addFailure = undefined;
+            if (holdBatch) {
+                const hold = holdBatch;
+                holdBatch = undefined;
+                await hold();
+            }
+            if (failure === 'rejected') return Response.json({}, { status:400 });
+            if (failure === 'timeout') return Response.json({}, { status:408 });
+            const inserted = { tag:nextTag++, tagValue:tag.metadataValue, cells };
+            tab.rows.unshift(inserted);
+            if (failure === 'lost') throw Error('Lost response after committing');
+            if (failure === 'missing-receipt') return Response.json({ replies:[{},{},{}] });
+            if (failure === 'changed-value') inserted.cells[1] += ' changed';
+            return Response.json({ replies:[{},{},{ createDeveloperMetadata:{ developerMetadata:rowTag(tab,inserted,0) } }] });
+        }
         if (body.requests?.[0]?.createDeveloperMetadata) {
             assert.deepEqual(body.requests.map(r => r.createDeveloperMetadata.developerMetadata.metadataValue), tab.rows.map(r => r.cells[0]));
             return Response.json({ replies: tab.rows.map((r,i) => ({createDeveloperMetadata:{ developerMetadata:{
@@ -529,6 +588,293 @@ try {
     assert.ok(logs.some(entry => entry.section === 'products' && entry.spreadsheetId === 'schedule-b' && entry.table === 'Schedule B' && entry.outcome === 'confirmed'));
     assert.ok(logs.some(entry => entry.section === 'ingredients' && entry.spreadsheetId === 'schedule-a' &&
         entry.outcome === 'unconfirmed' && entry.writeEvidence[0].readBack.raw === 'Unexpected'));
+    // Independence from process memory and distributed token contention use
+    // two route registries sharing the same persistent Firestore mock.
+    const { MockFirestore } = await import('../stage2/firestore-mock.mjs');
+    const mockFile = process.env.FIRESTORE_MOCK_FILE;
+    process.env.FIRESTORE_MOCK_FILE = join(directory,'phase-c-firestore.json');
+    const auditWrites = [];
+    class AddFirestore extends MockFirestore {
+        runTransaction(fn) {
+            return super.runTransaction(tx => {
+                const set = tx.set.bind(tx);
+                tx.set = (ref, entry, options) => {
+                    if (entry.kind === 'add') auditWrites.push([entry.token,entry.outcome]);
+                    return set(ref,entry,options);
+                };
+                return fn(tx);
+            });
+        }
+    }
+    const db = new AddFirestore();
+    if (mockFile === undefined) delete process.env.FIRESTORE_MOCK_FILE;
+    else process.env.FIRESTORE_MOCK_FILE = mockFile;
+    const addDeps = { ...routeDeps, db:() => db };
+    const addStore = createSourceStore(addDeps);
+    await addStore.save(await createSourceStore(routeDeps).raw('agency'));
+    const addServers = [];
+    async function startAddServer() {
+        const freshApp = express();
+        freshApp.use(express.json());
+        const { boot } = registerSourceRoutes(freshApp,addDeps);
+        const freshServer = await new Promise(resolve => {
+            const listener = freshApp.listen(0,'127.0.0.1',() => resolve(listener));
+        });
+        addServers.push(freshServer);
+        await boot();
+        return 'http://127.0.0.1:' + freshServer.address().port;
+    }
+    try {
+        const a = await startAddServer();
+        const b = await startAddServer();
+        async function request(base, path, { body, method = body ? 'POST' : 'GET', status = 200, headers = {} } = {}) {
+            const response = await priorFetch(base + path,{ method,
+                headers:{ 'Content-Type':'application/json',...headers }, body:JSON.stringify(body) });
+            const json = await response.json();
+            assert.ok([status].flat().includes(response.status), JSON.stringify({ status:response.status,json }));
+            return json;
+        }
+        const editor = (section, base = a) => request(base,'/api/sources/sheet-editor/' + section + '/new');
+        const add = async (section, fields, { base = a, token = randomUUID(), revision, ...opts } = {}) => {
+            if (fields && revision === undefined) revision = (await editor(section, base)).addRevision;
+            return request(base,'/api/sources/rows/' + section,{ ...opts, body:{ token,fields,addRevision:revision } });
+        };
+        const abandon = (section, token, base = b) =>
+            request(base,'/api/sources/sheet-editor/' + section + '/abandon',{body:{token}});
+        const addEditor = await editor('products');
+        const companyRevision = (await editor('companies')).addRevision;
+        assert.match(addEditor.addRevision,/^[0-9a-f]{64}$/);
+        assert.deepEqual(addEditor.fields.find(field => field.field === 'companyLink').value,[]);
+        assert.ok(!addEditor.fields.some(field => field.header === 'ID' || field.field === 'Private'));
+        assert.ok(addEditor.companies.some(company => company.id === companyX.id));
+        let pendingQueries = 0;
+        const ordinary = createGoogleSheetsApi({ spreadsheetId:'clients', mapping:phaseB, unconfirmedAdds:async () => {
+            pendingQueries++;
+            return new Set();
+        } });
+        const legacyUuid = { tag:78, cells:[randomUUID(),'Ordinary UUID','','Factory'] };
+        companiesTab.state.rows.push(legacyUuid);
+        assert.ok((await ordinary.readRows('Clients')).some(row => row.sourceKey === legacyUuid.cells[0]));
+        assert.equal(pendingQueries,0);
+        companiesTab.state.rows.pop();
+        const initialAddCount = addBatches;
+        await add('companies',{name:'Not permitted',type:'Factory'},{status:403,headers:{'x-test-role':'reader'}});
+        await add('companies',{name:'Other agency',type:'Factory'},{revision:companyRevision,status:409,headers:{'x-test-agency':'other'}});
+        await add('ingredients',{name:'Missing link',companyLink:['unknown']},{status:400});
+        await add('products',{name:'Missing link',companyLink:[]},{status:400});
+        await add('companies',{name:'Injected ID',type:'Factory',id:'x'},{status:400});
+        await add('companies',{name:'Missing type'},{status:400});
+        const duplicate = { ...companiesTab.state.rows[0], tag:undefined };
+        companiesTab.state.rows.push(duplicate);
+        assert.match((await add('companies',{name:'Duplicated source',type:'Factory'},{status:400})).error,/unique ID/);
+        companiesTab.state.rows.pop();
+        const earlyToken = randomUUID();
+        let layoutStarted, releaseLayout;
+        const started = new Promise(resolve => { layoutStarted = resolve; });
+        const released = new Promise(resolve => { releaseLayout = resolve; });
+        holdLayout = () => { layoutStarted(); return released; };
+        const first = add('companies',{name:'Abandoned request',type:'Factory'},{token:earlyToken,revision:companyRevision,status:409});
+        await started;
+        try {
+            assert.match((await add('companies',undefined,{base:b,token:earlyToken,status:400})).error,/No Add was sent/);
+        } finally { releaseLayout(); }
+        await first;
+        assert.equal(addBatches,initialAddCount);
+
+        addFailure = 'lost';
+        const companyToken = randomUUID();
+        const company = await add('companies',{name:'=New factory',type:'Factory',companyFee:125,Notes:'Stored text'},
+            {token:companyToken});
+        assert.match(company.recordId,/^addc[0-9a-f]{4}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+        const rawCompany = companiesTab.state.rows[0];
+        assert.deepEqual(rawCompany.cells.slice(0,9),[company.recordId,'=New factory',null,'Factory',null,null,125,null,'Stored text']);
+        assert.equal(rawCompany.tag,company.metadataId);
+        assert.equal(rawCompany.tagValue,company.recordId);
+        assert.equal(addBatches,initialAddCount + 1);
+        assert.deepEqual(await add('companies',undefined,{base:b,token:companyToken}),company);
+        assert.deepEqual(auditWrites.filter(([token]) => token === companyToken).map(([,outcome]) => outcome),
+            ['attempted','confirmed']);
+        await add('companies',{name:'Different',type:'Factory'},{base:b,token:companyToken,status:409});
+        assert.equal(companiesTab.state.rows.filter(row => row.cells[0] === company.recordId).length,1);
+        const newCompany = (await request(b,'/api/sources/sheet-editor/companies')).rows.find(row => row.name === '=New factory');
+        assert.equal((await request(b,editPath('companies',newCompany))).fields.find(field => field.field === 'name').value,'=New factory');
+
+        const [addedA, addedB] = await Promise.all([
+            add('ingredients',{name:'New flour',companyLink:[newCompany.id,companyX.id],expiresOn:'2028-02-29',certification:'=OU'}),
+            add('ingredients',{name:'New sugar',companyLink:[companyX.id],Deposit:17},{base:b}),
+        ]);
+        assert.notEqual(addedA.recordId,addedB.recordId);
+        assert.notEqual(addedA.metadataId,addedB.metadataId);
+        for (const entry of [addedA,addedB]) {
+            const matching = ingredientsTab.state.rows.filter(row => row.cells[0] === entry.recordId);
+            assert.equal(matching.length,1);
+            assert.equal(matching[0].tag,entry.metadataId);
+            assert.equal(matching[0].tagValue,entry.recordId);
+        }
+        assert.ok((await request(a,'/api/factories/' + newCompany.id + '/items')).ingredients
+            .some(row => row.name === 'New flour' && row.expiresOn === '2028-02-29' && row.certificationRaw === '=OU'));
+
+        const sameToken = randomUUID();
+        const sameFields = { name:'New cereal',companyLink:[newCompany.id],code:'000093',symbolRequired:false,'Approved on':'2028-01-02' };
+        const beforeSame = addBatches;
+        const results = await Promise.all([a,b].map(base => add('products',sameFields,{base,token:sameToken,status:[200,409]})));
+        const savedProduct = results.find(result => result.saved);
+        assert.ok(savedProduct);
+        assert.equal(addBatches,beforeSame + 1);
+        assert.deepEqual(await add('products',undefined,{base:b,token:sameToken}),savedProduct);
+        assert.equal(productsTab.state.rows.filter(row => row.cells[0] === savedProduct.recordId && row.tag === savedProduct.metadataId).length,1);
+        const publishedProduct = (await request(b,'/api/factories/' + newCompany.id + '/items')).products.find(row => row.name === 'New cereal');
+        const productRow = (await request(b,'/api/sources/sheet-editor/products')).rows.find(row => row.name === publishedProduct.name);
+        const productFields = (await request(b,editPath('products',productRow))).fields;
+        assert.equal(productFields.find(field => field.field === 'code').value,'000093');
+        assert.equal(productFields.find(field => field.field === 'symbolRequired').value,false);
+
+        addFailure = 'missing-receipt';
+        const receiptToken = randomUUID();
+        await add('products',{name:'Needs recovery',companyLink:[companyX.id]},{token:receiptToken,status:409});
+        const restarted = await startAddServer();
+        assert.ok(!(await request(restarted,'/api/sources/sheet-editor/products')).rows.some(row => row.name === 'Needs recovery'));
+        assert.ok(!(await request(restarted,'/api/factories/' + companyX.id + '/items')).products.some(row => row.name === 'Needs recovery'));
+        const beforeRecovery = addBatches;
+        assert.equal((await add('products',undefined,{base:restarted,token:receiptToken})).saved,true);
+        assert.equal(addBatches,beforeRecovery);
+
+        for (const [mode, status, message, rowDelta] of [
+            ['rejected',400,/Google Sheets rejected/,0],
+            ['timeout',409,/may already be in Google Sheets/,0],
+            ['changed-value',409,/may already be in Google Sheets/,1],
+        ]) {
+            const token = randomUUID(), before = productsTab.state.rows.length, sent = addBatches;
+            addFailure = mode;
+            assert.match((await add('products',{name:mode,companyLink:[companyX.id]},{token,status})).error,message);
+            assert.match((await add('products',undefined,{base:b,token,status})).error,message);
+            assert.equal(addBatches,sent + 1);
+            assert.equal(productsTab.state.rows.length,before + rowDelta);
+            const audit = await addStore.addLedger('agency',token).get();
+            assert.equal(audit.outcome,mode === 'rejected' ? 'rejected' : 'unconfirmed');
+            assert.equal(audit.verified,false);
+            if (mode === 'timeout') {
+                assert.equal((await abandon('products',token)).abandoned,true);
+                assert.equal((await abandon('products',token)).abandoned,true);
+                assert.equal((await addStore.addLedger('agency',token).get()).outcome,'abandoned');
+                await add('products',undefined,{base:b,token,status:400});
+                await add('products',{name:mode,companyLink:[companyX.id]},{base:b,token,status:400});
+                assert.equal(addBatches,sent + 1);
+                assert.equal(productsTab.state.rows.length,before);
+            }
+        }
+        const audit = await addStore.addLedger('agency',companyToken).get();
+        assert.deepEqual([audit.operationId,audit.actorId,audit.agencyId,audit.name,audit.recordId,audit.table,
+            audit.metadataId,audit.outcome,audit.verified],
+            [company.operationId,'admin','agency','=New factory',company.recordId,'Clients',company.metadataId,'confirmed',true]);
+        assert.equal((await addStore.sheetAdds('schedule-b',true)).length,2);
+        assert.equal(new Set((await addStore.sheetAdds('schedule-b')).map(entry => entry.operationId)).size,
+            (await addStore.sheetAdds('schedule-b')).length);
+        assert.ok(!Object.hasOwn(audit,'fields') && !Object.hasOwn(audit,'cells'));
+
+        const saveMapping = async (mapping, baseId = 'clients') => {
+            await request(a,'/api/sources/connection',{method:'PUT',body:{ sourceType:'google_sheets',baseId,access:'readwrite',mapping }});
+            await request(a,'/api/sources/sheets-editing',{method:'PUT',body:{enabled:true}});
+        };
+        const otherBook = fixture({ title:'Clients', sheetId:0, headers:[...companiesTab.state.headers],
+            rows:structuredClone(companiesTab.state.rows) });
+        files.set('clients-copy',{...otherBook,title:'Clients'});
+        const switched = { ...phaseB, companies:{ ...phaseB.companies,file:{id:'clients-copy',name:'Copy'} } };
+        for (const [mapping, baseId] of [[switched,'clients-copy'], [phaseB,'clients'],
+            [{ ...phaseB, companies:{ ...phaseB.companies,companyFee:'Unmapped' } },'clients']]) {
+            const { addRevision } = await editor('companies');
+            await saveMapping(mapping,baseId);
+            assert.notEqual((await editor('companies')).addRevision,addRevision);
+            const token = randomUUID(), before = googleWrites;
+            const stale = await add('companies',{name:'Stale form',type:'Factory',companyFee:40},{token,revision:addRevision,status:409});
+            assert.equal(stale.addRevisionStale,true);
+            assert.equal(await addStore.addLedger('agency',token).get(),null);
+            assert.equal(googleWrites,before);
+        }
+
+        const productState = productsTab.state;
+        const swapIdAndPrivate = () => {
+            const id = productState.headers.indexOf('ID'), other = productState.headers.indexOf('Private');
+            for (const row of productState.rows) if (row.tag) row.tagValue ??= row.cells[id];
+            for (const cells of [productState.headers, ...productState.rows.map(row => row.cells)])
+                [cells[id], cells[other]] = [cells[other], cells[id]];
+        };
+        const movedProduct = { name:'ID column moved during Add',companyLink:[companyX.id] };
+        const beforeMove = googleWrites, beforeRows = productState.rows.length;
+        const preflightToken = randomUUID(), revision = (await editor('products')).addRevision;
+        afterLayout = swapIdAndPrivate;
+        try {
+            const stale = await add('products',movedProduct,{token:preflightToken,revision,status:409});
+            assert.equal(stale.addRevisionStale,true);
+            assert.equal((await addStore.addLedger('agency',preflightToken).get()).outcome,'rejected');
+            assert.equal(googleWrites,beforeMove);
+            assert.equal(productState.rows.length,beforeRows);
+        } finally { swapIdAndPrivate(); }
+
+        const movedToken = randomUUID();
+        // Move the column after the final layout check while the write is in flight.
+        holdBatch = swapIdAndPrivate;
+        try {
+            const error = await add('products',movedProduct,{token:movedToken,status:409});
+            assert.match(error.error,/may already be in Google Sheets/);
+            assert.equal(googleWrites,beforeMove + 1);
+            assert.equal(productState.rows.length,beforeRows + 1);
+            const audit = await addStore.addLedger('agency',movedToken).get();
+            assert.equal(audit.outcome,'unconfirmed');
+            const inserted = productState.rows[0];
+            assert.equal(inserted.tagValue,audit.recordId);
+            assert.equal(inserted.cells[productState.headers.indexOf('Private')],audit.recordId);
+            assert.ok(!inserted.cells[productState.headers.indexOf('ID')]);
+            const refreshed = await startAddServer();
+            await request(refreshed,'/api/sources/refresh',{body:{},status:[200,429]});
+            assert.equal((await request(refreshed,'/api/sources/connection')).status,'ok');
+            const items = (await request(refreshed,'/api/factories/' + companyX.id + '/items')).products;
+            assert.ok(items.some(row => row.name === 'Needs recovery'));
+            assert.ok(!items.some(row => row.name === movedProduct.name));
+            assert.ok(!(await request(refreshed,'/api/sources/sheet-editor/products')).rows.some(row => row.name === movedProduct.name));
+
+            // The tag alone is enough to suppress the row even if its misplaced cell is cleared.
+            inserted.cells[productState.headers.indexOf('Private')] = null;
+            const adapter = createGoogleSheetsApi({spreadsheetId:'schedule-b', mapping:phaseB,
+                unconfirmedAdds:async id => new Set((await addStore.sheetAdds(id,true)).map(add => add.recordId))});
+            const rows = await adapter.readRows(phaseB.products.table);
+            assert.ok(rows.some(row => row.fields.Name === 'Needs recovery'));
+            assert.ok(!rows.some(row => row.fields.Name === movedProduct.name));
+        } finally {
+            if (productState.rows[0].cells[1] === movedProduct.name) productState.rows.shift();
+            swapIdAndPrivate();
+        }
+
+        const lateToken = randomUUID();
+        let batchStarted, releaseBatch;
+        const batchInFlight = new Promise(resolve => { batchStarted = resolve; });
+        const batchReleased = new Promise(resolve => { releaseBatch = resolve; });
+        holdBatch = () => { batchStarted(); return batchReleased; };
+        const late = add('products',{name:'Late Google commit',companyLink:[companyX.id]},
+            {token:lateToken,status:409});
+        await batchInFlight;
+        try {
+            assert.equal((await abandon('products',lateToken)).abandoned,true);
+        } finally { releaseBatch(); }
+        await late;
+        assert.equal((await addStore.addLedger('agency',lateToken).get()).outcome,'abandoned');
+        assert.ok(productsTab.state.rows.some(row => row.cells[1] === 'Late Google commit'));
+        const renamed = 'Renamed Schedule B';
+        files.get('schedule-b').title = renamed;
+        await saveMapping({ ...phaseB,products:{ ...phaseB.products,table:renamed } });
+        const imported = (await request(a,'/api/factories/' + companyX.id + '/items')).products;
+        assert.ok(imported.some(row => row.name === 'Needs recovery'));
+        assert.ok(productsTab.state.rows.some(row => row.cells[1] === 'changed-value changed'));
+        assert.ok(!imported.some(row => ['changed-value changed','Late Google commit'].includes(row.name)));
+        assert.ok(!(await request(a,'/api/sources/sheet-editor/products')).rows.some(row =>
+            ['changed-value changed','Late Google commit'].includes(row.name)));
+        const fresh = await add('companies',{name:'Fresh Add',type:'Factory'});
+        assert.equal(fresh.saved,true);
+        console.log('Phase C passed through HTTP for all three sections, including stale mappings, moved ID columns, renamed tabs, abandonment and late commits.');
+    } finally {
+        await Promise.all(addServers.map(server => new Promise(resolve => server.close(resolve))));
+    }
+
     const shared = fixture({ title:'Shared', tracked:new Map([[19,'bakery'],[32,'flour']]),
         headers:['ID','Name','Company'], rows:[
             { tag:19, cells:['bakery','Bakery',''] },
@@ -597,11 +943,33 @@ const uiFields = { companies: [{ id:'permanent-x', key:'x', name:'Company X' }, 
 ] };
 const submissions = [];
 let refreshes = 0, uiSaved = 0;
+const addSubmissions = [], abandonSubmissions = [], session = new Map();
+let uiAddStuck = false, uiAddStale = false;
+const oldSession = globalThis.sessionStorage;
+globalThis.sessionStorage = {
+    getItem:key => session.get(key) ?? null, setItem:(key,value) => session.set(key,value), removeItem:key => session.delete(key),
+};
 globalThis.fetch = async (url, init = {}) => {
     if (url === '/api/sources/sheet-editor/products/product') return Response.json(uiFields);
     if (url === '/api/sources/sheet-editor/companies/company') return Response.json({ companies:[], fields:[
         { field:'type',header:'Type',rule:'text',value:'Factory',choices:['Factory','Kitchen'],revision:'old-type' },
     ] });
+    if (url === '/api/sources/sheet-editor/products/new') return Response.json({
+        addScope:['agency','admin','products','spreadsheet','Products'], addRevision:'form-revision', companies:uiFields.companies,
+        fields:[{ field:'name',header:'Name',rule:'text',value:'' },
+            { ...uiFields.fields[0],value:'' },{ ...uiFields.fields[1],value:[] }],
+    });
+    if (url === '/api/sources/rows/products') {
+        addSubmissions.push(JSON.parse(init.body));
+        if (addSubmissions.length === 1) throw Error('Response unavailable');
+        if (uiAddStuck) return Response.json({error:'The new record could not be confirmed.'},{status:409});
+        if (uiAddStale) return Response.json({error:'The mapped sheet or columns changed.',addRevisionStale:true},{status:409});
+        return Response.json({saved:true});
+    }
+    if (url === '/api/sources/sheet-editor/products/abandon') {
+        abandonSubmissions.push(JSON.parse(init.body));
+        return Response.json({abandoned:true});
+    }
     if (url === '/api/sources/refresh') { refreshes++; return Response.json({ ok:true }); }
     assert.equal(url,'/api/sources/rows/products/product');
     submissions.push(JSON.parse(init.body));
@@ -630,5 +998,66 @@ try {
     const companyView = mount(SheetRecordEditor,{ section:'companies', row:{id:'company',name:'Bakery'}, onSaved() {}, onClose() {} });
     await companyView.render();
     assert.match(companyView.html(),/<select[^>]*><option value="Factory" selected="">Factory<\/option><option value="Kitchen">Kitchen<\/option><\/select>/);
-    console.log('Sheet editors use configured company types and require review after an unconfirmed save.');
-} finally { globalThis.fetch = priorFetch; }
+    let addsSaved = 0;
+    const addProps = { section:'products', onSaved() { addsSaved++; }, onClose() {} };
+    const addView = mount(SheetRecordEditor,addProps);
+    await addView.render();
+    const addInputs = addView.find(e => e.type === 'form')[0].props.children[0].props.children.map(e => e.props.children);
+    addInputs[0].props.onChange('Cereal');
+    addInputs[1].props.onChange('00123');
+    addInputs[2].props.onChange(['permanent-x']);
+    await addView.render();
+    await addView.submit();
+    assert.match(addView.text(),/could not be confirmed.*Check again/);
+    assert.equal(addsSaved,0);
+    const reopened = mount(SheetRecordEditor,addProps);
+    await reopened.render();
+    assert.match(reopened.text(),/Check whether Google Sheets saved/);
+    await reopened.submit();
+    assert.deepEqual(addSubmissions,[
+        { token:addSubmissions[0].token,fields:{ name:'Cereal',code:'00123',companyLink:['permanent-x'] },addRevision:'form-revision' },
+        { token:addSubmissions[0].token },
+    ]);
+    assert.equal(addsSaved,1);
+    assert.equal(session.size,0);
+    const enterName = async (view, name) => {
+        view.find(e => e.type === 'form')[0].props.children[0].props.children[0].props.children.props.onChange(name);
+        await view.render();
+    };
+    uiAddStuck = true;
+    const stuck = mount(SheetRecordEditor,addProps);
+    await stuck.render();
+    await enterName(stuck,'Pending record');
+    await stuck.submit();
+    const abandonedToken = addSubmissions.at(-1).token;
+    const pending = mount(SheetRecordEditor,addProps);
+    await pending.render();
+    await pending.submit();
+    assert.deepEqual(addSubmissions.at(-1),{token:abandonedToken});
+    await pending.click('Abandon Add attempt');
+    assert.equal(abandonSubmissions.length,0);
+    await pending.click('Confirm abandonment');
+    assert.deepEqual(abandonSubmissions,[{token:abandonedToken}]);
+    assert.equal(session.size,0);
+    assert.equal(pending.find(e => e.type === 'fieldset')[0].props.disabled,false);
+    uiAddStuck = false;
+    await enterName(pending,'Fresh record');
+    await pending.submit();
+    assert.notEqual(addSubmissions.at(-1).token,abandonedToken);
+    assert.equal(addSubmissions.at(-1).fields.name,'Fresh record');
+    assert.equal(addsSaved,2);
+
+    uiAddStale = true;
+    const stale = mount(SheetRecordEditor,addProps);
+    await stale.render();
+    await enterName(stale,'Stale record');
+    await stale.submit();
+    assert.equal(session.size,0);
+    assert.equal(stale.find(e => e.type === 'fieldset')[0].props.disabled,true);
+    assert.match(stale.text(),/mapped sheet or columns changed/);
+    console.log('Sheet editors recover or abandon an uncertain Add after reopening and clear stale submissions.');
+} finally {
+    globalThis.fetch = priorFetch;
+    if (oldSession === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = oldSession;
+}

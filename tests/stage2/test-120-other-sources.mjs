@@ -42,8 +42,15 @@ export default {
                 created++;
                 return send({ spreadsheetId: 'created', properties: { title: 'Demo new' } });
             }
-            if (path.startsWith('/v4/spreadsheets/') && !path.includes('/values/'))
+            if (path.startsWith('/v4/spreadsheets/') && !path.includes('/values/')) {
+                const range = url.searchParams.get('ranges');
+                if (range) {
+                    const title = range.slice(1, -1);
+                    const rowData = rows[title].map(row => ({ values: row.map(value => ({ formattedValue: String(value) })) }));
+                    return send({ sheets: [{ properties: { title }, data: [{ rowData }] }] });
+                }
                 return send({ sheets: [...Object.keys(rows),'Notes'].map(title => ({ properties: { title } })) });
+            }
             if (path.includes('/values/')) {
                 const table = path.split('/values/')[1].split('!')[0].replace(/:append$/, '').replace(/^'|'$/g, '');
                 if (req.method === 'GET')

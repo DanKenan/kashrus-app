@@ -380,15 +380,29 @@ export default {
       const expInfo = await call('GET', `/api/kiosk/qr/info/${s.code}`);
       assert(expInfo.status === 410, `R info of an expired code -> 410: ${expInfo.status}`);
       // Claim window: 29.8 s ok, exactly 30 s refused.
+      const pollAtApprovalAge = async (ageMs) => {
+        // Backdate the persisted approval, then pin the poll to its exact age.
+        // HTTP and store latency must not consume the 200 ms before the deadline.
+        const { code } = await hook({ action: 'backdate', deviceId: T1.id, ms: ageMs });
+        assert(Number.isSafeInteger(code?.approvedAtMs), 'R backdated approval has a timestamp');
+        const iso = new Date(code.approvedAtMs + ageMs).toISOString();
+        try {
+          const clock = await ctx.api('POST', '/api/__test__/clock', { iso });
+          assert(clock.status === 200 && clock.json?.pinned, 'R pin the server clock');
+          return await poll(T1);
+        } finally {
+          const clock = await ctx.api('POST', '/api/__test__/clock', { iso: null });
+          assert(clock.status === 200 && clock.json?.pinned === false, 'R restore the server clock');
+        }
+      };
       s = await freshCode(T1);
       assert((await approve(yossi, s.code)).status === 200, 'R approve (window ok)');
-      await hook({ action: 'backdate', deviceId: T1.id, ms: 29800 });
-      assert(signedIn(await poll(T1)), 'R claim at 29.8 s -> ok');
+      const inTime = await pollAtApprovalAge(29800);
+      assert(signedIn(inTime), `R claim at 29.8 s -> ok: ${J(inTime.json)}`);
       s = await freshCode(T1);
       const late = await approve(yossi, s.code);
       assert(late.status === 200, 'R approve (window closed)');
-      await hook({ action: 'backdate', deviceId: T1.id, ms: 30000 });
-      const lp = await poll(T1);
+      const lp = await pollAtApprovalAge(30000);
       assert(lp.status === 200 && lp.json?.state === 'waiting' && !lp.set[K] && lp.json.link, `R claim at exactly 30 s -> refused, fresh code: ${J(lp.json)}`);
       const lst = await status(yossi, late.json.approvalId);
       assert(lst.json?.state === 'failed' && lst.json.message === "The tablet didn't open. Scan again.", `R phone: the tablet didn't open: ${J(lst.json)}`);

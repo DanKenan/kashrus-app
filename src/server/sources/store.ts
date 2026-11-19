@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import type { AddAudit, EditAudit } from './tagged-row.ts';
 import type { Backup } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
@@ -202,11 +203,70 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     if (deps.db()) await commit(removals);
     else await localWrite(async () => { await commit(removals.slice(0,1)); await commit(removals.slice(1)).catch(retryLocalCleanup); });
   }
-  async function saveEditAudit(entry: import('./tagged-row.ts').EditAudit) {
+  const auditCollection = 'sourceFeeAudit';
+  async function saveEditAudit(entry: EditAudit) {
     if (deps.staged()) throw Error('Writes blocked');
-    await commit([{ collection: 'sourceFeeAudit', id: entry.operationId, doc: entry }]);
+    await commit([{ collection: auditCollection, id: entry.operationId, doc: entry }]);
   }
-  return { saveEditAudit, retryLocalCleanup, reclaimLocalUploads, connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
+
+  function addLedger(agencyId: string, token: string) {
+    const id = 'add-' + digest(JSON.stringify([agencyId, token]));
+    async function update(choose: (current: AddAudit | null) => AddAudit | undefined) {
+      if (deps.staged()) throw Error('Writes blocked');
+      const db = deps.db();
+      if (db) {
+        const ref = db.collection(auditCollection).doc(id);
+        return db.runTransaction(async (tx: any) => {
+          const doc = await tx.get(ref);
+          const current: AddAudit | null = doc.exists ? doc.data() : null;
+          const next = choose(current);
+          if (next) tx.set(ref, next);
+          return current;
+        });
+      }
+      let current: AddAudit | null = null;
+      await localWrite(async () => {
+        current = await read(auditCollection, id);
+        const next = choose(current);
+        if (next) await commit([{ collection: auditCollection, id, doc: next }]);
+      });
+      return current;
+    }
+    return {
+      get: (): Promise<AddAudit | null> => read(auditCollection, id),
+      claim: (entry: AddAudit) => update(current => current ? undefined : entry),
+      abandon(actorId: string, section: AddAudit['section']) {
+        return update(current => {
+          if (current?.actorId !== actorId || current.section !== section) return;
+          if (current.outcome === 'attempted' || current.outcome === 'unconfirmed')
+            // Keep the workbook quarantine if Google commits after abandonment.
+            return { ...current, outcome: 'abandoned', abandonedAt: new Date().toISOString() };
+        });
+      },
+      async finish(entry: AddAudit) {
+        const prior = await update(current => {
+          if (current?.operationId !== entry.operationId) throw Error('Missing Add operation');
+          if (['confirmed', 'rejected', 'abandoned'].includes(current.outcome)) return;
+          if (entry.outcome === 'unconfirmed' && current.outcome === 'unconfirmed' &&
+              (!entry.metadataId || entry.metadataId === current.metadataId)) return;
+          const next = { ...entry };
+          if (next.outcome === 'confirmed' || next.outcome === 'rejected') delete next.pendingSpreadsheetId;
+          return next;
+        });
+        return prior?.outcome !== 'abandoned' && prior?.outcome !== 'rejected';
+      },
+    };
+  }
+
+  async function sheetAdds(spreadsheetId: string, pendingOnly = false): Promise<AddAudit[]> {
+    const field = pendingOnly ? 'pendingSpreadsheetId' : 'addSpreadsheetId';
+    const db = deps.db();
+    if (db) return (await db.collection(auditCollection).where(field, '==', spreadsheetId).get()).docs.map((d: any) => d.data());
+    return (await list(auditCollection)).filter(entry => entry[field] === spreadsheetId);
+  }
+
+  return { saveEditAudit, addLedger, sheetAdds, retryLocalCleanup, reclaimLocalUploads,
+    connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
 }
 // Read legacy connection settings without rewriting source values.
 export function normalizeConnection(connection: any): Connection {

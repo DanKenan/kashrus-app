@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { describeTaggedEdit, updateTaggedRow, type Cell, type Change, type Edit, type EditAudit, type FieldWriteEvidence, type Target } from './tagged-row.ts';
+import { createHash, randomUUID } from 'node:crypto';
+import { addedRowHash, describeTaggedEdit, newAddRecordId, planTaggedAdd, updateTaggedRow, type AddAudit, type AddTarget, type Cell, type Change, type Edit, type EditAudit, type FieldWriteEvidence, type Target } from './tagged-row.ts';
 
 type Post = (path: string, body: unknown) => Promise<any>;
 type Grid = { sheetId?: number; startRowIndex?: number; endRowIndex: number; startColumnIndex?: number; endColumnIndex: number };
@@ -14,6 +14,13 @@ function cell(data?: GridCell): Cell {
     formula: v?.formulaValue ?? (!v && data?.effectiveValue ? 'derived' : undefined),
     dateSerial: data?.effectiveFormat?.numberFormat?.type === 'DATE' && (!v || v.stringValue === '' || typeof v.numberValue === 'number') };
 }
+const tabRange = (table: string) => "'" + table.replace(/'/g, "''") + "'";
+function readHeaders(values: GridCell[]): string[] {
+  const headers = values.map(c => c.userEnteredValue?.stringValue);
+  while (headers.length && headers.at(-1) === undefined) headers.pop();
+  if (!headers.length || headers.some(h => typeof h !== 'string' || !h.trim()) || new Set(headers).size !== headers.length) throw conflict();
+  return headers as string[];
+}
 const equalHeaders = (a: string[], b: string[]) => a.length === b.length && a.every((h,i) => h === b[i]);
 const singleCell = (grid: Grid, sheetId: number, row: number, col: number) =>
   (grid.sheetId === undefined ? 0 : grid.sheetId) === sheetId &&
@@ -25,7 +32,7 @@ const singleCell = (grid: Grid, sheetId: number, row: number, col: number) =>
 function taggedSnapshot(post: Post, edit: Edit, target: Target) {
   const tag = { developerMetadataLookup: { metadataId: target.metadataId, metadataKey: 'recordId',
     metadataValue: target.recordId, locationType: 'ROW' } };
-  const header = { a1Range: "'" + target.table.replace(/'/g, "''") + "'!1:1" };
+  const header = { a1Range: tabRange(target.table) + '!1:1' };
   async function snapshot() {
     const mask = 'namedRanges,sheets(properties(sheetId,title),data(startRow,startColumn,rowData(values(userEnteredValue,effectiveValue,effectiveFormat(numberFormat(type))))))';
     const result = await post(':getByDataFilter?fields=' + encodeURIComponent(mask), { dataFilters: [tag, header] });
@@ -38,14 +45,12 @@ function taggedSnapshot(post: Post, edit: Edit, target: Target) {
     });
     const top = blocks.filter((b: any) => b.index === 0), rows = blocks.filter((b: any) => b.index > 0);
     if (top.length !== 1 || rows.length !== 1) throw conflict();
-    const headers: string[] = top[0].values.map((c: GridCell) => c.userEnteredValue?.stringValue);
-    while (headers.length && headers.at(-1) === undefined) headers.pop();
-    if (!headers.length || headers.some(h => typeof h !== 'string' || !h.trim()) || new Set(headers).size !== headers.length) throw conflict();
+    const headers = readHeaders(top[0].values);
     const cells: Cell[] = rows[0].values.map(cell);
     const id = cells[headers.indexOf(edit.idHeader)];
     if (!id || id.formula || String(id.raw ?? '') !== target.recordId) throw conflict();
     const names = new Map<string, Binding>((result.namedRanges || []).map((n: Binding) => [n.namedRangeId, n]));
-    return { headers, cells, sheetId: properties.sheetId, row: rows[0].index, names, metadataId: target.metadataId, recordId: target.recordId };
+    return { headers, cells, sheetId: properties.sheetId ?? 0, row: rows[0].index, names, metadataId: target.metadataId, recordId: target.recordId };
   }
   return snapshot;
 }
@@ -161,4 +166,177 @@ export async function editSheetRow(post: Post, edit: Edit, target: Target, audit
     if (bindings.length) await batch(bindings.map(b => ({ deleteNamedRange: { namedRangeId: b.namedRangeId } })))
       .catch(() => console.warn('[sources] Temporary Sheets edit ranges could not be removed.'));
   }
+}
+
+async function addLayout(post: Post, edit: Edit, target: AddTarget) {
+  const mask = 'sheets(properties(sheetId,title,sheetType,gridProperties(rowCount)),data(startRow,startColumn,rowData(values(userEnteredValue))))';
+  const result = await post(':getByDataFilter?fields=' + encodeURIComponent(mask), {
+    dataFilters: [{ a1Range: tabRange(target.table) + '!1:1' }],
+  });
+  const tab = result.sheets?.[0], properties = tab?.properties;
+  const top = tab?.data?.[0];
+  if (result.sheets?.length !== 1 || properties?.title !== target.table || properties.sheetType !== 'GRID' ||
+      !top || top.startRow || top.startColumn) throw conflict();
+  if (properties.gridProperties?.rowCount === 1)
+    throw Object.assign(Error('Add a blank row below the header in Google Sheets, then try again.'), { status: 409 });
+  if (!(properties.gridProperties?.rowCount >= 2)) throw conflict();
+  const headers = readHeaders(top.rowData?.[0]?.values ?? []);
+  if (!headers.includes(edit.idHeader)) throw conflict();
+  return { sheetId: properties.sheetId ?? 0, headers, cells: [] as Cell[], recordId: '', metadataId: 0 };
+}
+
+export async function readSheetAddEditor(post: Post, edit: Edit, target: AddTarget) {
+  const blank = await addLayout(post, edit, target);
+  const fields = describeTaggedEdit(edit, { ...target, recordId: '', metadataId: 0 }, blank);
+  if (!fields.some(field => field.field === 'name') ||
+      (edit.section !== 'companies' && !fields.some(field => field.field === 'companyLink')))
+    throw Object.assign(Error('Review the required mapped columns before adding records.'), { status: 409 });
+  return { fields, addRevision: addRevision(edit, target, blank) };
+}
+
+const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+function addRevision(edit: Edit, target: AddTarget, layout: Awaited<ReturnType<typeof addLayout>>) {
+  const mapping = JSON.stringify(edit.mapping, (_key, value) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]))
+      : value);
+  return hash([target.agencyId, target.actorId, target.section, target.spreadsheetId, target.table,
+    edit.idHeader, mapping, layout.sheetId, layout.headers]);
+}
+
+const staleAdd = () => Object.assign(Error('The mapped sheet or columns changed. Close and reopen the Add form.'),
+  { status: 409, addRevisionStale: true });
+
+type AddStore = {
+  get(): Promise<AddAudit | null>;
+  claim(audit: AddAudit): Promise<AddAudit | null>;
+  finish(audit: AddAudit): Promise<boolean>;
+};
+
+export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, token: string, ledger: AddStore,
+  readIds: () => Promise<string[]>, resume: boolean, revision: unknown) {
+  const requestHash = hash(Object.entries(edit.fields ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+  const review = () => Object.assign(Error('The new record could not be confirmed. It may already be in Google Sheets. Check again or review the sheet.'),
+    { status: 409, sheetNeedsReview: true });
+  const rejected = () => Object.assign(Error('Google Sheets rejected the new record. Review the sheet and try again.'), { status: 400 });
+  const lookup = (recordId: string) => ({ developerMetadataLookup: { metadataKey: 'recordId', metadataValue: recordId, locationType: 'ROW' } });
+  async function tags(recordId: string) {
+    const found = await post('/developerMetadata:search', { dataFilters: [lookup(recordId)] });
+    return (found.matchedDeveloperMetadata || []).map((match: any) => match.developerMetadata);
+  }
+  function validTag(tag: any, recordId: string, sheetId?: number) {
+    const location = tag?.location?.dimensionRange;
+    return tag?.metadataKey === 'recordId' && tag.metadataValue === recordId && tag.visibility === 'DOCUMENT' &&
+      Number.isSafeInteger(tag.metadataId) && tag.metadataId > 0 && location?.dimension === 'ROWS' &&
+      (sheetId === undefined || (location.sheetId ?? 0) === sheetId) &&
+      Number.isSafeInteger(location.startIndex) && location.startIndex > 0 && location.endIndex === location.startIndex + 1;
+  }
+  async function verify(entry: AddAudit, receiptId: number | null = null) {
+    let metadataId = receiptId;
+    try {
+      const found = await tags(entry.recordId);
+      if (found.length !== 1 || !validTag(found[0], entry.recordId)) throw Error();
+      if (receiptId !== null && receiptId !== found[0].metadataId) throw Error();
+      metadataId = found[0].metadataId;
+      const after = await taggedSnapshot(post, edit, { ...target, recordId: entry.recordId, metadataId: metadataId! })();
+      if (!validTag(found[0], entry.recordId, after.sheetId) ||
+          (await readIds()).filter(id => id === entry.recordId).length !== 1) throw Error();
+      if (edit.refreshLinks) edit.links = await edit.refreshLinks();
+      if (addedRowHash(edit, after, after.sheetId) !== entry.expectedHash) throw Error();
+      if (!await ledger.finish({ ...entry, metadataId, outcome: 'confirmed', verified: true })) throw Error();
+      return { operationId: entry.operationId, recordId: entry.recordId, metadataId };
+    } catch {
+      await ledger.finish({ ...entry, metadataId, outcome: 'unconfirmed' }).catch(() =>
+        console.warn('[sources] Could not finalize a Sheets Add audit.', entry.operationId));
+      throw review();
+    }
+  }
+  async function recover(entry: AddAudit) {
+    if (entry.actorId !== target.actorId || entry.section !== target.section || entry.spreadsheetId !== target.spreadsheetId || entry.table !== target.table ||
+        (!resume && entry.requestHash !== requestHash))
+      throw Object.assign(Error('This Add request belongs to a different record or sheet. Review the original request.'), { status: 409 });
+    if (entry.outcome === 'rejected') throw rejected();
+    if (entry.outcome === 'abandoned')
+      throw Object.assign(Error('This Add attempt was abandoned. Start a fresh Add.'), { status: 400 });
+    if (entry.outcome === 'confirmed') return { operationId: entry.operationId, recordId: entry.recordId, metadataId: entry.metadataId };
+    return verify(entry, entry.metadataId);
+  }
+
+  const prior = await ledger.get();
+  if (prior) return recover(prior);
+  const name = edit.fields?.name;
+  const entry: AddAudit = { ...target, kind: 'add', addSpreadsheetId: target.spreadsheetId, operationId: randomUUID(),
+    recordId: newAddRecordId(), token, outcome: 'attempted', verified: false, metadataId: null, at: new Date().toISOString(),
+    name: typeof name === 'string' && name.length <= 2000 ? name : '', requestHash, expectedHash: '' };
+  if (resume) {
+    // A response can be lost before the first request claims the token.
+    // Reserving it here ensures that an in-flight request cannot write later.
+    const winner = await ledger.claim({ ...entry, outcome: 'rejected' });
+    if (winner) return recover(winner);
+    throw Object.assign(Error('No Add was sent to Google Sheets. You can submit the form again.'), { status: 400 });
+  }
+  if (typeof revision !== 'string') throw staleAdd();
+  const row = await addLayout(post, edit, target);
+  if (revision !== addRevision(edit, target, row)) throw staleAdd();
+  try {
+    if (edit.refreshLinks) edit.links = await edit.refreshLinks();
+    const changes = planTaggedAdd(edit, row);
+    entry.name = String(changes.find(change => change.field === 'name')!.requested);
+    const recordIds = await readIds();
+    if (recordIds.includes(entry.recordId) || (await tags(entry.recordId)).length)
+      throw Object.assign(Error('The generated record ID already exists. Try again.'), { status: 400 });
+    await edit.validateChanges?.(changes);
+    row.cells = row.headers.map(header => ({
+      raw: header === edit.idHeader ? entry.recordId : changes.find(change => change.header === header)?.requested ?? null,
+    }));
+    entry.expectedHash = addedRowHash(edit, row, row.sheetId);
+  } catch (cause) {
+    const winner = await ledger.claim({ ...entry, outcome: 'rejected' });
+    if (winner) return recover(winner);
+    // No batch was sent. The user can correct the form with a fresh token.
+    throw Object.assign(Error(cause instanceof Error && 'status' in cause ? cause.message :
+      'Could not prepare the new record. Review the connection and try again.'), { status: 400 });
+  }
+  entry.pendingSpreadsheetId = target.spreadsheetId;
+  const winner = await ledger.claim(entry);
+  if (winner) return recover(winner);
+
+  // Insert at the first data row. Each atomic batch creates its own slot even
+  // when a different Add has inserted a row since this request read the layout.
+  const index = 1;
+  const location = { sheetId: row.sheetId, dimension: 'ROWS', startIndex: index, endIndex: index + 1 };
+  const values = row.cells.map(({ raw }) => raw === null ? {} : { userEnteredValue:
+    typeof raw === 'number' ? { numberValue: raw } : typeof raw === 'boolean' ? { boolValue: raw } : { stringValue: raw } });
+  try {
+    const current = await addLayout(post, edit, target);
+    if (current.sheetId !== row.sheetId || !equalHeaders(current.headers, row.headers)) throw staleAdd();
+  } catch (cause) {
+    // The token is claimed, but no batch was sent.
+    await ledger.finish({ ...entry, outcome: 'rejected' });
+    throw cause;
+  }
+  let result;
+  try {
+    result = await post(':batchUpdate', { requests: [
+      { insertDimension: { range: location, inheritFromBefore: false } },
+      { updateCells: { start: { sheetId: row.sheetId, rowIndex: index, columnIndex: 0 }, rows: [{ values }], fields: 'userEnteredValue' } },
+      { createDeveloperMetadata: { developerMetadata: {
+        metadataKey: 'recordId', metadataValue: entry.recordId, visibility: 'DOCUMENT', location: { dimensionRange: location },
+      } } },
+    ] });
+  } catch (cause) {
+    if ((cause as { rejected?: boolean }).rejected) {
+      await ledger.finish({ ...entry, outcome: 'rejected' });
+      throw rejected();
+    }
+    // A transport error can occur after the batch commits. Never dispatch it again.
+    return verify(entry);
+  }
+  const receipt = result?.replies?.[2]?.createDeveloperMetadata?.developerMetadata;
+  if (!validTag(receipt, entry.recordId, row.sheetId) || receipt.location.dimensionRange.startIndex !== index) {
+    await ledger.finish({ ...entry, outcome: 'unconfirmed' });
+    throw review();
+  }
+  return verify(entry, receipt.metadataId);
 }

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { parseMoney } from '../../lib/sourceAmount.ts';
 import { builtinFieldKeys, isMappedCustomField, type ValueRule, type SourceSection } from '../../lib/sourcePreview.ts';
 import { companyTypeChoices } from './mapping.ts';
+import { cellText } from './tabular.ts';
 import type { SourceMapping } from './types.ts';
 
 type Scalar = string | number | boolean;
@@ -208,6 +209,51 @@ export type EditAudit = Target & {
   changedFields: string[]; previous: Record<string, Scalar | null>; requested: Record<string, unknown>;
   verified: boolean; at: string; otherFieldsChanged?: boolean; writeEvidence?: FieldWriteEvidence[];
 };
+
+// RFC 9562 version 8 leaves custom bits for the Add marker. The other 106
+// bits remain random. Ordinary spreadsheet IDs need no Add-ledger lookup.
+export function newAddRecordId() {
+  const uuid = randomUUID();
+  return 'addc' + uuid.slice(4, 14) + '8' + uuid.slice(15);
+}
+export const isAddRecordId = (id: string) =>
+  /^addc[0-9a-f]{4}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+
+export type AddTarget = Omit<Target, 'recordId' | 'metadataId'>;
+export type AddAudit = AddTarget & {
+  kind: 'add'; operationId: string; token: string; recordId: string; metadataId: number | null;
+  outcome: EditAudit['outcome'] | 'abandoned'; verified: boolean; at: string; name: string;
+  abandonedAt?: string;
+  addSpreadsheetId: string; pendingSpreadsheetId?: string; requestHash: string; expectedHash: string;
+};
+
+export function planTaggedAdd(edit: Edit, snapshot: TaggedSnapshot) {
+  const fields = edit.fields;
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields) || !Object.hasOwn(fields, 'name') || !cellText(fields.name))
+    return reject('Enter a name.');
+  if (edit.section !== 'companies' && (!Array.isArray(fields.companyLink) || !fields.companyLink.length))
+    return reject('Choose at least one associated company.');
+  if (edit.section === 'companies' && companyTypeChoices(edit.mapping.companies) && !Object.hasOwn(fields, 'type'))
+    return reject('Choose a company type from the configured values.');
+  return planTaggedEdit(edit, snapshot);
+}
+
+// Store a fingerprint of the intended row, including the meaning of its
+// associations. This lets a restart verify the row without storing its cells.
+export function addedRowHash(edit: Edit, snapshot: TaggedSnapshot, sheetId: number) {
+  const values = snapshot.headers.map((header, index) => {
+    const cell = snapshot.cells[index];
+    if (cell?.formula) return reject('The new row contains a formula. Review it in Google Sheets.');
+    return !cell || cell.raw === '' ? null : cell.raw;
+  });
+  const associations = Object.keys(edit.mapping[edit.section]).flatMap(field => {
+    const spec = editableColumn(edit, field);
+    if (spec?.rule !== 'companyLink') return [];
+    const value = values[snapshot.headers.indexOf(spec.header)];
+    return typeof value === 'string' ? [[field, ids(value, edit.links)]] : [];
+  });
+  return createHash('sha256').update(JSON.stringify([sheetId, edit.idHeader, snapshot.headers, values, associations])).digest('hex');
+}
 
 export async function updateTaggedRow(edit: Edit, target: Target, provider: {
   read(target: Target): Promise<TaggedSnapshot>;

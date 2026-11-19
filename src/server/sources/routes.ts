@@ -12,7 +12,7 @@ import { createSourceCache, nextNightlyRun } from './cache.ts';
 import { encryptKey, decryptKey, keyHint } from './crypto.ts';
 import { guessMapping } from './mapping.ts';
 import { normalizeConnection, createSourceStore, type Connection } from './store.ts';
-import type { Change, Edit, Target } from './tagged-row.ts';
+import type { AddTarget, Change, Edit } from './tagged-row.ts';
 import { cellText } from './tabular.ts';
 import type { ConnectionResult, SourceMapping } from './types.ts';
 
@@ -99,9 +99,11 @@ export function registerSourceRoutes(app: any, deps: {
   const oauthRecord=(id:string,p:OAuthProvider)=>connections.get(id)?.oauth?.[p];
   const token=(id:string,p:OAuthProvider)=>(force=false)=>oauth.token(id,p,oauthRecord(id,p),force).then(t=>t.accessToken);
   const providerApi=(id:string,p:OAuthProvider,fileId='')=>p==='google_sheets'?createGoogleSheetsApi({spreadsheetId:fileId,mapping:emptyMapping,apiBase:apiBases.get(p),token:token(id,p)}):createExcelApi({workbookId:fileId,mapping:emptyMapping,apiBase:apiBases.get(p),token:token(id,p)});
+  const unconfirmedAdds = async (spreadsheetId: string) => new Set(
+    (await store.sheetAdds(spreadsheetId, true)).map(add => add.recordId));
   const sheetsApi = (c: Connection, section: SourceSection) => createGoogleSheetsApi({
     spreadsheetId: c.mapping[section].file?.id || c.baseId, mapping: c.mapping,
-    apiBase: apiBases.get('google_sheets'), token: token(c.agencyId, 'google_sheets'),
+    apiBase: apiBases.get('google_sheets'), token: token(c.agencyId, 'google_sheets'), unconfirmedAdds,
   });
   function blank(id:string,userId:string,sourceType:Connection['sourceType']):Connection {return {agencyId:id,sourceType,baseId:sourceType==='upload'?'upload':'',access:'read',mapping:structuredClone(emptyMapping),encryptedKey:'',keyHint:'',updatedAt:new Date().toISOString(),updatedBy:userId,backupHashes:{}};}
 
@@ -120,7 +122,7 @@ export function registerSourceRoutes(app: any, deps: {
     }
   }
   const status = (id: string) => keyErrors.has(id) ? 'error' : cache.state(id).status;
-  const connector = (c: Connection, plain?: string, files = uploads.get(c.agencyId) || []) => createConnector({ kind: c.sourceType, baseId: c.baseId, spreadsheetId: c.baseId, workbookId: c.baseId, url: c.baseId, mapping: c.mapping, files, ...(isOAuthProvider(c.sourceType)?{token:token(c.agencyId,c.sourceType)}:{}), ...(deps.testMode ? { apiBase: c.sourceType==='airtable'?apiBase:apiBases.get(c.sourceType) } : {}) } as SourceSettings, plain || (['airtable','supabase'].includes(c.sourceType)?storedKey(c):''));
+  const connector = (c: Connection, plain?: string, files = uploads.get(c.agencyId) || []) => createConnector({ kind: c.sourceType, baseId: c.baseId, spreadsheetId: c.baseId, workbookId: c.baseId, url: c.baseId, mapping: c.mapping, files, ...(c.sourceType === 'google_sheets' ? { unconfirmedAdds } : {}), ...(isOAuthProvider(c.sourceType)?{token:token(c.agencyId,c.sourceType)}:{}), ...(deps.testMode ? { apiBase: c.sourceType==='airtable'?apiBase:apiBases.get(c.sourceType) } : {}) } as SourceSettings, plain || (['airtable','supabase'].includes(c.sourceType)?storedKey(c):''));
   const loadBackups = (id: string) => store.load(id, Object.keys(connections.get(id)?.backupHashes || {}));
   const cache = createSourceCache({ mappingFor: id => connections.get(id)?.mapping, connectorFor: id => connector(connections.get(id)!), backups: { load: loadBackups }, group1SettingsFor: id => ({ group1Label: connections.get(id)?.group1Label || 'Group 1', group1Overrides: connections.get(id)?.group1Overrides, valueAssignments: connections.get(id)?.mapping.valueAssignments }) });
   const flights = new Map<string, Promise<any>>(), last = new Map<string, number>(), timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -246,20 +248,32 @@ export function registerSourceRoutes(app: any, deps: {
     const data = cache.data(id);
     return list === 'companies' ? [...(data?.companies ?? []), ...(data?.otherCompanies ?? [])] : data?.[list] ?? [];
   }
-  function sheetTarget(c: Connection, list: SourceSection, rowId: string, actorId: string) {
+  function sheetAddTarget(c: Connection, list: SourceSection, actorId: string) {
     assertSeparateSheetTabs(c);
     const tags = sheetTags(c, list);
-    const row = cachedSheetRows(c.agencyId, list).find(r => r.id === rowId);
-    const record = tags?.records.find(r => r.key === row?.sourceKey);
-    if (!tags || !record) return sheetConflict('Record tag missing. Refresh and review the source.');
+    if (!tags) return sheetConflict('Enable editing on the mapped tab.');
     const config = c.mapping[list];
-    const target: Target = { actorId, agencyId: c.agencyId, section: list, recordId: record.key,
-      metadataId: record.metadataId, spreadsheetId: config.file?.id || c.baseId, table: config.table };
+    const target: AddTarget = { actorId, agencyId: c.agencyId, section: list,
+      spreadsheetId: config.file?.id || c.baseId, table: config.table };
     const edit: Edit = { mapping: c.mapping, section: list, idHeader: tags.idHeader, fields: {}, links: noLinks,
       customTypes: new Map(Object.entries(c.mapping.editableCustomFields?.[list] ?? {})) };
     return { target, edit };
   }
-  async function checkCompanyRename(c: Connection, target: Target, changes: readonly Change[]) {
+  async function confirmedAdds(target: AddTarget) {
+    return (await store.sheetAdds(target.spreadsheetId)).filter(add =>
+      add.table === target.table && add.outcome === 'confirmed');
+  }
+  async function sheetTarget(c: Connection, list: SourceSection, rowId: string, actorId: string) {
+    const { target, edit } = sheetAddTarget(c, list, actorId);
+    const tags = sheetTags(c, list)!;
+    const row = cachedSheetRows(c.agencyId, list).find(r => r.id === rowId);
+    if (!row?.sourceKey) return sheetConflict('Record tag missing. Refresh and review the source.');
+    const record = tags.records.find(r => r.key === row.sourceKey);
+    const metadataId = record?.metadataId ?? (await confirmedAdds(target)).find(add => add.recordId === row.sourceKey)?.metadataId;
+    if (!metadataId) return sheetConflict('Record tag missing. Refresh and review the source.');
+    return { target: { ...target, metadataId, recordId: row.sourceKey }, edit };
+  }
+  async function checkCompanyName(c: Connection, changes: readonly Change[], recordId?: string) {
     const rename = changes.find(change => change.field === 'name');
     if (!rename) return;
     const dependentFields = sections.flatMap(section => {
@@ -273,7 +287,10 @@ export function registerSourceRoutes(app: any, deps: {
     if (!dependentFields.length) return;
     const companies = await sheetCompanies(c);
     const before = companyLinkResolver(companies);
-    const after = companyLinkResolver(companies.map(row => row.sourceKey === target.recordId ? { ...row, name: cellText(rename.requested) } : row));
+    const name = cellText(rename.requested);
+    const after = companyLinkResolver(recordId
+      ? companies.map(row => row.sourceKey === recordId ? { ...row, name } : row)
+      : [...companies, { id: randomUUID(), name }]);
     for (const { section, columns } of dependentFields) {
       for (const row of await sheetRows(c, section)) {
         for (const column of columns) {
@@ -284,7 +301,9 @@ export function registerSourceRoutes(app: any, deps: {
           } catch (cause) {
             if (!(cause instanceof CompanyLinkError)) throw cause;
           }
-          return sheetConflict('This name change would leave company links unresolved or change which company they match. Review the linked records in Google Sheets and use permanent company IDs before renaming.');
+          return sheetConflict(recordId
+            ? 'This name change would leave company links unresolved or change which company they match. Review the linked records in Google Sheets and use permanent company IDs before renaming.'
+            : 'This name would change existing company links. Use permanent company IDs in the linked sheet rows before adding the company.');
         }
       }
     }
@@ -299,7 +318,7 @@ export function registerSourceRoutes(app: any, deps: {
     const sheetsEditSections = sheetAccess(c) ? sections.filter(section => sheetTags(c, section)) : [];
     return { sheetsEditSections, sheetsFeeEditing: sheetsEditSections.includes('companies'), canWrite:!!c && c.access==='readwrite' && c.sourceType==='supabase', counts:{companies:s.companies.length,ingredients:cache.data(id)?.ingredients.length||0,products:cache.data(id)?.products.length||0}, ...(c?.upload?{fileName:c.upload.fileNames[0],upload:{fileNames:c.upload.fileNames,copiedAt:c.upload.copiedAt,rows:c.upload.rows}}:{}), ...(c && isOAuthProvider(c.sourceType) && c.oauth?.[c.sourceType]?{accountEmail:oauth.email(id,c.oauth[c.sourceType])}:{}), group1Label: c?.group1Label || 'Group 1', sourceType: c?.sourceType || null, baseId: c?.baseId || '', access: c?.access || 'read', mapping: c?.mapping || null, hasKey: !!c?.encryptedKey, keyHint: c?.keyHint || '', status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: keyErrors.has(id) ? unreadableKey : s.error || null };
   };
-  const handler = (fn: any) => async (req: any, res: any) => { const caller = own(req, res); if (!caller) return; try { await fn(req, res, caller); } catch (cause:any) { const code=cause instanceof SavedKeyError?400:[400,403,409,429].includes(cause.status)?cause.status:503; res.status(code).json({ error: cause instanceof SavedKeyError ? unreadableKey : code===503?'Source operation failed':cause.message,...(cause.notSetUp?{notSetUp:true}:{}) }); } };
+  const handler = (fn: any) => async (req: any, res: any) => { const caller = own(req, res); if (!caller) return; try { await fn(req, res, caller); } catch (cause:any) { const code=cause instanceof SavedKeyError?400:[400,403,409,429].includes(cause.status)?cause.status:503; res.status(code).json({ error: cause instanceof SavedKeyError ? unreadableKey : code===503?'Source operation failed':cause.message,...(cause.notSetUp?{notSetUp:true}:{}),...(cause.addRevisionStale?{addRevisionStale:true}:{}) }); } };
   const mutation = (fn: any) => handler((req: any, res: any, caller: any) => serialize(caller.id, () => fn(req, res, caller)));
   const blocked = (res: any) => { if (deps.staged()) {
       res.status(503).json({ error: 'Writes blocked' });
@@ -566,19 +585,44 @@ export function registerSourceRoutes(app: any, deps: {
       res.json({ ok: true });
   }));
   const sectionOf = (value: any): value is SourceSection => sections.includes(value);
-  app.get('/api/sources/sheet-editor/:list', handler((req: any, res: any, { id }: any) => {
+  const validAddToken = (value: unknown): value is string => typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+  app.get('/api/sources/sheet-editor/:list', handler(async (req: any, res: any, { id, user }: any) => {
     const c = connections.get(id), list = req.params.list;
     if (!sheetAccess(c) || !sectionOf(list) || !sheetTags(c, list))
       return res.status(403).json({ error: 'This source is read only.' });
-    assertSeparateSheetTabs(c);
-    const tags = new Set(sheetTags(c, list)!.records.map(record => record.key));
+    const { target } = sheetAddTarget(c, list, user.id);
+    const tags = new Set([...sheetTags(c, list)!.records.map(record => record.key),
+      ...(await confirmedAdds(target)).map(add => add.recordId)]);
     res.json({ rows: cachedSheetRows(id, list).filter(row => row.sourceKey && tags.has(row.sourceKey)).map(({ id, name }) => ({ id, name })) });
+  }));
+  app.get('/api/sources/sheet-editor/:list/new', handler(async (req: any, res: any, { id, user }: any) => {
+    const c = connections.get(id), list = req.params.list;
+    if (!sheetAccess(c) || !sectionOf(list) || !sheetTags(c, list))
+      return res.status(403).json({ error: 'This source is read only.' });
+    const { target, edit } = sheetAddTarget(c, list, user.id);
+    const { fields, addRevision } = await sheetsApi(c, list).readAddEditor(edit, target);
+    const companies = fields.some(field => field.rule === 'companyLink') ? await sheetCompanies(c) : [];
+    res.json({ fields, addRevision, companies: companies.map(row => ({ id: row.id, name: row.name, key: row.sourceKey })),
+      addScope: [id, user.id, list, target.spreadsheetId, target.table] });
+  }));
+  app.post('/api/sources/sheet-editor/:list/abandon', handler(async (req: any, res: any, { id, user }: any) => {
+    if (blocked(res)) return;
+    const { list } = req.params, token = req.body?.token;
+    if (!sectionOf(list) || !validAddToken(token))
+      return res.status(400).json({ error: 'A valid Add request token is required.' });
+    const prior = await store.addLedger(id, token).abandon(user.id, list);
+    if (!prior || prior.actorId !== user.id || prior.section !== list)
+      return res.status(409).json({ error: 'Check whether the Add was saved before abandoning it.' });
+    if (prior.outcome === 'confirmed')
+      return res.status(409).json({ error: 'This Add was already confirmed. Check again to see the saved record.' });
+    res.json({ abandoned: true });
   }));
   app.get('/api/sources/sheet-editor/:list/:rowId', handler(async (req: any, res: any, { id, user }: any) => {
     const c = connections.get(id), list = req.params.list;
     if (!sheetAccess(c) || !sectionOf(list) || !sheetTags(c, list))
       return res.status(403).json({ error: 'This source is read only.' });
-    const { target, edit } = sheetTarget(c, list, req.params.rowId, user.id);
+    const { target, edit } = await sheetTarget(c, list, req.params.rowId, user.id);
     const needsLinks = list !== 'companies' || [...edit.customTypes!.values()].includes('companyLink');
     const companies = needsLinks ? await sheetCompanies(c) : [];
     edit.links = companyLinks(companies);
@@ -593,6 +637,9 @@ export function registerSourceRoutes(app: any, deps: {
           await flights.get(id);
       const c = connections.get(id), list: SourceSection = req.params.list;
       const sheets = c?.sourceType === 'google_sheets' && (c.sheetsTables || c.sheetsPilot);
+      if (!req.params.rowId && !sheets && (req.body?.addRevision !== undefined || req.body?.token !== undefined))
+          return res.status(409).json({ error: 'The mapped sheet or columns changed. Close and reopen the Add form.',
+              ...(req.body?.fields !== undefined && { addRevisionStale: true }) });
       const fields = sheets ? req.body?.fields : guardSourceWrite(c, list, req.body?.fields);
       if (isOAuthProvider(c!.sourceType))
           oauth.requireSetUp(c!.sourceType);
@@ -604,9 +651,32 @@ export function registerSourceRoutes(app: any, deps: {
       if (sheets) {
           if (c.access !== 'readwrite' || c.oauth?.google_sheets?.access !== 'readwrite')
               return res.status(403).json({ error: 'This source is read only.' });
-          if (!req.params.rowId || !['companies', 'ingredients', 'products'].includes(list))
-              return res.status(400).json({ error: 'Choose an existing mapped record.' });
-          const { target, edit } = sheetTarget(c, list, req.params.rowId, user.id);
+          if (!sectionOf(list)) return res.status(400).json({ error: 'Choose an existing mapped record.' });
+          if (!req.params.rowId) {
+              const token = req.body?.token;
+              if (!validAddToken(token))
+                  return res.status(400).json({ error: 'A valid Add request token is required.' });
+              const { target, edit } = sheetAddTarget(c, list, user.id);
+              edit.fields = fields;
+              if (list !== 'companies' || [...edit.customTypes!.values()].includes('companyLink'))
+                  edit.refreshLinks = async () => companyLinks(await sheetCompanies(c));
+              if (list === 'companies') edit.validateChanges = changes => checkCompanyName(c, changes);
+              const result = await sheetsApi(c, list).addTaggedRow(edit, target, token, store.addLedger(id, token),
+                  fields === undefined, req.body?.addRevision)
+                  .catch(cause => {
+                      if (cause.sheetNeedsReview) cache.requireRefresh(id, cause.message);
+                      throw cause;
+                  });
+              try {
+                  cache.publish(id, await connector(c).loadAll!());
+              } catch {
+                  const warning = 'The new record was confirmed in Google Sheets. Refresh the source to update the inspection list.';
+                  cache.requireRefresh(id, warning);
+                  return res.json({ ...result, saved: true, refreshRequired: true, warning });
+              }
+              return res.json({ ...result, saved: true });
+          }
+          const { target, edit } = await sheetTarget(c, list, req.params.rowId, user.id);
           edit.fields = fields;
           edit.expected = req.body?.expected;
           edit.requireRevision = true;
@@ -615,7 +685,7 @@ export function registerSourceRoutes(app: any, deps: {
               edit.refreshLinks = async () => companyLinks(await sheetCompanies(c));
               edit.links = await edit.refreshLinks();
           }
-          if (list === 'companies') edit.validateChanges = changes => checkCompanyRename(c, target, changes);
+          if (list === 'companies') edit.validateChanges = changes => checkCompanyName(c, changes, target.recordId);
           const result = await sheetsApi(c, list).updateTaggedRow(edit, target, store.saveEditAudit).catch(cause => {
               if (cause.sheetNeedsReview) cache.requireRefresh(id, cause.message);
               throw cause;

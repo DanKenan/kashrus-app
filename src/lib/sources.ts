@@ -32,7 +32,8 @@ export function mappingReady(mapping: SourceMapping): boolean {
 export async function sourceRequest(path: string, method?: string, body?: unknown) {
   const response = await apiFetch(path, method ? { method, headers: { 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) } : undefined);
   const data = await response.json();
-  if (!response.ok || data?.error) throw Object.assign(new Error(data?.error || "Couldn't reach the database. Try again."), { status: response.status });
+  if (!response.ok || data?.error) throw Object.assign(new Error(data?.error || "Couldn't reach the database. Try again."),
+    { status: response.status, ...(data?.addRevisionStale === true && { addRevisionStale: true }) });
   return data;
 }
 export function sourceStatus(connection: SourceConnection, timeZone: string): string {
