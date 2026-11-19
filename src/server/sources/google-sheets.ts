@@ -172,7 +172,7 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     async function blockedAddRow(table: string, idHeader: string) {
         const pending = await config.unconfirmedAdds?.(config.spreadsheetId);
         if (!pending?.size) return;
-        // Read current cells and tags together so row moves don't misidentify the row to delete.
+        // Read cells and tags together so the last-seen row number matches the tagged row in this snapshot.
         const { rowData = [], rowMetadata = [] } = await readGridData(table);
         const headers = rowData[0]?.values?.map(effectiveValue) ?? [];
         const column = headers.indexOf(idHeader);
@@ -198,8 +198,10 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
         if (blankId && explainBlankId) {
             const row = await blockedAddRow(table, idHeader).catch(() => undefined);
             if (row !== undefined) throw conflict('A previous Add left a row hidden in Shutfey on this tab. ' +
-                `In Google Sheets, check that row ${row} on the “${table}” tab is the unfinished record with a blank ${idHeader} cell. ` +
-                'Delete the entire row, then try adding again.');
+                `In Google Sheets, it was last seen at row ${row} on the “${table}” tab and may have moved. ` +
+                `Verify which row matches the details you entered in the previous Add and check that its ${idHeader} cell is blank. ` +
+                'If you can identify the row unambiguously, delete the entire row and try adding again. ' +
+                'If you’re unsure which row it is, contact support before deleting anything.');
         }
         if (blankId || new Set(ids).size !== ids.length) throw conflict('Every data row needs a unique ID.');
         return ids;

@@ -848,9 +848,23 @@ try {
 
             const next = await add('products',{name:'Next product',companyLink:[companyX.id]},{base:refreshed,status:400});
             blockedAddError = next.error;
-            assert.match(blockedAddError,/A previous Add left a row hidden in Shutfey on this tab/);
-            assert.ok(blockedAddError.includes(`row 2 on the “${phaseB.products.table}” tab`));
-            assert.match(blockedAddError,/blank ID cell.*Delete the entire row, then try adding again/);
+            // A different unfinished row occupies the reported position before the admin acts.
+            const otherRow = { cells:['','Manually entered row'] };
+            productState.rows.unshift(otherRow);
+            try {
+                const idColumn = productState.headers.indexOf('ID');
+                assert.equal(productState.rows[0],otherRow);
+                assert.equal(productState.rows[1],inserted);
+                assert.ok(!otherRow.cells[idColumn] && !inserted.cells[idColumn]);
+                assert.match(blockedAddError,/A previous Add left a row hidden in Shutfey on this tab/);
+                assert.ok(blockedAddError.includes(`last seen at row 2 on the “${phaseB.products.table}” tab and may have moved`));
+                assert.match(blockedAddError,/matches the details you entered in the previous Add.*ID cell is blank/);
+                assert.match(blockedAddError,/If you can identify the row unambiguously, delete the entire row/);
+                assert.match(blockedAddError,/If you’re unsure which row it is, contact support before deleting anything/);
+
+                const rechecked = await add('products',{name:'Next product',companyLink:[companyX.id]},{base:refreshed,status:400});
+                assert.ok(rechecked.error.includes(`last seen at row 3 on the “${phaseB.products.table}” tab`));
+            } finally { productState.rows.shift(); }
             assert.equal(googleWrites,beforeMove + 1);
         } finally {
             if (productState.rows[0].cells[1] === movedProduct.name) productState.rows.shift();
@@ -1074,7 +1088,9 @@ try {
     uiAddBlocked = true;
     const blocked = mount(SheetRecordEditor,addProps);
     await blocked.render();
-    assert.match(blocked.html(),/delete the unfinished row identified in the error from the Google Sheets tab/);
+    assert.match(blocked.html(),/last seen in Google Sheets.*matches the details you entered in the previous Add.*ID cell is blank/);
+    assert.match(blocked.html(),/If you can identify the row unambiguously, delete the entire row/);
+    assert.match(blocked.html(),/If you’re unsure which row it is, contact support before deleting anything/);
     await enterName(blocked,'Next product');
     await blocked.submit();
     assert.equal(blocked.find(e => e.props.role === 'alert')[0].props.children,blockedAddError);
