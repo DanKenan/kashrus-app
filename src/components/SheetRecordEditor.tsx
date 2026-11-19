@@ -267,7 +267,7 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
     {row && <p dir="auto" className="break-words">{row.name}</p>}
     <details className="rounded-lg border border-line bg-sunken p-3">
       <summary className="flex min-h-11 cursor-pointer items-center font-semibold focus-visible:ring-2 focus-visible:ring-gold">? About Google Sheets editing</summary>
-      <SheetEditHelpContent />
+      <SheetEditHelpContent adding={adding} />
     </details>
     {error && <p role="alert" className="break-words text-bad">{error}</p>}
     {notice && <p role="status" className="break-words text-warn">{notice}</p>}

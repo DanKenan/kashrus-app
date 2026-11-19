@@ -12,6 +12,9 @@ type GridData = {
     rowData?: { values?: GridValue[] }[];
     rowMetadata?: { developerMetadata?: { metadataKey: string; metadataValue: string }[] }[];
 };
+const effectiveValue = (cell?: GridValue) =>
+    cell?.effectiveValue?.stringValue ?? cell?.effectiveValue?.numberValue ?? cell?.effectiveValue?.boolValue;
+const hasValue = (value: unknown) => value !== '' && value != null;
 export interface TaggedTable {
     records: { key: string; metadataId: number }[];
     headers: string[];
@@ -48,7 +51,7 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     const matrices = new Map<string, unknown[][]>();
     async function values(table: string, file?: SourceFile) { const path = `${sheet(file)}/values/${encodeURIComponent(range(table))}`; if (!matrices.has(path))
         matrices.set(path, (await request('sheets', path)).values || []); return matrices.get(path)!; }
-    async function readGridRows(table: string, file: SourceFile | undefined, expiration: string | undefined) {
+    async function readGridData(table: string, file?: SourceFile, expiration?: string): Promise<GridData> {
         // Fetch row tags, values and date formats together so a row move cannot
         // make a tag or date serial apply to a different record.
         const format = expiration ? ',effectiveFormat(numberFormat(type))' : '';
@@ -58,10 +61,12 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
         const result = await request('sheets', `${sheet(file)}?${query}`);
         const tab = result.sheets?.find((entry: { properties: { title: string } }) => entry.properties?.title === table);
         if (!tab) throw Error('Google Sheets tab missing.');
-        const data: GridData = tab.data?.[0] ?? {};
+        return tab.data?.[0] ?? {};
+    }
+    async function readGridRows(table: string, file: SourceFile | undefined, expiration: string | undefined) {
+        const data = await readGridData(table, file, expiration);
         const grid = (data.rowData ?? []).map(row => row.values ?? []);
-        const parsed = matrixRows(grid.map(row => row.map(cell => cell.formattedValue ??
-            cell.effectiveValue?.stringValue ?? cell.effectiveValue?.numberValue ?? cell.effectiveValue?.boolValue)));
+        const parsed = matrixRows(grid.map(row => row.map(cell => cell.formattedValue ?? effectiveValue(cell))));
         const index = expiration ? parsed.columns.indexOf(expiration) : -1;
         if (expiration && index >= 0) {
             for (const row of parsed.rows) {
@@ -164,21 +169,47 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     const post = (path: string, body: unknown) => request('sheets', sheet() + path, {
         method: 'POST', body: JSON.stringify(body),
     });
-    async function readIds(table: string, idHeader: string) {
+    async function blockedAddRow(table: string, idHeader: string) {
+        const pending = await config.unconfirmedAdds?.(config.spreadsheetId);
+        if (!pending?.size) return;
+        // Read cells and tags together so the last-seen row number matches the tagged row in this snapshot.
+        const { rowData = [], rowMetadata = [] } = await readGridData(table);
+        const headers = rowData[0]?.values?.map(effectiveValue) ?? [];
+        const column = headers.indexOf(idHeader);
+        if (column < 0 || headers.lastIndexOf(idHeader) !== column) return;
+        const row = rowMetadata.findIndex((metadata, index) => {
+            const cells = rowData[index]?.values ?? [];
+            return index > 0 && metadata.developerMetadata?.some(tag =>
+                tag.metadataKey === 'recordId' && isAddRecordId(tag.metadataValue) && pending.has(tag.metadataValue)) &&
+                !String(effectiveValue(cells[column]) ?? '').trim() &&
+                cells.some(cell => hasValue(effectiveValue(cell)));
+        });
+        if (row > 0) return row + 1;
+    }
+    async function readIds(table: string, idHeader: string, explainBlankId?: boolean) {
         const result = await request('sheets', sheet() + '/values/' +
             encodeURIComponent(range(table)) + '?valueRenderOption=UNFORMATTED_VALUE');
         const [headers = [], ...rows]: unknown[][] = result.values || [];
         const index = headers.indexOf(idHeader);
         if (index < 0 || headers.lastIndexOf(idHeader) !== index) throw conflict('Choose one unique ID column.');
-        const ids = rows.filter(row => row.some(value => value !== '' && value != null))
+        const ids = rows.filter(row => row.some(hasValue))
             .map(row => String(row[index] ?? '').trim());
-        if (ids.some(id => !id) || new Set(ids).size !== ids.length) throw conflict('Every data row needs a unique ID.');
+        const blankId = ids.includes('');
+        if (blankId && explainBlankId) {
+            const row = await blockedAddRow(table, idHeader).catch(() => undefined);
+            if (row !== undefined) throw conflict('A previous Add left a row hidden in Shutfey on this tab. ' +
+                `In Google Sheets, it was last seen at row ${row} on the “${table}” tab and may have moved. ` +
+                `Verify which row matches the details you entered in the previous Add and check that its ${idHeader} cell is blank. ` +
+                'If you can identify the row unambiguously, delete the entire row and try adding again. ' +
+                'If you’re unsure which row it is, contact support before deleting anything.');
+        }
+        if (blankId || new Set(ids).size !== ids.length) throw conflict('Every data row needs a unique ID.');
         return ids;
     }
     return { calls: () => calls, listTables, tagManagedRows,
         readAddEditor(edit: Edit, target: AddTarget) { return readSheetAddEditor(post, edit, target); },
         addTaggedRow(edit: Edit, target: AddTarget, token: string, ledger: Parameters<typeof addSheetRow>[4], resume: boolean, revision: unknown) {
-            return addSheetRow(post, edit, target, token, ledger, () => readIds(target.table, edit.idHeader), resume, revision);
+            return addSheetRow(post, edit, target, token, ledger, explainBlankId => readIds(target.table, edit.idHeader, explainBlankId), resume, revision);
         },
         readTaggedEditor(edit: Edit, target: Target) { return readSheetEditor(post, edit, target); },
         updateTaggedRow(edit: Edit, target: Target, audit: (entry: EditAudit) => Promise<void>) {
