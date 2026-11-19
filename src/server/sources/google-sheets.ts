@@ -27,8 +27,16 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
             const res = await sourceFetch(`${base}${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...init.headers, Authorization: `Bearer ${token}` } }, config.fetchImpl);
             if (res.status === 401 && attempt === 0 && config.token)
                 continue;
-            if (!res.ok)
+            if (!res.ok) {
+                const body = await res.clone().json().catch(() => null);
+                console.warn('[sources] Google API rejected request', {
+                    service,
+                    operation: path.includes('/values/') ? 'read-values' : path.includes('/spreadsheets/') ? 'read-spreadsheet' : 'other',
+                    httpStatus: res.status,
+                    reason: body?.error?.errors?.[0]?.reason || body?.error?.status || 'unknown',
+                });
                 throw Object.assign(Error('Google Sheets request failed'), { rejected: res.status >= 400 && res.status < 500 });
+            }
             return res.status === 204 ? {} : res.json();
         }
         throw Error('Google Sheets request failed');
