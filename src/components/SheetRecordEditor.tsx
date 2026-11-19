@@ -144,7 +144,8 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
       setError('Enter a name.');
       return;
     }
-    const entries = editor.fields.filter(({ field }) => Object.hasOwn(draft, field))
+    const entries = editor.fields.filter(({ field, rule }) => Object.hasOwn(draft, field) &&
+      !(rule === 'money' && typeof draft[field] === 'string' && !draft[field].trim()))
       .map(({ field, rule }) => [field, rule === 'money' ? parseMoney(draft[field]) : draft[field]] as const);
     if (!pendingToken && entries.some(([, value]) => value === undefined)) { setError('Enter a valid amount.'); return; }
     lock.current = true;

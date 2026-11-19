@@ -250,9 +250,10 @@ export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, tok
 
   const prior = await ledger.get();
   if (prior) return recover(prior);
+  const name = edit.fields?.name;
   const entry: AddAudit = { ...target, kind: 'add', addSpreadsheetId: target.spreadsheetId, operationId: randomUUID(),
     recordId: randomUUID(), token, outcome: 'attempted', verified: false, metadataId: null, at: new Date().toISOString(),
-    name: '', requestHash, expectedHash: '' };
+    name: typeof name === 'string' && name.length <= 2000 ? name : '', requestHash, expectedHash: '' };
   if (resume) {
     // A response can be lost before the first request claims the token.
     // Reserving it here ensures that an in-flight request cannot write later.
