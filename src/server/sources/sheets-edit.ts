@@ -191,18 +191,31 @@ export async function readSheetAddEditor(post: Post, edit: Edit, target: AddTarg
   if (!fields.some(field => field.field === 'name') ||
       (edit.section !== 'companies' && !fields.some(field => field.field === 'companyLink')))
     throw Object.assign(Error('Review the required mapped columns before adding records.'), { status: 409 });
-  return fields;
+  return { fields, addRevision: addRevision(edit, target, blank) };
 }
+
+const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+function addRevision(edit: Edit, target: AddTarget, layout: Awaited<ReturnType<typeof addLayout>>) {
+  const mapping = JSON.stringify(edit.mapping, (_key, value) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]))
+      : value);
+  return hash([target.agencyId, target.actorId, target.section, target.spreadsheetId, target.table,
+    edit.idHeader, mapping, layout.sheetId, layout.headers]);
+}
+
+const staleAdd = () => Object.assign(Error('The mapped sheet or columns changed. Close and reopen the Add form.'),
+  { status: 409, addRevisionStale: true });
 
 type AddStore = {
   get(): Promise<AddAudit | null>;
   claim(audit: AddAudit): Promise<AddAudit | null>;
-  finish(audit: AddAudit): Promise<void>;
+  finish(audit: AddAudit): Promise<boolean>;
 };
 
 export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, token: string, ledger: AddStore,
-  readIds: () => Promise<string[]>, resume: boolean) {
-  const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  readIds: () => Promise<string[]>, resume: boolean, revision: unknown) {
   const requestHash = hash(Object.entries(edit.fields ?? {}).sort(([a], [b]) => a.localeCompare(b)));
   const review = () => Object.assign(Error('The new record could not be confirmed. It may already be in Google Sheets. Check again or review the sheet.'),
     { status: 409, sheetNeedsReview: true });
@@ -231,7 +244,7 @@ export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, tok
           (await readIds()).filter(id => id === entry.recordId).length !== 1) throw Error();
       if (edit.refreshLinks) edit.links = await edit.refreshLinks();
       if (addedRowHash(edit, after, after.sheetId) !== entry.expectedHash) throw Error();
-      await ledger.finish({ ...entry, metadataId, outcome: 'confirmed', verified: true });
+      if (!await ledger.finish({ ...entry, metadataId, outcome: 'confirmed', verified: true })) throw Error();
       return { operationId: entry.operationId, recordId: entry.recordId, metadataId };
     } catch {
       await ledger.finish({ ...entry, metadataId, outcome: 'unconfirmed' }).catch(() =>
@@ -244,6 +257,8 @@ export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, tok
         (!resume && entry.requestHash !== requestHash))
       throw Object.assign(Error('This Add request belongs to a different record or sheet. Review the original request.'), { status: 409 });
     if (entry.outcome === 'rejected') throw rejected();
+    if (entry.outcome === 'abandoned')
+      throw Object.assign(Error('This Add attempt was abandoned. Start a fresh Add.'), { status: 400 });
     if (entry.outcome === 'confirmed') return { operationId: entry.operationId, recordId: entry.recordId, metadataId: entry.metadataId };
     return verify(entry, entry.metadataId);
   }
@@ -261,9 +276,10 @@ export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, tok
     if (winner) return recover(winner);
     throw Object.assign(Error('No Add was sent to Google Sheets. You can submit the form again.'), { status: 400 });
   }
-  let row: Awaited<ReturnType<typeof addLayout>>;
+  if (typeof revision !== 'string') throw staleAdd();
+  const row = await addLayout(post, edit, target);
+  if (revision !== addRevision(edit, target, row)) throw staleAdd();
   try {
-    row = await addLayout(post, edit, target);
     if (edit.refreshLinks) edit.links = await edit.refreshLinks();
     const changes = planTaggedAdd(edit, row);
     entry.name = String(changes.find(change => change.field === 'name')!.requested);

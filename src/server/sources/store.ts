@@ -235,16 +235,25 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     return {
       get: (): Promise<AddAudit | null> => read(auditCollection, id),
       claim: (entry: AddAudit) => update(current => current ? undefined : entry),
+      abandon(actorId: string, section: AddAudit['section']) {
+        return update(current => {
+          if (current?.actorId !== actorId || current.section !== section) return;
+          if (current.outcome === 'attempted' || current.outcome === 'unconfirmed')
+            // Keep the workbook quarantine if Google commits after abandonment.
+            return { ...current, outcome: 'abandoned', abandonedAt: new Date().toISOString() };
+        });
+      },
       async finish(entry: AddAudit) {
-        await update(current => {
+        const prior = await update(current => {
           if (current?.operationId !== entry.operationId) throw Error('Missing Add operation');
-          if (current.outcome === 'confirmed' || current.outcome === 'rejected') return;
+          if (['confirmed', 'rejected', 'abandoned'].includes(current.outcome)) return;
           if (entry.outcome === 'unconfirmed' && current.outcome === 'unconfirmed' &&
               (!entry.metadataId || entry.metadataId === current.metadataId)) return;
           const next = { ...entry };
           if (next.outcome === 'confirmed' || next.outcome === 'rejected') delete next.pendingSpreadsheetId;
           return next;
         });
+        return prior?.outcome !== 'abandoned' && prior?.outcome !== 'rejected';
       },
     };
   }

@@ -99,8 +99,8 @@ export function registerSourceRoutes(app: any, deps: {
   const oauthRecord=(id:string,p:OAuthProvider)=>connections.get(id)?.oauth?.[p];
   const token=(id:string,p:OAuthProvider)=>(force=false)=>oauth.token(id,p,oauthRecord(id,p),force).then(t=>t.accessToken);
   const providerApi=(id:string,p:OAuthProvider,fileId='')=>p==='google_sheets'?createGoogleSheetsApi({spreadsheetId:fileId,mapping:emptyMapping,apiBase:apiBases.get(p),token:token(id,p)}):createExcelApi({workbookId:fileId,mapping:emptyMapping,apiBase:apiBases.get(p),token:token(id,p)});
-  const unconfirmedAdds = async (spreadsheetId: string, table: string) => new Set(
-    (await store.sheetAdds(spreadsheetId, true)).filter(add => add.table === table).map(add => add.recordId));
+  const unconfirmedAdds = async (spreadsheetId: string) => new Set(
+    (await store.sheetAdds(spreadsheetId, true)).map(add => add.recordId));
   const sheetsApi = (c: Connection, section: SourceSection) => createGoogleSheetsApi({
     spreadsheetId: c.mapping[section].file?.id || c.baseId, mapping: c.mapping,
     apiBase: apiBases.get('google_sheets'), token: token(c.agencyId, 'google_sheets'), unconfirmedAdds,
@@ -318,7 +318,7 @@ export function registerSourceRoutes(app: any, deps: {
     const sheetsEditSections = sheetAccess(c) ? sections.filter(section => sheetTags(c, section)) : [];
     return { sheetsEditSections, sheetsFeeEditing: sheetsEditSections.includes('companies'), canWrite:!!c && c.access==='readwrite' && c.sourceType==='supabase', counts:{companies:s.companies.length,ingredients:cache.data(id)?.ingredients.length||0,products:cache.data(id)?.products.length||0}, ...(c?.upload?{fileName:c.upload.fileNames[0],upload:{fileNames:c.upload.fileNames,copiedAt:c.upload.copiedAt,rows:c.upload.rows}}:{}), ...(c && isOAuthProvider(c.sourceType) && c.oauth?.[c.sourceType]?{accountEmail:oauth.email(id,c.oauth[c.sourceType])}:{}), group1Label: c?.group1Label || 'Group 1', sourceType: c?.sourceType || null, baseId: c?.baseId || '', access: c?.access || 'read', mapping: c?.mapping || null, hasKey: !!c?.encryptedKey, keyHint: c?.keyHint || '', status: status(id), refreshedAt: s.refreshedAt || null, calls: s.calls, backupSaveError: backupErrors.has(id), backupTakenAt: s.backupTakenAt || null, error: keyErrors.has(id) ? unreadableKey : s.error || null };
   };
-  const handler = (fn: any) => async (req: any, res: any) => { const caller = own(req, res); if (!caller) return; try { await fn(req, res, caller); } catch (cause:any) { const code=cause instanceof SavedKeyError?400:[400,403,409,429].includes(cause.status)?cause.status:503; res.status(code).json({ error: cause instanceof SavedKeyError ? unreadableKey : code===503?'Source operation failed':cause.message,...(cause.notSetUp?{notSetUp:true}:{}) }); } };
+  const handler = (fn: any) => async (req: any, res: any) => { const caller = own(req, res); if (!caller) return; try { await fn(req, res, caller); } catch (cause:any) { const code=cause instanceof SavedKeyError?400:[400,403,409,429].includes(cause.status)?cause.status:503; res.status(code).json({ error: cause instanceof SavedKeyError ? unreadableKey : code===503?'Source operation failed':cause.message,...(cause.notSetUp?{notSetUp:true}:{}),...(cause.addRevisionStale?{addRevisionStale:true}:{}) }); } };
   const mutation = (fn: any) => handler((req: any, res: any, caller: any) => serialize(caller.id, () => fn(req, res, caller)));
   const blocked = (res: any) => { if (deps.staged()) {
       res.status(503).json({ error: 'Writes blocked' });
@@ -585,6 +585,8 @@ export function registerSourceRoutes(app: any, deps: {
       res.json({ ok: true });
   }));
   const sectionOf = (value: any): value is SourceSection => sections.includes(value);
+  const validAddToken = (value: unknown): value is string => typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
   app.get('/api/sources/sheet-editor/:list', handler(async (req: any, res: any, { id, user }: any) => {
     const c = connections.get(id), list = req.params.list;
     if (!sheetAccess(c) || !sectionOf(list) || !sheetTags(c, list))
@@ -599,10 +601,22 @@ export function registerSourceRoutes(app: any, deps: {
     if (!sheetAccess(c) || !sectionOf(list) || !sheetTags(c, list))
       return res.status(403).json({ error: 'This source is read only.' });
     const { target, edit } = sheetAddTarget(c, list, user.id);
-    const fields = await sheetsApi(c, list).readAddEditor(edit, target);
+    const { fields, addRevision } = await sheetsApi(c, list).readAddEditor(edit, target);
     const companies = fields.some(field => field.rule === 'companyLink') ? await sheetCompanies(c) : [];
-    res.json({ fields, companies: companies.map(row => ({ id: row.id, name: row.name, key: row.sourceKey })),
+    res.json({ fields, addRevision, companies: companies.map(row => ({ id: row.id, name: row.name, key: row.sourceKey })),
       addScope: [id, user.id, list, target.spreadsheetId, target.table] });
+  }));
+  app.post('/api/sources/sheet-editor/:list/abandon', handler(async (req: any, res: any, { id, user }: any) => {
+    if (blocked(res)) return;
+    const { list } = req.params, token = req.body?.token;
+    if (!sectionOf(list) || !validAddToken(token))
+      return res.status(400).json({ error: 'A valid Add request token is required.' });
+    const prior = await store.addLedger(id, token).abandon(user.id, list);
+    if (!prior || prior.actorId !== user.id || prior.section !== list)
+      return res.status(409).json({ error: 'Check whether the Add was saved before abandoning it.' });
+    if (prior.outcome === 'confirmed')
+      return res.status(409).json({ error: 'This Add was already confirmed. Check again to see the saved record.' });
+    res.json({ abandoned: true });
   }));
   app.get('/api/sources/sheet-editor/:list/:rowId', handler(async (req: any, res: any, { id, user }: any) => {
     const c = connections.get(id), list = req.params.list;
@@ -623,6 +637,9 @@ export function registerSourceRoutes(app: any, deps: {
           await flights.get(id);
       const c = connections.get(id), list: SourceSection = req.params.list;
       const sheets = c?.sourceType === 'google_sheets' && (c.sheetsTables || c.sheetsPilot);
+      if (!req.params.rowId && !sheets && (req.body?.addRevision !== undefined || req.body?.token !== undefined))
+          return res.status(409).json({ error: 'The mapped sheet or columns changed. Close and reopen the Add form.',
+              ...(req.body?.fields !== undefined && { addRevisionStale: true }) });
       const fields = sheets ? req.body?.fields : guardSourceWrite(c, list, req.body?.fields);
       if (isOAuthProvider(c!.sourceType))
           oauth.requireSetUp(c!.sourceType);
@@ -637,14 +654,15 @@ export function registerSourceRoutes(app: any, deps: {
           if (!sectionOf(list)) return res.status(400).json({ error: 'Choose an existing mapped record.' });
           if (!req.params.rowId) {
               const token = req.body?.token;
-              if (typeof token !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(token))
+              if (!validAddToken(token))
                   return res.status(400).json({ error: 'A valid Add request token is required.' });
               const { target, edit } = sheetAddTarget(c, list, user.id);
               edit.fields = fields;
               if (list !== 'companies' || [...edit.customTypes!.values()].includes('companyLink'))
                   edit.refreshLinks = async () => companyLinks(await sheetCompanies(c));
               if (list === 'companies') edit.validateChanges = changes => checkCompanyName(c, changes);
-              const result = await sheetsApi(c, list).addTaggedRow(edit, target, token, store.addLedger(id, token), fields === undefined)
+              const result = await sheetsApi(c, list).addTaggedRow(edit, target, token, store.addLedger(id, token),
+                  fields === undefined, req.body?.addRevision)
                   .catch(cause => {
                       if (cause.sheetNeedsReview) cache.requireRefresh(id, cause.message);
                       throw cause;

@@ -222,7 +222,8 @@ export const isAddRecordId = (id: string) =>
 export type AddTarget = Omit<Target, 'recordId' | 'metadataId'>;
 export type AddAudit = AddTarget & {
   kind: 'add'; operationId: string; token: string; recordId: string; metadataId: number | null;
-  outcome: EditAudit['outcome']; verified: boolean; at: string; name: string;
+  outcome: EditAudit['outcome'] | 'abandoned'; verified: boolean; at: string; name: string;
+  abandonedAt?: string;
   addSpreadsheetId: string; pendingSpreadsheetId?: string; requestHash: string; expectedHash: string;
 };
 

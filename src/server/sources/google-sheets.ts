@@ -21,7 +21,7 @@ export interface GoogleSheetsConfig {
     accessToken?: string;
     token?(force?: boolean): Promise<string>;
     fetchImpl?: typeof fetch;
-    unconfirmedAdds?(spreadsheetId: string, table: string): Promise<Set<string>>;
+    unconfirmedAdds?(spreadsheetId: string): Promise<Set<string>>;
 }
 export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     let calls = 0;
@@ -164,8 +164,8 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     }
     return { calls: () => calls, listTables, tagManagedRows,
         readAddEditor(edit: Edit, target: AddTarget) { return readSheetAddEditor(post, edit, target); },
-        addTaggedRow(edit: Edit, target: AddTarget, token: string, ledger: Parameters<typeof addSheetRow>[4], resume: boolean) {
-            return addSheetRow(post, edit, target, token, ledger, () => readIds(target.table, edit.idHeader), resume);
+        addTaggedRow(edit: Edit, target: AddTarget, token: string, ledger: Parameters<typeof addSheetRow>[4], resume: boolean, revision: unknown) {
+            return addSheetRow(post, edit, target, token, ledger, () => readIds(target.table, edit.idHeader), resume, revision);
         },
         readTaggedEditor(edit: Edit, target: Target) { return readSheetEditor(post, edit, target); },
         updateTaggedRow(edit: Edit, target: Target, audit: (entry: EditAudit) => Promise<void>) {
@@ -181,7 +181,7 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
                 .find(section => section.table === table && (section.file?.id || config.spreadsheetId) === fileId)?.pk ||
                 parsed.columns.find(column => /^id$/i.test(column));
             const hasAdd = primary && parsed.rows.some(row => isAddRecordId(String(row.fields[primary])));
-            const blocked = hasAdd ? await config.unconfirmedAdds?.(fileId, table) : undefined;
+            const blocked = hasAdd ? await config.unconfirmedAdds?.(fileId) : undefined;
             const rows = primary && blocked?.size ? parsed.rows.filter(row => !blocked.has(String(row.fields[primary]))) : parsed.rows;
             return keyRows(rows, parsed.columns, ['google_sheets', fileId, table], config.mapping);
         },

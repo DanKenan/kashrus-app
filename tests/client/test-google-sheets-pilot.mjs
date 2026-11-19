@@ -227,7 +227,7 @@ try {
     process.env.GOOGLE_OAUTH_CLIENT_ID = randomUUID();
     process.env.GOOGLE_OAUTH_CLIENT_SECRET = randomUUID();
     globalThis.document = { activeElement:null, addEventListener() {}, removeEventListener() {} };
-    let googleWrites = 0, addBatches = 0, addFailure, holdLayout;
+    let googleWrites = 0, addBatches = 0, addFailure, holdLayout, holdBatch;
     let nextTag = 1000;
     function rowTag(tab, row, index) {
         return { metadataId:row.tag, metadataKey:'recordId', metadataValue:row.tagValue ?? row.cells[0],
@@ -302,6 +302,11 @@ try {
                 location:{ dimensionRange:range } });
             const failure = addFailure;
             addFailure = undefined;
+            if (holdBatch) {
+                const hold = holdBatch;
+                holdBatch = undefined;
+                await hold();
+            }
             if (failure === 'rejected') return Response.json({}, { status:400 });
             if (failure === 'timeout') return Response.json({}, { status:408 });
             const inserted = { tag:nextTag++, tagValue:tag.metadataValue, cells };
@@ -612,16 +617,23 @@ try {
     try {
         const a = await startAddServer();
         const b = await startAddServer();
-        async function request(base, path, { body, status = 200, headers = {} } = {}) {
-            const response = await priorFetch(base + path,{ method:body ? 'POST' : 'GET',
+        async function request(base, path, { body, method = body ? 'POST' : 'GET', status = 200, headers = {} } = {}) {
+            const response = await priorFetch(base + path,{ method,
                 headers:{ 'Content-Type':'application/json',...headers }, body:JSON.stringify(body) });
             const json = await response.json();
             assert.ok([status].flat().includes(response.status), JSON.stringify({ status:response.status,json }));
             return json;
         }
-        const add = (section, fields, { base = a, token = randomUUID(), ...opts } = {}) =>
-            request(base,'/api/sources/rows/' + section,{ ...opts, body:{ token,fields } });
-        const addEditor = await request(a,'/api/sources/sheet-editor/products/new');
+        const editor = (section, base = a) => request(base,'/api/sources/sheet-editor/' + section + '/new');
+        const add = async (section, fields, { base = a, token = randomUUID(), revision, ...opts } = {}) => {
+            if (fields && revision === undefined) revision = (await editor(section, base)).addRevision;
+            return request(base,'/api/sources/rows/' + section,{ ...opts, body:{ token,fields,addRevision:revision } });
+        };
+        const abandon = (section, token, base = b) =>
+            request(base,'/api/sources/sheet-editor/' + section + '/abandon',{body:{token}});
+        const addEditor = await editor('products');
+        const companyRevision = (await editor('companies')).addRevision;
+        assert.match(addEditor.addRevision,/^[0-9a-f]{64}$/);
         assert.deepEqual(addEditor.fields.find(field => field.field === 'companyLink').value,[]);
         assert.ok(!addEditor.fields.some(field => field.header === 'ID' || field.field === 'Private'));
         assert.ok(addEditor.companies.some(company => company.id === companyX.id));
@@ -637,7 +649,7 @@ try {
         companiesTab.state.rows.pop();
         const initialAddCount = addBatches;
         await add('companies',{name:'Not permitted',type:'Factory'},{status:403,headers:{'x-test-role':'reader'}});
-        await add('companies',{name:'Other agency',type:'Factory'},{status:409,headers:{'x-test-agency':'other'}});
+        await add('companies',{name:'Other agency',type:'Factory'},{revision:companyRevision,status:409,headers:{'x-test-agency':'other'}});
         await add('ingredients',{name:'Missing link',companyLink:['unknown']},{status:400});
         await add('products',{name:'Missing link',companyLink:[]},{status:400});
         await add('companies',{name:'Injected ID',type:'Factory',id:'x'},{status:400});
@@ -651,7 +663,7 @@ try {
         const started = new Promise(resolve => { layoutStarted = resolve; });
         const released = new Promise(resolve => { releaseLayout = resolve; });
         holdLayout = () => { layoutStarted(); return released; };
-        const first = add('companies',{name:'Abandoned request',type:'Factory'},{token:earlyToken,status:409});
+        const first = add('companies',{name:'Abandoned request',type:'Factory'},{token:earlyToken,revision:companyRevision,status:409});
         await started;
         try {
             assert.match((await add('companies',undefined,{base:b,token:earlyToken,status:400})).error,/No Add was sent/);
@@ -731,6 +743,15 @@ try {
             const audit = await addStore.addLedger('agency',token).get();
             assert.equal(audit.outcome,mode === 'rejected' ? 'rejected' : 'unconfirmed');
             assert.equal(audit.verified,false);
+            if (mode === 'timeout') {
+                assert.equal((await abandon('products',token)).abandoned,true);
+                assert.equal((await abandon('products',token)).abandoned,true);
+                assert.equal((await addStore.addLedger('agency',token).get()).outcome,'abandoned');
+                await add('products',undefined,{base:b,token,status:400});
+                await add('products',{name:mode,companyLink:[companyX.id]},{base:b,token,status:400});
+                assert.equal(addBatches,sent + 1);
+                assert.equal(productsTab.state.rows.length,before);
+            }
         }
         const audit = await addStore.addLedger('agency',companyToken).get();
         assert.deepEqual([audit.operationId,audit.actorId,audit.agencyId,audit.name,audit.recordId,audit.table,
@@ -740,7 +761,53 @@ try {
         assert.equal(new Set((await addStore.sheetAdds('schedule-b')).map(entry => entry.operationId)).size,
             (await addStore.sheetAdds('schedule-b')).length);
         assert.ok(!Object.hasOwn(audit,'fields') && !Object.hasOwn(audit,'cells'));
-        console.log('Phase C passed through HTTP for all three sections, including concurrent batches, restart recovery, validation, visibility and audit outcomes.');
+
+        const saveMapping = async (mapping, baseId = 'clients') => {
+            await request(a,'/api/sources/connection',{method:'PUT',body:{ sourceType:'google_sheets',baseId,access:'readwrite',mapping }});
+            await request(a,'/api/sources/sheets-editing',{method:'PUT',body:{enabled:true}});
+        };
+        const otherBook = fixture({ title:'Clients', sheetId:0, headers:[...companiesTab.state.headers],
+            rows:structuredClone(companiesTab.state.rows) });
+        files.set('clients-copy',{...otherBook,title:'Clients'});
+        const switched = { ...phaseB, companies:{ ...phaseB.companies,file:{id:'clients-copy',name:'Copy'} } };
+        for (const [mapping, baseId] of [[switched,'clients-copy'], [phaseB,'clients'],
+            [{ ...phaseB, companies:{ ...phaseB.companies,companyFee:'Unmapped' } },'clients']]) {
+            const { addRevision } = await editor('companies');
+            await saveMapping(mapping,baseId);
+            assert.notEqual((await editor('companies')).addRevision,addRevision);
+            const token = randomUUID(), before = googleWrites;
+            const stale = await add('companies',{name:'Stale form',type:'Factory',companyFee:40},{token,revision:addRevision,status:409});
+            assert.equal(stale.addRevisionStale,true);
+            assert.equal(await addStore.addLedger('agency',token).get(),null);
+            assert.equal(googleWrites,before);
+        }
+
+        const lateToken = randomUUID();
+        let batchStarted, releaseBatch;
+        const batchInFlight = new Promise(resolve => { batchStarted = resolve; });
+        const batchReleased = new Promise(resolve => { releaseBatch = resolve; });
+        holdBatch = () => { batchStarted(); return batchReleased; };
+        const late = add('products',{name:'Late Google commit',companyLink:[companyX.id]},
+            {token:lateToken,status:409});
+        await batchInFlight;
+        try {
+            assert.equal((await abandon('products',lateToken)).abandoned,true);
+        } finally { releaseBatch(); }
+        await late;
+        assert.equal((await addStore.addLedger('agency',lateToken).get()).outcome,'abandoned');
+        assert.ok(productsTab.state.rows.some(row => row.cells[1] === 'Late Google commit'));
+        const renamed = 'Renamed Schedule B';
+        files.get('schedule-b').title = renamed;
+        await saveMapping({ ...phaseB,products:{ ...phaseB.products,table:renamed } });
+        const imported = (await request(a,'/api/factories/' + companyX.id + '/items')).products;
+        assert.ok(imported.some(row => row.name === 'Needs recovery'));
+        assert.ok(productsTab.state.rows.some(row => row.cells[1] === 'changed-value changed'));
+        assert.ok(!imported.some(row => ['changed-value changed','Late Google commit'].includes(row.name)));
+        assert.ok(!(await request(a,'/api/sources/sheet-editor/products')).rows.some(row =>
+            ['changed-value changed','Late Google commit'].includes(row.name)));
+        const fresh = await add('companies',{name:'Fresh Add',type:'Factory'});
+        assert.equal(fresh.saved,true);
+        console.log('Phase C passed through HTTP for all three sections, including stale mappings, renamed tabs, abandonment and late commits.');
     } finally {
         await Promise.all(addServers.map(server => new Promise(resolve => server.close(resolve))));
     }
@@ -813,7 +880,8 @@ const uiFields = { companies: [{ id:'permanent-x', key:'x', name:'Company X' }, 
 ] };
 const submissions = [];
 let refreshes = 0, uiSaved = 0;
-const addSubmissions = [], session = new Map();
+const addSubmissions = [], abandonSubmissions = [], session = new Map();
+let uiAddStuck = false, uiAddStale = false;
 const oldSession = globalThis.sessionStorage;
 globalThis.sessionStorage = {
     getItem:key => session.get(key) ?? null, setItem:(key,value) => session.set(key,value), removeItem:key => session.delete(key),
@@ -824,14 +892,20 @@ globalThis.fetch = async (url, init = {}) => {
         { field:'type',header:'Type',rule:'text',value:'Factory',choices:['Factory','Kitchen'],revision:'old-type' },
     ] });
     if (url === '/api/sources/sheet-editor/products/new') return Response.json({
-        addScope:['agency','admin','products','spreadsheet','Products'], companies:uiFields.companies,
+        addScope:['agency','admin','products','spreadsheet','Products'], addRevision:'form-revision', companies:uiFields.companies,
         fields:[{ field:'name',header:'Name',rule:'text',value:'' },
             { ...uiFields.fields[0],value:'' },{ ...uiFields.fields[1],value:[] }],
     });
     if (url === '/api/sources/rows/products') {
         addSubmissions.push(JSON.parse(init.body));
         if (addSubmissions.length === 1) throw Error('Response unavailable');
+        if (uiAddStuck) return Response.json({error:'The new record could not be confirmed.'},{status:409});
+        if (uiAddStale) return Response.json({error:'The mapped sheet or columns changed.',addRevisionStale:true},{status:409});
         return Response.json({saved:true});
+    }
+    if (url === '/api/sources/sheet-editor/products/abandon') {
+        abandonSubmissions.push(JSON.parse(init.body));
+        return Response.json({abandoned:true});
     }
     if (url === '/api/sources/refresh') { refreshes++; return Response.json({ ok:true }); }
     assert.equal(url,'/api/sources/rows/products/product');
@@ -878,12 +952,47 @@ try {
     assert.match(reopened.text(),/Check whether Google Sheets saved/);
     await reopened.submit();
     assert.deepEqual(addSubmissions,[
-        { token:addSubmissions[0].token,fields:{ name:'Cereal',code:'00123',companyLink:['permanent-x'] } },
+        { token:addSubmissions[0].token,fields:{ name:'Cereal',code:'00123',companyLink:['permanent-x'] },addRevision:'form-revision' },
         { token:addSubmissions[0].token },
     ]);
     assert.equal(addsSaved,1);
     assert.equal(session.size,0);
-    console.log('Sheet editors use configured company types and recover an uncertain Add after reopening.');
+    const enterName = async (view, name) => {
+        view.find(e => e.type === 'form')[0].props.children[0].props.children[0].props.children.props.onChange(name);
+        await view.render();
+    };
+    uiAddStuck = true;
+    const stuck = mount(SheetRecordEditor,addProps);
+    await stuck.render();
+    await enterName(stuck,'Pending record');
+    await stuck.submit();
+    const abandonedToken = addSubmissions.at(-1).token;
+    const pending = mount(SheetRecordEditor,addProps);
+    await pending.render();
+    await pending.submit();
+    assert.deepEqual(addSubmissions.at(-1),{token:abandonedToken});
+    await pending.click('Abandon Add attempt');
+    assert.equal(abandonSubmissions.length,0);
+    await pending.click('Confirm abandonment');
+    assert.deepEqual(abandonSubmissions,[{token:abandonedToken}]);
+    assert.equal(session.size,0);
+    assert.equal(pending.find(e => e.type === 'fieldset')[0].props.disabled,false);
+    uiAddStuck = false;
+    await enterName(pending,'Fresh record');
+    await pending.submit();
+    assert.notEqual(addSubmissions.at(-1).token,abandonedToken);
+    assert.equal(addSubmissions.at(-1).fields.name,'Fresh record');
+    assert.equal(addsSaved,2);
+
+    uiAddStale = true;
+    const stale = mount(SheetRecordEditor,addProps);
+    await stale.render();
+    await enterName(stale,'Stale record');
+    await stale.submit();
+    assert.equal(session.size,0);
+    assert.equal(stale.find(e => e.type === 'fieldset')[0].props.disabled,true);
+    assert.match(stale.text(),/mapped sheet or columns changed/);
+    console.log('Sheet editors recover or abandon an uncertain Add after reopening and clear stale submissions.');
 } finally {
     globalThis.fetch = priorFetch;
     if (oldSession === undefined) delete globalThis.sessionStorage;
