@@ -11,7 +11,9 @@ function fixture(options = {}) {
     const state = { headers: [...headers], rows: [
         { tag: 19, cells: ['a', 100, 'Original', 'Main', '=1+1'] },
         { tag: 32, cells: ['b', 70, 'Other', 'Second', '=2+2'] },
-    ], names: new Map(), reads: 0, writes: 0, audit: [] };
+    ], sheetId: 7, names: new Map(), creationRequests: [], reads: 0, writes: 0, audit: [] };
+    const returnedName = ({ namedRangeId, name, range }) => ({ namedRangeId, name,
+        range: options.returnedRange ? options.returnedRange(range) : range });
     const fetchImpl = async (url, init) => {
         const body = JSON.parse(init.body);
         if (url.includes(':getByDataFilter?')) {
@@ -19,22 +21,26 @@ function fixture(options = {}) {
             options.beforeRead?.(state);
             assert.deepEqual(body.dataFilters, [{ developerMetadataLookup: { metadataId: 19,
                 metadataKey: 'recordId', metadataValue: 'a', locationType: 'ROW' } }, { a1Range: "'Companies'!1:1" }]);
-            const response = Response.json({ namedRanges: [...state.names.values()], sheets: [{ properties: { title: 'Companies', sheetId: 7 },
+            const response = Response.json({ namedRanges: [...state.names.values()].map(returnedName),
+                sheets: [{ properties: { title: 'Companies', sheetId: state.sheetId },
                 data: [{ rowData: [{ values: state.headers.map(gridCell) }] }, ...state.rows.flatMap((row,i) => row.tag === 19
                     ? [{ startRow: i+1, rowData: [{ values: row.cells.map(gridCell) }] }] : [])] }] });
             options.afterRead?.(state);
             return response;
         }
         if (url.endsWith(':batchUpdate') && body.requests) {
+            const replies = [];
             for (const r of body.requests) {
                 if (r.addNamedRange) {
                     const n = r.addNamedRange.namedRange;
                     assert.equal(n.range.endRowIndex, n.range.startRowIndex + 1);
                     assert.equal(n.range.endColumnIndex, n.range.startColumnIndex + 1);
                     state.names.set(n.namedRangeId, n);
+                    state.creationRequests.push(structuredClone(n.range));
+                    replies.push({ addNamedRange: { namedRange: returnedName(n) } });
                 } else state.names.delete(r.deleteNamedRange.namedRangeId);
             }
-            return Response.json({});
+            return Response.json({ replies });
         }
         assert.ok(url.endsWith('/values:batchUpdate'));
         const first = state.writes++ === 0;
@@ -185,7 +191,9 @@ const { randomUUID } = await import('node:crypto');
 const { registerSourceRoutes } = await import('../../src/server/sources/routes.ts');
 const { SourceCompanyEditor } = await import('../../src/components/SourceCompanyEditor.tsx');
 const { mount } = await import('./lib/mini-render.mjs');
-const { state, fetchImpl } = fixture(), app = express(), directory = await mkdtemp(join(tmpdir(),'sheets-edit-'));
+let responseRange;
+const { state, fetchImpl } = fixture({ returnedRange: range => responseRange ? { ...responseRange } : range });
+const app = express(), directory = await mkdtemp(join(tmpdir(),'sheets-edit-'));
 app.use(express.json());
 const priorFetch = globalThis.fetch, priorDocument = globalThis.document;
 const secret = randomUUID();
@@ -207,7 +215,7 @@ try {
         if (url === 'https://openidconnect.googleapis.com/v1/userinfo') return Response.json({ email: 'fixture@example.test' });
         assert.ok(url.startsWith('https://sheets.googleapis.com/v4/spreadsheets/pilot'));
         if (!init.body) return Response.json(url.includes('/values/') ? { values:[state.headers,...state.rows.map(r=>r.cells)] } :
-            { sheets:[{properties:{title:'Companies',sheetId:7}}] });
+            { sheets:[{properties:{title:'Companies',sheetId:state.sheetId}}] });
         if (url.endsWith('/developerMetadata:search')) return Response.json({});
         const body = JSON.parse(init.body);
         if (body.requests?.[0]?.createDeveloperMetadata) {
@@ -252,7 +260,8 @@ try {
     const audit = JSON.parse(await readFile(join(auditDir,entries[0]),'utf8'));
     assert.equal(audit.outcome,'confirmed');
     assert.deepEqual(audit.previous,{name:'Original',address:'Main',companyFee:100});
-    const endpoint = local + '/api/sources/rows/companies/' + company.id;
+    const rowPath = '/api/sources/rows/companies/' + company.id;
+    const endpoint = local + rowPath;
     for (const [role, fields, status] of [
         ['reader',{name:'Forbidden'},403], ['admin',{pk:'new-id'},409], ['admin',{Formula:'x'},409],
         ['admin',{companyFee:300},409],
@@ -263,6 +272,50 @@ try {
         assert.equal(state.writes,1);
     }
     console.log('Local HTTP flow passed: simulated Google OAuth, connect, enable editing, submit company form, verify sheet cells, audit and refreshed app values.');
+
+    moveFee(state, 3);
+    state.rows[0].cells[3] = 100;
+    const before = state.rows.map(r => [...r.cells]);
+    const expected = structuredClone(before);
+    expected[0][3] = 999;
+    const d2 = { startRowIndex: 1, endRowIndex: 2, startColumnIndex: 3, endColumnIndex: 4 };
+    state.sheetId = 0;
+    responseRange = d2;
+    const { reads, writes } = state;
+    state.creationRequests.length = 0;
+    const result = await api(rowPath, 'PATCH', { fields: { companyFee: 999 } });
+    assert.deepEqual(state.creationRequests, [{ sheetId: 0, ...d2 }]);
+    assert.equal(state.writes, writes + 1);
+    assert.deepEqual(state.rows.map(r => r.cells), expected);
+    assert.equal(state.reads, reads + 4); // Initial snapshot, validation, fresh binding, and post-write readback.
+    assert.equal(result.saved, true);
+    const savedAudits = await Promise.all((await readdir(auditDir)).map(async file =>
+        JSON.parse(await readFile(join(auditDir, file), 'utf8'))));
+    const feeAudit = savedAudits.find(entry => entry.requested.companyFee === 999);
+    assert.equal(feeAudit?.outcome, 'confirmed');
+    assert.equal(feeAudit.verified, true);
+    assert.deepEqual(feeAudit.previous, { companyFee: 100 });
+
+    for (const [label, sheetId, grid] of [
+        ['different sheet ID', 0, { ...d2, sheetId: 7 }],
+        ['null sheet ID', 0, { ...d2, sheetId: null }],
+        ['wrong row', 0, { ...d2, startRowIndex: 2, endRowIndex: 3 }],
+        ['wrong column', 0, { ...d2, startColumnIndex: 2, endColumnIndex: 3 }],
+        ['omitted sheet ID for a nonzero tab', 7, d2],
+    ]) {
+        state.sheetId = sheetId;
+        responseRange = grid;
+        const beforeWrites = state.writes;
+        state.creationRequests.length = 0;
+        const res = await priorFetch(endpoint, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fields: { companyFee: 100 } }) });
+        assert.equal(res.status, 409, label);
+        assert.match((await res.json()).error, /The sheet rejected the change/, label);
+        assert.deepEqual(state.creationRequests, [{ sheetId, ...d2 }], label);
+        assert.equal(state.writes, beforeWrites, label);
+        assert.deepEqual(state.rows.map(r => r.cells), expected, label);
+    }
+    console.log('Sheets range regression passed: omitted tab zero writes only D2, and mismatched coordinates return HTTP 409 before dispatch.');
 } finally {
     globalThis.fetch = priorFetch;
     globalThis.document = priorDocument;

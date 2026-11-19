@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { updateTaggedRow, type Cell, type Change, type Edit, type EditAudit, type FieldWriteEvidence, type Target } from './tagged-row.ts';
 
 type Post = (path: string, body: unknown) => Promise<any>;
-type Grid = { sheetId: number; startRowIndex?: number; endRowIndex: number; startColumnIndex?: number; endColumnIndex: number };
+type Grid = { sheetId?: number; startRowIndex?: number; endRowIndex: number; startColumnIndex?: number; endColumnIndex: number };
 type Binding = { namedRangeId: string; name: string; range: Grid };
 type RejectionReason = 'cell_changed' | 'tagged_row_read_failed' | 'range_creation_failed' |
   'range_missing' | 'range_mismatch' | 'values_update_rejected';
@@ -18,8 +18,11 @@ function cell(data?: GridCell): Cell {
 }
 const equalHeaders = (a: string[], b: string[]) => a.length === b.length && a.every((h,i) => h === b[i]);
 const singleCell = (grid: Grid, sheetId: number, row: number, col: number) =>
-  grid.sheetId === sheetId && (grid.startRowIndex ?? 0) === row && grid.endRowIndex === row + 1 &&
-  (grid.startColumnIndex ?? 0) === col && grid.endColumnIndex === col + 1;
+  (grid.sheetId === undefined ? 0 : grid.sheetId) === sheetId &&
+  (grid.startRowIndex ?? 0) === row &&
+  grid.endRowIndex === row + 1 &&
+  (grid.startColumnIndex ?? 0) === col &&
+  grid.endColumnIndex === col + 1;
 
 export async function editSheetRow(post: Post, edit: Edit, target: Target, audit: (entry: EditAudit) => Promise<void>) {
   const tag = { developerMetadataLookup: { metadataId: target.metadataId, metadataKey: 'recordId',
