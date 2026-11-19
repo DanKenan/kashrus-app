@@ -45,9 +45,19 @@ export const saveCompany = (fields: Partial<{ name: string; address: string; typ
 export async function uploadFile(file: File, draftId:string) { const response = await apiFetch(`/api/sources/upload?draftId=${encodeURIComponent(draftId)}&name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'Content-Type': file.name.toLowerCase().endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }, body: file }); const data = await response.json(); if (!response.ok || data.error) throw new Error(data.error); return data as TabData & { fileName: string; rows: number }; }
 // Picker is loaded only in response to a signed-in account's explicit action.
 export async function pickGoogleFile(onPick: (file: SourceFile) => void) {
-  const { accessToken, appId } = await sourceRequest('/api/sources/oauth/google_sheets/picker-token', 'POST');
+  const { accessToken, appId, apiKey } = await sourceRequest('/api/sources/oauth/google_sheets/picker-token', 'POST');
+  if (!appId?.trim() || !apiKey?.trim()) {
+    throw new Error("Google Picker is not set up. The app's Google Picker configuration is missing.");
+  }
   const browser = window as unknown as { gapi: { load: (name: string, options: { callback: () => void; onerror: () => void }) => void }; google: { picker: any } };
   if (!browser.gapi) await new Promise<void>((resolve, reject) => { const script = document.createElement('script'); script.src = 'https://apis.google.com/js/api.js'; script.onload = () => resolve(); script.onerror = () => reject(new Error("Couldn't load Google Drive. Try again.")); document.head.appendChild(script); });
   await new Promise<void>((resolve, reject) => browser.gapi.load('picker', { callback: resolve, onerror: () => reject(new Error("Couldn't load Google Drive. Try again.")) }));
-  const picker = browser.google.picker; const builder = new picker.PickerBuilder().addView(new picker.DocsView().setMimeTypes('application/vnd.google-apps.spreadsheet')).setOAuthToken(accessToken).setCallback((data: any) => { if (data.action === picker.Action.PICKED) onPick({ id: data.docs[0].id, name: data.docs[0].name }); }); if (appId) builder.setAppId(appId); builder.build().setVisible(true);
+  const picker = browser.google.picker;
+  const builder = new picker.PickerBuilder()
+    .addView(new picker.DocsView().setMimeTypes('application/vnd.google-apps.spreadsheet'))
+    .setOAuthToken(accessToken)
+    .setAppId(appId)
+    .setDeveloperKey(apiKey)
+    .setCallback((data: any) => { if (data.action === picker.Action.PICKED) onPick({ id: data.docs[0].id, name: data.docs[0].name }); });
+  builder.build().setVisible(true);
 }
