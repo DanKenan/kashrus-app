@@ -308,6 +308,14 @@ export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, tok
   const location = { sheetId: row.sheetId, dimension: 'ROWS', startIndex: index, endIndex: index + 1 };
   const values = row.cells.map(({ raw }) => raw === null ? {} : { userEnteredValue:
     typeof raw === 'number' ? { numberValue: raw } : typeof raw === 'boolean' ? { boolValue: raw } : { stringValue: raw } });
+  try {
+    const current = await addLayout(post, edit, target);
+    if (current.sheetId !== row.sheetId || !equalHeaders(current.headers, row.headers)) throw staleAdd();
+  } catch (cause) {
+    // The token is claimed, but no batch was sent.
+    await ledger.finish({ ...entry, outcome: 'rejected' });
+    throw cause;
+  }
   let result;
   try {
     result = await post(':batchUpdate', { requests: [

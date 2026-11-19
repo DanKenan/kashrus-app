@@ -227,7 +227,7 @@ try {
     process.env.GOOGLE_OAUTH_CLIENT_ID = randomUUID();
     process.env.GOOGLE_OAUTH_CLIENT_SECRET = randomUUID();
     globalThis.document = { activeElement:null, addEventListener() {}, removeEventListener() {} };
-    let googleWrites = 0, addBatches = 0, addFailure, holdLayout, holdBatch;
+    let googleWrites = 0, addBatches = 0, addFailure, holdLayout, afterLayout, holdBatch;
     let nextTag = 1000;
     function rowTag(tab, row, index) {
         return { metadataId:row.tag, metadataKey:'recordId', metadataValue:row.tagValue ?? row.cells[0],
@@ -259,7 +259,9 @@ try {
             assert.equal(query.get('ranges'),quoteTab(title));
             const mask = query.get('fields');
             assert.equal([...mask].filter(char => char === '(').length,[...mask].filter(char => char === ')').length);
-            assert.match(mask,/formattedValue,effectiveValue,effectiveFormat\(numberFormat\(type\)\)/);
+            assert.match(mask,/formattedValue,effectiveValue/);
+            assert.match(mask,/rowMetadata\(developerMetadata\(metadataKey,metadataValue\)\)/);
+            if (file.dates?.size) assert.match(mask,/effectiveFormat\(numberFormat\(type\)\)/);
             const rowData = [{ values:tab.headers.map(raw => ({ formattedValue:raw, effectiveValue:{stringValue:raw} })) },
                 ...tab.rows.map(row => ({ values:row.cells.map((raw, col) => {
                     const date = typeof raw === 'number' && file.dates?.has(tab.headers[col]);
@@ -267,7 +269,9 @@ try {
                     return { formattedValue:displayedValue(file,raw,col),
                         effectiveValue:userEnteredValue, ...(date && {effectiveFormat:{numberFormat:{type:'DATE'}}}) };
                 }) }))];
-            return Response.json({ sheets:[{ ...props, data:[{rowData}] }] });
+            const rowMetadata = [{}, ...tab.rows.map((row, index) =>
+                row.tag ? { developerMetadata:[rowTag(tab, row, index)] } : {})];
+            return Response.json({ sheets:[{ ...props, data:[{rowData,rowMetadata}] }] });
         }
         if (url.endsWith(':batchUpdate') || url.endsWith('/values:batchUpdate')) googleWrites++;
         const body = JSON.parse(init.body);
@@ -278,9 +282,15 @@ try {
                 holdLayout = undefined;
                 await hold();
             }
-            return Response.json({ sheets:[{ properties:{ title, ...(tab.sheetId && { sheetId:tab.sheetId }),
+            const response = Response.json({ sheets:[{ properties:{ title, ...(tab.sheetId && { sheetId:tab.sheetId }),
                 sheetType:'GRID', gridProperties:{ rowCount:1000 } },
                 data:[{ rowData:[{ values:tab.headers.map(raw => gridCell(raw)) }] }] }] });
+            if (afterLayout) {
+                const change = afterLayout;
+                afterLayout = undefined;
+                change();
+            }
+            return response;
         }
         if (url.endsWith('/developerMetadata:search')) {
             const key = body.dataFilters[0].developerMetadataLookup.metadataValue;
@@ -782,6 +792,59 @@ try {
             assert.equal(googleWrites,before);
         }
 
+        const productState = productsTab.state;
+        const swapIdAndPrivate = () => {
+            const id = productState.headers.indexOf('ID'), other = productState.headers.indexOf('Private');
+            for (const row of productState.rows) if (row.tag) row.tagValue ??= row.cells[id];
+            for (const cells of [productState.headers, ...productState.rows.map(row => row.cells)])
+                [cells[id], cells[other]] = [cells[other], cells[id]];
+        };
+        const movedProduct = { name:'ID column moved during Add',companyLink:[companyX.id] };
+        const beforeMove = googleWrites, beforeRows = productState.rows.length;
+        const preflightToken = randomUUID(), revision = (await editor('products')).addRevision;
+        afterLayout = swapIdAndPrivate;
+        try {
+            const stale = await add('products',movedProduct,{token:preflightToken,revision,status:409});
+            assert.equal(stale.addRevisionStale,true);
+            assert.equal((await addStore.addLedger('agency',preflightToken).get()).outcome,'rejected');
+            assert.equal(googleWrites,beforeMove);
+            assert.equal(productState.rows.length,beforeRows);
+        } finally { swapIdAndPrivate(); }
+
+        const movedToken = randomUUID();
+        // Move the column after the final layout check while the write is in flight.
+        holdBatch = swapIdAndPrivate;
+        try {
+            const error = await add('products',movedProduct,{token:movedToken,status:409});
+            assert.match(error.error,/may already be in Google Sheets/);
+            assert.equal(googleWrites,beforeMove + 1);
+            assert.equal(productState.rows.length,beforeRows + 1);
+            const audit = await addStore.addLedger('agency',movedToken).get();
+            assert.equal(audit.outcome,'unconfirmed');
+            const inserted = productState.rows[0];
+            assert.equal(inserted.tagValue,audit.recordId);
+            assert.equal(inserted.cells[productState.headers.indexOf('Private')],audit.recordId);
+            assert.ok(!inserted.cells[productState.headers.indexOf('ID')]);
+            const refreshed = await startAddServer();
+            await request(refreshed,'/api/sources/refresh',{body:{},status:[200,429]});
+            assert.equal((await request(refreshed,'/api/sources/connection')).status,'ok');
+            const items = (await request(refreshed,'/api/factories/' + companyX.id + '/items')).products;
+            assert.ok(items.some(row => row.name === 'Needs recovery'));
+            assert.ok(!items.some(row => row.name === movedProduct.name));
+            assert.ok(!(await request(refreshed,'/api/sources/sheet-editor/products')).rows.some(row => row.name === movedProduct.name));
+
+            // The tag alone is enough to suppress the row even if its misplaced cell is cleared.
+            inserted.cells[productState.headers.indexOf('Private')] = null;
+            const adapter = createGoogleSheetsApi({spreadsheetId:'schedule-b', mapping:phaseB,
+                unconfirmedAdds:async id => new Set((await addStore.sheetAdds(id,true)).map(add => add.recordId))});
+            const rows = await adapter.readRows(phaseB.products.table);
+            assert.ok(rows.some(row => row.fields.Name === 'Needs recovery'));
+            assert.ok(!rows.some(row => row.fields.Name === movedProduct.name));
+        } finally {
+            if (productState.rows[0].cells[1] === movedProduct.name) productState.rows.shift();
+            swapIdAndPrivate();
+        }
+
         const lateToken = randomUUID();
         let batchStarted, releaseBatch;
         const batchInFlight = new Promise(resolve => { batchStarted = resolve; });
@@ -807,7 +870,7 @@ try {
             ['changed-value changed','Late Google commit'].includes(row.name)));
         const fresh = await add('companies',{name:'Fresh Add',type:'Factory'});
         assert.equal(fresh.saved,true);
-        console.log('Phase C passed through HTTP for all three sections, including stale mappings, renamed tabs, abandonment and late commits.');
+        console.log('Phase C passed through HTTP for all three sections, including stale mappings, moved ID columns, renamed tabs, abandonment and late commits.');
     } finally {
         await Promise.all(addServers.map(server => new Promise(resolve => server.close(resolve))));
     }

@@ -8,6 +8,10 @@ type GridValue = {
     effectiveValue?: { stringValue?: string; numberValue?: number; boolValue?: boolean };
     effectiveFormat?: { numberFormat?: { type?: string } };
 };
+type GridData = {
+    rowData?: { values?: GridValue[] }[];
+    rowMetadata?: { developerMetadata?: { metadataKey: string; metadataValue: string }[] }[];
+};
 export interface TaggedTable {
     records: { key: string; metadataId: number }[];
     headers: string[];
@@ -44,19 +48,22 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     const matrices = new Map<string, unknown[][]>();
     async function values(table: string, file?: SourceFile) { const path = `${sheet(file)}/values/${encodeURIComponent(range(table))}`; if (!matrices.has(path))
         matrices.set(path, (await request('sheets', path)).values || []); return matrices.get(path)!; }
-    async function readRowsWithExpiration(table: string, file: SourceFile | undefined, expiration: string) {
-        // Read display values, effective values and formats together so a concurrent
-        // row move cannot pair a date serial with a different record.
+    async function readGridRows(table: string, file: SourceFile | undefined, expiration: string | undefined) {
+        // Fetch row tags, values and date formats together so a row move cannot
+        // make a tag or date serial apply to a different record.
+        const format = expiration ? ',effectiveFormat(numberFormat(type))' : '';
+        const tags = config.unconfirmedAdds ? ',rowMetadata(developerMetadata(metadataKey,metadataValue))' : '';
         const query = new URLSearchParams({ ranges: range(table),
-            fields: 'sheets(properties(title),data(rowData(values(formattedValue,effectiveValue,effectiveFormat(numberFormat(type))))))' });
+            fields: `sheets(properties(title),data(rowData(values(formattedValue,effectiveValue${format}))${tags}))` });
         const result = await request('sheets', `${sheet(file)}?${query}`);
         const tab = result.sheets?.find((entry: { properties: { title: string } }) => entry.properties?.title === table);
         if (!tab) throw Error('Google Sheets tab missing.');
-        const grid: GridValue[][] = (tab.data?.[0]?.rowData || []).map((row: { values?: GridValue[] }) => row.values || []);
+        const data: GridData = tab.data?.[0] ?? {};
+        const grid = (data.rowData ?? []).map(row => row.values ?? []);
         const parsed = matrixRows(grid.map(row => row.map(cell => cell.formattedValue ??
             cell.effectiveValue?.stringValue ?? cell.effectiveValue?.numberValue ?? cell.effectiveValue?.boolValue)));
-        const index = parsed.columns.indexOf(expiration);
-        if (index >= 0) {
+        const index = expiration ? parsed.columns.indexOf(expiration) : -1;
+        if (expiration && index >= 0) {
             for (const row of parsed.rows) {
                 const cell = grid[row.rowNumber! - 1]?.[index];
                 const value = cell?.effectiveValue;
@@ -68,7 +75,13 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
                 }
             }
         }
-        return parsed;
+        const recordTags = new Map<number, string[]>();
+        for (const [index, row] of (data.rowMetadata ?? []).entries()) {
+            const ids = (row.developerMetadata ?? []).filter(tag =>
+                tag.metadataKey === 'recordId' && isAddRecordId(tag.metadataValue)).map(tag => tag.metadataValue);
+            if (ids.length) recordTags.set(index + 1, ids);
+        }
+        return { ...parsed, recordTags };
     }
     async function listTables(file?: SourceFile) { const meta = await request('sheets', `${sheet(file)}?fields=sheets.properties`); const tables = []; for (const s of meta.sheets || []) {
         const table = s.properties.title;
@@ -176,13 +189,16 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
             const ingredients = config.mapping.ingredients;
             const expiration = ingredients.table === table && (ingredients.file?.id || config.spreadsheetId) === fileId
                 ? ingredients.expiresOn : undefined;
-            const parsed = expiration ? await readRowsWithExpiration(table, file, expiration) : matrixRows(await values(table, file));
+            const grid = expiration || config.unconfirmedAdds ? await readGridRows(table, file, expiration) : undefined;
+            const parsed = grid ?? matrixRows(await values(table, file));
             const primary = [config.mapping.companies, config.mapping.ingredients, config.mapping.products]
                 .find(section => section.table === table && (section.file?.id || config.spreadsheetId) === fileId)?.pk ||
                 parsed.columns.find(column => /^id$/i.test(column));
-            const hasAdd = primary && parsed.rows.some(row => isAddRecordId(String(row.fields[primary])));
+            const hasAdd = grid?.recordTags.size || (primary && parsed.rows.some(row => isAddRecordId(String(row.fields[primary]))));
             const blocked = hasAdd ? await config.unconfirmedAdds?.(fileId) : undefined;
-            const rows = primary && blocked?.size ? parsed.rows.filter(row => !blocked.has(String(row.fields[primary]))) : parsed.rows;
+            const rows = blocked?.size ? parsed.rows.filter(row =>
+                !grid?.recordTags.get(row.rowNumber!)?.some(id => blocked.has(id)) &&
+                !(primary && blocked.has(String(row.fields[primary])))) : parsed.rows;
             return keyRows(rows, parsed.columns, ['google_sheets', fileId, table], config.mapping);
         },
         async sampleRows(table: string) {
