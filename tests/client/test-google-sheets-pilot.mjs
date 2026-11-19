@@ -625,6 +625,16 @@ try {
         assert.deepEqual(addEditor.fields.find(field => field.field === 'companyLink').value,[]);
         assert.ok(!addEditor.fields.some(field => field.header === 'ID' || field.field === 'Private'));
         assert.ok(addEditor.companies.some(company => company.id === companyX.id));
+        let pendingQueries = 0;
+        const ordinary = createGoogleSheetsApi({ spreadsheetId:'clients', mapping:phaseB, unconfirmedAdds:async () => {
+            pendingQueries++;
+            return new Set();
+        } });
+        const legacyUuid = { tag:78, cells:[randomUUID(),'Ordinary UUID','','Factory'] };
+        companiesTab.state.rows.push(legacyUuid);
+        assert.ok((await ordinary.readRows('Clients')).some(row => row.sourceKey === legacyUuid.cells[0]));
+        assert.equal(pendingQueries,0);
+        companiesTab.state.rows.pop();
         const initialAddCount = addBatches;
         await add('companies',{name:'Not permitted',type:'Factory'},{status:403,headers:{'x-test-role':'reader'}});
         await add('companies',{name:'Other agency',type:'Factory'},{status:409,headers:{'x-test-agency':'other'}});
@@ -653,7 +663,7 @@ try {
         const companyToken = randomUUID();
         const company = await add('companies',{name:'=New factory',type:'Factory',companyFee:125,Notes:'Stored text'},
             {token:companyToken});
-        assert.match(company.recordId,/^[0-9a-f-]{36}$/);
+        assert.match(company.recordId,/^addc[0-9a-f]{4}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
         const rawCompany = companiesTab.state.rows[0];
         assert.deepEqual(rawCompany.cells.slice(0,9),[company.recordId,'=New factory',null,'Factory',null,null,125,null,'Stored text']);
         assert.equal(rawCompany.tag,company.metadataId);

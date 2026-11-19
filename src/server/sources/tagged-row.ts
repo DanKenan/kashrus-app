@@ -210,6 +210,15 @@ export type EditAudit = Target & {
   verified: boolean; at: string; otherFieldsChanged?: boolean; writeEvidence?: FieldWriteEvidence[];
 };
 
+// RFC 9562 version 8 leaves custom bits for the Add marker. The other 106
+// bits remain random. Ordinary spreadsheet IDs need no Add-ledger lookup.
+export function newAddRecordId() {
+  const uuid = randomUUID();
+  return 'addc' + uuid.slice(4, 14) + '8' + uuid.slice(15);
+}
+export const isAddRecordId = (id: string) =>
+  /^addc[0-9a-f]{4}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+
 export type AddTarget = Omit<Target, 'recordId' | 'metadataId'>;
 export type AddAudit = AddTarget & {
   kind: 'add'; operationId: string; token: string; recordId: string; metadataId: number | null;

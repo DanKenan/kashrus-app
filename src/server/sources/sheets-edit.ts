@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { addedRowHash, describeTaggedEdit, planTaggedAdd, updateTaggedRow, type AddAudit, type AddTarget, type Cell, type Change, type Edit, type EditAudit, type FieldWriteEvidence, type Target } from './tagged-row.ts';
+import { addedRowHash, describeTaggedEdit, newAddRecordId, planTaggedAdd, updateTaggedRow, type AddAudit, type AddTarget, type Cell, type Change, type Edit, type EditAudit, type FieldWriteEvidence, type Target } from './tagged-row.ts';
 
 type Post = (path: string, body: unknown) => Promise<any>;
 type Grid = { sheetId?: number; startRowIndex?: number; endRowIndex: number; startColumnIndex?: number; endColumnIndex: number };
@@ -252,7 +252,7 @@ export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, tok
   if (prior) return recover(prior);
   const name = edit.fields?.name;
   const entry: AddAudit = { ...target, kind: 'add', addSpreadsheetId: target.spreadsheetId, operationId: randomUUID(),
-    recordId: randomUUID(), token, outcome: 'attempted', verified: false, metadataId: null, at: new Date().toISOString(),
+    recordId: newAddRecordId(), token, outcome: 'attempted', verified: false, metadataId: null, at: new Date().toISOString(),
     name: typeof name === 'string' && name.length <= 2000 ? name : '', requestHash, expectedHash: '' };
   if (resume) {
     // A response can be lost before the first request claims the token.

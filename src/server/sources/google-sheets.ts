@@ -1,5 +1,5 @@
 import { addSheetRow, editSheetRow, readSheetAddEditor, readSheetEditor } from './sheets-edit.ts';
-import { isoDateFromSheetsSerial, type AddTarget, type Edit, type EditAudit, type Target } from './tagged-row.ts';
+import { isAddRecordId, isoDateFromSheetsSerial, type AddTarget, type Edit, type EditAudit, type Target } from './tagged-row.ts';
 import { sourceFetch } from './http.ts';
 import { matrixRows, tabularConnector, keyRows } from './tabular.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
@@ -177,10 +177,11 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
             const expiration = ingredients.table === table && (ingredients.file?.id || config.spreadsheetId) === fileId
                 ? ingredients.expiresOn : undefined;
             const parsed = expiration ? await readRowsWithExpiration(table, file, expiration) : matrixRows(await values(table, file));
-            const blocked = await config.unconfirmedAdds?.(fileId, table);
             const primary = [config.mapping.companies, config.mapping.ingredients, config.mapping.products]
                 .find(section => section.table === table && (section.file?.id || config.spreadsheetId) === fileId)?.pk ||
                 parsed.columns.find(column => /^id$/i.test(column));
+            const hasAdd = primary && parsed.rows.some(row => isAddRecordId(String(row.fields[primary])));
+            const blocked = hasAdd ? await config.unconfirmedAdds?.(fileId, table) : undefined;
             const rows = primary && blocked?.size ? parsed.rows.filter(row => !blocked.has(String(row.fields[primary]))) : parsed.rows;
             return keyRows(rows, parsed.columns, ['google_sheets', fileId, table], config.mapping);
         },
