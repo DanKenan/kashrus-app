@@ -17,7 +17,7 @@ const labels: Record<string, string> = {
 export const sheetSectionNames = { companies: 'Companies', ingredients: 'Schedule A', products: 'Schedule B' };
 const recordNames = { companies: 'company', ingredients: 'ingredient', products: 'product' };
 type Value = string | number | boolean | string[];
-type Field = { field: string; header: string; rule: ValueRule; value: Value; readOnly?: string; revision: string };
+type Field = { field: string; header: string; rule: ValueRule; value: Value; readOnly?: string; choices?: string[]; revision: string };
 type Row = { id: string; name: string };
 type Company = Row & { key: string };
 type Editor = { fields: Field[]; companies: Company[] };
@@ -75,6 +75,13 @@ function FieldInput({ section, field, value, companies, onChange }: {
     (section === 'companies' && ['address', 'companyFee', 'mashgiachFee'].includes(field.field));
   const label = builtIn ? labels[field.field] : field.field;
   if (field.readOnly) return <p className="break-words">{label} · <span className="text-ink-soft">{field.readOnly}</span></p>;
+  if (field.choices) return <label className="block space-y-2">
+    {label}
+    <select className={setupField} value={String(value)} onChange={e => onChange(e.target.value)}>
+      {!field.choices.includes(String(value)) && <option value={String(value)} disabled>{String(value) || 'Choose a type'}</option>}
+      {field.choices.map(choice => <option key={choice} value={choice}>{choice}</option>)}
+    </select>
+  </label>;
   if (field.rule === 'companyLink') return <CompanySelector label={label} companies={companies} selected={value as string[]} onChange={onChange} />;
   if (field.rule === 'boolean') return <label className="flex min-h-11 items-center gap-2">
     <input type="checkbox" checked={value === true} onChange={e => onChange(e.target.checked)} />{label}

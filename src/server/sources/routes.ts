@@ -221,6 +221,16 @@ export function registerSourceRoutes(app: any, deps: {
   const sheetTags = (c: Connection, list: SourceSection) => c.sheetsTables?.[list] ||
     (list === 'companies' ? c.sheetsPilot : undefined);
   const sheetConflict = (message: string): never => { throw Object.assign(Error(message), { status: 409 }); };
+  function assertSeparateSheetTabs(c: Connection) {
+    const tabs = new Set<string>();
+    for (const section of sections) {
+      const { table, file } = c.mapping[section];
+      if (!table) continue;
+      const key = JSON.stringify([file?.id || c.baseId, table]);
+      if (tabs.has(key)) return sheetConflict('Choose a separate Google Sheets tab for each mapped section before editing.');
+      tabs.add(key);
+    }
+  }
   const sheetRows = (c: Connection, list: SourceSection) => sheetsApi(c, list).readRows(c.mapping[list].table);
   async function sheetCompanies(c: Connection) {
     return (await sheetRows(c, 'companies')).map(row => ({
@@ -237,6 +247,7 @@ export function registerSourceRoutes(app: any, deps: {
     return list === 'companies' ? [...(data?.companies ?? []), ...(data?.otherCompanies ?? [])] : data?.[list] ?? [];
   }
   function sheetTarget(c: Connection, list: SourceSection, rowId: string, actorId: string) {
+    assertSeparateSheetTabs(c);
     const tags = sheetTags(c, list);
     const row = cachedSheetRows(c.agencyId, list).find(r => r.id === rowId);
     const record = tags?.records.find(r => r.key === row?.sourceKey);
@@ -493,10 +504,11 @@ export function registerSourceRoutes(app: any, deps: {
       if (c?.sourceType !== 'google_sheets' || typeof req.body?.enabled !== 'boolean')
           return res.status(400).json({ error: 'Choose a connected Google sheet.' });
       const next = { ...c, updatedAt: new Date().toISOString(), updatedBy: user.id };
-      if (req.body.enabled && sections.every(section => !c.mapping[section].table || c.sheetsTables?.[section])) return res.json(safe(id));
       if (req.body.enabled) {
-          if (c.access !== 'readwrite' || c.oauth?.google_sheets?.access !== 'readwrite')
+          if (!sheetAccess(c))
               return res.status(403).json({ error: 'Change access to enable editing.' });
+          assertSeparateSheetTabs(c);
+          if (sections.every(section => !c.mapping[section].table || c.sheetsTables?.[section])) return res.json(safe(id));
           next.sheetsTables = { ...c.sheetsTables };
           for (const section of sections) {
               const { table, pk } = c.mapping[section];
@@ -558,6 +570,7 @@ export function registerSourceRoutes(app: any, deps: {
     const c = connections.get(id), list = req.params.list;
     if (!sheetAccess(c) || !sectionOf(list) || !sheetTags(c, list))
       return res.status(403).json({ error: 'This source is read only.' });
+    assertSeparateSheetTabs(c);
     const tags = new Set(sheetTags(c, list)!.records.map(record => record.key));
     res.json({ rows: cachedSheetRows(id, list).filter(row => row.sourceKey && tags.has(row.sourceKey)).map(({ id, name }) => ({ id, name })) });
   }));
@@ -732,7 +745,7 @@ export function registerSourceRoutes(app: any, deps: {
     cache.state(id).itemsFor(companyId, kind).map(item => {
       const override = connections.get(id)?.group1Overrides?.[kind]?.[item.id];
       return { certificationRaw: item.certificationRaw, statusRaw: item.statusRaw, agencyRaw: item.agencyRaw, confidence: item.confidence, id: item.id, name: item.name, agency: 'certifyingAgency' in item ? item.certifyingAgency || '' : '',
-        dpm: item.dpm || null, group1: typeof override === 'boolean' ? override : item.group1 === true,
+        ...('expiresOn' in item && { expiresOn: item.expiresOn }), dpm: item.dpm || null, group1: typeof override === 'boolean' ? override : item.group1 === true,
         group1Source: typeof override === 'boolean' ? 'admin' : 'source' };
     });
   app.get('/api/factories/:companyId/items', handler((req: any, res: any, { id }: any) => {
@@ -854,7 +867,7 @@ export function inspectionSourceAccessor(cache: ReturnType<typeof createSourceCa
       items: (companyId: string, kind: 'ingredient' | 'product') => state.itemsFor(companyId, kind).map(item => ({
         id: item.id, name: item.name, brand: item.brand ?? '', code: 'code' in item ? item.code ?? '' : '',
         certificationRaw: item.certificationRaw ?? '', statusRaw: item.statusRaw ?? '', agency: item.certifyingAgency ?? '',
-        dpm: item.dpm ?? '', group1: connection?.group1Overrides?.[kind]?.[item.id] ?? item.group1 === true,
+        ...('expiresOn' in item && { expiresOn: item.expiresOn }), dpm: item.dpm ?? '', group1: connection?.group1Overrides?.[kind]?.[item.id] ?? item.group1 === true,
       })),
     };
   };

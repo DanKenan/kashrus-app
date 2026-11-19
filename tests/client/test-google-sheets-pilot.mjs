@@ -74,7 +74,7 @@ function fixture(options = {}) {
     const api = createGoogleSheetsApi({ spreadsheetId: 'pilot', mapping, fetchImpl });
     const save = (fields = { companyFee: 200 }) => api.updateTaggedRow({ mapping, section: 'companies', idHeader: 'ID',
         fields, links: { resolve: () => [], sourceKey: () => undefined } }, target, async e => state.audit.push(structuredClone(e)));
-    return { state, save, fetchImpl };
+    return { state, save, fetchImpl, dates };
 }
 function moveFee(s, other = 2) {
     for (const row of [s.headers, ...s.rows.map(r => r.cells)]) [row[1],row[other]] = [row[other],row[1]];
@@ -204,6 +204,7 @@ const { tmpdir } = await import('node:os');
 const { join } = await import('node:path');
 const { randomUUID } = await import('node:crypto');
 const { registerSourceRoutes } = await import('../../src/server/sources/routes.ts');
+const { createSourceStore } = await import('../../src/server/sources/store.ts');
 const { SourceCompanyEditor } = await import('../../src/components/SourceCompanyEditor.tsx');
 const { mount } = await import('./lib/mini-render.mjs');
 let responseRange;
@@ -213,11 +214,12 @@ const app = express(), directory = await mkdtemp(join(tmpdir(),'sheets-edit-'));
 app.use(express.json());
 const priorFetch = globalThis.fetch, priorDocument = globalThis.document;
 const secret = randomUUID();
-registerSourceRoutes(app, { dataDir: directory, secret: () => secret, staged: () => false, testMode: false,
+const routeDeps = { dataDir: directory, secret: () => secret, staged: () => false, testMode: false,
     db: () => null, timeZone: () => 'UTC', requireAdmin: (req,res) => {
         if (req.headers['x-test-role'] === 'reader') { res.status(403).json({ error:'Admin required' }); return null; }
         return { id:'admin',agencyId:req.headers['x-test-agency'] || 'agency' };
-    } });
+    } };
+const { inspectionSource } = registerSourceRoutes(app, routeDeps);
 const server = await new Promise(resolve => { const s = app.listen(0,'127.0.0.1',() => resolve(s)); });
 const local = 'http://127.0.0.1:' + server.address().port;
 const previousClient = process.env.GOOGLE_OAUTH_CLIENT_ID, previousSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
@@ -225,6 +227,12 @@ try {
     process.env.GOOGLE_OAUTH_CLIENT_ID = randomUUID();
     process.env.GOOGLE_OAUTH_CLIENT_SECRET = randomUUID();
     globalThis.document = { activeElement:null, addEventListener() {}, removeEventListener() {} };
+    let googleWrites = 0;
+    function displayedValue(file, raw, col) {
+        if (typeof raw !== 'number' || !file.dates?.has(file.state.headers[col])) return raw;
+        const [year, month, day] = new Date(Date.UTC(1899,11,30) + raw * 86400000).toISOString().slice(0,10).split('-');
+        return [day,month,year].join('/');
+    }
     globalThis.fetch = async (url, init = {}) => {
         if (String(url).startsWith('/api/')) return priorFetch(local + url, init);
         if (url === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: randomUUID(), refresh_token: randomUUID() });
@@ -233,13 +241,30 @@ try {
         const file = files.get(fileId);
         assert.ok(file, 'unexpected spreadsheet: ' + url);
         const { state: tab, title } = file;
+        const query = new URL(url).searchParams;
         if (!init.body) {
             if (url.includes('/values/')) {
                 assert.equal(decodeURIComponent(new URL(url).pathname.split('/values/')[1]), quoteTab(title));
-                return Response.json({ values:[tab.headers,...tab.rows.map(r=>r.cells)] });
+                const unformatted = query.get('valueRenderOption') === 'UNFORMATTED_VALUE';
+                return Response.json({ values:[tab.headers,...tab.rows.map(r => r.cells.map((raw, col) =>
+                    unformatted ? raw : displayedValue(file,raw,col)))] });
             }
-            return Response.json({ sheets:[{properties:{title,sheetId:tab.sheetId}}] });
+            const props = { properties:{title,sheetId:tab.sheetId} };
+            if (!query.has('ranges')) return Response.json({ sheets:[props] });
+            assert.equal(query.get('ranges'),quoteTab(title));
+            const mask = query.get('fields');
+            assert.equal([...mask].filter(char => char === '(').length,[...mask].filter(char => char === ')').length);
+            assert.match(mask,/formattedValue,effectiveValue,effectiveFormat\(numberFormat\(type\)\)/);
+            const rowData = [{ values:tab.headers.map(raw => ({ formattedValue:raw, effectiveValue:{stringValue:raw} })) },
+                ...tab.rows.map(row => ({ values:row.cells.map((raw, col) => {
+                    const date = typeof raw === 'number' && file.dates?.has(tab.headers[col]);
+                    const { userEnteredValue } = gridCell(raw);
+                    return { formattedValue:displayedValue(file,raw,col),
+                        effectiveValue:userEnteredValue, ...(date && {effectiveFormat:{numberFormat:{type:'DATE'}}}) };
+                }) }))];
+            return Response.json({ sheets:[{ ...props, data:[{rowData}] }] });
         }
+        if (url.endsWith(':batchUpdate') || url.endsWith('/values:batchUpdate')) googleWrites++;
         if (url.endsWith('/developerMetadata:search')) return Response.json({});
         const body = JSON.parse(init.body);
         if (body.requests?.[0]?.createDeveloperMetadata) {
@@ -369,7 +394,7 @@ try {
         dates: new Set(['Expiry']),
         rows: [
             { tag:42, cells:['i','Flour','Company X','Old brand','OU-P','OU','pareve','Old plant',45400,100,'=1+1','Keep'] },
-            { tag:43, cells:['j','Salt','','','OU-P','','','',null,0,'=2+2','Keep'] },
+            { tag:43, cells:['j','Salt','y','','OU-P','','','','2028-06-07',0,'=2+2','Keep'] },
         ],
         beforeRead(tab) {
             if (disrupt && tab.reads === disrupt) tab.rows[1].cells[4] = 'Unexpected';
@@ -403,6 +428,16 @@ try {
         return data;
     }
     const companyEditor = await readEditor('companies',companyX);
+    assert.deepEqual(companyEditor.fields.find(f => f.field === 'type').choices,['Factory','Kitchen']);
+    const companyBefore = structuredClone(companiesTab.state.rows[0].cells);
+    const factoryBefore = await api('/api/factories/' + companyX.id + '/items');
+    assert.equal(factoryBefore.ingredients[0].expiresOn,'2024-04-18');
+    const writesBeforeTypo = googleWrites;
+    assert.match((await patch('companies',companyX,{type:'Facotry'},{editor:companyEditor,status:400})).error,/configured values/);
+    assert.equal(googleWrites,writesBeforeTypo);
+    assert.deepEqual(companiesTab.state.rows[0].cells,companyBefore);
+    assert.deepEqual(await api('/api/factories/' + companyX.id + '/items'),factoryBefore);
+    assert.ok((await api('/api/factories')).companies.some(row => row.id === companyX.id));
     assert.match((await patch('companies', companyX, { name:'Renamed X' }, { editor:companyEditor, status:409 })).error, /would leave company links/);
     assert.equal(companiesTab.state.writes,0);
     const ingredientEditor = await readEditor('ingredients',ingredient);
@@ -430,23 +465,30 @@ try {
     ingredientsTab.state.rows.reverse();
     ingredientsTab.state.rows.unshift({ tag:99, cells:['new','Inserted'] });
     const editIngredient = { name:'Wheat flour', brand:'=Raw brand', companyLink:[companyZ.id,companyY.id,companyX.id],
-        certification:'  OK-D  ', agency:'Star K', status:'Dairy equipment', plant:'North', expiresOn:'2028-02-29', Deposit:12.75 };
+        certification:'  OK-D  ', agency:'Star K', status:'Dairy equipment', plant:'North', expiresOn:'2028-03-04', Deposit:12.75 };
     await patch('ingredients',ingredient,editIngredient,{ editor:ingredientEditor });
-    const serial = (Date.UTC(2028,1,29) - Date.UTC(1899,11,30)) / 86400000;
+    const serial = (Date.UTC(2028,2,4) - Date.UTC(1899,11,30)) / 86400000;
     assert.deepEqual(ingredientsTab.state.rows[2].cells,
         ['i','Wheat flour','z, y, x','=Raw brand','  OK-D  ','Star K','Dairy equipment','North',serial,12.75,'=1+1','Keep']);
     assert.equal(ingredientsTab.state.rows[1].cells[1],'Salt');
     assert.equal(ingredientsTab.state.rows[0].cells[1],'Inserted');
     const reread = await readEditor('ingredients',ingredient);
-    assert.equal(reread.fields.find(f => f.field === 'expiresOn').value,'2028-02-29');
+    assert.equal(reread.fields.find(f => f.field === 'expiresOn').value,'2028-03-04');
+    assert.equal(displayedValue(ingredientsTab,ingredientsTab.state.rows[2].cells[8],8),'04/03/2028');
     assert.deepEqual(new Set(reread.fields.find(f => f.field === 'companyLink').value),new Set([companyX.id,companyY.id,companyZ.id]));
     const factoryItems = await api('/api/factories/' + companyX.id + '/items');
-    assert.deepEqual(factoryItems.ingredients.map(({ name, dpm }) => [name,dpm]), [['Wheat flour','dairy_equipment']]);
+    assert.deepEqual(factoryItems.ingredients.map(({ name, dpm, expiresOn }) => [name,dpm,expiresOn]),
+        [['Wheat flour','dairy_equipment','2028-03-04']]);
+    assert.equal(inspectionSource('agency').items(companyX.id,'ingredient')[0].expiresOn,'2028-03-04');
+    const yItems = await api('/api/factories/' + companyY.id + '/items');
+    assert.equal(yItems.ingredients.find(row => row.name === 'Salt').expiresOn,'2028-06-07');
 
     await patch('companies',companyX,{ name:'Renamed X', address:'New road', type:'Kitchen', brand:'New company brand',
         plant:'New company plant', companyFee:999, mashgiachFee:250, Notes:'=Literal note' },{ editor:companyEditor });
     assert.deepEqual(companiesTab.state.rows[0].cells,
         ['x','Renamed X','New road','Kitchen','New company brand','New company plant',999,250,'=Literal note','Keep']);
+    assert.equal(inspectionSource('agency').state.companies.find(row => row.id === companyX.id).type,'Kitchen');
+    assert.deepEqual(await api('/api/factories/' + companyX.id + '/items'),factoryItems);
 
     const productEditor = await readEditor('products',product);
     await patch('products',product,{ name:'Corn cereal', brand:'New product brand', code:'0000123', companyLink:[companyY.id,companyX.id],
@@ -487,6 +529,54 @@ try {
     assert.ok(logs.some(entry => entry.section === 'products' && entry.spreadsheetId === 'schedule-b' && entry.table === 'Schedule B' && entry.outcome === 'confirmed'));
     assert.ok(logs.some(entry => entry.section === 'ingredients' && entry.spreadsheetId === 'schedule-a' &&
         entry.outcome === 'unconfirmed' && entry.writeEvidence[0].readBack.raw === 'Unexpected'));
+    const shared = fixture({ title:'Shared', tracked:new Map([[19,'bakery'],[32,'flour']]),
+        headers:['ID','Name','Company'], rows:[
+            { tag:19, cells:['bakery','Bakery',''] },
+            { tag:32, cells:['flour','Flour','Bakery'] },
+        ],
+    });
+    files.set('shared-review',{ ...shared, title:'Shared' });
+    const overlapping = { companies:{ table:'Shared', pk:'ID', name:'Name' },
+        ingredients:{ table:'Shared', file:{ id:'shared-review', name:'Shared' }, pk:'ID', name:'Name', companyLink:'Company' },
+        products:{ table:'' }, group1Values:[] };
+    await api('/api/sources/connection','PUT',{ sourceType:'google_sheets', baseId:'shared-review', access:'readwrite', mapping:overlapping });
+    const bakery = (await api('/api/factories')).companies.find(row => row.name === 'Bakery');
+    assert.equal((await api('/api/factories/' + bakery.id + '/items')).ingredients[0].name,'Flour');
+    const writesBeforeOverlap = googleWrites;
+    async function expectSharedTabRejection(base, path, method, body) {
+        const response = await priorFetch(base + path,{ method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body) });
+        assert.equal(response.status,409);
+        assert.match((await response.json()).error,/separate Google Sheets tab/);
+    }
+    await expectSharedTabRejection(local,'/api/sources/sheets-editing','PUT',{enabled:true});
+
+    // Exercise the PATCH guard for an agency that already enabled the shared tab on the earlier head.
+    const store = createSourceStore(routeDeps);
+    const savedConnection = await store.raw('agency');
+    const existingTags = { headers:shared.state.headers, idHeader:'ID',
+        records:shared.state.rows.map(row => ({ key:row.cells[0],metadataId:row.tag })) };
+    await store.save({ ...savedConnection,sheetsTables:{ companies:existingTags,ingredients:existingTags } });
+    const legacy = express();
+    legacy.use(express.json());
+    const { boot } = registerSourceRoutes(legacy,routeDeps);
+    const legacyServer = await new Promise(resolve => { const s = legacy.listen(0,'127.0.0.1',() => resolve(s)); });
+    try {
+        await boot();
+        const legacyBase = 'http://127.0.0.1:' + legacyServer.address().port;
+        const target = { agencyId:'agency', actorId:'admin', section:'ingredients', spreadsheetId:'shared-review',
+            table:'Shared', recordId:'bakery', metadataId:19 };
+        const transport = createGoogleSheetsApi({ spreadsheetId:'shared-review', mapping:overlapping, fetchImpl:shared.fetchImpl });
+        const editable = await transport.readTaggedEditor({ mapping:overlapping,section:'ingredients',idHeader:'ID',fields:{},
+            links:{ resolve:() => [],sourceKey:() => undefined } },target);
+        await expectSharedTabRejection(legacyBase,'/api/sources/sheets-editing','PUT',{enabled:true});
+        await expectSharedTabRejection(legacyBase,'/api/sources/rows/ingredients/' + bakery.id,'PATCH',
+            { fields:{ name:'Accidental company rename' },expected:{ name:editable.find(field => field.field === 'name').revision } });
+        const intact = await priorFetch(legacyBase + '/api/factories/' + bakery.id + '/items');
+        assert.equal((await intact.json()).ingredients[0].name,'Flour');
+    } finally { await new Promise(resolve => legacyServer.close(resolve)); }
+    assert.equal(googleWrites,writesBeforeOverlap);
+    assert.deepEqual(shared.state.rows.map(row => row.cells),[['bakery','Bakery',''],['flour','Flour','Bakery']]);
+    console.log('Shared tabs reject editing on enable and PATCH with zero Google writes.');
     console.log('Phase B passed through HTTP and the simulated Sheets transport for all mapped fields on separate files and tabs.');
 
 } finally {
@@ -509,6 +599,9 @@ const submissions = [];
 let refreshes = 0, uiSaved = 0;
 globalThis.fetch = async (url, init = {}) => {
     if (url === '/api/sources/sheet-editor/products/product') return Response.json(uiFields);
+    if (url === '/api/sources/sheet-editor/companies/company') return Response.json({ companies:[], fields:[
+        { field:'type',header:'Type',rule:'text',value:'Factory',choices:['Factory','Kitchen'],revision:'old-type' },
+    ] });
     if (url === '/api/sources/refresh') { refreshes++; return Response.json({ ok:true }); }
     assert.equal(url,'/api/sources/rows/products/product');
     submissions.push(JSON.parse(init.body));
@@ -534,5 +627,8 @@ try {
     assert.equal(refreshes,1);
     assert.match(view.html(),/value="0099"/);
     assert.equal(view.find(e => e.type === 'button' && e.props.type === 'submit')[0].props.disabled,true);
-    console.log('Schedule B editor sends a sparse revision-checked patch and requires review after an unconfirmed save.');
+    const companyView = mount(SheetRecordEditor,{ section:'companies', row:{id:'company',name:'Bakery'}, onSaved() {}, onClose() {} });
+    await companyView.render();
+    assert.match(companyView.html(),/<select[^>]*><option value="Factory" selected="">Factory<\/option><option value="Kitchen">Kitchen<\/option><\/select>/);
+    console.log('Sheet editors use configured company types and require review after an unconfirmed save.');
 } finally { globalThis.fetch = priorFetch; }

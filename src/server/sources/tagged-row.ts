@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { parseMoney } from '../../lib/sourceAmount.ts';
 import { builtinFieldKeys, isMappedCustomField, type ValueRule, type SourceSection } from '../../lib/sourcePreview.ts';
+import { companyTypeChoices } from './mapping.ts';
 import type { SourceMapping } from './types.ts';
 
 type Scalar = string | number | boolean;
@@ -21,6 +22,13 @@ export function feeAlreadySet(previous: unknown, amount: number) {
 const text = (value: string) => value.replace(/\r\n?/g, '\n');
 const day = 86400000;
 const sheetsEpoch = Date.UTC(1899, 11, 30);
+export function isoDateFromSheetsSerial(value: unknown) {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return undefined;
+  const date = new Date(sheetsEpoch + value * day);
+  if (!Number.isFinite(date.getTime())) return undefined;
+  const iso = date.toISOString();
+  return /^\d{4}-/.test(iso) ? iso.slice(0, 10) : undefined;
+}
 function isoSerial(value: unknown) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
   const millis = Date.parse(value + 'T00:00:00Z');
@@ -133,10 +141,7 @@ export function describeTaggedEdit(edit: Edit, target: Target, snapshot: TaggedS
     let value: string | number | boolean | string[] = cell.raw ?? '';
     let readOnly = cell.formula ? 'Formula cells are read only.' : undefined;
     if (!readOnly && rule === 'date' && value !== '') {
-      if (cell.dateSerial && typeof value === 'number' && Number.isInteger(value)) {
-        const date = new Date(sheetsEpoch + value * day);
-        if (Number.isFinite(date.getTime())) value = date.toISOString().slice(0, 10);
-      }
+      if (cell.dateSerial) value = isoDateFromSheetsSerial(value) ?? value;
       if (isoSerial(value) === undefined) readOnly = 'Review the date format in Google Sheets.';
     }
     if (!readOnly && rule === 'money' && value !== '') value = parseMoney(value) ?? value;
@@ -150,7 +155,8 @@ export function describeTaggedEdit(edit: Edit, target: Target, snapshot: TaggedS
       catch { readOnly = 'Review the company links in Google Sheets.'; }
     }
     // A formula result is intentionally excluded from the raw editor.
-    return [{ field, header, rule, value, readOnly, revision: revision(target, snapshot, header, cell, rule) }];
+    const choices = edit.section === 'companies' && field === 'type' ? companyTypeChoices(edit.mapping.companies) : undefined;
+    return [{ field, header, rule, value, readOnly, ...(choices && { choices }), revision: revision(target, snapshot, header, cell, rule) }];
   });
 }
 
@@ -172,6 +178,11 @@ export function planTaggedEdit(edit: Edit, snapshot: TaggedSnapshot, target?: Ta
     if ((!expected && edit.requireRevision && !legacyField) ||
         (expected && (!target || !Object.hasOwn(expected, field) || expected[field] !== revision(target, snapshot, header, cell, rule))))
       return reject('This field or its mapped column changed. Refresh and review.');
+    if (edit.section === 'companies' && field === 'type') {
+      const choices = companyTypeChoices(edit.mapping.companies);
+      if (choices && (typeof value !== 'string' || !choices.includes(value)))
+        throw Object.assign(Error('Choose a company type from the configured values.'), { status: 400 });
+    }
     const requested = encode(rule, value, cell, edit.links);
     const change = { field, header, rule, requested, previous: cell.raw,
       ...(rule === 'companyLink' && { companyIds: [...new Set(value as string[])].sort() }) };

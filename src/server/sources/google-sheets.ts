@@ -1,8 +1,13 @@
 import { editSheetRow, readSheetEditor } from './sheets-edit.ts';
-import type { Edit, EditAudit, Target } from './tagged-row.ts';
+import { isoDateFromSheetsSerial, type Edit, type EditAudit, type Target } from './tagged-row.ts';
 import { sourceFetch } from './http.ts';
 import { matrixRows, tabularConnector, keyRows } from './tabular.ts';
 import type { SourceMapping, SourceFile } from './types.ts';
+type GridValue = {
+    formattedValue?: string;
+    effectiveValue?: { stringValue?: string; numberValue?: number; boolValue?: boolean };
+    effectiveFormat?: { numberFormat?: { type?: string } };
+};
 export interface TaggedTable {
     records: { key: string; metadataId: number }[];
     headers: string[];
@@ -38,6 +43,32 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
     const matrices = new Map<string, unknown[][]>();
     async function values(table: string, file?: SourceFile) { const path = `${sheet(file)}/values/${encodeURIComponent(range(table))}`; if (!matrices.has(path))
         matrices.set(path, (await request('sheets', path)).values || []); return matrices.get(path)!; }
+    async function readRowsWithExpiration(table: string, file: SourceFile | undefined, expiration: string) {
+        // Read display values, effective values and formats together so a concurrent
+        // row move cannot pair a date serial with a different record.
+        const query = new URLSearchParams({ ranges: range(table),
+            fields: 'sheets(properties(title),data(rowData(values(formattedValue,effectiveValue,effectiveFormat(numberFormat(type))))))' });
+        const result = await request('sheets', `${sheet(file)}?${query}`);
+        const tab = result.sheets?.find((entry: { properties: { title: string } }) => entry.properties?.title === table);
+        if (!tab) throw Error('Google Sheets tab missing.');
+        const grid: GridValue[][] = (tab.data?.[0]?.rowData || []).map((row: { values?: GridValue[] }) => row.values || []);
+        const parsed = matrixRows(grid.map(row => row.map(cell => cell.formattedValue ??
+            cell.effectiveValue?.stringValue ?? cell.effectiveValue?.numberValue ?? cell.effectiveValue?.boolValue)));
+        const index = parsed.columns.indexOf(expiration);
+        if (index >= 0) {
+            for (const row of parsed.rows) {
+                const cell = grid[row.rowNumber! - 1]?.[index];
+                const value = cell?.effectiveValue;
+                if (value?.stringValue && /^\d{4}-\d{2}-\d{2}$/.test(value.stringValue)) {
+                    row.fields[expiration] = value.stringValue;
+                } else if (cell?.effectiveFormat?.numberFormat?.type === 'DATE') {
+                    const iso = isoDateFromSheetsSerial(value?.numberValue);
+                    if (iso !== undefined) row.fields[expiration] = iso;
+                }
+            }
+        }
+        return parsed;
+    }
     async function listTables(file?: SourceFile) { const meta = await request('sheets', `${sheet(file)}?fields=sheets.properties`); const tables = []; for (const s of meta.sheets || []) {
         const table = s.properties.title;
         const v = await values(table, file);
@@ -125,9 +156,12 @@ export function createGoogleSheetsApi(config: GoogleSheetsConfig) {
             return editSheetRow(post, edit, target, audit);
         },
         async readRows(table: string, file?: SourceFile) {
-            const v = await values(table, file);
-            const parsed = matrixRows(v);
-            return keyRows(parsed.rows, parsed.columns, ['google_sheets', file?.id || config.spreadsheetId, table], config.mapping);
+            const fileId = file?.id || config.spreadsheetId;
+            const ingredients = config.mapping.ingredients;
+            const expiration = ingredients.table === table && (ingredients.file?.id || config.spreadsheetId) === fileId
+                ? ingredients.expiresOn : undefined;
+            const parsed = expiration ? await readRowsWithExpiration(table, file, expiration) : matrixRows(await values(table, file));
+            return keyRows(parsed.rows, parsed.columns, ['google_sheets', fileId, table], config.mapping);
         },
         async sampleRows(table: string) {
             return matrixRows((await values(table)).slice(0,4)).rows;
