@@ -215,7 +215,7 @@ type AddStore = {
 };
 
 export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, token: string, ledger: AddStore,
-  readIds: () => Promise<string[]>, resume: boolean, revision: unknown) {
+  readIds: (explainBlankId?: boolean) => Promise<string[]>, resume: boolean, revision: unknown) {
   const requestHash = hash(Object.entries(edit.fields ?? {}).sort(([a], [b]) => a.localeCompare(b)));
   const review = () => Object.assign(Error('The new record could not be confirmed. It may already be in Google Sheets. Check again or review the sheet.'),
     { status: 409, sheetNeedsReview: true });
@@ -283,7 +283,7 @@ export async function addSheetRow(post: Post, edit: Edit, target: AddTarget, tok
     if (edit.refreshLinks) edit.links = await edit.refreshLinks();
     const changes = planTaggedAdd(edit, row);
     entry.name = String(changes.find(change => change.field === 'name')!.requested);
-    const recordIds = await readIds();
+    const recordIds = await readIds(true);
     if (recordIds.includes(entry.recordId) || (await tags(entry.recordId)).length)
       throw Object.assign(Error('The generated record ID already exists. Try again.'), { status: 400 });
     await edit.validateChanges?.(changes);

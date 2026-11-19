@@ -207,7 +207,7 @@ const { registerSourceRoutes } = await import('../../src/server/sources/routes.t
 const { createSourceStore } = await import('../../src/server/sources/store.ts');
 const { SourceCompanyEditor } = await import('../../src/components/SourceCompanyEditor.tsx');
 const { mount } = await import('./lib/mini-render.mjs');
-let responseRange;
+let responseRange, blockedAddError;
 const { state, fetchImpl } = fixture({ returnedRange: range => responseRange ? { ...responseRange } : range });
 const files = new Map([['pilot', { state, fetchImpl, title: 'Companies' }]]);
 const app = express(), directory = await mkdtemp(join(tmpdir(),'sheets-edit-'));
@@ -800,6 +800,11 @@ try {
                 [cells[id], cells[other]] = [cells[other], cells[id]];
         };
         const movedProduct = { name:'ID column moved during Add',companyLink:[companyX.id] };
+        productState.rows.push({ cells:['','Manually entered row'] });
+        try {
+            const error = await add('products',movedProduct,{base:restarted,status:400});
+            assert.equal(error.error,'Every data row needs a unique ID.');
+        } finally { productState.rows.pop(); }
         const beforeMove = googleWrites, beforeRows = productState.rows.length;
         const preflightToken = randomUUID(), revision = (await editor('products')).addRevision;
         afterLayout = swapIdAndPrivate;
@@ -840,10 +845,18 @@ try {
             const rows = await adapter.readRows(phaseB.products.table);
             assert.ok(rows.some(row => row.fields.Name === 'Needs recovery'));
             assert.ok(!rows.some(row => row.fields.Name === movedProduct.name));
+
+            const next = await add('products',{name:'Next product',companyLink:[companyX.id]},{base:refreshed,status:400});
+            blockedAddError = next.error;
+            assert.match(blockedAddError,/A previous Add left a row hidden in Shutfey on this tab/);
+            assert.ok(blockedAddError.includes(`row 2 on the “${phaseB.products.table}” tab`));
+            assert.match(blockedAddError,/blank ID cell.*Delete the entire row, then try adding again/);
+            assert.equal(googleWrites,beforeMove + 1);
         } finally {
             if (productState.rows[0].cells[1] === movedProduct.name) productState.rows.shift();
             swapIdAndPrivate();
         }
+        assert.equal((await add('products',{name:'Next product',companyLink:[companyX.id]},{base:restarted})).saved,true);
 
         const lateToken = randomUUID();
         let batchStarted, releaseBatch;
@@ -944,7 +957,7 @@ const uiFields = { companies: [{ id:'permanent-x', key:'x', name:'Company X' }, 
 const submissions = [];
 let refreshes = 0, uiSaved = 0;
 const addSubmissions = [], abandonSubmissions = [], session = new Map();
-let uiAddStuck = false, uiAddStale = false;
+let uiAddStuck = false, uiAddStale = false, uiAddBlocked = false;
 const oldSession = globalThis.sessionStorage;
 globalThis.sessionStorage = {
     getItem:key => session.get(key) ?? null, setItem:(key,value) => session.set(key,value), removeItem:key => session.delete(key),
@@ -964,6 +977,7 @@ globalThis.fetch = async (url, init = {}) => {
         if (addSubmissions.length === 1) throw Error('Response unavailable');
         if (uiAddStuck) return Response.json({error:'The new record could not be confirmed.'},{status:409});
         if (uiAddStale) return Response.json({error:'The mapped sheet or columns changed.',addRevisionStale:true},{status:409});
+        if (uiAddBlocked) return Response.json({error:blockedAddError},{status:400});
         return Response.json({saved:true});
     }
     if (url === '/api/sources/sheet-editor/products/abandon') {
@@ -1055,6 +1069,17 @@ try {
     assert.equal(session.size,0);
     assert.equal(stale.find(e => e.type === 'fieldset')[0].props.disabled,true);
     assert.match(stale.text(),/mapped sheet or columns changed/);
+
+    uiAddStale = false;
+    uiAddBlocked = true;
+    const blocked = mount(SheetRecordEditor,addProps);
+    await blocked.render();
+    assert.match(blocked.html(),/delete the unfinished row identified in the error from the Google Sheets tab/);
+    await enterName(blocked,'Next product');
+    await blocked.submit();
+    assert.equal(blocked.find(e => e.props.role === 'alert')[0].props.children,blockedAddError);
+    assert.equal(session.size,0);
+    assert.equal(blocked.find(e => e.type === 'fieldset')[0].props.disabled,false);
     console.log('Sheet editors recover or abandon an uncertain Add after reopening and clear stale submissions.');
 } finally {
     globalThis.fetch = priorFetch;
