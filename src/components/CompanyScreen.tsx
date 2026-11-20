@@ -8,7 +8,7 @@ import { SheetRecordEditor } from './SheetRecordEditor';
 import { emptyContact, getPlaceInfo, mapsUrl, type CompanyInfo, type Contact, type PlaceInfo } from '../lib/companyInfo';
 import { amountValue, feesRequest, getFees, leftLine, money, type CompanyFee, type FeePlace } from '../lib/fees';
 import { sourceRequest, type SourceConnection } from '../lib/sources';
-import { canEdit, providers, saveCompany } from '../lib/sourcesSetup';
+import { canEdit, canEditAirtableCompany, readAirtableCompany, updateAirtableCompany, uncertainCompanyEdit, type AirtableCompanyBaseline, providers, saveCompany } from '../lib/sourcesSetup';
 
 type Company = { id: string; name: string; address?: string; type?: string; companyFee?: number; archived?: boolean };
 const contactRoles = ['Owner', 'Manager', 'Kitchen', 'Office'];
@@ -49,6 +49,8 @@ export function CompanyScreen({ company, role, connection, yearlyCount, onClose,
           <h3 className="text-xl font-semibold">Company details</h3>
           {sheetEditing
             ? <SheetRecordEditor section="companies" row={company} inlineCompany onClose={onClose} onSaved={sourceSaved} />
+            : canWrite && connection && canEditAirtableCompany(role, connection)
+            ? <AirtableCompanyDetails key={JSON.stringify([company.id, connection.baseId])} company={company} connection={connection} onSaved={sourceSaved} />
             : <CompanyDetails company={company} connection={connection} editable={canWrite && canEdit(role, connection)} onSaved={sourceSaved} />}
         </section>}
         {!company.archived && <section className={sectionStyle}>
@@ -68,6 +70,111 @@ export function CompanyScreen({ company, role, connection, yearlyCount, onClose,
       </div>
     </div>
   </div>;
+}
+
+function AirtableCompanyDetails({ company, connection, onSaved }: {
+  key?: string; company: Company; connection: SourceConnection; onSaved(name?: string): void;
+}) {
+  const [baseline, setBaseline] = useState<AirtableCompanyBaseline | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [review, setReview] = useState(false);
+  const [readOnly, setReadOnly] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [auditWarning, setAuditWarning] = useState('');
+  const action = useRef<'idle' | 'busy' | 'review'>('idle');
+  const mapping = connection.mapping?.companies;
+  useEffect(() => {
+    let active = true;
+    readAirtableCompany(company.id).then(next => { if (active) setBaseline(next); })
+      .catch(error => {
+        if (active) { setMessage(error.message); setReadOnly(error.readOnly === true); }
+      });
+    return () => { active = false; };
+  }, [company.id]);
+  const fields = { ...baseline?.fields, ...draft };
+  const changed = Object.fromEntries(Object.entries<string>(draft).filter(([key, value]) => (value || null) !== baseline?.fields[key]));
+  const editable = baseline?.access === 'readwrite' && !readOnly;
+  const canSave = editable && !busy && !review && !!fields.name?.trim() && Object.keys(changed).length > 0;
+  async function reload() {
+    if (action.current === 'busy') return;
+    action.current = 'busy';
+    setBusy(true);
+    try {
+      const next = await readAirtableCompany(company.id);
+      if (baseline && (baseline.updatedAt !== next.updatedAt || baseline.baseId !== next.baseId))
+        throw Error('The source connection changed. Reopen the company.');
+      setBaseline(next);
+      setReadOnly(false);
+      setMessage('');
+      setReview(false);
+      action.current = 'idle';
+    } catch (error: any) { setMessage(error.message); if (error.readOnly) setReadOnly(true); }
+    finally { if (action.current === 'busy') action.current = review ? 'review' : 'idle'; setBusy(false); }
+  }
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!baseline || !canSave || action.current !== 'idle') return;
+    action.current = 'busy';
+    setBusy(true);
+    try {
+      const result = await updateAirtableCompany(company.id, baseline, changed);
+      setAuditWarning(result.auditWarning || '');
+      setReadOnly(result.readOnly === true);
+      if (result.outcome === 'unconfirmed') {
+        action.current = 'review';
+        setReview(true);
+        setMessage('');
+        return;
+      }
+      if (!result.saved) { setMessage(result.error); return; }
+      setBaseline({ ...baseline, fields: result.fields });
+      setDraft({});
+      setMessage(result.warning || 'Company details saved.');
+      onSaved(result.fields.name || undefined);
+    } finally {
+      if (action.current === 'busy') action.current = 'idle';
+      setBusy(false);
+    }
+  }
+  function changeField(field: string, value: string) {
+    setMessage('');
+    const next = { ...draft };
+    if ((value || null) === baseline?.fields[field]) delete next[field];
+    else next[field] = value;
+    setDraft(next);
+  }
+  const matchesType = (value: string) => value.trim().toLowerCase() === changed.type.trim().toLowerCase();
+  const movesOut = 'type' in changed && (mapping?.foodServiceValues?.some(matchesType) ||
+    !!mapping?.factoryValues?.length && !mapping.factoryValues.some(matchesType));
+  if (!baseline && readOnly) return <>
+    <CompanyDetails company={company} connection={connection} editable={false} onSaved={onSaved} />
+    {message && <p role="status">{message}</p>}
+  </>;
+  return <form className="space-y-4" onSubmit={submit}>
+    {baseline && <fieldset className="space-y-4" disabled={busy || readOnly}>
+      {([...detailFields, ['brand', 'Brand'], ['plant', 'Plant']] as const).map(([field, label]) => mapping?.[field] &&
+        <label key={field} className="block space-y-2">{label}
+          {field === 'type' && baseline.typeOptions ? <select className={setupField} value={fields.type || ''}
+            onChange={event => changeField(field, event.target.value)}>
+            <option value=""></option>{baseline.typeOptions.map(option => <option key={option}>{option}</option>)}
+          </select> : <input className={setupField} dir="auto" maxLength={2000} required={field === 'name'} value={fields[field] || ''}
+            onChange={event => changeField(field, event.target.value)} />}
+          {Object.hasOwn(draft, field) && <span className="text-sm text-ink-soft">Original: {baseline.fields[field] || '—'}</span>}
+        </label>)}
+    </fieldset>}
+    {(company.companyFee !== undefined || mapping?.companyFee) && <div>
+      <p className="text-sm text-ink-soft">Fee</p><p>{company.companyFee === undefined ? '—' : money(company.companyFee)}</p>
+    </div>}
+    {editable && <p className="text-ink-soft">Changes are saved in your Airtable.</p>}
+    {movesOut && <p>This company will move out of Factories.</p>}
+    {review && <p role="status">{uncertainCompanyEdit}</p>}
+    {message && <p role="status">{message}</p>}
+    {auditWarning && <p role="alert">{auditWarning}</p>}
+    {readOnly && <p>This source is read only in Shutfey.</p>}
+    {editable && <button type="submit" className={setupPrimary} disabled={!canSave}>{busy ? 'Saving…' : 'Save company details'}</button>}
+    {(review || !baseline && message && !readOnly) && <button type="button" className={visitButton} disabled={busy} onClick={reload}>Reload and review</button>}
+  </form>;
 }
 
 function CompanyDetails({ company, connection, editable, onSaved }: {

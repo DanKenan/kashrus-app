@@ -209,7 +209,7 @@ assert.deepEqual(calls.at(-1), ['PATCH', path.details, { fields: { address: '2 T
 assert.match(directDetails.text(), /Company details saved/);
 
 const readOnly = await mount(CompanyScreen, { ...props, role: 'admin',
-  connection: { sourceType: 'airtable', access: 'readwrite', mapping: sourceMapping },
+  connection: { sourceType: 'airtable', access: 'read', mapping: sourceMapping },
 }).render();
 const readOnlyDetails = await panel(readOnly, 'Company details');
 assert.match(readOnlyDetails.text(), /Name Test Bakery Address 1 Test Street Type Factory Fee \$1,200/);

@@ -2,11 +2,12 @@ import type { Connection } from './store.ts';
 // Every list write passes this single guard. Report routes have no writer reference.
 export function guardSourceWrite(c: Connection | undefined, list: string, fields: unknown): Record<string, string> {
     const reject = (status: number, error: string): never => { throw Object.assign(Error(error), { status }); };
-    if (!c || c.sourceType === 'airtable' || c.sourceType === 'upload')
+    if (!c || c.sourceType === 'upload')
         return reject(409, 'Editing from the app is not available for this source.');
     if (c.access !== 'readwrite')
         return reject(403, 'This source is read only.');
-    if (c.sourceType !== 'supabase') return reject(409, 'Spreadsheet rows are read only.');
+    if (c.sourceType === 'airtable' && list !== 'companies') return reject(409, 'Only companies can be edited in Airtable.');
+    if (c.sourceType !== 'supabase' && c.sourceType !== 'airtable') return reject(409, 'Spreadsheet rows are read only.');
     if (!['companies', 'ingredients', 'products'].includes(list))
         return reject(400, 'Invalid list');
     const config = c.mapping[list as 'companies' | 'ingredients' | 'products'] as any;
@@ -21,6 +22,8 @@ export function guardSourceWrite(c: Connection | undefined, list: string, fields
         if (config.table === company.table && (config.file?.id || c.baseId) === (company.file?.id || c.baseId) &&
             config[key] && [company.companyFee, company.mashgiachFee].includes(config[key]))
             return reject(400, 'Imported fee columns are read only.');
+        if (c.sourceType === 'airtable' && Object.hasOwn(output, config[key]) && output[config[key]] !== value)
+            return reject(400, 'Conflicting values map to the same Airtable column.');
         if (typeof config[key] === 'string' && config[key]) output[config[key]] = value;
     }
     if (!Object.keys(output).length) return reject(400, 'Only mapped list columns can be edited.');

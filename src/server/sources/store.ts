@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import type { AddAudit, EditAudit } from './tagged-row.ts';
+import type { AddAudit, AirtableEditAudit, EditAudit } from './tagged-row.ts';
 import type { Backup } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
@@ -204,7 +204,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     else await localWrite(async () => { await commit(removals.slice(0,1)); await commit(removals.slice(1)).catch(retryLocalCleanup); });
   }
   const auditCollection = 'sourceFeeAudit';
-  async function saveEditAudit(entry: EditAudit) {
+  async function saveEditAudit(entry: EditAudit | AirtableEditAudit) {
     if (deps.staged()) throw Error('Writes blocked');
     await commit([{ collection: auditCollection, id: entry.operationId, doc: entry }]);
   }

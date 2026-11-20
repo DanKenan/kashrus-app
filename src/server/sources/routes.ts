@@ -5,6 +5,7 @@ import { validSupabaseUrl } from './supabase.ts';
 import type { CompanyRemoval, SheetRemovalEvidence } from '../inspections/company-removal.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { parseUpload, uploadRowsError, uploadTypeError, type UploadedFile } from './upload.ts';
+import { createAirtableConnector, type AirtableCompanyField } from './airtable.ts';
 import { guardSourceWrite } from './write.ts';
 import { CompanyLinkError, mapSourceLists, companyLinkResolver } from './mapping.ts';
 import { summarizeValues, customFieldTypes, isMappedCustomField, type SourceSection } from '../../lib/sourcePreview.ts';
@@ -13,9 +14,9 @@ import { createSourceCache, nextNightlyRun } from './cache.ts';
 import { encryptKey, decryptKey, keyHint } from './crypto.ts';
 import { guessMapping } from './mapping.ts';
 import { normalizeConnection, createSourceStore, type Connection } from './store.ts';
-import type { AddTarget, Change, Edit } from './tagged-row.ts';
+import type { AddTarget, AirtableEditAudit, Change, Edit } from './tagged-row.ts';
 import { cellText } from './tabular.ts';
-import type { ConnectionResult, SourceMapping } from './types.ts';
+import type { Company, SourceMapping } from './types.ts';
 
 const unreadableKey = "The saved key can't be read. Enter the key again in Settings.";
 class SavedKeyError extends Error {
@@ -92,6 +93,24 @@ function companySourceIdentity(c: Connection | undefined) {
   return createHash('sha256').update(JSON.stringify([c.sourceType, file?.id || c.baseId, table])).digest('base64url');
 }
 
+type LinkCompany = Pick<Company, 'id' | 'sourceKey' | 'name'>;
+function associationChanges(values: unknown[], eligible: LinkCompany[], others: LinkCompany[],
+  recordId: string | undefined, name: string, unmatched: 'ignore' | 'reject') {
+  const before = companyLinkResolver(eligible, others, unmatched);
+  const renamed = recordId ? eligible.map(row => (row.sourceKey || row.id) === recordId ? { ...row, name } : row)
+    : [...eligible, { id: randomUUID(), name }];
+  const after = companyLinkResolver(renamed, others, unmatched);
+  function resolve(resolver: typeof before, value: unknown) {
+    try { return JSON.stringify(resolver(value).sort()); }
+    catch (cause) { if (!(cause instanceof CompanyLinkError)) throw cause; return null; }
+  }
+  return values.some(value => {
+    const original = resolve(before, value);
+    if (original === null) return unmatched === 'reject';
+    return original !== resolve(after, value);
+  });
+}
+
 export function registerSourceRoutes(app: any, deps: {
   db(): any; dataDir: string; staged(): boolean; secret(): string; testMode: boolean;
   agencyName?(agencyId: string): string;
@@ -122,7 +141,39 @@ export function registerSourceRoutes(app: any, deps: {
   });
   function blank(id:string,userId:string,sourceType:Connection['sourceType']):Connection {return {agencyId:id,sourceType,baseId:sourceType==='upload'?'upload':'',access:'read',mapping:structuredClone(emptyMapping),encryptedKey:'',keyHint:'',updatedAt:new Date().toISOString(),updatedBy:userId,backupHashes:{}};}
 
-  const tested = new Map<string, { baseId: string; sourceType: string; key: string; at: number; result: ConnectionResult }>();
+  const verifiedScopes = new Map<string, {
+    baseId: string; tokenKey: string; access: 'read' | 'readwrite'; at: number; typeOptions?: string[];
+  }>();
+  function airtable(c: Connection) {
+    return createAirtableConnector({ baseId: c.baseId, apiKey: storedKey(c), mapping: c.mapping,
+      apiBase: deps.testMode ? apiBase : undefined });
+  }
+  async function verifyScope(c: Connection, adapter: ReturnType<typeof airtable>, schemaOptional = false) {
+    const result = await adapter.testConnection(schemaOptional);
+    if (!result.ok || !result.access) throw Object.assign(Error(result.error || 'Connection test failed'), { status: schemaOptional ? result.status || 503 : 400, airtable: true });
+    const scope = { baseId: c.baseId, tokenKey: c.encryptedKey, access: result.access, at: Date.now(), typeOptions: adapter.typeOptions() };
+    return { scope, tables: result.tables };
+  }
+  async function editScope(c: Connection, adapter: ReturnType<typeof airtable>) {
+    const cached = verifiedScopes.get(c.agencyId);
+    const scope = cached && cached.baseId === c.baseId && cached.tokenKey === c.encryptedKey ? cached : (await verifyScope(c, adapter, true)).scope;
+    verifiedScopes.set(c.agencyId, scope);
+    if (scope.access !== 'readwrite') {
+      const next = { ...c, access: 'read' as const, updatedAt: new Date().toISOString() };
+      await save(next);
+      connections.set(c.agencyId, next);
+      throw Object.assign(Error('Airtable write access was lost. This source is read only.'), { status: 403, readOnly: true });
+    }
+    return scope;
+  }
+  async function permissionError(c: Connection, adapter: ReturnType<typeof airtable>, cause: any) {
+    if (cause.status === 403 && cause.airtable) {
+      verifiedScopes.delete(c.agencyId);
+      try { await editScope(c, adapter); }
+      catch (check: any) { if (check.readOnly) return check; verifiedScopes.delete(c.agencyId); }
+    }
+    return cause;
+  }
   const backupErrors = new Set<string>();
   const pending = new Map<string, { connection: Connection; expected:Connection; backups: import('./cache.ts').Backup[]; attempt: number; timer?: ReturnType<typeof setTimeout> }>();
   const keyErrors = new Set<string>();
@@ -307,27 +358,14 @@ export function registerSourceRoutes(app: any, deps: {
     });
     if (!dependentFields.length) return;
     const companies = await sheetCompanies(c);
-    const before = companyLinkResolver(companies);
-    const name = cellText(rename.requested);
-    const after = companyLinkResolver(recordId
-      ? companies.map(row => row.sourceKey === recordId ? { ...row, name } : row)
-      : [...companies, { id: randomUUID(), name }]);
-    for (const { section, columns } of dependentFields) {
-      for (const row of await sheetRows(c, section)) {
-        for (const column of columns) {
-          if (typeof column !== 'string') continue;
-          try {
-            const value = row.fields[column];
-            if (JSON.stringify(before(value).sort()) === JSON.stringify(after(value).sort())) continue;
-          } catch (cause) {
-            if (!(cause instanceof CompanyLinkError)) throw cause;
-          }
-          return sheetConflict(recordId
-            ? 'This name change would leave company links unresolved or change which company they match. Review the linked records in Google Sheets and use permanent company IDs before renaming.'
-            : 'This name would change existing company links. Use permanent company IDs in the linked sheet rows before adding the company.');
-        }
-      }
-    }
+    const links: unknown[] = [];
+    for (const { section, columns } of dependentFields)
+      for (const row of await sheetRows(c, section))
+        for (const column of columns) if (typeof column === 'string') links.push(row.fields[column]);
+    if (associationChanges(links, companies, [], recordId, cellText(rename.requested), 'reject'))
+      return sheetConflict(recordId
+        ? 'This name change would leave company links unresolved or change which company they match. Review the linked records in Google Sheets and use permanent company IDs before renaming.'
+        : 'This name would change existing company links. Use permanent company IDs in the linked sheet rows before adding the company.');
   }
 
   const own = (req: any, res: any) => { const u = deps.requireAdmin(req, res); return u ? { user: u, id: u.agencyId || 'agency-hkc' } : null; };
@@ -576,6 +614,11 @@ export function registerSourceRoutes(app: any, deps: {
       if (flights.has(id)) await flights.get(id);
       const needsSignIn = isOAuthProvider(c.sourceType) && req.body.access === 'readwrite' && c.oauth?.[c.sourceType]?.access !== 'readwrite';
       const next = { ...connections.get(id)!, access: needsSignIn ? 'read' as const : req.body.access, updatedAt: new Date().toISOString(), updatedBy: user.id };
+      if (c.sourceType === 'airtable' && next.access === 'readwrite') {
+        const { scope } = await verifyScope(c, airtable(c), true);
+        verifiedScopes.set(id, scope);
+        next.access = scope.access;
+      }
       if (next.access === 'read') { delete next.sheetsPilot; delete next.sheetsTables; }
       await save(next);
       connections.set(id, next);
@@ -600,7 +643,7 @@ export function registerSourceRoutes(app: any, deps: {
       drafts.delete(id);
       cache.reset(id);
       oauth.clear(id);
-      tested.delete(id);
+      verifiedScopes.delete(id);
       keyErrors.delete(id);
       backupErrors.delete(id);
       unconfirmed.delete(id);
@@ -651,25 +694,145 @@ export function registerSourceRoutes(app: any, deps: {
     const fields = await sheetsApi(c, list).readTaggedEditor(edit, target);
     res.json({ fields, companies: companies.map(row => ({ id: row.id, name: row.name, key: row.sourceKey })) });
   }));
+  function editableCompany(c: Connection, recordId: string) {
+    if (!/^rec[A-Za-z0-9]+$/.test(recordId)) throw Object.assign(Error('Invalid Airtable record ID.'), { status: 400 });
+    const row = cache.data(c.agencyId)?.companies.find(company => company.id === recordId);
+    if (!row) return sheetConflict('This company is no longer in the current company list.');
+    const removal = deps.companyRemoval?.removal(c.agencyId, recordId, companySourceIdentity(c)!, row.archiveKey);
+    if (removal?.archived || removal?.requested || removal?.deletedAt)
+      return sheetConflict('This company is archived or being removed.');
+  }
+  function editError(res: any, error: any, extra = {}) {
+    return res.status(error.status || 503).json({ error: error.message, ...(error.readOnly && { readOnly: true }), ...extra });
+  }
+  app.get('/api/sources/rows/companies/:rowId/edit', mutation(async (req: any, res: any, { id }: any) => {
+    const c = connections.get(id);
+    if (c?.sourceType !== 'airtable') return res.status(409).json({ error: 'Editing from the app is not available for this source.' });
+    const recordId = req.params.rowId;
+    if (c.access !== 'readwrite') return res.status(403).json({ error: 'This source is read only.', readOnly: true });
+    const adapter = airtable(c);
+    try {
+      editableCompany(c, recordId);
+      const scope = await editScope(c, adapter);
+      const record = await adapter.readCompany(recordId);
+      if (record.recordId !== recordId) return res.status(404).json({ error: 'Company record not found.' });
+      res.set?.('Cache-Control', 'no-store');
+      res.json({ fields: record.values, baseId: c.baseId, updatedAt: c.updatedAt, access: scope.access, typeOptions: scope.typeOptions });
+    } catch (cause) { return editError(res, await permissionError(c, adapter, cause)); }
+  }));
+
+  const refreshAfterEdit = new Set<string>();
+  async function saveAirtableCompany(c: Connection, req: any, res: any, actorId: string) {
+    const recordId = req.params.rowId || '';
+    const entry: AirtableEditAudit = { operationId: randomUUID(), sourceType: 'airtable', baseId: c.baseId,
+      table: c.mapping.companies.table, recordId, actorId, agencyId: c.agencyId, section: 'companies',
+      at: new Date().toISOString(), outcome: 'rejected', changedFields: [], previous: {}, requested: {},
+      verified: false, writeEvidence: {} };
+    let adapter: ReturnType<typeof airtable> | undefined;
+    let sent = false;
+    let error: any;
+    try {
+      guardSourceWrite(c, req.params.list, req.body?.fields);
+      if (!recordId) {
+        if (req.method === 'PATCH') throw Object.assign(Error('Choose an existing mapped record.'), { status: 400 });
+        sheetConflict('Adding Airtable companies is not available.');
+      }
+      const { fields, originals, baseId, updatedAt } = req.body;
+      const changed = Object.keys(fields) as AirtableCompanyField[]; // Validated by guardSourceWrite.
+      entry.changedFields = changed;
+      entry.requested = fields;
+      limitWrites(c.agencyId);
+      if (baseId !== c.baseId || updatedAt !== c.updatedAt) sheetConflict('The source connection changed. Reopen the company.');
+      editableCompany(c, recordId);
+      adapter = airtable(c);
+      const scope = await editScope(c, adapter);
+      for (const field of changed) {
+        if (!c.mapping.companies[field])
+          throw Object.assign(Error('Only mapped list columns can be edited.'), { status: 400 });
+        if (!originals || !Object.hasOwn(originals, field) || !(originals[field] === null || typeof originals[field] === 'string'))
+          throw Object.assign(Error('Include the original value for every changed field.'), { status: 400 });
+      }
+      if ('name' in fields) {
+        const { data, links } = await adapter.renameData();
+        if (associationChanges(links, data.companies, data.otherCompanies ?? [], recordId, fields.name, 'ignore'))
+          sheetConflict('This name change would change company links. Use permanent company IDs before renaming.');
+      }
+      if (fields.type && scope.typeOptions && !scope.typeOptions.includes(fields.type))
+        throw Object.assign(Error('Choose a type from the Airtable column options.'), { status: 400 });
+      const before = await adapter.readCompany(recordId);
+      entry.writeEvidence.verifyGet = before;
+      if (before.recordId !== recordId) throw Object.assign(Error('Company record not found.'), { status: 404 });
+      const included = changed.filter(field => {
+        const current = before.values[field];
+        entry.previous[field] = current;
+        if (current === (fields[field] || null)) return false;
+        if (current !== (originals[field] || null)) sheetConflict('The company changed in Airtable. Reload and review.');
+        return true;
+      });
+      if (included.length) {
+        const patch = Object.fromEntries(included.map(field => [c.mapping.companies[field]!, fields[field] || null]));
+        entry.outcome = 'attempted';
+        try { await store.saveEditAudit(entry); }
+        catch { return res.status(503).json({ error: 'The audit could not be recorded. The edit was stopped before saving.' }); }
+        sent = true;
+        try { await adapter.patchCompany(recordId, patch); }
+        catch (cause: any) { if (cause.status >= 400 && cause.status < 500) sent = false; throw cause; }
+        const after = await adapter.readCompany(recordId);
+        entry.writeEvidence.confirmGet = after;
+        if (after.recordId !== recordId || included.some(field => after.values[field] !== (fields[field] || null)))
+          throw Error('Airtable confirmation did not match.');
+      }
+      entry.verified = true;
+      entry.outcome = 'confirmed';
+    } catch (cause) {
+      entry.outcome = sent ? 'unconfirmed' : 'rejected';
+      error = adapter ? await permissionError(c, adapter, cause) : cause;
+    }
+    let auditWarning: string | undefined;
+    try { await store.saveEditAudit(entry); }
+    catch { auditWarning = 'The final edit audit could not be recorded.'; }
+    if (entry.outcome === 'unconfirmed') return res.status(409).json({ outcome: entry.outcome, auditWarning,
+      readOnly: error?.readOnly, error: 'Airtable may have saved these changes. Reload and review before retrying.' });
+    if (error) return editError(res, error, { auditWarning, ...(c.access === 'read' && { readOnly: true }) });
+    const values = (entry.writeEvidence.confirmGet ?? entry.writeEvidence.verifyGet)!.values;
+    try {
+      cache.publish(c.agencyId, await adapter!.loadAll!());
+      refreshAfterEdit.delete(c.agencyId);
+    } catch (cause) {
+      await permissionError(c, adapter!, cause);
+      const warning = 'Saved in Airtable. Refresh required.';
+      refreshAfterEdit.add(c.agencyId);
+      cache.requireRefresh(c.agencyId, warning);
+      return res.json({ saved: true, fields: values, refreshRequired: true, warning, auditWarning, readOnly: connections.get(c.agencyId)?.access === 'read' });
+    }
+    return res.json({ saved: true, fields: values, auditWarning });
+  }
   const writeTimes = new Map<string, number[]>();
+  function limitWrites(id: string) {
+    const recent = (writeTimes.get(id) || []).filter(t => Date.now() - t < 60000);
+    if (recent.length >= 30) throw Object.assign(Error('Too many writes. Try again in a minute.'), { status: 429 });
+    recent.push(Date.now());
+    writeTimes.set(id, recent);
+  }
   const write = mutation(async (req: any, res: any, { id, user }: any) => {
       if (blocked(res))
           return;
       if (flights.has(id))
           await flights.get(id);
       const c = connections.get(id), list: SourceSection = req.params.list;
+      if (c?.sourceType === 'airtable') return saveAirtableCompany(c, req, res, user.id);
+      if (req.method === 'PATCH' && !req.params.rowId)
+          return res.status(400).json({ error: 'Choose an existing mapped record.' });
       const sheets = c?.sourceType === 'google_sheets' && (c.sheetsTables || c.sheetsPilot);
       if (!req.params.rowId && !sheets && (req.body?.addRevision !== undefined || req.body?.token !== undefined))
           return res.status(409).json({ error: 'The mapped sheet or columns changed. Close and reopen the Add form.',
               ...(req.body?.fields !== undefined && { addRevisionStale: true }) });
+      if (req.body?.originals !== undefined || req.body?.updatedAt !== undefined)
+          return res.status(409).json({ error: 'The source connection changed. Reopen the company.' });
       const fields = sheets ? req.body?.fields : guardSourceWrite(c, list, req.body?.fields);
       if (isOAuthProvider(c!.sourceType))
           oauth.requireSetUp(c!.sourceType);
-      const recent = (writeTimes.get(id) || []).filter(t => Date.now() - t < 60000);
-      if (recent.length >= 30)
-          return res.status(429).json({ error: 'Too many writes. Try again in a minute.' });
-      recent.push(Date.now());
-      writeTimes.set(id, recent);
+      limitWrites(id);
       if (sheets) {
           if (c.access !== 'readwrite' || c.oauth?.google_sheets?.access !== 'readwrite')
               return res.status(403).json({ error: 'This source is read only.' });
@@ -751,6 +914,7 @@ export function registerSourceRoutes(app: any, deps: {
       }
       res.json({ row, saved: true });
   });
+  app.patch?.('/api/sources/rows/:list', write);
   app.post('/api/sources/rows/:list', write);
   app.patch?.('/api/sources/rows/:list/:rowId', write);
   if (deps.testMode)
@@ -767,13 +931,8 @@ export function registerSourceRoutes(app: any, deps: {
     const old = connections.get(id), plain = req.body.apiKey?.trim();
     if (!plain && !old?.encryptedKey) return res.status(400).json({ error: 'API key required' });
     const c: Connection = { group1Label: req.body.group1Label?.trim() ?? old?.group1Label ?? 'Group 1', group1Overrides: old?.group1Overrides || { ingredient: {}, product: {} }, agencyId: id, sourceType: req.body.sourceType, baseId: req.body.baseId, access: req.body.access, mapping: req.body.mapping, encryptedKey: plain ? encryptKey(plain, deps.secret(), id) : old!.encryptedKey, keyHint: plain ? keyHint(plain) : old!.keyHint, updatedAt: new Date().toISOString(), updatedBy: user.id, backupHashes: old?.backupHashes || {}, ...(old?.lastRefresh ? { lastRefresh: old.lastRefresh } : {}) };
-    const key = plain || storedKey(c), recent = tested.get(id);
-    let validation = recent && recent.baseId === c.baseId && recent.sourceType === c.sourceType && recent.key === key && Date.now() - recent.at < 30 * 60_000 ? recent.result : undefined;
-    if (!validation) {
-      validation = await connector(c, key).testConnection();
-      if (validation.ok) tested.set(id, { baseId: c.baseId, sourceType: c.sourceType, key, at: Date.now(), result: validation });
-    }
-    if (!validation.ok) return res.status(400).json({ error: validation.error || 'Connection test failed' });
+    const validation = await verifyScope(c, airtable(c));
+    if (validation.scope.access === 'read') c.access = 'read';
     for (const kind of ['companies', 'ingredients', 'products'] as const) {
       const config = c.mapping[kind], table = validation.tables?.find(t => t.name === config.table);
       if (!table || Object.entries(config).some(([field, column]) => field !== 'table' && typeof column === 'string' && !table.columns.includes(column))) return res.status(400).json({ error: 'Mapped tables and columns must exist in the source.' });
@@ -791,6 +950,7 @@ export function registerSourceRoutes(app: any, deps: {
     uploads.delete(id);
     backupErrors.delete(id);
     connections.set(id, c); keyErrors.delete(id);
+    verifiedScopes.set(id, validation.scope);
     if (changed && (!old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || keyChanged || JSON.stringify({ ...old.mapping, valueAssignments: undefined }) !== JSON.stringify({ ...c.mapping, valueAssignments: undefined }))) cache.reset(id);
     else cache.reassign(id, c.mapping);
     res.json(safe(id)); schedule(id); void serialize(id, () => refresh(id));
@@ -802,7 +962,6 @@ export function registerSourceRoutes(app: any, deps: {
     const c = { ...old, ...req.body, agencyId: id, mapping: old?.mapping || emptyMapping } as Connection;
     const adapter = connector(c, plain), result = await adapter.testConnection();
     if (!result.ok) return res.json({ ok: false, error: result.error, calls: adapter.calls() });
-    tested.set(id, { baseId: c.baseId, sourceType: c.sourceType, key: plain || storedKey(c), at: Date.now(), result });
     const guess = guessMapping(result.tables || []);
     const preferred = new Set([guess.mapping.companies.table, guess.mapping.ingredients.table, guess.mapping.products.table]);
     const tables = [...(result.tables || [])].sort((a, b) => Number(preferred.has(b.name)) - Number(preferred.has(a.name)));
@@ -1054,6 +1213,14 @@ export function registerSourceRoutes(app: any, deps: {
     });
   }));
   app.get('/api/factories', handler(async (_req: any, res: any, { id }: any) => {
+    if (refreshAfterEdit.has(id)) await serialize(id, async () => {
+      if (!refreshAfterEdit.has(id)) return;
+      const c = connections.get(id);
+      if (c?.sourceType === 'airtable') {
+        try { cache.publish(id, await connector(c).loadAll!()); } catch { return; }
+      }
+      refreshAfterEdit.delete(id);
+    });
     const s = cache.state(id), c = connections.get(id);
     const foodServiceIds = new Set(await deps.foodServiceCompanyIds?.(id) ?? []);
     const source = companySourceIdentity(c), lifecycle = deps.companyRemoval;
