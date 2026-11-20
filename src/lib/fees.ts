@@ -15,6 +15,10 @@ export async function feesRequest<T>(path: string, method = 'GET', body?: unknow
   if (!response.ok) throw Error(result.error || "Couldn't save or load. Check the connection and try again.");
   return result;
 }
+export interface FactoryFeeChange { id: string; report: string | null; actor: string; company: string; oldRate: number | null; newRate: number; at: string; readAt: string | null; status: string }
+export const getFeeChanges = (before?: string) => feesRequest<{ events: FactoryFeeChange[]; nextCursor: string | null }>(
+  '/api/inspections/fee-changes' + (before ? '?before=' + encodeURIComponent(before) : ''));
+export const readFeeChange = (id: string) => feesRequest('/api/inspections/fee-changes/' + encodeURIComponent(id) + '/read', 'POST', {});
 export const getFees = () => feesRequest<FeesData>('/api/inspections/fees');
 export const saveFees = (id: string, company: CompanyFee | null, mashgiach: { amount: number } | null) => feesRequest(`/api/inspections/fees/${encodeURIComponent(id)}`, 'PUT', { company, mashgiach });
 export const decideFee = (id: string, amount?: number) => feesRequest(`/api/inspections/reports/${encodeURIComponent(id)}/fee-decision`, 'POST', amount === undefined ? {} : { amount });

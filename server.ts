@@ -1,3 +1,5 @@
+import { feePushTimeout } from './src/server/inspections/fee-change-events.ts';
+import { createFeeChangePush } from './src/server/inspections/fee-change-push.ts';
 import { registerInspectionRoutes } from './src/server/inspections/routes.ts';
 import { removeLegacyKeys, stripLegacyKeys } from './src/server/sources/legacy.ts';
 import { registerSourceRoutes } from './src/server/sources/routes.ts';
@@ -896,7 +898,7 @@ app.use('/api', async (req, res, next) => {
   // accept a verified Google OIDC token from Cloud Scheduler INSTEAD OF a session
   // token. This is narrowly scoped — only these exact routes, only POST, only with
   // a valid OIDC token. All other routes require session auth as before.
-  if (req.method === 'POST' && (req.path === '/media/sweep' || req.path === '/internal/consistency-check')) {
+  if (req.method === 'POST' && (req.path === '/media/sweep' || req.path === '/internal/consistency-check' || req.path === '/internal/fee-change-sweep')) {
     const oidcValid = await verifySchedulerOidc(req);
     if (oidcValid) {
       // Mark as scheduler-authenticated; the route handler checks this
@@ -14884,10 +14886,38 @@ const inspectionRoutes = registerInspectionRoutes(app, {
   people: (agencyId) => users.filter(u => u.agencyId === agencyId && !sessionIneligibleCode(u)),
   agencyName: (agencyId) => agencies.find(a => a.id === agencyId)?.name || 'Agency',
   timeZone: (agencyId) => effectiveTimeZone(undefined, agencies.find(a => a.id === agencyId)?.timeZone),
+  feePush: createFeeChangePush({
+    async eligible(agency, admin) {
+      const state = firestoreDb ? (await firestoreDb.doc(FIRESTORE_STATE_DOC).get()).data() : { agencies, users, pushSubscriptions };
+      const member = state?.users?.find((u: any) => u.id === admin && u.agencyId === agency);
+      if (!state?.agencies?.some((a: any) => a.id === agency) || member?.role !== 'admin' || sessionIneligibleCode(member)) return [];
+      return (state.pushSubscriptions ?? []).filter((s: PushSubscriptionRecord) =>
+        s.agencyId === agency && s.userId === admin && pushModeAllows(s, 'general'));
+    },
+    send: (sub, payload, topic) => webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, payload, { topic, timeout: feePushTimeout }),
+    async prune(dead) {
+      await commitState(fresh => {
+        const keep = (s: PushSubscriptionRecord) => s.endpoint !== dead.endpoint || s.agencyId !== dead.agencyId ||
+          s.userId !== dead.userId || s.keys?.auth !== dead.keys.auth || s.keys?.p256dh !== dead.keys.p256dh;
+        return { doc: { ...fresh, pushSubscriptions: (fresh.pushSubscriptions ?? []).filter(keep) }, result: null };
+      }, { label: 'prune-fee-change-subscription' });
+    },
+  }),
   now: serverNow, testMode: isTestMode(), push: sendPushToRecipient,
   db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
   source: sourceRoutes.inspectionSource, user: getAuthUser,
   maxPhotoChars: ANSWER_PHOTO_MAX_CHARS, photoRe: ANSWER_PHOTO_DATA_RE,
+});
+app.post('/api/internal/fee-change-sweep', async (req, res) => {
+  if (!(req as any).schedulerAuth && !requirePlatformOperator(req, res)) return;
+  try {
+    const result = await inspectionRoutes.sweepFeeChanges();
+    log.info('[fee-change-sweep] ' + JSON.stringify(result));
+    res.json(result);
+  } catch {
+    log.error('[fee-change-sweep] Delivery state unavailable');
+    res.status(503).json({ error: 'Fee change sweep could not finish' });
+  }
 });
 // Drain debounced agency inbox state before graceful process termination.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => {

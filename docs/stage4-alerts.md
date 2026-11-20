@@ -265,3 +265,27 @@ From `STAGE4_PLAN.md` §2.1–2.3. Anything not implemented above is marked
 **Don's contacts:** `kenandan770@gmail.com` (all) · SMS `+1 347-670-0381` (urgent only).
 Don's actual alert configuration and successful notification tests are separate
 operational acceptance gates — this doc is the plan, not the proof.
+
+### Factory fee change delivery
+
+Create the following Cloud Scheduler job in the service's deployment project.
+Use the region, HTTPS service URL, audience and service account configured for
+the consistency check. The schedule runs every minute in UTC.
+
+```sh
+gcloud scheduler jobs create http shutfey-fee-change-sweep \
+  --location="$REGION" --schedule='* * * * *' --time-zone='Etc/UTC' \
+  --uri="$SERVICE_URL/api/internal/fee-change-sweep" --http-method=POST \
+  --oidc-service-account-email="$SCHEDULER_SERVICE_ACCOUNT" \
+  --oidc-token-audience="$SCHEDULER_AUDIENCE"
+```
+
+For an existing job use `gcloud scheduler jobs update http` with the same
+arguments. Verify its schedule and OIDC settings with `gcloud scheduler jobs
+describe shutfey-fee-change-sweep --location="$REGION"`. Run it once with
+`gcloud scheduler jobs run shutfey-fee-change-sweep --location="$REGION"` and
+verify an authenticated 200 in Cloud Run. Inspect the `[fee-change-sweep]`
+summary for the oldest pending event time and counts of failed and exhausted deliveries.
+A device can receive a repeat if a worker crashes after push-service acceptance
+and before the acknowledgement commits. The same Web Push Topic is reused and
+the admin's Pay list retains a single entry.

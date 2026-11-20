@@ -261,7 +261,7 @@ export default {
     assert.equal(subscribed.status, 200);
    }
    await api('admin', 'POST', '/api/__test__/push-log/clear', {});
-   const { decided } = await action('coordinator changes rate and records decision', 'POST', changePath, rate, 1, 200, 'coord');
+   const { decided } = await action('coordinator changes rate and records decision', 'POST', changePath, rate, 2, 200, 'coord', 1);
    assert.equal(decided.amount, 180);
    assert.equal(decided.by, people.coord.id);
    assert.deepEqual(await readFactoryFee('admin'), { company: factoryFee.company, mashgiach: rate });
@@ -269,11 +269,27 @@ export default {
    assert.equal(feeCheck.paidAmount, 180);
    assert.equal(feeCheck.decided.byName, people.coord.name);
    assert.equal(feeCheck.canChangeFactoryFee, false);
-   assert.deepEqual(await action('retry factory fee change', 'POST', changePath, rate, 0, 200, 'coord'), { decided });
-   await action('resolved mismatch cannot change the rate again', 'POST', changePath, { amount: 190 }, 0, 409, 'coord');
-   const { log } = (await api('admin', 'GET', '/api/__test__/push-log')).json;
-   assert.deepEqual(log.map(push => push.recipientUserId).sort(), [people.admin.id, secondAdmin.id].sort());
-   assert.ok(log.every(push => push.title === 'Factory visit fee changed' && push.body.includes('Northfield Snacks')));
+   assert.deepEqual(await action('retry factory fee change', 'POST', changePath, rate, 0, 200, 'coord', 1), { decided });
+   await action('resolved mismatch cannot change the rate again', 'POST', changePath, { amount: 190 }, 0, 409, 'coord', 1);
+   const inboxPath = '/api/inspections/fee-changes';
+   const notices = async who => (await api(who, 'GET', inboxPath)).json.events;
+   const [notice] = await notices('admin');
+   assert.equal(notice.status, 'Pending');
+   assert.deepEqual([notice.actor, notice.company, notice.oldRate, notice.newRate], [people.coord.name, 'Northfield Snacks', 150, 180]);
+   assert.equal((await notices('secondAdmin'))[0].id, notice.id);
+   assert.deepEqual(await notices('foreign'), []);
+   assert.equal((await api('coord', 'GET', inboxPath)).status, 403);
+   assert.equal((await api('mash', 'GET', inboxPath)).status, 403);
+   assert.equal((await api('foreign', 'POST', inboxPath + '/' + notice.id + '/read', {})).status, 404);
+   assert.equal((await api('admin', 'POST', inboxPath + '/' + notice.id + '/read', {})).status, 200);
+   assert.equal((await notices('secondAdmin'))[0].readAt, null);
+   assert.equal((await api('admin', 'POST', '/api/internal/fee-change-sweep', {})).status, 403);
+   const sweep = await ctx.api('POST', '/api/internal/fee-change-sweep', {});
+   assert.equal(sweep.status, 200, JSON.stringify(sweep.json));
+   // Deliberately invalid subscription keys fail the real adapter's send, after the successful save.
+   assert.equal((await notices('admin'))[0].status, 'Pending');
+   assert.equal((await notices('admin')).length, 1);
+   assert.deepEqual(await readFactoryFee('admin'), { company: factoryFee.company, mashgiach: rate });
 
    await action('set a different rate before the inherited-rate report', 'PUT', feesPath('snacks119'), factoryFee);
    const inheritedReport = await api('elsewhere', 'POST', '/api/visits/reports', {
@@ -286,7 +302,8 @@ export default {
    assert.deepEqual((await api('elsewhere', 'GET', visitPath)).json.fee, { ...rate, currency: 'USD' });
    await api('admin', 'POST', '/api/__test__/push-log/clear', {});
    const { decided: inheritedDecision } = await action('coordinator accepts the inherited rate', 'POST',
-    `/api/inspections/reports/${inheritedReport.json.report.id}/fee-change`, rate, 1, 200, 'coord');
+    `/api/inspections/reports/${inheritedReport.json.report.id}/fee-change`, rate, 1, 200, 'coord', 1);
+   assert.deepEqual((await notices('admin')).map(e => e.id), [notice.id]);
    assert.equal(inheritedDecision.amount, rate.amount);
    assert.equal(inheritedDecision.by, people.coord.id);
    assert.deepEqual(await readFactoryFee('admin'), { company: factoryFee.company, mashgiach: null });

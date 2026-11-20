@@ -1,4 +1,5 @@
 import { createCompanyRemovalStore, retentionElapsed, type CompanyRemoval } from './company-removal.ts';
+import { createFeeChangeWorker, type FeePush } from './fee-change-events.ts';
 import { createFeesStore } from './fees-store.ts';
 import { createCompanyInfoStore, validateCompanyInfo, emptyInfo, contactsRevision } from './company-info-store.ts';
 import { validateFees, validateSettings, validateAccountant, computePay, range, amount, shape, paidAmount } from './fees.ts';
@@ -19,12 +20,15 @@ export function registerInspectionRoutes(app: any, deps: {
   agencyIds?(): string[]; db(): any; dataDir: string; staged(): boolean; source: ReturnType<typeof inspectionSourceAccessor>;
   user(req: any): { id: string; name: string; role: string; agencyId?: string } | undefined;
   scheduleAgencyIds?(): string[]; people?(agency: string): Person[]; timeZone?(agency: string): string;
-  agencyName?(agency: string): string;
+  feePush?: FeePush; agencyName?(agency: string): string;
   now?(): Date; testMode?: boolean; push?(user: Person, title: string, body: string): void | Promise<void>;
   maxPhotoChars: number; photoRe: RegExp;
 }) {
   const now = () => deps.now?.() || new Date();
   const fees = createFeesStore({ ...deps, now }), companyInfo = createCompanyInfoStore({ ...deps, now });
+  const feeEvents = createFeeChangeWorker({ ...deps, now }, fees, deps.feePush ?? {
+    targets: async () => [], send: async () => 'unavailable',
+  });
   const email = createEmailTransport(deps.dataDir, !!deps.testMode), outboxes = new Map<string, Message[]>();
   const schedules = createScheduleStore({ ...deps, now });
   const removals = createCompanyRemovalStore({ ...deps, now });
@@ -151,6 +155,9 @@ export function registerInspectionRoutes(app: any, deps: {
   function visitFee(a: string, id: string): Fee {
     const set = placeFee(a, id)?.mashgiach;
     if (set) return { amount: set.amount, currency: 'USD' };
+    return inheritedFee(a, id);
+  }
+  function inheritedFee(a: string, id: string): Fee {
     const data = deps.source(a).connection?.fees?.mashgiach?.[id];
     return !Object.hasOwn(food.doc(a).manualPlaces, id) && data && Number.isFinite(data.amount) ? { amount: data.amount, currency: data.currency } : null;
   }
@@ -308,42 +315,30 @@ export function registerInspectionRoutes(app: any, deps: {
       if (report.kind === 'food_service' || !report.feeMismatch || !activeFactory(a, id)) {
         return { error: 'An active factory report with a fee mismatch is required', status: 400 } as const;
       }
-      return fees.locked(a, async () => {
-        if (!canEditFactoryReportFee(a, u)) return { error: 'Forbidden', status: 403 } as const;
-        const previous = fees.doc(a).decisions[report.id];
-        if (u.role === 'coordinator' && previous?.setFee) {
-          if (previous.by === u.id && previous.amount === value) return { decided: previous } as const;
-          return { error: 'This report fee change has already been recorded', status: 409 } as const;
-        }
-        const rateChanged = visitFee(a, id)?.amount !== value;
-        const at = now().toISOString();
-        const update = fees.stage(a, next => {
-          if (rateChanged) {
-            const old = Object.hasOwn(next.places, id) ? next.places[id] : null;
-            Object.defineProperty(next.places, id, {
-              value: { company: old?.company ?? null, mashgiach: { amount: value }, updatedBy: u.id, updatedAt: at },
-              enumerable: true, configurable: true, writable: true,
-            });
-          }
-          next.decisions[report.id] = { amount: value, setFee: true, by: u.id, byName: u.name, at };
-        });
-        if (update) {
-          await fees.persist(a, update.before, update.next);
-          fees.install(a, update.next);
-        }
-        return {
-          decided: fees.doc(a).decisions[report.id],
-          ...(rateChanged && u.role === 'coordinator' ? { notifyFor: report.companyName } : {}),
-        };
+      return fees.recordChange({
+        agency: a, report: report.id, companyId: id, company: report.companyName, actorId: u.id, actor: u.name,
+        coordinator: u.role === 'coordinator', newRate: value, inherited: inheritedFee(a, id)?.amount ?? null,
+        admins: people(a).filter(p => p.role === 'admin').map(p => p.id),
       });
     });
     if ('error' in changed) return res.status(changed.status).json({ error: changed.error });
-    if ('notifyFor' in changed) {
-      await sendInspectionPush(people(a).filter(p => p.role === 'admin'), 'Factory visit fee changed',
-        `${changed.notifyFor} — changed by ${u.name}`);
-    }
     res.json({ decided: changed.decided });
   }, true));
+  app.get('/api/inspections/fee-changes', handler('only', async (req: any, res: any, u: Person, a: string) => {
+    const before = req.query.before;
+    if (before !== undefined && (typeof before !== 'string' || !/^\d{4}-[\dT:.-]{18}Z\|[\w-]{43}$/.test(before)))
+      return res.status(400).json({ error: 'Invalid fee change cursor' });
+    const page = await feeEvents.inbox(a, u.id, before);
+    const events = await Promise.all(page.events.map(async row => ({
+      ...row, report: (await store.get(a, row.report)) ? row.report : null,
+    })));
+    res.json({ events, nextCursor: page.nextCursor });
+  }));
+  app.post('/api/inspections/fee-changes/:id/read', handler('only', async (req: any, res: any, u: Person, a: string) => {
+    if (!/^[\w-]{43}$/.test(req.params.id)) return res.status(404).end();
+    const read = await feeEvents.markRead(a, req.params.id, u.id);
+    res.status(read ? 200 : 404).json({ read });
+  }));
   app.get('/api/inspections/company-info/:placeId', handler(true, (req: any, res: any, u: Person, a: string) => {
     const id = req.params.placeId, entry = removal(a, id);
     const archived = u.role === 'admin' && entry?.archived && !entry.requested && !entry.deletedAt;
@@ -780,7 +775,7 @@ export function registerInspectionRoutes(app: any, deps: {
   if (deps.testMode) app.post('/api/__test__/inspections/check', handler('only', async (_req: any, res: any, u: Person) => {
     res.json(await check());
   }));
-  return { check, withRemoval, removal, setRemoval, bindSheetArchives, pendingRemovals, foodServiceCompanyIds: async (a: string) => { await food.ensure(a); return connectedPlaces(a).filter(p => p.source === 'connected').map(p => p.id); }, flushSeen: inbox.flush, boot: async () => {
+  return { sweepFeeChanges: () => feeEvents.sweep(deps.scheduleAgencyIds?.() ?? deps.agencyIds?.() ?? []), check, withRemoval, removal, setRemoval, bindSheetArchives, pendingRemovals, foodServiceCompanyIds: async (a: string) => { await food.ensure(a); return connectedPlaces(a).filter(p => p.source === 'connected').map(p => p.id); }, flushSeen: inbox.flush, boot: async () => {
     await store.boot(deps.agencyIds?.() || []);
     const agencies = deps.scheduleAgencyIds?.() || deps.agencyIds?.() || [];
     await Promise.all([schedules.boot(agencies), food.boot(agencies), inbox.boot(agencies), fees.boot(agencies), companyInfo.boot(agencies), removals.boot(agencies)]);

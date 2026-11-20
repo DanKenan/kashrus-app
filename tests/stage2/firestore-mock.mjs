@@ -54,9 +54,12 @@ class MockQuery {
         field !== 'sortKey' && !(field === 'companyId' && op === '==' && this.filters.length === 1 && !this.orders.length))) || (this.filters.length && this.orders.some(([field]) => this.filters.some(([filter]) => filter !== field))) || this.orders.length > 1 ||
       this.filters.some(([field, op]) => op !== '==' && this.orders.some(([order]) => order !== field))
     )) throw Error('composite index required');
-    const compare = (a, b) => { for (const [field, direction] of this.orders) { const cmp = a[field] === b[field] ? 0 : a[field] < b[field] ? -1 : 1; if (cmp) return direction === 'desc' ? -cmp : cmp; } return 0; };
+    // Firestore's orderBy excludes missing fields. Range predicates imply ascending order.
+    const range = this.filters.find(([, op]) => ['<', '>='].includes(op));
+    const orders = this.orders.length ? this.orders : range ? [[range[0], 'asc']] : [];
+    const compare = (a, b) => { for (const [field, direction] of orders) { const cmp = a[field] === b[field] ? 0 : a[field] < b[field] ? -1 : 1; if (cmp) return direction === 'desc' ? -cmp : cmp; } return 0; };
     const boundary = this.cursor && Object.fromEntries(this.orders.map(([field], i) => [field, this.cursor[i]]));
-    const rows = Object.entries(this.store._docs).filter(([path, data]) => path.startsWith(`${this.path}/`) && data !== undefined && this.filters.every(([field, op, value]) => op === '==' ? data[field] === value : op === '>=' ? data[field] >= value : op === '<' ? data[field] < value : false)).sort((a, b) => compare(a[1], b[1])).filter(([, data]) => !boundary || compare(data, boundary) > 0).slice(0, this.cap);
+    const rows = Object.entries(this.store._docs).filter(([path, data]) => path.startsWith(`${this.path}/`) && data !== undefined && orders.every(([field]) => Object.hasOwn(data, field)) && this.filters.every(([field, op, value]) => op === '==' ? data[field] === value : op === '>=' ? data[field] >= value : op === '<' ? data[field] < value : false)).sort((a, b) => compare(a[1], b[1])).filter(([, data]) => !boundary || compare(data, boundary) > 0).slice(0, this.cap);
     const docs = rows.map(([path, data]) => ({ id: path.slice(this.path.length + 1), ref: this.store.doc(path), exists: true, data: () => JSON.parse(JSON.stringify(this.fields ? Object.fromEntries(this.fields.filter(field => data[field] !== undefined).map(field => [field, data[field]])) : data)) }));
     return { docs, empty: !docs.length, size: docs.length, forEach: fn => docs.forEach(fn) };
   }

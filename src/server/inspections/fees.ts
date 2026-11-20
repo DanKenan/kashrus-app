@@ -3,7 +3,7 @@ export type PlaceFees = { company: { amount: number; per: 'visit' | 'month' | 'y
 export type Timing = { mode: 'after_report'; days?: never; everyDays?: never } | { mode: 'dates'; days: (number | 'last')[]; everyDays?: never } | { mode: 'every_days'; everyDays: number; days?: never };
 export type Accountant = { name: string; email: string; timing: Timing };
 export type Decision = { amount?: number; setFee?: true; by: string; byName: string; at: string };
-export type FeesDoc = { settings: { feeEditors: 'admins' | 'admins_and_coordinators' }; places: Record<string, PlaceFees>; accountant: Accountant | null; lastSent: { at: string; periodEnd: string; key?: string } | null; decisions: Record<string, Decision>; updatedAt: string };
+export type FeesDoc = { events?: Record<string, import('./fee-change-events.ts').FeeChangeEvent>; settings: { feeEditors: 'admins' | 'admins_and_coordinators' }; places: Record<string, PlaceFees>; accountant: Accountant | null; lastSent: { at: string; periodEnd: string; key?: string } | null; decisions: Record<string, Decision>; updatedAt: string };
 export const bad = (message = 'Invalid fee data'): never => { throw Object.assign(Error(message), { status: 400 }); };
 export function shape(value: any, keys: string[], required = keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !keys.includes(k)) || required.some(k => !Object.hasOwn(value, k))) bad();
