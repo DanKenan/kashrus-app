@@ -22,8 +22,11 @@ export function guardSourceWrite(c: Connection | undefined, list: string, fields
         if (config.table === company.table && (config.file?.id || c.baseId) === (company.file?.id || c.baseId) &&
             config[key] && [company.companyFee, company.mashgiachFee].includes(config[key]))
             return reject(400, 'Imported fee columns are read only.');
-        if (c.sourceType === 'airtable' && Object.hasOwn(output, config[key]) && output[config[key]] !== value)
-            return reject(400, 'Conflicting values map to the same Airtable column.');
+        if (c.sourceType === 'airtable') {
+            if (key === 'name' && !value.trim()) return reject(400, 'Enter a company name.');
+            if (config[key] && allowed.some(other => other !== key && config[other] === config[key]))
+                return reject(400, 'Map each editable company field to a separate Airtable column.');
+        }
         if (typeof config[key] === 'string' && config[key]) output[config[key]] = value;
     }
     if (!Object.keys(output).length) return reject(400, 'Only mapped list columns can be edited.');

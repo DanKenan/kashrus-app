@@ -766,7 +766,8 @@ export function registerSourceRoutes(app: any, deps: {
         const current = before.values[field];
         entry.previous[field] = current;
         if (current === (fields[field] || null)) return false;
-        if (current !== (originals[field] || null)) sheetConflict('The company changed in Airtable. Reload and review.');
+        if (current !== (originals[field] || null))
+          throw Object.assign(Error('The company changed in Airtable. Reload and review.'), { status: 409, code: 'STALE_COMPANY_VALUE' });
         return true;
       });
       if (included.length) {
@@ -793,7 +794,7 @@ export function registerSourceRoutes(app: any, deps: {
     catch { auditWarning = 'The final edit audit could not be recorded.'; }
     if (entry.outcome === 'unconfirmed') return res.status(409).json({ outcome: entry.outcome, auditWarning,
       readOnly: error?.readOnly, error: 'Airtable may have saved these changes. Reload and review before retrying.' });
-    if (error) return editError(res, error, { auditWarning, ...(c.access === 'read' && { readOnly: true }) });
+    if (error) return editError(res, error, { auditWarning, ...(error.code === 'STALE_COMPANY_VALUE' && { code: error.code }), ...(c.access === 'read' && { readOnly: true }) });
     const values = (entry.writeEvidence.confirmGet ?? entry.writeEvidence.verifyGet)!.values;
     try {
       cache.publish(c.agencyId, await adapter!.loadAll!());

@@ -77,7 +77,7 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
 }) {
   const [baseline, setBaseline] = useState<AirtableCompanyBaseline | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
-  const [review, setReview] = useState(false);
+  const [review, setReview] = useState<'uncertain' | 'stale' | null>(null);
   const [readOnly, setReadOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -96,6 +96,26 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
   const changed = Object.fromEntries(Object.entries<string>(draft).filter(([key, value]) => (value || null) !== baseline?.fields[key]));
   const editable = baseline?.access === 'readwrite' && !readOnly;
   const canSave = editable && !busy && !review && !!fields.name?.trim() && Object.keys(changed).length > 0;
+  async function saveValues(from: AirtableCompanyBaseline, values: Record<string, string>) {
+    const result = await updateAirtableCompany(company.id, from, values);
+    setAuditWarning(result.auditWarning || '');
+    setReadOnly(result.readOnly === true);
+    if (!result.saved) {
+      if (result.outcome === 'unconfirmed' || result.code === 'STALE_COMPANY_VALUE') {
+        action.current = 'review';
+        setDraft(values);
+        setReview(result.outcome === 'unconfirmed' ? 'uncertain' : 'stale');
+      }
+      setMessage(result.outcome === 'unconfirmed' ? '' : result.error);
+      return;
+    }
+    setBaseline({ ...from, fields: result.fields });
+    setDraft({});
+    setReview(null);
+    action.current = 'idle';
+    setMessage(result.warning || 'Company details saved.');
+    onSaved(result.fields.name || undefined);
+  }
   async function reload() {
     if (action.current === 'busy') return;
     action.current = 'busy';
@@ -104,10 +124,15 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
       const next = await readAirtableCompany(company.id);
       if (baseline && (baseline.updatedAt !== next.updatedAt || baseline.baseId !== next.baseId))
         throw Error('The source connection changed. Reopen the company.');
+      if (review === 'uncertain' && Object.entries<string>(draft).every(([field, value]) => next.fields[field] === (value || null))) {
+        // Using the requested values as originals makes this a verify-and-republish only.
+        await saveValues(next, draft);
+        return;
+      }
       setBaseline(next);
       setReadOnly(false);
       setMessage('');
-      setReview(false);
+      setReview(null);
       action.current = 'idle';
     } catch (error: any) { setMessage(error.message); if (error.readOnly) setReadOnly(true); }
     finally { if (action.current === 'busy') action.current = review ? 'review' : 'idle'; setBusy(false); }
@@ -118,20 +143,7 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
     action.current = 'busy';
     setBusy(true);
     try {
-      const result = await updateAirtableCompany(company.id, baseline, changed);
-      setAuditWarning(result.auditWarning || '');
-      setReadOnly(result.readOnly === true);
-      if (result.outcome === 'unconfirmed') {
-        action.current = 'review';
-        setReview(true);
-        setMessage('');
-        return;
-      }
-      if (!result.saved) { setMessage(result.error); return; }
-      setBaseline({ ...baseline, fields: result.fields });
-      setDraft({});
-      setMessage(result.warning || 'Company details saved.');
-      onSaved(result.fields.name || undefined);
+      await saveValues(baseline, changed);
     } finally {
       if (action.current === 'busy') action.current = 'idle';
       setBusy(false);
@@ -152,7 +164,8 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
     {message && <p role="status">{message}</p>}
   </>;
   return <form className="space-y-4" onSubmit={submit}>
-    {baseline && <fieldset className="space-y-4" disabled={busy || readOnly}>
+    {!baseline && (busy || !message) && <p role="status">Loading company details…</p>}
+    {baseline && <fieldset className="space-y-4" disabled={busy || readOnly || review === 'uncertain'}>
       {([...detailFields, ['brand', 'Brand'], ['plant', 'Plant']] as const).map(([field, label]) => mapping?.[field] &&
         <label key={field} className="block space-y-2">{label}
           {field === 'type' && baseline.typeOptions ? <select className={setupField} value={fields.type || ''}
@@ -168,7 +181,7 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
     </div>}
     {editable && <p className="text-ink-soft">Changes are saved in your Airtable.</p>}
     {movesOut && <p>This company will move out of Factories.</p>}
-    {review && <p role="status">{uncertainCompanyEdit}</p>}
+    {review === 'uncertain' && <p role="status">{uncertainCompanyEdit}</p>}
     {message && <p role="status">{message}</p>}
     {auditWarning && <p role="alert">{auditWarning}</p>}
     {readOnly && <p>This source is read only in Shutfey.</p>}

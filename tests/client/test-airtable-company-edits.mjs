@@ -69,7 +69,12 @@ try {
     throw Error('Timed out waiting for the editor');
   };
   globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
-  globalThis.fetch = (input, init) => nativeFetch(String(input).startsWith('/') ? url + input : input, init);
+  let releaseLoad;
+  const initialLoad = new Promise(resolve => { releaseLoad = resolve; });
+  globalThis.fetch = async (input, init) => {
+    if (input === row + '/edit') await initialLoad;
+    return nativeFetch(String(input).startsWith('/') ? url + input : input, init);
+  };
   for (const [role, connection] of [['admin', { ...config, access: 'read' }], ['staff', config], ['admin', { ...config, sourceType: 'upload' }]])
     assert.equal(canEditAirtableCompany(role, connection), false);
   assert.equal(canEdit('admin', config), false);
@@ -79,6 +84,9 @@ try {
   const panel = screen.tree().props.children.props.children[1].props.children[0].props.children[1];
   const editor = await mount(panel.type, panel.props).render();
   const button = () => editor.find(node => node.props.type === 'submit')[0];
+  assert.match(editor.text(), /Loading company details/);
+  assert.equal(button(), undefined);
+  releaseLoad();
   await waitFor(async () => { await editor.render(); return !!button(); });
   assert.equal(state.scopeChecks, scopes + 1);
   assert.equal(button().props.disabled, true);
@@ -114,25 +122,67 @@ try {
   await editor.submit();
   assert.equal(patches.length, 1);
   state.denyConfirm = false;
+  const cachedAddress = async () => (await (await api('/api/factories')).json()).companies.find(c => c.id === 'rec0').address;
+  assert.equal(await cachedAddress(), 'Main Street');
+  await editor.click('Reload and review');
+  assert.equal(patches.length, 1);
+  assert.equal(saved, 1);
+  assert.match(editor.text(), /Company details saved/);
+  assert.equal(await cachedAddress(), 'Draft address');
+
+  await change('Draft address', 'Second address');
+  state.denyConfirm = true;
+  await editor.submit();
+  state.denyConfirm = false;
+  state.failList = true;
+  await editor.click('Reload and review');
+  assert.equal(patches.length, 2);
+  assert.match(editor.text(), /Saved in Airtable. Refresh required./);
+  state.failList = false;
+  assert.equal(await cachedAddress(), 'Second address');
+
+  await change('Second address', 'Draft address');
+  state.denyConfirm = true;
+  await editor.submit();
+  state.denyConfirm = false;
+  original.Address = 'First external address';
+  await editor.click('Reload and review');
+  assert.match(editor.text(), /First external address/);
+  assert.equal(button().props.disabled, false);
+  assert.equal(patches.length, 3);
+
+  // A second external edit now races an ordinary, deliberate save.
   original.Address = 'External address';
+  await editor.submit();
+  assert.match(editor.text(), /The company changed in Airtable. Reload and review./);
+  assert.doesNotMatch(editor.text(), /may have saved/);
+  assert.equal(button().props.disabled, true);
+  assert.equal(patches.length, 3);
   await editor.click('Reload and review');
   assert.match(editor.text(), /External address/);
+  assert.ok(editor.find(node => node.props.value === 'Draft address').length);
+  assert.equal(patches.length, 3);
   assert.equal(button().props.disabled, false);
   await change('Company 0', 'Updated company');
   await change('Factory', 'Other');
   assert.match(editor.text(), /move out of Factories/);
   failAudit = 'confirmed';
   await editor.submit();
-  assert.equal(saved, 1);
+  assert.equal(saved, 3);
   assert.match(editor.text(), /Company details saved/);
   assert.match(editor.text(), /final edit audit could not be recorded/);
   assert.deepEqual(original, { Name: 'Updated company', Address: 'Draft address', Type: 'Other' });
-  assert.equal(patches.length, 2);
-  assert.equal(state.scopeChecks, scopes + 2);
+  assert.equal(patches.length, 4);
+  assert.equal(state.scopeChecks, scopes + 4);
   failAudit = undefined;
   original.Type = 'Factory';
   // Restore eligibility via a new settings save and verify the refresh-warning path.
   await api('/api/sources/connection', 'PUT', config);
+  await change('Draft address', 'Old connection draft');
+  await editor.submit();
+  assert.match(editor.text(), /The source connection changed. Reopen the company./);
+  assert.doesNotMatch(editor.text(), /Reload and review/);
+  assert.equal(patches.length, 4);
   const fresh = await (await api(row + '/edit')).json();
   state.failList = true;
   const response = await api(row, 'PATCH', { ...fresh, fields: { address: '' }, originals: { address: original.Address } });

@@ -131,6 +131,18 @@ export default {
       assert.equal((await api('admin', 'PATCH', endpoint, { fields: { name: 'Changed' } })).status, 403);
       assert.equal(state.calls, readCalls);
       state.writable = true;
+      rows.Ingredients[0].fields.Company = 'Company 0';
+      const aliasMapping = { ...mapping, companies: { ...mapping.companies, brand: 'Name', plant: 'Type' } };
+      assert.equal((await api('admin', 'PUT', '/api/sources/connection', { ...same, mapping: aliasMapping, access: 'readwrite' })).status, 200);
+      const aliasEditor = (await api('admin', 'GET', endpoint + '/edit')).json;
+      for (const [field, value] of [['brand', 'Renamed'], ['plant', 'Invalid']]) {
+        const response = await api('admin', 'PATCH', endpoint, { baseId: aliasEditor.baseId, updatedAt: aliasEditor.updatedAt,
+          fields: { [field]: value }, originals: { [field]: aliasEditor.fields[field] } });
+        assert.equal(response.status, 400);
+        assert.match(response.json.error, /separate Airtable column/);
+      }
+      assert.equal(patches.length, 0);
+      rows.Ingredients[0].fields.Company = ['rec0'];
       assert.equal((await api('admin', 'PUT', '/api/sources/connection', { ...same, access: 'readwrite' })).status, 200);
       const editor = await api('admin', 'GET', endpoint + '/edit');
       assert.equal(editor.status, 200);
@@ -150,12 +162,20 @@ export default {
       for (const fields of [{ address: 'x' }, { name: 'x', brand: 'x' }, { companyFee: '42' }, { unknown: 'x' }])
         assert.equal((await patch(fields, {})).status, 400);
       assert.equal((await patch({ type: 'Invalid' }, { type: 'Factory' })).status, 400);
+      for (const name of ['', '  ']) {
+        const blank = await patch({ name }, { name: 'Company 0' });
+        assert.equal(blank.status, 400);
+        assert.equal(blank.json.error, 'Enter a company name.');
+      }
+      assert.equal(patches.length, 0);
       assert.equal(state.calls, count);
       rows.Ingredients[0].fields.Company = 'Company 0';
       assert.equal((await patch({ name: 'Renamed' }, { name: 'Company 0' })).status, 409);
       rows.Ingredients[0].fields.Company = ['rec0'];
       rows.Products[0].fields.Company = 'Dropped';
-      assert.equal((await patch({ type: 'Factory', address: 'x' }, { type: null, address: 'stale' })).status, 409);
+      const stale = await patch({ type: 'Factory', address: 'x' }, { type: null, address: 'stale' });
+      assert.equal(stale.status, 409);
+      assert.equal(stale.json.code, 'STALE_COMPANY_VALUE');
       assert.equal(patches.length, 0);
       const change = { name: 'Renamed', address: '', type: 'Factory' };
       const originals = { name: 'Company 0', address: 'Main Street', type: null };
