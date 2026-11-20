@@ -12,7 +12,7 @@ rows.Products = Array.from({ length: 3 }, (_, i) => ({ id: `p${i}`, fields: { Na
 const tables = [...Array.from({ length: 17 }, (_, i) => ({ name: `Other ${i}`, fields: [{ name: 'Description' }] })), ...Object.keys(rows).map(name => ({ name, fields: [{ name: 'Name' }, { name: 'Company' }, { name: 'Cert' }, { name: 'Brand' }] }))];
 globalThis.fetch = async url => {
   calls++; const u = new URL(url);
-  if (u.pathname.endsWith('/whoami')) return Response.json({ scopes: [] });
+  if (u.pathname === '/v0/meta/bases') return Response.json({ bases: [{ id: 'appTEST', permissionLevel: 'read' }] });
   if (u.pathname.endsWith('/tables')) return Response.json({ tables });
   await gate;
   return Response.json({ records: rows[decodeURIComponent(u.pathname.split('/').at(-1))] || [] });

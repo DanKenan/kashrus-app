@@ -7,7 +7,7 @@ const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms
 const companyFields = ['name', 'address', 'type', 'brand', 'plant'] as const;
 export type AirtableCompanyField = typeof companyFields[number];
 interface CompanyEditorConnector extends SourceConnector {
-  testConnection(schemaOptional?: boolean): Promise<ConnectionResult & { status?: number }>;
+  testConnection(): Promise<ConnectionResult & { status?: number }>;
   readCompany(id: string): Promise<{ recordId: string; values: Record<string, string | null> }>;
   patchCompany(id: string, fields: Record<string, string | null>): Promise<void>;
   renameData(): Promise<{ data: SourceData; links: unknown[] }>;
@@ -192,15 +192,28 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
       }
       return samples;
     },
-    async testConnection(schemaOptional = false) {
+    async testConnection() {
       try {
-        const identity = await request('/v0/meta/whoami');
-        const access = identity.scopes?.includes('data.records:write') ? 'readwrite' : 'read';
-        const schema = await request(`/v0/meta/bases/${encodeURIComponent(baseId)}/tables`).catch(cause => {
-          if (schemaOptional && (cause.status === 403 || cause.status === 404)) return null;
-          throw cause;
-        });
-        if (!schema) return { ok: true, access };
+        let access: 'read' | 'readwrite';
+        let offset: string | undefined;
+        const seen = new Set<string>();
+        for (;;) {
+          const query = offset ? `?offset=${encodeURIComponent(offset)}` : '';
+          const page = await request('/v0/meta/bases' + query);
+          if (!Array.isArray(page?.bases) || page.bases.some((base: any) => typeof base?.id !== 'string' || !base.id))
+            throw Error('Airtable returned invalid base metadata');
+          offset = page.offset;
+          if (offset !== undefined && (typeof offset !== 'string' || !offset || seen.has(offset)))
+            throw Error('Airtable returned invalid pagination');
+          const base = page.bases.find((base: any) => base.id === baseId);
+          if (base) {
+            access = base.permissionLevel === 'create' || base.permissionLevel === 'edit' ? 'readwrite' : 'read';
+            break;
+          }
+          if (!offset) return { ok: false, error: 'This Airtable token cannot see the selected base.' };
+          seen.add(offset);
+        }
+        const schema = await request(`/v0/meta/bases/${encodeURIComponent(baseId)}/tables`);
         const type = schema.tables.find((table: any) => table.name === mapping.companies.table || table.id === mapping.companies.table)
           ?.fields.find((field: any) => field.name === mapping.companies.type);
         options = type?.type === 'singleSelect' ? type.options?.choices?.map((choice: any) => choice.name) : undefined;

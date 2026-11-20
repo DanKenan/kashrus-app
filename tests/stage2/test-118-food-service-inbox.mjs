@@ -13,7 +13,7 @@ export default {
   ], Ingredients: [{ id: 'ingredient118', fields: { Name: 'Test ingredient', Company: ['factory118a'] } }], Products: [{ id: 'product118', fields: { Name: 'Test product', Company: ['factory118a'] } }] };
   const mock = http.createServer((req, res) => {
    res.setHeader('Content-Type', 'application/json'); const url = new URL(req.url, 'http://localhost');
-   if (url.pathname.endsWith('/whoami')) return res.end(JSON.stringify({ scopes: ['data.records:read'] }));
+   if (url.pathname === '/v0/meta/bases') return res.end(JSON.stringify({ bases: [{ id: 'appTEST118', permissionLevel: 'read' }] }));
    if (url.pathname.endsWith('/tables')) return res.end(JSON.stringify({ tables: Object.entries(rows).map(([name, records]) => ({ name, fields: Object.keys(records[0].fields).map(name => ({ name })) })) }));
    res.end(JSON.stringify({ records: rows[decodeURIComponent(url.pathname.split('/').pop())] || [] }));
   });
