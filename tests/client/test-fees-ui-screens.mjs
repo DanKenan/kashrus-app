@@ -35,7 +35,30 @@ const pay = mount(PayScreen, { role: 'admin', timeZone: 'UTC', onClose() {} }); 
 for (const text of ['Paid to mashgichim', 'Companies pay', 'Left for the agency', '1 report has a different amount — tap to review', '2 visits have no fee', 'Download CSV', 'Download Excel', 'Email to accountant now', "Preview the accountant's email", 'Only admins see this screen. Mashgichim never see company amounts.']) assert.ok(pay.text().includes(text), text);
 assert.equal(pay.buttons().find(b => b.label === 'Email to accountant now').el.props.disabled, true);
 let updated = 0; const check = mount(ReportFeeCheck, { reportId: 'test-report', placeId: 'test-place', placeName: 'Test place', timeZone: 'UTC', check: { reportAmount: 180, setAmount: 150, decided: null }, async onUpdated() { updated++; } }); await check.render(); assert.match(check.text(), /The amount doesn't match/); assert.match(check.text(), /The pay table uses \$150.00/); assert.match(check.text(), /The mashgiach doesn't see this/); await check.click('Keep'); assert.equal(updated, 1); assert.deepEqual(calls.at(-1), ['POST', '/api/inspections/reports/test-report/fee-decision', {}]);
+fees.canEdit = true;
+const factoryCheck = {
+  reportId: 'test/factory-report', placeId: 'test-place', placeName: 'Test place', timeZone: 'UTC',
+  check: { reportAmount: 180, setAmount: 150, decided: null, canChangeFactoryFee: false },
+  async onUpdated() { updated++; },
+};
+const forbidden = mount(ReportFeeCheck, factoryCheck);
+await forbidden.render();
+assert.doesNotMatch(forbidden.text(), /Change the fee for this place/);
+const allowed = mount(ReportFeeCheck, { ...factoryCheck, check: { ...factoryCheck.check, canChangeFactoryFee: true } });
+await allowed.render();
+await allowed.click('Change the fee for this place');
+const [editor] = collect(allowed.tree(), FeesSheet);
+const reportSheet = mount(FeesSheet, editor.props);
+await reportSheet.render();
+assert.equal(reportSheet.find(e => e.type === 'fieldset')[1].props.disabled, true);
+assert.deepEqual(reportSheet.find(e => e.type === 'input').map(e => e.props.value), ['1200', '180']);
+const beforeReportSave = calls.length;
+await reportSheet.submit();
+assert.deepEqual(calls.slice(beforeReportSave), [['POST', '/api/inspections/reports/test%2Ffactory-report/fee-change', { amount: 180 }]]);
+assert.equal(updated, 2);
 recordFetch({ '/api/visits/places': { address: 'Test address', phone: '000', contacts: [{ name: 'Test hidden' }], company: { amount: 999 } } }); const card = mount(PlaceInfoCard, { placeId: 'test-place' }); await card.render(); assert.match(card.text(), /Test address/); assert.doesNotMatch(card.text(), /Test hidden|999/); assert.match(card.html(), /maps\/search/); assert.match(card.html(), /tel:000/);
 for (const file of ['FactoryVisitScreen', 'FoodServiceVisitScreen', 'PlaceInfoCard']) { const source = fs.readFileSync(`src/components/${file}.tsx`, 'utf8'); assert.doesNotMatch(source, /company\.amount|Companies pay|feeMismatch|dataFee|feeCheck|decisions|accountant|contacts|Left for the agency/); assert.match(source, /PlaceInfoCard/); }
-for (const file of ['FactoriesScreen', 'FoodServiceScreen']) { const source = fs.readFileSync(`src/components/${file}.tsx`, 'utf8'); assert.match(source, /canSeeFees\(role\)/); assert.match(source, /FeesSheet/); assert.match(source, /CompanyInfoSheet/); assert.match(source, /PayScreen/); }
+const foodService = fs.readFileSync('src/components/FoodServiceScreen.tsx', 'utf8');
+for (const existing of [/canSeeFees\(role\)/, /FeesSheet/, /CompanyInfoSheet/, /PayScreen/]) assert.match(foodService, existing);
+assert.match(fs.readFileSync('src/components/FactoriesScreen.tsx', 'utf8'), /PayScreen/);
 console.log('fees sheets, role restrictions, empty forms, disabled email, mismatch decision and mashgiach privacy: OK');

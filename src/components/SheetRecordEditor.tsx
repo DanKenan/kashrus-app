@@ -70,12 +70,16 @@ function CompanySelector({ label, companies, selected, onChange }: {
   </fieldset>;
 }
 
+function fieldLabel(section: SourceSection, field: string) {
+  const builtIn = isBuiltinFieldKey(section, field) ||
+    (section === 'companies' && ['address', 'companyFee', 'mashgiachFee'].includes(field));
+  return builtIn ? labels[field] : field;
+}
+
 function FieldInput({ section, field, value, companies, onChange }: {
   section: SourceSection; field: Field; value: Value; companies: Company[]; onChange(value: Value): void;
 }) {
-  const builtIn = isBuiltinFieldKey(section, field.field) ||
-    (section === 'companies' && ['address', 'companyFee', 'mashgiachFee'].includes(field.field));
-  const label = builtIn ? labels[field.field] : field.field;
+  const label = fieldLabel(section, field.field);
   if (field.readOnly) return <p className="break-words">{label} · <span className="text-ink-soft">{field.readOnly}</span></p>;
   if (field.choices) return <label className="block space-y-2">
     {label}
@@ -98,8 +102,8 @@ function FieldInput({ section, field, value, companies, onChange }: {
   </label>;
 }
 
-export function SheetRecordEditor({ section, row, onClose, onSaved }: {
-  section: SourceSection; row?: Row; onClose(): void; onSaved(): void;
+export function SheetRecordEditor({ section, row, onClose, onSaved, inlineCompany = false }: {
+  section: SourceSection; row?: Row; onClose(): void; onSaved(name?: string): void; inlineCompany?: boolean;
 }) {
   const adding = !row;
   const path = `/${section}/${row ? encodeURIComponent(row.id) : 'new'}`;
@@ -111,6 +115,7 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
   const [staleAdd, setStaleAdd] = useState(false);
   const [review, setReview] = useState(false);
   const [notice, setNotice] = useState('');
+  const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const lock = useRef(false);
   const fetchEditor = (): Promise<Editor> => sourceRequest('/api/sources/sheet-editor' + path);
@@ -130,7 +135,8 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
     return () => { active = false; };
   }, [path]);
 
-  const changed = editor?.fields.filter(({ field, readOnly, value }) =>
+  const fields = editor?.fields;
+  const changed = fields?.filter(({ field, readOnly, value }) =>
     !readOnly && Object.hasOwn(draft, field) && (Array.isArray(value)
       ? JSON.stringify([...value].sort()) !== JSON.stringify([...(draft[field] as string[])].sort())
       : String(draft[field]) !== String(value))) ?? [];
@@ -219,12 +225,34 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
     lock.current = true;
     setBusy(true);
     setError('');
+    setSaved(false);
     try {
       const result = await sourceRequest('/api/sources/rows' + path, 'PATCH', {
         fields: Object.fromEntries(entries),
         expected: Object.fromEntries(changed.map(({ field, revision }) => [field, revision])),
       });
       if (result.saved !== true) throw Error();
+      if (inlineCompany) {
+        setSaved(true);
+        onSaved(entries.find(([field]) => field === 'name')?.[1] as string | undefined);
+        if (result.refreshRequired) {
+          setReview(true);
+          setError(result.warning || 'Refresh the source to update the inspection list.');
+          return;
+        }
+        if (result.warning) {
+          setNotice(result.warning);
+          return;
+        }
+        try {
+          setEditor(await fetchEditor());
+          setDraft({});
+        } catch {
+          setReview(true);
+          setError("Couldn't reload company details. Refresh for review before editing again.");
+        }
+        return;
+      }
       onSaved();
       if (result.warning) {
         if (result.refreshRequired) {
@@ -249,12 +277,15 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
     lock.current = true;
     setBusy(true);
     try {
-      if (!(await readAgain()).ok) throw Error('Refresh failed. Review the connected sheet before editing.');
-      setEditor(await fetchEditor());
+      if (!(inlineCompany && notice) && !(await readAgain()).ok) throw Error('Refresh failed. Review the connected sheet before editing.');
+      const refreshed = await fetchEditor();
+      setEditor(refreshed);
       setDraft({});
       setReview(false);
+      setNotice('');
       setError('');
-      onSaved();
+      if (inlineCompany) onSaved(String(refreshed.fields.find(field => field.field === 'name')?.value || '') || undefined);
+      else onSaved();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Refresh failed.');
     } finally {
@@ -263,32 +294,39 @@ export function SheetRecordEditor({ section, row, onClose, onSaved }: {
     }
   }
 
-  return <VisitSheet title={`${adding ? 'Add' : 'Edit'} ${recordNames[section]}`} onClose={() => { if (!lock.current) onClose(); }}>
-    {row && <p dir="auto" className="break-words">{row.name}</p>}
-    <details className="rounded-lg border border-line bg-sunken p-3">
+  const content = <>
+    {row && !inlineCompany && <p dir="auto" className="break-words">{row.name}</p>}
+    {!inlineCompany && <details className="rounded-lg border border-line bg-sunken p-3">
       <summary className="flex min-h-11 cursor-pointer items-center font-semibold focus-visible:ring-2 focus-visible:ring-gold">? About Google Sheets editing</summary>
       <SheetEditHelpContent adding={adding} />
-    </details>
+    </details>}
+    {saved && <p role="status" className="text-good">Company details saved.</p>}
     {error && <p role="alert" className="break-words text-bad">{error}</p>}
     {notice && <p role="status" className="break-words text-warn">{notice}</p>}
     {adding && pendingToken && !error && <p role="status">Check whether Google Sheets saved the new record.</p>}
     {!editor && !error && <p role="status">Loading fields…</p>}
     {editor && <form onSubmit={save} className="space-y-4">
       <fieldset disabled={busy || review || staleAdd || !!notice || !!pendingToken} className="space-y-4">
-        {editor.fields.map(field => <div key={field.field}>
-          <FieldInput section={section} field={field} value={Object.hasOwn(draft, field.field) ? draft[field.field] : field.value}
-            companies={editor.companies} onChange={value => setDraft(previous => ({ ...previous, [field.field]: value }))} />
+        {fields?.map(field => <div key={field.field}>
+          {inlineCompany && field.readOnly ? <dl>
+            <dt className="text-sm text-ink-soft">{fieldLabel(section, field.field)}</dt>
+            <dd dir="auto" className="break-words">{String(field.value ?? '') || '—'}</dd>
+            <dd className="text-sm text-ink-soft">{field.readOnly}</dd>
+          </dl> : <FieldInput section={section} field={field} value={Object.hasOwn(draft, field.field) ? draft[field.field] : field.value}
+            companies={editor.companies} onChange={value => { setSaved(false); setDraft(previous => ({ ...previous, [field.field]: value })); }} />}
         </div>)}
       </fieldset>
       {adding ? !notice && <button type="submit" className={setupPrimary} disabled={busy || staleAdd}>{busy
         ? (pendingToken ? 'Checking…' : 'Saving…') : pendingToken ? 'Check again' : `Add ${recordNames[section]}`}</button>
-        : review ? <button type="button" className={setupPrimary} disabled={busy} onClick={() => void refreshForReview()}>{busy ? 'Refreshing…' : 'Refresh for review'}</button>
-        : !notice && <button type="submit" className={setupPrimary} disabled={busy || !changed.length}>{busy ? 'Saving…' : `Save ${recordNames[section]}`}</button>}
+        : review || (inlineCompany && notice) ? <button type="button" className={setupPrimary} disabled={busy} onClick={() => void refreshForReview()}>{busy ? 'Refreshing…' : 'Refresh for review'}</button>
+        : !notice && <button type="submit" className={setupPrimary} disabled={busy || !changed.length}>{busy ? 'Saving…' : inlineCompany ? 'Save company details' : `Save ${recordNames[section]}`}</button>}
       {adding && pendingToken && !notice && (confirmAbandon ? <div className="space-y-2">
         <p>Review the original Google Sheet first. Abandoning this attempt keeps any row it creates out of Shutfey. A fresh Add will use a new request.</p>
         <button type="button" className={sourceButton} disabled={busy} onClick={() => void abandonAdd()}>Confirm abandonment</button>
         <button type="button" className={sourceButton} disabled={busy} onClick={() => setConfirmAbandon(false)}>Cancel</button>
       </div> : <button type="button" className={sourceButton} disabled={busy} onClick={() => setConfirmAbandon(true)}>Abandon Add attempt</button>)}
     </form>}
-  </VisitSheet>;
+  </>;
+  return inlineCompany ? content :
+    <VisitSheet title={`${adding ? 'Add' : 'Edit'} ${recordNames[section]}`} onClose={() => { if (!lock.current) onClose(); }}>{content}</VisitSheet>;
 }

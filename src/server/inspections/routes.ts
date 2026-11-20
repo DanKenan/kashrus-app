@@ -1,6 +1,6 @@
 import { createCompanyRemovalStore, retentionElapsed, type CompanyRemoval } from './company-removal.ts';
 import { createFeesStore } from './fees-store.ts';
-import { createCompanyInfoStore, validateCompanyInfo, emptyInfo } from './company-info-store.ts';
+import { createCompanyInfoStore, validateCompanyInfo, emptyInfo, contactsRevision } from './company-info-store.ts';
 import { validateFees, validateSettings, validateAccountant, computePay, range, amount, shape, paidAmount } from './fees.ts';
 import { accountantPeriod, afterReportDelayMs, nextAccountantDate, buildAccountantMessage } from './accountant.ts';
 import { createEmailTransport, type Message } from './email.ts';
@@ -144,6 +144,10 @@ export function registerInspectionRoutes(app: any, deps: {
   const candidates = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'factory'), ...others(a).filter(c => !food.doc(a).marked.includes(c.id))].filter(c => active(a, c.id)).map(c => ({ id: c.id, name: c.name, type: c.type ?? '' }));
   const templates = (a: string) => food.doc(a).templateOrder.map(id => food.doc(a).templates[id]);
   const placeFee = (a: string, id: string) => Object.hasOwn(fees.doc(a).places, id) ? fees.doc(a).places[id] : null;
+  const activeFactory = (a: string, id: string) => deps.source(a).state.companies.some(c =>
+    c.id === id && kind(a, c) === 'factory' && active(a, id));
+  const canEditFactoryReportFee = (a: string, u: Person) =>
+    u.role === 'admin' || fees.doc(a).settings.feeEditors === 'admins_and_coordinators';
   function visitFee(a: string, id: string): Fee {
     const set = placeFee(a, id)?.mashgiach;
     if (set) return { amount: set.amount, currency: 'USD' };
@@ -246,10 +250,20 @@ export function registerInspectionRoutes(app: any, deps: {
   app.put?.('/api/inspections/fees/:placeId', handler(true, async (req: any, res: any, u: Person, a: string) => {
     if (u.role !== 'admin' && fees.doc(a).settings.feeEditors !== 'admins_and_coordinators') return res.status(403).json({ error: 'Forbidden' });
     const id = req.params.placeId;
-    if (!allPlaces(a).some(c => c.id === id) || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
-    const value = validateFees(req.body);
-    await fees.update(a, next => { const old = placeFee(a, id); if (!isDeepStrictEqual({ company: old?.company ?? null, mashgiach: old?.mashgiach ?? null }, value)) Object.defineProperty(next.places, id, { value: { ...value, updatedBy: u.id, updatedAt: now().toISOString() }, enumerable: true, configurable: true, writable: true }); });
-    res.json(value);
+    const place = allPlaces(a).find(c => c.id === id);
+    if (!place || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
+    if (u.role !== 'admin' && kind(a, place) === 'factory') return res.status(403).json({ error: 'Forbidden' });
+    shape(req.body, ['company', 'mashgiach'], []);
+    await fees.update(a, next => {
+      const old = Object.hasOwn(next.places, id) ? next.places[id] : null;
+      const previous = { company: old?.company ?? null, mashgiach: old?.mashgiach ?? null };
+      const value = validateFees({ ...previous, ...req.body });
+      if (!isDeepStrictEqual(previous, value)) Object.defineProperty(next.places, id, {
+        value: { ...value, updatedBy: u.id, updatedAt: now().toISOString() }, enumerable: true, configurable: true, writable: true,
+      });
+    });
+    const saved = placeFee(a, id);
+    res.json({ company: saved?.company ?? null, mashgiach: saved?.mashgiach ?? null });
   }));
   app.put?.('/api/inspections/fee-settings', handler('only', async (req: any, res: any, _u: Person, a: string) => {
     const value = validateSettings(req.body); await fees.update(a, next => { next.settings = value; }); res.json({ settings: value });
@@ -284,17 +298,76 @@ export function registerInspectionRoutes(app: any, deps: {
       res.json({ decided: fees.doc(a).decisions[r.id] });
     });
   }, true));
+  app.post('/api/inspections/reports/:id/fee-change', handler(true, async (req: any, res: any, u: Person, a: string) => {
+    shape(req.body, ['amount']);
+    const value = amount(req.body.amount);
+    const changed = await schedules.locked(a, async () => {
+      const report = await store.get(a, req.params.id);
+      if (!report || !visible(a, report.companyId, u)) return { error: 'Report not found', status: 404 } as const;
+      const id = report.companyId;
+      if (report.kind === 'food_service' || !report.feeMismatch || !activeFactory(a, id)) {
+        return { error: 'An active factory report with a fee mismatch is required', status: 400 } as const;
+      }
+      return fees.locked(a, async () => {
+        if (!canEditFactoryReportFee(a, u)) return { error: 'Forbidden', status: 403 } as const;
+        const previous = fees.doc(a).decisions[report.id];
+        if (u.role === 'coordinator' && previous?.setFee) {
+          if (previous.by === u.id && previous.amount === value) return { decided: previous } as const;
+          return { error: 'This report fee change has already been recorded', status: 409 } as const;
+        }
+        const rateChanged = visitFee(a, id)?.amount !== value;
+        const at = now().toISOString();
+        const update = fees.stage(a, next => {
+          if (rateChanged) {
+            const old = Object.hasOwn(next.places, id) ? next.places[id] : null;
+            Object.defineProperty(next.places, id, {
+              value: { company: old?.company ?? null, mashgiach: { amount: value }, updatedBy: u.id, updatedAt: at },
+              enumerable: true, configurable: true, writable: true,
+            });
+          }
+          next.decisions[report.id] = { amount: value, setFee: true, by: u.id, byName: u.name, at };
+        });
+        if (update) {
+          await fees.persist(a, update.before, update.next);
+          fees.install(a, update.next);
+        }
+        return {
+          decided: fees.doc(a).decisions[report.id],
+          ...(rateChanged && u.role === 'coordinator' ? { notifyFor: report.companyName } : {}),
+        };
+      });
+    });
+    if ('error' in changed) return res.status(changed.status).json({ error: changed.error });
+    if ('notifyFor' in changed) {
+      await sendInspectionPush(people(a).filter(p => p.role === 'admin'), 'Factory visit fee changed',
+        `${changed.notifyFor} — changed by ${u.name}`);
+    }
+    res.json({ decided: changed.decided });
+  }, true));
   app.get('/api/inspections/company-info/:placeId', handler(true, (req: any, res: any, u: Person, a: string) => {
     const id = req.params.placeId, entry = removal(a, id);
     const archived = u.role === 'admin' && entry?.archived && !entry.requested && !entry.deletedAt;
     if ((!allPlaces(a).some(c => c.id === id) && !archived) || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
-    res.json(info(a, id));
+    const value = info(a, id);
+    res.json({ ...value, contactsRevision: contactsRevision(value.contacts) });
   }));
   app.put?.('/api/inspections/company-info/:placeId', handler('only', async (req: any, res: any, _u: Person, a: string) => {
     const id = req.params.placeId;
-    if (!allPlaces(a).some(c => c.id === id)) return res.status(404).json({ error: 'Place not found' });
-    shape(req.body, ['address', 'phone', 'contacts'], []);
-    await companyInfo.update(a, next => { const old = Object.hasOwn(next.places, id) ? next.places[id] : emptyInfo(); const value = validateCompanyInfo({ ...old, ...req.body }, old); Object.defineProperty(next.places, id, { value, enumerable: true, configurable: true, writable: true }); }); res.json(info(a, id));
+    const place = allPlaces(a).find(c => c.id === id);
+    if (!place) return res.status(404).json({ error: 'Place not found' });
+    shape(req.body, ['address', 'phone', 'contacts', 'contactsRevision'], []);
+    const { contactsRevision: expected, ...changes } = req.body;
+    await companyInfo.update(a, next => {
+      const old = Object.hasOwn(next.places, id) ? next.places[id] : emptyInfo();
+      if (Object.hasOwn(changes, 'contacts') && (kind(a, place) === 'factory' || expected !== undefined) &&
+          expected !== contactsRevision(old.contacts)) {
+        throw Object.assign(Error('Contacts changed since you started editing. Reload contacts to see the latest list.'), { status: 409 });
+      }
+      const value = validateCompanyInfo({ ...old, ...changes }, old);
+      Object.defineProperty(next.places, id, { value, enumerable: true, configurable: true, writable: true });
+    });
+    const value = info(a, id);
+    res.json({ ...value, contactsRevision: contactsRevision(value.contacts) });
   }));
   app.get('/api/visits/places/:placeId/info', handler(false, (req: any, res: any, u: Person, a: string) => {
     const id = req.params.placeId;
@@ -315,7 +388,10 @@ export function registerInspectionRoutes(app: any, deps: {
     const title = hasProblems ? '⚠ Problem found' : 'New report';
     const body = hasProblems ? `${r.companyName} — ${n} ${n === 1 ? 'problem' : 'problems'} · ${r.mashgiachName}` : `${r.companyName} — ${r.mashgiachName}`;
     const recipients = new Map(people(a).filter(p => p.id !== r.mashgiachId && (p.role === 'admin' || (p.role === 'coordinator' && schedules.company(a, r.companyId).coordinatorIds.includes(p.id)))).map(p => [p.id, p]));
-    for (const p of recipients.values()) try { await deps.push?.(p, title, body); } catch { /* Delivery never fails a saved report. */ }
+    await sendInspectionPush(recipients.values(), title, body);
+  }
+  async function sendInspectionPush(recipients: Iterable<Person>, title: string, body: string) {
+    for (const p of recipients) try { await deps.push?.(p, title, body); } catch { /* Delivery never fails a saved report. */ }
   }
   app.get('/api/food-service', handler(true, (_req: any, res: any, u: Person, a: string) => {
     const visiblePlaces = sortedPlaces(a, u);
@@ -543,7 +619,18 @@ export function registerInspectionRoutes(app: any, deps: {
       const r = await store.get(agency, req.params.id);
       if (!r || !visible(agency, r.companyId, u)) return res.status(404).json({ error: 'Report not found' });
       await inbox.mark(agency, r, u);
-      res.json({ report: { ...reportSummary(agency, r), note: r.note, ...(r.feeMismatch ? { feeCheck: { reportAmount: r.dataFee?.amount ?? null, setAmount: placeFee(agency, r.companyId)?.mashgiach?.amount ?? r.fee?.amount ?? null, paidAmount: paidAmount(r, fees.doc(agency)), decided: fees.doc(agency).decisions[r.id] ? (({ amount, byName, at }) => ({ ...(amount === undefined ? {} : { amount }), byName, at }))(fees.doc(agency).decisions[r.id]) : null } } : {}), ...(r.kind === 'food_service' ? { checklist: r.checklist, templateId: r.templateId, templateVersion: r.templateVersion } : { marks: r.marks, offList: r.offList }) } });
+      const decision = fees.doc(agency).decisions[r.id];
+      const feeCheck = r.feeMismatch ? {
+        reportAmount: r.dataFee?.amount ?? null,
+        setAmount: placeFee(agency, r.companyId)?.mashgiach?.amount ?? r.fee?.amount ?? null,
+        paidAmount: paidAmount(r, fees.doc(agency)),
+        decided: decision ? { ...(decision.amount === undefined ? {} : { amount: decision.amount }), byName: decision.byName, at: decision.at } : null,
+        ...(r.kind !== 'food_service' ? {
+          canChangeFactoryFee: activeFactory(agency, r.companyId) && canEditFactoryReportFee(agency, u) &&
+            (u.role === 'admin' || !decision?.setFee),
+        } : {}),
+      } : null;
+      res.json({ report: { ...reportSummary(agency, r), note: r.note, ...(feeCheck ? { feeCheck } : {}), ...(r.kind === 'food_service' ? { checklist: r.checklist, templateId: r.templateId, templateVersion: r.templateVersion } : { marks: r.marks, offList: r.offList }) } });
     });
   }, true));
   app.get('/api/inspections/reports/:id/photos', handler(true, async (req: any, res: any, u: any, agency: string) => {

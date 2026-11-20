@@ -38,6 +38,7 @@ export default {
    for (let i = 0; i < 200; i++) { const ready = await api('admin', 'GET', '/api/inspections/fees'); const r = (await api('admin', 'POST', '/api/__test__/reads', {})).json; stable = ready.status === 200 && ready.json.places?.some(p => p.id === 'cafe119') && r.total === previous ? stable + 1 : 0; previous = r.total; if (stable >= 5) return r; await sleep(100); } throw Error('Fees boot did not settle');
   };
   const feeA = { company: { amount: 60, per: 'visit' }, mashgiach: { amount: 50 } };
+  const factoryFee = { company: { amount: 200, per: 'visit' }, mashgiach: { amount: 150 } };
   const query = 'from=2026-10-01&to=2026-10-31';
   try {
    await pin('2026-10-20T14:00:00Z');
@@ -46,6 +47,9 @@ export default {
     await ctx.api('POST', '/api/__test__/inject-fixture', { users: [people[who]] });
     tokens[who] = (await ctx.api('POST', '/api/__test__/mint-token', { userId: people[who].id })).json.token;
    }
+   const secondAdmin = { ...people.admin, id: people.admin.id + '-second', email: `${agencyId}-second@example.test` };
+   await ctx.api('POST', '/api/__test__/inject-fixture', { users: [secondAdmin] });
+   tokens.secondAdmin = (await ctx.api('POST', '/api/__test__/mint-token', { userId: secondAdmin.id })).json.token;
    await api('admin', 'POST', '/api/__test__/sources-api-base', { url: `http://127.0.0.1:${mock.address().port}` });
    const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', factoryValues: ['Factory'], foodServiceValues: ['Cafe', 'Bakery'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: [] };
    assert.equal((await api('admin', 'PUT', '/api/sources/connection', { sourceType: 'airtable', baseId: 'appTEST119', access: 'read', mapping, apiKey: 'fake-key-119' })).status, 200);
@@ -55,7 +59,7 @@ export default {
    await action('edit fee', 'PUT', feesPath('cafe119'), feeA);
    await action('unchanged fee', 'PUT', feesPath('cafe119'), feeA, 0);
    await action('yearly company fee', 'PUT', feesPath('bakery119'), { company: { amount: 1200, per: 'year' }, mashgiach: { amount: 80 } });
-   await action('factory fee', 'PUT', feesPath('snacks119'), { company: { amount: 200, per: 'visit' }, mashgiach: { amount: 150 } });
+   await action('factory fee', 'PUT', feesPath('snacks119'), factoryFee);
    for (const [id, who] of [['cafe119', 'mash'], ['bakery119', 'assign'], ['snacks119', 'elsewhere']]) await api('admin', 'PUT', `/api/inspections/schedule/companies/${id}/people`, { mashgiachIds: [people[who].id], coordinatorIds: id === 'cafe119' ? [people.coord.id] : [] });
    await api('admin', 'PUT', '/api/inspections/schedule/settings', { mashgichimSeeAll: false });
    await action('coordinator cannot edit by default', 'PUT', feesPath('cafe119'), feeA, 0, 403, 'coord');
@@ -63,7 +67,48 @@ export default {
    await action('unchanged setting', 'PUT', '/api/inspections/fee-settings', { feeEditors: 'admins_and_coordinators' }, 0);
    const scoped = await action('coordinator browse', 'GET', '/api/inspections/fees', undefined, 0, 200, 'coord'); assert.equal(scoped.canEdit, true); assert.equal(scoped.accountant, undefined); assert.deepEqual(scoped.places.map(p => p.id), ['cafe119']);
    await action('coordinator unchanged fee', 'PUT', feesPath('cafe119'), feeA, 0, 200, 'coord');
+   await action('coordinator edits food-service rate', 'PUT', feesPath('cafe119'), { ...feeA, mashgiach: { amount: 51 } }, 1, 200, 'coord');
+   await action('coordinator restores food-service rate', 'PUT', feesPath('cafe119'), feeA, 1, 200, 'coord');
    await action('coordinator other place', 'PUT', feesPath('bakery119'), feeA, 0, 404, 'coord');
+   const factoryPeople = `/api/inspections/schedule/companies/snacks119/people`;
+   const assignFactory = coordinatorIds => api('admin', 'PUT', factoryPeople, { mashgiachIds: [people.elsewhere.id], coordinatorIds });
+   const readFactoryFee = async who => {
+    const response = await action('read factory fees', 'GET', '/api/inspections/fees', undefined, 0, 200, who);
+    const { company, mashgiach } = response.places.find(p => p.id === 'snacks119');
+    return { company, mashgiach };
+   };
+   assert.equal((await assignFactory([people.coord.id])).status, 200);
+   assert.deepEqual(await readFactoryFee('coord'), factoryFee);
+   await action('assigned coordinator cannot replace either factory fee', 'PUT', feesPath('snacks119'), feeA, 0, 403, 'coord');
+   assert.deepEqual(await readFactoryFee('admin'), factoryFee);
+   assert.equal((await assignFactory([])).status, 200);
+
+   const feeBaseline = await readFactoryFee('admin');
+   assert.deepEqual(await readFactoryFee('secondAdmin'), feeBaseline);
+   const companyUpdate = { company: { amount: 210, per: 'visit' } };
+   const rateUpdate = { mashgiach: { amount: 155 } };
+   await action('second session edits company fee', 'PUT', feesPath('snacks119'), companyUpdate, 1, 200, 'secondAdmin');
+   assert.deepEqual(await action('first session edits visit rate', 'PUT', feesPath('snacks119'), rateUpdate), { ...companyUpdate, ...rateUpdate });
+   assert.deepEqual(await readFactoryFee('admin'), { ...companyUpdate, ...rateUpdate });
+   assert.deepEqual(await action('explicit null clears only the rate', 'PUT', feesPath('snacks119'), { mashgiach: null }), { ...companyUpdate, mashgiach: null });
+   await action('restore factory fees', 'PUT', feesPath('snacks119'), factoryFee);
+
+   const factoryInfo = '/api/inspections/company-info/snacks119';
+   const firstDraft = await action('first session reads factory contacts', 'GET', factoryInfo, undefined, 0);
+   const secondDraft = await action('second session reads factory contacts', 'GET', factoryInfo, undefined, 0, 200, 'secondAdmin');
+   assert.equal(firstDraft.contactsRevision, secondDraft.contactsRevision);
+   const newContact = { name: 'New contact', role: 'Office', email: '', phone: '' };
+   const latest = await action('second session adds a factory contact', 'PUT', factoryInfo, {
+    contactsRevision: secondDraft.contactsRevision, contacts: [newContact],
+   }, 1, 200, 'secondAdmin');
+   assert.notEqual(latest.contactsRevision, firstDraft.contactsRevision);
+   const conflict = await action('first session cannot overwrite newer contacts', 'PUT', factoryInfo, {
+    contactsRevision: firstDraft.contactsRevision, contacts: [{ ...newContact, name: 'Stale draft' }], phone: '555-0101',
+   }, 0, 409);
+   assert.match(conflict.error, /Contacts changed/);
+   await action('factory contact replacement requires revision', 'PUT', factoryInfo, { contacts: [] }, 0, 409);
+   assert.deepEqual(await action('latest contacts survive stale save', 'GET', factoryInfo, undefined, 0), latest);
+   assert.deepEqual(await action('location-only save preserves contacts', 'PUT', factoryInfo, { phone: '555-0101' }), { ...latest, phone: '555-0101' });
    await action('accountant edit', 'PUT', '/api/inspections/accountant', accountant);
    await action('unchanged accountant', 'PUT', '/api/inspections/accountant', accountant, 0);
    await action('none send', 'POST', '/api/inspections/accountant/send', { kind: 'now', from: '2026-10-01', to: '2026-10-31' }, 0).then(r => assert.deepEqual(r, { sent: false, reason: 'not_set_up' }));
@@ -92,7 +137,7 @@ export default {
    await api('admin', 'PUT', '/api/inspections/schedule/companies/snacks119/people', { mashgiachIds: [people.elsewhere.id], coordinatorIds: [] });
    const mismatch = saved[10];
    const detail = (await api('admin', 'GET', `/api/inspections/reports/${mismatch.id}`)).json.report;
-   assert.deepEqual(detail.feeCheck, { reportAmount: 180, setAmount: 150, paidAmount: 150, decided: null });
+   assert.deepEqual(detail.feeCheck, { reportAmount: 180, setAmount: 150, paidAmount: 150, decided: null, canChangeFactoryFee: true });
    await api('admin', 'POST', '/api/__test__/inspections/flush-seen', {});
    await action('invalid decision', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 177 }, 0, 400);
    await action('data amount cannot override admin fee', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 180 }, 0, 400);
@@ -183,6 +228,74 @@ export default {
    const past = await action('cold past month pay', 'GET', '/api/inspections/pay?from=2026-05-01&to=2026-05-31', undefined, 0, 200, 'admin', 5); assert.equal(past.totals.visits, 5);
    await action('cached past month pay', 'GET', '/api/inspections/pay?from=2026-05-01&to=2026-05-31&by=mashgiach', undefined, 0);
    await action('cached past month preview', 'GET', '/api/inspections/accountant/preview?from=2026-05-01&to=2026-05-31', undefined, 0);
+   // A fresh factory mismatch can change the rate and notify only this agency's admins.
+   await pin('2027-01-15T14:01:00Z');
+   assert.equal((await api('admin', 'POST', '/api/__test__/source-fees', {
+    agencyId, fees: { mashgiach: { snacks119: { amount: 180, currency: 'USD' } } },
+   })).status, 200);
+   const fresh = await api('elsewhere', 'POST', '/api/visits/reports', {
+    clientReportId: 'report-119-coordinator-change', companyId: 'snacks119',
+    startedAt: '2027-01-15T14:00:00Z', listVersion: '', marks: [], offList: [],
+   });
+   assert.equal(fresh.status, 201);
+   const freshPath = `/api/inspections/reports/${fresh.json.report.id}`;
+   const changePath = freshPath + '/fee-change';
+   const rate = { amount: 180 };
+   assert.equal((await api('coord', 'POST', changePath, rate)).status, 404);
+   assert.equal((await assignFactory([people.coord.id])).status, 200);
+   assert.equal((await api('foreign', 'POST', changePath, rate)).status, 404);
+   assert.equal((await api('elsewhere', 'POST', changePath, rate)).status, 403);
+   await action('disable coordinator fee editing', 'PUT', '/api/inspections/fee-settings', { feeEditors: 'admins' });
+   assert.equal((await api('coord', 'GET', freshPath)).json.report.feeCheck.canChangeFactoryFee, false);
+   assert.equal((await api('coord', 'POST', changePath, rate)).status, 403);
+   await action('enable coordinator fee editing', 'PUT', '/api/inspections/fee-settings', { feeEditors: 'admins_and_coordinators' });
+   assert.equal((await api('coord', 'GET', freshPath)).json.report.feeCheck.canChangeFactoryFee, true);
+   assert.equal((await api('coord', 'POST', `/api/inspections/reports/${saved[11].id}/fee-change`, rate)).status, 400);
+   assert.equal((await api('coord', 'POST', changePath, { ...rate, company: feeA.company })).status, 400);
+   await action('direct factory fee is still admin-only', 'PUT', feesPath('snacks119'), { mashgiach: rate }, 0, 403, 'coord');
+   assert.deepEqual(await readFactoryFee('admin'), factoryFee);
+   for (const who of ['admin', 'secondAdmin', 'coord', 'foreign']) {
+    const subscribed = await api(who, 'POST', '/api/push/subscribe', {
+     subscription: { endpoint: `https://push.test.invalid/119-${who}-${agencyId}`, keys: { p256dh: 'p', auth: 'a' } },
+    });
+    assert.equal(subscribed.status, 200);
+   }
+   await api('admin', 'POST', '/api/__test__/push-log/clear', {});
+   const { decided } = await action('coordinator changes rate and records decision', 'POST', changePath, rate, 1, 200, 'coord');
+   assert.equal(decided.amount, 180);
+   assert.equal(decided.by, people.coord.id);
+   assert.deepEqual(await readFactoryFee('admin'), { company: factoryFee.company, mashgiach: rate });
+   const { feeCheck } = (await api('coord', 'GET', freshPath)).json.report;
+   assert.equal(feeCheck.paidAmount, 180);
+   assert.equal(feeCheck.decided.byName, people.coord.name);
+   assert.equal(feeCheck.canChangeFactoryFee, false);
+   assert.deepEqual(await action('retry factory fee change', 'POST', changePath, rate, 0, 200, 'coord'), { decided });
+   await action('resolved mismatch cannot change the rate again', 'POST', changePath, { amount: 190 }, 0, 409, 'coord');
+   const { log } = (await api('admin', 'GET', '/api/__test__/push-log')).json;
+   assert.deepEqual(log.map(push => push.recipientUserId).sort(), [people.admin.id, secondAdmin.id].sort());
+   assert.ok(log.every(push => push.title === 'Factory visit fee changed' && push.body.includes('Northfield Snacks')));
+
+   await action('set a different rate before the inherited-rate report', 'PUT', feesPath('snacks119'), factoryFee);
+   const inheritedReport = await api('elsewhere', 'POST', '/api/visits/reports', {
+    clientReportId: 'report-119-inherited-rate', companyId: 'snacks119',
+    startedAt: '2027-01-15T14:00:00Z', listVersion: '', marks: [], offList: [],
+   });
+   assert.equal(inheritedReport.status, 201);
+   await action('clear the visit rate override', 'PUT', feesPath('snacks119'), { mashgiach: null });
+   const visitPath = '/api/visits/factories/snacks119';
+   assert.deepEqual((await api('elsewhere', 'GET', visitPath)).json.fee, { ...rate, currency: 'USD' });
+   await api('admin', 'POST', '/api/__test__/push-log/clear', {});
+   const { decided: inheritedDecision } = await action('coordinator accepts the inherited rate', 'POST',
+    `/api/inspections/reports/${inheritedReport.json.report.id}/fee-change`, rate, 1, 200, 'coord');
+   assert.equal(inheritedDecision.amount, rate.amount);
+   assert.equal(inheritedDecision.by, people.coord.id);
+   assert.deepEqual(await readFactoryFee('admin'), { company: factoryFee.company, mashgiach: null });
+   assert.deepEqual((await api('admin', 'GET', '/api/__test__/push-log')).json.log, []);
+   const newSourceRate = { amount: 190, currency: 'USD' };
+   assert.equal((await api('admin', 'POST', '/api/__test__/source-fees', {
+    agencyId, fees: { mashgiach: { snacks119: newSourceRate } },
+   })).status, 200);
+   assert.deepEqual((await api('elsewhere', 'GET', visitPath)).json.fee, newSourceRate);
    console.table(table); return 'Fees/pay/export/accountant/company info, privacy sentinels, scheduled jobs, persistence and exact budgets passed.';
   } finally { await ctx.api('POST', '/api/__test__/staged', { enabled: false }); await pin(null); await new Promise(r => mock.close(r)); }
  },
