@@ -54,7 +54,9 @@ try {
   assert.equal(JSON.stringify(state).includes(plain), false);
   const fetchBefore = globalThis.fetch;
   const mapping = { companies: { table: 'Companies', name: 'Name' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: 'Products', name: 'Name', companyLink: 'Company' }, group1Values: [] };
-  globalThis.fetch = async () => Response.json({ scopes: [], tables: ['Companies', 'Ingredients', 'Products'].map(name => ({ name, fields: [{ name: 'Name' }, { name: 'Company' }] })), records: [] });
+  globalThis.fetch = async url => new URL(url).pathname === '/v0/meta/bases'
+    ? Response.json({ bases: [{ id: 'appTEST', permissionLevel: 'read' }] })
+    : Response.json({ tables: ['Companies', 'Ingredients', 'Products'].map(name => ({ name, fields: [{ name: 'Name' }, { name: 'Company' }] })), records: [] });
   try {
     const replacement = await saved.request('put', '/api/sources/connection', { sourceType: 'airtable', baseId: 'appTEST', access: 'read', mapping, apiKey: 'fake-replacement-key' });
     assert.equal(replacement.code, 200); assert.equal(replacement.json.status, 'never'); assert.equal(replacement.json.error, null);

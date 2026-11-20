@@ -20,7 +20,7 @@ const server = http.createServer((req, res) => {
   res.setHeader('Content-Type', 'application/json');
   if (mode === '401' || mode === '403' || mode === '404') { res.statusCode = Number(mode); return res.end(JSON.stringify({ error: fakeKey })); }
   if (mode === '429' && retry++ < 1 || mode === 'always429') { res.statusCode = 429; res.setHeader('Retry-After', '0'); return res.end('{}'); }
-  if (url.pathname === '/v0/meta/whoami') return res.end(JSON.stringify({ scopes: writes ? ['data.records:read', 'data.records:write'] : ['data.records:read'] }));
+  if (url.pathname === '/v0/meta/bases') return res.end(JSON.stringify({ bases: [{ id: 'demo', permissionLevel: writes ? 'edit' : 'read' }] }));
   if (url.pathname === '/v0/meta/bases/demo/tables') return res.end(JSON.stringify({ tables: Object.entries(tables).map(([name, rows]) => ({ name, fields: Object.keys(rows[0].fields).map(name => ({ name })) })) }));
   const name = decodeURIComponent(url.pathname.split('/').at(-1));
   if (url.searchParams.has('maxRecords')) {

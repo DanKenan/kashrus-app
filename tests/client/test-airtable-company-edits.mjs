@@ -13,8 +13,7 @@ import { mount } from './lib/mini-render.mjs';
 const dir = await mkdtemp(path.join(tmpdir(), 'company-editor-'));
 process.env.FIRESTORE_MOCK_FILE = path.join(dir, 'store.json');
 const db = new MockFirestore();
-const { state, rows, key, mapping, patches, mock } = await mockAirtable();
-state.writable = true;
+const { state, rows, key, mapping, patches, mock } = await mockAirtable('appTEST');
 let removal, failAudit, attemptedId;
 const writes = [];
 const batch = db.batch.bind(db);
@@ -55,11 +54,17 @@ try {
   const first = await appInstance();
   Object.assign(mapping.companies, { brand: 'Brand', plant: 'Plant', mashgiachFee: 'Supervision' });
   const config = { sourceType: 'airtable', baseId: 'appTEST', mapping, access: 'readwrite' };
-  assert.equal((await first.api('/api/sources/connection', 'PUT', { ...config, apiKey: key })).status, 200);
+  assert.equal((await (await first.api('/api/sources/connection', 'PUT', { ...config, access: 'read', apiKey: key })).json()).access, 'read');
+  state.level = 'create';
+  const tested = await (await first.api('/api/sources/test', 'POST', { ...config, apiKey: '' })).json();
+  assert.equal(tested.access, 'readwrite');
+  assert.equal((await (await first.api('/api/sources/connection')).json()).access, 'read');
+  assert.equal((await (await first.api('/api/sources/connection', 'PUT', { ...config, access: tested.access, apiKey: '' })).json()).access, 'readwrite');
+  assert.equal(state.mutations, 0);
   const row = '/api/sources/rows/companies/rec0';
   await first.api(row + '/edit'); // Wait for the saved connection's background refresh.
   const { url, api } = await appInstance();
-  const scopes = state.scopeChecks;
+  const scopes = state.baseChecks;
   const original = rows.Companies[0].fields;
   const waitFor = async callback => {
     for (let i = 0; i < 200; i++) {
@@ -88,7 +93,7 @@ try {
   assert.equal(button(), undefined);
   releaseLoad();
   await waitFor(async () => { await editor.render(); return !!button(); });
-  assert.equal(state.scopeChecks, scopes + 1);
+  assert.equal(state.baseChecks, scopes + 1);
   assert.equal(button().props.disabled, true);
   const change = async (from, to) => {
     const input = editor.find(node => node.props.value === from && node.props.onChange)[0];
@@ -173,7 +178,7 @@ try {
   assert.match(editor.text(), /final edit audit could not be recorded/);
   assert.deepEqual(original, { Name: 'Updated company', Address: 'Draft address', Type: 'Other' });
   assert.equal(patches.length, 4);
-  assert.equal(state.scopeChecks, scopes + 4);
+  assert.equal(state.baseChecks, scopes + 4);
   failAudit = undefined;
   original.Type = 'Factory';
   // Restore eligibility via a new settings save and verify the refresh-warning path.
@@ -204,18 +209,18 @@ try {
   assert.equal((await patch({ address: 'Changed' }, { address: null })).status, 404);
   assert.equal(patches.length, patchCount);
   delete state.recordId;
-  state.denyPatch = state.scopeOffline = true;
+  state.denyPatch = state.baseOffline = true;
   const refused = await patch({ address: 'Changed' }, { address: null });
   assert.equal(refused.status, 403);
   assert.match((await refused.json()).error, /Airtable 403/);
   assert.equal(writes.at(-1).outcome, 'rejected');
   assert.equal((await (await api('/api/sources/connection')).json()).access, 'readwrite');
-  state.scopeOffline = state.denyPatch = false;
-  const checks = state.scopeChecks;
+  state.baseOffline = state.denyPatch = false;
+  const checks = state.baseChecks;
   assert.equal((await patch({ address: 'Changed' }, { address: null })).status, 200);
-  assert.equal(state.scopeChecks, checks + 1);
+  assert.equal(state.baseChecks, checks + 1);
   assert.equal(patches.length, patchCount + 1);
-  state.writable = false;
+  state.level = 'read';
   // Reopen with the current binding to check that a scope downgrade disables the editor.
   const latestEditor = await mount(panel.type, panel.props).render();
   await waitFor(async () => {

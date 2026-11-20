@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { shiftFixture } from './test-101-shifts-crud.mjs';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-export async function mockAirtable() {
+export async function mockAirtable(baseId = 'appTEST115') {
   const key = 'fake-source-test115-key';
   const mapping = { companies: { table: 'Companies', name: 'Name', type: 'Type', address: 'Address', factoryValues: ['Factory'] }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company', certification: 'Cert', status: 'Status', agency: 'Agency' }, products: { table: 'Products', name: 'Name', companyLink: 'Company', certification: 'Cert', status: 'Status', agency: 'Agency' }, group1Values: ['Group 1'] };
   const rows = {
@@ -10,7 +10,7 @@ export async function mockAirtable() {
     Ingredients: Array.from({ length: 230 }, (_, i) => ({ id: `ing${i}`, fields: { Name: `Ingredient ${i}`, Company: [`rec${i % 5}`], Cert: 'OU-D', Status: 'Dairy Equipment', Agency: 'OU' } })),
     Products: Array.from({ length: 120 }, (_, i) => ({ id: `prod${i}`, fields: { Name: `Product ${i}`, Company: [`rec${i % 5}`], Cert: 'OU-D', Status: 'Dairy Equipment', Agency: 'OU' } })),
   };
-  const state = { calls: 0, writable: false, denyConfirm: false, permission: false, scopeChecks: 0 };
+  const state = { calls: 0, level: 'read', mutations: 0, denyConfirm: false, permission: false, baseChecks: 0 };
   const schema = Object.entries(rows).map(([name, records]) => ({ name, fields: Object.keys(records[0].fields).map(name =>
     name === 'Type' ? { name, type: 'singleSelect', options: { choices: ['Factory', 'Other'].map(name => ({ name })) } } : { name }) }));
   schema.find(table => table.name === 'Companies').fields.push({ name: 'Brand' }, { name: 'Plant' }, { name: 'Supervision' });
@@ -19,10 +19,18 @@ export async function mockAirtable() {
     state.calls++; res.setHeader('Content-Type', 'application/json');
     if (req.headers.authorization !== `Bearer ${key}`) { res.writeHead(401); return res.end('{}'); }
     const url = new URL(req.url, 'http://localhost');
-    if (url.pathname === '/v0/meta/whoami') {
-      state.scopeChecks++;
-      if (state.scopeOffline) return req.socket.destroy();
-      return res.end(JSON.stringify({ scopes: state.writable ? ['data.records:write'] : [] }));
+    if (req.method !== 'GET') state.mutations++;
+    if (url.pathname === '/v0/meta/whoami') return res.end(JSON.stringify({ id: 'usrFixture' }));
+    if (url.pathname === '/v0/meta/bases') {
+      const offset = url.searchParams.get('offset');
+      if (!offset) state.baseChecks++;
+      if (state.baseOffline) return req.socket.destroy();
+      if (state.malformed) return res.end(JSON.stringify(state.malformed));
+      if (!offset || state.repeatOffset) return res.end(JSON.stringify({
+        bases: [{ id: 'appUnrelated', name: 'Another base', permissionLevel: 'create' }], offset: 'next/page+2',
+      }));
+      assert.equal(offset, 'next/page+2');
+      return res.end(JSON.stringify({ bases: state.absent ? [] : [{ id: baseId, name: 'Fixture', permissionLevel: state.level }] }));
     }
     if (url.pathname.endsWith('/tables')) return res.end(JSON.stringify({ tables: schema }));
     if (url.pathname.endsWith('/Companies/rec0')) {
@@ -64,7 +72,7 @@ export default {
       assert.equal((await raw()).connection, null);
       const tested = await api('admin', 'POST', '/api/sources/test', body);
       assert.equal(tested.json.ok, true); assert.ok(tested.json.guess.mapping.companies);
-      assert.equal(tested.json.calls, 5); assert.equal(tested.json.samples.Ingredients.length, 3);
+      assert.equal(tested.json.calls, 6); assert.equal(tested.json.samples.Ingredients.length, 3);
       const firstWrites = (await ctx.api('POST', '/api/__test__/writes', {})).json;
       state.calls = 0;
       assert.equal((await api('admin', 'PUT', '/api/sources/connection', body)).status, 200);
@@ -74,7 +82,7 @@ export default {
       const afterFirstWrites = (await ctx.api('POST', '/api/__test__/writes', {})).json;
       assert.equal((afterFirstWrites.byCollection.sourceBackups || 0) - (firstWrites.byCollection.sourceBackups || 0), 5);
       assert.equal((afterFirstWrites.byCollection.sourceConnections || 0) - (firstWrites.byCollection.sourceConnections || 0), 2);
-      assert.equal(state.calls, 8); // Two metadata calls, then six paginated list reads.
+      assert.equal(state.calls, 9); // Three metadata calls, then six paginated list reads.
       assert.match(stored.connection.encryptedKey, /^v1:/);
       assert.equal('apiKey' in stored.connection, false);
       assert.equal(JSON.stringify(stored).includes(key), false);
@@ -120,9 +128,9 @@ export default {
       state.calls = 0;
       const { apiKey, ...same } = body;
       assert.equal((await api('admin', 'PUT', '/api/sources/connection', same)).status, 200);
-      for (let i = 0; i < 100 && state.calls < 8; i++) await sleep(100);
+      for (let i = 0; i < 100 && state.calls < 9; i++) await sleep(100);
       await sleep(200);
-      assert.equal(state.calls, 8);
+      assert.equal(state.calls, 9);
       assert.equal(((await ctx.api('POST', '/api/__test__/writes', {})).json.byCollection.sourceConnections || 0) - connectionWrites, (await raw()).connection.lastRefresh.at.slice(0, 10) === beforeRefreshDay ? 1 : 2);
       assert.equal((await ctx.api('POST', '/api/__test__/writes', {})).json.byCollection.sourceBackups || 0, beforeWrites);
       const endpoint = '/api/sources/rows/companies/rec0';
@@ -130,7 +138,60 @@ export default {
       assert.equal((await api('admin', 'GET', endpoint + '/edit')).status, 403);
       assert.equal((await api('admin', 'PATCH', endpoint, { fields: { name: 'Changed' } })).status, 403);
       assert.equal(state.calls, readCalls);
-      state.writable = true;
+      const testStored = async () => (await api('admin', 'POST', '/api/sources/test', { ...same, apiKey: '' })).json;
+      for (const level of ['read', 'comment', 'none', 'interfaceOnly', 'permissionSetOnly', undefined, 'futureRole', 'edit', 'create']) {
+        state.level = level;
+        const result = await testStored();
+        assert.equal(result.ok, true);
+        assert.equal(result.access, ['create', 'edit'].includes(level) ? 'readwrite' : 'read');
+      }
+      assert.equal(state.mutations, 0);
+      const savedRead = await raw();
+      assert.equal(savedRead.connection.access, 'read');
+      for (const fault of [{ absent: true }, { malformed: { bases: [null] } }, { repeatOffset: true }, { baseOffline: true }]) {
+        Object.assign(state, fault);
+        const failed = await testStored();
+        assert.equal(failed.ok, false);
+        assert.equal(failed.access, undefined);
+        if (fault.absent) assert.equal(failed.error, 'This Airtable token cannot see the selected base.');
+        assert.equal((await api('admin', 'PUT', '/api/sources/connection', { ...same, access: 'readwrite' })).status, 400);
+        assert.deepEqual(await raw(), savedRead);
+        delete state[Object.keys(fault)[0]];
+      }
+      let checksBefore = state.baseChecks;
+      const saveUpgrade = await api('admin', 'PUT', '/api/sources/connection', { ...same, apiKey: '', access: 'readwrite' });
+      assert.equal(saveUpgrade.json.access, 'readwrite');
+      assert.equal(state.baseChecks, checksBefore + 1);
+      const upgraded = (await raw()).connection;
+      assert.equal(upgraded.access, 'readwrite');
+      assert.equal(upgraded.encryptedKey, savedRead.connection.encryptedKey);
+      assert.equal((await api('admin', 'GET', endpoint + '/edit')).status, 200);
+      assert.equal(state.baseChecks, checksBefore + 1);
+      assert.equal((await api('admin', 'POST', '/api/factories/rec0/removal', {
+        action: 'delete', confirmation: 'DELETE', source: factories.status.companySource, name: 'Company 0',
+      })).status, 409);
+      assert.equal((await api('admin', 'GET', '/api/factories/rec0/removal?source=' + factories.status.companySource)).json.mode, null);
+      assert.equal(state.mutations, 0);
+
+      const setAccess = async access => (await api('admin', 'PUT', '/api/sources/access', { access })).json.access;
+      checksBefore = state.baseChecks;
+      assert.equal(await setAccess('read'), 'read');
+      assert.equal(state.baseChecks, checksBefore);
+      state.level = 'comment';
+      assert.equal(await setAccess('readwrite'), 'read');
+      state.level = 'edit';
+      assert.equal(await setAccess('readwrite'), 'readwrite');
+      assert.equal(state.baseChecks, checksBefore + 2);
+      try {
+        await ctx.api('POST', '/api/__test__/clock', { iso: new Date(Date.now() + 301_000).toISOString() });
+        state.baseOffline = true;
+        assert.equal((await api('admin', 'GET', endpoint + '/edit')).status, 503);
+        assert.equal((await raw()).connection.access, 'readwrite');
+        state.baseOffline = false;
+        assert.equal((await api('admin', 'GET', endpoint + '/edit')).status, 200);
+        assert.equal(state.baseChecks, checksBefore + 4);
+      } finally { await ctx.api('POST', '/api/__test__/clock', { iso: null }); }
+      state.level = 'create';
       rows.Ingredients[0].fields.Company = 'Company 0';
       const aliasMapping = { ...mapping, companies: { ...mapping.companies, brand: 'Name', plant: 'Type' } };
       assert.equal((await api('admin', 'PUT', '/api/sources/connection', { ...same, mapping: aliasMapping, access: 'readwrite' })).status, 200);
@@ -150,7 +211,7 @@ export default {
       assert.deepEqual(editor.json.typeOptions, ['Factory', 'Other']);
       const patch = (fields, originals, extra = {}, path = endpoint) =>
         api('admin', 'PATCH', path, { baseId, updatedAt, fields, originals, ...extra });
-      const count = state.calls, checks = state.scopeChecks;
+      const count = state.calls, checks = state.baseChecks;
       assert.equal((await api('mash', 'GET', endpoint + '/edit')).status, 403);
       assert.equal((await api('admin', 'POST', '/api/sources/rows/companies', { fields: { name: 'Add' } })).status, 409);
       assert.equal((await patch({ name: 'x' }, {}, {}, '/api/sources/rows/companies')).status, 400);
@@ -184,19 +245,26 @@ export default {
       assert.equal(unclear.json.outcome, 'unconfirmed');
       assert.deepEqual(recordCalls.slice(-3), ['GET', 'PATCH', 'GET']);
       assert.deepEqual(patches, [{ Name: 'Renamed', Address: null }]);
-      assert.equal(state.scopeChecks, checks + 1);
+      assert.equal(state.baseChecks, checks + 1);
       assert.equal((await api('admin', 'GET', '/api/factories')).json.companies.some(c => c.name === 'Renamed'), false);
       state.denyConfirm = false;
       assert.equal((await patch(change, originals)).json.saved, true);
       assert.equal(patches.length, 1);
       assert.equal((await api('admin', 'GET', '/api/factories')).json.companies.some(c => c.name === 'Renamed'), true);
+      state.denyPatch = true;
+      const beforeDenied = recordCalls.length, beforeRecheck = state.baseChecks;
+      assert.equal((await patch({ address: 'new' }, { address: null })).status, 403);
+      assert.deepEqual(recordCalls.slice(beforeDenied), ['GET', 'PATCH']);
+      assert.equal(state.baseChecks, beforeRecheck + 1);
+      assert.equal((await raw()).connection.access, 'readwrite');
+      state.denyPatch = false;
       state.permission = true;
       assert.equal((await patch({ address: 'new' }, { address: null })).status, 403);
       assert.equal((await raw()).connection.access, 'readwrite');
-      state.writable = false;
+      state.level = 'read';
       assert.equal((await patch({ address: 'new' }, { address: null })).status, 403);
       assert.equal((await raw()).connection.access, 'read');
-      state.writable = true; state.permission = false;
+      state.level = 'create'; state.permission = false;
       await api('admin', 'PUT', '/api/sources/connection', { ...same, access: 'readwrite' });
       const fresh = (await api('admin', 'GET', endpoint + '/edit')).json;
       const final = await patch({ name: 'Final', address: 'New Street', type: 'Other' }, fresh.fields, { updatedAt: fresh.updatedAt });

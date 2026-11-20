@@ -6,6 +6,7 @@ import type { Backup } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
 export interface Connection {
+  airtableDirectRemoval?: boolean;
   sheetsPilot?: import('./google-sheets.ts').TaggedTable; // Existing Fee pilot connections
   sheetsTables?: Partial<Record<'companies' | 'ingredients' | 'products', import('./google-sheets.ts').TaggedTable>>;
   oauth?: Partial<Record<import('./oauth.ts').OAuthProvider, import('./oauth.ts').OAuthRecord>>;
@@ -273,5 +274,8 @@ export function normalizeConnection(connection: any): Connection {
   const mapping = { ...connection.mapping };
   mapping.group1Values = mapping.group1Values ?? mapping.noSymbolValues ?? ['Group 1'];
   delete mapping.noSymbolValues;
-  return { ...connection, mapping, group1Label: connection.group1Label || 'Group 1' };
+  // Capture the legacy grant before any new access decision can change it.
+  const removal = connection.sourceType === 'airtable'
+    ? { airtableDirectRemoval: connection.airtableDirectRemoval ?? (connection.access === 'readwrite') } : {};
+  return { ...connection, ...removal, mapping, group1Label: connection.group1Label || 'Group 1' };
 }

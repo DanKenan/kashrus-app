@@ -17,7 +17,7 @@ const db = {
   collection: collection => ({ async get() { reads++; return { docs: [...docs].filter(([key]) => key.startsWith(collection + '/')).map(([, doc]) => ({ data: () => structuredClone(doc) })) }; }, doc: id => ({ collection, id, async get() { reads++; const doc = docs.get(`${collection}/${id}`); return { exists: !!doc, data: () => structuredClone(doc) }; } }) }),
   batch() { const ops = []; return { set(ref, doc) { ops.push([ref, doc]); }, delete(ref) { ops.push([ref]); }, async commit() { if (failWrite) throw Error('write failed'); for (const [ref, doc] of ops) { writes++; if (doc) docs.set(`${ref.collection}/${ref.id}`, structuredClone(doc)); else docs.delete(`${ref.collection}/${ref.id}`); } } }; },
 };
-globalThis.fetch = async url => { sourceCalls++; if (offline) throw Error('offline'); const name = decodeURIComponent(new URL(url).pathname.split('/').at(-1)); if (name === 'tables') return Response.json({ tables: Object.keys(rows).map(name => ({ name, fields: ['Name', 'Company', 'Cert', 'Status'].map(name => ({ name })) })) }); if (name === 'whoami') return Response.json({ scopes: [] }); return Response.json({ records: rows[name] || [] }); };
+globalThis.fetch = async url => { sourceCalls++; if (offline) throw Error('offline'); const name = decodeURIComponent(new URL(url).pathname.split('/').at(-1)); if (name === 'tables') return Response.json({ tables: Object.keys(rows).map(name => ({ name, fields: ['Name', 'Company', 'Cert', 'Status'].map(name => ({ name })) })) }); if (name === 'bases') return Response.json({ bases: [{ id: 'appTEST', permissionLevel: 'read' }] }); return Response.json({ records: rows[name] || [] }); };
 function fixture() {
   const handlers = new Map(), app = Object.fromEntries(['get', 'post', 'put'].map(method => [method, (path, handler) => handlers.set(`${method} ${path}`, handler)]));
   const routes = registerSourceRoutes(app, { db: () => db, dataDir: '/unused', staged: () => false, secret: () => 'test-secret', testMode: false, requireAdmin(req, res) { if (req.admin === false) { res.status(403).json({ error: 'Forbidden' }); return null; } return { id: 'admin', agencyId: req.agency }; }, timeZone: () => 'UTC' });
@@ -47,7 +47,7 @@ try {
   const before = [writes, sourceCalls];
   assert.equal((await put({ kind: 'ingredient', itemId: 'i', group1: false })).status, 200);
   assert.equal(writes - before[0], 1); assert.equal(sourceCalls, before[1]);
-  assert.deepEqual((await getItems()).json.ingredients[0], { certificationRaw: 'Group 1', statusRaw: undefined, agencyRaw: undefined, confidence: 1, id: 'i', name: 'Salt', agency: '', dpm: null, group1: false, group1Source: 'admin' });
+  assert.deepEqual((await getItems()).json.ingredients[0], { certificationRaw: 'Group 1', statusRaw: undefined, agencyRaw: undefined, expiresOn: undefined, confidence: 1, id: 'i', name: 'Salt', agency: '', dpm: null, group1: false, group1Source: 'admin' });
   assert.equal((await routes.request('put', '/api/sources/group1', { kind: 'ingredient', itemId: 'i', group1: true }, { agency: 'b' })).status, 404);
   assert.equal((await routes.request('get', '/api/factories/:companyId/items', {}, { agency: 'b' })).status, 404);
   assert.equal((await routes.request('put', '/api/sources/group1', { kind: 'ingredient', itemId: 'i', group1: true }, { admin: false })).status, 403);

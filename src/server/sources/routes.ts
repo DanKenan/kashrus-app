@@ -141,36 +141,40 @@ export function registerSourceRoutes(app: any, deps: {
   });
   function blank(id:string,userId:string,sourceType:Connection['sourceType']):Connection {return {agencyId:id,sourceType,baseId:sourceType==='upload'?'upload':'',access:'read',mapping:structuredClone(emptyMapping),encryptedKey:'',keyHint:'',updatedAt:new Date().toISOString(),updatedBy:userId,backupHashes:{}};}
 
-  const verifiedScopes = new Map<string, {
+  const baseWriteEligibility = new Map<string, {
     baseId: string; tokenKey: string; access: 'read' | 'readwrite'; at: number; typeOptions?: string[];
   }>();
   function airtable(c: Connection) {
     return createAirtableConnector({ baseId: c.baseId, apiKey: storedKey(c), mapping: c.mapping,
       apiBase: deps.testMode ? apiBase : undefined });
   }
-  async function verifyScope(c: Connection, adapter: ReturnType<typeof airtable>, schemaOptional = false) {
-    const result = await adapter.testConnection(schemaOptional);
-    if (!result.ok || !result.access) throw Object.assign(Error(result.error || 'Connection test failed'), { status: schemaOptional ? result.status || 503 : 400, airtable: true });
-    const scope = { baseId: c.baseId, tokenKey: c.encryptedKey, access: result.access, at: Date.now(), typeOptions: adapter.typeOptions() };
-    return { scope, tables: result.tables };
+  const eligibilityTime = () => deps.now?.().getTime() ?? Date.now();
+  async function verifyBaseAccess(c: Connection, adapter: ReturnType<typeof airtable>, editing = false) {
+    baseWriteEligibility.delete(c.agencyId);
+    const result = await adapter.testConnection();
+    if (!result.ok || !result.access) throw Object.assign(Error(result.error || 'Connection test failed'), { status: editing ? result.status || 503 : 400 });
+    const eligibility = { baseId: c.baseId, tokenKey: c.encryptedKey, access: result.access, at: eligibilityTime(), typeOptions: adapter.typeOptions() };
+    return { eligibility, tables: result.tables };
   }
-  async function editScope(c: Connection, adapter: ReturnType<typeof airtable>) {
-    const cached = verifiedScopes.get(c.agencyId);
-    const scope = cached && cached.baseId === c.baseId && cached.tokenKey === c.encryptedKey ? cached : (await verifyScope(c, adapter, true)).scope;
-    verifiedScopes.set(c.agencyId, scope);
-    if (scope.access !== 'readwrite') {
+  async function editorEligibility(c: Connection, adapter: ReturnType<typeof airtable>) {
+    const cached = baseWriteEligibility.get(c.agencyId);
+    if (cached && cached.baseId === c.baseId && cached.tokenKey === c.encryptedKey && eligibilityTime() < cached.at + 5 * 60_000)
+      return cached;
+    const { eligibility } = await verifyBaseAccess(c, adapter, true);
+    if (eligibility.access !== 'readwrite') {
       const next = { ...c, access: 'read' as const, updatedAt: new Date().toISOString() };
       await save(next);
       connections.set(c.agencyId, next);
       throw Object.assign(Error('Airtable write access was lost. This source is read only.'), { status: 403, readOnly: true });
     }
-    return scope;
+    baseWriteEligibility.set(c.agencyId, eligibility);
+    return eligibility;
   }
   async function permissionError(c: Connection, adapter: ReturnType<typeof airtable>, cause: any) {
     if (cause.status === 403 && cause.airtable) {
-      verifiedScopes.delete(c.agencyId);
-      try { await editScope(c, adapter); }
-      catch (check: any) { if (check.readOnly) return check; verifiedScopes.delete(c.agencyId); }
+      baseWriteEligibility.delete(c.agencyId);
+      try { await editorEligibility(c, adapter); }
+      catch (check: any) { if (check.readOnly) return check; baseWriteEligibility.delete(c.agencyId); }
     }
     return cause;
   }
@@ -615,11 +619,11 @@ export function registerSourceRoutes(app: any, deps: {
       const needsSignIn = isOAuthProvider(c.sourceType) && req.body.access === 'readwrite' && c.oauth?.[c.sourceType]?.access !== 'readwrite';
       const next = { ...connections.get(id)!, access: needsSignIn ? 'read' as const : req.body.access, updatedAt: new Date().toISOString(), updatedBy: user.id };
       if (c.sourceType === 'airtable' && next.access === 'readwrite') {
-        const { scope } = await verifyScope(c, airtable(c), true);
-        verifiedScopes.set(id, scope);
-        next.access = scope.access;
+        const { eligibility } = await verifyBaseAccess(c, airtable(c), true);
+        next.access = eligibility.access;
+        if (next.access === 'readwrite') baseWriteEligibility.set(id, eligibility);
       }
-      if (next.access === 'read') { delete next.sheetsPilot; delete next.sheetsTables; }
+      if (next.access === 'read') { baseWriteEligibility.delete(id); delete next.sheetsPilot; delete next.sheetsTables; }
       await save(next);
       connections.set(id, next);
       res.json({ access: next.access, ...(needsSignIn ? { needsSignIn: true } : {}) });
@@ -643,7 +647,7 @@ export function registerSourceRoutes(app: any, deps: {
       drafts.delete(id);
       cache.reset(id);
       oauth.clear(id);
-      verifiedScopes.delete(id);
+      baseWriteEligibility.delete(id);
       keyErrors.delete(id);
       backupErrors.delete(id);
       unconfirmed.delete(id);
@@ -713,11 +717,11 @@ export function registerSourceRoutes(app: any, deps: {
     const adapter = airtable(c);
     try {
       editableCompany(c, recordId);
-      const scope = await editScope(c, adapter);
+      const eligibility = await editorEligibility(c, adapter);
       const record = await adapter.readCompany(recordId);
       if (record.recordId !== recordId) return res.status(404).json({ error: 'Company record not found.' });
       res.set?.('Cache-Control', 'no-store');
-      res.json({ fields: record.values, baseId: c.baseId, updatedAt: c.updatedAt, access: scope.access, typeOptions: scope.typeOptions });
+      res.json({ fields: record.values, baseId: c.baseId, updatedAt: c.updatedAt, access: eligibility.access, typeOptions: eligibility.typeOptions });
     } catch (cause) { return editError(res, await permissionError(c, adapter, cause)); }
   }));
 
@@ -745,7 +749,7 @@ export function registerSourceRoutes(app: any, deps: {
       if (baseId !== c.baseId || updatedAt !== c.updatedAt) sheetConflict('The source connection changed. Reopen the company.');
       editableCompany(c, recordId);
       adapter = airtable(c);
-      const scope = await editScope(c, adapter);
+      const eligibility = await editorEligibility(c, adapter);
       for (const field of changed) {
         if (!c.mapping.companies[field])
           throw Object.assign(Error('Only mapped list columns can be edited.'), { status: 400 });
@@ -757,7 +761,7 @@ export function registerSourceRoutes(app: any, deps: {
         if (associationChanges(links, data.companies, data.otherCompanies ?? [], recordId, fields.name, 'ignore'))
           sheetConflict('This name change would change company links. Use permanent company IDs before renaming.');
       }
-      if (fields.type && scope.typeOptions && !scope.typeOptions.includes(fields.type))
+      if (fields.type && eligibility.typeOptions && !eligibility.typeOptions.includes(fields.type))
         throw Object.assign(Error('Choose a type from the Airtable column options.'), { status: 400 });
       const before = await adapter.readCompany(recordId);
       entry.writeEvidence.verifyGet = before;
@@ -932,8 +936,10 @@ export function registerSourceRoutes(app: any, deps: {
     const old = connections.get(id), plain = req.body.apiKey?.trim();
     if (!plain && !old?.encryptedKey) return res.status(400).json({ error: 'API key required' });
     const c: Connection = { group1Label: req.body.group1Label?.trim() ?? old?.group1Label ?? 'Group 1', group1Overrides: old?.group1Overrides || { ingredient: {}, product: {} }, agencyId: id, sourceType: req.body.sourceType, baseId: req.body.baseId, access: req.body.access, mapping: req.body.mapping, encryptedKey: plain ? encryptKey(plain, deps.secret(), id) : old!.encryptedKey, keyHint: plain ? keyHint(plain) : old!.keyHint, updatedAt: new Date().toISOString(), updatedBy: user.id, backupHashes: old?.backupHashes || {}, ...(old?.lastRefresh ? { lastRefresh: old.lastRefresh } : {}) };
-    const validation = await verifyScope(c, airtable(c));
-    if (validation.scope.access === 'read') c.access = 'read';
+    c.airtableDirectRemoval = old?.sourceType === 'airtable' && old.baseId === c.baseId &&
+      old.airtableDirectRemoval === true && old.mapping.companies?.table === c.mapping.companies.table;
+    const validation = await verifyBaseAccess(c, airtable(c));
+    if (validation.eligibility.access === 'read') c.access = 'read';
     for (const kind of ['companies', 'ingredients', 'products'] as const) {
       const config = c.mapping[kind], table = validation.tables?.find(t => t.name === config.table);
       if (!table || Object.entries(config).some(([field, column]) => field !== 'table' && typeof column === 'string' && !table.columns.includes(column))) return res.status(400).json({ error: 'Mapped tables and columns must exist in the source.' });
@@ -951,7 +957,7 @@ export function registerSourceRoutes(app: any, deps: {
     uploads.delete(id);
     backupErrors.delete(id);
     connections.set(id, c); keyErrors.delete(id);
-    verifiedScopes.set(id, validation.scope);
+    if (c.access === 'readwrite') baseWriteEligibility.set(id, validation.eligibility);
     if (changed && (!old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || keyChanged || JSON.stringify({ ...old.mapping, valueAssignments: undefined }) !== JSON.stringify({ ...c.mapping, valueAssignments: undefined }))) cache.reset(id);
     else cache.reassign(id, c.mapping);
     res.json(safe(id)); schedule(id); void serialize(id, () => refresh(id));
@@ -962,6 +968,8 @@ export function registerSourceRoutes(app: any, deps: {
     if (!plain && !old) return res.status(400).json({ error: 'API key required' });
     const c = { ...old, ...req.body, agencyId: id, mapping: old?.mapping || emptyMapping } as Connection;
     const adapter = connector(c, plain), result = await adapter.testConnection();
+    if (old?.sourceType === 'airtable' && c.sourceType === 'airtable' && c.baseId === old.baseId &&
+        (!result.ok || result.access !== 'readwrite')) baseWriteEligibility.delete(id);
     if (!result.ok) return res.json({ ok: false, error: result.error, calls: adapter.calls() });
     const guess = guessMapping(result.tables || []);
     const preferred = new Set([guess.mapping.companies.table, guess.mapping.ingredients.table, guess.mapping.products.table]);
@@ -1030,7 +1038,7 @@ export function registerSourceRoutes(app: any, deps: {
     res.json({ item: items(id, company.id, kind).find(item => item.id === itemId) });
   }));
   const removalMode = (c: Connection): CompanyRemoval['requested'] | null => c.sourceType === 'google_sheets' ? 'guided'
-    : c.sourceType === 'airtable' && c.access === 'readwrite' ? 'direct' : null;
+    : c.sourceType === 'airtable' && c.access === 'readwrite' && c.airtableDirectRemoval === true ? 'direct' : null;
   const linkedLabels = { companies: 'Companies', ingredients: 'Schedule A', products: 'Schedule B' };
   const verifyCompanyIdentity = 'Check linked records and verify the company identity before continuing.';
   async function sheetRemovalIdentity(c: Connection, companyId: string, entry?: CompanyRemoval) {
