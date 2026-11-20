@@ -1,23 +1,32 @@
 import { sourceFetch } from './http.ts';
-import { applyMapping, companyLinkResolver, CompanyLinkError } from './mapping.ts';
-import type { SourceConnector, SourceData, SourceMapping, SourceRow } from './types.ts';
+import { applyMapping, mapSourceLists, companyLinkResolver, CompanyLinkError } from './mapping.ts';
+import type { ConnectionResult, SourceConnector, SourceData, SourceMapping, SourceRow } from './types.ts';
 
 export interface AirtableConfig { baseId: string; apiKey: string; mapping: SourceMapping; apiBase?: string; fetchImpl?: typeof fetch }
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'https://api.airtable.com', fetchImpl = fetch }: AirtableConfig): SourceConnector {
+const companyFields = ['name', 'address', 'type', 'brand', 'plant'] as const;
+export type AirtableCompanyField = typeof companyFields[number];
+interface CompanyEditorConnector extends SourceConnector {
+  testConnection(schemaOptional?: boolean): Promise<ConnectionResult & { status?: number }>;
+  readCompany(id: string): Promise<{ recordId: string; values: Record<string, string | null> }>;
+  patchCompany(id: string, fields: Record<string, string | null>): Promise<void>;
+  renameData(): Promise<{ data: SourceData; links: unknown[] }>;
+  typeOptions(): string[] | undefined;
+}
+export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'https://api.airtable.com', fetchImpl = fetch }: AirtableConfig): CompanyEditorConnector {
   let count = 0, lastStart = 0;
   let queue = Promise.resolve();
   let loaded: SourceData | undefined, loading: Promise<SourceData> | undefined;
   let rawRows: Record<string, SourceRow[]> = {};
   // Serialize request starts, including metadata and retries, to stay below 5/s.
-  async function request(path: string, method = 'GET', missingAllowed = false): Promise<any> {
+  async function request(path: string, method = 'GET', missingAllowed = false, body?: object): Promise<any> {
     const run = async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         await wait(Math.max(0, lastStart + 201 - Date.now()));
         lastStart = Date.now(); count++;
         let response: Response;
         try {
-          response = await sourceFetch(`${apiBase.replace(/\/$/, '')}${path}`, { method, headers: { Authorization: `Bearer ${apiKey}` }, redirect: 'error' }, fetchImpl);
+          response = await sourceFetch(`${apiBase.replace(/\/$/, '')}${path}`, { method, headers: { Authorization: `Bearer ${apiKey}`, ...(body && { 'Content-Type': 'application/json' }) }, ...(body && { body: JSON.stringify(body) }), redirect: 'error' }, fetchImpl);
         } catch { throw new Error('Airtable request failed'); }
         finally { lastStart = Date.now(); }
         if (response.status === 429 && attempt === 0) {
@@ -32,7 +41,7 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
         if (!response.ok) {
           const descriptions: Record<number, string> = { 401: 'authentication failed', 403: 'access denied', 404: 'base or table not found', 429: 'rate limit exceeded after retry' };
           await response.body?.cancel();
-          throw new Error(`Airtable ${response.status}: ${descriptions[response.status] ?? 'request failed'}`);
+          throw Object.assign(Error(`Airtable ${response.status}: ${descriptions[response.status] ?? 'request failed'}`), { status: response.status, airtable: true });
         }
         try { return await response.json(); } catch { throw new Error('Airtable returned invalid JSON'); }
       }
@@ -67,14 +76,47 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
           if (offset) seen.add(offset);
         } while (offset);
       }
-      loaded = applyMapping(rows, mapping, 'ignore');
       rawRows = rows;
+      loaded = applyMapping(rows, mapping, 'ignore');
       return loaded;
     })();
     try { return await loading; } finally { loading = undefined; }
   }
   const data = () => loaded ? Promise.resolve(loaded) : loading ?? loadAll();
+  let options: string[] | undefined;
+  const companyPath = (id: string) => `/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(mapping.companies.table)}/${encodeURIComponent(id)}`;
   return {
+    typeOptions: () => options,
+    async readCompany(id) {
+      const record = await request(companyPath(id));
+      if (!record || typeof record.id !== 'string' || !record.fields || typeof record.fields !== 'object' || Array.isArray(record.fields))
+        throw Error('Airtable returned an invalid company record.');
+      const values = Object.fromEntries(companyFields.map(field => {
+        const column = mapping.companies[field];
+        const value = column ? record.fields[column] : null;
+        if (value != null && typeof value !== 'string') throw Error('A mapped company field is not text.');
+        return [field, value || null];
+      }));
+      return { recordId: record.id, values };
+    },
+    async patchCompany(id, fields) { await request(companyPath(id), 'PATCH', false, { fields }); },
+    async renameData() {
+      const mapped = await data().catch(cause => {
+        // A pre-existing ambiguous item link has no association to preserve.
+        if (!(cause instanceof CompanyLinkError)) throw cause;
+        return mapSourceLists({ companies: rawRows[mapping.companies.table] }, mapping);
+      });
+      const links: unknown[] = [];
+      for (const section of ['companies', 'ingredients', 'products'] as const) {
+        const config = mapping[section] as Record<string, unknown>;
+        const columns = Object.entries(mapping.editableCustomFields?.[section] ?? {})
+          .filter(([, rule]) => rule === 'companyLink').map(([field]) => config[field]);
+        if (section !== 'companies') columns.push(config.companyLink);
+        for (const row of rawRows[mapping[section].table])
+          for (const column of columns) if (typeof column === 'string') links.push(row.fields[column]);
+      }
+      return { data: mapped, links };
+    },
     kind: 'airtable', calls: () => count, loadAll,
     async companyDeletion(id) {
       if (!/^rec[A-Za-z0-9]+$/.test(id)) throw Error('Invalid Airtable record ID');
@@ -150,13 +192,21 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
       }
       return samples;
     },
-    async testConnection() {
+    async testConnection(schemaOptional = false) {
       try {
         const identity = await request('/v0/meta/whoami');
-        const schema = await request(`/v0/meta/bases/${encodeURIComponent(baseId)}/tables`);
-        return { ok: true, access: identity.scopes?.includes('data.records:write') ? 'readwrite' : 'read',
+        const access = identity.scopes?.includes('data.records:write') ? 'readwrite' : 'read';
+        const schema = await request(`/v0/meta/bases/${encodeURIComponent(baseId)}/tables`).catch(cause => {
+          if (schemaOptional && (cause.status === 403 || cause.status === 404)) return null;
+          throw cause;
+        });
+        if (!schema) return { ok: true, access };
+        const type = schema.tables.find((table: any) => table.name === mapping.companies.table || table.id === mapping.companies.table)
+          ?.fields.find((field: any) => field.name === mapping.companies.type);
+        options = type?.type === 'singleSelect' ? type.options?.choices?.map((choice: any) => choice.name) : undefined;
+        return { ok: true, access,
           tables: schema.tables.map((t: any) => ({ name: t.name, columns: t.fields.map((f: any) => f.name) })) };
-      } catch (e) { return { ok: false, error: e instanceof Error && e.message.startsWith('Airtable ') ? e.message : 'Airtable connection failed' }; }
+      } catch (e: any) { return { ok: false, status: e.status, error: e instanceof Error && e.message.startsWith('Airtable ') ? e.message : 'Airtable connection failed' }; }
     },
     async listCompanies() { return (await data()).companies; },
     async listItems(companyId, kind) { return (kind === 'ingredient' ? (await data()).ingredients : (await data()).products).filter(i => i.companyIds.includes(companyId)); },

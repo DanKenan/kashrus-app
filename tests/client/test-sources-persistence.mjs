@@ -47,7 +47,7 @@ try {
   const before = calls;
   assert.equal((await request('put', '/api/sources/connection', body)).status, 200);
   await until(async () => (await state()).backupSaveError);
-  assert.equal(calls - before, 3); // PUT reuses the test schema.
+  assert.equal(calls - before, 5); // A connection save verifies scope and schema, then reloads three lists.
   assert.equal((await request('get', '/api/factories')).json.status.backupSaveError, true);
   assert.deepEqual(docs.get('sourceConnections/a').backupHashes, {});
   clock += 61000;
@@ -94,5 +94,5 @@ try {
   release(); await until(async () => (await state()).status === 'ok');
   await routes.boot(); const failedLoads = connectionLoads; startupFails = false;
   await until(() => connectionLoads > failedLoads);
-  console.log('source PUT validation, schema reuse, cache reset and memory-only backup retry passed');
+  console.log('source PUT validation, scope verification, cache reset and memory-only backup retry passed');
 } finally { globalThis.fetch = originalFetch; Date.now = originalNow; }

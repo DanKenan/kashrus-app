@@ -61,3 +61,30 @@ export async function pickGoogleFile(onPick: (file: SourceFile) => void) {
     .setCallback((data: any) => { if (data.action === picker.Action.PICKED) onPick({ id: data.docs[0].id, name: data.docs[0].name }); });
   builder.build().setVisible(true);
 }
+
+export const canEditAirtableCompany = (role: string, connection: SourceConnection | null) =>
+  role === 'admin' && connection?.sourceType === 'airtable' && connection.access === 'readwrite';
+
+type CompanyValues = Record<string, string | null>;
+export interface AirtableCompanyBaseline {
+  baseId: string; updatedAt: string; fields: CompanyValues; access: 'readwrite'; typeOptions?: string[];
+}
+const companyRowPath = (id: string) => `/api/sources/rows/companies/${encodeURIComponent(id)}`;
+export async function readAirtableCompany(id: string): Promise<AirtableCompanyBaseline> {
+  const response = await apiFetch(companyRowPath(id) + '/edit', { cache: 'no-store' });
+  const data = await response.json();
+  if (!response.ok) throw Object.assign(Error(data.error || "Couldn't load the company."), { readOnly: data.readOnly });
+  return data;
+}
+
+export const uncertainCompanyEdit = 'Airtable may have saved these changes. Reload and review before retrying.';
+export async function updateAirtableCompany(id: string, baseline: AirtableCompanyBaseline, fields: Record<string, string>) {
+  const originals = Object.fromEntries(Object.keys(fields).map(field => [field, baseline.fields[field]]));
+  try {
+    const response = await apiFetch(companyRowPath(id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields, originals, baseId: baseline.baseId, updatedAt: baseline.updatedAt }) });
+    const result = await response.json();
+    if ((response.ok && result.saved === true) || result.error) return result;
+  } catch { /* A lost response cannot establish whether the PATCH landed. */ }
+  return { outcome: 'unconfirmed', error: uncertainCompanyEdit };
+}

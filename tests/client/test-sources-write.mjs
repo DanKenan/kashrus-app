@@ -3,9 +3,9 @@ import { guardSourceWrite } from '../../src/server/sources/write.ts';
 const mapping = { companies: { table: 'Companies', name: 'Name', address: 'Street', companyFee: 'Annual Fee' }, ingredients: { table: 'Ingredients', name: 'Name', companyLink: 'Company' }, products: { table: '' }, group1Values: [] };
 const c = { sourceType: 'supabase', access: 'readwrite', mapping };
 assert.deepEqual({ ...guardSourceWrite(c, 'companies', { name: 'Demo Bakery', address: 'Demo Street' }) }, { Name: 'Demo Bakery', Street: 'Demo Street' });
-for (const sourceType of ['airtable', 'upload'])
+for (const sourceType of ['upload'])
     assert.throws(() => guardSourceWrite({ ...c, sourceType }, 'companies', { name: 'Demo' }), e => e.status === 409);
-for (const sourceType of ['google_sheets', 'excel', 'supabase'])
+for (const sourceType of ['google_sheets', 'excel', 'supabase', 'airtable'])
     assert.throws(() => guardSourceWrite({ ...c, sourceType, access: 'read' }, 'companies', { name: 'Demo' }), e => e.status === 403);
 for (const list of ['reports', 'fees', 'oauth', 'products'])
     assert.throws(() => guardSourceWrite(c, list, { name: 'Demo' }), e => e.status === 400);
@@ -15,8 +15,9 @@ console.log('single write guard restricts providers, access, lists and mapped co
 
 for (const key of ['companyFee','mashgiachFee']) {
     const protectedMapping={...mapping,companies:{...mapping.companies,[key]:'Imported',brand:'Imported'}};
-    for (const fields of [{[key]:'80'},{brand:'80'}])
-        assert.throws(()=>guardSourceWrite({...c,mapping:protectedMapping},'companies',fields),e=>e.status===400);
+    for (const sourceType of ['supabase', 'airtable'])
+        for (const fields of [{[key]:'80'},{brand:'80'}])
+            assert.throws(()=>guardSourceWrite({...c,sourceType,mapping:protectedMapping},'companies',fields),e=>e.status===400);
 }
 
 for (const sourceType of ['google_sheets','excel'])

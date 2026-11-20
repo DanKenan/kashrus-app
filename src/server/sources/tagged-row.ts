@@ -210,6 +210,12 @@ export type EditAudit = Target & {
   verified: boolean; at: string; otherFieldsChanged?: boolean; writeEvidence?: FieldWriteEvidence[];
 };
 
+type RecordEvidence = { recordId: string; values: Record<string, string | null> };
+export type AirtableEditAudit = Pick<EditAudit, 'operationId' | 'outcome' | 'changedFields' | 'previous' | 'requested' |
+  'verified' | 'at' | 'actorId' | 'agencyId' | 'section' | 'recordId' | 'table'> & {
+  sourceType: 'airtable'; baseId: string; writeEvidence: { verifyGet?: RecordEvidence; confirmGet?: RecordEvidence };
+};
+
 // RFC 9562 version 8 leaves custom bits for the Add marker. The other 106
 // bits remain random. Ordinary spreadsheet IDs need no Add-ledger lookup.
 export function newAddRecordId() {
