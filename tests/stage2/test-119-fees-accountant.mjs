@@ -274,6 +274,28 @@ export default {
    const { log } = (await api('admin', 'GET', '/api/__test__/push-log')).json;
    assert.deepEqual(log.map(push => push.recipientUserId).sort(), [people.admin.id, secondAdmin.id].sort());
    assert.ok(log.every(push => push.title === 'Factory visit fee changed' && push.body.includes('Northfield Snacks')));
+
+   await action('set a different rate before the inherited-rate report', 'PUT', feesPath('snacks119'), factoryFee);
+   const inheritedReport = await api('elsewhere', 'POST', '/api/visits/reports', {
+    clientReportId: 'report-119-inherited-rate', companyId: 'snacks119',
+    startedAt: '2027-01-15T14:00:00Z', listVersion: '', marks: [], offList: [],
+   });
+   assert.equal(inheritedReport.status, 201);
+   await action('clear the visit rate override', 'PUT', feesPath('snacks119'), { mashgiach: null });
+   const visitPath = '/api/visits/factories/snacks119';
+   assert.deepEqual((await api('elsewhere', 'GET', visitPath)).json.fee, { ...rate, currency: 'USD' });
+   await api('admin', 'POST', '/api/__test__/push-log/clear', {});
+   const { decided: inheritedDecision } = await action('coordinator accepts the inherited rate', 'POST',
+    `/api/inspections/reports/${inheritedReport.json.report.id}/fee-change`, rate, 1, 200, 'coord');
+   assert.equal(inheritedDecision.amount, rate.amount);
+   assert.equal(inheritedDecision.by, people.coord.id);
+   assert.deepEqual(await readFactoryFee('admin'), { company: factoryFee.company, mashgiach: null });
+   assert.deepEqual((await api('admin', 'GET', '/api/__test__/push-log')).json.log, []);
+   const newSourceRate = { amount: 190, currency: 'USD' };
+   assert.equal((await api('admin', 'POST', '/api/__test__/source-fees', {
+    agencyId, fees: { mashgiach: { snacks119: newSourceRate } },
+   })).status, 200);
+   assert.deepEqual((await api('elsewhere', 'GET', visitPath)).json.fee, newSourceRate);
    console.table(table); return 'Fees/pay/export/accountant/company info, privacy sentinels, scheduled jobs, persistence and exact budgets passed.';
   } finally { await ctx.api('POST', '/api/__test__/staged', { enabled: false }); await pin(null); await new Promise(r => mock.close(r)); }
  },

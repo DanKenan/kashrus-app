@@ -318,11 +318,13 @@ export function registerInspectionRoutes(app: any, deps: {
         const rateChanged = visitFee(a, id)?.amount !== value;
         const at = now().toISOString();
         const update = fees.stage(a, next => {
-          const old = Object.hasOwn(next.places, id) ? next.places[id] : null;
-          if (old?.mashgiach?.amount !== value) Object.defineProperty(next.places, id, {
-            value: { company: old?.company ?? null, mashgiach: { amount: value }, updatedBy: u.id, updatedAt: at },
-            enumerable: true, configurable: true, writable: true,
-          });
+          if (rateChanged) {
+            const old = Object.hasOwn(next.places, id) ? next.places[id] : null;
+            Object.defineProperty(next.places, id, {
+              value: { company: old?.company ?? null, mashgiach: { amount: value }, updatedBy: u.id, updatedAt: at },
+              enumerable: true, configurable: true, writable: true,
+            });
+          }
           next.decisions[report.id] = { amount: value, setFee: true, by: u.id, byName: u.name, at };
         });
         if (update) {
