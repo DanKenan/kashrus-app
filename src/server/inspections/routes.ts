@@ -1,6 +1,6 @@
 import { createCompanyRemovalStore, retentionElapsed, type CompanyRemoval } from './company-removal.ts';
 import { createFeesStore } from './fees-store.ts';
-import { createCompanyInfoStore, validateCompanyInfo, emptyInfo } from './company-info-store.ts';
+import { createCompanyInfoStore, validateCompanyInfo, emptyInfo, contactsRevision } from './company-info-store.ts';
 import { validateFees, validateSettings, validateAccountant, computePay, range, amount, shape, paidAmount } from './fees.ts';
 import { accountantPeriod, afterReportDelayMs, nextAccountantDate, buildAccountantMessage } from './accountant.ts';
 import { createEmailTransport, type Message } from './email.ts';
@@ -246,10 +246,20 @@ export function registerInspectionRoutes(app: any, deps: {
   app.put?.('/api/inspections/fees/:placeId', handler(true, async (req: any, res: any, u: Person, a: string) => {
     if (u.role !== 'admin' && fees.doc(a).settings.feeEditors !== 'admins_and_coordinators') return res.status(403).json({ error: 'Forbidden' });
     const id = req.params.placeId;
-    if (!allPlaces(a).some(c => c.id === id) || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
-    const value = validateFees(req.body);
-    await fees.update(a, next => { const old = placeFee(a, id); if (!isDeepStrictEqual({ company: old?.company ?? null, mashgiach: old?.mashgiach ?? null }, value)) Object.defineProperty(next.places, id, { value: { ...value, updatedBy: u.id, updatedAt: now().toISOString() }, enumerable: true, configurable: true, writable: true }); });
-    res.json(value);
+    const place = allPlaces(a).find(c => c.id === id);
+    if (!place || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
+    if (u.role !== 'admin' && kind(a, place) === 'factory') return res.status(403).json({ error: 'Forbidden' });
+    shape(req.body, ['company', 'mashgiach'], []);
+    await fees.update(a, next => {
+      const old = Object.hasOwn(next.places, id) ? next.places[id] : null;
+      const previous = { company: old?.company ?? null, mashgiach: old?.mashgiach ?? null };
+      const value = validateFees({ ...previous, ...req.body });
+      if (!isDeepStrictEqual(previous, value)) Object.defineProperty(next.places, id, {
+        value: { ...value, updatedBy: u.id, updatedAt: now().toISOString() }, enumerable: true, configurable: true, writable: true,
+      });
+    });
+    const saved = placeFee(a, id);
+    res.json({ company: saved?.company ?? null, mashgiach: saved?.mashgiach ?? null });
   }));
   app.put?.('/api/inspections/fee-settings', handler('only', async (req: any, res: any, _u: Person, a: string) => {
     const value = validateSettings(req.body); await fees.update(a, next => { next.settings = value; }); res.json({ settings: value });
@@ -288,13 +298,26 @@ export function registerInspectionRoutes(app: any, deps: {
     const id = req.params.placeId, entry = removal(a, id);
     const archived = u.role === 'admin' && entry?.archived && !entry.requested && !entry.deletedAt;
     if ((!allPlaces(a).some(c => c.id === id) && !archived) || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
-    res.json(info(a, id));
+    const value = info(a, id);
+    res.json({ ...value, contactsRevision: contactsRevision(value.contacts) });
   }));
   app.put?.('/api/inspections/company-info/:placeId', handler('only', async (req: any, res: any, _u: Person, a: string) => {
     const id = req.params.placeId;
-    if (!allPlaces(a).some(c => c.id === id)) return res.status(404).json({ error: 'Place not found' });
-    shape(req.body, ['address', 'phone', 'contacts'], []);
-    await companyInfo.update(a, next => { const old = Object.hasOwn(next.places, id) ? next.places[id] : emptyInfo(); const value = validateCompanyInfo({ ...old, ...req.body }, old); Object.defineProperty(next.places, id, { value, enumerable: true, configurable: true, writable: true }); }); res.json(info(a, id));
+    const place = allPlaces(a).find(c => c.id === id);
+    if (!place) return res.status(404).json({ error: 'Place not found' });
+    shape(req.body, ['address', 'phone', 'contacts', 'contactsRevision'], []);
+    const { contactsRevision: expected, ...changes } = req.body;
+    await companyInfo.update(a, next => {
+      const old = Object.hasOwn(next.places, id) ? next.places[id] : emptyInfo();
+      if (Object.hasOwn(changes, 'contacts') && (kind(a, place) === 'factory' || expected !== undefined) &&
+          expected !== contactsRevision(old.contacts)) {
+        throw Object.assign(Error('Contacts changed since you started editing. Reload contacts to see the latest list.'), { status: 409 });
+      }
+      const value = validateCompanyInfo({ ...old, ...changes }, old);
+      Object.defineProperty(next.places, id, { value, enumerable: true, configurable: true, writable: true });
+    });
+    const value = info(a, id);
+    res.json({ ...value, contactsRevision: contactsRevision(value.contacts) });
   }));
   app.get('/api/visits/places/:placeId/info', handler(false, (req: any, res: any, u: Person, a: string) => {
     const id = req.params.placeId;

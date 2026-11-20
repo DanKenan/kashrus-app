@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { setTimeout as pause } from 'node:timers/promises';
 import { createGoogleSheetsApi } from '../../src/server/sources/google-sheets.ts';
 
 const headers = ['ID', 'Fee', 'Company', 'Address', 'Formula'];
@@ -206,6 +207,7 @@ const { randomUUID } = await import('node:crypto');
 const { registerSourceRoutes } = await import('../../src/server/sources/routes.ts');
 const { createSourceStore } = await import('../../src/server/sources/store.ts');
 const { SourceCompanyEditor } = await import('../../src/components/SourceCompanyEditor.tsx');
+const { SheetRecordEditor } = await import('../../src/components/SheetRecordEditor.tsx');
 const { mount } = await import('./lib/mini-render.mjs');
 let responseRange, blockedAddError;
 const { state, fetchImpl } = fixture({ returnedRange: range => responseRange ? { ...responseRange } : range });
@@ -542,8 +544,23 @@ try {
     const yItems = await api('/api/factories/' + companyY.id + '/items');
     assert.equal(yItems.ingredients.find(row => row.name === 'Salt').expiresOn,'2028-06-07');
 
-    await patch('companies',companyX,{ name:'Renamed X', address:'New road', type:'Kitchen', brand:'New company brand',
-        plant:'New company plant', companyFee:999, mashgiachFee:250, Notes:'=Literal note' },{ editor:companyEditor });
+    let inlineSaved;
+    const inlineCompany = await mount(SheetRecordEditor, { section:'companies', row:companyX, inlineCompany:true,
+        onSaved(name) { inlineSaved = name; }, onClose() { assert.fail('The inline editor closed'); } }).render();
+    for (let i = 0; i < 100 && inlineCompany.text().includes('Loading fields'); i++) {
+        await pause(20);
+        await inlineCompany.render();
+    }
+    const companyFields = { name:'Renamed X', address:'New road', type:'Kitchen', brand:'New company brand',
+        plant:'New company plant', companyFee:'999', mashgiachFee:'250', Notes:'=Literal note' };
+    for (const [field, value] of Object.entries(companyFields)) {
+        const [control] = inlineCompany.find(node => node.type === 'div' && node.props.children?.props.field?.field === field);
+        assert.ok(control, `Missing inline field ${field}. ${inlineCompany.text()}`);
+        control.props.children.props.onChange(value);
+    }
+    await inlineCompany.render();
+    await inlineCompany.submit();
+    assert.equal(inlineSaved,'Renamed X');
     assert.deepEqual(companiesTab.state.rows[0].cells,
         ['x','Renamed X','New road','Kitchen','New company brand','New company plant',999,250,'=Literal note','Keep']);
     assert.equal(inspectionSource('agency').state.companies.find(row => row.id === companyX.id).type,'Kitchen');
@@ -961,7 +978,6 @@ try {
     await rm(directory,{recursive:true,force:true});
 }
 
-const { SheetRecordEditor } = await import('../../src/components/SheetRecordEditor.tsx');
 const uiProduct = { id: 'product', name: 'Cereal' };
 const uiFields = { companies: [{ id:'permanent-x', key:'x', name:'Company X' }, { id:'permanent-y', key:'y', name:'Company Y' }], fields: [
     { field:'code', header:'UPC', rule:'text', value:'0099', revision:'old-code' },

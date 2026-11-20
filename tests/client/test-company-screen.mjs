@@ -9,10 +9,14 @@ globalThis.localStorage = { getItem() { return null; } };
 
 const calls = [];
 let contactFailure = true;
-let info = { address: '1 Test Street', phone: '555-0100', contacts: [{ id: 'owner', name: 'Test Owner', role: 'Owner', email: '', phone: '' }] };
+let info = { address: '1 Test Street', phone: '555-0100', contacts: [{ id: 'owner', name: 'Test Owner', role: 'Owner', email: '', phone: '' }], contactsRevision: 1 };
 let rate = 45;
+let companyOverride = null;
 let sheetName = 'Test Bakery';
 let sheetRevision = 'revision-1';
+let sheetAddress = 'Original Sheets address';
+let sheetsAddressRevision = 'address-1';
+let sheetWarning = true;
 const path = {
   details: '/api/sources/rows/companies/test',
   sheet: '/api/sources/sheet-editor/companies/test',
@@ -28,24 +32,40 @@ globalThis.fetch = async (url, options = {}) => {
   calls.push([method, url, body]);
   if (url === path.sheet) return Response.json({ companies: [], fields: [
     { field: 'name', rule: 'text', value: sheetName, revision: sheetRevision },
+    { field: 'address', rule: 'text', value: sheetAddress, revision: sheetsAddressRevision },
     { field: 'companyFee', rule: 'money', value: 1200, revision: 'fee-revision' },
     { field: 'mashgiachFee', rule: 'money', value: 45, revision: 'visit-fee-revision' },
   ] });
   if (url === path.details && method === 'PATCH') {
-    sheetName = body.fields.name;
-    sheetRevision = 'revision-2';
+    if (body.fields.name) {
+      sheetName = body.fields.name;
+      sheetRevision = 'revision-2';
+    }
+    if (sheetWarning) {
+      sheetWarning = false;
+      sheetAddress = 'Concurrent Sheets address';
+      sheetsAddressRevision = 'address-2';
+      return Response.json({ saved: true, warning: 'Other cells in this row changed while you were saving.' });
+    }
+    if (body.fields.address) sheetAddress = body.fields.address;
     return Response.json({ saved: true });
   }
   if (url === path.fees) return Response.json({ canEdit: true, places: [{
-    id: 'test', company: null, importedCompany: { amount: 1200, per: 'year' }, mashgiach: { amount: rate }, mashgiachNames: [],
+    id: 'test', company: companyOverride, importedCompany: { amount: 1200, per: 'year' }, mashgiach: { amount: rate }, mashgiachNames: [],
   }] });
   if (url === path.fees + '/test' && method === 'PUT') {
     rate = body.mashgiach.amount;
-    return Response.json(body);
+    return Response.json({ company: companyOverride, mashgiach: { amount: rate } });
   }
   if (url === path.contact && method === 'PUT') {
     if (contactFailure) return Response.json({ error: 'Contacts unavailable. Try again.' }, { status: 503 });
-    info = { ...info, ...body };
+    if (body.contacts && body.contactsRevision !== info.contactsRevision) {
+      return Response.json({ error: 'Contacts changed since you started editing.' }, { status: 409 });
+    }
+    const { contacts, contactsRevision, ...location } = body;
+    info = { ...info, ...location, ...(contacts && {
+      contacts: contacts.map(contact => ({ id: 'manager', ...contact })), contactsRevision: info.contactsRevision + 1,
+    }) };
     return Response.json(info);
   }
   if (url === path.contact) return Response.json(info);
@@ -92,8 +112,8 @@ assert.match(location.html(), /maps\/search.*tel:555-0100/);
 assert.deepEqual([details, fees, location].map(form => form.buttons().find(b => /Save/.test(b.label)).label),
   ['Save company details', 'Save fees', 'Save contacts']);
 
-const sheetNameInput = details.find(node => node.type === 'div' && node.props.children?.props.field?.field === 'name')[0];
-sheetNameInput.props.children.props.onChange('New Bakery');
+const sheetField = field => details.find(node => node.type === 'div' && node.props.children?.props.field?.field === field)[0].props.children;
+sheetField('name').props.onChange('New Bakery');
 await details.render();
 await fill(fees, 'input', '45', '55');
 await fill(location, 'input', '555-0100', '555-0101');
@@ -105,6 +125,14 @@ assert.equal(sourceSaves, 1);
 assert.deepEqual(calls.find(([method]) => method === 'PATCH'), ['PATCH', path.details,
   { fields: { name: 'New Bakery' }, expected: { name: 'revision-1' } }]);
 assert.match(details.text(), /Company details saved/);
+assert.match(details.text(), /Other cells in this row changed/);
+assert.equal(details.find(node => node.type === 'fieldset')[0].props.disabled, true);
+await details.click('Refresh for review');
+assert.equal(sourceSaves, 2);
+assert.equal(sheetField('name').props.value, 'New Bakery');
+assert.equal(sheetField('address').props.value, 'Concurrent Sheets address');
+assert.doesNotMatch(details.text(), /Other cells in this row changed/);
+assert.equal(details.find(node => node.type === 'fieldset')[0].props.disabled, false);
 await admin.render();
 assert.match(admin.text(), /New Bakery Company screen/);
 await admin.click('Remove company');
@@ -114,9 +142,11 @@ await fees.render(panelProps(admin, 'Fees').props);
 await location.render(panelProps(admin, 'Location & contacts').props);
 assert.ok(fees.find(node => node.type === 'input' && node.props.value === '55').length);
 assert.ok(location.find(node => node.type === 'input' && node.props.value === '555-0101').length);
+companyOverride = { amount: 1400, per: 'year' };
 await fees.submit();
-assert.deepEqual(calls.at(-1), ['PUT', path.fees + '/test', { company: null, mashgiach: { amount: 55 } }]);
+assert.deepEqual(calls.at(-1), ['PUT', path.fees + '/test', { mashgiach: { amount: 55 } }]);
 assert.match(fees.text(), /Fees saved/);
+assert.ok(fees.find(node => node.type === 'input' && node.props.value === '1400').length);
 assert.match(location.text(), /Contacts unavailable/);
 contactFailure = false;
 await location.submit();
@@ -129,10 +159,29 @@ const rolePicker = location.find(node => node.type === 'select' && node.props.va
 rolePicker.props.onChange({ target: { value: 'Manager' } });
 await location.render();
 await location.submit();
-assert.deepEqual(calls.at(-1)[2], { contacts: [info.contacts[0], { name: 'Test Manager', role: 'Manager', email: '', phone: '' }] });
+assert.deepEqual(calls.at(-1)[2], { contactsRevision: 1, contacts: [info.contacts[0], { name: 'Test Manager', role: 'Manager', email: '', phone: '' }] });
 await location.click('Delete contact', 1);
 await location.submit();
-assert.deepEqual(calls.at(-1)[2], { contacts: [info.contacts[0]] });
+assert.deepEqual(calls.at(-1)[2], { contactsRevision: 2, contacts: [info.contacts[0]] });
+
+await fill(location, 'input', 'Test Owner', 'My contact draft');
+await fill(location, 'input', '555-0101', '555-0102');
+info = { ...info, contactsRevision: 4, contacts: [{ ...info.contacts[0], name: 'Newer contact' }] };
+sheetField('address').props.onChange('Edited Sheets address');
+await details.render();
+await details.submit();
+assert.deepEqual(calls.findLast(([method]) => method === 'PATCH'), ['PATCH', path.details,
+  { fields: { address: 'Edited Sheets address' }, expected: { address: 'address-2' } }]);
+await admin.render();
+await location.render(panelProps(admin, 'Location & contacts').props);
+await location.submit();
+assert.equal(calls.at(-1)[2].contactsRevision, 3);
+assert.match(location.text(), /Contacts changed since you started editing/);
+assert.equal(info.contacts[0].name, 'Newer contact');
+assert.equal(info.phone, '555-0101');
+await location.click('Reload contacts');
+assert.ok(location.find(node => node.type === 'input' && node.props.value === 'Newer contact').length);
+assert.ok(location.find(node => node.type === 'input' && node.props.value === '555-0102').length);
 
 for (const role of ['coordinator', 'mashgiach']) {
   const start = calls.length;
@@ -144,7 +193,7 @@ for (const role of ['coordinator', 'mashgiach']) {
   assert.doesNotMatch(fees.text(), /What the company pays|1200|Save/);
   assert.match(location.text(), /1 Test Street.*555-0101/);
   assert.doesNotMatch(location.text(), /Add contact|Save/);
-  assert.equal(location.text().includes('Test Owner'), role === 'coordinator');
+  assert.equal(location.text().includes('Newer contact'), role === 'coordinator');
   assert.deepEqual(calls.slice(start).map(([method, url]) => [method, url]),
     [['GET', path.visit], ['GET', role === 'coordinator' ? path.contact : path.location]]);
 }

@@ -5,9 +5,9 @@ import { foodInput } from './ChecklistTemplatesScreen';
 import { useVisitFocus, visitButton, visitRequest } from './FactoryVisitScreen';
 import { setupField, setupPrimary } from './MappingStep';
 import { SheetRecordEditor } from './SheetRecordEditor';
-import { emptyContact, getCompanyInfo, getPlaceInfo, mapsUrl, saveCompanyInfo, type CompanyInfo, type Contact } from '../lib/companyInfo';
-import { amountValue, getFees, leftLine, money, saveFees, type CompanyFee, type FeePlace } from '../lib/fees';
-import type { SourceConnection } from '../lib/sources';
+import { emptyContact, getPlaceInfo, mapsUrl, type CompanyInfo, type Contact, type PlaceInfo } from '../lib/companyInfo';
+import { amountValue, feesRequest, getFees, leftLine, money, type CompanyFee, type FeePlace } from '../lib/fees';
+import { sourceRequest, type SourceConnection } from '../lib/sources';
 import { canEdit, providers, saveCompany } from '../lib/sourcesSetup';
 
 type Company = { id: string; name: string; address?: string; type?: string; companyFee?: number; archived?: boolean };
@@ -199,12 +199,12 @@ function CompanyFees({ id, yearlyCount, sourceRevision }: { id: string; yearlyCo
     try {
       const next = feesToSave(place);
       const changes = {
-        company: company === initial.company && per === initial.per ? place.company : next.company,
-        mashgiach: mashgiach === initial.mashgiach ? place.mashgiach : next.mashgiach,
+        ...(company !== initial.company || per !== initial.per ? { company: next.company } : {}),
+        ...(mashgiach !== initial.mashgiach ? { mashgiach: next.mashgiach } : {}),
       };
-      await saveFees(id, changes.company, changes.mashgiach);
+      const result = await feesRequest<Pick<FeePlace, 'company' | 'mashgiach'>>(`/api/inspections/fees/${encodeURIComponent(id)}`, 'PUT', changes);
       savedRevision.current += 1;
-      setPlace(current => current && ({ ...current, ...changes }));
+      setPlace(current => current && ({ ...current, ...result }));
       setDraft({});
       setSaved(true);
     } catch (cause) {
@@ -217,7 +217,13 @@ function CompanyFees({ id, yearlyCount, sourceRevision }: { id: string; yearlyCo
 
   function change(next: Partial<FeeDraft>) {
     setSaved(false);
-    setDraft(current => ({ ...current, ...next }));
+    setDraft(current => {
+      const updated = { ...current, ...next };
+      if (updated.company === initial.company) delete updated.company;
+      if (updated.mashgiach === initial.mashgiach) delete updated.mashgiach;
+      if (updated.per === initial.per) delete updated.per;
+      return updated;
+    });
   }
 
   return <form className="space-y-4" onSubmit={submit}>
@@ -241,44 +247,70 @@ function CompanyFees({ id, yearlyCount, sourceRevision }: { id: string; yearlyCo
   </form>;
 }
 
+type CompanyInfoWithRevision = CompanyInfo & { contactsRevision?: string };
 function CompanyLocation({ id, role, editable, sourceRevision }: { id: string; role: string; editable: boolean; sourceRevision: number }) {
-  const [info, setInfo] = useState<CompanyInfo | null>(null);
-  const [draft, setDraft] = useState<Partial<CompanyInfo>>({});
+  const [info, setInfo] = useState<CompanyInfoWithRevision | null>(null);
+  const [draft, setDraft] = useState<Partial<PlaceInfo>>({});
+  const [contactDraft, setContactDraft] = useState<{ contacts: Contact[]; baseline: CompanyInfoWithRevision } | null>(null);
+  const [contactsConflict, setContactsConflict] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const lock = useRef(false);
   const readSequence = useRef(0);
   const showContacts = role === 'admin' || role === 'coordinator';
+  const path = `/api/inspections/company-info/${encodeURIComponent(id)}`;
   useEffect(() => {
     const read = ++readSequence.current;
-    const request = showContacts ? getCompanyInfo(id) : getPlaceInfo(id).then(location => ({ ...location, contacts: [] }));
+    const request = showContacts ? feesRequest<CompanyInfoWithRevision>(path) : getPlaceInfo(id).then(location => ({ ...location, contacts: [] }));
     void request.then(data => { if (read === readSequence.current) setInfo(data); })
       .catch(cause => { if (read === readSequence.current) setError(cause.message); });
     return () => { readSequence.current += 1; };
   }, [id, showContacts, sourceRevision]);
   if (!info) return error ? <p role="alert" className="text-bad">{error}</p> : <p role="status">Loading company info…</p>;
 
-  const { address, phone, contacts } = { ...info, ...draft };
+  const { address, phone } = { ...info, ...draft };
+  const contacts = contactDraft?.contacts ?? info.contacts;
   const patch = {
     ...(address !== info.address && { address }),
     ...(phone !== info.phone && { phone }),
-    ...(JSON.stringify(contacts) !== JSON.stringify(info.contacts) && { contacts }),
+    ...(contactDraft && { contacts, contactsRevision: contactDraft.baseline.contactsRevision }),
   };
   const valid = contacts.every(contact => contact.name.trim() && contact.role.trim());
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!editable || lock.current || !valid || !Object.keys(patch).length) return;
+    if (!editable || lock.current || contactsConflict || !valid || !Object.keys(patch).length) return;
     lock.current = true;
     setBusy(true);
     setError('');
     setSaved(false);
     try {
-      const result = await saveCompanyInfo(id, patch);
+      const result: CompanyInfoWithRevision = await sourceRequest(path, 'PUT', patch);
       readSequence.current += 1;
       setInfo(result);
       setDraft({});
+      setContactDraft(null);
       setSaved(true);
+    } catch (cause) {
+      if ((cause as { status?: number } | null)?.status === 409) setContactsConflict(true);
+      setError((cause as Error).message);
+    } finally {
+      lock.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function reloadContacts() {
+    if (lock.current) return;
+    lock.current = true;
+    setBusy(true);
+    const read = ++readSequence.current;
+    try {
+      const result = await feesRequest<CompanyInfoWithRevision>(path);
+      if (read === readSequence.current) setInfo(result);
+      setContactDraft(null);
+      setContactsConflict(false);
+      setError('');
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -287,12 +319,19 @@ function CompanyLocation({ id, role, editable, sourceRevision }: { id: string; r
     }
   }
 
-  function change(next: Partial<CompanyInfo>) {
+  function change(next: Partial<PlaceInfo>) {
     setSaved(false);
     setDraft(current => ({ ...current, ...next }));
   }
+  function changeContacts(contacts: Contact[]) {
+    setSaved(false);
+    setContactDraft(current => {
+      const baseline = current?.baseline ?? info!;
+      return JSON.stringify(contacts) === JSON.stringify(baseline.contacts) ? null : { contacts, baseline };
+    });
+  }
   function changeContact(index: number, next: Partial<Contact>) {
-    change({ contacts: contacts.map((contact, i) => i === index ? { ...contact, ...next } : contact) });
+    changeContacts(contacts.map((contact, i) => i === index ? { ...contact, ...next } : contact));
   }
 
   return <form className="space-y-4" onSubmit={submit}>
@@ -327,7 +366,7 @@ function CompanyLocation({ id, role, editable, sourceRevision }: { id: string; r
             value={contact.role} onChange={event => changeContact(index, { role: event.target.value })} /></label>}
           <label className="block">Email<input type="email" maxLength={200} className={foodInput} value={contact.email} onChange={event => changeContact(index, { email: event.target.value })} /></label>
           <label className="block">Phone<input type="tel" maxLength={40} className={foodInput} value={contact.phone} onChange={event => changeContact(index, { phone: event.target.value })} /></label>
-          <button type="button" className={visitButton} onClick={() => change({ contacts: contacts.filter((_, i) => i !== index) })}>Delete contact</button>
+          <button type="button" className={visitButton} onClick={() => changeContacts(contacts.filter((_, i) => i !== index))}>Delete contact</button>
         </fieldset> :
         <div key={contact.id ?? index} className="space-y-2 rounded-lg border border-line p-4">
           <p dir="auto" className="break-words font-semibold">{contact.name}</p>
@@ -336,11 +375,12 @@ function CompanyLocation({ id, role, editable, sourceRevision }: { id: string; r
           {contact.phone && <a className="block min-h-11 break-words" href={`tel:${contact.phone}`}>{contact.phone}</a>}
         </div>)}
       {editable && <button type="button" className={visitButton} disabled={busy || contacts.length >= 20}
-        onClick={() => change({ contacts: [...contacts, emptyContact()] })}>Add contact</button>}
+        onClick={() => changeContacts([...contacts, emptyContact()])}>Add contact</button>}
       {contacts.length >= 20 && <p>Maximum 20 contacts.</p>}
     </>}
     {saved && <p role="status" className="text-good">Contacts saved.</p>}
     {error && <p role="alert" className="text-bad">{error}</p>}
-    {editable && <button type="submit" className={visitButton} disabled={busy || !valid || !Object.keys(patch).length}>{busy ? 'Saving…' : 'Save contacts'}</button>}
+    {contactsConflict && <button type="button" className={visitButton} disabled={busy} onClick={() => reloadContacts()}>Reload contacts</button>}
+    {editable && <button type="submit" className={visitButton} disabled={busy || contactsConflict || !valid || !Object.keys(patch).length}>{busy ? 'Saving…' : 'Save contacts'}</button>}
   </form>;
 }

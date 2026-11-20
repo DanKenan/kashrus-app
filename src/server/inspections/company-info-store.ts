@@ -1,10 +1,13 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createAgencyDocument, type DocumentDeps } from './food-service-store.ts';
 import { bad, bounded, shape, validEmail } from './fees.ts';
 export type Contact = { id: string; name: string; role: string; email: string; phone: string };
 export type CompanyInfo = { address: string; phone: string; contacts: Contact[] };
 export type CompanyInfoDoc = { places: Record<string, CompanyInfo>; updatedAt: string };
 export const emptyInfo = (): CompanyInfo => ({ address: '', phone: '', contacts: [] });
+export const contactsRevision = (contacts: Contact[]) => createHash('sha256')
+  .update(JSON.stringify(contacts.map(({ id, name, role, email, phone }) => [id, name, role, email, phone])))
+  .digest('hex');
 export function validateCompanyInfo(v: any, old: CompanyInfo): CompanyInfo {
   shape(v, ['address', 'phone', 'contacts']);
   const address = bounded(v.address, 200), phone = bounded(v.phone, 40);
