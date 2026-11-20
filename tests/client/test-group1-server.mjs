@@ -47,7 +47,7 @@ try {
   const before = [writes, sourceCalls];
   assert.equal((await put({ kind: 'ingredient', itemId: 'i', group1: false })).status, 200);
   assert.equal(writes - before[0], 1); assert.equal(sourceCalls, before[1]);
-  assert.deepEqual((await getItems()).json.ingredients[0], { certificationRaw: 'Group 1', statusRaw: undefined, agencyRaw: undefined, confidence: 1, id: 'i', name: 'Salt', agency: '', dpm: null, group1: false, group1Source: 'admin' });
+  assert.deepEqual((await getItems()).json.ingredients[0], { certificationRaw: 'Group 1', statusRaw: undefined, agencyRaw: undefined, expiresOn: undefined, confidence: 1, id: 'i', name: 'Salt', agency: '', dpm: null, group1: false, group1Source: 'admin' });
   assert.equal((await routes.request('put', '/api/sources/group1', { kind: 'ingredient', itemId: 'i', group1: true }, { agency: 'b' })).status, 404);
   assert.equal((await routes.request('get', '/api/factories/:companyId/items', {}, { agency: 'b' })).status, 404);
   assert.equal((await routes.request('put', '/api/sources/group1', { kind: 'ingredient', itemId: 'i', group1: true }, { admin: false })).status, 403);

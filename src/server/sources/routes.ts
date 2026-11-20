@@ -937,7 +937,7 @@ export function registerSourceRoutes(app: any, deps: {
     if (!plain && !old?.encryptedKey) return res.status(400).json({ error: 'API key required' });
     const c: Connection = { group1Label: req.body.group1Label?.trim() ?? old?.group1Label ?? 'Group 1', group1Overrides: old?.group1Overrides || { ingredient: {}, product: {} }, agencyId: id, sourceType: req.body.sourceType, baseId: req.body.baseId, access: req.body.access, mapping: req.body.mapping, encryptedKey: plain ? encryptKey(plain, deps.secret(), id) : old!.encryptedKey, keyHint: plain ? keyHint(plain) : old!.keyHint, updatedAt: new Date().toISOString(), updatedBy: user.id, backupHashes: old?.backupHashes || {}, ...(old?.lastRefresh ? { lastRefresh: old.lastRefresh } : {}) };
     c.airtableDirectRemoval = old?.sourceType === 'airtable' && old.baseId === c.baseId &&
-      old.mapping.companies.table === c.mapping.companies.table && old.airtableDirectRemoval === true;
+      old.airtableDirectRemoval === true && old.mapping.companies?.table === c.mapping.companies.table;
     const validation = await verifyBaseAccess(c, airtable(c));
     if (validation.eligibility.access === 'read') c.access = 'read';
     for (const kind of ['companies', 'ingredients', 'products'] as const) {
