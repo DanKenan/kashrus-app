@@ -8,7 +8,7 @@ export interface FeesData { settings: { feeEditors: 'admins' | 'admins_and_coord
 export interface PayRow { key: string; name: string; visits: number; perVisit?: number | null; uniformFee?: number | null; breakdown?: { placeId: string; place: string; visits: number; fee: number | null; paid: number }[]; paid: number; companies: number; left: number }
 export interface PayData { from: string; to: string; by: string; rows: PayRow[]; totals: Omit<PayRow, 'key' | 'name'>; mismatches: number; noFee: number }
 export interface EmailPreview { to: string; subject: string; html: string; text: string; attachments: { filename: string; contentType: string; bytes: number }[] }
-export interface FeeCheck { reportAmount: number; setAmount: number; paidAmount?: number | null; decided: { amount?: number; byName: string; at: string } | null }
+export interface FeeCheck { reportAmount: number; setAmount: number; paidAmount?: number | null; decided: { amount?: number; byName: string; at: string } | null; canChangeFactoryFee?: boolean }
 export async function feesRequest<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const response = await apiFetch(path, { method, ...(body !== undefined ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
   const result = await response.json();
@@ -18,6 +18,7 @@ export async function feesRequest<T>(path: string, method = 'GET', body?: unknow
 export const getFees = () => feesRequest<FeesData>('/api/inspections/fees');
 export const saveFees = (id: string, company: CompanyFee | null, mashgiach: { amount: number } | null) => feesRequest(`/api/inspections/fees/${encodeURIComponent(id)}`, 'PUT', { company, mashgiach });
 export const decideFee = (id: string, amount?: number) => feesRequest(`/api/inspections/reports/${encodeURIComponent(id)}/fee-decision`, 'POST', amount === undefined ? {} : { amount });
+export const changeFactoryReportFee = (id: string, amount: number) => feesRequest(`/api/inspections/reports/${encodeURIComponent(id)}/fee-change`, 'POST', { amount });
 export const canSeeFees = (role: string) => role === 'admin' || role === 'coordinator';
 export const canSeePay = (role: string) => role === 'admin';
 export const canChangeFees = (role: string, editors: FeesData['settings']['feeEditors']) => role === 'admin' || role === 'coordinator' && editors === 'admins_and_coordinators';

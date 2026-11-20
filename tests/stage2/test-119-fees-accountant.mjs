@@ -137,7 +137,7 @@ export default {
    await api('admin', 'PUT', '/api/inspections/schedule/companies/snacks119/people', { mashgiachIds: [people.elsewhere.id], coordinatorIds: [] });
    const mismatch = saved[10];
    const detail = (await api('admin', 'GET', `/api/inspections/reports/${mismatch.id}`)).json.report;
-   assert.deepEqual(detail.feeCheck, { reportAmount: 180, setAmount: 150, paidAmount: 150, decided: null });
+   assert.deepEqual(detail.feeCheck, { reportAmount: 180, setAmount: 150, paidAmount: 150, decided: null, canChangeFactoryFee: true });
    await api('admin', 'POST', '/api/__test__/inspections/flush-seen', {});
    await action('invalid decision', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 177 }, 0, 400);
    await action('data amount cannot override admin fee', 'POST', `/api/inspections/reports/${mismatch.id}/fee-decision`, { amount: 180 }, 0, 400);
@@ -228,6 +228,52 @@ export default {
    const past = await action('cold past month pay', 'GET', '/api/inspections/pay?from=2026-05-01&to=2026-05-31', undefined, 0, 200, 'admin', 5); assert.equal(past.totals.visits, 5);
    await action('cached past month pay', 'GET', '/api/inspections/pay?from=2026-05-01&to=2026-05-31&by=mashgiach', undefined, 0);
    await action('cached past month preview', 'GET', '/api/inspections/accountant/preview?from=2026-05-01&to=2026-05-31', undefined, 0);
+   // A fresh factory mismatch can change the rate and notify only this agency's admins.
+   await pin('2027-01-15T14:01:00Z');
+   assert.equal((await api('admin', 'POST', '/api/__test__/source-fees', {
+    agencyId, fees: { mashgiach: { snacks119: { amount: 180, currency: 'USD' } } },
+   })).status, 200);
+   const fresh = await api('elsewhere', 'POST', '/api/visits/reports', {
+    clientReportId: 'report-119-coordinator-change', companyId: 'snacks119',
+    startedAt: '2027-01-15T14:00:00Z', listVersion: '', marks: [], offList: [],
+   });
+   assert.equal(fresh.status, 201);
+   const freshPath = `/api/inspections/reports/${fresh.json.report.id}`;
+   const changePath = freshPath + '/fee-change';
+   const rate = { amount: 180 };
+   assert.equal((await api('coord', 'POST', changePath, rate)).status, 404);
+   assert.equal((await assignFactory([people.coord.id])).status, 200);
+   assert.equal((await api('foreign', 'POST', changePath, rate)).status, 404);
+   assert.equal((await api('elsewhere', 'POST', changePath, rate)).status, 403);
+   await action('disable coordinator fee editing', 'PUT', '/api/inspections/fee-settings', { feeEditors: 'admins' });
+   assert.equal((await api('coord', 'GET', freshPath)).json.report.feeCheck.canChangeFactoryFee, false);
+   assert.equal((await api('coord', 'POST', changePath, rate)).status, 403);
+   await action('enable coordinator fee editing', 'PUT', '/api/inspections/fee-settings', { feeEditors: 'admins_and_coordinators' });
+   assert.equal((await api('coord', 'GET', freshPath)).json.report.feeCheck.canChangeFactoryFee, true);
+   assert.equal((await api('coord', 'POST', `/api/inspections/reports/${saved[11].id}/fee-change`, rate)).status, 400);
+   assert.equal((await api('coord', 'POST', changePath, { ...rate, company: feeA.company })).status, 400);
+   await action('direct factory fee is still admin-only', 'PUT', feesPath('snacks119'), { mashgiach: rate }, 0, 403, 'coord');
+   assert.deepEqual(await readFactoryFee('admin'), factoryFee);
+   for (const who of ['admin', 'secondAdmin', 'coord', 'foreign']) {
+    const subscribed = await api(who, 'POST', '/api/push/subscribe', {
+     subscription: { endpoint: `https://push.test.invalid/119-${who}-${agencyId}`, keys: { p256dh: 'p', auth: 'a' } },
+    });
+    assert.equal(subscribed.status, 200);
+   }
+   await api('admin', 'POST', '/api/__test__/push-log/clear', {});
+   const { decided } = await action('coordinator changes rate and records decision', 'POST', changePath, rate, 1, 200, 'coord');
+   assert.equal(decided.amount, 180);
+   assert.equal(decided.by, people.coord.id);
+   assert.deepEqual(await readFactoryFee('admin'), { company: factoryFee.company, mashgiach: rate });
+   const { feeCheck } = (await api('coord', 'GET', freshPath)).json.report;
+   assert.equal(feeCheck.paidAmount, 180);
+   assert.equal(feeCheck.decided.byName, people.coord.name);
+   assert.equal(feeCheck.canChangeFactoryFee, false);
+   assert.deepEqual(await action('retry factory fee change', 'POST', changePath, rate, 0, 200, 'coord'), { decided });
+   await action('resolved mismatch cannot change the rate again', 'POST', changePath, { amount: 190 }, 0, 409, 'coord');
+   const { log } = (await api('admin', 'GET', '/api/__test__/push-log')).json;
+   assert.deepEqual(log.map(push => push.recipientUserId).sort(), [people.admin.id, secondAdmin.id].sort());
+   assert.ok(log.every(push => push.title === 'Factory visit fee changed' && push.body.includes('Northfield Snacks')));
    console.table(table); return 'Fees/pay/export/accountant/company info, privacy sentinels, scheduled jobs, persistence and exact budgets passed.';
   } finally { await ctx.api('POST', '/api/__test__/staged', { enabled: false }); await pin(null); await new Promise(r => mock.close(r)); }
  },
