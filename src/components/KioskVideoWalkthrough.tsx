@@ -126,8 +126,19 @@ export function getDemoPointerFrame(
     return null;
   }
 
+  const tapLength = (index: number): number => {
+    const beat = beats[index];
+    const next = beats[index + 1];
+
+    if (!next) return TAP_MS;
+
+    const gap = Math.max(1, next.at - beat.at);
+
+    return Math.min(TAP_MS, gap * 0.45);
+  };
+
   const index = beats.findIndex(
-    beat => elapsed < beat.at + TAP_MS,
+    (beat, i) => elapsed < beat.at + tapLength(i),
   );
 
   if (index < 0) return null;
@@ -137,8 +148,12 @@ export function getDemoPointerFrame(
   const previous =
     index > 0 ? beats[index - 1] : null;
 
+  const previousEnd = previous
+    ? previous.at + tapLength(index - 1)
+    : 0;
+
   const glideStart = Math.max(
-    previous ? previous.at + TAP_MS : 0,
+    previousEnd,
     beat.at - GLIDE_MS,
   );
 
@@ -154,7 +169,10 @@ export function getDemoPointerFrame(
     };
   }
 
-  const travelLength = Math.max(1, beat.at - glideStart);
+  const travelLength = Math.max(
+    1,
+    beat.at - glideStart,
+  );
 
   return {
     target: beat.target,
@@ -162,10 +180,9 @@ export function getDemoPointerFrame(
     travel: ease(
       (elapsed - glideStart) / travelLength,
     ),
-    tap:
-      elapsed >= beat.at
-        ? clamp((elapsed - beat.at) / TAP_MS)
-        : 0,
+    tap: elapsed >= beat.at
+      ? clamp((elapsed - beat.at) / tapLength(index))
+      : 0,
     visible: true,
   };
 }
@@ -1186,8 +1203,8 @@ function WindowsScene({
           <DemoLayer amount={opened}>
             <KioskScreen />
 
-            <DemoBadge>
-              Assigned Access active
+            <DemoBadge neutral>
+              Test pairing after restart
             </DemoBadge>
 
             <div className="kiosk-demo-key-tip">
@@ -2170,7 +2187,7 @@ function WalkthroughPlayer({
   }, []);
 
   useEffect(() => {
-    if (!isPlaying) return;
+    if (!isPlaying || reducedMotion) return;
 
     let last = performance.now();
     let frame = 0;
@@ -2218,7 +2235,7 @@ function WalkthroughPlayer({
         onVisibilityChange,
       );
     };
-  }, [isPlaying, total]);
+  }, [isPlaying, total, reducedMotion]);
 
   const seek = (value: number) => {
     const next = Math.max(0, Math.min(total, value));
@@ -2233,7 +2250,29 @@ function WalkthroughPlayer({
 
   const replay = () => {
     seek(0);
-    setIsPlaying(true);
+    setIsPlaying(!reducedMotion);
+  };
+
+  const togglePlayback = () => {
+    if (reducedMotion) {
+      setIsPlaying(false);
+
+      const nextIndex = sceneIndex + 1;
+
+      seek(
+        nextIndex < scenes.length
+          ? starts[nextIndex]
+          : 0,
+      );
+
+      return;
+    }
+
+    if (elapsed >= total) {
+      replay();
+    } else {
+      setIsPlaying(!isPlaying);
+    }
   };
 
   const timeline = {
@@ -2307,8 +2346,8 @@ function WalkthroughPlayer({
           type="range"
           min={0}
           max={total}
-          step={1}
-          value={Math.round(elapsed)}
+          step={100}
+          value={Math.round(elapsed / 100) * 100}
           onChange={event =>
             seek(Number(event.currentTarget.value))
           }
@@ -2328,15 +2367,13 @@ function WalkthroughPlayer({
           <button
             type="button"
             aria-label={
-              isPlaying
-                ? 'Pause walkthrough'
-                : 'Play walkthrough'
+              reducedMotion
+                ? 'Next walkthrough chapter'
+                : isPlaying
+                  ? 'Pause walkthrough'
+                  : 'Play walkthrough'
             }
-            onClick={() =>
-              elapsed >= total
-                ? replay()
-                : setIsPlaying(!isPlaying)
-            }
+            onClick={togglePlayback}
             className="grid min-h-11 min-w-11 place-items-center rounded-xl border border-line-control bg-sunken text-ink"
           >
             {isPlaying

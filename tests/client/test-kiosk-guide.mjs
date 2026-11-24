@@ -865,7 +865,7 @@ assert.match(
 
 assert.match(
   renderStep('windows', 3, 7000),
-  /Assigned Access active/,
+  /Test pairing after restart/,
 );
 
 assert.match(
@@ -1453,9 +1453,9 @@ assert.match(
   /@media \(prefers-reduced-motion: reduce\)/,
 );
 
-assert.match(
+assert.doesNotMatch(
   demoCss,
-  /\[data-walkthrough-playing="true"\]/,
+  /^\s*(?:animation|transition)(?:-[a-z-]+)?\s*:/m,
 );
 
 assert.doesNotMatch(
@@ -1467,6 +1467,41 @@ assert.doesNotMatch(
 assert.doesNotMatch(
   demoCss,
   /@keyframes\s+kiosk-/,
+);
+
+// Rapid typing choreography: pointer stays synced with every typed key and glides between keys.
+const rapidBeats = [
+  { target: 'key-1', at: 1450 },
+  { target: 'key-2', at: 1880 },
+  { target: 'key-3', at: 2310 },
+];
+
+for (const beat of rapidBeats) {
+  const frame = getDemoPointerFrame(
+    beat.at + 10,
+    rapidBeats,
+  );
+
+  assert.equal(
+    frame.target,
+    beat.target,
+    'Pointer must tap the same key that enters the character',
+  );
+
+  assert.equal(frame.travel, 1);
+  assert.ok(frame.tap > 0);
+}
+
+const betweenKeys = getDemoPointerFrame(
+  1750,
+  rapidBeats,
+);
+
+assert.equal(betweenKeys.target, 'key-2');
+assert.equal(betweenKeys.previousTarget, 'key-1');
+assert.ok(
+  betweenKeys.travel > 0 &&
+  betweenKeys.travel < 1,
 );
 
 console.log(

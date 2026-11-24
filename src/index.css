@@ -2388,21 +2388,18 @@
    ------------------------------------------------------------ */
 
 @media (prefers-reduced-motion: no-preference) {
-  [data-walkthrough-playing="true"]
   .kiosk-demo-layer {
     transform: scale(
       calc(0.975 + var(--reveal) * 0.025)
     );
   }
 
-  [data-walkthrough-playing="true"]
   .kiosk-demo-badge {
     transform: scale(
       calc(0.9 + var(--reveal) * 0.1)
     );
   }
 
-  [data-walkthrough-playing="true"]
   .kiosk-demo-toggle {
     background: color-mix(
       in srgb,
@@ -2487,4 +2484,31 @@
   .kiosk-demo-handheld.is-small {
     max-width: 190px;
   }
+}
+
+/* Container-width responsive rules and dark-mode toggle thumb contrast */
+.kiosk-demo-illustration {
+  container-type: inline-size;
+}
+
+@container (max-width: 280px) {
+  .kiosk-demo-duo {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .kiosk-demo-duo
+  .kiosk-demo-handheld.is-small {
+    max-width: 190px;
+  }
+}
+
+.kiosk-demo-laptop-base {
+  max-width: 100%;
+  margin-inline: auto;
+}
+
+.dark .kiosk-demo-toggle[data-on="true"]
+.kiosk-demo-toggle-thumb {
+  background: var(--demo-bezel-dark);
 }

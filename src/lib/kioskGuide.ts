@@ -369,7 +369,7 @@ export const KIOSK_LOCK_GUIDES: Record<
         3,
         'confirm',
         'Test the kiosk account',
-        'Sign in to the dedicated kiosk account. Pair Shutfey there if necessary and test staff sign-in. A temporary F11 full-screen session is not a security lock.',
+        'Sign in to the dedicated kiosk account, pair Shutfey, and test staff sign-in. Restart the device and confirm pairing is retained. Edge kiosk sessions may use InPrivate browsing, so persistent pairing must be verified. F11 alone is not a security lock.',
         'Ctrl+Alt+Del',
         'Assigned Access',
       ),
