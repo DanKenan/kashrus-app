@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { BookOpen, RefreshCw } from 'lucide-react';
 import { ShutfeyLogo } from './ShutfeyLogo';
 import { apiFetch, setKioskDevice, setKioskVenueName } from '../lib/api';
 
 interface KioskPairingProps {
-  onPaired: (device: string) => void;
+  onPaired: (device: string, venueName?: string | null) => void;
+  onOpenSetupGuide?: () => void;
   onExitKiosk: () => void;
   darkMode: boolean;
 }
@@ -25,7 +26,7 @@ interface ApprovedDevice {
  * polls until the pairing is approved, then stores its device credential
  * and moves on to the PIN screen. The tablet never lists venues.
  */
-export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingProps) {
+export function KioskPairing({ onPaired, onExitKiosk, darkMode, onOpenSetupGuide }: KioskPairingProps) {
   const [pairingId, setPairingId] = useState<string | null>(null);
   const [code, setCode] = useState('');
   const [deviceSecret, setDeviceSecret] = useState('');
@@ -92,7 +93,7 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
           const storedDevice = `${device.id}.${deviceSecret}`;
           setKioskDevice(storedDevice);
           setKioskVenueName(device.venueName || null);
-          onPairedRef.current(storedDevice);
+          onPairedRef.current(storedDevice, device.venueName || null);
         }
       } catch {
         // A failed poll is not fatal; the next poll tries again.
@@ -112,7 +113,7 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
 
       <div className="mt-6 text-center">
         <p className="text-xs font-bold uppercase tracking-[0.2em] text-gold-deep">Staff sign-in</p>
-        <h1 className="mt-1 text-3xl font-black font-sans">Pair this tablet</h1>
+        <h1 className="mt-1 text-3xl font-black font-sans">Pair this device</h1>
         <p className="mt-3 max-w-md text-ink-soft font-semibold">
           In the app, open Kiosk tablets and enter this code.
         </p>
@@ -121,11 +122,11 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
       <div className="mt-10 w-full max-w-md flex flex-col items-center gap-5">
         {expired ? (
           <>
-            <p className="text-lg font-bold text-red-600">Code expired</p>
+            <p className="text-lg font-bold text-bad">Code expired</p>
             <button
               onClick={() => void startPairing()}
               disabled={busy}
-              className="tactile-4 inline-flex items-center gap-2 rounded-2xl bg-gold-deep px-6 py-4 text-lg font-extrabold text-white active:scale-95 transition-transform disabled:opacity-40"
+              className="tactile-4 inline-flex items-center gap-2 rounded-2xl bg-gold-deep px-6 py-4 text-lg font-extrabold text-paper active:scale-95 transition-transform disabled:opacity-40"
             >
               <RefreshCw className="w-5 h-5" />
               <span>New code</span>
@@ -147,18 +148,24 @@ export function KioskPairing({ onPaired, onExitKiosk, darkMode }: KioskPairingPr
         {!expired && code && (
           <p className="text-center text-sm text-ink-soft">Waiting for someone to pair this tablet…</p>
         )}
-        {error && <p className="text-center text-sm font-bold text-red-600">{error}</p>}
+        {error && <p className="text-center text-sm font-bold text-bad">{error}</p>}
         {error && !code && (
           <button
             onClick={() => void startPairing()}
             disabled={busy}
-            className="tactile-4 inline-flex items-center gap-2 rounded-2xl bg-gold-deep px-6 py-4 text-lg font-extrabold text-white active:scale-95 transition-transform disabled:opacity-40"
+            className="tactile-4 inline-flex items-center gap-2 rounded-2xl bg-gold-deep px-6 py-4 text-lg font-extrabold text-paper active:scale-95 transition-transform disabled:opacity-40"
           >
             <RefreshCw className="w-5 h-5" />
             <span>Try again</span>
           </button>
         )}
 
+        {onOpenSetupGuide && (
+          <button type="button" onClick={onOpenSetupGuide}
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-gold bg-gold-wash px-4 text-sm font-bold text-gold-ink">
+            <BookOpen size={17} aria-hidden="true" /> How to set up &amp; lock this device
+          </button>
+        )}
         <button
           onClick={onExitKiosk}
           className="mt-4 text-center text-xs text-ink-faint underline underline-offset-2"

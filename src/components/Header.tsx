@@ -6,6 +6,7 @@ import { useMinWidth } from '../lib/useMinWidth';
 import { ConfirmModal } from './ConfirmModal';
 import { clearSession, deviceCredentialKeyFor, endServerSession, getSessionToken, noticeSiteRefusalFor, sessionAuthHeaders } from '../lib/api';
 import { 
+  BookOpen,
   CheckCircle2, 
   Wifi, 
   WifiOff, 
@@ -87,6 +88,7 @@ interface HeaderProps {
   /** Manager role: the venue OWNER's Team sheet (add a manager, mashgiach <-> manager). Owners only. */
   onOpenOwnerTeam?: () => void;
   onOpenKioskDevices?: () => void;
+  onOpenKioskGuide?: () => void;
   onResetDailyBoard: () => void;
   isRealtimeConnected: boolean;
   activeWorkersCount: number;
@@ -129,6 +131,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenPool,
   onOpenOwnerTeam,
   onOpenKioskDevices,
+  onOpenKioskGuide,
   onResetDailyBoard,
   isRealtimeConnected,
   activeWorkersCount,
@@ -576,7 +579,7 @@ export const Header: React.FC<HeaderProps> = ({
                       </div>
 
                       {/* Kiosk mode: turn this device into a shared wall tablet */}
-                      {canEnterKiosk && (isTabletWidth || canManageKiosks) && (
+                      {canEnterKiosk && (isTabletWidth || canManageKiosks || !!onOpenKioskGuide) && (
                         <div className="px-1 py-0.5 border-t border-line/60 mt-1 pt-1">
                           {isTabletWidth && (
                           <button
@@ -596,6 +599,16 @@ export const Header: React.FC<HeaderProps> = ({
                             >
                               <Tablet className="w-4 h-4 text-gold-deep" />
                               <span>Kiosk tablets</span>
+                            </button>
+                          )}
+                          {onOpenKioskGuide && (
+                            <button type="button" onClick={() => { setUserMenuOpen(false); onOpenKioskGuide(); }}
+                              className="flex min-h-11 w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-xs hover:bg-gold-wash">
+                              <BookOpen className="size-4 shrink-0 text-gold-deep" aria-hidden="true" />
+                              <span>
+                                <span className="block font-bold text-gold-deep">Kiosk setup guide</span>
+                                <span className="block text-ink-soft">Setup, device locking &amp; staff sign-in</span>
+                              </span>
                             </button>
                           )}
                         </div>
@@ -897,7 +910,7 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="rounded-xl bg-sunken px-1 py-1">
               <PushNotificationToggle userEmail={currentUser.email} userId={currentUser.id} />
               <UpdateAppButton />
-              {canEnterKiosk && (isTabletWidth || canManageKiosks) && (
+              {canEnterKiosk && (isTabletWidth || canManageKiosks || !!onOpenKioskGuide) && (
                 <>
                   {isTabletWidth && (
                   <button
@@ -917,6 +930,16 @@ export const Header: React.FC<HeaderProps> = ({
                     >
                       <Tablet className="w-4 h-4 text-gold-deep" />
                       <span>Kiosk tablets</span>
+                    </button>
+                  )}
+                  {onOpenKioskGuide && (
+                    <button type="button" onClick={() => { setMobileMenuOpen(false); onOpenKioskGuide(); }}
+                      className="flex min-h-11 w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-xs hover:bg-gold-wash">
+                      <BookOpen className="size-4 shrink-0 text-gold-deep" aria-hidden="true" />
+                      <span>
+                        <span className="block font-bold text-gold-deep">Kiosk setup guide</span>
+                        <span className="block text-ink-soft">Setup, device locking &amp; staff sign-in</span>
+                      </span>
                     </button>
                   )}
                 </>

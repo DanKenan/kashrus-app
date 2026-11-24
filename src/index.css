@@ -927,3 +927,66 @@
 .task-checklist-kiosk .checklist-attribution, .task-checklist-kiosk .checklist-hint, .task-checklist-kiosk .checklist-progress p { font-size: 16px; }
 .checklist-row:focus-visible, .checklist-builder button:focus-visible, .checklist-add input:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 @media (hover: hover) { .checklist-row:not([aria-checked="true"]):hover, .checklist-builder button:hover { background: var(--sunken); } }
+
+/* The range remains a native keyboard and pointer control. */
+.kiosk-walkthrough-progress {
+  accent-color: var(--gold-deep);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 100% 4px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes kiosk-tap-ripple {
+    0%, 100% { opacity: 0; transform: scale(1); }
+    30% { opacity: 1; }
+    75% { opacity: 0; transform: scale(1.17); }
+  }
+
+  @keyframes kiosk-toggle-slide {
+    0%, 12% { transform: translateX(-100%); }
+    35%, 100% { transform: translateX(0); }
+  }
+
+  @keyframes kiosk-button-pulse {
+    0%, 100% { opacity: 0; }
+    16%, 40%, 64% { opacity: 1; }
+    28%, 52%, 76% { opacity: 0; }
+  }
+
+  @keyframes kiosk-lock-reveal {
+    0% { opacity: 0.35; transform: scale(0.82); }
+    40%, 100% { opacity: 1; transform: scale(1); }
+  }
+
+  @keyframes kiosk-scan-line {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(28px); }
+  }
+
+  [data-walkthrough-playing] .kiosk-lock-reveal {
+    animation: kiosk-lock-reveal 1.8s ease-out 1;
+  }
+
+  [data-walkthrough-playing] .kiosk-scan-line {
+    animation: kiosk-scan-line 1.8s ease-in-out infinite;
+  }
+
+  [data-walkthrough-playing] .kiosk-tap-ripple {
+    border: 2px solid var(--gold);
+    animation: kiosk-tap-ripple 1.8s ease-out infinite;
+  }
+
+  [data-walkthrough-playing] .kiosk-toggle-slide {
+    animation: kiosk-toggle-slide 1.8s ease-out 1;
+  }
+
+  [data-walkthrough-playing] .kiosk-button-pulse {
+    box-shadow: 0 0 0 4px var(--gold-deep);
+    animation: kiosk-button-pulse 1.8s ease-out infinite;
+  }
+
+  [data-walkthrough-playing=false] :is(.kiosk-tap-ripple, .kiosk-toggle-slide, .kiosk-button-pulse, .kiosk-lock-reveal, .kiosk-scan-line) {
+    animation-play-state: paused;
+  }
+}

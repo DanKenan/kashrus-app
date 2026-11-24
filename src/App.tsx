@@ -58,6 +58,10 @@ import { KioskQrPhone } from './components/KioskQrPhone';
 import { TabletSignInSheet } from './components/TabletSignInSheet';
 import { isKqrPath, kqrCodeFromPath, readCanUseTabletSignIn, readPendingKqr, savePendingKqr, clearPendingKqr } from './lib/kioskQr';
 import { KioskDevicesModal } from './components/KioskDevicesModal';
+import { KioskSetupGuideModal } from './components/KioskSetupGuideModal';
+import { KioskLockGuideModal } from './components/KioskLockGuideModal';
+import { detectKioskDevice, type KioskDeviceFamily } from './lib/kioskGuide';
+import { BookOpen, Check as KioskPairCheck } from 'lucide-react';
 import { initialAuthView, isInstalledApp } from './lib/homeRoute';
 import { HomeLandingBoundary } from './components/HomeLandingBoundary';
 // The public home page is its own lazily loaded file (JS + CSS): a signed-in
@@ -213,7 +217,19 @@ export default function App() {
       return null;
     }
   });
+  const [kioskSetupGuideOpen, setKioskSetupGuideOpen] = useState(false);
+  const [kioskLockGuideOpen, setKioskLockGuideOpen] = useState(false);
+  const [kioskLockGuideDevice, setKioskLockGuideDevice] = useState<KioskDeviceFamily>();
+  const [postPairPrompt, setPostPairPrompt] = useState<{ venueName: string | null } | null>(null);
   const isKiosk = kioskMode;
+
+  useEffect(() => {
+    if (isKiosk && kioskDevice && !currentUser) return;
+    if (postPairPrompt) {
+      setPostPairPrompt(null);
+      setKioskLockGuideOpen(false);
+    }
+  }, [isKiosk, kioskDevice, currentUser, postPairPrompt]);
   // Don 2026-10-27: a refresh puts back the main screen the person was on (lib/screenMemory.ts). Never on the kiosk.
   const [restoredScreen] = useState<SavedScreen>(() => (isKiosk ? defaultScreen(null) : readSavedScreen(currentUser)));
   const [adminHome, setAdminHome] = useState(() => !isKiosk && currentUser?.role === 'admin' && restoredScreen.view === 'home');
@@ -2357,6 +2373,26 @@ export default function App() {
     );
   }
 
+  const openKioskSetupGuide = () => setKioskSetupGuideOpen(true);
+  const openKioskLockGuide = (device?: KioskDeviceFamily) => {
+    setKioskSetupGuideOpen(false);
+    setKioskLockGuideDevice(device);
+    setKioskLockGuideOpen(true);
+  };
+  const closeKioskLockGuide = () => {
+    setKioskLockGuideOpen(false);
+    setPostPairPrompt(null);
+  };
+  const kioskGuideModals = (
+    <>
+      <KioskSetupGuideModal isOpen={kioskSetupGuideOpen} onClose={() => setKioskSetupGuideOpen(false)}
+        onOpenLockGuide={openKioskLockGuide} />
+      <KioskLockGuideModal isOpen={kioskLockGuideOpen} onClose={closeKioskLockGuide}
+        initialDevice={kioskLockGuideDevice} pairedVenueName={postPairPrompt?.venueName}
+        onDoneToKiosk={closeKioskLockGuide} />
+    </>
+  );
+
   // Public screens: the landing home page opens first; auth form on demand.
   // Require authentication to view tasks and shift operations
   // A kiosk with no paired device and a person still here: a blank frame until the quiet sign-out above runs
@@ -2367,6 +2403,7 @@ export default function App() {
   if (!currentUser) {
     // Kiosk tablets pair once, then go straight to their venue's PIN screen.
     if (isKiosk) {
+      const detectedDevice = postPairPrompt ? detectKioskDevice() : null;
       return (
         <div className="min-h-screen bg-paper text-ink flex flex-col transition-colors">
           {toastMessage && (
@@ -2375,9 +2412,35 @@ export default function App() {
               <span>{toastMessage}</span>
             </div>
           )}
+          {kioskGuideModals}
+          {kioskDevice && postPairPrompt && (
+            <section aria-labelledby="kiosk-pair-lock-title" className="mx-auto mt-4 w-full max-w-lg px-4">
+              <div className="space-y-2 rounded-2xl border border-gold bg-surface p-4 e1">
+                <p className="inline-flex items-center gap-1.5 rounded-full bg-ok-bg px-3 py-1 text-sm font-bold text-ok">
+                  <KioskPairCheck size={16} aria-hidden="true" /> Paired to {postPairPrompt.venueName || 'this venue'}
+                </p>
+                <h2 id="kiosk-pair-lock-title" className="text-xl font-bold">One last step: lock this device</h2>
+                <p className="text-sm text-ink-soft">Follow the 3 visual steps so staff stay inside Shutfey.</p>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" onClick={() => openKioskLockGuide()}
+                    className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-gold-deep px-4 text-sm font-bold text-paper">
+                    <BookOpen size={17} aria-hidden="true" />
+                    {detectedDevice?.detected ? `Show lock guide (${detectedDevice.detectedLabel})` : 'Show lock guide'}
+                  </button>
+                  <button type="button" onClick={() => setPostPairPrompt(null)} className="min-h-11 rounded-xl px-3 text-sm font-bold text-ink-soft hover:bg-sunken">
+                    Skip for now
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
           {!kioskDevice ? (
             <KioskPairing
-              onPaired={(device) => setKioskDeviceState(device)}
+              onPaired={(device, venueName) => {
+                setKioskDeviceState(device);
+                setPostPairPrompt({ venueName: venueName ?? null });
+              }}
+              onOpenSetupGuide={openKioskSetupGuide}
               onExitKiosk={exitKioskMode}
               darkMode={darkMode}
             />
@@ -2646,6 +2709,7 @@ export default function App() {
         onOpenPool={isVenueOwnerLike(currentUser) && !isKiosk ? () => setIsPoolOpen(true) : undefined}
         onOpenOwnerTeam={ownerMayAddManager(currentUser) && !isKiosk ? () => setIsOwnerTeamOpen(true) : undefined}
         onOpenKioskDevices={() => setIsKioskDevicesOpen(true)}
+        onOpenKioskGuide={openKioskSetupGuide}
         onResetDailyBoard={handleResetDailyBoard}
         isRealtimeConnected={isRealtimeConnected}
         activeWorkersCount={activeWorkersCount}
@@ -3248,9 +3312,18 @@ export default function App() {
         onSuccessToast={(msg) => showToast(msg)}
       />
 
+      {kioskGuideModals}
       <KioskDevicesModal
         isOpen={isKioskDevicesOpen}
         onClose={() => setIsKioskDevicesOpen(false)}
+        onOpenSetupGuide={() => {
+          setIsKioskDevicesOpen(false);
+          openKioskSetupGuide();
+        }}
+        onOpenLockGuide={() => {
+          setIsKioskDevicesOpen(false);
+          openKioskLockGuide();
+        }}
         currentUser={currentUser}
         venues={venues}
       />
