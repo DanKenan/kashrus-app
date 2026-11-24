@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Tablet, X, AlertTriangle, Check, Unlink } from 'lucide-react';
+import { Tablet, X, AlertTriangle, Check, Unlink, BookOpen, Lock, ArrowRight } from 'lucide-react';
 import { User, Venue } from '../types';
 import { apiFetch } from '../lib/api';
 import { realtimeSocket } from '../lib/socketClient';
@@ -20,6 +20,8 @@ interface KioskDevicesModalProps {
   onClose: () => void;
   currentUser: User | null;
   venues: Venue[];
+  onOpenSetupGuide?: () => void;
+  onOpenLockGuide?: () => void;
 }
 
 function relativeLastSeen(lastSeenAt?: string): string {
@@ -41,6 +43,8 @@ export const KioskDevicesModal: React.FC<KioskDevicesModalProps> = ({
   onClose,
   currentUser,
   venues,
+  onOpenSetupGuide,
+  onOpenLockGuide,
 }) => {
   const [devices, setDevices] = useState<KioskDevice[]>([]);
   const [code, setCode] = useState('');
@@ -185,6 +189,17 @@ export const KioskDevicesModal: React.FC<KioskDevicesModalProps> = ({
         </div>
 
         <div className="px-6 py-4 overflow-y-auto">
+          {onOpenSetupGuide && (
+            <button type="button" onClick={onOpenSetupGuide}
+              className="mb-4 flex w-full items-center gap-3 rounded-xl border border-gold bg-gold-wash p-3 text-left text-gold-ink">
+              <BookOpen size={20} className="shrink-0" aria-hidden="true" />
+              <span className="flex-1">
+                <span className="block text-sm font-bold">Kiosk setup &amp; lock guide</span>
+                <span className="block text-xs">Visual steps for any phone, tablet or laptop</span>
+              </span>
+              <span className="inline-flex items-center gap-1 text-xs font-bold">Open <ArrowRight size={14} aria-hidden="true" /></span>
+            </button>
+          )}
           <form onSubmit={handlePair} className="space-y-3 pb-5 border-b border-line">
             <h3 className="text-sm font-bold text-ink">Pair a tablet</h3>
             <div className="grid sm:grid-cols-[1fr_1fr] gap-3">
@@ -257,14 +272,22 @@ export const KioskDevicesModal: React.FC<KioskDevicesModalProps> = ({
                         {device.venueName} · Last seen {relativeLastSeen(device.lastSeenAt)}
                       </p>
                     </div>
-                    <button
-                      onClick={() => void handleUnpair(device)}
-                      disabled={busy}
-                      className="px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-40 shrink-0 inline-flex items-center gap-2 bg-surface border border-line-control text-bad hover:bg-sunken"
-                    >
-                      <Unlink className="w-4 h-4" aria-hidden="true" />
-                      Unpair
-                    </button>
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                      {onOpenLockGuide && (
+                        <button type="button" onClick={onOpenLockGuide}
+                          className="inline-flex min-h-11 items-center gap-1 rounded-xl border border-gold/50 bg-gold-wash px-2 text-xs font-bold text-gold-ink">
+                          <Lock size={14} aria-hidden="true" /> Lock guide
+                        </button>
+                      )}
+                      <button
+                        onClick={() => void handleUnpair(device)}
+                        disabled={busy}
+                        className="px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-40 shrink-0 inline-flex items-center gap-2 bg-surface border border-line-control text-bad hover:bg-sunken"
+                      >
+                        <Unlink className="w-4 h-4" aria-hidden="true" />
+                        Unpair
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
