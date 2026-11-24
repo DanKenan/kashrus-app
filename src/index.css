@@ -928,62 +928,1563 @@
 .checklist-row:focus-visible, .checklist-builder button:focus-visible, .checklist-add input:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 @media (hover: hover) { .checklist-row:not([aria-checked="true"]):hover, .checklist-builder button:hover { background: var(--sunken); } }
 
-/* The range remains a native keyboard and pointer control. */
+/* FILE: src/index.css (replace lines 931-end) */
+
+/* ============================================================
+   Kiosk walkthrough
+   Homepage-inspired hardware and deterministic demo motion.
+   ============================================================ */
+
 .kiosk-walkthrough-progress {
+  --walkthrough-progress: 0%;
+
   accent-color: var(--gold-deep);
+
+  background-image: linear-gradient(
+    to right,
+    var(--gold-deep) var(--walkthrough-progress),
+    var(--line-strong) 0
+  );
+
   background-position: center;
   background-repeat: no-repeat;
   background-size: 100% 4px;
 }
 
+/* ------------------------------------------------------------
+   Illustration and stage
+   ------------------------------------------------------------ */
+
+.kiosk-demo-player-stage {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 12px 18px;
+
+  background:
+    radial-gradient(
+      ellipse at 50% 30%,
+      var(--surface),
+      transparent 72%
+    ),
+    var(--sunken);
+}
+
+.kiosk-demo-illustration {
+  --demo-bezel-light: #4a3a2d;
+  --demo-bezel-dark: #120c08;
+  --demo-bezel-edge: #2b2119;
+  --demo-metal: #9c8975;
+  --demo-metal-light: #d8cabb;
+  --demo-hardware: #32251b;
+  --demo-hardware-ink: #f8f4ed;
+
+  --demo-chassis: linear-gradient(
+    145deg,
+    var(--demo-bezel-light),
+    var(--demo-bezel-dark) 45%,
+    var(--demo-bezel-edge)
+  );
+
+  --demo-chassis-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.08) inset,
+    0 22px 44px -14px rgb(20 12 6 / 0.5),
+    0 8px 18px -8px rgb(20 12 6 / 0.35);
+
+  --demo-finger-fill: rgb(27 19 12 / 0.26);
+  --demo-finger-edge: rgb(255 255 255 / 0.92);
+
+  --demo-toggle-off: var(--line-strong);
+  --demo-toggle-on: var(--ok);
+
+  width: 100%;
+  max-width: 540px;
+  min-width: 0;
+  margin-inline: auto;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.dark .kiosk-demo-illustration {
+  --demo-bezel-light: #594634;
+  --demo-bezel-edge: #35271d;
+
+  --demo-chassis-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.12) inset,
+    0 22px 44px -14px rgb(0 0 0 / 0.65),
+    0 8px 18px -8px rgb(0 0 0 / 0.45);
+
+  --demo-finger-fill: rgb(255 255 255 / 0.22);
+}
+
+.kiosk-demo-stage {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+
+  width: 100%;
+  min-width: 0;
+  padding: 12px 10px 14px;
+
+  pointer-events: none;
+  user-select: none;
+}
+
+.kiosk-demo-illustration-label {
+  margin-top: 8px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.kiosk-demo-muted {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.kiosk-demo-note {
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------
+   Realistic handheld hardware
+   ------------------------------------------------------------ */
+
+.kiosk-demo-handheld {
+  position: relative;
+  width: min(100%, 266px);
+  min-width: 0;
+  padding: 7px;
+
+  background: var(--demo-chassis);
+  box-shadow: var(--demo-chassis-shadow);
+  border-radius: 25px;
+}
+
+.kiosk-demo-handheld.is-small {
+  width: 100%;
+  max-width: 200px;
+  padding: 5px;
+  border-radius: 20px;
+}
+
+.kiosk-demo-handheld-screen {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 244px;
+
+  background: var(--paper);
+  color: var(--ink);
+
+  border-radius: 19px;
+  overflow: hidden;
+}
+
+.kiosk-demo-handheld.is-small
+.kiosk-demo-handheld-screen {
+  border-radius: 15px;
+  min-height: 240px;
+}
+
+.kiosk-demo-statusbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+
+  min-height: 26px;
+  padding: 6px 12px 4px;
+  background: var(--paper);
+
+  font-size: 12px;
+  line-height: 1;
+}
+
+.kiosk-demo-status-pill {
+  position: absolute;
+  left: 50%;
+  top: 5px;
+  width: 36px;
+  height: 9px;
+
+  transform: translateX(-50%);
+  background: var(--demo-bezel-dark);
+  border-radius: 10px;
+}
+
+.kiosk-demo-handheld:not([data-family="ios"])
+.kiosk-demo-status-pill {
+  width: 7px;
+  height: 7px;
+}
+
+.kiosk-demo-status-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kiosk-demo-battery {
+  position: relative;
+  display: block;
+  width: 16px;
+  height: 8px;
+
+  border: 1px solid var(--ink-soft);
+  border-radius: 2px;
+}
+
+.kiosk-demo-battery::before {
+  content: "";
+  position: absolute;
+  inset: 1px 3px 1px 1px;
+  border-radius: 1px;
+  background: var(--ink);
+}
+
+.kiosk-demo-battery::after {
+  content: "";
+  position: absolute;
+  right: -3px;
+  top: 2px;
+  width: 2px;
+  height: 3px;
+  background: var(--ink-soft);
+}
+
+.kiosk-demo-handheld-content {
+  position: relative;
+  flex: 1;
+
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+
+  min-width: 0;
+  padding: 8px 10px 10px;
+}
+
+.kiosk-demo-homebar {
+  display: grid;
+  place-items: center;
+  height: 15px;
+  background: var(--paper);
+}
+
+.kiosk-demo-homebar > span {
+  width: 72px;
+  height: 4px;
+
+  border-radius: 4px;
+  background: var(--ink);
+  opacity: 0.85;
+}
+
+.kiosk-demo-android-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  height: 28px;
+
+  background: var(--demo-bezel-dark);
+  color: var(--demo-hardware-ink);
+
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.kiosk-demo-android-nav > span {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 24px;
+}
+
+.kiosk-demo-hardware {
+  position: absolute;
+  z-index: 2;
+  top: 47px;
+  right: -4px;
+
+  width: 6px;
+  height: 29px;
+
+  background: linear-gradient(
+    to right,
+    var(--demo-metal),
+    var(--demo-bezel-edge)
+  );
+
+  border-radius: 0 4px 4px 0;
+  box-shadow: 1px 0 2px rgb(0 0 0 / 0.4);
+}
+
+.kiosk-demo-hardware-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.kiosk-demo-count {
+  padding: 3px 7px;
+  border-radius: 20px;
+
+  background: var(--gold-wash);
+  color: var(--gold-ink);
+  font-weight: 800;
+}
+
+.kiosk-demo-pulse-count {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.kiosk-demo-pulse-count > span {
+  display: grid;
+  place-items: center;
+
+  width: 21px;
+  height: 21px;
+
+  border: 1px solid var(--line);
+  border-radius: 50%;
+
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+
+.kiosk-demo-pulse-count > span[data-active="true"] {
+  border-color: var(--gold);
+  background: var(--gold-wash);
+  color: var(--gold-ink);
+
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--gold) 18%, transparent);
+}
+
+/* ------------------------------------------------------------
+   Realistic laptop hardware
+   ------------------------------------------------------------ */
+
+.kiosk-demo-laptop {
+  width: min(100%, 420px);
+  min-width: 0;
+}
+
+.kiosk-demo-laptop-bezel {
+  position: relative;
+  padding: 12px 8px 9px;
+
+  background: var(--demo-chassis);
+  box-shadow: var(--demo-chassis-shadow);
+
+  border-radius: 16px 16px 7px 7px;
+}
+
+.kiosk-demo-camera {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+
+  width: 4px;
+  height: 4px;
+
+  transform: translateX(-50%);
+  background: var(--demo-metal);
+  border: 1px solid var(--demo-bezel-dark);
+  border-radius: 50%;
+}
+
+.kiosk-demo-laptop-screen {
+  min-height: 208px;
+  border-radius: 7px;
+  overflow: hidden;
+
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.kiosk-demo-windowbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+
+  padding: 7px 9px;
+  min-height: 28px;
+
+  background: var(--sunken);
+  border-bottom: 1px solid var(--line);
+
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
+.kiosk-demo-windowbar > span:nth-child(2) {
+  min-width: 0;
+  text-align: center;
+}
+
+.kiosk-demo-window-controls {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kiosk-demo-window-controls > i {
+  display: block;
+
+  width: 7px;
+  height: 7px;
+
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.kiosk-demo-laptop[data-family="mac"]
+.kiosk-demo-window-controls > i:nth-child(1) {
+  background: var(--bad);
+}
+
+.kiosk-demo-laptop[data-family="mac"]
+.kiosk-demo-window-controls > i:nth-child(2) {
+  background: var(--gold);
+}
+
+.kiosk-demo-laptop[data-family="mac"]
+.kiosk-demo-window-controls > i:nth-child(3) {
+  background: var(--ok);
+}
+
+.kiosk-demo-window-end {
+  font-size: 12px;
+}
+
+.kiosk-demo-laptop-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+
+  min-width: 0;
+  min-height: 178px;
+  padding: 10px 14px;
+}
+
+.kiosk-demo-laptop-base {
+  position: relative;
+  width: 108%;
+  height: 10px;
+  margin-left: -4%;
+
+  background: linear-gradient(
+    to bottom,
+    var(--demo-metal-light),
+    var(--demo-metal) 50%,
+    var(--demo-bezel-edge)
+  );
+
+  border-radius: 2px 2px 15px 15px;
+
+  box-shadow:
+    0 9px 16px -6px rgb(20 12 6 / 0.45);
+}
+
+.kiosk-demo-laptop-base > span {
+  display: block;
+  margin-inline: auto;
+
+  width: 19%;
+  height: 4px;
+
+  border-radius: 0 0 5px 5px;
+  background: var(--demo-bezel-edge);
+  opacity: 0.6;
+}
+
+/* ------------------------------------------------------------
+   Finger and cursor
+   ------------------------------------------------------------ */
+
+.kiosk-demo-finger {
+  --fx: 0px;
+  --fy: 0px;
+  --finger-visible: 0;
+  --finger-press: 1;
+  --ring-scale: 1;
+  --ring-opacity: 0;
+
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  left: 0;
+
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+
+  border-radius: 50%;
+  background: var(--demo-finger-fill);
+
+  box-shadow:
+    0 0 0 2px var(--demo-finger-edge),
+    0 6px 16px rgb(0 0 0 / 0.32);
+
+  opacity: var(--finger-visible);
+
+  transform:
+    translate3d(var(--fx), var(--fy), 0)
+    scale(var(--finger-press));
+
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.kiosk-demo-ring {
+  position: absolute;
+  inset: -3px;
+
+  border: 2px solid var(--gold);
+  border-radius: 50%;
+
+  opacity: var(--ring-opacity);
+  transform: scale(var(--ring-scale));
+
+  pointer-events: none;
+}
+
+.kiosk-demo-finger.is-cursor {
+  width: 24px;
+  height: 32px;
+  margin: 0;
+
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+
+  transform-origin: 0 0;
+
+  transform:
+    translate3d(
+      calc(var(--fx) - 2px),
+      calc(var(--fy) - 1px),
+      0
+    )
+    scale(var(--finger-press));
+}
+
+.kiosk-demo-cursor-svg {
+  position: relative;
+  z-index: 1;
+
+  display: block;
+  width: 24px;
+  height: 32px;
+
+  filter: drop-shadow(
+    1px 3px 2px rgb(0 0 0 / 0.35)
+  );
+}
+
+.kiosk-demo-cursor-path {
+  fill: var(--demo-hardware-ink);
+  stroke: var(--demo-bezel-dark);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.kiosk-demo-finger.is-cursor .kiosk-demo-ring {
+  inset: auto;
+  left: -12px;
+  top: -13px;
+  width: 28px;
+  height: 28px;
+}
+
+/* The pointer is a simulated illustration, never a real control. */
+
+.kiosk-demo-target {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------
+   Deterministic layer transitions
+   ------------------------------------------------------------ */
+
+.kiosk-demo-stack {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+}
+
+.kiosk-demo-stack > .kiosk-demo-layer {
+  grid-area: 1 / 1;
+}
+
+.kiosk-demo-layer {
+  --reveal: 1;
+
+  min-width: 0;
+
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 8px;
+
+  opacity: var(--reveal);
+}
+
+.kiosk-demo-layer[data-visible="false"] {
+  visibility: hidden;
+}
+
+.kiosk-demo-layer[data-visible="true"] {
+  visibility: visible;
+}
+
+.kiosk-demo-badge {
+  --reveal: 1;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+
+  min-height: 26px;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+
+  padding: 5px 9px;
+  border-radius: 20px;
+
+  background: var(--ok-bg);
+  color: var(--ok);
+
+  font-weight: 700;
+  text-align: center;
+
+  opacity: var(--reveal);
+
+  box-shadow: 0 0 14px
+    color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+.kiosk-demo-badge > svg {
+  flex-shrink: 0;
+}
+
+.kiosk-demo-badge[data-visible="false"] {
+  visibility: hidden;
+}
+
+.kiosk-demo-badge.is-neutral {
+  background: var(--gold-wash);
+  color: var(--gold-ink);
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------
+   Simulated OS settings and switches
+   ------------------------------------------------------------ */
+
+.kiosk-demo-settings-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 3px 1px;
+}
+
+.kiosk-demo-settings-heading > strong {
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.kiosk-demo-settings-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+
+  padding: 10px;
+
+  border: 1px solid var(--line);
+  border-radius: 10px;
+
+  background: var(--surface);
+}
+
+.kiosk-demo-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+
+  min-width: 0;
+  padding: 9px 8px;
+
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.kiosk-demo-settings-row > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kiosk-demo-toggle-target {
+  flex-shrink: 0;
+  padding: 3px 0;
+}
+
+.kiosk-demo-toggle {
+  --toggle-position: 0;
+
+  display: block;
+  position: relative;
+
+  width: 36px;
+  height: 21px;
+
+  border-radius: 20px;
+  background: var(--demo-toggle-off);
+
+  box-shadow: 0 1px 3px
+    rgb(0 0 0 / 0.14) inset;
+}
+
+.kiosk-demo-toggle[data-on="true"] {
+  background: var(--demo-toggle-on);
+}
+
+.kiosk-demo-toggle-thumb {
+  position: absolute;
+
+  top: 2px;
+  left: 2px;
+
+  width: 17px;
+  height: 17px;
+
+  border-radius: 50%;
+
+  background: var(--demo-hardware-ink);
+
+  box-shadow: 0 1px 4px
+    rgb(0 0 0 / 0.24);
+
+  transform: translateX(
+    calc(var(--toggle-position) * 15px)
+  );
+}
+
+.kiosk-demo-passcode {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+
+  padding: 12px 7px;
+
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--sunken);
+}
+
+.kiosk-demo-passcode > strong {
+  letter-spacing: 2px;
+  font-size: 15px;
+}
+
+.kiosk-demo-checkbox {
+  display: grid;
+  place-items: center;
+
+  width: 19px;
+  height: 19px;
+
+  flex-shrink: 0;
+
+  border: 1px solid var(--line-control);
+  border-radius: 5px;
+  background: var(--paper);
+}
+
+.kiosk-demo-checkbox[data-checked="true"] {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: var(--paper);
+}
+
+.kiosk-demo-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+
+  min-height: 30px;
+  padding: 7px 10px;
+
+  border: 1px solid var(--gold-deep);
+  border-radius: 8px;
+
+  background: var(--gold-deep);
+  color: var(--paper);
+
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.kiosk-demo-button.is-secondary {
+  border-color: var(--line-control);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.kiosk-demo-button > svg {
+  flex-shrink: 0;
+}
+
+.kiosk-demo-input {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  min-width: 0;
+  min-height: 29px;
+
+  padding: 5px 7px;
+  border: 1px solid var(--line-control);
+  border-radius: 7px;
+  background: var(--paper);
+
+  color: var(--ink);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.kiosk-demo-os-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+
+  padding: 8px;
+
+  background: var(--surface);
+  border: 1px solid var(--gold);
+  border-radius: 10px;
+
+  box-shadow: 0 4px 12px
+    rgb(20 12 6 / 0.12);
+}
+
+.kiosk-demo-os-overlay > span:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.kiosk-demo-os-overlay small {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+/* ------------------------------------------------------------
+   Simulated Shutfey screen
+   ------------------------------------------------------------ */
+
+.kiosk-demo-app-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+
+  min-width: 0;
+  min-height: 150px;
+
+  padding: 12px 8px;
+
+  border: 1px solid var(--line);
+  border-radius: 10px;
+
+  background:
+    radial-gradient(
+      ellipse at 50% 0%,
+      var(--gold-wash),
+      transparent 80%
+    ),
+    var(--paper);
+
+  text-align: center;
+}
+
+.kiosk-demo-app-screen.is-compact {
+  min-height: 116px;
+  padding: 8px 6px;
+  gap: 5px;
+}
+
+.kiosk-demo-brand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+
+  color: var(--gold-ink);
+
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.kiosk-demo-brand > svg {
+  flex-shrink: 0;
+}
+
+.kiosk-demo-venue {
+  font-size: 14px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.kiosk-demo-qr {
+  position: relative;
+
+  display: inline-grid;
+  place-items: center;
+
+  width: 65px;
+  height: 65px;
+  padding: 7px;
+
+  border: 1px solid var(--line);
+  border-radius: 9px;
+
+  background: var(--demo-hardware-ink);
+  color: var(--demo-bezel-dark);
+}
+
+.kiosk-demo-code-option {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+
+  padding: 4px 7px;
+
+  border-radius: 6px;
+  background: var(--gold-wash);
+  color: var(--gold-ink);
+
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------
+   Home Screen and app launching
+   ------------------------------------------------------------ */
+
+.kiosk-demo-home-screen {
+  align-items: center;
+  justify-content: center;
+
+  min-height: 195px;
+  padding: 12px 8px;
+
+  border-radius: 12px;
+
+  background:
+    radial-gradient(
+      ellipse at 30% 20%,
+      var(--gold-wash),
+      transparent 75%
+    ),
+    var(--sunken);
+}
+
+.kiosk-demo-app-icon {
+  --icon-press: 0;
+
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+
+  width: fit-content;
+  max-width: 100%;
+
+  margin-inline: auto;
+
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+
+  transform: scale(
+    calc(1 - var(--icon-press) * 0.09)
+  );
+}
+
+.kiosk-demo-app-mark {
+  display: grid;
+  place-items: center;
+
+  width: 43px;
+  height: 43px;
+
+  border-radius: 11px;
+
+  background: linear-gradient(
+    145deg,
+    var(--gold-ink),
+    var(--demo-bezel-dark)
+  );
+
+  color: var(--demo-hardware-ink);
+
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.09) inset,
+    0 5px 9px rgb(20 12 6 / 0.23);
+}
+
+.dark .kiosk-demo-app-mark {
+  background: var(--demo-chassis);
+  color: var(--gold);
+}
+
+.kiosk-demo-home-dock,
+.kiosk-demo-desktop-dock {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+
+  width: fit-content;
+  max-width: 100%;
+
+  margin: 6px auto 0;
+  padding: 10px 14px;
+
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+
+  color: var(--gold-ink);
+}
+
+.kiosk-demo-dock-icon {
+  --bounce: 0;
+
+  transform: translateY(
+    calc(var(--bounce) * -12px)
+  );
+}
+
+/* ------------------------------------------------------------
+   Android Recents and menus
+   ------------------------------------------------------------ */
+
+.kiosk-demo-recents-scene {
+  --recents: 0;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+
+  min-height: 210px;
+  min-width: 0;
+}
+
+.kiosk-demo-recents-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+
+  margin-inline: auto;
+
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+
+.kiosk-demo-recents-title
+.kiosk-demo-app-mark {
+  width: 29px;
+  height: 29px;
+  border-radius: 8px;
+}
+
+.kiosk-demo-recents-title
+.kiosk-demo-app-mark > svg {
+  width: 20px;
+  height: 20px;
+}
+
+.kiosk-demo-recents-title
+.kiosk-demo-app-icon > span:last-child {
+  display: none;
+}
+
+.kiosk-demo-recent-card {
+  width: 100%;
+  min-width: 0;
+
+  transform: scale(
+    calc(1 - var(--recents) * 0.12)
+  );
+
+  transform-origin: center;
+}
+
+.kiosk-demo-preview-card {
+  position: relative;
+
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+
+  padding: 6px;
+  border-radius: 11px;
+
+  background: var(--sunken);
+
+  box-shadow: 0 4px 10px
+    rgb(20 12 6 / 0.14);
+}
+
+.kiosk-demo-floating-menu {
+  position: relative;
+  z-index: 3;
+
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+
+  margin-inline: auto;
+  width: 100%;
+  max-width: 155px;
+
+  padding: 8px;
+
+  background: var(--surface);
+  border: 1px solid var(--line-control);
+  border-radius: 10px;
+
+  box-shadow: 0 7px 14px
+    rgb(20 12 6 / 0.18);
+}
+
+/* ------------------------------------------------------------
+   Desktop OS visual details
+   ------------------------------------------------------------ */
+
+.kiosk-demo-browser-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+
+  min-height: 25px;
+
+  padding: 5px 8px;
+
+  border: 1px solid var(--line);
+  border-radius: 7px;
+
+  background: var(--sunken);
+  color: var(--ink-soft);
+
+  font-weight: 650;
+}
+
+.kiosk-demo-mac-expand {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+
+  background: var(--ok);
+  color: var(--paper);
+  border-radius: 50%;
+}
+
+.kiosk-demo-key-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+
+  width: fit-content;
+  max-width: 100%;
+
+  margin-inline: auto;
+
+  padding: 5px 9px;
+  border: 1px solid var(--line-control);
+  border-radius: 6px;
+
+  background: var(--surface);
+  color: var(--ink);
+
+  box-shadow: 0 2px 0 var(--line-strong);
+
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.kiosk-demo-login-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+
+  min-height: 160px;
+}
+
+/* ------------------------------------------------------------
+   Two-device overview
+   ------------------------------------------------------------ */
+
+.kiosk-demo-duo {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr)
+    minmax(0, 1fr);
+
+  align-items: start;
+  gap: 12px;
+
+  width: 100%;
+  max-width: 420px;
+}
+
+.kiosk-demo-duo-item {
+  min-width: 0;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+}
+
+.kiosk-demo-device-label {
+  min-height: 16px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--ink-soft);
+}
+
+.kiosk-demo-duo
+.kiosk-demo-handheld-content {
+  padding: 7px;
+  gap: 6px;
+}
+
+.kiosk-demo-duo
+.kiosk-demo-statusbar {
+  padding-inline: 7px;
+}
+
+.kiosk-demo-duo
+.kiosk-demo-status-pill {
+  width: 19px;
+  height: 6px;
+}
+
+.kiosk-demo-duo
+.kiosk-demo-settings-heading > strong {
+  font-size: 13px;
+}
+
+.kiosk-demo-duo
+.kiosk-demo-badge {
+  width: fit-content;
+  padding-inline: 6px;
+}
+
+.kiosk-demo-duo
+.kiosk-demo-button {
+  padding: 6px;
+}
+
+.kiosk-demo-pair-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+
+  min-width: 0;
+  min-height: 192px;
+
+  text-align: center;
+}
+
+.kiosk-demo-pair-code {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  padding: 9px 5px;
+
+  border: 1px solid var(--gold);
+  border-radius: 7px;
+
+  background: var(--gold-wash);
+  color: var(--gold-ink);
+
+  font-family: var(--font-mono, monospace);
+  font-size: 17px;
+  letter-spacing: 0.035em;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.kiosk-demo-typed {
+  font-family: var(--font-mono, monospace);
+  letter-spacing: 0.04em;
+}
+
+.kiosk-demo-keyboard,
+.kiosk-demo-pin-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  gap: 4px;
+  width: 100%;
+}
+
+.kiosk-demo-key {
+  display: grid;
+  place-items: center;
+
+  min-height: 23px;
+
+  border: 1px solid var(--line);
+  border-radius: 5px;
+
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.kiosk-demo-venue-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+
+  padding: 7px 5px;
+  border: 1px solid var(--gold);
+  border-radius: 7px;
+
+  background: var(--gold-wash);
+  color: var(--gold-ink);
+
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.kiosk-demo-venue-option > svg {
+  flex-shrink: 0;
+}
+
+.kiosk-demo-pin-dots {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+
+  min-height: 23px;
+}
+
+.kiosk-demo-pin-dots > span {
+  width: 9px;
+  height: 9px;
+
+  border: 1px solid var(--line-control);
+  border-radius: 50%;
+
+  background: var(--surface);
+}
+
+.kiosk-demo-pin-dots > span[data-filled="true"] {
+  background: var(--gold-deep);
+  border-color: var(--gold-deep);
+}
+
+.kiosk-demo-scan-line {
+  --scan: 0;
+  --scan-visible: 0;
+
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 6px;
+
+  height: 2px;
+
+  border-radius: 2px;
+  background: var(--gold-deep);
+
+  opacity: var(--scan-visible);
+
+  transform: translateY(
+    calc(var(--scan) * 48px)
+  );
+}
+
+/* ------------------------------------------------------------
+   Playback-only decorative enhancement.
+
+   Motion is sampled from the React timeline. Do not add CSS
+   transitions to the moving pointer or switches: doing so would
+   introduce a second clock and break exact seeking and pausing.
+   ------------------------------------------------------------ */
+
 @media (prefers-reduced-motion: no-preference) {
-  @keyframes kiosk-tap-ripple {
-    0%, 100% { opacity: 0; transform: scale(1); }
-    30% { opacity: 1; }
-    75% { opacity: 0; transform: scale(1.17); }
+  [data-walkthrough-playing="true"]
+  .kiosk-demo-layer {
+    transform: scale(
+      calc(0.975 + var(--reveal) * 0.025)
+    );
   }
 
-  @keyframes kiosk-toggle-slide {
-    0%, 12% { transform: translateX(-100%); }
-    35%, 100% { transform: translateX(0); }
+  [data-walkthrough-playing="true"]
+  .kiosk-demo-badge {
+    transform: scale(
+      calc(0.9 + var(--reveal) * 0.1)
+    );
   }
 
-  @keyframes kiosk-button-pulse {
-    0%, 100% { opacity: 0; }
-    16%, 40%, 64% { opacity: 1; }
-    28%, 52%, 76% { opacity: 0; }
+  [data-walkthrough-playing="true"]
+  .kiosk-demo-toggle {
+    background: color-mix(
+      in srgb,
+      var(--demo-toggle-off)
+        calc((1 - var(--toggle-position)) * 100%),
+      var(--demo-toggle-on)
+    );
+  }
+}
+
+/* CSS-level safety net in addition to the React media-query state. */
+
+@media (prefers-reduced-motion: reduce) {
+  .kiosk-demo-finger,
+  .kiosk-demo-scan-line {
+    display: none;
   }
 
-  @keyframes kiosk-lock-reveal {
-    0% { opacity: 0.35; transform: scale(0.82); }
-    40%, 100% { opacity: 1; transform: scale(1); }
+  .kiosk-demo-layer,
+  .kiosk-demo-badge,
+  .kiosk-demo-app-icon,
+  .kiosk-demo-dock-icon {
+    transform: none;
+  }
+}
+
+/* ------------------------------------------------------------
+   Narrow-screen handling
+   ------------------------------------------------------------ */
+
+@media (max-width: 420px) {
+  .kiosk-demo-player-stage {
+    padding-inline: 6px;
   }
 
-  @keyframes kiosk-scan-line {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(28px); }
+  .kiosk-demo-stage {
+    padding-inline: 5px;
   }
 
-  [data-walkthrough-playing="true"] .kiosk-lock-reveal {
-    animation: kiosk-lock-reveal 1.8s ease-out 1;
+  .kiosk-demo-duo {
+    gap: 7px;
   }
 
-  [data-walkthrough-playing="true"] .kiosk-scan-line {
-    animation: kiosk-scan-line 1.8s ease-in-out infinite;
+  .kiosk-demo-duo
+  .kiosk-demo-handheld {
+    padding: 4px;
   }
 
-  [data-walkthrough-playing="true"] .kiosk-tap-ripple {
-    border: 2px solid var(--gold);
-    animation: kiosk-tap-ripple 1.8s ease-out infinite;
+  .kiosk-demo-duo
+  .kiosk-demo-handheld-content {
+    padding-inline: 5px;
   }
 
-  [data-walkthrough-playing="true"] .kiosk-toggle-slide {
-    animation: kiosk-toggle-slide 1.8s ease-out 1;
+  .kiosk-demo-duo
+  .kiosk-demo-statusbar {
+    gap: 3px;
+    padding-inline: 5px;
   }
 
-  [data-walkthrough-playing="true"] .kiosk-button-pulse {
-    box-shadow: 0 0 0 4px var(--gold-deep);
-    animation: kiosk-button-pulse 1.8s ease-out infinite;
+  .kiosk-demo-duo
+  .kiosk-demo-status-pill {
+    display: none;
   }
 
+  .kiosk-demo-duo
+  .kiosk-demo-pair-code {
+    font-size: 15px;
+  }
+
+  .kiosk-demo-laptop-content {
+    padding-inline: 9px;
+  }
+}
+
+@media (max-width: 340px) {
+  .kiosk-demo-duo {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .kiosk-demo-duo
+  .kiosk-demo-handheld.is-small {
+    max-width: 190px;
+  }
 }
