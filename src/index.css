@@ -964,29 +964,26 @@
     50% { transform: translateY(28px); }
   }
 
-  [data-walkthrough-playing] .kiosk-lock-reveal {
+  [data-walkthrough-playing="true"] .kiosk-lock-reveal {
     animation: kiosk-lock-reveal 1.8s ease-out 1;
   }
 
-  [data-walkthrough-playing] .kiosk-scan-line {
+  [data-walkthrough-playing="true"] .kiosk-scan-line {
     animation: kiosk-scan-line 1.8s ease-in-out infinite;
   }
 
-  [data-walkthrough-playing] .kiosk-tap-ripple {
+  [data-walkthrough-playing="true"] .kiosk-tap-ripple {
     border: 2px solid var(--gold);
     animation: kiosk-tap-ripple 1.8s ease-out infinite;
   }
 
-  [data-walkthrough-playing] .kiosk-toggle-slide {
+  [data-walkthrough-playing="true"] .kiosk-toggle-slide {
     animation: kiosk-toggle-slide 1.8s ease-out 1;
   }
 
-  [data-walkthrough-playing] .kiosk-button-pulse {
+  [data-walkthrough-playing="true"] .kiosk-button-pulse {
     box-shadow: 0 0 0 4px var(--gold-deep);
     animation: kiosk-button-pulse 1.8s ease-out infinite;
   }
 
-  [data-walkthrough-playing=false] :is(.kiosk-tap-ripple, .kiosk-toggle-slide, .kiosk-button-pulse, .kiosk-lock-reveal, .kiosk-scan-line) {
-    animation-play-state: paused;
-  }
 }

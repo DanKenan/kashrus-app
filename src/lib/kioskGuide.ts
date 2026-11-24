@@ -30,7 +30,7 @@ export function detectKioskDevice(env?: KioskDeviceEnv): DetectedKioskDevice {
     ({ family, detectedLabel, switcherLabel: KIOSK_LOCK_GUIDES[family].switcherLabel, detected });
 
   if (/Silk\/|Kindle|\bKF[A-Z0-9]{2,}\b/i.test(userAgent)) return result('fire', 'Amazon Fire');
-  if (/SamsungBrowser|SAMSUNG|\b(?:SM-|GT-|SC-0|SHV-|SGH-)/i.test(userAgent)) return result('samsung', 'Samsung');
+  if (/\bSAMSUNG\b|\b(?:SM-|GT-|SC-0|SHV-|SGH-)/i.test(userAgent)) return result('samsung', 'Samsung');
   if (/iPad/i.test(signature) || (/Macintosh|MacIntel/i.test(signature) && maxTouchPoints > 1)) return result('ios', 'iPad');
   if (/iPhone|iPod/i.test(signature)) return result('ios', 'iPhone');
   if (/\bCrOS\b|Chrome\s*OS/i.test(signature)) return result('chromebook', 'Chromebook');

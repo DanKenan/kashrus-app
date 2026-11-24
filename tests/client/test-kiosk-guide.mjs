@@ -17,11 +17,12 @@ const cases = [
   [{ platform: 'MacIntel', maxTouchPoints: 5 }, 'ios', 'iPad'],
   [{ userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15', maxTouchPoints: 0 }, 'mac', 'Mac'],
   [{ userAgentDataPlatform: 'macOS' }, 'mac', 'Mac'],
-  ...['SamsungBrowser/27.0', 'SM-X710', 'SAMSUNG', 'GT-P5110', 'SC-04E', 'SHV-E210', 'SGH-I747']
+  ...['SamsungBrowser/27.0 SM-X710', 'SM-X710', 'SAMSUNG', 'GT-P5110', 'SC-04E', 'SHV-E210', 'SGH-I747']
     .map(model => [{ userAgent: `Mozilla/5.0 (Linux; Android 14; ${model}) Chrome/131` }, 'samsung', 'Samsung']),
   ...['Silk/127.0', 'KFAPWI', 'KFTUWI', 'KFMUWI', 'KFTRWI', 'KFMAWI', 'Kindle', 'KFNEW9']
     .map(model => [{ userAgent: `Mozilla/5.0 (Linux; Android 11; ${model})` }, 'fire', 'Amazon Fire']),
   [{ userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8)' }, 'android', 'Android'],
+  [{ userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) SamsungBrowser/27.0' }, 'android', 'Android'],
   [{ userAgentDataPlatform: 'Android', userAgentDataMobile: false }, 'android', 'Android'],
   [{ userAgent: 'Mozilla/5.0 (X11; CrOS x86_64 15699)' }, 'chromebook', 'Chromebook'],
   [{ userAgentDataPlatform: 'Chrome OS' }, 'chromebook', 'Chromebook'],

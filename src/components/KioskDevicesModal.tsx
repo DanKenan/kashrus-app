@@ -275,7 +275,7 @@ export const KioskDevicesModal: React.FC<KioskDevicesModalProps> = ({
                     <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
                       {onOpenLockGuide && (
                         <button type="button" onClick={onOpenLockGuide}
-                          className="inline-flex min-h-9 items-center gap-1 rounded-xl border border-gold/50 bg-gold-wash px-2 text-xs font-bold text-gold-ink">
+                          className="inline-flex min-h-11 items-center gap-1 rounded-xl border border-gold/50 bg-gold-wash px-2 text-xs font-bold text-gold-ink">
                           <Lock size={14} aria-hidden="true" /> Lock guide
                         </button>
                       )}

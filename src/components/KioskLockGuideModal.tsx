@@ -24,13 +24,45 @@ interface GuideDialogProps {
 export function KioskGuideDialog({ titleId, title, subtitle, onClose, children, footer }: GuideDialogProps) {
   const panel = useRef<HTMLDivElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     const previous = document.activeElement;
     const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = panel.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), a[href]');
+      if (!focusable?.length) { event.preventDefault(); return; }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!panel.current?.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof Node && !panel.current?.contains(event.target)) closeButton.current?.focus();
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    document.addEventListener('focusin', onFocusIn);
     closeButton.current?.focus();
     return () => {
+      document.removeEventListener('keydown', onKeyDown, true);
+      document.removeEventListener('focusin', onFocusIn);
       document.body.style.overflow = originalOverflow;
       if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
     };
@@ -40,25 +72,7 @@ export function KioskGuideDialog({ titleId, title, subtitle, onClose, children, 
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-scrim p-2 sm:p-5"
       onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div ref={panel} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={`${titleId}-description`}
-        className="flex max-h-[calc(100dvh-1rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-line bg-surface text-ink e3 sm:max-h-[90dvh]"
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') {
-            event.stopPropagation();
-            onClose();
-          }
-          if (event.key !== 'Tab') return;
-          const focusable = panel.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), a[href]');
-          if (!focusable?.length) return;
-          const first = focusable[0];
-          const last = focusable[focusable.length - 1];
-          if (event.shiftKey && document.activeElement === first) {
-            event.preventDefault();
-            last.focus();
-          } else if (!event.shiftKey && document.activeElement === last) {
-            event.preventDefault();
-            first.focus();
-          }
-        }}>
+        className="flex max-h-[calc(100dvh-1rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-line bg-surface text-ink e3 sm:max-h-[90dvh]">
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-line px-4 py-3 sm:px-6">
           <div>
             <h2 id={titleId} className="text-xl font-bold">{title}</h2>
@@ -92,10 +106,11 @@ export function KioskGuideDeviceSwitcher({ detected, selected, onSelect }: {
         </span>
         <span className="text-ink-soft">Different device? Switch below</span>
       </div>
+      {!detected.detected && <p className="text-xs text-warn">Device not recognized. iPhone / iPad is only an example; select your actual device before following the steps.</p>}
       <div role="group" aria-label="Device type" className="flex flex-wrap gap-1.5">
         {KIOSK_DEVICE_ORDER.map((family) => (
           <button key={family} type="button" aria-pressed={family === selected} onClick={() => onSelect(family)}
-            className={`min-h-10 rounded-full px-3 text-xs font-bold ${family === selected ? 'bg-gold-deep text-paper' : 'border border-line bg-sunken text-ink hover:border-line-strong'}`}>
+            className={`min-h-11 rounded-full px-3 text-xs font-bold ${family === selected ? 'bg-gold-deep text-paper' : 'border border-line bg-sunken text-ink hover:border-line-strong'}`}>
             {KIOSK_LOCK_GUIDES[family].switcherLabel}
           </button>
         ))}
@@ -116,8 +131,8 @@ function LockGuide({ onClose, initialDevice, pairedVenueName, onDoneToKiosk }: O
   const guide = KIOSK_LOCK_GUIDES[selectedDevice];
   const isPaired = pairedVenueName !== undefined;
   return (
-    <KioskGuideDialog titleId="kiosk-lock-guide-title" title="Lock this device to Shutfey"
-      subtitle="So staff stay inside the kiosk screen and can't leave the app." onClose={onClose}
+    <KioskGuideDialog titleId="kiosk-lock-guide-title" title="Device access settings for Shutfey"
+      subtitle="Use the strongest restriction supported by your device. Full screen alone is not a security lock." onClose={onClose}
       footer={<>
         <button type="button" className={kioskGuidePrimary} onClick={isPaired ? onDoneToKiosk ?? onClose : onClose}>
           {isPaired ? 'Done — Go to Kiosk Screen' : 'Done'}

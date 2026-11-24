@@ -2419,8 +2419,8 @@ export default function App() {
                 <p className="inline-flex items-center gap-1.5 rounded-full bg-ok-bg px-3 py-1 text-sm font-bold text-ok">
                   <KioskPairCheck size={16} aria-hidden="true" /> Paired to {postPairPrompt.venueName || 'this venue'}
                 </p>
-                <h2 id="kiosk-pair-lock-title" className="text-xl font-bold">One last step: lock this device</h2>
-                <p className="text-sm text-ink-soft">Follow the 3 visual steps so staff stay inside Shutfey.</p>
+                <h2 id="kiosk-pair-lock-title" className="text-xl font-bold">One last step: review device restrictions</h2>
+                <p className="text-sm text-ink-soft">Follow the device-specific steps. Full screen alone is not a security lock.</p>
                 <div className="flex flex-wrap gap-2">
                   <button type="button" onClick={() => openKioskLockGuide()}
                     className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-gold-deep px-4 text-sm font-bold text-paper">

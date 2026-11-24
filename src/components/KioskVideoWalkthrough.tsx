@@ -221,7 +221,7 @@ function WalkthroughPlayer({ mode, device = 'ios', onStepChange }: WalkthroughPr
           <div className="ml-auto flex flex-wrap gap-1" role="group" aria-label="Walkthrough chapters">
             {scenes.map((chapter, i) => <button type="button" key={chapter.id} aria-label={`Chapter ${i + 1}: ${chapter.title}`}
               aria-current={i === sceneIndex ? 'step' : undefined} onClick={() => seek(starts[i])}
-              className={`min-h-10 min-w-10 rounded-full text-xs font-bold ${i === sceneIndex ? 'bg-gold-deep text-paper' : 'border border-line-control bg-sunken text-ink'}`}>
+              className={`min-h-11 min-w-11 rounded-full text-xs font-bold ${i === sceneIndex ? 'bg-gold-deep text-paper' : 'border border-line-control bg-sunken text-ink'}`}>
               {i + 1}
             </button>)}
           </div>
