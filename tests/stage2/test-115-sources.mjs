@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { documentCases } from './airtable-document-cases.mjs';
 import { shiftFixture } from './test-101-shifts-crud.mjs';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 export async function mockAirtable(baseId = 'appTEST115') {
@@ -11,9 +12,9 @@ export async function mockAirtable(baseId = 'appTEST115') {
     Products: Array.from({ length: 120 }, (_, i) => ({ id: `prod${i}`, fields: { Name: `Product ${i}`, Company: [`rec${i % 5}`], Cert: 'OU-D', Status: 'Dairy Equipment', Agency: 'OU' } })),
   };
   const state = { calls: 0, level: 'read', mutations: 0, denyConfirm: false, permission: false, baseChecks: 0 };
-  const schema = Object.entries(rows).map(([name, records]) => ({ name, fields: Object.keys(records[0].fields).map(name =>
-    name === 'Type' ? { name, type: 'singleSelect', options: { choices: ['Factory', 'Other'].map(name => ({ name })) } } : { name }) }));
-  schema.find(table => table.name === 'Companies').fields.push({ name: 'Brand' }, { name: 'Plant' }, { name: 'Supervision' });
+  const schema = Object.entries(rows).map(([name, records]) => ({ id: 'tbl' + name, name, fields: Object.keys(records[0].fields).map(name =>
+    name === 'Type' ? { name, type: 'singleSelect', options: { choices: ['Factory', 'Other'].map(name => ({ name })) } } : { name, type: 'singleLineText' }) }));
+  schema.find(table => table.name === 'Companies').fields.push({ name: 'Brand', type: 'singleLineText' }, { name: 'Plant', type: 'singleLineText' }, { name: 'Supervision', type: 'currency' });
   const recordCalls = [], patches = [];
   const mock = http.createServer(async (req, res) => {
     state.calls++; res.setHeader('Content-Type', 'application/json');
@@ -272,6 +273,7 @@ export default {
       assert.deepEqual(recordCalls.slice(-3), ['GET', 'PATCH', 'GET']);
       assert.deepEqual(rows.Companies[0].fields, { Name: 'Final', Address: 'New Street', Type: 'Other' });
       assert.equal((await api('admin', 'GET', '/api/factories')).json.companies.some(c => c.id === 'rec0'), false);
+      await documentCases(baseUrl,ctx);
       return '6 calls per refresh; 5 factories, 46 ingredients and 24 products each; 0 page reads; unchanged backups cost 0 writes';
     } finally { socket?.close(); await new Promise(r => mock.close(r)); }
   },

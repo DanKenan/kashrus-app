@@ -2,11 +2,13 @@ type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'dairy_equipment' | 'p
 export type Dpm = 'dairy' | 'dairy_equipment' | 'pareve' | 'meat';
 export type SourceKind = 'airtable' | 'google_sheets' | 'excel' | 'supabase' | 'upload';
 export interface Company {
+  attachments?: SourceAttachment[];
   sourceKey?: string;
   archiveKey?: string;
   id: string; name: string; address?: string; companyFee?: number; mashgiachFee?: number; type?: string; brand?: string; plant?: string; extra: Record<string, string>;
 }
 export interface Ingredient {
+  attachments?: SourceAttachment[];
   sourceKey?: string;
   id: string; companyIds: string[]; name: string; brand?: string; certifyingAgency?: string;
   dpm?: Dpm; group1: boolean; plant?: string; expiresOn?: string;
@@ -16,19 +18,21 @@ export interface Product {
   sourceKey?: string;
   id: string; companyIds: string[]; name: string; brand?: string; code?: string;
   certificationRaw?: string; statusRaw?: string; agencyRaw?: string; certifyingAgency?: string; confidence?: number;
-  dpm?: Dpm; group1?: boolean; symbolRequired?: boolean; plant?: string; extra: Record<string, string>;
+  dpm?: Dpm; group1?: boolean; symbolRequired?: boolean; symbolRaw?: string; plant?: string; extra: Record<string, string>;
 }
+export type SourceAttachment = { id: string; filename: string; size?: number; contentType?: string };
 export interface SourceMapping {
+  certificationOrganizations?: Partial<Record<'ingredients' | 'products', boolean>>;
   editableCustomFields?: import('../../lib/sourcePreview.ts').EditableCustomFields;
-  companies: { table: string; file?: SourceFile; pk?: string; address?: string; companyFee?: string; mashgiachFee?: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
-  ingredients: { table: string; file?: SourceFile; pk?: string; companyLink?: string; name?: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
+  companies: { locAttachment?: string; table: string; file?: SourceFile; pk?: string; address?: string; companyFee?: string; mashgiachFee?: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
+  ingredients: { locAttachment?: string; table: string; file?: SourceFile; pk?: string; companyLink?: string; name?: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
   products: { table: string; file?: SourceFile; pk?: string; companyLink?: string; name?: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };
   valueAssignments?: Record<string, Record<string, ValueAssignment>> | Partial<Record<'ingredient' | 'product', Record<string, Record<string, ValueAssignment>>>>;
   group1Values: string[];
 }
 export interface SourceData { companies: Company[]; otherCompanies?: Pick<Company, 'id' | 'name' | 'type' | 'sourceKey' | 'archiveKey'>[]; ingredients: Ingredient[]; products: Product[] }
 export interface SourceFile { id: string; name: string }
-export interface SourceTable { name: string; columns: string[] }
+export interface SourceTable { name: string; columns: string[]; fieldTypes?: Record<string, string> }
 export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
 export interface ConnectionResult { ok: boolean; access?: 'read' | 'readwrite'; tables?: SourceTable[]; error?: string }
 export interface SourceConnector {

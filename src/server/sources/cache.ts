@@ -1,4 +1,4 @@
-import { CompanyLinkError, classifyRaw } from './mapping.ts';
+import { CompanyLinkError, classifyRaw, attachmentDescriptors } from './mapping.ts';
 import type { SourceMapping } from './types.ts';
 import { createHash } from 'node:crypto';
 import type { Company, Group1Overrides, Ingredient, Product, SourceConnector, SourceData } from './types.ts';
@@ -13,7 +13,7 @@ export interface Backup {
 export interface SourceState {
   status: 'never' | 'ok' | 'stale' | 'backup' | 'error'; refreshedAt?: string; calls: number;
   companies: Company[]; otherCompanies?: SourceData['otherCompanies']; itemsFor(companyId: string, kind: 'ingredient' | 'product'): (Ingredient | Product)[];
-  backupTakenAt?: string; backupError?: string; error?: string;
+  companyBackupTimes?: Record<string,string>; backupTakenAt?: string; backupError?: string; error?: string;
 }
 export interface RefreshResult { ok: boolean; calls: number; changedBackups: Backup[]; latestBackups?: Backup[]; error?: string }
 export interface SourceCacheConfig {
@@ -28,13 +28,13 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
   return data.companies.map(c => {
     const content = {
       companyName: safeText(c.name),
-      company: { id: safeText(c.id), name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant), address: safeText(c.address), companyFee: c.companyFee, mashgiachFee: c.mashgiachFee, ...(c.archiveKey ? { archiveKey: c.archiveKey } : {}) },
+      company: { ...(c.attachments && {attachments: attachmentDescriptors(c.attachments)}), id: safeText(c.id), name: safeText(c.name), type: safeText(c.type), brand: safeText(c.brand), plant: safeText(c.plant), address: safeText(c.address), companyFee: c.companyFee, mashgiachFee: c.mashgiachFee, ...(c.archiveKey ? { archiveKey: c.archiveKey } : {}) },
       ingredients: data.ingredients.filter(i => i.companyIds.includes(c.id)).map(i => ({
-        id: safeText(i.id), name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
+        ...(i.attachments && {attachments: attachmentDescriptors(i.attachments)}), id: safeText(i.id), name: safeText(i.name), brand: safeText(i.brand), certifyingAgency: safeText(i.certifyingAgency),
         dpm: i.dpm, expiresOn: safeText(i.expiresOn), certificationRaw: safeText(i.certificationRaw), statusRaw: safeText(i.statusRaw), agencyRaw: safeText(i.agencyRaw), confidence: i.confidence, group1: i.group1 === true, plant: safeText(i.plant),
       })),
       products: data.products.filter(p => p.companyIds.includes(c.id)).map(p => ({
-        certificationRaw: safeText(p.certificationRaw), statusRaw: safeText(p.statusRaw), agencyRaw: safeText(p.agencyRaw), certifyingAgency: safeText(p.certifyingAgency), confidence: p.confidence, id: safeText(p.id), name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: p.dpm, group1: p.group1 === true, symbolRequired: typeof p.symbolRequired === 'boolean' ? p.symbolRequired : undefined, plant: safeText(p.plant),
+        certificationRaw: safeText(p.certificationRaw), statusRaw: safeText(p.statusRaw), agencyRaw: safeText(p.agencyRaw), certifyingAgency: safeText(p.certifyingAgency), confidence: p.confidence, id: safeText(p.id), name: safeText(p.name), brand: safeText(p.brand), code: safeText(p.code), dpm: p.dpm, group1: p.group1 === true, ...(p.symbolRaw && {symbolRaw:safeText(p.symbolRaw)}), symbolRequired: typeof p.symbolRequired === 'boolean' ? p.symbolRequired : undefined, plant: safeText(p.plant),
       })),
     };
     for (const items of [content.ingredients, content.products]) items.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
@@ -92,20 +92,20 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
             if (saved.length) {
               const data: SourceData = { companies: [], ingredients: [], products: [] };
               for (const b of saved) {
-                data.companies.push({ id: b.companyId, ...b.company, name: safeText(b.companyName), extra: {} });
+                data.companies.push({ id: b.companyId, ...b.company, ...(b.company?.attachments && {attachments: attachmentDescriptors(b.company.attachments)}), name: safeText(b.companyName), extra: {} });
                 for (const [kind, items] of [['ingredients', b.ingredients], ['products', b.products]] as const) {
                   items.forEach((item, index) => {
                     const base = { certificationRaw: typeof item.certificationRaw === 'string' ? item.certificationRaw : undefined, statusRaw: typeof item.statusRaw === 'string' ? item.statusRaw : undefined, agencyRaw: typeof item.agencyRaw === 'string' ? item.agencyRaw : undefined, certifyingAgency: item.certifyingAgency, confidence: item.confidence, id: safeText(item.id) || `backup:${b.companyId}:${kind}:${index}`, companyIds: [b.companyId], name: safeText(item.name), brand: safeText(item.brand),
                       dpm: ['dairy', 'dairy_equipment', 'pareve', 'meat'].includes(item.dpm) ? item.dpm as Ingredient['dpm'] : undefined, plant: safeText(item.plant), extra: {} };
-                    if (kind === 'ingredients') data.ingredients.push({ ...base, expiresOn: safeText('expiresOn' in item ? item.expiresOn : ''), certifyingAgency: safeText('certifyingAgency' in item ? item.certifyingAgency : ''), group1: 'group1' in item && item.group1 === true });
-                    else data.products.push({ ...base, group1: 'group1' in item && item.group1 === true, symbolRequired: 'symbolRequired' in item ? item.symbolRequired : undefined, code: safeText('code' in item ? item.code : '') });
+                    if (kind === 'ingredients') data.ingredients.push({ ...base, ...('attachments' in item && { attachments: attachmentDescriptors(item.attachments) }), expiresOn: safeText('expiresOn' in item ? item.expiresOn : ''), certifyingAgency: safeText('certifyingAgency' in item ? item.certifyingAgency : ''), group1: 'group1' in item && item.group1 === true });
+                    else data.products.push({ ...base, ...('symbolRaw' in item && {symbolRaw:safeText(item.symbolRaw)}), group1: 'group1' in item && item.group1 === true, symbolRequired: 'symbolRequired' in item ? item.symbolRequired : undefined, code: safeText('code' in item ? item.code : '') });
                   });
                 }
               }
               const mapping = mappingFor?.(id);
               if (mapping) for (const kind of ['ingredients', 'products'] as const)
                 for (const item of data[kind]) if (item.certificationRaw !== undefined || item.statusRaw !== undefined || item.agencyRaw !== undefined) Object.assign(item, classifyRaw(mapping, mapping[kind], item));
-              publish(id, data, 'backup', { calls, error: backupError || error, backupError, backupTakenAt: saved.map(b => b.takenAt).sort()[0] });
+              publish(id, data, 'backup', { calls, error: backupError || error, backupError, companyBackupTimes: Object.fromEntries(saved.map(b => [b.companyId,b.takenAt])), backupTakenAt: saved.map(b => b.takenAt).sort()[0] });
             }
           } catch { /* Backup failures also leave the cache in a usable error state. */ }
         }

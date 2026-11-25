@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import type { AddAudit, AirtableEditAudit, EditAudit } from './tagged-row.ts';
+import type { AddAudit, AirtableOperation, AirtableEditAudit, EditAudit } from './tagged-row.ts';
 import type { Backup } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
@@ -210,6 +210,28 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     await commit([{ collection: auditCollection, id: entry.operationId, doc: entry }]);
   }
 
+  function airtableLedger(agencyId: string, operationId: string) {
+    const id = 'airtable-' + digest(JSON.stringify([agencyId, operationId]));
+    const get = (): Promise<AirtableOperation | null> => read(auditCollection, id);
+    const put = (entry: AirtableOperation) => commit([{ collection: auditCollection, id, doc: entry }]);
+    return { get, finish: put, async claim(entry: AirtableOperation): Promise<AirtableOperation | null> {
+      if (deps.staged()) throw Error('Writes blocked');
+      const db = deps.db();
+      if (db) {
+        const ref = db.collection(auditCollection).doc(id);
+        return db.runTransaction(async (tx: any) => {
+          const doc = await tx.get(ref);
+          if (doc.exists) return doc.data();
+          tx.set(ref, entry);
+          return null;
+        });
+      }
+      let prior: AirtableOperation | null = null;
+      await localWrite(async () => { prior = await get(); if (!prior) await put(entry); });
+      return prior;
+    } };
+  }
+
   function addLedger(agencyId: string, token: string) {
     const id = 'add-' + digest(JSON.stringify([agencyId, token]));
     async function update(choose: (current: AddAudit | null) => AddAudit | undefined) {
@@ -266,7 +288,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     return (await list(auditCollection)).filter(entry => entry[field] === spreadsheetId);
   }
 
-  return { saveEditAudit, addLedger, sheetAdds, retryLocalCleanup, reclaimLocalUploads,
+  return { saveEditAudit, airtableLedger, addLedger, sheetAdds, retryLocalCleanup, reclaimLocalUploads,
     connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
 }
 // Read legacy connection settings without rewriting source values.

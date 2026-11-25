@@ -775,7 +775,13 @@ export function registerInspectionRoutes(app: any, deps: {
   if (deps.testMode) app.post('/api/__test__/inspections/check', handler('only', async (_req: any, res: any, u: Person) => {
     res.json(await check());
   }));
-  return { sweepFeeChanges: () => feeEvents.sweep(deps.scheduleAgencyIds?.() ?? deps.agencyIds?.() ?? []), check, withRemoval, removal, setRemoval, bindSheetArchives, pendingRemovals, foodServiceCompanyIds: async (a: string) => { await food.ensure(a); return connectedPlaces(a).filter(p => p.source === 'connected').map(p => p.id); }, flushSeen: inbox.flush, boot: async () => {
+  async function itemVisible(user: Person, id: string) {
+    const a = user.agencyId;
+    if (!a) return false;
+    await Promise.all([schedules.ensure(a), food.ensure(a), removals.ensure(a)]);
+    return activeFactory(a, id) && visible(a, id, user, true);
+  }
+  return { itemVisible, sweepFeeChanges: () => feeEvents.sweep(deps.scheduleAgencyIds?.() ?? deps.agencyIds?.() ?? []), check, withRemoval, removal, setRemoval, bindSheetArchives, pendingRemovals, foodServiceCompanyIds: async (a: string) => { await food.ensure(a); return connectedPlaces(a).filter(p => p.source === 'connected').map(p => p.id); }, flushSeen: inbox.flush, boot: async () => {
     await store.boot(deps.agencyIds?.() || []);
     const agencies = deps.scheduleAgencyIds?.() || deps.agencyIds?.() || [];
     await Promise.all([schedules.boot(agencies), food.boot(agencies), inbox.boot(agencies), fees.boot(agencies), companyInfo.boot(agencies), removals.boot(agencies)]);

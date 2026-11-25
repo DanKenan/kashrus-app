@@ -1,6 +1,6 @@
 import { parseMoney } from '../../lib/sourceAmount.ts';
 export { parseMoney } from '../../lib/sourceAmount.ts';
-import type { Company, Dpm, SourceData, SourceMapping, SourceRow, SourceTable } from './types.ts';
+import type { Company, Dpm, SourceData, SourceMapping, SourceAttachment, SourceRow, SourceTable } from './types.ts';
 import { isBuiltinFieldKey, type SourceSection } from '../../lib/sourcePreview.ts';
 
 const normalized = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -45,7 +45,7 @@ function overlap(name: string, aliases: string[]): number {
   }));
 }
 // Partial mappings deliberately leave missing tables/columns unset for the caller to review.
-export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values' | 'valueAssignments' | 'editableCustomFields'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
+export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values' | 'valueAssignments' | 'editableCustomFields' | 'certificationOrganizations'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
 export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; guessed: Record<string, number> } {
   const mapping: GuessedMapping = { companies: {}, ingredients: {}, products: {}, group1Values: ['Group 1'] };
   const guessed: Record<string, number> = {};
@@ -54,6 +54,11 @@ export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; 
     const exactTable = !!table;
     if (!table) table = tables.map(t => ({ t, score: overlap(t.name, tableNames[kind]) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score)[0]?.t;
     if (!table) continue;
+    const attachment = kind === 'companies' && table.name === 'Establishments' ? 'LOC'
+      : kind === 'ingredients' && table.name === 'Ingredients List' ? 'Attachments' : undefined;
+    if (kind !== 'products' && attachment && table.fieldTypes?.[attachment] === 'multipleAttachments')
+      mapping[kind].locAttachment = attachment;
+    table = { ...table, columns: table.columns.filter(column => table!.fieldTypes?.[column] !== 'multipleAttachments') };
     mapping[kind].table = table.name;
     guessed[`${kind}.table`] = exactTable ? 1 : 0.6;
     const fields = kind === 'companies' ? ['name', 'type', 'brand', 'plant', 'address', 'companyFee', 'mashgiachFee']
@@ -112,7 +117,15 @@ export function classifyRaw(mapping: SourceMapping, config: { certification?: st
   const cert = assigned(mapping, config.certification, raw.certificationRaw || '', kind);
   const status = assigned(mapping, config.status, raw.statusRaw || '', kind);
   const agency = assigned(mapping, config.agency, raw.agencyRaw || '', kind);
-  return { certifyingAgency: agency.agency || cert.agency, dpm: status.dpm || cert.dpm,
+  const assignments = mapping.valueAssignments as Record<string, any> | undefined;
+  const columns = assignments?.[kind] ?? assignments;
+  const explicit = [[config.certification, raw.certificationRaw], [config.status, raw.statusRaw]]
+    .map(([column, value]) => column && value?.trim() && columns?.[column]?.[value]?.agency).find(Boolean);
+  const organization = mapping.certificationOrganizations?.[kind === 'ingredient' ? 'ingredients' : 'products'] ??
+    (kind === 'ingredient' && mapping.ingredients.table === 'Ingredients List' && config.certification === 'Certification');
+  const organizationText = raw.certificationRaw?.trim();
+  const statusOnly = /^(?:(?:pareve|parve|dairy(?: equipment)?|de|meat|passover|p|d|m)\b[\s|,/+-]*)+$/i;
+  return { certifyingAgency: raw.agencyRaw?.trim() || (organization && organizationText && !statusOnly.test(organizationText) && organizationText) || explicit || undefined, dpm: status.dpm || cert.dpm,
     group1: [cert, status, agency].some(v => v.group1 === true), confidence: Math.min(cert.confidence, status.confidence, agency.confidence) };
 }
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value.trim() : undefined;
@@ -210,6 +223,12 @@ export function companyLinkResolver(eligible: LinkCompany[], others: LinkCompany
   return (value: unknown) => resolve(value).filter(id => eligibleIds.has(id));
 }
 
+export function attachmentDescriptors(value: unknown): SourceAttachment[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(file => file && typeof file.id === 'string' && typeof file.filename === 'string'
+    ? [{ id: file.id, filename: file.filename, ...(Number.isSafeInteger(file.size) && { size: file.size }),
+      ...(typeof (file.type ?? file.contentType) === 'string' && { contentType: file.type ?? file.contentType }) }] : []);
+}
 export function applyMapping(rows: Record<string, SourceRow[]>, mapping: SourceMapping, unmatched: UnmatchedLinks = 'reject'): SourceData {
   return mapSourceLists({
     companies: rows[mapping.companies.table],
@@ -236,7 +255,7 @@ export function mapSourceLists(
   const c = mapping.companies;
   const types = companyTypeChoices(c)?.map(folded);
   const companies = (rows.companies ?? []).filter(r => !types || types.includes(folded(read(r, c.type) ?? '')))
-    .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), ...(r.archiveKey ? { archiveKey: r.archiveKey } : {}), name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), address: read(r, c.address), companyFee: parseMoney(read(r, c.companyFee)), mashgiachFee: parseMoney(read(r, c.mashgiachFee)), extra: extra(r, c, 'companies') }));
+    .map(r => ({ ...(c.locAttachment && {attachments: attachmentDescriptors(r.fields[c.locAttachment])}), id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), ...(r.archiveKey ? { archiveKey: r.archiveKey } : {}), name: read(r, c.name) ?? '', type: read(r, c.type), brand: read(r, c.brand), plant: read(r, c.plant), address: read(r, c.address), companyFee: parseMoney(read(r, c.companyFee)), mashgiachFee: parseMoney(read(r, c.mashgiachFee)), extra: extra(r, c, 'companies') }));
   const keptIds = new Set(companies.map(c => c.id));
   const otherCompanies = (rows.companies ?? []).filter(r => !keptIds.has(r.id))
     .map(r => ({ id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), ...(r.archiveKey ? { archiveKey: r.archiveKey } : {}), name: read(r, c.name) ?? '', type: read(r, c.type) }));
@@ -244,7 +263,7 @@ export function mapSourceLists(
   const i = mapping.ingredients, p = mapping.products;
   const ingredients = (rows.ingredients ?? []).map(r => {
     const raw = { certificationRaw: read(r, i.certification), statusRaw: read(r, i.status), agencyRaw: read(r, i.agency) };
-    return { id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), companyIds: links(i.companyLink && r.fields[i.companyLink]), name: read(r, i.name) ?? '', brand: read(r, i.brand),
+    return { ...(i.locAttachment && {attachments: attachmentDescriptors(r.fields[i.locAttachment])}), id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), companyIds: links(i.companyLink && r.fields[i.companyLink]), name: read(r, i.name) ?? '', brand: read(r, i.brand),
       ...raw, ...classifyRaw(mapping, i, raw),
       plant: read(r, i.plant), expiresOn: read(r, i.expiresOn), extra: extra(r, i, 'ingredients') };
   });
@@ -253,7 +272,7 @@ export function mapSourceLists(
     const symbolRequired = typeof raw === 'boolean' ? raw : typeof raw === 'string' && /^(yes|true|1|no|false|0)$/i.test(raw.trim()) ? /^(yes|true|1)$/i.test(raw.trim()) : undefined;
     const classifiedRaw = { certificationRaw: read(r, p.certification), statusRaw: read(r, p.status), agencyRaw: read(r, p.agency) };
     return { ...classifiedRaw, ...classifyRaw(mapping, p, classifiedRaw), id: r.id, ...(r.sourceKey ? {sourceKey:r.sourceKey} : {}), companyIds: links(p.companyLink && r.fields[p.companyLink]), name: read(r, p.name) ?? '', brand: read(r, p.brand),
-      code: read(r, p.code), symbolRequired, plant: read(r, p.plant), extra: extra(r, p, 'products') };
+      code: read(r, p.code), symbolRequired, ...(typeof raw === 'string' && {symbolRaw: raw}), plant: read(r, p.plant), extra: extra(r, p, 'products') };
   });
   return { companies, ingredients, products, otherCompanies };
 }

@@ -6,6 +6,7 @@ import type { CompanyRemoval, SheetRemovalEvidence } from '../inspections/compan
 import { createHash, randomUUID } from 'node:crypto';
 import { parseUpload, uploadRowsError, uploadTypeError, type UploadedFile } from './upload.ts';
 import { createAirtableConnector, type AirtableCompanyField } from './airtable.ts';
+import { registerCompanyItems } from './company-items.ts';
 import { guardSourceWrite } from './write.ts';
 import { CompanyLinkError, mapSourceLists, companyLinkResolver } from './mapping.ts';
 import { summarizeValues, customFieldTypes, isMappedCustomField, type SourceSection } from '../../lib/sourcePreview.ts';
@@ -44,6 +45,9 @@ function settings(body: any, mapping = true) {
       else if (!str(v)) throw Error('Invalid mapping');
     }
   }
+  if (m.certificationOrganizations !== undefined && (!m.certificationOrganizations || typeof m.certificationOrganizations !== 'object'
+    || Array.isArray(m.certificationOrganizations) || Object.entries(m.certificationOrganizations).some(([k,v]) => !['ingredients','products'].includes(k) || typeof v !== 'boolean')))
+    throw Error('Invalid certification mapping.');
   if (m.editableCustomFields !== undefined) {
     if (!m.editableCustomFields || typeof m.editableCustomFields !== 'object' || Array.isArray(m.editableCustomFields)) throw Error('Invalid editable custom fields');
     for (const [section, declarations] of Object.entries(m.editableCustomFields)) {
@@ -123,10 +127,12 @@ export function registerSourceRoutes(app: any, deps: {
     pendingRemovals(agencyId: string, source: string): Promise<[string, CompanyRemoval][]>;
   };
   now?(): Date;
+  itemUser?(req: any): any;
+  itemVisible?(user: any, companyId: string): Promise<boolean>;
   requireAdmin(req: any, res: any): any; timeZone(id: string): string | undefined;
 }) {
   const store = createSourceStore(deps), connections = new Map<string, Connection>();
-  let apiBase: string | undefined;
+  let apiBase: string | undefined = deps.testMode ? 'http://127.0.0.1:1' : undefined;
   const apiBases = new Map<string,string>(), uploads = new Map<string,UploadedFile[]>();
   const drafts = new Map<string,{token:string;files:UploadedFile[]}>();
   const oauth = createOAuth({secret:deps.secret,apiBase:p=>deps.testMode?apiBases.get(p):undefined});
@@ -146,7 +152,7 @@ export function registerSourceRoutes(app: any, deps: {
   }>();
   function airtable(c: Connection) {
     return createAirtableConnector({ baseId: c.baseId, apiKey: storedKey(c), mapping: c.mapping,
-      apiBase: deps.testMode ? apiBase : undefined });
+      apiBase: deps.testMode ? apiBase : undefined, contentBase: deps.testMode ? apiBases.get('airtableContent') ?? 'http://127.0.0.1:1' : undefined });
   }
   const eligibilityTime = () => deps.now?.().getTime() ?? Date.now();
   async function verifyBaseAccess(c: Connection, adapter: ReturnType<typeof airtable>, editing = false) {
@@ -721,7 +727,7 @@ export function registerSourceRoutes(app: any, deps: {
       const record = await adapter.readCompany(recordId);
       if (record.recordId !== recordId) return res.status(404).json({ error: 'Company record not found.' });
       res.set?.('Cache-Control', 'no-store');
-      res.json({ fields: record.values, baseId: c.baseId, updatedAt: c.updatedAt, access: eligibility.access, typeOptions: eligibility.typeOptions });
+      res.json({ warnings: record.warnings, fields: record.values, baseId: c.baseId, updatedAt: c.updatedAt, access: eligibility.access, typeOptions: eligibility.typeOptions });
     } catch (cause) { return editError(res, await permissionError(c, adapter, cause)); }
   }));
 
@@ -767,6 +773,7 @@ export function registerSourceRoutes(app: any, deps: {
       entry.writeEvidence.verifyGet = before;
       if (before.recordId !== recordId) throw Object.assign(Error('Company record not found.'), { status: 404 });
       const included = changed.filter(field => {
+        if (!Object.hasOwn(before.values, field)) throw Object.assign(Error('Only mapped list columns can be edited.'), {status: 400});
         const current = before.values[field];
         entry.previous[field] = current;
         if (current === (fields[field] || null)) return false;
@@ -800,17 +807,20 @@ export function registerSourceRoutes(app: any, deps: {
       readOnly: error?.readOnly, error: 'Airtable may have saved these changes. Reload and review before retrying.' });
     if (error) return editError(res, error, { auditWarning, ...(error.code === 'STALE_COMPANY_VALUE' && { code: error.code }), ...(c.access === 'read' && { readOnly: true }) });
     const values = (entry.writeEvidence.confirmGet ?? entry.writeEvidence.verifyGet)!.values;
+    return res.json({ saved: true, fields: values, auditWarning, ...await republishAirtable(c, adapter!) });
+  }
+  async function republishAirtable(c: Connection, adapter: ReturnType<typeof airtable>) {
     try {
-      cache.publish(c.agencyId, await adapter!.loadAll!());
+      cache.publish(c.agencyId, await adapter.loadAll());
       refreshAfterEdit.delete(c.agencyId);
+      return {};
     } catch (cause) {
-      await permissionError(c, adapter!, cause);
+      await permissionError(c, adapter, cause);
       const warning = 'Saved in Airtable. Refresh required.';
       refreshAfterEdit.add(c.agencyId);
       cache.requireRefresh(c.agencyId, warning);
-      return res.json({ saved: true, fields: values, refreshRequired: true, warning, auditWarning, readOnly: connections.get(c.agencyId)?.access === 'read' });
+      return { refreshRequired: true, warning, readOnly: connections.get(c.agencyId)?.access === 'read' };
     }
-    return res.json({ saved: true, fields: values, auditWarning });
   }
   const writeTimes = new Map<string, number[]>();
   function limitWrites(id: string) {
@@ -819,6 +829,13 @@ export function registerSourceRoutes(app: any, deps: {
     recent.push(Date.now());
     writeTimes.set(id, recent);
   }
+  registerCompanyItems(app, {
+    user: req => deps.itemUser?.(req), visible: (user, id) => deps.itemVisible?.(user, id) ?? Promise.resolve(false),
+    serialize, withAssignmentLock: (id, fn) => deps.companyRemoval?.withRemoval(id, fn) ?? fn(),
+    connection: id => connections.get(id), state: cache.state, adapter: airtable, eligible: editorEligibility,
+    permissionError, ledger: store.airtableLedger, limit: limitWrites, blocked: deps.staged,
+    republish: republishAirtable,
+  });
   const write = mutation(async (req: any, res: any, { id, user }: any) => {
       if (blocked(res))
           return;
@@ -942,7 +959,9 @@ export function registerSourceRoutes(app: any, deps: {
     if (validation.eligibility.access === 'read') c.access = 'read';
     for (const kind of ['companies', 'ingredients', 'products'] as const) {
       const config = c.mapping[kind], table = validation.tables?.find(t => t.name === config.table);
-      if (!table || Object.entries(config).some(([field, column]) => field !== 'table' && typeof column === 'string' && !table.columns.includes(column))) return res.status(400).json({ error: 'Mapped tables and columns must exist in the source.' });
+      if (kind !== 'products' && c.mapping[kind].locAttachment && table?.fieldTypes?.[c.mapping[kind].locAttachment!] !== 'multipleAttachments')
+        return res.status(400).json({ error: 'Choose an Airtable attachment column.' });
+      if (!table || Object.entries(config).some(([field, column]) => field !== 'table' && typeof column === 'string' && !(field === 'locAttachment' && !column) && !table.columns.includes(column))) return res.status(400).json({ error: 'Mapped tables and columns must exist in the source.' });
     }
     let keyChanged = false;
     if (plain && old) {

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { MapPin, Phone, X } from 'lucide-react';
+import { CompanyItemLists } from './CompanyItemLists';
 import { FeeChoice } from './FeesSheet';
 import { foodInput } from './ChecklistTemplatesScreen';
 import { useVisitFocus, visitButton, visitRequest } from './FactoryVisitScreen';
@@ -16,8 +17,8 @@ const detailFields = [['name', 'Name'], ['address', 'Address'], ['type', 'Type']
 const sectionStyle = 'space-y-4 px-4 py-5 sm:px-6';
 const dangerButton = visitButton.replace('border-line-control', 'border-bad').replace('text-ink', 'text-bad');
 
-export function CompanyScreen({ company, role, connection, yearlyCount, onClose, onSourceSaved, onRemove }: {
-  key?: string; company: Company; role: string; connection: SourceConnection | null; yearlyCount: number | null;
+export function CompanyScreen({ company, role, connection, yearlyCount, timeZone, onClose, onSourceSaved, onRemove }: {
+  key?: string; timeZone?: string; company: Company; role: string; connection: SourceConnection | null; yearlyCount: number | null;
   onClose(): void; onSourceSaved(): void; onRemove?(name: string): void;
 }) {
   const root = useVisitFocus(onClose);
@@ -49,10 +50,11 @@ export function CompanyScreen({ company, role, connection, yearlyCount, onClose,
           <h3 className="text-xl font-semibold">Company details</h3>
           {sheetEditing
             ? <SheetRecordEditor section="companies" row={company} inlineCompany onClose={onClose} onSaved={sourceSaved} />
-            : canWrite && connection && canEditAirtableCompany(role, connection)
+            : canWrite && connection && (!connection.status || connection.status === 'ok') && canEditAirtableCompany(role, connection)
             ? <AirtableCompanyDetails key={JSON.stringify([company.id, connection.baseId])} company={company} connection={connection} onSaved={sourceSaved} />
             : <CompanyDetails company={company} connection={connection} editable={canWrite && canEdit(role, connection)} onSaved={sourceSaved} />}
         </section>}
+        {!company.archived && <CompanyItemLists companyId={company.id} role={role} timeZone={timeZone} revision={sourceRevision} onSaved={sourceSaved} />}
         {!company.archived && <section className={sectionStyle}>
           <h3 className="text-xl font-semibold">Fees</h3>
           {isAdmin ? <CompanyFees id={company.id} yearlyCount={yearlyCount} sourceRevision={sourceRevision} />
@@ -166,7 +168,7 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
   return <form className="space-y-4" onSubmit={submit}>
     {!baseline && (busy || !message) && <p role="status">Loading company details…</p>}
     {baseline && <fieldset className="space-y-4" disabled={busy || readOnly || review === 'uncertain'}>
-      {([...detailFields, ['brand', 'Brand'], ['plant', 'Plant']] as const).map(([field, label]) => mapping?.[field] &&
+      {([...detailFields, ['brand', 'Brand'], ['plant', 'Plant']] as const).map(([field, label]) => mapping?.[field] && Object.hasOwn(baseline.fields, field) &&
         <label key={field} className="block space-y-2">{label}
           {field === 'type' && baseline.typeOptions ? <select className={setupField} value={fields.type || ''}
             onChange={event => changeField(field, event.target.value)}>
@@ -180,6 +182,7 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
       <p className="text-sm text-ink-soft">Fee</p><p>{company.companyFee === undefined ? '—' : money(company.companyFee)}</p>
     </div>}
     {editable && <p className="text-ink-soft">Changes are saved in your Airtable.</p>}
+    {baseline?.warnings?.map(warning => <p key={warning} role="status">{warning}</p>)}
     {movesOut && <p>This company will move out of Factories.</p>}
     {review === 'uncertain' && <p role="status">{uncertainCompanyEdit}</p>}
     {message && <p role="status">{message}</p>}

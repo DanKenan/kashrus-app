@@ -1,16 +1,18 @@
 type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'dairy_equipment' | 'pareve' | 'meat'; group1?: boolean };
 import { apiFetch } from './api';
 
+export type SourceAttachment = { id: string; filename: string; size?: number; contentType?: string };
 export interface SourceMapping {
+  certificationOrganizations?: Partial<Record<'ingredients' | 'products', boolean>>;
   editableCustomFields?: import('./sourcePreview').EditableCustomFields;
-  companies: { file?: { id: string; name: string }; address?: string; companyFee?: string; mashgiachFee?: string; table: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
-  ingredients: { file?: { id: string; name: string }; table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
+  companies: { locAttachment?: string; file?: { id: string; name: string }; address?: string; companyFee?: string; mashgiachFee?: string; table: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
+  ingredients: { locAttachment?: string; file?: { id: string; name: string }; table: string; companyLink: string; name: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
   products: { file?: { id: string; name: string }; table: string; companyLink: string; name: string; brand?: string; code?: string; certification?: string; agency?: string; status?: string; symbolRequired?: string; plant?: string };
   valueAssignments?: Record<string, Record<string, ValueAssignment>> | Partial<Record<'ingredient' | 'product', Record<string, Record<string, ValueAssignment>>>>;
   group1Values: string[];
 }
 
-export interface SourceTable { name: string; columns: string[] }
+export interface SourceTable { name: string; columns: string[]; fieldTypes?: Record<string, string> }
 export interface SourceConnection {
   group1Label?: string; sourceType: string | null; baseId?: string; access?: 'read' | 'readwrite'; mapping?: SourceMapping;
   hasKey?: boolean; keyHint?: string; status?: 'recovering' | 'never' | 'ok' | 'stale' | 'backup' | 'error';
