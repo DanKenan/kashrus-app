@@ -988,14 +988,15 @@ export function registerSourceRoutes(app: any, deps: {
       if (sections.some(section => c.mapping[section].table === c.mapping.contacts?.table))
         return res.status(400).json({ error: 'Airtable contacts must use a separate table.' });
     }
-    c.contactsVersion = old?.sourceType === 'airtable' && contactSourceKey({ ...c, contactsVersion: old.contactsVersion }) === contactSourceKey(old)
-      ? old.contactsVersion : randomUUID();
-    if (!c.contactsVersion) delete c.contactsVersion;
     let keyChanged = false;
     if (plain && old) {
       try { keyChanged = plain !== decryptKey(old.encryptedKey, deps.secret(), id); }
       catch { keyChanged = true; }
     }
+    c.contactsVersion = !keyChanged && old?.sourceType === 'airtable' &&
+      contactSourceKey({ ...c, contactsVersion: old.contactsVersion }) === contactSourceKey(old)
+      ? old.contactsVersion : randomUUID();
+    if (!c.contactsVersion) delete c.contactsVersion;
     const coreMapping = (mapping: SourceMapping) => ({ ...mapping, contacts: undefined });
     const changed = !old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || JSON.stringify(coreMapping(old.mapping)) !== JSON.stringify(coreMapping(c.mapping)) || keyChanged;
     if (changed) { c.backupHashes = {}; delete c.lastRefresh; }

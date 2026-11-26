@@ -48,6 +48,7 @@ const rows = {
 };
 
 const originalFetch = globalThis.fetch, clock = Date.now;
+const restrictedKey = 'fake-restricted-test-key';
 let clockOffset = 0, outage = false, failContactAt = 0;
 const requests = [];
 Date.now = () => clock() + clockOffset;
@@ -64,6 +65,9 @@ globalThis.fetch = async (url, init) => {
   const offset = Number(path.searchParams.get('offset') ?? 0);
   if (name === 'Contacts') {
     assert.deepEqual(new Set(path.searchParams.getAll('fields[]')), new Set(Object.values(contactsMapping).slice(1)));
+    if (new Headers(init.headers).get('Authorization') === `Bearer ${restrictedKey}`) {
+      return Response.json({}, { status: 403 });
+    }
     if (failContactAt === offset) return Response.json({}, { status: 503 });
     return Response.json({
       records: rows.Contacts.slice(offset, offset + 11),
@@ -231,6 +235,7 @@ try {
 
   outage = false;
   failContactAt = -1;
+  const contactRows = rows.Contacts;
   rows.Contacts = [];
   assert.equal((await refresh(restarted)).ok, true);
   const empty = await getContacts(restarted);
@@ -248,7 +253,33 @@ try {
   assert.equal((await refresh(restartedEmpty)).ok, true);
   assert.deepEqual(await getContacts(restartedEmpty), { contacts: [], configured: false, status: 'not_configured', lastReadAt: null });
   assert.equal((await restartedEmpty.request('GET', connectionPath)).body.status, 'ok');
-  console.log('Airtable contacts: strict schema, 31 paginated records, role scope, independent refresh, and durable empty and stale snapshots passed');
+
+  schema = [...core, contactTable];
+  rows.Contacts = contactRows;
+  failContactAt = -1;
+  const mappedConfig = { ...config, mapping: { ...mapping, contacts: contactsMapping } };
+  assert.equal((await restartedEmpty.request('PUT', connectionPath, { body: mappedConfig })).code, 200);
+  await until(async () => (await restartedEmpty.request('GET', airtablePath)).body?.status === 'ok');
+  assert.equal((await getContacts(restartedEmpty)).contacts.length, lastGood.contacts.length);
+
+  const assertRestrictedContacts = async instance => {
+    await until(async () => {
+      const result = await instance.request('GET', airtablePath);
+      if (result.code === 404) return false; // The company list is still loading.
+      assert.equal(result.code, 200);
+      assert.deepEqual(result.body.contacts, [], 'replacement credential cannot expose the old contacts');
+      return result.body.status === 'error';
+    });
+    assert.deepEqual(await getContacts(instance), { contacts: [], configured: true, status: 'error', lastReadAt: null });
+    assert.equal((await instance.request('GET', connectionPath)).body.status, 'ok');
+  };
+  const replaced = await restartedEmpty.request('PUT', connectionPath, { body: { ...mappedConfig, apiKey: restrictedKey } });
+  assert.equal(replaced.code, 200);
+  await assertRestrictedContacts(restartedEmpty);
+  const restartedRestricted = server();
+  await restartedRestricted.boot();
+  await assertRestrictedContacts(restartedRestricted);
+  console.log('Airtable contacts: schema, pagination, role scope, snapshots, and credential replacement passed');
 } finally {
   globalThis.fetch = originalFetch;
   Date.now = clock;
