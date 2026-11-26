@@ -67,7 +67,7 @@ export const canEditAirtableCompany = (role: string, connection: SourceConnectio
 
 type CompanyValues = Record<string, string | null>;
 export interface AirtableCompanyBaseline {
-  baseId: string; updatedAt: string; fields: CompanyValues; access: 'readwrite'; typeOptions?: string[];
+  baseId: string; updatedAt: string; fields: CompanyValues; warnings?: string[]; access: 'readwrite'; typeOptions?: string[];
 }
 const companyRowPath = (id: string) => `/api/sources/rows/companies/${encodeURIComponent(id)}`;
 export async function readAirtableCompany(id: string): Promise<AirtableCompanyBaseline> {

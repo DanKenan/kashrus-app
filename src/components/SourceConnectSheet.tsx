@@ -21,7 +21,7 @@ const groups = sourceMatchingFields;
 const sectionTabs = { companies: 'Companies', ingredients: 'Schedule A', products: 'Schedule B' } as const;
 const mappingGroups = Object.keys(groups) as (keyof typeof groups)[];
 const commaList = (value: string) => value.split(',').map(s => s.trim()).filter(Boolean);
-const builtinKeys = (group: keyof typeof groups): string[] => [...builtinFieldKeys[group]];
+const builtinKeys = (group: keyof typeof groups): string[] => [...builtinFieldKeys[group], ...(group === 'products' ? [] : ['locAttachment'])];
 const settingsKeys = ['factoryValues', 'foodServiceValues', 'valueAssignments', 'group1Values', 'hidden'];
 // A custom label that matches a built-in key, a settings key, or a built-in
 // display name is reserved for that section. A reserved row keeps its column
@@ -220,7 +220,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
           for (const group of Object.keys(groups) as (keyof typeof groups)[]) {
             const values = next[group] as unknown as Record<string, string | string[]>;
             for (const [field, value] of Object.entries(suggestion[group])) {
-              if ((removed[group] || []).includes(field)) continue;
+              if ((removed[group] || []).includes(field) || field === 'locAttachment' && values[field] === '') continue;
               if (!connection.mapping || !values[field]?.length) {
                 values[field] = value as string | string[];
                 const path = `${group}.${field}`;
@@ -254,13 +254,17 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   };
   const select = (group: keyof typeof groups, field: string, label: string, opts?: { onRemove?: () => void }) => {
     const values = mapping[group] as unknown as Record<string, string>;
-    const value = values[field] || '';
-    const options = field === 'table' ? tables.map(t => t.name) : tables.find(t => t.name === values.table)?.columns || [];
+    const table = tables.find(t => t.name === values.table);
+    const fallback = field === 'locAttachment' && group === 'companies' && table?.name === 'Establishments' ? 'LOC'
+      : field === 'locAttachment' && group === 'ingredients' && table?.name === 'Ingredients List' ? 'Attachments' : '';
+    const value = values[field] ?? (table?.fieldTypes?.[fallback] === 'multipleAttachments' ? fallback : '');
+    const options = field === 'table' ? tables.map(t => t.name) : table?.columns.filter(name =>
+      (table.fieldTypes?.[name] === 'multipleAttachments') === (field === 'locAttachment')) || [];
     const path = `${group}.${field}`;
     const control = <select id={`${id}-${path}`} name={path} className={mappingFieldClass} value={value} disabled={!!busy} required={['table', 'name', 'companyLink'].includes(field)} onChange={e => {
         if (field === 'table') {
           setMapping(prev => ({ ...prev, [group]: { table: e.target.value, name: '', ...(group === 'companies' ? {} : { companyLink: '' }) } }));
-        } else if (!e.target.value && !requiredField(field)) {
+        } else if (!e.target.value && !requiredField(field) && field !== 'locAttachment') {
           setMapping(prev => {
             const rec = { ...(prev[group] as unknown as Record<string, string>) };
             delete rec[field];
@@ -274,7 +278,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
         if (field === 'table') setExtraColumns(prev => ({ ...prev, [group]: {} }));
       }}>
         <option value="">— Not used —</option>
-        {Array.from(new Set([...options, ...(value ? [value] : [])])).map(v => <option key={v} value={v}>{v}</option>)}
+        {Array.from(new Set([...options, ...(value && (!table?.fieldTypes || options.includes(value)) ? [value] : [])])).map(v => <option key={v} value={v}>{v}</option>)}
       </select>;
     return <div key={field} className="min-w-0 space-y-1">
       <div className="flex items-center justify-between gap-2">
@@ -331,7 +335,8 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
     const taken = !!label && (reserved || (added[group] || []).some(r => r.id !== row.id && r.label.trim() === label));
     const values = mapping[group] as unknown as Record<string, string>;
     const value = (extraColumns[group] || {})[row.id] || '';
-    const options = tables.find(t => t.name === values.table)?.columns || [];
+    const table = tables.find(t => t.name === values.table);
+    const options = table?.columns.filter(name => table.fieldTypes?.[name] !== 'multipleAttachments') || [];
     return <div key={row.id} className="min-w-0 space-y-3 rounded-lg border border-line p-4">
       <div className="space-y-1">
         <div className="flex items-center justify-between gap-2">
@@ -347,7 +352,7 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
           setExtraColumns(prev => ({ ...prev, [group]: { ...(prev[group] || {}), [row.id]: e.target.value } }));
         }}>
           <option value="">— Not used —</option>
-          {Array.from(new Set([...options, ...(value ? [value] : [])])).map(v => <option key={v} value={v}>{v}</option>)}
+          {Array.from(new Set([...options, ...(value && (!table?.fieldTypes || options.includes(value)) ? [value] : [])])).map(v => <option key={v} value={v}>{v}</option>)}
         </select>
       </div>
     </div>;
@@ -444,6 +449,12 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
                 <p className="text-base text-ink-soft">{tables.length ? 'Choose the Airtable field that supplies each value.' : 'Test the connection to load the available Airtable fields.'}</p>
                 {added[group].length > 0 && <div className="space-y-3">{added[group].map(row => extraRow(group, row))}</div>}
                 <div className="space-y-3">
+                  {group !== 'companies' && mapping[group].certification && <label className="flex min-h-11 items-center gap-2">
+                    <input type="checkbox" checked={mapping.certificationOrganizations?.[group] ??
+                      (group === 'ingredients' && mapping[group].table === 'Ingredients List' && mapping[group].certification === 'Certification')}
+                      onChange={e => setMapping(m => ({...m, certificationOrganizations:{...m.certificationOrganizations,[group]:e.target.checked}}))} />
+                    Certification column contains certifying agency names</label>}
+                  {group !== 'products' && select(group, 'locAttachment', group === 'companies' ? 'Letter of Certification (LOC)' : 'Certification PDF')}
                   {groups[group].filter(([field]) => !removed[group].includes(field)).map(([field, label]) => select(group, field, label, requiredField(field) ? undefined : { onRemove: () => removeField(group, field) }))}
                 </div>
                 {removed[group].length > 0 && <>

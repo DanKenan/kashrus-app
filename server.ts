@@ -14866,6 +14866,8 @@ const checkInPhotoStore = createCheckInPhotoStore({
 });
 const sourceRoutes = registerSourceRoutes(app, {
   db: () => firestoreDb, dataDir: DATA_DIR, staged: kqrPickupWritesBlocked,
+  itemUser: getAuthUser,
+  itemVisible: (user, id) => inspectionRoutes.itemVisible(user, id),
   foodServiceCompanyIds: (agencyId) => inspectionRoutes.foodServiceCompanyIds(agencyId),
   companyRemoval: {
     withRemoval: (agencyId, action) => inspectionRoutes.withRemoval(agencyId, action),
