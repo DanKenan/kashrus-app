@@ -4,6 +4,7 @@ import { documentFixture, fixturePdf } from './airtable-document-fixture.mjs';
 import { shiftFixture } from './test-101-shifts-crud.mjs';
 
 export async function documentCases(baseUrl,ctx) {
+  await reviewDuplicateAdd(baseUrl,ctx);
   const {api,tokens,people} = await shiftFixture(baseUrl,ctx,'115documents');
   const fake = await documentFixture();
   const root = '/api/sources/companies/recAhlstrom';
@@ -80,7 +81,8 @@ export async function documentCases(baseUrl,ctx) {
     assert.equal(reopened.pending.name,'Lost ingredient');
     assert.equal(reopened.pending.recordId,undefined);
     const candidate = reopened.linked.find(row => row.name === reopened.pending.name);
-    const accepted = await call('POST',list+'/reconcile',{...binding,decision:'accept',operationId:uncertainAdd.operationId,recordId:candidate.id});
+    const accepted = await call('POST',list+'/reconcile',{...binding,decision:'accept',operationId:uncertainAdd.operationId,recordId:candidate.id,
+      reviewedIds:[candidate.id],duplicatesAcknowledged:true});
     assert.equal(accepted.recordId,candidate.id);
     assert.equal(fake.state.creates,2);
     const another = {...uncertainAdd,operationId:randomUUID(),fields:{name:'Abandoned ingredient'}};
@@ -133,5 +135,37 @@ export async function documentCases(baseUrl,ctx) {
     assert.equal('address' in tolerant.fields,false); assert.ok(tolerant.warnings.length);
     fake.tables[0].fields.find(f => f.name==='Name').type='multipleAttachments';
     await call('GET','/api/sources/rows/companies/recAhlstrom/edit',undefined,'admin',409);
+  } finally { await fake.close(); }
+}
+
+async function reviewDuplicateAdd(baseUrl,ctx) {
+  const {api} = await shiftFixture(baseUrl,ctx,'115duplicateAdd');
+  const fake = await documentFixture();
+  const list = '/api/sources/companies/recAhlstrom/items/ingredients';
+  async function call(method,path,body,status=200) {
+    const result = await api('admin',method,path,body);
+    assert.equal(result.status,status,method+' '+path+' '+JSON.stringify(result.json));
+    return result.json;
+  }
+  try {
+    await call('POST','/api/__test__/sources-api-base',{url:fake.apiBase});
+    await call('PUT','/api/sources/connection',{sourceType:'airtable',baseId:fake.baseId,apiKey:fake.key,access:'readwrite',mapping:fake.mapping});
+    const {baseId,updatedAt,linked} = await call('GET',list+'/add');
+    const older = linked[0];
+    const binding = {baseId,updatedAt,operationId:randomUUID()};
+    fake.state.loseCreate = true;
+    await call('POST',list,{...binding,fields:{name:older.name}},409);
+    const reopened = await call('GET',list+'/add?operationId='+binding.operationId);
+    assert.equal(reopened.pending.recordId,undefined);
+    const reviewedIds = reopened.linked.filter(row => row.name === older.name).map(row => row.id);
+    assert.equal(reviewedIds.length,2);
+    assert.ok(reviewedIds.includes(older.id));
+    const accept = {...binding,decision:'accept',recordId:older.id};
+    await call('POST',list+'/reconcile',{...accept,reviewedIds},409);
+    await call('POST',list+'/reconcile',{...accept,duplicatesAcknowledged:true,reviewedIds:[older.id]},409);
+    const newId = reviewedIds.find(id => id !== older.id);
+    const accepted = await call('POST',list+'/reconcile',{...accept,recordId:newId,duplicatesAcknowledged:true,reviewedIds});
+    assert.equal(accepted.recordId,newId);
+    assert.equal(fake.state.creates,1);
   } finally { await fake.close(); }
 }

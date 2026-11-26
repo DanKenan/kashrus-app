@@ -75,7 +75,7 @@ for (const decision of ['accept','abandon']) {
   const name = 'Calcium carbonate', recordId = 'recRecovered';
   globalThis.fetch = async (url,opts) => {
     if (url.endsWith('/reconcile')) {
-      assert.deepEqual(JSON.parse(opts.body),{decision,...(decision==='accept' && {recordId}),operationId,baseId:b.baseId,updatedAt:b.updatedAt});
+      assert.deepEqual(JSON.parse(opts.body),{decision,...(decision==='accept' && {recordId,duplicatesAcknowledged:true,reviewedIds:[recordId]}),operationId,baseId:b.baseId,updatedAt:b.updatedAt});
       return Response.json(decision==='accept' ? {saved:true} : {abandoned:true});
     }
     if (opts.method==='POST') {
@@ -92,6 +92,11 @@ for (const decision of ['accept','abandon']) {
   assert.match(reopened.text(),/Calcium carbonate · recRecovered/);
   assert.match(reopened.text(),/Accept linked record/);
   assert.match(reopened.text(),/Abandon Add/);
+  if (decision === 'accept') {
+    assert.ok(reopened.buttons().find(b => b.label === 'Accept linked record').el.props.disabled);
+    reopened.find(el => el.props.type === 'checkbox')[0].props.onChange({target:{checked:true}});
+    await reopened.render();
+  }
   await reopened.click(decision==='accept' ? 'Accept linked record' : 'Abandon Add');
   assert.ok(closed);
   assert.doesNotMatch((await mount(CompanyItemEditor,args).render()).text(),/Abandon Add/);
@@ -116,3 +121,29 @@ await recoveryEditor.click('Reload and review');
 assert.equal(recoveryEditor.find(el=>el.props.value==='Confirmed').length,1);
 await recoveryEditor.click('Save changes');
 assert.equal(saveCount,2);
+
+let liveName = 'Original', patches = [];
+globalThis.fetch = async (url, opts) => {
+  if (opts.method === 'PATCH') {
+    const body = JSON.parse(opts.body);
+    patches.push(body.fields);
+    liveName = body.fields.name;
+    return Response.json({saved:true,refreshRequired:true,warning:'Saved in Airtable. Refresh required.'});
+  }
+  return Response.json({...b,fields:{name:liveName}});
+};
+const conflicted = await mount(CompanyItemEditor,{path:'/items/products',id:'recP',ingredient:false,onSaved(){},onClose(){}}).render();
+await conflicted.type('','1212');
+await conflicted.click('Save changes');
+assert.match(conflicted.text(),/Saved in Airtable. Refresh required/);
+liveName = '999999';
+await conflicted.click('Reload and review');
+await conflicted.click('Save changes');
+assert.deepEqual(patches,[{name:'1212'}]);
+assert.equal(liveName,'999999');
+assert.match(conflicted.text(),/changed again in Airtable/);
+assert.ok(conflicted.buttons().find(b => b.label === 'Save changes').el.props.disabled);
+await conflicted.click('Use current Airtable values');
+await conflicted.type('','Reviewed');
+await conflicted.click('Save changes');
+assert.equal(liveName,'Reviewed');

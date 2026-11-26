@@ -240,7 +240,7 @@ export function registerCompanyItems(app: any, deps: Deps) {
     const {req, res, c, adapter, companyId} = ctx;
     const {operationId, recordId, decision} = req.body ?? {};
     bound(c, req.body?.baseId, req.body?.updatedAt);
-    const {schema, table} = await itemContext(ctx);
+    const {schema, table, list} = await itemContext(ctx);
     const {ledger, entry} = await pendingAdd(ctx, table, operationId);
     if (decision === 'abandon') {
       if (entry && entry.outcome !== 'confirmed') await ledger.finish({...entry, outcome:'abandoned'});
@@ -248,6 +248,13 @@ export function registerCompanyItems(app: any, deps: Deps) {
     }
     if (decision !== 'accept' || !entry || entry.outcome === 'abandoned' || !entry.requested?.name ||
         !recordIdPattern.test(recordId) || entry.recordId && entry.recordId !== recordId) fail(409, staleItem);
+    if (!entry.recordId) {
+      if (req.body.duplicatesAcknowledged !== true) fail(409, 'Review all matching records and acknowledge that duplicates may exist.');
+      const reviewed = ids(req.body.reviewedIds, recordIdPattern);
+      const name = entry.requested.name;
+      const matches = (await adapter.loadAll())[list].filter(item => item.companyIds.includes(companyId) && item.name === name);
+      if (!reviewed.includes(recordId) || !sameIds(reviewed, matches.map(item => item.id))) fail(409, staleItem);
+    }
     const row = await adapter.readRecord(table, recordId);
     const fields = itemValues(schema, row.fields);
     if (!ids(row.fields[schema.link.name] ?? [], recordIdPattern).includes(companyId) ||

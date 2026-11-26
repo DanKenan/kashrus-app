@@ -27,7 +27,9 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
   const [mode,setMode] = useState<'create'|'existing'|'remove'>('create');
   const [selected,setSelected] = useState(''), [relation,setRelation] = useState<EditorData | null>(null);
   const [busy,setBusy] = useState(false), [review,setReview] = useState(false), [error,setError] = useState('');
-  const [verifyDraft,setVerifyDraft] = useState(false);
+  const [requested,setRequested] = useState<Record<string,Value> | null>(null);
+  const [conflicts,setConflicts] = useState<string[]>([]);
+  const [duplicatesAcknowledged,setDuplicatesAcknowledged] = useState(false);
   const [uncertainAdd,setUncertainAdd] = useState(false);
   const lock = useRef(false), operation = useRef(crypto.randomUUID());
   const label = ingredient ? 'ingredient' : 'product';
@@ -51,6 +53,12 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
       }
       if (baseline && (baseline.baseId !== next.baseId || baseline.updatedAt !== next.updatedAt)) throw Error('The source connection changed. Reopen the record.');
       setBaseline(next); setRelation(null); setSelected(''); setError(''); setReview(false);
+      setDuplicatesAcknowledged(false);
+      if (requested) {
+        const divergent = Object.keys(requested).filter(key => next.fields[key] !== requested[key]);
+        setConflicts(divergent);
+        setDraft({});
+      }
       if (!next.pending) operation.current = crypto.randomUUID();
     } catch (cause: any) { setError(cause.status && cause.status < 500 ? cause.message : "Couldn't load the latest record from Airtable. Editing is unavailable until the connection works."); }
     finally { setBusy(false); }
@@ -63,9 +71,13 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
     return () => { active = false; };
   }, [selected, row]);
   const fields = {...baseline?.fields, ...draft};
-  const changed = Object.fromEntries(Object.entries(draft).filter(([key,value]) => verifyDraft || value !== baseline?.fields[key]));
+  const changed = requested ?? Object.fromEntries(Object.entries(draft).filter(([key,value]) => value !== baseline?.fields[key]));
+  const matches = baseline?.linked?.filter(item => baseline.pending?.recordId
+    ? item.id === baseline.pending.recordId : item.name === baseline.pending?.name) ?? [];
+  const needsDuplicateReview = !!baseline?.pending && !baseline.pending.recordId;
+  const editBlocked = !writable || busy || review || conflicts.length > 0;
   async function save() {
-    if (!writable || !baseline || lock.current || review || uncertainAdd) return;
+    if (!baseline || editBlocked || lock.current || uncertainAdd || (mode === 'create' && !Object.keys(changed).length)) return;
     lock.current = true; setBusy(true); setError('');
     const linking = mode === 'existing' || mode === 'remove';
     try {
@@ -79,13 +91,13 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
       if (!result.saved) throw Error('Save could not be confirmed.');
       if (!id && !linking) rememberAdd(storageKey(b), '');
       if (id && !linking && result.refreshRequired) {
-        setDraft(changed); setVerifyDraft(true); setReview(true); setError(result.warning); onSaved(result.warning);
+        setRequested(changed); setReview(true); setError(result.warning); onSaved(result.warning);
         return;
       }
       onSaved(result.warning || (mode === 'remove' ? 'Item removed from this company. Its Airtable record was kept.' : mode === 'existing' ? 'Item restored to this company.' : id ? 'Changes saved in Airtable.' : 'Item added to Airtable.'));
       onClose();
     } catch (cause: any) {
-      if (id && !linking && (!cause.status || cause.message.includes('may have saved'))) setVerifyDraft(true);
+      if (id && !linking && (!cause.status || cause.message.includes('may have saved'))) setRequested(changed);
       if (!id && !linking) {
         if (!cause.status || cause.status >= 500 || cause.message.includes('may have created')) setUncertainAdd(true);
         else rememberAdd(storageKey(baseline), '');
@@ -96,10 +108,13 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
   }
   async function reconcile(decision:'accept'|'abandon', recordId?:string) {
     if (!baseline || !writable || lock.current) return;
+    if (decision === 'accept' && needsDuplicateReview && !duplicatesAcknowledged) return;
     lock.current = true; setBusy(true);
     try {
       const result = await visitRequest(path + '/reconcile', {method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({decision, recordId, operationId:operation.current, baseId:baseline.baseId, updatedAt:baseline.updatedAt})});
+        body:JSON.stringify({decision, recordId, ...(decision === 'accept' && needsDuplicateReview && {
+          duplicatesAcknowledged, reviewedIds:matches.map(item => item.id)
+        }), operationId:operation.current, baseId:baseline.baseId, updatedAt:baseline.updatedAt})});
       if (!(decision === 'accept' ? result.saved : result.abandoned)) throw Error('Reload and review the record.');
       rememberAdd(storageKey(baseline), '');
       if (result.saved) onSaved(result.warning || 'Item added to Airtable.');
@@ -111,20 +126,22 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
     {!baseline && busy && <p role="status">Loading record…</p>}
     {baseline && <>
       {uncertainAdd && !review && <section><h3 className="font-semibold">Review linked records in Airtable</h3>
-        <ul>{baseline.linked?.filter(i => baseline.pending?.recordId ? i.id === baseline.pending.recordId : i.name === baseline.pending?.name).map(i =>
-          <li key={i.id}>{i.name} · {i.id} <button className={visitButton} disabled={busy || !writable} onClick={() => reconcile('accept',i.id)}>Accept linked record</button></li>)}</ul>
+        {needsDuplicateReview && <label className="block"><input type="checkbox" checked={duplicatesAcknowledged} disabled={busy || !writable}
+          onChange={e => setDuplicatesAcknowledged(e.target.checked)} /> I reviewed all matching linked records and understand that duplicates may exist.</label>}
+        <ul>{matches.map(i =>
+          <li key={i.id}>{i.name} · {i.id} <button className={visitButton} disabled={busy || !writable || needsDuplicateReview && !duplicatesAcknowledged} onClick={() => reconcile('accept',i.id)}>Accept linked record</button></li>)}</ul>
         <button className={visitButton} disabled={busy || !writable} onClick={() => reconcile('abandon')}>Abandon Add</button></section>}
       {!id && !uncertainAdd && <div className="flex flex-wrap gap-2">{(['create','existing'] as const).map(option =>
-        <button className={visitButton} disabled={!writable || busy || review} key={option} aria-pressed={mode === option} onClick={() => setMode(option)}>
+        <button className={visitButton} disabled={editBlocked} key={option} aria-pressed={mode === option} onClick={() => setMode(option)}>
           {option === 'create' ? 'Create new ' + label : 'Add existing'}</button>)}</div>}
-      {mode === 'existing' ? <label className="block">Add existing {label}<select className={setupField} disabled={!writable || busy || review} value={selected} onChange={e => setSelected(e.target.value)}>
+      {mode === 'existing' ? <label className="block">Add existing {label}<select className={setupField} disabled={editBlocked} value={selected} onChange={e => setSelected(e.target.value)}>
         <option value="">Choose an existing {label}</option>{baseline.existing?.map(item => <option key={item.id} value={item.id}>{[item.name,item.brand,item.plant,item.id].filter(Boolean).join(' · ')}</option>)}
       </select></label> : mode === 'remove' ? <p>Remove this {label} from this company? Its Airtable record, documents and other company links will be kept.</p> :
-        <fieldset className="space-y-3" disabled={!writable || busy || review || uncertainAdd}>
+        <fieldset className="space-y-3" disabled={editBlocked || uncertainAdd}>
           {baseline.companyIds.length > 1 && <p>This record is shared. Changes are visible to every linked company.</p>}
           {baseline.warnings?.map(w => <p key={w}>{w}</p>)}
           {Object.keys(baseline.fields).map(key => {
-            const change = (v:Value) => { setVerifyDraft(false); setDraft(prev => ({...prev,[key]:v})); };
+            const change = (v:Value) => { setRequested(null); setDraft(prev => ({...prev,[key]:v})); };
             const value = String(fields[key] ?? '');
             const common = {className:setupField, required:key === 'name', value, onChange:(e:React.ChangeEvent<HTMLInputElement|HTMLTextAreaElement|HTMLSelectElement>) => change(e.target.value || null)};
             return <label key={key} className="block">{labels[key] || key}
@@ -132,13 +149,18 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
               : baseline.typeOptions[key] ? <select {...common}><option value=""></option>{baseline.typeOptions[key].map(v => <option key={v}>{v}</option>)}</select>
               : baseline.fieldTypes[key] === 'multilineText' ? <textarea {...common} maxLength={2000} />
               : <input {...common} type={key === 'expiresOn' ? 'date' : 'text'} maxLength={2000} />}
-              {id && key in changed && <span className="text-sm text-ink-soft">Original: {String(baseline.fields[key] ?? '—')}</span>}
+              {id && !conflicts.length && key in changed && <span className="text-sm text-ink-soft">Original: {String(baseline.fields[key] ?? '—')}</span>}
             </label>;
           })}
         </fieldset>}
+      {!!conflicts.length && <section role="alert">
+        <p>This field changed again in Airtable after your save. Review the new value before making another change.</p>
+        <ul>{conflicts.map(key => <li key={key}>{labels[key] || key} · Requested: {String(requested?.[key] ?? '—')} · Current: {String(baseline.fields[key] ?? '—')}</li>)}</ul>
+        <button className={visitButton} onClick={() => { setRequested(null); setConflicts([]); }}>Use current Airtable values</button>
+      </section>}
       {id && !recovery && ingredient && mode === 'create' && <CertificatePanel path={row+'/documents'} files={files} writable={writable} onSaved={() => onSaved('PDF saved in Airtable.')} />}
-      {id && !recovery && mode === 'create' && <details><summary className="min-h-11">More actions</summary><button className={visitButton} disabled={!writable || busy || review} onClick={() => setMode('remove')}>Remove from this company</button></details>}
-      {!uncertainAdd && <button className={visitButton} disabled={!writable || busy || review || (mode === 'existing' ? !relation : mode === 'create' && (!String(fields.name ?? '').trim() || !Object.keys(changed).length))} onClick={save}>
+      {id && !recovery && mode === 'create' && <details><summary className="min-h-11">More actions</summary><button className={visitButton} disabled={editBlocked} onClick={() => setMode('remove')}>Remove from this company</button></details>}
+      {!uncertainAdd && <button className={visitButton} disabled={editBlocked || (mode === 'existing' ? !relation : mode === 'create' && (!String(fields.name ?? '').trim() || !Object.keys(changed).length))} onClick={save}>
         {busy ? 'Saving…' : mode === 'existing' ? 'Restore to this company' : mode === 'remove' ? 'Remove from this company' : 'Save changes'}</button>}
     </>}
     {error && <p role="alert">{error}</p>}
