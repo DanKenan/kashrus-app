@@ -1,6 +1,9 @@
 // Don 2026-10-22 header menu cleanup: general/account things in the menu; the venue's things on the venue screen.
 import fs from 'node:fs';
+import { Header } from '../../src/components/Header.tsx';
+import { KioskDevicesModal } from '../../src/components/KioskDevicesModal.tsx';
 import { venueTabsFor } from '../../src/components/VenueTabs.tsx';
+import { mount, recordFetch } from './lib/mini-render.mjs';
 let passed = 0, failures = 0;
 const ok = (n, c, d = '') => { if (c) { passed++; console.log('PASS ' + n); } else { failures++; console.log('FAIL ' + n + (d ? ' :: ' + d : '')); } };
 const hdr = fs.readFileSync(new URL('../../src/components/Header.tsx', import.meta.url), 'utf8');
@@ -11,8 +14,83 @@ for (const gone of ['Create New Assignment', 'Ingredients audit', 'Kosher Events
 for (const kept of ['Switch venue', 'Venues Hub', 'New Venue', 'Agency dashboard', 'Toggle Appearance', '<PushNotificationToggle', '<UpdateAppButton', 'Kiosk tablets', 'Change Password', 'Sign Out'])
   ok(`M phone menu keeps ${kept}`, mobile.includes(kept));
 ok('K "Enter kiosk mode" only at >= 768 px (both menus)', (hdr.match(/\{isTabletWidth && \(\s*<button\s+onClick=\{enterKioskMode\}/g) || []).length === 2 && hdr.includes('useMinWidth(768)'));
-ok('K "Kiosk tablets" admin only (both menus)', (hdr.match(/\{canManageKiosks && onOpenKioskDevices && \(/g) || []).length === 2 && /const canManageKiosks = currentUser\?\.role === 'admin';/.test(hdr));
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const homeVenue = { id: 'home', name: 'Home Kitchen' };
+const grantedVenue = { id: 'granted', name: 'Granted Kitchen' };
+const venues = [grantedVenue, homeVenue];
+const coordinator = { id: 'u1', name: 'Test User', email: 'user@test.local', role: 'coordinator', venueId: homeVenue.id };
+let kioskOpens = 0;
+const kioskButton = (e) => e.type === 'button' && e.props.title === 'Pair or unpair kiosk tablets';
+for (const role of ['admin', 'coordinator', 'mashgiach']) {
+  for (const [menu, toggleId] of [['desktop', 'header-user-menu-btn'], ['mobile', 'mobile-header-menu-toggle']]) {
+    const header = mount(Header, {
+      currentUser: { ...coordinator, role },
+      currentVenue: homeVenue,
+      allVenues: venues,
+      onOpenKioskDevices: () => { kioskOpens++; },
+    });
+    await header.render();
+    await header.click((e) => e.props.id === toggleId);
+    const button = header.buttons().find(({ el }) => kioskButton(el));
+    ok(`K ${role} "Kiosk tablets" visibility in the ${menu} menu`, role === 'mashgiach' ? !button : button?.label === 'Kiosk tablets');
+    if (role === 'coordinator' && button) {
+      const before = kioskOpens;
+      await header.click(kioskButton);
+      ok(`K coordinator can open "Kiosk tablets" from the ${menu} menu`, kioskOpens === before + 1);
+    }
+  }
+}
+
+globalThis.window = { confirm: () => true };
+const homeDevice = { id: 'existing', name: 'Existing tablet', venueId: homeVenue.id, venueName: homeVenue.name };
+const grantedDevice = { id: 'granted-tablet', name: 'Granted tablet', venueId: grantedVenue.id, venueName: grantedVenue.name };
+const outOfScopeDevice = { id: 'out-of-scope-tablet', name: 'Outside tablet', venueId: 'outside', venueName: 'Outside Kitchen' };
+const scopedVenueIds = new Set([homeVenue.id, grantedVenue.id]);
+let devices = [homeDevice, grantedDevice, outOfScopeDevice];
+const kioskCalls = recordFetch({
+  'GET /api/kiosk/devices': () => ({ devices: devices.filter(({ venueId }) => scopedVenueIds.has(venueId)) }),
+  'POST /api/kiosk/devices/pair': (_path, { name, venueId }) => {
+    const device = { id: 'paired', name, venueId, venueName: homeVenue.name };
+    devices = [...devices, device];
+    return { device };
+  },
+  [`DELETE /api/kiosk/devices/${grantedDevice.id}`]: () => {
+    devices = devices.filter(({ id }) => id !== grantedDevice.id);
+    return { ok: true };
+  },
+});
+const kioskModal = mount(KioskDevicesModal, { isOpen: true, currentUser: coordinator, venues });
+const unpairButtonCount = () => kioskModal.buttons().filter(({ label }) => label === 'Unpair').length;
+await kioskModal.render();
+ok('K coordinator modal lists tablets at both the home and granted venues with their venue names',
+  [homeDevice, grantedDevice].every(({ name, venueName }) => kioskModal.text().includes(`${name} ${venueName}`)) &&
+  unpairButtonCount() === 2);
+ok('K coordinator modal omits the out-of-scope tablet filtered out by the server',
+  !kioskModal.text().includes(outOfScopeDevice.name) && !kioskModal.text().includes(outOfScopeDevice.venueName));
+ok('K coordinator modal fixes the pairing venue to the home venue',
+  kioskModal.find((e) => e.type === 'div' && e.props.children === homeVenue.name).length === 1 &&
+  kioskModal.find((e) => e.type === 'select').length === 0);
+await kioskModal.type('ABC234', 'xyz789');
+await kioskModal.type('Kitchen tablet', 'New tablet');
+await kioskModal.submit();
+ok('K coordinator modal refreshes the list after pairing',
+  kioskModal.text().includes('Paired New tablet.') && unpairButtonCount() === 3);
+const [grantedRow] = kioskModal.find((e) => e.key === grantedDevice.id);
+const [, grantedActions] = grantedRow.props.children;
+await kioskModal.click((e) => e.type === 'button' && grantedActions.props.children.includes(e));
+ok('K coordinator modal refreshes the list after unpairing the granted-venue tablet',
+  kioskModal.text().includes(`Unpaired ${grantedDevice.name}.`) &&
+  !kioskModal.text().includes(grantedVenue.name) && kioskModal.text().includes(homeDevice.name) &&
+  kioskModal.text().includes('New tablet') && unpairButtonCount() === 2);
+ok('K coordinator modal never requests DELETE for the out-of-scope tablet',
+  !kioskCalls.some(([method, path]) => method === 'DELETE' && path === `/api/kiosk/devices/${outOfScopeDevice.id}`));
+ok('K coordinator modal uses the home venue in the pairing request and reloads after each write', eq(kioskCalls, [
+  ['GET', '/api/kiosk/devices', null],
+  ['POST', '/api/kiosk/devices/pair', { code: 'XYZ789', venueId: homeVenue.id, name: 'New tablet' }],
+  ['GET', '/api/kiosk/devices', null],
+  ['DELETE', `/api/kiosk/devices/${grantedDevice.id}`, null],
+  ['GET', '/api/kiosk/devices', null],
+]));
 ok('T admin tabs', eq(venueTabsFor({ role: 'admin' }), ['board', 'events', 'team', 'history']));
 ok('T coordinator tabs', eq(venueTabsFor({ role: 'coordinator' }), ['board', 'events', 'team', 'history']));
 ok('T mashgiach tabs (no Team)', eq(venueTabsFor({ role: 'mashgiach' }), ['board', 'events', 'history']));
