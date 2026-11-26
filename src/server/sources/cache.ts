@@ -1,7 +1,13 @@
 import { CompanyLinkError, classifyRaw } from './mapping.ts';
 import type { SourceMapping } from './types.ts';
 import { createHash } from 'node:crypto';
-import type { Company, Group1Overrides, Ingredient, Product, SourceConnector, SourceData } from './types.ts';
+import type { AirtableContact, Company, Group1Overrides, Ingredient, Product, SourceConnector, SourceData } from './types.ts';
+
+export interface ContactSnapshot { contacts: AirtableContact[]; lastReadAt: string }
+export interface ContactState {
+  contacts: AirtableContact[]; configured: boolean; status: 'not_configured' | 'loading' | 'ok' | 'stale' | 'error';
+  lastReadAt: string | null;
+}
 
 export interface Backup {
   group1Overrides?: Group1Overrides; group1Label?: string; valueAssignments?: SourceMapping['valueAssignments'];
@@ -44,6 +50,7 @@ function makeBackups(agencyId: string, data: SourceData, takenAt: string): Backu
 }
 export function createSourceCache({ connectorFor, backups, group1SettingsFor, mappingFor, now = Date.now }: SourceCacheConfig) {
   const entries = new Map<string, { state: SourceState; data?: SourceData; backupLoaded: boolean; hashes: Map<string, string> }>();
+  const contactEntries = new Map<string, { key: string; state: ContactState }>();
   const flights = new Map<string, Promise<RefreshResult>>();
   function entry(id: string) {
     if (!entries.has(id)) entries.set(id, { state: { status: 'never', calls: 0, companies: [], otherCompanies: [], itemsFor: () => [] }, backupLoaded: false, hashes: new Map() });
@@ -54,11 +61,11 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
     e.state = { status, calls: 0, companies: data.companies, otherCompanies: data.otherCompanies ?? [],
       itemsFor: (companyId, kind) => (kind === 'ingredient' ? data.ingredients : data.products).filter(i => i.companyIds.includes(companyId)), ...fields };
   }
-  async function run(id: string): Promise<RefreshResult> {
+  async function run(id: string, connect = () => connectorFor(id)): Promise<RefreshResult> {
     const e = entry(id);
     let connector: SourceConnector | undefined, start = 0;
     try {
-      connector = await connectorFor(id); start = connector.calls();
+      connector = await connect(); start = connector.calls();
       let data: SourceData;
       if (connector.loadAll) data = await connector.loadAll();
       else {
@@ -128,13 +135,22 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
     },
     data: (agencyId: string) => entry(agencyId).data,
     reset(agencyId: string) { entries.delete(agencyId); },
+    contacts(agencyId: string, key?: string, configured = false): ContactState {
+      const entry = contactEntries.get(agencyId);
+      if (entry && key === entry.key) return entry.state;
+      return { contacts: [], configured, status: key ? 'loading' : 'not_configured', lastReadAt: null };
+    },
+    setContacts(agencyId: string, key: string, state: ContactState) {
+      contactEntries.set(agencyId, { key, state });
+    },
+    resetContacts(agencyId: string) { contactEntries.delete(agencyId); },
     state: (agencyId: string): SourceState => entry(agencyId).state,
     setKnownHashes(agencyId: string, hashes: ReadonlyMap<string, string> | Record<string, string>) {
       entry(agencyId).hashes = new Map(hashes instanceof Map ? hashes : Object.entries(hashes));
     },
-    refresh(agencyId: string): Promise<RefreshResult> {
+    refresh(agencyId: string, connect?: () => SourceConnector | Promise<SourceConnector>): Promise<RefreshResult> {
       const active = flights.get(agencyId); if (active) return active;
-      const flight = run(agencyId).finally(() => flights.delete(agencyId));
+      const flight = run(agencyId, connect).finally(() => flights.delete(agencyId));
       flights.set(agencyId, flight); return flight;
     },
   };

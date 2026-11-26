@@ -528,6 +528,33 @@ try {
   assert.deepEqual(savedMapping, before);
   await existing.click('Test connection');
   assert.equal(existing.find(e => e.type === 'span' && e.props.children === 'Guessed').length, 0);
+  const contactCalls = [];
+  globalThis.fetch = async (url, options) => {
+    contactCalls.push(JSON.parse(options.body));
+    return Response.json(url.endsWith('/test') ? { ok: true, access: 'read', tables: [
+      { name: 'Custom Contacts', columns: ['Link', 'Full name', 'Roles'] },
+    ], guess: { mapping, guessed: {} } } : { ok: true });
+  };
+  const contactForm = await mount(SourceConnectForm, {
+    connection: { sourceType: 'airtable', baseId: 'appSaved', hasKey: true, mapping },
+    onClose() {}, onSaved() {},
+  }).render();
+  assert.match(contactForm.text(), /Airtable contacts/);
+  await contactForm.click('Test connection');
+  await contactForm.type('contacts.table', 'Custom Contacts');
+  await contactForm.submit();
+  assert.equal(contactCalls.length, 1, 'a selected contacts table requires both fields');
+  await contactForm.type('contacts.companyLink', 'Link');
+  await contactForm.type('contacts.name', 'Full name');
+  await contactForm.type('contacts.roles', 'Roles');
+  await contactForm.submit();
+  assert.deepEqual(contactCalls.at(-1).mapping, {
+    ...mapping, contacts: { table: 'Custom Contacts', companyLink: 'Link', name: 'Full name', roles: 'Roles' },
+  });
+  assert.equal(contactCalls.at(-1).apiKey, undefined);
+  await contactForm.type('contacts.table', '');
+  await contactForm.submit();
+  assert.equal(contactCalls.at(-1).mapping.contacts, undefined);
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'Access denied. Check the key.' }), { status: 403 });
   const form = mount(SourceConnectForm, { connection: { sourceType: null, baseId: 'appBase', mapping: emptyMapping() }, onClose() {}, onSaved() {} }); await form.render();
   await form.click('Test connection'); assert.match(form.text(), /Access denied. Check the key\./); assert.equal(form.find(e => e.props.role === 'alert').length, 1);

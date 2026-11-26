@@ -199,7 +199,12 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
   }, []);
   const clearSchema = () => { setTables([]); setSamples(null); setMessage(''); };
   const payload = () => ({ sourceType: 'airtable', baseId: baseId.trim(), ...(apiKey ? { apiKey } : {}) });
-  const ready = !!baseId.trim() && mappingReady(mapping) && !!group1Label.trim() && group1Label.trim().length <= 30;
+  const contactMapping = mapping.contacts;
+  const contactTable = tables.find(table => table.name === contactMapping?.table);
+  const contactFields = [['companyLink', 'Establishments'], ['name', 'Name'], ['phone', 'Phone Number'],
+    ['email', 'Email'], ['roles', 'Role'], ['firstName', 'First name']] as const;
+  const ready = !!baseId.trim() && mappingReady(mapping) && !!group1Label.trim() && group1Label.trim().length <= 30 &&
+    (!contactMapping || !!contactMapping.companyLink && !!contactMapping.name);
   const run = async (action: 'test' | 'save') => {
     if (lock.current || (action === 'save' && !ready)) return;
     lock.current = true; setBusy(action); setError(''); setMessage('');
@@ -465,6 +470,30 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
               </>}
               {preview(group)}
             </fieldset>)}
+            <fieldset disabled={!!busy} className="min-w-0 space-y-3 rounded-xl border border-line px-4 pb-4">
+              <legend className="px-1 text-base font-semibold">Airtable contacts</legend>
+              <label className="block space-y-2 text-base">Contacts table
+                <select name="contacts.table" className={mappingFieldClass} value={contactMapping?.table ?? ''} onChange={event => {
+                  const table = event.target.value;
+                  setMapping(current => ({ ...current, contacts: table ? { table, companyLink: '', name: '' } : undefined }));
+                }}>
+                  <option value="">— Automatic —</option>
+                  {[...new Set([...tables.map(table => table.name).filter(table => !mappingGroups.some(group => mapping[group].table === table)),
+                    ...(contactMapping ? [contactMapping.table] : [])])].map(table => <option key={table}>{table}</option>)}
+                </select>
+              </label>
+              {contactMapping && contactFields.map(([field, label]) => <label key={field} className="block space-y-2 text-base">{label}
+                <select name={`contacts.${field}`} className={mappingFieldClass} value={contactMapping[field] ?? ''}
+                  required={field === 'companyLink' || field === 'name'} onChange={event => {
+                    const value = event.target.value;
+                    setMapping(current => ({ ...current, contacts: { ...contactMapping, [field]: value } }));
+                  }}>
+                  <option value="">—</option>
+                  {[...new Set([...(contactTable?.columns ?? []), ...(contactMapping[field] ? [contactMapping[field]] : [])])]
+                    .map(column => <option key={column}>{column}</option>)}
+                </select>
+              </label>)}
+            </fieldset>
           </section>
           <fieldset className="space-y-4"><legend className="text-xl font-semibold">What each value means</legend>
             <p className="text-base text-ink-soft">Your database writes the certification in different ways. Tell the app once what each one means — it applies to every ingredient that uses it.</p>

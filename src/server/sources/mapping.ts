@@ -1,6 +1,6 @@
 import { parseMoney } from '../../lib/sourceAmount.ts';
 export { parseMoney } from '../../lib/sourceAmount.ts';
-import type { Company, Dpm, SourceData, SourceMapping, SourceRow, SourceTable } from './types.ts';
+import type { AirtableContactMapping, AirtableField, Company, Dpm, SourceData, SourceMapping, SourceRow, SourceTable } from './types.ts';
 import { isBuiltinFieldKey, type SourceSection } from '../../lib/sourcePreview.ts';
 
 const normalized = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -44,8 +44,50 @@ function overlap(name: string, aliases: string[]): number {
     return common / Math.max(a.size, b.size, 1);
   }));
 }
+const airtableContactFields = {
+  companyLink: 'Establishments', name: 'Name', phone: 'Phone Number',
+  email: 'Email', roles: 'Role', firstName: 'First name',
+} as const;
+function contactFieldMatches(key: keyof typeof airtableContactFields, field: AirtableField, companyId?: string) {
+  switch (key) {
+    case 'companyLink': return !!companyId && field.type === 'multipleRecordLinks' && field.linkedTableId === companyId;
+    case 'phone': return field.type === 'phoneNumber';
+    case 'email': return field.type === 'email';
+    case 'roles': return field.type === 'multipleSelects';
+    default: return field.type === 'singleLineText' || (field.type === 'formula' && field.resultType === 'singleLineText');
+  }
+}
+export function normalizeContactMapping(input: unknown): AirtableContactMapping {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('Invalid Airtable contacts mapping.');
+  const mapping = Object.fromEntries(Object.entries(input).filter(([key, value]) => {
+    if ((key !== 'table' && !Object.hasOwn(airtableContactFields, key)) || typeof value !== 'string' || value.length > 200)
+      throw Error('Invalid Airtable contacts mapping.');
+    return !!value.trim();
+  })) as unknown as AirtableContactMapping;
+  if (!mapping.table || !mapping.companyLink || !mapping.name) throw Error('Choose an Airtable contacts table, establishment link, and name.');
+  return mapping;
+}
+export function resolveContactMapping(tables: SourceTable[], companyTable: string, mapping?: AirtableContactMapping): AirtableContactMapping | undefined {
+  const company = tables.find(table => table.name === companyTable || table.id === companyTable);
+  const table = tables.find(table => table.name === (mapping?.table ?? 'Contacts') || table.id === mapping?.table && !!mapping?.table);
+  if (table && table !== company) {
+    const selected: Record<string, string> = { table: table.name };
+    for (const [key, defaultName] of Object.entries(airtableContactFields)) {
+      const fieldKey = key as keyof typeof airtableContactFields;
+      const column = mapping ? mapping[fieldKey] : defaultName;
+      if (!column) continue;
+      const field = table.fields?.find(field => field.name === column);
+      if (field && contactFieldMatches(fieldKey, field, company?.id)) selected[key] = column;
+      else if (mapping) throw Error('Airtable contacts fields must match their expected types and link to the mapped company table.');
+    }
+    if (selected.companyLink && selected.name) return selected as unknown as AirtableContactMapping;
+  }
+  if (mapping) throw Error('Airtable contacts must use a separate table linked to the mapped company table.');
+  return undefined;
+}
+
 // Partial mappings deliberately leave missing tables/columns unset for the caller to review.
-export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values' | 'valueAssignments' | 'editableCustomFields'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
+export type GuessedMapping = { [K in 'companies' | 'ingredients' | 'products']: Partial<SourceMapping[K]> } & Pick<SourceMapping, 'contacts' | 'group1Values'>;
 export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; guessed: Record<string, number> } {
   const mapping: GuessedMapping = { companies: {}, ingredients: {}, products: {}, group1Values: ['Group 1'] };
   const guessed: Record<string, number> = {};

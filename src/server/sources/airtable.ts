@@ -1,6 +1,6 @@
 import { sourceFetch } from './http.ts';
 import { applyMapping, mapSourceLists, companyLinkResolver, CompanyLinkError } from './mapping.ts';
-import type { ConnectionResult, SourceConnector, SourceData, SourceMapping, SourceRow } from './types.ts';
+import type { AirtableContact, AirtableContactMapping, ConnectionResult, SourceConnector, SourceData, SourceMapping, SourceRow, SourceTable } from './types.ts';
 
 export interface AirtableConfig { baseId: string; apiKey: string; mapping: SourceMapping; apiBase?: string; fetchImpl?: typeof fetch }
 const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -8,6 +8,8 @@ const companyFields = ['name', 'address', 'type', 'brand', 'plant'] as const;
 export type AirtableCompanyField = typeof companyFields[number];
 interface CompanyEditorConnector extends SourceConnector {
   testConnection(): Promise<ConnectionResult & { status?: number }>;
+  listTables(): Promise<SourceTable[]>;
+  readContacts(mapping: AirtableContactMapping): Promise<AirtableContact[]>;
   readCompany(id: string): Promise<{ recordId: string; values: Record<string, string | null> }>;
   patchCompany(id: string, fields: Record<string, string | null>): Promise<void>;
   renameData(): Promise<{ data: SourceData; links: unknown[] }>;
@@ -50,6 +52,53 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
     queue = result.then(() => undefined, () => undefined);
     return result;
   }
+  const readSchema = () => request(`/v0/meta/bases/${encodeURIComponent(baseId)}/tables`);
+  function schemaTables(schema: any): SourceTable[] {
+    if (!Array.isArray(schema?.tables)) throw Error('Airtable returned invalid table metadata');
+    return schema.tables.map((table: any) => ({
+      name: table.name, id: table.id, columns: table.fields.map((field: any) => field.name),
+      fields: table.fields.map((field: any) => ({
+        name: field.name, type: field.type, linkedTableId: field.options?.linkedTableId,
+        resultType: field.options?.result?.type,
+      })),
+    }));
+  }
+  async function* recordPages(table: string, columns: Iterable<string>): AsyncGenerator<SourceRow[]> {
+    const params = new URLSearchParams({ pageSize: '100' });
+    for (const column of columns) params.append('fields[]', column);
+    const seen = new Set<string>();
+    for (;;) {
+      const page = await request(`/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(table)}?${params}`);
+      if (!Array.isArray(page?.records)) throw new Error('Airtable returned invalid records');
+      yield page.records;
+      if (page.offset === undefined) return;
+      if (typeof page.offset !== 'string' || !page.offset || seen.has(page.offset)) throw new Error('Airtable returned invalid pagination');
+      seen.add(page.offset);
+      params.set('offset', page.offset);
+    }
+  }
+  async function readContacts(config: AirtableContactMapping): Promise<AirtableContact[]> {
+    const { table, companyLink, name, phone, email, roles, firstName } = config;
+    const columns = new Set(Object.values({ companyLink, name, phone, email, roles, firstName }).filter((value): value is string => !!value));
+    const contacts: AirtableContact[] = [];
+    const recordId = /^rec[A-Za-z0-9]+$/;
+    const text = (value: unknown) => typeof value === 'string' ? value.trim() : '';
+    for await (const page of recordPages(table, columns)) {
+      for (const row of page) {
+        if (typeof row?.id !== 'string' || !recordId.test(row.id) || !row.fields || typeof row.fields !== 'object' || Array.isArray(row.fields))
+          throw Error('Airtable returned an invalid contact record');
+        const links = row.fields[companyLink], roleValues = roles ? row.fields[roles] : undefined;
+        const companyIds = Array.isArray(links) ? [...new Set(links.filter((id): id is string => typeof id === 'string' && recordId.test(id)))] : [];
+        if (!companyIds.length) continue;
+        contacts.push({
+          id: row.id, companyIds, name: text(row.fields[name]) || text(firstName && row.fields[firstName]),
+          phone: text(phone && row.fields[phone]), email: text(email && row.fields[email]),
+          roles: Array.isArray(roleValues) ? roleValues.map(text).filter(Boolean) : [], source: 'airtable',
+        });
+      }
+    }
+    return contacts;
+  }
   async function loadAll(): Promise<SourceData> {
     if (loading) return loading;
     loading = (async () => {
@@ -62,19 +111,7 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
       const rows: Record<string, SourceRow[]> = Object.create(null);
       for (const [table, columns] of tables) {
         rows[table] = [];
-        let offset: string | undefined;
-        const seen = new Set<string>();
-        do {
-          const params = new URLSearchParams({ pageSize: '100' });
-          for (const column of columns) params.append('fields[]', column);
-          if (offset) params.set('offset', offset);
-          const page = await request(`/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(table)}?${params}`);
-          if (!Array.isArray(page.records)) throw new Error('Airtable returned invalid records');
-          rows[table].push(...page.records);
-          offset = page.offset;
-          if (offset && (typeof offset !== 'string' || seen.has(offset))) throw new Error('Airtable returned invalid pagination');
-          if (offset) seen.add(offset);
-        } while (offset);
+        for await (const page of recordPages(table, columns)) rows[table].push(...page);
       }
       rawRows = rows;
       loaded = applyMapping(rows, mapping, 'ignore');
@@ -117,7 +154,8 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
       }
       return { data: mapped, links };
     },
-    kind: 'airtable', calls: () => count, loadAll,
+    kind: 'airtable', calls: () => count, loadAll, readContacts,
+    async listTables() { return schemaTables(await readSchema()); },
     async companyDeletion(id) {
       if (!/^rec[A-Za-z0-9]+$/.test(id)) throw Error('Invalid Airtable record ID');
       const base = `/v0/${encodeURIComponent(baseId)}`;
@@ -213,12 +251,11 @@ export function createAirtableConnector({ baseId, apiKey, mapping, apiBase = 'ht
           if (!offset) return { ok: false, error: 'This Airtable token cannot see the selected base.' };
           seen.add(offset);
         }
-        const schema = await request(`/v0/meta/bases/${encodeURIComponent(baseId)}/tables`);
+        const schema = await readSchema();
         const type = schema.tables.find((table: any) => table.name === mapping.companies.table || table.id === mapping.companies.table)
           ?.fields.find((field: any) => field.name === mapping.companies.type);
         options = type?.type === 'singleSelect' ? type.options?.choices?.map((choice: any) => choice.name) : undefined;
-        return { ok: true, access,
-          tables: schema.tables.map((t: any) => ({ name: t.name, columns: t.fields.map((f: any) => f.name) })) };
+        return { ok: true, access, tables: schemaTables(schema) };
       } catch (e: any) { return { ok: false, status: e.status, error: e instanceof Error && e.message.startsWith('Airtable ') ? e.message : 'Airtable connection failed' }; }
     },
     async listCompanies() { return (await data()).companies; },
