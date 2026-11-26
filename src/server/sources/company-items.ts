@@ -15,6 +15,7 @@ type Deps = {
   serialize<T>(agency: string, fn: () => Promise<T>): Promise<T>;
   withAssignmentLock<T>(agency: string, fn: () => Promise<T>): Promise<T>;
   connection(agency: string): Connection | undefined;
+  refreshAfterEdit(agency: string): boolean;
   state(agency: string): SourceState;
   adapter(c: Connection): Adapter;
   eligible(c: Connection, adapter: Adapter): Promise<unknown>;
@@ -101,12 +102,12 @@ export function registerCompanyItems(app: any, deps: Deps) {
   const root = '/api/sources/companies/:companyId';
   const listPath = root + '/items/:list';
   const rowPath = listPath + '/:rowId';
-  function route(access: 'list' | 'admin' | 'documents', fn: (ctx: Context) => Promise<any>) {
+  function route(access: 'list' | 'admin' | 'edit' | 'documents', fn: (ctx: Context) => Promise<any>) {
     return async (req: any, res: any) => {
       const user = deps.user(req), companyId = req.params.companyId, writing = req.method !== 'GET';
       try {
         if (!user?.agencyId || req.kiosk || !['admin','coordinator','mashgiach'].includes(user.role)) fail(403, 'Forbidden');
-        if (access === 'admin' && user.role !== 'admin') fail(403, 'Forbidden');
+        if ((access === 'admin' || access === 'edit') && user.role !== 'admin') fail(403, 'Forbidden');
         if (access === 'documents' && !(writing ? canEditCompanyDocuments(user) : canViewCompanyDocuments(user)))
           fail(403, writing ? "You don't have permission to change this certificate." : 'Forbidden');
         const run = async () => {
@@ -116,6 +117,7 @@ export function registerCompanyItems(app: any, deps: Deps) {
           const state = deps.state(user.agencyId);
           const company = state.companies.find(row => row.id === companyId);
           if (!company) fail(403, 'Forbidden');
+          const recovery = state.status === 'stale' && deps.refreshAfterEdit(user.agencyId);
           const docs = canViewCompanyDocuments(user);
           if (access === 'list') {
             const items = (kind: 'ingredient' | 'product') => state.itemsFor(companyId, kind).map(item => {
@@ -125,15 +127,15 @@ export function registerCompanyItems(app: any, deps: Deps) {
                 ...('symbolRaw' in item && {symbolRaw: item.symbolRaw}), ...('symbolRequired' in item && { symbolRequired: item.symbolRequired }),
                 ...(docs && 'attachments' in item && { attachments: item.attachments }) };
             });
-            return res.json({ company: { name: company.name, address: company.address, type: company.type }, ingredients: items('ingredient'), products: items('product'), status: state.status,
+            return res.json({ company: { name: company.name, address: company.address, type: company.type }, ingredients: items('ingredient'), products: items('product'), status: state.status, recovery,
               savedAt: state.refreshedAt ?? state.companyBackupTimes?.[companyId] ?? state.backupTakenAt ?? null, sourceType: c.sourceType, access: c.access,
               ...(docs && company.attachments && {attachments: company.attachments}) });
           }
           if (c.sourceType !== 'airtable') fail(409, 'This operation requires Airtable.');
           if (writing && deps.blocked()) fail(503, 'Writes blocked');
-          const editing = access === 'admin' || writing;
+          const editing = access === 'admin' || access === 'edit' || writing;
           if (editing && c.access !== 'readwrite') fail(403, 'This Airtable connection is read only. Contact an administrator.');
-          if (editing && state.status !== 'ok') fail(503, baselineError);
+          if (editing && state.status !== 'ok' && !(access === 'edit' && recovery)) fail(503, baselineError);
           const adapter = deps.adapter(c);
           try {
             if (editing) await deps.eligible(c, adapter);
@@ -206,6 +208,14 @@ export function registerCompanyItems(app: any, deps: Deps) {
     const schema = itemSchema(c, list, await adapter.readSchema());
     return { list, schema, table: schema.table.name };
   }
+  async function pendingAdd(ctx: Context, table: string, operationId: unknown) {
+    const ledger = deps.ledger(ctx.c.agencyId, token(operationId));
+    const entry = await ledger.get();
+    if (entry && (entry.actorId !== ctx.user.id || entry.action !== 'add' || entry.section !== ctx.req.params.list ||
+        entry.companyId !== ctx.companyId || entry.table !== table || entry.baseId !== ctx.c.baseId || entry.updatedAt !== ctx.c.updatedAt))
+      fail(409, bindingError);
+    return {ledger, entry};
+  }
   async function editor(ctx: Context) {
     const {req, res, c, adapter, companyId} = ctx;
     const {schema, table, list} = await itemContext(ctx);
@@ -216,14 +226,36 @@ export function registerCompanyItems(app: any, deps: Deps) {
     const candidates = row ? [] : (await adapter.loadAll())[list];
     const describe = ({id,name,brand,plant}: typeof candidates[number]) => ({id,name,brand,plant});
     const choices = Object.entries(schema.fields).filter(([, f]) => f.type === 'singleSelect');
-    res.json({ fields, companyIds, baseId: c.baseId, updatedAt: c.updatedAt, warnings: schema.warnings,
+    const entry = !row && req.query?.operationId ? (await pendingAdd(ctx, table, req.query.operationId)).entry : null;
+    res.json({ ...(!row && {addScope: [c.agencyId, ctx.user.id, c.baseId, c.updatedAt],
+        pending: entry && entry.outcome !== 'abandoned' ? {name: entry.requested?.name, recordId: entry.recordId} : null}),
+      fields, companyIds, baseId: c.baseId, updatedAt: c.updatedAt, warnings: schema.warnings,
       typeOptions: Object.fromEntries(choices.map(([k,f]) => [k, f.options!.choices!.map(v => v.name)])),
       fieldTypes: Object.fromEntries(Object.entries(schema.fields).map(([k,f]) => [k,f.type])),
       ...(!row && { existing: candidates.filter(item => !item.companyIds.includes(companyId)).map(describe),
         linked: candidates.filter(item => item.companyIds.includes(companyId)).map(describe) }) });
   }
   app.get(listPath + '/add', route('admin', editor));
-  app.get(rowPath + '/edit', route('admin', editor));
+  app.post(listPath + '/reconcile', route('admin', async ctx => {
+    const {req, res, c, adapter, companyId} = ctx;
+    const {operationId, recordId, decision} = req.body ?? {};
+    bound(c, req.body?.baseId, req.body?.updatedAt);
+    const {schema, table} = await itemContext(ctx);
+    const {ledger, entry} = await pendingAdd(ctx, table, operationId);
+    if (decision === 'abandon') {
+      if (entry && entry.outcome !== 'confirmed') await ledger.finish({...entry, outcome:'abandoned'});
+      return res.json({abandoned:true});
+    }
+    if (decision !== 'accept' || !entry || entry.outcome === 'abandoned' || !entry.requested?.name ||
+        !recordIdPattern.test(recordId) || entry.recordId && entry.recordId !== recordId) fail(409, staleItem);
+    const row = await adapter.readRecord(table, recordId);
+    const fields = itemValues(schema, row.fields);
+    if (!ids(row.fields[schema.link.name] ?? [], recordIdPattern).includes(companyId) ||
+        !Object.entries(entry.requested).every(([key,value]) => fields[key] === value)) fail(409, staleItem);
+    await ledger.finish({...entry, recordId, outcome:'confirmed'});
+    res.json({saved:true, recordId, ...await deps.republish(c, adapter)});
+  }));
+  app.get(rowPath + '/edit', route('edit', editor));
   app.get(rowPath + '/relationship', route('admin', async ctx => {
     const {schema, table} = await itemContext(ctx);
     const row = await ctx.adapter.readRecord(table, ctx.req.params.rowId);
@@ -297,7 +329,7 @@ export function registerCompanyItems(app: any, deps: Deps) {
     });
   }
   app.post(listPath, route('admin', ctx => writeItem(ctx, 'add')));
-  app.patch?.(rowPath, route('admin', ctx => writeItem(ctx, 'edit')));
+  app.patch?.(rowPath, route('edit', ctx => writeItem(ctx, 'edit')));
   for (const action of ['unlink', 'restore'] as const) app.post(rowPath + '/' + action, route('admin', ctx => writeItem(ctx, action)));
   async function documentTarget({req, c, adapter, companyId}: Context) {
     const list = req.params.rowId ? 'ingredients' : 'companies';

@@ -331,7 +331,7 @@ export type AirtableOperation = {
   operationId: string; agencyId: string; actorId: string; companyId: string; baseId: string;
   updatedAt: string; table: string; section: 'companies' | 'ingredients' | 'products'; recordId?: string;
   action: 'edit' | 'add' | 'unlink' | 'restore' | 'upload'; at: string;
-  outcome: 'attempted' | 'confirmed' | 'rejected' | 'unconfirmed' | 'review';
+  outcome: 'attempted' | 'confirmed' | 'rejected' | 'unconfirmed' | 'review' | 'abandoned';
   originalIds?: string[]; replaceId?: string; filename?: string; size?: number; newId?: string;
   changedFields?: string[]; previous?: Record<string, string | null | boolean>; requested?: Record<string, string | null | boolean>; requestHash: string;
 };

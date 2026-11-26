@@ -212,7 +212,11 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
 
   function airtableLedger(agencyId: string, operationId: string) {
     const id = 'airtable-' + digest(JSON.stringify([agencyId, operationId]));
-    const get = (): Promise<AirtableOperation | null> => read(auditCollection, id);
+    // Limit the idempotency window while retaining untouched audit documents.
+    function active(entry: AirtableOperation | null): AirtableOperation | null {
+      return entry && entry.outcome !== 'rejected' && Date.parse(entry.at) + 7 * 86400_000 > Date.now() ? entry : null;
+    }
+    const get = async () => active(await read(auditCollection, id));
     const put = (entry: AirtableOperation) => commit([{ collection: auditCollection, id, doc: entry }]);
     return { get, finish: put, async claim(entry: AirtableOperation): Promise<AirtableOperation | null> {
       if (deps.staged()) throw Error('Writes blocked');
@@ -221,7 +225,8 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
         const ref = db.collection(auditCollection).doc(id);
         return db.runTransaction(async (tx: any) => {
           const doc = await tx.get(ref);
-          if (doc.exists) return doc.data();
+          const prior = active(doc.exists ? doc.data() : null);
+          if (prior) return prior;
           tx.set(ref, entry);
           return null;
         });

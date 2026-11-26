@@ -62,6 +62,7 @@ export async function documentFixture() {
     const records = rows[table];
     if (!records) {res.writeHead(404);return send({});}
     if (!id && req.method === 'POST') {
+      if (state.rejectCreate) {res.writeHead(422); return send({});}
       state.creates++;
       const created = row('recCreated'+state.creates,body.fields);records.push(created);
       if (state.loseCreate) return req.socket.destroy();
@@ -96,6 +97,7 @@ export async function documentFixture() {
   const content = await listen((req,res,parts,body) => {
     assert.equal(req.method,'POST'); assert.equal(parts[1],baseId); assert.equal(parts[4],'uploadAttachment');
     assert.equal(body.contentType,'application/pdf');
+    if (state.rejectUpload) {res.writeHead(422); return res.end('{}');}
     const target = Object.values(rows).flat().find(r => r.id === parts[2]);
     const column = parts[3].replace(/^fld/,'');
     const size = Buffer.from(body.file,'base64').length;

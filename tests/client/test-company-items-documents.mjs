@@ -69,3 +69,50 @@ assert.equal(sent.headers.get('X-Replace-Id'),'attLOC');
 assert.match(panel.text(),/Airtable may have received this PDF/);
 assert.ok(panel.buttons().find(b=>b.label==='Save changes').el.props.disabled);
 console.log('Company item lists, role gates, typed edits, draft recovery and binary PDF controls passed.');
+
+for (const decision of ['accept','abandon']) {
+  let operationId, closed = false;
+  const name = 'Calcium carbonate', recordId = 'recRecovered';
+  globalThis.fetch = async (url,opts) => {
+    if (url.endsWith('/reconcile')) {
+      assert.deepEqual(JSON.parse(opts.body),{decision,...(decision==='accept' && {recordId}),operationId,baseId:b.baseId,updatedAt:b.updatedAt});
+      return Response.json(decision==='accept' ? {saved:true} : {abandoned:true});
+    }
+    if (opts.method==='POST') {
+      operationId = JSON.parse(opts.body).operationId;
+      throw Error('Lost Add response');
+    }
+    return Response.json({...b,fields:{name:null},addScope:['agency','actor','base','version'],
+      pending:url.includes('?operationId='+operationId) ? {name} : null,linked:[{name,id:recordId}]});
+  };
+  const args = {path:'/items/ingredients',ingredient:true,onSaved(){},onClose(){closed=true;}};
+  const add = await mount(CompanyItemEditor,args).render();
+  await add.type('',name); await add.click('Save changes');
+  const reopened = await mount(CompanyItemEditor,args).render();
+  assert.match(reopened.text(),/Calcium carbonate · recRecovered/);
+  assert.match(reopened.text(),/Accept linked record/);
+  assert.match(reopened.text(),/Abandon Add/);
+  await reopened.click(decision==='accept' ? 'Accept linked record' : 'Abandon Add');
+  assert.ok(closed);
+  assert.doesNotMatch((await mount(CompanyItemEditor,args).render()).text(),/Abandon Add/);
+}
+
+globalThis.fetch = async () => Response.json({...snapshot,recovery:true});
+await list.render({...props,revision:2});
+assert.match(list.html(),/>Edit</);
+assert.doesNotMatch(list.html(),/Add ingredient|Replace PDF/);
+let saveCount = 0;
+globalThis.fetch = async (url, opts) => {
+  if (opts.method==='PATCH') {
+    saveCount++;
+    return Response.json(saveCount===1 ? {saved:true,refreshRequired:true,warning:'Saved in Airtable. Refresh required.'} : {saved:true});
+  }
+  return Response.json({...b,fields:{name:saveCount ? 'Confirmed' : 'Flour'}});
+};
+const recoveryEditor = await mount(CompanyItemEditor,{path:'/items/products',id:'recP',ingredient:false,onSaved(){},onClose(){}}).render();
+await recoveryEditor.type('','Confirmed'); await recoveryEditor.click('Save changes');
+assert.match(recoveryEditor.text(),/Saved in Airtable. Refresh required./);
+await recoveryEditor.click('Reload and review');
+assert.equal(recoveryEditor.find(el=>el.props.value==='Confirmed').length,1);
+await recoveryEditor.click('Save changes');
+assert.equal(saveCount,2);

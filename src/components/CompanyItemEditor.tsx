@@ -5,11 +5,22 @@ import { CertificatePanel } from './CertificatePanel';
 import type { SourceAttachment } from '../lib/sources';
 type Value = string | boolean | null;
 type EditorData = { fields: Record<string, Value>; typeOptions: Record<string, string[]>; fieldTypes: Record<string,string>;
+  addScope?: string[]; pending?: {name?:string; recordId?:string};
   baseId: string; updatedAt: string; companyIds: string[]; warnings: string[]; linked?: {id:string;name:string}[]; existing?: {id:string; name:string; brand?:string; plant?:string}[] };
 const labels: Record<string,string> = { name:'Name', status:'Status', certification:'Certification / certifying agency', agency:'Certifying kosher agency',
   code:'Code / UPC', symbolRequired:'Symbol required', expiresOn:'Expiration date', brand:'Brand', plant:'Plant' };
-export function CompanyItemEditor({path, id, ingredient, files, writable = true, onClose, onSaved}: {
-  path:string; id?:string; writable?:boolean; ingredient:boolean; files?:SourceAttachment[]; onClose():void; onSaved(message:string):void;
+// Keep the operation token across dialog closes, including when tab storage is unavailable.
+const pendingAdds = new Map<string, string>();
+function rememberAdd(key:string, token:string) {
+  if (token) pendingAdds.set(key, token);
+  else pendingAdds.delete(key);
+  try {
+    if (token) sessionStorage.setItem(key, token);
+    else sessionStorage.removeItem(key);
+  } catch {}
+}
+export function CompanyItemEditor({path, id, ingredient, files, writable = true, recovery = false, onClose, onSaved}: {
+  path:string; id?:string; writable?:boolean; recovery?:boolean; ingredient:boolean; files?:SourceAttachment[]; onClose():void; onSaved(message:string):void;
 }) {
   const [baseline,setBaseline] = useState<EditorData | null>(null);
   const [draft,setDraft] = useState<Record<string,Value>>({});
@@ -22,13 +33,25 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
   const label = ingredient ? 'ingredient' : 'product';
   const row = path + '/' + encodeURIComponent(id || selected);
   const endpoint = id ? row + '/edit' : path + '/add';
+  const storageKey = (data:EditorData) => JSON.stringify(['company-item-add', path, ...(data.addScope ?? [])]);
   async function load() {
     setBusy(true);
     try {
-      const next = await visitRequest(endpoint);
+      let next: EditorData = await visitRequest(endpoint);
+      if (!id) {
+        const key = storageKey(next);
+        let token = pendingAdds.get(key);
+        try { token ||= sessionStorage.getItem(key) || undefined; } catch {}
+        if (token) {
+          next = await visitRequest(endpoint + '?operationId=' + encodeURIComponent(token));
+          if (next.pending) operation.current = token;
+          else rememberAdd(key, '');
+        }
+        setUncertainAdd(!!next.pending);
+      }
       if (baseline && (baseline.baseId !== next.baseId || baseline.updatedAt !== next.updatedAt)) throw Error('The source connection changed. Reopen the record.');
       setBaseline(next); setRelation(null); setSelected(''); setError(''); setReview(false);
-      if (!uncertainAdd) operation.current = crypto.randomUUID();
+      if (!next.pending) operation.current = crypto.randomUUID();
     } catch (cause: any) { setError(cause.status && cause.status < 500 ? cause.message : "Couldn't load the latest record from Airtable. Editing is unavailable until the connection works."); }
     finally { setBusy(false); }
   }
@@ -42,7 +65,7 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
   const fields = {...baseline?.fields, ...draft};
   const changed = Object.fromEntries(Object.entries(draft).filter(([key,value]) => verifyDraft || value !== baseline?.fields[key]));
   async function save() {
-    if (!writable || !baseline || lock.current || review) return;
+    if (!writable || !baseline || lock.current || review || uncertainAdd) return;
     lock.current = true; setBusy(true); setError('');
     const linking = mode === 'existing' || mode === 'remove';
     try {
@@ -51,24 +74,47 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
       const request = { baseId: b.baseId, updatedAt: b.updatedAt, ...(linking ? {companyIds:b.companyIds}
         : { fields: changed, originals: Object.fromEntries(Object.keys(changed).map(k => [k,b.fields[k]])), operationId: operation.current }) };
       const dest = linking ? row + (mode === 'remove' ? '/unlink' : '/restore') : id ? row : path;
+      if (!id && !linking) rememberAdd(storageKey(b), operation.current);
       const result = await visitRequest(dest, {method: id && !linking ? 'PATCH' : 'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(request)});
       if (!result.saved) throw Error('Save could not be confirmed.');
+      if (!id && !linking) rememberAdd(storageKey(b), '');
+      if (id && !linking && result.refreshRequired) {
+        setDraft(changed); setVerifyDraft(true); setReview(true); setError(result.warning); onSaved(result.warning);
+        return;
+      }
       onSaved(result.warning || (mode === 'remove' ? 'Item removed from this company. Its Airtable record was kept.' : mode === 'existing' ? 'Item restored to this company.' : id ? 'Changes saved in Airtable.' : 'Item added to Airtable.'));
       onClose();
     } catch (cause: any) {
       if (id && !linking && (!cause.status || cause.message.includes('may have saved'))) setVerifyDraft(true);
-      if (!id && !linking && (!cause.status || cause.message.includes('may have created'))) setUncertainAdd(true);
+      if (!id && !linking) {
+        if (!cause.status || cause.status >= 500 || cause.message.includes('may have created')) setUncertainAdd(true);
+        else rememberAdd(storageKey(baseline), '');
+      }
       setReview(!cause.status || cause.status === 409 || cause.status >= 500);
       setError(cause.status ? cause.message : !id && !linking ? 'Airtable may have created this item. Reload and review before trying again.' : 'Airtable may have saved these changes. Reload and review before retrying.');
     } finally { lock.current = false; setBusy(false); }
+  }
+  async function reconcile(decision:'accept'|'abandon', recordId?:string) {
+    if (!baseline || !writable || lock.current) return;
+    lock.current = true; setBusy(true);
+    try {
+      const result = await visitRequest(path + '/reconcile', {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({decision, recordId, operationId:operation.current, baseId:baseline.baseId, updatedAt:baseline.updatedAt})});
+      if (!(decision === 'accept' ? result.saved : result.abandoned)) throw Error('Reload and review the record.');
+      rememberAdd(storageKey(baseline), '');
+      if (result.saved) onSaved(result.warning || 'Item added to Airtable.');
+      onClose();
+    } catch (cause:any) { setError(cause.message); setReview(true); }
+    finally { lock.current = false; setBusy(false); }
   }
   return <VisitSheet title={(id ? 'Edit ' : 'Add ') + label} onClose={() => { if (!busy) onClose(); }}>
     {!baseline && busy && <p role="status">Loading record…</p>}
     {baseline && <>
       {uncertainAdd && !review && <section><h3 className="font-semibold">Review linked records in Airtable</h3>
-        <ul>{baseline.linked?.filter(i => i.name === draft.name).map(i => <li key={i.id}>{i.name} · {i.id}</li>)}</ul>
-        <p>The original operation ID will be used to check this Add.</p></section>}
-      {!id && <div className="flex flex-wrap gap-2">{(['create','existing'] as const).map(option =>
+        <ul>{baseline.linked?.filter(i => baseline.pending?.recordId ? i.id === baseline.pending.recordId : i.name === baseline.pending?.name).map(i =>
+          <li key={i.id}>{i.name} · {i.id} <button className={visitButton} disabled={busy || !writable} onClick={() => reconcile('accept',i.id)}>Accept linked record</button></li>)}</ul>
+        <button className={visitButton} disabled={busy || !writable} onClick={() => reconcile('abandon')}>Abandon Add</button></section>}
+      {!id && !uncertainAdd && <div className="flex flex-wrap gap-2">{(['create','existing'] as const).map(option =>
         <button className={visitButton} disabled={!writable || busy || review} key={option} aria-pressed={mode === option} onClick={() => setMode(option)}>
           {option === 'create' ? 'Create new ' + label : 'Add existing'}</button>)}</div>}
       {mode === 'existing' ? <label className="block">Add existing {label}<select className={setupField} disabled={!writable || busy || review} value={selected} onChange={e => setSelected(e.target.value)}>
@@ -90,10 +136,10 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
             </label>;
           })}
         </fieldset>}
-      {id && ingredient && mode === 'create' && <CertificatePanel path={row+'/documents'} files={files} writable={writable} onSaved={() => onSaved('PDF saved in Airtable.')} />}
-      {id && mode === 'create' && <details><summary className="min-h-11">More actions</summary><button className={visitButton} disabled={!writable || busy || review} onClick={() => setMode('remove')}>Remove from this company</button></details>}
-      <button className={visitButton} disabled={!writable || busy || review || (mode === 'existing' ? !relation : mode === 'create' && (!String(fields.name ?? '').trim() || !Object.keys(changed).length))} onClick={save}>
-        {busy ? 'Saving…' : uncertainAdd ? 'Check Add outcome' : mode === 'existing' ? 'Restore to this company' : mode === 'remove' ? 'Remove from this company' : 'Save changes'}</button>
+      {id && !recovery && ingredient && mode === 'create' && <CertificatePanel path={row+'/documents'} files={files} writable={writable} onSaved={() => onSaved('PDF saved in Airtable.')} />}
+      {id && !recovery && mode === 'create' && <details><summary className="min-h-11">More actions</summary><button className={visitButton} disabled={!writable || busy || review} onClick={() => setMode('remove')}>Remove from this company</button></details>}
+      {!uncertainAdd && <button className={visitButton} disabled={!writable || busy || review || (mode === 'existing' ? !relation : mode === 'create' && (!String(fields.name ?? '').trim() || !Object.keys(changed).length))} onClick={save}>
+        {busy ? 'Saving…' : mode === 'existing' ? 'Restore to this company' : mode === 'remove' ? 'Remove from this company' : 'Save changes'}</button>}
     </>}
     {error && <p role="alert">{error}</p>}
     {(review || !baseline && error) && <button className={visitButton} disabled={busy} onClick={load}>Reload and review</button>}

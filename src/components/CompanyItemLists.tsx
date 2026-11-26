@@ -8,7 +8,7 @@ import { setupField } from './MappingStep';
 type List = 'ingredients' | 'products';
 type Row = { id:string; name:string; brand?:string; plant?:string; certifyingAgency?:string; statusRaw?:string; expiresOn?:string;
   dpm?:string; code?:string; symbolRequired?:boolean; symbolRaw?:string; attachments?:SourceAttachment[] };
-type Lists = Record<List,Row[]> & { company?: {name:string; address?:string; type?:string}; attachments?:SourceAttachment[]; access:string; sourceType:string; status:string; savedAt?:string };
+type Lists = Record<List,Row[]> & { company?: {name:string; address?:string; type?:string}; attachments?:SourceAttachment[]; access:string; sourceType:string; status:string; recovery?:boolean; savedAt?:string };
 const titles = { ingredients:'Ingredients', products:'Products' };
 const noun = { ingredients:'ingredient', products:'product' };
 export function ItemAgency({ agency }: { agency?:string }) {
@@ -32,6 +32,7 @@ export function CompanyItemLists({ companyId, role, revision, timeZone, onSaved 
   const airtable = data.sourceType === 'airtable', docs = airtable && ['admin','coordinator'].includes(role);
   const live = data.status === 'ok', writable = airtable && data.access === 'readwrite' && live;
   const admin = role === 'admin' && writable;
+  const canEdit = admin || (role === 'admin' && airtable && data.access === 'readwrite' && !!data.recovery);
   const saved = (text:string) => {setMessage(text); onSaved();};
   const filenamePanel = (item:Row) => <CertificatePanel path={path + '/items/ingredients/' + encodeURIComponent(item.id) + '/documents'}
     files={item.attachments} writable={writable} onSaved={onSaved} />;
@@ -71,12 +72,12 @@ export function CompanyItemLists({ companyId, role, revision, timeZone, onSaved 
           {item.code && <p className="break-all">Code / UPC · {item.code}</p>}
           {(item.symbolRequired !== undefined || item.symbolRaw) && <p>Symbol required · {item.symbolRaw || (item.symbolRequired ? 'Yes' : 'No')}</p>}
           {docs && list === 'ingredients' && filenamePanel(item)}
-          {admin && <button className={visitButton} onClick={() => setEditor({list,id:item.id})}>Edit</button>}
+          {canEdit && <button className={visitButton} onClick={() => setEditor({list,id:item.id})}>Edit</button>}
         </li>)}</ul>
       {!data[list].length && <p>No {list} listed for this company.</p>}
       {!!search && !data[list].some(item => item.name.toLowerCase().includes(search.trim().toLowerCase())) && <p>No matching {list}.</p>}
     </VisitSheet>}
-    {editor && <CompanyItemEditor path={path + '/items/' + editor.list} writable={admin} ingredient={editor.list === 'ingredients'} id={editor.id}
+    {editor && <CompanyItemEditor path={path + '/items/' + editor.list} writable={editor.id ? canEdit : admin} recovery={!live} ingredient={editor.list === 'ingredients'} id={editor.id}
       files={data[editor.list].find(i => i.id === editor.id)?.attachments} onClose={() => setEditor(null)} onSaved={saved} />}
   </>;
 }

@@ -731,7 +731,7 @@ export function registerSourceRoutes(app: any, deps: {
     } catch (cause) { return editError(res, await permissionError(c, adapter, cause)); }
   }));
 
-  const refreshAfterEdit = new Set<string>();
+  const refreshAfterEdit = new Map<string, string>();
   async function saveAirtableCompany(c: Connection, req: any, res: any, actorId: string) {
     const recordId = req.params.rowId || '';
     const entry: AirtableEditAudit = { operationId: randomUUID(), sourceType: 'airtable', baseId: c.baseId,
@@ -817,7 +817,7 @@ export function registerSourceRoutes(app: any, deps: {
     } catch (cause) {
       await permissionError(c, adapter, cause);
       const warning = 'Saved in Airtable. Refresh required.';
-      refreshAfterEdit.add(c.agencyId);
+      refreshAfterEdit.set(c.agencyId, c.updatedAt);
       cache.requireRefresh(c.agencyId, warning);
       return { refreshRequired: true, warning, readOnly: connections.get(c.agencyId)?.access === 'read' };
     }
@@ -834,7 +834,7 @@ export function registerSourceRoutes(app: any, deps: {
     serialize, withAssignmentLock: (id, fn) => deps.companyRemoval?.withRemoval(id, fn) ?? fn(),
     connection: id => connections.get(id), state: cache.state, adapter: airtable, eligible: editorEligibility,
     permissionError, ledger: store.airtableLedger, limit: limitWrites, blocked: deps.staged,
-    republish: republishAirtable,
+    republish: republishAirtable, refreshAfterEdit: id => refreshAfterEdit.get(id) === connections.get(id)?.updatedAt,
   });
   const write = mutation(async (req: any, res: any, { id, user }: any) => {
       if (blocked(res))

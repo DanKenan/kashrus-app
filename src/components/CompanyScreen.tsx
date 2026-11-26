@@ -50,7 +50,8 @@ export function CompanyScreen({ company, role, connection, yearlyCount, timeZone
           <h3 className="text-xl font-semibold">Company details</h3>
           {sheetEditing
             ? <SheetRecordEditor section="companies" row={company} inlineCompany onClose={onClose} onSaved={sourceSaved} />
-            : canWrite && connection && (!connection.status || connection.status === 'ok') && canEditAirtableCompany(role, connection)
+            : canWrite && connection && (!connection.status || connection.status === 'ok' ||
+                connection.status === 'stale' && connection.error === 'Saved in Airtable. Refresh required.') && canEditAirtableCompany(role, connection)
             ? <AirtableCompanyDetails key={JSON.stringify([company.id, connection.baseId])} company={company} connection={connection} onSaved={sourceSaved} />
             : <CompanyDetails company={company} connection={connection} editable={canWrite && canEdit(role, connection)} onSaved={sourceSaved} />}
         </section>}
