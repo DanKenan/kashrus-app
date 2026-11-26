@@ -2,11 +2,12 @@ import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { AddAudit, AirtableEditAudit, EditAudit } from './tagged-row.ts';
-import type { Backup } from './cache.ts';
+import type { Backup, ContactSnapshot } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
 export interface Connection {
   airtableDirectRemoval?: boolean;
+  contactsVersion?: string;
   sheetsPilot?: import('./google-sheets.ts').TaggedTable; // Existing Fee pilot connections
   sheetsTables?: Partial<Record<'companies' | 'ingredients' | 'products', import('./google-sheets.ts').TaggedTable>>;
   oauth?: Partial<Record<import('./oauth.ts').OAuthProvider, import('./oauth.ts').OAuthRecord>>;
@@ -69,6 +70,20 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     if (db) { const snap = await db.collection(collection).doc(id).get(); return snap.exists ? snap.data() : null; }
     try { return JSON.parse(await fs.readFile(file(collection, id), 'utf8')); }
     catch (e: any) { if (e.code === 'ENOENT') return null; throw e; }
+  }
+  const contactCollection = 'sourceContactSnapshots';
+  async function loadContacts(agencyId: string, key: string): Promise<ContactSnapshot | null> {
+    const saved = await read(contactCollection, agencyId);
+    if (saved?.key !== key || typeof saved?.snapshot !== 'string') return null;
+    const snapshot = JSON.parse(saved.snapshot) as ContactSnapshot;
+    if (!Array.isArray(snapshot.contacts) || !Number.isFinite(Date.parse(snapshot.lastReadAt))) throw Error('Invalid contact snapshot');
+    return snapshot;
+  }
+  async function saveContacts(agencyId: string, key: string, snapshot: ContactSnapshot | null) {
+    const encoded = JSON.stringify(snapshot);
+    // Keep one atomically replaceable document comfortably below Firestore's document limit.
+    if (Buffer.byteLength(encoded) > 750 * 1024) throw Error('Airtable contact snapshot is too large');
+    await commit([{ collection: contactCollection, id: agencyId, ...(snapshot && { doc: { key, snapshot: encoded } }) }]);
   }
   async function save(connection: Connection, backups: Backup[] = [], previousUpload?: Connection['upload']) {
     if (deps.staged()) return;
@@ -201,6 +216,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
   async function remove(c:Connection) {
     if(deps.staged())throw Error('Writes blocked');
     const removals = [{collection:'sourceConnections',id:c.agencyId},...Array.from({length:c.upload?.parts||0},(_,i)=>({collection:'sourceUploads',id:uploadPart(c.agencyId,c.upload!,i)}))];
+    if (c.sourceType === 'airtable' || c.contactsVersion) removals.push({ collection: contactCollection, id: c.agencyId });
     if (deps.db()) await commit(removals);
     else await localWrite(async () => { await commit(removals.slice(0,1)); await commit(removals.slice(1)).catch(retryLocalCleanup); });
   }
@@ -266,7 +282,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
     return (await list(auditCollection)).filter(entry => entry[field] === spreadsheetId);
   }
 
-  return { saveEditAudit, addLedger, sheetAdds, retryLocalCleanup, reclaimLocalUploads,
+  return { saveEditAudit, addLedger, sheetAdds, retryLocalCleanup, reclaimLocalUploads, loadContacts, saveContacts,
     connections: async () => (await list('sourceConnections')).map(normalizeConnection), save, load, raw, saveUpload, loadUpload, remove };
 }
 // Read legacy connection settings without rewriting source values.

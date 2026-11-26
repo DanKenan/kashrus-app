@@ -12,11 +12,11 @@ import { summarizeValues, customFieldTypes, isMappedCustomField, type SourceSect
 import { createConnector, type SourceSettings } from './stubs.ts';
 import { createSourceCache, nextNightlyRun } from './cache.ts';
 import { encryptKey, decryptKey, keyHint } from './crypto.ts';
-import { guessMapping } from './mapping.ts';
+import { guessMapping, normalizeContactMapping, resolveContactMapping } from './mapping.ts';
 import { normalizeConnection, createSourceStore, type Connection } from './store.ts';
 import type { AddTarget, AirtableEditAudit, Change, Edit } from './tagged-row.ts';
 import { cellText } from './tabular.ts';
-import type { Company, SourceMapping } from './types.ts';
+import type { Company, SourceConnector, SourceMapping, SourceTable } from './types.ts';
 
 const unreadableKey = "The saved key can't be read. Enter the key again in Settings.";
 class SavedKeyError extends Error {
@@ -34,6 +34,10 @@ function settings(body: any, mapping = true) {
   const m = body.mapping;
   const str = (v: any) => typeof v === 'string' && v.length <= 200;
   if (!m || typeof m !== 'object' || Array.isArray(m)) throw Error('Invalid mapping');
+  if (m.contacts !== undefined) {
+    if (body.sourceType !== 'airtable') throw Error('Airtable contacts require an Airtable source.');
+    m.contacts = normalizeContactMapping(m.contacts);
+  }
   for (const kind of ['companies', 'ingredients', 'products']) {
     const c = m[kind];
     if (body.sourceType !== 'airtable' && kind !== 'companies' && c?.table === '') continue;
@@ -91,6 +95,12 @@ function companySourceIdentity(c: Connection | undefined) {
   if (!c?.mapping.companies?.table) return undefined;
   const { file, table } = c.mapping.companies;
   return createHash('sha256').update(JSON.stringify([c.sourceType, file?.id || c.baseId, table])).digest('base64url');
+}
+function contactSourceKey(c: Connection | undefined) {
+  if (c?.sourceType !== 'airtable') return undefined;
+  return createHash('sha256').update(JSON.stringify([
+    companySourceIdentity(c), c.contactsVersion, c.mapping.contacts,
+  ])).digest('base64url');
 }
 
 type LinkCompany = Pick<Company, 'id' | 'sourceKey' | 'name'>;
@@ -258,7 +268,28 @@ export function registerSourceRoutes(app: any, deps: {
     }); }, Math.min(3600_000, 5000 * 3 ** Math.min(attempt, 10)));
     job.timer.unref();
   }
-  function refresh(id: string): Promise<any> {
+  async function refreshContacts(c: Connection, adapter?: SourceConnector, tables?: SourceTable[]) {
+    const id = c.agencyId, key = contactSourceKey(c);
+    if (!key) return;
+    const previous = cache.contacts(id, key, !!c.mapping.contacts);
+    let configured = previous.configured;
+    try {
+      if (!adapter?.listTables || !adapter.readContacts) throw Error('Airtable contacts unavailable');
+      const mapping = resolveContactMapping(tables ?? await adapter.listTables(), c.mapping.companies.table, c.mapping.contacts);
+      if (!mapping || [c.mapping.ingredients.table, c.mapping.products.table].includes(mapping.table)) {
+        if (previous.lastReadAt) await store.saveContacts(id, key, null);
+        cache.setContacts(id, key, { contacts: [], configured: false, status: 'not_configured', lastReadAt: null });
+        return;
+      }
+      configured = true;
+      const snapshot = { contacts: await adapter.readContacts(mapping), lastReadAt: new Date().toISOString() };
+      await store.saveContacts(id, key, snapshot);
+      cache.setContacts(id, key, { ...snapshot, configured, status: 'ok' });
+    } catch {
+      cache.setContacts(id, key, { ...previous, configured, status: previous.lastReadAt ? 'stale' : 'error' });
+    }
+  }
+  function refresh(id: string, tables?: SourceTable[]): Promise<any> {
     if (flights.has(id)) return flights.get(id)!;
     last.set(id, Date.now());
     const start = Date.now();
@@ -267,7 +298,9 @@ export function registerSourceRoutes(app: any, deps: {
     const p = (async () => {
       await saves.get(id)?.catch(() => {});
       const c = connections.get(id)!;
-      const cached = await cache.refresh(id);
+      let adapter: SourceConnector | undefined;
+      const cached = await cache.refresh(id, () => adapter = connector(c));
+      const contactRefresh = refreshContacts(c, adapter, tables);
       if (cached.ok) await bindSheetArchives(c).catch(() => console.warn('[sources] company archive binding will retry'));
       const result = keyErrors.has(id) ? { ...cached, ok: false, error: unreadableKey } : cached;
       if(c.sourceType==='upload') return {ok:result.ok,status:status(id),calls:0,refreshedAt:cache.state(id).refreshedAt||null};
@@ -288,6 +321,7 @@ export function registerSourceRoutes(app: any, deps: {
         }
         else if (toSave.length) retrySave(id, c, updated, toSave);
       } catch { console.warn(`[sources] persistence failed agency=${id}`); backupErrors.add(id); cache.setKnownHashes(id, c.backupHashes); retrySave(id, c, updated, toSave); }
+      await contactRefresh;
       console.info(`[sources] agency=${id} ok=${result.ok} calls=${result.calls} ms=${Date.now() - start}`);
       return { ok: result.ok, status: status(id), calls: result.calls, refreshedAt: cache.state(id).refreshedAt || null };
     })().finally(() => flights.delete(id));
@@ -446,6 +480,9 @@ export function registerSourceRoutes(app: any, deps: {
       unconfirmed.delete(id);
       connections.set(id, c);
       cache.reset(id);
+      cache.resetContacts(id);
+      if (old?.sourceType === 'airtable')
+          await store.saveContacts(id, '', null).catch(() => console.warn('[sources] contact snapshot cleanup failed'));
       cache.publish(id, data);
       schedule(id);
       res.json(safe(id));
@@ -646,6 +683,7 @@ export function registerSourceRoutes(app: any, deps: {
       uploads.delete(id);
       drafts.delete(id);
       cache.reset(id);
+      cache.resetContacts(id);
       oauth.clear(id);
       baseWriteEligibility.delete(id);
       keyErrors.delete(id);
@@ -944,12 +982,22 @@ export function registerSourceRoutes(app: any, deps: {
       const config = c.mapping[kind], table = validation.tables?.find(t => t.name === config.table);
       if (!table || Object.entries(config).some(([field, column]) => field !== 'table' && typeof column === 'string' && !table.columns.includes(column))) return res.status(400).json({ error: 'Mapped tables and columns must exist in the source.' });
     }
+    if (c.mapping.contacts) {
+      try { c.mapping.contacts = resolveContactMapping(validation.tables ?? [], c.mapping.companies.table, c.mapping.contacts); }
+      catch (error) { return res.status(400).json({ error: (error as Error).message }); }
+      if (sections.some(section => c.mapping[section].table === c.mapping.contacts?.table))
+        return res.status(400).json({ error: 'Airtable contacts must use a separate table.' });
+    }
+    c.contactsVersion = old?.sourceType === 'airtable' && contactSourceKey({ ...c, contactsVersion: old.contactsVersion }) === contactSourceKey(old)
+      ? old.contactsVersion : randomUUID();
+    if (!c.contactsVersion) delete c.contactsVersion;
     let keyChanged = false;
     if (plain && old) {
       try { keyChanged = plain !== decryptKey(old.encryptedKey, deps.secret(), id); }
       catch { keyChanged = true; }
     }
-    const changed = !old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || JSON.stringify(old.mapping) !== JSON.stringify(c.mapping) || keyChanged;
+    const coreMapping = (mapping: SourceMapping) => ({ ...mapping, contacts: undefined });
+    const changed = !old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || JSON.stringify(coreMapping(old.mapping)) !== JSON.stringify(coreMapping(c.mapping)) || keyChanged;
     if (changed) { c.backupHashes = {}; delete c.lastRefresh; }
     if (old?.backupParts) c.backupParts = old.backupParts;
     const job = pending.get(id); clearTimeout(job?.timer); pending.delete(id);
@@ -957,10 +1005,16 @@ export function registerSourceRoutes(app: any, deps: {
     uploads.delete(id);
     backupErrors.delete(id);
     connections.set(id, c); keyErrors.delete(id);
+    const previousContactKey = contactSourceKey(old);
+    if (previousContactKey && previousContactKey !== contactSourceKey(c)) {
+      if (cache.contacts(id, previousContactKey).lastReadAt)
+        await store.saveContacts(id, previousContactKey, null).catch(() => console.warn('[sources] contact snapshot cleanup failed'));
+      cache.resetContacts(id);
+    }
     if (c.access === 'readwrite') baseWriteEligibility.set(id, validation.eligibility);
-    if (changed && (!old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || keyChanged || JSON.stringify({ ...old.mapping, valueAssignments: undefined }) !== JSON.stringify({ ...c.mapping, valueAssignments: undefined }))) cache.reset(id);
+    if (changed && (!old || old.baseId !== c.baseId || old.sourceType !== c.sourceType || keyChanged || JSON.stringify({ ...coreMapping(old.mapping), valueAssignments: undefined }) !== JSON.stringify({ ...coreMapping(c.mapping), valueAssignments: undefined }))) cache.reset(id);
     else cache.reassign(id, c.mapping);
-    res.json(safe(id)); schedule(id); void serialize(id, () => refresh(id));
+    res.json(safe(id)); schedule(id); void serialize(id, () => refresh(id, validation.tables));
   }));
   app.post('/api/sources/test', handler(async (req: any, res: any, { id }: any) => {
     try { settings(req.body, false); } catch (e: any) { return res.status(400).json({ error: e.message }); }
@@ -972,10 +1026,16 @@ export function registerSourceRoutes(app: any, deps: {
         (!result.ok || result.access !== 'readwrite')) baseWriteEligibility.delete(id);
     if (!result.ok) return res.json({ ok: false, error: result.error, calls: adapter.calls() });
     const guess = guessMapping(result.tables || []);
+    if (c.sourceType === 'airtable') {
+      const companyTable = (old?.baseId === c.baseId && old?.mapping.companies.table) || guess.mapping.companies.table;
+      const contacts = companyTable && resolveContactMapping(result.tables ?? [], companyTable);
+      if (contacts) guess.mapping.contacts = contacts;
+    }
     const preferred = new Set([guess.mapping.companies.table, guess.mapping.ingredients.table, guess.mapping.products.table]);
     const tables = [...(result.tables || [])].sort((a, b) => Number(preferred.has(b.name)) - Number(preferred.has(a.name)));
     let samples;
-    try { samples = adapter.samples ? await adapter.samples(tables.slice(0, 15)) : {}; }
+    try { samples = adapter.samples ? await adapter.samples(tables.filter(table => c.sourceType !== 'airtable' ||
+      (table.name !== 'Contacts' && table.name !== c.mapping.contacts?.table)).slice(0, 15)) : {}; }
     catch { return res.json({ ok: false, error: 'Source preview failed', calls: adapter.calls() }); }
     res.json({ ...result, guess, samples, calls: adapter.calls() });
   }));
@@ -1277,6 +1337,12 @@ export function registerSourceRoutes(app: any, deps: {
       const files = await store.loadUpload(c);
       uploads.set(c.agencyId,files);
     }
+    const key = contactSourceKey(c);
+    if (key) {
+      const snapshot = await store.loadContacts(c.agencyId, key).catch(() => null);
+      if (snapshot) cache.setContacts(c.agencyId, key, { ...snapshot, configured: true, status: 'ok' });
+    }
+    if (connections.has(c.agencyId)) return;
     connections.set(c.agencyId,c);
     cache.setKnownHashes(c.agencyId,c.backupHashes || {});
     schedule(c.agencyId);
@@ -1334,6 +1400,7 @@ export function inspectionSourceAccessor(cache: ReturnType<typeof createSourceCa
     const connection = connections.get(agencyId), state = cache.state(agencyId);
     return {
       state, identity: companySourceIdentity(connection), connection: connection ? {...connection, fees:{...connection.fees,mashgiach:{...connection.fees?.mashgiach,...Object.fromEntries(state.companies.filter(c=>c.mashgiachFee!==undefined).map(c=>[c.id,{amount:c.mashgiachFee!,currency:'USD'}]))}}} : undefined,
+      airtableContacts: () => cache.contacts(agencyId, contactSourceKey(connection), !!connection?.mapping.contacts),
       listVersion: (companyId: string) => connection?.backupHashes?.[companyId] || '',
       items: (companyId: string, kind: 'ingredient' | 'product') => state.itemsFor(companyId, kind).map(item => ({
         id: item.id, name: item.name, brand: item.brand ?? '', code: 'code' in item ? item.code ?? '' : '',

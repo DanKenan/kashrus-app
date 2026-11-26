@@ -18,7 +18,14 @@ export interface Product {
   certificationRaw?: string; statusRaw?: string; agencyRaw?: string; certifyingAgency?: string; confidence?: number;
   dpm?: Dpm; group1?: boolean; symbolRequired?: boolean; plant?: string; extra: Record<string, string>;
 }
+export interface AirtableContactMapping {
+  table: string; companyLink: string; name: string; phone?: string; email?: string; roles?: string; firstName?: string;
+}
+export interface AirtableContact {
+  id: string; companyIds: string[]; name: string; phone: string; email: string; roles: string[]; source: 'airtable';
+}
 export interface SourceMapping {
+  contacts?: AirtableContactMapping;
   editableCustomFields?: import('../../lib/sourcePreview.ts').EditableCustomFields;
   companies: { table: string; file?: SourceFile; pk?: string; address?: string; companyFee?: string; mashgiachFee?: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
   ingredients: { table: string; file?: SourceFile; pk?: string; companyLink?: string; name?: string; brand?: string; certification?: string; agency?: string; status?: string; plant?: string; expiresOn?: string };
@@ -28,7 +35,8 @@ export interface SourceMapping {
 }
 export interface SourceData { companies: Company[]; otherCompanies?: Pick<Company, 'id' | 'name' | 'type' | 'sourceKey' | 'archiveKey'>[]; ingredients: Ingredient[]; products: Product[] }
 export interface SourceFile { id: string; name: string }
-export interface SourceTable { name: string; columns: string[] }
+export interface AirtableField { name: string; type: string; linkedTableId?: string; resultType?: string }
+export interface SourceTable { name: string; columns: string[]; id?: string; fields?: AirtableField[] }
 export type SourceSamples = Record<string, { id: string; fields: Record<string, string> }[]>;
 export interface ConnectionResult { ok: boolean; access?: 'read' | 'readwrite'; tables?: SourceTable[]; error?: string }
 export interface SourceConnector {
@@ -37,6 +45,7 @@ export interface SourceConnector {
   listCompanies(): Promise<Company[]>;
   listItems(companyId: string, kind: 'ingredient' | 'product'): Promise<(Ingredient | Product)[]>;
   loadAll?(): Promise<SourceData>;
+  readContacts?(mapping: AirtableContactMapping): Promise<AirtableContact[]>;
   samples?(tables: SourceTable[]): Promise<SourceSamples>;
   listTables?(): Promise<SourceTable[]>;
   readRows?(table: string, file?: SourceFile): Promise<SourceRow[]>;

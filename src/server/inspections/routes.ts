@@ -339,12 +339,32 @@ export function registerInspectionRoutes(app: any, deps: {
     const read = await feeEvents.markRead(a, req.params.id, u.id);
     res.status(read ? 200 : 404).json({ read });
   }));
-  app.get('/api/inspections/company-info/:placeId', handler(true, (req: any, res: any, u: Person, a: string) => {
-    const id = req.params.placeId, entry = removal(a, id);
+  function canReadCompanyInfo(a: string, id: string, u: Person) {
+    const entry = removal(a, id);
     const archived = u.role === 'admin' && entry?.archived && !entry.requested && !entry.deletedAt;
-    if ((!allPlaces(a).some(c => c.id === id) && !archived) || !visible(a, id, u)) return res.status(404).json({ error: 'Place not found' });
+    return (allPlaces(a).some(c => c.id === id) || archived) && visible(a, id, u);
+  }
+  app.get('/api/inspections/company-info/:placeId', handler(false, (req: any, res: any, u: Person, a: string) => {
+    const id = req.params.placeId;
+    if (!canReadCompanyInfo(a, id, u)) return res.status(404).json({ error: 'Place not found' });
+    res.set?.('Cache-Control', 'private, no-store');
     const value = info(a, id);
-    res.json({ ...value, contactsRevision: contactsRevision(value.contacts) });
+    res.json(u.role === 'mashgiach'
+      ? { ...value, contacts: [] }
+      : { ...value, contactsRevision: contactsRevision(value.contacts) });
+  }));
+  app.get('/api/inspections/company-info/:placeId/airtable-contacts', handler(true, (req: any, res: any, u: Person, a: string) => {
+    const id = req.params.placeId;
+    if (!canReadCompanyInfo(a, id, u)) return res.status(404).json({ error: 'Place not found' });
+    res.set?.('Cache-Control', 'private, no-store');
+    const source = deps.source(a);
+    const { contacts, ...snapshot } = source.airtableContacts();
+    const linked = source.state.companies.some(c => c.id === id) || source.state.otherCompanies?.some(c => c.id === id);
+    res.json({
+      ...snapshot,
+      contacts: linked ? contacts.filter(contact => contact.companyIds.includes(id)).map(({ companyIds: _links, ...contact }) => contact) : [],
+      ...(snapshot.status === 'stale' && { timeZone: zone(a) }),
+    });
   }));
   app.put?.('/api/inspections/company-info/:placeId', handler('only', async (req: any, res: any, _u: Person, a: string) => {
     const id = req.params.placeId;

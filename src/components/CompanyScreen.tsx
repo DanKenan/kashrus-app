@@ -5,7 +5,7 @@ import { foodInput } from './ChecklistTemplatesScreen';
 import { useVisitFocus, visitButton, visitRequest } from './FactoryVisitScreen';
 import { setupField, setupPrimary } from './MappingStep';
 import { SheetRecordEditor } from './SheetRecordEditor';
-import { emptyContact, getPlaceInfo, mapsUrl, type CompanyInfo, type Contact, type PlaceInfo } from '../lib/companyInfo';
+import { emptyContact, getAirtableContacts, getPlaceInfo, groupCompanyContacts, mapsUrl, type AirtableContactsResponse, type CompanyInfo, type Contact, type PlaceInfo } from '../lib/companyInfo';
 import { amountValue, feesRequest, getFees, leftLine, money, type CompanyFee, type FeePlace } from '../lib/fees';
 import { sourceRequest, type SourceConnection } from '../lib/sources';
 import { canEdit, canEditAirtableCompany, readAirtableCompany, updateAirtableCompany, uncertainCompanyEdit, type AirtableCompanyBaseline, providers, saveCompany } from '../lib/sourcesSetup';
@@ -368,8 +368,31 @@ function CompanyFees({ id, yearlyCount, sourceRevision }: { id: string; yearlyCo
 }
 
 type CompanyInfoWithRevision = CompanyInfo & { contactsRevision?: string };
+function ContactDetails({ name, roles, phone, email }: { name?: string; roles: string; phone: string; email?: string }) {
+  return <div className="space-y-1">
+    {name && <p dir="auto" className="break-words font-semibold">{name}</p>}
+    <p dir="auto" className="break-words">{roles || 'Role not specified'}</p>
+    {phone && <a className="block min-h-11 break-words" href={`tel:${phone}`}>{phone}</a>}
+    {email && <a className="block min-h-11 break-words" href={`mailto:${email}`}>{email}</a>}
+  </div>;
+}
+function AirtableContactsStatus({ snapshot }: { snapshot: AirtableContactsResponse | null }) {
+  if (!snapshot || snapshot.status === 'loading') return <p role="status">Loading contacts…</p>;
+  if (snapshot.status === 'error') return <p role="status">Couldn't load Airtable contacts. Try again after the next source refresh.</p>;
+  if (snapshot.status === 'stale' && snapshot.lastReadAt) {
+    const date = new Intl.DateTimeFormat('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      timeZone: snapshot.timeZone, timeZoneName: 'short',
+    }).format(new Date(snapshot.lastReadAt));
+    return <p role="status">Couldn't refresh Airtable contacts. Showing the last saved contacts from {date}.</p>;
+  }
+  if (!snapshot.configured) return <p className="text-ink-soft">Airtable contacts are not connected.</p>;
+  return null;
+}
 function CompanyLocation({ id, role, editable, sourceRevision }: { id: string; role: string; editable: boolean; sourceRevision: number }) {
   const [info, setInfo] = useState<CompanyInfoWithRevision | null>(null);
+  const [airtable, setAirtable] = useState<AirtableContactsResponse | null>(null);
+  const [editingContacts, setEditingContacts] = useState<ReadonlySet<number>>(() => new Set());
   const [draft, setDraft] = useState<Partial<PlaceInfo>>({});
   const [contactDraft, setContactDraft] = useState<{ contacts: Contact[]; baseline: CompanyInfoWithRevision } | null>(null);
   const [contactsConflict, setContactsConflict] = useState(false);
@@ -387,10 +410,23 @@ function CompanyLocation({ id, role, editable, sourceRevision }: { id: string; r
       .catch(cause => { if (read === readSequence.current) setError(cause.message); });
     return () => { readSequence.current += 1; };
   }, [id, showContacts, sourceRevision]);
-  if (!info) return error ? <p role="alert" className="text-bad">{error}</p> : <p role="status">Loading company info…</p>;
+  useEffect(() => {
+    if (!showContacts) return;
+    let active = true;
+    void getAirtableContacts(id).then(snapshot => { if (active) setAirtable(snapshot); })
+      .catch(() => {
+        if (active) setAirtable({ contacts: [], configured: false, status: 'error', lastReadAt: null });
+      });
+    return () => { active = false; };
+  }, [id, showContacts, sourceRevision]);
+  if (!info) return error ? <p role="alert" className="text-bad">{error}</p> : <>
+    <p role="status">Loading company info…</p>
+    {showContacts && <><h4 className="font-semibold">Contacts</h4><p role="status">Loading contacts…</p></>}
+  </>;
 
   const { address, phone } = { ...info, ...draft };
   const contacts = contactDraft?.contacts ?? info.contacts;
+  const cards = showContacts ? groupCompanyContacts(contacts, airtable?.contacts ?? []) : [];
   const patch = {
     ...(address !== info.address && { address }),
     ...(phone !== info.phone && { phone }),
@@ -410,6 +446,7 @@ function CompanyLocation({ id, role, editable, sourceRevision }: { id: string; r
       setInfo(result);
       setDraft({});
       setContactDraft(null);
+      setEditingContacts(new Set());
       setSaved(true);
     } catch (cause) {
       if ((cause as { status?: number } | null)?.status === 409) setContactsConflict(true);
@@ -453,6 +490,13 @@ function CompanyLocation({ id, role, editable, sourceRevision }: { id: string; r
   function changeContact(index: number, next: Partial<Contact>) {
     changeContacts(contacts.map((contact, i) => i === index ? { ...contact, ...next } : contact));
   }
+  function editContact(index: number) {
+    setEditingContacts(current => new Set([...current, index]));
+  }
+  function removeContact(index: number) {
+    changeContacts(contacts.filter((_, i) => i !== index));
+    setEditingContacts(current => new Set([...current].filter(i => i !== index).map(i => i > index ? i - 1 : i)));
+  }
 
   return <form className="space-y-4" onSubmit={submit}>
     {editable ? <fieldset disabled={busy} className="space-y-4">
@@ -472,30 +516,45 @@ function CompanyLocation({ id, role, editable, sourceRevision }: { id: string; r
     </div>}
     {showContacts && <>
       <h4 className="font-semibold">Contacts</h4>
-      {!contacts.length && <p className="text-ink-soft">No contacts yet</p>}
-      {contacts.map((contact, index) => editable ?
-        <fieldset key={contact.id ?? index} disabled={busy} className="min-w-0 space-y-2 rounded-lg border border-line p-4">
-          <legend dir="auto" className="max-w-full break-words px-1">{contact.name || 'Contact'}</legend>
-          <label className="block">Name<input dir="auto" required maxLength={80} className={foodInput} value={contact.name} onChange={event => changeContact(index, { name: event.target.value })} /></label>
-          <label className="block">Role<select className={foodInput}
-            value={contactRoles.includes(contact.role) ? contact.role : 'Other'}
-            onChange={event => changeContact(index, { role: event.target.value === 'Other' ? '' : event.target.value })}>
-            {contactRoles.map(value => <option key={value}>{value}</option>)}<option>Other</option>
-          </select></label>
-          {!contactRoles.includes(contact.role) && <label className="block">Other role<input dir="auto" required maxLength={40} className={foodInput}
-            value={contact.role} onChange={event => changeContact(index, { role: event.target.value })} /></label>}
-          <label className="block">Email<input type="email" maxLength={200} className={foodInput} value={contact.email} onChange={event => changeContact(index, { email: event.target.value })} /></label>
-          <label className="block">Phone<input type="tel" maxLength={40} className={foodInput} value={contact.phone} onChange={event => changeContact(index, { phone: event.target.value })} /></label>
-          <button type="button" className={visitButton} onClick={() => changeContacts(contacts.filter((_, i) => i !== index))}>Delete contact</button>
-        </fieldset> :
-        <div key={contact.id ?? index} className="space-y-2 rounded-lg border border-line p-4">
-          <p dir="auto" className="break-words font-semibold">{contact.name}</p>
-          <p dir="auto" className="break-words">{contact.role}</p>
-          {contact.email && <a className="block min-h-11 break-words" href={`mailto:${contact.email}`}>{contact.email}</a>}
-          {contact.phone && <a className="block min-h-11 break-words" href={`tel:${contact.phone}`}>{contact.phone}</a>}
-        </div>)}
+      <AirtableContactsStatus snapshot={airtable} />
+      {!cards.length && airtable && ['ok', 'not_configured', 'stale'].includes(airtable.status) &&
+        <p className="text-ink-soft">No contacts on file.</p>}
+      {!!cards.length && <ul className="space-y-3">{cards.map(({ app: contact, index, airtable: imported, duplicate }) => {
+        const grouped = !!contact && !!imported;
+        return <li key={contact ? `shutfey:${contact.id ?? index}` : `airtable:${imported?.id}`} className="min-w-0 space-y-3 rounded-lg border border-line p-4">
+          <p className="text-sm text-ink-soft">{grouped ? 'Airtable + Shutfey' : imported ? 'Airtable' : 'Shutfey'}</p>
+          {imported && <div className="space-y-1">
+            {grouped && <p className="text-sm text-ink-soft">Airtable</p>}
+            <ContactDetails name={imported.name || 'Contact'} roles={imported.roles.join(' · ')} phone={imported.phone} email={imported.email} />
+            <p className="text-sm text-ink-soft">Managed in Airtable · Read only</p>
+          </div>}
+          {grouped && <p className="text-sm text-ink-soft">This contact also appears in Shutfey.</p>}
+          {duplicate && <p className="text-sm text-ink-soft">Multiple contacts share this email.</p>}
+          {contact && index !== undefined && (editable && editingContacts.has(index)
+            ? <fieldset disabled={busy} className="min-w-0 space-y-2">
+              <legend dir="auto" className="max-w-full break-words font-semibold">{contact.name || 'Contact'}</legend>
+              <label className="block">Name<input dir="auto" required maxLength={80} className={foodInput} value={contact.name} onChange={event => changeContact(index, { name: event.target.value })} /></label>
+              <label className="block">Role<select className={foodInput}
+                value={contactRoles.includes(contact.role) ? contact.role : 'Other'}
+                onChange={event => changeContact(index, { role: event.target.value === 'Other' ? '' : event.target.value })}>
+                {contactRoles.map(value => <option key={value}>{value}</option>)}<option>Other</option>
+              </select></label>
+              {!contactRoles.includes(contact.role) && <label className="block">Other role<input dir="auto" required maxLength={40} className={foodInput}
+                value={contact.role} onChange={event => changeContact(index, { role: event.target.value })} /></label>}
+              <label className="block">Email<input type="email" maxLength={200} className={foodInput} value={contact.email} onChange={event => changeContact(index, { email: event.target.value })} /></label>
+              <label className="block">Phone<input type="tel" maxLength={40} className={foodInput} value={contact.phone} onChange={event => changeContact(index, { phone: event.target.value })} /></label>
+              <button type="button" className={visitButton} onClick={() => removeContact(index)}>Delete contact</button>
+            </fieldset>
+            : <div className="space-y-2">
+              {grouped && <p className="text-sm text-ink-soft">Shutfey</p>}
+              <ContactDetails name={contact.name === imported?.name ? undefined : contact.name || 'Contact'} roles={contact.role}
+                phone={contact.phone} email={grouped ? undefined : contact.email} />
+              {editable && <button type="button" className={visitButton} disabled={busy} onClick={() => editContact(index)}>Edit Shutfey contact</button>}
+            </div>)}
+        </li>;
+      })}</ul>}
       {editable && <button type="button" className={visitButton} disabled={busy || contacts.length >= 20}
-        onClick={() => changeContacts([...contacts, emptyContact()])}>Add contact</button>}
+        onClick={() => { editContact(contacts.length); changeContacts([...contacts, emptyContact()]); }}>Add contact</button>}
       {contacts.length >= 20 && <p>Maximum 20 contacts.</p>}
     </>}
     {saved && <p role="status" className="text-good">Contacts saved.</p>}

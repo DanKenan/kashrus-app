@@ -10,6 +10,7 @@ globalThis.localStorage = { getItem() { return null; } };
 const calls = [];
 let contactFailure = true;
 let info = { address: '1 Test Street', phone: '555-0100', contacts: [{ id: 'owner', name: 'Test Owner', role: 'Owner', email: '', phone: '' }], contactsRevision: 1 };
+let imported = { contacts: [], configured: false, status: 'not_configured', lastReadAt: null };
 let rate = 45;
 let companyOverride = null;
 let sheetName = 'Test Bakery';
@@ -22,6 +23,7 @@ const path = {
   sheet: '/api/sources/sheet-editor/companies/test',
   fees: '/api/inspections/fees',
   contact: '/api/inspections/company-info/test',
+  airtable: '/api/inspections/company-info/test/airtable-contacts',
   visit: '/api/visits/factories/test',
   location: '/api/visits/places/test/info',
 };
@@ -69,6 +71,7 @@ globalThis.fetch = async (url, options = {}) => {
     return Response.json(info);
   }
   if (url === path.contact) return Response.json(info);
+  if (url === path.airtable) return Response.json(imported);
   if (url === path.location) return Response.json({ address: info.address, phone: info.phone });
   if (url === path.visit) return Response.json({ fee: { amount: rate, currency: 'USD' } });
   throw Error('Unexpected request ' + url);
@@ -109,6 +112,7 @@ assert.equal(panelProps(admin, 'Company details').type, SheetRecordEditor);
 const fees = await panel(admin, 'Fees');
 const location = await panel(admin, 'Location & contacts');
 assert.match(location.html(), /maps\/search.*tel:555-0100/);
+assert.match(location.html(), /Airtable contacts are not connected\./);
 assert.deepEqual([details, fees, location].map(form => form.buttons().find(b => /Save/.test(b.label)).label),
   ['Save company details', 'Save fees', 'Save contacts']);
 
@@ -152,7 +156,7 @@ contactFailure = false;
 await location.submit();
 assert.match(location.text(), /Contacts saved/);
 await location.click('Add contact');
-const newContactName = location.find(node => node.type === 'label' && node.props.children[0] === 'Name')[1];
+const newContactName = location.find(node => node.type === 'label' && node.props.children[0] === 'Name')[0];
 newContactName.props.children[1].props.onChange({ target: { value: 'Test Manager' } });
 await location.render();
 const rolePicker = location.find(node => node.type === 'select' && node.props.value === 'Other')[0];
@@ -160,10 +164,12 @@ rolePicker.props.onChange({ target: { value: 'Manager' } });
 await location.render();
 await location.submit();
 assert.deepEqual(calls.at(-1)[2], { contactsRevision: 1, contacts: [info.contacts[0], { name: 'Test Manager', role: 'Manager', email: '', phone: '' }] });
-await location.click('Delete contact', 1);
+await location.click('Edit Shutfey contact', 0);
+await location.click('Delete contact');
 await location.submit();
 assert.deepEqual(calls.at(-1)[2], { contactsRevision: 2, contacts: [info.contacts[0]] });
 
+await location.click('Edit Shutfey contact');
 await fill(location, 'input', 'Test Owner', 'My contact draft');
 await fill(location, 'input', '555-0101', '555-0102');
 info = { ...info, contactsRevision: 4, contacts: [{ ...info.contacts[0], name: 'Newer contact' }] };
@@ -193,9 +199,10 @@ for (const role of ['coordinator', 'mashgiach']) {
   assert.doesNotMatch(fees.text(), /What the company pays|1200|Save/);
   assert.match(location.text(), /1 Test Street.*555-0101/);
   assert.doesNotMatch(location.text(), /Add contact|Save/);
-  assert.equal(location.text().includes('Newer contact'), role === 'coordinator');
+  assert.equal(location.html().includes('Newer contact'), role === 'coordinator');
   assert.deepEqual(calls.slice(start).map(([method, url]) => [method, url]),
-    [['GET', path.visit], ['GET', role === 'coordinator' ? path.contact : path.location]]);
+    role === 'coordinator' ? [['GET', path.visit], ['GET', path.contact], ['GET', path.airtable]]
+      : [['GET', path.visit], ['GET', path.location]]);
 }
 
 const sourceMapping = { companies: { name: 'Name', address: 'Address', type: 'Type' } };
@@ -220,4 +227,41 @@ assert.doesNotMatch(archive.text(), /Fees/);
 assert.match(archive.text(), /Remove company/);
 const archiveLocation = await panel(archive, 'Location & contacts');
 assert.doesNotMatch(archiveLocation.text(), /Save contacts/);
+
+const airtableContact = (id, name, email, roles = []) => ({ id, name, email, roles, source: 'airtable', phone: '555-0199' });
+info = { ...info, contacts: [
+  { id: 'match', name: 'Bert Shutfey', email: ' BERT@example.test ', role: 'Manager', phone: '555-0188' },
+  { id: 'duplicate1', name: 'Deb', email: 'deb@example.test', role: 'Owner', phone: '' },
+  { id: 'duplicate2', name: 'Dee', email: 'DEB@example.test', role: 'Office', phone: '' },
+  { id: 'no-email', name: 'Aly', email: ' ', role: 'Office', phone: '' },
+] };
+imported = { configured: true, status: 'stale', lastReadAt: '2026-11-25T18:00:00Z', timeZone: 'America/Los_Angeles', contacts: [
+  airtableContact('rec1', 'Bert Airtable', 'bert@example.test', ['Owner', 'Secondary Contact']),
+  airtableContact('rec2', 'Deb Airtable', 'deb@example.test'),
+  airtableContact('rec3', 'Aly', ''),
+] };
+const combined = await panel(await mount(CompanyScreen, { ...props, role: 'admin', connection: { sourceType: 'airtable' } }).render(), 'Location & contacts');
+const combinedHtml = combined.html();
+assert.equal(combined.find(node => node.type === 'li').length, 6, 'only the unique cross-source email groups');
+assert.match(combinedHtml, /Airtable \+ Shutfey.*Bert Airtable.*Owner · Secondary Contact.*555-0199.*Managed in Airtable · Read only.*This contact also appears in Shutfey\..*Bert Shutfey.*Manager.*555-0188/);
+assert.match(combined.text(), /Multiple contacts share this email\./);
+assert.match(combinedHtml, /Role not specified/);
+assert.match(combinedHtml, /saved contacts from Nov 25, 2026, 10:00 AM PST\./);
+assert.equal(combined.buttons().filter(button => button.label === 'Edit Shutfey contact').length, 4);
+await combined.click('Edit Shutfey contact', 1);
+await fill(combined, 'input', '555-0188', '555-0177');
+await combined.submit();
+assert.equal(calls.at(-1)[1], path.contact);
+assert.equal(calls.at(-1)[2].contacts.length, 4);
+assert.equal(calls.at(-1)[2].contacts[0].phone, '555-0177');
+assert.match(combined.html(), /Bert Airtable.*555-0199/);
+
+info = { ...info, contacts: [] };
+imported = { contacts: [], configured: true, status: 'ok', lastReadAt: '2026-11-25T18:00:00Z' };
+const empty = await panel(await mount(CompanyScreen, { ...props, role: 'coordinator', connection: null }).render(), 'Location & contacts');
+assert.match(empty.text(), /No contacts on file\./);
+assert.doesNotMatch(empty.html(), /Airtable contacts are not connected\./);
+imported = { contacts: [], configured: true, status: 'error', lastReadAt: null };
+await empty.render({ sourceRevision: 1 });
+assert.match(empty.html(), /Couldn&#x27;t load Airtable contacts\. Try again after the next source refresh\./);
 console.log('Company screen roles, source revisions, independent saves, failure recovery, and removal handoff passed.');

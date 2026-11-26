@@ -177,10 +177,15 @@ export default {
    for (const [method, path, body] of [...readRoutes.map(p => ['GET', p]), ...newRoutes, ['POST', '/api/visits/reports', privacyBody]]) {
     const r = await raw('mash', path, method, body), text = r.bytes.toString();
     for (const sentinel of ['60.17', '77.31', 'private119@example.test', '555-0199-contact-private', 'accountant119@example.test']) assert.equal(text.includes(sentinel), false, `${path}: ${sentinel}`);
-    for (const key of ['left', 'companyPays', 'dataFee', 'feeMismatch', 'feeCheck', 'decisions', 'accountant', 'contacts']) assert.equal(new RegExp(`"${key}"\\s*:`).test(text), false, `${path}: ${key}`);
+    const redactedCompanyInfo = method === 'GET' && path === infoPath;
+    if (redactedCompanyInfo) {
+     assert.equal(r.response.status, 200);
+     assert.deepEqual(JSON.parse(text), { address: 'Test address', phone: '555-0100', contacts: [] });
+    }
+    for (const key of ['left', 'companyPays', 'dataFee', 'feeMismatch', 'feeCheck', 'decisions', 'accountant', ...(redactedCompanyInfo ? [] : ['contacts'])]) assert.equal(new RegExp(`"${key}"\\s*:`).test(text), false, `${path}: ${key}`);
     const inspect = value => { if (!value || typeof value !== 'object') return; assert.equal(Object.hasOwn(value, 'per'), false, path); assert.equal(!!value.company && typeof value.company === 'object' && Object.hasOwn(value.company, 'amount'), false, path); for (const child of Object.values(value)) inspect(child); };
     if (r.response.headers.get('content-type')?.includes('json')) inspect(JSON.parse(text));
-    if (newRoutes.some(n => n[0] === method && n[1] === path)) assert.ok([403, 404].includes(r.response.status), `${path}: role gate`);
+    if (!redactedCompanyInfo && newRoutes.some(n => n[0] === method && n[1] === path)) assert.ok([403, 404].includes(r.response.status), `${path}: role gate`);
    }
    for (const [method, path, body] of newRoutes.filter(n => !n[1].includes('/fees') && !n[1].includes('company-info') && !n[1].includes('fee-decision'))) assert.equal((await api('coord', method, path, body)).status, 403, path);
    assert.equal((await api('foreign', 'GET', '/api/inspections/fees')).json.places.length, 0);
