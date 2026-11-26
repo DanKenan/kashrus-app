@@ -180,7 +180,8 @@ export const Header: React.FC<HeaderProps> = ({
   // Don 2026-10-22: "Enter kiosk mode" only on a tablet-size screen (>= 768 px wide); a phone is never a kiosk.
   const isTabletWidth = useMinWidth(768);
   // Don 2026-10-22: "Kiosk tablets" (pairing/unpairing) is management: admin only.
-  const canManageKiosks = currentUser?.role === 'admin';
+  // Don 2026-11-26: Coordinators can also manage kiosk tablets within their server-enforced venue scope.
+  const canManageKiosks = currentUser?.role === 'admin' || currentUser?.role === 'coordinator';
 
   // QA2 #10: the venue name always shows (it truncates with …). With an agency
   // logo the phone header makes room by hiding the word "Shutfey" and keeping
