@@ -132,7 +132,7 @@ export function registerSourceRoutes(app: any, deps: {
   requireAdmin(req: any, res: any): any; timeZone(id: string): string | undefined;
 }) {
   const store = createSourceStore(deps), connections = new Map<string, Connection>();
-  let apiBase: string | undefined = deps.testMode ? 'http://127.0.0.1:1' : undefined;
+  let apiBase: string | undefined;
   const apiBases = new Map<string,string>(), uploads = new Map<string,UploadedFile[]>();
   const drafts = new Map<string,{token:string;files:UploadedFile[]}>();
   const oauth = createOAuth({secret:deps.secret,apiBase:p=>deps.testMode?apiBases.get(p):undefined});
@@ -152,7 +152,7 @@ export function registerSourceRoutes(app: any, deps: {
   }>();
   function airtable(c: Connection) {
     return createAirtableConnector({ baseId: c.baseId, apiKey: storedKey(c), mapping: c.mapping,
-      apiBase: deps.testMode ? apiBase : undefined, contentBase: deps.testMode ? apiBases.get('airtableContent') ?? 'http://127.0.0.1:1' : undefined });
+      apiBase: deps.testMode ? apiBase : undefined, contentBase: deps.testMode ? apiBases.get('airtableContent') : undefined });
   }
   const eligibilityTime = () => deps.now?.().getTime() ?? Date.now();
   async function verifyBaseAccess(c: Connection, adapter: ReturnType<typeof airtable>, editing = false) {
