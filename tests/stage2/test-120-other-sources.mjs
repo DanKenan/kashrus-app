@@ -183,7 +183,9 @@ export default {
             const vendor = (await request('GET', '/api/food-service')).candidates.find(c => c.name === 'Vendor');
             const vendorPath = `/api/sources/rows/companies/${vendor.id}`;
             const vendorItems = `/api/factories/${vendor.id}/items`;
-            await request('GET', vendorItems, undefined, 404);
+            const unmatched = await request('GET', vendorItems);
+            assert.deepEqual(unmatched.ingredients, []);
+            assert.deepEqual(unmatched.products, []);
             await measure('promote vendor with existing links', () => request('PATCH', vendorPath, { fields: { type: 'Factory' } }));
             const promoted = await request('GET', vendorItems);
             assert.deepEqual(promoted.ingredients.map(i => i.name), ['Shared flour']);
@@ -213,7 +215,9 @@ export default {
             await request('PATCH', flourPath, { fields: { companyLink: 'full' } });
             assert.equal((await cachedFlour()).name, 'Renamed flour');
             assert.equal((await request('GET', '/api/sources/connection')).status, 'ok');
-            await request('GET', vendorItems, undefined, 404);
+            const demoted = await request('GET', vendorItems);
+            assert.deepEqual(demoted.ingredients, []);
+            assert.deepEqual(demoted.products, []);
             // Warm P5's agency-local stores before measuring source actions.
             await request('GET', '/api/inspections/fees');
             const fees = await request('GET', '/api/inspections/fees');

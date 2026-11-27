@@ -32,7 +32,8 @@ try {
       relationships: { ingredient: 'Ready', product: 'Read only' },
       companies: [{ id: 'recCedar', name: 'Cedar Milling', ingredients: ['Rolled oats'], products: ['Seed crackers'] }],
     });
-    if (url.endsWith('/connection')) return reply({ ok: true });
+    if (url.endsWith('/connection')) return reply({ status: 'ok' });
+    if (url === '/api/food-service') return reply({ places: [], candidates: [] });
     if (url.endsWith('/items')) return reply({ sourceType:'airtable', access:'readwrite', status:'ok', flexibleMapping:true,
       connectedLists:{ingredients:false,products:true,contacts:false}, mappingWrites:{products:true}, ingredients:[], products:[] });
     if (url === path) return reply({ writable:true, items:[{ id:'recRice', name:'Brown rice flour' }], companies:[] });
@@ -51,7 +52,6 @@ try {
   assert.match(wizard.text(), /Which table stores the connection\?/);
   assert.match(wizard.text(), /Can one item belong to more than one company\?/);
   await wizard.click('Continue');
-  assert.match(wizard.text(), /Review your connection/);
   assert.ok(wizard.text().includes(wrong));
   assert.match(wizard.text(), /Cedar Milling.*Rolled oats.*Seed crackers/);
   assert.equal(button(wizard, 'Save connection').props.disabled, true);
@@ -59,8 +59,12 @@ try {
   await wizard.click('Test mapping');
   assert.equal(button(wizard, 'Save connection').props.disabled, false);
   await wizard.click('Save connection');
+  assert.match(wizard.text(), /Choose food service places/);
+  assert.equal(calls.find(([url, method]) => url.endsWith('/connection') && method === 'PUT')[2].mapping.version, 2);
+  await wizard.click('Continue');
+  assert.match(wizard.text(), /Review your connection/);
+  await wizard.click('Continue');
   assert.match(wizard.text(), /Airtable connection saved\./);
-  assert.equal(calls.at(-1)[2].mapping.version, 2);
 
   for (const role of ['admin','coordinator','mashgiach']) {
     const lists = mount(CompanyItemLists, { companyId:'recCedar', role, revision:0, onSaved() {} });

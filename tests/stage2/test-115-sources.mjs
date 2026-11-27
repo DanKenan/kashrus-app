@@ -111,8 +111,11 @@ export default {
       assert.equal((await ctx.api('POST', '/api/__test__/reads', {})).json.total, 0);
       assert.deepEqual((await api('foreign', 'GET', '/api/sources/values')).json.values, []);
       assert.equal((await api('mash', 'GET', '/api/sources/values')).status, 403);
-      assert.equal(factories.companies.length, 5);
-      for (const c of factories.companies) { assert.equal(c.ingredientCount, 46); assert.equal(c.productCount, 24); }
+      assert.deepEqual(factories.companies.map(c => c.id), rows.Companies.map(c => c.id));
+      for (const [index, c] of factories.companies.entries()) {
+        assert.equal(c.ingredientCount, index < 5 ? 46 : 0);
+        assert.equal(c.productCount, index < 5 ? 24 : 0);
+      }
       assert.equal((await api('admin', 'POST', '/api/sources/refresh', {})).status, 429);
       for (const path of ['/api/factories', '/api/sources/connection']) assert.equal((await api('mash', 'GET', path)).status, 403);
       for (const path of ['/api/sources/test', '/api/sources/refresh']) assert.equal((await api('mash', 'POST', path, body)).status, 403);
@@ -272,9 +275,12 @@ export default {
       assert.equal(final.json.saved, true);
       assert.deepEqual(recordCalls.slice(-3), ['GET', 'PATCH', 'GET']);
       assert.deepEqual(rows.Companies[0].fields, { Name: 'Final', Address: 'New Street', Type: 'Other' });
-      assert.equal((await api('admin', 'GET', '/api/factories')).json.companies.some(c => c.id === 'rec0'), false);
+      const fallback = (await api('admin', 'GET', '/api/factories')).json.companies.find(c => c.id === 'rec0');
+      assert.equal(fallback?.name, 'Final');
+      assert.equal(fallback.ingredientCount, 0);
+      assert.equal(fallback.productCount, 0);
       await documentCases(baseUrl,ctx);
-      return '6 calls per refresh; 5 factories, 46 ingredients and 24 products each; 0 page reads; unchanged backups cost 0 writes';
+      return '6 calls per refresh; 7 factory rows, 5 with mapped items; 0 page reads; unchanged backups cost 0 writes';
     } finally { socket?.close(); await new Promise(r => mock.close(r)); }
   },
 };

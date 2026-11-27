@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { FieldValue } from 'firebase-admin/firestore';
 import type { Template } from './food-service.ts';
 export type DocumentDeps = { db(): any; dataDir: string; staged(): boolean; now(): Date };
-export type FoodServiceDoc = { templates: Record<string, Template>; templateOrder: string[]; marked: string[]; placeTemplates: Record<string, string | null>; manualPlaces: Record<string, { name: string; address: string; createdAt: string }>; updatedAt: string };
+export type FoodServiceDoc = { templates: Record<string, Template>; templateOrder: string[]; marked: string[]; factoryMarked: string[]; placeTemplates: Record<string, string | null>; manualPlaces: Record<string, { name: string; address: string; createdAt: string }>; updatedAt: string };
 // Shared agency-document persistence: one boot read, memory-only mutations, changed leaves only.
 export function createAgencyDocument<T extends { updatedAt: string }>(deps: DocumentDeps, collection: string, empty: () => T) {
   const memory = new Map<string, T>(), loads = new Map<string, Promise<void>>(), queues = new Map<string, Promise<unknown>>();
@@ -83,4 +83,4 @@ export function createAgencyDocument<T extends { updatedAt: string }>(deps: Docu
   }
   return { doc, ensure, locked, check, stage, persist, persistLocal, update, install: (a: string, d: T) => memory.set(a, d), ready: (a: string) => memory.has(a), boot: async (agencies: string[]) => { await Promise.allSettled([...new Set(agencies)].map(ensure)); } };
 }
-export const createFoodServiceStore = (deps: DocumentDeps) => createAgencyDocument<FoodServiceDoc>(deps, 'inspectionFoodService', () => ({ templates: {}, templateOrder: [], marked: [], placeTemplates: {}, manualPlaces: {}, updatedAt: '' }));
+export const createFoodServiceStore = (deps: DocumentDeps) => createAgencyDocument<FoodServiceDoc>(deps, 'inspectionFoodService', () => ({ templates: {}, templateOrder: [], marked: [], factoryMarked: [], placeTemplates: {}, manualPlaces: {}, updatedAt: '' }));

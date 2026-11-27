@@ -1,6 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { airtableMappingCopy, assigned, builtinFieldKeys, previewRows, summarizeValues, type SourceValue, type SourceSamples } from '../lib/sourcePreview';
-import { ChevronDown, Plus, X } from 'lucide-react';
+import { visitRequest } from './FactoryVisitScreen';
+import type { FoodData, PlaceKind } from '../lib/foodService';
+import { Check, ChevronDown, Plus, X } from 'lucide-react';
 import { emptyMapping, mappingReady, sourceRequest, type AirtableField, type EntityMapping, type MappingIssue, type RelationshipMapping, type SourceConnection, type SourceMapping, type SourceTable } from '../lib/sources';
 
 export const sourceButton = 'pressable min-h-11 rounded-lg border border-line-control bg-surface px-3 text-base font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold disabled:opacity-50';
@@ -522,7 +524,7 @@ const flexibleFields = {
   ingredient: [...sourceMatchingFields.ingredients.slice(1), ['locAttachment', 'Letter of Certification (LOC)']],
   product: sourceMatchingFields.products.slice(1),
 } as const;
-const wizardHeadings = ['Find your Airtable tables', 'Where are your records stored?', 'How are these records connected?', 'Review your connection'];
+const wizardHeadings = ['Find your Airtable tables', 'Where are your records stored?', 'How are these records connected?', 'Choose food service places', 'Review your connection'];
 type WizardPreview = {
   issues: MappingIssue[];
   connected: Record<string, boolean>;
@@ -531,15 +533,27 @@ type WizardPreview = {
   companies: { id: string; name: string; ingredients: string[]; products: string[] }[];
 };
 
+type PickerVenue = { id: string; name: string; type: string; typeMatched?: boolean; currentKind: PlaceKind };
+const placeKindLabel = { factory: 'Factory', food_service: 'Food service' } as const;
+const defaultPlaceKind = (venue: PickerVenue) => venue.typeMatched ? 'food_service' : 'factory';
+
 export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) {
   const [baseId, setBaseId] = useState(connection.baseId ?? '');
   const [apiKey, setApiKey] = useState('');
+  const [factoryValues, setFactoryValues] = useState((connection.mapping?.companies?.factoryValues ?? []).join(', '));
+  const [foodServiceValues, setFoodServiceValues] = useState((connection.mapping?.companies?.foodServiceValues ?? []).join(', '));
   const [tables, setTables] = useState<SourceTable[]>([]);
   const [access, setAccess] = useState<'read' | 'readwrite'>('read');
   const [entities, setEntities] = useState<EntityMapping[]>(connection.mapping?.entities ?? []);
   const [relations, setRelations] = useState<RelationshipMapping[]>(connection.mapping?.relationships ?? []);
   const [cardinalitySet, setCardinalitySet] = useState(() => new Set(relations.map(relation => relation.id)));
   const [step, setStep] = useState(0);
+  const [connectionSaved, setConnectionSaved] = useState(false);
+  const [venues, setVenues] = useState<PickerVenue[]>();
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState(() => new Set<string>());
+  const [picks, setPicks] = useState(() => new Map<string, PlaceKind>());
+  const [counts, setCounts] = useState<{ factory: number; food_service: number }>();
   const [preview, setPreview] = useState<WizardPreview>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -553,8 +567,53 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
   useEffect(() => { body.current?.scrollTo(0, 0); if (step) heading.current?.focus(); }, [step]);
   const payload = () => ({ sourceType: 'airtable', baseId: baseId.trim(), ...(apiKey.trim() && { apiKey: apiKey.trim() }) });
   const mapping = (): SourceMapping => ({ ...emptyMapping(), version: 2, entities, relationships: relations,
+    companies: { ...emptyMapping().companies,
+      factoryValues: commaList(factoryValues), foodServiceValues: commaList(foodServiceValues),
+    },
     group1Values: connection.mapping?.group1Values ?? ['Group 1'] });
-  async function run(action: 'discover' | 'preview' | 'save') {
+  async function loadVenues(saved?: SourceConnection) {
+    try {
+      let status = (saved ?? await sourceRequest('/api/sources/connection')).status;
+      for (let attempt = 0; status === 'never' && attempt < 30; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        status = (await sourceRequest('/api/sources/connection')).status;
+      }
+      if (status && status !== 'ok') throw Error();
+      // The v1 preview shows three rows and the v2 preview shows at most five companies.
+      // The connected lists supply all active venues after the connection cache is ready.
+      const data: FoodData = await visitRequest('/api/food-service');
+      setVenues([
+        ...data.candidates.map(venue => ({ ...venue, currentKind: 'factory' as const })),
+        ...data.places.filter(venue => venue.source === 'connected')
+          .map(venue => ({ ...venue, currentKind: 'food_service' as const })),
+      ].sort((a, b) => a.name.localeCompare(b.name)));
+    } catch {
+      setError('The venue list could not be loaded. Try again, or skip this step and mark venues later from the Food service screen.');
+    }
+  }
+  async function saveChoices() {
+    if (!venues) return;
+    const changes = { add: [] as string[], remove: [] as string[], factoryAdd: [] as string[], factoryRemove: [] as string[] };
+    const next = { factory: 0, food_service: 0 };
+    for (const venue of venues) {
+      const pick = picks.get(venue.id) ?? venue.currentKind;
+      next[pick]++;
+      if (pick === venue.currentKind) continue;
+      if (pick !== defaultPlaceKind(venue)) changes[pick === 'factory' ? 'factoryAdd' : 'add'].push(venue.id);
+      else changes[pick === 'factory' ? 'remove' : 'factoryRemove'].push(venue.id);
+    }
+    if (Object.values(changes).some(ids => ids.length)) {
+      try {
+        await visitRequest('/api/food-service/marked', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes) });
+      } catch {
+        setError('The connection was saved, but the food service choices were not saved. Open the Food service screen and mark the venues again.');
+        return;
+      }
+    }
+    setCounts(next);
+    setStep(4);
+  }
+  async function run(action: 'discover' | 'preview' | 'save' | 'retry' | 'choices') {
     if (inFlight.current) return;
     inFlight.current = true;
     setBusy(true); setError('');
@@ -566,6 +625,7 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
         setTables(discovered); setAccess(result.access);
         if (baseId.trim() !== connection.baseId || !connection.mapping) {
           setRelations([]); setCardinalitySet(new Set());
+          setFactoryValues(''); setFoodServiceValues('');
           setEntities(flexibleKinds.flatMap(kind => {
             const suggested = result.guess?.mapping?.[flexibleNames[kind].toLowerCase()];
             const table = discovered.find(t => t.name === suggested?.table);
@@ -581,9 +641,14 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
         setPreview(undefined);
         const result = await sourceRequest('/api/sources/airtable-mapping/preview', 'POST', { ...payload(), mapping: mapping() });
         setPreview(result);
+      } else if (action === 'save') {
+        const saved: SourceConnection = await sourceRequest('/api/sources/connection', 'PUT', { ...payload(), access, mapping: mapping() });
+        setConnectionSaved(true); setApiKey(''); setStep(3);
+        await loadVenues(saved);
+      } else if (action === 'retry') {
+        await loadVenues();
       } else {
-        await sourceRequest('/api/sources/connection', 'PUT', { ...payload(), access, mapping: mapping() });
-        setMessage('Airtable connection saved.'); setApiKey(''); onSaved();
+        await saveChoices();
       }
     } catch (cause: any) { setError(cause.message); }
     finally { inFlight.current = false; setBusy(false); }
@@ -606,21 +671,37 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
   const selectClass = mappingFieldClass + ' block';
   const card = 'min-w-0 space-y-3 rounded-lg border border-line p-4';
   const company = entities.find(entity => entity.kind === 'company');
-  const advance = () => {
-    setError('');
-    if (step === 2) { setPreview(undefined); setStep(3); void run('preview'); }
-    else setStep(step + 1);
+  const shownVenues = venues?.filter(venue => venue.name.toLowerCase().includes(query.trim().toLowerCase())) ?? [];
+  const allShownSelected = shownVenues.length > 0 && shownVenues.every(venue => selected.has(venue.id));
+  const chooseKind = (ids: Iterable<string>, choice: PlaceKind) =>
+    setPicks(previous => {
+      const next = new Map(previous);
+      for (const id of ids) next.set(id, choice);
+      return next;
+    });
+  const toggleSelected = (ids: Iterable<string>, checked: boolean) =>
+    setSelected(previous => {
+      const next = new Set(previous);
+      for (const id of ids) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  const close = () => {
+    if (connectionSaved && !message) onSaved();
+    onClose();
   };
-  return <dialog ref={dialog} aria-labelledby={titleId} onCancel={event => {event.preventDefault(); if (!busy) onClose();}}
+  return <dialog ref={dialog} aria-labelledby={titleId} onCancel={event => {event.preventDefault(); if (!busy) close();}}
     className="fixed inset-x-0 bottom-0 top-auto mx-auto my-0 max-h-[95dvh] w-full max-w-2xl overflow-hidden rounded-t-xl bg-surface text-ink tactile-4 backdrop:bg-scrim">
     <div className="flex max-h-[95dvh] min-w-0 flex-col">
       <header className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 sm:px-6">
         <h2 id={titleId} className="flex-1 text-2xl font-semibold">Connect your Airtable</h2>
-        <button type="button" aria-label="Close" disabled={busy} onClick={onClose} className={`${sourceButton} inline-flex w-11 items-center justify-center px-0`}><X aria-hidden="true" className="size-5" /></button>
+        <button type="button" aria-label="Close" disabled={busy} onClick={close} className={`${sourceButton} inline-flex w-11 items-center justify-center px-0`}><X aria-hidden="true" className="size-5" /></button>
       </header>
       <div ref={body} className="min-h-0 space-y-4 overflow-y-auto overscroll-contain p-4 sm:px-6">
         <ol aria-label="Connection steps" className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-soft">
-          {['Find tables', 'Choose records', 'Connect records', 'Review'].map((title, index) => <li key={title} aria-current={step === index ? 'step' : undefined}
+          {['Find tables', 'Choose records', 'Connect records', wizardHeadings[3], 'Review'].map((title, index) => <li key={title} aria-current={step === index ? 'step' : undefined}
             className={step === index ? 'font-semibold text-ink' : undefined}>{title}</li>)}
         </ol>
         <h3 ref={heading} tabIndex={-1} className="text-xl font-semibold">{wizardHeadings[step]}</h3>
@@ -674,7 +755,13 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
             })}
             <p>{airtableMappingCopy.missing('Contacts')}</p>
           </>}
-          {step === 2 && flexibleKinds.slice(1).map(kind => {
+          {step === 2 && !preview && company?.fields.type && <section className={card}>
+            <label className="block">Which types are factories<input name="factoryValues" className={fieldClass}
+              value={factoryValues} onChange={event => setFactoryValues(event.target.value)} /></label>
+            <label className="block">Which types are food service places<input name="foodServiceValues" className={fieldClass}
+              value={foodServiceValues} onChange={event => setFoodServiceValues(event.target.value)} /></label>
+          </section>}
+          {step === 2 && !preview && flexibleKinds.slice(1).map(kind => {
             const entity = entities.find(e => e.kind === kind);
             if (!entity || !company) return <p key={kind}>{airtableMappingCopy.missing(flexibleNames[kind])}</p>;
             const relation = relations.find(r => r.fromEntity === entity.id);
@@ -711,7 +798,47 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
             </section>;
           })}
           {step === 3 && <>
-            <p>Check that the right records appear under the right companies before saving.</p>
+            <p>Choose whether each venue is a factory or a food service place. The type from Airtable fills in a starting choice for each venue, and you can change any venue here.</p>
+            {venues && (venues.length ? <>
+              <input type="search" aria-label="Search venues by name" placeholder="Search venues by name" className={fieldClass}
+                value={query} onChange={event => setQuery(event.target.value)} />
+              <label className="flex min-h-11 items-center gap-2">
+                <input type="checkbox" className="accent-ink focus-visible:ring-2 focus-visible:ring-gold" checked={allShownSelected} disabled={!shownVenues.length}
+                  onChange={event => {
+                    const ids = shownVenues.map(venue => venue.id);
+                    if (event.target.checked) toggleSelected(ids, true);
+                    else toggleSelected(ids, false);
+                  }} />
+                Select all shown venues
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className={sourceButton} disabled={!selected.size} onClick={() => chooseKind(selected, 'food_service')}>{`Mark ${selected.size} venues as food service`}</button>
+                <button type="button" className={sourceButton} disabled={!selected.size} onClick={() => chooseKind(selected, 'factory')}>{`Mark ${selected.size} venues as a factory`}</button>
+              </div>
+              <ul className="max-h-96 space-y-2 overflow-y-auto overscroll-contain">
+                {shownVenues.map(venue => {
+                  const pick = picks.get(venue.id) ?? venue.currentKind;
+                  return <li key={venue.id} className="min-w-0 space-y-2 rounded-lg border border-line p-4">
+                    <label className="flex min-h-11 items-center gap-2">
+                      <input type="checkbox" className="accent-ink focus-visible:ring-2 focus-visible:ring-gold" checked={selected.has(venue.id)} onChange={event => toggleSelected([venue.id], event.target.checked)} />
+                      <span dir="auto" className="break-words font-semibold">{venue.name}</span>
+                    </label>
+                    <p className="break-words text-ink-soft">{`Starting choice: ${placeKindLabel[defaultPlaceKind(venue)]}, from the type `}<bdi>{venue.type || '—'}</bdi>.</p>
+                    <div className="flex flex-wrap gap-2">
+                      {(['factory', 'food_service'] as const).map(choice => <button type="button" key={choice} className={sourceButton}
+                        aria-pressed={pick === choice} onClick={() => chooseKind([venue.id], choice)}>
+                        <span className="inline-flex items-center gap-2">{pick === choice && <Check aria-hidden="true" className="size-4" />}{placeKindLabel[choice]}</span>
+                      </button>)}
+                    </div>
+                    {picks.has(venue.id) && pick !== venue.currentKind && <p>{`You changed this venue to ${placeKindLabel[pick]}.`}</p>}
+                  </li>;
+                })}
+              </ul>
+            </> : <p>No venues were found in the connected company list.</p>)}
+          </>}
+          {step === 4 && counts && <p>{`${counts.factory} ${counts.factory === 1 ? 'factory' : 'factories'} and ${counts.food_service} food service ${counts.food_service === 1 ? 'place' : 'places'}. You can change any venue later from the Factories screen or the Food service screen.`}</p>}
+          {(step === 2 && preview || step === 4) && <>
+            {step === 2 && <p>Check that the right records appear under the right companies before saving.</p>}
             {preview && <>
               {preview.companies.map(company => <section key={company.id} className={card}>
                 <h4 className="break-words font-semibold">{company.name}</h4>
@@ -738,15 +865,27 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
         {message && <p role="status">{message}</p>}
       </div>
       <footer className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-line p-4 sm:px-6">
-        {step > 0 && !message && <button className={sourceButton} disabled={busy} onClick={() => {setError(''); setStep(step - 1);}}>Back</button>}
-        {step === 3 && !message && <button className={sourceButton} disabled={busy} onClick={() => void run('preview')}>Test mapping</button>}
-        {!message && <button className={`${sourceButton.replace('border-line-control bg-surface', 'border-gold-deep bg-gold-deep').replace('text-ink', 'text-paper')}`} disabled={busy ||
+        {step > 0 && !connectionSaved && <button className={sourceButton} disabled={busy} onClick={() => {
+          setError('');
+          if (step === 2 && preview) setPreview(undefined);
+          else setStep(step - 1);
+        }}>Back</button>}
+        {step === 2 && preview && <button className={sourceButton} disabled={busy} onClick={() => void run('preview')}>Test mapping</button>}
+        {step === 3 && error && !venues && <button className={sourceButton} disabled={busy} onClick={() => void run('retry')}>Try again</button>}
+        {step === 3 && error && !venues && <button className={sourceButton} disabled={busy} onClick={() => { setError(''); setStep(4); }}>Skip this step</button>}
+        {!message && <button className={sourceButton.replace('border-line-control bg-surface', 'border-gold-deep bg-gold-deep').replace('text-ink', 'text-paper')} disabled={busy ||
           (step === 0 && (!baseId.trim() || !apiKey.trim() && !(connection.hasKey && baseId.trim() === connection.baseId))) ||
           (step === 1 && (!company?.fields.name || entities.some(e => !e.fields.name || e.filter && !e.filter.values.length))) ||
-          (step === 2 && relations.some(r => !r.fieldId || !cardinalitySet.has(r.id))) ||
-          (step === 3 && (!preview || preview.issues.some(issue => issue.blocking)))}
-          onClick={() => step === 0 ? void run('discover') : step === 3 ? void run('save') : advance()}>
-          {step === 0 ? 'Find your Airtable tables' : step === 3 ? 'Save connection' : 'Continue'}
+          (step === 2 && (relations.some(r => !r.fieldId || !cardinalitySet.has(r.id)) || !!preview?.issues.some(issue => issue.blocking))) ||
+          (step === 3 && !venues)}
+          onClick={() => {
+            if (step === 0) void run('discover');
+            if (step === 1) setStep(2);
+            if (step === 2) void run(preview ? 'save' : 'preview');
+            if (step === 3) void run('choices');
+            if (step === 4) { setMessage('Airtable connection saved.'); onSaved(); }
+          }}>
+          {step === 0 ? 'Find your Airtable tables' : step === 2 && preview ? 'Save connection' : 'Continue'}
         </button>}
       </footer>
     </div>

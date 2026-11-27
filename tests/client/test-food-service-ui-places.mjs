@@ -24,18 +24,17 @@ for (const file of ['src/lib/foodService.ts', ...['ChecklistTemplatesScreen', 'F
 const typedPlace = { ...company, id: 'test-typed', source: 'connected', type: ' TEST FOOD ' };
 globalThis.fetch = async url => new Response(JSON.stringify(url.endsWith('/connection') ? { mapping: { companies: { foodServiceValues: [' Test food '] } } } : { ...data, places: [typedPlace] }));
 const typed = mount(FoodServiceScreen, props); await typed.render();
-assert.match(typed.text(), /Food service because of its type in your connected list/); assert.doesNotMatch(typed.text(), /Not food service/);
+assert.match(typed.text(), /Food service because of its type in your connected list/); assert.match(typed.html(), /Mark as a factory/);
 const typeLine = typed.find(e => e.type === 'p' && e.props.children === typedPlace.type)[0]; assert.ok(typeLine); assert.equal(typeLine.props.dir, 'auto'); assert.match(typeLine.props.className, /whitespace-pre-wrap break-words/);
 for (const [typeMatched, marked, explanation] of [[false, true, false], [true, true, true]]) {
   globalThis.fetch = async (url, opts = {}) => { calls.push([url, opts.method || 'GET', opts.body && JSON.parse(opts.body)]); return new Response(JSON.stringify(url.endsWith('/connection') ? { mapping: { companies: { foodServiceValues: [' Test food '] } } } : { ...data, places: [{ ...typedPlace, type: typeMatched ? typedPlace.type : ' Test Other ', typeMatched, marked }] })); };
   const markedPlace = mount(FoodServiceScreen, props); await markedPlace.render();
-  assert.equal(markedPlace.text().includes('Food service because of its type in your connected list'), explanation); assert.match(markedPlace.text(), /Not food service/);
-  await markedPlace.click(e => e.props.children === 'Not food service');
-  assert.deepEqual(calls.filter(c => c[0] === '/api/food-service/marked').at(-1)[2], { remove: [typedPlace.id] });
+  assert.equal(markedPlace.text().includes('Food service because of its type in your connected list'), explanation);
+  assert.match(markedPlace.html(), /Mark as a factory/);
 }
 const coordinatorCalls = [];
 globalThis.fetch = async url => { coordinatorCalls.push(url); return new Response(JSON.stringify({ ...data, places: [{ ...typedPlace, typeMatched: true, marked: false }] })); };
-const coordinator = mount(FoodServiceScreen, { ...props, role: 'coordinator' }); await coordinator.render(); assert.match(coordinator.text(), /Food service because of its type in your connected list/); assert.doesNotMatch(coordinator.text(), /Not food service/); assert.ok(!coordinatorCalls.includes('/api/sources/connection'));
+const coordinator = mount(FoodServiceScreen, { ...props, role: 'coordinator' }); await coordinator.render(); assert.match(coordinator.text(), /Food service because of its type in your connected list/); assert.doesNotMatch(coordinator.html(), /Mark as a factory/); assert.ok(!coordinatorCalls.includes('/api/sources/connection'));
 function collect(node, type) { if (!node || typeof node !== 'object') return []; if (Array.isArray(node)) return node.flatMap(n => collect(n, type)); return [...(node.type === type ? [node] : []), ...collect(node.props?.children, type)]; }
 const candidates = [{ id: 'test-factory', name: ' Test Factory Name ', type: ' Factory ' }, { id: 'test-other', name: ' Test Other Name ', type: ' Other Type ' }];
 globalThis.fetch = async () => new Response(JSON.stringify({ ...data, candidates }));
